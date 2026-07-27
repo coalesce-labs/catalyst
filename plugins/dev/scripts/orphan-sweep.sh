@@ -48,6 +48,12 @@
 #                                 reclamation (default 5). All three are parsed as
 #                                 BOUNDED base-10 integers; anything bash arithmetic
 #                                 could not evaluate falls back to the default loudly.
+#   SWEEP_PROC_CWD_TIMEOUT_SECS — deadline for the per-pid `lsof` cwd probe (default 5,
+#                                 0 = unbounded). `lsof` blocks in the kernel on a hung
+#                                 or stale mount, and this runs from a LaunchAgent, so
+#                                 one such candidate would wedge the whole run. A timed-
+#                                 out probe yields an UNKNOWN cwd (which spares), never
+#                                 a truncated path.
 #   SWEEP_AB_ENABLED            — agent-browser reaper on/off (default 1)
 #   SWEEP_AB_CPU_THRESHOLD      — runaway browser %CPU threshold (default 30)
 #   SWEEP_AB_MIN_AGE_SECS       — min browser age for the runaway rule (default 600)
@@ -188,13 +194,22 @@ _init_roots() {
   SWEEP_INCLUDE_GLOBAL_CLAUDE_WT="${SWEEP_INCLUDE_GLOBAL_CLAUDE_WT:-1}"
   SWEEP_PROJECT_CLAUDE_WT="${SWEEP_PROJECT_CLAUDE_WT:-${SCRIPT_DIR%/plugins/dev/scripts}/.claude/worktrees}"
   SWEEP_CONFIG_PATH="${SWEEP_CONFIG_PATH:-$(_resolve_sweep_config_path)}"
+  # PARITY: shadow-default
   # CTL-1531: vector-1 widened (any-command) branch. off|shadow|enforce.
   # DEFAULT shadow, per ADR-023 ("Dark by default"; "Rejected: enable-on-merge").
   # This branch is the WEAKER-gated of the two widened implementations — unlike
   # proc-reaper.mjs it has no live-agent correlation and no two-sweep persistence,
-  # so it kills on FIRST observation — and the installed LaunchAgent sets no
-  # EnvironmentVariables, which makes this in-script default the production value.
-  # The flip to enforce is operator-owned and belongs in the plist.
+  # so it kills on FIRST observation.
+  #
+  # This in-script default is the FLOOR, not the production value: since CTL-1531
+  # the shipped plist template carries an explicit
+  # `EnvironmentVariables/SWEEP_PROC_WIDEN`, and install-orphan-sweep.sh resolves
+  # it (env → .catalyst/config.json `catalyst.sweep.procWiden` → the value already
+  # in the installed plist → shadow). So the operator's flip lives in the
+  # TEMPLATE-backed plist and SURVIVES the unconditional plist regeneration that
+  # every `catalyst-stack install-services` performs — hand-editing the installed
+  # plist is no longer the mechanism, and would still be reverted by the next
+  # install. See install-orphan-sweep.sh `_resolve_widen_mode`.
   SWEEP_PROC_WIDEN="${SWEEP_PROC_WIDEN:-shadow}"
   case "$SWEEP_PROC_WIDEN" in
     off|shadow|enforce) ;;
@@ -491,8 +506,59 @@ sweep_signals() {
 
 # ─── vector 1: stale proc kill (legacy + CTL-1531 widened branch) ───────────
 
+# PARITY: probe-deadline
+# _proc_cwd <pid> — the process's cwd, or "" when it cannot be determined.
+#
+# CTL-1531 round 2 (Codex): the probe is BOUNDED. `lsof` blocks in the kernel on
+# a hung or stale mount (a dropped NFS/SMB share, a spun-down external disk) and
+# had NO deadline here at all. In the SHIPPED shadow mode every old PPID-1
+# process that clears argv + age reaches this call, so ONE candidate sitting on a
+# bad mount wedges the LaunchAgent indefinitely and starves the signal, worktree
+# and browser vectors queued behind it. The JS sibling got `timeout: 5000` on its
+# execFile in round 1; this is the mirror.
+#
+# Deliberately NOT `timeout(1)` / `gtimeout`: stock macOS — the fleet's primary
+# launchd environment — ships neither and GNU coreutils is not a dependency
+# (AGENTS.md, "make the LOOP ITSELF self-limiting"). The portable idiom is a
+# watchdog child, and it costs NOTHING on the fast path: `wait` returns the
+# instant lsof exits and the watchdog is killed before its sleep elapses.
+#
+# `kill` here is the BASH BUILTIN, never `env kill`. It only ever targets THIS
+# function's own children, so it stays invisible both to the candidate-signalling
+# audit and to the test harness's $MOCKBIN/kill mock (which would otherwise
+# record probe traffic as if it were a destructive signal).
+_PROC_CWD_TIMEOUT_DEFAULT=5
 _proc_cwd() {
-  lsof -p "$1" -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+  local pid="$1" limit tmp lpid wpid
+  limit="${SWEEP_PROC_CWD_TIMEOUT_SECS:-$_PROC_CWD_TIMEOUT_DEFAULT}"
+  [[ "$limit" =~ ^[0-9]{1,4}$ ]] || limit="$_PROC_CWD_TIMEOUT_DEFAULT"
+  tmp="${TMPDIR:-/tmp}/orphan-sweep-cwd.$$.${pid}"
+  : > "$tmp" 2>/dev/null || return 0        # cannot stage a probe → unknown
+  rm -f "${tmp}.timedout"
+  lsof -p "$pid" -a -d cwd -Fn > "$tmp" 2>/dev/null &
+  lpid=$!
+  wpid=""
+  if [[ "$limit" -gt 0 ]]; then
+    # The marker is written BEFORE the kill so that observing it is race-free:
+    # if it exists, the probe was cut short and its output must not be trusted.
+    ( sleep "$limit"; : > "${tmp}.timedout"; kill -9 "$lpid" 2>/dev/null ) >/dev/null 2>&1 &
+    wpid=$!
+  fi
+  wait "$lpid" 2>/dev/null
+  if [[ -n "$wpid" ]]; then kill -9 "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null; fi
+  if [[ -e "${tmp}.timedout" ]]; then
+    # A killed lsof can leave a TRUNCATED path mid-line, and a truncated path
+    # under the worktree root is exactly the shape of a perfect widened kill
+    # candidate (it "does not exist"). Discard the whole answer — unknown spares.
+    # `log` goes to stdout and this function's stdout IS the return value, so the
+    # warning must go to stderr.
+    log "cwd probe for pid ${pid} exceeded ${limit}s (hung mount?) — treating cwd as UNKNOWN" >&2
+    rm -f "$tmp" "${tmp}.timedout"
+    return 0
+  fi
+  sed -n 's/^n//p' "$tmp" 2>/dev/null | head -1
+  rm -f "$tmp"
+  return 0
 }
 
 _candidate_pids() {
@@ -532,11 +598,16 @@ _is_self_or_ancestor() {
   return 1
 }
 
-# ── CTL-1531: never-kill argv allowlist / command denylist ──────────────────
-# Allowlist mirrors proc-reaper.mjs DEFAULT_ALLOWLIST_PATTERNS — the fleet's own
-# control plane must never be reapable, and a hand-started daemon
+# ── PARITY: allowlist — CTL-1531 never-kill argv allowlist ──────────────────
+# Mirrors proc-reaper.mjs DEFAULT_ALLOWLIST_PATTERNS — the fleet's own control
+# plane must never be reapable, and a hand-started daemon
 # (`cd ~/catalyst/wt/CTL-x && bun run … & disown`) is ppid 1 with cwd under wt.
+# `orphan-sweep.sh` and `catalyst-stack` are here because both are PPID-1 BY
+# CONSTRUCTION (LaunchAgent-run; `nohup … & disown`), so the ppid gate cannot
+# spare them: without these entries the sweep can reap ITSELF or the supervisor
+# that restarts the fleet.
 _PROC_ALLOWLIST_RE='execution-core/daemon\.mjs|broker/index\.mjs|orch-monitor/server\.ts|tailscale|ipnextension|orphan-sweep\.sh|catalyst-stack'
+# PARITY: denylist
 # Denylist of command basenames: session multiplexers and login/init plumbing.
 # A tmux/screen server is daemonized (ppid 1 BY CONSTRUCTION) and inherits its
 # cwd from whatever shell first started it — one kill nukes every pane the
@@ -651,7 +722,7 @@ _sweep_bounded_int() {
   return 0
 }
 
-# ── CTL-1531 P2-h: tri-state cwd probe (present | gone | unknown) ────────────
+# ── PARITY: tri-state-cwd-probe (present | gone | unknown) — CTL-1531 P2-h ──
 #
 # `[[ -d "$cwd" ]]` is FALSE for a deleted directory AND for one that merely
 # cannot be stat'd — EACCES (a mode-000 or root-owned parent), EIO (failing
@@ -688,27 +759,116 @@ _probe_cwd_state() {
   return 0
 }
 
-# ── CTL-1531 P2-i: liveness probe + confirmed-exit wait ─────────────────────
+# ── PARITY: confirmed-exit — TRI-STATE liveness probe + confirmed-exit wait ──
 #
 # Deliberately `ps`, never `kill -0`: the sweep signals through `env kill`, so a
 # `kill -0` liveness probe would be indistinguishable from the destructive call
-# in an audit (and in the test harness's mock). Empty output ⇒ the pid is gone.
-_proc_alive() {
-  [[ -n "$(ps -o pid= -p "$1" 2>/dev/null | tr -d ' ')" ]]
+# in an audit (and in the test harness's mock).
+#
+# CTL-1531 round 2 (Codex): the old form tested only for EMPTY OUTPUT
+# (`[[ -n "$(ps …)" ]]`), which made a transient process-table / resource /
+# fork failure INDISTINGUISHABLE from an absent pid. `_proc_gone_within` then
+# self-certified an exit, the caller logged "killed $pid" and emitted an
+# `orphan_proc` reclamation — while the target might still be running. Same
+# fail-open class as the earlier findings, this time inside the confirmation
+# probe itself, and the JS sibling had it too (`killProc(pid,0)` collapses
+# ESRCH and EPERM into one `false`; fixed there as `defaultProbeAlive`).
+#
+# Three outcomes, kept separate, matching real `ps` on this fleet (verified on
+# macOS 26: an absent-but-in-range pid exits 1 with EMPTY stdout AND EMPTY
+# stderr; a probe that could not run says so on stderr):
+#   alive   — rc 0 and a pid on stdout
+#   gone    — rc != 0, nothing on stdout, and NOTHING ON STDERR (a clean "no
+#             such process" answer)
+#   unknown — anything else: stderr non-empty (`ps` itself failed / was not
+#             found / refused), or rc 0 with no output. UNKNOWN NEVER CLAIMS
+#             AN EXIT.
+# Result lands in the global $_SWEEP_PROC_ALIVE_STATE (same stdout-collision
+# reason as _probe_cwd_state).
+_SWEEP_PROC_ALIVE_STATE=unknown
+_SWEEP_PROBE_ERR_FILE=""
+_proc_alive_state() {
+  local pid="$1" out rc
+  _SWEEP_PROC_ALIVE_STATE=unknown
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  if [[ -z "$_SWEEP_PROBE_ERR_FILE" ]]; then
+    _SWEEP_PROBE_ERR_FILE="${TMPDIR:-/tmp}/orphan-sweep-probe.$$"
+  fi
+  : > "$_SWEEP_PROBE_ERR_FILE" 2>/dev/null || return 0   # cannot stage → unknown
+  out="$(LC_ALL=C ps -o pid= -p "$pid" 2>"$_SWEEP_PROBE_ERR_FILE")"
+  rc=$?
+  out="$(printf '%s' "$out" | tr -d ' \t\n')"
+  if [[ "$rc" -eq 0 && -n "$out" ]]; then
+    _SWEEP_PROC_ALIVE_STATE=alive
+  elif [[ -s "$_SWEEP_PROBE_ERR_FILE" ]]; then
+    _SWEEP_PROC_ALIVE_STATE=unknown          # the PROBE failed, not the process
+  elif [[ "$rc" -ne 0 && -z "$out" ]]; then
+    _SWEEP_PROC_ALIVE_STATE=gone             # clean "no such process"
+  fi
+  rm -f "$_SWEEP_PROBE_ERR_FILE"
+  return 0
 }
 
-# _proc_gone_within <pid> <grace_secs> — 0 when the pid is CONFIRMED gone.
-# Probes immediately, then once per second up to <grace_secs>.
+# _proc_alive <pid> — back-compat boolean wrapper. 0 = NOT confirmed gone (alive
+# OR unprobeable), 1 = confirmed gone. Never used to claim an exit on its own.
+_proc_alive() {
+  _proc_alive_state "$1"
+  [[ "$_SWEEP_PROC_ALIVE_STATE" != "gone" ]]
+}
+
+# _proc_gone_within <pid> <grace_secs> — 0 ONLY when the pid is CONFIRMED gone.
+# Probes immediately, then once per second up to <grace_secs>. An `unknown`
+# probe is NOT an exit: it keeps polling and, at the deadline, returns 1 so the
+# caller falls through to the escalation / "no reclamation recorded" path.
 _proc_gone_within() {
   local pid="$1" grace="$2" i=0
   while :; do
-    _proc_alive "$pid" || return 0
+    _proc_alive_state "$pid"
+    [[ "$_SWEEP_PROC_ALIVE_STATE" == "gone" ]] && return 0
     [[ "$i" -ge "$grace" ]] && return 1
     sleep 1
     i=$((i+1))
   done
 }
 
+# ── PARITY: pre-signal-revalidation ─────────────────────────────────────────
+#
+# _widen_still_owned <pid> <argv> — re-prove the ENTIRE widened ownership
+# conjunction from reads taken NOW. 0 = still ours, 1 = not (or cannot tell).
+# The freshly-observed cwd is returned through $_SWEEP_WIDEN_CWD_NOW.
+#
+# Called TWICE per candidate, and that is the point (CTL-1531 round 2, Codex):
+#   • before SIGTERM — a worktree can be recreated and a pid recycled between
+#     the classification gate and the signal;
+#   • before SIGKILL — the grace wait is a SECOND stale-evidence window. If the
+#     original process exits under SIGTERM and its pid is REUSED during the
+#     grace, `_proc_gone_within` sees only that the numeric pid is alive, and an
+#     unconditional SIGKILL then lands on the REPLACEMENT process. The first
+#     signal has an identity re-match; the second one needs the same.
+# Every ambiguous probe FAILS CLOSED (returns 1 → no signal).
+_SWEEP_WIDEN_CWD_NOW=""
+_widen_still_owned() {
+  local pid="$1" argv="$2"
+  _SWEEP_WIDEN_CWD_NOW=""
+  # identity: still reparented to launchd, still the SAME full argv (pid-reuse)
+  [[ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' | head -1)" == "1" ]] || return 1
+  [[ "$(ps -o command= -p "$pid" 2>/dev/null | head -1)" == "$argv" ]] || return 1
+  # P2-g: RE-PROBE the cwd. Re-reading ppid and argv while testing a CACHED cwd
+  # defeats the point — the pid that matters here is a *recycled* one, and a
+  # recycled pid has its own cwd this loop has never looked at. (A worktree
+  # recreated under the same path by a concurrent `create-worktree.sh` is the
+  # other half.) Ask lsof again and re-apply BOTH gates to whatever it answers.
+  local cwd_now
+  cwd_now="$(_proc_cwd "$pid")"
+  [[ -n "$cwd_now" ]] || return 1
+  _cwd_under_wt_root "$cwd_now" || return 1
+  _probe_cwd_state "$cwd_now"
+  [[ "$_SWEEP_CWD_STATE" == "gone" ]] || return 1
+  _SWEEP_WIDEN_CWD_NOW="$cwd_now"
+  return 0
+}
+
+# PARITY: argv-redaction
 # _argv_basename <argv> — argv[0]'s basename, into $_SWEEP_ARGV_BASE.
 # CTL-1531 P1-e: this is the MOST that may appear in a log line. See the log
 # calls in sweep_procs_widened for why the full argv must never be written.
@@ -740,6 +900,7 @@ sweep_procs_widened() {
   local mode="${SWEEP_PROC_WIDEN:-shadow}"
   [[ "$mode" == "off" ]] && return 0
 
+  # PARITY: root-absent-bail
   # BOUND 1 — root-absent early bail. `[[ -d $cwd ]]` would be false for every
   # process under a renamed/unmounted root at once; that is a root-level fault,
   # not N independent orphans.
@@ -765,11 +926,15 @@ sweep_procs_widened() {
   #               that traps/ignores SIGTERM from consuming a cap slot — and
   #               therefore crowding a REAL orphan out of the run — every single
   #               sweep, forever.
-  #   signalled — candidates we sent ANY signal to. Bounded by `cap * 2`, because
-  #               a candidate is worth at most two signals (SIGTERM, then
-  #               SIGKILL). This is the blast-radius bound that the
-  #               confirmation-based cap can no longer provide on its own: a host
-  #               where nothing responds to signals must not turn "cap 5" into
+  #   signalled — SIGNALS DELIVERED. Incremented on the SIGTERM *and* on the
+  #               SIGKILL, because that is what the `cap * 2` ceiling claims to
+  #               bound: a candidate is worth at most two signals (SIGTERM, then
+  #               SIGKILL), so `cap` candidates are worth at most `cap * 2`
+  #               signals. Counting once PER CANDIDATE (the CTL-1531 round-1
+  #               form) silently let a cap of N authorize 2N candidates and 4N
+  #               delivered signals. This is the blast-radius bound that the
+  #               confirmation-based cap cannot provide on its own: a host where
+  #               nothing responds to signals must not turn "cap 5" into
   #               unbounded signalling.
   local acted=0 deferred=0 signalled=0
   local pid ppid cwd cwd_now argv age
@@ -793,7 +958,10 @@ sweep_procs_widened() {
     # (g) hard command denylist (session multiplexers / login / init plumbing),
     #     matched over the FULL argv with the `progname:` form anchored
     _argv_denied "$argv" && continue
-    # (h) BOUND 3 — age floor; unreadable age fails CLOSED
+    # PARITY: age-floor
+    # (h) BOUND 3 — age floor; unreadable age fails CLOSED. Mirrors
+    #     proc-reaper.mjs minEtimeSec: a just-spawned process whose worktree is
+    #     mid-teardown must not be reaped out from under the teardown.
     age="$(_proc_etime_secs "$pid")"
     [[ "$age" =~ ^[0-9]+$ ]] || continue
     [[ "$age" -ge "$min_age" ]] || continue
@@ -827,6 +995,7 @@ sweep_procs_widened() {
       log "[shadow] would kill $pid (cmd: ${_SWEEP_ARGV_BASE}; orphan; cwd gone under wt root: $cwd)"
       continue
     fi
+    # PARITY: per-run-cap
     # BOUND 2 — per-run cap on CONFIRMED terminations. Counted only on the
     # enforcing path so shadow keeps reporting the FULL candidate set (that is
     # the signal the operator needs to size the cap before flipping to enforce).
@@ -834,29 +1003,31 @@ sweep_procs_widened() {
       deferred=$((deferred+1))
       continue
     fi
-    # BOUND 2b — blast-radius bound on SIGNALS. Reached only when signals are
-    # being delivered without producing exits, i.e. a host in a state no sweep
-    # can fix. Stop rather than pile on more.
-    if [[ "$cap" -gt 0 && "$signalled" -ge $((cap * 2)) ]]; then
+    # BOUND 2b — blast-radius bound on DELIVERED SIGNALS. Reached only when
+    # signals are being delivered without producing exits, i.e. a host in a state
+    # no sweep can fix. Stop rather than pile on more.
+    #
+    # CTL-1531 round 3: admit only if this candidate's WORST CASE still fits under
+    # the ceiling. A candidate is worth up to TWO signals (SIGTERM, then SIGKILL)
+    # and this test runs at ADMISSION — so `signalled -ge cap*2` admits one at
+    # `cap*2 - 1`, which then spends two more and delivers `cap*2 + 1`. ODD parity
+    # provokes it: cap=2 (ceiling 4), one candidate exiting under SIGTERM (1
+    # signal) then stubborn ones ⇒ 1+2+2 = 5.
+    if [[ "$cap" -gt 0 && $((signalled + 2)) -gt $((cap * 2)) ]]; then
       log "widened proc sweep: signal bound reached ($((cap * 2))) with only ${acted} confirmed termination(s) — stopping this run (a human should look at this host)"
       break
     fi
     # TOCTOU re-check immediately before signalling: a worktree can be recreated,
     # and a pid can be recycled, between the gate and the kill.
-    [[ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' | head -1)" == "1" ]] || continue
-    [[ "$(ps -o command= -p "$pid" 2>/dev/null | head -1)" == "$argv" ]] || continue
-    # P2-g: RE-PROBE the cwd. Re-reading ppid and argv while testing the CACHED
-    # `$cwd` from classification defeats the point of the re-check — the pid that
-    # matters here is a *recycled* one, and a recycled pid has its own cwd that
-    # this loop has never looked at. (A worktree recreated under the same path is
-    # the other half: `create-worktree.sh` is running concurrently with the
-    # sweep.) Ask lsof again, and re-apply BOTH the under-root and the definitely-
-    # gone gates to whatever it answers now.
-    cwd_now="$(_proc_cwd "$pid")"
-    [[ -n "$cwd_now" ]] || continue
-    _cwd_under_wt_root "$cwd_now" || continue
-    _probe_cwd_state "$cwd_now"
-    [[ "$_SWEEP_CWD_STATE" == "gone" ]] || continue
+    # The spare is LOGGED (CTL-1531 round 3). It used to be a bare `continue`, so
+    # a candidate dropped here was indistinguishable in the log from one that
+    # never qualified — which also made the gate unobservable to the behavioural
+    # parity check. The JS sibling already warns at the same point.
+    if ! _widen_still_owned "$pid" "$argv"; then
+      log "widened proc sweep: $pid no longer matches the candidate at signal time (pid reuse, re-created worktree, or an unreadable probe) — sparing"
+      continue
+    fi
+    cwd_now="$_SWEEP_WIDEN_CWD_NOW"
 
     # P2-i: `kill` reports that the signal was DELIVERED, not that the target
     # EXITED. A process that traps or ignores SIGTERM used to be logged as
@@ -869,8 +1040,23 @@ sweep_procs_widened() {
     fi
     signalled=$((signalled+1))
     if ! _proc_gone_within "$pid" "$grace"; then
+      # PARITY: pre-signal-revalidation — the SIGKILL is a SECOND signal and gets
+      # the SAME identity re-match the SIGTERM had. The confirmation wait above
+      # only proves "the numeric pid is not confirmed gone"; if the original
+      # process exited and its pid was REUSED during the grace, an unconditional
+      # `kill -9` lands on the replacement. (It also covers the case where the
+      # probe could not answer at all — unknown fails closed here.)
+      if ! _widen_still_owned "$pid" "$argv"; then
+        log "widened proc sweep: $pid no longer matches the candidate after the ${grace}s grace (pid reuse, re-created worktree, or an unreadable probe) — NOT escalating to SIGKILL"
+        continue
+      fi
+      cwd_now="$_SWEEP_WIDEN_CWD_NOW"
       log "widened proc sweep: $pid survived SIGTERM after ${grace}s — escalating to SIGKILL"
       env kill -9 "$pid" 2>/dev/null || true
+      # BOUND 2b accounting: SIGKILL is a DELIVERED SIGNAL and counts. Counting
+      # only once per candidate let a cap of N authorize 2N candidates and 4N
+      # signals — the ceiling has to bound what it claims to bound.
+      signalled=$((signalled+1))
       if ! _proc_gone_within "$pid" "$grace"; then
         log "widened proc sweep: $pid STILL alive after SIGKILL — no reclamation recorded (cmd: ${_SWEEP_ARGV_BASE}; cwd: $cwd_now)"
         continue

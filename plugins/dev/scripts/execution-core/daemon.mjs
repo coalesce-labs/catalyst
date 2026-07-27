@@ -1230,6 +1230,11 @@ function startReaperAndTimer({
   const procReaper = new ProcReaper({
     mode: procCfg.mode ?? "shadow",
     widenMode: procCfg.widenMode ?? "shadow",
+    // CTL-1531 round 2: per-run cap on WIDENED confirmed terminations, mirroring
+    // orphan-sweep.sh's SWEEP_PROC_WIDEN_MAX_KILLS. Omitted ⇒ the module default
+    // (5); a non-numeric value is rejected by the constructor, not by an
+    // arithmetic accident that silently uncaps a process killer.
+    ...(procCfg.widenMaxKills != null ? { widenMaxKills: Number(procCfg.widenMaxKills) } : {}),
     ...(procCfg.graceMs != null ? { graceMs: Number(procCfg.graceMs) } : {}),
     ...(procCfg.minEtimeSec != null ? { minEtimeSec: Number(procCfg.minEtimeSec) } : {}),
     ...(procCfg.worktreeRoot ? { worktreeRoot: procCfg.worktreeRoot } : {}),

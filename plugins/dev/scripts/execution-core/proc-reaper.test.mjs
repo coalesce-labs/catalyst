@@ -7,15 +7,22 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test proc-reaper.test.mjs
 
 import { describe, it, test, expect, mock } from "bun:test";
+// CTL-1531 round 3: the BEHAVIOURAL parity suite spawns `bash __tests__/parity-scenario.sh`
+// (a fully-mocked fixture — see that file's SAFETY note) and the probe-deadline tests
+// spawn a deliberately hung mock `lsof` from a scratch $PATH. No test signals a real pid.
+import { execFileSync } from "node:child_process";
 // CTL-1531 P1-b drives the REAL default cwd probe against the REAL filesystem
 // (the only disk-touching tests in this file; they read, and clean up after
 // themselves under os.tmpdir()). No test here ever signals a real pid.
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ProcReaper,
   defaultCwdExists,
+  lsofTimeoutMs,
+  defaultProbeAlive,
+  WIDEN_DEFAULT_MAX_KILLS,
   WIDEN_MODES,
   classifyProc,
   classifyPreCwd,
@@ -941,6 +948,8 @@ function shOrphanFixture({
     psLister: () => psLines,
     lsofCwd: () => GONE_WT,
     cwdExists: () => false, // the worktree was deleted out from under it
+    // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+    worktreeRootExists: () => true,
     agentsResult: () => ({ ok: agentsOk, agents: [] }),
     killProc,
     sleep: async () => {},
@@ -1073,6 +1082,8 @@ describe("CTL-1531 ProcReaper.sweep — widened class end-to-end", () => {
       psLister: () => psLines,
       lsofCwd: () => `${WT_ROOT}/evergreen/evr-23`,
       cwdExists: () => false,
+      // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+      worktreeRootExists: () => true,
       agentsResult: () => ({ ok: true, agents: [] }),
       killProc,
       sleep: async () => {},
@@ -1105,6 +1116,8 @@ describe("CTL-1531 ProcReaper.sweep — widened class end-to-end", () => {
       psLister: () => (++n === 1 ? [first] : [reused]),
       lsofCwd: () => `${WT_ROOT}/evergreen/evr-23`,
       cwdExists: () => false,
+      // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+      worktreeRootExists: () => true,
       agentsResult: () => ({ ok: true, agents: [] }),
       killProc,
       sleep: async () => {},
@@ -1294,6 +1307,8 @@ describe("CTL-1531 ProcReaper.sweep — ONE batched cwd probe, not one per pid",
           return new Map(pids.map((p) => [p, `${WT_ROOT}/CTL-X`]));
         },
         cwdExists: () => false,
+        // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+        worktreeRootExists: () => true,
         agentsResult: () => ({ ok: true, agents: [] }),
         killProc: recordingKill(),
         sleep: async () => {},
@@ -1333,6 +1348,8 @@ describe("CTL-1531 ProcReaper.sweep — ONE batched cwd probe, not one per pid",
         return new Map(pids.map((p) => [p, `${WT_ROOT}/CTL-X`]));
       },
       cwdExists: () => false,
+      // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+      worktreeRootExists: () => true,
       agentsResult: () => ({ ok: true, agents: [] }),
       killProc: recordingKill(),
       sleep: async () => {},
@@ -1364,6 +1381,8 @@ describe("CTL-1531 ProcReaper.sweep — ONE batched cwd probe, not one per pid",
       // for a process it lacks permission to read.
       lsofCwdBatch: () => new Map([[10, `${WT_ROOT}/CTL-X`]]),
       cwdExists: () => false,
+      // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+      worktreeRootExists: () => true,
       agentsResult: () => ({ ok: true, agents: [] }),
       killProc: recordingKill(),
       sleep: async () => {},
@@ -1391,6 +1410,8 @@ describe("CTL-1531 ProcReaper.sweep — ONE batched cwd probe, not one per pid",
         throw new Error("lsof timed out");
       },
       cwdExists: () => false,
+      // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+      worktreeRootExists: () => true,
       agentsResult: () => ({ ok: true, agents: [] }),
       killProc,
       sleep: async () => {},
@@ -1420,6 +1441,8 @@ describe("CTL-1531 ProcReaper.sweep — ONE batched cwd probe, not one per pid",
       },
       lsofCwdBatch: (pids) => new Map(pids.map((p) => [p, `${WT_ROOT}/CTL-X`])),
       cwdExists: () => false,
+      // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+      worktreeRootExists: () => true,
       agentsResult: () => ({ ok: true, agents: [] }),
       killProc: recordingKill(),
       sleep: async () => {},
@@ -1530,6 +1553,8 @@ function widenReaper({
     psLister: () => pick(psSeq, nPs++, psLines),
     lsofCwd: () => pick(cwdSeq, nCwd++, cwd),
     cwdExists: () => pick(existsSeq, nExists++, false),
+    // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+    worktreeRootExists: () => true,
     agentsResult: () => pick(agents, nAgents++, { ok: true, agents: [] }),
     killProc,
     sleep: async () => {},
@@ -1993,6 +2018,8 @@ describe("CTL-1531 P2-f — widened ownership is re-proved from a FRESH read bef
       },
       lsofCwd: () => `${WT_ROOT}/evergreen/evr-23`,
       cwdExists: () => false,
+      // CTL-1531 round 2: the worktree ROOT is present. It gets its own seam because it answers a different question from a candidate's cwd, and the widened class is DISABLED for the whole sweep unless the root is definitely there (a missing root makes EVERY cwd under it look gone at once).
+      worktreeRootExists: () => true,
       agentsResult: () => ({ ok: true, agents: [] }),
       killProc,
       sleep: async () => order.push("sleep"),
@@ -2034,8 +2061,11 @@ describe("defaultCwdExists — only ENOENT/ENOTDIR prove deletion (CTL-1531 P1-b
   it("ENOENT ⇒ false (definitely gone)", () => {
     expect(defaultCwdExists("/x", { stat: throwing("ENOENT") })).toBe(false);
   });
-  it("ENOTDIR ⇒ false (definitely gone)", () => {
-    expect(defaultCwdExists("/x", { stat: throwing("ENOTDIR") })).toBe(false);
+  // ENOTDIR is deliberately NOT kill evidence: the shell probe only recognises
+  // "No such file or directory", so treating ENOTDIR as proof of deletion made JS
+  // the killing side of an undeclared asymmetry (CTL-1531 round 3, M10).
+  it("ENOTDIR ⇒ null (spare) — matches the shell probe, which cannot see it", () => {
+    expect(defaultCwdExists("/x", { stat: throwing("ENOTDIR") })).toBeNull();
   });
 
   // These are the unpinned ones: each must be UNKNOWN (null ⇒ spare), never false.
@@ -2068,5 +2098,1248 @@ describe("defaultCwdExists — only ENOENT/ENOTDIR prove deletion (CTL-1531 P1-b
     expect(defaultCwdExists("", { stat })).toBeNull();
     expect(defaultCwdExists(null, { stat })).toBeNull();
     expect(calls).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CTL-1531 Codex round 2 — the four JS-side findings, plus the DRIFT GUARD.
+//
+// The theme of round 2 is that this file and `orphan-sweep.sh` are two
+// implementations of ONE policy and each round found a hardening on one side
+// missing from the other, in BOTH directions. Round 1 gave the JS side an lsof
+// deadline the shell lacked; the shell had a root-absent bail and a per-run kill
+// cap the JS lacked. The last describe in this file is the mechanization that
+// makes the next such divergence fail CI instead of a review round.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── P1-a (round 2): a missing worktree ROOT disables the widened class ─────
+//
+// "The cwd no longer exists" is the ONLY ownership evidence authorizing a kill
+// on an arbitrary command, and it is CORRELATED: rename / delete / unmount
+// `worktreeRoot` and EVERY PPID-1 process beneath it satisfies it in the same
+// pass. Two-sweep persistence is no defense — the same correlated fault answers
+// both sweeps — so one root-level failure becomes a mass kill.
+describe("CTL-1531 round 2 P1-a — root-absent bail (ported from orphan-sweep.sh BOUND 1)", () => {
+  it("root DEFINITELY GONE → the widened candidate is never signalled and never reported", async () => {
+    const { reaper, hardSignals, emit } = widenReaper({
+      widenMode: "enforce",
+      extra: { worktreeRootExists: () => false },
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(hardSignals()).toHaveLength(0);
+    expect(r2.reaped).toHaveLength(0);
+    expect(r2.wouldReap).toHaveLength(0);
+    // The row falls back to the EXACT pre-CTL-1531 spare reason (widenMode off).
+    expect(r2.spared.some((s) => s.reason === "command-not-killable")).toBe(true);
+    expect(emit.calls.some((c) => c.fields?.reason === "widen-root-absent")).toBe(true);
+  });
+
+  it("root UNREADABLE (probe cannot answer) also bails — fail closed, not fail open", async () => {
+    const { reaper, hardSignals } = widenReaper({
+      widenMode: "enforce",
+      // EACCES on the mount point / ESTALE on a dropped share ⇒ null ⇒ cannot tell.
+      extra: { worktreeRootExists: () => null },
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(hardSignals()).toHaveLength(0);
+    expect(r2.reaped).toHaveLength(0);
+  });
+
+  it("a THROWING root probe bails (never treated as 'present')", async () => {
+    const { reaper, hardSignals } = widenReaper({
+      widenMode: "enforce",
+      extra: {
+        worktreeRootExists: () => {
+          throw new Error("stat: ESTALE");
+        },
+      },
+    });
+    await reaper.sweep({});
+    expect((await reaper.sweep({})).reaped).toHaveLength(0);
+    expect(hardSignals()).toHaveLength(0);
+  });
+
+  it("the bail is LOGGED with the root and why (an operator must be able to see it)", async () => {
+    const warns = [];
+    const log = { info: () => {}, warn: (f, m) => warns.push({ f, m }), error: () => {} };
+    const { reaper } = widenReaper({
+      widenMode: "enforce",
+      log,
+      extra: { worktreeRootExists: () => false },
+    });
+    await reaper.sweep({});
+    const hit = warns.find((w) => /worktree root is absent/i.test(w.m));
+    expect(hit).toBeDefined();
+    expect(hit.f.worktreeRoot).toBe(WT_ROOT);
+    expect(hit.f.probe).toBe("absent");
+  });
+
+  it("NON-VACUITY: with the root PRESENT the very same fixture IS reaped", async () => {
+    const { twoSweeps } = widenReaper({ widenMode: "enforce" });
+    expect((await twoSweeps()).reaped.map((x) => x.pid)).toContain(4444);
+  });
+
+  it("the LEGACY node/bun class is untouched by a missing root (the .sh bail skips only the widened branch)", async () => {
+    // A node orphan under the root: the legacy class never depended on the
+    // deleted-cwd conjunct, so a missing root must not silently disable it.
+    const killProc = recordingKill({ alive: new Set([4242]) });
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      widenMode: "enforce",
+      worktreeRoot: WT_ROOT,
+      minEtimeSec: 900,
+      psLister: () => [psLine({ pid: 4242, ppid: 1, etime: "20:00", command: "node /x/foo.mjs" })],
+      lsofCwd: () => `${WT_ROOT}/CTL-X`,
+      cwdExists: () => false,
+      worktreeRootExists: () => false, // root gone
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc,
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped.map((x) => x.pid)).toContain(4242);
+  });
+
+  it("the root probe DERIVES from cwdExists when not injected (it can never silently fail open)", () => {
+    const seen = [];
+    const reaper = new ProcReaper({
+      worktreeRoot: WT_ROOT,
+      cwdExists: (p) => {
+        seen.push(p);
+        return true;
+      },
+      log: silentLog(),
+    });
+    expect(reaper.worktreeRootExists(WT_ROOT)).toBe(true);
+    expect(seen).toEqual([WT_ROOT]);
+  });
+});
+
+// ─── P1-b (round 2): the per-run cap on WIDENED kills ───────────────────────
+
+// N identical widened `sh` orphans, all fully kill-eligible.
+function widenFleet({ pids, widenMaxKills, survivors = new Set(), extra = {} } = {}) {
+  const rows = pids.map((p) => `${p} 1 1200 16:30:00 ${SH_ARGS}`);
+  const alive = new Set(pids);
+  const calls = [];
+  const killProc = (pid, signal) => {
+    calls.push([pid, signal]);
+    if (signal === 0) return alive.has(pid);
+    if (signal === "SIGKILL" && !survivors.has(pid)) alive.delete(pid);
+    return true;
+  };
+  killProc.calls = calls;
+  const warns = [];
+  const reaper = new ProcReaper({
+    mode: "enforce",
+    widenMode: "enforce",
+    ...(widenMaxKills === undefined ? {} : { widenMaxKills }),
+    worktreeRoot: WT_ROOT,
+    minEtimeSec: 900,
+    psLister: () => rows,
+    lsofCwd: () => `${WT_ROOT}/evergreen/evr-23`,
+    cwdExists: () => false,
+    worktreeRootExists: () => true,
+    agentsResult: () => ({ ok: true, agents: [] }),
+    killProc,
+    sleep: async () => {},
+    selfPid: 1,
+    parentPid: 2,
+    emit: recordingEmit(),
+    log: { info: () => {}, warn: (f, m) => warns.push({ f, m }), error: () => {} },
+  });
+  const hard = () => calls.filter(([, s]) => s !== 0);
+  return { reaper, killProc, warns, hard };
+}
+
+describe("CTL-1531 round 2 P1-b — per-run cap on widened kills (mirrors SWEEP_PROC_WIDEN_MAX_KILLS)", () => {
+  it("the default cap is 5, matching the .sh default", () => {
+    expect(WIDEN_DEFAULT_MAX_KILLS).toBe(5);
+    expect(new ProcReaper({ log: silentLog() }).widenMaxKills).toBe(5);
+  });
+
+  it("10 eligible widened orphans + cap 3 → exactly 3 reaped, 7 deferred", async () => {
+    const pids = [4401, 4402, 4403, 4404, 4405, 4406, 4407, 4408, 4409, 4410];
+    const { reaper, hard } = widenFleet({ pids, widenMaxKills: 3 });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped).toHaveLength(3);
+    expect(r2.spared.filter((s) => s.reason === "widen-cap-reached")).toHaveLength(7);
+    // …and the ones over the cap were never SIGNALLED at all.
+    expect(new Set(hard().map(([p]) => p)).size).toBe(3);
+  });
+
+  it("the deferral is REPORTED in the .sh's own words ('cap reached (N), M deferred')", async () => {
+    const { reaper, warns } = widenFleet({ pids: [4401, 4402, 4403], widenMaxKills: 1 });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(warns.some((w) => /widened cap reached \(1\), 2 deferred to the next run/.test(w.m))).toBe(
+      true
+    );
+  });
+
+  it("a signal-IGNORING process does not consume a cap slot (it crowds out no real orphan)", async () => {
+    // 4401 survives everything and is enumerated FIRST. The cap counts CONFIRMED
+    // terminations for exactly this reason — otherwise a stubborn process eats a
+    // slot on every run, forever, and the real orphan behind it is never reached.
+    // (It does spend SIGNAL budget — 2 of the 4 a cap of 2 allows — which is the
+    // separate blast-radius ceiling asserted below.)
+    const { reaper } = widenFleet({
+      pids: [4401, 4402],
+      widenMaxKills: 2,
+      survivors: new Set([4401]),
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped.map((x) => x.pid)).toEqual([4402]);
+  });
+
+  it("SIGNALS are bounded at cap x 2 when nothing responds — and SIGKILL COUNTS", async () => {
+    // The .sh bug Codex flagged: the ceiling incremented once per CANDIDATE
+    // although each candidate receives SIGTERM *and* SIGKILL, so "cap 2"
+    // permitted 4 candidates and 8 delivered signals. Counting signals, cap 2
+    // ⇒ ceiling 4 ⇒ 2 candidates x 2 signals, then stop.
+    const pids = [4401, 4402, 4403, 4404, 4405, 4406, 4407, 4408];
+    const { reaper, hard, warns } = widenFleet({
+      pids,
+      widenMaxKills: 2,
+      survivors: new Set(pids),
+    });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(hard()).toHaveLength(4); // NOT 8
+    expect(new Set(hard().map(([p]) => p)).size).toBe(2);
+    expect(
+      warns.some((w) =>
+        /widened signal bound reached \(4\) with only 0 confirmed termination\(s\)/.test(w.m)
+      )
+    ).toBe(true);
+  });
+
+  it("cap 0 means UNCAPPED (an operator decision, documented as such)", async () => {
+    const pids = [4401, 4402, 4403, 4404, 4405, 4406, 4407];
+    const { reaper } = widenFleet({ pids, widenMaxKills: 0 });
+    await reaper.sweep({});
+    expect((await reaper.sweep({})).reaped).toHaveLength(7);
+  });
+
+  it("a garbage cap degrades to the DEFAULT, never to uncapped", () => {
+    for (const bad of ["nope", NaN, -1, undefined, null, {}]) {
+      expect(new ProcReaper({ widenMaxKills: bad, log: silentLog() }).widenMaxKills).toBe(
+        WIDEN_DEFAULT_MAX_KILLS
+      );
+    }
+  });
+
+  it("the cap does NOT bound the LEGACY node/bun class", async () => {
+    const pids = [5001, 5002, 5003, 5004, 5005, 5006, 5007];
+    const alive = new Set(pids);
+    const killProc = (pid, signal) => {
+      if (signal === 0) return alive.has(pid);
+      if (signal === "SIGKILL") alive.delete(pid);
+      return true;
+    };
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      widenMode: "enforce",
+      widenMaxKills: 1,
+      worktreeRoot: WT_ROOT,
+      minEtimeSec: 900,
+      psLister: () => pids.map((p) => `${p} 1 1200 16:30:00 node /x/a.mjs`),
+      lsofCwd: () => `${WT_ROOT}/CTL-X`,
+      cwdExists: () => true,
+      worktreeRootExists: () => true,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc,
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    expect((await reaper.sweep({})).reaped).toHaveLength(7);
+  });
+
+  it("SHADOW still reports the FULL candidate set (the cap is enforcing-path only)", async () => {
+    // That report is exactly the signal an operator needs to size the cap
+    // BEFORE flipping to enforce, so shadow must not be truncated by it.
+    const pids = [4401, 4402, 4403, 4404, 4405, 4406];
+    const { reaper } = widenFleet({ pids, widenMaxKills: 2 });
+    reaper.mode = "shadow";
+    await reaper.sweep({});
+    expect((await reaper.sweep({})).wouldReap).toHaveLength(6);
+  });
+});
+
+// ─── P2 (round 2): the liveness probe is TRI-STATE ──────────────────────────
+//
+// The .sh finding was `_proc_alive`'s "empty ps output ⇒ exited". The JS half is
+// `killProc(pid, 0)`, whose boolean collapses ESRCH (gone) and EPERM (found,
+// foreign-uid ⇒ ALIVE) into one `false` — so a FAILED probe was read as "gone".
+describe("CTL-1531 round 2 — defaultProbeAlive is tri-state (alive | gone | cannot tell)", () => {
+  const throwing = (code) => () => {
+    const e = new Error(code);
+    e.code = code;
+    throw e;
+  };
+  it("signal 0 accepted ⇒ true (alive)", () => {
+    expect(defaultProbeAlive(123, { kill: () => {} })).toBe(true);
+  });
+  it("ESRCH ⇒ false — the ONLY outcome that proves an exit", () => {
+    expect(defaultProbeAlive(123, { kill: throwing("ESRCH") })).toBe(false);
+  });
+  it("EPERM ⇒ true: the kernel FOUND it and refused us; it is alive, not gone", () => {
+    expect(defaultProbeAlive(123, { kill: throwing("EPERM") })).toBe(true);
+  });
+  for (const code of ["EINVAL", "EIO", undefined]) {
+    it(`${code} ⇒ null (cannot tell — never an exit)`, () => {
+      expect(defaultProbeAlive(123, { kill: throwing(code) })).toBeNull();
+    });
+  }
+  it("a nonsense pid ⇒ null, with no signal attempted", () => {
+    let calls = 0;
+    const kill = () => {
+      calls++;
+    };
+    expect(defaultProbeAlive(0, { kill })).toBeNull();
+    expect(defaultProbeAlive(-1, { kill })).toBeNull();
+    expect(defaultProbeAlive("x", { kill })).toBeNull();
+    expect(calls).toBe(0);
+  });
+});
+
+describe("CTL-1531 round 2 — a FAILED liveness probe never claims an exit", () => {
+  // Build a widened fixture whose post-SIGTERM probe answers `answer`.
+  function probeFixture(answer) {
+    const emit = recordingEmit();
+    const hard = [];
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      widenMode: "enforce",
+      worktreeRoot: WT_ROOT,
+      minEtimeSec: 900,
+      psLister: () => [`4444 1 1200 16:30:00 ${SH_ARGS}`],
+      lsofCwd: () => `${WT_ROOT}/evergreen/evr-23`,
+      cwdExists: () => false,
+      worktreeRootExists: () => true,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc: (pid, signal) => {
+        hard.push([pid, signal]);
+        return true;
+      },
+      probeAlive: () => answer,
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit,
+      log: silentLog(),
+    });
+    return { reaper, emit, hard };
+  }
+
+  it("probe returns null (could not tell) → NOT reaped, no reclamation emitted", async () => {
+    const { reaper, emit } = probeFixture(null);
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped).toHaveLength(0);
+    expect(emit.calls.filter((c) => c.type === "procOrphans.reaped")).toHaveLength(0);
+  });
+
+  it("probe returns null → the SIGTERM is NOT self-certified as an exit (SIGKILL still tried)", async () => {
+    const { reaper, hard } = probeFixture(null);
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(hard.map(([, s]) => s)).toContain("SIGKILL");
+  });
+
+  it("a THROWING probe is likewise 'cannot tell', never 'gone'", async () => {
+    const { reaper, emit } = probeFixture(undefined);
+    reaper.probeAlive = () => {
+      throw new Error("procfs read failed");
+    };
+    await reaper.sweep({});
+    expect((await reaper.sweep({})).reaped).toHaveLength(0);
+    expect(emit.calls.filter((c) => c.type === "procOrphans.reaped")).toHaveLength(0);
+  });
+
+  it("NON-VACUITY: a probe that CONFIRMS absence does record the reclamation", async () => {
+    const { reaper, emit } = probeFixture(false);
+    await reaper.sweep({});
+    expect((await reaper.sweep({})).reaped.map((x) => x.pid)).toContain(4444);
+    expect(emit.calls.some((c) => c.type === "procOrphans.reaped")).toBe(true);
+  });
+
+  it("an EPERM target is not reported reaped (the old boolean seam read EPERM as 'exited')", async () => {
+    // defaultKillProc returns false for EPERM. Routed through the tri-state
+    // probe, EPERM means ALIVE, so the sweep under-reports instead of emitting
+    // a reclamation for a process that is still running.
+    const emit = recordingEmit();
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      widenMode: "enforce",
+      worktreeRoot: WT_ROOT,
+      minEtimeSec: 900,
+      psLister: () => [`4444 1 1200 16:30:00 ${SH_ARGS}`],
+      lsofCwd: () => `${WT_ROOT}/evergreen/evr-23`,
+      cwdExists: () => false,
+      worktreeRootExists: () => true,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc: () => false, // every signal "fails" (EPERM) — the boolean seam
+      probeAlive: (pid) => defaultProbeAlive(pid, {
+        kill: () => {
+          const e = new Error("EPERM");
+          e.code = "EPERM";
+          throw e;
+        },
+      }),
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit,
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    expect((await reaper.sweep({})).reaped).toHaveLength(0);
+    expect(emit.calls.filter((c) => c.type === "procOrphans.reaped")).toHaveLength(0);
+  });
+
+  it("an injected killProc keeps the probe hermetic even when swapped AFTER construction", async () => {
+    // The seam is resolved at CALL time, so a test that reassigns `killProc`
+    // cannot be left probing a REAL pid through the native default.
+    const reaper = new ProcReaper({ psLister: () => [], log: silentLog() });
+    const seen = [];
+    reaper.killProc = (pid, signal) => {
+      seen.push([pid, signal]);
+      return false;
+    };
+    expect(await reaper._safeProbeAlive(999999)).toBe(false);
+    expect(seen).toEqual([[999999, 0]]);
+  });
+});
+
+// ─── P2 (round 2): the SIGKILL gets the SAME ownership re-proof as the SIGTERM
+//
+// `graceMs` is a SECOND stale-evidence window after the pre-SIGTERM
+// revalidation. `_terminateWithGrace` used to re-match only argv before the
+// SIGKILL, so a widened candidate that moved into a live cwd, had its worktree
+// recreated, was claimed by a live agent, or was re-parented during the wait was
+// still SIGKILLed.
+describe("CTL-1531 round 2 P2 — the widened SIGKILL re-proves the FULL conjunction", () => {
+  // psSeq/cwdSeq/existsSeq/agents are consumed in order, so index 2+ is what the
+  // PRE-SIGKILL revalidation sees (0 = classification, 1 = pre-SIGTERM re-proof).
+  const SURVIVES = { alive: true };
+  function graceFixture({ psSeq, cwdSeq, existsSeq, agents } = {}) {
+    const calls = [];
+    let nPs = 0;
+    let nCwd = 0;
+    let nExists = 0;
+    let nAgents = 0;
+    const pick = (seq, i, fb) => (Array.isArray(seq) ? (i < seq.length ? seq[i] : seq.at(-1)) : fb);
+    const rows = [`4444 1 1200 16:30:00 ${SH_ARGS}`];
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      widenMode: "enforce",
+      worktreeRoot: WT_ROOT,
+      minEtimeSec: 900,
+      psLister: () => pick(psSeq, nPs++, rows),
+      lsofCwd: () => pick(cwdSeq, nCwd++, `${WT_ROOT}/evergreen/evr-23`),
+      cwdExists: () => pick(existsSeq, nExists++, false),
+      worktreeRootExists: () => true,
+      agentsResult: () => pick(agents, nAgents++, { ok: true, agents: [] }),
+      killProc: (pid, signal) => {
+        calls.push([pid, signal]);
+        return signal === 0 ? SURVIVES.alive : true; // survives SIGTERM
+      },
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    const sigkills = () => calls.filter(([, s]) => s === "SIGKILL");
+    return { reaper, calls, sigkills };
+  }
+
+  // Sweep 1 consumes: ps(1). Sweep 2 consumes: ps(1) + revalidate ps(1) then, if
+  // it survives SIGTERM, the SIGKILL revalidation's ps(1). Index the LAST entry
+  // of each seq to drive "what the pre-SIGKILL re-proof sees".
+  const LATE = (early, late) => [early, early, early, late];
+
+  it("PPID changed during the grace (re-adopted by a live supervisor) → NO SIGKILL", async () => {
+    const good = [`4444 1 1200 16:30:00 ${SH_ARGS}`];
+    const readopted = [`4444 500 1200 16:30:00 ${SH_ARGS}`];
+    const { reaper, sigkills } = graceFixture({ psSeq: LATE(good, readopted) });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(sigkills()).toHaveLength(0);
+    expect(r2.reaped).toHaveLength(0);
+  });
+
+  it("the pid was RECYCLED under a different argv during the grace → NO SIGKILL", async () => {
+    const good = [`4444 1 1200 16:30:00 ${SH_ARGS}`];
+    const recycled = [`4444 1 1200 16:30:00 sh -c a-totally-different-process`];
+    const { reaper, sigkills } = graceFixture({ psSeq: LATE(good, recycled) });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(sigkills()).toHaveLength(0);
+  });
+
+  it("the worktree was RE-CREATED during the grace (cwd exists again) → NO SIGKILL", async () => {
+    const { reaper, sigkills } = graceFixture({ existsSeq: LATE(false, true) });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(sigkills()).toHaveLength(0);
+  });
+
+  it("the cwd MOVED out from under the worktree root during the grace → NO SIGKILL", async () => {
+    const { reaper, sigkills } = graceFixture({
+      cwdSeq: LATE(`${WT_ROOT}/evergreen/evr-23`, "/Users/test/elsewhere/gone"),
+    });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(sigkills()).toHaveLength(0);
+  });
+
+  it("a LIVE AGENT claimed the tree during the grace → NO SIGKILL", async () => {
+    const { reaper, sigkills } = graceFixture({
+      agents: LATE(
+        { ok: true, agents: [] },
+        { ok: true, agents: [{ pid: 4444, cwd: `${WT_ROOT}/CTL-9` }] }
+      ),
+    });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(sigkills()).toHaveLength(0);
+  });
+
+  it("the agents read FAILS during the grace → NO SIGKILL (catastrophe guard, applied late)", async () => {
+    const { reaper, sigkills } = graceFixture({
+      agents: LATE({ ok: true, agents: [] }, { ok: false, agents: [] }),
+    });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(sigkills()).toHaveLength(0);
+  });
+
+  it("the signal-time cwd probe cannot answer during the grace → NO SIGKILL", async () => {
+    const { reaper, sigkills } = graceFixture({
+      cwdSeq: LATE(`${WT_ROOT}/evergreen/evr-23`, null),
+    });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(sigkills()).toHaveLength(0);
+  });
+
+  it("NON-VACUITY: everything still holds at SIGKILL time → the SIGKILL IS sent", async () => {
+    const { reaper, sigkills } = graceFixture({});
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(sigkills()).toHaveLength(1);
+  });
+
+  it("REGRESSION: the LEGACY node/bun class keeps its argv-only pre-SIGKILL re-match", async () => {
+    // The full widened conjunction must NOT be imposed on node/bun — a live cwd
+    // is normal there and narrowing it would be a silent coverage regression.
+    const rows = [psLine({ pid: 4242, ppid: 1, etime: "20:00", command: "node /x/foo.mjs" })];
+    const killProc = recordingKill({ alive: new Set([4242]) });
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      worktreeRoot: WT_ROOT,
+      minEtimeSec: 900,
+      psLister: () => rows,
+      lsofCwd: () => `${WT_ROOT}/CTL-X`,
+      cwdExists: () => true, // cwd STILL EXISTS — fatal for a widened row, fine here
+      worktreeRootExists: () => true,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc,
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(killProc.calls.filter(([, s]) => s === "SIGKILL")).toHaveLength(1);
+    expect(r2.reaped.map((x) => x.pid)).toContain(4242);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE DRIFT GUARD — the actual root cause of three review rounds.
+//
+// `proc-reaper.mjs` (daemon) and `orphan-sweep.sh` (LaunchAgent) are TWO
+// IMPLEMENTATIONS OF ONE POLICY, and every review round so far has found a
+// hardening present on one side and missing on the other — in BOTH directions:
+//
+//   round 1  → JS gained an `lsof` deadline the shell did not have
+//   round 1  → the shell gained a root-absent bail + a per-run kill cap the JS
+//              did not have
+//   round 2  → the shell's liveness probe read a FAILED probe as an exit; so did
+//              the JS one. The shell revalidated identity before SIGTERM but not
+//              before SIGKILL; so did the JS one.
+//
+// Reviews are not a control for this. The mechanization: every SHARED safety
+// property carries a `PARITY: <slug>` marker at its site in BOTH files, and this
+// test asserts the two marker SETS are IDENTICAL and equal the table below. Add
+// a gate to one side without tagging the sibling and this FAILS.
+//
+// It is deliberately dumb. It cannot check that the two implementations are
+// semantically equivalent — only that neither side quietly grows (or loses) a
+// property the other lacks, which is exactly the failure mode observed.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// The contract. Each entry is a safety property BOTH implementations must carry.
+// Adding a row means tagging both files; removing one means deleting both markers.
+// The prose is the reviewable part — the slug is the assertion.
+//
+// MODULE SCOPE on purpose: the BEHAVIOURAL suite at the bottom of this file asserts
+// that every slug here also has a runnable scenario, and a second hand-maintained
+// copy of this list would be exactly the drift this whole mechanism exists to stop.
+const SHARED_SAFETY_PROPERTIES = Object.freeze({
+  "root-absent-bail":
+    "If the worktree ROOT itself is absent/unreadable, abandon the WIDENED class for this run. 'cwd is gone' is correlated: one missing root makes every process beneath it qualify at once.",
+  "per-run-cap":
+    "Bound the widened class per run: a cap on CONFIRMED terminations (default 5) plus a cap x 2 ceiling on DELIVERED signals, with 'cap reached (N), M deferred' reporting.",
+  "tri-state-cwd-probe":
+    "'Does this cwd still exist?' is present | gone | UNKNOWN. Only a definite ENOENT is kill evidence; EACCES/EIO/ESTALE/EPERM/ENOTDIR spare. Never a bare existsSync / [[ -d ]].",
+  "pre-signal-revalidation":
+    "Re-prove the full ownership conjunction from a FRESH read immediately before EACH signal — before the SIGTERM and again before the SIGKILL (the grace wait is a second stale-evidence window, and a pid can be reused inside it).",
+  "confirmed-exit":
+    "kill(2) returns on DELIVERY, not exit. Only a probe that CONFIRMS absence records a reclamation; a probe that could not answer is UNKNOWN and never claims the exit.",
+  "probe-deadline":
+    "The LSOF cwd-RESOLUTION probe is bounded (CATALYST_LSOF_TIMEOUT_MS / SWEEP_PROC_CWD_TIMEOUT_SECS), so one hung/stale mount cannot wedge the sweep. A timed-out probe yields UNKNOWN, never a truncated path. SCOPE: lsof ONLY — the cwd-EXISTENCE probe is unbounded on both sides, see DOCUMENTED_ASYMMETRIES. NOT symmetric at the edge: SWEEP_PROC_CWD_TIMEOUT_SECS=0 DISABLES the .sh bound (documented as unbounded at orphan-sweep.sh:51), whereas lsofTimeoutMs() refuses 0 and falls back to the default — so an operator can turn the bound off on the .sh side only.",
+  allowlist:
+    "A hard never-kill argv-substring allowlist covering the fleet's own control plane — daemon / broker / orch-monitor / tailscale AND the two PPID-1-by-construction entries orphan-sweep.sh and catalyst-stack, which the parent-pid gate cannot spare.",
+  denylist:
+    "A WIDENED-class command denylist for session multiplexers and login/init plumbing (tmux/screen/sshd/ssh/mosh/login/launchd/init/systemd/nohup), matched over the FULL argv with setproctitle's `progname:` form anchored.",
+  "age-floor":
+    "A minimum process age (minEtimeSec / SWEEP_PROC_WIDEN_MIN_AGE_SECS, default 900s) before a widened candidate may be signalled, so a just-spawned process whose worktree is mid-teardown is never reaped out from under the teardown.",
+  "argv-redaction":
+    "Never write a candidate's FULL argv to a log line or event payload — an arbitrary command's argv routinely carries tokens, passwords and signed URLs, and both logs are persisted. pid + command basename + reason only.",
+  "shadow-default":
+    "The widened class ships DARK: its own three-state knob (widenMode / SWEEP_PROC_WIDEN) defaults to shadow independently of the narrow class's mode, and an unrecognized value degrades to shadow, never to enforce.",
+});
+
+// Properties that are INTENTIONALLY one-sided. Listing them here is the escape
+// hatch: if a behavior belongs on only one side, say so out loud instead of
+// tagging it and forcing a bogus mirror.
+const DOCUMENTED_ASYMMETRIES = Object.freeze({
+  "two-sweep persistence": "JS only — the .sh sweep is stateless between runs and acts on first observation.",
+  "live-agent LIVE_TREE correlation": "JS only — `claude agents --json` + the ps children-map are not available to the .sh sweep.",
+  "catastrophe guard on the agents read": "JS only — same reason.",
+  "batched lsof prefetch": "JS only — a perf fix for the daemon's event loop; the .sh sweep is not on it.",
+  "legacy pgrep 'bun run|turbo|node' branch": ".sh only — path-unrestricted, reclaims debris outside the worktree root.",
+  "bounded base-10 config parsing": ".sh only — bash arithmetic's octal/overflow traps have no JS analogue.",
+  "self/ancestor pid walk": ".sh only — the JS side gets self+parent+daemon pids injected.",
+  // CTL-1531 round 3 (M7). The `probe-deadline` property covers LSOF and
+  // nothing else. defaultCwdExists is a SYNCHRONOUS, UNBOUNDED statSync: on a
+  // hung NFS/SMB mount it blocks the execution-core daemon's whole event loop,
+  // while the .sh sibling's `stat` wedges only its own LaunchAgent run. The
+  // asymmetry is the BLAST RADIUS, and it is declared here rather than papered
+  // over by widening `probe-deadline` to claim a bound the code does not have.
+  "unbounded statSync cwd-existence probe (event-loop blocking)":
+    "JS only — bounding it needs a subprocess PER CANDIDATE, i.e. exactly the spawn storm CTL-1531's batched lsof exists to remove; the .sh `stat` blocks only its own LaunchAgent run.",
+});
+
+describe("CTL-1531 — parity between proc-reaper.mjs and orphan-sweep.sh", () => {
+  const readSource = (rel) => readFileSync(join(import.meta.dir, rel), "utf8");
+  const markersIn = (text) => {
+    const out = new Set();
+    for (const m of text.matchAll(/PARITY:\s*([a-z][a-z0-9-]*)/g)) out.add(m[1]);
+    return out;
+  };
+
+  const JS_SRC = readSource("proc-reaper.mjs");
+  const SH_SRC = readSource("../orphan-sweep.sh");
+  const jsMarkers = markersIn(JS_SRC);
+  const shMarkers = markersIn(SH_SRC);
+  const expected = new Set(Object.keys(SHARED_SAFETY_PROPERTIES));
+  const sorted = (s) => [...s].sort();
+
+  it("proc-reaper.mjs tags EVERY shared safety property (and nothing extra)", () => {
+    expect(sorted(jsMarkers)).toEqual(sorted(expected));
+  });
+
+  it("orphan-sweep.sh tags EVERY shared safety property (and nothing extra)", () => {
+    expect(sorted(shMarkers)).toEqual(sorted(expected));
+  });
+
+  it("the two marker sets are IDENTICAL — this is the assertion that catches drift", () => {
+    // Fails the moment one side gains (or loses) a hardening the other lacks.
+    // The diff names the slug, so the fix is obvious: tag the sibling, or add
+    // the missing gate there.
+    expect(sorted(jsMarkers)).toEqual(sorted(shMarkers));
+  });
+
+  it("every shared property has a human-readable statement of WHAT must hold", () => {
+    for (const [slug, why] of Object.entries(SHARED_SAFETY_PROPERTIES)) {
+      expect(typeof why).toBe("string");
+      expect(why.length).toBeGreaterThan(40); // a slug alone is not a contract
+      expect(slug).toMatch(/^[a-z][a-z0-9-]*$/);
+    }
+  });
+
+  it("both files point a reader at this contract before they edit a gate", () => {
+    // A marker nobody knows the rule for is just a comment. Each source must
+    // name the sibling, so the parity requirement is discoverable from either.
+    expect(JS_SRC).toContain("orphan-sweep.sh");
+    expect(SH_SRC).toContain("proc-reaper.mjs");
+    expect(JS_SRC).toMatch(/PARITY/);
+    expect(SH_SRC).toMatch(/PARITY/);
+  });
+
+  it("the intentional asymmetries are declared, not silently untagged", () => {
+    // Documenting them is what keeps the strict set-equality above honest: an
+    // author with a genuinely one-sided change has a place to put it that is
+    // not "quietly skip the marker".
+    expect(Object.keys(DOCUMENTED_ASYMMETRIES).length).toBeGreaterThan(0);
+    for (const [name, why] of Object.entries(DOCUMENTED_ASYMMETRIES)) {
+      expect(name.length).toBeGreaterThan(0);
+      expect(why).toMatch(/^(JS only|\.sh only)/);
+    }
+    // A slug must never appear in both lists — that would mean a property is
+    // claimed as shared AND as one-sided.
+    for (const name of Object.keys(DOCUMENTED_ASYMMETRIES)) {
+      expect(expected.has(name)).toBe(false);
+    }
+  });
+
+  it("SANITY: the extractor really does find markers (a typo'd regex must not pass vacuously)", () => {
+    expect(jsMarkers.size).toBe(Object.keys(SHARED_SAFETY_PROPERTIES).length);
+    expect(shMarkers.size).toBe(Object.keys(SHARED_SAFETY_PROPERTIES).length);
+    expect(markersIn("nothing here").size).toBe(0);
+    expect(markersIn("// PARITY: made-up-slug").has("made-up-slug")).toBe(true);
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // THE MARKER TESTS ABOVE ARE A TAGGING INVARIANT, NOT A SAFETY ONE.
+  //
+  // Measured on this very PR: deleting a `# PARITY: argv-redaction` COMMENT
+  // failed 3 tests, while deleting the shell's actual root-absent BAIL (marker
+  // left in place) failed 0. Everything above can be satisfied by a file of
+  // comments. Keep it — a missing tag is a cheap early warning — but do not
+  // mistake it for the invariant. The invariant is below.
+  // ═════════════════════════════════════════════════════════════════════════
+  it("DISCLAIMER: the marker set is a tagging invariant; the behavioural suite below is the real check", () => {
+    // Encoded as an assertion so the disclaimer cannot rot away from the code:
+    // every shared property MUST also appear in the behavioural scenario table.
+    for (const slug of Object.keys(SHARED_SAFETY_PROPERTIES)) {
+      expect(Object.keys(BEHAVIOURAL_SCENARIOS)).toContain(slug);
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE BEHAVIOURAL DRIFT GUARD (CTL-1531 round 3) — the real invariant.
+//
+// The marker suite above asserts that the two files carry the same COMMENTS.
+// This one asserts that they BEHAVE the same. For each shared safety property it
+// runs ONE scenario through BOTH implementations:
+//
+//   .sh  → __tests__/parity-scenario.sh drives the REAL orphan-sweep.sh against
+//          a hermetic MOCKBIN fixture (ps/lsof/pgrep/kill/claude all mocked, $HOME
+//          redirected, `env kill` resolving to a log-appending mock) and prints a
+//          machine-readable outcome. NO real process is enumerated or signalled.
+//   JS   → the same scenario expressed through ProcReaper's injected seams.
+//
+// and asserts BOTH produce the SAME outcome — the same pids signalled, the same
+// NUMBER of signals delivered, the same pids recorded as reclaimed. Remove the
+// gate from EITHER side and the named test goes RED.
+//
+// Every scenario starts from the SAME maximally-kill-eligible shape and varies
+// exactly ONE thing. `control/baseline` proves that shape really does get killed,
+// so a "nothing was signalled" assertion can never pass because the harness is
+// simply inert.
+//
+// WHERE A TRUE CROSS-CHECK IS NOT PRACTICAL, IT IS SAID SO — see
+// PARTIAL_BEHAVIOURAL_COVERAGE below. Downgrading a claim is the point; the
+// failure this suite exists to stop is a check that quietly claims more than it
+// verifies.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const P_WT = "/parity/wt";
+const P_GONE = `${P_WT}/deleted-tree`;
+// Must match parity-scenario.sh's PARITY_SECRET exactly.
+const P_SECRET = "PARITY-SECRET-sk-live-DEADBEEF";
+const P_SH = join(import.meta.dir, "..", "__tests__", "parity-scenario.sh");
+
+/** capturingLog — records every log line (message + serialized fields). */
+function capturingLog() {
+  const lines = [];
+  const at = (level) => (fields, msg) => {
+    let f = "";
+    try {
+      f = JSON.stringify(fields ?? {});
+    } catch {
+      f = "<unserializable>";
+    }
+    lines.push(`${level} ${typeof msg === "string" ? msg : ""} ${f}`);
+  };
+  return { info: at("info"), warn: at("warn"), error: at("error"), lines };
+}
+
+/** runShellScenario — execute the .sh half and normalize its JSON outcome. */
+function runShellScenario(name) {
+  const stdout = execFileSync("bash", [P_SH, name], { encoding: "utf8", timeout: 120000 });
+  const line = stdout.trim().split("\n").filter(Boolean).pop();
+  const j = JSON.parse(line);
+  return {
+    signalled: j.signalled,
+    signals: j.signals,
+    reclaimed: j.reclaimed,
+    exit: j.exit,
+    log: Buffer.from(j.logB64, "base64").toString("utf8"),
+  };
+}
+
+/**
+ * runJsScenario — the SAME scenario through ProcReaper's seams.
+ *
+ * The JS reaper has two-sweep persistence (a DOCUMENTED_ASYMMETRY: the .sh sweep
+ * acts on first observation), so it is driven twice and the SECOND sweep is the
+ * acting one. That is the only intentional difference in how the two halves are
+ * driven; every gate under test is evaluated identically on both sweeps.
+ */
+async function runJsScenario(name) {
+  const log = capturingLog();
+  const killCalls = [];
+  const killProc = (pid, signal) => {
+    killCalls.push([pid, signal]);
+    return true;
+  };
+  const emits = [];
+  const emit = async (type, fields) => {
+    emits.push({ type, fields });
+    return true;
+  };
+
+  let rows = [];
+  let rowsAtCall = null; // (n) => rows — for the TOCTOU / revalidation scenario
+  const cwds = {}; // pid → cwd
+  const alive = new Set(); // pids that ignore BOTH signals
+  let cwdExistsFn = () => false; // "definitely gone"
+  let rootExistsFn = () => true;
+  let useRealLsof = false;
+  const cfg = {};
+
+  const row = (pid, { cmd = "sh -c while :; do :; done", etime = "16:40:00", ppid = 1 } = {}) =>
+    psLine({ pid, ppid, etime, command: cmd });
+
+  switch (name) {
+    case "control/baseline":
+      rows = [row(2001)];
+      cwds[2001] = P_GONE;
+      break;
+    case "allowlist":
+      rows = [
+        row(2001, { cmd: "/bin/bash /Users/x/plugin-source/plugins/dev/scripts/orphan-sweep.sh" }),
+        row(2002, {
+          cmd: "/bin/bash /Users/x/plugin-source/plugins/dev/scripts/catalyst-stack start",
+        }),
+      ];
+      cwds[2001] = P_GONE;
+      cwds[2002] = P_GONE;
+      break;
+    case "denylist":
+      rows = [row(2001, { cmd: "tmux: server (/private/tmp/tmux-501/default)" })];
+      cwds[2001] = P_GONE;
+      break;
+    case "age-floor":
+      rows = [row(2001, { etime: "00:30" })];
+      cwds[2001] = P_GONE;
+      break;
+    case "root-absent-bail":
+      rows = [row(2001), row(2002), row(2003), row(2004), row(2005)];
+      for (const p of [2001, 2002, 2003, 2004, 2005]) cwds[p] = P_GONE;
+      rootExistsFn = () => false; // the ROOT itself is gone
+      break;
+    case "per-run-cap":
+      rows = [row(2001), row(2002), row(2003), row(2004), row(2005)];
+      for (const p of [2001, 2002, 2003, 2004, 2005]) cwds[p] = P_GONE;
+      cfg.widenMaxKills = 2;
+      break;
+    case "signal-bound-odd":
+      rows = [row(2001), row(2002), row(2003), row(2004)];
+      for (const p of [2001, 2002, 2003, 2004]) cwds[p] = P_GONE;
+      cfg.widenMaxKills = 2;
+      alive.add(2002).add(2003).add(2004); // 2001 exits under SIGTERM → ODD parity
+      break;
+    case "tri-state-cwd-probe":
+      rows = [row(2001)];
+      cwds[2001] = `${P_WT}/unreadable-tree`;
+      cwdExistsFn = () => null; // EIO/ESTALE — the probe cannot ANSWER
+      break;
+    case "pre-signal-revalidation": {
+      rows = [row(2001)];
+      cwds[2001] = P_GONE;
+      const recycled = [row(2001, { cmd: "sh -c a-completely-different-process" })];
+      // ps read #1 = sweep 1's snapshot, #2 = sweep 2's snapshot, #3 = the
+      // pre-signal revalidation. The scenario asserts the spare REASON below, so
+      // if that call sequence ever changes the test fails loudly rather than
+      // passing for the wrong reason.
+      rowsAtCall = (n) => (n >= 3 ? recycled : rows);
+      break;
+    }
+    case "confirmed-exit":
+      rows = [row(2001)];
+      cwds[2001] = P_GONE;
+      alive.add(2001); // ignores SIGTERM *and* SIGKILL
+      break;
+    case "probe-deadline":
+      rows = [row(2001)];
+      cwds[2001] = P_GONE;
+      useRealLsof = true; // a genuinely HUNG `lsof` on $PATH, bounded by the deadline
+      break;
+    case "argv-redaction":
+      rows = [row(2001, { cmd: `sh -c curl -H Authorization: Bearer ${P_SECRET} https://x/y` })];
+      cwds[2001] = P_GONE;
+      break;
+    case "shadow-default":
+      rows = [row(2001)];
+      cwds[2001] = P_GONE;
+      break;
+    default:
+      throw new Error(`unknown JS parity scenario: ${name}`);
+  }
+
+  let psCalls = 0;
+  const psLister = async () => {
+    psCalls += 1;
+    return rowsAtCall ? rowsAtCall(psCalls) : rows;
+  };
+
+  const base = {
+    mode: "enforce",
+    widenMode: "enforce",
+    worktreeRoot: P_WT,
+    graceMs: 0,
+    psLister,
+    cwdExists: cwdExistsFn,
+    worktreeRootExists: rootExistsFn,
+    agentsResult: () => ({ ok: true, agents: [] }),
+    killProc,
+    probeAlive: (pid) => alive.has(pid),
+    sleep: async () => {},
+    selfPid: 111111,
+    parentPid: 111112,
+    log,
+    emit,
+    ...cfg,
+  };
+  // Only the probe-deadline scenario exercises the REAL lsof seam (it is the
+  // thing under test); every other scenario keeps a hermetic injected probe.
+  if (!useRealLsof) base.lsofCwd = async (pid) => (pid in cwds ? cwds[pid] : null);
+  // shadow-default: the knob must be ABSENT, not set to "shadow" — the property
+  // is that the DEFAULT is dark even while the narrow class is "enforce".
+  if (name === "shadow-default") delete base.widenMode;
+
+  let restorePath = null;
+  let restoreTimeout = null;
+  let mockDir = null;
+  if (useRealLsof) {
+    mockDir = mkdtempSync(join(tmpdir(), "parity-lsof-"));
+    const bin = join(mockDir, "lsof");
+    Bun.write(bin, "#!/usr/bin/env bash\nsleep 3\n");
+    chmodSync(bin, 0o755);
+    restorePath = process.env.PATH;
+    restoreTimeout = process.env.CATALYST_LSOF_TIMEOUT_MS;
+    process.env.PATH = `${mockDir}:${process.env.PATH}`;
+    process.env.CATALYST_LSOF_TIMEOUT_MS = "300";
+  }
+
+  let report;
+  try {
+    const reaper = new ProcReaper(base);
+    await reaper.sweep({}); // sweep 1 — satisfies two-sweep persistence
+    report = await reaper.sweep({}); // sweep 2 — the ACTING sweep
+  } finally {
+    if (useRealLsof) {
+      if (restorePath === undefined) delete process.env.PATH;
+      else process.env.PATH = restorePath;
+      if (restoreTimeout === undefined) delete process.env.CATALYST_LSOF_TIMEOUT_MS;
+      else process.env.CATALYST_LSOF_TIMEOUT_MS = restoreTimeout;
+      if (mockDir) rmSync(mockDir, { recursive: true, force: true });
+    }
+  }
+
+  const signalCalls = killCalls.filter(([, s]) => s !== 0);
+  const asc = (a, b) => a - b;
+  return {
+    signalled: [...new Set(signalCalls.map(([p]) => p))].sort(asc),
+    signals: signalCalls.length,
+    reclaimed: report.reaped.map((r) => r.pid).sort(asc),
+    reasons: report.spared.map((s) => s.reason),
+    log: log.lines.join("\n"),
+    emitted: JSON.stringify(emits),
+  };
+}
+
+/**
+ * The scenario table. `outcome` is what BOTH implementations must produce.
+ * `jsProof` / `shProof` are the ANTI-VACUITY assertions: a substring the
+ * implementation must have logged (or, for JS, a spare reason it must have
+ * recorded) proving the row was dropped by the gate under test and not by some
+ * unrelated earlier gate.
+ */
+const BEHAVIOURAL_SCENARIOS = Object.freeze({
+  "control/baseline": {
+    outcome: { signalled: [2001], signals: 1, reclaimed: [2001] },
+    jsProof: { log: "reaped WIDENED orphan" },
+    shProof: { log: "killed 2001" },
+  },
+  allowlist: {
+    outcome: { signalled: [], signals: 0, reclaimed: [] },
+    jsProof: { reason: "allowlisted" },
+    // .sh: an allowlisted candidate is dropped by a bare `continue` with no log
+    // line. control/baseline is the anti-vacuity proof — same fixture, argv the
+    // only difference, and it kills.
+    shProof: null,
+  },
+  denylist: {
+    outcome: { signalled: [], signals: 0, reclaimed: [] },
+    jsProof: { reason: "command-denylisted" },
+    shProof: null, // same as allowlist: silent `continue`; baseline is the control
+  },
+  "age-floor": {
+    outcome: { signalled: [], signals: 0, reclaimed: [] },
+    jsProof: { reason: "too-young" },
+    shProof: null, // silent `continue`; baseline is the control
+  },
+  "root-absent-bail": {
+    outcome: { signalled: [], signals: 0, reclaimed: [] },
+    jsProof: { log: "DISABLING the widened class" },
+    shProof: { log: "is absent — skipping" },
+  },
+  "per-run-cap": {
+    outcome: { signalled: [2001, 2002], signals: 2, reclaimed: [2001, 2002] },
+    jsProof: { log: "widened cap reached (2)" },
+    shProof: { log: "cap reached (2), 3 deferred" },
+  },
+  "signal-bound-odd": {
+    // cap 2 ⇒ ceiling 4 DELIVERED signals. 1 (2001 exits under SIGTERM) + 2
+    // (2002 ignores both) = 3; admitting 2003 would deliver 5 = cap*2 + 1.
+    outcome: { signalled: [2001, 2002], signals: 3, reclaimed: [2001] },
+    jsProof: { log: "widened signal bound reached (4)" },
+    shProof: { log: "signal bound reached (4)" },
+  },
+  "tri-state-cwd-probe": {
+    outcome: { signalled: [], signals: 0, reclaimed: [] },
+    jsProof: { reason: "cwd-exists-unknown" },
+    shProof: null, // silent `continue`; baseline is the control
+  },
+  "pre-signal-revalidation": {
+    outcome: { signalled: [], signals: 0, reclaimed: [] },
+    jsProof: { reason: "widened-revalidation-failed" },
+    shProof: { log: "no longer matches the candidate at signal time" },
+  },
+  "confirmed-exit": {
+    // Two signals DELIVERED, ZERO reclamations: `kill` returning success is not
+    // an exit, and an unconfirmed exit must never be reported as one.
+    outcome: { signalled: [2001], signals: 2, reclaimed: [] },
+    jsProof: { log: "exit NOT confirmed after SIGKILL" },
+    shProof: { log: "STILL alive after SIGKILL" },
+  },
+  "probe-deadline": {
+    outcome: { signalled: [], signals: 0, reclaimed: [] },
+    jsProof: { reason: "cwd-unknown" },
+    shProof: null, // the timed-out probe spares silently; baseline is the control
+  },
+  "argv-redaction": {
+    outcome: { signalled: [2001], signals: 1, reclaimed: [2001] },
+    jsProof: { log: "reaped WIDENED orphan" },
+    shProof: { log: "killed 2001" },
+  },
+  "shadow-default": {
+    outcome: { signalled: [], signals: 0, reclaimed: [] },
+    jsProof: { log: "WOULD reap WIDENED orphan" },
+    shProof: { log: "[shadow] would kill 2001" },
+  },
+});
+
+/**
+ * Properties whose cross-implementation check is WEAKER than "both sides drove
+ * the same fixture to the same outcome, and each proved WHY". Declared, not
+ * hidden: the whole failure mode this suite exists to stop is a check that
+ * claims more coverage than it has.
+ */
+const PARTIAL_BEHAVIOURAL_COVERAGE = Object.freeze({
+  "two-sweep persistence":
+    "NOT cross-checked — JS-only by design (see DOCUMENTED_ASYMMETRIES). The JS half is driven for two sweeps so every OTHER property can be compared at all.",
+  "allowlist / denylist / age-floor / tri-state-cwd-probe / probe-deadline (.sh side)":
+    "The .sh sweep drops these candidates with a silent `continue`, so there is no log line to assert on. Coverage rests on the control/baseline scenario: the SAME fixture with only the tested field changed IS signalled, so a sparing outcome is attributable to that field. Weaker than the JS side, which records an explicit spare reason.",
+  "probe-deadline (JS half not cross-checked)":
+    "The BEHAVIOURAL scenario for this property is .sh-ONLY: deleting both `timeout:` options in the JS implementation leaves the parity scenario GREEN. It cannot cross-check JS even in principle — a hung mock lsof yields empty output, so the JS cwd resolves to null and the candidate is spared either way, with or without the deadline. JS coverage for this property therefore rests ENTIRELY on the two dedicated CATALYST_LSOF_TIMEOUT_MS latency tests, not on the parity harness.",
+  "probe-deadline (wall clock)":
+    "Both halves assert that a hung probe SPARES and that the run still completes, not that it completed within a specific latency budget — a timing assertion would be flaky under CI load. The JS half additionally has a dedicated latency test (CATALYST_LSOF_TIMEOUT_MS) that DOES assert elapsed time, against a deliberately sub-second deadline.",
+  "shadow-default (.sh side)":
+    "The .sh sweep has no separate narrow-class mode, so 'the widened knob defaults to shadow INDEPENDENTLY of the narrow mode' is only fully expressible on the JS side. The .sh half asserts the weaker 'unset ⇒ shadow'.",
+});
+
+describe("CTL-1531 — BEHAVIOURAL parity (both implementations, same scenario)", () => {
+  it("the scenario table covers every shared safety property", () => {
+    const covered = new Set(Object.keys(BEHAVIOURAL_SCENARIOS));
+    for (const slug of Object.keys(SHARED_SAFETY_PROPERTIES)) {
+      expect(covered.has(slug)).toBe(true);
+    }
+    // …and the control is present, without which every "spared" row is vacuous.
+    expect(covered.has("control/baseline")).toBe(true);
+  });
+
+  it("the .sh driver exposes exactly the scenarios this table drives", () => {
+    const listed = execFileSync("bash", [P_SH, "--list"], { encoding: "utf8" })
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .sort();
+    const wanted = Object.keys(BEHAVIOURAL_SCENARIOS)
+      .map((k) => (k === "control/baseline" ? "baseline" : k))
+      .sort();
+    expect(listed).toEqual(wanted);
+  });
+
+  it("the weaker cross-checks are DECLARED, not silently claimed as full coverage", () => {
+    expect(Object.keys(PARTIAL_BEHAVIOURAL_COVERAGE).length).toBeGreaterThan(0);
+    for (const [what, why] of Object.entries(PARTIAL_BEHAVIOURAL_COVERAGE)) {
+      expect(what.length).toBeGreaterThan(0);
+      expect(why.length).toBeGreaterThan(60);
+    }
+  });
+
+  for (const [scenario, spec] of Object.entries(BEHAVIOURAL_SCENARIOS)) {
+    it(
+      `behaviour parity — ${scenario}`,
+      async () => {
+        const shName = scenario === "control/baseline" ? "baseline" : scenario;
+        const sh = runShellScenario(shName);
+        const js = await runJsScenario(scenario);
+
+        // 1. the .sh implementation produced the required outcome
+        expect({ signalled: sh.signalled, signals: sh.signals, reclaimed: sh.reclaimed }).toEqual(
+          spec.outcome
+        );
+        // 2. the JS implementation produced the required outcome
+        expect({ signalled: js.signalled, signals: js.signals, reclaimed: js.reclaimed }).toEqual(
+          spec.outcome
+        );
+        // 3. …and they agree with EACH OTHER (the drift assertion proper)
+        expect({ signalled: sh.signalled, signals: sh.signals, reclaimed: sh.reclaimed }).toEqual({
+          signalled: js.signalled,
+          signals: js.signals,
+          reclaimed: js.reclaimed,
+        });
+        // 4. ANTI-VACUITY: each side proved the row was handled by the gate under
+        //    test, not dropped earlier by something unrelated.
+        if (spec.jsProof?.log) expect(js.log).toContain(spec.jsProof.log);
+        if (spec.jsProof?.reason) expect(js.reasons).toContain(spec.jsProof.reason);
+        if (spec.shProof?.log) expect(sh.log).toContain(spec.shProof.log);
+        // 5. the .sh run never crashed (a non-zero exit would make (1) vacuous)
+        expect(sh.exit).toBe(0);
+      },
+      120000
+    );
+  }
+
+  it(
+    "argv-redaction — NEITHER implementation writes the candidate's full argv anywhere",
+    async () => {
+      const sh = runShellScenario("argv-redaction");
+      const js = await runJsScenario("argv-redaction");
+      // Both DID act on the candidate (otherwise there is nothing to redact).
+      expect(sh.reclaimed).toEqual([2001]);
+      expect(js.reclaimed).toEqual([2001]);
+      // …and neither the persisted sweep log nor the daemon log/event payloads
+      // carry the secret that was sitting in argv.
+      expect(sh.log).not.toContain(P_SECRET);
+      expect(js.log).not.toContain(P_SECRET);
+      expect(js.emitted).not.toContain(P_SECRET);
+    },
+    120000
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CTL-1531 round 3 (M3) — the JS lsof deadline had NO test at all: deleting both
+// `timeout:` options left the suite 314/0 green, and `grep -c timeout` over both
+// JS test files returned 0. These drive the REAL default probes against a
+// deliberately HUNG `lsof` on $PATH, with a sub-second CATALYST_LSOF_TIMEOUT_MS
+// so the assertion is about the DEADLINE and not about wall-clock patience.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("CTL-1531 — the lsof cwd probe is BOUNDED (PARITY: probe-deadline)", () => {
+  /** withHungLsof — a mock `lsof` that blocks for `sleepSecs`, first on $PATH. */
+  async function withHungLsof(sleepSecs, timeoutMs, fn) {
+    const dir = mkdtempSync(join(tmpdir(), "lsof-deadline-"));
+    const bin = join(dir, "lsof");
+    await Bun.write(bin, `#!/usr/bin/env bash\nsleep ${sleepSecs}\n`);
+    chmodSync(bin, 0o755);
+    const prevPath = process.env.PATH;
+    const prevTimeout = process.env.CATALYST_LSOF_TIMEOUT_MS;
+    process.env.PATH = `${dir}:${prevPath}`;
+    if (timeoutMs === null) delete process.env.CATALYST_LSOF_TIMEOUT_MS;
+    else process.env.CATALYST_LSOF_TIMEOUT_MS = String(timeoutMs);
+    try {
+      return await fn();
+    } finally {
+      process.env.PATH = prevPath;
+      if (prevTimeout === undefined) delete process.env.CATALYST_LSOF_TIMEOUT_MS;
+      else process.env.CATALYST_LSOF_TIMEOUT_MS = prevTimeout;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it(
+    "_safeCwd gives up on a hung lsof and returns UNKNOWN (not a hang)",
+    async () => {
+      const reaper = new ProcReaper({ log: silentLog() }); // DEFAULT lsofCwd seam
+      const t0 = Date.now();
+      const got = await withHungLsof(3, 300, () => reaper._safeCwd(424242));
+      const elapsed = Date.now() - t0;
+      expect(got).toBeNull(); // unknown → spares
+      // The mock blocks for 3s. Without the deadline this is ~3000ms.
+      expect(elapsed).toBeLessThan(1500);
+    },
+    30000
+  );
+
+  it(
+    "_safeCwdBatch gives up on a hung lsof and reports EVERY pid unknown",
+    async () => {
+      const reaper = new ProcReaper({ log: silentLog() }); // DEFAULT batch seam
+      const t0 = Date.now();
+      const got = await withHungLsof(3, 300, () => reaper._safeCwdBatch([101, 102, 103]));
+      const elapsed = Date.now() - t0;
+      expect([...got.keys()].sort((a, b) => a - b)).toEqual([101, 102, 103]);
+      expect([...got.values()]).toEqual([null, null, null]); // unknown ⇒ spare all
+      expect(elapsed).toBeLessThan(1500);
+    },
+    30000
+  );
+
+  it("lsofTimeoutMs: default, override, and every degrade-to-default case", () => {
+    const prev = process.env.CATALYST_LSOF_TIMEOUT_MS;
+    try {
+      delete process.env.CATALYST_LSOF_TIMEOUT_MS;
+      expect(lsofTimeoutMs()).toBe(5000);
+      process.env.CATALYST_LSOF_TIMEOUT_MS = "250";
+      expect(lsofTimeoutMs()).toBe(250);
+      // A garbage / out-of-range / disabling value must fall back to the DEFAULT,
+      // never to "unbounded" — 0, NaN and negatives all disable execFile's timeout.
+      for (const bad of ["0", "-1", "abc", "", "600001", "NaN"]) {
+        process.env.CATALYST_LSOF_TIMEOUT_MS = bad;
+        expect(lsofTimeoutMs()).toBe(5000);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_LSOF_TIMEOUT_MS;
+      else process.env.CATALYST_LSOF_TIMEOUT_MS = prev;
+    }
   });
 });

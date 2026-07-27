@@ -60,9 +60,20 @@
 // DEFAULT mode:"shadow" — emits procOrphans.would-reap, kills NOTHING. Bakes on
 // mini before any enforce flip (like stall-janitor CTL-1004 + cost-cap CTL-1137).
 //
-// ALL IO is injected (psLister/lsofCwd/lsofCwdBatch/cwdExists/agentsResult/
-// killProc/sleep/now) so the unit tests never spawn a subprocess, run ps/lsof/
-// stat, touch ~/.claude, or signal a real pid.
+// ALL IO is injected (psLister/lsofCwd/lsofCwdBatch/cwdExists/worktreeRootExists/
+// agentsResult/killProc/probeAlive/sleep/now) so the unit tests never spawn a
+// subprocess, run ps/lsof/stat, touch ~/.claude, or signal a real pid.
+//
+// ─── PARITY WITH orphan-sweep.sh (read this before editing a safety gate) ────
+// This file and `plugins/dev/scripts/orphan-sweep.sh` are TWO IMPLEMENTATIONS OF
+// ONE POLICY (the daemon-side reaper and the LaunchAgent-side sweep). They have
+// drifted in BOTH directions across three review rounds — each round found a
+// hardening present on one side and missing on the other. Every SHARED safety
+// property therefore carries a `PARITY: <slug>` marker at its site in BOTH
+// files, and `proc-reaper.test.mjs` asserts the two marker SETS are identical.
+// If you add or remove a shared gate here, tag it and tag the sibling, or the
+// parity test fails. Deliberately one-sided behavior must NOT be tagged — see
+// the "documented asymmetries" list in that test.
 
 import { execFile, execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
@@ -72,17 +83,33 @@ import { emitReapIntent } from "./reap-intent.mjs";
 import { listClaudeAgentsResult } from "./claude-agents.mjs";
 import { log as defaultLog } from "./config.mjs";
 
+// PARITY: allowlist
 // The hard never-kill argv-substring allowlist (case-insensitive). Config-
 // extensible via orphanReaper.procReaper.allowlistPatterns. Tailscale's helper
 // procs (Tailscale.app / IPNExtension) are launchd-parented but must NEVER die.
+//
+// CTL-1531 round 3: `orphan-sweep.sh` and `catalyst-stack` were present in the
+// .sh sibling's _PROC_ALLOWLIST_RE and MISSING here — the exact drift the parity
+// contract exists to stop, shipped under a comment claiming the two lists
+// mirrored each other. Both are PPID-1 BY CONSTRUCTION, so the pid-based half of
+// the allowlist (self / parent / daemonPids) does not cover them:
+//   • orphan-sweep.sh runs from a LaunchAgent — launchd is its parent, and it is
+//     never the daemon's parent, so the daemon reaper could target the SWEEP.
+//   • catalyst-stack is re-exec'd by launchd (`catalyst-stack start` every 600s)
+//     and hand-started as `nohup … & disown`.
+// A reaper that can kill the other reaper — or the process supervisor that
+// restarts the fleet — is a self-inflicted outage, not a reclamation.
 const DEFAULT_ALLOWLIST_PATTERNS = Object.freeze([
   "execution-core/daemon.mjs",
   "broker/index.mjs",
   "orch-monitor/server.ts",
   "tailscale",
   "ipnextension",
+  "orphan-sweep.sh",
+  "catalyst-stack",
 ]);
 
+// PARITY: denylist
 // CTL-1531 — the WIDENED-class-only command DENYLIST (mirrors orphan-sweep.sh's
 // _PROC_DENY_CMD_RE). The node/bun class never needed one: `node`/`bun` are not
 // session multiplexers or login plumbing. The widened class admits ANY command,
@@ -119,7 +146,33 @@ const DEFAULT_DENY_COMMAND_RE =
 //             event) but are never signalled, even when mode === "enforce".
 //   enforce → widened rows follow `mode` (so BOTH gates must be open to kill).
 // The legacy node/bun class is untouched by this knob in every state.
+// PARITY: shadow-default
 export const WIDEN_MODES = Object.freeze(["off", "shadow", "enforce"]);
+
+// PARITY: per-run-cap
+// CTL-1531 round 2 (Codex P1-b) — the per-run bound on WIDENED kills, ported
+// from orphan-sweep.sh's SWEEP_PROC_WIDEN_MAX_KILLS (same default, same
+// semantics, same "cap reached (N), M deferred" reporting) so the two
+// implementations of this policy agree.
+//
+// Why a cap at all: the widened class's authorizing evidence is "the cwd path
+// no longer exists", and that predicate is CORRELATED across the whole host —
+// rename, delete or unmount `worktreeRoot` and EVERY process beneath it
+// satisfies it in the same pass. Two sweeps of that (the persistence gate) and
+// a single root-level fault becomes a host-wide kill. A genuine orphan leak is
+// a handful of processes; anything larger is a root-level event that wants a
+// human, not a killer.
+//
+// TWO ceilings, deliberately, because they bound different things (this is the
+// ambiguity Codex flagged on the .sh side, fixed identically in both):
+//   • `widenMaxKills` bounds CONFIRMED TERMINATIONS. Counting confirmed exits
+//     rather than attempts is what stops a process that traps/ignores SIGTERM
+//     from consuming a cap slot — and so crowding a real orphan out — forever.
+//   • the derived signal ceiling bounds DELIVERED SIGNALS at `cap * 2` and
+//     counts EVERY signal (SIGTERM *and* SIGKILL). A candidate is worth at most
+//     two signals, so `cap` candidates are worth at most `cap * 2` signals. A
+//     host where nothing responds to signals stops instead of piling on.
+export const WIDEN_DEFAULT_MAX_KILLS = 5;
 
 /**
  * normalizeWidenMode — PURE. Any value that is not exactly one of
@@ -439,7 +492,10 @@ export async function classifyProc(row, ctx) {
     return { action: "spare", reason: "outside-target-worktree" };
   }
 
+  // PARITY: age-floor
   // (9) etime corroboration floor (never a SOLE gate — all the above ran first).
+  // Mirrors SWEEP_PROC_WIDEN_MIN_AGE_SECS. A just-spawned process whose worktree
+  // is mid-teardown must not be reaped out from under the teardown.
   if ((row.etimeSec ?? 0) < minEtimeSec) return { action: "spare", reason: "too-young" };
 
   return {
@@ -487,9 +543,33 @@ function execFileTolerant(bin, args, opts = {}) {
   });
 }
 
-// lsof probes are bounded so ONE hung mount cannot wedge the daemon's reaper
-// handler (the single-pid path shipped with no timeout at all).
-const LSOF_TIMEOUT_MS = 5000;
+// PARITY: probe-deadline
+// The LSOF cwd probe is bounded so ONE hung mount cannot wedge the daemon's
+// reaper handler (the single-pid path shipped with no timeout at all). The .sh
+// sibling bounds its own `lsof` with a watchdog child (stock macOS ships no
+// `timeout`), configurable via SWEEP_PROC_CWD_TIMEOUT_SECS.
+//
+// NOTE the scope: this property covers the LSOF probe on both sides and NOTHING
+// ELSE. The "does this cwd path still exist?" probe (defaultCwdExists →
+// statSync here, `stat` there) is UNBOUNDED on both sides; see the
+// "unbounded statSync existence probe" entry in proc-reaper.test.mjs's
+// DOCUMENTED_ASYMMETRIES for why, and for the blast-radius difference.
+//
+// CATALYST_LSOF_TIMEOUT_MS is the JS-side knob (the .sh side already had
+// SWEEP_PROC_CWD_TIMEOUT_SECS). It is read at CALL time, not at module load, so
+// a test can drive a sub-second deadline against a deliberately hung `lsof`
+// without a 5s wall clock — which is what makes the deadline TESTABLE at all.
+const LSOF_TIMEOUT_DEFAULT_MS = 5000;
+
+export function lsofTimeoutMs() {
+  const raw = process.env.CATALYST_LSOF_TIMEOUT_MS;
+  if (raw === undefined || raw === null || raw === "") return LSOF_TIMEOUT_DEFAULT_MS;
+  const n = Number(raw);
+  // Bounded, like the .sh side's _sweep_bounded_int: a garbage or out-of-range
+  // value falls back to the DEFAULT, never to "unbounded" (0 / NaN / negative
+  // would all disable the deadline, which is the failure this guard exists for).
+  return Number.isFinite(n) && n > 0 && n <= 600000 ? Math.floor(n) : LSOF_TIMEOUT_DEFAULT_MS;
+}
 // Chunk size for the batched probe. 1493 pids in one call measured 561ms, so
 // this is not about lsof cost — it bounds the argv length and the per-call
 // blast radius of a timeout (a timed-out chunk loses only its own pids).
@@ -498,7 +578,7 @@ const LSOF_BATCH_CHUNK = 512;
 async function defaultLsofCwd(pid) {
   try {
     const out = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
-      timeout: LSOF_TIMEOUT_MS,
+      timeout: lsofTimeoutMs(),
     });
     // -Fn output: lines like `pPID`, `fcwd`, `n/abs/path`. The cwd path line
     // starts with 'n'.
@@ -568,7 +648,7 @@ async function defaultLsofCwdBatch(pids) {
     const stdout = await execFileTolerant(
       "lsof",
       ["-a", "-d", "cwd", "-Fpn", "-p", chunk.join(",")],
-      { timeout: LSOF_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }
+      { timeout: lsofTimeoutMs(), maxBuffer: 16 * 1024 * 1024 }
     );
     for (const [pid, path] of parseLsofCwdBatch(stdout)) {
       if (!out.has(pid)) out.set(pid, path);
@@ -582,6 +662,10 @@ async function defaultLsofCwdBatch(pids) {
 // ESRCH/EPERM (gone, or alive-but-foreign → NEVER our kill). Signal 0 is the
 // liveness probe; a foreign-uid proc throws EPERM here and is treated as "not
 // ours" (false) so the SIGKILL re-probe spares it.
+//
+// NOTE (CTL-1531 round 2): this BOOLEAN seam is fine for DELIVERING a signal but
+// is NOT a sound liveness probe — see defaultProbeAlive. Nothing in this file
+// may read `killProc(pid, 0) === false` as "the process is gone".
 function defaultKillProc(pid, signal) {
   try {
     process.kill(pid, signal);
@@ -591,11 +675,44 @@ function defaultKillProc(pid, signal) {
   }
 }
 
+// PARITY: confirmed-exit
+/**
+ * defaultProbeAlive — TRI-STATE liveness: true (alive) | false (definitely
+ * gone) | null (the probe itself could not answer). CTL-1531 round 2, the JS
+ * half of Codex's `_proc_alive` finding.
+ *
+ * The old code probed liveness through `killProc(pid, 0)`, whose boolean
+ * collapses three distinct outcomes into `false`:
+ *   • ESRCH — no such process. The ONLY one that proves an exit.
+ *   • EPERM — the kernel FOUND the process and refused us. It is ALIVE. Reading
+ *     this as "gone" made `_terminateWithGrace` return true right after SIGTERM
+ *     and report a reclamation for a process that never died — the same
+ *     fail-open class as the earlier findings, now inside the confirmation.
+ *   • anything else (EINVAL, a thrown non-Error, an injected seam blowing up) —
+ *     UNKNOWN. A failed probe is not evidence of an exit.
+ * Only `false` may be read as "definitely gone"; `true` and `null` both mean
+ * "do not claim the exit".
+ */
+export function defaultProbeAlive(pid, { kill = process.kill } = {}) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  try {
+    kill(n, 0);
+    return true; // signal 0 accepted → the process exists
+  } catch (err) {
+    const code = err?.code;
+    if (code === "ESRCH") return false; // definitely gone
+    if (code === "EPERM") return true; // found, but foreign-uid → ALIVE
+    return null; // cannot tell
+  }
+}
+
 // defaultCwdExists — CTL-1531's "does the cwd path still exist?" probe. MUST
 // return a real boolean (a non-boolean is read as "unknown" and spares). Kept a
 // separate injectable seam so the widened-class tests drive deletion purely as a
 // predicate: no test ever touches the filesystem.
 //
+// PARITY: tri-state-cwd-probe
 // CTL-1531 P1-b — this MUST NOT use existsSync(). existsSync swallows EVERY
 // stat error and returns plain `false`, so an UNANSWERABLE probe (EACCES on a
 // mode-000 parent, EIO on a failing disk, ESTALE / ENOTCONN on a dropped NFS or
@@ -609,6 +726,16 @@ function defaultKillProc(pid, signal) {
 // and ESTALE cannot be provoked on a real filesystem, and treating either as
 // "definitely gone" would make a flaky mount look like positive kill evidence.
 // Production always uses statSync.
+//
+// NOT COVERED BY `PARITY: probe-deadline` (CTL-1531 round 3). This statSync is
+// SYNCHRONOUS and UNBOUNDED: a stat against a hung NFS/SMB mount blocks the
+// daemon's whole event loop until the kernel gives up, which is a strictly worse
+// blast radius than the .sh sibling's `stat` (that one wedges only its own
+// LaunchAgent run). Bounding it would mean moving the probe into a subprocess on
+// every candidate — more spawns than the hang it guards against, and the exact
+// per-pid spawn storm CTL-1531's batched lsof exists to remove. So it is
+// deliberately left unbounded and DECLARED, in DOCUMENTED_ASYMMETRIES, rather
+// than advertised as bounded by a property the code does not implement.
 export function defaultCwdExists(path, { stat = statSync } = {}) {
   if (typeof path !== "string" || !path) return null; // unknown → spare
   try {
@@ -616,7 +743,15 @@ export function defaultCwdExists(path, { stat = statSync } = {}) {
     return true;
   } catch (err) {
     const code = err?.code;
-    if (code === "ENOENT" || code === "ENOTDIR") return false; // definitely gone
+    // Only ENOENT. ENOTDIR was here, and it made JS the KILLING side of an
+    // undeclared asymmetry: the shell probe matches only "No such file or
+    // directory", so macOS's "Not a directory" falls through to unknown ⇒ SPARE,
+    // while JS treated it as proof of deletion ⇒ kill evidence. The shared
+    // property text also says "Only a definite ENOENT is kill evidence", which
+    // was false for JS. Converged to the safer side rather than widening the
+    // shell: for a gate that kills, the two implementations disagreeing is worse
+    // than either answer, and sparing costs one deferred sweep.
+    if (code === "ENOENT") return false; // definitely gone
     return null; // EACCES / EIO / ESTALE / EPERM / … → CANNOT TELL → spare
   }
 }
@@ -635,6 +770,9 @@ export class ProcReaper {
     // Defaults to "shadow" even when `mode` is already "enforce" — see
     // WIDEN_MODES. Mirrors the .sh side's SWEEP_PROC_WIDEN.
     widenMode = "shadow",
+    // CTL-1531 round 2 (P1-b): per-run cap on WIDENED confirmed terminations.
+    // 0 = uncapped. Mirrors SWEEP_PROC_WIDEN_MAX_KILLS. See WIDEN_DEFAULT_MAX_KILLS.
+    widenMaxKills = WIDEN_DEFAULT_MAX_KILLS,
     worktreeRoot = `${homedir()}/catalyst/wt`,
     graceMs = 5000,
     minEtimeSec = 900,
@@ -643,9 +781,20 @@ export class ProcReaper {
     lsofCwd = defaultLsofCwd,
     lsofCwdBatch = null,
     cwdExists = defaultCwdExists,
+    // CTL-1531 round 2 (P1-a): "is the worktree ROOT itself still there?" — a
+    // DIFFERENT question from "is this candidate's cwd still there?", so it gets
+    // its own seam. It defaults to the cwd probe (never to a constant), so a
+    // caller that swaps in a real-filesystem cwd probe gets a real root probe
+    // too and the gate can never silently fail open.
+    worktreeRootExists = null,
     denyCommandRe = DEFAULT_DENY_COMMAND_RE,
     agentsResult = () => listClaudeAgentsResult(),
     killProc = defaultKillProc,
+    // CTL-1531 round 2: TRI-STATE liveness. Explicit injection always wins;
+    // otherwise the errno-discriminating native probe is used ONLY when the kill
+    // seam is also the native default — so a test that injects `killProc` alone
+    // keeps a fully hermetic probe and never touches a real pid.
+    probeAlive = null,
     sleep = realSleep,
     now = () => Date.now(),
     selfPid = process.pid,
@@ -659,6 +808,16 @@ export class ProcReaper {
     // Normalized on the way in: an unrecognized value degrades to "shadow",
     // never to "enforce" (a config typo must not arm a process killer).
     this.widenMode = normalizeWidenMode(widenMode);
+    // A non-numeric / non-finite / negative cap degrades to the DEFAULT, never
+    // to uncapped — the .sh side's `_sweep_bounded_int` rule, in JS. Note the
+    // `typeof` test is load-bearing: `Number(null)` is 0, and 0 is the
+    // DOCUMENTED "uncapped" value, so coercing would turn a null config field
+    // into an uncapped process killer. Explicit numeric 0 still means uncapped —
+    // that is an operator decision, not a typo.
+    this.widenMaxKills =
+      typeof widenMaxKills === "number" && Number.isFinite(widenMaxKills) && widenMaxKills >= 0
+        ? Math.floor(widenMaxKills)
+        : WIDEN_DEFAULT_MAX_KILLS;
     this.worktreeRoot = worktreeRoot;
     this.graceMs = graceMs;
     this.minEtimeSec = minEtimeSec;
@@ -676,9 +835,16 @@ export class ProcReaper {
           ? defaultLsofCwdBatch
           : null;
     this.cwdExists = cwdExists;
+    this.worktreeRootExists =
+      typeof worktreeRootExists === "function" ? worktreeRootExists : (p) => this.cwdExists(p);
     this.denyCommandRe = denyCommandRe instanceof RegExp ? denyCommandRe : DEFAULT_DENY_COMMAND_RE;
     this.agentsResult = agentsResult;
     this.killProc = killProc;
+    // Stored UNRESOLVED (null = "derive it"). The derivation reads
+    // `this.killProc` at CALL time, not construction time — a caller (or test)
+    // that swaps the kill seam after construction must not be left probing real
+    // pids through the native default. See _safeProbeAlive.
+    this.probeAlive = typeof probeAlive === "function" ? probeAlive : null;
     this.sleep = sleep;
     this.now = now;
     this.selfPid = selfPid;
@@ -763,6 +929,38 @@ export class ProcReaper {
       allowlistPatterns: this.allowlistPatterns,
     });
 
+    // PARITY: root-absent-bail
+    // CTL-1531 round 2 (Codex P1-a), ported from orphan-sweep.sh's BOUND 1.
+    //
+    // The widened class's authorizing conjunct is "this cwd no longer exists".
+    // That predicate is CORRELATED, not independent: rename, delete or unmount
+    // `worktreeRoot` and EVERY PPID-1 process whose cwd was beneath it answers
+    // ENOENT in the same pass. Two sweeps of that (persistence is satisfied by
+    // the SAME correlated fault, so it is no defense here) and one root-level
+    // failure becomes a mass kill.
+    //
+    // So: probe the ROOT ITSELF first. If it is not definitely present, the
+    // signal is about the root, not about any individual process — disable the
+    // widened admission for this sweep entirely and say why. Fail closed: only
+    // `true` proceeds; `false` (gone) and `null` (unreadable — EACCES on the
+    // mount point, ESTALE on a dropped share) both bail. The LEGACY node/bun
+    // class is untouched, exactly as the .sh bail skips only the widened branch.
+    let effectiveWidenMode = this.widenMode;
+    if (effectiveWidenMode !== "off") {
+      const rootPresent = await this._safeWorktreeRootExists(this.worktreeRoot);
+      if (rootPresent !== true) {
+        effectiveWidenMode = "off";
+        this.log.warn(
+          {
+            worktreeRoot: this.worktreeRoot,
+            probe: rootPresent === false ? "absent" : "unreadable",
+          },
+          "proc-reaper: worktree root is absent/unreadable — DISABLING the widened class for this sweep (a missing root makes EVERY cwd under it look gone)"
+        );
+        await this._safeEmit("procOrphans.spared", { reason: "widen-root-absent" });
+      }
+    }
+
     const ctx = {
       byPid,
       liveAgentCwds,
@@ -771,7 +969,7 @@ export class ProcReaper {
       worktreeRoot: this.worktreeRoot,
       killableCommands: this.killableCommands,
       denyCommandRe: this.denyCommandRe,
-      widenMode: this.widenMode,
+      widenMode: effectiveWidenMode,
       minEtimeSec: this.minEtimeSec,
       // Assigned below, once the batched prefetch has run. classifyPreCwd (the
       // only thing called before that) never touches it.
@@ -804,6 +1002,14 @@ export class ProcReaper {
       if (v.action === "kill") thisSweepCandidates.set(row.pid, row.args);
     }
 
+    // PARITY: per-run-cap — the widened class's two run-scoped ceilings. See
+    // WIDEN_DEFAULT_MAX_KILLS for why there are two and what each bounds.
+    const widenCap = this.widenMaxKills;
+    let widenActed = 0; // CONFIRMED terminations (bounded by widenCap)
+    let widenSignalled = 0; // signals DELIVERED, SIGTERM *and* SIGKILL (bounded by widenCap*2)
+    let widenDeferred = 0;
+    let widenSignalBoundHit = false;
+
     // Two-sweep persistence: act only on a candidate seen orphaned-and-killable
     // on the PREVIOUS sweep too, with a matching command (pid-reuse guard).
     for (const { row, v } of verdicts) {
@@ -824,6 +1030,7 @@ export class ProcReaper {
       // during the shadow bake, and log it explicitly (there was no log at all
       // on the would-reap path before — the shadow signal was event-only).
       //
+      // PARITY: argv-redaction
       // CTL-1531 P1-d — the log NEVER carries `row.args`. The widened class
       // admits ARBITRARY commands, and an arbitrary argv routinely carries an
       // API token, a password, an `Authorization:` header or a pre-signed URL
@@ -842,7 +1049,7 @@ export class ProcReaper {
       // other state it is pinned to shadow, so a host already at
       // procReaper.mode:"enforce" still merely OBSERVES the new class.
       const effectiveMode = widened
-        ? this.widenMode === "enforce"
+        ? effectiveWidenMode === "enforce"
           ? this.mode
           : "shadow"
         : this.mode;
@@ -866,6 +1073,50 @@ export class ProcReaper {
           worktreePath: await ctx.cwdForPid(row.pid),
         });
       } else if (effectiveMode === "enforce") {
+        // PARITY: per-run-cap — both ceilings are applied on the ENFORCING path
+        // only, so shadow keeps reporting the FULL candidate set (that is the
+        // signal an operator needs to size the cap before flipping to enforce).
+        if (widened && widenCap > 0) {
+          if (widenSignalBoundHit) {
+            report.spared.push({
+              pid: row.pid,
+              command: row.command,
+              reason: "widen-signal-bound-reached",
+            });
+            continue;
+          }
+          if (widenActed >= widenCap) {
+            widenDeferred += 1;
+            report.spared.push({
+              pid: row.pid,
+              command: row.command,
+              reason: "widen-cap-reached",
+            });
+            continue;
+          }
+          // CTL-1531 round 3: admit only if the candidate's WORST CASE still fits
+          // under the ceiling. A candidate is worth up to TWO signals (SIGTERM,
+          // then SIGKILL), and the check runs at ADMISSION — so testing
+          // `signalled >= cap*2` admits a candidate at `cap*2 - 1` which then
+          // spends two more, delivering `cap*2 + 1`. Provoked by ODD parity: with
+          // cap=2 (ceiling 4), one candidate that exits under SIGTERM (1 signal)
+          // followed by stubborn ones delivered 1+2+2 = 5. `signalled + 2 > cap*2`
+          // is the bound that actually bounds what it claims to bound.
+          if (widenSignalled + 2 > widenCap * 2) {
+            widenSignalBoundHit = true;
+            this.log.warn(
+              { cap: widenCap, signalBound: widenCap * 2, confirmed: widenActed },
+              `proc-reaper: widened signal bound reached (${widenCap * 2}) with only ${widenActed} confirmed termination(s) — stopping this run (a human should look at this host)`
+            );
+            report.spared.push({
+              pid: row.pid,
+              command: row.command,
+              reason: "widen-signal-bound-reached",
+            });
+            continue;
+          }
+        }
+        // PARITY: pre-signal-revalidation
         // CTL-1531 P2-f: re-establish the widened ownership conjunction from a
         // FRESH read immediately before the first signal (see
         // _revalidateWidened for why the classification snapshot is stale here).
@@ -881,8 +1132,17 @@ export class ProcReaper {
           );
           continue;
         }
-        const killed = await this._terminateWithGrace(row);
+        const killed = await this._terminateWithGrace(row, {
+          widened,
+          ctx,
+          onSignal: widened
+            ? () => {
+                widenSignalled += 1;
+              }
+            : null,
+        });
         if (killed) {
+          if (widened) widenActed += 1;
           report.reaped.push({ pid: row.pid, command: row.command, reason: v.reason, widened });
           this.log.info(
             { pid: row.pid, command: row.command, reason: v.reason, widened },
@@ -898,6 +1158,15 @@ export class ProcReaper {
           });
         }
       }
+    }
+
+    // PARITY: per-run-cap — same wording as the .sh side's deferral report, so
+    // one Loki/log query finds the overflow on either implementation.
+    if (widenDeferred > 0) {
+      this.log.warn(
+        { cap: widenCap, deferred: widenDeferred },
+        `proc-reaper: widened cap reached (${widenCap}), ${widenDeferred} deferred to the next run`
+      );
     }
 
     // Roll persistence forward: remember THIS sweep's candidates for the next.
@@ -974,31 +1243,60 @@ export class ProcReaper {
     return (await this._safeCwdExists(cwd)) === false; // true OR unknown ⇒ spare
   }
 
-  // SIGTERM → wait graceMs → re-probe kill(pid,0) → SIGKILL only if still alive.
-  // Never SIGKILL first (let node/bun flush). Returns true if the proc is gone
-  // (whether it exited under SIGTERM or SIGKILL).
-  async _terminateWithGrace(row) {
+  // SIGTERM → wait graceMs → re-probe liveness → SIGKILL only if still alive.
+  // Never SIGKILL first (let node/bun flush). Returns true ONLY when the proc is
+  // CONFIRMED gone (whether it exited under SIGTERM or SIGKILL).
+  async _terminateWithGrace(row, { widened = false, ctx = null, onSignal = null } = {}) {
     this.killProc(row.pid, "SIGTERM");
+    if (typeof onSignal === "function") onSignal();
     await this.sleep(this.graceMs);
-    // Re-probe: signal 0 returns true (alive) / false (gone or foreign-uid).
-    const stillAlive = this.killProc(row.pid, 0);
-    if (!stillAlive) return true; // exited under SIGTERM (or vanished) — done.
-    // Re-match FULL argv just before SIGKILL to dodge pid-reuse: re-snapshot. A
-    // pid recycled into a different process during the grace window has a
-    // different argv (or is absent) → stillSame false → no SIGKILL.
-    let stillSame = true;
-    try {
-      const fresh = parsePsRows(await this.psLister());
-      const cur = fresh.find((r) => r.pid === row.pid);
-      stillSame = !!cur && cur.args === row.args;
-    } catch {
-      stillSame = false; // can't re-confirm → do NOT SIGKILL (degrade safe).
-    }
-    if (!stillSame) {
-      this.log.warn({ pid: row.pid }, "proc-reaper: pid no longer matches argv — skipping SIGKILL");
-      return false;
+    // PARITY: confirmed-exit — TRI-STATE. Only a probe that CONFIRMS absence
+    // (`false`) may claim the exit. `true` (alive) and `null` (the probe itself
+    // failed — EPERM/EINVAL/a throwing seam) both fall through to the SIGKILL
+    // path, because a failed probe is not evidence that anything died.
+    const alive = await this._safeProbeAlive(row.pid);
+    if (alive === false) return true; // exited under SIGTERM — done.
+    // PARITY: pre-signal-revalidation
+    // `graceMs` (default 5s, and serial across candidates) is a second window in
+    // which the evidence can go stale, so the pre-SIGTERM revalidation does NOT
+    // cover the SIGKILL. Re-prove ownership from reads taken NOW.
+    //
+    // For the WIDENED class an argv re-match alone is not enough: the process
+    // may have moved into a live cwd, its worktree may have been recreated by
+    // `create-worktree.sh`, a live agent may have claimed the tree, or its PPID
+    // may have changed — in every one of those it would still have been
+    // SIGKILLed. Re-run the FULL widened conjunction (ppid===1, argv, no
+    // live-agent owner, cwd under the root / target, cwd still deleted).
+    if (widened) {
+      if (!(await this._revalidateWidened(row, ctx))) {
+        this.log.warn(
+          { pid: row.pid, command: row.command },
+          "proc-reaper: widened candidate no longer proves ownership at SIGKILL time — skipping SIGKILL"
+        );
+        return false;
+      }
+    } else {
+      // Legacy node/bun class: unchanged pre-CTL-1531 pid-reuse guard. A pid
+      // recycled into a different process during the grace window has a
+      // different argv (or is absent) → stillSame false → no SIGKILL.
+      let stillSame = true;
+      try {
+        const fresh = parsePsRows(await this.psLister());
+        const cur = fresh.find((r) => r.pid === row.pid);
+        stillSame = !!cur && cur.args === row.args;
+      } catch {
+        stillSame = false; // can't re-confirm → do NOT SIGKILL (degrade safe).
+      }
+      if (!stillSame) {
+        this.log.warn(
+          { pid: row.pid },
+          "proc-reaper: pid no longer matches argv — skipping SIGKILL"
+        );
+        return false;
+      }
     }
     this.killProc(row.pid, "SIGKILL");
+    if (typeof onSignal === "function") onSignal();
     // CTL-1531 (Codex P2-i): kill(2) returns on DELIVERY, not on exit. A process
     // wedged in uninterruptible sleep (D state on a hung mount) — or one we lack
     // permission to signal — survives SIGKILL. Returning true unconditionally
@@ -1008,26 +1306,45 @@ export class ProcReaper {
     return await this._confirmGone(row.pid);
   }
 
-  // _confirmGone — poll kill(pid,0) until the pid is CONFIRMED gone, bounded.
-  // Fail-CLOSED in the reporting direction: if we cannot prove it exited (probe
-  // throws, or it is still alive at the deadline) we return false, so the sweep
-  // UNDER-reports rather than emitting a reclamation that never happened.
+  // PARITY: confirmed-exit
+  // _confirmGone — poll the TRI-STATE liveness probe until the pid is CONFIRMED
+  // gone, bounded. Fail-CLOSED in the reporting direction: only an explicit
+  // `false` ("definitely gone") returns true. `null` — the probe ITSELF failed —
+  // is NOT an exit and must never be read as one; at the deadline we return
+  // false, so the sweep UNDER-reports rather than emitting a reclamation that
+  // never happened.
   async _confirmGone(pid, { attempts = 5, intervalMs = 200 } = {}) {
     for (let i = 0; i < attempts; i++) {
-      let alive;
-      try {
-        alive = this.killProc(pid, 0);
-      } catch {
-        alive = true; // unprobeable ⇒ do NOT claim it was reaped
-      }
-      if (!alive) return true;
+      const alive = await this._safeProbeAlive(pid);
+      if (alive === false) return true; // CONFIRMED gone
       if (i < attempts - 1) await this.sleep(intervalMs);
     }
     this.log.warn(
       { pid },
-      "proc-reaper: pid survived SIGKILL (unconfirmed exit) — NOT counted as reaped"
+      "proc-reaper: exit NOT confirmed after SIGKILL (still alive, or the liveness probe itself could not answer) — NOT counted as reaped"
     );
     return false;
+  }
+
+  // _safeProbeAlive — normalize the liveness seam to true|false|null. Any throw,
+  // or any non-boolean answer, becomes null = UNKNOWN, and unknown never claims
+  // an exit. Fail closed by construction (mirrors _safeCwdExists).
+  //
+  // The seam is resolved HERE, not in the constructor: an explicit `probeAlive`
+  // always wins; otherwise the errno-discriminating native probe is used ONLY
+  // while `killProc` is still the native default. Any injected kill seam —
+  // including one assigned after construction — routes the probe back through
+  // it, so a hermetic test can never leak a real `process.kill` probe.
+  async _safeProbeAlive(pid) {
+    const probe =
+      this.probeAlive ??
+      (this.killProc === defaultKillProc ? defaultProbeAlive : (p) => this.killProc(p, 0));
+    try {
+      const r = await probe(pid);
+      return typeof r === "boolean" ? r : null;
+    } catch {
+      return null;
+    }
   }
 
   async _safeCwd(pid) {
@@ -1086,6 +1403,18 @@ export class ProcReaper {
   async _safeCwdExists(path) {
     try {
       const r = await this.cwdExists(path);
+      return typeof r === "boolean" ? r : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // PARITY: root-absent-bail — "is the worktree root itself present?", normalized
+  // to true|false|null. Only `true` lets the widened class run this sweep.
+  async _safeWorktreeRootExists(root) {
+    if (typeof root !== "string" || !root) return false;
+    try {
+      const r = await this.worktreeRootExists(root);
       return typeof r === "boolean" ? r : null;
     } catch {
       return null;

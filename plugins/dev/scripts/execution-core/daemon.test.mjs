@@ -1180,6 +1180,37 @@ describe("startReaperAndTimer — injects a production ProcReaper (CTL-1165 D2)"
     });
     expect(capturedOpts.procReaper.mode).toBe("enforce"); // legacy class honours config
     expect(capturedOpts.procReaper.widenMode).toBe("shadow"); // widened class stays dark
+    // CTL-1531 round 2: and the widened class is CAPPED per run even when the
+    // operator supplies no cap. Omitting the key must land on the module default
+    // (5), never on 0 — which is the DOCUMENTED "uncapped" value.
+    expect(capturedOpts.procReaper.widenMaxKills).toBe(5);
+    stopDaemon();
+  });
+
+  // The cap is operator-tunable, and the daemon must actually thread it through —
+  // otherwise the knob documented in configuration.md / the Layer-1 schema is inert.
+  test("procReaper.widenMaxKills is threaded from config (CTL-1531 round 2)", () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      orphanReaperConfig: { procReaper: { widenMaxKills: 2 } },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
+      pollMs: 0,
+      debounceMs: 600_000,
+    });
+    expect(capturedOpts.procReaper.widenMaxKills).toBe(2);
     stopDaemon();
   });
 });

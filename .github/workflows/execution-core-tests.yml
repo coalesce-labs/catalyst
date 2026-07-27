@@ -48,6 +48,12 @@ on:
       # it appeared in no workflow at all, so a change to its kill gates could
       # merge entirely unverified.
       - "plugins/dev/scripts/orphan-sweep.sh"
+      # CTL-1531 round 3: the installer resolves the SWEEP_PROC_WIDEN value baked
+      # into the LaunchAgent (shadow vs enforce for the widened process killer),
+      # and the template is where that key lives — both are guarded by
+      # install-orphan-sweep{,-guard}.test.sh below.
+      - "plugins/dev/scripts/install-orphan-sweep.sh"
+      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/__tests__/**"
       # CTL-1387: the CLI-reference generator + the page it drives are guarded by
       # cli-reference-drift.test.sh below; a change to either must run this suite.
@@ -78,6 +84,12 @@ on:
       # it appeared in no workflow at all, so a change to its kill gates could
       # merge entirely unverified.
       - "plugins/dev/scripts/orphan-sweep.sh"
+      # CTL-1531 round 3: the installer resolves the SWEEP_PROC_WIDEN value baked
+      # into the LaunchAgent (shadow vs enforce for the widened process killer),
+      # and the template is where that key lives — both are guarded by
+      # install-orphan-sweep{,-guard}.test.sh below.
+      - "plugins/dev/scripts/install-orphan-sweep.sh"
+      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/__tests__/**"
       # CTL-1387: see the pull_request note above.
       - "plugins/dev/scripts/gen-cli-reference.sh"
@@ -215,6 +227,26 @@ jobs:
       - name: orphan-sweep LaunchAgent plist test (CTL-1531)
         working-directory: plugins/dev/scripts
         run: bash __tests__/orphan-sweep-plist.test.sh
+
+      - name: orphan-sweep installer test (CTL-1531)
+        # The installer resolves the SWEEP_PROC_WIDEN rollout value that ends up
+        # in the LaunchAgent's EnvironmentVariables — i.e. whether the widened
+        # process killer runs in shadow or enforce on every host. Its 7 I13
+        # assertions guard the precedence chain (env → .catalyst/config.json →
+        # the value already installed → shadow) and, crucially, that a routine
+        # `catalyst-stack install-services` does NOT silently revert an operator's
+        # flip. Hermetic: launchctl/uname mocked, $HOME redirected to a temp dir,
+        # and the baked program path is a purpose-built scratch dir handed in via
+        # CATALYST_FORCE_BAKE_DIR — nothing is ever loaded into real launchd.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/install-orphan-sweep.test.sh
+
+      - name: orphan-sweep installer ephemeral-path guard test (CTL-1306)
+        # The CTL-1306 guard the suite above deliberately routes around: baking a
+        # linked-worktree / temp program path into the LaunchAgent silently
+        # exit-127'd the reaper fleet-wide. Runs the REAL refusal paths.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/install-orphan-sweep-guard.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying

@@ -1708,6 +1708,8 @@ _n_file="${WIDEN_MOCK_STATE:-/tmp}/${fmt%=}-${pid}"
 _n=$(( $(cat "$_n_file" 2>/dev/null || echo 0) + 1 )); printf '%s' "$_n" > "$_n_file"
 case "$fmt" in
   ppid=)
+    eval "v3=\"\${WPPID3_${pid}:-}\""
+    if [[ -n "$v3" && "$_n" -ge 3 ]]; then printf '%s\n' "$v3"; exit 0; fi
     eval "v2=\"\${WPPID2_${pid}:-}\""
     if [[ -n "$v2" && "$_n" -ge 2 ]]; then printf '%s\n' "$v2"; exit 0; fi
     eval "v=\"\${WPPID_${pid}:-}\""
@@ -1731,6 +1733,8 @@ case "$fmt" in
     esac
     ;;
   command=)
+    eval "v3=\"\${WCMD3_${pid}:-}\""
+    if [[ -n "$v3" && "$_n" -ge 3 ]]; then printf '%s\n' "$v3"; exit 0; fi
     eval "v2=\"\${WCMD2_${pid}:-}\""
     if [[ -n "$v2" && "$_n" -ge 2 ]]; then printf '%s\n' "$v2"; exit 0; fi
     eval "v=\"\${WCMD_${pid}-__DEFAULT__}\""     # single '-': set-but-EMPTY is honoured
@@ -1742,13 +1746,24 @@ case "$fmt" in
     [[ "$v" == "__DEFAULT__" ]] && v="16:40:00"   # 60000s — well over the 900s floor
     [[ -n "$v" ]] && printf '%s\n' "$v"
     ;;
-  # CTL-1531 P2-i: the post-signal LIVENESS probe (`ps -o pid= -p N`). EMPTY by
-  # default = "the pid is gone", i.e. every signal is confirmed to have worked.
-  # $WALIVE_<pid>=1 makes that pid a process that traps/ignores SIGTERM AND
-  # SIGKILL and stays alive — the case that used to be logged as "killed".
+  # CTL-1531 P2-i: the post-signal LIVENESS probe (`ps -o pid= -p N`).
+  #   default            → CONFIRMED GONE. Reproduces REAL `ps` for an absent
+  #                        but in-range pid on this fleet (verified on macOS 26):
+  #                        EXIT 1, empty stdout, EMPTY STDERR. The exit status is
+  #                        load-bearing since CTL-1531 round 2 — the probe is
+  #                        tri-state, and "rc 0 with no output" is UNKNOWN, not
+  #                        gone, so a mock that exited 0 here would model a
+  #                        process the sweep can never confirm dead.
+  #   $WALIVE_<pid>=1    → alive: traps/ignores SIGTERM *and* SIGKILL.
+  #   $WPSFAIL_<pid>=1   → the PROBE ITSELF fails (process table unreadable,
+  #                        fork/resource failure): non-zero exit WITH stderr.
+  #                        Must read as UNKNOWN — never as an exit.
   pid=)
+    eval "v=\"\${WPSFAIL_${pid}:-}\""
+    if [[ -n "$v" ]]; then echo "ps: resource temporarily unavailable" >&2; exit 1; fi
     eval "v=\"\${WALIVE_${pid}:-}\""
-    [[ -n "$v" ]] && printf '%s\n' "$pid"
+    if [[ -n "$v" ]]; then printf '%s\n' "$pid"; exit 0; fi
+    exit 1
     ;;
 esac
 exit 0
@@ -1768,8 +1783,20 @@ while [[ $# -gt 0 ]]; do
 done
 _n_file="${WIDEN_MOCK_STATE:-/tmp}/lsof-${pid}"
 _n=$(( $(cat "$_n_file" 2>/dev/null || echo 0) + 1 )); printf '%s' "$_n" > "$_n_file"
+# CTL-1531 round 2: $WHANG_<pid>=<secs> models lsof BLOCKING IN THE KERNEL on a
+# hung / stale mount — the case the shell probe had no deadline for. The sleep is
+# SELF-LIMITING (AGENTS.md house rule): if the sweep's watchdog fails to fire,
+# this exits on its own instead of leaking a spinner, and the test's own deadline
+# turns the overrun into a FAILURE rather than a hang.
+eval "hang=\"\${WHANG_${pid}:-}\""
+if [[ -n "$hang" ]]; then sleep "$hang"; fi
 # Single '-' + sentinel: a WCWD2_ that is set but EMPTY means "lsof can no longer
 # answer for this pid at re-probe time", which is a distinct fixture from unset.
+eval "v3=\"\${WCWD3_${pid}-__UNSET__}\""
+if [[ "$v3" != "__UNSET__" && "$_n" -ge 3 ]]; then
+  [[ -n "$v3" ]] && printf 'n%s\n' "$v3"
+  exit 0
+fi
 eval "v2=\"\${WCWD2_${pid}-__UNSET__}\""
 if [[ "$v2" != "__UNSET__" && "$_n" -ge 2 ]]; then
   [[ -n "$v2" ]] && printf 'n%s\n' "$v2"
@@ -1799,9 +1826,10 @@ chmod +x "$MOCKBIN/kill"
 # previous case's `WETIME_`).
 _widen_clear() {
   local v
-  for v in $(compgen -v | grep -E '^W(CMD2?|PPID2?|CWD2?|ETIME|ALIVE)_[0-9]+$'); do unset "$v"; done
+  for v in $(compgen -v | grep -E '^W(CMD[23]?|PPID[23]?|CWD[23]?|ETIME|ALIVE|PSFAIL|HANG)_[0-9]+$'); do unset "$v"; done
   unset WIDEN_PS_ROWS WIDEN_LEGACY_PIDS WIDEN_FIXTURE_PIDS
   unset SWEEP_PROC_WIDEN_MAX_KILLS SWEEP_PROC_WIDEN_MIN_AGE_SECS SWEEP_PROC_WIDEN_GRACE_SECS
+  unset SWEEP_PROC_CWD_TIMEOUT_SECS
   rm -f "$KILL_LOG" "$SWEEP_SELF_PID_FILE" "$SWEEP_ANCESTOR_PID_FILE"
   rm -f "${WIDEN_MOCK_STATE}"/* 2>/dev/null || true
 }
@@ -2003,6 +2031,15 @@ run "T98: the cap does NOT truncate the shadow report (all 5 candidates logged)"
 # Root-absent early bail. A renamed/unmounted $SWEEP_WT_ROOT makes EVERY cwd
 # beneath it satisfy "cwd is gone" in the SAME pass — a root-level fault, not N
 # independent orphans. Without the bail this fixture SIGTERMs all 5 at once.
+#
+# CTL-1531 round 3 — THE FIXTURE CWDS MUST LIVE UNDER THE VANISHED ROOT. The
+# original form left them at the default ($WIDEN_GONE, under ${SCRATCH}/wt_widen)
+# while pointing SWEEP_WT_ROOT at ${SCRATCH}/wt_widen_ABSENT, so gate (j)
+# (`_cwd_under_wt_root`) rejected all 5 candidates BEFORE the bail could matter:
+# `! test -s $KILL_LOG` was true no matter what, and mutating the bail's
+# `return 0` to `:` left the suite 200/0 green. Repointed here so the bail is the
+# ONLY thing between this fixture and 5 SIGTERMs.
+WIDEN_ABSENT_ROOT="${SCRATCH}/wt_widen_ABSENT"   # deliberately NEVER created
 _widen_clear
 export WIDEN_PS_ROWS="2101 1
 2102 1
@@ -2010,10 +2047,26 @@ export WIDEN_PS_ROWS="2101 1
 2104 1
 2105 1"
 export WIDEN_FIXTURE_PIDS="2101 2102 2103 2104 2105"
+export WCWD_2101="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WCWD_2102="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WCWD_2103="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WCWD_2104="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WCWD_2105="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
 run "T99: ROOT-ABSENT bail — a missing SWEEP_WT_ROOT kills nothing and says why" \
-  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_WT_ROOT='${SCRATCH}/wt_widen_ABSENT' bash '$SWEEP' > '${SCRATCH}/t99.out' 2>&1 \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_WT_ROOT='${WIDEN_ABSENT_ROOT}' bash '$SWEEP' > '${SCRATCH}/t99.out' 2>&1 \
     && expect_contains '${SCRATCH}/t99.out' 'is absent — skipping' \
     && ! test -s '${KILL_LOG}'"
+
+# NON-VACUITY for T99. The SAME five candidates, the SAME cwds — but with the
+# root PRESENT they are all signalled. Without this control T99 could go on
+# passing for the old reason (gate (j) rejecting everything) forever.
+mkdir -p "${WIDEN_ABSENT_ROOT}"
+run "T99b: NON-VACUITY — with the root PRESENT the identical fixture IS signalled" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=5 SWEEP_PROC_WIDEN_GRACE_SECS=0 \
+      SWEEP_WT_ROOT='${WIDEN_ABSENT_ROOT}' bash '$SWEEP' > '${SCRATCH}/t99b.out' 2>&1 \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '5'"
+rmdir "${WIDEN_ABSENT_ROOT}" 2>/dev/null || true
+_widen_clear
 
 # ════════════════════════════════════════════════════════════════════════════
 # CTL-1531 Codex round 1 — P1-c / P1-e / P2-g / P2-h / P2-i regressions
@@ -2219,7 +2272,13 @@ run "T119: …but DOES escalate to SIGKILL first (the escalation is not skipped)
     && expect_contains '${SCRATCH}/t117.out' 'survived SIGTERM after 0s — escalating to SIGKILL'"
 
 # A stubborn process must not crowd a REAL orphan out of the per-run cap.
-# Order matters: 2201 (stubborn) is enumerated before 2202 (reapable), cap = 1.
+# Order matters: 2201 (stubborn) is enumerated before 2202 (reapable).
+#
+# CTL-1531 round 2: cap = 2, not 1. The stubborn candidate does not consume a
+# CONFIRMED-TERMINATION slot (that is the property under test) but it DOES spend
+# 2 of the run's signal budget, and since SIGKILL now counts against the `cap x 2`
+# signal ceiling (T122/T124), a cap of 1 would legitimately exhaust the whole
+# budget on 2201 alone. Cap 2 keeps both bounds observable and independent.
 _widen_clear
 export WIDEN_PS_ROWS="2201 1
 2202 1"
@@ -2227,7 +2286,7 @@ export WIDEN_FIXTURE_PIDS="2201 2202"
 export WALIVE_2201=1
 rm -f "$SCRATCH_OTEL_LOG"
 run "T120: a signal-ignoring process does NOT consume cap capacity (the real orphan is still reaped)" \
-  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=1 SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t120.out' 2>&1 \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=2 SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t120.out' 2>&1 \
     && expect_contains '${SCRATCH}/t120.out' 'killed 2202 (cmd: sh;' \
     && expect_not_contains '${SCRATCH}/t120.out' 'killed 2201 (cmd:'"
 
@@ -2235,16 +2294,59 @@ run "T121: …and exactly ONE reclamation is emitted (for the process that actua
   bash -c "test \"\$(grep -c 'orphan_proc' '${SCRATCH_OTEL_LOG}')\" = '1'"
 
 # …but signalling is still BOUNDED. Confirmed-exit accounting alone cannot bound
-# a host where NOTHING responds to signals, so a second ceiling caps delivered
-# signals at cap × 2 (each candidate is worth SIGTERM + SIGKILL and no more).
-# cap=2 ⇒ 4 candidates signalled × 2 signals = 8 kill.log lines, then stop.
+# a host where NOTHING responds to signals, so a second ceiling caps DELIVERED
+# SIGNALS at cap × 2 (each candidate is worth SIGTERM + SIGKILL and no more).
+#
+# CTL-1531 round 2 (Codex): the SIGKILL now counts against that ceiling. The
+# round-1 form incremented once per CANDIDATE, so "cap 2" actually permitted 4
+# candidates and 8 delivered signals — and THIS TEST ENCODED THE BUG by
+# asserting 8 lines. cap=2 ⇒ ceiling 4 ⇒ 2 candidates × 2 signals = 4 kill.log
+# lines, then stop. Reverting the accounting makes this 8 again.
 _widen_uniform 8
 export WALIVE_2201=1 WALIVE_2202=1 WALIVE_2203=1 WALIVE_2204=1
 export WALIVE_2205=1 WALIVE_2206=1 WALIVE_2207=1 WALIVE_2208=1
 run "T122: signalling stays BOUNDED when everything ignores signals (stops at cap x 2, says why)" \
   bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=2 SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t122.out' 2>&1 \
     && expect_contains '${SCRATCH}/t122.out' 'signal bound reached (4) with only 0 confirmed termination(s) — stopping this run' \
-    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '8'"
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '4'"
+
+# The tightest statement of the same accounting rule: ONE stubborn candidate at
+# cap 1 spends the ENTIRE budget (SIGTERM + SIGKILL = 2 = cap × 2), so the second
+# candidate is never signalled. Counting per-candidate instead of per-signal
+# yields 4 lines here.
+_widen_uniform 2
+export WALIVE_2201=1 WALIVE_2202=1
+run "T124: SIGKILL counts against the signal ceiling (cap 1 ⇒ 2 signals total, not 4)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=1 SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > /dev/null 2>&1 \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '2' \
+    && grep -qw '2201' '${KILL_LOG}' \
+    && ! grep -qw '2202' '${KILL_LOG}'"
+
+# ── CTL-1531 round 3: the ceiling's REAL bound was cap x 2 + 1 ──────────────
+#
+# T122/T124 both use EVEN parity — every candidate spends exactly 2 signals — so
+# both the old `signalled -ge cap*2` admission test and the correct
+# `signalled + 2 -gt cap*2` one give the same answer. The overrun needs ODD
+# parity: a candidate that exits under SIGTERM spends ONE signal, leaving the
+# counter at an odd value where the old test still admits a candidate that then
+# spends TWO more.
+#
+#   cap 2 ⇒ ceiling 4.  2201 exits under SIGTERM (1) — 2202/2203/2204 ignore both.
+#     old form: 2202 admitted at 1 (→3), 2203 admitted at 3 (→5) = cap*2 + 1
+#     fixed   : 2202 admitted (1+2 ≤ 4 → 3), 2203 REFUSED (3+2 > 4). 3 signals.
+# Asserted by COUNTING delivered signals, so reverting the admission test flips
+# this from 3 to 5.
+_widen_uniform 4
+export WALIVE_2202=1 WALIVE_2203=1 WALIVE_2204=1
+run "T124b: the signal ceiling holds under ODD parity (cap x 2, never cap x 2 + 1)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=2 SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t124b.out' 2>&1 \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '3' \
+    && grep -qw '2201' '${KILL_LOG}' \
+    && grep -q -- '-9 2202' '${KILL_LOG}' \
+    && ! grep -qw '2203' '${KILL_LOG}'"
+
+run "T124c: …and it says why, naming the ceiling it stopped at" \
+  bash -c "expect_contains '${SCRATCH}/t124b.out' 'signal bound reached (4)'"
 
 # NON-VACUITY for the whole P2-i block: with the default (mock) liveness answer
 # — the pid IS gone after SIGTERM — the reclamation is recorded and no SIGKILL
@@ -2259,6 +2361,137 @@ run "T123: NON-VACUITY — a CONFIRMED exit records the reclamation and never es
 
 chmod 755 "$WIDEN_WALLED"          # let the EXIT trap's rm -rf reclaim it
 rm -f "$WIDEN_FILE_CWD"
+_widen_clear
+
+# ── CTL-1531 round 2: a FAILED liveness probe is UNKNOWN, never an exit ─────
+#
+# `_proc_alive` used to test only for EMPTY `ps` output, so a transient process
+# table / resource / fork failure was indistinguishable from an absent pid:
+# `_proc_gone_within` self-certified the exit, and the caller logged "killed"
+# and emitted an `orphan_proc` reclamation while the target might still be
+# running. $WPSFAIL_<pid> makes the probe itself fail (non-zero exit WITH
+# stderr) — the state that must read as `unknown`.
+_widen_uniform 1
+export WPSFAIL_2201=1
+rm -f "$SCRATCH_OTEL_LOG"
+run "T125: a probe that FAILS is not an exit — the pid is NOT logged as killed" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t125.out' 2>&1 \
+    && expect_not_contains '${SCRATCH}/t125.out' 'killed 2201 (cmd:'"
+
+run "T126: …and NO orphan_proc reclamation is emitted for an unconfirmable exit" \
+  bash -c "! grep -q 'orphan_proc' '${SCRATCH_OTEL_LOG}' 2>/dev/null"
+
+# NON-VACUITY: the SAME fixture minus the probe failure DOES record the exit.
+# Without this pair T125/T126 would pass even if the sweep had simply stopped
+# reaping anything at all.
+_widen_uniform 1
+rm -f "$SCRATCH_OTEL_LOG"
+run "T127: NON-VACUITY — a CLEAN 'no such process' probe still confirms the exit" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t127.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t127.out' 'killed 2201 (cmd: sh;' \
+    && grep -q 'orphan_proc' '${SCRATCH_OTEL_LOG}'"
+
+# ── CTL-1531 round 2: the SIGKILL re-matches identity, like the SIGTERM ─────
+#
+# The confirmation wait proves only that the NUMERIC pid is not confirmed gone.
+# If the original process exits under SIGTERM and its pid is REUSED during the
+# grace, an unconditional `kill -9` lands on the REPLACEMENT process. The
+# pre-SIGTERM gate has an identity re-match; the second signal needs the same.
+#
+# $WALIVE keeps the pid "alive" so the escalation path is reached, and the W*3_
+# fixtures answer from the THIRD read on — which is EXACTLY the pre-SIGKILL
+# revalidation window. Read 1 is the classification gate, read 2 is the
+# pre-SIGTERM re-match. The W*2_ form would reject the candidate before the
+# SIGTERM ever went out, so these cases would pass VACUOUSLY (no SIGKILL because
+# there was no signal at all) and would not exercise the new gate.
+_widen_uniform 1
+export WALIVE_2201=1
+export WCMD3_2201="sh -c a-completely-different-process"   # pid recycled
+run "T128: pid RECYCLED under a new argv during the grace → NO SIGKILL" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t128.out' 2>&1 \
+    && grep -qx '2201' '${KILL_LOG}' \
+    && ! grep -q -- '-9 2201' '${KILL_LOG}' \
+    && expect_contains '${SCRATCH}/t128.out' 'NOT escalating to SIGKILL'"
+
+_widen_uniform 1
+export WALIVE_2201=1
+export WPPID3_2201="777"                                    # re-adopted
+run "T129: PPID changed during the grace (re-adopted) → NO SIGKILL" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > /dev/null 2>&1 \
+    && grep -qx '2201' '${KILL_LOG}' \
+    && ! grep -q -- '-9 2201' '${KILL_LOG}'"
+
+_widen_uniform 1
+export WALIVE_2201=1
+export WCWD3_2201="$WIDEN_LIVE"                             # worktree re-created
+run "T130: the worktree was RE-CREATED during the grace → NO SIGKILL" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > /dev/null 2>&1 \
+    && grep -qx '2201' '${KILL_LOG}' \
+    && ! grep -q -- '-9 2201' '${KILL_LOG}'"
+
+_widen_uniform 1
+export WALIVE_2201=1
+export WCWD3_2201="$WIDEN_OUTSIDE_GONE"                     # moved out of the root
+run "T131: the cwd MOVED out from under the wt root during the grace → NO SIGKILL" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > /dev/null 2>&1 \
+    && grep -qx '2201' '${KILL_LOG}' \
+    && ! grep -q -- '-9 2201' '${KILL_LOG}'"
+
+# NON-VACUITY: nothing changed during the grace ⇒ the SIGKILL IS delivered.
+# (T119 asserts the same escalation, but on the pre-round-2 code path; keeping
+# it here pins that the NEW gate did not simply disable the escalation.)
+_widen_uniform 1
+export WALIVE_2201=1
+run "T132: NON-VACUITY — identity unchanged during the grace → the SIGKILL IS sent" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > /dev/null 2>&1 \
+    && grep -q -- '-9 2201' '${KILL_LOG}'"
+
+# ── CTL-1531 round 2: the cwd probe is BOUNDED (hung-mount deadline) ────────
+#
+# `lsof` blocks in the kernel on a stale/hung mount and had NO deadline on this
+# side, so ONE such candidate wedged the whole LaunchAgent run and starved the
+# signal, worktree and browser vectors behind it. $WHANG_<pid> makes the mock
+# block; the sweep must give up on that pid, treat the cwd as UNKNOWN (spare),
+# and FINISH.
+#
+# The assertion itself is self-limiting (AGENTS.md house rule): the sweep runs in
+# the background with its own watchdog, so a REGRESSION shows up as a FAILED test
+# within the deadline rather than as a hung suite. Nothing here can outlive the
+# test — the watchdog kills the sweep, and the mock's own `sleep` is bounded.
+_t_bounded() {                       # _t_bounded <deadline_secs> <outfile> <cmd...>
+  local limit="$1" out="$2"; shift 2
+  local mark="${SCRATCH}/.t_bounded_overran" cpid wpid rc
+  rm -f "$mark"
+  "$@" > "$out" 2>&1 &
+  cpid=$!
+  ( sleep "$limit"; : > "$mark"; kill -9 "$cpid" 2>/dev/null ) >/dev/null 2>&1 &
+  wpid=$!
+  wait "$cpid"; rc=$?
+  kill -9 "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+  [[ -e "$mark" ]] && { echo "OVERRAN the ${limit}s deadline (the probe is unbounded)"; return 1; }
+  return "$rc"
+}
+
+_widen_uniform 1
+export WHANG_2201=25                 # lsof blocks ~25s for this pid
+run "T133: a HUNG cwd probe does not wedge the sweep (it is bounded and the run finishes)" \
+  _t_bounded 12 "${SCRATCH}/t133.out" \
+    env SWEEP_PROC_WIDEN=enforce SWEEP_PROC_CWD_TIMEOUT_SECS=1 SWEEP_PROC_WIDEN_GRACE_SECS=0 \
+      bash "$SWEEP"
+
+run "T134: …the timeout is reported (an operator can see WHY the cwd was unknown)" \
+  bash -c "expect_contains '${SCRATCH}/t133.out' 'cwd probe for pid 2201 exceeded 1s'"
+
+run "T135: …and the pid whose cwd could not be read is SPARED (unknown never kills)" \
+  bash -c "! grep -qw '2201' '${KILL_LOG}'"
+
+# NON-VACUITY: the identical fixture without the hang IS reaped, so T133-T135
+# cannot pass merely because the sweep stopped working.
+_widen_uniform 1
+run "T136: NON-VACUITY — the same candidate with a RESPONSIVE probe is still killed" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_CWD_TIMEOUT_SECS=1 SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > /dev/null 2>&1 \
+    && grep -qw '2201' '${KILL_LOG}'"
+
 _widen_clear
 
 # ── UNION: the legacy branch keeps its path-unrestricted coverage ────────────
