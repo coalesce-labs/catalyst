@@ -60,7 +60,7 @@ Branch on the exit code:
 | `10` | mechanical changes needed (bridge / skills wiring / pointer) — no monolithic problem | Phase 3 |
 | `11` | `CLAUDE.md` is monolithic — needs the intelligent split | Phase 3 (mechanical parts only), then Phase 4 |
 | `2` | bad usage (`--repo` not a dir, unknown flag) | fix the invocation and re-run |
-| `4` | ambiguous skills state (message says exactly what conflicts) | STOP — surface the script's stderr diagnostic verbatim; never modify either skills tree yourself; present the conflict and ask the human operator to resolve it, then re-run the classifier (Phase 2) to verify |
+| `4` | ambiguous skills state (message says exactly what conflicts) | ONE sanctioned exception, else STOP. Exception (the per-skill symlink farm): applies only when the diagnostic is the symlink-inside-the-trees refusal AND all three pre-checks pass BEFORE touching anything — (a) every entry of `.claude/skills` is a symlink resolving into `../../.agents/skills/<name>` (one real file or foreign link disqualifies), (b) neither `.claude` nor `.agents` is itself a symlink, (c) `git check-ignore --stdin` over `.agents/skills` + every `.agents/skills/<name>` + `.claude/skills` reports nothing ignored (a masked hard-stop must surface BEFORE deletion, not after). All pass → converge (delete the per-entry links — links, not content — `rmdir .claude/skills`, `ln -s '../.agents/skills' .claude/skills`), re-run the dry-run, and dispatch the NEW rc through this same table (a coexisting monolithic CLAUDE.md legitimately yields rc `11` next — continue the flow; rc `0` only when nothing else is pending). ANY pre-check failing, or any other rc-4 diagnostic → STOP: surface the script's stderr verbatim; never modify either skills tree yourself; present the conflict and ask the human operator, then re-run the classifier to verify |
 | `5` | I/O error | inspect the printed message |
 
 ## Phase 3: Mechanical fix
@@ -75,16 +75,9 @@ bash "$SCRIPT" --repo . --fix 2>&1
 - After fixing from rc `10`, re-run the Phase 2 dry-run and require rc `0`.
 - After fixing from rc `11`, re-run the Phase 2 dry-run and expect rc `11` again (the monolithic
   split is still outstanding) — proceed to Phase 4.
-- rc `4` (ambiguous skills state) is a STOP with ONE sanctioned exception, checked here in
-  Phase 2 (the generic stop would otherwise make it unreachable): when the diagnostic is the
-  symlink-inside-the-trees refusal AND inspection proves `.claude/skills` is a PURE per-skill
-  symlink farm (EVERY entry a symlink resolving into `../../.agents/skills/<name>`; one real
-  file or foreign link disqualifies), converge it per Phase 7 rule 1 (delete the per-entry
-  links — links, not content — `rmdir`, `ln -s '../.agents/skills'`), then re-run the dry-run
-  and require rc `0`. EVERY other rc `4` is the hard stop: surface the script's stderr
-  diagnostic verbatim, never modify either skills tree yourself — resolving the conflict is a
-  decision for the human operator. Present the conflict and ask; once they've resolved it,
-  re-run the classifier (Phase 2) to verify.
+- rc `4` at any point: dispatch through the Phase 2 table's rc-4 row — it is the single
+  authoritative statement of the one sanctioned exception (the pre-validated per-skill symlink
+  farm convergence) and the hard stop for everything else.
 
 ## Phase 4: Intelligent split (rc 11 only)
 
@@ -166,7 +159,9 @@ say `none`, not claim artifacts that don't exist):
 
 The migration is not done when the classifier passes; the docs must also be GOOD. This review
 phase always RUNS (it is part of the skill's contract — the frontmatter description discloses
-it), but its WRITE authority is tiered: gates 1 and 4 (canonical form, checkup-clean) are
+it), but its WRITE authority is tiered. Start by reading the FINAL `AGENTS.md` and `CLAUDE.md`
+IN FULL (Phases 5-6 may have changed them since any earlier read; a "no findings" verdict from
+stale or unread files is invalid): gates 1 and 4 (canonical form, checkup-clean) are
 mechanical and applied directly; gates 2 and 3 (conciseness, progressive disclosure) are
 editorial — REPORT findings always, but apply only trivially-safe fixes directly (exact
 duplicates from the merge, dead boilerplate the split itself created) and **ask the user before
@@ -194,9 +189,11 @@ any other editorial change or relocation**. Never silently rewrite prose the use
    a line is "accounted for" when it lives in `AGENTS.md`, `CLAUDE.md`, **or a doc that one of
    them references by path**; list every relocation (source heading → target file) in the
    summary.
-4. **Checkup-clean.** Finish with `check-project-setup.sh` §3/§10 (when the repo is
-   Catalyst-configured) or at minimum the classifier dry-run: the audit surfaces must read
-   green, not merely "no error".
+4. **Checkup-clean.** The satisfiable gate: the classifier dry-run exits `0`, AND — when the
+   repo is Catalyst-configured — running `check-project-setup.sh` produces NO §3 snippet
+   warning and NO §10 dual-harness warning (§10's green line, when it prints, confirms it).
+   Warnings from unrelated sections (webhooks, thoughts, config keys) do NOT count against
+   this gate — report them as observations only.
 
 Report what the review changed (or "no findings") in the final summary.
 
@@ -207,6 +204,10 @@ Report what the review changed (or "no findings") in the final summary.
 - **Never delete or overwrite instruction content.** The only case that removes a tree is
   `.claude/skills` and `.agents/skills` both existing as real, byte-identical directories — the
   script collapses that to a symlink, guarded by `diff -r`.
+  The TWO sanctioned tree-removal cases: (1) a duplicate `.claude/skills` proven byte-identical
+  to `.agents/skills` (script-guarded by `diff -r` + mode compare), and (2) the pre-validated
+  per-skill symlink FARM (Phase 2 rc-4 exception) — where only symlinks and the then-empty
+  directory are removed, never file content.
 - **Idempotent.** Re-running any phase against an already-converged repo is a no-op.
 - **rc `4` is a stop sign, not a retry loop** — except the single Phase-2-sanctioned
   per-skill-symlink-farm convergence (see Phase 2 and Phase 7 rule 1). Every other ambiguous
