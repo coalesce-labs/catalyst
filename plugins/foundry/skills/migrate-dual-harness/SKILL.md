@@ -75,10 +75,16 @@ bash "$SCRIPT" --repo . --fix 2>&1
 - After fixing from rc `10`, re-run the Phase 2 dry-run and require rc `0`.
 - After fixing from rc `11`, re-run the Phase 2 dry-run and expect rc `11` again (the monolithic
   split is still outstanding) — proceed to Phase 4.
-- rc `4` (ambiguous skills state) is a STOP, not an auto-fix and not a retry loop: surface the
-  script's stderr diagnostic verbatim to the user and never modify either skills tree yourself —
-  resolving the conflict is a decision for the human operator. Present the conflict and ask; once
-  they've resolved it, re-run the classifier (Phase 2) to verify.
+- rc `4` (ambiguous skills state) is a STOP with ONE sanctioned exception, checked here in
+  Phase 2 (the generic stop would otherwise make it unreachable): when the diagnostic is the
+  symlink-inside-the-trees refusal AND inspection proves `.claude/skills` is a PURE per-skill
+  symlink farm (EVERY entry a symlink resolving into `../../.agents/skills/<name>`; one real
+  file or foreign link disqualifies), converge it per Phase 7 rule 1 (delete the per-entry
+  links — links, not content — `rmdir`, `ln -s '../.agents/skills'`), then re-run the dry-run
+  and require rc `0`. EVERY other rc `4` is the hard stop: surface the script's stderr
+  diagnostic verbatim, never modify either skills tree yourself — resolving the conflict is a
+  decision for the human operator. Present the conflict and ask; once they've resolved it,
+  re-run the classifier (Phase 2) to verify.
 
 ## Phase 4: Intelligent split (rc 11 only)
 
@@ -167,7 +173,7 @@ duplicates from the merge, dead boilerplate the split itself created) and **ask 
 any other editorial change or relocation**. Never silently rewrite prose the user authored:
 
 1. **Canonical form, not merely functional.** Variants that happen to work still get converged.
-   The one **sanctioned rc-4 exception**: when the classifier's rc-4 diagnostic is the
+   The one **sanctioned rc-4 exception** (recognized and executed in Phase 2, where rc 4 first surfaces — restated here as the canonical-form rule): when the classifier's rc-4 diagnostic is the
    symlink-inside-the-trees refusal AND inspection proves `.claude/skills/` is a pure per-skill
    symlink farm (EVERY entry is a symlink resolving into `../../.agents/skills/<name>` — one
    real file or foreign link disqualifies it), converge it: delete the per-entry links (links,
@@ -202,8 +208,10 @@ Report what the review changed (or "no findings") in the final summary.
   `.claude/skills` and `.agents/skills` both existing as real, byte-identical directories — the
   script collapses that to a symlink, guarded by `diff -r`.
 - **Idempotent.** Re-running any phase against an already-converged repo is a no-op.
-- **rc `4` is a stop sign, not a retry loop.** Ambiguous skills state means two real trees with
-  different content, or a symlink pointing somewhere unexpected. The agent must never modify
-  either skills tree itself — surface the script's stderr diagnostic verbatim and present the
-  conflict to the human operator; resolving it is their decision, not the agent's. Re-run the
-  classifier (Phase 2) to verify only after they've resolved it.
+- **rc `4` is a stop sign, not a retry loop** — except the single Phase-2-sanctioned
+  per-skill-symlink-farm convergence (see Phase 2 and Phase 7 rule 1). Every other ambiguous
+  state (two real trees with different content, a symlink pointing somewhere unexpected) means
+  the agent must never modify either skills tree itself — surface the script's stderr
+  diagnostic verbatim and present the conflict to the human operator; resolving it is their
+  decision, not the agent's. Re-run the classifier (Phase 2) to verify only after they've
+  resolved it.
