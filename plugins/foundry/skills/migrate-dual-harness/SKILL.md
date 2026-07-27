@@ -5,7 +5,9 @@ description:
   the same instructions and skills — AGENTS.md as the portable canonical doc, a thin CLAUDE.md
   `@AGENTS.md` bridge, and a `.agents/skills` dir with a `.claude/skills` symlink onto it. Use
   when asked to migrate to dual-harness, make this repo work in both Claude and Codex, or for
-  agent metadata cleanup."
+  agent metadata cleanup. Ends with a quality review: canonical-form convergence and
+  checkup-clean are applied mechanically; conciseness / progressive-disclosure findings are
+  reported, with editorial changes confirmed with the user first."
 disable-model-invocation: true
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
@@ -156,16 +158,23 @@ say `none`, not claim artifacts that don't exist):
 
 ## Phase 7: Quality review (always — even when Phases 3-5 were no-ops)
 
-The migration is not done when the classifier passes; the docs must also be GOOD. Review the
-final `AGENTS.md` + `CLAUDE.md` pair against these gates and apply light-touch fixes directly
-(bigger restructures: propose to the user, don't improvise):
+The migration is not done when the classifier passes; the docs must also be GOOD. This review
+phase always RUNS (it is part of the skill's contract — the frontmatter description discloses
+it), but its WRITE authority is tiered: gates 1 and 4 (canonical form, checkup-clean) are
+mechanical and applied directly; gates 2 and 3 (conciseness, progressive disclosure) are
+editorial — REPORT findings always, but apply only trivially-safe fixes directly (exact
+duplicates from the merge, dead boilerplate the split itself created) and **ask the user before
+any other editorial change or relocation**. Never silently rewrite prose the user authored:
 
-1. **Canonical form, not merely functional.** Variants that happen to work still get converged:
-   per-skill symlinks under `.claude/skills/` become the single directory symlink (delete the
-   per-entry links — they are links, not content — then `rmdir` + `ln -s '../.agents/skills'`);
-   a prose "see AGENTS.md" pointer becomes the literal `@AGENTS.md` line 1; the bridge's
-   Claude-specific notes live under one clear heading. Re-run the classifier after converging —
-   rc 0 required.
+1. **Canonical form, not merely functional.** Variants that happen to work still get converged.
+   The one **sanctioned rc-4 exception**: when the classifier's rc-4 diagnostic is the
+   symlink-inside-the-trees refusal AND inspection proves `.claude/skills/` is a pure per-skill
+   symlink farm (EVERY entry is a symlink resolving into `../../.agents/skills/<name>` — one
+   real file or foreign link disqualifies it), converge it: delete the per-entry links (links,
+   not content), `rmdir .claude/skills`, `ln -s '../.agents/skills' .claude/skills`. Every OTHER
+   rc-4 remains a hard stop per Phase 2. Also converge: a prose "see AGENTS.md" pointer becomes
+   the literal `@AGENTS.md` line 1; the bridge's Claude-specific notes live under one clear
+   heading. Re-run the classifier after converging — rc 0 required.
 2. **Concise.** The bridge carries ONLY what is genuinely Claude-specific — no restated
    AGENTS.md content, no filler ("this file provides guidance to…" boilerplate dies here).
    AGENTS.md states each rule once; duplicated guidance introduced by the merge is collapsed to
@@ -175,7 +184,10 @@ final `AGENTS.md` + `CLAUDE.md` pair against these gates and apply light-touch f
    belongs in `docs/` (or the repo's equivalent) behind a short "read on demand" pointer, and
    skill knowledge belongs in the skill files, referenced by path, never inlined. If the merge
    produced a wall of detail, move the detail out to a referenced doc and leave the pointer —
-   content is RELOCATED, never dropped (the conservation check from Phase 4 still applies).
+   content is RELOCATED, never dropped — and the Phase 4 conservation check widens accordingly:
+   a line is "accounted for" when it lives in `AGENTS.md`, `CLAUDE.md`, **or a doc that one of
+   them references by path**; list every relocation (source heading → target file) in the
+   summary.
 4. **Checkup-clean.** Finish with `check-project-setup.sh` §3/§10 (when the repo is
    Catalyst-configured) or at minimum the classifier dry-run: the audit surfaces must read
    green, not merely "no error".
