@@ -1331,17 +1331,43 @@ function monthlyLogPath(eventsDir, date) {
 // returns PASS. That made a fail-CLOSED node-activation gate fail OPEN on the very
 // signal it calls authoritative. Bounding the read removes that failure mode.
 // checkSdkDaemonEnv still accepts the legacy string seam for existing tests.
+//
+// CTL-1529 (Codex P1): the `scan` seam RETURNS ITS COVERAGE VERDICT and this
+// function honors it. Bounding the read fixed the ERR_STRING_TOO_LONG fail-open
+// but introduced a quieter one in its place: when more than the byte cap of
+// events falls inside the 24h lookback, scanEventsSince reports `covered:false`
+// and every bg-fallback event beyond the truncated tail is invisible — so the
+// AUTHORITATIVE self-report check would answer PASS from data it never read. On
+// macOS the process-env probe deliberately defers to this signal (`ps eww` cannot
+// read another process's env), so an unhealthy node would read healthy end to end.
+//
+// A health check that reports PASS on incomplete data is worse than one that
+// errors, so an uncovered window can never produce PASS. It resolves to WARN —
+// the severity this file already uses for every "can't verify" state (no pid-file,
+// stale pid, reused pid) — with the truncation named explicitly in the detail.
+// PASS now means what it says: the whole window was read and it was clean.
 function scanRecentBgFallback({ paths, scan, now, recentWindowMs }) {
   const cutoff = now() - recentWindowMs;
   const hours = Math.round(recentWindowMs / 3_600_000);
   let recent = 0;
   let latestTs = null;
+  const truncated = [];
   for (const p of paths) {
     const events = [];
+    let res;
     try {
-      scan({ path: p, sinceMs: cutoff, onEvent: (e) => events.push(e) });
+      res = scan({ path: p, sinceMs: cutoff, onEvent: (e) => events.push(e) });
     } catch {
       // absent/unreadable → treat as "no degrades observed" (fail-open)
+    }
+    // ONLY an explicit `covered:false` means "the window was truncated". A seam
+    // that returns nothing (a bespoke test scanner) is treated as covered, which
+    // is what it was before this verdict existed; the production default and the
+    // legacy string wrapper both return a real verdict.
+    if (res && res.covered === false) {
+      truncated.push(
+        `${p} (scanned ${res.windowBytes ?? "?"}B of ${res.size ?? "?"}B; oldest record ${res.oldestTs ?? "none"})`,
+      );
     }
     for (const evt of events) {
       if (evt?.attributes?.["event.name"] !== "execution-core.executor.bg-fallback") continue;
@@ -1353,13 +1379,30 @@ function scanRecentBgFallback({ paths, scan, now, recentWindowMs }) {
       }
     }
   }
+  // A degrade that IS visible is reported even from a truncated window — the
+  // truncation can only have hidden more of them, never invented this one.
   if (recent > 0) {
     return mkCheck(
       "sdk-bg-fallback",
       STATUS.WARN,
       `executor=sdk but ${recent} execution-core.executor.bg-fallback event(s) in the last ${hours}h — ` +
         `the daemon silently degraded sdk→bg at boot (most recent ${new Date(latestTs).toISOString()}); ` +
-        `fix the daemon's auth env (CLAUDE_CODE_OAUTH_TOKEN, no ANTHROPIC_API_KEY) and restart`,
+        `fix the daemon's auth env (CLAUDE_CODE_OAUTH_TOKEN, no ANTHROPIC_API_KEY) and restart` +
+        (truncated.length
+          ? ` [count is a LOWER BOUND — the bounded event-log tail did not span the full ${hours}h: ${truncated.join("; ")}]`
+          : ""),
+    );
+  }
+  if (truncated.length) {
+    return mkCheck(
+      "sdk-bg-fallback",
+      STATUS.WARN,
+      `UNKNOWN, not clean: the bounded event-log tail could not span the full ${hours}h lookback, so ` +
+        `execution-core.executor.bg-fallback events older than the truncation point were never read — ` +
+        `${truncated.join("; ")}. This check is the authoritative sdk→bg self-report (the process-env ` +
+        `probe defers to it on macOS), so it reports UNKNOWN rather than PASS on incomplete data. ` +
+        `Rotate/shrink the monthly event log, or confirm sdk auth directly on the daemon ` +
+        `(CLAUDE_CODE_OAUTH_TOKEN set, no ANTHROPIC_API_KEY)`,
     );
   }
   return mkCheck(
@@ -1435,6 +1478,12 @@ export function checkSdkDaemonEnv(deps = {}) {
     readEventLog = undefined,
     // CTL-1529: the bounded event-log scan seam (see scanRecentBgFallback).
     scanEventLog = undefined,
+    // CTL-1529: tuning passed through to the PRODUCTION bounded scan
+    // (maxBytes/chunkSize/initialWindow). Exists so a test can drive the real
+    // default seam into cap exhaustion against a small fixture and assert the
+    // coverage verdict survives the trip back out — the discard this Codex P1
+    // fix is about. Empty in production.
+    eventLogScanOpts = {},
     now = () => Date.now(),
     recentWindowMs = 24 * 60 * 60 * 1000, // 24h
   } = deps;
@@ -1569,6 +1618,12 @@ export function checkSdkDaemonEnv(deps = {}) {
   if (prev !== paths[0]) paths.push(prev);
   // CTL-1529: resolve the scan seam. Explicit scanEventLog > legacy string seam
   // (tests) > the bounded time-covering tail (production).
+  //
+  // EVERY seam returns a COVERAGE VERDICT `{ covered, windowBytes, size, oldestTs }`
+  // (Codex P1). scanRecentBgFallback refuses to answer PASS when `covered` is false,
+  // so the verdict must not be dropped on the way out of the seam — that discard is
+  // exactly the defect: `covered` was computed correctly and then thrown away, and
+  // the check reported PASS over events it had never read.
   const scan =
     scanEventLog ??
     (readEventLog
@@ -1582,15 +1637,22 @@ export function checkSdkDaemonEnv(deps = {}) {
               /* tolerate partial/corrupt lines */
             }
           }
+          // The legacy seam hands back the WHOLE file body, so its window is the
+          // whole file by construction — always covered.
+          return { covered: true, reachedBof: true, oldestTs: null, windowBytes: 0, size: 0 };
         }
-      : ({ path, sinceMs, onEvent }) => {
+      : ({ path, sinceMs, onEvent }) =>
+          // maxBytes is the DEFAULT_TAIL_MAX_BYTES 64 MiB cap: ~34 MB/day on the
+          // fleet's busiest host, so a 24h lookback normally fits with ~2x headroom
+          // and `covered` comes back true. When a burst blows past it the verdict
+          // says so and the check degrades to WARN/UNKNOWN instead of PASS.
           scanEventsSince({
             path,
             targetSinceMs: sinceMs,
             lineFilter: (line) => line.includes("execution-core.executor.bg-fallback"),
             onEvent,
-          });
-        });
+            ...eventLogScanOpts,
+          }));
   checks.push(scanRecentBgFallback({ paths, scan, now, recentWindowMs }));
 
   return checks;

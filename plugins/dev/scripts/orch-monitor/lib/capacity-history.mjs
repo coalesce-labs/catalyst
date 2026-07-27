@@ -78,6 +78,12 @@ export function readCapacityHistory({ read, logPath, aliases = null } = {}) {
         path: logPath ?? "",
         fromOffset: 0,
         lineFilter: (line) => line.includes(CAPACITY_CHANGED_EVENT),
+        // CTL-1529 (Codex P2): one-shot read to EOF — include a final record that
+        // lacks a trailing newline. The legacy `read()` string seam above splits on
+        // "\n" and therefore already parses it; without this the production path
+        // would drop the most recent autotune step (the one the Utilization chart
+        // is being polled for) whenever the log's last write is mid-flush.
+        emitTrailingLine: true,
         onEvent: ingest,
       });
     }

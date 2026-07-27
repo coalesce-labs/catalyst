@@ -582,6 +582,11 @@ export function replayWorkerStateProjection() {
     scanEventsChunked({
       path: logPath,
       fromOffset: 0,
+      // CTL-1529 (Codex P2): one-shot replay to EOF — fold the final record even
+      // when the log ends without a trailing newline (a crash-truncated log is
+      // exactly the case this boot replay exists for, and that record is the
+      // NEWEST worker-state transition).
+      emitTrailingLine: true,
       onEvent: (event) => {
         projectWorkerStateEvent(event);
         eventsFolded++;

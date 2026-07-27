@@ -950,11 +950,88 @@ export const HEARTBEAT_GRACE_MS =
 // a new horizon: the cross-host peer transport already answers over a 60-minute
 // Loki window (loki-liveness.mjs), and getEventLogPath() is current-month-only,
 // so the whole-file read already forgets everything at each UTC month rollover.
-// Floored at HEARTBEAT_GRACE_MS so a misconfigured override cannot drop below the
-// correctness floor.
-export const HEARTBEAT_TAIL_WINDOW_MS = Math.max(
-  HEARTBEAT_GRACE_MS,
-  Number(process.env.EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS) || HEARTBEAT_GRACE_MS * 72,
+//
+// ── the override is BOUNDED-PARSED, not `Number(env) || default` ────────────
+//
+// The first cut was `Math.max(GRACE, Number(env) || GRACE * 72)`, which accepted
+// three values that break the window in different directions. Measured on this
+// module at the default grace:
+//
+//   "999"  → 600000    a sub-grace value is silently clamped UP to exactly the
+//                      grace window. That is the DEGENERATE case: a tail that
+//                      spans only the grace window contains, BY DEFINITION, only
+//                      hosts that are still alive — every stale host is older
+//                      than now-grace and therefore outside it. So the
+//                      present-but-stale band is EMPTY, `covered:true` certifies
+//                      nothing about stale-vs-absent, and dead-host failover is
+//                      off with no event and no log line. Hence a MIN strictly
+//                      ABOVE the grace window, not merely at it.
+//   "-1"   → 600000    same silent clamp, from an obvious typo.
+//   "1e400"/"Infinity" → Infinity. scanEventsSince then walks to BOF every tick
+//                      — the whole-file read this ticket exists to remove,
+//                      reinstated by a config string.
+//   "abc"/"0" → 43200000, the default, but SILENTLY: `Number("abc") || d` and
+//                      `Number("0") || d` are indistinguishable from unset.
+//
+// MIN = 2 x HEARTBEAT_GRACE_MS — DERIVED, never hardcoded, so raising the grace
+//   raises the floor with it. Two grace windows is the smallest setting with a
+//   NON-EMPTY present-but-stale band (a host dead between 1x and 2x grace is
+//   still in the tail, hence still reclaimable). Anything smaller is the
+//   degenerate case above.
+// MAX = 31 days — the month-partitioned log's own horizon. getEventLogPath() is
+//   current-month-only, so no window beyond one month can ever be satisfied by
+//   more data: past this, `covered` can only come from reachedBof, i.e. from
+//   reading the entire file. A cap here keeps "read everything, every tick" out
+//   of the configuration space.
+//
+// Invalid ⇒ the DEFAULT, reported through `onInvalid` (the daemon logs it) —
+// never a silent clamp, because the failure it causes is invisible for hours.
+export const HEARTBEAT_TAIL_WINDOW_MIN_MS = HEARTBEAT_GRACE_MS * 2;
+export const HEARTBEAT_TAIL_WINDOW_MAX_MS = 31 * 24 * 60 * 60_000; // 31 days
+export const HEARTBEAT_TAIL_WINDOW_DEFAULT_MS = HEARTBEAT_GRACE_MS * 72; // 12 h at the default grace
+
+export function resolveHeartbeatTailWindowMs(
+  raw,
+  {
+    defaultMs = HEARTBEAT_TAIL_WINDOW_DEFAULT_MS,
+    min = HEARTBEAT_TAIL_WINDOW_MIN_MS,
+    max = HEARTBEAT_TAIL_WINDOW_MAX_MS,
+    onInvalid = null,
+  } = {},
+) {
+  // Unset / empty is the documented way to take the default — stay silent.
+  if (raw === undefined || raw === null) return defaultMs;
+  const str = String(raw).trim();
+  if (str === "") return defaultMs;
+
+  const n = Number(str);
+  let reason = null;
+  if (!Number.isFinite(n)) {
+    reason = "not a finite number"; // NaN ("abc"), Infinity, -Infinity, 1e400
+  } else {
+    const v = Math.floor(n);
+    if (v < min) reason = `below the ${min}ms minimum (must exceed HEARTBEAT_GRACE_MS to make stale-vs-absent decidable)`;
+    else if (v > max) reason = `above the ${max}ms maximum (the monthly log's own horizon)`;
+    else return v;
+  }
+  if (typeof onInvalid === "function") onInvalid({ raw: str, reason, defaultMs, min, max });
+  return defaultMs;
+}
+
+export const HEARTBEAT_TAIL_WINDOW_MS = resolveHeartbeatTailWindowMs(
+  process.env.EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS,
+  {
+    onInvalid: ({ raw, reason, defaultMs, min, max }) => {
+      try {
+        log.warn(
+          { raw, reason, min, max, usingMs: defaultMs },
+          "ctl-1529: EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS is invalid — ignoring it and using the default window",
+        );
+      } catch {
+        /* logger unavailable (bare import in a test) — the fallback still applies */
+      }
+    },
+  },
 );
 
 // resolveRestoreHoldMs — parse the CTL-1091 restore-hold override with the

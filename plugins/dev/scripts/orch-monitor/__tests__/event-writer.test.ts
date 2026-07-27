@@ -1,9 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CanonicalEventWriter } from "../lib/event-writer";
 import type { CanonicalEvent } from "../lib/canonical-event";
+
+// bytesRequested — total `length` argument across readSync calls. The spy's
+// call tuple resolves to the 3-arg `readSync(fd, buffer, opts)` overload under
+// TS, so index positionally through `unknown[]` rather than fighting the
+// overload set (CTL-1529).
+function bytesRequested(calls: readonly unknown[][]): number {
+  return calls.reduce<number>(
+    (sum, c) => sum + (typeof c[3] === "number" ? c[3] : 0),
+    0,
+  );
+}
 
 let workdir: string;
 
@@ -154,6 +166,115 @@ describe("CanonicalEventWriter", () => {
       .split("\n")
       .filter((l) => l.length > 0);
     expect(lines.length).toBe(2);
+  });
+
+  // ── CTL-1529: the legacy-rotation probe is BOUNDED ────────────────────────
+  //
+  // `isLegacyFirstLine` needed ONE line and read the whole file to get it. The
+  // file is the monthly event log — 344,818,089 bytes on mini — and `server.ts`
+  // constructs THREE writers, each with its own `rotated` Set, so a single
+  // monitor process paid that read three times at startup. It is the exact
+  // defect CTL-1529 exists to remove, and it lived in a directory the guard
+  // already scanned (the argument was an opaque `filePath`, three hops from
+  // anything spelled like the event log, so the guard could not see it).
+  describe("CTL-1529 — the legacy probe reads a bounded prefix, not the whole file", () => {
+    const BIG = 8 * 1024 * 1024;
+    const fixed = new Date("2026-05-08T18:00:00Z");
+    const target = () => join(workdir, "2026-05.jsonl");
+
+    /** Write a monthly file whose first line is `first`, padded out to ~8 MiB. */
+    function writeBigMonth(first: string): void {
+      mkdirSync(workdir, { recursive: true });
+      writeFileSync(target(), first + "\n" + "z".repeat(BIG) + "\n");
+    }
+
+    it("reads only a small prefix of a multi-megabyte log to classify the first line", async () => {
+      writeBigMonth(JSON.stringify(sampleEvent()));
+      const readSyncSpy = spyOn(fs, "readSync");
+      const readFileSyncSpy = spyOn(fs, "readFileSync");
+      try {
+        const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
+        await writer.append(sampleEvent({ body: { message: "second" } }));
+
+        // The whole-file API is never used on the log at all.
+        const fullReads = readFileSyncSpy.mock.calls.filter((c) => c[0] === target());
+        expect(fullReads).toEqual([]);
+
+        // And the bounded API asked for at most one initial probe (64 KiB),
+        // regardless of the file being 8 MiB.
+        const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
+        expect(requested).toBeGreaterThan(0);
+        expect(requested).toBeLessThanOrEqual(64 * 1024);
+        expect(requested).toBeLessThan(BIG);
+      } finally {
+        readSyncSpy.mockRestore();
+        readFileSyncSpy.mockRestore();
+      }
+      // …and the semantics are unchanged: a canonical first line is not rotated.
+      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(false);
+    });
+
+    it("still rotates a LEGACY first line in a multi-megabyte log (bounding did not blind it)", async () => {
+      writeBigMonth(JSON.stringify({ ts: "2026-05-07T00:00:00Z", event: "session-started" }));
+      const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
+      await writer.append(sampleEvent());
+      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(true);
+    });
+
+    it("FAIL-SAFE: an undecidably long first line does NOT rotate, and says so", async () => {
+      // The one deliberate behavior change. Old code read the whole file, found
+      // an unparseable first line, and RENAMED the live log. The bounded probe
+      // gives up at 1 MiB — and "I could not read enough" must never be
+      // conflated with "this is legacy", because only one of them destroys the
+      // path every reader is tailing.
+      mkdirSync(workdir, { recursive: true });
+      writeFileSync(target(), "x".repeat(2 * 1024 * 1024) + "\n");
+      const warnings: string[] = [];
+      const writer = new CanonicalEventWriter({
+        baseDir: workdir,
+        now: () => fixed,
+        logger: { warn: (m) => warnings.push(m) },
+      });
+      await writer.append(sampleEvent());
+      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(false);
+      expect(warnings.some((w) => w.includes("first-line probe exceeded"))).toBe(true);
+      // The append still lands.
+      expect(readFileSync(target(), "utf8")).toContain("github.pr.merged");
+    });
+
+    it("a SHORT unparseable first line still rotates (the fail-safe is only for the cap)", async () => {
+      mkdirSync(workdir, { recursive: true });
+      writeFileSync(target(), "not json at all\n");
+      const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
+      await writer.append(sampleEvent());
+      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(true);
+    });
+
+    it("preserves the old split().find() semantics: leading blank lines are skipped", async () => {
+      mkdirSync(workdir, { recursive: true });
+      writeFileSync(target(), "\n\n" + JSON.stringify({ ts: "x", event: "legacy" }) + "\n");
+      const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
+      await writer.append(sampleEvent());
+      // The first NON-EMPTY line is legacy ⇒ rotate (a naive "bytes before the
+      // first \n" probe would have seen "" and skipped rotation).
+      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(true);
+    });
+
+    it("preserves the old semantics: a first line with NO trailing newline still classifies", async () => {
+      mkdirSync(workdir, { recursive: true });
+      writeFileSync(target(), JSON.stringify({ ts: "x", event: "legacy" })); // no "\n"
+      const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
+      await writer.append(sampleEvent());
+      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(true);
+    });
+
+    it("an empty file is not legacy (nothing to rotate)", async () => {
+      mkdirSync(workdir, { recursive: true });
+      writeFileSync(target(), "");
+      const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
+      await writer.append(sampleEvent());
+      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(false);
+    });
   });
 
   it("write failure is logged but does not throw", async () => {

@@ -3238,22 +3238,206 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
 // HEARTBEAT_TAIL_MAX_BYTES — CTL-1529 byte cap for the bounded heartbeat tail.
 // See DEFAULT_TAIL_MAX_BYTES in event-tail.mjs for the derivation; overridable per
 // host because log density varies ~3x across the fleet.
-export const HEARTBEAT_TAIL_MAX_BYTES =
-  Number(process.env.EXECUTION_CORE_HEARTBEAT_TAIL_MAX_BYTES) || DEFAULT_TAIL_MAX_BYTES;
+//
+// The override is parsed with the BOUNDED-INT discipline this codebase already uses
+// for env knobs (config.mjs::resolveRestoreHoldMs) rather than a bare
+// `Number(env) || default`, because a bare parse accepts two values that break the
+// cap in opposite directions (Codex P2):
+//
+//   • NEGATIVE — scanEventsSince clamps the cap with `Math.max(1, …)`, so `-1`
+//     becomes a ONE-BYTE budget. Every nontrivial multi-host liveness read then
+//     returns covered:false, makeTickHeartbeatReader throws HeartbeatWindowError on
+//     every tick, and BOTH liveness gates degrade to the full roster CONTINUOUSLY —
+//     dead-host failover and the dispatch shed silently switch off fleet-wide, with
+//     nothing but a config typo to show for it.
+//   • Infinity — `Math.min(Infinity, MAX_SAFE_INTEGER)` is an effectively unbounded
+//     cap, which reinstates exactly the whole-log read this ticket removed.
+//
+// So: finite, positive, integer, and clamped to a documented [MIN, MAX] band.
+// Anything else falls back to the default LOUDLY (never silently) — a mistyped
+// knob must be visible in the daemon log, not inferred weeks later from a stranded
+// ticket.
+//
+// MIN 1 MiB  — one chunkSize. Below this the tail cannot even span a single read,
+//              so no window is provable and the cap is indistinguishable from
+//              "disable liveness".
+//
+//              NOTE (round 2): this floor is MECHANICAL, not semantic — it says
+//              "at least one chunk", not "enough bytes to decide anything". Byte
+//              counts cannot carry a time guarantee, because log density varies
+//              ~3x across the fleet and ~9x between a quiet host and a burst; the
+//              same 1 MiB spans 14 minutes on a busy day and 36 on a quiet one.
+//              A byte MIN therefore CANNOT be the thing that makes stale-vs-absent
+//              decidable, and it must not be read as if it were. What makes it
+//              decidable is the TIME assertion in scanLocalHeartbeats: `covered`
+//              is proved against HEARTBEAT_TAIL_WINDOW_MS, so a cap too small for
+//              the configured window yields covered:false → HeartbeatWindowError →
+//              the documented full-roster degrade. An operator who sets a small
+//              cap now gets a loud refusal instead of a silent "everyone absent".
+// MAX 1 GiB  — above the largest monthly log ever observed in the fleet (883 MB on
+//              mini), so it still admits a legitimate "scan everything on this host"
+//              override while keeping the read bounded by a NUMBER rather than by
+//              whatever the file happens to be.
+export const HEARTBEAT_TAIL_MIN_BYTES = 1024 * 1024; // 1 MiB
+export const HEARTBEAT_TAIL_CEILING_BYTES = 1024 * 1024 * 1024; // 1 GiB
+
+export function resolveHeartbeatTailMaxBytes(
+  raw,
+  {
+    defaultBytes = DEFAULT_TAIL_MAX_BYTES,
+    min = HEARTBEAT_TAIL_MIN_BYTES,
+    max = HEARTBEAT_TAIL_CEILING_BYTES,
+    onInvalid = null,
+  } = {},
+) {
+  // Unset / empty is not "invalid" — it is the documented way to take the default,
+  // and must stay silent.
+  if (raw === undefined || raw === null) return defaultBytes;
+  const str = String(raw).trim();
+  if (str === "") return defaultBytes;
+
+  const n = Number(str);
+  let reason = null;
+  if (!Number.isFinite(n)) {
+    // Covers NaN ("abc"), Infinity, and -Infinity in one gate.
+    reason = "not a finite number";
+  } else {
+    const v = Math.floor(n);
+    if (v < min) reason = `below the ${min}B minimum`;
+    else if (v > max) reason = `above the ${max}B maximum`;
+    else return v;
+  }
+  if (typeof onInvalid === "function") onInvalid({ raw: str, reason, defaultBytes, min, max });
+  return defaultBytes;
+}
+
+export const HEARTBEAT_TAIL_MAX_BYTES = resolveHeartbeatTailMaxBytes(
+  process.env.EXECUTION_CORE_HEARTBEAT_TAIL_MAX_BYTES,
+  {
+    onInvalid: ({ raw, reason, defaultBytes, min, max }) => {
+      try {
+        log.warn(
+          { raw, reason, min, max, usingBytes: defaultBytes },
+          "ctl-1529: EXECUTION_CORE_HEARTBEAT_TAIL_MAX_BYTES is invalid — ignoring it and using the default cap",
+        );
+      } catch {
+        /* logger unavailable (bare import in a test) — the fallback still applies */
+      }
+    },
+  },
+);
 
 // HeartbeatWindowError — CTL-1529. Raised when the bounded tail could NOT prove it
-// spans HEARTBEAT_GRACE_MS and the caller asked for that guarantee.
+// spans HEARTBEAT_TAIL_WINDOW_MS (the TARGET window — round 2; it used to be the
+// far weaker HEARTBEAT_GRACE_MS) and the caller asked for that guarantee.
 //
-// Tagged with a distinct `code` on purpose: readClusterHeartbeats ALREADY throws
-// for an unrelated reason (requirePeerView with no trustworthy cross-host view),
-// and both throws land in the same catch sites. Without the tag a genuine cap
-// exhaustion would be permanently misread as a Loki/anchor outage.
+// Tagged with a distinct `code` because readClusterHeartbeats ALREADY throws for
+// an unrelated reason (requirePeerView with no trustworthy cross-host view) and
+// both throws land in the same catch sites.
+//
+// BE PRECISE ABOUT WHAT THIS BUYS TODAY: no production code reads `err.code` —
+// grep it and the only hit is the assignment below. Every current catch site
+// degrades to the FULL roster for BOTH throws, which is the correct and
+// deliberately identical response. So the tag is for DIAGNOSIS (a log line or a
+// human reading a stack) and to make a future caller ABLE to distinguish cap
+// exhaustion from a transport outage — it does not distinguish them today.
+// Claiming otherwise would overstate the code, which is the exact defect this
+// change set kept finding elsewhere.
 export class HeartbeatWindowError extends Error {
   constructor(message) {
     super(message);
     this.name = "HeartbeatWindowError";
     this.code = "ERR_HEARTBEAT_WINDOW_UNCOVERED";
   }
+}
+
+// ─── the tail HORIZON, and the one place it is not free (CTL-1529 round 3) ────
+//
+// THE RESIDUAL, stated plainly because the earlier docstring denied it existed.
+// Bounding the heartbeat read replaces an UNBOUNDED horizon (the whole-file read
+// looked all the way back to the start of the month) with a FINITE one
+// (HEARTBEAT_TAIL_WINDOW_MS, 12 h at the shipped defaults). Inside the window
+// nothing changes. OUTSIDE it there is a real behaviour difference, and it is a
+// REGRESSION vs origin/main, not merely a gap:
+//
+//   a host whose newest heartbeat is OLDER than windowMs is not in the tail, so
+//   it is ABSENT from `lastSeen` — and `deadHosts` is fail-OPEN, so absent means
+//   "not proven dead" and its in-flight work is NEVER reclaimed. The whole-file
+//   read saw that host, classified it PRESENT-BUT-STALE, and reclaimed it.
+//
+// Measured on this ticket's own 24 h fixture: a host last seen 20 h ago is
+// `deadHosts → ["ancient","stale"]` under origin/main and `["stale"]` here.
+//
+// WHY THE RESIDUAL IS ACCEPTED. Recovery runs on every scheduler tick, so a host
+// that dies while the fleet is running is detected within HEARTBEAT_GRACE_MS
+// (10 min) — twelve hours before it can fall out of the horizon. Reaching the
+// stranding case requires the SURVIVING daemon to have also been down (or its
+// ticks failing) for longer than the whole window, which is itself an incident.
+// The tradeoff is deliberate: an unbounded horizon costs a 883 MB read on every
+// liveness gate on every tick, which is the outage this ticket exists to stop.
+//
+// WHAT IS NOT ACCEPTED IS THE SILENCE. Under the first two rounds this stranding
+// produced no event, no log line, and `covered:true` — the caller was told the
+// tail was trustworthy and given a map in which a dead host looked like a host
+// that had simply never been heard of. So the residual now SIGNALS.
+//
+// hostsBeyondTailHorizon — pure. The rostered hosts a COVERED tail could not
+// speak for. Deliberately does not distinguish "dead beyond the horizon" from
+// "never heard of": the tail cannot tell those apart, and that indistinguishability
+// IS the finding. `covered:false` returns [] because that case is already loud
+// (HeartbeatWindowError → the documented full-roster degrade).
+export function hostsBeyondTailHorizon({ lastSeen = {}, roster = [], covered = true } = {}) {
+  if (!covered) return [];
+  if (!Array.isArray(roster)) return [];
+  return roster.filter(
+    (h) => typeof h === "string" && h.length > 0 && !(typeof lastSeen[h] === "string" && lastSeen[h].length > 0),
+  );
+}
+
+// BEYOND_HORIZON_WARN_INTERVAL_MS — the per-host re-warn period for the sink
+// below. The liveness gates run on every scheduler tick (seconds), so an
+// unthrottled warn would turn one stranded host into a log flood and get muted;
+// a throttle that never re-fires would make a PERSISTENT strand invisible after
+// its first tick. Hourly is the compromise: the first observation warns
+// immediately, and the condition keeps re-announcing itself for as long as it holds.
+export const BEYOND_HORIZON_WARN_INTERVAL_MS = 60 * 60 * 1000;
+
+const beyondHorizonLastWarnMs = new Map();
+
+// resetBeyondHorizonThrottle — test seam. The throttle is module state on purpose
+// (it must survive across the tick's several readClusterHeartbeats calls); this
+// lets a test assert both the emit and the suppression deterministically.
+export function resetBeyondHorizonThrottle() {
+  beyondHorizonLastWarnMs.clear();
+}
+
+// warnHostsBeyondTailHorizon — the DEFAULT sink: one WARN per host per interval,
+// on the exec-core daemon .log, which Alloy ships to Loki. A log line (not an
+// event) on purpose: this fires from inside the heartbeat READ path, and
+// appending to `~/catalyst/events/*.jsonl` from the reader of that same file is
+// how the CTL-346 filter-wake loop happened. Returns the hosts it actually
+// emitted for, so callers/tests can assert the throttle.
+export function warnHostsBeyondTailHorizon({ hosts = [], windowMs, oldestTs = null, nowMs = Date.now() } = {}) {
+  const emitted = [];
+  for (const host of hosts) {
+    const prev = beyondHorizonLastWarnMs.get(host);
+    if (prev !== undefined && nowMs - prev < BEYOND_HORIZON_WARN_INTERVAL_MS) continue;
+    beyondHorizonLastWarnMs.set(host, nowMs);
+    emitted.push(host);
+  }
+  for (const host of emitted) {
+    try {
+      log.warn(
+        { host, windowMs, oldestTs },
+        "ctl-1529: rostered host is absent from a COVERED heartbeat tail — it is either dead beyond " +
+          "the configured window or never seen here; recovery is fail-open so its work will NOT be " +
+          "reclaimed. Raise EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS or reclaim by hand.",
+      );
+    } catch {
+      /* logger unavailable (bare import in a test) — the throttle bookkeeping still applies */
+    }
+  }
+  return emitted;
 }
 
 // scanLocalHeartbeats — CTL-1529. ONE bounded, time-covering pass over the LOCAL
@@ -3268,13 +3452,45 @@ export class HeartbeatWindowError extends Error {
 // dead" ⇒ never reclaimed; stale ⇒ dead ⇒ reclaimed and re-homed. A fixed
 // N-megabyte tail silently converts the second into the first (on a busy day 1 MB
 // of this log spans ~14 minutes), so a genuinely dead host's work strands forever
-// with no event and no log line. A tail that provably spans the grace window makes
-// "absent" mean something again, and HEARTBEAT_TAIL_WINDOW_MS's margin above that
-// floor keeps hours-old heartbeats classified exactly as the whole-file read
-// classified them.
+// with no event and no log line.
+//
+// COVERAGE IS PROVED AGAINST THE TARGET WINDOW, NOT THE GRACE WINDOW (round 2).
+// The first cut passed `requiredSinceMs = nowMs - graceMs`, which certified only
+// "the tail reaches back 10 minutes" — i.e. only that it can see who is ALIVE.
+// That is the wrong guarantee for the property this whole change rests on, and
+// it is wrong in a specific, degenerate way: a tail spanning exactly the grace
+// window contains, BY DEFINITION, only hosts still inside it. Every stale host is
+// older than now-grace and therefore OUTSIDE the tail, so `sawStale` is
+// structurally impossible and `covered:true` asserts nothing about
+// stale-vs-absent. Measured on a 42 MiB / 30 h fixture with a host dead 6 h:
+// maxBytes at 1 MiB (the mechanical byte MIN) and at 8 MiB both reported
+// `covered:true, sawStale:false` — a whole band of accepted configurations in
+// which dead-host failover was off and NOTHING said so.
+//
+// So the required floor is the TARGET window. `Math.max` keeps graceMs as an
+// absolute floor for a caller that passes a degenerate windowMs directly (the env
+// path can't: resolveHeartbeatTailWindowMs enforces MIN = 2x grace).
+//
+// WHAT `covered:true` ACTUALLY GUARANTEES (round 3 — the round-2 wording claimed
+// more than the code delivers, and this is the exact overstatement being fixed):
+//
+//   IT DOES MEAN: the tail provably spans windowMs, so EVERY host that
+//   heartbeated within the last windowMs is present in `lastSeen` with its true
+//   newest ts. Stale-vs-alive is decidable for all of them; that is the property
+//   the liveness gates need and it now holds.
+//
+//   IT DOES **NOT** MEAN: a host missing from `lastSeen` is genuinely absent.
+//   The round-2 comment said exactly that ("genuinely absent rather than merely
+//   beyond my reach") and it is FALSE. A host whose newest heartbeat predates
+//   windowMs is missing for precisely the "beyond my reach" reason — and
+//   `deadHosts` is fail-open, so it is silently never reclaimed. See "the tail
+//   HORIZON" above HeartbeatWindowError for the measured regression vs the
+//   whole-file read, why the finite horizon is accepted, and
+//   `hostsBeyondTailHorizon` — which makes the residue observable so this is a
+//   BOUNDED, ANNOUNCED horizon rather than a silent one.
 //
 // Returns { lastSeen, admission, covered, oldestTs, windowBytes, size, reachedBof }.
-// `covered:false` is the ONLY new state (cap exhausted before the grace floor) —
+// `covered:false` is the ONLY new state (cap exhausted before the target window) —
 // it is reported, never swallowed; readClusterHeartbeats turns it into a throw for
 // callers that opt in. Peak transient is ONE chunk regardless of file size.
 export function scanLocalHeartbeats({
@@ -3295,7 +3511,9 @@ export function scanLocalHeartbeats({
     res = scan({
       path: logPath,
       targetSinceMs: nowMs - windowMs,
-      requiredSinceMs: nowMs - graceMs,
+      // The GUARANTEE, not merely the floor — see "COVERAGE IS PROVED AGAINST
+      // THE TARGET WINDOW" above. graceMs survives only as an absolute floor.
+      requiredSinceMs: nowMs - Math.max(windowMs, graceMs),
       maxBytes,
       ...(chunkSize === undefined ? {} : { chunkSize }),
       ...(initialWindow === undefined ? {} : { initialWindow }),
@@ -3411,15 +3629,21 @@ export function readClusterHeartbeats({
   initialWindow = undefined,
   onRead = null,
   scanLocal = null,
-  // CTL-1529: opt IN to the grace-window guarantee. TRUE ⇒ a tail that cannot
-  // prove it spans graceMs THROWS (HeartbeatWindowError) instead of returning a
-  // map in which "absent" is meaningless. Set by makeTickHeartbeatReader for the
+  // CTL-1529: opt IN to the tail-window guarantee. TRUE ⇒ a tail that cannot
+  // prove it spans windowMs THROWS (HeartbeatWindowError) instead of returning a
+  // map in which "absent" is meaningless. (Round 2: the proof is against the
+  // TARGET window; against graceMs alone it certified only who is alive, which
+  // is exactly the question the caller is NOT asking.) Set by makeTickHeartbeatReader for the
   // liveness gates, whose catches all degrade to the FULL roster. Left FALSE for
   // display/CLI callers (orch-monitor's footer + cluster view,
   // archive-stale-host-workers) which have no try/catch and already render an
   // absent host as offline — a truncated best-effort map is strictly better for
   // them than a 500 or a crash.
   requireGraceWindow = false,
+  // CTL-1529 round 3: sink for the "rostered host beyond the tail horizon" signal.
+  // Defaults to the throttled daemon-log warn; injectable so tests can assert the
+  // emission WITHOUT depending on the logger or on the module-level throttle.
+  onBeyondHorizon = null,
   // CTL-1091 (Codex P1 #3): when TRUE — the DISPATCH positive-liveness path — a
   // multi-host roster with NO trustworthy cross-host view THROWS instead of
   // returning a local-only map. "No trustworthy view" = the peer transport is
@@ -3451,7 +3675,7 @@ export function readClusterHeartbeats({
       });
   if (requireGraceWindow && !scanned.covered) {
     throw new HeartbeatWindowError(
-      `ctl-1529: bounded heartbeat tail could not prove ${graceMs}ms of coverage ` +
+      `ctl-1529: bounded heartbeat tail could not prove ${Math.max(windowMs, graceMs)}ms of coverage ` +
         `(scanned ${scanned.windowBytes}B of ${scanned.size}B, oldest=${scanned.oldestTs ?? "none"}); ` +
         `refusing to report a stale host as absent — caller degrades to the full roster`,
     );
@@ -3509,6 +3733,32 @@ export function readClusterHeartbeats({
         // lexicographic compare would discard a genuinely newer peer ts.
         const cur = lastSeen[host];
         if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+      }
+    }
+  }
+
+  // CTL-1529 round 3 — ANNOUNCE THE HORIZON. A rostered host still missing from a
+  // COVERED map is one this read cannot speak for: dead beyond windowMs, or never
+  // seen. Either way `deadHosts` fail-opens and its work is not reclaimed, which
+  // under rounds 1-2 happened with no event, no log line, and covered:true. See
+  // "the tail HORIZON" above HeartbeatWindowError.
+  //
+  // Gated on requireGraceWindow (⇒ the LIVENESS GATES, via makeTickHeartbeatReader)
+  // for two reasons: those are the only callers whose DECISION the gap changes, and
+  // the display/CLI callers (orch-monitor footer, cluster view,
+  // archive-stale-host-workers) already render an absent host as offline — warning
+  // there would be noise on a path that strands nothing.
+  //
+  // AFTER the peer merge, deliberately: a host absent from the local tail but
+  // present in the cross-host view is fully accounted for and must not warn.
+  if (requireGraceWindow && scanned.covered) {
+    const beyond = hostsBeyondTailHorizon({ lastSeen, roster, covered: true });
+    if (beyond.length > 0) {
+      const emit = onBeyondHorizon ?? warnHostsBeyondTailHorizon;
+      try {
+        emit({ hosts: beyond, windowMs, oldestTs: scanned.oldestTs, nowMs });
+      } catch {
+        // Observability must never break liveness — the map is returned regardless.
       }
     }
   }
@@ -3695,6 +3945,13 @@ const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
 // return roster hosts whose newest heartbeat is older than (nowMs - graceMs).
 // A host ABSENT from lastSeen is NOT flagged dead: with per-host local logs the
 // survivor may simply never have seen it (Open Question 1). Conservative: unknown ⇒ alive.
+//
+// CTL-1529: this fail-open rule is what turns the tail's finite horizon into a
+// stranded ticket. A host whose newest heartbeat predates HEARTBEAT_TAIL_WINDOW_MS
+// is absent from `lastSeen` for a reason that is NOT "never seen", but this
+// function cannot tell the difference and therefore declines to reclaim. The
+// horizon is announced by `hostsBeyondTailHorizon` /
+// `warnHostsBeyondTailHorizon` at the read, not here — `deadHosts` stays pure.
 export function deadHosts({ lastSeen, roster, graceMs, nowMs }) {
   const cutoff = nowMs - graceMs;
   return roster.filter((h) => {

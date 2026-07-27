@@ -31,6 +31,7 @@
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownerForTicket } from "./hrw.mjs";
@@ -126,16 +127,49 @@ function eventLogPath() {
 // natural bound is a time window: ESCALATION_LOOKBACK_MS back from now, capped in
 // bytes by scanEventsSince. The pre-existing failure mode was silent — the catch
 // dropped source 2 entirely and the sweep looked plausible but incomplete.
-const ESCALATION_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const ESCALATION_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-function collectEventLog({ nowMs = Date.now(), windowMs = ESCALATION_LOOKBACK_MS } = {}) {
+// ESCALATION_TAIL_MAX_BYTES — CTL-1529 (Codex P2). The ADVERTISED window above and
+// the ACTUALLY SCANNED window have to agree, and under the shared 64 MiB
+// DEFAULT_TAIL_MAX_BYTES they did not: at the ~34 MB/day this ticket measured on
+// the fleet's busiest host, 64 MiB is exhausted after ~1.9 days, so escalations
+// from the remaining ~5 days were dropped while the code still called itself a
+// 7-day lookback. Silent truncation of a lookback the caller trusts is the exact
+// class of bug this ticket exists to remove.
+//
+// DERIVATION: 7 days x 34 MB/day = 238 MB; round up to 256 MiB for ~8 % headroom.
+// Affordable HERE and nowhere else in this PR: this runs ONCE per recovery-pass
+// worker launch (not per scheduler tick, not per HTTP request), the `recovery.`
+// lineFilter means the scan JSON.parses only a handful of lines out of the window,
+// and peak RESIDENT memory is one 1 MiB chunk regardless of the cap — the cap
+// bounds WORK, not memory. It is still a hard ceiling: past it the read stops
+// growing with the file and `covered:false` is SURFACED (see collectEventLog's
+// return + the sweep banner) rather than swallowed.
+export const ESCALATION_TAIL_MAX_BYTES = 256 * 1024 * 1024;
+
+// Returns { items, covered, windowMs, oldestTs, maxBytes }. `covered:false` means
+// the byte cap was hit before `windowMs` was spanned, so `items` is an UNDER-count
+// — the caller must say so out loud rather than present a short window as the full
+// one. `maxBytes` is echoed back so the banner reports the cap that ACTUALLY
+// applied rather than re-deriving it (and so a test can pin the default).
+export function collectEventLog({
+  nowMs = Date.now(),
+  windowMs = ESCALATION_LOOKBACK_MS,
+  maxBytes = ESCALATION_TAIL_MAX_BYTES,
+  logPath = null, // test seam; production resolves the current month's log
+  chunkSize = undefined,
+  initialWindow = undefined,
+} = {}) {
   const items = [];
-  const path = eventLogPath();
-  if (!existsSync(path)) return items;
+  const path = logPath ?? eventLogPath();
+  if (!existsSync(path)) return { items, covered: true, windowMs, oldestTs: null, maxBytes };
   try {
-    scanEventsSince({
+    const res = scanEventsSince({
       path,
       targetSinceMs: nowMs - windowMs,
+      maxBytes,
+      ...(chunkSize === undefined ? {} : { chunkSize }),
+      ...(initialWindow === undefined ? {} : { initialWindow }),
       lineFilter: (line) => line.includes("recovery."),
       onEvent: (evt) => {
         const name = evt?.attributes?.["event.name"] || "";
@@ -150,10 +184,31 @@ function collectEventLog({ nowMs = Date.now(), windowMs = ESCALATION_LOOKBACK_MS
         });
       },
     });
+    return {
+      items,
+      covered: res.covered !== false,
+      windowMs,
+      oldestTs: res.oldestTs ?? null,
+      maxBytes,
+    };
   } catch {
-    return items;
+    // An I/O failure means source 2 produced nothing AND we learned nothing —
+    // report it as uncovered so the banner does not imply a clean 7-day sweep.
+    return { items, covered: false, windowMs, oldestTs: null, maxBytes };
   }
-  return items;
+}
+
+// formatEscalationCoverage — the loud line for a truncated source-2 window. Null
+// when the advertised window was fully covered (the normal case).
+export function formatEscalationCoverage({ covered, windowMs, oldestTs, maxBytes }) {
+  if (covered) return null;
+  const days = (windowMs / (24 * 60 * 60 * 1000)).toFixed(1);
+  return (
+    `(WARNING: event-log escalation window TRUNCATED — asked for ${days}d, the bounded tail only ` +
+    `reached back to ${oldestTs ?? "an unknown point"} (byte cap ${maxBytes ?? ESCALATION_TAIL_MAX_BYTES}B). ` +
+    `Source 2 (recovery.escalated / recovery.would-escalate) is INCOMPLETE; older escalations are ` +
+    `missing from this sweep.)`
+  );
 }
 
 // ── source 3: the webhook-fed Linear cache (NO direct Linear API) ─────────────
@@ -318,12 +373,17 @@ async function main() {
     const hadBrief = printDispatchedBrief(ticket, orchDir);
     if (hadBrief) return;
     // Brief missing → ticket-scoped sweep so the agent still has the stuck context.
+    const log = collectEventLog();
     const all = unionDedupe(
       collectWorkerSignals(orchDir),
-      collectEventLog(),
+      log.items,
       (await collectLinearCache()).items
     ).filter((it) => it.ticket === ticket);
     console.log("--- ticket-scoped stuck context ---");
+    // CTL-1529 (Codex P2): say it out loud when the advertised lookback was not
+    // actually covered — a short window must never masquerade as the full one.
+    const truncated = formatEscalationCoverage(log);
+    if (truncated) console.log(truncated);
     for (const it of all) console.log(formatSweepItem(it));
     console.log(`TOTAL: ${all.length} items (ticket-scoped)`);
     return;
@@ -337,8 +397,12 @@ async function main() {
   if (cache.unavailable) {
     console.log("(linear cache unavailable under this runtime)");
   }
+  // CTL-1529 (Codex P2): source 2's window is bounded. When the cap truncated it,
+  // the sweep is incomplete and MUST say so — the failure this replaces was silent.
+  const truncated = formatEscalationCoverage(events);
+  if (truncated) console.log(truncated);
 
-  const union = unionDedupe(signals, events, cache.items);
+  const union = unionDedupe(signals, events.items, cache.items);
 
   // HRW is a SOFT owner-signal, NOT a hard filter (a sibling ticket you don't own
   // may explain YOUR conflict). KEEP the whole stuck set; ANNOTATE each item with
@@ -368,10 +432,20 @@ async function main() {
   console.log(`TOTAL: ${union.length} items (${yours.length} yours, ${context.length} context)`);
 }
 
-main().catch((err) => {
-  // Never crash the context gather — print a degraded banner and exit 0 so the
-  // skill still proceeds (it can reconstruct from logs/gh directly).
-  console.log("MODE=sweep");
-  console.log(`(context-gather error: ${err?.message || err}; proceed manually)`);
-  console.log("TOTAL: 0 items (0 yours, 0 context)");
-});
+// Portable entrypoint guard (mirrors linear-reconcile-cli.mjs, CTL-578:
+// import.meta.main is undefined on Node <22.16). CTL-1529: this used to run
+// main() on plain IMPORT, so the module's helpers could not be unit-tested at all
+// without executing a whole sweep as a side effect. Behavior when invoked as a
+// script is unchanged.
+const isEntrypoint =
+  import.meta.main === true ||
+  (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]);
+if (isEntrypoint) {
+  main().catch((err) => {
+    // Never crash the context gather — print a degraded banner and exit 0 so the
+    // skill still proceeds (it can reconstruct from logs/gh directly).
+    console.log("MODE=sweep");
+    console.log(`(context-gather error: ${err?.message || err}; proceed manually)`);
+    console.log("TOTAL: 0 items (0 yours, 0 context)");
+  });
+}

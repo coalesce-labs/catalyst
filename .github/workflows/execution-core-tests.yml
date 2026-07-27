@@ -34,9 +34,16 @@ on:
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
       # only the broker must run this suite too (Codex P2).
       - "plugins/dev/scripts/broker/**"
-      # CTL-1529: event-log-read-guard.test.mjs scans orch-monitor for whole-file
-      # event-log reads, so an orch-monitor-only change must run this suite.
-      - "plugins/dev/scripts/orch-monitor/**"
+      # CTL-1529 round 3: event-log-read-guard.test.mjs scans the WHOLE
+      # plugins/dev/scripts tree for whole-file event-log reads (round 2 scanned an
+      # enumerated 4 of 16 directories and the header overstated it). The trigger
+      # must match the scan, or a new whole-log read lands in an untriggered
+      # directory and the guard never runs — which is how otel-forward/lib/dlq.ts's
+      # three unbounded reads sat unnoticed in a long-lived daemon.
+      - "plugins/dev/scripts/**"
+      # NOTE: the glob above SUBSUMES every plugins/dev/scripts path listed below.
+      # They are retained as documentation of WHICH STEP each path feeds, not as
+      # triggers — do not read the list as the trigger set.
       # CTL-1369: the catalyst-install launcher, the `catalyst` router, and the CLI
       # registration (install-cli.sh / check-setup.sh) are the production entry path to
       # `catalyst install|uninstall|reinstall`; changing them must run the smoke test below.
@@ -64,9 +71,16 @@ on:
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
       # only the broker must run this suite too (Codex P2).
       - "plugins/dev/scripts/broker/**"
-      # CTL-1529: event-log-read-guard.test.mjs scans orch-monitor for whole-file
-      # event-log reads, so an orch-monitor-only change must run this suite.
-      - "plugins/dev/scripts/orch-monitor/**"
+      # CTL-1529 round 3: event-log-read-guard.test.mjs scans the WHOLE
+      # plugins/dev/scripts tree for whole-file event-log reads (round 2 scanned an
+      # enumerated 4 of 16 directories and the header overstated it). The trigger
+      # must match the scan, or a new whole-log read lands in an untriggered
+      # directory and the guard never runs — which is how otel-forward/lib/dlq.ts's
+      # three unbounded reads sat unnoticed in a long-lived daemon.
+      - "plugins/dev/scripts/**"
+      # NOTE: the glob above SUBSUMES every plugins/dev/scripts path listed below.
+      # They are retained as documentation of WHICH STEP each path feeds, not as
+      # triggers — do not read the list as the trigger set.
       # CTL-1369: launcher / router / CLI-registration entry path (see PR-trigger note above).
       - "plugins/dev/scripts/catalyst-install"
       - "plugins/dev/scripts/catalyst"
@@ -199,6 +213,35 @@ jobs:
         # --fix / exit-code contract.
         working-directory: plugins/dev/scripts
         run: bash __tests__/migrate-dual-harness.test.sh
+
+      - name: Broker worker-state projection test (CTL-1529)
+        # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
+        # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),
+        # and `grep worker-state-projection .github/workflows/` used to return NOTHING —
+        # so two of this PR's fixes shipped behind a test CI never ran. It cannot join
+        # the `bun test` list below: that job's working-directory is execution-core, and
+        # this suite needs the BROKER package's own node_modules (pino) to import
+        # ./index.mjs. Hence its own step with its own install.
+        working-directory: plugins/dev/scripts/broker
+        run: |
+          bun install --frozen-lockfile
+          bun test worker-state-projection.test.mjs
+
+      - name: otel-forward tests (CTL-1529 round 3)
+        # otel-forward had NO CI coverage at all before this
+        # (`grep otel-forward .github/workflows/` returned nothing), and it is a
+        # long-lived daemon whose entire job is reading the event log. This round
+        # bounded lib/dlq.ts's dlqDepth — a whole-file read + whole-file split on a
+        # repeating timer, over a DLQ that grows precisely during an OTLP outage.
+        # The whole suite runs: measured 120 pass / 0 fail on this branch and
+        # 117 / 0 at the merge base, so there is no pre-existing red to import.
+        # (An earlier revision of this step was scoped to dlq.test.ts and justified
+        # that with "5 failures, pre-existing" in lib/destinations/* — that was
+        # false, and it would have told future readers not to widen.)
+        working-directory: plugins/dev/scripts/otel-forward
+        run: |
+          bun install --frozen-lockfile
+          bun test
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying

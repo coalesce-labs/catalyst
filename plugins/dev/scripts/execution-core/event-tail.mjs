@@ -63,6 +63,20 @@ export function scanEventsChunked({
   // chunk regardless of file size (the property this whole module exists for).
   // Default null = zero cost.
   onRead = null,
+  // CTL-1529 (Codex P2): ONE-SHOT scans must not silently drop a final complete
+  // record that lacks a trailing newline. The chunked reader deliberately holds
+  // that text back in `leftover` because an INCREMENTAL reader (event-scan.mjs,
+  // reaper-metrics.mjs, transcript-tail.mjs) will complete it on the next pass
+  // from `endOffset`. A scan that runs ONCE to EOF has no next pass, so for it the
+  // held-back text is not a partial line — it is the newest event, and precisely
+  // the one a crash-truncated log is missing. The `readFileSync(...).split("\n")`
+  // readers this module replaced parsed it, and tailParsedEvents preserves it, so
+  // dropping it is a regression against both.
+  //
+  // Set TRUE only for a scan that reads to EOF exactly once. `leftover` is still
+  // returned verbatim (an emit does not consume it) so the flag can never corrupt
+  // a byte cursor if someone sets it on a resuming reader by mistake.
+  emitTrailingLine = false,
 } = {}) {
   let fd;
   let size;
@@ -112,6 +126,16 @@ export function scanEventsChunked({
     }
     const flushed = decoder.end();
     if (flushed) feed(flushed);
+    // CTL-1529 (Codex P2): the final complete-but-unterminated record. Same gates a
+    // complete line gets (skip-mode, lineFilter, parse-or-skip) so a genuinely
+    // partial mid-write line is still dropped rather than half-parsed.
+    if (emitTrailingLine && !skipping && carry && (!lineFilter || lineFilter(carry))) {
+      try {
+        onEvent(JSON.parse(carry));
+      } catch {
+        /* genuinely partial mid-write line — skip, same as the old split path */
+      }
+    }
     return { endOffset: size, leftover: carry };
   } finally {
     try {
@@ -158,6 +182,11 @@ function probeOldestTs({ path, fromOffset, chunkSize, onRead, tsOf }) {
       chunkSize,
       skipFirstLine: fromOffset > 0,
       onRead,
+      // CTL-1529 (Codex P2): the probe reads to EOF once, so it must see the same
+      // record set the forward scan below will. Otherwise a window whose ONLY
+      // parseable record is the unterminated final line probes as empty and the
+      // walk keeps doubling toward BOF for no reason.
+      emitTrailingLine: true,
       onEvent: (e) => {
         const t = tsOf(e);
         if (typeof t === "string" && t.length > 0) {
@@ -267,6 +296,13 @@ export function scanEventsSince({
     skipFirstLine: fromOffset > 0,
     lineFilter,
     onRead,
+    // CTL-1529 (Codex P2): scanEventsSince is BY CONSTRUCTION a one-shot read to
+    // EOF — it has no cursor and no next pass — so a final record without a
+    // trailing newline is a real event, not a partial line. Every consumer of this
+    // primitive (doctor's bg-fallback gate, the heartbeat tail, the governance
+    // readers, the recovery escalation sweep) inherits the fix here, at the one
+    // place that can guarantee it.
+    emitTrailingLine: true,
     onEvent,
   });
 
@@ -305,23 +341,20 @@ export function tailParsedEvents({
     const collected = [];
     // skipFirstLine when seeking mid-file: the bytes before the first newline are
     // a partial line whose suffix could parse as a bogus event (CTL-1514).
-    const { leftover } = scanEventsChunked({
+    //
+    // emitTrailingLine: a log whose final record lacks a trailing newline leaves
+    // that record in `leftover` (never emitted as a complete line). Include it if
+    // it parses — the replaced raw.split("\n") parsed it, and board-health/recovery
+    // dedup must not miss the newest event in a truncated / crash-recovered log
+    // (Codex P2). It arrives last, i.e. in file order, so the `.slice(-maxLines)`
+    // below still returns the true tail.
+    scanEventsChunked({
       path,
       fromOffset,
       skipFirstLine: fromOffset > 0,
+      emitTrailingLine: true,
       onEvent: (e) => collected.push(e),
     });
-    // A log whose final record lacks a trailing newline leaves that record in
-    // `leftover` (never emitted as a complete line). Include it if it parses —
-    // the replaced raw.split("\n") parsed it, and board-health/recovery dedup must
-    // not miss the newest event in a truncated / crash-recovered log (Codex P2).
-    if (leftover) {
-      try {
-        collected.push(JSON.parse(leftover));
-      } catch {
-        /* genuinely partial mid-write line — skip, same as the old split path */
-      }
-    }
     if (collected.length >= maxLines || fromOffset === 0) {
       return collected.slice(-maxLines);
     }
