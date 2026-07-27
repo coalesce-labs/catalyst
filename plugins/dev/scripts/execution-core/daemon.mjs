@@ -1234,7 +1234,19 @@ function startReaperAndTimer({
     // orphan-sweep.sh's SWEEP_PROC_WIDEN_MAX_KILLS. Omitted ⇒ the module default
     // (5); a non-numeric value is rejected by the constructor, not by an
     // arithmetic accident that silently uncaps a process killer.
-    ...(procCfg.widenMaxKills != null ? { widenMaxKills: Number(procCfg.widenMaxKills) } : {}),
+    // Pass through ONLY a real, finite NUMBER. readOrphanReaperConfig just parses
+    // JSON with no schema validation, so `""`, `false` and `[]` all reach here —
+    // and each `Number()`s to 0, which the constructor accepts as the INTENTIONAL
+    // "uncapped" setting. The eager coercion therefore DEFEATED the constructor's
+    // own type guard, and a malformed config value silently removed the widened
+    // kill ceiling instead of degrading to the documented default of 5.
+    //
+    // Explicit numeric 0 is preserved: the constructor documents it as a real
+    // operator choice ("uncapped"), so this must reject typos WITHOUT taking away
+    // that escape hatch. Non-numbers are omitted so the default applies.
+    ...(typeof procCfg.widenMaxKills === "number" && Number.isFinite(procCfg.widenMaxKills)
+      ? { widenMaxKills: procCfg.widenMaxKills }
+      : {}),
     ...(procCfg.graceMs != null ? { graceMs: Number(procCfg.graceMs) } : {}),
     ...(procCfg.minEtimeSec != null ? { minEtimeSec: Number(procCfg.minEtimeSec) } : {}),
     ...(procCfg.worktreeRoot ? { worktreeRoot: procCfg.worktreeRoot } : {}),

@@ -204,7 +204,20 @@ _resolve_widen_mode() {
     case "$candidate" in
       off|shadow|enforce) printf '%s' "$candidate"; return 0 ;;
       "") ;;
-      *) echo "install-orphan-sweep.sh: ignoring SWEEP_PROC_WIDEN='${candidate}' (allowed off|shadow|enforce)" >&2 ;;
+      # SET-BUT-INVALID SHORT-CIRCUITS TO shadow — it must NOT fall through to a
+      # lower-precedence source. Continuing the loop meant a mistyped rollback
+      # (`SWEEP_PROC_WIDEN=shdow`) was warned about and then IGNORED in favour of
+      # an `enforce` already sitting in the config or the installed plist — so the
+      # operator's attempt to DISARM the killer re-armed it, contradicting the
+      # contract three lines above ("never to enforce: a typo must not arm a
+      # process killer"). An explicit-but-unrecognized value is a clear intent to
+      # change the mode, and the only safe reading of an unparseable intent is the
+      # dark default.
+      *)
+        echo "install-orphan-sweep.sh: SWEEP_PROC_WIDEN='${candidate}' is not one of off|shadow|enforce — falling back to 'shadow' (NOT to any lower-precedence value)" >&2
+        printf 'shadow'
+        return 0
+        ;;
     esac
   done
   printf 'shadow'
