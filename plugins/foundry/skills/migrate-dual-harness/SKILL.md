@@ -5,7 +5,9 @@ description:
   the same instructions and skills — AGENTS.md as the portable canonical doc, a thin CLAUDE.md
   `@AGENTS.md` bridge, and a `.agents/skills` dir with a `.claude/skills` symlink onto it. Use
   when asked to migrate to dual-harness, make this repo work in both Claude and Codex, or for
-  agent metadata cleanup."
+  agent metadata cleanup. Ends with a quality review: canonical-form convergence and
+  checkup-clean are applied mechanically; conciseness / progressive-disclosure findings are
+  reported, with editorial changes confirmed with the user first."
 disable-model-invocation: true
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
@@ -58,7 +60,7 @@ Branch on the exit code:
 | `10` | mechanical changes needed (bridge / skills wiring / pointer) — no monolithic problem | Phase 3 |
 | `11` | `CLAUDE.md` is monolithic — needs the intelligent split | Phase 3 (mechanical parts only), then Phase 4 |
 | `2` | bad usage (`--repo` not a dir, unknown flag) | fix the invocation and re-run |
-| `4` | ambiguous skills state (message says exactly what conflicts) | STOP — surface the script's stderr diagnostic verbatim; never modify either skills tree yourself; present the conflict and ask the human operator to resolve it, then re-run the classifier (Phase 2) to verify |
+| `4` | ambiguous skills state (message says exactly what conflicts) | ONE sanctioned exception, else STOP. Exception (the per-skill symlink farm): applies only when the diagnostic is the symlink-inside-the-trees refusal AND all three pre-checks pass BEFORE touching anything — (a) every entry of `.claude/skills` is a symlink resolving into `../../.agents/skills/<name>` (one real file or foreign link disqualifies), (b) neither `.claude` nor `.agents` is itself a symlink, (c) `git check-ignore --stdin` over `.agents/skills` + every `.agents/skills/<name>` + `.claude/skills` reports nothing ignored (a masked hard-stop must surface BEFORE deletion, not after). All pass → converge (delete the per-entry links — links, not content — `rmdir .claude/skills`, `ln -s '../.agents/skills' .claude/skills`), re-run the dry-run, and dispatch the NEW rc through this same table (a coexisting monolithic CLAUDE.md legitimately yields rc `11` next — continue the flow; rc `0` only when nothing else is pending). ANY pre-check failing, or any other rc-4 diagnostic → STOP: surface the script's stderr verbatim; never modify either skills tree yourself; present the conflict and ask the human operator, then re-run the classifier to verify |
 | `5` | I/O error | inspect the printed message |
 
 ## Phase 3: Mechanical fix
@@ -73,10 +75,9 @@ bash "$SCRIPT" --repo . --fix 2>&1
 - After fixing from rc `10`, re-run the Phase 2 dry-run and require rc `0`.
 - After fixing from rc `11`, re-run the Phase 2 dry-run and expect rc `11` again (the monolithic
   split is still outstanding) — proceed to Phase 4.
-- rc `4` (ambiguous skills state) is a STOP, not an auto-fix and not a retry loop: surface the
-  script's stderr diagnostic verbatim to the user and never modify either skills tree yourself —
-  resolving the conflict is a decision for the human operator. Present the conflict and ask; once
-  they've resolved it, re-run the classifier (Phase 2) to verify.
+- rc `4` at any point: dispatch through the Phase 2 table's rc-4 row — it is the single
+  authoritative statement of the one sanctioned exception (the pre-validated per-skill symlink
+  farm convergence) and the hard stop for everything else.
 
 ## Phase 4: Intelligent split (rc 11 only)
 
@@ -154,6 +155,48 @@ say `none`, not claim artifacts that don't exist):
   Status:      <rc 0 classification>
 ```
 
+## Phase 7: Quality review (always — even when Phases 3-5 were no-ops)
+
+The migration is not done when the classifier passes; the docs must also be GOOD. This review
+phase always RUNS (it is part of the skill's contract — the frontmatter description discloses
+it), but its WRITE authority is tiered. Start by reading the FINAL `AGENTS.md` and `CLAUDE.md`
+IN FULL (Phases 5-6 may have changed them since any earlier read; a "no findings" verdict from
+stale or unread files is invalid): gates 1 and 4 (canonical form, checkup-clean) are
+mechanical and applied directly; gates 2 and 3 (conciseness, progressive disclosure) are
+editorial — REPORT findings always, but apply only trivially-safe fixes directly (exact
+duplicates from the merge, dead boilerplate the split itself created) and **ask the user before
+any other editorial change or relocation**. Never silently rewrite prose the user authored:
+
+1. **Canonical form, not merely functional.** Variants that happen to work still get converged.
+   The one **sanctioned rc-4 exception** (recognized and executed in Phase 2, where rc 4 first surfaces — restated here as the canonical-form rule): when the classifier's rc-4 diagnostic is the
+   symlink-inside-the-trees refusal AND inspection proves `.claude/skills/` is a pure per-skill
+   symlink farm (EVERY entry is a symlink resolving into `../../.agents/skills/<name>` — one
+   real file or foreign link disqualifies it), converge it: delete the per-entry links (links,
+   not content), `rmdir .claude/skills`, `ln -s '../.agents/skills' .claude/skills`. Every OTHER
+   rc-4 remains a hard stop per Phase 2. Also converge: a prose "see AGENTS.md" pointer becomes
+   the literal `@AGENTS.md` line 1; the bridge's Claude-specific notes live under one clear
+   heading. Re-run the classifier after converging — rc 0 required.
+2. **Concise.** The bridge carries ONLY what is genuinely Claude-specific — no restated
+   AGENTS.md content, no filler ("this file provides guidance to…" boilerplate dies here).
+   AGENTS.md states each rule once; duplicated guidance introduced by the merge is collapsed to
+   the single authoritative statement.
+3. **Progressive disclosure.** AGENTS.md is the always-loaded top layer: it should carry the
+   rules an agent needs on every task, and POINT at everything else — deep reference material
+   belongs in `docs/` (or the repo's equivalent) behind a short "read on demand" pointer, and
+   skill knowledge belongs in the skill files, referenced by path, never inlined. If the merge
+   produced a wall of detail, move the detail out to a referenced doc and leave the pointer —
+   content is RELOCATED, never dropped — and the Phase 4 conservation check widens accordingly:
+   a line is "accounted for" when it lives in `AGENTS.md`, `CLAUDE.md`, **or a doc that one of
+   them references by path**; list every relocation (source heading → target file) in the
+   summary.
+4. **Checkup-clean.** The satisfiable gate: the classifier dry-run exits `0`, AND — when the
+   repo is Catalyst-configured — running `check-project-setup.sh` produces NO §3 snippet
+   warning and NO §10 dual-harness warning (§10's green line, when it prints, confirms it).
+   Warnings from unrelated sections (webhooks, thoughts, config keys) do NOT count against
+   this gate — report them as observations only.
+
+Report what the review changed (or "no findings") in the final summary.
+
 ## Important
 
 - **Never commit.** After verifying, report the changed files and suggest a commit message
@@ -161,9 +204,15 @@ say `none`, not claim artifacts that don't exist):
 - **Never delete or overwrite instruction content.** The only case that removes a tree is
   `.claude/skills` and `.agents/skills` both existing as real, byte-identical directories — the
   script collapses that to a symlink, guarded by `diff -r`.
+  The TWO sanctioned tree-removal cases: (1) a duplicate `.claude/skills` proven byte-identical
+  to `.agents/skills` (script-guarded by `diff -r` + mode compare), and (2) the pre-validated
+  per-skill symlink FARM (Phase 2 rc-4 exception) — where only symlinks and the then-empty
+  directory are removed, never file content.
 - **Idempotent.** Re-running any phase against an already-converged repo is a no-op.
-- **rc `4` is a stop sign, not a retry loop.** Ambiguous skills state means two real trees with
-  different content, or a symlink pointing somewhere unexpected. The agent must never modify
-  either skills tree itself — surface the script's stderr diagnostic verbatim and present the
-  conflict to the human operator; resolving it is their decision, not the agent's. Re-run the
-  classifier (Phase 2) to verify only after they've resolved it.
+- **rc `4` is a stop sign, not a retry loop** — except the single Phase-2-sanctioned
+  per-skill-symlink-farm convergence (see Phase 2 and Phase 7 rule 1). Every other ambiguous
+  state (two real trees with different content, a symlink pointing somewhere unexpected) means
+  the agent must never modify either skills tree itself — surface the script's stderr
+  diagnostic verbatim and present the conflict to the human operator; resolving it is their
+  decision, not the agent's. Re-run the classifier (Phase 2) to verify only after they've
+  resolved it.
