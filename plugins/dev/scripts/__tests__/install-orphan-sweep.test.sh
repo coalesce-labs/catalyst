@@ -340,7 +340,7 @@ rm -f "$DEST"
 SWEEP_PROC_WIDEN=ENFORCE! _install >/dev/null 2>&1
 run "I13h: an unrecognized value falls back to shadow, never enforce" \
   bash -c "[[ \"\$(_widen_of)\" == 'shadow' ]]"
-run_output "I13i: …and says so out loud" "ignoring SWEEP_PROC_WIDEN" \
+run_output "I13i: …and says so out loud" "falling back to 'shadow'" \
   bash -c "rm -f '${DEST}'; SWEEP_PROC_WIDEN=nonsense CATALYST_FORCE_OS=Darwin bash '${INSTALLER}'"
 
 # config → catalyst.sweep.procWiden, which outranks a stale installed value.
