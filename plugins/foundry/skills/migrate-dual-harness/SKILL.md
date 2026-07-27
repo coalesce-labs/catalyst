@@ -154,6 +154,34 @@ say `none`, not claim artifacts that don't exist):
   Status:      <rc 0 classification>
 ```
 
+## Phase 7: Quality review (always — even when Phases 3-5 were no-ops)
+
+The migration is not done when the classifier passes; the docs must also be GOOD. Review the
+final `AGENTS.md` + `CLAUDE.md` pair against these gates and apply light-touch fixes directly
+(bigger restructures: propose to the user, don't improvise):
+
+1. **Canonical form, not merely functional.** Variants that happen to work still get converged:
+   per-skill symlinks under `.claude/skills/` become the single directory symlink (delete the
+   per-entry links — they are links, not content — then `rmdir` + `ln -s '../.agents/skills'`);
+   a prose "see AGENTS.md" pointer becomes the literal `@AGENTS.md` line 1; the bridge's
+   Claude-specific notes live under one clear heading. Re-run the classifier after converging —
+   rc 0 required.
+2. **Concise.** The bridge carries ONLY what is genuinely Claude-specific — no restated
+   AGENTS.md content, no filler ("this file provides guidance to…" boilerplate dies here).
+   AGENTS.md states each rule once; duplicated guidance introduced by the merge is collapsed to
+   the single authoritative statement.
+3. **Progressive disclosure.** AGENTS.md is the always-loaded top layer: it should carry the
+   rules an agent needs on every task, and POINT at everything else — deep reference material
+   belongs in `docs/` (or the repo's equivalent) behind a short "read on demand" pointer, and
+   skill knowledge belongs in the skill files, referenced by path, never inlined. If the merge
+   produced a wall of detail, move the detail out to a referenced doc and leave the pointer —
+   content is RELOCATED, never dropped (the conservation check from Phase 4 still applies).
+4. **Checkup-clean.** Finish with `check-project-setup.sh` §3/§10 (when the repo is
+   Catalyst-configured) or at minimum the classifier dry-run: the audit surfaces must read
+   green, not merely "no error".
+
+Report what the review changed (or "no findings") in the final summary.
+
 ## Important
 
 - **Never commit.** After verifying, report the changed files and suggest a commit message
