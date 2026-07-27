@@ -50,10 +50,15 @@ replica-read rule below is absolute).
   load-bearing.** A background process must not be able to outlive the command that started it.
   Give it its own deadline so it dies on its own **even if every cleanup line you wrote is broken**
   — an unbounded `while :; do :; done` has no place in this repo. Prefer a self-limiting loop; it
-  needs no external command and is portable:
-  `end=$((SECONDS+120)); while [ $SECONDS -lt $end ]; do :; done`. (`timeout` / `gtimeout` are a
-  convenience *if* present — stock macOS, the fleet's primary launchd environment, ships neither
-  and GNU coreutils is not a dependency, so never depend on them.) This is not hypothetical — four
+  needs no external command and is portable — but it must **sleep**, not spin:
+  `end=$((SECONDS+120)); while [ $SECONDS -lt $end ]; do sleep 1; done`. An empty body
+  (`do :; done`) re-evaluates `$SECONDS` as fast as the CPU allows and burns a whole core for the
+  duration — which is the very incident this rule exists to prevent, so do not write the deadline
+  loop that way even though it terminates. If the background work is a real command rather than a
+  keep-alive, prefer a watchdog that sleeps and then signals:
+  `cmd & p=$!; (sleep 120; kill "$p" 2>/dev/null) & w=$!; wait "$p"; kill "$w" 2>/dev/null`.
+  (`timeout` / `gtimeout` are a convenience *if* present — stock macOS, the fleet's primary launchd
+  environment, ships neither and GNU coreutils is not a dependency, so never depend on them.) This is not hypothetical — four
   such spinners leaked out of one test run and burned ~4 CPU cores for 16.5 hours while the script
   that spawned them reported `cleanup verified`. Three traps, all of which fired in that incident:
   - **The shell here is `zsh`, which does NOT word-split an unquoted parameter.**

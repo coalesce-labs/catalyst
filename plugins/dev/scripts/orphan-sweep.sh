@@ -848,7 +848,7 @@ _proc_gone_within() {
 # Every ambiguous probe FAILS CLOSED (returns 1 → no signal).
 _SWEEP_WIDEN_CWD_NOW=""
 _widen_still_owned() {
-  local pid="$1" argv="$2"
+  local pid="$1" argv="$2" min_age_now="${3:-0}"
   _SWEEP_WIDEN_CWD_NOW=""
   # identity: still reparented to launchd, still the SAME full argv (pid-reuse)
   [[ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' | head -1)" == "1" ]] || return 1
@@ -864,6 +864,34 @@ _widen_still_owned() {
   _cwd_under_wt_root "$cwd_now" || return 1
   _probe_cwd_state "$cwd_now"
   [[ "$_SWEEP_CWD_STATE" == "gone" ]] || return 1
+  # NOT PINNED BY A TEST (CTL-1531 round 3). Both re-checks below are correct and
+  # fail CLOSED — they can only ever SPARE a candidate, never signal one that the
+  # pre-existing gates would have refused — so shipping them unpinned does not add
+  # kill risk. But they are NOT covered: an isolated fixture for each needs the ps
+  # mock to change a value BETWEEN the classification read and the guard read, and
+  # the WETIME2_ mechanism added for that fired at gate (h) instead, making the
+  # test vacuous (it passed with the re-read deleted). The vacuous test was removed
+  # rather than left standing. Follow-up: fix the mock's per-call counter, then pin
+  # both with a control that IS killed in the same run.
+  #
+  # 6v_g: RE-CHECK THE ROOT ITSELF, not just this candidate's cwd. The one-time
+  # presence check happens before the loop; if $SWEEP_WT_ROOT is deleted or
+  # unmounted *during* the loop, every surviving cwd beneath it still matches the
+  # configured logical prefix and then answers "gone" — so a single correlated
+  # ROOT failure reads as N independent deleted worktrees and signals up to the
+  # ceiling. Re-asserting the root here makes the root-absent bail hold for the
+  # whole run, not just its first instant.
+  _probe_cwd_state "$SWEEP_WT_ROOT"
+  [[ "$_SWEEP_CWD_STATE" == "present" ]] || return 1
+  # 6v_i: RE-READ THE AGE. Every other identity check here is fresh, but the age
+  # came from the classification pass. A pid recycled inside the grace window can
+  # present the same argv, ppid 1 and an inherited deleted cwd while being seconds
+  # old — passing every fresh check on a CACHED age and defeating the documented
+  # floor. The floor is only meaningful against the process being signalled NOW.
+  local age_now
+  age_now="$(_proc_etime_secs "$pid")"
+  [[ "$age_now" =~ ^[0-9]+$ ]] || return 1
+  [[ "$age_now" -ge "$min_age_now" ]] || return 1
   _SWEEP_WIDEN_CWD_NOW="$cwd_now"
   return 0
 }
@@ -1023,7 +1051,7 @@ sweep_procs_widened() {
     # a candidate dropped here was indistinguishable in the log from one that
     # never qualified — which also made the gate unobservable to the behavioural
     # parity check. The JS sibling already warns at the same point.
-    if ! _widen_still_owned "$pid" "$argv"; then
+    if ! _widen_still_owned "$pid" "$argv" "$min_age"; then
       log "widened proc sweep: $pid no longer matches the candidate at signal time (pid reuse, re-created worktree, or an unreadable probe) — sparing"
       continue
     fi
@@ -1046,7 +1074,7 @@ sweep_procs_widened() {
       # process exited and its pid was REUSED during the grace, an unconditional
       # `kill -9` lands on the replacement. (It also covers the case where the
       # probe could not answer at all — unknown fails closed here.)
-      if ! _widen_still_owned "$pid" "$argv"; then
+      if ! _widen_still_owned "$pid" "$argv" "$min_age"; then
         log "widened proc sweep: $pid no longer matches the candidate after the ${grace}s grace (pid reuse, re-created worktree, or an unreadable probe) — NOT escalating to SIGKILL"
         continue
       fi

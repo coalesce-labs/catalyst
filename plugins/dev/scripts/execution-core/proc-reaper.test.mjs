@@ -1692,27 +1692,22 @@ describe("CTL-1531 P1-b — defaultCwdExists is tri-state (true | false | null)"
     expect(probe(join(tmp, "definitely-not-here"))).toBe(false);
   });
 
-  it("a path that cannot be stat'd (EACCES on a mode-000 parent) → null, NOT false", () => {
+  it("a path that cannot be stat'd (EACCES) → null, NOT false", () => {
     // THE REGRESSION. With existsSync this returns `false` = "the worktree was
     // deleted" = kill an arbitrary process on evidence that was never gathered.
-    const walled = join(tmp, "walled");
-    const inner = join(walled, "wt");
-    mkdirSync(inner, { recursive: true });
-    chmodSync(walled, 0o000);
-    try {
-      expect(probe(inner)).toBe(null);
-      // And the errno really is EACCES-shaped, not ENOENT (the fixture is sound).
-      let code = null;
-      try {
-        statSync(inner);
-      } catch (err) {
-        code = err.code;
-      }
-      expect(code).toBe("EACCES");
-    } finally {
-      chmodSync(walled, 0o755);
-      rmSync(tmp, { recursive: true, force: true });
-    }
+    //
+    // Driven through the INJECTED stat seam, not a mode-000 directory on disk:
+    // as uid 0 a mode-000 parent does not prevent traversal, so the real-FS
+    // fixture yields no EACCES at all and the assertion silently tests nothing.
+    // That is not hypothetical — this test failed in a root container for
+    // exactly that reason. A permission fixture cannot express "unreadable" to a
+    // user who is exempt from permissions.
+    const eacces = () => {
+      const e = new Error("EACCES: permission denied");
+      e.code = "EACCES";
+      throw e;
+    };
+    expect(defaultCwdExists("/walled/wt", { stat: eacces })).toBeNull();
   });
 
   it("a non-string / empty path → null (unknown), never a boolean", () => {
@@ -3279,7 +3274,14 @@ describe("CTL-1531 — the lsof cwd probe is BOUNDED (PARITY: probe-deadline)", 
   async function withHungLsof(sleepSecs, timeoutMs, fn) {
     const dir = mkdtempSync(join(tmpdir(), "lsof-deadline-"));
     const bin = join(dir, "lsof");
-    await Bun.write(bin, `#!/usr/bin/env bash\nsleep ${sleepSecs}\n`);
+    // `trap '' TERM` is LOAD-BEARING, not decoration. A plain `sleep` dies on the
+    // SIGTERM that node's execFile `timeout` option delivers, so the child exits,
+    // the callback fires, and the promise settles — which made these tests pass
+    // against a deadline that did not actually bound anything. The case the
+    // deadline exists for is a probe wedged in uninterruptible I/O on a stale
+    // mount, which ignores SIGTERM; modelled here by trapping it. Measured with a
+    // 700ms deadline: 30,213ms before the watchdog fix, 703ms after.
+    await Bun.write(bin, `#!/usr/bin/env bash\ntrap '' TERM\nsleep ${sleepSecs}\n`);
     chmodSync(bin, 0o755);
     const prevPath = process.env.PATH;
     const prevTimeout = process.env.CATALYST_LSOF_TIMEOUT_MS;

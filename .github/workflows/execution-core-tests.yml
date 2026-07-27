@@ -41,6 +41,9 @@ on:
       - "plugins/dev/scripts/catalyst"
       - "plugins/dev/scripts/catalyst-linear"
       - "plugins/dev/scripts/catalyst-stack"
+      # CTL-1531: orphan-sweep-plist.test.sh VALIDATES this template, so a PR that
+      # edits only the plist must run this workflow or the test never sees it.
+      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
       # CTL-1531: orphan-sweep.sh is a DESTRUCTIVE, kill-processes script whose
@@ -77,6 +80,9 @@ on:
       - "plugins/dev/scripts/catalyst"
       - "plugins/dev/scripts/catalyst-linear"
       - "plugins/dev/scripts/catalyst-stack"
+      # CTL-1531: orphan-sweep-plist.test.sh VALIDATES this template, so a PR that
+      # edits only the plist must run this workflow or the test never sees it.
+      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
       # CTL-1531: orphan-sweep.sh is a DESTRUCTIVE, kill-processes script whose

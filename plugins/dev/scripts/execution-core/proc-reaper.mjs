@@ -508,10 +508,43 @@ export async function classifyProc(row, ctx) {
 // ─── Default IO seams (replaced wholesale in tests) ──────────────────────────
 
 function execFileAsync(bin, args, opts = {}) {
+  // Same deadline contract as execFileTolerant: when a `timeout` is supplied we
+  // enforce it with our OWN watchdog and settle independently of child exit.
+  // node's `timeout` option only DELIVERS a SIGTERM and then keeps awaiting the
+  // child, so a probe wedged in uninterruptible I/O on a stale mount never
+  // settles — which is exactly the case the lsof deadline exists for, and is why
+  // the single-pid path measured 30s against a 700ms deadline before this.
+  const { timeout, ...rest } = opts;
   return new Promise((resolve, reject) => {
-    execFile(bin, args, { encoding: "utf8", ...opts }, (err, stdout) =>
-      err ? reject(err) : resolve(stdout)
-    );
+    let settled = false;
+    let timer = null;
+    const finish = (fn, v) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn(v);
+    };
+    let child;
+    try {
+      child = execFile(bin, args, { encoding: "utf8", ...rest }, (err, stdout) =>
+        err ? finish(reject, err) : finish(resolve, stdout)
+      );
+    } catch (err) {
+      return finish(reject, err);
+    }
+    if (Number.isFinite(timeout) && timeout > 0) {
+      timer = setTimeout(() => {
+        try {
+          child?.kill?.("SIGKILL"); // best effort; a D-state child may survive it
+        } catch {
+          /* unsignalable — stop waiting regardless */
+        }
+        const err = new Error(`execFileAsync: ${bin} exceeded ${timeout}ms`);
+        err.code = "ETIMEDOUT";
+        finish(reject, err); // callers treat a rejection as UNKNOWN ⇒ spare
+      }, timeout);
+      if (typeof timer.unref === "function") timer.unref();
+    }
   });
 }
 
@@ -532,13 +565,43 @@ async function defaultPsLister() {
 // unreadable (measured on this host: exit 1 with 1155 valid process records),
 // so rejecting would throw away the entire batch on a single dead pid.
 function execFileTolerant(bin, args, opts = {}) {
+  // The deadline is enforced by OUR OWN watchdog, not by execFile's `timeout`.
+  // node's option only DELIVERS a SIGTERM at the deadline and then keeps waiting
+  // for the child to exit — the callback, and therefore this promise, stays
+  // pending until it does. A probe wedged in uninterruptible I/O on a stale mount
+  // (the exact case this bound exists for) never exits and ignores SIGTERM, so
+  // the "5 second bound" would still have wedged the daemon's reaper handler
+  // indefinitely. Resolving independently is what actually bounds the caller.
+  const { timeout, ...rest } = opts;
   return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(v);
+    };
+    let child;
     try {
-      execFile(bin, args, { encoding: "utf8", ...opts }, (_err, stdout) =>
-        resolve(typeof stdout === "string" ? stdout : "")
+      child = execFile(bin, args, { encoding: "utf8", ...rest }, (_err, stdout) =>
+        done(typeof stdout === "string" ? stdout : "")
       );
     } catch {
-      resolve("");
+      return done("");
+    }
+    if (Number.isFinite(timeout) && timeout > 0) {
+      timer = setTimeout(() => {
+        // Best-effort reap of the straggler; a D-state child may ignore even
+        // SIGKILL, which is precisely why we no longer WAIT for it.
+        try {
+          child?.kill?.("SIGKILL");
+        } catch {
+          /* already gone, or unsignalable — either way stop waiting */
+        }
+        done(""); // empty ⇒ cwd unknown ⇒ the candidate is SPARED
+      }, timeout);
+      if (typeof timer.unref === "function") timer.unref();
     }
   });
 }
