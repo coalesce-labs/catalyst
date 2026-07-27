@@ -882,6 +882,12 @@ describe("ensureCodexSkills", () => {
   // refresh's temp-symlink creation fails immediately (before anything is
   // touched), which exercises the "leave dest untouched on failure" contract.
   test("refresh failure (unwritable dir) leaves the ORIGINAL top-level link untouched + warns, never discarded (zdB)", () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      // Root bypasses the 0555 permission bits, so the forced EACCES never
+      // fires and the refresh would (correctly) succeed — the contract under
+      // test is unreachable as root. Skip rather than assert the wrong target.
+      return;
+    }
     const wt = mkdtempSync(join(tmpdir(), "codex-wt-zdb-top-"));
     const codexHome = mkdtempSync(join(tmpdir(), "codex-home-zdb-top-"));
     const oldCheckout = mkdtempSync(join(tmpdir(), "codex-old-checkout-zdb-"));

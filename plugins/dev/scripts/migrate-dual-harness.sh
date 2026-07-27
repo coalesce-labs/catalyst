@@ -229,6 +229,15 @@ fi
 # .agents/skills symlink must both stop here at rc 4, never reach "collapse"
 # (which would `diff -r` the real tree against itself through the symlink, see
 # it as "identical", then `rm -rf` the only copy) or "none"/"move".
+# An unreadable (but traversable) tree must be a loud I/O error, not silently
+# classified: every empty-vs-nonempty probe below uses `ls -A`, whose failure
+# would read as "empty" and skip a repo's real skills with rc 0.
+for skills_dir in "$CS" "$AS"; do
+	if [[ -d "$skills_dir" && ! -L "$skills_dir" && ! -r "$skills_dir" ]]; then
+		die "cannot read ${skills_dir#"$REPO"/} (permission denied) — fix permissions and re-run" 5
+	fi
+done
+
 SKILLS_ACTION="none"
 SKILLS_MSG=""
 if [[ -L "$AS" ]]; then
@@ -388,6 +397,16 @@ if [[ "$SKILLS_ACTION" == "move" ]]; then
 			SKILLS_MSG=".claude/skills contains a dangling symlink ('${rel_link}') — cannot prove its target stays inside the tree after the move"
 			break
 		fi
+		# An ABSOLUTE link is unportable even when it currently resolves
+		# inside the tree: its text names this checkout's path, so it dangles
+		# after a clone/rename even though the move itself succeeds.
+		case "$(readlink "$link_path")" in
+		/*)
+			SKILLS_ACTION="ambiguous"
+			SKILLS_MSG=".claude/skills contains an ABSOLUTE symlink ('${rel_link}') — its text names this checkout's path and would dangle after clone/rename; make it relative and re-run"
+			break
+			;;
+		esac
 		target_dir_real="$(resolve_symlink_target_dir "$link_path")"
 		if [[ -z "$target_dir_real" ]]; then
 			SKILLS_ACTION="ambiguous"
@@ -435,6 +454,15 @@ esac
 case "$SKILLS_ACTION" in
 move | symlink-only | collapse | ok | rewrite)
 	if git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
+		# Sparse-checkout: check-ignore reports no hit for a path outside the
+		# cone, yet a plain `git add -A` refuses to stage new files there — the
+		# moved skills would silently drop from the commit. Refuse when sparse
+		# mode is active; the operator widens the cone (or uses git add
+		# --sparse deliberately) and re-runs.
+		if [[ "$(git -C "$REPO" config --get core.sparseCheckout 2>/dev/null)" == "true" ]]; then
+			SKILLS_ACTION="ambiguous"
+			SKILLS_MSG="the repo has an active sparse-checkout (core.sparseCheckout=true) — a plain 'git add -A' may refuse paths outside the cone, silently dropping migrated skills from the commit; widen the cone to include .agents/ and .claude/ and re-run"
+		fi
 		# Check the actual DESTINATION pathnames that will exist under
 		# .agents/skills, not just the directory itself — an ignore rule that
 		# matches only descendants (`.agents/skills/**`, or a global `*.md`)

@@ -140,15 +140,18 @@ Re-run the classifier and confirm rc `0`:
 bash "$SCRIPT" --repo . 2>&1
 ```
 
-Print a summary table:
+Print a summary table **rendered from the OBSERVED state, never from this template's example
+values** — check each artifact and report what actually exists (a repo with no skills tree
+legitimately reaches rc 0 with no `.agents/skills`, no symlink, and no pointer; those rows must
+say `none`, not claim artifacts that don't exist):
 
 ```
 ── Dual-Harness Migration ──────────────────────
-  Docs:        AGENTS.md canonical, CLAUDE.md → @AGENTS.md bridge
-  Skills:      .agents/skills/ (.claude/skills → symlink)
-  Pointer:     ## Skills section present in AGENTS.md
-  House rules: Working the Loop block current
-  Status:      dual-ok (rc 0)
+  Docs:        <e.g. AGENTS.md canonical, CLAUDE.md → @AGENTS.md bridge>
+  Skills:      <.agents/skills/ (.claude/skills → symlink) | none>
+  Pointer:     <## Skills section present in AGENTS.md | n/a (no skills)>
+  House rules: <Working the Loop block current | absent>
+  Status:      <rc 0 classification>
 ```
 
 ## Important

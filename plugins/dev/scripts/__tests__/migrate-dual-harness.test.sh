@@ -594,6 +594,44 @@ run "$R" >/dev/null 2>&1; assert_eq "40 submodule: dry-run rc=4" 4 "$?"
 run "$R" --fix >/dev/null 2>&1; assert_eq "40 submodule: --fix rc=4" 4 "$?"
 [[ -d "$R/.claude/skills" && ! -L "$R/.claude/skills" ]] && pass "40 submodule: nothing moved" || fail "40 submodule: nothing moved"
 
+# 41. ABSOLUTE nested symlink that resolves INSIDE the moving tree → rc 4 (its
+#     text names this checkout's path; it would dangle after clone/rename even
+#     though the move itself would succeed).
+R="$SCRATCH/absinside"; mkdir -p "$R/.claude/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+printf 'body\n' >"$R/.claude/skills/foo/SKILL.md"
+ln -s "$R/.claude/skills/foo" "$R/.claude/skills/alias"
+run "$R" >/dev/null 2>&1; assert_eq "41 absinside: dry-run rc=4" 4 "$?"
+run "$R" --fix >/dev/null 2>&1; assert_eq "41 absinside: --fix rc=4" 4 "$?"
+[[ -d "$R/.claude/skills" && ! -L "$R/.claude/skills" ]] && pass "41 absinside: nothing moved" || fail "41 absinside: nothing moved"
+
+# 42. sparse-checkout active (core.sparseCheckout=true) with a pending move →
+#     rc 4; disabling it → proceeds.
+R="$SCRATCH/sparse"; mkdir -p "$R/.claude/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+printf 'body\n' >"$R/.claude/skills/foo/SKILL.md"
+git -C "$R" init -q
+git -C "$R" config core.sparseCheckout true
+run "$R" >/dev/null 2>&1; assert_eq "42 sparse: dry-run rc=4" 4 "$?"
+git -C "$R" config core.sparseCheckout false
+run "$R"; assert_eq "42 sparse: rc=10 once sparse mode is off" 10 "$?"
+
+# 43. unreadable (traversable but unlistable) .claude/skills → rc 5 I/O error,
+#     never silently classified as empty/none. (Skipped as root — permission
+#     bits don't bind root.)
+if [[ "$(id -u)" -ne 0 ]]; then
+	R="$SCRATCH/unreadable"; mkdir -p "$R/.claude/skills/foo"
+	printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+	printf '# AGENTS.md\n' >"$R/AGENTS.md"
+	printf 'body\n' >"$R/.claude/skills/foo/SKILL.md"
+	chmod 111 "$R/.claude/skills"
+	run "$R" >/dev/null 2>&1; rc=$?
+	chmod 755 "$R/.claude/skills"
+	assert_eq "43 unreadable: rc=5 (I/O), not a silent none" 5 "$rc"
+fi
+
 echo ""
 echo "migrate-dual-harness.test.sh: ${PASSES} passed, ${FAILURES} failed"
 [[ $FAILURES -eq 0 ]]
