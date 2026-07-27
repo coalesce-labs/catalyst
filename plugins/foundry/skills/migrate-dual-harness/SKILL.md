@@ -79,6 +79,47 @@ bash "$SCRIPT" --repo . --fix 2>&1
   authoritative statement of the one sanctioned exception (the pre-validated per-skill symlink
   farm convergence) and the hard stop for everything else.
 
+## Phase 3.5: Cross-agent invocation safety
+
+Runs whenever the repo has a skills tree (`.agents/skills/`), independent of rc — a mechanical
+safety gate, not part of the monolithic-split judgment call in Phase 4.
+
+**The sidecar convention (CTL-1536).** A skill dir MAY carry two plain declarative sidecar files
+alongside its `SKILL.md`:
+
+- `agents/openai.yaml` — Codex policy (e.g. `policy.allow_implicit_invocation`).
+- `agents/portability.yaml` — portability metadata (e.g. `mutating: true`).
+
+Both are read natively by whatever consumes them; **no build step or generator produces or
+consumes either file.** This is explicitly *not* the catalyst-cloud CTL-1446 generated-copy
+mechanism (a `tools/agent-skills/{build,check,clean}.mjs` pipeline that produced hashed, drift-
+checked `.claude/skills` copies) — CTL-1536 retired that pipeline in favor of these plain sidecars
+plus the single canonical symlink this skill already converges repos onto.
+
+**The MUTATING-PAIR RULE.** Any skill that performs an external write — a financial/ledger
+mutation, an email send, a third-party API write, browser automation that changes remote state, a
+`git push`, or similar — MUST have BOTH of the following, never just one:
+
+1. `disable-model-invocation: true` in its own `SKILL.md` frontmatter, AND
+2. `agents/openai.yaml` with `policy.allow_implicit_invocation: false`.
+
+This is fail-or-omit, never silent degrade: a mutating skill with only the Claude-side gate is
+still silently auto-invocable by Codex, and vice versa.
+
+**Applying it.** Classifying a skill as "mutating" takes model judgment (the same kind of call
+Phase 4 makes when splitting prose) — a script can't grep its way to "this writes external
+state." For every skill dir under `.agents/skills/`, read its `SKILL.md` body in full and decide
+whether it performs an external write per the rule above. Wherever a gap exists (missing either
+half of the pair, or both), add the missing piece(s) directly:
+
+- Add `disable-model-invocation: true` to `SKILL.md` frontmatter if absent (or flip an explicit
+  `false` to `true`).
+- Create or update `agents/openai.yaml` with `policy.allow_implicit_invocation: false` if absent.
+
+This check is **mechanical**, not editorial — unlike Phase 7's conciseness/progressive-disclosure
+gates, it is a safety gate closing a real invocation-gating hole, not a style preference, so apply
+the fix directly rather than only reporting it (see Phase 7 gate 5).
+
 ## Phase 4: Intelligent split (rc 11 only)
 
 This is the one step a script cannot do — reconciling prose requires model judgment.
@@ -161,11 +202,12 @@ The migration is not done when the classifier passes; the docs must also be GOOD
 phase always RUNS (it is part of the skill's contract — the frontmatter description discloses
 it), but its WRITE authority is tiered. Start by reading the FINAL `AGENTS.md` and `CLAUDE.md`
 IN FULL (Phases 5-6 may have changed them since any earlier read; a "no findings" verdict from
-stale or unread files is invalid): gates 1 and 4 (canonical form, checkup-clean) are
-mechanical and applied directly; gates 2 and 3 (conciseness, progressive disclosure) are
-editorial — REPORT findings always, but apply only trivially-safe fixes directly (exact
-duplicates from the merge, dead boilerplate the split itself created) and **ask the user before
-any other editorial change or relocation**. Never silently rewrite prose the user authored:
+stale or unread files is invalid): gates 1, 4, and 5 (canonical form, checkup-clean,
+mutating-pair invocation safety) are mechanical and applied directly; gates 2 and 3
+(conciseness, progressive disclosure) are editorial — REPORT findings always, but apply only
+trivially-safe fixes directly (exact duplicates from the merge, dead boilerplate the split
+itself created) and **ask the user before any other editorial change or relocation**. Never
+silently rewrite prose the user authored:
 
 1. **Canonical form, not merely functional.** Variants that happen to work still get converged.
    The one **sanctioned rc-4 exception** (recognized and executed in Phase 2, where rc 4 first surfaces — restated here as the canonical-form rule): when the classifier's rc-4 diagnostic is the
@@ -194,6 +236,12 @@ any other editorial change or relocation**. Never silently rewrite prose the use
    warning and NO §10 dual-harness warning (§10's green line, when it prints, confirms it).
    Warnings from unrelated sections (webhooks, thoughts, config keys) do NOT count against
    this gate — report them as observations only.
+5. **Mutating-pair invocation safety (mechanical, not editorial).** Re-check the Phase 3.5
+   sidecar/mutating-pair rule against the FINAL skills tree: every skill whose `SKILL.md` body
+   performs an external write must have BOTH `disable-model-invocation: true` in its frontmatter
+   AND `agents/openai.yaml` with `policy.allow_implicit_invocation: false`. Unlike gates 2 and 3,
+   a gap here is applied directly, not merely reported — it's a safety gate closing a real
+   invocation-gating hole, not a style preference the user should be consulted on.
 
 Report what the review changed (or "no findings") in the final summary.
 
