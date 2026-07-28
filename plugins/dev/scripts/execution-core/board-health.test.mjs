@@ -1634,23 +1634,22 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
     expect(r.ok).toBe(true);
   });
 
-  test("proposes a tier3 ESCALATION, never an auto re-dispatch", () => {
+  test("proposes an ANCHORABLE tier2 move so the delegate actually sweeps it up", () => {
+    // tier3 is "escalate-only, never anchorable" — a tier3 proposal would be
+    // detected, reported, and then left as stuck as before. That is precisely how
+    // this cohort sat untouched for 13 days. It must be anchorable.
     const inv = evaluateInvariants(board({ ticketsById: one() }));
     const moves = proposeMoves(inv, { sanctionedNeedsHuman: [] });
-    const m = moves.tier3.find((x) => x.move === "escalate-unowned-in-flight");
+    const m = moves.tier2.find((x) => x.move === "recover-unowned-in-flight");
     expect(m).toBeTruthy();
     expect(m.ticket).toBe("CTL-9");
-    // it must NOT appear in the actionable tiers — these tickets have no artifact
-    // explaining WHY they are parked, so acting automatically could re-dispatch
-    // work a human is deliberately holding.
-    expect(moves.tier1.some((x) => x.ticket === "CTL-9")).toBe(false);
-    expect(moves.tier2.some((x) => x.ticket === "CTL-9")).toBe(false);
+    expect(moves.tier3.some((x) => x.ticket === "CTL-9")).toBe(false);
   });
 
   test("an operator-sanctioned ticket is not re-proposed", () => {
     const inv = evaluateInvariants(board({ ticketsById: one() }));
     const moves = proposeMoves(inv, { sanctionedNeedsHuman: ["CTL-9"] });
-    expect(moves.tier3.some((x) => x.move === "escalate-unowned-in-flight")).toBe(false);
+    expect(moves.tier2.some((x) => x.move === "recover-unowned-in-flight")).toBe(false);
   });
 
   test("mode:off omits the invariant entirely (the off set stays byte-identical)", () => {

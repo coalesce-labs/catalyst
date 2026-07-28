@@ -1124,14 +1124,24 @@ export function proposeMoves(invariants, _b) {
   for (const t of invariants.frozenNeedsHuman?.flagged ?? []) {
     if (!invariants.frozenNeedsHuman.ok && !sanction(t)) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
   }
-  // CTL-1475: tier3 = ESCALATE, deliberately not tier1/2. These tickets have no
-  // pipeline artifact, so the automation cannot know WHY they are parked — a human
-  // may be holding one on purpose. Auto-resetting them to Todo would re-dispatch
-  // work someone is sitting on. Surfacing them is the whole fix: they were
-  // invisible, and a named ticket a human can act on beats a wrong action.
+  // CTL-1475: tier2 = ANCHORABLE, so the delegate actually sweeps these up.
+  //
+  // An earlier revision made this tier3 (escalate-only) on the reasoning that the
+  // automation cannot know WHY a ticket is parked, so acting might trample work a
+  // human is holding. That was too cautious, and it made the invariant nearly
+  // pointless: tier3 is "never anchorable", so the delegate is CONTRACTUALLY
+  // forbidden from touching these — the cohort would have been detected, reported,
+  // and then left exactly as stuck as before. Detection without actuation is how
+  // this population sat untouched for 13 days in the first place.
+  //
+  // tier2 (not tier1) is the deliberate part: the recovery-pass worker READS the
+  // ticket and decides what to do with it — it does not blindly reset anything —
+  // and tier1 is reserved for the higher-urgency PR cohorts. Operator-sanctioned
+  // tickets are still suppressed via `sanction()`, which is the real escape hatch
+  // for "a human is holding this one".
   for (const t of invariants.unownedInFlight?.flagged ?? []) {
     if (!invariants.unownedInFlight.ok && !sanction(t)) {
-      tier3.push({ ticket: t, move: "escalate-unowned-in-flight", rationale: "Linear state claims in-flight but there is no worker and no open PR" });
+      tier2.push({ ticket: t, move: "recover-unowned-in-flight", rationale: "Linear state claims in-flight but there is no worker and no open PR" });
     }
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
