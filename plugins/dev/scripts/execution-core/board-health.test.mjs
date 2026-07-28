@@ -1558,7 +1558,7 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
     expect(r.flagged).toEqual(["CTL-9"]);
   });
 
-  test("does NOT flag when the pipeline has a signal for it (any signal = it is known)", () => {
+  test("does NOT flag when a LIVE worker signal owns it", () => {
     const r = evaluateInvariants(
       board({ ticketsById: one(), signals: [{ ticket: "CTL-9", status: "running" }] })
     ).unownedInFlight;
@@ -1566,14 +1566,66 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
     expect(r.flagged).toEqual([]);
   });
 
-  test("does NOT flag a ticket with an open PR — a PR IS ownership", () => {
+  // REGRESSION (Codex P2): counting ANY signal — live or terminal — as ownership made
+  // this invariant blind itself. The recovery pass that THIS cohort dispatches writes
+  // `phase-recovery-pass.json` with status `complete`; under the old predicate that
+  // artifact exempted the ticket forever, so a ticket got exactly one sweep and then
+  // went permanently invisible even while still stuck. Mutation-checked: reverting
+  // `hasLiveSignal` to "any signal" turns each case below RED.
+  test("DOES flag a ticket whose only signal is TERMINAL — a completed artifact is not ownership", () => {
+    for (const status of ["complete", "failed", "stalled", "aborted", "turn-cap-exhausted"]) {
+      const r = evaluateInvariants(
+        board({ ticketsById: one(), signals: [{ ticket: "CTL-9", status }] })
+      ).unownedInFlight;
+      expect(r.ok).toBe(false);
+      expect(r.flagged).toEqual(["CTL-9"]);
+    }
+  });
+
+  test("DOES flag after its own recovery pass completed — the cohort must stay re-flaggable", () => {
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        signals: [{ ticket: "CTL-9", phase: "recovery-pass", status: "complete" }],
+      })
+    ).unownedInFlight;
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
+  test("does NOT flag a ticket with a confirmed-open PR — a PR IS ownership", () => {
     const r = evaluateInvariants(
       board({
         ticketsById: one({ pr_number: 42 }),
-        prStatusMap: mkPrStatusMap([{ number: 42, status: "open", repo: "r" }]),
+        prStatusMap: mkPrStatusMap([{ prNumber: 42, status: "open", repo: "r" }]),
       })
     ).unownedInFlight;
     expect(r.ok).toBe(true);
+  });
+
+  // REGRESSION (Codex P2): the old check was `prNumber != null && prMap.size > 0`, so a
+  // ticket carrying a HISTORICAL PR number was exempted by the mere existence of any
+  // unrelated row in the global map. A closed/merged PR is not ownership — that is the
+  // stuck shape this cohort exists to catch.
+  test("DOES flag a ticket whose linked PR is closed or merged, not open", () => {
+    for (const status of ["closed", "merged"]) {
+      const r = evaluateInvariants(
+        board({
+          ticketsById: one({ pr_number: 42 }),
+          prStatusMap: mkPrStatusMap([{ prNumber: 42, status, repo: "r" }]),
+        })
+      ).unownedInFlight;
+      expect(r.flagged).toEqual(["CTL-9"]);
+    }
+  });
+
+  test("DOES flag when the PR map holds only an UNRELATED number", () => {
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one({ pr_number: 42 }),
+        prStatusMap: mkPrStatusMap([{ prNumber: 999, status: "open", repo: "r" }]),
+      })
+    ).unownedInFlight;
+    expect(r.flagged).toEqual(["CTL-9"]);
   });
 
   test("does NOT flag a FRESH ticket (a worker between phases must never trip this)", () => {
@@ -1591,6 +1643,25 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
       const r = evaluateInvariants(board({ ticketsById: one({ state }) })).unownedInFlight;
       expect(r.ok).toBe(true);
     }
+  });
+
+  // REGRESSION (Codex P2): the state matcher was written against THIS fleet's config,
+  // where `reviewing` maps onto "Validate" — so the shipped template's
+  // `stateMap.reviewing = "Review"` never appeared in our data and the gap was
+  // invisible locally. Every configured in-flight phase name must be covered.
+  test("covers every in-flight state in the shipped template stateMap", () => {
+    for (const state of ["Research", "Plan", "Implement", "Validate", "Review", "Remediate", "PR"]) {
+      const r = evaluateInvariants(board({ ticketsById: one({ state }) })).unownedInFlight;
+      expect(r.flagged).toEqual(["CTL-9"]);
+    }
+  });
+
+  // Triage is the ADMISSION boundary (eligibleQuery = {status:"Todo", triageStatus:"Triage"}),
+  // not a claim that a worker is on the ticket. Flagging it would race new-work pull and
+  // dispatch recovery for tickets that are merely queued.
+  test("does NOT flag Triage — that is the admission boundary, not an ownership claim", () => {
+    const r = evaluateInvariants(board({ ticketsById: one({ state: "Triage" }) })).unownedInFlight;
+    expect(r.ok).toBe(true);
   });
 
   test("FAILS SAFE on an unreadable timestamp — unknown age is never staleness", () => {
@@ -1655,5 +1726,27 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   test("mode:off omits the invariant entirely (the off set stays byte-identical)", () => {
     const off = evaluateInvariants(board({ ticketsById: one(), mode: "off" }));
     expect(off.unownedInFlight).toBeUndefined();
+  });
+
+  // REGRESSION (Codex P2): the delegate's mandate here is HOLISTIC — one ticket is the
+  // dispatch anchor, but the worker must sweep the whole cohort. The recovery-pass skill
+  // CONSUMES this brief instead of re-running the board scan, so a cohort missing from
+  // the context is one the worker cannot enumerate: it would fix the single anchor and
+  // leave the rest exactly as stuck. Mutation-checked: drop the field → RED.
+  test("buildBoardContext surfaces the WHOLE cohort, not just the anchor", () => {
+    const many = new Map(
+      ["CTL-9", "CTL-10", "CTL-11"].map((id) => [
+        id,
+        { id, state: "Implement", updatedAt: at(72) },
+      ]),
+    );
+    const b = board({ ticketsById: many });
+    const ctx = buildBoardContext(b, evaluateInvariants(b));
+    expect(ctx.unownedInFlight).toEqual(["CTL-9", "CTL-10", "CTL-11"]);
+  });
+
+  test("buildBoardContext defaults the cohort to [] when green (shadow-safe)", () => {
+    const b = board({ ticketsById: one({ updatedAt: at(2) }) });
+    expect(buildBoardContext(b, evaluateInvariants(b)).unownedInFlight).toEqual([]);
   });
 });

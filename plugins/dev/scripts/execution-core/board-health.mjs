@@ -98,7 +98,14 @@ const PR_MERGED_RE = /^(merged|deployed)$/i;
 // worker, nothing reclaims it: admission only pulls Todo, the recovery census
 // scans worker dirs, and every existing invariant keys on a pipeline artifact
 // these tickets do not have. So they rot, invisibly, forever.
-const IN_FLIGHT_STATE_RE = /^(research|plan|implement|validate|remediate|pr)$|in.?review|in.?progress/i;
+// `review` is here for the SHIPPED TEMPLATE's `stateMap.reviewing = "Review"`
+// (config.template.json) — this fleet maps `reviewing` onto "Validate", so the bare
+// "Review" name never appears locally and the gap was invisible in our own data.
+// `triage` is deliberately EXCLUDED: it is the admission boundary
+// (eligibleQuery = {status:"Todo", triageStatus:"Triage"}), so a ticket legitimately
+// queued for pickup would read as unowned in-flight and race new-work admission.
+const IN_FLIGHT_STATE_RE =
+  /^(research|plan|implement|validate|review|remediate|pr)$|in.?review|in.?progress/i;
 // label/status forms of "needs a human".
 const NEEDS_HUMAN_LABEL_RE = /needs.?human/i;
 const NEEDS_HUMAN_STATUSES = new Set(["needs-human", "needs_human", "stalled"]);
@@ -789,10 +796,17 @@ function checkUnownedInFlight(b, t) {
   }
   const nowMs = Number.isFinite(b?.now) ? b.now : Date.now();
   const limit = t?.unownedInFlightMs ?? DEFAULT_THRESHOLDS.unownedInFlightMs;
-  // Any signal at all — live OR terminal — means the pipeline HAS touched this
-  // ticket, so it is not the hand-moved/orphaned shape this cohort is about.
-  // (workerAge and the PR cohorts already cover a ticket with a stale worker.)
-  const hasAnySignal = new Set(b.signals?.filter((s) => s?.ticket).map((s) => s.ticket) ?? []);
+  // Only a LIVE signal proves ownership. Counting terminal artifacts too made the
+  // invariant blind itself: the recovery pass this cohort dispatches WRITES
+  // `phase-recovery-pass.json` with status `complete`, so the first sweep of a ticket
+  // permanently exempted it from ever being flagged again — even when the ticket was
+  // still stuck. One shot per ticket, then silence, which defeats the whole point of a
+  // recurring invariant. `isLiveWorkerStatus` is the same predicate the orphaned-open-PR
+  // cohort already uses, and the scheduler's phantom-directory logic likewise treats a
+  // `complete` signal as inert rather than as real pipeline work.
+  const hasLiveSignal = new Set(
+    b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket) ?? [],
+  );
   const prMap = b.prStatusMap instanceof Map ? b.prStatusMap : null;
   const flagged = [];
   let unobservableAges = 0;
@@ -800,8 +814,18 @@ function checkUnownedInFlight(b, t) {
     const state = d?.state ?? d?.linear_state ?? null;
     if (!state || !IN_FLIGHT_STATE_RE.test(String(state))) continue;
     if (isTerminalLinearState(d)) continue;
-    if (hasAnySignal.has(id)) continue; // the pipeline knows about it
-    if (prNumberOf(d) != null && prMap && prMap.size > 0) continue; // an open PR IS ownership
+    if (hasLiveSignal.has(id)) continue; // a worker is genuinely on it
+    // An OPEN PR is ownership — but only its own, confirmed open PR. Treating "the
+    // ticket has a PR number AND the global map is nonempty" as proof let a CLOSED or
+    // MERGED PR (or an unrelated repo's row for the same number) suppress the invariant
+    // forever, while an unavailable/empty map flagged tickets whose PR is genuinely
+    // open. Resolve the exact (repo, number) the way the sibling PR cohorts do.
+    const prNum = prNumberOf(d);
+    if (prNum != null && prMap) {
+      const pr = lookupPrStatus(prMap, prNum, b.repoForTicket ? safeRepoOf(b.repoForTicket, id) : null);
+      if (pr && pr.ambiguous) continue; // cannot disambiguate → spare it
+      if (pr && String(pr.status).toLowerCase() === "open") continue;
+    }
     const updatedAt = d?.updatedAt ?? d?.updated_at ?? null;
     // Accept BOTH shapes. The replica stores these as epoch-millisecond INTEGERS
     // (1782759683683) while other producers use ISO strings, and Date.parse() on a
@@ -1277,6 +1301,13 @@ export function buildBoardContext(boardState, invariants) {
     phantomPrs: invariants.phantomMergedPr?.flagged ?? [],
     orphanedPrs: invariants.orphanedOpenPr?.flagged ?? [],
     frozenNeedsHuman: invariants.frozenNeedsHuman?.flagged ?? [],
+    // CTL-1475: the delegate's mandate for this cohort is HOLISTIC — one ticket
+    // becomes the dispatch anchor, but the worker is meant to sweep them all. The
+    // recovery-pass skill consumes this brief instead of re-running the board scan,
+    // so a cohort omitted here is a cohort the worker cannot even enumerate: it would
+    // see the failure count and a single anchor, fix one ticket, and leave the rest
+    // exactly as stuck. Additive, like the cohorts above; [] when green/unobservable.
+    unownedInFlight: invariants.unownedInFlight?.flagged ?? [],
     strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
       host,
       // the tickets HRW-owned by this stranded host — the delegate's actionable

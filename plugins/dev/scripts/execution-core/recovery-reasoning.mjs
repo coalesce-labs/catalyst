@@ -1264,6 +1264,12 @@ function promoteNumericAttrs(type, details) {
     num("cohort_phantom_merged_pr", details.invariants?.phantomMergedPr?.failed);
     num("cohort_orphaned_pr", details.invariants?.orphanedOpenPr?.failed);
     num("cohort_frozen_needs_human", details.invariants?.frozenNeedsHuman?.failed);
+    // CTL-1475: same contract for the unowned-in-flight cohort — the tickets whose
+    // Linear state claims a worker that does not exist. Promoted (not left in
+    // body.payload) so the sweep is chartable: this count going DOWN is the only
+    // queryable proof the delegate is actually landing these, rather than merely
+    // re-flagging them every scan.
+    num("cohort_unowned_in_flight", details.invariants?.unownedInFlight?.failed);
   }
   return a;
 }
