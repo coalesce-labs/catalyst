@@ -4944,7 +4944,9 @@ export function schedulerTick(
         const rSigs = readWorkerSignals(orchDir)
           .filter(
             (sig) =>
-              sig.status === "needs-human" ||
+              // CTL-1552: escalations now write the terminal "stalled" (was the
+              // bespoke non-terminal "needs-human"), already covered below — no
+              // writer emits "needs-human" as a signal status anymore.
               sig.status === "failed" ||
               sig.status === "stalled" ||
               resolveTicketType(orchDir, sig.ticket) === "unknown"
