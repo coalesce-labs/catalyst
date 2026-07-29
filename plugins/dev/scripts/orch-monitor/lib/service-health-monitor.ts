@@ -6,8 +6,10 @@
 // service-health.ts; this module owns only the I/O (HTTP probe, event-log
 // recency read) and the tick loop.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+
+import { readTailUtf8 } from "./event-log-reader";
 
 import {
   type ProbeResult,
@@ -123,19 +125,17 @@ export function readEmissionAge(
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   const path = join(catalystDir, "events", `${y}-${m}.jsonl`);
   if (!existsSync(path)) return null;
-  let text: string;
-  try {
-    // Read only the tail of the file — daemon heartbeats are frequent so the
-    // newest match is near the end. Cap at 512KB to bound the read.
-    const size = statSync(path).size;
-    const readFrom = Math.max(0, size - 512 * 1024);
-    text = readFileSync(path, "utf8");
-    if (readFrom > 0) {
-      text = text.slice(readFrom);
-    }
-  } catch {
-    return null;
-  }
+  // Read only the tail of the file — daemon heartbeats are frequent so the
+  // newest match is near the end. Cap at 512KB to bound the read.
+  //
+  // CTL-1529: this USED to `readFileSync(path, "utf8")` and then `.slice()` the
+  // last 512 KB back off — i.e. it materialized the entire 344 MB monthly log
+  // to keep 0.15% of it, on every service-health poll, while the comment above
+  // claimed the read was bounded. `readTailUtf8` makes the code match the
+  // comment: it seeks to `size - 512 KiB` and reads only from there, dropping
+  // the leading fragment line so a cut record can't parse into a bogus event.
+  const text = readTailUtf8(path, 512 * 1024);
+  if (text.length === 0) return null;
   const lines = text.split("\n");
   let newestTs: number | null = null;
   // Track the MAX timestamp across all matching lines — the on-disk order is

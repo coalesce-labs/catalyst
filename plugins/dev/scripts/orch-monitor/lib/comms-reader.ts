@@ -110,6 +110,13 @@ function readRegistry(registryPath: string): Registry {
 
 function readChannelFile(path: string): { messages: CommsMessage[]; tailOffset: number } {
   if (!existsSync(path)) return { messages: [], tailOffset: 0 };
+  // EVENT-LOG-FULL-READ-OK(CTL-1529): this is a per-channel comms JSONL
+  // (~/catalyst/comms/channels/<name>.jsonl), NOT the monthly event log. The
+  // guard's dataflow can't tell the two apart (both are `.jsonl` paths built
+  // the same way), and the tradeoff differs: a channel is bounded by one run's
+  // message traffic (KBs), and the function's contract is "every message in
+  // this channel plus the byte offset of EOF" — a tail read would silently drop
+  // history and desync `tailOffset` from the caller's incremental cursor.
   const raw = readFileSync(path, "utf-8");
   const tailOffset = Buffer.byteLength(raw);
   if (!raw) return { messages: [], tailOffset };

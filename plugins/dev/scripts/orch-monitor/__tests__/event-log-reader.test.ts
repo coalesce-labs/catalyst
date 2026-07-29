@@ -14,10 +14,22 @@ import {
   tailEventLog,
   readTunnelEventStats,
   scanFileLines,
+  readTailUtf8,
   fullReadMetrics,
   recordFullRead,
 } from "../lib/event-log-reader";
 import { createEventRing } from "../lib/event-ring";
+
+// bytesRequested — total `length` argument across readSync calls. The spy's
+// call tuple resolves to the 3-arg `readSync(fd, buffer, opts)` overload under
+// TS, so index positionally through `unknown[]` rather than fighting the
+// overload set (CTL-1529).
+function bytesRequested(calls: readonly unknown[][]): number {
+  return calls.reduce<number>(
+    (sum, c) => sum + (typeof c[3] === "number" ? c[3] : 0),
+    0,
+  );
+}
 
 let workdir: string;
 
@@ -740,5 +752,66 @@ describe("readBacklog / readTunnelEventStats fallback: chunked scan, never readF
       readSyncSpy.mockRestore();
       readFileSyncSpy.mockRestore();
     }
+  });
+});
+
+// ── CTL-1529: readTailUtf8 — the bounded replacement for "read it all, then
+// slice the tail off". Two live sites shipped that shape; the worst of them ran
+// against the 344 MB monthly event log on every service-health poll while its
+// own comment claimed "Cap at 512KB to bound the read".
+describe("readTailUtf8 (CTL-1529)", () => {
+  const LINE = "y".repeat(99) + "\n"; // exactly 100 bytes per line
+
+  function writeLines(name: string, n: number): string {
+    const path = join(workdir, name);
+    writeFileSync(path, LINE.repeat(n));
+    return path;
+  }
+
+  it("returns the whole file when it is smaller than the cap (byte-identical to a full read)", () => {
+    const path = writeLines("small.jsonl", 10);
+    expect(readTailUtf8(path, 64 * 1024)).toBe(LINE.repeat(10));
+  });
+
+  it("returns only the tail when the file exceeds the cap, and READS only that much", () => {
+    const path = writeLines("big.jsonl", 100_000); // 10 MB
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    let out: string;
+    try {
+      out = readTailUtf8(path, 10_000); // 10 KB cap
+      const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
+      expect(requested).toBeLessThanOrEqual(10_000);
+      expect(readFileSyncSpy.mock.calls.filter((c) => c[0] === path)).toEqual([]);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+    // The cap lands exactly on a line boundary, so the fragment rule drops one
+    // whole line: 10_000 / 100 = 100 lines requested, 99 complete ones returned.
+    expect(out.length).toBe(9_900);
+    expect(out).toBe(LINE.repeat(99));
+  });
+
+  it("DROPS the leading fragment so a cut record cannot parse into a bogus event", () => {
+    const path = join(workdir, "frag.jsonl");
+    writeFileSync(
+      path,
+      JSON.stringify({ ts: "2026-07-01T00:00:00Z", keep: false }) + "\n" +
+        JSON.stringify({ ts: "2026-07-02T00:00:00Z", keep: true }) + "\n",
+    );
+    // A cap that starts mid-way through the FIRST record.
+    const out = readTailUtf8(path, 40);
+    expect(out.includes("keep\":false")).toBe(false);
+    for (const line of out.split("\n").filter((l) => l.length > 0)) {
+      expect(() => JSON.parse(line) as unknown).not.toThrow();
+    }
+  });
+
+  it("a missing or empty file is \"\" and never throws", () => {
+    expect(readTailUtf8(join(workdir, "nope.jsonl"), 1024)).toBe("");
+    const empty = join(workdir, "empty.jsonl");
+    writeFileSync(empty, "");
+    expect(readTailUtf8(empty, 1024)).toBe("");
   });
 });

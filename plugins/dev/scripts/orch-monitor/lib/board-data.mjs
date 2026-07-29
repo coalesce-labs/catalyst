@@ -53,7 +53,7 @@ import { getEventLogPath } from "../../execution-core/config.mjs";
 // attribute any remaining RSS ratchet to this path (same counter the CTL-1232
 // instrumentation + the other ring consumers use). event-log-reader.ts has no
 // bun:sqlite/pino edge, so this import is graph-safe.
-import { recordFullRead } from "./event-log-reader.ts";
+import { recordFullRead, scanFileLines } from "./event-log-reader.ts"; // CTL-1529: bounded chunked scan
 import { isLinearTerminal } from "../../execution-core/terminal-state.mjs";
 
 const execFileP = promisify(execFile);
@@ -1354,15 +1354,27 @@ export function loadRecoveryOutcomes(eventLogPath = getEventLogPath(), ring = nu
     return foldRecoveryOutcomes(ring.query({ predicate }));
   }
 
-  let text;
+  // CTL-1529: the ring-underflow fallback is now a chunked scan instead of a
+  // whole-file readFileSync. Coverage is byte-identical (the fold wants the whole
+  // month); only the peak transient changes — one 1 MiB buffer plus the handful of
+  // recovery.* lines that survive the pre-filter, rather than an 883 MB contiguous
+  // string that bun/mimalloc never returns to the OS. Reached on monitor cold start
+  // (before the ring's first coldFill) and from ring-less callers.
+  const matched = [];
+  // No initializer: scanFileLines assigns it as the first statement of the try and
+  // the catch returns early, so an initial value is never read (and `= 0` trips
+  // eslint no-useless-assignment, which is an error in @eslint/js 10's recommended).
+  let scanned;
   try {
     const _t0 = performance.now();
-    text = readFileSync(eventLogPath, "utf8");
-    recordFullRead("loadRecoveryOutcomes", text.length, performance.now() - _t0);
+    scanned = scanFileLines(eventLogPath, (line) => {
+      if (line.includes("recovery.fixed") || line.includes("recovery.would-fix")) matched.push(line);
+    });
+    recordFullRead("loadRecoveryOutcomes", scanned, performance.now() - _t0);
   } catch {
     return new Map(); // ENOENT: no events yet
   }
-  return foldRecoveryOutcomes(text.split("\n"));
+  return foldRecoveryOutcomes(matched);
 }
 
 // synthesizeOrphanTickets — pure helper: one BoardTicket-shaped card per

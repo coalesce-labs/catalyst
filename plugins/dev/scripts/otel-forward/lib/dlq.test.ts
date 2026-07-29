@@ -1,5 +1,5 @@
 import { describe, test, expect, mock } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendToDlq, drainDlq, dlqDepth, drainDlqBounded } from "./dlq.ts";
@@ -34,6 +34,49 @@ describe("dlqDepth", () => {
     appendToDlq(path, [{ ts: "b" }] as any);
     appendToDlq(path, [{ ts: "c" }] as any);
     expect(dlqDepth(path)).toBe(3);
+    rmSync(dir, { recursive: true });
+  });
+
+  // ── CTL-1529: the count is chunked, and byte-for-byte identical to the
+  // whole-file `readFileSync(...).split("\n").filter(Boolean).length` it replaced.
+  // The ORACLE below is that exact old expression, so any divergence in the new
+  // chunked scanner fails here rather than silently mis-reporting DLQ depth (the
+  // number otel-forward publishes as a lag metric).
+  const oracleDepth = (p: string) => readFileSync(p, "utf8").split("\n").filter(Boolean).length;
+
+  test("matches the old whole-file expression ACROSS a chunk boundary (>64 KiB)", () => {
+    // The DLQ grows precisely during an OTLP outage — the multi-chunk path is the
+    // realistic one, and it is the only path the single-chunk tests never take.
+    const dir = mkdtempSync(join(tmpdir(), "dlqdepth-big-"));
+    const path = join(dir, "dlq.jsonl");
+    const pad = "x".repeat(1000);
+    const n = 300; // ~300 KB ⇒ ~5 chunks at DEPTH_CHUNK_BYTES = 64 KiB
+    for (let i = 0; i < n; i++) appendToDlq(path, [{ ts: `e${i}`, pad }] as any);
+    expect(dlqDepth(path)).toBe(n);
+    expect(dlqDepth(path)).toBe(oracleDepth(path));
+    rmSync(dir, { recursive: true });
+  });
+
+  test("an UNTERMINATED final line counts, exactly as filter(Boolean) did", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dlqdepth-partial-"));
+    const path = join(dir, "dlq.jsonl");
+    writeFileSync(path, '[{"ts":"a"}]\n[{"ts":"b"}]'); // no trailing newline
+    expect(dlqDepth(path)).toBe(2);
+    expect(dlqDepth(path)).toBe(oracleDepth(path));
+    rmSync(dir, { recursive: true });
+  });
+
+  test("blank lines are NOT counted (parity with filter(Boolean)) and an empty file is 0", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dlqdepth-blank-"));
+    const withBlanks = join(dir, "blanks.jsonl");
+    writeFileSync(withBlanks, '\n\n[{"ts":"a"}]\n\n[{"ts":"b"}]\n\n');
+    expect(dlqDepth(withBlanks)).toBe(2);
+    expect(dlqDepth(withBlanks)).toBe(oracleDepth(withBlanks));
+
+    const empty = join(dir, "empty.jsonl");
+    writeFileSync(empty, "");
+    expect(dlqDepth(empty)).toBe(0);
+    expect(dlqDepth(empty)).toBe(oracleDepth(empty));
     rmSync(dir, { recursive: true });
   });
 });

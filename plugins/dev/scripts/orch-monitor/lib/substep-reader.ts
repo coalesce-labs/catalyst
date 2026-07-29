@@ -91,6 +91,11 @@ export function readSubStepEventsFromFile(
     `^workflow\\.substep\\.(started|complete|failed)\\.${escapedTicket}$`,
   );
   try {
+    // EVENT-LOG-FULL-READ-OK(CTL-1529): deliberate PARITY ORACLE, dead in production — the
+    // /api/ticket-substeps route uses readSubStepEvents(ring, ...) with no file fallback, and the
+    // only non-test reference is __tests__/ticket-substeps-ring.test.ts, which asserts the ring
+    // path returns the same result as this dumb exhaustive scan. Bounding it would weaken that
+    // assertion. Delete it together with the parity test, or leave it exactly as is.
     const text = readFileSync(logPath, "utf-8");
     const results: SubStepEvent[] = [];
     for (const line of text.split("\n")) {
