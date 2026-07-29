@@ -877,9 +877,16 @@ export class ProcReaper {
     // DOCUMENTED "uncapped" value, so coercing would turn a null config field
     // into an uncapped process killer. Explicit numeric 0 still means uncapped —
     // that is an operator decision, not a typo.
+    // CTL-1531 (Codex P1): require an INTEGER, and never floor into uncapped. The
+    // old test admitted any finite non-negative number and then floored it, so a
+    // malformed fractional cap like `widenMaxKills: 0.5` became `0` — which is the
+    // DOCUMENTED "uncapped" value. A typo in the config therefore removed the
+    // widened-process kill ceiling entirely, the exact inversion of what a cap is
+    // for. `Number.isInteger` also implies finite, so it subsumes the old check.
+    // Exact numeric 0 still means uncapped: that is an operator decision, not a typo.
     this.widenMaxKills =
-      typeof widenMaxKills === "number" && Number.isFinite(widenMaxKills) && widenMaxKills >= 0
-        ? Math.floor(widenMaxKills)
+      typeof widenMaxKills === "number" && Number.isInteger(widenMaxKills) && widenMaxKills >= 0
+        ? widenMaxKills
         : WIDEN_DEFAULT_MAX_KILLS;
     this.worktreeRoot = worktreeRoot;
     this.graceMs = graceMs;

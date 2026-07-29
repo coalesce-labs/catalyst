@@ -2326,11 +2326,19 @@ describe("CTL-1531 round 2 P1-b — per-run cap on widened kills (mirrors SWEEP_
   });
 
   it("a garbage cap degrades to the DEFAULT, never to uncapped", () => {
-    for (const bad of ["nope", NaN, -1, undefined, null, {}]) {
+    // REGRESSION (Codex P1): the FRACTIONAL cases are the dangerous ones. The old
+    // guard admitted any finite non-negative number and then floored it, so 0.5
+    // became 0 — the documented "uncapped" value. A config typo silently removed
+    // the widened-process kill ceiling, which is the exact inversion of a cap.
+    for (const bad of ["nope", NaN, -1, undefined, null, {}, 0.5, 0.99, 2.5, Infinity]) {
       expect(new ProcReaper({ widenMaxKills: bad, log: silentLog() }).widenMaxKills).toBe(
         WIDEN_DEFAULT_MAX_KILLS
       );
     }
+  });
+
+  it("an EXACT integer 0 still means uncapped — an operator decision, not a typo", () => {
+    expect(new ProcReaper({ widenMaxKills: 0, log: silentLog() }).widenMaxKills).toBe(0);
   });
 
   it("the cap does NOT bound the LEGACY node/bun class", async () => {
