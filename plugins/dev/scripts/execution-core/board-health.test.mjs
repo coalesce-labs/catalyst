@@ -700,6 +700,63 @@ describe("proposeMoves — CTL-1432 sanctioned-latch suppression (B3)", () => {
   });
 });
 
+// ─── CTL-1552: parked-by-human LABEL suppression (the cluster-wide successor to
+// the per-host sanctionedNeedsHuman env var) ────────────────────────────────
+describe("CTL-1552 — parked-by-human label suppression", () => {
+  test("proposeMoves: a parked-by-human ticket is suppressed from tier1 (needsHumanPile)", () => {
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-9"]) };
+    const board = mkBoard({ ticketsById: new Map([["CTL-9", { labels: [{ name: "parked-by-human" }] }]]) });
+    const m = proposeMoves(invs, board);
+    expect([...m.tier1, ...m.tier2].some((x) => x.ticket === "CTL-9")).toBe(false);
+  });
+
+  test("proposeMoves: a parked-by-human ticket is suppressed from tier2 (frozenNeedsHuman)", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-9", "CTL-REAL"]) };
+    const board = mkBoard({ ticketsById: new Map([["CTL-9", { labels: [{ name: "parked-by-human" }] }]]) });
+    const m = proposeMoves(invs, board);
+    const t2 = m.tier2.map((x) => x.ticket);
+    expect(t2).toContain("CTL-REAL"); // a NON-parked frozen ticket is still proposed
+    expect(t2).not.toContain("CTL-9");
+  });
+
+  test("eligibleDeferredAnchors: a parked-by-human ticket is not an anchor candidate (even HRW-owned & present)", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["CTL-9"],
+      ticketsById: new Map([["CTL-9", { labels: [{ name: "parked-by-human" }], state: "Todo" }]]),
+    });
+    expect(eligibleDeferredAnchors(board)).not.toContain("CTL-9");
+  });
+
+  test("VISIBILITY invariant: a parked ticket STAYS in buildBoardContext.frozenNeedsHuman", () => {
+    // suppression is in proposeMoves ONLY, never in the cohort surfaces — a human
+    // must still see a parked ticket. CTL-9 carries needs-human + parked-by-human.
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 1, true, ["CTL-9"]) };
+    const board = mkBoard({
+      ticketsById: new Map([["CTL-9", { labels: [{ name: "needs-human" }, { name: "parked-by-human" }] }]]),
+    });
+    const ctx = buildBoardContext(board, invs);
+    expect(ctx.frozenNeedsHuman).toContain("CTL-9");
+  });
+
+  test("buildBoardScanEvent: details.sanctioned lists the suppressed (parked) ticket ids", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-9", "CTL-REAL"]) };
+    const board = mkBoard({
+      capacity: { freeSlots: 4 },
+      ticketsById: new Map([["CTL-9", { labels: [{ name: "parked-by-human" }] }]]),
+    });
+    const decision = decideBoardHealth(invs, board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision });
+    expect(ev.details.sanctioned).toContain("CTL-9");
+    expect(ev.details.sanctioned).not.toContain("CTL-REAL"); // only what was actually suppressed
+  });
+
+  test("env-var sanctionedNeedsHuman still suppresses (additive — no mid-rollout regression)", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 1, true, ["CTL-ENV"]) };
+    const m = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-ENV"] }));
+    expect(m.tier2.map((x) => x.ticket)).not.toContain("CTL-ENV");
+  });
+});
+
 // ─── CTL-1432 (B2): deferred board-health intents become anchor candidates ──────
 describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () => {
   test("a deferred board-health ticket (on the live board) with NO invariant flag is a self-owned anchor candidate", () => {

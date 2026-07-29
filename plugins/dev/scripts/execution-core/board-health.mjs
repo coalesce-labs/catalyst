@@ -208,6 +208,26 @@ export function isParkedByHuman(d) {
   const ls = labelsOf(d);
   return Array.isArray(ls) && ls.some((l) => labelName(l).toLowerCase() === PARKED_BY_HUMAN_LABEL);
 }
+// CTL-1552: the ONE suppression predicate shared by proposeMoves,
+// eligibleDeferredAnchors, and buildBoardScanEvent's suppressed-set — so the
+// gate, the ranking, and the observability can never disagree (same discipline
+// eligibleDeferredAnchors' shared-helper comment documents). A ticket is
+// suppressed when it carries the parked-by-human label OR (still, additively
+// through the CTL-1552 rollout) sits in the legacy per-host sanctionedNeedsHuman
+// env-var set. Phase 3 removes the env-var arm, leaving the label alone.
+function makeSuppressed(board) {
+  const sanctioned = new Set(board?.sanctionedNeedsHuman ?? []);
+  const byId = board?.ticketsById;
+  const get = typeof byId?.get === "function" ? (t) => byId.get(t) : () => undefined;
+  return (t) => sanctioned.has(t) || isParkedByHuman(get(t));
+}
+// suppressedTickets — the flagged ids actually suppressed this scan (flagged ∩
+// suppressed). Feeds the recovery.board-scan event so an operator can see WHICH
+// tickets were held back, not just infer it by differencing flagged vs moves.
+function suppressedTickets(invariants, board) {
+  const suppressed = makeSuppressed(board);
+  return dedupeFlagged(invariants).filter(suppressed);
+}
 
 let _lastRunMs = 0; // host-local throttle state (mirrors unstuck-sweep)
 
@@ -1290,7 +1310,9 @@ function checkNeedsHumanPile(b) {
 // readDeferredBoardHealthIntents.) Shared by decideBoardHealth (gate count) AND
 // selectAnchorCandidates (ranking) so the two never disagree.
 export function eligibleDeferredAnchors(board) {
-  const sanctioned = new Set(board?.sanctionedNeedsHuman ?? []);
+  // CTL-1552: suppression via the shared predicate — env-var sanction OR the
+  // parked-by-human label (so a parked deferred-anchor is not resurrected here).
+  const suppressed = makeSuppressed(board);
   const byId = board?.ticketsById;
   // CTL-1432 (Codex P2): HRW-ownership filter, mirroring selectAnchorCandidates — a
   // foreign-owned deferred marker must not make the gate proceed (this host would then
@@ -1305,7 +1327,7 @@ export function eligibleDeferredAnchors(board) {
     }
   };
   return (board?.deferredBoardHealth ?? []).filter((t) => {
-    if (sanctioned.has(t)) return false;
+    if (suppressed(t)) return false;
     if (!owns(t)) return false;
     const d = byId && typeof byId.get === "function" ? byId.get(t) : undefined;
     if (!d) return false;
@@ -1327,6 +1349,10 @@ export function decideBoardHealth(invariants, boardState) {
   // trips the gate is inert). tier3 moves are escalate-only (never anchorable by
   // selectAnchorCandidates), so they alone do not justify a holistic pass.
   const moves = proposeMoves(invariants, boardState);
+  // CTL-1552: the flagged tickets actually suppressed this scan (env-var sanction
+  // ∪ parked-by-human label). Threaded onto the decision so buildBoardScanEvent
+  // can expose it as details.sanctioned — first-class, not inferred by differencing.
+  const sanctioned = suppressedTickets(invariants, boardState);
   // CTL-1432 (Codex P1): count only deferred intents that pass full acceptance
   // (not sanctioned, live + non-terminal) — a since-terminal / sanctioned defer must not
   // make the gate proceed (it would proceed then no-anchor). Same helper selectAnchorCandidates uses.
@@ -1345,31 +1371,34 @@ export function decideBoardHealth(invariants, boardState) {
       observableFailed.length === 0 ? "all-green" : "no-actionable-moves",
       invariantsFailed,
       moves,
+      sanctioned,
     );
   }
   // Gate 2 — actionable work but no free slot to dispatch a fix → skip.
   if ((boardState.capacity?.freeSlots ?? 0) <= 0) {
-    return decision("skip", "no-free-slots", invariantsFailed, emptyMoves());
+    return decision("skip", "no-free-slots", invariantsFailed, emptyMoves(), sanctioned);
   }
   // Gate 3 — near a rate-limit cliff → acting now risks 429s → skip (and obey it).
   const rl = invariants.rateLimitHeadroom;
   if (rl && rl.observable && !rl.ok) {
-    return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves());
+    return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves(), sanctioned);
   }
   // Gate 4 — actionable work + headroom → proceed.
   const reason =
     observableFailed.length > 0
       ? `${observableFailed.length} invariant(s) flagged`
       : `${deferred.length} deferred board-health intent(s)`;
-  return decision("proceed", reason, invariantsFailed, moves);
+  return decision("proceed", reason, invariantsFailed, moves, sanctioned);
 }
 
-function decision(gateDecision, reason, invariantsFailed, moves) {
+function decision(gateDecision, reason, invariantsFailed, moves, sanctioned = []) {
   return {
     gate: { decision: gateDecision, reason },
     invariantsFailed,
     proposed: { tier1: moves.tier1.length, tier2: moves.tier2.length, tier3: moves.tier3.length },
     moves,
+    // CTL-1552: the tickets suppressed this scan (parked-by-human / env sanction).
+    sanctioned,
   };
 }
 
@@ -1386,8 +1415,10 @@ export function proposeMoves(invariants, _b) {
   // frozenNeedsHuman / boardContext (suppression is HERE only, never in
   // checkFrozenNeedsHuman) so a human still sees them; they just stop drowning the
   // genuinely-stuck tickets every 5-min scan (making proposedTier1/2 a constant).
-  const sanctioned = new Set(_b?.sanctionedNeedsHuman ?? []);
-  const sanction = (t) => sanctioned.has(t);
+  // CTL-1552: suppression now also honors the parked-by-human LABEL (read from
+  // the descriptor board-health already receives), not just the legacy per-host
+  // sanctionedNeedsHuman env-var set — so a park applies on EVERY host.
+  const sanction = makeSuppressed(_b);
   if (invariants.dispatchLiveness && !invariants.dispatchLiveness.ok) {
     tier1.push({ move: "kick-dispatch", rationale: invariants.dispatchLiveness.note });
   }
@@ -1737,6 +1768,10 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       // route + reason for each held ticket survives to the event-log / HUD /
       // monitor. Ticket-id keyed → high cardinality → body.payload, never promoted.
       strandedRoutes: invariants.strandedMidPipeline?.classified ?? {},
+      // CTL-1552: the tickets suppressed this scan (parked-by-human / env sanction).
+      // A ticket-id list → body.payload, never a promoted scalar. Lets an operator
+      // see WHAT was held back instead of differencing flagged against the moves.
+      sanctioned: decision.sanctioned ?? [],
       tier1Moves: decision.moves.tier1,
       tier2Moves: decision.moves.tier2,
       tier3Moves: decision.moves.tier3,
