@@ -311,7 +311,6 @@ import {
   readUnstuckSweepConfig,
   readRecoveryPassConfig,
   readBoardHealthConfig,
-  readSanctionedNeedsHuman,
   readReclaimGatewayFreshMs,
   isThrottled,
 } from "./config.mjs";
@@ -5509,7 +5508,6 @@ export function schedulerTick(
           repoForTicket: _boardHealth.repoForTicket,
           getReconcileMarkers: _boardHealth.getReconcileMarkers,
           getDeferredBoardHealthTickets: _boardHealth.getDeferredBoardHealthTickets, // CTL-1432 (B2)
-          sanctionedNeedsHuman: _boardHealth.sanctionedNeedsHuman, // CTL-1432 (B3)
           // CTL-1157: thread the PR-status reader + the provably-dead host set.
           // Both are daemon-bound (the binding below); a bare tick passes neither
           // → empty-Map / empty-array defaults keep the new invariants
@@ -8241,11 +8239,10 @@ function runTick() {
         readEventRing: () => readBoardHealthEventTail(),
         getReconcileMarkers: () => readReconcileHealthMarkers({}),
         // CTL-1432 (B2): deferred board-health intents → first-class anchor candidates
-        // (retires the dormant delegate-mini session). (B3): the sanctioned needs-human
-        // allowlist (env CATALYST_BH_SANCTIONED_LATCHES / Layer-2 config), suppressed
-        // from proposeMoves so the genuinely-stuck tickets stop being drowned each scan.
+        // (retires the dormant delegate-mini session). CTL-1552: the sanctioned
+        // needs-human latch moved off this per-host seam onto the parked-by-human
+        // Linear label board-health reads from each ticket descriptor.
         getDeferredBoardHealthTickets: () => readDeferredBoardHealthIntents(runningOpts.orchDir),
-        sanctionedNeedsHuman: readSanctionedNeedsHuman(),
         // CTL-1157 (A11): the filter_state PR-status reader (phantom/orphaned-PR
         // invariants) + the provably-dead host set for the HRW-safe holistic
         // failover. computeSurvivingRoster already exists (scheduler.mjs) and
