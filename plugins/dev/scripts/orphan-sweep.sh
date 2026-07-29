@@ -532,6 +532,13 @@ _proc_cwd() {
   local pid="$1" limit tmp lpid wpid
   limit="${SWEEP_PROC_CWD_TIMEOUT_SECS:-$_PROC_CWD_TIMEOUT_DEFAULT}"
   [[ "$limit" =~ ^[0-9]{1,4}$ ]] || limit="$_PROC_CWD_TIMEOUT_DEFAULT"
+  # CTL-1531 (Codex P2): force BASE 10 before any arithmetic. The regex above
+  # happily accepts "08"/"09", but bash reads a leading-zero operand as OCTAL, so
+  # `[[ "$limit" -gt 0 ]]` below errors on the invalid digit and evaluates FALSE —
+  # no watchdog is started and the `wait` on a hung `lsof` can block forever. The
+  # malformed value bypassed the deadline entirely instead of degrading to 5.
+  # Affects the legacy sweep too, not only the widened class.
+  limit=$((10#$limit))
   tmp="${TMPDIR:-/tmp}/orphan-sweep-cwd.$$.${pid}"
   : > "$tmp" 2>/dev/null || return 0        # cannot stage a probe → unknown
   rm -f "${tmp}.timedout"

@@ -1247,8 +1247,23 @@ function startReaperAndTimer({
     ...(typeof procCfg.widenMaxKills === "number" && Number.isFinite(procCfg.widenMaxKills)
       ? { widenMaxKills: procCfg.widenMaxKills }
       : {}),
-    ...(procCfg.graceMs != null ? { graceMs: Number(procCfg.graceMs) } : {}),
-    ...(procCfg.minEtimeSec != null ? { minEtimeSec: Number(procCfg.minEtimeSec) } : {}),
+    // CTL-1531 (Codex P2): a malformed value must fall back to the DEFAULT, never
+    // reach the reaper as NaN. `Number("bad")` is NaN, and the age gate in
+    // proc-reaper.mjs is `etimeSec < minEtimeSec` — which is FALSE for every process
+    // when the right side is NaN. So one typo'd config field silently removed the
+    // 900-second teardown-safety floor and made even a one-second-old arbitrary
+    // command killable by the widened path. Omitting the key lets the reaper's own
+    // documented default stand, which is the whole point of a floor.
+    // `!= null` is kept as the OUTER test on purpose: Number(null) is 0, so folding
+    // null into the numeric check would newly pass an explicit null through as 0.
+    ...(procCfg.graceMs != null && Number.isFinite(Number(procCfg.graceMs)) && Number(procCfg.graceMs) >= 0
+      ? { graceMs: Number(procCfg.graceMs) }
+      : {}),
+    ...(procCfg.minEtimeSec != null &&
+    Number.isFinite(Number(procCfg.minEtimeSec)) &&
+    Number(procCfg.minEtimeSec) >= 0
+      ? { minEtimeSec: Number(procCfg.minEtimeSec) }
+      : {}),
     ...(procCfg.worktreeRoot ? { worktreeRoot: procCfg.worktreeRoot } : {}),
     ...(Array.isArray(procCfg.allowlistPatterns)
       ? { allowlistPatterns: procCfg.allowlistPatterns }
