@@ -1496,6 +1496,91 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
   });
 
+  // ─── CTL-1567: a human response clears needs-human FIRST, unconditionally ───
+  //
+  // Both cases below were silently dropped before this fix, which is why the
+  // "Needs you" list only ever grew. Measured on the live fleet 2026-07-29: 10 of
+  // 12 parked tickets had NO worker dir on either host, and the ones that did
+  // carried `status: "needs-human"` — the one status the loop ignored.
+
+  test("REGRESSION: clears needs-human even when the ticket has NO worker directory", async () => {
+    const orch = tmpOrcDir(); // deliberately no workers/<TICKET>/ at all
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-NODIR", body: "here is your answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    // The label lives in Linear; a reaped worker dir must not make it unclearable.
+    expect(removed).toContainEqual({ ticket: "CTL-NODIR", label: "needs-human" });
+  });
+
+  test("REGRESSION: clears needs-human for a signal with status=needs-human", async () => {
+    const orch = tmpOrcDir();
+    // recovery-emit.mjs / recovery-reasoning.mjs write THIS status, which matched
+    // neither the `stalled` nor the `needs-input` branch.
+    writeSignal(orch, "CTL-NH", "implement", { status: "needs-human" });
+    const removed = [];
+    const cleared = [];
+    await handleCommentWake(
+      { ticket: "CTL-NH", body: "answered" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+        clearStall: ({ ticket, phase }) => {
+          cleared.push({ ticket, phase });
+          return true;
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-NH", label: "needs-human" });
+    // …and it is treated like `stalled`, so the stall is cleared too.
+    expect(cleared).toContainEqual({ ticket: "CTL-NH", phase: "implement" });
+  });
+
+  test("the bot's OWN comment still does NOT clear the label (self-echo guard intact)", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-BOT", body: "parking question", authorId: "bot-uuid" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("a Linear write failure does not throw — the wake path stays fail-open", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-ERR", "implement", { status: "needs-human" });
+    await handleCommentWake(
+      { ticket: "CTL-ERR", body: "answered" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => {
+          throw new Error("linear 503");
+        },
+        clearStall: () => true,
+      }
+    );
+    // reaching here without throwing IS the assertion
+    expect(true).toBe(true);
+  });
+
   // CTL-764 finding 11: the daemon removes the durable needs-input label out-of-band and
   // redispatches — the scheduler never sees this edge, so the needs-input→cleared
   // resolution must be recorded here in the canonical worker.transition stream.

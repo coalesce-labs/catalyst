@@ -324,6 +324,26 @@ function ensureState(orchDir) {
   }
 }
 
+// clearNeedsHumanMarkers — CTL-1567: delete the once-markers that pair with the
+// `needs-human` Linear label, so a cleared label and the local marker can never
+// disagree. Mirrors the marker path in label-guard.mjs (`labelMarkerBase`) and
+// the pair that clearStalledLabel removes. Best-effort: a missing marker (the
+// common case — most parked tickets have no worker dir at all) is success, not
+// an error. Returns the paths actually removed, for logging/tests.
+export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}) {
+  const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
+  const removed = [];
+  for (const suffix of [".applied", ".skipped"]) {
+    try {
+      rm(`${base}${suffix}`);
+      removed.push(`${base}${suffix}`);
+    } catch {
+      /* absent → nothing to reconcile for this suffix */
+    }
+  }
+  return removed;
+}
+
 // handleCommentWake — CTL-549 re-dispatch hook. Called on each
 // `linear.comment.created` event by the daemon's `onComment` callback wired
 // into startMonitor. Scans all phase signals for the comment's ticket; for
@@ -354,6 +374,56 @@ export async function handleCommentWake(
   // writers' guard. botUserId accepts a string or Set<string>.
   if (_isBotId(botUserId, parsed.authorId)) return;
 
+  // CTL-1567: CLEAR FIRST — a human answered, so the ticket must drop off the
+  // "Needs you" list before anything else is attempted, and regardless of whether
+  // anything else succeeds.
+  //
+  // This used to happen only deep inside the per-signal loop below, which made it
+  // conditional on host-local state that has nothing to do with the label:
+  //   • no `workers/<TICKET>/` dir  → the `catch { return }` below fired and the
+  //     comment was silently dropped. The label lives in LINEAR; a reaped worker
+  //     directory must not make it permanently unclearable. Measured 2026-07-29:
+  //     10 of 12 parked tickets had no worker dir on either host.
+  //   • `status: "needs-human"`     → matched neither the `stalled` nor the
+  //     `needs-input` branch, so the ONE status that means "parked for a human"
+  //     was the one the wake path ignored.
+  //
+  // Re-adding is cheap and already automatic (`labelOnce` re-applies it if the
+  // ticket still needs a human after this response is processed); never-clearing
+  // is what grows the inbox without bound. Idempotent: removeLabel reports the
+  // already-absent case as removed:true, so this is safe to run on every comment
+  // and safe to run concurrently on both hosts.
+  let clearedNeedsHuman = false;
+  try {
+    const res = await removeLabel(ticket, "needs-human");
+    clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
+  } catch {
+    /* fail-open — a Linear write failure must never block the wake path */
+  }
+  if (clearedNeedsHuman) {
+    // Keep the once-marker in step with the label. Clearing one without the other
+    // is the desync that leaves labelOnce permanently disarmed (or the board
+    // showing a park Linear no longer has).
+    try {
+      clearNeedsHumanMarkers(orchDir, ticket);
+    } catch (err) {
+      log.warn(
+        { ticket, err: err?.message },
+        "handleCommentWake: needs-human marker reconcile failed — label already cleared"
+      );
+    }
+    try {
+      appendWorkerTransitionEvent({
+        ticket,
+        from: "needs-human",
+        to: "cleared",
+        reason: "human-responded",
+      });
+    } catch {
+      /* observability only */
+    }
+  }
+
   const workerDir = join(orchDir, "workers", ticket);
   let signalFiles;
   try {
@@ -361,6 +431,7 @@ export async function handleCommentWake(
       (f) => f.startsWith("phase-") && f.endsWith(".json")
     );
   } catch {
+    // No local worker state: the label clear above is the entire correct response.
     return;
   }
 
@@ -376,7 +447,12 @@ export async function handleCommentWake(
     // the J3 seam (delete the synthetic stalled signal + remove the needs-human
     // label & markers + .orphan-detected). The scheduler re-derives advancement
     // from the preserved prior-done signal and re-dispatches the phase fresh.
-    if (sig.status === "stalled") {
+    // CTL-1567: `needs-human` is a SECOND signal status meaning exactly what
+    // `stalled` means (written by recovery-emit.mjs / recovery-reasoning.mjs).
+    // It matched neither branch here, so an operator answering one of those
+    // tickets got no stall clear and no re-dispatch. Treat the two identically
+    // until the duplicate status is normalized away (CTL-1552).
+    if (sig.status === "stalled" || sig.status === "needs-human") {
       const phase = fname.slice("phase-".length, -".json".length);
       try {
         clearStall({ ticket, phase });
