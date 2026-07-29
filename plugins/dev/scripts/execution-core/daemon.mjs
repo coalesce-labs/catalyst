@@ -1254,15 +1254,21 @@ function startReaperAndTimer({
     // 900-second teardown-safety floor and made even a one-second-old arbitrary
     // command killable by the widened path. Omitting the key lets the reaper's own
     // documented default stand, which is the whole point of a floor.
-    // `!= null` is kept as the OUTER test on purpose: Number(null) is 0, so folding
-    // null into the numeric check would newly pass an explicit null through as 0.
-    ...(procCfg.graceMs != null && Number.isFinite(Number(procCfg.graceMs)) && Number(procCfg.graceMs) >= 0
-      ? { graceMs: Number(procCfg.graceMs) }
+    // Test the RAW type — never coerce. `Number()` maps `false`, `""` and `[]` all to
+    // 0, so a coercing guard accepts every one of them as a legitimate floor of zero
+    // and disables the 900-second protection just as surely as the NaN case did. Only
+    // a real number is a real threshold; anything else falls through to the reaper's
+    // documented default. This matches the `widenMaxKills` guard above rather than
+    // inventing a second, weaker convention for the same kind of field.
+    ...(typeof procCfg.graceMs === "number" &&
+    Number.isFinite(procCfg.graceMs) &&
+    procCfg.graceMs >= 0
+      ? { graceMs: procCfg.graceMs }
       : {}),
-    ...(procCfg.minEtimeSec != null &&
-    Number.isFinite(Number(procCfg.minEtimeSec)) &&
-    Number(procCfg.minEtimeSec) >= 0
-      ? { minEtimeSec: Number(procCfg.minEtimeSec) }
+    ...(typeof procCfg.minEtimeSec === "number" &&
+    Number.isFinite(procCfg.minEtimeSec) &&
+    procCfg.minEtimeSec >= 0
+      ? { minEtimeSec: procCfg.minEtimeSec }
       : {}),
     ...(procCfg.worktreeRoot ? { worktreeRoot: procCfg.worktreeRoot } : {}),
     ...(Array.isArray(procCfg.allowlistPatterns)
