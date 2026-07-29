@@ -5,7 +5,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test daemon-watchdog-predicates.test.mjs
 
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, afterEach } from "bun:test";
 import {
   mkdtempSync,
   writeFileSync,
@@ -21,6 +21,7 @@ import {
   readDlqBytes,
   readLagStuck,
   classifyDaemonStuck,
+  forwarderEventLogPath,
   DAEMON_WATCHDOG_TARGETS,
 } from "./daemon-watchdog-predicates.mjs";
 
@@ -67,6 +68,20 @@ describe("classifyDaemonStuck (pure, boundary-exact)", () => {
       tripped: [],
     });
   });
+
+  test("missing DLQ (null) does NOT trip a dlqMaxBytes:0 threshold — a real 0-byte file does", () => {
+    // With dlqMaxBytes:0 a missing DLQ read as 0 would satisfy `0 >= 0` and
+    // wedge-restart every host with no DLQ. null (the missing sentinel) is dropped.
+    expect(classifyDaemonStuck({ dlqBytes: null, lagStuck: false }, { dlqMaxBytes: 0 })).toEqual({
+      stuck: false,
+      tripped: [],
+    });
+    // A genuinely present 0-byte DLQ is a real reading and DOES cross a 0 threshold.
+    expect(classifyDaemonStuck({ dlqBytes: 0, lagStuck: false }, { dlqMaxBytes: 0 })).toEqual({
+      stuck: true,
+      tripped: ["dlq"],
+    });
+  });
 });
 
 describe("readDlqBytes (statSync size, never readFileSync)", () => {
@@ -81,10 +96,21 @@ describe("readDlqBytes (statSync size, never readFileSync)", () => {
     }
   });
 
-  test("missing file → 0 (non-crossing)", () => {
+  test("missing file → null (non-crossing, distinct from a real 0-byte DLQ)", () => {
     const { dir, cleanup } = tmp();
     try {
-      expect(readDlqBytes(join(dir, "nope.jsonl"))).toBe(0);
+      expect(readDlqBytes(join(dir, "nope.jsonl"))).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("real empty file → 0 (a genuine 0-byte DLQ, NOT the missing sentinel)", () => {
+    const { dir, cleanup } = tmp();
+    try {
+      const p = join(dir, "empty.jsonl");
+      writeFileSync(p, "");
+      expect(readDlqBytes(p)).toBe(0);
     } finally {
       cleanup();
     }
@@ -207,5 +233,32 @@ describe("DAEMON_WATCHDOG_TARGETS registry", () => {
     expect(t.dlqPath).toContain("otel-forward-dlq-otlp.jsonl");
     expect(t.checkpointPath).toContain("otel-forward.checkpoint.json");
     expect(t.restartArgs).toEqual(["forward-restart"]);
+  });
+});
+
+describe("forwarderEventLogPath (matches otel-forward's tail target)", () => {
+  const saved = { dir: process.env.CATALYST_DIR, events: process.env.CATALYST_EVENTS_DIR };
+  afterEach(() => {
+    if (saved.dir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = saved.dir;
+    if (saved.events === undefined) delete process.env.CATALYST_EVENTS_DIR;
+    else process.env.CATALYST_EVENTS_DIR = saved.events;
+  });
+
+  function ym() {
+    const now = new Date();
+    return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
+
+  test("defaults to $CATALYST_DIR/events/<UTC-month>.jsonl", () => {
+    process.env.CATALYST_DIR = "/tmp/cat-x";
+    delete process.env.CATALYST_EVENTS_DIR;
+    expect(forwarderEventLogPath()).toBe(`/tmp/cat-x/events/${ym()}.jsonl`);
+  });
+
+  test("honors CATALYST_EVENTS_DIR override (mirrors otel-forward/index.ts)", () => {
+    process.env.CATALYST_DIR = "/tmp/cat-x";
+    process.env.CATALYST_EVENTS_DIR = "/mnt/elsewhere/events";
+    expect(forwarderEventLogPath()).toBe(`/mnt/elsewhere/events/${ym()}.jsonl`);
   });
 });

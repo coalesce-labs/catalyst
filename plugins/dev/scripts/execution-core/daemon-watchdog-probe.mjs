@@ -29,6 +29,7 @@ import {
   readDlqBytes as defaultReadDlqBytes,
   readLagStuck as defaultReadLagStuck,
   classifyDaemonStuck,
+  forwarderEventLogPath,
   DAEMON_WATCHDOG_TARGETS,
 } from "./daemon-watchdog-predicates.mjs";
 import {
@@ -37,7 +38,7 @@ import {
   escalate as defaultEscalate,
   getWatchdogDir,
 } from "./daemon-watchdog-alert.mjs";
-import { readDaemonWatchdogConfig, getEventLogPath, log as defaultLog } from "./config.mjs";
+import { readDaemonWatchdogConfig, log as defaultLog } from "./config.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MONITOR_SCRIPT = join(__dirname, "..", "catalyst-monitor.sh");
@@ -104,9 +105,12 @@ export function startDaemonWatchdogProbe({
 } = {}) {
   const { mode, intervalMs, dlqMaxBytes, stalenessMs, cooldownMs, sustainedTicks, verifyTicks } = config;
   // Default io for the alert sinks (log line + marker + best-effort event log).
+  // NB: no cached `logPath` — the alert sinks fall back to getEventLogPath() and
+  // must recompute it per raise/clear so a daemon up across a UTC month rollover
+  // appends to the current month's log, not the one resolved at probe start
+  // (CTL-1502 Codex P1). The lag read below resolves its own fresh path too.
   const alertIo = io ?? {
     log,
-    logPath: getEventLogPath(),
     markerDir: getWatchdogDir(),
     now: () => new Date().toISOString(),
   };
@@ -131,12 +135,16 @@ export function startDaemonWatchdogProbe({
         continue;
       }
       const nowMs = now();
-      const dlqBytes = await safeAsync(() => readDlqBytes(t.dlqPath), 0);
+      const dlqBytes = await safeAsync(() => readDlqBytes(t.dlqPath), null);
       const lagStuck = await safeAsync(
         () =>
           readLagStuck({
             checkpointPath: t.checkpointPath,
-            eventLogPath: alertIo.logPath ?? getEventLogPath(),
+            // Resolve the forwarder's input log fresh each tick, honoring
+            // CATALYST_EVENTS_DIR so we stat the file otel-forward actually tails
+            // (not the default path) and re-derive it across a UTC month rollover
+            // (CTL-1502 Codex P1).
+            eventLogPath: forwarderEventLogPath(),
             stalenessMs,
             now: nowMs,
           }),

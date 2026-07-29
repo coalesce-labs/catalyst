@@ -280,8 +280,9 @@ mode, restarts the stuck daemon exactly once per breach episode.
   progress signal because it advances only on real forwarding, unlike the checkpoint file's mtime
   (rewritten unconditionally every 10 s — the same trap as the unconditional heartbeat).
 - **Out-of-band alert path** (the watched daemon's own egress may be the wedged thing): the alert
-  rides the exec-core daemon's pino `.log` (Alloy-shipped, independent of otel-forward) plus a local
-  marker `~/catalyst/watchdog/<daemon>.alert.json` the HUD reads. A best-effort
+  rides the exec-core daemon's pino `.log` (Alloy-shipped, independent of otel-forward) plus a durable
+  local marker `~/catalyst/watchdog/<daemon>.alert.json` latching the current stuck/cleared state (a
+  HUD/orch-monitor renderer over that marker is a follow-up — CTL-1502 Codex P2). A best-effort
   `catalyst.alert.raised|cleared {kind:"daemon_stuck"}` event to the log (for dashboards) is
   explicitly *not* load-bearing — it rides the very egress that may be broken.
 - **State machine** (a structural clone of the fleet-health probe, hysteresis + cooldown): a

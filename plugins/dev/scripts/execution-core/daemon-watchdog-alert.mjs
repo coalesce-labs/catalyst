@@ -4,7 +4,11 @@
 //
 //   1. the exec-core daemon pino `log` line (Alloy ships the `.log` → Loki,
 //      independent of the otel-forward egress that may itself be the wedged path)
-//   2. a local marker file ~/catalyst/watchdog/<daemon>.alert.json the HUD reads
+//   2. a durable local marker file ~/catalyst/watchdog/<daemon>.alert.json — a
+//      stable machine-readable latch of the current stuck/cleared state, independent
+//      of the egress path (a HUD/orch-monitor reader that renders it is a follow-up,
+//      CTL-1502 Codex P2; today the marker is consumed by operators/tests + this
+//      writer, and the state is also surfaced via sinks 1 & 3)
 //   3. best-effort catalyst.alert.raised|cleared to the event log for dashboards
 //      — explicitly NOT load-bearing (it rides the very egress that may be broken)
 //
@@ -51,8 +55,9 @@ function catalystDir() {
   return process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 }
 
-// The HUD-readable marker dir — ~/catalyst/watchdog/. Re-resolved per call so
-// tests redirect via CATALYST_DIR (matches the predicates module).
+// The durable marker dir — ~/catalyst/watchdog/. Re-resolved per call so tests
+// redirect via CATALYST_DIR (matches the predicates module). A HUD/orch-monitor
+// reader that renders these markers is a follow-up (CTL-1502 Codex P2).
 export function getWatchdogDir() {
   return join(catalystDir(), "watchdog");
 }

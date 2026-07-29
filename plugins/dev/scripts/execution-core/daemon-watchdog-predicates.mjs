@@ -5,7 +5,9 @@
 // are robust past 2 GB where the in-payload dlqDepth's whole-file readFileSync
 // throws RangeError (index.ts:145, swallowed → the payload dlqDepth silently
 // freezes on a huge DLQ). Missing/throwing reads return a NON-CROSSING sentinel
-// (0 / false) so a read failure can never fabricate a breach.
+// (null / false) so a read failure can never fabricate a breach — the classifier
+// guards `dlqBytes != null`, so a null read never trips even a `dlqMaxBytes: 0`
+// threshold (a real 0-byte file is distinct: it reads as the number 0).
 
 import { statSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -18,14 +20,30 @@ function catalystDir() {
 }
 
 // P1 — DLQ size via statSync (O(1); never reads bytes, so robust past 2 GB where
-// the in-payload dlqDepth's readFileSync throws RangeError). Missing/throw → 0
-// (non-crossing).
+// the in-payload dlqDepth's readFileSync throws RangeError). Missing/throw → null
+// (non-crossing) — NOT 0: a missing DLQ file must be distinguishable from a real
+// empty one, or a `dlqMaxBytes: 0` threshold would treat every host with no DLQ
+// as stuck (`0 >= 0`). The classifier's `dlqBytes != null` guard drops null.
 export function readDlqBytes(dlqPath) {
   try {
     return statSync(dlqPath).size;
   } catch {
-    return 0;
+    return null;
   }
+}
+
+// The forwarder's INPUT log — the file otel-forward tails and appends to. Resolved
+// exactly as otel-forward/index.ts (CATALYST_EVENTS_DIR override, then UTC month),
+// and recomputed per call so an execution-core daemon that stays up across a UTC
+// month rollover follows the new file instead of statting the prior month (CTL-1502
+// Codex P1). Distinct from config.mjs getEventLogPath(): that is the emitter path
+// (where the watchdog writes its OWN alert event); this is the file whose staleness
+// the lag predicate measures, which must match the forwarder's tail target.
+export function forwarderEventLogPath() {
+  const eventsDir = process.env.CATALYST_EVENTS_DIR ?? join(catalystDir(), "events");
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  return join(eventsDir, `${ym}.jsonl`);
 }
 
 // P2 — forwarding-lag: lastForwardedTs frozen for >= stalenessMs WHILE the event
