@@ -218,6 +218,26 @@ active work:
 - **Deferred**: reading `.draftPr` draft-state as a secondary advancement signal (advancement
   currently driven by signal `status === "done"` only).
 
+### Recovery-pass `pr_not_merged` remediation (CTL-1496)
+
+When `phase-teardown` emits `failed(reason: "pr_not_merged")`, the scheduler's **Pass 0r** sweeps
+it as a recovery item. Previously the classifier blindly escalated it to a human. With CTL-1496
+(`CATALYST_RECOVERY_PASS=shadow|enforce`), the classifier instead probes live GitHub state
+(`pr-block-probe.mjs` → one `gh pr view` + GraphQL `reviewThreads` + `gh pr view --json reviews`):
+
+- **Failing required checks or unresolved bot (Codex) threads, no human `CHANGES_REQUESTED`** →
+  `{ decision: "fix", fix_class: "bounded-llm" }` with a `"pr-not-merged"` brief embedding the
+  concrete failing-check names and thread ids. The recovery-pass worker fixes the CI, addresses the
+  review findings, resolves the threads, and posts `@codex review` via `gh-pr-comment.sh
+  --idempotent` to re-trigger the automated reviewer, then merges when `CLEAN`.
+- **Human `CHANGES_REQUESTED`** → `escalate` with the specific reviewer ask (PR and thread linked),
+  never the opaque `"Failure reason: pr_not_merged"` string.
+- **Probe throws** → `defer` (transient GitHub outage — retry next tick).
+- **No open PR found** → `escalate`.
+
+The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
+`recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
+
 ### Runaway-loop guards (CTL-671)
 
 `schedulerTick` is hardened against runaway dispatch/reclaim loops on phantom/non-resolving tickets
@@ -353,9 +373,33 @@ strings.
 | Space                                                                   | Rule                                                                                                                           |
 | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `filter.*`                                                              | Broker interest-management only (else filter-wake loop).                                                                       |
-| `broker.daemon.*`                                                       | Broker heartbeats/startup/shutdown only.                                                                                       |
+| `broker.daemon.*`                                                       | Broker lifecycle/health only (see the member list below).                                                                      |
 | `session.heartbeat`                                                     | Exact match; broker liveness pings only (CTL-401).                                                                             |
 | `phase.<name>.(complete\|failed\|turn-cap-exhausted\|skipped).<ticket>` | Routing namespace matched by `PHASE_EVENT_PATTERN`; `<name>` must be in `KNOWN_PHASES` or `INTENTIONAL_PHASE_SLOT_EXCEPTIONS`. |
+
+**`broker.daemon.*` members** (the complete emitted set, verified): `broker.daemon.startup` and
+`broker.daemon.shutdown` (`index.mjs`), `broker.daemon.heartbeat` (`index.mjs`), `broker.daemon.gc`
+(`gc-startup.mjs`), `broker.daemon.prose_disabled` (`router.mjs`), and the CTL-1523
+`broker.daemon.degraded` / `broker.daemon.recovered` pair (`broker-degraded.mjs`).
+
+That degraded/recovered pair is an EDGE-TRIGGERED episode with a **durable latch** (marker
+`~/catalyst/broker-degraded-latch.json`), and it is **OPT-IN and dormant by default** — it evaluates
+nothing unless `FILTER_BROKER_DEGRADED_ENABLED=1`. Under **execution-core dispatch** its
+`interests.size === 0` conjunct is permanently true (the daemon runs no `filter.register` producer),
+so the gate carries no information there. That is a property of execution-core, **not** of every
+configuration named `phase-agents`: a **legacy-wave** host — one driving
+`/catalyst-legacy:orchestrate`, which invokes `plugins/dev/scripts/orchestrate-register-interests.sh`
+— does register interests (pr/ticket/comms unconditionally, plus a per-ticket `phase_lifecycle` when
+`dispatchMode` is `phase-agents`), so there an empty table IS anomalous and enabling the knob is
+appropriate.
+
+**Neither this detector nor CTL-1122's `checkSourceRecency` can detect a fully-dead broker** — both
+execute inside the broker process, so a dead broker emits neither. `checkSourceRecency` detects an
+ingestion **stall** (an upstream source gone silent) while the broker is **alive**, via
+`catalyst.ingestion.stale` + `catalyst.alert.raised(system_down)`. Proving the process itself is gone
+requires an **external absence-based check** on the broker's own heartbeat/log series — a Loki
+`absent_over_time` alert on `broker.daemon.heartbeat` or the broker `.log` stream (absence, because a
+fully-dead daemon is a *missing series*, which `count_over_time == 0` cannot assert).
 
 **`KNOWN_PHASES`** (canonical 10, in order): `triage`, `research`, `plan`, `implement`, `verify`,
 `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown`.

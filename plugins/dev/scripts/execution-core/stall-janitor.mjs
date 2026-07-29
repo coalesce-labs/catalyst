@@ -53,6 +53,7 @@ import { NEXT_PHASE } from "../lib/workflow-descriptor.mjs";
 // truth — a new emit type is unusable until it is added to the shared list,
 // which the vocabulary then registers automatically.
 import { JANITOR_EVENT_TYPES } from "./janitor-event-types.mjs";
+import { isTicketKey } from "./ticket-key.mjs";
 
 // Named accessors over the frozen list — one per janitor emit type. Indexing the
 // frozen array keeps the strings in ONE place; a typo here is a load error, not a
@@ -529,6 +530,7 @@ export function defaultCollectOrphanCandidates({
   for (const d of workerDirs) {
     if (!d.isDirectory()) continue;
     const ticket = d.name;
+    if (!isTicketKey(ticket)) continue; // CTL-1504: non-ticket dir names are debris, not tickets
     try {
       const workerDir = join(orchDir, "workers", ticket);
       const teardownDone = existsSync(join(workerDir, ".terminal-done.applied"));
@@ -651,7 +653,7 @@ export function defaultCollectGhostCandidates({
 export function defaultTicketFromCwd(cwd) {
   if (!cwd) return null;
   const seg = stripTrailingSlash(cwd).split("/").pop();
-  return /^[A-Z]+-\d+$/.test(seg ?? "") ? seg : null;
+  return isTicketKey(seg ?? "") ? seg : null;
 }
 
 // defaultSignalMtimeMs — mtime of a phase signal file, or null when unreadable.
@@ -759,6 +761,7 @@ export function defaultCollectStallClearCandidates({
   for (const d of workerDirs) {
     if (!d.isDirectory()) continue;
     const ticket = d.name;
+    if (!isTicketKey(ticket)) continue; // CTL-1504: non-ticket dir names are debris, not tickets
     try {
       const workerDir = join(orchDir, "workers", ticket);
       // Find a `stalled` phase signal carrying the J3-relevant reason.
@@ -888,6 +891,7 @@ export function defaultCollectTerminalSignalGcCandidates({
   for (const d of workerDirs) {
     if (!d.isDirectory()) continue;
     const ticket = d.name;
+    if (!isTicketKey(ticket)) continue; // CTL-1504: non-ticket dir names are debris, not tickets
     try {
       const workerDir = join(orchDir, "workers", ticket);
 

@@ -48,6 +48,10 @@ on:
       # cli-reference-drift.test.sh below; a change to either must run this suite.
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
+      # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
+      # either must run migrate-dual-harness.test.sh below.
+      - "plugins/dev/scripts/migrate-dual-harness.sh"
+      - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
   push:
     branches: [main]
@@ -68,6 +72,10 @@ on:
       # CTL-1387: see the pull_request note above.
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
+      # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
+      # either must run migrate-dual-harness.test.sh below.
+      - "plugins/dev/scripts/migrate-dual-harness.sh"
+      - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
 
 jobs:
@@ -163,6 +171,28 @@ jobs:
         # flags (source/result/op top-level attrs + numeric age_ms).
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
+
+      - name: gh-pr-comment helper test (CTL-1496)
+        # Covers PR_NUMBER numeric validation + the idempotent existing-comment
+        # guard (skip on match, fail-closed on fetch failure).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/gh-pr-comment.test.sh
+
+      - name: recovery-pass pr_not_merged remediation test (CTL-1496)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/recovery-pass-pr-not-merged.test.sh
+
+      - name: review-comments headless resolution test (CTL-1496)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/review-comments-headless.test.sh
+
+      - name: migrate-dual-harness test (CTL-1530)
+        # Covers the dual-harness classification (dual-ok / codex-only /
+        # claude-only-monolithic / no-harness), the skills-dir state machine
+        # (.claude/skills symlink vs .agents/skills), and the dry-run /
+        # --fix / exit-code contract.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/migrate-dual-harness.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
@@ -317,6 +347,7 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \

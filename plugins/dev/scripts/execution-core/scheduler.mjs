@@ -64,6 +64,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
+import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import {
   defaultDispatch,
@@ -421,6 +422,46 @@ export function computeSurvivingRoster(
   } catch {
     return roster;
   }
+}
+
+// CTL-1524 (C4a): computeDeadHosts — the roster minus the surviving set, computed
+// with EXACTLY ONE computeSurvivingRoster call regardless of roster size.
+//
+// The daemon's board-health binding previously read
+//   roster.filter((h) => !computeSurvivingRoster(roster).includes(h))
+// which re-ran the ENTIRE surviving computation once PER HOST. computeSurvivingRoster's
+// default readHeartbeats is readClusterHeartbeats — a whole-file read of the event log
+// (883MB on mini, ~305ms under bun), so at N=2 a single deadHosts evaluation cost two
+// full-log reads (~610ms) on every tick. Hoisting the call and testing membership
+// against a Set makes that one read, and C4b below makes even that one lazy.
+//
+// NOTE: the read itself is NOT dead code. A claim that readClusterHeartbeats always
+// throws ERR_STRING_TOO_LONG (883MB > node's 512MB MAX_STRING_LENGTH) does not hold
+// here — the daemon runs under BUN, where the read completes (verified: 883MB in
+// ~1.4s). C4 removes only the REDUNDANT calls, never the read.
+//
+// Semantics are preserved exactly: computeSurvivingRoster returns the roster unchanged
+// for length <= 1 and degrades to the FULL roster on a failed/garbled heartbeat read,
+// so both cases still yield an EMPTY dead set (no failover, never a double-act).
+// FAIL-SAFE on a degenerate survivor set: computeSurvivingRoster NEVER returns empty
+// (`alive.length > 0 ? alive : roster`), so an empty/non-array/thrown result means the
+// computation itself misbehaved — not that the whole fleet died. Degrade to an EMPTY
+// dead set (forgo failover this tick) rather than declaring every host dead, which
+// would be the destructive direction.
+export function computeDeadHosts(
+  roster,
+  { computeSurviving = computeSurvivingRoster } = {}
+) {
+  if (!Array.isArray(roster) || roster.length <= 1) return [];
+  let alive;
+  try {
+    alive = computeSurviving(roster);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(alive) || alive.length === 0) return [];
+  const surviving = new Set(alive);
+  return roster.filter((h) => !surviving.has(h));
 }
 
 // CTL-1091 Phase 3: the RAW positively-live host set. Dispatch ownership requires
@@ -3153,20 +3194,15 @@ let _boardHealthLastRunMs = 0;
 // CTL-1257 shared ring (not yet threadable here). Best-effort: any read/parse
 // error degrades to [] so the dependent invariants flag observable:false rather
 // than throwing the tick.
-function readBoardHealthEventTail(maxLines = 800) {
+// CTL-1514: exported for direct unit coverage. Reads the last `maxLines` events
+// via the shared scanEventsChunked primitive (event-tail.mjs, CTL-673) — a
+// bounded ~1.6MB window near EOF — instead of materializing the entire monthly
+// event log (300MB+ / ~478K lines) into one string + array on the SYNCHRONOUS
+// scheduler tick every BOARD_HEALTH_INTERVAL_MS. That whole-file readFileSync was
+// the driver behind the measured 115s scheduler event-loop-delay spikes on mini.
+export function readBoardHealthEventTail(maxLines = 800) {
   try {
-    const raw = readFileSync(getEventLogPath(), "utf8");
-    const lines = raw.split("\n");
-    const out = [];
-    for (const line of lines.slice(-maxLines)) {
-      if (!line) continue;
-      try {
-        out.push(JSON.parse(line));
-      } catch {
-        /* skip a partial/garbled line */
-      }
-    }
-    return out;
+    return tailParsedEvents({ path: getEventLogPath(), maxLines });
   } catch {
     return [];
   }
@@ -5142,7 +5178,16 @@ export function schedulerTick(
           // → empty-Map / empty-array defaults keep the new invariants
           // observable:false and the holistic failover unreachable (shadow-safe).
           getPrStatusMap: _boardHealth.getPrStatusMap,
-          deadHosts: _boardHealth.deadHosts ? _boardHealth.deadHosts(roster) : [],
+          // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
+          // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
+          // internal throttle could never protect it — the cost was paid before the
+          // throttle was consulted. boardHealthPass now calls this only once it has
+          // decided to proceed. Backward-compatible: a plain ARRAY is still accepted
+          // (bare ticks / tests that pass one directly).
+          deadHosts:
+            typeof _boardHealth.deadHosts === "function"
+              ? () => _boardHealth.deadHosts(roster)
+              : (_boardHealth.deadHosts ?? []),
           lastRunMs: _boardHealthLastRunMs,
           // emit defaults to defaultEmitEvent. CTL-1300: thread the optional `act`
           // seam — supplied ONLY by the daemon binding (the holistic recovery-pass
@@ -7579,7 +7624,9 @@ function runTick() {
             return null;
           }
         },
-        deadHosts: (roster) => roster.filter((h) => !computeSurvivingRoster(roster).includes(h)),
+        // CTL-1524 (C4a): ONE computeSurvivingRoster call (⇒ one whole-log heartbeat
+        // read), not one per host. See computeDeadHosts above.
+        deadHosts: (roster) => computeDeadHosts(roster),
         // CTL-1157 (MUST-FIX 2): iterate the ordered candidate list and dispatch
         // the FIRST actionable (non-cooldown/non-latched) candidate — instead of
         // returning {dispatched:false} on the first skip, which wedged the whole

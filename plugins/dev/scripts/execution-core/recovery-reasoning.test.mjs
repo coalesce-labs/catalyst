@@ -27,6 +27,8 @@ import {
   recordVerdict,
   defaultSkipReason,
   escalateExhaustedIntents,
+  classifyPrNotMerged,
+  PR_NOT_MERGED_REASON,
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -2162,5 +2164,367 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 })).toBe("escalated");
     // …and B1's terminal TTL ages it back into triage.
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 + RECOVERY_TERMINAL_INTENT_TTL_MS })).toBeNull();
+  });
+});
+
+// ─── CTL-1496: pr_not_merged classification ─────────────────────────────────
+
+describe("classifyPrNotMerged (CTL-1496)", () => {
+  const mkEvidence = () => ({
+    logsOutput: null,
+    signal: { failureReason: PR_NOT_MERGED_REASON },
+    failureReason: PR_NOT_MERGED_REASON,
+    ticket: "CTL-1",
+  });
+  const probeReturning = (o) => () => o;
+
+  test("failing check → bounded-llm fix, brief names the check", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 42,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).toContain("quality");
+  });
+
+  test("unresolved bot thread only → bounded-llm fix (review sub-mode)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 43,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [{ id: "T1", path: "a.ts", line: 3, body: "fix this" }],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).toContain("review");
+  });
+
+  test("human CHANGES_REQUESTED → escalate with PR number in reason, not opaque pr_not_merged", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 44,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H1", body: "redesign", path: "b.ts", line: 9 }],
+        hasChangesRequested: true,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+    expect(r.details.reason).toContain("44");
+    expect(r.details.reason).not.toBe("Failure reason: pr_not_merged");
+  });
+
+  test("no blockers / CLEAN → bounded-llm fix (finish the merge)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 45,
+        mergeStateStatus: "CLEAN",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+
+  test("BLOCKED with no actionable cause → escalate (awaiting required approval, not LLM-fixable)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 46,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no remediable cause");
+  });
+
+  test("DIRTY with no actionable cause → escalate 'no remediable cause' (fallthrough coverage)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 47,
+        mergeStateStatus: "DIRTY",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no remediable cause");
+  });
+
+  test("probe throws → defer (transient), NOT escalate", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: () => { throw new Error("gh down"); },
+    });
+    expect(r.decision).toBe("defer");
+  });
+
+  test("no PR found (prNumber null) → escalate with 'no open PR' reason", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({ prNumber: null }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no open PR");
+  });
+
+  test("generateRemediateBrief('pr-not-merged') mentions gh pr view, @codex review", () => {
+    const b = generateRemediateBrief("pr-not-merged");
+    expect(b).toContain("gh pr view");
+    expect(b).toContain("@codex review");
+  });
+
+  test("generateRemediateBrief('pr-not-merged', probe) embeds check names and thread paths", () => {
+    const probe = {
+      prNumber: 42,
+      mergeStateStatus: "BLOCKED",
+      failingChecks: [{ name: "quality-gate", detailsUrl: null }],
+      unresolvedBotThreads: [{ id: "T1", path: "src/foo.ts", line: 5, body: "fix this" }],
+    };
+    const b = generateRemediateBrief("pr-not-merged", probe);
+    expect(b).toContain("quality-gate");
+    expect(b).toContain("src/foo.ts");
+    expect(b).toContain("@codex review");
+  });
+
+  // REGRESSION GUARD: probe is never called for non-pr_not_merged reasons.
+  test("merge-conflict still bounded-llm without touching the probe", () => {
+    let called = false;
+    const r = defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "merge-conflict" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(called).toBe(false);
+  });
+
+  test("unknown failure without pr_not_merged — probe never called", () => {
+    let called = false;
+    defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "some-other-reason" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(called).toBe(false);
+  });
+
+  test("classifyPrNotMerged exported + produces same result as via defaultClassifyTicket", () => {
+    const probe = probeReturning({
+      prNumber: 50,
+      mergeStateStatus: "BLOCKED",
+      failingChecks: [{ name: "lint", detailsUrl: null }],
+      unresolvedBotThreads: [],
+      unresolvedHumanThreads: [],
+      hasChangesRequested: false,
+    });
+    const via1 = defaultClassifyTicket(mkEvidence(), { probePrBlock: probe });
+    const via2 = classifyPrNotMerged(mkEvidence(), { probePrBlock: probe });
+    expect(via1).toEqual(via2);
+  });
+
+  // ── CTL-1496 remediation (Codex re-review round 2) ──
+
+  // P2: a merely-open human discussion thread (reviewDecision NOT
+  // CHANGES_REQUESTED) must NOT short-circuit to a human-escalation latch when
+  // there is a fixable cause — it follows the actionable path.
+  test("open human thread w/o CHANGES_REQUESTED + failing check → fix (not escalate)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 51,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H9", body: "just a question", path: "x.ts", line: 2 }],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+  });
+
+  // P2: pending required checks (queued/in-progress) are not a failure and not
+  // stuck — defer instead of latching a "no remediable cause" escalation.
+  test("only pending checks, no other cause → defer (retry next tick)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 52,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        pendingChecks: [{ name: "e2e", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("defer");
+    expect(r.details.reason).toContain("e2e");
+  });
+
+  // P2: a failing check still wins over pending — fix, don't defer.
+  test("failing check alongside a pending check → fix (failing wins)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 53,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "unit", detailsUrl: null }],
+        pendingChecks: [{ name: "e2e", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+
+  // P1: the ticket's repo + worktreePath are threaded from the worker signal
+  // into the probe so it resolves the ticket's repository, not the daemon's.
+  test("threads repo + worktreePath from the worker signal into the probe", () => {
+    let seen = null;
+    classifyPrNotMerged(
+      {
+        failureReason: PR_NOT_MERGED_REASON,
+        ticket: "CTL-77",
+        signal: {
+          failureReason: PR_NOT_MERGED_REASON,
+          branchName: "ryan/ctl-77-x",
+          repo: "acme/widgets",
+          worktreePath: "/wt/CTL-77",
+        },
+      },
+      {
+        probePrBlock: (ticket, opts) => {
+          seen = { ticket, ...opts };
+          return { prNumber: 77, mergeStateStatus: "CLEAN", failingChecks: [], unresolvedBotThreads: [], unresolvedHumanThreads: [], hasChangesRequested: false };
+        },
+      },
+    );
+    expect(seen.ticket).toBe("CTL-77");
+    expect(seen.repo).toBe("acme/widgets");
+    expect(seen.worktreePath).toBe("/wt/CTL-77");
+    expect(seen.branch).toBe("ryan/ctl-77-x");
+  });
+});
+
+// ─── CTL-1496 Phase 4: reasoningRecoveryPass end-to-end (enforce + shadow) ──
+
+describe("reasoningRecoveryPass — pr_not_merged end-to-end (CTL-1496 Phase 4)", () => {
+  const mkPrNotMergedItem = () => ({
+    ticket: "CTL-PRNM",
+    evidence: {
+      failureReason: "pr_not_merged",
+      signal: { failureReason: "pr_not_merged" },
+      ticket: "CTL-PRNM",
+      logsOutput: null,
+      jobState: null,
+    },
+  });
+
+  test("enforce: pr_not_merged + failing check → dispatches recovery-pass (fix intent recorded)", () => {
+    const intents = [];
+    const events = [];
+    const items = [mkPrNotMergedItem()];
+    reasoningRecoveryPass(items, {
+      mode: "enforce",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "bounded-llm",
+        details: {
+          reason: "PR #42 failing quality",
+          brief: "…@codex review…",
+        },
+      }),
+      invokeRecoveryPass: (_ticket, _o) => ({
+        success: true,
+        dispatched: true,
+        details: {},
+      }),
+      recordIntent: (t, i) => intents.push({ t, i }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(intents.length).toBeGreaterThan(0);
+    const fixIntent = intents.find((i) => i.i.decision === "fix" || i.i.type === "recovery-pass");
+    expect(fixIntent).toBeDefined();
+    expect(events.some((e) => e.type === "recovery.fixed" || e.type === "recovery.decision")).toBe(true);
+  });
+
+  test("shadow: pr_not_merged + failing check → emits would-fix event, dispatches NOTHING", () => {
+    const events = [];
+    const items = [mkPrNotMergedItem()];
+    reasoningRecoveryPass(items, {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "bounded-llm",
+        details: { reason: "PR #42", brief: "…" },
+      }),
+      invokeRecoveryPass: () => {
+        throw new Error("must not dispatch in shadow mode");
+      },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(events.some((e) => String(e.type).includes("would"))).toBe(true);
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
+  });
+
+  test("shadow: human CHANGES_REQUESTED → emits would-escalate, dispatches NOTHING", () => {
+    const events = [];
+    reasoningRecoveryPass([mkPrNotMergedItem()], {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "escalate",
+        fix_class: "human",
+        details: { reason: "PR #44 blocked by human review — 'redesign' (b.ts:9)" },
+      }),
+      invokeRecoveryPass: () => { throw new Error("must not dispatch in shadow"); },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(events.some((e) => String(e.type).includes("would-escalate") || String(e.type).includes("would"))).toBe(true);
+  });
+
+  test("probe throws in enforce → defer outcome (no dispatch, no escalation latch)", () => {
+    const events = [];
+    const intents = [];
+    reasoningRecoveryPass([mkPrNotMergedItem()], {
+      mode: "enforce",
+      classifyTicket: () => ({
+        decision: "defer",
+        fix_class: "board-health",
+        details: { reason: "pr_not_merged: probe failed (gh down); retry next tick" },
+      }),
+      invokeRecoveryPass: () => { throw new Error("must not dispatch on defer"); },
+      recordIntent: (t, i) => intents.push({ t, i }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    const deferIntent = intents.find((i) => i.i.decision === "defer");
+    expect(deferIntent).toBeDefined();
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
+    expect(events.some((e) => e.type === "recovery.escalated")).toBe(false);
   });
 });

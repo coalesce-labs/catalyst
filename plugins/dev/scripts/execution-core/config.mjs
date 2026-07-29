@@ -137,6 +137,16 @@ export function getReconcileHealthDir() {
   return resolve(getExecutionCoreDir(), "reconcile-health");
 }
 
+// CTL-1503 — fleet-health durable-latch dir. Holds the edge-trigger latch marker
+// (fleet-health-latch.json) the probe persists on the healthy→degraded /
+// degraded→healthy edges and hydrates on start, so a daemon restart mid-episode
+// does not re-emit `degraded` with no prior `recovered`. CATALYST_DIR-scoped
+// (re-resolved per call) so tests isolate via CATALYST_DIR, mirroring
+// getReconcileHealthDir.
+export function getFleetHealthDir() {
+  return resolve(getExecutionCoreDir(), "fleet-health");
+}
+
 // The durable event-log tailer cursor — monitor.mjs persists its byte offset
 // here so a daemon restart resumes the fast path instead of re-seeding at EOF.
 export function getCursorPath() {
@@ -557,12 +567,54 @@ export function getExecutor(configPath) {
 
 // --- CTL-1457: per-phase executor routing + codex-exec runtime settings ---
 
-// readExecutorByPhaseLayer1 — pull catalyst.orchestration.executorByPhase (a
-// phase→executor map) out of a project's Layer-1 .catalyst/config.json. Returns
-// {} for a null/missing/unparseable file or an absent/non-object key so callers
-// fall back to the daemon executor. Never throws — mirrors
-// readFleetHealthConfigLayer1's ENOENT-tolerant shape.
-export function readExecutorByPhaseLayer1(configPath) {
+// readExecutorByPhaseLayer1 — resolve the executorByPhase (phase→executor) map.
+// Precedence: env CATALYST_EXECUTOR_BY_PHASE (a JSON map) OVER Layer-1
+// catalyst.orchestration.executorByPhase — mirroring resolveExecutor's
+// env-over-Layer-1 precedence. Returns {} for a null/missing/unparseable file or an
+// absent/non-object key so callers fall back to the daemon executor. Never throws —
+// mirrors readFleetHealthConfigLayer1's ENOENT-tolerant shape.
+//
+// CTL-1457 follow-up (Gap 1): the env override is the DURABLE, clobber-safe home for
+// a routing pin. On worker nodes the per-node Layer-1 .catalyst/config.json is
+// git-reset every few minutes, so a routing pin written to the file cannot persist;
+// CATALYST_EXECUTOR_BY_PHASE (set in the daemon launch env) survives that reset. When
+// set to a plain-object JSON map it REPLACES the file (env-over-Layer-1). When set but
+// malformed (invalid JSON, or JSON that is not a plain object) it WARN-logs actionably
+// and FALLS THROUGH to the Layer-1 file — a routing pin never silently vanishes AND a
+// typo never silently routes. Example: {"triage":"codex-exec"}.
+export function readExecutorByPhaseLayer1(configPath, env = process.env) {
+  const rawEnv = env?.CATALYST_EXECUTOR_BY_PHASE;
+  if (typeof rawEnv === "string" && rawEnv.trim() !== "") {
+    let parsedEnv;
+    let parseErr = null;
+    try {
+      parsedEnv = JSON.parse(rawEnv);
+    } catch (err) {
+      parseErr = err;
+    }
+    const isPlainObject =
+      !parseErr && parsedEnv && typeof parsedEnv === "object" && !Array.isArray(parsedEnv);
+    // Every route VALUE must be a string. A non-string (e.g. {"triage":false} /
+    // {"triage":null}) would make resolveExecutorForPhase treat that phase as unrouted
+    // AND hide a valid Layer-1 route — silently losing the durable pin this override adds.
+    const badPhase = isPlainObject
+      ? Object.entries(parsedEnv).find(([, v]) => typeof v !== "string")?.[0]
+      : undefined;
+    if (isPlainObject && badPhase === undefined) {
+      // A well-formed phase→executor string map → env REPLACES the Layer-1 file.
+      return parsedEnv;
+    }
+    // Any malformed shape (JSON parse error, non-object, or a non-string route value) →
+    // WARN + fall through to the Layer-1 file. Never throw, never silently route.
+    log.warn(
+      { value: rawEnv, err: parseErr?.message, badPhase },
+      parseErr
+        ? "CATALYST_EXECUTOR_BY_PHASE is set but is not valid JSON — ignoring the env override and falling back to the Layer-1 executorByPhase map"
+        : badPhase !== undefined
+          ? `CATALYST_EXECUTOR_BY_PHASE has a non-string value for phase "${badPhase}" — ignoring the env override and falling back to the Layer-1 executorByPhase map`
+          : "CATALYST_EXECUTOR_BY_PHASE is set but did not parse to a JSON object (a phase→executor map) — ignoring the env override and falling back to the Layer-1 executorByPhase map"
+    );
+  }
   if (!configPath) return {};
   try {
     const parsed = JSON.parse(readFileSync(configPath, "utf8"));
@@ -591,11 +643,11 @@ export function readExecutorByPhaseLayer1(configPath) {
 //     today (zero behavior change when executorByPhase is empty).
 // Returns { executor, source } — source is "executorByPhase" for a routed phase,
 // else resolveExecutor's source ("env" | "layer1" | "default"). The `env` bag is
-// accepted for signature symmetry with the other injected-env-bag readers; routing
-// itself is Layer-1-file-only today (there is no env override for the map).
+// threaded into readExecutorByPhaseLayer1 so the CTL-1457-followup env override
+// (CATALYST_EXECUTOR_BY_PHASE, env-over-Layer-1) is honored here too — a phase routed
+// via the durable env map resolves exactly as one routed via the Layer-1 file.
 export function resolveExecutorForPhase(phase, { configPath, env = process.env } = {}) {
-  void env; // reserved for signature symmetry; per-phase routing is Layer-1-file-only.
-  const map = readExecutorByPhaseLayer1(configPath);
+  const map = readExecutorByPhaseLayer1(configPath, env);
   const raw = phase != null ? map[phase] : undefined;
   if (typeof raw === "string" && raw.trim() !== "") {
     const normalized = raw.trim().toLowerCase();
@@ -1087,11 +1139,21 @@ export function readMemorySamplerConfig() {
 // (catalyst.orchestration.fleetHealth in .catalyst/config.json) > code default.
 // `selfHealEnabled` DEFAULTS OFF — the first ship is a pure alert; nothing is
 // reaped until an operator opts in via EXECUTION_CORE_FLEET_SELF_HEAL.
+//
+// CTL-1503: the fleet.health.degraded event is now EDGE-TRIGGERED with a
+// HYSTERESIS BAND — degraded fires once on the healthy→degraded edge and a paired
+// fleet.health.recovered fires once on the degraded→healthy edge. The swap signal
+// carries a distinct lower `swapUsedMbClearThreshold`: the latch clears only once
+// swap drops strictly below the clear threshold, so a signal hovering in the band
+// [clear, trip) cannot re-flap. The absolute swap trip is raised above the
+// observed normal-swap ceiling (~11.5–24 GB on a 16 GB Mac) so it stops firing on
+// every tick. Both are per-host tunable via env / Layer-1.
 const FLEET_HEALTH_DEFAULTS = Object.freeze({
   enabled: true,
   intervalMs: 120_000,
   jobsThreshold: 500,
-  swapUsedMbThreshold: 4096,
+  swapUsedMbThreshold: 24576,
+  swapUsedMbClearThreshold: 16384,
   agentsThreshold: 12,
   procsThreshold: 40,
   selfHealEnabled: false,
@@ -1126,6 +1188,29 @@ function fleetHealthNumber(envVal, l1Val, def) {
 
 export function readFleetHealthConfig(configPath) {
   const l1 = readFleetHealthConfigLayer1(configPath);
+  // CTL-1503 (Codex P2): the swap CLEAR threshold must be STRICTLY below the TRIP
+  // threshold, or a steady swap value at the trip level is simultaneously `trip`
+  // (>=) and `clear` (<) — the latch emits recovery while the breach continues, then
+  // alternates degraded/recovered each tick. Resolve both, then clamp an invalid
+  // clear (>= trip) down to trip-1 with a loud warn so hysteresis is always a real band.
+  const swapTrip = fleetHealthNumber(
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
+    l1.swapUsedMbThreshold,
+    FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
+  );
+  let swapClear = fleetHealthNumber(
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD,
+    l1.swapUsedMbClearThreshold,
+    FLEET_HEALTH_DEFAULTS.swapUsedMbClearThreshold,
+  );
+  if (swapClear >= swapTrip) {
+    const clamped = Math.max(0, swapTrip - 1);
+    log.warn(
+      { swapClear, swapTrip, clamped },
+      "fleet-health: swapUsedMbClearThreshold >= swapUsedMbThreshold — clamping clear below trip to keep a real hysteresis band",
+    );
+    swapClear = clamped;
+  }
   return {
     // env=0 disables; otherwise Layer-1 enabled===false disables; else default-on.
     enabled:
@@ -1144,11 +1229,10 @@ export function readFleetHealthConfig(configPath) {
       l1.jobsThreshold,
       FLEET_HEALTH_DEFAULTS.jobsThreshold,
     ),
-    swapUsedMbThreshold: fleetHealthNumber(
-      process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
-      l1.swapUsedMbThreshold,
-      FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
-    ),
+    swapUsedMbThreshold: swapTrip,
+    // CTL-1503 — lower clear threshold for the swap hysteresis band; the latch
+    // releases only once swap drops strictly below this (clamped < trip above).
+    swapUsedMbClearThreshold: swapClear,
     agentsThreshold: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_AGENTS_THRESHOLD,
       l1.agentsThreshold,
@@ -1712,6 +1796,15 @@ export function readLinearReplica(env = process.env) {
 // catalystDir() idiom) so tests redirect via the env var.
 export function getReplicaDbPath() {
   return process.env.CATALYST_REPLICA_DB || resolve(catalystDir(), "catalyst-replica.db");
+}
+
+// CTL-1508: path to the cloud-sync self-heal breadcrumb — dropped by the writer just
+// before a genuine-stall exit(1), cleared on the next boot's 'live'. Lives beside the
+// writer's log/DB under ~/catalyst so CTL-1509's external responder and doctor find it at
+// a stable path. Re-resolved per call (the catalystDir() idiom) so tests redirect via
+// CATALYST_DIR.
+export function getCloudSyncSelfHealPath() {
+  return resolve(catalystDir(), "cloud-sync.selfheal.json");
 }
 
 // --- Catalyst-Cloud token resolution (CTL-1394) ---

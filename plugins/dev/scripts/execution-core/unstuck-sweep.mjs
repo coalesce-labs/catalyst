@@ -17,6 +17,7 @@ import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { log, getEventLogPath } from "./config.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "./unstuck-sweep-event-types.mjs";
+import { isTicketKey } from "./ticket-key.mjs";
 
 export { UNSTUCK_SWEEP_EVENT_TYPES };
 
@@ -132,6 +133,7 @@ export function defaultCollectUnstuckCandidates({
   for (const d of workerDirs) {
     if (!d.isDirectory()) continue;
     const ticket = d.name;
+    if (!isTicketKey(ticket)) continue; // CTL-1504: never probe a non-ticket dir name
     try {
       const workerDir = join(orchDir, "workers", ticket);
       let signalFiles;

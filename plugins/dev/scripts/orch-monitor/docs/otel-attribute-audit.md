@@ -12,8 +12,8 @@ Do **not** edit this file directly.
 | --- | --- |
 | ✓ Conforming | 20 |
 | → Rename-to | 37 |
-| ● Legitimately Custom | 39 |
-| **Total** | 96 |
+| ● Legitimately Custom | 40 |
+| **Total** | 97 |
 
 ## Classification by Emitter
 
@@ -68,6 +68,7 @@ Do **not** edit this file directly.
 | `vcs.ref.name` | `canonical-event.ts:75` | ✓ conforming |  |  |  |
 | `vcs.repository.name` | `canonical-event.ts:73` | ✓ conforming |  |  |  |
 | `vcs.revision` | `canonical-event.ts:76` | → rename-to | → `vcs.ref.revision` | Cluster E |  |
+| `webhook.delivery.id` | `canonical-event.ts:100` | ● custom |  |  | CTL-1532 |
 
 ### Bash (`canonical-event.sh`)
 

@@ -71,7 +71,10 @@ emit_stale_base_detected() {
 }
 
 # emit_auto_rebased — INFO: rebase succeeded (clean or additive auto-resolve).
-# --orch <id>  --ticket <key>  --phase <name>  --strategy <clean|additive|recreate>
+# --orch <id>  --ticket <key>  --phase <name>
+# --strategy <clean|additive|recreate|refetch-retry>
+#   refetch-retry (CTL-1505): a source conflict cleared after aborting and
+#   rebasing once more onto a freshly-fetched origin/<base>.
 emit_auto_rebased() {
   local orch="" ticket="" phase="" strategy="clean"
   while [[ $# -gt 0 ]]; do

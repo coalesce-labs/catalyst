@@ -15,9 +15,38 @@ description: Fast browser automation CLI for AI agents. **ALWAYS use instead of 
 
 **Do NOT use Playwright MCP tools.** If browser automation is needed, always use `agent-browser` CLI instead.
 
+## Session Hygiene (REQUIRED — prevents leaked browsers)
+
+agent-browser runs a **persistent per-session daemon** that owns a real "Chrome for
+Testing" browser. That daemon **outlives the CLI** — the browser keeps running (and,
+if left on an auto-refreshing page, keeps re-rendering and pegging a CPU core) until
+something closes it. On shared fleet/worker hosts a leaked browser starves the box
+(CTL-1500). So treat every session as something you **must** open with a name and
+**always close**:
+
+- **REQUIRED: always pass `--session <name>`.** Pick a short task-specific name
+  (e.g. `ctl-1500-verify`, `gh-review`). Never rely on the implicit `default`
+  session — a shared default collides across concurrent workers and is the hardest
+  leak to attribute and clean up.
+- **REQUIRED: always `close` when done.** End every task with
+  `agent-browser --session <name> close`. Do it in the same turn you finish the
+  browser work — do not leave a session open "in case". If you took a wrong turn,
+  close before starting over.
+- **BANNED: unnamed / shared-`default` sessions.** Every `open` must carry an
+  explicit `--session`. An un-named session on a worker host is a leak waiting to
+  happen.
+- **BANNED: abandoned open-loops.** Never write retry/wait loops that call
+  `agent-browser ... open` (e.g. `until agent-browser --session s open <url>; do
+  sleep …; done`) without a guaranteed matching `close`. Each failed `open` can
+  spawn/adopt a browser; a loop that exits without closing strands them. If you must
+  poll, `open` **once**, then use `wait`/`reload`, and `close` in a trap/`finally`.
+- **On a worker/CI host**, prefer the shortest-lived session possible and close it
+  immediately; a phase worker that exits without closing relies on the host reaper
+  (orphan-sweep vector 5) to clean up, which is a backstop, not a substitute.
+
 ## Starting a Browser Session
 
-**ALWAYS use `--headed` and a named session.** Headed mode shows a visible browser window so the user can watch. Sessions preserve browser state so they survive accidental closes and can be resumed.
+**ALWAYS use `--headed` and a named session.** Headed mode shows a visible browser window so the user can watch. Sessions preserve browser state so they survive accidental closes and can be resumed. **Always `close` the session when the task is done (see Session Hygiene above).**
 
 ```bash
 agent-browser --headed --session my-task open https://example.com
@@ -313,4 +342,4 @@ agent-browser connect <port|url>   # Connect to existing browser
 4. **Use snapshot -i -c** for AI-efficient page state
 5. **Use @refs** from snapshots for interactions, not CSS selectors
 6. **agent-browser, NOT Playwright MCP** — always prefer the CLI
-7. **Close when done**: `agent-browser --headed --session <name> close` to clean up
+7. **ALWAYS close when done** (REQUIRED): `agent-browser --session <name> close`. The daemon + browser outlive the CLI and leak a CPU-pegging browser on shared hosts if left open (CTL-1500). Never leave a session open; never use unnamed/shared-`default` sessions or abandoned `until … open` loops. See **Session Hygiene** above.

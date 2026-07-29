@@ -45,6 +45,7 @@ import {
   getTicketState,
   getWaitingSession,
   getActiveWaitingSessions,
+  upsertWorkerState,
 } from "./broker-state.mjs";
 
 // ─── Shared DB setup ─────────────────────────────────────────────────────────
@@ -2779,15 +2780,72 @@ describe("CTL-352 saveInterests guards", () => {
 
 describe("CTL-352 broker state + degraded event", () => {
   const STATE_FILE = () => join(tmpDir, "broker.state.json");
+  // CTL-1523: degraded now requires an ACTIVE fleet (the discriminator that tells a
+  // silently-dead broker from a correctly-idle one) sustained over N ticks, and its
+  // latch is durable — so these tests seed a worker row, tick N times, and reset the
+  // latch between tests (it is no longer part of __resetBrokerLivenessForTest).
+  const seedActiveWorker = (ticket = "CTL-352") =>
+    upsertWorkerState({
+      orchestrator: "o",
+      ticket,
+      status: "implement",
+      eventId: `e-${ticket}`,
+      eventTs: new Date().toISOString(),
+    });
+  const degradedLinesIn = (logPath) => {
+    if (!existsSync(logPath)) return [];
+    return readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .filter((l) => {
+        try {
+          return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded";
+        } catch {
+          return false;
+        }
+      });
+  };
+  const recoveredLinesIn = (logPath) => {
+    if (!existsSync(logPath)) return [];
+    return readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .filter((l) => {
+        try {
+          return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.recovered";
+        } catch {
+          return false;
+        }
+      });
+  };
+  const logPathNow = () => join(tmpDir, "events", `${new Date().toISOString().slice(0, 7)}.jsonl`);
+
+  // CTL-1523: the detector is OPT-IN and dormant by default (an empty interest table
+  // carries no information under execution-core dispatch, which registers no
+  // interests at all — see config.mjs), so every test in this block that expects an
+  // emit must arm it explicitly.
+  let prevDegradedEnabled;
 
   beforeEach(async () => {
-    const { __resetBrokerLivenessForTest } = await import("./index.mjs");
+    prevDegradedEnabled = process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
+    const { __resetBrokerLivenessForTest, __resetBrokerDegradedLatchForTest } = await import(
+      "./index.mjs"
+    );
     __resetBrokerLivenessForTest();
+    __resetBrokerDegradedLatchForTest();
   });
 
   afterEach(async () => {
-    const { __resetBrokerLivenessForTest } = await import("./index.mjs");
+    if (prevDegradedEnabled === undefined) delete process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    else process.env.FILTER_BROKER_DEGRADED_ENABLED = prevDegradedEnabled;
+    const { __resetBrokerLivenessForTest, __resetBrokerDegradedLatchForTest } = await import(
+      "./index.mjs"
+    );
     __resetBrokerLivenessForTest();
+    __resetBrokerDegradedLatchForTest();
   });
 
   test("buildBrokerState includes interestCount, lastWakeAt, lastRegisterAt", async () => {
@@ -2852,94 +2910,81 @@ describe("CTL-352 broker state + degraded event", () => {
     expect(typeof after).toBe("string");
   });
 
-  test("broker.daemon.degraded emitted once when interests empty and uptime > 5 min", async () => {
+  test("broker.daemon.degraded emitted once when interests empty, fleet active, uptime > 5 min", async () => {
     const { runWatchdogTick, __setBrokerStartedAtForTest, getInterests } = await import(
       "./index.mjs"
     );
+    const { BROKER_DEGRADED_SUSTAINED_TICKS } = await import("./config.mjs");
     clearInterests();
+    seedActiveWorker(); // CTL-1523: the discriminator — a genuinely in-flight fleet
     const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
     __setBrokerStartedAtForTest(sixMinAgo);
 
-    runWatchdogTick();
-    runWatchdogTick();
-    runWatchdogTick();
+    for (let i = 0; i < BROKER_DEGRADED_SUSTAINED_TICKS + 2; i++) runWatchdogTick();
 
-    // Read the month event log; assert exactly one degraded event.
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    // Read the month event log; assert exactly one degraded event (edge-triggered).
+    const logPath = logPathNow();
     expect(existsSync(logPath)).toBe(true);
-    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
-    const degradedLines = lines.filter((l) => {
-      try {
-        const evt = JSON.parse(l);
-        return evt.attributes?.["event.name"] === "broker.daemon.degraded";
-      } catch {
-        return false;
-      }
-    });
+    const degradedLines = degradedLinesIn(logPath);
     expect(degradedLines).toHaveLength(1);
     const evt = JSON.parse(degradedLines[0]);
     expect(evt.severityText).toBe("WARN");
-    expect(evt.body.payload.reason).toBe("no registered interests");
+    expect(evt.body.payload.reason).toBe("no registered interests while fleet is active");
+    expect(evt.body.payload.activeWorkers).toBe(true);
     expect(typeof evt.body.payload.uptimeMs).toBe("number");
     expect(getInterests().size).toBe(0);
   });
 
   test("degraded NOT emitted within the 5-minute startup grace", async () => {
     const { runWatchdogTick, __setBrokerStartedAtForTest } = await import("./index.mjs");
+    const { BROKER_DEGRADED_SUSTAINED_TICKS } = await import("./config.mjs");
     clearInterests();
+    seedActiveWorker(); // fleet IS active — only the grace holds the emit back
     const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
     __setBrokerStartedAtForTest(oneMinAgo);
 
-    runWatchdogTick();
+    for (let i = 0; i < BROKER_DEGRADED_SUSTAINED_TICKS + 2; i++) runWatchdogTick();
 
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
-    if (!existsSync(logPath)) return; // no events at all — vacuously fine
-    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
-    const degradedLines = lines.filter((l) => {
-      try {
-        return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded";
-      } catch {
-        return false;
-      }
-    });
-    expect(degradedLines).toHaveLength(0);
+    expect(degradedLinesIn(logPathNow())).toHaveLength(0);
   });
 
-  test("degraded re-arms after interests come back and go empty again", async () => {
+  // CTL-1523: this was "degraded re-arms after interests come back and go empty
+  // again" asserting toHaveLength(2) off two bare ticks — which is exactly the
+  // silent re-arm the fix removes. Re-arming is still supported, but it now runs
+  // through the LEDGER: degraded → (interests return) recovered → (empty again,
+  // sustained) degraded. Interests returning is the CLEAR EDGE, not a mute button.
+  test("re-arm goes through the paired ledger: degraded → recovered → degraded", async () => {
     const { runWatchdogTick, __setBrokerStartedAtForTest, handleRegister, handleDeregister } =
       await import("./index.mjs");
+    const { BROKER_DEGRADED_SUSTAINED_TICKS } = await import("./config.mjs");
     clearInterests();
+    seedActiveWorker();
     const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
     __setBrokerStartedAtForTest(sixMinAgo);
 
-    runWatchdogTick(); // emits first degraded
+    for (let i = 0; i < BROKER_DEGRADED_SUSTAINED_TICKS; i++) runWatchdogTick(); // degraded #1
+    expect(degradedLinesIn(logPathNow())).toHaveLength(1);
 
     handleRegister({
       event: "filter.register",
       orchestrator: "orch-rearm-1",
       detail: { interest_id: "rearm-1", notify_event: "filter.wake.rearm-1", prompt: "p" },
     });
+    runWatchdogTick(); // interests present → the clear edge → recovered
+    expect(recoveredLinesIn(logPathNow())).toHaveLength(1);
+    expect(JSON.parse(recoveredLinesIn(logPathNow())[0]).body.payload.reason).toBe(
+      "interests registered",
+    );
+
     handleDeregister({
       event: "filter.deregister",
       orchestrator: "orch-rearm-1",
       detail: { interest_id: "rearm-1" },
     });
+    for (let i = 0; i < BROKER_DEGRADED_SUSTAINED_TICKS; i++) runWatchdogTick(); // degraded #2
 
-    runWatchdogTick(); // should re-emit (cleared on non-empty, then armed again on empty)
-
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
-    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
-    const degradedLines = lines.filter((l) => {
-      try {
-        return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded";
-      } catch {
-        return false;
-      }
-    });
-    expect(degradedLines).toHaveLength(2);
+    expect(degradedLinesIn(logPathNow())).toHaveLength(2);
+    expect(recoveredLinesIn(logPathNow())).toHaveLength(1);
   });
 });
 

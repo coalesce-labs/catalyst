@@ -506,3 +506,86 @@ is sync; async would require a separate flush loop with new failure modes).
 via otel-forward, optional broker table); all fail-open. The HUD capacity header gains
 per-disposition buckets and triage is carved out of `maxParallel` counting. AGENTS.md /
 architecture.md carry the two-axis model as first-class concepts.
+
+## ADR-027: Browser automation stays local — cloud browser backends rejected (2026-07-25)
+
+**Decision** — Catalyst's browser automation continues to run **local Chromium** via
+`agent-browser`'s default backend. A hosted browser provider (Browserbase, and by extension Kernel /
+Browserless-cloud / BrowserStack) is **not** adopted. Recorded because the proposal is superficially
+attractive and will otherwise be re-proposed.
+
+**Killer 1 — a cloud browser cannot reach a local dev server.** Every browser target Catalyst cares
+about is loopback or tailnet: `mini:7400` (orch-monitor SPA), `localhost:3000/4000/8080` (dev
+servers in worktrees), `127.0.0.1:<rand>` (gstack control plane). Browserbase ships **no tunnel** —
+no BrowserStack-Local / Sauce-Connect equivalent; verified as a documented absence across
+`docs.browserbase.com` (`llms.txt` index, `remote-browser-versus-local-browser`,
+`building-automated-tests`, `allowed-domains`), and stated affirmatively in
+`platform/browser/files/uploads`: the remote browser "can't access files on your local machine". The
+adjacent `platform/identity/vpn` feature runs the **opposite** direction (routes the cloud browser's
+_egress_ through a proxy you deploy) and validates proxies eagerly at session creation, so a
+local-only proxy fails the session outright. `agent-browser` ships no tunneling either — navigation
+executes as CDP `Page.navigate` **inside the remote container**, so `localhost` resolves there.
+Adopting a cloud backend is a capability deletion.
+
+**Killer 2 — the stated motive was false.** The proposal's premise was relieving pressure from local
+headless Chromium. Measured live on 2026-07-25: **0 headless Chromium processes on mini and 0 on
+mini-2**; mini-2 has no browser binary installed at all and still swaps. No skill in
+`plugins/*/skills/` invokes `agent-browser` on the fleet — every fleet-side reference is
+provisioning (`install-cli.sh:242`, `check-setup.sh:106`), env injection
+(`phase-agent-dispatch:863,944`), or leak containment (`orphan-sweep.sh:779`). Actual memory
+pressure is exec-core (3.7–6 GB), orch-monitor (2.5 GB), an 826 MB monthly event log, and 101
+worktrees on mini. Offloading browsers reclaims ~0 MB of a 15 GB problem.
+
+**Do not solve Killer 1 with a reverse tunnel.** `orphan-sweep.sh` has five vectors and zero tunnel
+coverage, so a tunnel spawned in a `claude --bg` worker is a new unreapable orphan class — and a
+leaked tunnel is not a wasted process but persistent public ingress. Critically,
+`orch-monitor/server.ts:795` binds `0.0.0.0` with no auth across ~80 routes including actuation
+(`POST /api/ec-worker/<T>/stop`, `POST /api/ticket/<T>/respond` → re-dispatches an autonomous agent
+holding repo-write and PR-merge authority), and `/debug/heap-snapshot` (~server.ts:4632) is gated on
+`server.requestIP(req)?.address === 127.0.0.1`. Tunnel daemons dial the origin over loopback, so
+**every tunneled request presents as 127.0.0.1 and that gate fails open to the internet.** A tunnel
+converts the localhost trust boundary into a fail-open one. (The webhook routes are properly
+HMAC-verified with `timingSafeEqual`; the actuation routes are not.)
+
+**Cost inversion** — even inside the included tier, the economics fail on leak behavior, not price.
+A leaked session goes **free → metered**: CTL-1500's exact failure shape (worker dies, browser
+survives) costs $0 today and is reaped hourly; on a hosted provider it bills to the 6-hour session
+cap, and `orphan-sweep.sh` vector 5 cannot see — let alone reap — a remote session.
+`AGENT_BROWSER_IDLE_TIMEOUT_MS` becomes a billing floor stacked on the 1-minute session minimum
+rather than a safety net.
+
+**BrowserStack specifically is structurally incompatible**, independent of price. Its endpoint
+`wss://cdp.browserstack.com/playwright?caps=…` speaks Playwright's proprietary **server** protocol
+despite the `cdp.` hostname; `agent-browser` speaks **raw CDP** (`connectOverCDP`). Compounding:
+credentials must ride inside a URL-encoded caps JSON (no header auth), caps must carry a
+`client.playwrightVersion` matching the caller's bundled Playwright, and a **90-second idle
+timeout** would kill sessions during normal LLM reasoning pauses. Noted because BrowserStack Local
+is ironically the only mature localhost tunnel in the comparison — it solves the exact blocker, on
+the one vendor we cannot drive.
+
+**Alternatives considered** — _Kernel / Browser Use / AgentCore_: same localhost blocker.
+_Cloudflare Browser Rendering_: same, plus always bot-identified. _Browserless self-hosted_: viable
+on reachability but SSPL-1.0-or-commercial, a license decision plain Chrome sidesteps. **If browser
+consolidation is ever genuinely wanted**, the correct shape is plain headless Chrome on the `home`
+OTel box (100.65.193.30, Linux) + `agent-browser connect ws://<ip>:9222` — raw CDP, $0, no license
+question, and unlike any hosted provider it can reach `mini:7400`. Requires
+`--remote-debugging-address=0.0.0.0`, addressing by **IP not hostname** (Chrome host-header
+validation, CVE-2018-6101), and `--user-data-dir` on Chrome 136+. Note this yields _tailnet_
+reachability, not literal localhost: dev servers must bind `0.0.0.0`. Do not site it on mini.
+
+**Consequences** — no vendor dependency, no subscription, no new orphan class, and the localhost
+trust boundary is preserved. `orphan-sweep.sh` vector 5 remains the correct and sufficient
+containment for browser leaks. Revisit only if a _stated_ driver appears that local Chrome cannot
+serve — parallel session isolation, execution on non-Mac hosts, IP diversity, or stealth — and note
+that for stealth or persistent auth, Kernel (`KERNEL_STEALTH`, `KERNEL_PROFILE_NAME`) and
+Browserless (`BROWSERLESS_STEALTH`) expose knobs the Browserbase create path in `agent-browser` does
+not send at all.
+
+**Verification caveat** — provider internals were established against `agent-browser 0.27.2`
+(laptop); the fleet runs **0.32.4**. Re-verify binary-level claims (that the Browserbase create path
+sends no `projectId` / `keepAlive` / `browserSettings` / `advancedStealth`) against 0.32.4 before
+relying on them.
+
+**Follow-up, independent of this decision** — the unauthenticated orch-monitor control plane on
+`0.0.0.0` is a standing finding, currently contained only by the tailnet perimeter. Untickted as of
+this ADR.

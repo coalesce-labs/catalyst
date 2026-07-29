@@ -26,6 +26,7 @@ import {
   MAX_BATCH_SIZE,
   WATCHDOG_INTERVAL_MS,
   HEARTBEAT_STALE_MS,
+  HEARTBEAT_EVICT_MS,
   ORCH_STATUS_REPLAY_STALE_MS,
   DETERMINISTIC_INTEREST_TYPES,
   isIngestionRecencyEnabled,
@@ -41,6 +42,8 @@ import {
   INGESTION_SEED_BYTES,
   WATCHER_RECENCY_STALE_MS,
   getPrevMonthEventLogPath,
+  BROKER_DEGRADED_GRACE_MS,
+  BROKER_DEGRADED_SUSTAINED_TICKS,
 } from "./config.mjs";
 import {
   getInterests,
@@ -51,9 +54,16 @@ import {
   getBrokerStartedAt,
   setLastWakeAt,
   setLastRegisterAt,
-  getDegradedEmittedAt,
-  setDegradedEmittedAt,
 } from "./state.mjs";
+// CTL-1523: the broker-degraded detector (fleet-activity-gated, sustained,
+// durably latched). The pure machine + latch live in the leaf module; the router
+// supplies the two side effects — the activity reading and the event append.
+import {
+  checkBrokerDegraded,
+  isBrokerDegradedLatchOpen,
+  BROKER_DEGRADED_EVENT,
+  BROKER_RECOVERED_EVENT,
+} from "./broker-degraded.mjs";
 import {
   saveInterests,
   persistBrokerState,
@@ -116,6 +126,7 @@ import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488
 // log per the design-review D2 blocker).
 import { evaluateSource } from "../lib/ingestion-recency.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import {
   MONITOR_SERVICE_NAME,
   GITHUB_SERVICE_NAME,
@@ -145,8 +156,24 @@ const workerToOrchestrator = getWorkerToOrchestrator();
 const waitingSessions = getWaitingSessionsMap();
 const orchestratorStatusMap = getOrchestratorStatusMap();
 
-// CTL-352: empty-interests degraded threshold (5-minute startup grace).
-const DEGRADED_THRESHOLD_MS = 5 * 60 * 1000;
+// CTL-1523: the empty-interests startup grace moved to config.mjs as the
+// FILTER_BROKER_DEGRADED_GRACE_MS knob (was the hard-coded CTL-352
+// DEGRADED_THRESHOLD_MS).
+
+// CTL-1523 (Codex round 3): an interest-return EDGE that happens BETWEEN two
+// watchdog ticks. Replacing the CTL-352 synchronous re-arm with the watchdog's
+// periodic `interests.size` SAMPLE lost the one-shot case: an interest that
+// registers AND deregisters inside the ~60 s tick interval is never observed, so
+// the `recovered` never fires and the stale latch suppresses every later degraded
+// episode until the fleet goes idle. Record the EDGE instead of re-introducing an
+// out-of-band re-arm (which is what left a degraded unpaired in the ledger).
+// Set by the registration paths, consumed and cleared once per watchdog tick.
+let _sawInterestSinceLastTick = false;
+// Cannot throw: a bare boolean assignment, deliberately no I/O and no logging, so
+// it is safe to call from any hot registration path.
+function noteInterestRegistered() {
+  _sawInterestSinceLastTick = true;
+}
 
 // CTL-993: merge-to-main plugin-checkout refresh wiring. The broker module lives
 // at <repo>/plugins/dev/scripts/broker/router.mjs, so the repo .catalyst config
@@ -371,6 +398,28 @@ function shouldSkipWake(sourceEventId, interestId) {
 export function __clearEmittedWakeCacheForTest() {
   _emittedWakeCache.clear();
 }
+
+// CTL-1516: delete expired _emittedWakeCache entries. Its keys are per-source-event
+// unique (an event id never recurs), so an expired entry is otherwise never
+// overwritten and the map grows without bound for the life of the process. Swept
+// on the recurring watchdog tick; `expiry <= now` is the exact complement of
+// shouldSkipWake's live-check (`now < expiry`), and unique keys guarantee that
+// removing an expired entry can never cause a duplicate wake.
+function sweepEmittedWakeCache(now = Date.now()) {
+  for (const [key, expiry] of _emittedWakeCache) {
+    if (expiry <= now) _emittedWakeCache.delete(key);
+  }
+}
+
+// Test seams (CTL-1516) — mirror the __clearEmittedWakeCacheForTest pattern so
+// the bounding contract can be asserted without reaching into module internals.
+export function __seedEmittedWakeForTest(key, expiry) {
+  _emittedWakeCache.set(key, expiry);
+}
+export function __emittedWakeCacheSizeForTest() {
+  return _emittedWakeCache.size;
+}
+export { sweepEmittedWakeCache };
 
 // === CTL-1122: ingestion-silence detection (the surviving-process observer) ===
 // The broker tails every event, so it records the last-seen timestamp + event id
@@ -629,9 +678,16 @@ function checkSourceRecency(source, now) {
     downAfterMs: source.downAfterMs,
   });
   let severity = ungatedSeverity;
-  if (source.gated && !fleetIsActive(now)) {
-    // Gate closed: the fleet isn't working, so webhook silence is expected, not
-    // a fault. Force "up" → no stale, and a clean clear of any open outage.
+  // CTL-1523 review F2: fleetActivity is now tri-state, but this CTL-1122 gate keeps
+  // its original FAIL-CLOSED semantics exactly — only a demonstrably-active fleet
+  // (=== true) holds the gate open, so both "proven idle" (false) and "unknown"
+  // (null, the old catch-returns-false case) force "up" as they always did. Do not
+  // relax this to `=== false`: an unreadable worker table must never license a
+  // github-silence page.
+  if (source.gated && fleetActivity(now) !== true) {
+    // Gate closed: the fleet isn't working (or we cannot tell), so webhook silence
+    // is expected, not a fault. Force "up" → no stale, and a clean clear of any
+    // open outage.
     severity = "up";
   }
   const { state, emit } = nextRecencyAlarmState(prevAlarm, {
@@ -789,16 +845,51 @@ function checkNeedsHumanPileup(now) {
   return emit;
 }
 
-// fleetIsActive — the activity-gate input for gated recency sources. Defensive
-// wrapper around hasActiveWorkers: a watchdog tick must NEVER throw, and the
-// broker-state DB read could fail (e.g. closed handle in an isolated unit test,
-// or a transient error). On failure, fail the gate CLOSED (treat as no active
-// work) — the no-false-alarm safe default, consistent with the detector's
-// fail-open-to-"up" philosophy.
-function fleetIsActive(now) {
+// fleetActivity — the activity reading shared by the gated recency sources and the
+// CTL-1523 broker-degraded detector. Defensive wrapper around hasActiveWorkers: a
+// watchdog tick must NEVER throw, and the broker-state DB read could fail (e.g. a
+// closed handle in an isolated unit test, or a transient error).
+//
+// TRI-STATE (CTL-1523 review F2). The reading is deliberately three-valued:
+//   true  — the fleet is demonstrably working
+//   false — PROVEN idle (the read succeeded and found no active worker)
+//   null  — UNKNOWN (the read failed; we know nothing either way)
+//
+// Collapsing null into false was the defect: a transient SQLite failure looked
+// identical to a proven-idle fleet, so the degraded detector cleared its latch and
+// emitted a FALSE `broker.daemon.recovered` (reason "fleet idle"); when the DB
+// recovered, the still-anomalous condition re-tripped after the debounce, producing a
+// duplicate degraded edge from one uninterrupted episode. Consumers must now decide
+// explicitly what "unknown" means for them (the detector HOLDS its latch; see
+// classifyBrokerDegradedClear).
+function fleetActivity(now) {
   try {
     return hasActiveWorkers(new Date(now).toISOString());
   } catch {
+    return null; // unknown — NOT proven idle
+  }
+}
+
+// emitBrokerDegradedEvent — the append side effect the CTL-1523 detector injects.
+// Returns true on a successful append, false on any failure, and NEVER throws:
+// checkBrokerDegraded advances its durable latch only on true, so a transient
+// event-log failure re-attempts the same edge next tick instead of losing it.
+// (appendEvent itself is void and CAN throw — appendFileSync — hence the wrap.)
+function emitBrokerDegradedEvent({ action, detail }) {
+  const degraded = action === "degraded";
+  try {
+    appendEvent({
+      event: degraded ? BROKER_DEGRADED_EVENT : BROKER_RECOVERED_EVENT,
+      orchestrator: null,
+      worker: null,
+      severity: degraded ? "WARN" : "INFO",
+      detail,
+    });
+    return true;
+  } catch (err) {
+    // Optional-call for parity with the two sites in broker-degraded.mjs: this
+    // rides runWatchdogTick, which must NEVER throw.
+    log.warn?.({ err: err?.message, action }, "broker-degraded: event append failed");
     return false;
   }
 }
@@ -996,8 +1087,13 @@ export function handleRegister(event) {
   }
   saveInterests();
   setLastRegisterAt(new Date().toISOString());
-  // CTL-352: a fresh registration arms a future degraded event.
-  setDegradedEmittedAt(null);
+  // CTL-1523: the CTL-352 out-of-band re-arm (setDegradedEmittedAt(null)) is gone.
+  // "Interests came back" is now the CLEAR EDGE and must be observed by the
+  // watchdog so it emits the paired broker.daemon.recovered — a silent re-arm here
+  // would leave a degraded with no recovery in the ledger. We record only that the
+  // edge HAPPENED, so a registration that is gone again before the next tick is
+  // still counted (see _sawInterestSinceLastTick).
+  noteInterestRegistered();
   persistBrokerState();
 }
 
@@ -1120,7 +1216,9 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, rep
   log.info({ sessionId, prNumber }, "auto-correlated pr_lifecycle for session");
   saveInterests();
   setLastRegisterAt(new Date().toISOString());
-  setDegradedEmittedAt(null);
+  // CTL-1523: no out-of-band re-arm — the watchdog observes the clear edge, and
+  // this records the edge so a between-tick registration is not missed.
+  noteInterestRegistered();
   persistBrokerState();
 }
 
@@ -1935,7 +2033,9 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
   if (changed) {
     saveInterests();
     setLastRegisterAt(new Date().toISOString());
-    setDegradedEmittedAt(null);
+    // CTL-1523: no out-of-band re-arm — the watchdog observes the clear edge, and
+    // this records the edge so a between-tick registration is not missed.
+    noteInterestRegistered();
     persistBrokerState();
   }
 }
@@ -2256,40 +2356,93 @@ function queueEvent(event) {
 export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   const now = Date.now();
 
+  // CTL-1516: bound the wake-dedup cache each tick (expired keys are otherwise
+  // never reclaimed — see sweepEmittedWakeCache).
+  sweepEmittedWakeCache(now);
+
   // CTL-1280: deterministic liveness heartbeat. One fixed-cadence line to
   // broker.log every watchdog tick (~60s) so an Alloy→Loki liveness check can
   // watch for the heartbeat marker instead of relying on incidental log volume (a
   // quiet-but-healthy daemon would otherwise read as silent/down). Rides the
   // Alloy .log stream → independent of the otel-forward event pipeline.
   logDaemonHeartbeat(log, "broker");
+  // CTL-1517: per-process RSS/heap OTel gauge on the same watchdog tick (fire-and-forget;
+  // never throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
+  emitProcessMemoryMetric({ serviceName: "catalyst.broker", log }).catch(() => {});
 
-  // CTL-352: empty-interests observability. Warn on every tick when the table
-  // is empty so a silently-dead broker is loud in broker.log, and emit a
-  // one-shot broker.daemon.degraded event after the 5-minute startup grace so
-  // downstream consumers (HUD, alerts) can pair startup ↔ degraded.
+  // CTL-352 / CTL-1523: empty-interests observability. The signal is only an
+  // anomaly when the fleet is ACTIVELY WORKING — under execution-core dispatch no
+  // component registers interests at all, so an empty table on an idle fleet is the
+  // healthy steady state, not a silently-dead broker. The gate, the sustained-tick
+  // debounce, and the durable edge latch live in broker-degraded.mjs; this call
+  // supplies the two side effects.
+  //
+  // NOTE: the log-level split below is INDEPENDENT of the detector's opt-in knob —
+  // it is plain broker.log hygiene and always applies. checkBrokerDegraded itself is
+  // dormant unless FILTER_BROKER_DEGRADED_ENABLED=1 (it returns null on its first
+  // line), so on an execution-core host this call is a no-op.
+  //
+  // Neither this nor the CTL-1122 checkSourceRecency pass below can detect a FULLY
+  // DEAD broker: both execute inside this process. checkSourceRecency detects an
+  // ingestion STALL while the broker is alive; a dead broker is a MISSING series and
+  // needs an EXTERNAL absence check (Loki `absent_over_time` on
+  // `broker.daemon.heartbeat` / the broker `.log` stream).
+  const brokerStartedAt = getBrokerStartedAt();
+  const startedTs = brokerStartedAt ? new Date(brokerStartedAt).getTime() : now;
+  const brokerUptimeMs = now - startedTs;
+  // Tri-state (CTL-1523 review F2): true | false (proven idle) | null (unknown).
+  const fleetActive = fleetActivity(now);
   if (interests.size === 0) {
-    const brokerStartedAt = getBrokerStartedAt();
-    const startedTs = brokerStartedAt ? new Date(brokerStartedAt).getTime() : now;
-    const uptimeMs = now - startedTs;
-    log.warn({ uptimeMs }, "watchdog: no registered interests");
-    if (uptimeMs > DEGRADED_THRESHOLD_MS && getDegradedEmittedAt() === null) {
-      appendEvent({
-        event: "broker.daemon.degraded",
-        orchestrator: null,
-        worker: null,
-        severity: "WARN",
-        detail: {
-          reason: "no registered interests",
-          uptimeMs,
-          brokerStartedAt,
-        },
-      });
-      setDegradedEmittedAt(new Date().toISOString());
-      persistBrokerState();
+    // CTL-1523: split by the same discriminator the detector uses. An empty table
+    // WHILE work is in flight is a real anomaly (warn); on an idle fleet — or when
+    // the activity read is unavailable, where we have no anomaly claim to make — it
+    // is expected and was drowning broker.log (~171 lines / 2.85h on mini) → debug.
+    if (fleetActive === true) {
+      log.warn({ uptimeMs: brokerUptimeMs }, "watchdog: no registered interests");
+    } else {
+      log.debug(
+        { uptimeMs: brokerUptimeMs, fleetActive },
+        "watchdog: no registered interests (fleet idle or activity unknown)",
+      );
     }
-  } else if (getDegradedEmittedAt() !== null) {
-    setDegradedEmittedAt(null);
   }
+  // CTL-1523 (Codex round 3): feed the detector the interest count AS OBSERVED OVER
+  // THE WHOLE TICK INTERVAL, not just at this instant. A one-shot interest that
+  // registered and deregistered since the last tick still PROVES the broker
+  // processed a registration (it is demonstrably not silently dead), so it must
+  // clear an open episode — and must not trip a new one. Consume-and-clear: the
+  // edge counts for exactly one tick, and is cleared unconditionally (even when the
+  // detector is dormant) so a stale edge can never leak into a later interval.
+  // Codex round 4: the edge is EVIDENCE, so it is retained until it has actually
+  // been acted on. It is read here but cleared only AFTER the detector runs, and
+  // only if no episode is left open — mirroring the latch's own emit-then-advance
+  // discipline. Clearing it up front meant a failed `recovered` append destroyed
+  // the one thing that made the clear verdict true, stranding the latch open (and
+  // suppressing later degraded events) until an unrelated registration or an idle
+  // fleet came along.
+  const sawInterestEdge = _sawInterestSinceLastTick;
+  // 1 = "at least one registration was observed this interval" when the live table
+  // is empty again; otherwise the real size. The detector only ever asks
+  // empty-vs-non-empty of this number.
+  const observedInterestCount = interests.size > 0 ? interests.size : sawInterestEdge ? 1 : 0;
+  checkBrokerDegraded({
+    interestCount: observedInterestCount,
+    uptimeMs: brokerUptimeMs,
+    brokerStartedAt,
+    fleetActive,
+    nowMs: now,
+    // Both knobs injected explicitly (they default to the same config constants
+    // inside the detector) so the wiring reads as one config surface rather than
+    // half-explicit / half-defaulted.
+    graceMs: BROKER_DEGRADED_GRACE_MS,
+    sustainedTicks: BROKER_DEGRADED_SUSTAINED_TICKS,
+    emit: emitBrokerDegradedEvent,
+  });
+  // Retire the edge only once it can no longer be needed: either it was acted on
+  // (the episode closed) or there was no open episode for it to close. If an
+  // episode is STILL open the recovery has not landed — keep the evidence so the
+  // next tick retries. Guarded so a detector throw can never strand the flag set.
+  if (sawInterestEdge && !isBrokerDegradedLatchOpen()) _sawInterestSinceLastTick = false;
 
   // CTL-1122: judge each ingestion source's liveness from its event recency —
   // the surviving-process observation the 11h silent outage proved we were
@@ -2311,6 +2464,11 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   // a single appendEvent call per interest — avoids N identical wake rows in
   // the HUD when N sessions go stale simultaneously.
   const staleNow = new Map(); // sourceId → { ts, minsAgo }
+  // CTL-1516: sessions to drop from lastHeartbeat + workerToOrchestrator this
+  // tick — definitively dead, or stale past the eviction horizon — so neither map
+  // lingers on an ended (per-job-unique) session id forever. Notified sessions are
+  // deleted in the wake-cleanup below; this Set backstops the unmatched rest.
+  const toEvict = new Set();
   for (const [sourceId, state] of lastHeartbeat) {
     // CTL-672: prefer the `claude agents` truth (resolved via the catalyst.db
     // sess_→UUID bridge); fall back to heartbeat-ts staleness only when the
@@ -2338,10 +2496,26 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
         /* DB not opened */
       }
     }
+    // CTL-1516: a session is evictable once it is unambiguously done — reported
+    // `dead` by `claude agents`, or (when liveness is unknown) already `stale`
+    // AND aged past the eviction horizon. Requiring `stale` here guarantees
+    // eviction can never precede the configured stale threshold even if an
+    // operator raises FILTER_HEARTBEAT_STALE_MS above HEARTBEAT_EVICT_MS —
+    // otherwise an unmatched session's only heartbeat row could be dropped before
+    // the watchdog would have added it to staleNow and woken its interest (Codex
+    // P2 on #2728). Collected AFTER the CTL-403 waiting guard so a legitimately-
+    // waiting session is never evicted.
+    if (liv === "dead" || (stale && liv !== "alive" && now - state.ts > HEARTBEAT_EVICT_MS)) {
+      toEvict.add(sourceId);
+    }
     if (stale && !state.notified) {
       const minsAgo = Math.round((now - state.ts) / 60_000);
       staleNow.set(sourceId, { ts: state.ts, minsAgo });
     } else if (!stale && state.notified) {
+      // Original CTL-419 re-arm: a recovered session clears its notified flag so a
+      // future stale episode wakes again. (Kept intact — CTL-1516 bounds the maps
+      // via the toEvict backstop below, NOT by deleting on the wake, so this
+      // suppression/re-arm state machine is unchanged.)
       lastHeartbeat.set(sourceId, { ts: state.ts, notified: false });
     }
   }
@@ -2411,9 +2585,29 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
       log.info({ interestId, sourceId }, "watchdog cleanup: removed stale session");
     }
     for (const sourceId of notifiedSessions) {
+      // CTL-1516: keep the original notified:true re-mark here — do NOT delete on
+      // the wake. Deleting on the first wake dropped workerToOrchestrator (breaking
+      // orchestrator-interest matching for a heartbeat-revived session) and lost
+      // the duplicate-wake suppression the notified:true row provides until an
+      // alive tick re-arms it (Codex P1/P2 on #2728). Unbounded growth is instead
+      // bounded by the toEvict backstop below, which drops a session's rows ONLY
+      // once it is dead or aged past HEARTBEAT_EVICT_MS — a terminal point where a
+      // revival would re-check-in via handleAgentCheckin and recreate both maps.
       const info = staleNow.get(sourceId);
       lastHeartbeat.set(sourceId, { ts: info.ts, notified: true });
     }
+  }
+
+  // CTL-1516: backstop eviction — the ONLY place the maps are bounded. Drop
+  // heartbeat + orchestrator-map rows for sessions that are definitively dead, or
+  // stale AND aged past HEARTBEAT_EVICT_MS. This runs regardless of whether the
+  // session matched an interest, so a session that has been woken (notified:true)
+  // and stays terminal is eventually reclaimed rather than lingering forever, and
+  // an unmatched dead/aged session is reclaimed too. At this terminal horizon a
+  // revival re-checks-in and recreates both maps, so no live association is lost.
+  for (const sourceId of toEvict) {
+    lastHeartbeat.delete(sourceId);
+    workerToOrchestrator.delete(sourceId);
   }
 
   if (watchdogWoke) {

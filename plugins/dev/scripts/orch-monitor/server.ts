@@ -7,6 +7,7 @@ import webpush from "web-push";
 import * as pushStore from "./lib/push-subscriptions";
 import {
   createNotificationProjector,
+  resolveDaemonNotifyHoldMs,
   type ProjectorBoard,
 } from "./lib/notification-filter";
 import { createPushBridge } from "./lib/push-bridge";
@@ -22,6 +23,7 @@ import {
 import { readSessionStore } from "./lib/session-store";
 import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
 import { DAEMON_HEARTBEAT_MSG } from "../lib/daemon-heartbeat.mjs"; // CTL-1280
+import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import type { BoardPayload } from "./lib/board-data.mjs";
 import { assembleBoard, _getTranscriptCacheSize } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
@@ -1011,6 +1013,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // liveness check can watch for the shared heartbeat marker independent of the
         // otel-forward event pipeline (the heartbeat EVENT above rides otel-forward).
         console.info(`${DAEMON_HEARTBEAT_MSG} (monitor)`);
+        // CTL-1517: per-process RSS/heap OTel gauge on the same ~30s tick (fire-and-forget;
+        // never throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
+        void emitProcessMemoryMetric({ serviceName: "catalyst.monitor", log: console });
       },
     });
 
@@ -1444,6 +1449,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // New /api/fsm/*, /api/beliefs/*, /api/governance, /api/journey/:ticket
   // routes insert between the /api/beliefs/stream branch and the 404 fallthrough.
   // Re-locate this anchor by grep after each insertion — cited line numbers shift.
+
+  // CTL-1522: how long a non-healthy daemon state must hold before the
+  // notification projector pushes. This is the NOTIFICATION layer's debounce and
+  // is deliberately separate from the healthy-window below, which governs the
+  // liveness DISPLAY (footer dot, /api/nav/stream, cluster view) and must stay
+  // sensitive. Widening the display window to quiet notifications was tried once
+  // (CTL-1169, 30s→90s) and the storm returned. Unset → the module default;
+  // 0 restores the pre-CTL-1522 immediate-edge behavior.
+  const daemonNotifyHoldMs = resolveDaemonNotifyHoldMs(
+    process.env.MONITOR_DAEMON_NOTIFY_HOLD_MS,
+  );
 
   const productionDaemonHealth = async (): Promise<DaemonHealth> => {
     try {
@@ -4207,7 +4223,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/notifications/stream") {
           let unsubNotif: (() => void) | null = null;
           let closedNotif = false;
-          const notifProjector = createNotificationProjector();
+          const notifProjector = createNotificationProjector({
+            daemonNotifyHoldMs,
+          });
           const emitNotifications = (
             controller: ReadableStreamDefaultController<Uint8Array>,
             pb: ProjectorBoard,
@@ -4698,7 +4716,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   if (pushBridgeOpt !== false) {
     const bridge = createPushBridge({
       store: pushStore,
-      projector: createNotificationProjector(),
+      projector: createNotificationProjector({ daemonNotifyHoldMs }),
     });
     // Register the unsubscribe so server.stop() tears the bridge down BEFORE it
     // calls pushStore.closeDb(). Otherwise an orphaned board subscription on the

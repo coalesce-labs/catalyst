@@ -129,6 +129,27 @@ describe("createLinearWebhookHandler", () => {
     expect(res.status).toBe(400);
   });
 
+  // CTL-1532: the appended envelope must carry the provider's own delivery id.
+  // Verified event-scoped (not per-subscription) for Linear: the same
+  // `linear-delivery` value reaches both the workspace webhook (-> smee) and the
+  // catalyst-cloud OAuth app, so it is a sound join key for the parity harness.
+  it("stamps webhook.delivery.id from the linear-delivery header", async () => {
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+      eventLog,
+    });
+    const res = await handler.handle(
+      makeReq(issueUpdatePayload(), {
+        "linear-delivery": "276ce46b-30fc-41bf-b77b-c6c0c82ec712",
+      })
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.attributes["webhook.delivery.id"]).toBe(
+      "276ce46b-30fc-41bf-b77b-c6c0c82ec712"
+    );
+  });
+
   it("happy path → 200 + canonical envelope written to event log", async () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],

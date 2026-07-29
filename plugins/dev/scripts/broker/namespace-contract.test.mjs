@@ -23,6 +23,9 @@ describe("isBrokerProtectedName", () => {
   test("returns true for broker.daemon.* prefix", () => {
     expect(isBrokerProtectedName("broker.daemon.start")).toBe(true);
     expect(isBrokerProtectedName("broker.daemon.degraded")).toBe(true);
+    // CTL-1523: the paired recovery event rides the same protected prefix, so
+    // shouldSkipEvent drops it from re-ingestion with no contract change.
+    expect(isBrokerProtectedName("broker.daemon.recovered")).toBe(true);
   });
 
   test("returns true for exact session.heartbeat", () => {

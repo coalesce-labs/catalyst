@@ -854,6 +854,14 @@ compose_worker_settings_json() {
 	local cluster_generation_val="${CATALYST_CLUSTER_GENERATION-}" # CTL-864
 	local executor_val="${EXECUTOR-}"                             # CTL-1457
 
+	# CTL-1500: cap agent-browser daemon idle life so a worker that runs
+	# `agent-browser open` and then exits/crashes doesn't strand a headed
+	# "Chrome for Testing" browser that re-renders the auto-refresh SPA and pegs a
+	# core. Honored by agent-browser versions that support the env var; a harmless
+	# no-op on older builds (the orphan-sweep vector-5 reaper is the version-agnostic
+	# backstop). Default 5 min; override by exporting AGENT_BROWSER_IDLE_TIMEOUT_MS.
+	local ab_idle_timeout_ms="${AGENT_BROWSER_IDLE_TIMEOUT_MS:-300000}"
+
 	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
 
 	jq -nc \
@@ -870,6 +878,7 @@ compose_worker_settings_json() {
 		--arg generation "$generation_val" \
 		--arg cluster_generation "$cluster_generation_val" \
 		--arg executor "$executor_val" \
+		--arg ab_idle_timeout_ms "$ab_idle_timeout_ms" \
 		--arg statusline_cmd "$statusline_script" \
 		--argjson have_statusline "$([[ -f $statusline_script ]] && echo true || echo false)" \
 		'{
@@ -877,7 +886,8 @@ compose_worker_settings_json() {
          {
            "CLAUDE_CODE_ENABLE_TELEMETRY": $enable_telemetry,
            "OTEL_METRICS_EXPORTER": $metrics_exporter,
-           "OTEL_LOGS_EXPORTER": $logs_exporter
+           "OTEL_LOGS_EXPORTER": $logs_exporter,
+           "AGENT_BROWSER_IDLE_TIMEOUT_MS": $ab_idle_timeout_ms
          }
          + (if $otlp_endpoint == "" then {} else { "OTEL_EXPORTER_OTLP_ENDPOINT": $otlp_endpoint } end)
          + (if $otlp_protocol == "" then {} else { "OTEL_EXPORTER_OTLP_PROTOCOL": $otlp_protocol } end)
@@ -924,6 +934,12 @@ DISPATCH_ENV=(
 	# prefix here (reaches sdk/codex spawns directly); ALSO threaded through
 	# settings.env below so it survives the `claude --bg` RPC that drops this prefix.
 	"CATALYST_EXECUTOR_ID=${EXECUTOR}"
+	# CTL-1500: agent-browser idle-shutdown cap. Mirrors the dual-channel pattern
+	# above: this plain-prefix copy reaches the codex executor (buildCodexEnv reads
+	# only spec.env, never settings.env) and the sdk executor; the settings.env copy
+	# in compose_worker_settings_json is the one that survives the `claude --bg` RPC
+	# for the bg executor (the host that actually leaks). Default 5 min.
+	"AGENT_BROWSER_IDLE_TIMEOUT_MS=${AGENT_BROWSER_IDLE_TIMEOUT_MS:-300000}"
 )
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")

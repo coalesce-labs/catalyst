@@ -446,8 +446,13 @@
                 },
                 "swapUsedMbThreshold": {
                   "type": "number",
-                  "default": 4096,
-                  "description": "Emit when macOS swap-used MB reaches this value. Env EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD overrides."
+                  "default": 24576,
+                  "description": "macOS swap-used MB at or above which the swap signal TRIPS (edge-triggered since CTL-1503). Raised above the observed normal-swap ceiling of a 16 GB Mac so it stops firing every tick. Env EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD overrides."
+                },
+                "swapUsedMbClearThreshold": {
+                  "type": "number",
+                  "default": 16384,
+                  "description": "CTL-1503 hysteresis band: the latched swap degradation CLEARS (fires fleet.health.recovered once) only when swap drops strictly below this LOWER threshold, so a value hovering in the band [clear, trip) cannot re-flap. Clamped below swapUsedMbThreshold if misconfigured. Env EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD overrides."
                 },
                 "agentsThreshold": {
                   "type": "number",
@@ -567,6 +572,19 @@
                 "type": "string"
               },
               "examples": [["auto-filed", "agent-feedback"]]
+            }
+          }
+        },
+        "responder": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Daemon-health responder tuning (CTL-1509) — consumed at INSTALL time by install-health-responder.sh (repo .catalyst/config.json walk-up), which bakes the value into the LaunchAgent's StartInterval. Node-scoped machine tuning in spirit (like sweep.*), permitted here so a repo can pin the sweep cadence; re-run 'catalyst-stack adopt-cloud-sync' (or install-services) after changing it.",
+          "properties": {
+            "intervalSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 900,
+              "description": "How often the health-responder launchd sweep runs (seconds; the installer clamps to 60-900, default 180)."
             }
           }
         },

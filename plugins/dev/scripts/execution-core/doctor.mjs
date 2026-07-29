@@ -1704,7 +1704,7 @@ export function checkReaper(deps = {}) {
   }
 
   const m = xml.match(/<string>([^<]*orphan-sweep\.sh)<\/string>/);
-  const baked = m ? m[1] : null;
+  const baked = m ? decodePlistString(m[1]) : null;
   if (!baked) {
     checks.push(mkCheck(
       "reaper-installed", STATUS.WARN,
@@ -1744,6 +1744,422 @@ export function checkReaper(deps = {}) {
     // lastExit === 0 (clean) or null (loaded but never run yet)
     checks.push(mkCheck("reaper-health", STATUS.PASS, `reaper installed and healthy (${baked})`));
   }
+  return checks;
+}
+
+// defaultResponderState — load state + last exit of the health-responder
+// LaunchAgent. Same launchctl contract as defaultReaperState: `launchctl list
+// <label>` exits 0 and prints a dict containing `"LastExitStatus" = N;` only
+// when launchd has the job loaded; non-zero means never bootstrapped.
+function defaultResponderState() {
+  try {
+    const r = spawnSync("launchctl", ["list", "ai.coalesce.catalyst-health-responder"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0 || !r.stdout) return { loaded: false, lastExit: null };
+    const m = r.stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
+    return { loaded: true, lastExit: m ? parseInt(m[1], 10) : null };
+  } catch {
+    return { loaded: false, lastExit: null };
+  }
+}
+
+// defaultResponderLogMtimeMs — mtime (ms) of the responder heartbeat log, or
+// null when missing/unreadable/EMPTY. catalystDir, when given, is the value
+// baked into the installed plist (Codex P2 round 2: the caller's own
+// process.env.CATALYST_DIR is a transient invocation detail — a doctor run
+// without that env set would check the wrong path on a nondefault-CATALYST_DIR
+// node even though the plist correctly persists it, CTL-1510 item 1). A
+// zero-byte log is treated the SAME as missing (Codex P2 round 2): the
+// log-shipper pre-create fix (item 7) touches a placeholder file with a fresh
+// mtime for any tailed log that doesn't yet exist, and that placeholder must
+// not read as "a sweep just dispatched" when no sweep ever has.
+// Generous upper bound on how long a SINGLE sweep can legitimately run before
+// its heartbeat — used only to distinguish "a sweep is currently in
+// progress" from "a sweep died leaving stale diagnostics forever" (Codex P2
+// round 5). Doctor has no visibility into the responder's own bounded-
+// subprocess timeout env overrides (RESPONDER_LIST_TIMEOUT_SECS,
+// RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS, RESPONDER_KICKSTART_TIMEOUT_SECS,
+// RESPONDER_KICKSTART_WAIT_SECS) — unlike StartInterval, they aren't baked
+// into the plist, so this can't be truly DERIVED from the installed config
+// without a larger design change (persisting them there too). Widened to 5
+// minutes (round 6, Codex P2: 120s was tight enough that a legitimately
+// configured — if unusual — combination of those overrides could exceed it
+// and false-WARN on a still-running sweep) — comfortably covers any
+// realistic override combination while staying far below the staleAfterMs
+// dispatch-warning threshold (>=900s), so it can never mask a truly wedged
+// responder.
+const RESPONDER_IN_PROGRESS_GRACE_MS = 300_000;
+
+// Tolerance for the future-timestamp rejection below — see its call sites.
+const CLOCK_SKEW_TOLERANCE_MS = 2_000;
+
+function defaultResponderLogMtimeMs(catalystDir, nowMsFn = () => Date.now()) {
+  try {
+    const dir = catalystDir || process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
+    const p = resolve(dir, "health-responder.log");
+    const st = statSync(p);
+    if (st.size === 0) return null;
+    // Require the log's LAST line to be a completed `heartbeat status=`
+    // record (Codex P2 round 4, tightening round 3's content-only check): an
+    // append-only log can already hold an OLD heartbeat when a LATER sweep
+    // writes a diagnostic and dies before reaching heartbeat() — a bare
+    // substring match anywhere in the file still finds that old heartbeat,
+    // so mtime (bumped by the diagnostic write) would report "fresh" even
+    // though no sweep has completed since.
+    const lines = readFileSync(p, "utf8").split("\n").filter((l) => l.trim().length > 0);
+    const last = lines[lines.length - 1];
+    if (last && /\bheartbeat status=/.test(last)) return st.mtimeMs;
+    // The trailing line isn't a completed heartbeat — EITHER a sweep is
+    // currently mid-run (wrote a diagnostic, heartbeat still pending — the
+    // NORMAL shape while it's inside the launchctl-timeout/kickstart/settle
+    // path) OR a sweep died leaving that diagnostic as a permanent tail
+    // (Codex P2 round 5: requiring the last line to ALWAYS be a heartbeat
+    // false-WARNs on every in-progress sweep). Distinguish by the RECENCY of
+    // that write: within the generous in-progress grace window, trust it as
+    // "still running, not stale" — outside it, nothing has completed since,
+    // genuinely stale.
+    if (nowMsFn() - st.mtimeMs <= RESPONDER_IN_PROGRESS_GRACE_MS) return st.mtimeMs;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// decodePlistString — undo the XML entity encoding a plist <string> carries
+// (CTL-1510 item 3 writes `&amp;` for `&` in baked paths; Codex P2: passing
+// the still-encoded string to existsSync makes doctor report a working agent's
+// path as missing forever). &amp; is decoded LAST so `&amp;lt;` round-trips.
+function decodePlistString(s) {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+// checkHealthResponder (CTL-1509) — the periodic cloud-sync health responder
+// (health-responder.sh, the bounded-kickstart sweep) must be installed, LOADED
+// by launchd, its baked program path must still exist, and the installed script
+// must carry the RESPONDER_ENABLED kill-switch (a pre-CTL-1509 stale install
+// would silently do nothing). Mirrors checkReaper EXACTLY — every non-healthy
+// condition is a WARN, never a FAIL: catalyst-doctor's exit code is the count
+// of FAILs and gates the catalyst-join activation gate (do_doctor_gate runs
+// BEFORE install-services, which is exactly what would reinstall a stale
+// plist). A FAILing responder check would therefore BLOCK a node from
+// self-healing via join.
+// Severities:
+//   • plist absent             → WARN  (responder not installed; a dead writer stays dead)
+//   • no baked path in plist    → WARN  (malformed plist)
+//   • baked path missing        → WARN  (the CTL-1306 silent-death signature; reinstall)
+//   • kill-switch marker absent → WARN  (stale installed script; reinstall)
+//   • plist present, not loaded  → WARN  (launchd never bootstrapped it)
+//   • last exit 127             → WARN  (program path unresolved; reinstall)
+//   • other non-zero exit       → WARN  (check the log)
+//   • loaded + exit 0 or null   → PASS  (null = never run yet)
+export function checkHealthResponder(deps = {}) {
+  const {
+    plistPath = resolve(
+      homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-health-responder.plist",
+    ),
+    readFile = (p) => readFileSync(p, "utf8"),
+    fileExists = (p) => existsSync(p),
+    responderState = defaultResponderState,
+    // CTL-1510 item 6: mtime of the responder heartbeat log (every sweep —
+    // healthy or not — appends exactly one line, so a fresh mtime IS proof of
+    // dispatch). null = missing/unreadable.
+    logMtimeMs = defaultResponderLogMtimeMs,
+    // Install timestamp proxy for the never-ran-at-all case (Codex P2): the
+    // plist's own mtime. null = unreadable (stay quiet).
+    plistMtimeMs = () => { try { return statSync(plistPath).mtimeMs; } catch { return null; } },
+    nowMs = () => Date.now(),
+  } = deps;
+  const checks = [];
+
+  let xml;
+  try {
+    xml = readFile(plistPath);
+  } catch {
+    checks.push(mkCheck(
+      "responder-installed", STATUS.WARN,
+      "cloud-sync health responder not installed — a dead/wedged replica writer won't be auto-kickstarted; run 'catalyst-stack adopt-cloud-sync' (class-independent; workers also get it via install-services)",
+    ));
+    return checks;
+  }
+
+  const m = xml.match(/<string>([^<]*health-responder\.sh)<\/string>/);
+  const baked = m ? decodePlistString(m[1]) : null;
+  if (!baked) {
+    checks.push(mkCheck(
+      "responder-installed", STATUS.WARN,
+      `responder plist present but no health-responder.sh program path found in ${plistPath}`,
+    ));
+    return checks;
+  }
+
+  if (!fileExists(baked)) {
+    checks.push(mkCheck(
+      "responder-path", STATUS.WARN,
+      `responder points at a path that no longer exists (CTL-1306 silent-death signature): ${baked} — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  // The kill-switch marker doubles as a stale-install detector: the installed
+  // (baked) script — the one launchd actually runs — must be the CTL-1509
+  // shape. Same pattern as defaultReaperHasAbVector's CTL-1500 cross-check.
+  let script = null;
+  try {
+    script = readFile(baked);
+  } catch {
+    script = null;
+  }
+  if (script === null || !/RESPONDER_ENABLED/.test(script)) {
+    checks.push(mkCheck(
+      "responder-killswitch", STATUS.WARN,
+      `installed health-responder.sh (${baked}) is unreadable or lacks the RESPONDER_ENABLED kill-switch marker — stale install; reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  const { loaded, lastExit } = responderState();
+  if (!loaded) {
+    checks.push(mkCheck(
+      "responder-loaded", STATUS.WARN,
+      "responder plist present but not loaded by launchd — run 'catalyst-stack install-services'",
+    ));
+    return checks;
+  }
+
+  if (lastExit === 127) {
+    checks.push(mkCheck(
+      "responder-health", STATUS.WARN,
+      "responder last exited 127 (program path unresolved) — reinstall from the pristine clone",
+    ));
+    return checks;
+  }
+  if (typeof lastExit === "number" && lastExit !== 0) {
+    checks.push(mkCheck(
+      "responder-health", STATUS.WARN,
+      `responder last exited ${lastExit} — check ~/catalyst/health-responder.log`,
+    ));
+    return checks;
+  }
+
+  // Dispatch staleness (CTL-1510 item 6): "loaded + clean exit" is NOT proof
+  // the schedule is alive — a fleet host was observed with launchd holding the
+  // job loaded, LastExitStatus 0, and NO automatic spawns for hours
+  // (StartInterval pended; even RunAtLoad stopped firing after a reload).
+  // Every sweep appends a heartbeat line, so a log mtime older than 3×
+  // StartInterval means NEITHER launchd NOR the cron backstop is dispatching.
+  // A MISSING log gets the same treatment against the plist's install mtime
+  // (Codex P2): on a host where nothing pre-creates the log (dev/monitor
+  // classes have no Alloy), a never-dispatched job would otherwise read as
+  // never-run-yet and PASS forever. Within the window, missing = legitimately
+  // fresh install (RunAtLoad normally writes within seconds).
+  const im = xml.match(/<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/);
+  const intervalSecs = im ? parseInt(im[1], 10) : 180;
+  // Resolve CATALYST_DIR from the INSTALLED plist, not the caller's own
+  // process.env (Codex P2 round 2): a doctor invocation without that env set
+  // would otherwise check the default ~/catalyst path even on a node whose
+  // plist correctly persists a nondefault CATALYST_DIR (item 1), and either
+  // false-WARN on an actively-dispatching responder or false-PASS by reading
+  // an unrelated default-dir log.
+  const cdirMatch = xml.match(/<key>CATALYST_DIR<\/key>\s*<string>([^<]*)<\/string>/);
+  const plistCatalystDir = cdirMatch ? decodePlistString(cdirMatch[1]) : null;
+  const mtime = logMtimeMs(plistCatalystDir, nowMs);
+  const staleAfterMs = Math.max(3 * intervalSecs, 900) * 1000;
+  if (typeof mtime === "number") {
+    const age = nowMs() - mtime;
+    // A SUBSTANTIALLY negative age (the log's mtime is in the future — a
+    // backward clock step, or a log/state dir restored from a newer
+    // snapshot, Codex P2 round 6) must never read as freshness evidence:
+    // mirrors the bash-side sweep lock's own future-timestamp clamp (round
+    // 5) — favor a WARN over silently trusting a clock read that can't be
+    // verified. CLOCK_SKEW_TOLERANCE_MS absorbs ordinary write-then-stat
+    // jitter (filesystem mtime can round UP to whole-second granularity on
+    // some CI/container filesystems, putting a just-written file's mtime a
+    // few ms ahead of the very next Date.now() read — caught live on a
+    // Linux CI runner) without opening the door to a genuine clock-skew
+    // scenario, which in practice is minutes to years, not milliseconds.
+    if (age < -CLOCK_SKEW_TOLERANCE_MS) {
+      checks.push(mkCheck(
+        "responder-dispatch", STATUS.WARN,
+        "responder heartbeat log has a timestamp in the future — cannot trust it as freshness evidence (clock skew or a restored snapshot); investigate the host clock and this log's mtime",
+      ));
+      return checks;
+    }
+    if (age > staleAfterMs) {
+      const ageMin = Math.round(age / 60_000);
+      checks.push(mkCheck(
+        "responder-dispatch", STATUS.WARN,
+        `responder heartbeat log is ${ageMin} min old (interval ${intervalSecs}s) — no scheduler is dispatching the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
+      ));
+      return checks;
+    }
+  }
+  if (mtime === null) {
+    const pMtime = plistMtimeMs();
+    if (typeof pMtime === "number") {
+      const page = nowMs() - pMtime;
+      if (page < -CLOCK_SKEW_TOLERANCE_MS) {
+        checks.push(mkCheck(
+          "responder-dispatch", STATUS.WARN,
+          "responder plist install timestamp is in the future — cannot trust it as freshness evidence (clock skew or a restored snapshot); investigate the host clock and this plist's mtime",
+        ));
+        return checks;
+      }
+      if (page > staleAfterMs) {
+        const ageMin = Math.round(page / 60_000);
+        checks.push(mkCheck(
+          "responder-dispatch", STATUS.WARN,
+          `responder has never emitted a heartbeat (no log) ${ageMin} min after install — no scheduler ever dispatched the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
+        ));
+        return checks;
+      }
+    }
+  }
+
+  // lastExit === 0 (clean) or null (loaded but never run yet), heartbeat fresh
+  checks.push(mkCheck("responder-health", STATUS.PASS, `health responder installed and healthy (${baked})`));
+  return checks;
+}
+
+// ─── Phase 5f: agent-browser worker browser tool (CTL-1500) ──────────────────
+// Phase workers run browser tests (screenshots, live-UI verification) via the
+// `agent-browser` CLI (catalyst-dev:agent-browser skill). Hosts drifted badly:
+// mini ran 0.9.1 (IGNORES the idle-timeout knob), laptop 0.27.2, mini-2 had it
+// NOT INSTALLED. AGENT_BROWSER_IDLE_TIMEOUT_MS auto-shuts-down the per-session
+// daemon (the fix for the headed-Chrome core leak); honored only by >= 0.27.0.
+// Every non-healthy condition is WARN/INFO, never FAIL — same rationale as
+// checkReaper: doctor's exit code is the catalyst-join activation gate, and a
+// missing browser tool must not block owning/dispatching or self-healing.
+
+// Floor at which AGENT_BROWSER_IDLE_TIMEOUT_MS is honored (older builds ignore
+// it). Keep in sync with the bash floor in install-cli.sh / check-setup.sh.
+export const AGENT_BROWSER_MIN_VERSION = "0.27.0";
+
+// parseSemver — "agent-browser 0.32.4" | "0.32.4" → [0,32,4] (or null).
+export function parseSemver(s) {
+  const m = String(s ?? "").match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+// versionGte — dotted `a` >= `b`? Unparseable a → false.
+export function versionGte(a, b) {
+  const va = parseSemver(a), vb = parseSemver(b);
+  if (!va || !vb) return false;
+  for (let i = 0; i < 3; i++) {
+    if (va[i] > vb[i]) return true;
+    if (va[i] < vb[i]) return false;
+  }
+  return true;
+}
+
+function defaultAbVersion() {
+  const r = spawnSync("agent-browser", ["--version"], { encoding: "utf8", timeout: 10_000 });
+  if (r.error || r.status !== 0 || !r.stdout) return null; // ENOENT → error set / status null
+  return r.stdout.trim(); // "agent-browser 0.32.4"
+}
+
+// Fast + network-free: --quick skips the live launch, --offline skips CDN probes.
+function defaultAbDoctor() {
+  const r = spawnSync("agent-browser", ["doctor", "--quick", "--offline", "--json"],
+    { encoding: "utf8", timeout: 20_000 });
+  if (r.error || !r.stdout) return null;
+  try { return JSON.parse(r.stdout); } catch { return null; }
+}
+
+// phase-agent-dispatch (one dir up from execution-core/) bakes
+// AGENT_BROWSER_IDLE_TIMEOUT_MS into the dispatched worker env block (CTL-1500).
+function defaultDispatchWiresIdleTimeout() {
+  try {
+    const p = resolve(dirname(fileURLToPath(import.meta.url)), "..", "phase-agent-dispatch");
+    return /AGENT_BROWSER_IDLE_TIMEOUT_MS/.test(readFileSync(p, "utf8"));
+  } catch { return false; }
+}
+
+// Does the INSTALLED orphan-sweep.sh (the one launchd runs) carry the CTL-1500
+// vector-5 agent-browser reaper? Resolve its baked path from the same plist
+// checkReaper reads, grep for the SWEEP_AB_ENABLED / _ab_browser_roots marker.
+// null = reaper LaunchAgent not installed at all (checkReaper covers that).
+function defaultReaperHasAbVector() {
+  try {
+    const plist = resolve(homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-orphan-sweep.plist");
+    const m = readFileSync(plist, "utf8").match(/<string>([^<]*orphan-sweep\.sh)<\/string>/);
+    if (!m) return null;
+    return /SWEEP_AB_ENABLED|_ab_browser_roots/.test(readFileSync(decodePlistString(m[1]), "utf8"));
+  } catch { return null; }
+}
+
+// checkAgentBrowser — CTL-1500. present + >= min + idle-timeout wired + doctor
+// green + CTL-1500 reaper present. All advisory (WARN/INFO/PASS) — never FAILs.
+export function checkAgentBrowser(deps = {}) {
+  const {
+    abVersion = defaultAbVersion,
+    abDoctor = defaultAbDoctor,
+    dispatchWiresIdleTimeout = defaultDispatchWiresIdleTimeout,
+    reaperHasAbVector = defaultReaperHasAbVector,
+    minVersion = AGENT_BROWSER_MIN_VERSION,
+  } = deps;
+  const checks = [];
+
+  // (a) present on PATH
+  const raw = abVersion();
+  if (!raw) {
+    checks.push(mkCheck("agent-browser-installed", STATUS.WARN,
+      "agent-browser not found on PATH — worker browser tests (screenshots / live-UI " +
+        "verification) unavailable; `brew install agent-browser` then `agent-browser install`"));
+    return checks;
+  }
+  const version = (parseSemver(raw) ?? []).join(".") || raw;
+  checks.push(mkCheck("agent-browser-installed", STATUS.PASS, `agent-browser present (${raw})`));
+
+  // (b) version >= min (older builds silently IGNORE AGENT_BROWSER_IDLE_TIMEOUT_MS)
+  checks.push(versionGte(raw, minVersion)
+    ? mkCheck("agent-browser-version", STATUS.PASS,
+        `agent-browser ${version} >= ${minVersion} (honors AGENT_BROWSER_IDLE_TIMEOUT_MS)`)
+    : mkCheck("agent-browser-version", STATUS.WARN,
+        `agent-browser ${version} is below the ${minVersion} floor — it IGNORES ` +
+          `AGENT_BROWSER_IDLE_TIMEOUT_MS (the daemon idle-shutdown that stops the ` +
+          `headed-Chrome core leak); \`brew upgrade agent-browser\``));
+
+  // (c) idle-timeout wired into dispatched workers
+  checks.push(dispatchWiresIdleTimeout()
+    ? mkCheck("agent-browser-idle-timeout", STATUS.PASS,
+        "AGENT_BROWSER_IDLE_TIMEOUT_MS is wired into dispatched workers (phase-agent-dispatch)")
+    : mkCheck("agent-browser-idle-timeout", STATUS.WARN,
+        "phase-agent-dispatch does not inject AGENT_BROWSER_IDLE_TIMEOUT_MS — a leaked " +
+          "agent-browser daemon will not self-shutdown (CTL-1500 wiring missing)"));
+
+  // (d) optional: agent-browser's own doctor (fast, offline)
+  const d = abDoctor();
+  if (d && typeof d === "object") {
+    const s = d.summary ?? {};
+    checks.push(d.success
+      ? mkCheck("agent-browser-doctor", STATUS.PASS,
+          `agent-browser doctor: pass (${s.pass ?? "?"} pass, ${s.warn ?? 0} warn, ${s.fail ?? 0} fail)`)
+      : mkCheck("agent-browser-doctor", STATUS.WARN,
+          `agent-browser doctor reports ${s.fail ?? "?"} failing check(s) — run \`agent-browser doctor\``));
+  } else {
+    checks.push(mkCheck("agent-browser-doctor", STATUS.INFO,
+      "agent-browser doctor probe unavailable (older build without `doctor`, or probe failed)"));
+  }
+
+  // (e) CTL-1500 reaper present in the INSTALLED orphan-sweep.sh (checkReaper covers the LaunchAgent)
+  const hasVector = reaperHasAbVector();
+  checks.push(hasVector === true
+    ? mkCheck("agent-browser-reaper", STATUS.PASS,
+        "orphan-sweep.sh carries the CTL-1500 agent-browser leaked-browser reaper (vector 5)")
+    : hasVector === false
+      ? mkCheck("agent-browser-reaper", STATUS.WARN,
+          "installed orphan-sweep.sh predates CTL-1500 (no agent-browser vector-5 reaper) — " +
+            "reinstall from the pristine clone (`catalyst-stack install-services`)")
+      : mkCheck("agent-browser-reaper", STATUS.INFO,
+          "orphan-sweep reaper not installed — see the reaper-* checks"));
+
   return checks;
 }
 
@@ -3230,6 +3646,8 @@ export function checksForClass(nc, opts = {}) {
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
+      () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
+      () => checkAgentBrowser(), // CTL-1500: developers run the mini live-test browser loop too (advisory)
       () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
@@ -3285,6 +3703,8 @@ export function checksForClass(nc, opts = {}) {
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
+    () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
+    () => checkAgentBrowser(), // CTL-1500: worker browser tool present + >= min + idle-timeout wired + reaper (advisory, never FAIL)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)

@@ -291,6 +291,30 @@ function daemonAgeMs(node) {
   }
 }
 
+// bodyLooksNotFound — CTL-1504: the linearis CLI now exits nonzero for a
+// genuinely-missing ticket id, with the error body on STDERR
+// (`{"error":"Issue with identifier \"X\" not found"}`). A definitive not-found is
+// the ONLY nonzero we treat as "the ticket is gone"; every other nonzero
+// (429/network/auth/timeout) is transient. Matches the raw text of either stream
+// so it is robust to the JSON body and any plain-string form. Never throws.
+export function bodyLooksNotFound(stderr, stdout) {
+  const body = `${stderr ?? ""}\n${stdout ?? ""}`;
+  // CTL-1504 (Codex P1): require the Linear ENTITY-missing shape — an `issue` /
+  // `identifier` / `entity` qualifier next to "not found" — NOT a bare "not
+  // found". A transient transport error like `HTTP 404 Not Found` must stay
+  // "unknown" and never enter the destructive phantom-quarantine path.
+  return /\b(?:issue|identifier|entity)\b[^\n]*\bnot\s*found/i.test(body);
+}
+
+// isDefinitiveMissing — not-found OR invalid-identifier-format (the two "this is
+// not a live ticket" bodies). Used ONLY by fetchTicketState to pick the benign
+// reason; classifyTicketResolution stays strict (not-found only) so an
+// invalid-format never quarantines.
+export function isDefinitiveMissing(stderr, stdout) {
+  const body = `${stderr ?? ""}\n${stdout ?? ""}`;
+  return bodyLooksNotFound(stderr, stdout) || /invalid\s+issue\s+identifier/i.test(body);
+}
+
 // CTL-1364: optional `onExec` seam — invoked ONLY when this call falls through to the
 // ACTUAL live `linearis issues read` spawn (cache MISS + replica MISS + gateway
 // stale/miss). A cache/gateway/replica HIT returns early WITHOUT calling onExec, so the
@@ -356,14 +380,20 @@ export function fetchTicketState(
   // gateway is a cache, not the replica.
   const liveSource = replica ? "linearis_miss" : "linearis";
   const execStart = onExec ? Date.now() : 0;
-  const { code, stdout, timedOut } = exec("linearis", ["issues", "read", identifier], {
+  const { code, stdout, stderr, timedOut } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
   if (code !== 0) {
     recordDaemonRead(liveSource, "failed", identifier); // live read errored/timed-out — no data served
     if (probeBackoff && cache?.setNegative) {
-      cache.setNegative(identifier); // A4: back off — don't re-hammer this live read every tick
-      emitTicketStateLiveFallback({ identifier, reason: timedOut === true ? "timeout" : "error" });
+      cache.setNegative(identifier); // A4: back off either way — don't re-hammer this live read every tick
+      if (isDefinitiveMissing(stderr, stdout)) {
+        // CTL-1504: a deleted / malformed ticket is BENIGN — negative-cache it but
+        // do NOT fire the WARN live-fallback alert (this was the storm source). The
+        // phantom-sweep (classifyTicketResolution) owns quarantine.
+      } else {
+        emitTicketStateLiveFallback({ identifier, reason: timedOut === true ? "timeout" : "error" });
+      }
     }
     if (onExec) {
       try {
@@ -695,6 +725,13 @@ export function readTicketLabelNodes(identifier, { exec = defaultExec } = {}) {
 // discriminator is the BODY, not the exit code: a "not found" error string is
 // the definitive not-found; any other error body (auth/network/rate-limit) is
 // transient → unknown.
+//
+// CONTRACT DRIFT (CTL-1504, verified 2026-07-23): the CLI now exits **1** for a
+// genuinely-missing ticket, with the not-found body on **stderr**. So on a
+// nonzero exit we inspect the body (stderr preferred) for a definitive not-found
+// and return "not-found"; every other nonzero (429/network/auth/timeout/
+// invalid-format) stays "unknown". The exit-0 body-discriminator path below is
+// retained for back-compat with any deployment still on the 2026-05-27 contract.
 export function classifyTicketResolution(
   identifier,
   { exec = defaultExec, gateway, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
@@ -711,10 +748,16 @@ export function classifyTicketResolution(
   // CTL-1339: hot per-signal terminal read (phantom-sweep) — cap the wall-clock
   // so a 429-stalled linearis can't block the synchronous tick. A timed-out read
   // fails SAFE via the code-127 → "unknown" branch (never a false quarantine).
-  const { code, stdout } = exec("linearis", ["issues", "read", identifier], {
+  const { code, stdout, stderr } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
-  if (code !== 0) return "unknown"; // nonzero is ambiguous — NEVER not-found
+  if (code !== 0) {
+    // CTL-1504: the CLI now exits 1 for a genuinely-missing ticket, with the
+    // not-found body on stderr. A definitive not-found is the ONLY nonzero that
+    // may quarantine; every other nonzero (429/network/auth/timeout/invalid-format)
+    // stays ambiguous → "unknown" so a Linear outage never quarantines a real ticket.
+    return bodyLooksNotFound(stderr, stdout) ? "not-found" : "unknown";
+  }
   let node;
   try {
     node = JSON.parse(stdout);

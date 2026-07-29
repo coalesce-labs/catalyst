@@ -9,6 +9,7 @@ import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
 import { createTailer } from "./lib/tail.ts";
 import { log } from "./lib/logger.ts";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { OtlpSender } from "./lib/destinations/otlp.ts";
 import { PosthogSender } from "./lib/destinations/posthog.ts";
 import { CloudflareAESender } from "./lib/destinations/cloudflare-ae.ts";
@@ -132,6 +133,9 @@ function emitLag(): void {
   // startup line then went silent, reading as down). Rides the Alloy .log stream,
   // independent of the event pipeline this daemon itself ships.
   logDaemonHeartbeat(log, "otel-forward");
+  // CTL-1517: per-process RSS/heap OTel gauge on the same tick (fire-and-forget; never
+  // throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
+  void emitProcessMemoryMetric({ serviceName: "catalyst.otel-forward", log });
   // Skip on cold start before any event has been processed or delivered
   if (!lastLocalTs && !lastForwardedTs) return;
   try {

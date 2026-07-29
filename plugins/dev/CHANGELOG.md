@@ -1,5 +1,101 @@
 # Changelog
 
+## [12.38.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.37.0...catalyst-dev-v12.38.0)
+
+Jul 27, 2026
+
+<!-- ai-enhanced -->
+
+### Dual-Harness Migration & Event Loop Fix
+
+Run `migrate-dual-harness.sh` to migrate a single-harness repo (Claude-only or Codex-only) to the vendor-neutral dual-harness layout where both Claude Code and Codex share the same instructions and skills — checkup §10 and a new foundry skill handle the split automatically. A daemon event loop stall that caused 72–97 second heartbeat gaps during worktree cleanup bursts is also resolved, along with a fix that stamps provider delivery IDs onto webhook envelopes so the smee-vs-cloud parity harness can actually join on them.
+
+
+
+### PRs
+
+* **dev:** CTL-1530 dual-harness migration (migrate-dual-harness.sh + checkup §10 + foundry skill) ([#2753](https://github.com/coalesce-labs/catalyst/issues/2753)) ([0afc204](https://github.com/coalesce-labs/catalyst/commit/0afc204fd049cf6b9f9c6f7a2a87b5a032742bec))
+* **dev:** CTL-1524 unblock the daemon event loop in wt-cleanup-drain (free provenance gate first + bounded burst) ([#2747](https://github.com/coalesce-labs/catalyst/issues/2747)) ([d31c9c6](https://github.com/coalesce-labs/catalyst/commit/d31c9c609534d67fd872938ac10c86d19c875bda))
+* **dev:** CTL-1532 stamp the provider delivery id on webhook envelopes ([#2751](https://github.com/coalesce-labs/catalyst/issues/2751)) ([708437b](https://github.com/coalesce-labs/catalyst/commit/708437b1acfaf235d5cb6882ce5a27f116f06f55))
+
+## [12.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.36.0...catalyst-dev-v12.37.0)
+
+Jul 26, 2026
+
+<!-- ai-enhanced -->
+
+### Daemon Stability & Memory Audit Remediation
+
+This release fixes a cluster of runtime reliability issues discovered during a live memory and health audit on production nodes. The most impactful changes stop a 115-second scheduler stall caused by reading a 300 MB event log on every tick (now a bounded cursor scan), close a file-descriptor leak in the delegate-runner that was trending toward EMFILE, and silence ~300 spurious "daemon degraded" phone notifications per day by replacing a naked edge trigger in the notification filter with a 180-second sustained-state hold. Also included: per-process RSS/heap OTel gauges on every daemon so future leaks can be attributed to a specific service, edge-triggered fleet-health probes that fire once per degradation episode instead of on every tick, and a health-responder backstop that now supervises the host-metrics sampler so a silently dead agent gets auto-kickstarted rather than going unnoticed for days.
+
+
+
+### PRs
+
+* **dev:** CTL-1503 edge-triggered fleet-health probe (hysteresis band + recovered event + durable latch) ([#2704](https://github.com/coalesce-labs/catalyst/issues/2704)) ([a4dc53e](https://github.com/coalesce-labs/catalyst/commit/a4dc53e23923cfc63487e9a14e4b2f533836effc))
+* **dev:** CTL-1517 per-process RSS/heap OTel gauge on every daemon (leak attribution) ([#2732](https://github.com/coalesce-labs/catalyst/issues/2732)) ([8c85824](https://github.com/coalesce-labs/catalyst/commit/8c85824aeba204f9c02fefb942789b13d51bbf96))
+* **dev:** CTL-1518 health-responder supervises com.catalyst.agent sampler (self-heal backstop) ([#2731](https://github.com/coalesce-labs/catalyst/issues/2731)) ([b3ae705](https://github.com/coalesce-labs/catalyst/commit/b3ae705d24ddada36b9f93437130c4668e8bd9d7))
+* **dev:** CTL-1510 health-responder hardening — token-aware exit-0 gate, sweep lock, cron backstop + 5 more edges ([#2714](https://github.com/coalesce-labs/catalyst/issues/2714)) ([92ac2ec](https://github.com/coalesce-labs/catalyst/commit/92ac2ecf6ee70098518438fd67ad89dc05feea69))
+* **dev:** CTL-1513 bash-3.2 comment-parsing crash in _token_provisioned (production hotfix) ([#2719](https://github.com/coalesce-labs/catalyst/issues/2719)) ([ffd7da1](https://github.com/coalesce-labs/catalyst/commit/ffd7da1eb8df739a33115f84f6f5b5cf97772add))
+* **dev:** CTL-1514 tail event log by cursor in execution-core (stop 115s scheduler stalls) ([#2729](https://github.com/coalesce-labs/catalyst/issues/2729)) ([ac009d9](https://github.com/coalesce-labs/catalyst/commit/ac009d9994ba69a899fedf40b083e7154e3a9dff))
+* **dev:** CTL-1515 bound orch-monitor readBacklog/readTunnelEventStats fallbacks (chunked scan) ([#2730](https://github.com/coalesce-labs/catalyst/issues/2730)) ([9ea4502](https://github.com/coalesce-labs/catalyst/commit/9ea4502f2dc04d61dbe60558942657347143deae))
+* **dev:** CTL-1516 bound broker _emittedWakeCache + heartbeat/orchestrator maps ([#2728](https://github.com/coalesce-labs/catalyst/issues/2728)) ([2001242](https://github.com/coalesce-labs/catalyst/commit/20012422935a92e53718d99a2c63ac4e428605b0))
+* **dev:** CTL-1519 close delegate-runner log fd after detached spawn (fd leak → EMFILE) ([#2727](https://github.com/coalesce-labs/catalyst/issues/2727)) ([5709d17](https://github.com/coalesce-labs/catalyst/commit/5709d1786aed452fce8c98a83d2a22b6e6ac0049))
+* **dev:** CTL-1522 hold daemon-degraded notifications so a transient heartbeat stall never pushes ([#2739](https://github.com/coalesce-labs/catalyst/issues/2739)) ([5b56cef](https://github.com/coalesce-labs/catalyst/commit/5b56cef189fad0143314989a4a9bd4ed6cbc88fb))
+* **dev:** CTL-1523 stop the broker reporting daemon-degraded on an idle fleet ([#2740](https://github.com/coalesce-labs/catalyst/issues/2740)) ([4a58ddd](https://github.com/coalesce-labs/catalyst/commit/4a58ddda026b22640c008bf34d46d0472a119c72))
+
+## [12.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.35.0...catalyst-dev-v12.36.0)
+
+Jul 25, 2026
+
+<!-- ai-enhanced -->
+
+### Cloud-Sync Self-Heal & Daemon Health Responder
+
+Two fixes targeting the root causes of the 2026-07-23 replica-writer outage. The cloud-sync writer now exits cleanly within a bounded timeout on both stall and shutdown paths, writes a breadcrumb when it self-heals, and detects half-open sockets in roughly 2 ticks instead of 80+ minutes using SDK `lastFrameAt`. A new stateless launchd sweep runs every 3 minutes to catch the case where the writer dies and launchd fails to respawn it — kicking it back with a bounded, escalating retry rather than depending on `KeepAlive` alone. After merging, run `catalyst-stack install-services` on affected nodes and verify with `catalyst doctor`.
+
+
+
+### PRs
+
+* **dev:** CTL-1509 daemon-health responder — stateless launchd sweep kickstarts a dead/stale cloud-sync writer (bounded, escalating) ([#2710](https://github.com/coalesce-labs/catalyst/issues/2710)) ([6e0ec37](https://github.com/coalesce-labs/catalyst/commit/6e0ec376cb66152f98f872da3685e54a41c1e932))
+* **dev:** CTL-1508 exit-safe cloud-sync self-heal + selfheal breadcrumb + lastFrameAt stall classifier ([#2709](https://github.com/coalesce-labs/catalyst/issues/2709)) ([1e33520](https://github.com/coalesce-labs/catalyst/commit/1e33520fdca612d9f8b02e42bf6fe277f2687ee9))
+
+## [12.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.34.0...catalyst-dev-v12.35.0)
+
+Jul 23, 2026
+
+<!-- ai-enhanced -->
+
+### Agent Browser Leak Fix & Scheduler Hardening
+
+Leaked agent-browser Chrome processes that outlived their worker sessions — sometimes pegging a CPU core indefinitely — are now reaped automatically by a new vector in the hourly orphan sweep, which targets runaway or idle Chrome-for-Testing instances while leaving personal Chrome untouched. Workers also receive an idle-timeout environment variable at dispatch so agent-browser shuts itself down after 5 minutes of inactivity on supported versions. Two scheduler fixes round out the release: phantom ticket directories (like `.catalyst`) no longer poison board-health checks, and a transient source conflict during dispatch-time rebase now triggers a single retry against a fresh base before parking the ticket as needs-human.
+
+
+
+### PRs
+
+* **dev:** CTL-1500 reap leaked agent-browser Chrome + idle-timeout + setup-tooling ownership ([#2702](https://github.com/coalesce-labs/catalyst/issues/2702)) ([74fa0a8](https://github.com/coalesce-labs/catalyst/commit/74fa0a8ea2eda2bb96ef53772a320366ef3e87b7))
+* **dev:** CTL-1504 guard scheduler census sites + classify not-found (stop CTC-phantom board-health poison) ([#2698](https://github.com/coalesce-labs/catalyst/issues/2698)) ([6d6d154](https://github.com/coalesce-labs/catalyst/commit/6d6d15411b4fe469b175db9b4ed29a3628d38bf6))
+* **dev:** CTL-1505 retry rebase against fresh origin/&lt;base&gt; before parking a source conflict ([#2701](https://github.com/coalesce-labs/catalyst/issues/2701)) ([17de576](https://github.com/coalesce-labs/catalyst/commit/17de576be99523a232415334918010708ec00ef0))
+
+## [12.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.33.0...catalyst-dev-v12.34.0)
+
+Jul 23, 2026
+
+<!-- ai-enhanced -->
+
+### Autonomous PR Block Recovery
+
+When a PR fails to merge, the recovery pass now probes GitHub live — checking CI status, unresolved bot review threads, and review decisions — and routes autonomously: bounded fixes get dispatched to a worker, while genuine human gates (CHANGES_REQUESTED from a person, no open PR found) escalate with specific context instead of an opaque failure message. A `CATALYST_EXECUTOR_BY_PHASE` JSON env var also lands in this release, letting you set durable per-phase executor routing in `execution-core.env` without it being wiped by the broker's periodic `git reset`. The recovery pass feature ships behind `CATALYST_RECOVERY_PASS=shadow|enforce` and is off by default.
+
+
+
+### PRs
+
+* **dev:** CTL-1496 recovery-pass drives blocked PR to merge instead of escalating ([#2689](https://github.com/coalesce-labs/catalyst/issues/2689)) ([bec5e03](https://github.com/coalesce-labs/catalyst/commit/bec5e038be26256572fed0342c93cda1dc5bb31b))
+* **dev:** CTL-1457 follow-up — CATALYST_EXECUTOR_BY_PHASE env override (durable per-node routing) ([#2655](https://github.com/coalesce-labs/catalyst/issues/2655)) ([3afb50a](https://github.com/coalesce-labs/catalyst/commit/3afb50aea8e18ea3cc26c52b38d01dd6f66f6536))
+
 ## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0)
 
 Jul 22, 2026

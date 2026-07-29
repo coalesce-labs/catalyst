@@ -56,6 +56,12 @@ const DEFAULT_THRESHOLDS = {
   // combine with one fresh scan to fake a "K consecutive" run. 60 min gives K=6 at
   // 5-min cadence (~30-min real span) generous headroom while rejecting hour+ gaps.
   actuationLivenessWindowMs: Number(process.env.CATALYST_BH_ACTUATION_WINDOW_MS) || 60 * 60_000,
+  // CTL-1475: how long a ticket may ASSERT it is in flight with nothing backing
+  // that claim before it is flagged. Generous on purpose — a real worker between
+  // phases, a slow review, or a brief daemon restart must never trip this. The
+  // observed population sat like this for WEEKS, so 24h is already far past any
+  // legitimate gap while staying well inside "a human would call this stuck".
+  unownedInFlightMs: Number(process.env.CATALYST_BH_UNOWNED_INFLIGHT_MS) || 24 * 3_600_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -86,6 +92,20 @@ const BLOCKER_DONE_RE = /done|complete|merged|cancel|duplicate/i;
 // filter_state status that means the PR already landed/shipped.
 const PR_STATE_RE = /^pr$|in.?review/i;
 const PR_MERGED_RE = /^(merged|deployed)$/i;
+// CTL-1475: a Linear state that ASSERTS a worker is on the ticket right now.
+// These are the build states the pipeline moves a ticket through — each one is a
+// claim ("this is being implemented"), not a label. When the claim outlives the
+// worker, nothing reclaims it: admission only pulls Todo, the recovery census
+// scans worker dirs, and every existing invariant keys on a pipeline artifact
+// these tickets do not have. So they rot, invisibly, forever.
+// `review` is here for the SHIPPED TEMPLATE's `stateMap.reviewing = "Review"`
+// (config.template.json) — this fleet maps `reviewing` onto "Validate", so the bare
+// "Review" name never appears locally and the gap was invisible in our own data.
+// `triage` is deliberately EXCLUDED: it is the admission boundary
+// (eligibleQuery = {status:"Todo", triageStatus:"Triage"}), so a ticket legitimately
+// queued for pickup would read as unowned in-flight and race new-work admission.
+const IN_FLIGHT_STATE_RE =
+  /^(research|plan|implement|validate|review|remediate|pr)$|in.?review|in.?progress/i;
 // label/status forms of "needs a human".
 const NEEDS_HUMAN_LABEL_RE = /needs.?human/i;
 const NEEDS_HUMAN_STATUSES = new Set(["needs-human", "needs_human", "stalled"]);
@@ -202,6 +222,15 @@ function isLiveWorkerStatus(status) {
 // board-health never proposes recovery for already-terminal work whose only
 // remaining signal is a stale cached label (the CTL-1157/1162 stale-label class
 // that terminal-needs-human-reconcile strips lazily).
+// tsMillis — epoch-ms number | numeric string | ISO string → ms, else NaN.
+// Producers disagree on the wire shape; a timestamp reader that understands only
+// one of them fails SILENTLY (every row reads "unknown age"), so it understands both.
+function tsMillis(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
+  if (typeof v !== "string" || v === "") return NaN;
+  if (/^\d+$/.test(v)) return Number(v);
+  return Date.parse(v);
+}
 function isTerminalLinearState(d) {
   const state = d?.state ?? d?.linear_state ?? null;
   return state != null && BLOCKER_DONE_RE.test(String(state));
@@ -307,6 +336,21 @@ function deriveRing(events, nowMs) {
 }
 
 // ── (1) assembleBoardState — the ONE impure reader (reads only, never writes) ─
+// resolveDeadHosts — CTL-1524 (C4b). Accept EITHER a resolved array (the historical
+// contract, still used by bare ticks and unit tests) OR a zero-arg thunk the caller
+// wants evaluated lazily. The daemon binds a thunk because resolving it costs a
+// whole-log heartbeat read; every consumer below wants a plain array. Never throws —
+// a failed liveness read degrades to "no provably-dead hosts", which is the same
+// fail-safe computeSurvivingRoster already applies (no failover, never a double-act).
+export function resolveDeadHosts(deadHosts) {
+  try {
+    const v = typeof deadHosts === "function" ? deadHosts() : deadHosts;
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
 export function assembleBoardState({
   orchDir,
   getBoard = () => [],
@@ -398,7 +442,9 @@ export function assembleBoardState({
     signals,
     eligible,
     roster: Array.isArray(roster) ? roster : [],
-    deadHosts: Array.isArray(deadHosts) ? deadHosts : [],
+    // CTL-1524 (C4b): resolve here too, so a direct assembleBoardState caller may
+    // also pass a thunk. Already-resolved arrays pass through untouched.
+    deadHosts: resolveDeadHosts(deadHosts),
     self: self ?? "",
     multiHost: !!multiHost,
     // CTL-1157 off-gate: carried so evaluateInvariants can skip the cohort checks
@@ -463,6 +509,9 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // observable ONLY in enforce (shadow not-dispatching is by-design telemetry),
       // so the off-mode invariant set stays byte-identical to origin/main.
       actuationLiveness: () => checkActuationLiveness(boardState, thresholds),
+      // CTL-1475: work that asserts it is in flight while nothing owns it. Cohort-
+      // gated like its siblings so the `off` invariant set stays byte-identical.
+      unownedInFlight: () => checkUnownedInFlight(boardState, thresholds),
     });
   }
   const out = {};
@@ -720,6 +769,88 @@ function checkActuationLiveness(b, t) {
 // state whose linked PR has already merged/deployed — the GitHub-PR→Done
 // automation was removed (multi-PR tickets falsely went Done on first merge), so
 // nothing advances these now. Empty prStatusMap ⇒ observable:false (shadow-safe).
+// #11 — CTL-1475: UNOWNED IN-FLIGHT. A ticket whose Linear state asserts a worker
+// is on it, where no worker exists and no PR is open, past `unownedInFlightMs`.
+//
+// This is the blind spot every other invariant misses BY CONSTRUCTION, and the
+// reason is worth stating: admission only pulls `Todo`, the recovery census scans
+// worker DIRS, and workerAge / orphanedOpenPr / phantomMergedPr / needsHumanPile
+// all key on an artifact — a signal file, a PR, a label — that these tickets do
+// not have. A ticket hand-moved to `Implement`, or one whose worker died without
+// writing a terminal signal, therefore has NOTHING pointing at it. It is not that
+// the machinery decides to skip it; the machinery cannot see it at all.
+//
+// Observed 2026-07-14 (CTL-1475 audit): ~12 such tickets. Re-measured 2026-07-27:
+// 11 CTL tickets in in-flight states with ZERO worker dirs across BOTH hosts,
+// while the fleet's 10 workers were all for other tickets. Thirteen days, no
+// movement, nothing proposed — because nothing could name them.
+//
+// Deliberately conservative: a ticket is flagged only when EVERY positive sign of
+// ownership is absent (no live worker signal, no open PR) AND it is stale past the
+// threshold. Any evidence of ownership spares it — a false negative here costs one
+// more scan, a false positive re-dispatches work a human is holding.
+function checkUnownedInFlight(b, t) {
+  const tickets = b?.ticketsById;
+  if (!(tickets instanceof Map) || tickets.size === 0) {
+    return invariant(true, 0, false, [], "no ticket descriptors → unowned-in-flight not observable");
+  }
+  const nowMs = Number.isFinite(b?.now) ? b.now : Date.now();
+  const limit = t?.unownedInFlightMs ?? DEFAULT_THRESHOLDS.unownedInFlightMs;
+  // Only a LIVE signal proves ownership. Counting terminal artifacts too made the
+  // invariant blind itself: the recovery pass this cohort dispatches WRITES
+  // `phase-recovery-pass.json` with status `complete`, so the first sweep of a ticket
+  // permanently exempted it from ever being flagged again — even when the ticket was
+  // still stuck. One shot per ticket, then silence, which defeats the whole point of a
+  // recurring invariant. `isLiveWorkerStatus` is the same predicate the orphaned-open-PR
+  // cohort already uses, and the scheduler's phantom-directory logic likewise treats a
+  // `complete` signal as inert rather than as real pipeline work.
+  const hasLiveSignal = new Set(
+    b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket) ?? [],
+  );
+  const prMap = b.prStatusMap instanceof Map ? b.prStatusMap : null;
+  const flagged = [];
+  let unobservableAges = 0;
+  for (const [id, d] of tickets) {
+    const state = d?.state ?? d?.linear_state ?? null;
+    if (!state || !IN_FLIGHT_STATE_RE.test(String(state))) continue;
+    if (isTerminalLinearState(d)) continue;
+    if (hasLiveSignal.has(id)) continue; // a worker is genuinely on it
+    // An OPEN PR is ownership — but only its own, confirmed open PR. Treating "the
+    // ticket has a PR number AND the global map is nonempty" as proof let a CLOSED or
+    // MERGED PR (or an unrelated repo's row for the same number) suppress the invariant
+    // forever, while an unavailable/empty map flagged tickets whose PR is genuinely
+    // open. Resolve the exact (repo, number) the way the sibling PR cohorts do.
+    const prNum = prNumberOf(d);
+    if (prNum != null && prMap) {
+      const pr = lookupPrStatus(prMap, prNum, b.repoForTicket ? safeRepoOf(b.repoForTicket, id) : null);
+      if (pr && pr.ambiguous) continue; // cannot disambiguate → spare it
+      if (pr && String(pr.status).toLowerCase() === "open") continue;
+    }
+    const updatedAt = d?.updatedAt ?? d?.updated_at ?? null;
+    // Accept BOTH shapes. The replica stores these as epoch-millisecond INTEGERS
+    // (1782759683683) while other producers use ISO strings, and Date.parse() on a
+    // number yields NaN — which lands in the unreadable-age branch below. Verified
+    // against the live board: with parse-only, all 13 in-flight tickets read as
+    // "age unknown" and the invariant reported a permanently clean board. It would
+    // have shipped blind on the exact population it exists to catch.
+    const ts = tsMillis(updatedAt);
+    // Fail SAFE on an unreadable timestamp: without an age we cannot prove
+    // staleness, and flagging on "unknown" would re-dispatch fresh work.
+    if (!Number.isFinite(ts)) { unobservableAges++; continue; }
+    if (nowMs - ts >= limit) flagged.push(id);
+  }
+  return invariant(
+    flagged.length === 0,
+    flagged.length,
+    true,
+    flagged,
+    flagged.length === 0
+      ? "no unowned in-flight tickets"
+      : `${flagged.length} ticket(s) assert an in-flight state with no worker and no open PR past ${Math.round(limit / 3_600_000)}h`,
+    { unobservableAges, thresholdMs: limit },
+  );
+}
+
 function checkPhantomMergedPr(b) {
   const map = b.prStatusMap;
   if (!(map instanceof Map) || map.size === 0) {
@@ -1017,6 +1148,26 @@ export function proposeMoves(invariants, _b) {
   for (const t of invariants.frozenNeedsHuman?.flagged ?? []) {
     if (!invariants.frozenNeedsHuman.ok && !sanction(t)) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
   }
+  // CTL-1475: tier2 = ANCHORABLE, so the delegate actually sweeps these up.
+  //
+  // An earlier revision made this tier3 (escalate-only) on the reasoning that the
+  // automation cannot know WHY a ticket is parked, so acting might trample work a
+  // human is holding. That was too cautious, and it made the invariant nearly
+  // pointless: tier3 is "never anchorable", so the delegate is CONTRACTUALLY
+  // forbidden from touching these — the cohort would have been detected, reported,
+  // and then left exactly as stuck as before. Detection without actuation is how
+  // this population sat untouched for 13 days in the first place.
+  //
+  // tier2 (not tier1) is the deliberate part: the recovery-pass worker READS the
+  // ticket and decides what to do with it — it does not blindly reset anything —
+  // and tier1 is reserved for the higher-urgency PR cohorts. Operator-sanctioned
+  // tickets are still suppressed via `sanction()`, which is the real escape hatch
+  // for "a human is holding this one".
+  for (const t of invariants.unownedInFlight?.flagged ?? []) {
+    if (!invariants.unownedInFlight.ok && !sanction(t)) {
+      tier2.push({ ticket: t, move: "recover-unowned-in-flight", rationale: "Linear state claims in-flight but there is no worker and no open PR" });
+    }
+  }
   for (const h of invariants.strandedNode?.flagged ?? []) {
     if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
   }
@@ -1150,6 +1301,13 @@ export function buildBoardContext(boardState, invariants) {
     phantomPrs: invariants.phantomMergedPr?.flagged ?? [],
     orphanedPrs: invariants.orphanedOpenPr?.flagged ?? [],
     frozenNeedsHuman: invariants.frozenNeedsHuman?.flagged ?? [],
+    // CTL-1475: the delegate's mandate for this cohort is HOLISTIC — one ticket
+    // becomes the dispatch anchor, but the worker is meant to sweep them all. The
+    // recovery-pass skill consumes this brief instead of re-running the board scan,
+    // so a cohort omitted here is a cohort the worker cannot even enumerate: it would
+    // see the failure count and a single anchor, fix one ticket, and leave the rest
+    // exactly as stuck. Additive, like the cohorts above; [] when green/unobservable.
+    unownedInFlight: invariants.unownedInFlight?.flagged ?? [],
     strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
       host,
       // the tickets HRW-owned by this stranded host — the delegate's actionable
@@ -1254,13 +1412,17 @@ export function boardHealthPass({
   if (mode === "off") return { ran: false, reason: "off" }; // strict no-op
   const nowMs = now();
   if (isThrottledFn(lastRunMs, intervalMs, nowMs)) {
-    return { ran: false, reason: "throttled" }; // no emit, no act
+    return { ran: false, reason: "throttled" }; // no emit, no act, NO deadHosts read
   }
 
   const board = assembleBoardState({
     orchDir, getBoard, getWorkerSignals, getEligible,
     roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, getReconcileMarkers,
-    getPrStatusMap, deadHosts, mode, now,
+    // CTL-1524 (C4b): resolved HERE — past the `off` branch and past the throttle —
+    // so the expensive whole-log heartbeat read behind the daemon's thunk is paid
+    // only on a tick that actually proceeds, not on all ~59 throttled ticks between
+    // 5-minute passes. Arrays still work unchanged (resolveDeadHosts is a no-op).
+    getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), mode, now,
     getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
   });
   const invariants = evaluateInvariants(board, { mode });
