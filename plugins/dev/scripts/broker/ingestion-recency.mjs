@@ -159,6 +159,82 @@ export function initialRecencyAlarmState() {
 }
 
 /**
+ * makeWatcherRecency — CTL-1423 Phase 5. Factory for a single-watcher dead-man's
+ * switch tracker. The router holds one tracker per (host, watcherId, channel) key.
+ *
+ * - observe(envelope): fold one `channel.watcher.heartbeat` envelope into the
+ *   tracker's last-seen timestamp (best-effort; non-monotone events are ignored).
+ * - tick(nowMs): returns null (no transition) or { action, label, ageMs, causedBy }
+ *   where action = "raised" | "cleared" and label = "system_down". Transitions
+ *   follow the same edge-trigger/holddown machine as the monitor path above.
+ *
+ * @param {object} opts
+ * @param {number} [opts.staleAfterMs]  ms of silence before raising (default 3m)
+ * @param {number} [opts.holddownMs]    flap-guard ms (default 10m)
+ */
+export function makeWatcherRecency({ staleAfterMs = 180_000, holddownMs = 600_000 } = {}) {
+  let _lastSeenMs = null;
+  let _lastSeenId = null;
+  let _alarm = initialRecencyAlarmState();
+
+  function observe(envelope) {
+    const tsMs = Date.parse(envelope?.ts ?? "");
+    if (Number.isNaN(tsMs)) return;
+    if (_lastSeenMs === null || tsMs >= _lastSeenMs) {
+      _lastSeenMs = tsMs;
+      _lastSeenId = envelope?.id ?? null;
+    }
+  }
+
+  function tick(nowMs) {
+    let severity;
+    if (_lastSeenMs === null) {
+      severity = "unknown"; // never-seen → fail-open, never alarm
+    } else if (nowMs - _lastSeenMs >= staleAfterMs) {
+      severity = "down";
+    } else {
+      severity = "up";
+    }
+    // Snapshot the pre-transition alarm: downEmittedAt for the recovered-duration
+    // report (below), and the whole object so a failed downstream append can roll
+    // the edge back and retry (mirrors checkSourceRecency's deferred commit).
+    const prevAlarm = _alarm;
+    const downEmittedAtBefore = _alarm.downEmittedAt;
+    const { state, emit } = nextRecencyAlarmState(_alarm, { severity, nowMs, holddownMs });
+    _alarm = state;
+    if (!emit) return null;
+    // A `stale` reports the SILENCE (age since the last beat, vs the down
+    // threshold). A `cleared` reports the OUTAGE it resolved — its duration from
+    // the stale edge (downEmittedAt), NOT the age of the fresh recovery beat;
+    // otherwise a long outage cleared by one new beat underreports as ~0ms.
+    // Mirrors the monitor recency path (checkSourceRecency).
+    const ageMs =
+      emit === "stale"
+        ? _lastSeenMs !== null
+          ? Math.max(0, nowMs - _lastSeenMs)
+          : null
+        : downEmittedAtBefore !== null
+          ? Math.max(0, nowMs - downEmittedAtBefore)
+          : null;
+    return {
+      action: emit === "stale" ? "raised" : "cleared",
+      label: "system_down",
+      ageMs,
+      causedBy: _lastSeenId,
+      // The caller emits the alert AFTER tick() returns; if that append fails
+      // (e.g. transient ENOSPC/EACCES correlated with the very outage we detect),
+      // it calls rollback() so the un-latched edge re-fires next tick instead of
+      // being permanently lost until an opposite edge.
+      rollback: () => {
+        _alarm = prevAlarm;
+      },
+    };
+  }
+
+  return { observe, tick };
+}
+
+/**
  * nextRecencyAlarmState — PURE edge-trigger + holddown. Given the current
  * severity (from classifyRecency: "up"|"degraded"|"down"|"unknown") and the
  * prior state, return { state, emit } where emit ∈ "stale" | "recovered" | null.

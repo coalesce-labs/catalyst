@@ -40,6 +40,7 @@ import {
   GITHUB_RECENCY_DOWN_MS,
   INGESTION_RECENCY_HOLDDOWN_MS,
   INGESTION_SEED_BYTES,
+  WATCHER_RECENCY_STALE_MS,
   getPrevMonthEventLogPath,
   BROKER_DEGRADED_GRACE_MS,
   BROKER_DEGRADED_SUSTAINED_TICKS,
@@ -132,7 +133,9 @@ import {
   initialRecencyAlarmState,
   nextRecencyAlarmState,
   emitIngestionRecencyEvent,
+  makeWatcherRecency,
 } from "./ingestion-recency.mjs";
+import { CHANNEL_WATCHER_HEARTBEAT_EVENT } from "../channel-watcher/lib/heartbeat-schema.mjs";
 // CTL-1123: the broker alert-emit foundation — promote detector signals into a
 // stable catalyst.alert.* topic in the event log (delivery is a separate story).
 import {
@@ -446,6 +449,11 @@ const TERMINAL_LINEAR_STATES = new Set(["Done", "Canceled"]);
 // state. service.name -> alarmState (initialRecencyAlarmState shape).
 const _recencyAlarmByService = new Map();
 
+// CTL-1423 Phase 5: per-watcher dead-man's-switch tracker.
+// key = "host|watcherId|channel" → { tracker: makeWatcherRecency, meta: {host,watcherId,channel} }
+// Populated by observeWatcherHeartbeat when a channel.watcher.heartbeat event arrives.
+const _watcherTrackers = new Map();
+
 // RECENCY_SOURCES — one descriptor per ingestion source the watchdog evaluates
 // each tick. `gated:true` sources are activity-gated: their silence only alarms
 // while the fleet is actually working (hasActiveWorkers), because they idle
@@ -487,6 +495,62 @@ function recencyAlarmFor(serviceName) {
     _recencyAlarmByService.set(serviceName, state);
   }
   return state;
+}
+
+// observeWatcherHeartbeat — fold a channel.watcher.heartbeat envelope into the
+// per-watcher tracker (CTL-1423 Phase 5). Lazily creates a tracker on first beat
+// from each (host, watcherId, channel) key. Best-effort: missing payload fields
+// fall back to "unknown" so a malformed heartbeat can't crash the broker.
+function observeWatcherHeartbeat(event) {
+  if (!isIngestionRecencyEnabled()) return;
+  const payload = event?.body?.payload ?? {};
+  const host = payload["host.name"] ?? "unknown";
+  const watcherId = payload["watcher.id"] ?? "unknown";
+  const channel = payload["watcher.channel"] ?? "unknown";
+  const key = `${host}|${watcherId}|${channel}`;
+  let entry = _watcherTrackers.get(key);
+  if (!entry) {
+    entry = {
+      tracker: makeWatcherRecency({
+        staleAfterMs: WATCHER_RECENCY_STALE_MS,
+        holddownMs: INGESTION_RECENCY_HOLDDOWN_MS,
+      }),
+      meta: { host, watcherId, channel },
+    };
+    _watcherTrackers.set(key, entry);
+  }
+  entry.tracker.observe(event);
+}
+
+// tickWatcherRecency — one watchdog-tick evaluation of all known watcher trackers
+// (CTL-1423 Phase 5). Emits catalyst.alert.{raised,cleared} event_label=system_down
+// per tracker that crosses the stale/recovered edge. Identical alert contract to
+// the monitor path; the source field names host + watcherId + channel for forensics.
+// Best-effort: a failed emitAlertEvent is logged but does not affect tracker state.
+function tickWatcherRecency(now) {
+  if (!isIngestionRecencyEnabled() || !isAlertEmitEnabled()) return;
+  for (const [, { tracker, meta }] of _watcherTrackers) {
+    const result = tracker.tick(now);
+    if (!result) continue;
+    const ok = emitAlertEvent({
+      action: result.action,
+      kind: result.label,
+      reason: `channel-watcher ${meta.watcherId} (${meta.channel}) on ${meta.host} ${result.action === "raised" ? "silent past stale threshold" : "resumed"}`,
+      source: `${meta.host}/${meta.watcherId}/${meta.channel}`,
+      sinceMs: result.ageMs,
+      causedBy: result.causedBy,
+    });
+    if (!ok) {
+      // The append FAILED — roll the tracker's edge back so the next tick
+      // re-attempts the emit instead of losing the only system_down alert for
+      // this watcher until an opposite edge occurs (mirrors checkSourceRecency).
+      result.rollback?.();
+      log.warn(
+        { host: meta.host, watcherId: meta.watcherId, channel: meta.channel, action: result.action },
+        "alert-emit: watcher system_down alert append failed — will retry next tick",
+      );
+    }
+  }
 }
 
 // recordLastSeen — fold one ingested event into the per-service last-seen map.
@@ -542,6 +606,14 @@ function scanLogTailInto(logPath, seedBytes) {
       onEvent: (e) => {
         folded += 1;
         recordLastSeen(e);
+        // CTL-1423 Phase 5: also seed the per-watcher dead-man's-switch trackers
+        // from the tail. Without this, a broker that restarts AFTER a watcher has
+        // already died starts with an empty _watcherTrackers, tickWatcherRecency
+        // has nothing to evaluate, and the system_down switch fails open forever
+        // until the (dead) watcher emits a fresh heartbeat. Replaying the tail's
+        // last heartbeat gives the tracker a stale last-seen so the very next tick
+        // detects the outage — mirroring the seedLastSeenByService monitor path.
+        if (getEventName(e) === CHANNEL_WATCHER_HEARTBEAT_EVENT) observeWatcherHeartbeat(e);
       },
     });
   } catch (err) {
@@ -2377,6 +2449,9 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   // missing. PR1 = monitor heartbeat; PR2 = activity-gated github webhooks.
   for (const source of RECENCY_SOURCES) checkSourceRecency(source, now);
 
+  // CTL-1423 Phase 5: evaluate per-watcher dead-man's switches on every watchdog tick.
+  tickWatcherRecency(now);
+
   // CTL-1123: needs-human pile-up → catalyst.alert.{raised,cleared}. A LEVEL
   // signal (a count) with its own threshold + persistence + cooldown debounce —
   // distinct from the per-source recency edges above.
@@ -2586,6 +2661,11 @@ export function processEvent(event) {
   // the ingestion-silence detector). Non-consuming; runs ABOVE all gates so a
   // catalyst.monitor heartbeat is recorded even though no interest matches it.
   recordLastSeen(event);
+
+  // CTL-1423 Phase 5: fold channel.watcher.heartbeat events into per-watcher
+  // dead-man's switch trackers. Non-consuming side-channel; runs above all gates
+  // so heartbeats are recorded even when no interest matches.
+  if (name === CHANNEL_WATCHER_HEARTBEAT_EVENT) observeWatcherHeartbeat(event);
 
   // CTL-532: fold every event into the worker-state projection (best-effort,
   // non-consuming — the projection is a side-channel observer and never
