@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
+import { scanEventsChunked } from "../execution-core/event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { resolve, dirname } from "node:path";
 import {
   log,
@@ -564,38 +565,38 @@ export function projectWorkerStateEvent(event) {
 // replayWorkerStateProjection — startup replay: fold the whole current-month
 // event log into worker_state. Idempotent so it is correct whether the broker
 // just started cold, restarted after a crash, or has been running live.
-// TODO(CTL-532-followup): replayWorkerStateProjection and
-// loadExistingRegistrations both readFileSync the (large) current-month log at
-// startup — share a single startup file read.
+//
+// CTL-1529: this one legitimately wants the WHOLE month (it is a fold, not a
+// tail), so it is bounded in MEMORY rather than in coverage: scanEventsChunked
+// reads 1 MiB at a time and folds each complete line, instead of materializing an
+// 883 MB contiguous string plus a ~1.4M-element split array. Coverage is
+// byte-identical to the readFileSync it replaces; only the peak transient changes.
+// Malformed-line tolerance and the missing-file no-op are preserved by the
+// primitive (a missing file is a silent no-op returning fromOffset).
 export function replayWorkerStateProjection() {
   try {
     const logPath = getEventLogPath();
-    let raw;
-    try {
-      raw = readFileSync(logPath, "utf8");
-    } catch {
-      // No log file yet (fresh install) — nothing to replay.
-      return;
-    }
     let eventsFolded = 0;
     let lastEventId = null;
     let lastEventTs = null;
-    for (const line of raw.split("\n")) {
-      if (!line) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        continue; // skip malformed lines
-      }
-      projectWorkerStateEvent(event);
-      eventsFolded++;
-      const ts = event?.ts ?? event?.observedTs ?? null;
-      if (ts && (!lastEventTs || ts >= lastEventTs)) {
-        lastEventTs = ts;
-        lastEventId = event?.id ?? lastEventId;
-      }
-    }
+    scanEventsChunked({
+      path: logPath,
+      fromOffset: 0,
+      // CTL-1529 (Codex P2): one-shot replay to EOF — fold the final record even
+      // when the log ends without a trailing newline (a crash-truncated log is
+      // exactly the case this boot replay exists for, and that record is the
+      // NEWEST worker-state transition).
+      emitTrailingLine: true,
+      onEvent: (event) => {
+        projectWorkerStateEvent(event);
+        eventsFolded++;
+        const ts = event?.ts ?? event?.observedTs ?? null;
+        if (ts && (!lastEventTs || ts >= lastEventTs)) {
+          lastEventTs = ts;
+          lastEventId = event?.id ?? lastEventId;
+        }
+      },
+    });
     setProjectionMeta({ lastEventId, lastEventTs, eventsFolded });
     log.info({ eventsFolded, logPath }, "replayed worker-state projection");
   } catch (err) {

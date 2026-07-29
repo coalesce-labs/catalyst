@@ -162,6 +162,64 @@ export async function scanFileLinesAsync(
   return totalBytes;
 }
 
+/**
+ * readTailUtf8 — CTL-1529. Read AT MOST `maxBytes` from the END of `path` and
+ * return it as UTF-8 text.
+ *
+ * This exists because "read the whole file, then `.slice()` the tail" is a
+ * whole-file read wearing a bounded read's comment. Two live sites shipped that
+ * shape against files that grow without bound:
+ *
+ *   • `service-health-monitor.ts` — `readFileSync(<monthly event log>, "utf8")`
+ *     followed by `text.slice(size - 512 KiB)`. The comment said "Cap at 512KB
+ *     to bound the read"; the code materialized all 344 MB first (and the guard
+ *     could not see it, because the argument was a bare `path` variable).
+ *   • `stream-reader.ts` — same shape, 32 KiB, against a per-session stream log.
+ *
+ * The read starts at `max(0, size - maxBytes)`. When that offset is > 0 the
+ * first line is a FRAGMENT (the window cut mid-record), so it is dropped —
+ * every caller splits on "\n" and JSON.parses, and a truncated line's suffix
+ * can otherwise parse into a bogus record (the same discipline as
+ * `probeOldestTs`'s `skipFirstLine` in execution-core/event-tail.mjs). A file
+ * smaller than `maxBytes` is returned in full, byte-identical to the
+ * `readFileSync` it replaces.
+ *
+ * A `StringDecoder` is NOT needed: the whole window is decoded in one pass. The
+ * window's LEADING bytes may split a multibyte sequence, but those bytes belong
+ * to the dropped fragment line. Peak transient is `min(size, maxBytes)`.
+ * Missing/unreadable file ⇒ "" (never throws); the fd is always closed.
+ */
+export function readTailUtf8(path: string, maxBytes: number): string {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return "";
+  }
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return "";
+    const cap = Math.max(1, Math.floor(maxBytes));
+    const from = Math.max(0, size - cap);
+    const want = size - from;
+    const buf = Buffer.allocUnsafe(want);
+    let got = 0;
+    while (got < want) {
+      const n = readSync(fd, buf, got, want - got, from + got);
+      if (n <= 0) break;
+      got += n;
+    }
+    const text = buf.toString("utf8", 0, got);
+    if (from === 0) return text;
+    const nl = text.indexOf("\n");
+    return nl === -1 ? "" : text.slice(nl + 1);
+  } catch {
+    return "";
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const BACKOFF_BASE_MS = 200;
 const BACKOFF_CAP_MS = 1600;
 
