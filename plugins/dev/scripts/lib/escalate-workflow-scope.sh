@@ -41,18 +41,22 @@ _escalate_workflow_scope_push() {
       --as "$TICKET" --type attention --orch "${ORCH_ID}" >/dev/null 2>&1 || true
   fi
 
-  # Apply needs-human label (CTL-1181): best-effort, fail-open.
-  if command -v linearis >/dev/null 2>&1; then
-    linearis issues update "${TICKET}" --labels needs-human --label-mode add \
-      >/dev/null 2>&1 || true
-  fi
-
-  # Write local board marker so orch-monitor Needs-You inbox lights immediately
+  # Apply needs-human THROUGH the shared guard (CTL-1552): the belief-owner check
+  # + read-verify applyLabel + the once-marker in ONE place, replacing the prior
+  # raw label add and the hand-written once-marker (which skipped the guard and
+  # could desync marker vs. Linear). The CLI writes the once-marker itself via
+  # labelOnce, so orch-monitor's Needs-You inbox still lights. Best-effort,
+  # fail-open. Runs under bun (the execution-core runtime; applyLabel reaches
+  # bun:sqlite).
   local _orch="${ORCH_DIR:-${CATALYST_ORCHESTRATOR_DIR:-}}"
   if [[ -n "${_orch:-}" ]]; then
-    local _nh_marker="${_orch}/workers/${TICKET}/.linear-label-needs-human.applied"
-    mkdir -p "$(dirname "$_nh_marker")" 2>/dev/null || true
-    : > "$_nh_marker" 2>/dev/null || true
+    local _rt
+    _rt="$(command -v bun 2>/dev/null || command -v node 2>/dev/null || true)"
+    if [[ -n "${_rt:-}" ]]; then
+      "$_rt" "${PLUGIN_ROOT}/scripts/execution-core/label-needs-human.mjs" \
+        --ticket "${TICKET}" --orch-dir "${_orch}" \
+        --reason push_rejected_no_workflow_scope >/dev/null 2>&1 || true
+    fi
   fi
 
   # Post call_to_action to Linear as a comment so the operator sees the CTA.

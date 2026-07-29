@@ -8043,7 +8043,11 @@ function runTick() {
             },
           });
         },
-        gcTerminalSignals: defaultGcTerminalSignals(runningOpts.orchDir),
+        gcTerminalSignals: defaultGcTerminalSignals(runningOpts.orchDir, {
+          // CTL-1552: reconcile a live needs-human label before the J4 dir removal
+          // deletes its once-marker collaterally (mirrors defaultClearStall's seam).
+          removeLabel: (runningOpts.writeStatus ?? linearWrite).removeLabel,
+        }),
       },
       // CTL-1064: wire the unstuck-sweep census (Pass 0u). The census collects
       // stalled/failed workers lazily; the pass only runs when mode !== 'off'
