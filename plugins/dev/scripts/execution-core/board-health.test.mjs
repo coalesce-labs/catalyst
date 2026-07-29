@@ -23,6 +23,9 @@ import {
   resolveDeadHosts,
   // CTL-1644: pure revival-route classifier
   classifyRevivalRoute,
+  // CTL-1552: the parked-by-human label reader + the deferred-anchor filter it feeds.
+  isParkedByHuman,
+  eligibleDeferredAnchors,
 } from "./board-health.mjs";
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
 // exercises the production body.payload.details nesting + attribute promotion.
@@ -92,6 +95,28 @@ function mkBoard(o = {}) {
     now: o.now ?? NOW,
   };
 }
+
+// ─── CTL-1552: isParkedByHuman — the standalone parked-by-human label reader ──
+describe("isParkedByHuman — descriptor label reader", () => {
+  test("true when descriptor carries the label (alongside needs-human)", () => {
+    expect(
+      isParkedByHuman({ labels: [{ name: "needs-human" }, { name: "parked-by-human" }] }),
+    ).toBe(true);
+  });
+  test("false when absent / labels missing / null / undefined", () => {
+    expect(isParkedByHuman({ labels: [{ name: "needs-human" }] })).toBe(false);
+    expect(isParkedByHuman({})).toBe(false);
+    expect(isParkedByHuman(undefined)).toBe(false);
+    expect(isParkedByHuman(null)).toBe(false);
+  });
+  test("tolerates string labels and {name} labels (labelName shape)", () => {
+    expect(isParkedByHuman({ labels: ["parked-by-human"] })).toBe(true);
+    expect(isParkedByHuman({ labels: ["needs-human"] })).toBe(false);
+  });
+  test("case-insensitive on the label name", () => {
+    expect(isParkedByHuman({ labels: [{ name: "Parked-By-Human" }] })).toBe(true);
+  });
+});
 
 // ─── evaluateInvariants — one green + one failing per invariant ──────────────
 describe("evaluateInvariants — per-invariant green/fail", () => {

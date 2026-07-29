@@ -199,6 +199,15 @@ function labelsOf(d) {
 function labelName(l) {
   return String(l?.name ?? l ?? "");
 }
+// CTL-1552: the operator-driven "a human is holding this ticket" latch now rides
+// on a standalone workspace label, read from the descriptor board-health already
+// receives — NOT a per-host env var (which never syncs across the cluster). A pure
+// O(labels) reader over ticketsById descriptors; case-insensitive via labelName.
+const PARKED_BY_HUMAN_LABEL = "parked-by-human";
+export function isParkedByHuman(d) {
+  const ls = labelsOf(d);
+  return Array.isArray(ls) && ls.some((l) => labelName(l).toLowerCase() === PARKED_BY_HUMAN_LABEL);
+}
 
 let _lastRunMs = 0; // host-local throttle state (mirrors unstuck-sweep)
 
@@ -1280,7 +1289,7 @@ function checkNeedsHumanPile(b) {
 // isTerminalLinearState too. (The 30-min defer cooldown is applied upstream in
 // readDeferredBoardHealthIntents.) Shared by decideBoardHealth (gate count) AND
 // selectAnchorCandidates (ranking) so the two never disagree.
-function eligibleDeferredAnchors(board) {
+export function eligibleDeferredAnchors(board) {
   const sanctioned = new Set(board?.sanctionedNeedsHuman ?? []);
   const byId = board?.ticketsById;
   // CTL-1432 (Codex P2): HRW-ownership filter, mirroring selectAnchorCandidates — a
