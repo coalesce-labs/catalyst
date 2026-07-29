@@ -1496,6 +1496,32 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
   });
 
+  // CTL-1552: the unpark now clears the needs-human LABEL and its once-marker
+  // TOGETHER (via clearStalledLabel), re-arming labelOnce. The prior raw
+  // removeLabel left workers/<T>/.linear-label-needs-human.applied orphaned.
+  test("CTL-1552 — unpark clears the needs-human once-marker as well as the label", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "needs-input", parkedFrom: "implement" });
+    const marker = join(orch, "workers", "CTL-1", ".linear-label-needs-human.applied");
+    writeFileSync(marker, "");
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        // clearStalledLabel treats a { removed: true } result as a confirmed
+        // removal → deletes the once-marker(s).
+        removeLabel: (ticket, label) => {
+          removed.push({ ticket, label });
+          return { removed: true };
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" }); // label removed…
+    expect(existsSync(marker)).toBe(false); // …AND the once-marker cleared (re-armed)
+  });
+
   // CTL-764 finding 11: the daemon removes the durable needs-input label out-of-band and
   // redispatches — the scheduler never sees this edge, so the needs-input→cleared
   // resolution must be recorded here in the canonical worker.transition stream.

@@ -124,6 +124,7 @@ import {
   defaultClearStall, // CTL-1067: J3 stall-clear seam
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
+import { clearStalledLabel } from "./label-guard.mjs"; // CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle)
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
 import {
   writeBootMarker,
@@ -427,8 +428,14 @@ export async function handleCommentWake(
       clearHoldStopCooldown(orchDir, ticket, parkedPhase);
     }
 
+    // CTL-1552: clear the needs-human LABEL and its once-marker TOGETHER via
+    // clearStalledLabel — the operator-response unpark now owns both halves. The
+    // prior raw label-removal deleted the Linear label but orphaned the once-marker
+    // (workers/<T>/.linear-label-needs-human.applied), so labelOnce stayed disarmed
+    // (a genuine re-escalation could never re-apply). Both halves together re-arm
+    // the guard. Fail-open (clearStalledLabel never throws).
     try {
-      await removeLabel(ticket, "needs-human"); // CTL-1067 Bug 3: was "needs-human/question"
+      clearStalledLabel(orchDir, ticket, "needs-human", { removeLabel });
     } catch {
       /* fail-open */
     }
