@@ -1,18 +1,23 @@
 # Changelog
 
-## [12.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.38.0...catalyst-dev-v12.39.0) (2026-07-29)
+## [12.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.38.0...catalyst-dev-v12.39.0)
+
+Jul 29, 2026
+
+<!-- ai-enhanced -->
+
+### Supervised Watchers, Orphan Reaper & Board Health
+
+Channel-watchers now run as supervised launchd daemons that emit a heartbeat every interval and trigger a broker dead-man's switch alert when a watcher goes silent for more than three intervals. The orphan reaper drops its node/bun/turbo allowlist and now reaps any process whose cwd sits under a deleted worktree, batching the cwd lookups into a single `lsof` call to keep sweep cost under 730 ms. Two new board-health checks round out the release: one flags in-flight tickets with no worker, no signal file, and no open PR, and one bounds every read of the monthly event log to a time-covering tail — cutting a 341 MB scan from 1,114 MB peak RSS to 143 MB flat.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1423 — supervised background channel-watchers with ([6701521](https://github.com/coalesce-labs/catalyst/commit/67015210656b7f742fe6a4d30b80038e16a199c7))
 * **dev:** CTL-1423 — Supervised background channel-watchers with heartbeat + dead-man's-switch alerting ([#2557](https://github.com/coalesce-labs/catalyst/issues/2557)) ([6701521](https://github.com/coalesce-labs/catalyst/commit/67015210656b7f742fe6a4d30b80038e16a199c7))
 * **dev:** CTL-1475 flag work that claims to be in flight while nothing owns it ([#2763](https://github.com/coalesce-labs/catalyst/issues/2763)) ([d022893](https://github.com/coalesce-labs/catalyst/commit/d022893cf4852b27f02a906bb846903b2d936738))
 * **dev:** CTL-1531 reap orphaned processes by ownership evidence, not a node/bun allowlist ([#2756](https://github.com/coalesce-labs/catalyst/issues/2756)) ([c0267ba](https://github.com/coalesce-labs/catalyst/commit/c0267badfe5f750a7e2277097c9ce8da1b7a338b))
-
-
-### Performance Improvements
-
 * **dev:** CTL-1529 bound every read of the monthly event log (time-covering tail + shared per-tick scan) ([#2757](https://github.com/coalesce-labs/catalyst/issues/2757)) ([ab49964](https://github.com/coalesce-labs/catalyst/commit/ab49964c66f001287a5c2859c9b148d2e173b06b))
 
 ## [12.38.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.37.0...catalyst-dev-v12.38.0)
