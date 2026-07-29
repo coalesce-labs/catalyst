@@ -1141,6 +1141,121 @@ describe("startReaperAndTimer — injects a production ProcReaper (CTL-1165 D2)"
     expect(typeof capturedOpts.procReaper.sweep).toBe("function");
     // Default-safe: shadow mode emits would-reap, kills nothing.
     expect(capturedOpts.procReaper.mode).toBe("shadow");
+    // CTL-1531 P1-a: the widened any-command class carries its OWN rollout mode
+    // and it too ships dark. This assertion is what stops a future config change
+    // from arming the widened killer as a side effect of `mode: "enforce"` —
+    // the daemon must pass widenMode through as a SEPARATE, independently
+    // defaulted knob (ADR-023 "dark by default", one knob per actuator).
+    expect(capturedOpts.procReaper.widenMode).toBe("shadow");
+    stopDaemon();
+  });
+
+  // The assertion above is VACUOUS on its own: with an empty procReaper config both
+  // `procCfg.mode ?? "shadow"` and a hypothetical `procCfg.widenMode ?? procCfg.mode
+  // ?? "shadow"` evaluate to "shadow", so it cannot tell an INDEPENDENT knob from one
+  // that merely inherits. This case supplies mode:"enforce" and NO widenMode, which is
+  // exactly the deployment ADR-023 forbids arming implicitly — a host already running
+  // the legacy node/bun reaper in enforce must NOT thereby arm the widened
+  // any-command class. It goes RED under the inheriting mutation.
+  // readOrphanReaperConfig does NO schema validation, so a malformed value reaches
+  // the daemon verbatim. Each of these Number()s to 0, which the constructor treats
+  // as the intentional "uncapped" setting — so a typo would have SILENTLY REMOVED
+  // the widened kill ceiling rather than degrading to the documented default.
+  for (const bad of ["", false, [], {}, "abc", null, "5"]) {
+    test(`malformed widenMaxKills ${JSON.stringify(bad)} degrades to the default cap, never uncapped`, () => {
+      let capturedOpts = null;
+      startDaemon({
+        recover: () => {},
+        reconcileBoot: () => {},
+        startMonitor: () => {},
+        startScheduler: () => {},
+        watchRegistry: false,
+        enableReaper: true,
+        orphanReaperConfig: { procReaper: { widenMaxKills: bad } },
+        makeReaper: (opts) => {
+          capturedOpts = opts;
+          return { handle: () => Promise.resolve(), bootReplay: () => Promise.resolve() };
+        },
+        pollMs: 0,
+        debounceMs: 600_000,
+      });
+      expect(capturedOpts.procReaper.widenMaxKills).toBeGreaterThan(0);
+      stopDaemon();
+    });
+  }
+
+  test("an EXPLICIT numeric 0 is preserved as the documented uncapped escape hatch", () => {
+    // The typo guard above must not take away a real operator choice. `0` is a
+    // number, so it passes through; `""` is not, so it does not.
+    let capturedOpts = null;
+    startDaemon({
+      recover: () => {}, reconcileBoot: () => {}, startMonitor: () => {},
+      startScheduler: () => {}, watchRegistry: false, enableReaper: true,
+      orphanReaperConfig: { procReaper: { widenMaxKills: 0 } },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return { handle: () => Promise.resolve(), bootReplay: () => Promise.resolve() };
+      },
+      pollMs: 0, debounceMs: 600_000,
+    });
+    expect(capturedOpts.procReaper.widenMaxKills).toBe(0);
+    stopDaemon();
+  });
+
+  test("mode:enforce with no widenMode does NOT arm the widened class (independent knob, ADR-023)", () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      orphanReaperConfig: { procReaper: { mode: "enforce" } },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
+      pollMs: 0,
+      debounceMs: 600_000,
+    });
+    expect(capturedOpts.procReaper.mode).toBe("enforce"); // legacy class honours config
+    expect(capturedOpts.procReaper.widenMode).toBe("shadow"); // widened class stays dark
+    // CTL-1531 round 2: and the widened class is CAPPED per run even when the
+    // operator supplies no cap. Omitting the key must land on the module default
+    // (5), never on 0 — which is the DOCUMENTED "uncapped" value.
+    expect(capturedOpts.procReaper.widenMaxKills).toBe(5);
+    stopDaemon();
+  });
+
+  // The cap is operator-tunable, and the daemon must actually thread it through —
+  // otherwise the knob documented in configuration.md / the Layer-1 schema is inert.
+  test("procReaper.widenMaxKills is threaded from config (CTL-1531 round 2)", () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      orphanReaperConfig: { procReaper: { widenMaxKills: 2 } },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
+      pollMs: 0,
+      debounceMs: 600_000,
+    });
+    expect(capturedOpts.procReaper.widenMaxKills).toBe(2);
     stopDaemon();
   });
 });

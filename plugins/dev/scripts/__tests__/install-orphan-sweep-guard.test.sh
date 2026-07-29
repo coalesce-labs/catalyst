@@ -17,8 +17,15 @@ pass() { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
 # Run --print-only with an injected BAKE_DIR and no real machine config, capturing
 # combined output + exit code. CATALYST_FORCE_BAKE_DIR / CATALYST_LAYER2_CONFIG_FILE
 # are the test seams the installer exposes.
+#
+# CATALYST_FORCE_OS=Darwin is REQUIRED: the ephemeral-path guard sits behind the
+# installer's non-Darwin early exit (install-orphan-sweep.sh — it no-ops rc=0 on
+# Linux before ever reaching the guard). Unlike the macOS-only main suite
+# (install-orphan-sweep.test.sh) which SKIPS on Linux, this CTL-1306 guard must
+# stay covered on every CI host, so we force Darwin to exercise the refusal logic
+# regardless of the runner platform (the same seam the main suite's helper uses).
 run_guard() {
-  CATALYST_FORCE_BAKE_DIR="$1" CATALYST_LAYER2_CONFIG_FILE=/dev/null \
+  CATALYST_FORCE_OS=Darwin CATALYST_FORCE_BAKE_DIR="$1" CATALYST_LAYER2_CONFIG_FILE=/dev/null \
     bash "$INSTALLER" --print-only 2>&1
 }
 
@@ -71,7 +78,7 @@ cp "${REPO_ROOT}/plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orph
    "$PRISTINE/scripts/orch-monitor/dist/" 2>/dev/null
 cfg="$SCRATCH/config.json"
 printf '{"catalyst":{"orchestration":{"pluginDirs":["%s"]}}}\n' "$PRISTINE" > "$cfg"
-out="$(CATALYST_LAYER2_CONFIG_FILE="$cfg" bash "$INSTALLER" --print-only 2>&1)"
+out="$(CATALYST_FORCE_OS=Darwin CATALYST_LAYER2_CONFIG_FILE="$cfg" bash "$INSTALLER" --print-only 2>&1)"
 if [[ "$out" == *"${PRISTINE}/scripts/orphan-sweep.sh"* ]]; then
   pass "honors array-form pluginDirs (resolves .[0] pristine clone)"
 else

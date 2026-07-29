@@ -1220,11 +1220,56 @@ function startReaperAndTimer({
   // (selfPid defaults to process.pid; broker/monitor are covered by the argv
   // allowlist patterns). A disabled config ("off") makes every sweep an empty
   // no-op.
+  // CTL-1531: `widenMode` is a SEPARATE knob from `mode`. The widened
+  // any-command orphan class ships dark (shadow) on its own three-state gate, so
+  // a host already carrying procReaper.mode:"enforce" — granted for the narrow
+  // node/bun class after ITS shadow bake — does not silently inherit authority
+  // to SIGTERM an arbitrary PPID-1 command. Flipping it is operator-owned
+  // (ADR-023), exactly like the .sh side's SWEEP_PROC_WIDEN.
   const procCfg = orphanReaperConfig?.procReaper ?? {};
   const procReaper = new ProcReaper({
     mode: procCfg.mode ?? "shadow",
-    ...(procCfg.graceMs != null ? { graceMs: Number(procCfg.graceMs) } : {}),
-    ...(procCfg.minEtimeSec != null ? { minEtimeSec: Number(procCfg.minEtimeSec) } : {}),
+    widenMode: procCfg.widenMode ?? "shadow",
+    // CTL-1531 round 2: per-run cap on WIDENED confirmed terminations, mirroring
+    // orphan-sweep.sh's SWEEP_PROC_WIDEN_MAX_KILLS. Omitted ⇒ the module default
+    // (5); a non-numeric value is rejected by the constructor, not by an
+    // arithmetic accident that silently uncaps a process killer.
+    // Pass through ONLY a real, finite NUMBER. readOrphanReaperConfig just parses
+    // JSON with no schema validation, so `""`, `false` and `[]` all reach here —
+    // and each `Number()`s to 0, which the constructor accepts as the INTENTIONAL
+    // "uncapped" setting. The eager coercion therefore DEFEATED the constructor's
+    // own type guard, and a malformed config value silently removed the widened
+    // kill ceiling instead of degrading to the documented default of 5.
+    //
+    // Explicit numeric 0 is preserved: the constructor documents it as a real
+    // operator choice ("uncapped"), so this must reject typos WITHOUT taking away
+    // that escape hatch. Non-numbers are omitted so the default applies.
+    ...(typeof procCfg.widenMaxKills === "number" && Number.isFinite(procCfg.widenMaxKills)
+      ? { widenMaxKills: procCfg.widenMaxKills }
+      : {}),
+    // CTL-1531 (Codex P2): a malformed value must fall back to the DEFAULT, never
+    // reach the reaper as NaN. `Number("bad")` is NaN, and the age gate in
+    // proc-reaper.mjs is `etimeSec < minEtimeSec` — which is FALSE for every process
+    // when the right side is NaN. So one typo'd config field silently removed the
+    // 900-second teardown-safety floor and made even a one-second-old arbitrary
+    // command killable by the widened path. Omitting the key lets the reaper's own
+    // documented default stand, which is the whole point of a floor.
+    // Test the RAW type — never coerce. `Number()` maps `false`, `""` and `[]` all to
+    // 0, so a coercing guard accepts every one of them as a legitimate floor of zero
+    // and disables the 900-second protection just as surely as the NaN case did. Only
+    // a real number is a real threshold; anything else falls through to the reaper's
+    // documented default. This matches the `widenMaxKills` guard above rather than
+    // inventing a second, weaker convention for the same kind of field.
+    ...(typeof procCfg.graceMs === "number" &&
+    Number.isFinite(procCfg.graceMs) &&
+    procCfg.graceMs >= 0
+      ? { graceMs: procCfg.graceMs }
+      : {}),
+    ...(typeof procCfg.minEtimeSec === "number" &&
+    Number.isFinite(procCfg.minEtimeSec) &&
+    procCfg.minEtimeSec >= 0
+      ? { minEtimeSec: procCfg.minEtimeSec }
+      : {}),
     ...(procCfg.worktreeRoot ? { worktreeRoot: procCfg.worktreeRoot } : {}),
     ...(Array.isArray(procCfg.allowlistPatterns)
       ? { allowlistPatterns: procCfg.allowlistPatterns }

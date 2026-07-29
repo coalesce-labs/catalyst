@@ -396,7 +396,19 @@
                       "type": "string",
                       "enum": ["off", "shadow", "enforce"],
                       "default": "shadow",
-                      "description": "off disables the reaper; shadow (the default) logs procOrphans.would-reap for each eligible orphan but kills nothing; enforce SIGTERMs then (after grace, if still alive) SIGKILLs. Ships in shadow so the allowlist + live-tree correlation can be audited on real hosts before any enforce flip."
+                      "description": "off disables the reaper; shadow (the default) logs procOrphans.would-reap for each eligible orphan but kills nothing; enforce SIGTERMs then (after grace, if still alive) SIGKILLs. Ships in shadow so the allowlist + live-tree correlation can be audited on real hosts before any enforce flip. Does NOT arm the CTL-1531 widened any-command class — that has its own widenMode knob."
+                    },
+                    "widenMode": {
+                      "type": "string",
+                      "enum": ["off", "shadow", "enforce"],
+                      "default": "shadow",
+                      "description": "CTL-1531: INDEPENDENT rollout mode for the WIDENED (any-command) orphan class, deliberately NOT derived from `mode`. off removes the widened admission entirely (a byte-identical revert of the feature); shadow (the default) classifies and reports widened candidates via procOrphans.would-reap but never signals them, even when mode is already enforce; enforce lets a widened candidate follow `mode`, so BOTH knobs must be open before an arbitrary PPID-1 command is signalled. An unrecognized value degrades to shadow, never to enforce. Exists because a host already carrying mode:'enforce' — granted for the narrow node/bun class after ITS shadow bake — must not inherit authority over the widened class on deploy (ADR-023: dark by default, one knob per actuator). Mirrors orphan-sweep.sh's SWEEP_PROC_WIDEN."
+                    },
+                    "widenMaxKills": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "default": 5,
+                      "description": "CTL-1531: per-run cap on CONFIRMED terminations from the WIDENED class (0 = uncapped). Delivered signals carry a second ceiling of widenMaxKills x 2, since a candidate is worth at most SIGTERM + SIGKILL. The widened class's authorizing evidence ('this cwd no longer exists') is correlated across a whole host — one renamed or unmounted worktreeRoot makes every process beneath it qualify at once — so a run that wants to kill more than a handful is a root-level event that wants a human. A non-numeric value degrades to the default 5, never to uncapped. Mirrors orphan-sweep.sh's SWEEP_PROC_WIDEN_MAX_KILLS."
                     },
                     "graceMs": {
                       "type": "number",
@@ -614,6 +626,12 @@
               "minimum": 0,
               "default": 20,
               "description": "Maximum number of worktrees removed per sweep run."
+            },
+            "procWiden": {
+              "type": "string",
+              "enum": ["off", "shadow", "enforce"],
+              "default": "shadow",
+              "description": "CTL-1531: rollout mode for orphan-sweep.sh vector 1's WIDENED (any-command) branch — the daemon-side sibling of orchestration.orphanReaper.procReaper.widenMode. Read by install-orphan-sweep.sh and BAKED INTO the LaunchAgent's EnvironmentVariables as SWEEP_PROC_WIDEN, so the setting survives the plist regeneration that every routine `catalyst-stack install-services` performs. Resolution order: an explicit SWEEP_PROC_WIDEN env var at install time > this key > the value already present in the installed plist > shadow."
             }
           }
         },
