@@ -173,6 +173,17 @@ const PROBE_DONE = Symbol("probe-done");
 // mistaken for the window's oldest record. Returns null when the window holds no
 // parseable event (⇒ the caller keeps expanding). Bounded: reuses the audited
 // forward primitive and stops at the first hit.
+// NOTE (CTL-1529, Codex P1 — deferred to CTL-1550, deliberately NOT fixed here):
+// this returns the FIRST record after the offset and treats its ts as the window's
+// oldest. That is exact only if the log is monotonic by `ts`, which it is not
+// guaranteed to be — a backfilled record near EOF can overstate how far back the
+// window reaches. The naive hardening (sample the first K records and require the
+// NEWEST of them to predate the target) was implemented and REJECTED: in a normally
+// ordered log those first K records run FORWARD in time, so their newest sits far
+// later than the window's true start, coverage is denied, and the walk expands to
+// the cap — which destroys the bounded-read property this whole module exists for.
+// A sound fix needs an outlier-resistant statistic (median/k-th smallest) with a
+// re-tuned perf budget. See CTL-1550.
 function probeOldestTs({ path, fromOffset, chunkSize, onRead, tsOf }) {
   let found = null;
   try {

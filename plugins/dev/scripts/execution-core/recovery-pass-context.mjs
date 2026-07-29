@@ -29,7 +29,7 @@
 // Run under bun (broker-state uses bun:sqlite). Under node, source 3 degrades to
 // "(linear cache unavailable under this runtime)" and the other two still run.
 
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -437,9 +437,26 @@ async function main() {
 // main() on plain IMPORT, so the module's helpers could not be unit-tested at all
 // without executing a whole sweep as a side effect. Behavior when invoked as a
 // script is unchanged.
+// CTL-1529 (Codex P1): compare REAL paths, not the raw pair. Plugins are surfaced
+// through `.claude/` symlinks, and the two sides resolve differently:
+// `fileURLToPath(import.meta.url)` yields the symlink TARGET while `process.argv[1]`
+// keeps the symlink path the user typed. On Node <22.16 (`import.meta.main`
+// undefined) the equality was therefore false whenever this ran through the
+// installed symlink — the documented `node "${EXEC_CORE}/recovery-pass-context.mjs"`
+// invocation exited 0 having printed NOTHING: no MODE banner, no stuck context. A
+// silent no-op is the worst shape here, because the recovery-pass skill treats the
+// empty output as "no stuck work" rather than as a failure to look.
+const realOrSelf = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p; // unreadable/missing → fall back to the literal path
+  }
+};
 const isEntrypoint =
   import.meta.main === true ||
-  (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]);
+  (!!process.argv[1] &&
+    realOrSelf(fileURLToPath(import.meta.url)) === realOrSelf(process.argv[1]));
 if (isEntrypoint) {
   main().catch((err) => {
     // Never crash the context gather — print a degraded banner and exit 0 so the
