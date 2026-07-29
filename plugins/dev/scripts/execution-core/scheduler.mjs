@@ -993,9 +993,10 @@ const REAL_PIPELINE_PHASES = new Set([...PHASES, ...ANCILLARY_PHASES]);
 // CTL-1323: the terminal-SUCCESS statuses that mean a non-pipeline signal is truly
 // inert — no live worker, and no pending operator decision. ONLY these make a dir
 // phantom. We deliberately use a POSITIVE allow-list (not "anything not running"):
-// a recovery-pass that ESCALATED (needs-human), PARKED (needs-input/turn-cap-exhausted),
-// was PREEMPTED, or FAILED must stay held — it surfaces a Needs-You signal or is
-// resumable, and re-pulling it would bury that pending state / abandon recovery context.
+// a recovery-pass that ESCALATED (stalled + stalledReason:"needs_human", CTL-1552),
+// PARKED (needs-input/turn-cap-exhausted), was PREEMPTED, or FAILED must stay held — it
+// surfaces a Needs-You signal or is resumable, and re-pulling it would bury that pending
+// state / abandon recovery context.
 const PHANTOM_TERMINAL_STATUSES = new Set(["done", "complete", "skipped"]);
 
 // CTL-1323: isPhantomWorkerDir — true when a worker dir is a PHANTOM: it carries
@@ -1008,7 +1009,7 @@ const PHANTOM_TERMINAL_STATUSES = new Set(["done", "complete", "skipped"]);
 // phantom lets both list functions ignore it so the ticket is re-pulled fresh.
 //
 // A non-pipeline signal that is NOT terminal-success (dispatched/running/preempted/
-// needs-human/needs-input/turn-cap-exhausted/failed/…) makes the dir NON-phantom — it
+// stalled/needs-input/turn-cap-exhausted/failed/…) makes the dir NON-phantom — it
 // holds a real slot or a pending operator/recovery state we must not clobber. An EMPTY
 // signal set is NOT phantom (conservative — a bare/just-created dir we don't re-pull).
 // Pure over a phase→status map; exported for the CI unit suite.
