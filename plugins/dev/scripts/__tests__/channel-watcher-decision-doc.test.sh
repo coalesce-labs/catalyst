@@ -8,7 +8,6 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 FAILURES=0
 PASSES=0
@@ -16,7 +15,10 @@ PASSES=0
 pass() { PASSES=$((PASSES+1)); echo "  PASS: $1"; }
 fail() { FAILURES=$((FAILURES+1)); echo "  FAIL: $1"; }
 
-DOC="${REPO_ROOT}/thoughts/shared/decisions/2026-07-03-CTL-1423-channel-watcher-supervision.md"
+# The decision record is COMMITTED alongside the code it guards so this drift-guard
+# runs from a clean checkout / in CI. (thoughts/ is gitignored, so the canonical
+# human-facing copy there is NOT available to CI — do not point the test at it.)
+DOC="${SCRIPT_DIR}/../channel-watcher/DECISIONS.md"
 
 echo "channel-watcher decision-doc contract tests"
 

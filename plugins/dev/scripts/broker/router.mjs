@@ -492,9 +492,13 @@ function tickWatcherRecency(now) {
       causedBy: result.causedBy,
     });
     if (!ok) {
+      // The append FAILED — roll the tracker's edge back so the next tick
+      // re-attempts the emit instead of losing the only system_down alert for
+      // this watcher until an opposite edge occurs (mirrors checkSourceRecency).
+      result.rollback?.();
       log.warn(
         { host: meta.host, watcherId: meta.watcherId, channel: meta.channel, action: result.action },
-        "alert-emit: watcher system_down alert append failed",
+        "alert-emit: watcher system_down alert append failed — will retry next tick",
       );
     }
   }
@@ -553,6 +557,14 @@ function scanLogTailInto(logPath, seedBytes) {
       onEvent: (e) => {
         folded += 1;
         recordLastSeen(e);
+        // CTL-1423 Phase 5: also seed the per-watcher dead-man's-switch trackers
+        // from the tail. Without this, a broker that restarts AFTER a watcher has
+        // already died starts with an empty _watcherTrackers, tickWatcherRecency
+        // has nothing to evaluate, and the system_down switch fails open forever
+        // until the (dead) watcher emits a fresh heartbeat. Replaying the tail's
+        // last heartbeat gives the tracker a stale last-seen so the very next tick
+        // detects the outage — mirroring the seedLastSeenByService monitor path.
+        if (getEventName(e) === CHANNEL_WATCHER_HEARTBEAT_EVENT) observeWatcherHeartbeat(e);
       },
     });
   } catch (err) {

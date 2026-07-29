@@ -53,6 +53,7 @@ function baseEnvelope(eventName, host, now) {
 export function buildWatcherHeartbeat({ watcherId, channel, baselineTurn, currentTurn, host, now } = {}) {
   const e = baseEnvelope(CHANNEL_WATCHER_HEARTBEAT_EVENT, host, now);
   e.attributes["event.action"] = "heartbeat";
+  setWatcherIdentityAttributes(e, { watcherId, channel, baselineTurn, currentTurn });
   e.body.payload = {
     "watcher.id": watcherId,
     "watcher.channel": channel,
@@ -61,6 +62,18 @@ export function buildWatcherHeartbeat({ watcherId, channel, baselineTurn, curren
     "host.name": host ?? "unknown",
   };
   return e;
+}
+
+// setWatcherIdentityAttributes — mirror the watcher identity tuple onto the OTel
+// log-record attributes. The OTLP forwarder (otel-forward) and the direct watcher
+// OTLP sender both build logRecord.attributes from envelope.attributes ONLY, so
+// identity kept only in body.payload is invisible to LogQL — a dashboard/alert
+// filtering by watcher.id / watcher.channel cannot tell which watcher is alive.
+function setWatcherIdentityAttributes(e, { watcherId, channel, baselineTurn, currentTurn }) {
+  e.attributes["watcher.id"] = watcherId ?? "unknown";
+  e.attributes["watcher.channel"] = channel ?? "unknown";
+  if (baselineTurn !== undefined) e.attributes["watcher.baseline_turn"] = baselineTurn;
+  if (currentTurn !== undefined) e.attributes["watcher.current_turn"] = currentTurn;
 }
 
 /**
@@ -78,6 +91,7 @@ export function buildTurnDetected({ watcherId, channel, baselineTurn, currentTur
   if (currentTurn <= baselineTurn) return null;
   const e = baseEnvelope(CHANNEL_WATCHER_TURN_EVENT, host, now);
   e.attributes["event.action"] = "turn-detected";
+  setWatcherIdentityAttributes(e, { watcherId, channel, baselineTurn, currentTurn });
   e.body.payload = {
     "watcher.id": watcherId,
     "watcher.channel": channel,

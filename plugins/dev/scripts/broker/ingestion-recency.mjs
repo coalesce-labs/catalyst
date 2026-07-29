@@ -195,15 +195,39 @@ export function makeWatcherRecency({ staleAfterMs = 180_000, holddownMs = 600_00
     } else {
       severity = "up";
     }
+    // Snapshot the pre-transition alarm: downEmittedAt for the recovered-duration
+    // report (below), and the whole object so a failed downstream append can roll
+    // the edge back and retry (mirrors checkSourceRecency's deferred commit).
+    const prevAlarm = _alarm;
+    const downEmittedAtBefore = _alarm.downEmittedAt;
     const { state, emit } = nextRecencyAlarmState(_alarm, { severity, nowMs, holddownMs });
     _alarm = state;
     if (!emit) return null;
-    const ageMs = _lastSeenMs !== null ? Math.max(0, nowMs - _lastSeenMs) : null;
+    // A `stale` reports the SILENCE (age since the last beat, vs the down
+    // threshold). A `cleared` reports the OUTAGE it resolved — its duration from
+    // the stale edge (downEmittedAt), NOT the age of the fresh recovery beat;
+    // otherwise a long outage cleared by one new beat underreports as ~0ms.
+    // Mirrors the monitor recency path (checkSourceRecency).
+    const ageMs =
+      emit === "stale"
+        ? _lastSeenMs !== null
+          ? Math.max(0, nowMs - _lastSeenMs)
+          : null
+        : downEmittedAtBefore !== null
+          ? Math.max(0, nowMs - downEmittedAtBefore)
+          : null;
     return {
       action: emit === "stale" ? "raised" : "cleared",
       label: "system_down",
       ageMs,
       causedBy: _lastSeenId,
+      // The caller emits the alert AFTER tick() returns; if that append fails
+      // (e.g. transient ENOSPC/EACCES correlated with the very outage we detect),
+      // it calls rollback() so the un-latched edge re-fires next tick instead of
+      // being permanently lost until an opposite edge.
+      rollback: () => {
+        _alarm = prevAlarm;
+      },
     };
   }
 

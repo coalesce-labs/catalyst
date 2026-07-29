@@ -68,10 +68,18 @@ case "${1:-}" in
     mkdir -p "$(dirname "$PLIST_DST")"
     _resolve_plist > "$PLIST_DST"
     log "wrote $PLIST_DST"
-    # Load — best-effort; macOS version differences
+    # Load — bootstrap on modern macOS, `load -w` as the version fallback. Do NOT
+    # mask a total failure with `|| true`: if BOTH fail (invalid plist, wrong
+    # launchd domain) the job never registers, so verify it actually loaded rather
+    # than telling the operator "loaded" while no supervised watcher — and thus no
+    # heartbeat / dead-man coverage — is running.
     launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null || \
       launchctl load -w "$PLIST_DST" 2>/dev/null || true
-    log "loaded $LABEL (check: launchctl list $LABEL)"
+    if launchctl list "$LABEL" >/dev/null 2>&1; then
+      log "loaded $LABEL (check: launchctl list $LABEL)"
+    else
+      fail "launchctl did not register $LABEL — both 'bootstrap gui/$(id -u)' and 'load -w' failed. Check the plist ($PLIST_DST) and launchd domain; no supervised watcher is running."
+    fi
     ;;
 
   *)

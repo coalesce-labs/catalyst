@@ -45,10 +45,17 @@ export async function tick(channelPath, logPath, cfg, state, { now } = {}) {
     now,
   };
 
-  // Emit turn-detected if the turn count advanced past the baseline.
+  // Emit turn-detected if the turn count advanced past the baseline. Report
+  // whether the append actually landed so the daemon only advances its rolling
+  // baseline once the turn-detected event is durably recorded — a failed append
+  // (log transiently unwritable) must NOT be treated as "turn handled", or the
+  // event is lost forever when the next tick sees the advanced baseline.
+  // state.turnEmitted defaults true (nothing to emit) so a heartbeat-only tick
+  // never blocks baseline advancement.
+  state.turnEmitted = true;
   const turnEnvelope = buildTurnDetected(envelopeCfg);
   if (turnEnvelope) {
-    await appendEnvelope(logPath, turnEnvelope);
+    state.turnEmitted = await appendEnvelope(logPath, turnEnvelope);
   }
 
   // Always emit a heartbeat.

@@ -27,8 +27,28 @@ if (!WATCHER_CHANNEL) {
   process.exit(1);
 }
 
-const WATCHER_ID = process.env.CATALYST_WATCHER_ID ?? hostname();
-const INTERVAL_MS = parseInt(process.env.CATALYST_WATCHER_INTERVAL_MS ?? "30000", 10);
+// Default the watcher id to host + full channel PATH (not the bare basename), so
+// two watchers on the same host tailing different files that share a basename get
+// distinct identities. The broker keys its dead-man tracker on
+// (host, watcherId, channel); a shared default id would let the surviving
+// watcher's heartbeats mask the other's death.
+const WATCHER_ID = process.env.CATALYST_WATCHER_ID ?? `${hostname()}:${WATCHER_CHANNEL}`;
+
+// Validate the heartbeat interval: a 0/negative/malformed CATALYST_WATCHER_INTERVAL_MS
+// (e.g. an env-file typo like `abc`) makes parseInt yield NaN/≤0, which Bun coerces
+// to a ~1ms setInterval that floods the shared event log and pins broker/CPU/disk.
+// Fall back to the 30s default and floor at 1s.
+const INTERVAL_DEFAULT_MS = 30000;
+const INTERVAL_FLOOR_MS = 1000;
+let INTERVAL_MS = parseInt(process.env.CATALYST_WATCHER_INTERVAL_MS ?? String(INTERVAL_DEFAULT_MS), 10);
+if (!Number.isFinite(INTERVAL_MS) || INTERVAL_MS < INTERVAL_FLOOR_MS) {
+  if (process.env.CATALYST_WATCHER_INTERVAL_MS !== undefined) {
+    process.stderr.write(
+      `channel-watcher: invalid CATALYST_WATCHER_INTERVAL_MS=${JSON.stringify(process.env.CATALYST_WATCHER_INTERVAL_MS)} — using ${INTERVAL_DEFAULT_MS}ms\n`,
+    );
+  }
+  INTERVAL_MS = INTERVAL_DEFAULT_MS;
+}
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${process.env.HOME ?? homedir()}/catalyst`;
 
 function getEventLogPath() {
@@ -66,16 +86,28 @@ function logDaemonHeartbeat() {
   process.stderr.write(`{"level":"info","hb":true,"component":"channel-watcher","msg":"daemon heartbeat"}\n`);
 }
 
+let _tickRunning = false;
 async function runTick() {
+  // Serialize ticks: if channel/log I/O runs longer than the interval, setInterval
+  // would start a second runTick before this one advances cfg.baselineTurn — both
+  // would observe the same old baseline and append a DUPLICATE turn-detected for
+  // the same turn. Skip the overlapping run instead.
+  if (_tickRunning) return;
+  _tickRunning = true;
   try {
     logDaemonHeartbeat();
     await tick(WATCHER_CHANNEL, getEventLogPath(), cfg, state);
-    // After each tick, advance the baselineTurn so turn-detected fires once per turn.
-    if (state.currentTurn > cfg.baselineTurn) {
+    // Advance the rolling baseline so turn-detected fires once per turn — but ONLY
+    // when the turn-detected event was durably appended (state.turnEmitted). A
+    // failed append leaves the baseline in place so the next tick retries it rather
+    // than losing the turn permanently.
+    if (state.currentTurn > cfg.baselineTurn && state.turnEmitted !== false) {
       cfg.baselineTurn = state.currentTurn;
     }
   } catch (err) {
     process.stderr.write(`channel-watcher: tick error: ${err?.message}\n`);
+  } finally {
+    _tickRunning = false;
   }
 }
 

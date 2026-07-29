@@ -34,9 +34,15 @@ _warn_if_readable() {
 }
 
 # ─── Source per-node config (launchd can't see ~/.zshenv/direnv) ─────────────
+# `set -a` auto-exports every assignment made while sourcing, so plain
+# `KEY=value` lines in channel-watcher.env reach the `exec bun` child (which
+# inherits only EXPORTED vars). Without it, the preflight below would see
+# CATALYST_WATCHER_CHANNEL but the daemon would not, restart-looping under launchd.
 set +u
+set -a
 _warn_if_readable "$HOME/.config/catalyst/channel-watcher.env"
 [[ -r "$HOME/.config/catalyst/channel-watcher.env" ]] && . "$HOME/.config/catalyst/channel-watcher.env"
+set +a
 set -u
 
 # ─── Preflight ───────────────────────────────────────────────────────────────
