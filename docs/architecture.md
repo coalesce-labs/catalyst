@@ -263,7 +263,7 @@ reclaim storms). Three additive defenses:
 Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket;
 the terminal sweep applies `needs-human` via `labelOnce`.
 
-### Two-axis worker state & the recordWorkerTransition chokepoint (CTL-764)
+### Two-axis worker state & the recordTransition chokepoint (CTL-764)
 
 Every worker ticket has **two orthogonal axes** — never blurred:
 
@@ -296,12 +296,13 @@ real emitter (`defaultAppendWorkerTransitionEvent`) via `runTick`** — without 
 `recordTransition` early-returns and the event stream is dark. That event feeds sink (4), OTLP via
 `otel-forward` (dims as attributes — `body.payload` is stripped off-machine). The remaining sinks
 are written at their own scheduler sites around the same transition (not fanned out from inside the
-chokepoint): (1) Linear Status via the `applyPhaseStatus` chokepoint (Axis 1), (2) the
-`worker-status` label via the admission converger (`convergeHeldLabel`) / `labelOnce` (Axis 2), and
-(5) the optional broker `ticket_state_transitions` table (CTL-764 Phase 10). The standalone
-`recordWorkerTransition` module (`record-worker-transition.mjs`) is the extracted, unit-tested
-reference implementation of this same five-sink fan-out contract; the scheduler's live path uses the
-inline `recordTransition` today.
+chokepoint): (1) Linear Status via the `applyPhaseStatus` chokepoint (Axis 1) and (2) the
+`worker-status` label via the admission converger (`convergeHeldLabel`) / `labelOnce` (Axis 2). The
+inline `recordTransition` inside `schedulerTick` IS the implementation of this **four-sink** fan-out
+contract (`scheduler.mjs` — sink 3 the `worker.transition` event, sink 4 OTLP, plus sinks 1 and 2 at
+their own sites). CTL-1552 removed the two never-wired artifacts this section used to describe: the
+extracted standalone reference module (imported only by its own test) and a documented-but-unbuilt
+broker projection table for a would-be fifth sink.
 
 ### Unified data-flow
 
