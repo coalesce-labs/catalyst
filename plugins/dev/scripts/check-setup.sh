@@ -489,6 +489,18 @@ else
 		info "worker-status label check skipped (no data available)"
 		;;
 	esac
+
+	# CTL-1552: the standalone parked-by-human label (NOT a worker-status member).
+	# Reuses the ws_cs_all workspace-label snapshot fetched above; only asserts when
+	# that snapshot was populated this run (live query path).
+	if [[ -n ${ws_cs_all:-} ]]; then
+		if echo "$ws_cs_all" | jq -e \
+			'.[] | select(.name == "parked-by-human" and .parent == null)' >/dev/null 2>&1; then
+			pass "parked-by-human label (standalone)"
+		else
+			warn "parked-by-human label missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh"
+		fi
+	fi
 fi
 
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────
