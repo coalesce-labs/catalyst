@@ -74,13 +74,37 @@ export const EXPLANATION_PHASES = [...PHASE_ORDER, ...ANCILLARY_EXPLANATION_PHAS
  * never render. This returns the explanation object VERBATIM instead.
  */
 export function deriveRichExplanation(phaseSigs) {
+  let firstShaped = null;
   for (let i = phaseSigs.length - 1; i >= 0; i--) {
     const sig = phaseSigs[i];
     if (!sig || typeof sig !== "object") continue;
     const expl = sig.explanation;
-    if (expl && typeof expl === "object") return expl;
+    if (!expl || typeof expl !== "object") continue;
+    if (firstShaped === null) firstShaped = expl;
+    // Keep scanning past an explanation that carries nothing deriveAsk can use.
+    // A newer legacy/partial signal (only `human_question`, `what_failed`, …)
+    // would otherwise MASK an older one holding a real `ask` / `call_to_action`,
+    // dropping the pane to comment inference or to no ask at all.
+    if (isUsableExplanation(expl)) return expl;
   }
-  return null;
+  // Nothing usable anywhere → return the newest shaped one so any passthrough
+  // consumer still sees what the producer wrote (deriveAsk will yield null).
+  return firstShaped;
+}
+
+/** Can this explanation actually produce an ask? Mirrors what inbox-ask.mjs reads:
+ *  a structured `ask`, enumerated `options`, or the CTA / what-to-do prose. */
+export function isUsableExplanation(expl) {
+  if (!expl || typeof expl !== "object") return false;
+  const ask = expl.ask;
+  if (ask && typeof ask === "object" && typeof ask.summary === "string" && ask.summary.trim() !== "") {
+    return true;
+  }
+  if (Array.isArray(expl.options) && expl.options.length >= 2) return true;
+  for (const k of ["call_to_action", "what_to_do"]) {
+    if (typeof expl[k] === "string" && expl[k].trim() !== "") return true;
+  }
+  return false;
 }
 
 /** The global config that carries the app-actor `botUserId`s the authorship gate
@@ -109,6 +133,12 @@ export async function loadProjectConfig({
   env = process.env,
 } = {}) {
   try {
+    // `repoConfigPath` MUST be supplied by the server (it already resolves the
+    // Layer-1 path via --config / CATALYST_CONFIG_PATH). Falling back to
+    // `process.cwd()` is not viable on the persistent launch path: the committed
+    // launchd wrapper sets neither a working directory nor CATALYST_PROJECT_KEY, so
+    // a cwd-relative lookup misses and every reply returns `no_token` — the very
+    // inertness this fallback exists to prevent.
     let key = projectKey ?? env.CATALYST_PROJECT_KEY ?? null;
     if (key == null) {
       const p = repoConfigPath ?? join(process.cwd(), ".catalyst", "config.json");
@@ -118,6 +148,22 @@ export async function loadProjectConfig({
     if (typeof key !== "string" || key === "") return null;
     const path = join(HOME, ".config", "catalyst", `config-${key}.json`);
     return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The Layer-1 repo config (`.catalyst/config.json`). The legacy app-actor id lives
+ * here as `catalyst.monitor.linear.botUserId`, and the GET /thread path needs it:
+ * without it, a legacy installation classifies every Catalyst app comment as HUMAN
+ * (they carry is_bot=0), which empties `agentComments` and kills the derived ask.
+ * Fail-open to null.
+ */
+export async function loadRepoConfig({ path = null } = {}) {
+  try {
+    const p = path ?? join(process.cwd(), ".catalyst", "config.json");
+    return JSON.parse(await readFile(p, "utf8"));
   } catch {
     return null;
   }
@@ -168,10 +214,17 @@ export async function getConversation(
      *  app-actor ids that make the agent/human split correct (a Catalyst app
      *  actor's comments have is_bot=0 — see linear-thread.mjs::normalizeComment). */
     config = undefined,
+    /** Layer-1 repo config — carries the LEGACY `catalyst.monitor.linear.botUserId`
+     *  that the read path also needs for a correct agent/human split. */
+    repoConfig = undefined,
+    repoConfigPath = null,
   } = {},
 ) {
-  const cfg = config === undefined ? await loadGlobalConfig() : config;
-  const botUserIds = knownBotUserIds({ config: cfg });
+  const [cfg, repoCfg] = await Promise.all([
+    config === undefined ? loadGlobalConfig() : Promise.resolve(config),
+    repoConfig === undefined ? loadRepoConfig({ path: repoConfigPath }) : Promise.resolve(repoConfig),
+  ]);
+  const botUserIds = knownBotUserIds({ config: cfg, projectConfig: repoCfg });
   const [thread, phaseSigs] = await Promise.all([
     readThread(ticket, { limit, botUserIds }),
     readSignals(ticket, { workersDir, env }).catch(() => []),

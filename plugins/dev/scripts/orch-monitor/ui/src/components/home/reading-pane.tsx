@@ -504,7 +504,20 @@ export function ReadingPane({
             soft), and suppresses the reply affordance for synthesized rows with no
             Linear ticket behind them. */}
         {needsYou && (
-          <Conversation ticket={row.id} enabled onReplied={onReplied} />
+          <Conversation
+            ticket={row.id}
+            enabled
+            // The RESOLVING reply path is offered only on a true `attention` row.
+            // `needsYou` also covers the scheduler's `blocked` and `queued` rows,
+            // and a human comment cannot resolve those: the daemon's comment-wake
+            // removes only `needs-human`/`needs-input`, never the admission-gate
+            // labels. Offering it there would optimistically hide the row and then
+            // roll it back after the grace window — a worse experience than not
+            // offering it. The thread stays READABLE either way; only the reply
+            // affordance is withheld.
+            canResolveByReply={row.section === "attention"}
+            onReplied={onReplied}
+          />
         )}
 
         <Separator className="mt-6" />

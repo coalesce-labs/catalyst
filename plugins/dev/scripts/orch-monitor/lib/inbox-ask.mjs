@@ -230,63 +230,242 @@ export function askFromExplanation(explanation) {
   // summary because it is the shorter, more imperative line.
   const summary = condenseSummary(cta ?? whatToDo);
   if (summary == null) return null;
-  const kind = classifyAskText([cta, whatToDo].filter(Boolean).join(" — "));
-  return buildAsk({ kind, summary, suggestedReplies: [], source: "explanation" });
+  const classified = classifyAskText([cta, whatToDo].filter(Boolean).join(" — "));
+  return buildAsk({
+    kind: declaredKind(explanation, classified),
+    summary,
+    suggestedReplies: [],
+    source: "explanation",
+  });
 }
 
 /**
- * Last-resort derivation from the newest AGENT comment — what makes the ~handful
- * of tickets parked RIGHT NOW render usefully. `source: "comment"` lets the UI
- * mark it as inferred rather than producer-authored.
+ * The producer's DECLARED escalation type → ask kind.
  *
- * Never produces reply chips: a chip derived from prose would be a guess at what
- * the agent accepts, and a wrong chip is worse than a free-text box.
+ * `escalation_type` is an existing documented tagged union — `decision |
+ * authorization | manual` (recovery-pass/SKILL.md, _phase-agent-template/SKILL.md)
+ * — i.e. the producer's own word for what it is asking. It beats any reader-side
+ * reading of the CTA prose: the live `authorization` escalations say "authorize
+ * another recovery cycle …, or take it over?", which the text classifier reads as
+ * `clarify` ("free-text answer needed") when the producer plainly declared it a
+ * yes/no.
+ *
+ * `manual` is deliberately ABSENT: it is the DEFAULT the producer substitutes when
+ * nothing was declared (recovery-reasoning.mjs), so mapping it would turn
+ * "unspecified" into a claim. Those fall through to the prose classifier.
  */
-export function askFromComment(commentBody) {
-  const summary = condenseSummary(commentBody);
+const ESCALATION_TYPE_KINDS = { decision: "decide", authorization: "approve" };
+
+/** The declared kind, EXCEPT that a classified `act-then-confirm` always wins.
+ *  That is the one asymmetry worth hard-coding: if the prose says "create the
+ *  label, then reply done", honoring a declared `authorization` would tell the
+ *  operator a bare "yes" is sufficient when it demonstrably is not. */
+function declaredKind(explanation, classified) {
+  if (classified === "act-then-confirm") return classified;
+  const declared = ESCALATION_TYPE_KINDS[nonEmptyString(explanation?.escalation_type)?.toLowerCase()];
+  return declared ?? classified;
+}
+
+/**
+ * Build an ask from a classified comment candidate (see classifyAskCandidate).
+ *
+ * The class decides the KIND for a `blocker`, bypassing the prose classifier: a
+ * named failure with no question attached is work, not a question, and running it
+ * through the classifier returned `clarify` — whose rendered promise is "a written
+ * answer resolves this; there is no default". On a ticket blocked by a dirty tree
+ * or a CONFLICTING PR that promise is simply false, and it is the expensive
+ * direction of the error this module is built to avoid. `act-then-confirm` states
+ * it honestly: do the work, then reply to confirm.
+ */
+export function askFromCandidate(candidate) {
+  const text = nonEmptyString(candidate?.text);
+  if (text == null) return null;
+  const summary = condenseSummary(text);
   if (summary == null) return null;
   return buildAsk({
-    kind: classifyAskText(commentBody),
+    kind: candidate.class === "blocker" ? "act-then-confirm" : classifyAskText(text),
     summary,
+    // Never a chip from prose: it would be a guess at what the agent accepts, and
+    // a wrong chip is worse than a free-text box.
     suggestedReplies: [],
     source: "comment",
   });
 }
 
+/**
+ * Last-resort derivation from a single AGENT comment — what makes the ~handful of
+ * tickets parked RIGHT NOW render usefully. `source: "comment"` lets the UI mark it
+ * as inferred rather than producer-authored. Returns null when the comment carries
+ * no ask at all (a status note, a phase report, a bare pointer).
+ */
+export function askFromComment(commentBody) {
+  return askFromCandidate(classifyAskCandidate(commentBody));
+}
+
 // ── choosing WHICH agent comment carries the ask ──────────────────────────────
 //
-// The newest agent comment is usually the ask — but not always, and the exception
-// is systematic rather than rare. The recovery-pass escalation posts a content-free
-// POINTER as its final word:
+// The newest agent comment is usually the ask — but on a parked ticket it usually
+// ISN'T, and the exception is systematic rather than rare. Verified against the
+// live inbox (6 parked tickets, 2026-07-30): the newest agent comment was the ask
+// on ZERO of them. It was the recovery pass's content-free pointer on five:
 //
 //     🔼 **recovery-pass** self-heal attempts exhausted on this ticket —
-//     escalated to the operator. (See your inbox.)
+//     escalated to the operator. self-heal attempts exhausted (2 dispatches
+//     without a recorded verdict). (See your inbox.)
 //
-// That is the entire comment. Deriving the ask from it yields a summary that tells
-// the operator only that they are needed, which they already knew — while the
-// comment directly beneath it carries the actual reason:
+// That is the entire comment, and every clause of it is escalation BOOKKEEPING:
+// rendered as the ask it tells the operator only that they are needed — "(See your
+// inbox.)" inside the inbox — which they already knew. The informative comment sits
+// beneath it:
 //
-//     **Reason:** Failure reason: duplicate_of_CTL-1385:fix_already_merged…
+//     **Reason:** Failure reason: rebase_refused_dirty_tree
 //
-// So we skip SHORT, purely-referential escalation notices and use the newest
-// SUBSTANTIVE agent comment instead. This is selection among things the agent
-// really said — never fabrication. If every agent comment is a notice we fall back
-// to the newest one rather than rendering nothing: a weak ask beats an absent one
-// when the agent genuinely said nothing else.
+// STRIP, THEN CLASSIFY — the design that replaced a phrase blacklist.
+//
+// An earlier cut REJECTED any short comment matching a notice phrase. That threw
+// away the comment above (it matches "requires human judgment" and "marked for
+// human review" and is only 188 chars), left every remaining candidate a phase
+// report, and then fell back to `bodies[0]` — the pointer. So the filter meant to
+// suppress the pointer is exactly what elected it.
+//
+// The fix inverts the primitive: those phrases are producer BOILERPLATE to REMOVE,
+// not evidence to reject on. Every one of them comes from a template we can name
+// (recovery-reasoning.mjs `formatEscalationComment` / the `🔼` escalation comment;
+// recovery-emit.mjs's `🔍`/`🔼` notes; the recovery-pass SKILL's `✅`/`🔧` notes), so
+// strip the template and classify what the agent actually added:
+//
+//   ask     — a real request: a question, enumerated options, "reply <x>", or an
+//             explicit operator-action block. The operator answers or acts.
+//   blocker — a named FAILURE with no question attached ("Failure reason: …",
+//             "needs-human VALID: PR #212 CONFLICTING/DIRTY"). The operator must go
+//             DO something; no reply resolves it. → act-then-confirm.
+//   status  — the pass REPORTING, not asking ("✅ unstuck this", "🔧 is working
+//             this", a leave-alone verdict, a phase status report). Never an ask.
+//   none    — nothing left after the boilerplate. Never an ask.
+//
+// Selection is ranked (newest `ask`, else newest `blocker`) and there is NO
+// fallback to the newest body. The old `?? bodies[0]` was the "a weak ask beats an
+// absent one" rule, and production disproved it: it rendered "✅ recovery-pass
+// unstuck this — … now running" under the heading "What this needs from you", and
+// told the operator a written answer would resolve a ticket the agent had already
+// fixed. Absent is honest; a fabricated ask is not.
 
-/** Markers of a bare "you are needed, look elsewhere" notice. */
-const ESCALATION_NOTICE_PATTERNS = [
-  /\(see your inbox\.?\)/i,
-  /escalated to the operator/i,
-  /marked for human review/i,
-  /requires human judgment/i,
-  /self-heal attempts exhausted/i,
+/**
+ * Producer BOILERPLATE, removed before classifying. Each entry is a template we
+ * can point at, not a guess about prose:
+ *   1. the `<emoji> **recovery-pass** <verb> —` comment header (recovery-emit.mjs,
+ *      recovery-reasoning.mjs, recovery-pass/SKILL.md)
+ *   2/3/4. the three fixed lines of recovery-reasoning.mjs::formatEscalationComment
+ *   5/6. the escalation trailer ("escalated to the operator", "(See your inbox.)")
+ *   7. recovery-reasoning.mjs's escalation-bookkeeping reason — it restates THAT
+ *      the escalation happened, which is the one thing the operator already knows
+ *   8. recovery-emit.mjs's leave-alone trailer
+ * Ordered header-first so the header match still sees the start of the string.
+ */
+const BOILERPLATE_PATTERNS = [
+  /^\s*[^\p{L}\p{N}]*\*{0,2}recovery-pass\*{0,2}\s+[^—\n]*—\s*/u,
+  /^[ \t]*#{1,6}[^\n]*Recovery Escalation[ \t]*$/gim,
+  /Reasoning pass determined this requires human judgment\.?/gi,
+  /This ticket is now marked for human review\.?/gi,
+  /escalated to the operator\.?/gi,
+  /\(see your inbox\.?\)/gi,
+  /self-heal attempts exhausted(?:\s+on this ticket)?\s*(?:\(\s*\d+\s+dispatches?[^)]*\))?\.?/gi,
+  /No action needed[^.\n]*\.?/gi,
 ];
 
-/** Below this length a notice-matching comment is treated as a pure pointer. A
- *  LONG comment that happens to contain a notice phrase still carries content, so
- *  the length floor keeps the filter from discarding real asks. */
-const NOTICE_MAX_CHARS = 400;
+/**
+ * Strip the producer's boilerplate and return what the agent actually added, or
+ * null when nothing is left (a pure pointer). Exported for direct testing.
+ */
+export function stripEscalationBoilerplate(body) {
+  const s = nonEmptyString(body);
+  if (s == null) return null;
+  let out = s;
+  for (const re of BOILERPLATE_PATTERNS) out = out.replace(re, " ");
+  // Removal leaves orphaned punctuation at the EDGES (and the producer's own ".."
+  // where two sentences met). Trim only there — a global punctuation squash would
+  // rewrite the identifiers this summary exists to show, turning
+  // "duplicate_of_CTL-1385" into "duplicate_of_CTL 1385".
+  out = out
+    .replace(/\.{2,}/g, ".")
+    .replace(/^[\s.;,:—–]+/, "")
+    .replace(/[\s.;,:—–]+$/, "");
+  // Nothing but punctuation left → it was a pure pointer.
+  if (!/[\p{L}\p{N}]/u.test(out)) return null;
+  return nonEmptyString(out);
+}
+
+/**
+ * The recovery pass's REPORTING notes, keyed on the verb its own templates use.
+ * `is working this` / `unstuck this` / `resolved …` / `reviewed this` all say what
+ * the PASS did; none asks the operator for anything.
+ */
+const RECOVERY_STATUS_HEADER =
+  /^\s*[^\p{L}\p{N}]*\*{0,2}recovery-pass\*{0,2}\s+(?:is working this|unstuck this|resolved\b|reviewed this)/u;
+
+/**
+ * The one carve-out: `🔍 reviewed this — needs-human VALID: …` is a leave-alone
+ * verdict for the PASS but a confirmation for the OPERATOR — it means "I checked,
+ * you really are needed, here is why". Its "No action needed; leaving as-is"
+ * trailer is about the pass's own next tick, not about the operator, so treating
+ * the whole note as status buries the blocker it just named.
+ */
+const NEEDS_HUMAN_CONFIRMED = /\bneeds-human VALID\b/i;
+
+/** Is this the recovery pass reporting rather than asking? Exported for testing. */
+export function isRecoveryStatusNote(body) {
+  const s = nonEmptyString(body);
+  if (s == null) return false;
+  if (!RECOVERY_STATUS_HEADER.test(s)) return false;
+  return !NEEDS_HUMAN_CONFIRMED.test(s);
+}
+
+/**
+ * A named FAILURE with no question attached. These come from the escalation
+ * templates (`**Reason:**` / `Failure reason:`) and the leave-alone verdict
+ * (`needs-human VALID`, `Left for operator`), so they are the producer's words for
+ * "here is what is wrong", never a request the operator can answer by replying.
+ */
+const BLOCKER_MARKERS = [
+  /\bfailure reason\s*:/i,
+  /\*{2}reason\s*:?\*{2}/i,
+  /^\s*reason\s*:/im,
+  /\bneeds-human VALID\b/i,
+  /\bleft for (?:the )?operator\b/i,
+];
+
+/**
+ * An explicit operator-directed requirement, wherever it appears — including
+ * inside a phase status report, which is where the pipeline actually writes it:
+ *
+ *     **⚠️ Required pre-merge operator migration (ordering is load-bearing):**
+ *     apply `parked-by-human` to SLI-17, confirm it appears in
+ *     `details.sanctioned` on BOTH minis' `recovery.board-scan`, then remove …
+ *
+ * That paragraph is the ticket's own act-then-confirm example, and it was being
+ * discarded with the report that carries it. This is prose-shaped rather than
+ * template-shaped, so the markers are deliberately narrow — "required"/"must"
+ * within one line of "operator", or a literal "action required" — and a miss costs
+ * only the honest absence the ask block already renders.
+ */
+const OPERATOR_ACTION_MARKERS = [
+  /\brequired\b[^\n]{0,80}\boperator\b/i,
+  /\boperator\b[^\n]{0,80}\b(?:required|must)\b/i,
+  /\baction required\b/i,
+];
+
+/** The paragraph stating an explicit operator requirement, or null. Returns just
+ *  that paragraph — the surrounding report is bookkeeping the operator hasn't been
+ *  asked about. Exported for direct testing. */
+export function extractOperatorActionBlock(body) {
+  const s = nonEmptyString(body);
+  if (s == null) return null;
+  for (const para of s.split(/\n\s*\n/)) {
+    const p = nonEmptyString(para);
+    if (p != null && matchesAny(p, OPERATOR_ACTION_MARKERS)) return p;
+  }
+  return null;
+}
 
 /**
  * Markers of a PHASE STATUS REPORT — the per-phase bookkeeping the pipeline posts
@@ -298,10 +477,16 @@ const NOTICE_MAX_CHARS = 400;
  * producing nonsense like `act-then-confirm: "Phase Implement — Commits: 7"`.
  * Anchored to the leading phase header so ordinary prose that merely mentions a
  * phase is unaffected.
+ *
+ * The separator is `[\s-]+`, not `\s+`: the phase agents post under BOTH spellings
+ * ("**Phase Implement**" and "phase-implement mirror test — see phase summary"),
+ * and a whitespace-only separator let the hyphenated one through as an ask
+ * candidate — where, being ordinary prose, it outranked nothing but still won on a
+ * ticket whose real blocker was an older comment.
  */
 const PHASE_REPORT_PATTERNS = [
-  /^\s*\**\s*phase\s+(?:triage|research|plan|implement|verify|review|pr|monitor-merge|monitor-deploy|teardown)\b/i,
-  /^\s*\**\s*(?:plan|research|implement|verify|review)\s+phase\s+[—–-]/i,
+  /^\s*\**\s*phase[\s-]+(?:triage|research|plan|implement|verify|review|pr|monitor-merge|monitor-deploy|teardown)\b/i,
+  /^\s*\**\s*(?:plan|research|implement|verify|review)[\s-]+phase\s*[—–-]/i,
 ];
 
 /** Is this body a phase status report rather than an ask? Exported for testing. */
@@ -312,13 +497,9 @@ export function isPhaseStatusReport(body) {
 }
 
 /**
- * Markers that a comment carries a REAL ask despite also matching a notice phrase.
- *
- * The notice patterns are phrase matches, so a comment that BOTH announces the
- * escalation AND states the decision — "This requires human judgment: should we
- * choose A or B?" — was being discarded, and pickAskComment fell through to an
- * older, less relevant note. A standalone pointer asks nothing and enumerates
- * nothing; substantive text does. These are the signals that separate them.
+ * Markers that a comment states a REAL request rather than merely announcing that
+ * one exists. A standalone escalation pointer asks nothing and enumerates nothing;
+ * an actual ask does one of these.
  */
 const SUBSTANTIVE_ASK_MARKERS = [
   /\?/, // a literal question — the strongest signal a decision is being requested
@@ -334,35 +515,87 @@ export function hasSubstantiveAsk(body) {
   return matchesAny(s, SUBSTANTIVE_ASK_MARKERS);
 }
 
+/** What an agent comment can be as an ask candidate, STRONGEST FIRST — the array
+ *  order IS the selection ranking (pickAskCandidate walks it). */
+export const ASK_CANDIDATE_CLASSES = ["ask", "blocker", "prose", "status", "none"];
+
+/** The prefix of ASK_CANDIDATE_CLASSES that can carry an ask — everything ahead of
+ *  the two classes that never can. Sliced rather than re-listed so the ranking has
+ *  exactly one definition. */
+const USABLE_CANDIDATE_CLASSES = ASK_CANDIDATE_CLASSES.slice(
+  0,
+  ASK_CANDIDATE_CLASSES.indexOf("status"),
+);
+
 /**
- * Is this body unusable as an ask — either a content-free escalation pointer or a
- * phase status report? Exported for direct testing.
+ * Classify one agent comment as an ask candidate: `{ class, text }`, where `text`
+ * is the informative residue to summarize (null for `status`/`none`).
  *
- * (Kept under the original name because it is the ask-candidate rejection test;
- * the escalation pointer was simply the first kind of non-ask we found.)
+ * Order is precedence, and each step earns its place:
+ *   1. an explicit operator requirement wins ANYWHERE, even inside a status report
+ *      — it is the least ambiguous signal a human is being asked for something;
+ *   2. the pass's own reporting notes and the phase reports are never asks;
+ *   3. strip the boilerplate — nothing left means it was a pure pointer;
+ *   4. a question / options / "reply <x>" in the residue is a real `ask`;
+ *   5. a named failure with no question is a `blocker` — real work, not a reply;
+ *   6. anything else is ordinary `prose`: still the agent's words, and still the
+ *      best evidence available on a ticket parked before any producer change — but
+ *      ranked BELOW a blocker, because a stray one-liner ("phase-implement mirror
+ *      test — see phase summary") must never outrank "PR #212 CONFLICTING/DIRTY".
  */
-export function isEscalationNotice(body) {
+export function classifyAskCandidate(body) {
   const s = nonEmptyString(body);
-  if (s == null) return true; // an empty body carries no ask either
-  if (isPhaseStatusReport(s)) return true;
-  if (s.length > NOTICE_MAX_CHARS) return false;
-  if (!matchesAny(s, ESCALATION_NOTICE_PATTERNS)) return false;
-  // It reads like a notice — but if it ALSO states a real ask, it IS the ask.
-  // Discarding it would silently promote an older, less relevant comment.
-  return !hasSubstantiveAsk(s);
+  if (s == null) return { class: "none", text: null };
+
+  const actionBlock = extractOperatorActionBlock(s);
+  if (actionBlock != null) return { class: "ask", text: actionBlock };
+
+  if (isRecoveryStatusNote(s) || isPhaseStatusReport(s)) return { class: "status", text: null };
+
+  const residue = stripEscalationBoilerplate(s);
+  if (residue == null) return { class: "none", text: null };
+  if (hasSubstantiveAsk(residue)) return { class: "ask", text: residue };
+  if (matchesAny(residue, BLOCKER_MARKERS)) return { class: "blocker", text: residue };
+  return { class: "prose", text: residue };
 }
 
 /**
- * Pick the agent comment that best carries the ask, from a NEWEST-FIRST list of
- * agent comment bodies. Returns the newest substantive body, else the newest body,
- * else null for an empty list.
+ * Is this body unusable as an ask — a status report, a pass verdict, or a
+ * content-free escalation pointer? Exported for direct testing.
+ *
+ * (Kept under the original name because it has always been the ask-candidate
+ * rejection test; the escalation pointer was simply the first non-ask we found.)
  */
+export function isEscalationNotice(body) {
+  const cls = classifyAskCandidate(body).class;
+  return cls === "status" || cls === "none";
+}
+
+/**
+ * Pick the candidate that best carries the ask, from a NEWEST-FIRST list of agent
+ * comment bodies: the newest `ask`, else the newest `blocker`, else the newest
+ * `prose`, else null.
+ *
+ * There is deliberately NO fallback to the newest BODY — see the section header.
+ * Ranking by class before recency is what lets a real ask beat a newer pointer and
+ * an older blocker beat a newer throwaway line, without ever promoting the
+ * pipeline's own bookkeeping to an ask.
+ */
+export function pickAskCandidate(agentComments) {
+  const candidates = (Array.isArray(agentComments) ? agentComments : [])
+    .map((b) => classifyAskCandidate(b))
+    .filter((c) => c.text != null);
+  for (const cls of USABLE_CANDIDATE_CLASSES) {
+    const hit = candidates.find((c) => c.class === cls);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** The BODY TEXT of the best ask candidate (the residue, not the raw comment), or
+ *  null when no comment carries one. */
 export function pickAskComment(agentComments) {
-  const bodies = (Array.isArray(agentComments) ? agentComments : [])
-    .map((b) => nonEmptyString(b))
-    .filter(Boolean);
-  if (bodies.length === 0) return null;
-  return bodies.find((b) => !isEscalationNotice(b)) ?? bodies[0];
+  return pickAskCandidate(agentComments)?.text ?? null;
 }
 
 // ── the public entry point ───────────────────────────────────────────────────
@@ -371,25 +604,31 @@ export function pickAskComment(agentComments) {
  * Derive the ask summary for a parked ticket, walking the preference chain:
  *   structured `ask` → explanation fields → newest agent comment → null.
  *
- * `explanation` is the CTL-1110 six-field object (board-data.mjs::deriveExplanation)
- * optionally extended with an `ask` object. For the comment fallback, prefer
- * `agentComments` (a NEWEST-FIRST list, so notice-skipping can apply); the single
- * `lastAgentComment` remains accepted for callers that have only one body.
+ * `explanation` is the CTL-1110 escalation object passed VERBATIM (never through
+ * board-data.mjs::deriveExplanation, which projects only the six legacy string
+ * fields and would strip both `ask` and `options` — see
+ * inbox-conversation.mjs::deriveRichExplanation), optionally extended with an `ask`
+ * object. For the comment fallback, prefer `agentComments` (a NEWEST-FIRST list, so
+ * the ranked candidate pick can apply); the single `lastAgentComment` remains
+ * accepted for callers that have only one body.
  *
- * Returns null when NO source yields usable text — the pane then renders no ask
- * block at all (honest absence).
+ * Returns null when NO source yields usable text — including when every agent
+ * comment is a status note or a bare pointer. The pane then renders no ask block at
+ * all, which is honest; the alternative it replaced put "✅ recovery-pass unstuck
+ * this — now running" under the heading "What this needs from you".
  */
 export function deriveAsk({
   explanation = null,
   agentComments = null,
   lastAgentComment = null,
 } = {}) {
-  const commentBody =
-    (Array.isArray(agentComments) ? pickAskComment(agentComments) : null) ?? lastAgentComment;
+  const candidate =
+    (Array.isArray(agentComments) ? pickAskCandidate(agentComments) : null) ??
+    classifyAskCandidate(lastAgentComment);
   return (
     askFromStructured(explanation) ??
     askFromExplanation(explanation) ??
-    askFromComment(commentBody) ??
+    askFromCandidate(candidate) ??
     null
   );
 }

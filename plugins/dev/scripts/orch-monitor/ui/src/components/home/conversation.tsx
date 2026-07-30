@@ -313,7 +313,7 @@ function ReplyBox({
   ticket: string;
   draft: string;
   setDraft: React.Dispatch<React.SetStateAction<string>>;
-  onReplied: (outcome: ReplyOutcome, submitted: string) => void;
+  onReplied: (outcome: ReplyOutcome, submitted: string, submittedFor: string) => void;
 }) {
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -321,8 +321,12 @@ function ReplyBox({
   const draftAtSend = useRef("");
 
   const send = useCallback(async () => {
-    const body = draft.trim();
-    if (body === "" || sending) return;
+    // Trim ONLY to validate emptiness — the value SENT is the operator's verbatim
+    // draft. Sending draft.trim() defeated the server's postBody fix: a reply
+    // opening with a four-space Markdown code block still reached Linear without
+    // its indentation, rendering as prose instead of code.
+    if (draft.trim() === "" || sending) return;
+    const body = draft;
     draftAtSend.current = draft;
     setSending(true);
     setFailure(null);
@@ -333,7 +337,7 @@ function ReplyBox({
       // deletes a follow-up the operator started typing during the round trip,
       // which breaks this component's promise that typed words are never lost.
       setDraft((current) => (current === draftAtSend.current ? "" : current));
-      onReplied(outcome, body);
+      onReplied(outcome, body, ticket);
       return;
     }
     // Every failure path KEEPS the draft — the operator's words are never lost —
@@ -343,7 +347,7 @@ function ReplyBox({
         ? "Nothing to send."
         : (outcome as { message: string }).message,
     );
-    onReplied(outcome, body);
+    onReplied(outcome, body, ticket);
   }, [draft, sending, ticket, setDraft, onReplied]);
 
   return (
@@ -397,12 +401,18 @@ function ReplyBox({
 export function Conversation({
   ticket,
   enabled,
+  canResolveByReply = true,
   onReplied,
   now = Date.now(),
 }: {
   ticket: string;
   /** Only needs-you rows carry a conversation (running/done rows stay calm). */
   enabled: boolean;
+  /** Whether a human comment can actually RESOLVE this row. False for the
+   *  scheduler's blocked/queued rows, where comment-wake does not clear the
+   *  admission-gate label — the thread stays readable, the reply box does not
+   *  appear, and no false optimistic hide can occur. */
+  canResolveByReply?: boolean;
   /** Bubble the outcome so the surface can optimistically clear the row on a
    *  confirmed post and leave it in place on every failure. */
   onReplied?: (outcome: ReplyOutcome) => void;
@@ -431,8 +441,13 @@ export function Conversation({
   }, [ticket]);
 
   const handleReplied = useCallback(
-    (outcome: ReplyOutcome, submitted: string) => {
-      if (outcome.status === "replied") {
+    (outcome: ReplyOutcome, submitted: string, submittedFor: string) => {
+      // A reply to ticket A can land AFTER the operator has selected ticket B. The
+      // outcome must still bubble (B's row… actually A's row… must reconcile), but
+      // the locally rendered turns belong to A only — appending A's comment into
+      // B's thread would show a turn that B's server thread can never contain, and
+      // could mislead the next reply.
+      if (outcome.status === "replied" && submittedFor === ticket) {
         // Show the confirmed turn immediately …
         setOwnTurns((prev) => [
           ownReplyEntry(outcome.commentId, submitted, Date.now()),
@@ -444,7 +459,7 @@ export function Conversation({
       }
       onReplied?.(outcome);
     },
-    [onReplied],
+    [onReplied, ticket],
   );
 
   if (!enabled) return null;
@@ -498,7 +513,7 @@ export function Conversation({
 
       {/* The reply box — suppressed entirely for rows with no underlying Linear
           ticket, which have nothing to reply to (§4 / orphan-PR rows). */}
-      {conversation.canReply ? (
+      {conversation.canReply && canResolveByReply ? (
         <ReplyBox
           ticket={ticket}
           draft={draft}
@@ -507,7 +522,9 @@ export function Conversation({
         />
       ) : (
         <p className="mt-4 text-[11.5px] text-muted/70" data-no-reply-affordance={ticket}>
-          This item has no Linear ticket behind it, so there is nothing to reply to.
+          {!canResolveByReply
+            ? "Replying can't clear this one — it's held by the scheduler, not waiting on your answer."
+            : "This item has no Linear ticket behind it, so there is nothing to reply to."}
         </p>
       )}
 

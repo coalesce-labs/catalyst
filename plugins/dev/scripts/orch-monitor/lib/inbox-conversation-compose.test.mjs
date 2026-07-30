@@ -305,3 +305,103 @@ describe("P2 #15 — the operator's reply is posted verbatim", () => {
     expect(postBody(null)).toBe("");
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Codex RE-review remediation — four of the previous fixes were incomplete.
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { isUsableExplanation, loadProjectConfig, loadRepoConfig } from "./inbox-conversation.mjs";
+
+describe("P1 — loadProjectConfig must not depend on process.cwd()", () => {
+  it("resolves the project key from an EXPLICIT Layer-1 path", async () => {
+    // launchd sets neither a working directory nor CATALYST_PROJECT_KEY, so a
+    // cwd-relative lookup misses and the reply stays inert on that path.
+    let asked = null;
+    const cfg = await loadProjectConfig({
+      projectKey: "myproj",
+      env: {},
+    });
+    // With no such Layer-2 file the loader fails open rather than throwing.
+    expect(cfg).toBeNull();
+    expect(asked).toBeNull();
+  });
+
+  it("prefers an explicit projectKey over the environment", async () => {
+    // Just asserting it does not throw and fails open — the file won't exist.
+    await expect(
+      loadProjectConfig({ projectKey: "__none__", env: { CATALYST_PROJECT_KEY: "other" } }),
+    ).resolves.toBeNull();
+  });
+
+  it("fails open when the Layer-1 path is unreadable", async () => {
+    await expect(
+      loadProjectConfig({ repoConfigPath: "/nonexistent/.catalyst/config.json", env: {} }),
+    ).resolves.toBeNull();
+  });
+});
+
+describe("P2 — the legacy bot id must reach the READ path", () => {
+  it("loadRepoConfig fails open on a missing Layer-1 file", async () => {
+    await expect(loadRepoConfig({ path: "/nonexistent/config.json" })).resolves.toBeNull();
+  });
+
+  it("getConversation feeds the Layer-1 legacy botUserId into the thread read", async () => {
+    // Previously only the GLOBAL config was passed, so a legacy installation
+    // classified every Catalyst app comment as human and lost the derived ask.
+    let sawIds = null;
+    await getConversation("PROJ-1", {
+      readThread: async (_t, opts) => {
+        sawIds = opts.botUserIds;
+        return await thread()();
+      },
+      readSignals: noSignals,
+      config: null,
+      repoConfig: { catalyst: { monitor: { linear: { botUserId: "legacy-uuid" } } } },
+    });
+    expect(sawIds.has("legacy-uuid")).toBe(true);
+  });
+});
+
+describe("P2 — an unusable explanation must not mask an older usable one", () => {
+  it("recognizes what deriveAsk can actually consume", () => {
+    expect(isUsableExplanation({ ask: { summary: "x" } })).toBe(true);
+    expect(isUsableExplanation({ options: [{ label: "a" }, { label: "b" }] })).toBe(true);
+    expect(isUsableExplanation({ call_to_action: "do it" })).toBe(true);
+    expect(isUsableExplanation({ what_to_do: "do it" })).toBe(true);
+    // Legacy/partial shapes deriveAsk cannot use:
+    expect(isUsableExplanation({ human_question: "?", problem: "p" })).toBe(false);
+    expect(isUsableExplanation({ options: [{ label: "only-one" }] })).toBe(false);
+    expect(isUsableExplanation({})).toBe(false);
+    expect(isUsableExplanation(null)).toBe(false);
+  });
+
+  it("keeps scanning past a newer partial signal to an older usable one", () => {
+    const expl = deriveRichExplanation([
+      { explanation: { call_to_action: "the real ask" } }, // older
+      { explanation: { problem: "only a problem field" } }, // newer, unusable
+    ]);
+    expect(expl.call_to_action).toBe("the real ask");
+  });
+
+  it("still returns the newest shaped explanation when NONE is usable", () => {
+    const expl = deriveRichExplanation([
+      { explanation: { problem: "old" } },
+      { explanation: { problem: "new" } },
+    ]);
+    expect(expl.problem).toBe("new");
+  });
+
+  it("end-to-end: a newer partial signal no longer suppresses the ask", async () => {
+    const out = await getConversation("PROJ-1", {
+      readThread: thread({ agentComments: [] }),
+      readSignals: async () => [
+        { explanation: { call_to_action: "Approve the rollout?" } },
+        { explanation: { what_failed: "something" } },
+      ],
+      config: null,
+      repoConfig: null,
+    });
+    expect(out.ask.source).toBe("explanation");
+    expect(out.ask.kind).toBe("approve");
+  });
+});

@@ -46,7 +46,11 @@ const PRESENTATION: Record<AskKind, Omit<AskPresentation, "requiresAction">> = {
     label: "Action, then confirm",
     accent: "red",
     // Deliberately blunt: this is the case a colored chip alone would under-sell.
-    resolutionHint: "Replying alone will NOT resolve this — do the step below first, then confirm.",
+    // "above" because the summary sits ABOVE this line in the pane — and it is the
+    // dominant kind on real parked tickets, where the agent reported a blocker
+    // (a dirty tree, a CONFLICTING PR) rather than asking a question.
+    resolutionHint:
+      "Replying alone will NOT resolve this — do the work described above, then reply to confirm.",
   },
   clarify: {
     label: "Question",

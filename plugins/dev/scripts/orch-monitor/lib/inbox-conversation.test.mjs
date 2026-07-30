@@ -20,7 +20,16 @@ import {
   condenseSummary,
   deriveAsk,
 } from "./inbox-ask.mjs";
-import { isEscalationNotice, isPhaseStatusReport, pickAskComment } from "./inbox-ask.mjs";
+import {
+  classifyAskCandidate,
+  extractOperatorActionBlock,
+  isEscalationNotice,
+  isPhaseStatusReport,
+  isRecoveryStatusNote,
+  pickAskCandidate,
+  pickAskComment,
+  stripEscalationBoilerplate,
+} from "./inbox-ask.mjs";
 import { normalizeComment, readTicketThread } from "./linear-thread.mjs";
 import {
   knownBotUserIds,
@@ -243,6 +252,41 @@ describe("askFromExplanation — derived from CTL-1110 fields", () => {
     expect(ask.kind).toBe("approve");
     expect(ask.suggestedReplies).toEqual([]);
   });
+
+  it("honors the producer's DECLARED escalation_type over the prose reading", () => {
+    // `escalation_type` is an existing documented tagged union (decision |
+    // authorization | manual) — the producer's own word for what it is asking.
+    // The live `authorization` escalations read as `clarify` to the text
+    // classifier ("free-text answer needed") when the producer said yes/no.
+    const cta = "authorize another recovery cycle (clear its ledger latch), or take it over?";
+    expect(askFromExplanation({ call_to_action: cta }).kind).toBe("clarify");
+    expect(
+      askFromExplanation({ call_to_action: cta, escalation_type: "authorization" }).kind,
+    ).toBe("approve");
+    expect(
+      askFromExplanation({ call_to_action: "Pick a lockfile.", escalation_type: "decision" }).kind,
+    ).toBe("decide");
+  });
+
+  it("ignores `manual` — it is the producer's DEFAULT, not a declaration", () => {
+    // Mapping it would turn "unspecified" into a claim about the ask.
+    expect(
+      askFromExplanation({ call_to_action: "The lockfile is wrong.", escalation_type: "manual" })
+        .kind,
+    ).toBe("clarify");
+  });
+
+  it("lets a classified act-then-confirm OVERRIDE the declared type", () => {
+    // The one asymmetry worth hard-coding: honoring `authorization` here would
+    // promise the operator that a bare "yes" finishes a manual step.
+    const ask = askFromExplanation({
+      call_to_action: "The label is missing.",
+      what_to_do: "Create the label in Linear, then reply done.",
+      escalation_type: "authorization",
+    });
+    expect(ask.kind).toBe("act-then-confirm");
+    expect(ask.canResolveByReply).toBe(false);
+  });
 });
 
 describe("askFromComment — the last-resort fallback for tickets parked TODAY", () => {
@@ -257,6 +301,10 @@ describe("askFromComment — the last-resort fallback for tickets parked TODAY",
   it("returns null for an empty comment", () => {
     expect(askFromComment("")).toBeNull();
     expect(askFromComment(null)).toBeNull();
+  });
+  it("returns null for a comment that carries no ask at all", () => {
+    expect(askFromComment("✅ **recovery-pass** unstuck this — re-dispatched.")).toBeNull();
+    expect(askFromComment("**Phase Implement**\n- **Commits**: 7")).toBeNull();
   });
 });
 
@@ -294,80 +342,262 @@ describe("deriveAsk — the preference chain", () => {
 // linear-thread.mjs — the replica thread read (§2/§3)
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("isEscalationNotice / pickAskComment", () => {
-  it("recognizes the content-free recovery-pass pointer", () => {
-    // Verbatim from production: this is the ENTIRE comment body.
+// ── strip-then-classify: which agent comment carries the ask ─────────────────
+//
+// Every fixture below is a real production comment body with the ticket keys
+// re-keyed to PROJ (AGENTS.md → Version Control). They are the six parked tickets
+// the live inbox held on 2026-07-30 — the newest agent comment was the ask on
+// NONE of them, which is what this ladder exists to survive.
+
+/** The pointer the recovery pass posts as its final word (recovery-reasoning.mjs).
+ *  Every clause is escalation bookkeeping; rendered as the ask it tells the
+ *  operator to "see your inbox" while they are looking at their inbox. */
+const POINTER =
+  "🔼 **recovery-pass** self-heal attempts exhausted on this ticket — escalated to " +
+  "the operator. self-heal attempts exhausted (2 dispatches without a recorded " +
+  "verdict). (See your inbox.)";
+
+/** recovery-reasoning.mjs::formatEscalationComment — the comment that names the
+ *  REAL blocker, and the one a phrase blacklist discarded (it matches both
+ *  "requires human judgment" and "marked for human review", at 188 chars). */
+const ESCALATION_WITH_REASON =
+  "## PROJ-1176 Recovery Escalation\n\n" +
+  "Reasoning pass determined this requires human judgment.\n\n" +
+  "**Reason:** Failure reason: rebase_refused_dirty_tree\n\n" +
+  "This ticket is now marked for human review.";
+
+describe("stripEscalationBoilerplate", () => {
+  it("reduces the pure pointer to nothing", () => {
+    expect(stripEscalationBoilerplate(POINTER)).toBeNull();
+  });
+
+  it("keeps the REASON when it strips the escalation template around it", () => {
+    // The whole point of strip-then-classify: the phrases are boilerplate to
+    // REMOVE, not evidence to reject the comment on.
+    expect(stripEscalationBoilerplate(ESCALATION_WITH_REASON)).toBe(
+      "**Reason:** Failure reason: rebase_refused_dirty_tree",
+    );
+  });
+
+  it("never rewrites identifiers while trimming orphaned punctuation", () => {
+    // A global punctuation squash turned "duplicate_of_PROJ-1385" into
+    // "duplicate_of_PROJ 1385" — the summary exists to show exactly that string.
+    const residue = stripEscalationBoilerplate(
+      "## PROJ-1176 Recovery Escalation\n\n**Reason:** Failure reason: " +
+        "duplicate_of_PROJ-1385:fix_already_merged_no_code_change\n\n" +
+        "This ticket is now marked for human review.",
+    );
+    expect(residue).toContain("duplicate_of_PROJ-1385:fix_already_merged_no_code_change");
+  });
+
+  it("leaves a comment with no boilerplate untouched", () => {
+    expect(stripEscalationBoilerplate("Which of the 13 findings actually matter?")).toBe(
+      "Which of the 13 findings actually matter?",
+    );
+  });
+});
+
+describe("isRecoveryStatusNote", () => {
+  it("recognizes the pass REPORTING rather than asking", () => {
     expect(
-      isEscalationNotice(
-        "🔼 **recovery-pass** self-heal attempts exhausted on this ticket — " +
-          "escalated to the operator. (See your inbox.)",
+      isRecoveryStatusNote(
+        "✅ **recovery-pass** unstuck this — the 29-day Triage stall was a gen-1 " +
+          "triage worker that hit its turn cap. Re-dispatched triage → now running.",
       ),
     ).toBe(true);
-    expect(isEscalationNotice("This ticket is now marked for human review.")).toBe(true);
+    expect(
+      isRecoveryStatusNote("🔧 **recovery-pass** is working this — triage completed 29 days ago."),
+    ).toBe(true);
+    expect(
+      isRecoveryStatusNote(
+        "🔍 **recovery-pass** reviewed this — PROJ-63 is healthy and progressing. " +
+          "No action needed on the ticket.. No action needed; leaving as-is (re-checks).",
+      ),
+    ).toBe(true);
   });
 
-  it("rejects a PHASE STATUS REPORT as an ask candidate", () => {
-    // These are machine bookkeeping posts, and they are frequently the newest
-    // substantive agent comment. Left in, the classifier reads their imperative
+  it("does NOT swallow the `needs-human VALID` verdict — it names a blocker", () => {
+    // "No action needed; leaving as-is" is about the PASS's next tick, not the
+    // operator's. Treating the whole note as status buries the blocker it names.
+    expect(
+      isRecoveryStatusNote(
+        "🔍 **recovery-pass** reviewed this — needs-human VALID: PR #212 " +
+          "CONFLICTING/DIRTY + 2 codex P2 findings. Left for operator.. " +
+          "No action needed; leaving as-is (re-checks).",
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores comments that are not recovery-pass notes at all", () => {
+    expect(isRecoveryStatusNote("Which of the 13 findings actually matter?")).toBe(false);
+  });
+});
+
+describe("extractOperatorActionBlock", () => {
+  it("lifts the operator requirement out of the phase report carrying it", () => {
+    // The ticket's own act-then-confirm example, and it lives INSIDE a phase
+    // status report — the report is bookkeeping, that paragraph is the ask.
+    const report =
+      "**Phase Implement**\n\n- **Commits**: 7\n\n" +
+      "Implemented the 6-phase plan. All grep-gates clean.\n\n" +
+      "**⚠️ Required pre-merge operator migration (ordering is load-bearing):** " +
+      "apply `parked-by-human` to PROJ-17, confirm it appears in " +
+      "`details.sanctioned` on BOTH hosts, then remove PROJ-17 from the host env.";
+    expect(extractOperatorActionBlock(report)).toStartWith(
+      "**⚠️ Required pre-merge operator migration",
+    );
+  });
+
+  it("returns null for a report with no operator requirement", () => {
+    expect(
+      extractOperatorActionBlock("**Phase Verify**\n\n- **Result**: PASS\n- **Findings**: 4"),
+    ).toBeNull();
+  });
+});
+
+describe("classifyAskCandidate", () => {
+  it("classes the content-free pointer as `none`", () => {
+    expect(classifyAskCandidate(POINTER)).toEqual({ class: "none", text: null });
+  });
+
+  it("classes a phase status report and a pass verdict as `status`", () => {
+    // Machine bookkeeping posts. Left in, the classifier reads their imperative
     // bullets as instructions and emits nonsense like
     // `act-then-confirm: "Phase Implement — Commits: 7"`.
-    const report = "**Phase Implement**\n- **Branch**: `PROJ-1`\n- **Commits**: 7\n- **Diff**: 29 files changed";
-    expect(isPhaseStatusReport(report)).toBe(true);
-    expect(isEscalationNotice(report)).toBe(true);
-    expect(isPhaseStatusReport("**Plan phase — disposition: duplicate of PROJ-2**")).toBe(true);
+    const report = "**Phase Implement**\n- **Branch**: `PROJ-1`\n- **Commits**: 7";
+    expect(classifyAskCandidate(report).class).toBe("status");
+    expect(classifyAskCandidate("phase-implement mirror test — see phase summary").class).toBe(
+      "status",
+    );
+    expect(classifyAskCandidate("✅ **recovery-pass** unstuck this — re-dispatched.").class).toBe(
+      "status",
+    );
   });
 
-  it("does NOT reject prose that merely mentions a phase", () => {
+  it("classes a named failure with no question as a `blocker`", () => {
+    expect(classifyAskCandidate(ESCALATION_WITH_REASON).class).toBe("blocker");
+    expect(
+      classifyAskCandidate(
+        "🔍 **recovery-pass** reviewed this — needs-human VALID: PR #212 " +
+          "CONFLICTING/DIRTY + 2 codex P2 findings. Left for operator.",
+      ).class,
+    ).toBe("blocker");
+  });
+
+  it("classes a question / options / reply-with as an `ask`", () => {
+    expect(classifyAskCandidate("Which of the 13 findings actually matter?").class).toBe("ask");
+    expect(classifyAskCandidate("Reply approve to publish, or no to hold.").class).toBe("ask");
+  });
+
+  it("classes ordinary agent prose as `prose` — real, but the weakest candidate", () => {
+    expect(classifyAskCandidate("The lockfile situation needs a human eye.").class).toBe("prose");
+  });
+
+  it("keeps isEscalationNotice as the rejection test over the same ladder", () => {
+    expect(isEscalationNotice(POINTER)).toBe(true);
+    expect(isEscalationNotice("**Phase Implement**\n- **Commits**: 7")).toBe(true);
+    expect(isEscalationNotice(ESCALATION_WITH_REASON)).toBe(false);
+    // Prose that merely mentions a phase is not a report.
     const prose = "The implement phase needs a decision about which lockfile to keep.";
     expect(isPhaseStatusReport(prose)).toBe(false);
     expect(isEscalationNotice(prose)).toBe(false);
   });
+});
 
+describe("pickAskCandidate / pickAskComment — ranked, never `bodies[0]`", () => {
   it("prefers a real question over a phase report, even a newer one", () => {
-    const picked = pickAskComment([
-      "**Phase Verify**\n- **Result**: PASS\n- **Findings**: 4",
-      "Which of the 13 findings actually matter?",
-    ]);
-    expect(picked).toBe("Which of the 13 findings actually matter?");
+    expect(
+      pickAskComment([
+        "**Phase Verify**\n- **Result**: PASS\n- **Findings**: 4",
+        "Which of the 13 findings actually matter?",
+      ]),
+    ).toBe("Which of the 13 findings actually matter?");
   });
 
-  it("does NOT discard a long comment that merely mentions escalation", () => {
-    const long = `Reasoning pass determined this requires human judgment. ${"detail ".repeat(120)}`;
-    expect(isEscalationNotice(long)).toBe(false);
+  it("picks the older BLOCKER over the newer pointer that hid it", () => {
+    // The exact production shape: the pointer is newest, every phase report is
+    // rejected, and the reason sits two comments down.
+    const picked = pickAskCandidate([
+      POINTER,
+      "**Phase Review**\n- **Result**: PASS",
+      ESCALATION_WITH_REASON,
+    ]);
+    expect(picked.class).toBe("blocker");
+    expect(picked.text).toBe("**Reason:** Failure reason: rebase_refused_dirty_tree");
   });
 
-  it("skips notices and picks the newest SUBSTANTIVE agent comment", () => {
-    const picked = pickAskComment([
-      "🔼 recovery-pass self-heal attempts exhausted — escalated to the operator. (See your inbox.)",
-      "**Reason:** duplicate of PROJ-1385, fix already merged, no code change needed.",
-      "older still",
+  it("ranks a blocker ABOVE a newer throwaway prose line", () => {
+    const picked = pickAskCandidate([
+      "mirror test — see summary",
+      "**Reason:** Failure reason: rebase_refused_dirty_tree",
     ]);
-    expect(picked).toContain("duplicate of PROJ-1385");
+    expect(picked.class).toBe("blocker");
   });
 
-  it("falls back to the newest notice when EVERY comment is one", () => {
-    // A weak ask beats an absent one when the agent said nothing else.
-    const picked = pickAskComment([
-      "escalated to the operator. (See your inbox.)",
-      "marked for human review",
-    ]);
-    expect(picked).toBe("escalated to the operator. (See your inbox.)");
+  it("returns NULL when every comment is a status note or a pointer", () => {
+    // The defect this replaced fell back to `bodies[0]` here, which put
+    // "✅ recovery-pass unstuck this — now running" under the heading
+    // "What this needs from you" and claimed a written answer would resolve it.
+    expect(
+      pickAskComment([
+        POINTER,
+        "✅ **recovery-pass** unstuck this — re-dispatched triage → now running.",
+        "🔧 **recovery-pass** is working this — re-dispatching triage.",
+        "**Phase Plan**\n- **Phases**: 3",
+      ]),
+    ).toBeNull();
   });
 
   it("returns null for an empty list", () => {
     expect(pickAskComment([])).toBeNull();
     expect(pickAskComment(null)).toBeNull();
   });
+});
 
-  it("threads through deriveAsk so the ask skips the pointer", () => {
+describe("deriveAsk over real parked-ticket threads", () => {
+  it("skips the pointer and renders the question", () => {
     const ask = deriveAsk({
-      agentComments: [
-        "escalated to the operator. (See your inbox.)",
-        "Which of the 13 findings actually matter?",
-      ],
+      agentComments: [POINTER, "Which of the 13 findings actually matter?"],
     });
     expect(ask.summary).toBe("Which of the 13 findings actually matter?");
     expect(ask.kind).toBe("decide");
+  });
+
+  it("renders a BLOCKER as act-then-confirm, never as `clarify`", () => {
+    // `clarify` renders "a written answer resolves this; there is no default" —
+    // false on a ticket blocked by a dirty tree, and the expensive direction of
+    // the error (the operator types a reply and nothing clears).
+    const ask = deriveAsk({ agentComments: [POINTER, ESCALATION_WITH_REASON] });
+    expect(ask.kind).toBe("act-then-confirm");
+    expect(ask.canResolveByReply).toBe(false);
+    expect(ask.summary).toBe("**Reason:** Failure reason: rebase_refused_dirty_tree");
+  });
+
+  it("renders NO ask when the agent only reported progress", () => {
+    // The agent said it fixed the ticket and re-dispatched. Demanding an answer
+    // there states the opposite of the truth; absence is honest.
+    expect(
+      deriveAsk({
+        agentComments: [
+          POINTER,
+          "✅ **recovery-pass** unstuck this — re-dispatched triage → now running.",
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("lifts an operator requirement out of a phase report as act-then-confirm", () => {
+    const ask = deriveAsk({
+      agentComments: [
+        POINTER,
+        "**Phase Implement**\n\n- **Commits**: 7\n\n" +
+          "**⚠️ Required pre-merge operator migration:** apply `parked-by-human` to " +
+          "PROJ-17, confirm it on BOTH hosts, then remove PROJ-17 from the host env.",
+      ],
+    });
+    expect(ask.kind).toBe("act-then-confirm");
+    expect(ask.canResolveByReply).toBe(false);
+    expect(ask.summary).toContain("apply `parked-by-human` to PROJ-17");
   });
 });
 

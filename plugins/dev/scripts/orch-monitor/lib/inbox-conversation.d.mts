@@ -38,6 +38,12 @@ export function loadProjectConfig(opts?: {
   env?: Record<string, string | undefined>;
 }): Promise<unknown>;
 
+/** The Layer-1 repo config (`.catalyst/config.json`). Fails open to null. */
+export function loadRepoConfig(opts?: { path?: string | null }): Promise<unknown>;
+
+/** Can this explanation produce an ask deriveAsk can actually use? */
+export function isUsableExplanation(expl: unknown): boolean;
+
 /** The Catalyst data root, honoring CATALYST_DIR. */
 export function catalystDir(env?: Record<string, string | undefined>): string;
 export function defaultWorkersDir(env?: Record<string, string | undefined>): string;
@@ -78,5 +84,11 @@ export function getConversation(
     workersDir?: string | null;
     env?: Record<string, string | undefined>;
     config?: unknown;
+    /** Layer-1 repo config — carries the LEGACY `catalyst.monitor.linear.botUserId`
+     *  the read path needs for a correct agent/human split. */
+    repoConfig?: unknown;
+    /** Explicit Layer-1 config path (server-resolved). Never rely on process.cwd():
+     *  the launchd wrapper sets no working directory. */
+    repoConfigPath?: string | null;
   },
 ): Promise<Conversation>;

@@ -130,7 +130,11 @@ import {
 // via CTL-1567). The reply path is a SIBLING of /respond, not a replacement: see
 // lib/reply-ticket.mjs for why /respond's synthetic null-author event and its
 // hard held-run requirement make it unusable for this surface.
-import { getConversation, loadGlobalConfig, loadProjectConfig } from "./lib/inbox-conversation.mjs";
+import {
+  getConversation,
+  loadGlobalConfig,
+  loadProjectConfig,
+} from "./lib/inbox-conversation.mjs";
 import { replyToTicket } from "./lib/reply-ticket.mjs";
 /** Canonical ticket key for the conversation routes: a team prefix that may carry
  *  digits/underscores (`OPS_2-17`), then `-<number>`. Anchored, and containing no
@@ -3674,6 +3678,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const limitParam = Number(url.searchParams.get("limit"));
           const conversation = await getConversation(ticket, {
+            // Pass the SERVER-resolved Layer-1 path (--config / CATALYST_CONFIG_PATH).
+            // A cwd-relative fallback misses under launchd, which sets no working
+            // directory — and the legacy `catalyst.monitor.linear.botUserId` lives in
+            // that file, so missing it breaks the agent/human split on legacy hosts.
+            repoConfigPath: monitorConfigPath,
             ...(Number.isFinite(limitParam) && limitParam > 0
               ? { limit: Math.min(Math.floor(limitParam), 50) }
               : {}),
@@ -3741,7 +3750,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const text = typeof body.body === "string" ? body.body : "";
           const [globalConfig, projectConfig] = await Promise.all([
             loadGlobalConfig(),
-            loadProjectConfig(),
+            // Explicit resolved path — NOT process.cwd(). The launchd wrapper sets
+            // neither a working directory nor CATALYST_PROJECT_KEY, so a
+            // cwd-relative lookup leaves the Layer-2 token unresolved and every
+            // reply returns `no_token` on the persistent launch path.
+            loadProjectConfig({ repoConfigPath: monitorConfigPath }),
           ]);
           const result = await replyToTicket(
             { ticket, body: text },

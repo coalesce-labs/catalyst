@@ -240,16 +240,29 @@ export function HomeSurface() {
   const model = useMemo(() => {
     if (resolvedIds.size === 0) return rawModel;
     const keep = (row: { id: string }) => !resolvedIds.has(row.id);
+    const sections = rawModel.sections
+      .map((sec) => ({ ...sec, rows: sec.rows.filter(keep) }))
+      .filter((sec) => sec.rows.length > 0);
+    const order = rawModel.order.filter(keep);
+
+    // EVERY derived field must be recomputed from the filtered rows, not copied.
+    // Copying them left `defaultSelectedId` pointing at a now-hidden row (so the
+    // selection effect reselected it), and left the blocked/waiting counts — which
+    // drive the calm header and `isAllClear` — still reporting the removed item as
+    // needing attention until another SSE frame arrived.
+    const perSection = (kind: string) =>
+      sections.find((sec) => sec.kind === kind)?.rows.length ?? 0;
+
     return {
       ...rawModel,
-      sections: rawModel.sections
-        .map((sec) => ({ ...sec, rows: sec.rows.filter(keep) }))
-        .filter((sec) => sec.rows.length > 0),
-      order: rawModel.order.filter(keep),
+      sections,
+      order,
+      defaultSelectedId: order.length > 0 ? order[0].id : null,
       counts: {
         ...rawModel.counts,
-        // Keep the calm header honest: a hidden row is not still "needing you".
-        attention: Math.max(0, rawModel.counts.attention - resolvedIds.size),
+        attention: perSection("attention"),
+        blocked: perSection("blocked"),
+        waiting: perSection("waiting"),
       },
     };
   }, [rawModel, resolvedIds]);
@@ -273,6 +286,9 @@ export function HomeSurface() {
   // selection vanished from the order, fall back to the head of the walk order.
   useEffect(() => {
     setSelectedId((prev) => {
+      // A row that was optimistically resolved is gone from `order`, so the
+      // selection falls through to the recomputed default rather than sticking to
+      // an id the list no longer renders.
       if (prev != null && model.order.some((r) => r.id === prev)) return prev;
       return model.defaultSelectedId;
     });

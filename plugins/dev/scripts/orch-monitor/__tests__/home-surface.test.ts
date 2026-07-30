@@ -482,6 +482,34 @@ describe("Inbox conversation surface (CTL-1569)", () => {
     expect(homeSurfaceSrc).toMatch(/for \(const row of rawModel\.order\)/);
   });
 
+  it("re-review P2 — filtering resolved rows RECOMPUTES the dependent metadata", () => {
+    // Copying defaultSelectedId/counts from the raw model left the selection
+    // effect reselecting a hidden row and the calm header still counting it.
+    expect(homeSurfaceSrc).toContain("defaultSelectedId: order.length > 0");
+    expect(homeSurfaceSrc).toContain("perSection");
+  });
+
+  it("re-review P2 — the resolving reply is offered ONLY on a true attention row", () => {
+    // needsYou also covers the scheduler's blocked/queued rows, where comment-wake
+    // never clears the admission-gate label — replying there would optimistically
+    // hide the row and then roll it back.
+    expect(readingPaneSrc).toContain("canResolveByReply");
+    expect(readingPaneSrc).toMatch(/row\.section === "attention"/);
+    expect(conversationSrc).toContain("canResolveByReply");
+  });
+
+  it("re-review P2 — the CLIENT posts the untrimmed draft", () => {
+    // Sending draft.trim() defeated the server's verbatim postBody fix.
+    expect(conversationSrc).toContain("const body = draft;");
+    expect(conversationCode).not.toMatch(/const body = draft\.trim\(\)/);
+  });
+
+  it("re-review P1 — async reply state is scoped to the ticket it was sent for", () => {
+    // A reply to A landing after switching to B must not append A's comment to B.
+    expect(conversationSrc).toContain("submittedFor");
+    expect(conversationSrc).toMatch(/submittedFor === ticket/);
+  });
+
   it("the surface routes a reply outcome through the ONE optimistic-rollback rule", () => {
     // Reusing the verb's mark + grace window (rather than a second optimistic
     // path) keeps one reconcile rule deciding when a row truly leaves the inbox.
