@@ -101,6 +101,12 @@ cmd_start() {
     return 1
   fi
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
+  # CTL-1577: authenticate the broker's Linear traffic (cache-reconcile walk, label
+  # backfill — reads AND writes) as the Catalyst Orchestrator app-actor instead of the
+  # personal lin_api_ key inherited from the login shell, which bills the operator's
+  # shared 2500/hr per-user bucket. Fail-open: a failed mint keeps the env token.
+  source "$SCRIPT_DIR/lib/linear-app-actor.sh"
+  linear_app_actor_auth "catalyst-broker"
   nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" > "$LOG_FILE" 2>&1 &
   local server_pid=$!
   disown "$server_pid" 2>/dev/null || true
