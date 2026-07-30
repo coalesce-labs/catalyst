@@ -1,5 +1,12 @@
 # Changelog
 
+## [12.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.39.0...catalyst-dev-v12.39.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* **dev:** CTL-1567 clear needs-human the moment a human responds ([#2796](https://github.com/coalesce-labs/catalyst/issues/2796)) ([2f71e13](https://github.com/coalesce-labs/catalyst/commit/2f71e13cfdb24aaf7e1b5e07b50d58e47ef3feea))
+
 ## [12.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.38.0...catalyst-dev-v12.39.0)
 
 Jul 29, 2026
