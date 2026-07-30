@@ -81,6 +81,11 @@ import {
   mergeSummaryIntoTicket,
   type InboxSummaryResponse,
 } from "./inbox-summary-data";
+// CTL-1569: the conversation surface — the ask summary, the newest-first thread,
+// and the inline reply that posts a real Linear comment as the operator (which is
+// what actually clears `needs-human`, per CTL-1567).
+import { Conversation } from "./conversation";
+import type { ReplyOutcome } from "@/board/conversation-client";
 
 // ── inbox summary fetch-on-select (CTL-1042) ──────────────────────────────────
 type InboxSummaryState =
@@ -381,6 +386,7 @@ export function ReadingPane({
   workers,
   onAct,
   respondStatus = "idle",
+  onReplied,
 }: {
   row: InboxRow | null;
   /** The resident read-model workers — the View-in-Claude session id is the
@@ -392,6 +398,9 @@ export function ReadingPane({
   onAct?: (id: string) => void;
   /** CTL-903 (HOME5): the optimistic write status for the selected row. */
   respondStatus?: RespondRowStatus;
+  /** CTL-1569: the inline reply's outcome. The surface uses it to optimistically
+   *  clear the row on a CONFIRMED post and to leave it in place on any failure. */
+  onReplied?: (outcome: ReplyOutcome) => void;
 }) {
   if (!row) return <NothingSelected />;
 
@@ -486,6 +495,29 @@ export function ReadingPane({
         )}
         {needsYou && (
           <WhatsNeededNow row={effectiveRow} onAct={onAct} respondStatus={respondStatus} />
+        )}
+
+        {/* CTL-1569: the conversation — the derived ask ("what would satisfy
+            this?"), the Linear deep link, the inline reply box, and the
+            newest-first thread. Only needs-you rows carry it, so running/done rows
+            stay calm. It renders NOTHING while loading or on a read failure (fails
+            soft), and suppresses the reply affordance for synthesized rows with no
+            Linear ticket behind them. */}
+        {needsYou && (
+          <Conversation
+            ticket={row.id}
+            enabled
+            // The RESOLVING reply path is offered only on a true `attention` row.
+            // `needsYou` also covers the scheduler's `blocked` and `queued` rows,
+            // and a human comment cannot resolve those: the daemon's comment-wake
+            // removes only `needs-human`/`needs-input`, never the admission-gate
+            // labels. Offering it there would optimistically hide the row and then
+            // roll it back after the grace window — a worse experience than not
+            // offering it. The thread stays READABLE either way; only the reply
+            // affordance is withheld.
+            canResolveByReply={row.section === "attention"}
+            onReplied={onReplied}
+          />
         )}
 
         <Separator className="mt-6" />
