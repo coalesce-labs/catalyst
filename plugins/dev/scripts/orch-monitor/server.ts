@@ -1364,6 +1364,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
     readClusterLivenessFromLokiSyncCached: (args: {
       lokiUrl: string;
     }) => Record<string, AnchorPeerRec>;
+    readStickyIdentity: (args: { dir: string }) => string | null;
+    getCatalystRepoDir: () => string;
     deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
   } | null> | null = null;
   const loadDaemonDeps = () => {
@@ -1374,7 +1376,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const configMod = ["..", "execution-core", "config.mjs"].join("/");
           const heartbeatSyncMod = ["..", "execution-core", "cluster-heartbeat-sync.mjs"].join("/");
           const lokiSyncMod = ["..", "execution-core", "loki-liveness-sync.mjs"].join("/");
-          const [recovery, config, heartbeatSync, lokiSync, navSignal] = await Promise.all([
+          const hostStickyMod = ["..", "execution-core", "host-sticky.mjs"].join("/");
+          const [recovery, config, heartbeatSync, lokiSync, hostSticky, navSignal] = await Promise.all([
             import(recoveryMod) as Promise<{
               readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
               readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
@@ -1384,6 +1387,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
               getClusterHosts: () => string[];
               getLivenessAnchorIssue: () => string | null;
               getLokiQueryUrl: () => string | null;
+              getCatalystRepoDir: () => string;
             }>,
             import(heartbeatSyncMod) as Promise<{
               readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
@@ -1392,6 +1396,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
               readClusterLivenessFromLokiSyncCached: (args: {
                 lokiUrl: string;
               }) => Record<string, AnchorPeerRec>;
+            }>,
+            import(hostStickyMod) as Promise<{
+              readStickyIdentity: (args: { dir: string }) => string | null;
             }>,
             import("./lib/nav-signal.mjs"),
           ]);
@@ -1404,6 +1411,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
             getLokiQueryUrl: config.getLokiQueryUrl,
             readPeerHeartbeatsSync: heartbeatSync.readPeerHeartbeatsSync,
             readClusterLivenessFromLokiSyncCached: lokiSync.readClusterLivenessFromLokiSyncCached,
+            readStickyIdentity: hostSticky.readStickyIdentity,
+            getCatalystRepoDir: config.getCatalystRepoDir,
             deriveDaemonHealth: navSignal.deriveDaemonHealth,
           };
         } catch {
@@ -1600,6 +1609,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const HEARTBEAT_CADENCE_MS = envMs("EXECUTION_CORE_HEARTBEAT_INTERVAL_MS", 30_000); // node.heartbeat cadence
   const ANCHOR_PUBLISH_CADENCE_MS = envMs("EXECUTION_CORE_LIVENESS_PUBLISH_INTERVAL_MS", 120_000); // anchor publisher cadence
   const PEER_WINDOW_MARGIN_MS = 10_000;
+  // Live windows must stay strictly below the 5-min offline grace (classify
+  // checks live BEFORE grace, so a window ≥ grace would render a should-be-
+  // offline host as live). Cap leaves a real degraded band.
+  const PEER_WINDOW_GRACE_CAP_MS = 4 * 60_000;
   const lokiPeerWindowMs = HEARTBEAT_CADENCE_MS + peerPollMs + lokiCacheTtlMs + PEER_WINDOW_MARGIN_MS;
   const anchorPeerWindowMs = ANCHOR_PUBLISH_CADENCE_MS + peerPollMs + PEER_WINDOW_MARGIN_MS;
   let anchorPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -1718,7 +1731,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // the same normalization every heartbeat key gets. null when unknown.
   const resolveSelfPinnedHost = (): string | null => {
     try {
-      const raw = execCoreDeps?.getHostName?.() ?? null;
+      // Prefer the daemon's RECORDED sticky identity (host-sticky.mjs): on an
+      // unpinned multi-host install whose OS hostname changed, the daemon
+      // restores the sticky name only inside its own process — this separately
+      // launched monitor would otherwise see the NEW os.hostname(). Fall back
+      // to getHostName, then fold through the alias map like every host key.
+      let raw: string | null = null;
+      try {
+        const dir = execCoreDeps?.getCatalystRepoDir?.();
+        raw = dir ? (execCoreDeps?.readStickyIdentity?.({ dir }) ?? null) : null;
+      } catch {
+        raw = null;
+      }
+      raw = raw ?? execCoreDeps?.getHostName?.() ?? null;
       if (!raw) return null;
       return resolveHostAlias(raw, hostAliases) ?? raw;
     } catch {
@@ -1737,12 +1762,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
     // "degraded" then means genuinely late; the 5-min offline grace unchanged.
     intervalMsFor: (host: string) => {
       const self = resolveSelfPinnedHost();
-      if (self && host === self) return undefined; // default 30s — local log is direct
+      // SELF: the local log is direct (no transport lag) — the window is the
+      // daemon's own configured beat cadence (default 30s), not a literal.
+      if (self && host === self) return HEARTBEAT_CADENCE_MS;
       // Budget by the transport that produced THIS host's cached heartbeat
       // (per-host provenance; poll-global source only as a fallback), with the
-      // window DERIVED from the configured cadences.
+      // window DERIVED from the configured cadences — capped below the 5-min
+      // offline grace so classify's live-check can never mask a host that
+      // should already be offline.
       const src = peerSourceByHost[host] ?? lastPeerSource;
-      return src === "anchor" ? anchorPeerWindowMs : lokiPeerWindowMs;
+      const win = src === "anchor" ? anchorPeerWindowMs : lokiPeerWindowMs;
+      return Math.min(win, PEER_WINDOW_GRACE_CAP_MS);
     },
     // CTL-1551: the monitor's own identity for the view/signal (SlotDeck's
     // localHost) — resolved per assemble, alias-folded like every other host key.
