@@ -206,6 +206,16 @@ if [[ -n "$EXISTING_PR_NUMBER" ]]; then
         --reason "push_rejected_no_workflow_scope"
     fi
     exit 1
+  elif [[ "$PUSH_VERIFY_RC" -eq 4 ]]; then
+    # Postmortem fix: the safety gate refused this push (placeholder-identity
+    # commit or anomalous tree-wide deletion) — details are in the worker log
+    # via draft-pr.sh's _draft_pr_warn. This is NOT a staleness issue; do not
+    # retry or rebase past it. A human must inspect the offending commit(s).
+    echo "phase-pr: push refused by safety gate for #${EXISTING_PR_NUMBER} (see log above)" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "push_safety_gate_blocked"
+    exit 1
   elif [[ "$PUSH_VERIFY_RC" -ne 0 ]]; then
     echo "phase-pr: push-verify failed for #${EXISTING_PR_NUMBER} (stale ref)" >&2
     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
@@ -294,6 +304,15 @@ itself.
          --phase "$PHASE" --ticket "$TICKET" --status failed \
          --reason "push_rejected_no_workflow_scope"
      fi
+     exit 1
+   elif [[ "$PUSH_VERIFY_RC" -eq 4 ]]; then
+     # Postmortem fix: safety gate refused this push — see phase-pr's other
+     # push-verify call site above for the full rationale. Not a staleness
+     # issue; do not retry or rebase past it.
+     echo "phase-pr: push refused by safety gate on create-pr path (see log above)" >&2
+     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+       --phase "$PHASE" --ticket "$TICKET" --status failed \
+       --reason "push_safety_gate_blocked"
      exit 1
    elif [[ "$PUSH_VERIFY_RC" -ne 0 ]]; then
      echo "phase-pr: post-create-pr push-verify failed (stale ref)" >&2
