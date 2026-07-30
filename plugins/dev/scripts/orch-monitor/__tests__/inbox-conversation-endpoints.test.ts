@@ -125,17 +125,24 @@ describe("POST /api/ticket/:id/reply (CTL-1569)", () => {
     // A non-existent issue must NOT read as success — the UI restores the row on
     // any non-2xx, and a false success would silently lose the operator's words.
     //
-    // SPENDS NO LINEAR QUOTA: the credential is removed for the duration, so the
-    // post short-circuits at the `no_token` gate BEFORE any network call. Without
-    // this the route would run a real `viewer` query + a real `issue` lookup on
-    // every suite run — two API calls against a shared, rate-limited fleet quota,
-    // on a fleet that has had an active 429 problem. The assertion is the same
-    // either way (a non-resolvable reply is never `replied`), so making it offline
-    // costs no coverage and makes the result host-independent.
+    // SPENDS NO LINEAR QUOTA: BOTH credential sources are neutralized for the
+    // duration, so the post short-circuits at the `no_token` gate before any
+    // network call. Without this the route runs a real `viewer` query + a real
+    // `issue` lookup on every suite run — two API calls against a shared,
+    // rate-limited fleet quota, on a fleet that has had an active 429 problem.
+    //
+    // Clearing the env vars alone is NOT sufficient: the credential resolver also
+    // falls back to the Layer-2 personal token (required, because the launchd path
+    // exports nothing into the environment), and that file exists on a developer
+    // machine. Pointing the project key at a nonexistent project makes that lookup
+    // miss too. The assertion is unchanged either way, so this costs no coverage
+    // and makes the result host-independent.
     const prevToken = process.env.LINEAR_API_TOKEN;
     const prevKey = process.env.LINEAR_API_KEY;
+    const prevProject = process.env.CATALYST_PROJECT_KEY;
     delete process.env.LINEAR_API_TOKEN;
     delete process.env.LINEAR_API_KEY;
+    process.env.CATALYST_PROJECT_KEY = "__no_such_project_for_test__";
     try {
       const res = await post(ABSENT_TICKET, { body: "this must not be reported as sent" });
       expect(res.status).not.toBe(200);
@@ -148,6 +155,8 @@ describe("POST /api/ticket/:id/reply (CTL-1569)", () => {
     } finally {
       if (prevToken !== undefined) process.env.LINEAR_API_TOKEN = prevToken;
       if (prevKey !== undefined) process.env.LINEAR_API_KEY = prevKey;
+      if (prevProject !== undefined) process.env.CATALYST_PROJECT_KEY = prevProject;
+      else delete process.env.CATALYST_PROJECT_KEY;
     }
   });
 

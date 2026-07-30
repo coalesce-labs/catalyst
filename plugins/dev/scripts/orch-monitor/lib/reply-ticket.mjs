@@ -76,6 +76,10 @@ export async function replyToTicket(
     clearMarker = clearNeedsHumanMarker,
     env = process.env,
     config = null,
+    /** Layer-2 project config — carries the personal `linear.apiToken` that is the
+     *  ONLY credential source on the launchd path (catalyst-monitor.sh exports
+     *  none). Without it the reply is inert there. */
+    projectConfig = null,
     fetchImpl = fetch,
   } = {},
 ) {
@@ -88,7 +92,10 @@ export async function replyToTicket(
   // Post FIRST. Linear is the system of record for the conversation, and the local
   // bookkeeping below is meaningless if the comment never landed — so nothing local
   // is mutated until the comment is confirmed live.
-  const posted = await post({ ticket, body: text }, { fetchImpl, env, config });
+  // The VERBATIM body is posted (the poster strips only trailing whitespace) —
+  // `text` is used above solely to validate emptiness, because trimming leading
+  // whitespace would rewrite an indented Markdown code block into prose.
+  const posted = await post({ ticket, body }, { fetchImpl, env, config, projectConfig });
   if (posted.status !== "posted") {
     // Pass the refusal/failure through verbatim; the route maps it and the row is
     // restored. No local state was touched.

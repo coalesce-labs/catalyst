@@ -136,20 +136,47 @@ export function normalizeComment(row, { botUserIds = new Set() } = {}) {
   };
 }
 
-/** The SQL. Newest-first, tombstones excluded, bounded by LIMIT. Joins through
- *  `issues.identifier` so callers pass the human key ("CTL-1569") and never need
- *  the internal issue UUID. */
-const THREAD_SQL = `
-  SELECT c.id, c.body, c.updated_at, c.created_at,
+/**
+ * Build the thread SELECT for the columns this replica ACTUALLY has.
+ *
+ * `comments.created_at` is NOT universal. The committed replica fixture
+ * (execution-core/linear-cli.test.mjs) defines `comments` without it, and any
+ * installation at that schema version behaves the same way. Naming the column
+ * unconditionally makes SQLite raise `no such column: c.created_at`, which
+ * readTicketThread catches as a replica failure — so the whole conversation
+ * surface (thread AND the Linear deep link) silently disappears rather than
+ * degrading. Probing `PRAGMA table_info` is one cheap local call and keeps the
+ * feature working across schema versions.
+ *
+ * Newest-first, tombstones excluded, bounded by LIMIT. Joins through
+ * `issues.identifier` so callers pass the human key and never the issue UUID.
+ */
+export function buildThreadSql({ hasCreatedAt }) {
+  const createdCol = hasCreatedAt ? "c.created_at" : "NULL AS created_at";
+  const order = hasCreatedAt ? "COALESCE(c.updated_at, c.created_at)" : "c.updated_at";
+  return `
+  SELECT c.id, c.body, c.updated_at, ${createdCol},
          c.author_id, c.author_name, c.author_avatar_url, c.is_bot, c.parent_id
     FROM comments c
     JOIN issues i ON i.id = c.issue_id
    WHERE i.identifier = ?
      AND i.removed_at IS NULL
      AND c.removed_at IS NULL
-   ORDER BY COALESCE(c.updated_at, c.created_at) DESC, c.id DESC
+   ORDER BY ${order} DESC, c.id DESC
    LIMIT ?
 `;
+}
+
+/** Does this replica's `comments` table carry `created_at`? Fail-safe: any probe
+ *  problem answers "no", which yields the narrower query that always works. */
+export function commentsHasCreatedAt(db) {
+  try {
+    const cols = db.prepare("PRAGMA table_info(comments)").all() ?? [];
+    return cols.some((c) => c?.name === "created_at");
+  } catch {
+    return false;
+  }
+}
 
 /** The ticket's own Linear URL + title, for the "link straight to the ticket"
  *  requirement (§3). Read from the same local DB in the same open. */
@@ -225,7 +252,8 @@ export async function readTicketThread(
       db.run("PRAGMA busy_timeout = 250");
     }
     const bounded = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_THREAD_LIMIT;
-    const rows = db.prepare(THREAD_SQL).all(ticket, bounded) ?? [];
+    const sql = buildThreadSql({ hasCreatedAt: commentsHasCreatedAt(db) });
+    const rows = db.prepare(sql).all(ticket, bounded) ?? [];
     const issue = db.prepare(ISSUE_SQL).get(ticket) ?? null;
 
     const comments = (Array.isArray(rows) ? rows : [])

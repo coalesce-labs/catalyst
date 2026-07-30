@@ -196,7 +196,7 @@ export function HomeSurface() {
 
   // Derive the whole inbox from the resident snapshot (PURE). When no payload has
   // landed yet, an empty payload yields an empty (but valid) model.
-  const model = useMemo(
+  const rawModel = useMemo(
     () =>
       deriveInbox(
         payload ?? {
@@ -210,6 +210,49 @@ export function HomeSurface() {
       ),
     [payload],
   );
+
+  // CTL-903 / HOME5: the WRITE path. The hook owns the optimistic-resume state +
+  // the grace-window rollback; the verb fires record-response + resume-agent
+  // through the read-model write endpoint (board/respond-client.ts owns the
+  // fetch). The single-node case is an exact pass-through (the endpoint's
+  // identity fence no-op); a multi-node fence rejection arrives as `did-not-take`.
+  const { respond, statusFor, reconcile, markResolved, markDidNotTake } = useRespond();
+
+  // CTL-1569 / AC #8 ("posting removes the row without a manual refresh"): the
+  // optimistic mark alone was NOT enough. `statusFor` only changed how the pane
+  // rendered — `sections` and `order` still carried the row, so it stayed visible
+  // AND selected with a live reply box until some later SSE frame happened to drop
+  // it, which invited a duplicate submission in the gap. So the marks are PROJECTED
+  // out of the model here.
+  //
+  // This is safe precisely because it is not permanent: `reconcile` still runs on
+  // every frame, and a mark that is still waiting past the grace window rolls back
+  // (`markDidNotTake`), which removes it from `resolvedIds` and returns the row.
+  // Optimistic hide + the existing rollback is the whole contract.
+  const resolvedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of rawModel.order) {
+      if (isNeedsYouSection(row.section) && statusFor(row.id) === "resuming") ids.add(row.id);
+    }
+    return ids;
+  }, [rawModel, statusFor]);
+
+  const model = useMemo(() => {
+    if (resolvedIds.size === 0) return rawModel;
+    const keep = (row: { id: string }) => !resolvedIds.has(row.id);
+    return {
+      ...rawModel,
+      sections: rawModel.sections
+        .map((sec) => ({ ...sec, rows: sec.rows.filter(keep) }))
+        .filter((sec) => sec.rows.length > 0),
+      order: rawModel.order.filter(keep),
+      counts: {
+        ...rawModel.counts,
+        // Keep the calm header honest: a hidden row is not still "needing you".
+        attention: Math.max(0, rawModel.counts.attention - resolvedIds.size),
+      },
+    };
+  }, [rawModel, resolvedIds]);
 
   // The selection: null until the operator (or the default-select effect) picks a
   // row. Held in React state so j/k and click both drive the one reading pane.
@@ -253,12 +296,6 @@ export function HomeSurface() {
     return () => window.removeEventListener("keydown", onKey);
   }, [model.order]);
 
-  // CTL-903 / HOME5: the WRITE path. The hook owns the optimistic-resume state +
-  // the grace-window rollback; the verb fires record-response + resume-agent
-  // through the read-model write endpoint (board/respond-client.ts owns the
-  // fetch). The single-node case is an exact pass-through (the endpoint's
-  // identity fence no-op); a multi-node fence rejection arrives as `did-not-take`.
-  const { respond, statusFor, reconcile, markResolved, markDidNotTake } = useRespond();
   const onAct = useCallback(
     (id: string) => {
       // The recorded note is empty for the one-click verb — the BFF12 endpoint
@@ -290,12 +327,15 @@ export function HomeSurface() {
   // needs-you rows (blocked | waiting) — the exact "still shows the item waiting"
   // the scenario re-checks.
   const stillWaitingIds = useMemo(() => {
+    // RAW model on purpose: reconcile must see the row the server still reports as
+    // needs-you. Reading the projected model would make an optimistically hidden
+    // row look "cleared" immediately, so it could never roll back.
     const ids = new Set<string>();
-    for (const row of model.order) {
+    for (const row of rawModel.order) {
       if (isNeedsYouSection(row.section)) ids.add(row.id);
     }
     return ids;
-  }, [model]);
+  }, [rawModel]);
   useEffect(() => {
     reconcile(stillWaitingIds);
   }, [stillWaitingIds, reconcile]);

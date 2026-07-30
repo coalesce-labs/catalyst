@@ -30,13 +30,36 @@ export interface Conversation {
 /** The global config carrying the app-actor `botUserId`s. Fails open to null. */
 export function loadGlobalConfig(opts?: { path?: string }): Promise<unknown>;
 
+/** The Layer-2 project secrets file, carrying the operator's personal
+ *  `linear.apiToken` — the only Linear credential on the launchd path. Fails open. */
+export function loadProjectConfig(opts?: {
+  projectKey?: string | null;
+  repoConfigPath?: string | null;
+  env?: Record<string, string | undefined>;
+}): Promise<unknown>;
+
+/** The Catalyst data root, honoring CATALYST_DIR. */
+export function catalystDir(env?: Record<string, string | undefined>): string;
+export function defaultWorkersDir(env?: Record<string, string | undefined>): string;
+
+/** Phases whose signals may carry an escalation explanation — PHASE_ORDER plus the
+ *  ancillary `remediate`/`recovery-pass` (where rich escalations are authored). */
+export const EXPLANATION_PHASES: readonly string[];
+
+/** The newest explanation object, VERBATIM — preserving `ask` and `options`, which
+ *  board-data's projecting deriveExplanation discards. */
+export function deriveRichExplanation(
+  phaseSigs: Record<string, unknown>[],
+): Record<string, unknown> | null;
+
 /** The ticket's phase signals in canonical order. A missing worker dir yields []
  *  — the common parked case, not an error. */
 export function readPhaseSignals(
   ticket: string,
   opts?: {
-    workersDir?: string;
+    workersDir?: string | null;
     read?: (path: string, encoding: "utf8") => Promise<string>;
+    env?: Record<string, string | undefined>;
   },
 ): Promise<Record<string, unknown>[]>;
 
@@ -50,9 +73,10 @@ export function getConversation(
     ) => Promise<TicketThread>;
     readSignals?: (
       ticket: string,
-      opts: { workersDir: string },
+      opts: { workersDir: string | null; env?: Record<string, string | undefined> },
     ) => Promise<Record<string, unknown>[]>;
-    workersDir?: string;
+    workersDir?: string | null;
+    env?: Record<string, string | undefined>;
     config?: unknown;
   },
 ): Promise<Conversation>;

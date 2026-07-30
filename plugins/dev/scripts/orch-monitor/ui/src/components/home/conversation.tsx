@@ -53,19 +53,52 @@ type ConversationState =
 /** Load the conversation when a row is selected. `reloadKey` is bumped after a
  *  successful post so the operator sees their own comment land at the top of the
  *  thread — the turn they just took, reflected immediately. */
+/** Build the thread entry for a just-confirmed reply. The server returned a real
+ *  comment id, so this is a CONFIRMED comment being shown early — not a guess. */
+function ownReplyEntry(commentId: string, body: string, at: number): ThreadComment {
+  return {
+    id: commentId,
+    body,
+    isAgent: false,
+    isCatalystAgent: false,
+    isIntegration: false,
+    authorName: "you",
+    authorAvatarUrl: null,
+    at,
+    parentId: null,
+    truncated: body.length > 600,
+  };
+}
+
 function useConversation(ticket: string | undefined, enabled: boolean, reloadKey: number) {
   const [state, setState] = useState<ConversationState>({ kind: "idle" });
+  // The ticket the CURRENTLY held state belongs to. Without this, switching from
+  // ticket A to B kept A's loaded conversation on screen while B's request was in
+  // flight — so A's ask, suggestions, thread and URL rendered around a ReplyBox
+  // bound to B, and an operator acting in that window could post an answer derived
+  // from A's context onto B. State is only ever preserved for a SAME-ticket reload.
+  const loadedFor = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!enabled || !ticket) {
+      loadedFor.current = undefined;
       setState({ kind: "idle" });
       return;
     }
     let alive = true;
-    setState((prev) => (prev.kind === "loaded" ? prev : { kind: "loading" }));
+    const sameTicket = loadedFor.current === ticket;
+    setState((prev) => (sameTicket && prev.kind === "loaded" ? prev : { kind: "loading" }));
     void (async () => {
       const result = await fetchConversation(ticket);
       if (!alive) return;
-      setState(result.ok ? { kind: "loaded", conversation: result.conversation } : { kind: "error" });
+      // Guard against a late response for a ticket we have since navigated away
+      // from — it must never overwrite the current selection's state.
+      if (loadedFor.current !== undefined && loadedFor.current !== ticket && !alive) return;
+      if (result.ok) {
+        loadedFor.current = ticket;
+        setState({ kind: "loaded", conversation: result.conversation });
+      } else {
+        setState({ kind: "error" });
+      }
     })();
     return () => {
       alive = false;
@@ -279,24 +312,28 @@ function ReplyBox({
 }: {
   ticket: string;
   draft: string;
-  setDraft: (v: string) => void;
-  onReplied: (outcome: ReplyOutcome) => void;
+  setDraft: React.Dispatch<React.SetStateAction<string>>;
+  onReplied: (outcome: ReplyOutcome, submitted: string) => void;
 }) {
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // The exact draft at submit time, so a successful post clears only that text.
+  const draftAtSend = useRef("");
 
   const send = useCallback(async () => {
     const body = draft.trim();
     if (body === "" || sending) return;
+    draftAtSend.current = draft;
     setSending(true);
     setFailure(null);
     const outcome = await postReply({ ticket, body });
     setSending(false);
     if (outcome.status === "replied") {
-      // Clear the box only on a CONFIRMED post; the row's disappearance is the
-      // parent's call (it owns the optimistic mark + rollback window).
-      setDraft("");
-      onReplied(outcome);
+      // Clear ONLY the text that was actually submitted. A blind setDraft("")
+      // deletes a follow-up the operator started typing during the round trip,
+      // which breaks this component's promise that typed words are never lost.
+      setDraft((current) => (current === draftAtSend.current ? "" : current));
+      onReplied(outcome, body);
       return;
     }
     // Every failure path KEEPS the draft — the operator's words are never lost —
@@ -306,7 +343,7 @@ function ReplyBox({
         ? "Nothing to send."
         : (outcome as { message: string }).message,
     );
-    onReplied(outcome);
+    onReplied(outcome, body);
   }, [draft, sending, ticket, setDraft, onReplied]);
 
   return (
@@ -373,6 +410,13 @@ export function Conversation({
 }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [draft, setDraft] = useState("");
+  // Turns this session posted and confirmed, newest-first. These are merged into
+  // the rendered thread because a refetch immediately after the POST RACES the
+  // webhook/sync that writes the comment into the local replica — the one-shot
+  // refetch usually returns the pre-reply thread, and nothing schedules another,
+  // so the operator's own turn would stay invisible indefinitely. The server gave
+  // us a real comment id, so showing it is reporting a confirmed fact early.
+  const [ownTurns, setOwnTurns] = useState<ThreadComment[]>([]);
   const state = useConversation(ticket, enabled, reloadKey);
 
   // A new selection starts a fresh draft — one operator's half-typed answer must
@@ -382,22 +426,54 @@ export function Conversation({
     if (lastTicket.current !== ticket) {
       lastTicket.current = ticket;
       setDraft("");
+      setOwnTurns([]); // a different ticket's turns are not this ticket's thread
     }
   }, [ticket]);
 
   const handleReplied = useCallback(
-    (outcome: ReplyOutcome) => {
-      // Re-read the thread on success so the operator's own comment appears on top.
-      if (outcome.status === "replied") setReloadKey((k) => k + 1);
+    (outcome: ReplyOutcome, submitted: string) => {
+      if (outcome.status === "replied") {
+        // Show the confirmed turn immediately …
+        setOwnTurns((prev) => [
+          ownReplyEntry(outcome.commentId, submitted, Date.now()),
+          ...prev.filter((t) => t.id !== outcome.commentId),
+        ]);
+        // … and still re-read, so the canonical replica copy supersedes it once
+        // the sync lands (the merge below de-dupes by comment id).
+        setReloadKey((k) => k + 1);
+      }
       onReplied?.(outcome);
     },
     [onReplied],
   );
 
   if (!enabled) return null;
-  if (state.kind !== "loaded") return null; // loading/error → render nothing (fails soft)
+  if (state.kind === "idle" || state.kind === "loading") return null;
 
-  const { conversation } = state;
+  // A failed /thread read must NOT remove the reply composer. Posting is a
+  // SEPARATE endpoint and the thread is explicitly non-load-bearing, so degrading
+  // to "no conversation at all" would strand the operator: the component returned
+  // null until the row was reselected, so they could not answer even once
+  // connectivity recovered. Degrade to a composer-only view instead.
+  const conversation: ConversationResponse =
+    state.kind === "loaded"
+      ? state.conversation
+      : {
+          ticket,
+          url: null,
+          title: null,
+          thread: { available: false, comments: [], reason: "read-failed" },
+          ask: null,
+          canReply: true,
+        };
+
+  // Own turns first (they are the newest), then the replica's, de-duped by id so
+  // the canonical copy replaces the optimistic one the moment sync catches up.
+  const serverIds = new Set(conversation.thread.comments.map((c) => c.id));
+  const mergedComments = [
+    ...ownTurns.filter((t) => !serverIds.has(t.id)),
+    ...conversation.thread.comments,
+  ];
 
   return (
     <div data-conversation={ticket}>
@@ -439,12 +515,12 @@ export function Conversation({
 
       {/* The thread. Rendered only when the replica was actually READABLE — an
           unavailable source stays silent rather than claiming "no comments". */}
-      {conversation.thread.available && (
+      {(conversation.thread.available || mergedComments.length > 0) && (
         <section className="mt-4" data-conversation-thread>
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted">
             Conversation
           </p>
-          <Thread comments={conversation.thread.comments} now={now} />
+          <Thread comments={mergedComments} now={now} />
         </section>
       )}
     </div>

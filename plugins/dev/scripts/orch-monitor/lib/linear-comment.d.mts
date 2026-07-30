@@ -41,12 +41,18 @@ export type PostCommentResult =
   | { status: "not_found"; ticket: string; message: string }
   | { status: "error"; message: string };
 
-export function resolveLinearToken(env?: Record<string, string | undefined>): string | null;
+export function resolveLinearToken(
+  env?: Record<string, string | undefined>,
+  opts?: { projectConfig?: unknown },
+): string | null;
 
 /** App-actor user ids from `catalyst.linear.bot.<app>.botUserId`. Fails open to an
  *  empty set — the primary defense is the `viewer` shape check, which needs no
  *  config at all. */
-export function knownBotUserIds(opts?: { config?: unknown }): Set<string>;
+export function knownBotUserIds(opts?: {
+  config?: unknown;
+  projectConfig?: unknown;
+}): Set<string>;
 
 export function resolveAuthorIdentity(
   args: { token: string; botUserIds?: ReadonlySet<string> },
@@ -64,6 +70,7 @@ export function postOperatorComment(
     fetchImpl?: typeof fetch;
     env?: Record<string, string | undefined>;
     config?: unknown;
+    projectConfig?: unknown;
     resolveIdentity?: (
       args: { token: string; botUserIds?: ReadonlySet<string> },
       opts?: { fetchImpl?: typeof fetch },
@@ -74,3 +81,7 @@ export function postOperatorComment(
     ) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   },
 ): Promise<PostCommentResult>;
+
+/** The exact text to post: leading whitespace preserved (an indented Markdown
+ *  code block must survive), only trailing whitespace stripped. */
+export function postBody(raw: unknown): string;

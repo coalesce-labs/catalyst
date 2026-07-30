@@ -446,6 +446,42 @@ describe("Inbox conversation surface (CTL-1569)", () => {
     expect(conversationSrc).toMatch(/status === "replied"/);
   });
 
+  it("P1 #3 — a ticket switch must not mix the previous ticket's context", () => {
+    // Preserving the loaded conversation across a selection change rendered
+    // ticket A's ask/thread/URL around a ReplyBox bound to ticket B, so an
+    // operator acting in that window could post A's answer onto B.
+    expect(conversationSrc).toContain("loadedFor");
+    expect(conversationSrc).toMatch(/sameTicket/);
+  });
+
+  it("P2 #10 — a failed thread read must NOT remove the reply composer", () => {
+    // Posting is a separate endpoint and the thread is non-load-bearing; returning
+    // null on a read error stranded the operator until the row was reselected.
+    expect(conversationSrc).toContain("read-failed");
+    expect(conversationCode).not.toMatch(/state\.kind !== "loaded"\) return null/);
+  });
+
+  it("P2 #11 — a successful post clears ONLY the submitted text", () => {
+    expect(conversationSrc).toContain("draftAtSend");
+  });
+
+  it("P2 #16 — the posted turn appears without racing the replica sync", () => {
+    // A one-shot refetch after the POST loses the race with the webhook, so the
+    // operator's own turn stayed invisible. The confirmed comment id is shown.
+    expect(conversationSrc).toContain("ownTurns");
+    expect(conversationSrc).toContain("ownReplyEntry");
+    expect(conversationSrc).toContain("mergedComments");
+  });
+
+  it("P2 #6 — a replied row is projected OUT of the inbox model", () => {
+    // The optimistic mark alone only changed pane rendering; sections/order still
+    // carried the row, so it stayed visible and selected with a live reply box.
+    expect(homeSurfaceSrc).toContain("resolvedIds");
+    expect(homeSurfaceSrc).toContain("rawModel");
+    // Reconcile must read the RAW model, or a hidden row could never roll back.
+    expect(homeSurfaceSrc).toMatch(/for \(const row of rawModel\.order\)/);
+  });
+
   it("the surface routes a reply outcome through the ONE optimistic-rollback rule", () => {
     // Reusing the verb's mark + grace window (rather than a second optimistic
     // path) keeps one reconcile rule deciding when a row truly leaves the inbox.

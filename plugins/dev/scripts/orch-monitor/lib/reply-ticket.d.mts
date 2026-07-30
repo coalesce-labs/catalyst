@@ -38,13 +38,21 @@ export function replyToTicket(
   opts?: {
     post?: (
       args: { ticket: string; body: string },
-      opts?: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined>; config?: unknown },
+      opts?: {
+        fetchImpl?: typeof fetch;
+        env?: Record<string, string | undefined>;
+        config?: unknown;
+        projectConfig?: unknown;
+      },
     ) => Promise<PostCommentResult>;
     findHeld?: (ticket: string) => HeldRun | null;
     record?: (args: { ticket: string; phase: string; response: unknown }) => unknown;
     clearMarker?: (args: { ticket: string }) => unknown;
     env?: Record<string, string | undefined>;
     config?: unknown;
+    /** Layer-2 project config (personal `linear.apiToken`) — the launchd path's
+     *  only credential source. */
+    projectConfig?: unknown;
     fetchImpl?: typeof fetch;
   },
 ): Promise<ReplyTicketResult>;

@@ -50,11 +50,35 @@ const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
  *  in a reply box, so it fails fast and restores the row rather than hanging. */
 const REQUEST_TIMEOUT_MS = 15_000;
 
-/** Resolve the Linear token from the process env — the same pair the rest of the
- *  tree reads (`LINEAR_API_TOKEN` preferred, `LINEAR_API_KEY` as the alias). */
-export function resolveLinearToken(env = process.env) {
-  const tok = env.LINEAR_API_TOKEN || env.LINEAR_API_KEY || null;
-  return typeof tok === "string" && tok.trim() !== "" ? tok.trim() : null;
+/**
+ * Resolve the Linear credential to post the reply with.
+ *
+ * ── why this cannot be env-only ──────────────────────────────────────────────
+ * An env-only resolver makes this feature INERT on the normal persistent launch
+ * path. `catalyst-monitor.sh` (the committed launchd wrapper) exports no Linear
+ * token at all; the operator's personal token lives in the Layer-2 secrets file
+ * `~/.config/catalyst/config-<projectKey>.json` under `linear.apiToken`. So a
+ * launchd-started monitor would return `no_token` for every inline reply even
+ * though Linear is fully configured — the same class of silent no-op the
+ * authorship gate exists to prevent, arriving through a different door.
+ *
+ * Order: env (`LINEAR_API_TOKEN`, then the `LINEAR_API_KEY` alias) → Layer-2
+ * `linear.apiToken`.
+ *
+ * ── the one credential we must NEVER fall back to ────────────────────────────
+ * The same Layer-2 file also carries `catalyst.linear.agent.accessToken` — an
+ * APP-ACTOR OAuth token. Reaching for it would post the reply as the app, which
+ * CTL-1567's provenance gate ignores, making the reply silently do nothing. It is
+ * deliberately NOT in the chain. (The authorship gate below would catch it anyway;
+ * this is the belt to that braces.)
+ */
+export function resolveLinearToken(env = process.env, { projectConfig = null } = {}) {
+  const fromEnv = env.LINEAR_API_TOKEN || env.LINEAR_API_KEY || null;
+  if (typeof fromEnv === "string" && fromEnv.trim() !== "") return fromEnv.trim();
+  // Layer-2 personal token — the launchd path's only source.
+  const fromConfig = projectConfig?.linear?.apiToken;
+  if (typeof fromConfig === "string" && fromConfig.trim() !== "") return fromConfig.trim();
+  return null;
 }
 
 /**
@@ -67,16 +91,37 @@ export function resolveLinearToken(env = process.env) {
  * and that needs no config at all. The id list is a belt-and-braces second check
  * for the case where an app token still reports a user-like viewer.
  */
-export function knownBotUserIds({ config = null } = {}) {
+export function knownBotUserIds({ config = null, projectConfig = null } = {}) {
   const ids = new Set();
+  const add = (id) => {
+    if (typeof id === "string" && id.trim() !== "") ids.add(id.trim());
+  };
   const bots = config?.catalyst?.linear?.bot;
   if (bots && typeof bots === "object") {
-    for (const app of Object.values(bots)) {
-      const id = app?.botUserId;
-      if (typeof id === "string" && id.trim() !== "") ids.add(id.trim());
-    }
+    for (const app of Object.values(bots)) add(app?.botUserId);
   }
+  // LEGACY per-repo form: `catalyst.monitor.linear.botUserId`, read flat from the
+  // Layer-1 repo config — the shape the daemon's own self-echo guard reads. On an
+  // installation that only has this form, omitting it leaves every Catalyst app
+  // comment classified as HUMAN (they carry is_bot=0), which empties
+  // `agentComments` and breaks the comment-derived ask.
+  add(config?.catalyst?.monitor?.linear?.botUserId);
+  add(projectConfig?.catalyst?.monitor?.linear?.botUserId);
   return ids;
+}
+
+/**
+ * The exact text to post, given the operator's raw input.
+ *
+ * Trimming is used to VALIDATE emptiness, but must not rewrite what gets posted:
+ * a reply that opens with a four-space-indented Markdown code block loses its
+ * first line's indentation under `trim()`, and Linear then renders it as prose
+ * instead of code — different semantics from what the operator wrote. So leading
+ * whitespace is preserved verbatim and only trailing whitespace is dropped (which
+ * is invisible in the rendered comment and never load-bearing).
+ */
+export function postBody(raw) {
+  return typeof raw === "string" ? raw.replace(/\s+$/, "") : "";
 }
 
 /** GraphQL POST with a hard timeout. Returns the parsed body; throws on transport
@@ -171,11 +216,13 @@ export async function resolveIssueId({ token, ticket }, { fetchImpl = fetch } = 
       { fetchImpl },
     );
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    // Transport / auth / HTTP / GraphQL failure — NOT evidence the issue is absent.
+    return { ok: false, missing: false, error: e instanceof Error ? e.message : String(e) };
   }
   const id = body?.data?.issue?.id;
   if (typeof id !== "string" || id === "") {
-    return { ok: false, error: `no such issue: ${ticket}` };
+    // A successful query that returned no issue — a GENUINE miss.
+    return { ok: false, missing: true, error: `no such issue: ${ticket}` };
   }
   return { ok: true, id };
 }
@@ -218,21 +265,23 @@ export async function postOperatorComment(
     fetchImpl = fetch,
     env = process.env,
     config = null,
+    projectConfig = null,
     resolveIdentity = resolveAuthorIdentity,
     resolveIssue = resolveIssueId,
   } = {},
 ) {
-  const text = typeof body === "string" ? body.trim() : "";
-  if (text === "") return { status: "empty_body" };
+  // Emptiness is validated on the TRIMMED value, but the body posted below is the
+  // operator's verbatim text — see the postBody note.
+  if (typeof body !== "string" || body.trim() === "") return { status: "empty_body" };
 
-  const token = resolveLinearToken(env);
+  const token = resolveLinearToken(env, { projectConfig });
   if (token == null) return { status: "no_token" };
 
   // ── the authorship gate ────────────────────────────────────────────────────
   // Resolve identity BEFORE mutating. A bot token is refused with nothing posted,
   // so the operator is told the truth instead of being shown a phantom success.
   const identity = await resolveIdentity(
-    { token, botUserIds: knownBotUserIds({ config }) },
+    { token, botUserIds: knownBotUserIds({ config, projectConfig }) },
     { fetchImpl },
   );
   if (!identity.ok) {
@@ -250,13 +299,18 @@ export async function postOperatorComment(
 
   const issue = await resolveIssue({ token, ticket }, { fetchImpl });
   if (!issue.ok) {
-    return { status: "not_found", ticket, message: issue.error };
+    // Only a CONFIRMED miss is `not_found`. An HTTP 500 during the lookup is a
+    // retryable write failure — reporting it as "no such ticket" would hand the
+    // operator a false diagnosis about their own board.
+    return issue.missing === true
+      ? { status: "not_found", ticket, message: issue.error }
+      : { status: "error", ticket, message: `issue lookup failed: ${issue.error}` };
   }
 
   let result;
   try {
     result = await gql(
-      { token, query: COMMENT_CREATE, variables: { issueId: issue.id, body: text } },
+      { token, query: COMMENT_CREATE, variables: { issueId: issue.id, body: postBody(body) } },
       { fetchImpl },
     );
   } catch (e) {

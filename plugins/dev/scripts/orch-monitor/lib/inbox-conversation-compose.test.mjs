@@ -164,3 +164,144 @@ describe("readPhaseSignals", () => {
     expect(sigs.every((s) => s.status === "stalled")).toBe(true);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Codex review remediation (PR #2801) — each test pins a finding that a real
+// installation would have hit.
+// ═══════════════════════════════════════════════════════════════════════════
+
+import {
+  catalystDir,
+  defaultWorkersDir,
+  deriveRichExplanation,
+  EXPLANATION_PHASES,
+} from "./inbox-conversation.mjs";
+import {
+  knownBotUserIds as botIds,
+  postBody,
+  resolveLinearToken,
+} from "./linear-comment.mjs";
+
+describe("P1 #4 — the structured ask must survive to the derivation", () => {
+  it("preserves `ask` and `options`, which board-data's projection discards", () => {
+    // deriveExplanation keeps only the six legacy strings, so routing the ask
+    // through it made the "structured" tier unreachable and killed option chips.
+    const expl = deriveRichExplanation([
+      { explanation: { ask: { kind: "approve", summary: "Ship it?" }, options: [{ label: "yes" }] } },
+    ]);
+    expect(expl.ask.kind).toBe("approve");
+    expect(expl.options).toHaveLength(1);
+  });
+
+  it("end-to-end: a structured ask now reaches getConversation as source=structured", async () => {
+    const out = await getConversation("PROJ-1", {
+      readThread: thread({ agentComments: ["a comment that must lose"] }),
+      readSignals: async () => [
+        {
+          explanation: {
+            ask: { kind: "decide", summary: "A or B?", suggested_replies: ["A", "B"] },
+          },
+        },
+      ],
+      config: null,
+    });
+    expect(out.ask.source).toBe("structured");
+    expect(out.ask.suggestedReplies).toEqual(["A", "B"]);
+  });
+
+  it("end-to-end: enumerated options become chips", async () => {
+    const out = await getConversation("PROJ-1", {
+      readThread: thread({ agentComments: [] }),
+      readSignals: async () => [
+        {
+          explanation: {
+            call_to_action: "Pick one.",
+            options: [{ label: "close" }, { label: "keep" }],
+          },
+        },
+      ],
+      config: null,
+    });
+    expect(out.ask.suggestedReplies).toEqual(["close", "keep"]);
+  });
+
+  it("takes the NEWEST explanation when several phases carry one", () => {
+    const expl = deriveRichExplanation([
+      { explanation: { call_to_action: "old" } },
+      { explanation: { call_to_action: "new" } },
+    ]);
+    expect(expl.call_to_action).toBe("new");
+  });
+});
+
+describe("P2 #7 — recovery-pass is where rich escalations are authored", () => {
+  it("scans the ancillary phases, not just PHASE_ORDER", () => {
+    expect(EXPLANATION_PHASES).toContain("recovery-pass");
+    expect(EXPLANATION_PHASES).toContain("remediate");
+    // Ancillary last, so the newest-first scan prefers them.
+    expect(EXPLANATION_PHASES.indexOf("recovery-pass")).toBeGreaterThan(
+      EXPLANATION_PHASES.indexOf("teardown"),
+    );
+  });
+});
+
+describe("P2 #17 — honor the configured Catalyst data directory", () => {
+  it("uses CATALYST_DIR rather than a hardcoded ~/catalyst", () => {
+    expect(catalystDir({ CATALYST_DIR: "/data/cat" })).toBe("/data/cat");
+    expect(defaultWorkersDir({ CATALYST_DIR: "/data/cat" })).toBe(
+      "/data/cat/execution-core/workers",
+    );
+  });
+  it("falls back to ~/catalyst when unset", () => {
+    expect(catalystDir({})).toContain("catalyst");
+  });
+});
+
+describe("P1 #2 — the reply credential must resolve on the launchd path", () => {
+  it("prefers the env token", () => {
+    expect(resolveLinearToken({ LINEAR_API_TOKEN: "env-tok" })).toBe("env-tok");
+  });
+
+  it("falls back to the Layer-2 personal token when the env carries none", () => {
+    // catalyst-monitor.sh exports NO Linear token, so without this fallback every
+    // inline reply on the normal persistent launch path returns `no_token`.
+    expect(
+      resolveLinearToken({}, { projectConfig: { linear: { apiToken: "lin_api_personal" } } }),
+    ).toBe("lin_api_personal");
+  });
+
+  it("NEVER falls back to the app-actor OAuth token in the same file", () => {
+    // Posting as the app is silently ignored by CTL-1567 — the inert failure.
+    const projectConfig = {
+      catalyst: { linear: { agent: { accessToken: "lin_oauth_app_actor" } } },
+    };
+    expect(resolveLinearToken({}, { projectConfig })).toBeNull();
+  });
+});
+
+describe("P2 #8 — the legacy per-repo botUserId form", () => {
+  it("reads catalyst.monitor.linear.botUserId as well as the global bot map", () => {
+    const ids = botIds({
+      config: { catalyst: { monitor: { linear: { botUserId: "legacy-id" } } } },
+    });
+    expect(ids.has("legacy-id")).toBe(true);
+  });
+  it("accepts it from the project config too", () => {
+    const ids = botIds({
+      projectConfig: { catalyst: { monitor: { linear: { botUserId: "proj-id" } } } },
+    });
+    expect(ids.has("proj-id")).toBe(true);
+  });
+});
+
+describe("P2 #15 — the operator's reply is posted verbatim", () => {
+  it("preserves leading indentation (an indented code block keeps its semantics)", () => {
+    expect(postBody("    const x = 1;\nplain")).toBe("    const x = 1;\nplain");
+  });
+  it("still strips trailing whitespace (invisible, never load-bearing)", () => {
+    expect(postBody("hello   \n\n")).toBe("hello");
+  });
+  it("returns empty string for a non-string", () => {
+    expect(postBody(null)).toBe("");
+  });
+});

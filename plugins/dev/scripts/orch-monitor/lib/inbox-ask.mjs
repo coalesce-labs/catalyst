@@ -312,6 +312,29 @@ export function isPhaseStatusReport(body) {
 }
 
 /**
+ * Markers that a comment carries a REAL ask despite also matching a notice phrase.
+ *
+ * The notice patterns are phrase matches, so a comment that BOTH announces the
+ * escalation AND states the decision — "This requires human judgment: should we
+ * choose A or B?" — was being discarded, and pickAskComment fell through to an
+ * older, less relevant note. A standalone pointer asks nothing and enumerates
+ * nothing; substantive text does. These are the signals that separate them.
+ */
+const SUBSTANTIVE_ASK_MARKERS = [
+  /\?/, // a literal question — the strongest signal a decision is being requested
+  /\b(?:option|choose|pick|select|either)\b/i,
+  /(?:^|\s)(?:A\)|1\))\s/m, // enumerated alternatives
+  /\breply\s+(?:with\s+)?["'`]?\w/i, // "reply approve" / "reply done"
+];
+
+/** Does this body state an actual ask, beyond announcing that one exists? */
+export function hasSubstantiveAsk(body) {
+  const s = nonEmptyString(body);
+  if (s == null) return false;
+  return matchesAny(s, SUBSTANTIVE_ASK_MARKERS);
+}
+
+/**
  * Is this body unusable as an ask — either a content-free escalation pointer or a
  * phase status report? Exported for direct testing.
  *
@@ -323,7 +346,10 @@ export function isEscalationNotice(body) {
   if (s == null) return true; // an empty body carries no ask either
   if (isPhaseStatusReport(s)) return true;
   if (s.length > NOTICE_MAX_CHARS) return false;
-  return matchesAny(s, ESCALATION_NOTICE_PATTERNS);
+  if (!matchesAny(s, ESCALATION_NOTICE_PATTERNS)) return false;
+  // It reads like a notice — but if it ALSO states a real ask, it IS the ask.
+  // Discarding it would silently promote an older, less relevant comment.
+  return !hasSubstantiveAsk(s);
 }
 
 /**
