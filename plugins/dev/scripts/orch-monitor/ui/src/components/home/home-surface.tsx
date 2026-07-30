@@ -41,6 +41,7 @@ import { useScopedBoardSnapshot } from "@/hooks/use-scoped-board-snapshot";
 // resumes the agent, with optimistic rollback. The hook owns the optimistic
 // state + grace timer; the pure client/fetch live in board/respond-client.ts.
 import { useRespond, type RespondRowStatus } from "@/hooks/use-respond";
+import type { ReplyOutcome } from "@/board/conversation-client";
 import { ResizableSplit } from "./resizable-split";
 import { InboxRow } from "./inbox-row";
 import { ReadingPane } from "./reading-pane";
@@ -195,7 +196,7 @@ export function HomeSurface() {
 
   // Derive the whole inbox from the resident snapshot (PURE). When no payload has
   // landed yet, an empty payload yields an empty (but valid) model.
-  const model = useMemo(
+  const rawModel = useMemo(
     () =>
       deriveInbox(
         payload ?? {
@@ -209,6 +210,69 @@ export function HomeSurface() {
       ),
     [payload],
   );
+
+  // CTL-903 / HOME5: the WRITE path. The hook owns the optimistic-resume state +
+  // the grace-window rollback; the verb fires record-response + resume-agent
+  // through the read-model write endpoint (board/respond-client.ts owns the
+  // fetch). The single-node case is an exact pass-through (the endpoint's
+  // identity fence no-op); a multi-node fence rejection arrives as `did-not-take`.
+  const { respond, statusFor, reconcile, markResolved } = useRespond();
+
+  // CTL-1569 / AC #8 ("posting removes the row without a manual refresh"): the
+  // optimistic mark alone was NOT enough. `statusFor` only changed how the pane
+  // rendered — `sections` and `order` still carried the row, so it stayed visible
+  // AND selected with a live reply box until some later SSE frame happened to drop
+  // it, which invited a duplicate submission in the gap. So the marks are PROJECTED
+  // out of the model here.
+  //
+  // This is safe precisely because it is not permanent: `reconcile` still runs on
+  // every frame, and a mark that is still waiting past the grace window rolls back
+  // (`markDidNotTake`), which removes it from `resolvedIds` and returns the row.
+  // Optimistic hide + the existing rollback is the whole contract.
+  const resolvedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of rawModel.order) {
+      if (isNeedsYouSection(row.section) && statusFor(row.id) === "resuming") ids.add(row.id);
+    }
+    return ids;
+  }, [rawModel, statusFor]);
+
+  const model = useMemo(() => {
+    if (resolvedIds.size === 0) return rawModel;
+    const keep = (row: { id: string }) => !resolvedIds.has(row.id);
+    const sections = rawModel.sections
+      .map((sec) => ({ ...sec, rows: sec.rows.filter(keep) }))
+      .filter((sec) => sec.rows.length > 0);
+    const order = rawModel.order.filter(keep);
+
+    // EVERY derived field must be recomputed from the filtered rows, not copied.
+    // Copying them left `defaultSelectedId` pointing at a now-hidden row (so the
+    // selection effect reselected it), and left the blocked/waiting counts — which
+    // drive the calm header and `isAllClear` — still reporting the removed item as
+    // needing attention until another SSE frame arrived.
+    const perSection = (kind: string) =>
+      sections.find((sec) => sec.kind === kind)?.rows.length ?? 0;
+
+    return {
+      ...rawModel,
+      sections,
+      order,
+      defaultSelectedId: order.length > 0 ? order[0].id : null,
+      counts: {
+        ...rawModel.counts,
+        attention: perSection("attention"),
+        blocked: perSection("blocked"),
+        waiting: perSection("waiting"),
+        // The AGGREGATE must be recomputed too. `isAllClear` and
+        // `calmHeaderSentence` both read `needsYou`, not the components — so
+        // leaving it spread through meant resolving the LAST attention row still
+        // showed "1 needs you" and withheld the all-clear surface until an SSE
+        // frame arrived. That is precisely the relief moment this feature exists
+        // to deliver, so it must not wait on the network.
+        needsYou: perSection("attention") + perSection("blocked") + perSection("waiting"),
+      },
+    };
+  }, [rawModel, resolvedIds]);
 
   // The selection: null until the operator (or the default-select effect) picks a
   // row. Held in React state so j/k and click both drive the one reading pane.
@@ -229,6 +293,9 @@ export function HomeSurface() {
   // selection vanished from the order, fall back to the head of the walk order.
   useEffect(() => {
     setSelectedId((prev) => {
+      // A row that was optimistically resolved is gone from `order`, so the
+      // selection falls through to the recomputed default rather than sticking to
+      // an id the list no longer renders.
       if (prev != null && model.order.some((r) => r.id === prev)) return prev;
       return model.defaultSelectedId;
     });
@@ -252,12 +319,6 @@ export function HomeSurface() {
     return () => window.removeEventListener("keydown", onKey);
   }, [model.order]);
 
-  // CTL-903 / HOME5: the WRITE path. The hook owns the optimistic-resume state +
-  // the grace-window rollback; the verb fires record-response + resume-agent
-  // through the read-model write endpoint (board/respond-client.ts owns the
-  // fetch). The single-node case is an exact pass-through (the endpoint's
-  // identity fence no-op); a multi-node fence rejection arrives as `did-not-take`.
-  const { respond, statusFor, reconcile } = useRespond();
   const onAct = useCallback(
     (id: string) => {
       // The recorded note is empty for the one-click verb — the BFF12 endpoint
@@ -268,6 +329,29 @@ export function HomeSurface() {
     [respond],
   );
 
+  // CTL-1569: the inline REPLY's outcome. A confirmed post is a real resolution —
+  // the Linear comment clears `needs-human` within seconds (CTL-1567) — so the row
+  // is optimistically cleared through the SAME mark + grace-window machinery the
+  // verb uses; if the label never actually clears, the standing reconcile rolls it
+  // back and the row returns. Every failure marks did-not-take instead, so the item
+  // is restored rather than silently lost (§4).
+  const onReplied = useCallback(
+    (outcome: ReplyOutcome) => {
+      if (outcome.status === "replied") {
+        markResolved(outcome.ticket);
+        return;
+      }
+      // Do NOT mark an UNSENT reply as a failed resume. For `no_token`,
+      // `bot_identity`, `not_found` and transport failures no comment was sent and
+      // no resume was ever attempted, so `PaneVerb`'s "The agent did not resume —
+      // try again" is a second, wrong diagnosis printed beside the reply box's
+      // accurate one. The row is still restored (it was never hidden), and the
+      // specific posting error is what the operator should act on.
+      // `empty` is likewise a no-op.
+    },
+    [markResolved],
+  );
+
   // Reconcile the optimistic marks against EVERY new read-model frame: a row that
   // CLEARED (left the needs-you set) means the resume took (drop the mark); a row
   // STILL waiting past the grace window means it did not take (roll back → the
@@ -275,12 +359,15 @@ export function HomeSurface() {
   // needs-you rows (blocked | waiting) — the exact "still shows the item waiting"
   // the scenario re-checks.
   const stillWaitingIds = useMemo(() => {
+    // RAW model on purpose: reconcile must see the row the server still reports as
+    // needs-you. Reading the projected model would make an optimistically hidden
+    // row look "cleared" immediately, so it could never roll back.
     const ids = new Set<string>();
-    for (const row of model.order) {
+    for (const row of rawModel.order) {
       if (isNeedsYouSection(row.section)) ids.add(row.id);
     }
     return ids;
-  }, [model]);
+  }, [rawModel]);
   useEffect(() => {
     reconcile(stillWaitingIds);
   }, [stillWaitingIds, reconcile]);
@@ -316,6 +403,7 @@ export function HomeSurface() {
               workers={payload?.workers ?? []}
               onAct={onAct}
               respondStatus={selectedRow ? statusFor(selectedRow.id) : "idle"}
+              onReplied={onReplied}
             />
           )
         }

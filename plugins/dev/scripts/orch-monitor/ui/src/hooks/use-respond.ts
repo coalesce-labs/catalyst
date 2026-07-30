@@ -41,6 +41,12 @@ export interface UseRespond {
   /** Reconcile the in-flight marks against the CURRENT frame's still-waiting set
    *  (drops cleared marks, rolls back expired ones). Idempotent; call per frame. */
   reconcile: (stillWaitingIds: ReadonlySet<string>) => void;
+  /** CTL-1569: arm the optimistic mark + grace window for a row resolved by the
+   *  inline REPLY (a real Linear comment) rather than by the `respond` verb. */
+  markResolved: (ticket: string) => void;
+  /** CTL-1569: mark a resolution attempt as having not taken — the row is restored
+   *  and the operator told (a failed reply post must never lose the item). */
+  markDidNotTake: (ticket: string) => void;
 }
 
 /**
@@ -135,5 +141,39 @@ export function useRespond(
     [marks, didNotTake],
   );
 
-  return { respond, statusFor, reconcile: applyReconcile };
+  // CTL-1569: apply the optimistic mark for a resolution that happened through a
+  // DIFFERENT write than `respond` — specifically the inbox's inline reply, which
+  // posts a real Linear comment (the comment itself is what clears `needs-human`,
+  // per CTL-1567). The reply client owns that fetch, so the hook must be able to
+  // arm the mark + grace window without firing a respond call of its own.
+  //
+  // Reusing this machinery rather than adding a second optimistic path is the whole
+  // point: the row's disappearance and its rollback-if-it-didn't-take stay governed
+  // by ONE reconcile rule.
+  const markResolved = useCallback(
+    (ticket: string) => {
+      setDidNotTake((prev) => {
+        if (!prev.has(ticket)) return prev;
+        const next = new Set(prev);
+        next.delete(ticket);
+        return next;
+      });
+      setMarks((prev) => [...prev.filter((m) => m.ticket !== ticket), { ticket, markedAt: now() }]);
+    },
+    [now],
+  );
+
+  // CTL-1569: flag a resolution attempt that did NOT take, so the row is restored
+  // and the operator told. Used for a failed reply post (§4: never silently lose
+  // the item) — the same surface state a rolled-back respond produces.
+  const markDidNotTake = useCallback((ticket: string) => {
+    setMarks((prev) => prev.filter((m) => m.ticket !== ticket));
+    setDidNotTake((prev) => {
+      const next = new Set(prev);
+      next.add(ticket);
+      return next;
+    });
+  }, []);
+
+  return { respond, statusFor, reconcile: applyReconcile, markResolved, markDidNotTake };
 }

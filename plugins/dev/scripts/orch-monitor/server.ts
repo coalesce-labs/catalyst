@@ -123,6 +123,23 @@ import {
   respondTicket,
   type RespondTicketResult,
 } from "./lib/respond-ticket.mjs";
+// CTL-1569: the inbox conversation surface. Two routes, deliberately split by
+// posture — GET /thread is a pure REPLICA read (zero Linear API calls, so it is
+// safe on a hover-speed path), POST /reply is the one write that posts a REAL,
+// human-authored Linear comment (the mechanism that actually clears `needs-human`
+// via CTL-1567). The reply path is a SIBLING of /respond, not a replacement: see
+// lib/reply-ticket.mjs for why /respond's synthetic null-author event and its
+// hard held-run requirement make it unusable for this surface.
+import {
+  getConversation,
+  loadGlobalConfig,
+  loadProjectConfig,
+} from "./lib/inbox-conversation.mjs";
+import { replyToTicket } from "./lib/reply-ticket.mjs";
+/** Canonical ticket key for the conversation routes: a team prefix that may carry
+ *  digits/underscores (`OPS_2-17`), then `-<number>`. Anchored, and containing no
+ *  path characters, so it cannot express a traversal. */
+const CONVERSATION_TICKET_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -3634,6 +3651,148 @@ export function createServer(opts: CreateServerOptions): BunServer {
               // Response recorded + marker cleared + resume event emitted; the UI
               // marks the row `resuming` and arms its optimistic-rollback timer.
               return Response.json(result, { status: 200 });
+          }
+        }
+
+        // ── CTL-1569: the inbox conversation surface ───────────────────────────
+        //
+        // GET /api/ticket/<ticket>/thread — the ask summary + the last few comments
+        // (newest first) + the ticket's Linear deep link. A pure REPLICA read: it
+        // makes ZERO Linear API calls, which is what makes it safe to fetch on every
+        // row selection against a shared, rate-limited fleet quota. Fails OPEN —
+        // an absent/locked replica yields an unavailable thread, never a 5xx.
+        const threadMatch = url.pathname.match(/^\/api\/ticket\/([^/]+)\/thread$/);
+        if (threadMatch && req.method === "GET") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(threadMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          // CTL-1569: the canonical ticket key allows digits/underscores in the
+          // team prefix (e.g. `OPS_2-17`). A letters-only predicate 400s the entire
+          // conversation surface for such teams. Still anchored + no path
+          // characters, so traversal remains impossible.
+          if (!CONVERSATION_TICKET_RE.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const limitParam = Number(url.searchParams.get("limit"));
+          const conversation = await getConversation(ticket, {
+            // Pass the SERVER-resolved Layer-1 path (--config / CATALYST_CONFIG_PATH).
+            // A cwd-relative fallback misses under launchd, which sets no working
+            // directory — and the legacy `catalyst.monitor.linear.botUserId` lives in
+            // that file, so missing it breaks the agent/human split on legacy hosts.
+            repoConfigPath: monitorConfigPath,
+            ...(Number.isFinite(limitParam) && limitParam > 0
+              ? { limit: Math.min(Math.floor(limitParam), 50) }
+              : {}),
+          });
+          return Response.json(conversation, { status: 200 });
+        }
+
+        // POST /api/ticket/<ticket>/reply — post the operator's reply to Linear as a
+        // REAL human-authored comment. This is the resolution mechanism: once the
+        // comment lands, Linear's webhook drives the daemon's comment-wake, which
+        // clears `needs-human` unconditionally and first (CTL-1567, ~4s end to end).
+        //
+        // Deliberately UNLIKE /respond:
+        //   • NO typed-confirm. The typed gate exists for destructive verbs (stop a
+        //     worker); forcing an operator to retype the ticket id to send a chat
+        //     reply would defeat the entire surface. The reply text IS the intent.
+        //   • NO held-run requirement. The tickets that most need answering are
+        //     parked with no worker dir at all, and /respond 404s exactly those.
+        //
+        // EVERY non-2xx here must cause the UI to RESTORE the row (§4) — the row is
+        // never silently lost. `bot_identity` is the loud refusal that prevents the
+        // whole feature from shipping inert: an app-actor comment is ignored by
+        // CTL-1567, so it is refused BEFORE posting rather than faking success.
+        const replyMatch = url.pathname.match(/^\/api\/ticket\/([^/]+)\/reply$/);
+        if (replyMatch && req.method === "POST") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(replyMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!CONVERSATION_TICKET_RE.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          // CROSS-ORIGIN GUARD. This route posts operator-authored text to Linear,
+          // and the server binds 0.0.0.0 with no auth. `req.json()` parses a body
+          // regardless of Content-Type, so a plain `text/plain` form POST from any
+          // page the operator visits would otherwise be a valid request — the
+          // browser could not read the response, but the comment would still be
+          // posted as them to any guessable ticket. A same-origin check closes that:
+          // browsers always attach `Origin` to a cross-origin POST, while
+          // same-origin fetches from our own UI match the Host. Non-browser clients
+          // (curl, tests) send no Origin and are unaffected.
+          const origin = req.headers.get("origin");
+          if (origin != null && origin !== "") {
+            let sameOrigin = false;
+            try {
+              sameOrigin = new URL(origin).host === (req.headers.get("host") ?? url.host);
+            } catch {
+              sameOrigin = false;
+            }
+            if (!sameOrigin) {
+              return Response.json(
+                { status: "forbidden", error: "cross-origin reply rejected" },
+                { status: 403 },
+              );
+            }
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = (await req.json()) as Record<string, unknown>;
+          } catch {
+            return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+          }
+          const text = typeof body.body === "string" ? body.body : "";
+          const [globalConfig, projectConfig] = await Promise.all([
+            loadGlobalConfig(),
+            // Explicit resolved path — NOT process.cwd(). The launchd wrapper sets
+            // neither a working directory nor CATALYST_PROJECT_KEY, so a
+            // cwd-relative lookup leaves the Layer-2 token unresolved and every
+            // reply returns `no_token` on the persistent launch path.
+            loadProjectConfig({ repoConfigPath: monitorConfigPath }),
+          ]);
+          const result = await replyToTicket(
+            { ticket, body: text },
+            { config: globalConfig, projectConfig },
+          );
+          switch (result.status) {
+            case "replied":
+              // The comment is live and human-authored. The UI marks the row
+              // resolved optimistically and reconciles against the label.
+              return Response.json(result, { status: 200 });
+            case "empty_body":
+              return Response.json(
+                { ...result, error: "an empty reply was not sent" },
+                { status: 400 },
+              );
+            case "not_found":
+              return Response.json(
+                {
+                  ...result,
+                  error: `no Linear issue ${ticket} to reply to`,
+                },
+                { status: 404 },
+              );
+            case "bot_identity":
+            case "no_token":
+            case "error":
+            default:
+              // 502: the write did NOT act. Surfaced verbatim so the operator sees
+              // WHY (especially the app-actor refusal) and the row comes back.
+              return Response.json(
+                {
+                  ...result,
+                  error:
+                    (result as { message?: string }).message ??
+                    "reply was not posted to Linear",
+                },
+                { status: 502 },
+              );
           }
         }
 
