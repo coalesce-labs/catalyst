@@ -80,6 +80,11 @@ export interface ClusterEntityDeps {
   admissionReader?:
     | ((host: string) => { accepting?: boolean; holdReason?: "drain" | "liveness-cold" | null } | null | undefined)
     | null;
+  /** CTL-1551: liveness live-window override (ms), forwarded to assembleClusterView —
+   * the server budgets it for the Loki peer transport's pipeline lag. */
+  intervalMs?: number;
+  /** CTL-1551: liveness offline-grace override (ms), forwarded to assembleClusterView. */
+  graceMs?: number;
   /** Injected clock for tests. */
   now?: () => number;
 }
