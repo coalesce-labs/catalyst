@@ -1591,8 +1591,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
     const raw = Number(process.env.EXECUTION_CORE_LOKI_LIVENESS_CACHE_MS);
     return Number.isFinite(raw) && raw >= 0 ? raw : 20_000;
   })();
-  const HEARTBEAT_CADENCE_MS = 30_000; // node.heartbeat cadence (execution-core HEARTBEAT_INTERVAL_MS)
-  const ANCHOR_PUBLISH_CADENCE_MS = 120_000; // Linear-anchor publisher cadence (cluster-heartbeat-publisher)
+  // Cadences honor the same env overrides the daemon reads (execution-core
+  // config.mjs) so a re-tuned fleet widens the budget in lockstep.
+  const envMs = (name: string, fallback: number): number => {
+    const raw = Number(process.env[name]);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+  };
+  const HEARTBEAT_CADENCE_MS = envMs("EXECUTION_CORE_HEARTBEAT_INTERVAL_MS", 30_000); // node.heartbeat cadence
+  const ANCHOR_PUBLISH_CADENCE_MS = envMs("EXECUTION_CORE_LIVENESS_PUBLISH_INTERVAL_MS", 120_000); // anchor publisher cadence
   const PEER_WINDOW_MARGIN_MS = 10_000;
   const lokiPeerWindowMs = HEARTBEAT_CADENCE_MS + peerPollMs + lokiCacheTtlMs + PEER_WINDOW_MARGIN_MS;
   const anchorPeerWindowMs = ANCHOR_PUBLISH_CADENCE_MS + peerPollMs + PEER_WINDOW_MARGIN_MS;
@@ -1674,7 +1680,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
       // snapshot — retained entries keep the source that produced them.
       for (const [host, rec] of Object.entries(peers)) {
         if (rec?.last_seen && folded.heartbeats[host] === rec.last_seen) {
-          peerSourceByHost[host] = peerSource;
+          // Key provenance by the PINNED name — the resolver is called with
+          // alias-folded roster names (cluster-view folds heartbeat keys), so a
+          // raw-transport-keyed entry would never be found.
+          peerSourceByHost[resolveHostAlias(host, hostAliases) ?? host] = peerSource;
         }
       }
       anchorHeartbeatCache.map = folded.heartbeats;
