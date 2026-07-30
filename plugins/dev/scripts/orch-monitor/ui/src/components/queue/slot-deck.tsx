@@ -244,7 +244,14 @@ export function SlotDeck({
 
   // Cluster-mode path: use aggregateClusterCapacity + assignClusterSlots
   if (clusterSignal && clusterSignal.nodes.length > 1) {
-    const localHost = clusterSignal.nodes.find((n) => n.status === "live")?.host ?? "";
+    // CTL-1551: prefer the signal's explicit self identity — with peers now
+    // legitimately "live" (Loki transport), first-live-node picks the wrong
+    // host on any monitor that isn't first in the roster. The old heuristic
+    // remains only as a fallback for pre-CTL-1551 cached frames.
+    const localHost =
+      clusterSignal.selfHost ??
+      clusterSignal.nodes.find((n) => n.status === "live")?.host ??
+      "";
     const allSlots = assignClusterSlots({
       nodes: clusterSignal.nodes as any,
       localHost,

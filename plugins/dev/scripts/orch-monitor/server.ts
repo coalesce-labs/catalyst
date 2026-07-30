@@ -1364,6 +1364,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
     readClusterLivenessFromLokiSyncCached: (args: {
       lokiUrl: string;
     }) => Record<string, AnchorPeerRec>;
+    readStickyIdentity: (args: { dir: string }) => string | null;
+    getCatalystRepoDir: () => string;
     deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
   } | null> | null = null;
   const loadDaemonDeps = () => {
@@ -1374,7 +1376,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const configMod = ["..", "execution-core", "config.mjs"].join("/");
           const heartbeatSyncMod = ["..", "execution-core", "cluster-heartbeat-sync.mjs"].join("/");
           const lokiSyncMod = ["..", "execution-core", "loki-liveness-sync.mjs"].join("/");
-          const [recovery, config, heartbeatSync, lokiSync, navSignal] = await Promise.all([
+          const hostStickyMod = ["..", "execution-core", "host-sticky.mjs"].join("/");
+          const [recovery, config, heartbeatSync, lokiSync, hostSticky, navSignal] = await Promise.all([
             import(recoveryMod) as Promise<{
               readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
               readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
@@ -1384,6 +1387,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
               getClusterHosts: () => string[];
               getLivenessAnchorIssue: () => string | null;
               getLokiQueryUrl: () => string | null;
+              getCatalystRepoDir: () => string;
             }>,
             import(heartbeatSyncMod) as Promise<{
               readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
@@ -1392,6 +1396,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
               readClusterLivenessFromLokiSyncCached: (args: {
                 lokiUrl: string;
               }) => Record<string, AnchorPeerRec>;
+            }>,
+            import(hostStickyMod) as Promise<{
+              readStickyIdentity: (args: { dir: string }) => string | null;
             }>,
             import("./lib/nav-signal.mjs"),
           ]);
@@ -1404,6 +1411,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
             getLokiQueryUrl: config.getLokiQueryUrl,
             readPeerHeartbeatsSync: heartbeatSync.readPeerHeartbeatsSync,
             readClusterLivenessFromLokiSyncCached: lokiSync.readClusterLivenessFromLokiSyncCached,
+            readStickyIdentity: hostSticky.readStickyIdentity,
+            getCatalystRepoDir: config.getCatalystRepoDir,
             deriveDaemonHealth: navSignal.deriveDaemonHealth,
           };
         } catch {
@@ -1577,6 +1586,35 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // populated BEFORE the no-anchor early-return so it works single-host too.
   const localAdmissionCache: { map: Record<string, NodeAdmission> } = { map: {} };
   let execCoreDeps: Awaited<ReturnType<typeof loadDaemonDeps>> = null;
+  // CTL-1551: the peer transport the LAST poll actually used ("loki" | "anchor"),
+  // plus PER-HOST source memory — an AUTO fallback poll must not hand a RETAINED
+  // Loki-era heartbeat the anchor's looser window (fold rejects the anchor's
+  // stale records, so the retained entry's provenance is still Loki).
+  let lastPeerSource: string = "loki";
+  const peerSourceByHost: Record<string, string> = {};
+  // Live windows DERIVED from the configured cadences (an operator raising
+  // MONITOR_ANCHOR_POLL_MS or the cache TTL must not shrink the budget below
+  // the real pipeline): beat/publish cadence + poll interval + cache TTL + margin.
+  const peerPollMs = Number(process.env.MONITOR_ANCHOR_POLL_MS) || 60_000;
+  const lokiCacheTtlMs = (() => {
+    const raw = Number(process.env.EXECUTION_CORE_LOKI_LIVENESS_CACHE_MS);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 20_000;
+  })();
+  // Cadences honor the same env overrides the daemon reads (execution-core
+  // config.mjs) so a re-tuned fleet widens the budget in lockstep.
+  const envMs = (name: string, fallback: number): number => {
+    const raw = Number(process.env[name]);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+  };
+  const HEARTBEAT_CADENCE_MS = envMs("EXECUTION_CORE_HEARTBEAT_INTERVAL_MS", 30_000); // node.heartbeat cadence
+  const ANCHOR_PUBLISH_CADENCE_MS = envMs("EXECUTION_CORE_LIVENESS_PUBLISH_INTERVAL_MS", 120_000); // anchor publisher cadence
+  const PEER_WINDOW_MARGIN_MS = 10_000;
+  // Live windows must stay strictly below the 5-min offline grace (classify
+  // checks live BEFORE grace, so a window ≥ grace would render a should-be-
+  // offline host as live). Cap leaves a real degraded band.
+  const PEER_WINDOW_GRACE_CAP_MS = 4 * 60_000;
+  const lokiPeerWindowMs = HEARTBEAT_CADENCE_MS + peerPollMs + lokiCacheTtlMs + PEER_WINDOW_MARGIN_MS;
+  const anchorPeerWindowMs = ANCHOR_PUBLISH_CADENCE_MS + peerPollMs + PEER_WINDOW_MARGIN_MS;
   let anchorPollTimer: ReturnType<typeof setInterval> | null = null;
   const pollAnchorHeartbeats = (): void => {
     try {
@@ -1625,13 +1663,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
         cfgLokiUrl = null;
       }
       const explicitLokiUrl = process.env.CATALYST_LOKI_QUERY_URL?.trim() ? cfgLokiUrl : null;
-      const { peers } = readPeerRecords({
+      const { peers, source: peerSource } = readPeerRecords({
         rawSource: process.env.CATALYST_LIVENESS_READ_SOURCE,
         lokiUrl: explicitLokiUrl ?? lokiUrl ?? cfgLokiUrl ?? null,
         anchorIssue: execCoreDeps.getLivenessAnchorIssue(),
         readLoki: execCoreDeps.readClusterLivenessFromLokiSyncCached,
         readAnchor: execCoreDeps.readPeerHeartbeatsSync,
       }) as { peers: Record<string, AnchorPeerRec> | null; source: string };
+      // CTL-1551: remember which transport ACTUALLY served this poll — the
+      // liveness window resolver budgets by real transport, not by env intent
+      // (AUTO can fall back to the slower anchor when Loki is empty/down).
+      if (peerSource === "loki" || peerSource === "anchor") lastPeerSource = peerSource;
       if (peers == null) {
         anchorHeartbeatCache.map = {}; // no transport configured → no peers
         anchorCapacityCache.map = {};
@@ -1647,6 +1689,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
         prevCapacity: anchorCapacityCache.map,
         peers,
       });
+      // Stamp provenance ONLY for hosts whose folded heartbeat came from THIS
+      // snapshot — retained entries keep the source that produced them.
+      for (const [host, rec] of Object.entries(peers)) {
+        if (rec?.last_seen && folded.heartbeats[host] === rec.last_seen) {
+          // Key provenance by the PINNED name — the resolver is called with
+          // alias-folded roster names (cluster-view folds heartbeat keys), so a
+          // raw-transport-keyed entry would never be found.
+          peerSourceByHost[resolveHostAlias(host, hostAliases) ?? host] = peerSource;
+        }
+      }
       anchorHeartbeatCache.map = folded.heartbeats;
       anchorCapacityCache.map = folded.capacity;
     } catch {
@@ -1658,8 +1710,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       execCoreDeps = d;
       pollAnchorHeartbeats(); // prime immediately once deps resolve
     });
-    const anchorPollMs = Number(process.env.MONITOR_ANCHOR_POLL_MS) || 60_000;
-    anchorPollTimer = setInterval(pollAnchorHeartbeats, anchorPollMs);
+    anchorPollTimer = setInterval(pollAnchorHeartbeats, peerPollMs);
     anchorPollTimer.unref?.();
   }
 
@@ -1673,7 +1724,59 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // anchor peer cache). createClusterEntity then surfaces any node currently live
   // on the anchor — including a Stage-0 SHADOW node that owns zero tickets —
   // decoupled from the dispatch roster (see cluster-view.mjs CTL-1251 header).
+  // CTL-1551: resolve this monitor's own host through config AND the alias map,
+  // so it matches the (pinned) node names the cluster view renders. getHostName
+  // alone can lag a sticky-identity restore (the daemon pins CATALYST_HOST_NAME
+  // only in its own process) — alias-folding covers the pre-pin raw-name case,
+  // the same normalization every heartbeat key gets. null when unknown.
+  const resolveSelfPinnedHost = (): string | null => {
+    try {
+      // Prefer the daemon's RECORDED sticky identity (host-sticky.mjs): on an
+      // unpinned multi-host install whose OS hostname changed, the daemon
+      // restores the sticky name only inside its own process — this separately
+      // launched monitor would otherwise see the NEW os.hostname(). Fall back
+      // to getHostName, then fold through the alias map like every host key.
+      let raw: string | null = null;
+      try {
+        const dir = execCoreDeps?.getCatalystRepoDir?.();
+        raw = dir ? (execCoreDeps?.readStickyIdentity?.({ dir }) ?? null) : null;
+      } catch {
+        raw = null;
+      }
+      raw = raw ?? execCoreDeps?.getHostName?.() ?? null;
+      if (!raw) return null;
+      return resolveHostAlias(raw, hostAliases) ?? raw;
+    } catch {
+      return null;
+    }
+  };
+
   const clusterEntity = createClusterEntity({
+    // CTL-1551: PER-HOST live window. The SELF host's heartbeats come straight
+    // from the local event log (no transport lag) and keep the default 30s
+    // window — a locally-dead daemon degrades promptly. PEER heartbeats ride a
+    // pipeline with KNOWN lag, so a healthy peer can never satisfy 30s and
+    // would structurally render "degraded"; budget by transport:
+    //   loki (default): ~30s beat + 60s poll + 20s sync cache  → 120s window
+    //   linear anchor:  ~120s publish cadence + 60s poll       → 240s window
+    // "degraded" then means genuinely late; the 5-min offline grace unchanged.
+    intervalMsFor: (host: string) => {
+      const self = resolveSelfPinnedHost();
+      // SELF: the local log is direct (no transport lag) — the window is the
+      // daemon's own configured beat cadence (default 30s), not a literal.
+      if (self && host === self) return HEARTBEAT_CADENCE_MS;
+      // Budget by the transport that produced THIS host's cached heartbeat
+      // (per-host provenance; poll-global source only as a fallback), with the
+      // window DERIVED from the configured cadences — capped below the 5-min
+      // offline grace so classify's live-check can never mask a host that
+      // should already be offline.
+      const src = peerSourceByHost[host] ?? lastPeerSource;
+      const win = src === "anchor" ? anchorPeerWindowMs : lokiPeerWindowMs;
+      return Math.min(win, PEER_WINDOW_GRACE_CAP_MS);
+    },
+    // CTL-1551: the monitor's own identity for the view/signal (SlotDeck's
+    // localHost) — resolved per assemble, alias-folded like every other host key.
+    selfHostProvider: () => resolveSelfPinnedHost(),
     rosterProvider: () => {
       try {
         return execCoreDeps?.getClusterHosts() ?? [];
