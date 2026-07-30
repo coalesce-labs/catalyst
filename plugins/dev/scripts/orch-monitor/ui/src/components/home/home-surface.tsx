@@ -216,7 +216,7 @@ export function HomeSurface() {
   // through the read-model write endpoint (board/respond-client.ts owns the
   // fetch). The single-node case is an exact pass-through (the endpoint's
   // identity fence no-op); a multi-node fence rejection arrives as `did-not-take`.
-  const { respond, statusFor, reconcile, markResolved, markDidNotTake } = useRespond();
+  const { respond, statusFor, reconcile, markResolved } = useRespond();
 
   // CTL-1569 / AC #8 ("posting removes the row without a manual refresh"): the
   // optimistic mark alone was NOT enough. `statusFor` only changed how the pane
@@ -337,10 +337,19 @@ export function HomeSurface() {
   // is restored rather than silently lost (§4).
   const onReplied = useCallback(
     (outcome: ReplyOutcome) => {
-      if (outcome.status === "replied") markResolved(outcome.ticket);
-      else if (outcome.status !== "empty") markDidNotTake(outcome.ticket);
+      if (outcome.status === "replied") {
+        markResolved(outcome.ticket);
+        return;
+      }
+      // Do NOT mark an UNSENT reply as a failed resume. For `no_token`,
+      // `bot_identity`, `not_found` and transport failures no comment was sent and
+      // no resume was ever attempted, so `PaneVerb`'s "The agent did not resume —
+      // try again" is a second, wrong diagnosis printed beside the reply box's
+      // accurate one. The row is still restored (it was never hidden), and the
+      // specific posting error is what the operator should act on.
+      // `empty` is likewise a no-op.
     },
-    [markResolved, markDidNotTake],
+    [markResolved],
   );
 
   // Reconcile the optimistic marks against EVERY new read-model frame: a row that

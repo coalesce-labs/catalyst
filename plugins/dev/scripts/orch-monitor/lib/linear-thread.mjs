@@ -229,7 +229,9 @@ export async function readTicketThread(
     url: null,
     title: null,
     agentComments: [],
+    allAgentComments: [],
     lastAgentComment: null,
+    issueExists: false,
     reason,
   });
 
@@ -281,7 +283,19 @@ export async function readTicketThread(
     // Filtered on `isCatalystAgent`, NOT `isAgent`: integration plumbing (a GitHub
     // sync notice, a Linear automation note) is not the agent asking anything, and
     // letting it into this list makes it the derived ask.
-    const agentComments = scanned.filter((c) => c.isCatalystAgent).map((c) => c.body);
+    // ANSWERED-TURN BOUNDARY. Human turns are filtered out of `agentComments`, so
+    // the ranked candidate pick has no way to tell a question the operator ALREADY
+    // answered from the current one — and class-first ranking would happily promote
+    // an older approval question over a newer blocker, prompting the operator to
+    // re-answer the previous cycle. Only agent comments NEWER than the operator's
+    // most recent reply are live candidates. (If the operator never replied, every
+    // agent comment is live.)
+    const lastHumanIdx = scanned.findIndex((c) => !c.isAgent);
+    const liveAgent = lastHumanIdx === -1 ? scanned : scanned.slice(0, lastHumanIdx);
+    const agentComments = liveAgent.filter((c) => c.isCatalystAgent).map((c) => c.body);
+    // Every agent comment regardless of the boundary — kept for callers that want
+    // history rather than the live ask.
+    const allAgentComments = scanned.filter((c) => c.isCatalystAgent).map((c) => c.body);
 
     return {
       ticket,
@@ -290,7 +304,13 @@ export async function readTicketThread(
       url: typeof issue?.url === "string" && issue.url !== "" ? issue.url : null,
       title: typeof issue?.title === "string" && issue.title !== "" ? issue.title : null,
       agentComments,
+      allAgentComments,
       lastAgentComment: agentComments[0] ?? null,
+      // EXPLICIT existence bit. `url` is an OPTIONAL deep link and can be null on a
+      // real issue row (unpopulated or mid-sync), so using it as the existence
+      // predicate hid the composer on tickets the POST path can resolve perfectly
+      // well by identifier.
+      issueExists: issue != null,
       reason: null,
     };
   } catch (e) {

@@ -53,6 +53,7 @@ function stripComments(src: string): string {
 const homeCode = stripComments(homeSurfaceSrc);
 const rowCode = stripComments(inboxRowSrc);
 const conversationCode = stripComments(conversationSrc);
+const homeSurfaceCode = stripComments(homeSurfaceSrc);
 const appCode = stripComments(appSrc);
 
 // ── Scenario: The split survives an iPad-landscape width (firm floors) ────────
@@ -520,12 +521,25 @@ describe("Inbox conversation surface (CTL-1569)", () => {
     expect(homeSurfaceSrc).toMatch(/needsYou: perSection\("attention"\)/);
   });
 
+  it("round-4 P2 — an UNSENT reply is not reported as a failed resume", () => {
+    // no_token / bot_identity / not_found / network: nothing was sent and no
+    // resume was attempted, so "The agent did not resume — try again" would be a
+    // second, wrong diagnosis beside the reply box's accurate one.
+    expect(homeSurfaceCode).not.toMatch(/markDidNotTake\(/);
+    expect(homeSurfaceSrc).toContain("no comment was sent");
+  });
+
+  it("round-4 P2 — the draft clear is scoped to ticket AND edit version", () => {
+    // Value equality cannot prove no edit or ticket switch occurred.
+    expect(conversationSrc).toContain("sendTicket");
+    expect(conversationSrc).toContain("editVersion");
+  });
+
   it("the surface routes a reply outcome through the ONE optimistic-rollback rule", () => {
     // Reusing the verb's mark + grace window (rather than a second optimistic
     // path) keeps one reconcile rule deciding when a row truly leaves the inbox.
     expect(homeSurfaceSrc).toContain("onReplied");
     expect(homeSurfaceSrc).toContain("markResolved");
-    expect(homeSurfaceSrc).toContain("markDidNotTake");
   });
 });
 

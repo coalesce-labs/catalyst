@@ -205,6 +205,24 @@ export function askFromStructured(explanation) {
  * IS a decision, and their labels are legitimate reply chips (they came from the
  * producer, not from a guess). Otherwise the CTA/what-to-do text is classified.
  */
+/** Escalation types whose producer contract means the agent CANNOT do the work —
+ *  the human must perform it, so a written reply alone can never resolve them. */
+const ACTION_REQUIRED_ESCALATION_TYPES = new Set(["manual"]);
+
+/** A `manual` escalation is only trusted as action-required when the producer
+ *  actually filled the contract (a blocked capability / instructions), so a
+ *  legacy payload that merely DEFAULTED to "manual" still classifies normally. */
+export function isValidatedManualEscalation(expl) {
+  if (!expl || typeof expl !== "object") return false;
+  if (!ACTION_REQUIRED_ESCALATION_TYPES.has(expl.escalation_type)) return false;
+  for (const k of ["blocked_capability", "instructions", "remediation", "what_to_do"]) {
+    const v = expl[k];
+    if (typeof v === "string" && v.trim() !== "") return true;
+    if (Array.isArray(v) && v.length > 0) return true;
+  }
+  return false;
+}
+
 export function askFromExplanation(explanation) {
   if (!explanation || typeof explanation !== "object") return null;
 
@@ -262,6 +280,12 @@ const ESCALATION_TYPE_KINDS = { decision: "decide", authorization: "approve" };
  *  operator a bare "yes" is sufficient when it demonstrably is not. */
 function declaredKind(explanation, classified) {
   if (classified === "act-then-confirm") return classified;
+  // A VALIDATED `manual` escalation is action-required by contract: the producer
+  // says the agent could not do the work itself. Without this, a CTA like "Rotate
+  // the expired API credential." falls through to `clarify` and the pane promises
+  // that a written reply alone resolves it. Only validated payloads qualify, so a
+  // legacy signal that merely DEFAULTED to "manual" still classifies normally.
+  if (isValidatedManualEscalation(explanation)) return "act-then-confirm";
   const declared = ESCALATION_TYPE_KINDS[nonEmptyString(explanation?.escalation_type)?.toLowerCase()];
   return declared ?? classified;
 }
@@ -492,8 +516,11 @@ export function extractOperatorActionBlock(body) {
  * ticket whose real blocker was an older comment.
  */
 const PHASE_REPORT_PATTERNS = [
-  /^\s*\**\s*phase[\s-]+(?:triage|research|plan|implement|verify|review|pr|monitor-merge|monitor-deploy|teardown)\b/i,
-  /^\s*\**\s*(?:plan|research|implement|verify|review)[\s-]+phase\s*[—–-]/i,
+  // `remediate` included deliberately: phase-remediate posts `**Phase Remediate**`
+  // mirrors, and an unavailable field rendering as `?` made them classify as an ASK
+  // — putting pipeline bookkeeping under "What this needs from you".
+  /^\s*\**\s*phase[\s-]+(?:triage|research|plan|implement|verify|review|remediate|pr|monitor-merge|monitor-deploy|teardown)\b/i,
+  /^\s*\**\s*(?:plan|research|implement|verify|review|remediate)[\s-]+phase\s*[—–-]/i,
 ];
 
 /** Is this body a phase status report rather than an ask? Exported for testing. */

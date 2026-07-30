@@ -20,6 +20,10 @@ function thread({
   title = "T",
   agentComments = [],
   reason = null,
+  // Defaults to "the replica holds an issue row" unless a test says otherwise;
+  // `url` is an OPTIONAL deep link and is deliberately no longer the existence
+  // predicate (a real issue can have a null url mid-sync).
+  issueExists = url != null,
 } = {}) {
   return async () => ({
     ticket: "PROJ-1",
@@ -28,6 +32,8 @@ function thread({
     url,
     title,
     agentComments,
+    allAgentComments: agentComments,
+    issueExists,
     lastAgentComment: agentComments[0] ?? null,
     reason,
   });
@@ -121,11 +127,23 @@ describe("getConversation — the canReply gate (AC #10)", () => {
     expect(out.canReply).toBe(true);
   });
 
+  it("ALLOWS a reply when the issue EXISTS but its url is null (mid-sync)", async () => {
+    // `url` is optional; using it as the existence predicate hid the composer on
+    // tickets the POST path resolves fine by identifier.
+    const out = await getConversation("PROJ-1", {
+      readThread: thread({ available: true, url: null, issueExists: true }),
+      readSignals: noSignals,
+      config: null,
+      repoConfig: null,
+    });
+    expect(out.canReply).toBe(true);
+  });
+
   it("REFUSES a reply for a synthesized row with no Linear issue", async () => {
     // An orphan-PR card: the replica is readable and positively has no such issue,
     // so there is nothing to comment on → the UI shows no reply box.
     const out = await getConversation("ORPHAN-1", {
-      readThread: thread({ available: true, url: null }),
+      readThread: thread({ available: true, url: null, issueExists: false }),
       readSignals: noSignals,
       config: null,
     });
@@ -181,6 +199,7 @@ import {
   postBody,
   resolveLinearToken,
 } from "./linear-comment.mjs";
+import { configDir } from "./inbox-conversation.mjs";
 
 describe("P1 #4 — the structured ask must survive to the derivation", () => {
   it("preserves `ask` and `options`, which board-data's projection discards", () => {
@@ -426,5 +445,36 @@ describe("round-3 P2 — isUsableExplanation must mirror askFromStructured", () 
       { explanation: { ask: { summary: "Waiting for input" } } },
     ]);
     expect(expl.call_to_action).toBe("the real ask");
+  });
+});
+
+// ── Codex round-4 remediation ────────────────────────────────────────────────
+
+describe("round-4 — credential + config resolution", () => {
+  it("accepts BOTH Layer-2 token shapes", () => {
+    expect(resolveLinearToken({}, { projectConfig: { linear: { apiToken: "legacy" } } })).toBe("legacy");
+    expect(
+      resolveLinearToken({}, { projectConfig: { catalyst: { linear: { apiToken: "nested" } } } }),
+    ).toBe("nested");
+  });
+  it("still never falls back to the app-actor token", () => {
+    expect(
+      resolveLinearToken({}, {
+        projectConfig: { catalyst: { linear: { agent: { accessToken: "lin_oauth_app" } } } },
+      }),
+    ).toBeNull();
+  });
+  it("honors CATALYST_CONFIG_DIR for the secrets directory", () => {
+    expect(configDir({ CATALYST_CONFIG_DIR: "/custom" })).toBe("/custom");
+    expect(configDir({})).toContain(".config");
+  });
+});
+
+describe("round-4 — options must survive downstream normalization", () => {
+  it("rejects option shapes that normalize to fewer than two labels", () => {
+    expect(isUsableExplanation({ options: [{}, {}] })).toBe(false);
+    expect(isUsableExplanation({ options: ["A", "a"] })).toBe(false); // dedup → 1
+    expect(isUsableExplanation({ options: [{ label: "A" }] })).toBe(false);
+    expect(isUsableExplanation({ options: [{ label: "A" }, { label: "B" }] })).toBe(true);
   });
 });

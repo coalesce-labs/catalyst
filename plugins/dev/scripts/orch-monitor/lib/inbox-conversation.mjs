@@ -29,7 +29,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { ANCILLARY_EXPLANATION_PHASES, PHASE_ORDER } from "./board-data.mjs";
-import { askFromStructured, deriveAsk } from "./inbox-ask.mjs";
+import { askFromExplanation, askFromStructured, deriveAsk } from "./inbox-ask.mjs";
 import { knownBotUserIds } from "./linear-comment.mjs";
 import { DEFAULT_THREAD_LIMIT, readTicketThread } from "./linear-thread.mjs";
 
@@ -102,7 +102,15 @@ export function isUsableExplanation(expl) {
   // this predicate exists to prevent.
   const ask = expl.ask;
   if (ask && typeof ask === "object" && askFromStructured({ ask }) != null) return true;
-  if (Array.isArray(expl.options) && expl.options.length >= 2) return true;
+  // Run the DOWNSTREAM check, not a shape check: askFromExplanation normalizes and
+  // de-duplicates option labels and needs two VALID ones, so `[{}, {}]` or
+  // `["A","a"]` would pass a naive length test, stop the scan, and then produce no
+  // ask — masking an older valid explanation all over again.
+  // NOTE: pass ONLY the options. Injecting a call_to_action here would make the
+  // CTA branch succeed for ANY input and defeat the whole check.
+  if (Array.isArray(expl.options) && askFromExplanation({ options: expl.options }) != null) {
+    return true;
+  }
   for (const k of ["call_to_action", "what_to_do"]) {
     if (typeof expl[k] === "string" && expl[k].trim() !== "") return true;
   }
@@ -112,11 +120,18 @@ export function isUsableExplanation(expl) {
 /** The global config that carries the app-actor `botUserId`s the authorship gate
  *  cross-checks. Read lazily per call and fail-open to null — the gate's primary
  *  defense is the `viewer` shape check, which needs no config. */
-export async function loadGlobalConfig({
-  path = join(HOME, ".config", "catalyst", "config.json"),
-} = {}) {
+/** The configured secrets directory. `server.ts` already honors CATALYST_CONFIG_DIR
+ *  for OTel and webhook secrets; constructing a second hardcoded `~/.config/catalyst`
+ *  here made the reply route miss `config-<projectKey>.json` on such an install, so
+ *  every reply returned `no_token` while the credential sat in the configured dir. */
+export function configDir(env = process.env) {
+  return env.CATALYST_CONFIG_DIR || join(HOME, ".config", "catalyst");
+}
+
+export async function loadGlobalConfig({ path = null, env = process.env } = {}) {
+  const resolved = path ?? join(configDir(env), "config.json");
   try {
-    return JSON.parse(await readFile(path, "utf8"));
+    return JSON.parse(await readFile(resolved, "utf8"));
   } catch {
     return null;
   }
@@ -148,7 +163,7 @@ export async function loadProjectConfig({
       key = repo?.catalyst?.projectKey ?? repo?.projectKey ?? null;
     }
     if (typeof key !== "string" || key === "") return null;
-    const path = join(HOME, ".config", "catalyst", `config-${key}.json`);
+    const path = join(configDir(env), `config-${key}.json`);
     return JSON.parse(await readFile(path, "utf8"));
   } catch {
     return null;
@@ -235,9 +250,13 @@ export async function getConversation(
   const explanation = deriveRichExplanation(phaseSigs);
   const ask = deriveAsk({ explanation, agentComments: thread.agentComments });
 
-  // No issue row in a READABLE replica → a synthesized row with nothing to reply
-  // to. An UNREADABLE replica is not evidence of absence (see the header note).
-  const canReply = thread.available ? thread.url != null : true;
+  // No issue ROW in a READABLE replica → a synthesized card with nothing to reply
+  // to. Keyed on the explicit `issueExists` bit, NOT on `url`: the deep link is
+  // optional and can be null on a genuine issue (unpopulated / mid-sync), and using
+  // it as the existence predicate hid the composer on tickets the POST path
+  // resolves fine by identifier. An UNREADABLE replica is still not evidence of
+  // absence, so it stays permissive (see the header note).
+  const canReply = thread.available ? thread.issueExists === true : true;
 
   return {
     ticket,

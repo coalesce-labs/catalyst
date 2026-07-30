@@ -676,8 +676,11 @@ describe("readTicketThread", () => {
     expect(out.available).toBe(true);
     expect(out.comments.map((c) => c.id)).toEqual(["c3", "c2", "c1"]);
     expect(out.lastAgentComment).toBe("agent asks the question");
-    // The full ordered agent list is surfaced so the ask derivation can skip notices.
-    expect(out.agentComments).toEqual(["agent asks the question", "older agent note"]);
+    // LIVE candidates stop at the operator's last reply (c2): the older agent note
+    // below it was already answered, so it must not be re-surfaced as an ask.
+    expect(out.agentComments).toEqual(["agent asks the question"]);
+    // The unbounded history is still available.
+    expect(out.allAgentComments).toEqual(["agent asks the question", "older agent note"]);
     expect(out.url).toBe("https://linear.app/x/PROJ-1");
   });
 
@@ -1055,9 +1058,12 @@ describe("round-3 P2 — an operator-action block always requires action", () =>
 
 describe("round-3 P2 — the ask is found beyond the DISPLAY window", () => {
   it("scans deeper than the display limit for the agent's question", async () => {
-    // A run of human replies / integration chatter must not hide the agent's ask.
+    // INTEGRATION chatter must not hide the agent's ask. (Human replies are a
+    // different case entirely — they mark the question ANSWERED, and the
+    // answered-turn boundary deliberately drops it.)
     const humans = Array.from({ length: 8 }, (_, i) => ({
-      id: `h${i}`, body: `human reply ${i}`, is_bot: 0, author_id: "human-uuid", updated_at: 1000 - i,
+      id: `g${i}`, body: `synced to a GitHub issue ${i}`, is_bot: 1, author_id: null,
+      author_name: "GitHub", updated_at: 1000 - i,
     }));
     const agent = {
       id: "a1", body: "Which of the 13 findings actually matter?",
@@ -1072,5 +1078,83 @@ describe("round-3 P2 — the ask is found beyond the DISPLAY window", () => {
     expect(out.comments).toHaveLength(4);
     // … but the agent's question, outside that window, still drives the ask.
     expect(out.agentComments).toEqual(["Which of the 13 findings actually matter?"]);
+  });
+});
+
+// ── Codex round-4 remediation ────────────────────────────────────────────────
+
+describe("round-4 — the answered-turn boundary", () => {
+  it("never re-surfaces a question the operator already answered", async () => {
+    const { readTicketThread: read } = await import("./linear-thread.mjs");
+    const db = () => ({
+      prepare: (sql) => ({
+        all: () =>
+          sql.includes("FROM issues")
+            ? []
+            : [
+                { id: "a2", body: "Failure reason: rebase_refused_dirty_tree", is_bot: 0, author_id: "bot", updated_at: 300 },
+                { id: "h1", body: "yes go ahead", is_bot: 0, author_id: "human", updated_at: 200 },
+                { id: "a1", body: "Approve the rollout?", is_bot: 0, author_id: "bot", updated_at: 100 },
+              ],
+        get: () => (sql.includes("FROM issues") ? { url: "u" } : null),
+      }),
+      run() {},
+      close() {},
+    });
+    const out = await read("PROJ-1", { openDb: db, botUserIds: new Set(["bot"]) });
+    // Class-first ranking would otherwise let the older APPROVAL question outrank
+    // the newer blocker, prompting the operator to re-answer the previous cycle.
+    expect(out.agentComments).toEqual(["Failure reason: rebase_refused_dirty_tree"]);
+    expect(out.allAgentComments).toHaveLength(2);
+  });
+
+  it("treats every agent comment as live when the operator has never replied", async () => {
+    const { readTicketThread: read } = await import("./linear-thread.mjs");
+    const db = () => ({
+      prepare: (sql) => ({
+        all: () =>
+          sql.includes("FROM issues")
+            ? []
+            : [
+                { id: "a2", body: "newer agent", is_bot: 0, author_id: "bot", updated_at: 200 },
+                { id: "a1", body: "older agent", is_bot: 0, author_id: "bot", updated_at: 100 },
+              ],
+        get: () => (sql.includes("FROM issues") ? { url: "u" } : null),
+      }),
+      run() {},
+      close() {},
+    });
+    const out = await read("PROJ-1", { openDb: db, botUserIds: new Set(["bot"]) });
+    expect(out.agentComments).toEqual(["newer agent", "older agent"]);
+  });
+});
+
+describe("round-4 — a validated manual escalation requires action", () => {
+  it("forces act-then-confirm for a validated manual payload", async () => {
+    const { deriveAsk: d } = await import("./inbox-ask.mjs");
+    const ask = d({
+      explanation: {
+        escalation_type: "manual",
+        call_to_action: "Rotate the expired API credential.",
+        instructions: "open the console and rotate it",
+      },
+    });
+    expect(ask.kind).toBe("act-then-confirm");
+    expect(ask.canResolveByReply).toBe(false);
+  });
+
+  it("does NOT force it for a legacy payload that merely defaulted to manual", async () => {
+    const { deriveAsk: d } = await import("./inbox-ask.mjs");
+    expect(
+      d({ explanation: { escalation_type: "manual", call_to_action: "Approve the rollout?" } }).kind,
+    ).not.toBe("act-then-confirm");
+  });
+});
+
+describe("round-4 — phase-remediate mirrors are status reports", () => {
+  it("filters the remediate mirror out of ask candidates", async () => {
+    const { isPhaseStatusReport: isRep } = await import("./inbox-ask.mjs");
+    expect(isRep("**Phase Remediate**\n- **Commits**: ?")).toBe(true);
+    expect(isRep("**Remediate phase — disposition: fixed**")).toBe(true);
   });
 });

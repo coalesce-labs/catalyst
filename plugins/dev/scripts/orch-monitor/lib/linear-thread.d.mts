@@ -37,8 +37,15 @@ export interface TicketThread {
   /** The ticket's own Linear URL, mirrored in the replica's `issues` table (§3). */
   url: string | null;
   title: string | null;
-  /** Agent comment bodies, NEWEST FIRST — the ask-derivation fallback input. */
+  /** Agent comment bodies NEWER than the operator's last reply, NEWEST FIRST —
+   *  the LIVE ask candidates. Bounded by the answered-turn boundary so a question
+   *  the operator has already answered is never re-surfaced. */
   agentComments: string[];
+  /** Every agent comment in the scan window, ignoring the boundary. */
+  allAgentComments: string[];
+  /** Whether the replica holds an issue ROW. Distinct from `url`, which is an
+   *  optional deep link and can be null on a real issue. */
+  issueExists: boolean;
   lastAgentComment: string | null;
   reason: string | null;
 }

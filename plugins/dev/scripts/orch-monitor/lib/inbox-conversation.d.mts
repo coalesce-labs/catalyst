@@ -28,7 +28,10 @@ export interface Conversation {
 }
 
 /** The global config carrying the app-actor `botUserId`s. Fails open to null. */
-export function loadGlobalConfig(opts?: { path?: string }): Promise<unknown>;
+export function loadGlobalConfig(opts?: {
+  path?: string | null;
+  env?: Record<string, string | undefined>;
+}): Promise<unknown>;
 
 /** The Layer-2 project secrets file, carrying the operator's personal
  *  `linear.apiToken` — the only Linear credential on the launchd path. Fails open. */
@@ -37,6 +40,9 @@ export function loadProjectConfig(opts?: {
   repoConfigPath?: string | null;
   env?: Record<string, string | undefined>;
 }): Promise<unknown>;
+
+/** The configured secrets directory, honoring CATALYST_CONFIG_DIR. */
+export function configDir(env?: Record<string, string | undefined>): string;
 
 /** The Layer-1 repo config (`.catalyst/config.json`). Fails open to null. */
 export function loadRepoConfig(opts?: { path?: string | null }): Promise<unknown>;

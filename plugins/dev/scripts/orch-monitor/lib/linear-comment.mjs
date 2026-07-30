@@ -75,9 +75,19 @@ const REQUEST_TIMEOUT_MS = 15_000;
 export function resolveLinearToken(env = process.env, { projectConfig = null } = {}) {
   const fromEnv = env.LINEAR_API_TOKEN || env.LINEAR_API_KEY || null;
   if (typeof fromEnv === "string" && fromEnv.trim() !== "") return fromEnv.trim();
-  // Layer-2 personal token — the launchd path's only source.
-  const fromConfig = projectConfig?.linear?.apiToken;
-  if (typeof fromConfig === "string" && fromConfig.trim() !== "") return fromConfig.trim();
+  // Layer-2 personal token — the launchd path's only source. BOTH shapes are
+  // accepted: `linear.apiToken` is what the reference schema documents
+  // (website/.../reference/configuration.md) and what real installs carry, while
+  // the nested `catalyst.linear.apiToken` shows up in some setups. Reading only
+  // one shape means a validly-configured host resolves nothing and every reply
+  // returns `no_token` — the failure this whole fallback exists to prevent, so it
+  // is not worth being narrow about.
+  for (const candidate of [
+    projectConfig?.linear?.apiToken,
+    projectConfig?.catalyst?.linear?.apiToken,
+  ]) {
+    if (typeof candidate === "string" && candidate.trim() !== "") return candidate.trim();
+  }
   return null;
 }
 

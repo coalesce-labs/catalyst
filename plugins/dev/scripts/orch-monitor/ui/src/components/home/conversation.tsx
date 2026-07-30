@@ -317,8 +317,14 @@ function ReplyBox({
 }) {
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  // The exact draft at submit time, so a successful post clears only that text.
+  // The exact draft at submit time AND the ticket + edit-version it belonged to.
+  // Value equality alone cannot prove no edit or ticket switch occurred: if A's
+  // reply is pending and the operator selects B and types (or a chip prefills) the
+  // same text, A's late setter would clear B's draft.
   const draftAtSend = useRef("");
+  const sendTicket = useRef("");
+  const editVersion = useRef(0);
+  const versionAtSend = useRef(-1);
 
   const send = useCallback(async () => {
     // Trim ONLY to validate emptiness — the value SENT is the operator's verbatim
@@ -328,6 +334,8 @@ function ReplyBox({
     if (draft.trim() === "" || sending) return;
     const body = draft;
     draftAtSend.current = draft;
+    sendTicket.current = ticket;
+    versionAtSend.current = editVersion.current;
     setSending(true);
     setFailure(null);
     const outcome = await postReply({ ticket, body });
@@ -336,7 +344,11 @@ function ReplyBox({
       // Clear ONLY the text that was actually submitted. A blind setDraft("")
       // deletes a follow-up the operator started typing during the round trip,
       // which breaks this component's promise that typed words are never lost.
-      setDraft((current) => (current === draftAtSend.current ? "" : current));
+      // Clear only if this is still the SAME ticket AND the draft has not been
+      // edited since submit — never on text equality alone.
+      if (sendTicket.current === ticket && versionAtSend.current === editVersion.current) {
+        setDraft((current) => (current === draftAtSend.current ? "" : current));
+      }
       onReplied(outcome, body, ticket);
       return;
     }
@@ -356,7 +368,10 @@ function ReplyBox({
       <textarea
         data-reply-input={ticket}
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => {
+          editVersion.current += 1;
+          setDraft(e.target.value);
+        }}
         onKeyDown={(e) => {
           // ⌘/Ctrl+Enter sends; a bare Enter stays a newline so a considered,
           // multi-line answer is never fired off half-written.
