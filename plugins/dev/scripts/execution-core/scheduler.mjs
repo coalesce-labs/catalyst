@@ -23,6 +23,7 @@ import {
   rmSync,
   renameSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { monitorEventLoopDelay } from "node:perf_hooks";
@@ -346,6 +347,7 @@ import {
   labelNeedsHumanUnlessBeliefOwner,
   resolveAndApplyWorkerStatusLabel,
   WORKER_STATUS_LABELS,
+  labelMarkerBase, // CTL-1571: convergeHeldLabel writes the same once-marker labelOnce does
 } from "./label-guard.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs"; // CTL-1605: precedence order for the onTerminalCleared aggregate-arg → pre-clear `from` resolution
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
@@ -1945,10 +1947,30 @@ export function convergeHeldLabel(
   // Promise (which read `.removed` as undefined and false-confirmed every removal);
   // the callback therefore fires post-tick in production and callers must not
   // assume it ran before this function returns.
+  // CTL-1571: delete the once-marker (see the apply side below) the moment a
+  // removal is CONFIRMED — mirrors CTL-1567's needs-human fix ("keep the
+  // once-marker in step with the label"). Only HELD_LABELS (blocked/queued) ever
+  // get a marker written here; the legacy "waiting" alias is drained above but
+  // never marked, so clearing its marker path is a harmless no-op (ENOENT).
+  const clearMarker = (label) => {
+    if (!orchDir) return;
+    const base = labelMarkerBase(orchDir, ticket, label);
+    for (const suffix of [".applied", ".skipped"]) {
+      try {
+        unlinkSync(`${base}${suffix}`);
+      } catch {
+        /* ENOENT is the expected case — no marker to clear */
+      }
+    }
+  };
   const settle = (label, res) => {
     if (res != null && typeof res.then === "function") {
       res.then(
-        (r) => onRemoveResult?.(label, r?.removed !== false),
+        (r) => {
+          const removed = r?.removed !== false;
+          if (removed) clearMarker(label);
+          onRemoveResult?.(label, removed);
+        },
         (err) => {
           log.warn(
             { ticket, phase: "admission", err: err?.message },
@@ -1959,7 +1981,9 @@ export function convergeHeldLabel(
       );
       return;
     }
-    onRemoveResult?.(label, res?.removed !== false);
+    const removed = res?.removed !== false;
+    if (removed) clearMarker(label);
+    onRemoveResult?.(label, removed);
   };
   for (const label of HELD_LABELS_REMOVABLE) {
     if (label !== desired && have.has(label)) {
@@ -1989,6 +2013,30 @@ export function convergeHeldLabel(
       );
     }
     writes++;
+    // CTL-1571: write the SAME once-marker labelOnce writes for needs-human, so
+    // convergeStartedHeldLabels (CTL-1068) — which gates retraction on this
+    // marker's existence — can find and retract this label if the ticket is
+    // later admitted and this clear-on-pickup write never lands (a transient
+    // failure, and admission drops the ticket out of the pool that retries it).
+    // A test stub returning undefined counts as success, matching labelOnce's
+    // own convention (applyLabel is otherwise never expected to return undefined
+    // in production). mkdirSync (recursive) guards a ticket whose worker dir
+    // does not exist yet — labelOnce assumes the dir is already there because it
+    // is only ever invoked deep in the dispatch path; convergeHeldLabel runs from
+    // the admission tick, which can precede worker-dir creation.
+    const applied = res === undefined || res?.applied === true;
+    if (orchDir && applied) {
+      const base = labelMarkerBase(orchDir, ticket, desired);
+      try {
+        mkdirSync(dirname(base), { recursive: true });
+        writeFileSync(`${base}.applied`, "");
+      } catch (err) {
+        log.warn(
+          { ticket, label: desired, err: err.message },
+          "ctl-1571: held-label once-marker write failed — retraction may miss this label later"
+        );
+      }
+    }
     if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
       recordLabelCooldown(orchDir, ticket, desired, now());
       log.warn(
