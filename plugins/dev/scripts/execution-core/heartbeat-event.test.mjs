@@ -75,6 +75,21 @@ describe("buildHeartbeatEnvelope (CTL-859)", () => {
     const env = buildHeartbeatEnvelope();
     expect(env.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
   });
+
+  // ── CTL-1551: max_parallel as a Loki-reachable attribute ──
+  test("carries catalyst.node.max_parallel when maxParallelFn supplies a positive int", () => {
+    const env = buildHeartbeatEnvelope({ maxParallelFn: () => 3 });
+    expect(env.attributes["catalyst.node.max_parallel"]).toBe(3);
+  });
+
+  test("omits catalyst.node.max_parallel when unknown — never a fake 0", () => {
+    for (const bad of [null, 0, -1, 2.5, "3", NaN, undefined]) {
+      const env = buildHeartbeatEnvelope({ maxParallelFn: () => bad });
+      expect("catalyst.node.max_parallel" in env.attributes).toBe(false);
+    }
+    const noFn = buildHeartbeatEnvelope();
+    expect("catalyst.node.max_parallel" in noFn.attributes).toBe(false);
+  });
 });
 
 describe("emitHeartbeatEvent (CTL-859)", () => {
