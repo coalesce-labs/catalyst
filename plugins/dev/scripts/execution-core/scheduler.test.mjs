@@ -1467,6 +1467,30 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     expect(sig.stalledReason).toBe("phantom-ticket");
   });
 
+  test("an inconclusive deletion probe backs off — at most one live read per window (CTL-1570)", () => {
+    // removed:true descriptor + "unknown" probe (rate-limited / outage) leaves the
+    // dir phantom and the tombstone persistent; the marker-file backoff must cap
+    // the retry at one probe per DELETION_PROBE_INTERVAL_MS, not one per tick.
+    writeSignal("PROJ-204", "recovery-pass", "done");
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: { getDescriptor: (t) => (t === "PROJ-204" ? { removed: true } : null) },
+      isBgJobAlive: () => false,
+    };
+    let classifyCalls = 0;
+    const classifyResolution = () => {
+      classifyCalls++;
+      return "unknown"; // inconclusive — dir stays phantom, tombstone persists
+    };
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    expect(classifyCalls).toBe(1); // first tick probes
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    expect(classifyCalls).toBe(1); // subsequent ticks inside the window are throttled
+  });
+
   test("still probes a HELD (needs-human) recovery-pass dir — not over-skipped (CTL-1570)", () => {
     // A parked/escalated recovery dir is NOT phantom (operator surface) and keeps
     // its existence check, so a deleted ticket behind a needs-human dir is still

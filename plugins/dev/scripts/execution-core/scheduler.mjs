@@ -2533,6 +2533,46 @@ function recordRunawayAlert(orchDir, ticket, now) {
   }
 }
 
+// ── CTL-1570: deletion-probe backoff for phantom dirs ──
+// A phantom dir whose broker descriptor says removed:true re-arms the live
+// probe (deletion verification). If that probe is inconclusive ("unknown" —
+// rate-limited / outage / timeout), the dir stays phantom and the tombstone
+// would re-trigger a quota-consuming read EVERY tick, unbounded, precisely
+// during a quota outage. Marker-file backoff (same pattern as the runaway
+// cool-down above) caps it at one live probe per window per ticket. The marker
+// is written BEFORE the probe (attempt-based, not success-based) so a string of
+// failures cannot bypass the cap; a successful quarantine makes the dir
+// non-phantom and retires the whole path.
+const DELETION_PROBE_INTERVAL_MS = 10 * 60_000; // one verification per 10 min per ticket
+
+function deletionProbePath(orchDir, ticket) {
+  return join(orchDir, ".deletion-probes", ticket);
+}
+
+function inDeletionProbeCooldown(orchDir, ticket, now) {
+  let probedAt;
+  try {
+    probedAt = JSON.parse(readFileSync(deletionProbePath(orchDir, ticket), "utf8"))?.probedAt;
+  } catch {
+    return false; // absent / malformed → not in cool-down
+  }
+  if (typeof probedAt !== "number") return false;
+  return now - probedAt < DELETION_PROBE_INTERVAL_MS;
+}
+
+function recordDeletionProbe(orchDir, ticket, now) {
+  const dir = join(orchDir, ".deletion-probes");
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(deletionProbePath(orchDir, ticket), JSON.stringify({ ticket, probedAt: now }));
+  } catch (err) {
+    log.warn(
+      { ticket, err: err.message },
+      "scheduler: deletion-probe marker write failed — continuing"
+    );
+  }
+}
+
 // CTL-611: post-dispatch verifier. A dispatch is only really successful if
 // workers/<T>/phase-<P>.json was written with a non-empty bg_job_id and a
 // runnable status. A --dry-run leak (no signal at all) or a mark_launch_failed
@@ -4208,6 +4248,12 @@ export function schedulerTick(
         /* descriptor read is best-effort — never break the tick */
       }
       if (!removed) continue;
+      // Backoff: an inconclusive probe ("unknown") leaves the dir phantom and the
+      // removed tombstone persistent — without this cap the live read would retry
+      // every tick, unbounded, during exactly a quota outage. Marker written
+      // before the probe so failures can't bypass the cap.
+      if (inDeletionProbeCooldown(orchDir, sig.ticket, now())) continue;
+      recordDeletionProbe(orchDir, sig.ticket, now());
     }
     if (eligibleIds.has(sig.ticket)) continue; // (a) eligible → real ticket
     const bgId = sig.liveness?.kind === "bg" ? sig.liveness.value : null;
