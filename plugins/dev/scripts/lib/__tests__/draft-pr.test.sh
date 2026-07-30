@@ -1294,6 +1294,86 @@ chmod +x "${P10B_BIN}/git"
 ) || true
 assert_contains "$(cat "$P10B_OUT" 2>/dev/null)" "password=ghp_benigntoken123" "10b: helper emits the token as the credential password"
 
+# ─── Suite 11: _draft_pr_safety_gate — placeholder identity + blast radius (postmortem) ─
+echo ""
+echo "Suite 11: _draft_pr_safety_gate"
+
+# 11a: a commit authored by a placeholder identity (e.g. a test's own throwaway
+#      git-fixture recipe run against the real tree) blocks the push. rc==4,
+#      no output, origin/feature never created.
+echo "11a: placeholder-identity commit → draft_pr_push_verify returns 4, no push"
+new_fixture safety-placeholder
+(
+  cd "$WORK"
+  GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+    GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+    git commit --quiet --allow-empty -m "fixture"
+  source "$DRAFT_PR_LIB"
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/safety-placeholder.exit"
+  echo "$out" > "${SCRATCH}/safety-placeholder.out"
+  git rev-parse origin/feature > "${SCRATCH}/safety-placeholder.remote" 2>/dev/null || echo "<none>" > "${SCRATCH}/safety-placeholder.remote"
+) || true
+assert_eq "4" "$(cat "${SCRATCH}/safety-placeholder.exit" 2>/dev/null)" "11a: placeholder identity returns rc=4"
+assert_eq "" "$(cat "${SCRATCH}/safety-placeholder.out" 2>/dev/null)" "11a: placeholder identity echoes nothing"
+assert_eq "<none>" "$(cat "${SCRATCH}/safety-placeholder.remote" 2>/dev/null)" "11a: origin/feature never created"
+
+# 11b: a commit that deletes the entire base-tracked tree with zero offsetting
+#      insertions blocks the push. The fixture's own initial work commit is
+#      pushed first so it becomes @{u} — otherwise it would sit in the same
+#      pending range as the deletion and its insertion would mask the trip.
+#      Thresholds overridden down so the 2-file base is enough to trip the
+#      ratio deterministically.
+echo "11b: whole-tree deletion, no insertions → draft_pr_push_verify returns 4, no push"
+new_fixture safety-blast
+(
+  cd "$WORK"
+  git -c core.hooksPath=/dev/null push --quiet -u origin HEAD
+  git rm --quiet base.txt work.txt
+  git commit --quiet -m "chore: remove tracked files"
+  source "$DRAFT_PR_LIB"
+  export DRAFT_PR_BLAST_RADIUS_MIN_FILES=1 DRAFT_PR_BLAST_RADIUS_FRACTION=0.3
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/safety-blast.exit"
+  git rev-parse origin/feature > "${SCRATCH}/safety-blast.before_head"
+) || true
+assert_eq "4" "$(cat "${SCRATCH}/safety-blast.exit" 2>/dev/null)" "11b: whole-tree deletion returns rc=4"
+(
+  cd "$WORK"
+  CUR_REMOTE="$(git rev-parse origin/feature 2>/dev/null || echo '<none>')"
+  BEFORE="$(cat "${SCRATCH}/safety-blast.before_head")"
+  [[ "$CUR_REMOTE" == "$BEFORE" ]] && echo "unchanged" > "${SCRATCH}/safety-blast.remote_state" || echo "changed" > "${SCRATCH}/safety-blast.remote_state"
+)
+assert_eq "unchanged" "$(cat "${SCRATCH}/safety-blast.remote_state" 2>/dev/null)" "11b: origin/feature did not advance past the offending commit"
+
+# 11c: same deletion, but with an offsetting insertion elsewhere (a legitimate
+#      rename/replace) — the gate must NOT trip. Guards against the blast-radius
+#      check false-positiving on ordinary refactors that delete and re-add.
+echo "11c: deletion + offsetting insertion → gate does not trip; push succeeds"
+new_fixture safety-blast-offset
+(
+  cd "$WORK"
+  git -c core.hooksPath=/dev/null push --quiet -u origin HEAD
+  git rm --quiet base.txt work.txt
+  printf 'replacement\n' > replacement.txt
+  git add replacement.txt
+  git commit --quiet -m "chore: rename tracked files"
+  source "$DRAFT_PR_LIB"
+  export DRAFT_PR_BLAST_RADIUS_MIN_FILES=1 DRAFT_PR_BLAST_RADIUS_FRACTION=0.3
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/safety-blast-offset.exit"
+  git rev-parse HEAD > "${SCRATCH}/safety-blast-offset.local"
+  git rev-parse origin/feature > "${SCRATCH}/safety-blast-offset.remote" 2>/dev/null || echo "<none>" > "${SCRATCH}/safety-blast-offset.remote"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/safety-blast-offset.exit" 2>/dev/null)" "11c: offsetting insertion does not trip the gate"
+assert_eq "$(cat "${SCRATCH}/safety-blast-offset.local")" "$(cat "${SCRATCH}/safety-blast-offset.remote")" "11c: origin/feature advanced to HEAD (push succeeded)"
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"
