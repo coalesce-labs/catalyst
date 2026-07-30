@@ -16,6 +16,10 @@ export interface LivenessThresholds {
   intervalMs?: number;
   /** The generous grace window (≤ this ago, past interval → degraded). Defaults to 5min. */
   graceMs?: number;
+  /** CTL-1551: per-host live-window resolver — (host) => ms | undefined. Lets the
+   * server budget PEER transport lag without loosening the self host's window.
+   * Invalid/throwing resolver falls back to intervalMs. */
+  intervalMsFor?: (host: string) => number | undefined;
 }
 
 /** node-heartbeat cadence default (mirrors execution-core HEARTBEAT_INTERVAL_MS). */

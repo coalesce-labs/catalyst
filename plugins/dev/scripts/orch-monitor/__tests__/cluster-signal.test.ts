@@ -148,3 +148,28 @@ describe("deriveClusterSignal — defensive", () => {
     expect(typeof signal.generatedAt).toBe("string");
   });
 });
+
+// ── CTL-1551: selfHost passthrough ──
+describe("deriveClusterSignal selfHost (CTL-1551)", () => {
+  it("copies the view's selfHost so the UI never infers local identity from status", () => {
+    const sig = deriveClusterSignal({
+      generatedAt: "2026-07-30T17:00:00Z",
+      singleHost: false,
+      selfHost: "mini-2",
+      nodes: [
+        { host: "mini", status: "live", lastSeen: "2026-07-30T17:00:00Z", tickets: [] },
+        { host: "mini-2", status: "live", lastSeen: "2026-07-30T17:00:00Z", tickets: [] },
+      ],
+    } as never);
+    expect((sig as { selfHost?: string }).selfHost).toBe("mini-2");
+  });
+
+  it("omits selfHost when the view has none (back-compat frame shape)", () => {
+    const sig = deriveClusterSignal({
+      generatedAt: "2026-07-30T17:00:00Z",
+      singleHost: true,
+      nodes: [],
+    } as never);
+    expect("selfHost" in sig).toBe(false);
+  });
+});

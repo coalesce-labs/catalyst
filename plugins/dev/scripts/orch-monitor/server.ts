@@ -1577,6 +1577,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // populated BEFORE the no-anchor early-return so it works single-host too.
   const localAdmissionCache: { map: Record<string, NodeAdmission> } = { map: {} };
   let execCoreDeps: Awaited<ReturnType<typeof loadDaemonDeps>> = null;
+  // CTL-1551: the peer transport the LAST poll actually used ("loki" | "anchor").
+  let lastPeerSource: string = "loki";
   let anchorPollTimer: ReturnType<typeof setInterval> | null = null;
   const pollAnchorHeartbeats = (): void => {
     try {
@@ -1625,13 +1627,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
         cfgLokiUrl = null;
       }
       const explicitLokiUrl = process.env.CATALYST_LOKI_QUERY_URL?.trim() ? cfgLokiUrl : null;
-      const { peers } = readPeerRecords({
+      const { peers, source: peerSource } = readPeerRecords({
         rawSource: process.env.CATALYST_LIVENESS_READ_SOURCE,
         lokiUrl: explicitLokiUrl ?? lokiUrl ?? cfgLokiUrl ?? null,
         anchorIssue: execCoreDeps.getLivenessAnchorIssue(),
         readLoki: execCoreDeps.readClusterLivenessFromLokiSyncCached,
         readAnchor: execCoreDeps.readPeerHeartbeatsSync,
       }) as { peers: Record<string, AnchorPeerRec> | null; source: string };
+      // CTL-1551: remember which transport ACTUALLY served this poll — the
+      // liveness window resolver budgets by real transport, not by env intent
+      // (AUTO can fall back to the slower anchor when Loki is empty/down).
+      if (peerSource === "loki" || peerSource === "anchor") lastPeerSource = peerSource;
       if (peers == null) {
         anchorHeartbeatCache.map = {}; // no transport configured → no peers
         anchorCapacityCache.map = {};
@@ -1673,6 +1679,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // anchor peer cache). createClusterEntity then surfaces any node currently live
   // on the anchor — including a Stage-0 SHADOW node that owns zero tickets —
   // decoupled from the dispatch roster (see cluster-view.mjs CTL-1251 header).
+  // CTL-1551: resolve this monitor's own host through config AND the alias map,
+  // so it matches the (pinned) node names the cluster view renders. getHostName
+  // alone can lag a sticky-identity restore (the daemon pins CATALYST_HOST_NAME
+  // only in its own process) — alias-folding covers the pre-pin raw-name case,
+  // the same normalization every heartbeat key gets. null when unknown.
+  const resolveSelfPinnedHost = (): string | null => {
+    try {
+      const raw = execCoreDeps?.getHostName?.() ?? null;
+      if (!raw) return null;
+      return resolveHostAlias(raw, hostAliases) ?? raw;
+    } catch {
+      return null;
+    }
+  };
+
   const clusterEntity = createClusterEntity({
     // CTL-1551: PER-HOST live window. The SELF host's heartbeats come straight
     // from the local event log (no transport lag) and keep the default 30s
@@ -1683,16 +1704,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
     //   linear anchor:  ~120s publish cadence + 60s poll       → 240s window
     // "degraded" then means genuinely late; the 5-min offline grace unchanged.
     intervalMsFor: (host: string) => {
-      let self: string | null;
-      try {
-        self = execCoreDeps?.getHostName?.() ?? null;
-      } catch {
-        self = null;
-      }
+      const self = resolveSelfPinnedHost();
       if (self && host === self) return undefined; // default 30s — local log is direct
-      const src = (process.env.CATALYST_LIVENESS_READ_SOURCE ?? "").trim().toLowerCase();
-      return src === "linear" ? 240_000 : 120_000;
+      // Budget by the transport the poll ACTUALLY used last (AUTO can fall back
+      // to the anchor): loki ≈ 30s beat + 60s poll + 20s cache → 120s; the
+      // Linear anchor publishes every ~120s + 60s poll → 240s.
+      return lastPeerSource === "anchor" ? 240_000 : 120_000;
     },
+    // CTL-1551: the monitor's own identity for the view/signal (SlotDeck's
+    // localHost) — resolved per assemble, alias-folded like every other host key.
+    selfHostProvider: () => resolveSelfPinnedHost(),
     rosterProvider: () => {
       try {
         return execCoreDeps?.getClusterHosts() ?? [];

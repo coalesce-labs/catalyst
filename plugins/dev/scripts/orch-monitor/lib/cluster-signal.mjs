@@ -70,6 +70,12 @@ export function deriveClusterSignal(view) {
     // A malformed/absent view degrades to the single-host empty signal (the footer
     // simply shows its unknown/muted dot until the first real frame lands).
     singleHost: view?.singleHost ?? true,
+    // CTL-1551: pass the monitor's own identity through so the UI (SlotDeck
+    // localHost) never infers self from "first live node" — with peers now
+    // legitimately live, that heuristic picks the wrong host.
+    ...(typeof view?.selfHost === "string" && view.selfHost.length > 0
+      ? { selfHost: view.selfHost }
+      : {}),
     nodes: projected,
     generatedAt:
       typeof view?.generatedAt === "string" ? view.generatedAt : "",

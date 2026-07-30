@@ -41,6 +41,8 @@ export interface ClusterSignalNode {
 export interface ClusterSignal {
   /** True ⇒ exactly one node — footer shows one dot, the node filter is absent. */
   singleHost: boolean;
+  /** CTL-1551: this monitor's own host; absent on pre-CTL-1551 frames. */
+  selfHost?: string;
   /** One entry per REAL roster host (the synthetic unassigned bucket is dropped server-side). */
   nodes: ClusterSignalNode[];
   /** The source snapshot's generatedAt (passthrough for dedupe/debug). */
