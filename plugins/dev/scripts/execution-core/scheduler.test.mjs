@@ -1421,6 +1421,68 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     expect(classifyCalls).toBe(0); // eligible short-circuits before the Linear probe
   });
 
+  // ── CTL-1570: the sweep must not spend Linear budget on dirs it can resolve locally ──
+
+  test("never probes a phantom recovery-pass:done dir (CTL-1570)", () => {
+    // A terminal-success non-pipeline dir is already excluded from slot accounting
+    // (isPhantomWorkerDir, CTL-1323) — probing it every tick bought nothing and
+    // burned one live linearis read per tick per dir (the 2026-07-29 quota incident).
+    writeSignal("CTL-200", "recovery-pass", "done");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(0); // phantom dir resolved locally — no Linear probe
+  });
+
+  test("still probes a HELD (needs-human) recovery-pass dir — not over-skipped (CTL-1570)", () => {
+    // A parked/escalated recovery dir is NOT phantom (operator surface) and keeps
+    // its existence check, so a deleted ticket behind a needs-human dir is still
+    // detectable. Only terminal-success debris is exempt.
+    writeSignal("CTL-201", "recovery-pass", "needs-human");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(1); // held dir keeps its probe
+  });
+
+  test("threads the gateway into the phantom probe (CTL-1570)", () => {
+    // classifyTicketResolution has a 10-minute gateway short-circuit
+    // (GATEWAY_EXISTS_FRESH_MS) that can only fire when the gateway is passed.
+    // The sweep's call site historically passed only { exec }, so every probe
+    // fell through to a live linearis read.
+    writeSignal("CTL-202", "implement", "running");
+    const gateway = { getDescriptor: () => null };
+    let seenOpts = null;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway,
+      classifyResolution: (ticket, opts) => {
+        if (ticket === "CTL-202") seenOpts = opts;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(seenOpts?.gateway).toBe(gateway); // descriptor-store tier is reachable
+  });
+
   // ── CTL-1336: zero-spawn bg-liveness gate. The skip DECISION (fresh+alive / fresh+dead /
   // cold→fail-open / no-bg) is a pure exported helper `bgLivenessProtects`, unit-tested in
   // phantom-worker-dir.test.mjs (CI-gated, no harness interference). Here we only pin the

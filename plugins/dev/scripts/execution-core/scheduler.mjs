@@ -4169,7 +4169,14 @@ export function schedulerTick(
   const quarantinedPhantoms = [];
   for (const sig of readWorkerSignals(orchDir)) {
     if (!sig.ticket) continue;
-    if (!isTicketInFlight(readPhaseSignals(orchDir, sig.ticket))) continue; // skip terminal — no probe
+    const phaseSignals = readPhaseSignals(orchDir, sig.ticket);
+    if (!isTicketInFlight(phaseSignals)) continue; // skip terminal — no probe
+    // CTL-1570: a phantom dir (terminal-success non-pipeline signals, e.g.
+    // recovery-pass:done) is already excluded from slot accounting (CTL-1323) and
+    // the ticket it names demonstrably exists, so the Linear probe below can never
+    // quarantine it — it only burns one live read per dir per tick (the 2026-07-29
+    // fleet quota exhaustion). Resolve it locally and move on.
+    if (isPhantomWorkerDir(phaseSignals)) continue;
 
     // CTL-671 runaway-rate alert — OBSERVABILITY ONLY (does not quarantine, so
     // it covers noisy-but-real tickets too and runs before the phantom gates).
@@ -4209,7 +4216,11 @@ export function schedulerTick(
     // Linear. A live registry entry is a fact (same process as the dispatch), so
     // this can never mis-protect a phantom: phantoms are never registered.
     if (isSdkWorkerLive(sig.ticket)) continue;
-    if (classifyResolution(sig.ticket, { exec }) !== "not-found") continue; // (b) definitive only
+    // CTL-1570: thread the gateway so classifyTicketResolution's descriptor-store
+    // short-circuit (GATEWAY_EXISTS_FRESH_MS) can serve "exists" without a live
+    // linearis read — a held-but-workerless dir costs at most one live read per
+    // freshness window instead of one per tick.
+    if (classifyResolution(sig.ticket, { exec, gateway }) !== "not-found") continue; // (b) definitive only
     if (maybeQuarantinePhantom(orchDir, sig.ticket, sig.phase)) {
       quarantinedPhantoms.push({ ticket: sig.ticket, phase: sig.phase });
       log.warn(
