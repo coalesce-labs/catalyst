@@ -4171,12 +4171,6 @@ export function schedulerTick(
     if (!sig.ticket) continue;
     const phaseSignals = readPhaseSignals(orchDir, sig.ticket);
     if (!isTicketInFlight(phaseSignals)) continue; // skip terminal — no probe
-    // CTL-1570: a phantom dir (terminal-success non-pipeline signals, e.g.
-    // recovery-pass:done) is already excluded from slot accounting (CTL-1323) and
-    // the ticket it names demonstrably exists, so the Linear probe below can never
-    // quarantine it — it only burns one live read per dir per tick (the 2026-07-29
-    // fleet quota exhaustion). Resolve it locally and move on.
-    if (isPhantomWorkerDir(phaseSignals)) continue;
 
     // CTL-671 runaway-rate alert — OBSERVABILITY ONLY (does not quarantine, so
     // it covers noisy-but-real tickets too and runs before the phantom gates).
@@ -4196,6 +4190,25 @@ export function schedulerTick(
       );
     }
 
+    // CTL-1570: a phantom dir (terminal-success non-pipeline signals, e.g.
+    // recovery-pass:done) is already excluded from slot accounting (CTL-1323) and
+    // its ticket almost always still exists, so the live Linear probe below can
+    // never quarantine it — it only burns one live read per dir per tick (the
+    // 2026-07-29 fleet quota exhaustion). Resolve it locally and move on — UNLESS
+    // the broker's descriptor store says the ticket was removed, in which case the
+    // probe proceeds so a deleted ticket's debris dir is still quarantined
+    // (bounded deletion-verification: webhook-observed, zero live reads).
+    // Placed AFTER the runaway-rate alert above so that observability check still
+    // runs before every phantom gate.
+    if (isPhantomWorkerDir(phaseSignals)) {
+      let removed = false;
+      try {
+        removed = gateway?.getDescriptor?.(sig.ticket)?.removed === true;
+      } catch {
+        /* descriptor read is best-effort — never break the tick */
+      }
+      if (!removed) continue;
+    }
     if (eligibleIds.has(sig.ticket)) continue; // (a) eligible → real ticket
     const bgId = sig.liveness?.kind === "bg" ? sig.liveness.value : null;
     // (c) live worker → skip the Linear probe + quarantine. CTL-1336: read the warm

@@ -1427,7 +1427,7 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     // A terminal-success non-pipeline dir is already excluded from slot accounting
     // (isPhantomWorkerDir, CTL-1323) — probing it every tick bought nothing and
     // burned one live linearis read per tick per dir (the 2026-07-29 quota incident).
-    writeSignal("CTL-200", "recovery-pass", "done");
+    writeSignal("PROJ-200", "recovery-pass", "done");
     let classifyCalls = 0;
     schedulerTick(orchDir, {
       readEligible: () => [],
@@ -1442,11 +1442,36 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     expect(classifyCalls).toBe(0); // phantom dir resolved locally — no Linear probe
   });
 
+  test("a phantom dir whose ticket the broker saw DELETED still reaches the probe and quarantines (CTL-1570)", () => {
+    // Bounded deletion-verification: no live read is spent on a phantom dir unless
+    // the descriptor store says the ticket was removed — then the probe proceeds so
+    // the deleted ticket's debris is quarantined instead of persisting forever.
+    writeSignal("PROJ-203", "recovery-pass", "done");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: { getDescriptor: (t) => (t === "PROJ-203" ? { removed: true } : null) },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(1); // removed descriptor re-arms the probe
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "PROJ-203", "phase-recovery-pass.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled"); // quarantined — debris of a deleted ticket
+    expect(sig.stalledReason).toBe("phantom-ticket");
+  });
+
   test("still probes a HELD (needs-human) recovery-pass dir — not over-skipped (CTL-1570)", () => {
     // A parked/escalated recovery dir is NOT phantom (operator surface) and keeps
     // its existence check, so a deleted ticket behind a needs-human dir is still
     // detectable. Only terminal-success debris is exempt.
-    writeSignal("CTL-201", "recovery-pass", "needs-human");
+    writeSignal("PROJ-201", "recovery-pass", "needs-human");
     let classifyCalls = 0;
     schedulerTick(orchDir, {
       readEligible: () => [],
@@ -1466,7 +1491,7 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     // (GATEWAY_EXISTS_FRESH_MS) that can only fire when the gateway is passed.
     // The sweep's call site historically passed only { exec }, so every probe
     // fell through to a live linearis read.
-    writeSignal("CTL-202", "implement", "running");
+    writeSignal("PROJ-202", "implement", "running");
     const gateway = { getDescriptor: () => null };
     let seenOpts = null;
     schedulerTick(orchDir, {
@@ -1475,7 +1500,7 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
       liveBackgroundCount: () => 0,
       gateway,
       classifyResolution: (ticket, opts) => {
-        if (ticket === "CTL-202") seenOpts = opts;
+        if (ticket === "PROJ-202") seenOpts = opts;
         return "exists";
       },
       isBgJobAlive: () => false,
@@ -6229,7 +6254,7 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
 
   test("advancement sweep demotes rc=0 + missing bg job to failure", () => {
     // FSM owes plan; fakeDispatch returns rc=0 but does NOT write the signal.
-    writeSignal("CTL-200", "research", "done");
+    writeSignal("PROJ-200", "research", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 0, writeSignal: false });
 
@@ -6241,11 +6266,11 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
 
     expect(dispatch.calls).toHaveLength(1);
     // Demotion: no advance recorded.
-    expect(result?.advanced ?? []).not.toContainEqual({ ticket: "CTL-200", phase: "plan" });
+    expect(result?.advanced ?? []).not.toContainEqual({ ticket: "PROJ-200", phase: "plan" });
     // Cool-down marker exists (failure-on-disk effect).
-    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-200", "plan"))).toBe(true);
+    expect(existsSync(dispatchCooldownPath(orchDir, "PROJ-200", "plan"))).toBe(true);
     // Exactly one event emitted with verify_failed reason + code=0.
-    const events = dispatchFailedEvents("CTL-200");
+    const events = dispatchFailedEvents("PROJ-200");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "plan",
@@ -6255,13 +6280,13 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
   });
 
   test("advancement sweep emits phase.dispatch.failed on rc!=0", () => {
-    writeSignal("CTL-201", "research", "done");
+    writeSignal("PROJ-201", "research", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 1 });
 
     schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
 
-    const events = dispatchFailedEvents("CTL-201");
+    const events = dispatchFailedEvents("PROJ-201");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "plan",
@@ -6340,14 +6365,14 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
     const dispatch = fakeDispatch({ code: 1 });
 
     schedulerTick(orchDir, {
-      readEligible: () => eligibleOne("CTL-202"),
+      readEligible: () => eligibleOne("PROJ-202"),
       dispatch,
       now: () => 1_000,
       liveBackgroundCount: () => 0, // CTL-611: deterministic free slot post-CTL-657 rebase
       hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is dispatch.failed event
     });
 
-    const events = dispatchFailedEvents("CTL-202");
+    const events = dispatchFailedEvents("PROJ-202");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "research",
