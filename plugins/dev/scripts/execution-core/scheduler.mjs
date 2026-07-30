@@ -82,6 +82,7 @@ import {
   isAssigneeClaimable,
   isClaimable,
   readTicketLabels,
+  GATEWAY_EXISTS_FRESH_MS,
 } from "./linear-query.mjs";
 import { gatewayLabelsHit, descriptorAgeMs } from "./gateway-read.mjs"; // CTL-1079 / CTL-1570
 import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup
@@ -2545,11 +2546,12 @@ function recordRunawayAlert(orchDir, ticket, now) {
 // non-phantom and retires the whole path.
 const DELETION_PROBE_INTERVAL_MS = 10 * 60_000; // one verification per 10 min per ticket
 
-// A descriptor may only vouch a phantom's ticket ALIVE while it is fresh —
-// same bound as classifyTicketResolution's GATEWAY_EXISTS_FRESH_MS. A stale
-// { removed:false } row (missed removal webhook) must NOT suppress deletion
-// verification forever; past this age the dir falls to the bounded probe path.
-const PHANTOM_DESCRIPTOR_FRESH_MS = 10 * 60_000;
+// A descriptor may only vouch a phantom's ticket ALIVE while it is fresh — the
+// bound is the SHARED GATEWAY_EXISTS_FRESH_MS (imported from linear-query.mjs),
+// so this gate and classifyTicketResolution's short-circuit can never disagree.
+// A stale { removed:false } row (missed removal webhook) must NOT suppress
+// deletion verification forever; past this age the dir falls to the bounded
+// probe path.
 
 function deletionProbePath(orchDir, ticket) {
   return join(orchDir, ".deletion-probes", ticket);
@@ -4268,7 +4270,7 @@ export function schedulerTick(
       if (
         desc &&
         desc.removed !== true &&
-        descriptorAgeMs(desc, now()) <= PHANTOM_DESCRIPTOR_FRESH_MS
+        descriptorAgeMs(desc, now()) <= GATEWAY_EXISTS_FRESH_MS
       )
         continue;
       // Removed tombstone OR gateway miss (no gateway / no descriptor / unreadable

@@ -239,7 +239,10 @@ function normalizeTicket(node) {
 // 10 min; STATE changes constantly, so it gets the same 60s the in-memory
 // cache uses. The store is a safe optimization, never the source of truth —
 // every destructive decision still pays a live read.
-const GATEWAY_EXISTS_FRESH_MS = 10 * 60_000;
+// Exported (CTL-1570): the scheduler's phantom-dir alive-vouch gate must use the
+// SAME freshness bound as classifyTicketResolution's gateway short-circuit, or a
+// later tuning of one silently changes when deletion verification is suppressed.
+export const GATEWAY_EXISTS_FRESH_MS = 10 * 60_000;
 const GATEWAY_STATE_FRESH_MS = 60_000;
 
 // CTL-1403: daemon-side reads-by-source emit for fetchTicketState. Best-effort,
