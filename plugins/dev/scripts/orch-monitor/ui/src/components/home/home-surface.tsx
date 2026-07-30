@@ -41,6 +41,7 @@ import { useScopedBoardSnapshot } from "@/hooks/use-scoped-board-snapshot";
 // resumes the agent, with optimistic rollback. The hook owns the optimistic
 // state + grace timer; the pure client/fetch live in board/respond-client.ts.
 import { useRespond, type RespondRowStatus } from "@/hooks/use-respond";
+import type { ReplyOutcome } from "@/board/conversation-client";
 import { ResizableSplit } from "./resizable-split";
 import { InboxRow } from "./inbox-row";
 import { ReadingPane } from "./reading-pane";
@@ -257,7 +258,7 @@ export function HomeSurface() {
   // through the read-model write endpoint (board/respond-client.ts owns the
   // fetch). The single-node case is an exact pass-through (the endpoint's
   // identity fence no-op); a multi-node fence rejection arrives as `did-not-take`.
-  const { respond, statusFor, reconcile } = useRespond();
+  const { respond, statusFor, reconcile, markResolved, markDidNotTake } = useRespond();
   const onAct = useCallback(
     (id: string) => {
       // The recorded note is empty for the one-click verb — the BFF12 endpoint
@@ -266,6 +267,20 @@ export function HomeSurface() {
       void respond(id, "");
     },
     [respond],
+  );
+
+  // CTL-1569: the inline REPLY's outcome. A confirmed post is a real resolution —
+  // the Linear comment clears `needs-human` within seconds (CTL-1567) — so the row
+  // is optimistically cleared through the SAME mark + grace-window machinery the
+  // verb uses; if the label never actually clears, the standing reconcile rolls it
+  // back and the row returns. Every failure marks did-not-take instead, so the item
+  // is restored rather than silently lost (§4).
+  const onReplied = useCallback(
+    (outcome: ReplyOutcome) => {
+      if (outcome.status === "replied") markResolved(outcome.ticket);
+      else if (outcome.status !== "empty") markDidNotTake(outcome.ticket);
+    },
+    [markResolved, markDidNotTake],
   );
 
   // Reconcile the optimistic marks against EVERY new read-model frame: a row that
@@ -316,6 +331,7 @@ export function HomeSurface() {
               workers={payload?.workers ?? []}
               onAct={onAct}
               respondStatus={selectedRow ? statusFor(selectedRow.id) : "idle"}
+              onReplied={onReplied}
             />
           )
         }

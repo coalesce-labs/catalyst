@@ -123,6 +123,15 @@ import {
   respondTicket,
   type RespondTicketResult,
 } from "./lib/respond-ticket.mjs";
+// CTL-1569: the inbox conversation surface. Two routes, deliberately split by
+// posture — GET /thread is a pure REPLICA read (zero Linear API calls, so it is
+// safe on a hover-speed path), POST /reply is the one write that posts a REAL,
+// human-authored Linear comment (the mechanism that actually clears `needs-human`
+// via CTL-1567). The reply path is a SIBLING of /respond, not a replacement: see
+// lib/reply-ticket.mjs for why /respond's synthetic null-author event and its
+// hard held-run requirement make it unusable for this surface.
+import { getConversation, loadGlobalConfig } from "./lib/inbox-conversation.mjs";
+import { replyToTicket } from "./lib/reply-ticket.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -3634,6 +3643,107 @@ export function createServer(opts: CreateServerOptions): BunServer {
               // Response recorded + marker cleared + resume event emitted; the UI
               // marks the row `resuming` and arms its optimistic-rollback timer.
               return Response.json(result, { status: 200 });
+          }
+        }
+
+        // ── CTL-1569: the inbox conversation surface ───────────────────────────
+        //
+        // GET /api/ticket/<ticket>/thread — the ask summary + the last few comments
+        // (newest first) + the ticket's Linear deep link. A pure REPLICA read: it
+        // makes ZERO Linear API calls, which is what makes it safe to fetch on every
+        // row selection against a shared, rate-limited fleet quota. Fails OPEN —
+        // an absent/locked replica yields an unavailable thread, never a 5xx.
+        const threadMatch = url.pathname.match(/^\/api\/ticket\/([^/]+)\/thread$/);
+        if (threadMatch && req.method === "GET") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(threadMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const limitParam = Number(url.searchParams.get("limit"));
+          const conversation = await getConversation(ticket, {
+            ...(Number.isFinite(limitParam) && limitParam > 0
+              ? { limit: Math.min(Math.floor(limitParam), 50) }
+              : {}),
+          });
+          return Response.json(conversation, { status: 200 });
+        }
+
+        // POST /api/ticket/<ticket>/reply — post the operator's reply to Linear as a
+        // REAL human-authored comment. This is the resolution mechanism: once the
+        // comment lands, Linear's webhook drives the daemon's comment-wake, which
+        // clears `needs-human` unconditionally and first (CTL-1567, ~4s end to end).
+        //
+        // Deliberately UNLIKE /respond:
+        //   • NO typed-confirm. The typed gate exists for destructive verbs (stop a
+        //     worker); forcing an operator to retype the ticket id to send a chat
+        //     reply would defeat the entire surface. The reply text IS the intent.
+        //   • NO held-run requirement. The tickets that most need answering are
+        //     parked with no worker dir at all, and /respond 404s exactly those.
+        //
+        // EVERY non-2xx here must cause the UI to RESTORE the row (§4) — the row is
+        // never silently lost. `bot_identity` is the loud refusal that prevents the
+        // whole feature from shipping inert: an app-actor comment is ignored by
+        // CTL-1567, so it is refused BEFORE posting rather than faking success.
+        const replyMatch = url.pathname.match(/^\/api\/ticket\/([^/]+)\/reply$/);
+        if (replyMatch && req.method === "POST") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(replyMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = (await req.json()) as Record<string, unknown>;
+          } catch {
+            return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+          }
+          const text = typeof body.body === "string" ? body.body : "";
+          const result = await replyToTicket(
+            { ticket, body: text },
+            { config: await loadGlobalConfig() },
+          );
+          switch (result.status) {
+            case "replied":
+              // The comment is live and human-authored. The UI marks the row
+              // resolved optimistically and reconciles against the label.
+              return Response.json(result, { status: 200 });
+            case "empty_body":
+              return Response.json(
+                { ...result, error: "an empty reply was not sent" },
+                { status: 400 },
+              );
+            case "not_found":
+              return Response.json(
+                {
+                  ...result,
+                  error: `no Linear issue ${ticket} to reply to`,
+                },
+                { status: 404 },
+              );
+            case "bot_identity":
+            case "no_token":
+            case "error":
+            default:
+              // 502: the write did NOT act. Surfaced verbatim so the operator sees
+              // WHY (especially the app-actor refusal) and the row comes back.
+              return Response.json(
+                {
+                  ...result,
+                  error:
+                    (result as { message?: string }).message ??
+                    "reply was not posted to Linear",
+                },
+                { status: 502 },
+              );
           }
         }
 

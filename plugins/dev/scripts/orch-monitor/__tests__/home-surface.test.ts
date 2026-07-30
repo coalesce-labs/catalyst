@@ -40,6 +40,8 @@ const allClearHeroSrc = read("components/home/all-clear-hero.tsx");
 // client is called from).
 const readingPaneSrc = read("components/home/reading-pane.tsx");
 const useRespondSrc = read("hooks/use-respond.ts");
+// CTL-1569: the conversation surface joins the home tree (same no-fetch invariant).
+const conversationSrc = read("components/home/conversation.tsx");
 
 function stripComments(src: string): string {
   return src
@@ -50,6 +52,7 @@ function stripComments(src: string): string {
 
 const homeCode = stripComments(homeSurfaceSrc);
 const rowCode = stripComments(inboxRowSrc);
+const conversationCode = stripComments(conversationSrc);
 const appCode = stripComments(appSrc);
 
 // ── Scenario: The split survives an iPad-landscape width (firm floors) ────────
@@ -363,16 +366,87 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
   });
 
   it("the ONLY place the write client (fetch) is reached is the use-respond hook / its pure client", () => {
-    // The home tree's no-fetch invariant is preserved: home-surface / row / pane
-    // carry NO literal fetch/EventSource — the fetch is isolated in
-    // respond-client.ts and reached only via the use-respond hook.
-    for (const code of [homeCode, rowCode, readingPaneCode]) {
+    // The home tree's no-fetch invariant is preserved: home-surface / row / pane /
+    // conversation carry NO literal fetch/EventSource — the fetch is isolated in
+    // respond-client.ts / conversation-client.ts and reached only via a hook.
+    // CTL-1569 adds conversation.tsx to the tree, so it is held to the same rule.
+    for (const code of [homeCode, rowCode, readingPaneCode, conversationCode]) {
       expect(code).not.toMatch(/\bfetch\(/);
       expect(code).not.toMatch(/\bnew EventSource\b/);
     }
     // The hook calls the pure client (respondTicket), not a raw fetch of its own.
     expect(useRespondSrc).toContain("respondTicket");
     expect(useRespondCode).not.toMatch(/\bfetch\(/);
+    // The conversation reaches the network only through its isolated client.
+    expect(conversationSrc).toContain("fetchConversation");
+    expect(conversationSrc).toContain("postReply");
+  });
+});
+
+// ── CTL-1569: the inbox as a conversation surface ────────────────────────────
+describe("Inbox conversation surface (CTL-1569)", () => {
+  it("the pane mounts the conversation for needs-you rows only", () => {
+    // Running/done rows stay calm — the conversation is gated on needsYou.
+    expect(readingPaneSrc).toContain("Conversation");
+    expect(readingPaneSrc).toMatch(/needsYou &&\s*\(?\s*<Conversation/);
+  });
+
+  it("the thread renders NEWEST FIRST, in the order the server sent", () => {
+    // §2: the agent's question is almost always newest and the operator's prior
+    // reply the one before it — chronological order buries both. The server sorts
+    // DESC and the component must not re-sort.
+    expect(conversationSrc).toContain("newest-first");
+    expect(conversationCode).not.toMatch(/\.reverse\(\)/);
+    expect(conversationCode).not.toMatch(/\.sort\(/);
+  });
+
+  it("agent and human comments are visually distinct", () => {
+    expect(conversationSrc).toContain("data-thread-author");
+    expect(conversationSrc).toContain("isAgent");
+  });
+
+  it("long comment bodies clamp with expand-in-place", () => {
+    expect(conversationSrc).toContain("data-thread-expand");
+    expect(conversationSrc).toContain("line-clamp-4");
+  });
+
+  it("the ask summary states the kind AND whether replying alone is enough", () => {
+    // §1: the two things that must be unambiguous at a glance.
+    expect(conversationSrc).toContain("data-ask-kind");
+    expect(conversationSrc).toContain("data-ask-resolution");
+    expect(conversationSrc).toContain("requiresAction");
+  });
+
+  it("suggested replies PREFILL the box rather than auto-sending", () => {
+    // A chip is a shortcut, not a submit — the operator can still edit.
+    expect(conversationSrc).toContain("data-ask-suggestion");
+    expect(conversationSrc).toContain("onUseSuggestion");
+    expect(conversationSrc).toContain("setDraft");
+  });
+
+  it("every row links directly to its Linear ticket", () => {
+    expect(conversationSrc).toContain("data-linear-link");
+  });
+
+  it("a row with no underlying ticket shows NO reply affordance", () => {
+    // Orphan-PR rows are synthesized with no Linear issue — nothing to reply to.
+    expect(conversationSrc).toContain("canReply");
+    expect(conversationSrc).toContain("data-no-reply-affordance");
+  });
+
+  it("a failed post KEEPS the draft and surfaces the reason (never loses the item)", () => {
+    // §4: a failed post, or one whose label clear is suppressed, must restore the
+    // row. The draft is only cleared on a CONFIRMED post.
+    expect(conversationSrc).toContain("data-reply-failure");
+    expect(conversationSrc).toMatch(/status === "replied"/);
+  });
+
+  it("the surface routes a reply outcome through the ONE optimistic-rollback rule", () => {
+    // Reusing the verb's mark + grace window (rather than a second optimistic
+    // path) keeps one reconcile rule deciding when a row truly leaves the inbox.
+    expect(homeSurfaceSrc).toContain("onReplied");
+    expect(homeSurfaceSrc).toContain("markResolved");
+    expect(homeSurfaceSrc).toContain("markDidNotTake");
   });
 });
 

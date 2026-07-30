@@ -1,0 +1,731 @@
+// inbox-conversation.test.mjs — CTL-1569: the inbox conversation surface.
+//
+// Covers the three pure/injectable modules behind the feature:
+//   • inbox-ask.mjs      — "what this needs from you" derivation + kind classification
+//   • linear-thread.mjs  — replica-only thread read (newest-first, fail-open)
+//   • linear-comment.mjs — the operator-authorship gate + the real comment post
+//   • reply-ticket.mjs   — orchestration + the restore-the-row failure contract
+//
+// Every test is offline: no Linear API, no real replica, no worker dir.
+// Fixtures use the PROJ prefix per AGENTS.md → Version Control.
+
+import { describe, expect, it } from "bun:test";
+
+import {
+  ASK_KINDS,
+  askFromComment,
+  askFromExplanation,
+  askFromStructured,
+  classifyAskText,
+  condenseSummary,
+  deriveAsk,
+} from "./inbox-ask.mjs";
+import { isEscalationNotice, pickAskComment } from "./inbox-ask.mjs";
+import { normalizeComment, readTicketThread } from "./linear-thread.mjs";
+import {
+  knownBotUserIds,
+  postOperatorComment,
+  resolveAuthorIdentity,
+  resolveLinearToken,
+} from "./linear-comment.mjs";
+import { replyToTicket } from "./reply-ticket.mjs";
+
+// ── test doubles ─────────────────────────────────────────────────────────────
+
+/** A fake bun:sqlite-shaped handle over canned rows, keyed by SQL fragment. */
+function fakeDb({ comments = [], issue = null, throwOn = null }) {
+  return () => ({
+    prepare(sql) {
+      if (throwOn && sql.includes(throwOn)) {
+        throw new Error("database is locked");
+      }
+      const isIssueQuery = sql.includes("FROM issues");
+      return {
+        all: () => (isIssueQuery ? [] : comments),
+        get: () => (isIssueQuery ? issue : comments[0] ?? null),
+      };
+    },
+    run() {},
+    close() {},
+  });
+}
+
+/** A fetch double that dispatches on the GraphQL operation in the body. */
+function fakeFetch(handlers) {
+  return async (_url, init) => {
+    const parsed = JSON.parse(init.body);
+    const q = parsed.query;
+    const which = q.includes("viewer")
+      ? "viewer"
+      : q.includes("issue(id:")
+        ? "issue"
+        : q.includes("commentCreate")
+          ? "commentCreate"
+          : "unknown";
+    const handler = handlers[which];
+    if (!handler) throw new Error(`unexpected operation: ${which}`);
+    return handler(parsed.variables);
+  };
+}
+
+const jsonRes = (body, status = 200) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  text: async () => JSON.stringify(body),
+});
+
+const HUMAN_VIEWER = jsonRes({
+  data: { viewer: { id: "human-uuid", name: "Ryan Rozich", email: "ryan@example.com", isMe: true } },
+});
+const APP_VIEWER = jsonRes({
+  data: { viewer: { id: "bot-uuid", name: "Catalyst Orchestrator", email: null, isMe: false } },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// inbox-ask.mjs — the ask summary (§1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("classifyAskText — the four kinds", () => {
+  it("classifies an approve ask (a yes/no is enough)", () => {
+    expect(classifyAskText("Approve publishing SDK 0.7.1?")).toBe("approve");
+    expect(classifyAskText("Ok to proceed with the merge?")).toBe("approve");
+    expect(classifyAskText("I need permission to delete the stale branch.")).toBe("approve");
+  });
+
+  it("classifies a decide ask (choose between options)", () => {
+    expect(classifyAskText("Which option do you want?")).toBe("decide");
+    expect(classifyAskText("Either close it as superseded or keep it for later.")).toBe("decide");
+    expect(classifyAskText("Choose between A and B.")).toBe("decide");
+  });
+
+  it("classifies an act-then-confirm ask (you must DO something first)", () => {
+    expect(
+      classifyAskText("Create the parked-by-human label in Linear, then reply done."),
+    ).toBe("act-then-confirm");
+    expect(classifyAskText("Reply 'done' once you have rotated the token.")).toBe(
+      "act-then-confirm",
+    );
+    expect(classifyAskText("Manually create the missing workflow state.")).toBe(
+      "act-then-confirm",
+    );
+  });
+
+  it("falls back to clarify for unrecognized free text (the honest default)", () => {
+    expect(classifyAskText("The findings are ambiguous.")).toBe("clarify");
+    expect(classifyAskText("")).toBe("clarify");
+    expect(classifyAskText(null)).toBe("clarify");
+  });
+
+  it("prefers act-then-confirm over approve when BOTH markers appear", () => {
+    // The costly error is telling the operator a bare "yes" suffices when they must
+    // first go do something. That precedence is load-bearing, so pin it.
+    const text = "Approve the change, then reply done once you have applied the label.";
+    expect(classifyAskText(text)).toBe("act-then-confirm");
+  });
+
+  it("only ever returns one of the four documented kinds", () => {
+    for (const text of ["approve?", "which one", "then reply done", "hmm", "", "  "]) {
+      expect(ASK_KINDS).toContain(classifyAskText(text));
+    }
+  });
+});
+
+describe("condenseSummary", () => {
+  it("collapses whitespace", () => {
+    expect(condenseSummary("a\n\n  b   c")).toBe("a b c");
+  });
+  it("returns null for empty/absent input (never fabricates)", () => {
+    expect(condenseSummary("")).toBeNull();
+    expect(condenseSummary("   ")).toBeNull();
+    expect(condenseSummary(null)).toBeNull();
+  });
+  it("truncates long prose with an ellipsis", () => {
+    const out = condenseSummary("x".repeat(500), 100);
+    expect(out.length).toBe(100);
+    expect(out.endsWith("…")).toBe(true);
+  });
+});
+
+describe("askFromStructured — the producer-authored path (preferred)", () => {
+  it("uses a complete producer ask verbatim", () => {
+    const ask = askFromStructured({
+      ask: {
+        kind: "approve",
+        summary: "Reply approve to publish, or no to hold.",
+        suggested_replies: ["approve", "no"],
+      },
+    });
+    expect(ask.kind).toBe("approve");
+    expect(ask.summary).toBe("Reply approve to publish, or no to hold.");
+    expect(ask.suggestedReplies).toEqual(["approve", "no"]);
+    expect(ask.canResolveByReply).toBe(true);
+    expect(ask.source).toBe("structured");
+  });
+
+  it("accepts the camelCase alias for suggested replies", () => {
+    const ask = askFromStructured({
+      ask: { kind: "decide", summary: "A or B?", suggestedReplies: ["A", "B"] },
+    });
+    expect(ask.suggestedReplies).toEqual(["A", "B"]);
+  });
+
+  it("treats a HALF-written ask as absent so the derived path can still work", () => {
+    expect(askFromStructured({ ask: { kind: "approve" } })).toBeNull(); // no summary
+    expect(askFromStructured({ ask: { summary: "hi" } })).toBeNull(); // no kind
+    expect(askFromStructured({ ask: { kind: "nonsense", summary: "hi" } })).toBeNull();
+  });
+
+  it("returns null when there is no ask object at all", () => {
+    expect(askFromStructured(null)).toBeNull();
+    expect(askFromStructured({})).toBeNull();
+  });
+
+  it("derives canResolveByReply from the kind, never from the producer", () => {
+    // An act-then-confirm can NEVER claim reply-alone, even if a producer said so.
+    const ask = askFromStructured({
+      ask: { kind: "act-then-confirm", summary: "Do the thing, then confirm.", canResolveByReply: true },
+    });
+    expect(ask.canResolveByReply).toBe(false);
+  });
+});
+
+describe("askFromExplanation — derived from CTL-1110 fields", () => {
+  it("treats 2+ enumerated options as a decision, with the labels as chips", () => {
+    const ask = askFromExplanation({
+      call_to_action: "Pick how to handle PROJ-17.",
+      options: [
+        { label: "close as superseded", detail: "drop it" },
+        { label: "keep for Preferences", detail: "retain" },
+      ],
+    });
+    expect(ask.kind).toBe("decide");
+    expect(ask.suggestedReplies).toEqual(["close as superseded", "keep for Preferences"]);
+    expect(ask.canResolveByReply).toBe(true);
+    expect(ask.source).toBe("explanation");
+  });
+
+  it("classifies the CTA prose when there are no enumerated options", () => {
+    const ask = askFromExplanation({ call_to_action: "Approve the rollout?" });
+    expect(ask.kind).toBe("approve");
+    expect(ask.summary).toBe("Approve the rollout?");
+    expect(ask.suggestedReplies).toEqual([]);
+  });
+
+  it("reads what_to_do for the act-then-confirm marker the CTA lacks", () => {
+    // The "…then reply done" instruction usually lives in what_to_do; missing it
+    // would wrongly promise the operator that replying alone is enough.
+    const ask = askFromExplanation({
+      call_to_action: "The label is missing.",
+      what_to_do: "Create the label in Linear, then reply done.",
+    });
+    expect(ask.kind).toBe("act-then-confirm");
+    expect(ask.canResolveByReply).toBe(false);
+    // The CTA still leads the summary (shorter, more imperative).
+    expect(ask.summary).toBe("The label is missing.");
+  });
+
+  it("never invents reply chips from prose", () => {
+    const ask = askFromExplanation({ call_to_action: "Reply approve or no." });
+    expect(ask.suggestedReplies).toEqual([]);
+  });
+
+  it("returns null when the explanation carries no usable text", () => {
+    expect(askFromExplanation({ outcome: null, problem: null })).toBeNull();
+    expect(askFromExplanation({})).toBeNull();
+    expect(askFromExplanation(null)).toBeNull();
+  });
+
+  it("does not treat a SINGLE option as a decision", () => {
+    const ask = askFromExplanation({
+      call_to_action: "Approve this?",
+      options: [{ label: "yes" }],
+    });
+    expect(ask.kind).toBe("approve");
+    expect(ask.suggestedReplies).toEqual([]);
+  });
+});
+
+describe("askFromComment — the last-resort fallback for tickets parked TODAY", () => {
+  it("derives kind + summary from the newest agent comment", () => {
+    const ask = askFromComment("Which of the 13 findings actually matter?");
+    expect(ask.kind).toBe("decide");
+    expect(ask.source).toBe("comment");
+  });
+  it("never produces chips (a guessed chip is worse than none)", () => {
+    expect(askFromComment("Reply approve or hold.").suggestedReplies).toEqual([]);
+  });
+  it("returns null for an empty comment", () => {
+    expect(askFromComment("")).toBeNull();
+    expect(askFromComment(null)).toBeNull();
+  });
+});
+
+describe("deriveAsk — the preference chain", () => {
+  const structured = {
+    ask: { kind: "approve", summary: "structured wins", suggested_replies: ["yes"] },
+    call_to_action: "explanation loses",
+  };
+
+  it("prefers structured over explanation over comment", () => {
+    expect(deriveAsk({ explanation: structured }).summary).toBe("structured wins");
+    expect(
+      deriveAsk({ explanation: { call_to_action: "explanation wins" } }).summary,
+    ).toBe("explanation wins");
+    expect(
+      deriveAsk({ explanation: null, lastAgentComment: "comment wins" }).summary,
+    ).toBe("comment wins");
+  });
+
+  it("returns null when NO source yields text (the pane renders absent)", () => {
+    expect(deriveAsk({})).toBeNull();
+    expect(deriveAsk({ explanation: {}, lastAgentComment: "" })).toBeNull();
+  });
+
+  it("falls through a half-written structured ask to the explanation fields", () => {
+    const ask = deriveAsk({
+      explanation: { ask: { kind: "approve" }, call_to_action: "fell through" },
+    });
+    expect(ask.summary).toBe("fell through");
+    expect(ask.source).toBe("explanation");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// linear-thread.mjs — the replica thread read (§2/§3)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("isEscalationNotice / pickAskComment", () => {
+  it("recognizes the content-free recovery-pass pointer", () => {
+    // Verbatim from production: this is the ENTIRE comment body.
+    expect(
+      isEscalationNotice(
+        "🔼 **recovery-pass** self-heal attempts exhausted on this ticket — " +
+          "escalated to the operator. (See your inbox.)",
+      ),
+    ).toBe(true);
+    expect(isEscalationNotice("This ticket is now marked for human review.")).toBe(true);
+  });
+
+  it("does NOT discard a long comment that merely mentions escalation", () => {
+    const long = `Reasoning pass determined this requires human judgment. ${"detail ".repeat(120)}`;
+    expect(isEscalationNotice(long)).toBe(false);
+  });
+
+  it("skips notices and picks the newest SUBSTANTIVE agent comment", () => {
+    const picked = pickAskComment([
+      "🔼 recovery-pass self-heal attempts exhausted — escalated to the operator. (See your inbox.)",
+      "**Reason:** duplicate of PROJ-1385, fix already merged, no code change needed.",
+      "older still",
+    ]);
+    expect(picked).toContain("duplicate of PROJ-1385");
+  });
+
+  it("falls back to the newest notice when EVERY comment is one", () => {
+    // A weak ask beats an absent one when the agent said nothing else.
+    const picked = pickAskComment([
+      "escalated to the operator. (See your inbox.)",
+      "marked for human review",
+    ]);
+    expect(picked).toBe("escalated to the operator. (See your inbox.)");
+  });
+
+  it("returns null for an empty list", () => {
+    expect(pickAskComment([])).toBeNull();
+    expect(pickAskComment(null)).toBeNull();
+  });
+
+  it("threads through deriveAsk so the ask skips the pointer", () => {
+    const ask = deriveAsk({
+      agentComments: [
+        "escalated to the operator. (See your inbox.)",
+        "Which of the 13 findings actually matter?",
+      ],
+    });
+    expect(ask.summary).toBe("Which of the 13 findings actually matter?");
+    expect(ask.kind).toBe("decide");
+  });
+});
+
+describe("normalizeComment", () => {
+  it("maps is_bot 1 to isAgent true", () => {
+    expect(normalizeComment({ id: "c1", body: "x", is_bot: 1 }).isAgent).toBe(true);
+  });
+
+  it("treats a CATALYST APP ACTOR as the agent even though is_bot is 0", () => {
+    // The load-bearing case: Linear models an app actor as a user, so the agent's
+    // own comments arrive with is_bot=0. Classifying them as human would render
+    // every agent question as if the operator had written it.
+    const row = { id: "c1", body: "x", is_bot: 0, author_id: "bot-uuid", author_name: "Catalyst" };
+    expect(normalizeComment(row).isAgent).toBe(false); // no ids configured → is_bot only
+    expect(normalizeComment(row, { botUserIds: new Set(["bot-uuid"]) }).isAgent).toBe(true);
+  });
+
+  it("keeps a real human human even when bot ids are configured", () => {
+    const row = { id: "c2", body: "x", is_bot: 0, author_id: "human-uuid" };
+    expect(normalizeComment(row, { botUserIds: new Set(["bot-uuid"]) }).isAgent).toBe(false);
+  });
+
+  it("treats a null is_bot as human (the conservative display split)", () => {
+    expect(normalizeComment({ id: "c1", body: "x", is_bot: null }).isAgent).toBe(false);
+  });
+  it("flags a long body as truncated so the UI can clamp it", () => {
+    expect(normalizeComment({ id: "c1", body: "x".repeat(900) }).truncated).toBe(true);
+    expect(normalizeComment({ id: "c1", body: "short" }).truncated).toBe(false);
+  });
+  it("omits a timestamp rather than fabricating one", () => {
+    expect(normalizeComment({ id: "c1", body: "x" }).at).toBeNull();
+    expect(normalizeComment({ id: "c1", body: "x", created_at: 42 }).at).toBe(42);
+  });
+  it("drops a row with no id", () => {
+    expect(normalizeComment({ body: "x" })).toBeNull();
+    expect(normalizeComment(null)).toBeNull();
+  });
+});
+
+describe("readTicketThread", () => {
+  it("returns the thread and lifts the newest AGENT comment", async () => {
+    // Rows arrive newest-first from SQL; the newest agent entry is the ask.
+    const out = await readTicketThread("PROJ-1", {
+      openDb: fakeDb({
+        comments: [
+          { id: "c3", body: "agent asks the question", is_bot: 1, updated_at: 300 },
+          { id: "c2", body: "human replied earlier", is_bot: 0, updated_at: 200 },
+          { id: "c1", body: "older agent note", is_bot: 1, updated_at: 100 },
+        ],
+        issue: { identifier: "PROJ-1", title: "T", url: "https://linear.app/x/PROJ-1" },
+      }),
+    });
+    expect(out.available).toBe(true);
+    expect(out.comments.map((c) => c.id)).toEqual(["c3", "c2", "c1"]);
+    expect(out.lastAgentComment).toBe("agent asks the question");
+    // The full ordered agent list is surfaced so the ask derivation can skip notices.
+    expect(out.agentComments).toEqual(["agent asks the question", "older agent note"]);
+    expect(out.url).toBe("https://linear.app/x/PROJ-1");
+  });
+
+  it("distinguishes a GENUINELY EMPTY thread from an UNREADABLE one", async () => {
+    const emptyThread = await readTicketThread("PROJ-2", {
+      openDb: fakeDb({ comments: [], issue: { url: "u" } }),
+    });
+    expect(emptyThread.available).toBe(true);
+    expect(emptyThread.comments).toEqual([]);
+    expect(emptyThread.reason).toBeNull();
+
+    const broken = await readTicketThread("PROJ-2", {
+      openDb: fakeDb({ throwOn: "FROM comments" }),
+    });
+    expect(broken.available).toBe(false);
+    expect(broken.reason).toContain("replica-error");
+  });
+
+  it("fails OPEN — a locked/absent replica never throws into a request", async () => {
+    const out = await readTicketThread("PROJ-3", {
+      openDb: () => {
+        throw new Error("unable to open database file");
+      },
+    });
+    expect(out.available).toBe(false);
+    expect(out.comments).toEqual([]);
+    expect(out.lastAgentComment).toBeNull();
+  });
+
+  it("rejects an absent ticket without opening anything", async () => {
+    const out = await readTicketThread("", {
+      openDb: () => {
+        throw new Error("should not have opened");
+      },
+    });
+    expect(out.reason).toBe("no-ticket");
+  });
+
+  it("reports null url when the issue row is absent (a synthesized row)", async () => {
+    const out = await readTicketThread("PROJ-4", {
+      openDb: fakeDb({ comments: [], issue: null }),
+    });
+    expect(out.available).toBe(true);
+    expect(out.url).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// linear-comment.mjs — the authorship gate (§4, the ships-inert risk)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("resolveLinearToken", () => {
+  it("prefers LINEAR_API_TOKEN, falls back to LINEAR_API_KEY", () => {
+    expect(resolveLinearToken({ LINEAR_API_TOKEN: "a", LINEAR_API_KEY: "b" })).toBe("a");
+    expect(resolveLinearToken({ LINEAR_API_KEY: "b" })).toBe("b");
+    expect(resolveLinearToken({})).toBeNull();
+    expect(resolveLinearToken({ LINEAR_API_TOKEN: "   " })).toBeNull();
+  });
+});
+
+describe("knownBotUserIds", () => {
+  it("collects every configured app-actor id", () => {
+    const ids = knownBotUserIds({
+      config: {
+        catalyst: {
+          linear: {
+            bot: { orchestrator: { botUserId: "orch-id" }, worker: { botUserId: "worker-id" } },
+          },
+        },
+      },
+    });
+    expect([...ids].sort()).toEqual(["orch-id", "worker-id"]);
+  });
+  it("returns an empty set when config is absent (the viewer check still guards)", () => {
+    expect(knownBotUserIds({}).size).toBe(0);
+    expect(knownBotUserIds({ config: {} }).size).toBe(0);
+  });
+});
+
+describe("resolveAuthorIdentity", () => {
+  it("identifies a human personal key as NOT a bot", async () => {
+    const id = await resolveAuthorIdentity(
+      { token: "lin_api_x" },
+      { fetchImpl: fakeFetch({ viewer: () => HUMAN_VIEWER }) },
+    );
+    expect(id.ok).toBe(true);
+    expect(id.isBot).toBe(false);
+    expect(id.email).toBe("ryan@example.com");
+  });
+
+  it("flags an app-actor token by SHAPE (no email + isMe false)", async () => {
+    const id = await resolveAuthorIdentity(
+      { token: "lin_oauth_x" },
+      { fetchImpl: fakeFetch({ viewer: () => APP_VIEWER }) },
+    );
+    expect(id.isBot).toBe(true);
+  });
+
+  it("flags a token whose id matches a configured botUserId", async () => {
+    // Belt-and-braces: even a user-LOOKING viewer is caught by the id list.
+    const id = await resolveAuthorIdentity(
+      { token: "t", botUserIds: new Set(["human-uuid"]) },
+      { fetchImpl: fakeFetch({ viewer: () => HUMAN_VIEWER }) },
+    );
+    expect(id.isBot).toBe(true);
+  });
+
+  it("surfaces a transport failure instead of guessing", async () => {
+    const id = await resolveAuthorIdentity(
+      { token: "t" },
+      {
+        fetchImpl: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+      },
+    );
+    expect(id.ok).toBe(false);
+    expect(id.error).toContain("ECONNREFUSED");
+  });
+
+  it("treats an HTTP 200 with a GraphQL errors array as a failure", async () => {
+    // Linear returns 200 + errors on schema drift; a 200 alone is not success.
+    const id = await resolveAuthorIdentity(
+      { token: "t" },
+      { fetchImpl: fakeFetch({ viewer: () => jsonRes({ errors: [{ message: "bad field" }] }) }) },
+    );
+    expect(id.ok).toBe(false);
+    expect(id.error).toContain("bad field");
+  });
+});
+
+describe("postOperatorComment", () => {
+  const happyFetch = fakeFetch({
+    viewer: () => HUMAN_VIEWER,
+    issue: () => jsonRes({ data: { issue: { id: "issue-uuid", identifier: "PROJ-9" } } }),
+    commentCreate: () =>
+      jsonRes({
+        data: {
+          commentCreate: {
+            success: true,
+            comment: {
+              id: "comment-uuid",
+              createdAt: "2026-07-30T12:00:00Z",
+              user: { id: "human-uuid", name: "Ryan Rozich", email: "ryan@example.com" },
+            },
+          },
+        },
+      }),
+  });
+
+  it("posts as the operator and reports the SERVER-recorded author", async () => {
+    const out = await postOperatorComment(
+      { ticket: "PROJ-9", body: "approve" },
+      { fetchImpl: happyFetch, env: { LINEAR_API_TOKEN: "lin_api_x" } },
+    );
+    expect(out.status).toBe("posted");
+    expect(out.commentId).toBe("comment-uuid");
+    expect(out.author).toEqual({ id: "human-uuid", name: "Ryan Rozich" });
+  });
+
+  it("REFUSES to post as an app actor, and posts NOTHING", async () => {
+    // The whole point: an app-actor reply is ignored by CTL-1567, so it must never
+    // be sent and must never look like success.
+    let mutated = false;
+    const out = await postOperatorComment(
+      { ticket: "PROJ-9", body: "approve" },
+      {
+        fetchImpl: fakeFetch({
+          viewer: () => APP_VIEWER,
+          commentCreate: () => {
+            mutated = true;
+            return jsonRes({ data: { commentCreate: { success: true } } });
+          },
+        }),
+        env: { LINEAR_API_TOKEN: "lin_oauth_x" },
+      },
+    );
+    expect(out.status).toBe("bot_identity");
+    expect(mutated).toBe(false);
+    expect(out.message).toContain("app actor");
+  });
+
+  it("rejects an empty body without any network call", async () => {
+    const out = await postOperatorComment(
+      { ticket: "PROJ-9", body: "   " },
+      {
+        fetchImpl: () => {
+          throw new Error("should not fetch");
+        },
+        env: { LINEAR_API_TOKEN: "x" },
+      },
+    );
+    expect(out.status).toBe("empty_body");
+  });
+
+  it("reports no_token when the node has no Linear credential", async () => {
+    const out = await postOperatorComment({ ticket: "PROJ-9", body: "hi" }, { env: {} });
+    expect(out.status).toBe("no_token");
+  });
+
+  it("reports not_found for an unknown issue (e.g. a synthesized row)", async () => {
+    const out = await postOperatorComment(
+      { ticket: "PROJ-404", body: "hi" },
+      {
+        fetchImpl: fakeFetch({
+          viewer: () => HUMAN_VIEWER,
+          issue: () => jsonRes({ data: { issue: null } }),
+        }),
+        env: { LINEAR_API_TOKEN: "lin_api_x" },
+      },
+    );
+    expect(out.status).toBe("not_found");
+  });
+
+  it("never reports success when the mutation does not confirm it", async () => {
+    const out = await postOperatorComment(
+      { ticket: "PROJ-9", body: "hi" },
+      {
+        fetchImpl: fakeFetch({
+          viewer: () => HUMAN_VIEWER,
+          issue: () => jsonRes({ data: { issue: { id: "i" } } }),
+          commentCreate: () => jsonRes({ data: { commentCreate: { success: false } } }),
+        }),
+        env: { LINEAR_API_TOKEN: "lin_api_x" },
+      },
+    );
+    expect(out.status).toBe("error");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// reply-ticket.mjs — orchestration + the restore-the-row contract (§4)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("replyToTicket", () => {
+  const posted = { status: "posted", commentId: "c1", author: { id: "h", name: "Ryan" } };
+
+  it("succeeds for a ticket with NO worker dir (the case this feature exists for)", async () => {
+    // findHeldRun throwing/returning null must NOT fail the reply — the parked
+    // tickets that most need answering have no worker dir at all.
+    const out = await replyToTicket(
+      { ticket: "PROJ-63", body: "yes, go ahead" },
+      {
+        post: async () => posted,
+        findHeld: () => null,
+        record: () => {
+          throw new Error("must not record without a phase");
+        },
+        clearMarker: () => [],
+      },
+    );
+    expect(out.status).toBe("replied");
+    expect(out.phase).toBeNull();
+    expect(out.commentId).toBe("c1");
+  });
+
+  it("records the response next to the phase signal when a held run DOES exist", async () => {
+    const recorded = [];
+    const out = await replyToTicket(
+      { ticket: "PROJ-7", body: "option B" },
+      {
+        post: async () => posted,
+        findHeld: () => ({ phase: "implement", signal: {} }),
+        record: (a) => recorded.push(a),
+        clearMarker: () => [],
+      },
+    );
+    expect(out.phase).toBe("implement");
+    expect(recorded[0]).toMatchObject({ ticket: "PROJ-7", phase: "implement", response: "option B" });
+  });
+
+  it("does NOT mutate local state when the post fails (row is restored)", async () => {
+    let touched = false;
+    const out = await replyToTicket(
+      { ticket: "PROJ-7", body: "hi" },
+      {
+        post: async () => ({ status: "error", message: "boom" }),
+        findHeld: () => ({ phase: "implement", signal: {} }),
+        record: () => {
+          touched = true;
+        },
+        clearMarker: () => {
+          touched = true;
+        },
+      },
+    );
+    expect(out.status).toBe("error");
+    expect(touched).toBe(false);
+  });
+
+  it("passes a bot-identity refusal through verbatim (never a false success)", async () => {
+    const out = await replyToTicket(
+      { ticket: "PROJ-7", body: "hi" },
+      { post: async () => ({ status: "bot_identity", message: "app actor" }) },
+    );
+    expect(out.status).toBe("bot_identity");
+    expect(out.ticket).toBe("PROJ-7");
+  });
+
+  it("rejects an empty reply before calling Linear", async () => {
+    const out = await replyToTicket(
+      { ticket: "PROJ-7", body: "   " },
+      {
+        post: async () => {
+          throw new Error("should not post");
+        },
+      },
+    );
+    expect(out.status).toBe("empty_body");
+  });
+
+  it("survives best-effort local hygiene throwing after a successful post", async () => {
+    // A post that landed must never be reported as failed because a local
+    // breadcrumb write threw — the comment is already live in Linear.
+    const out = await replyToTicket(
+      { ticket: "PROJ-7", body: "hi" },
+      {
+        post: async () => posted,
+        findHeld: () => {
+          throw new Error("unreadable worker dir");
+        },
+        clearMarker: () => {
+          throw new Error("permission denied");
+        },
+      },
+    );
+    expect(out.status).toBe("replied");
+  });
+});
