@@ -1433,7 +1433,10 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       liveBackgroundCount: () => 0,
-      gateway: { getDescriptor: (t) => (t === "PROJ-200" ? { removed: false } : null) },
+      gateway: {
+        getDescriptor: (t) =>
+          t === "PROJ-200" ? { removed: false, updatedAt: new Date().toISOString() } : null,
+      },
       classifyResolution: () => {
         classifyCalls++;
         return "exists";
@@ -1442,7 +1445,33 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     };
     schedulerTick(orchDir, opts);
     schedulerTick(orchDir, opts);
-    expect(classifyCalls).toBe(0); // alive descriptor → resolved locally, zero reads
+    expect(classifyCalls).toBe(0); // FRESH alive descriptor → resolved locally, zero reads
+  });
+
+  test("a STALE alive descriptor cannot suppress deletion verification (CTL-1570)", () => {
+    // Missed removal webhook: the store retains an old { removed:false } row.
+    // Past PHANTOM_DESCRIPTOR_FRESH_MS it may no longer vouch — the dir falls to
+    // the bounded probe path (one live read per window, not zero forever).
+    writeSignal("PROJ-206", "recovery-pass", "done");
+    const staleTs = new Date(Date.now() - 60 * 60_000).toISOString(); // 1h old
+    let classifyCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: {
+        getDescriptor: (t) => (t === "PROJ-206" ? { removed: false, updatedAt: staleTs } : null),
+      },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(1); // stale vouch rejected → bounded verification
   });
 
   test("a phantom dir with NO gateway gets bounded deletion verification, not per-tick reads (CTL-1570)", () => {

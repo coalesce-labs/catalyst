@@ -83,7 +83,7 @@ import {
   isClaimable,
   readTicketLabels,
 } from "./linear-query.mjs";
-import { gatewayLabelsHit } from "./gateway-read.mjs"; // CTL-1079
+import { gatewayLabelsHit, descriptorAgeMs } from "./gateway-read.mjs"; // CTL-1079 / CTL-1570
 import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
@@ -2545,6 +2545,12 @@ function recordRunawayAlert(orchDir, ticket, now) {
 // non-phantom and retires the whole path.
 const DELETION_PROBE_INTERVAL_MS = 10 * 60_000; // one verification per 10 min per ticket
 
+// A descriptor may only vouch a phantom's ticket ALIVE while it is fresh —
+// same bound as classifyTicketResolution's GATEWAY_EXISTS_FRESH_MS. A stale
+// { removed:false } row (missed removal webhook) must NOT suppress deletion
+// verification forever; past this age the dir falls to the bounded probe path.
+const PHANTOM_DESCRIPTOR_FRESH_MS = 10 * 60_000;
+
 function deletionProbePath(orchDir, ticket) {
   return join(orchDir, ".deletion-probes", ticket);
 }
@@ -4256,7 +4262,15 @@ export function schedulerTick(
         /* descriptor read is best-effort — never break the tick */
       }
       // Broker vouches the ticket is alive → pure local resolution, zero reads.
-      if (desc && desc.removed !== true) continue;
+      // Only a FRESH descriptor may vouch (same guard as classifyTicketResolution):
+      // a stale { removed:false } row from a missed removal webhook must not
+      // suppress deletion verification forever.
+      if (
+        desc &&
+        desc.removed !== true &&
+        descriptorAgeMs(desc, now()) <= PHANTOM_DESCRIPTOR_FRESH_MS
+      )
+        continue;
       // Removed tombstone OR gateway miss (no gateway / no descriptor / unreadable
       // db — e.g. the standalone no-gateway daemon): deletion cannot be ruled out
       // locally, so fall through to the live probe — but BOUNDED to one probe per
