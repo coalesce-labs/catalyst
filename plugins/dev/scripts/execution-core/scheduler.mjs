@@ -2560,16 +2560,24 @@ function inDeletionProbeCooldown(orchDir, ticket, now) {
   return now - probedAt < DELETION_PROBE_INTERVAL_MS;
 }
 
-function recordDeletionProbe(orchDir, ticket, now) {
-  const dir = join(orchDir, ".deletion-probes");
+// recordDeletionProbeIfDue — true only when the ticket is OUT of cool-down AND
+// the marker persisted. Marker persistence is a PREREQUISITE for probing: on an
+// unwritable/full orchDir the write fails, and proceeding anyway would leave no
+// durable cap — every subsequent tick would repeat the read, collapsing the
+// 10-minute bound back to the per-tick quota loop. Fail closed (withhold the
+// probe) — the dir is inert debris either way, so deferring verification is safe.
+function recordDeletionProbeIfDue(orchDir, ticket, now) {
+  if (inDeletionProbeCooldown(orchDir, ticket, now)) return false;
   try {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(join(orchDir, ".deletion-probes"), { recursive: true });
     writeFileSync(deletionProbePath(orchDir, ticket), JSON.stringify({ ticket, probedAt: now }));
+    return true; // durable cap in place — probe may proceed
   } catch (err) {
     log.warn(
       { ticket, err: err.message },
-      "scheduler: deletion-probe marker write failed — continuing"
+      "scheduler: deletion-probe marker write failed — probe withheld"
     );
+    return false;
   }
 }
 
@@ -4241,19 +4249,20 @@ export function schedulerTick(
     // Placed AFTER the runaway-rate alert above so that observability check still
     // runs before every phantom gate.
     if (isPhantomWorkerDir(phaseSignals)) {
-      let removed = false;
+      let desc = null;
       try {
-        removed = gateway?.getDescriptor?.(sig.ticket)?.removed === true;
+        desc = gateway?.getDescriptor?.(sig.ticket) ?? null;
       } catch {
         /* descriptor read is best-effort — never break the tick */
       }
-      if (!removed) continue;
-      // Backoff: an inconclusive probe ("unknown") leaves the dir phantom and the
-      // removed tombstone persistent — without this cap the live read would retry
-      // every tick, unbounded, during exactly a quota outage. Marker written
-      // before the probe so failures can't bypass the cap.
-      if (inDeletionProbeCooldown(orchDir, sig.ticket, now())) continue;
-      recordDeletionProbe(orchDir, sig.ticket, now());
+      // Broker vouches the ticket is alive → pure local resolution, zero reads.
+      if (desc && desc.removed !== true) continue;
+      // Removed tombstone OR gateway miss (no gateway / no descriptor / unreadable
+      // db — e.g. the standalone no-gateway daemon): deletion cannot be ruled out
+      // locally, so fall through to the live probe — but BOUNDED to one probe per
+      // DELETION_PROBE_INTERVAL_MS per ticket, and only once the cool-down marker
+      // has durably persisted (fail-closed: no durable cap → no probe).
+      if (!recordDeletionProbeIfDue(orchDir, sig.ticket, now())) continue;
     }
     if (eligibleIds.has(sig.ticket)) continue; // (a) eligible → real ticket
     const bgId = sig.liveness?.kind === "bg" ? sig.liveness.value : null;

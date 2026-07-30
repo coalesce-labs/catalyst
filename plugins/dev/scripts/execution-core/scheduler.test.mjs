@@ -1423,13 +1423,35 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
 
   // ── CTL-1570: the sweep must not spend Linear budget on dirs it can resolve locally ──
 
-  test("never probes a phantom recovery-pass:done dir (CTL-1570)", () => {
+  test("never probes a phantom recovery-pass:done dir the broker vouches alive (CTL-1570)", () => {
     // A terminal-success non-pipeline dir is already excluded from slot accounting
     // (isPhantomWorkerDir, CTL-1323) — probing it every tick bought nothing and
     // burned one live linearis read per tick per dir (the 2026-07-29 quota incident).
     writeSignal("PROJ-200", "recovery-pass", "done");
     let classifyCalls = 0;
-    schedulerTick(orchDir, {
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: { getDescriptor: (t) => (t === "PROJ-200" ? { removed: false } : null) },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(0); // alive descriptor → resolved locally, zero reads
+  });
+
+  test("a phantom dir with NO gateway gets bounded deletion verification, not per-tick reads (CTL-1570)", () => {
+    // Gateway miss (standalone no-gateway daemon, unreadable db, missed webhook):
+    // deletion can't be ruled out locally, so ONE probe per cool-down window is
+    // allowed — never one per tick.
+    writeSignal("PROJ-205", "recovery-pass", "done");
+    let classifyCalls = 0;
+    const opts = {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       liveBackgroundCount: () => 0,
@@ -1438,8 +1460,11 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
         return "exists";
       },
       isBgJobAlive: () => false,
-    });
-    expect(classifyCalls).toBe(0); // phantom dir resolved locally — no Linear probe
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(1); // bounded: one verification per window
   });
 
   test("a phantom dir whose ticket the broker saw DELETED still reaches the probe and quarantines (CTL-1570)", () => {
