@@ -46,6 +46,8 @@ export interface FoldPeerSnapshotArgs {
   prevHeartbeats?: Record<string, string>;
   prevCapacity?: Record<string, { maxParallel: number; inFlightCount: number }>;
   peers?: Record<string, PeerRecord>;
+  /** Poll clock (injectable for tests) — used for the future-skew trust check. */
+  nowMs?: number;
 }
 
 export interface FoldPeerSnapshotResult {

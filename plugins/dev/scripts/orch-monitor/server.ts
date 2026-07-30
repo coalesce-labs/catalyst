@@ -1613,15 +1613,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
       // getter first (env-driven), else the monitor's own otel-config lokiUrl —
       // already resolved for the Telemetry surfaces, so a launchd monitor with a
       // bare env still finds the same Loki its other pages use.
-      let lokiPeerUrl: string | null = null;
+      // URL precedence (CTL-1551 round 3): an EXPLICIT CATALYST_LOKI_QUERY_URL
+      // wins; else the monitor's own configured otel lokiUrl (known-good — its
+      // Telemetry pages already query it); else execution-core's port-swap
+      // HEURISTIC derived from OTEL_EXPORTER_OTLP_ENDPOINT (which can point at
+      // the collector host, not Loki, when the two are split).
+      let cfgLokiUrl: string | null = null;
       try {
-        lokiPeerUrl = execCoreDeps.getLokiQueryUrl?.() ?? null;
+        cfgLokiUrl = execCoreDeps.getLokiQueryUrl?.() ?? null;
       } catch {
-        lokiPeerUrl = null;
+        cfgLokiUrl = null;
       }
+      const explicitLokiUrl = process.env.CATALYST_LOKI_QUERY_URL?.trim() ? cfgLokiUrl : null;
       const { peers } = readPeerRecords({
         rawSource: process.env.CATALYST_LIVENESS_READ_SOURCE,
-        lokiUrl: lokiPeerUrl ?? lokiUrl ?? null,
+        lokiUrl: explicitLokiUrl ?? lokiUrl ?? cfgLokiUrl ?? null,
         anchorIssue: execCoreDeps.getLivenessAnchorIssue(),
         readLoki: execCoreDeps.readClusterLivenessFromLokiSyncCached,
         readAnchor: execCoreDeps.readPeerHeartbeatsSync,

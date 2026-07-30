@@ -49,7 +49,14 @@ export function readPeerRecords({ rawSource, lokiUrl, anchorIssue, readLoki, rea
     return { peers: {}, source: "loki" };
   }
   if (!anchorIssue || typeof readAnchor !== "function") {
-    return { peers: null, source: "none" }; // no transport configured
+    // No anchor tier. `peers: null` (→ caller CLEARS caches) is reserved for
+    // "no transport configured AT ALL"; when a Loki transport exists but its
+    // read failed/was empty (the fail-open {}), return an EMPTY map instead so
+    // the caller's fold RETAINS its caches — a Loki blip on a loki-only AUTO
+    // host must not blank the display.
+    const lokiConfigured =
+      typeof lokiUrl === "string" && lokiUrl.length > 0 && typeof readLoki === "function";
+    return lokiConfigured ? { peers: {}, source: "loki" } : { peers: null, source: "none" };
   }
   return { peers: readAnchor({ anchorIssue }) ?? {}, source: "anchor" };
 }
@@ -84,7 +91,12 @@ export function retainMissingEntries(prev, next) {
 // Retained/blocked entries still age to offline via the node-liveness grace —
 // these guards only prevent instant regressions, never a false "live forever".
 // Returns { heartbeats, capacity } — the new cache maps.
-export function foldPeerSnapshot({ prevHeartbeats = {}, prevCapacity = {}, peers = {} } = {}) {
+// A cached timestamp more than this far in the FUTURE of the poll's clock is
+// untrusted (a clock-skewed publisher poisoned it): monotonic newest-wins would
+// otherwise reject every corrected heartbeat until wall time caught up.
+const FUTURE_SKEW_TOLERANCE_MS = 2 * 60_000;
+
+export function foldPeerSnapshot({ prevHeartbeats = {}, prevCapacity = {}, peers = {}, nowMs = Date.now() } = {}) {
   const nextHb = {};
   const nextCap = {};
   for (const [host, rec] of Object.entries(peers ?? {})) {
@@ -92,13 +104,26 @@ export function foldPeerSnapshot({ prevHeartbeats = {}, prevCapacity = {}, peers
     const hasTs = typeof rec.last_seen === "string" && rec.last_seen.length > 0;
     const newTs = hasTs ? Date.parse(rec.last_seen) : NaN;
     const prevTs = Date.parse(prevHeartbeats?.[host] ?? "");
-    const fresher = Number.isFinite(newTs) && (!Number.isFinite(prevTs) || newTs >= prevTs);
+    // A FUTURE-skewed cached ts is not a legitimate freshness bar — without this,
+    // one bad publish would block every corrected heartbeat until wall time
+    // reached the poisoned value (and retention would preserve it forever).
+    const prevTrusted =
+      Number.isFinite(prevTs) && prevTs <= nowMs + FUTURE_SKEW_TOLERANCE_MS;
+    const fresher = Number.isFinite(newTs) && (!prevTrusted || newTs >= prevTs);
     if (hasTs && fresher) nextHb[host] = rec.last_seen;
     const hasCapacity = rec.max_parallel != null || rec.in_flight_count != null;
     if (hasCapacity && fresher) {
+      // Per-FIELD merge: a record can carry one capacity field and not the other
+      // (partial structured metadata); the absent field retains its previous
+      // value instead of collapsing to zero.
+      const prevCap = prevCapacity?.[host];
       nextCap[host] = {
-        maxParallel: typeof rec.max_parallel === "number" ? rec.max_parallel : 0,
-        inFlightCount: typeof rec.in_flight_count === "number" ? rec.in_flight_count : 0,
+        maxParallel:
+          typeof rec.max_parallel === "number" ? rec.max_parallel : (prevCap?.maxParallel ?? 0),
+        inFlightCount:
+          typeof rec.in_flight_count === "number"
+            ? rec.in_flight_count
+            : (prevCap?.inFlightCount ?? 0),
       };
     }
   }

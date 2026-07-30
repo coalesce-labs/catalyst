@@ -113,6 +113,45 @@ describe("readPeerRecords (CTL-1551)", () => {
     expect(lokiCalls).toBe(0);
   });
 
+  it("AUTO loki-only (no anchor): a failed/empty Loki read returns EMPTY peers, not null — caches retained", () => {
+    const r = readPeerRecords({
+      rawSource: undefined,
+      lokiUrl: "http://loki:3100",
+      anchorIssue: null, // loki-only host — no legacy anchor
+      readLoki: () => ({}), // fail-open empty (outage)
+      readAnchor: undefined,
+    });
+    expect(r.source).toBe("loki");
+    expect(r.peers).toEqual({}); // {} flows through the fold → retention keeps caches
+  });
+
+  it("foldPeerSnapshot: partial capacity record merges per-field, never zeroing the absent one", async () => {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore — .mjs module
+    const { foldPeerSnapshot } = await import("../lib/peer-liveness.mjs");
+    const out = foldPeerSnapshot({
+      prevHeartbeats: { mini: "2026-07-30T15:00:00Z" },
+      prevCapacity: { mini: { maxParallel: 3, inFlightCount: 2 } },
+      peers: { mini: { last_seen: "2026-07-30T15:01:00Z", max_parallel: 4, in_flight_count: null } },
+      nowMs: Date.parse("2026-07-30T15:01:30Z"),
+    });
+    expect(out.capacity.mini).toEqual({ maxParallel: 4, inFlightCount: 2 }); // ifc retained
+  });
+
+  it("foldPeerSnapshot: a FUTURE-skewed cached timestamp does not block corrected heartbeats", async () => {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore — .mjs module
+    const { foldPeerSnapshot } = await import("../lib/peer-liveness.mjs");
+    const now = Date.parse("2026-07-30T15:00:00Z");
+    const out = foldPeerSnapshot({
+      prevHeartbeats: { mini: "2026-07-30T18:00:00Z" }, // 3h in the future — poisoned
+      prevCapacity: {},
+      peers: { mini: { last_seen: "2026-07-30T14:59:50Z" } }, // corrected clock
+      nowMs: now,
+    });
+    expect(out.heartbeats.mini).toBe("2026-07-30T14:59:50Z"); // recovered
+  });
+
   it("no transport configured (no URL, no anchor) → peers null so the caller clears caches", () => {
     const r = readPeerRecords({
       rawSource: undefined,
