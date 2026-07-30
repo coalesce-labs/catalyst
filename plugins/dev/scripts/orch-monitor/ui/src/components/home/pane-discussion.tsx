@@ -18,7 +18,7 @@ import { useTicketDiscussion } from "@/hooks/use-ticket-discussion";
 const COLLAPSED_LIMIT = 5;
 
 export function PaneDiscussion({ ticket }: { ticket: string }) {
-  const { comments, activity, available, loading } = useTicketDiscussion(ticket);
+  const { comments, activity, createdAt, available, loading } = useTicketDiscussion(ticket);
   if (loading || !available) return null;
   if (comments.length === 0 && activity.length === 0) return null;
 
@@ -26,9 +26,14 @@ export function PaneDiscussion({ ticket }: { ticket: string }) {
     <section className="mt-6" data-pane-discussion={ticket}>
       <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Discussion</p>
       <div className="mt-3">
+        {/* key: the reading pane keeps ONE instance across inbox selections, so
+            without it the previous ticket's "Show all" expansion leaks into the
+            next selection (and there is no Show-less to undo it). */}
         <TicketTimeline
+          key={ticket}
           comments={comments}
           activity={activity}
+          issueCreatedAt={createdAt}
           loaded
           available
           limit={COLLAPSED_LIMIT}

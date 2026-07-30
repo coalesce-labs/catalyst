@@ -94,6 +94,8 @@ export interface TicketDiscussion {
   identifier: string | null;
   /** The mirrored issue title, or null. */
   title: string | null;
+  /** Issue creation instant (ms epoch), or null when unavailable/unmirrored. */
+  createdAt: number | null;
   /** Comments oldest-first (by `updated_at`); [] when unavailable. */
   comments: TicketComment[];
   /** Activity events oldest-first (by `created_at`); [] when unavailable. */

@@ -573,7 +573,8 @@ function ActivitySection({ ticketId }: { ticketId: string }) {
 // — that one is the EXECUTION event stream; this is what people said and what
 // changed on the ticket. Keyed off the id so it works off-board.
 function DiscussionSection({ ticketId }: { ticketId: string }) {
-  const { comments, activity, available, loading } = useTicketDiscussion(ticketId);
+  const { comments, activity, createdAt, available, loading, error } =
+    useTicketDiscussion(ticketId);
   return (
     <section data-ticket-discussion style={{ marginBottom: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -592,10 +593,13 @@ function DiscussionSection({ ticketId }: { ticketId: string }) {
         }
       >
         <TicketTimeline
+          key={ticketId}
           comments={comments}
           activity={activity}
+          issueCreatedAt={createdAt}
           loaded={!loading}
           available={available}
+          error={error}
         />
       </Suspense>
     </section>

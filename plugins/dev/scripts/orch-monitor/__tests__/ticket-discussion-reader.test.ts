@@ -178,6 +178,7 @@ describe("readTicketDiscussion", () => {
       available: false,
       identifier: null,
       title: null,
+      createdAt: null,
       comments: [],
       activity: [],
     });

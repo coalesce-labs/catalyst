@@ -141,6 +141,24 @@ describe("creationEventId", () => {
   it("is null for an empty activity list", () => {
     expect(creationEventId([])).toBeNull();
   });
+
+  it("labels a bare earliest row within the creation window of the issue's created_at", () => {
+    const activity = [event({ id: "created", created_at: 60_000, actor_name: "ryan" })];
+    expect(creationEventId(activity, 0)).toBe("created");
+  });
+
+  it("refuses the label when the bare earliest row arrives long after the issue was created", () => {
+    // Linear emits bare rows for unextracted properties (subscribers, relations);
+    // a bare row a month after created_at is one of those, not the creation.
+    const activity = [event({ id: "late-bare", created_at: 31 * 24 * 3_600_000, actor_name: "ryan" })];
+    expect(creationEventId(activity, 0)).toBeNull();
+  });
+
+  it("keeps the unguarded behavior when the issue's created_at is unknown", () => {
+    const activity = [event({ id: "created", created_at: 999_999_999, actor_name: "ryan" })];
+    expect(creationEventId(activity, null)).toBe("created");
+    expect(creationEventId(activity)).toBe("created");
+  });
 });
 
 describe("coalesceBursts", () => {

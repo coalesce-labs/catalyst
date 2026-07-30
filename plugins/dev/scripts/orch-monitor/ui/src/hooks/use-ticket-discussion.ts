@@ -27,6 +27,8 @@ export interface TicketDiscussionState {
   available: boolean;
   comments: TicketComment[];
   activity: TicketActivityEvent[];
+  /** Issue creation instant (ms epoch) — gates the "created this issue" label. */
+  createdAt: number | null;
   loading: boolean;
   /** The transport/read failure reason, or null. */
   error: string | null;
@@ -36,6 +38,7 @@ const IDLE: TicketDiscussionState = {
   available: false,
   comments: [],
   activity: [],
+  createdAt: null,
   loading: false,
   error: null,
 };
@@ -66,6 +69,7 @@ export function useTicketDiscussion(id: string | undefined): TicketDiscussionSta
           available: Boolean(body?.available),
           comments: Array.isArray(body?.comments) ? body.comments : [],
           activity: Array.isArray(body?.activity) ? body.activity : [],
+          createdAt: typeof body?.createdAt === "number" ? body.createdAt : null,
           loading: false,
           error: null,
         });

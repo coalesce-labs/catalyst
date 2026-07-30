@@ -69,7 +69,14 @@ const READ_MODEL_MODULE = ["@catalyst-cloud", "read-model"].join("/");
 // The empty/unavailable answer. A single frozen-shape factory so every failure
 // path returns the identical contract (the route JSON-serializes it as-is).
 function unavailable() {
-  return { available: false, identifier: null, title: null, comments: [], activity: [] };
+  return {
+    available: false,
+    identifier: null,
+    title: null,
+    createdAt: null,
+    comments: [],
+    activity: [],
+  };
 }
 
 /**
@@ -127,6 +134,9 @@ export async function readTicketDiscussion(identifier, { dbPath, openDb } = {}) 
       available: true,
       identifier: detail.identifier ?? identifier,
       title: detail.title ?? null,
+      // Issue creation instant (ms epoch) — the UI's guard against labeling a
+      // late bare history row "created this issue" (CTL-1574 review defect 2).
+      createdAt: typeof detail.created_at === "number" ? detail.created_at : null,
       comments: Array.isArray(detail.comments) ? detail.comments : [],
       activity: Array.isArray(detail.activity) ? detail.activity : [],
     };

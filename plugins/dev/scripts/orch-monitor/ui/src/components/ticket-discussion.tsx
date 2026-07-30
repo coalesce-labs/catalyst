@@ -161,20 +161,36 @@ export interface BurstNode {
 }
 export type TimelineNode = CommentNode | EventNode | BurstNode;
 
+/** How far (ms) a bare earliest history row may sit after the issue's own
+ *  created_at and still be labeled "created this issue". Linear also emits bare
+ *  rows for properties the read-model doesn't extract (subscribers, relations,
+ *  attachments); on live data ~1/6 of issues' earliest bare row arrives hours or
+ *  weeks late, so without this window the label is frequently a fabrication. */
+const CREATION_WINDOW_MS = 5 * 60_000;
+
 /**
  * The id of the "created this issue" event, or null. It's the EARLIEST activity
  * event that carries no recorded transition — Linear emits a bare IssueHistory row
  * for issue creation. If the earliest event already describes a real change, we
  * have no creation row to label and this returns null (a real transition is never
- * mislabeled as "created"). Exported for tests.
+ * mislabeled as "created"). When the issue's own creation instant is known, the
+ * bare row must also fall within CREATION_WINDOW_MS of it — a late bare row (an
+ * unextracted property change) is left unlabeled rather than mislabeled.
+ * Exported for tests.
  */
-export function creationEventId(activity: TicketActivityEvent[]): string | null {
+export function creationEventId(
+  activity: TicketActivityEvent[],
+  issueCreatedAt?: number | null,
+): string | null {
   if (activity.length === 0) return null;
   let minTs = Infinity;
   for (const e of activity) if (e.created_at < minTs) minTs = e.created_at;
   // Among the earliest-timestamp events, the bare (no-transition) one is creation.
   const created = activity.find((e) => e.created_at === minTs && describeOrNull(e) === null);
-  return created ? created.id : null;
+  if (!created) return null;
+  if (typeof issueCreatedAt === "number" && created.created_at - issueCreatedAt > CREATION_WINDOW_MS)
+    return null;
+  return created.id;
 }
 
 /**
@@ -190,8 +206,9 @@ export function creationEventId(activity: TicketActivityEvent[]): string | null 
 export function buildTimeline(
   comments: TicketComment[],
   activity: TicketActivityEvent[],
+  issueCreatedAt?: number | null,
 ): TimelineNode[] {
-  const createdId = creationEventId(activity);
+  const createdId = creationEventId(activity, issueCreatedAt);
   const nodes: Array<CommentNode | EventNode> = [
     ...comments.map((c): CommentNode => ({ kind: "comment", ts: c.updated_at, comment: c })),
     ...activity.map(
@@ -503,16 +520,38 @@ export function initialsOf(name: string | null): string {
   return (first + last).toUpperCase() || "?";
 }
 
-/** The 24px author mark — an initials circle, or a Bot glyph for an agent author.
- *  Replaces the source's shadcn Avatar (adaptation 3); the border is what gives it
- *  definition against the card's own bg-surface-2. */
-function AuthorMark({ name, isBot }: { name: string | null; isBot: boolean }) {
+/** The 24px author mark — the author's Linear avatar when one is mirrored, else
+ *  an initials circle, or a Bot glyph for an agent author. Replaces the source's
+ *  shadcn Avatar (adaptation 3) with a plain <img> + failure fallback; the border
+ *  is what gives it definition against the card's own bg-surface-2. */
+function AuthorMark({
+  name,
+  isBot,
+  avatarUrl,
+}: {
+  name: string | null;
+  isBot: boolean;
+  avatarUrl: string | null;
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const showImg = Boolean(avatarUrl) && !imgFailed;
   return (
     <span
       aria-hidden
-      className="flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-surface-2 text-[10px] font-medium text-muted"
+      className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-surface-2 text-[10px] font-medium text-muted"
     >
-      {isBot ? <Bot className="size-3.5" /> : initialsOf(name)}
+      {showImg ? (
+        <img
+          src={avatarUrl ?? undefined}
+          alt=""
+          className="size-full object-cover"
+          onError={() => setImgFailed(true)}
+        />
+      ) : isBot ? (
+        <Bot className="size-3.5" />
+      ) : (
+        initialsOf(name)
+      )}
     </span>
   );
 }
@@ -534,7 +573,11 @@ function CommentItem({ comment, now }: { comment: TicketComment; now: number }) 
       className="flex flex-col gap-2 rounded-lg border border-border bg-surface-2 px-3.5 py-3 shadow-card"
     >
       <div data-ticket-comment-header className="flex items-center gap-2">
-        <AuthorMark name={comment.author_name} isBot={isBot} />
+        <AuthorMark
+          name={comment.author_name}
+          isBot={isBot}
+          avatarUrl={comment.author_avatar_url}
+        />
         <span className="text-[12px] font-medium text-fg">{name}</span>
         {isBot && <span className="font-mono text-[11px] text-muted">· agent</span>}
         {when && (
@@ -655,6 +698,8 @@ export function TicketTimeline({
   available = true,
   now = Date.now(),
   limit,
+  issueCreatedAt = null,
+  error = null,
 }: {
   comments: TicketComment[];
   activity: TicketActivityEvent[];
@@ -662,6 +707,11 @@ export function TicketTimeline({
   available?: boolean;
   now?: number;
   limit?: number;
+  /** The issue's own creation instant — gates the "created this issue" label. */
+  issueCreatedAt?: number | null;
+  /** Transport failure reason (fetch/HTTP), so an unreachable MONITOR is not
+   *  misreported as an unreadable REPLICA. */
+  error?: string | null;
 }) {
   const [showAll, setShowAll] = useState(false);
 
@@ -676,12 +726,14 @@ export function TicketTimeline({
   if (!available) {
     return (
       <div data-ticket-timeline-unavailable className="font-mono text-[12px] text-muted">
-        Linear discussion unavailable — the local replica could not be read.
+        {error
+          ? `Linear discussion could not be loaded — request failed (${error}).`
+          : "Linear discussion unavailable — the local replica could not be read."}
       </div>
     );
   }
 
-  const nodes = buildTimeline(comments, activity);
+  const nodes = buildTimeline(comments, activity, issueCreatedAt);
   if (nodes.length === 0) {
     return (
       <div data-ticket-timeline-empty className="font-mono text-[12px] text-muted">
