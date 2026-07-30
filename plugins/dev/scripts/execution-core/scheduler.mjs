@@ -82,8 +82,9 @@ import {
   isAssigneeClaimable,
   isClaimable,
   readTicketLabels,
+  GATEWAY_EXISTS_FRESH_MS,
 } from "./linear-query.mjs";
-import { gatewayLabelsHit } from "./gateway-read.mjs"; // CTL-1079
+import { gatewayLabelsHit, descriptorAgeMs } from "./gateway-read.mjs"; // CTL-1079 / CTL-1570
 import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
@@ -2533,6 +2534,61 @@ function recordRunawayAlert(orchDir, ticket, now) {
   }
 }
 
+// ── CTL-1570: deletion-probe backoff for phantom dirs ──
+// A phantom dir whose broker descriptor says removed:true re-arms the live
+// probe (deletion verification). If that probe is inconclusive ("unknown" —
+// rate-limited / outage / timeout), the dir stays phantom and the tombstone
+// would re-trigger a quota-consuming read EVERY tick, unbounded, precisely
+// during a quota outage. Marker-file backoff (same pattern as the runaway
+// cool-down above) caps it at one live probe per window per ticket. The marker
+// is written BEFORE the probe (attempt-based, not success-based) so a string of
+// failures cannot bypass the cap; a successful quarantine makes the dir
+// non-phantom and retires the whole path.
+const DELETION_PROBE_INTERVAL_MS = 10 * 60_000; // one verification per 10 min per ticket
+
+// A descriptor may only vouch a phantom's ticket ALIVE while it is fresh — the
+// bound is the SHARED GATEWAY_EXISTS_FRESH_MS (imported from linear-query.mjs),
+// so this gate and classifyTicketResolution's short-circuit can never disagree.
+// A stale { removed:false } row (missed removal webhook) must NOT suppress
+// deletion verification forever; past this age the dir falls to the bounded
+// probe path.
+
+function deletionProbePath(orchDir, ticket) {
+  return join(orchDir, ".deletion-probes", ticket);
+}
+
+function inDeletionProbeCooldown(orchDir, ticket, now) {
+  let probedAt;
+  try {
+    probedAt = JSON.parse(readFileSync(deletionProbePath(orchDir, ticket), "utf8"))?.probedAt;
+  } catch {
+    return false; // absent / malformed → not in cool-down
+  }
+  if (typeof probedAt !== "number") return false;
+  return now - probedAt < DELETION_PROBE_INTERVAL_MS;
+}
+
+// recordDeletionProbeIfDue — true only when the ticket is OUT of cool-down AND
+// the marker persisted. Marker persistence is a PREREQUISITE for probing: on an
+// unwritable/full orchDir the write fails, and proceeding anyway would leave no
+// durable cap — every subsequent tick would repeat the read, collapsing the
+// 10-minute bound back to the per-tick quota loop. Fail closed (withhold the
+// probe) — the dir is inert debris either way, so deferring verification is safe.
+function recordDeletionProbeIfDue(orchDir, ticket, now) {
+  if (inDeletionProbeCooldown(orchDir, ticket, now)) return false;
+  try {
+    mkdirSync(join(orchDir, ".deletion-probes"), { recursive: true });
+    writeFileSync(deletionProbePath(orchDir, ticket), JSON.stringify({ ticket, probedAt: now }));
+    return true; // durable cap in place — probe may proceed
+  } catch (err) {
+    log.warn(
+      { ticket, err: err.message },
+      "scheduler: deletion-probe marker write failed — probe withheld"
+    );
+    return false;
+  }
+}
+
 // CTL-611: post-dispatch verifier. A dispatch is only really successful if
 // workers/<T>/phase-<P>.json was written with a non-empty bg_job_id and a
 // runnable status. A --dry-run leak (no signal at all) or a mark_launch_failed
@@ -4169,7 +4225,8 @@ export function schedulerTick(
   const quarantinedPhantoms = [];
   for (const sig of readWorkerSignals(orchDir)) {
     if (!sig.ticket) continue;
-    if (!isTicketInFlight(readPhaseSignals(orchDir, sig.ticket))) continue; // skip terminal — no probe
+    const phaseSignals = readPhaseSignals(orchDir, sig.ticket);
+    if (!isTicketInFlight(phaseSignals)) continue; // skip terminal — no probe
 
     // CTL-671 runaway-rate alert — OBSERVABILITY ONLY (does not quarantine, so
     // it covers noisy-but-real tickets too and runs before the phantom gates).
@@ -4189,6 +4246,40 @@ export function schedulerTick(
       );
     }
 
+    // CTL-1570: a phantom dir (terminal-success non-pipeline signals, e.g.
+    // recovery-pass:done) is already excluded from slot accounting (CTL-1323) and
+    // its ticket almost always still exists, so the live Linear probe below can
+    // never quarantine it — it only burns one live read per dir per tick (the
+    // 2026-07-29 fleet quota exhaustion). Resolve it locally and move on — UNLESS
+    // the broker's descriptor store says the ticket was removed, in which case the
+    // probe proceeds so a deleted ticket's debris dir is still quarantined
+    // (bounded deletion-verification: webhook-observed, zero live reads).
+    // Placed AFTER the runaway-rate alert above so that observability check still
+    // runs before every phantom gate.
+    if (isPhantomWorkerDir(phaseSignals)) {
+      let desc = null;
+      try {
+        desc = gateway?.getDescriptor?.(sig.ticket) ?? null;
+      } catch {
+        /* descriptor read is best-effort — never break the tick */
+      }
+      // Broker vouches the ticket is alive → pure local resolution, zero reads.
+      // Only a FRESH descriptor may vouch (same guard as classifyTicketResolution):
+      // a stale { removed:false } row from a missed removal webhook must not
+      // suppress deletion verification forever.
+      if (
+        desc &&
+        desc.removed !== true &&
+        descriptorAgeMs(desc, now()) <= GATEWAY_EXISTS_FRESH_MS
+      )
+        continue;
+      // Removed tombstone OR gateway miss (no gateway / no descriptor / unreadable
+      // db — e.g. the standalone no-gateway daemon): deletion cannot be ruled out
+      // locally, so fall through to the live probe — but BOUNDED to one probe per
+      // DELETION_PROBE_INTERVAL_MS per ticket, and only once the cool-down marker
+      // has durably persisted (fail-closed: no durable cap → no probe).
+      if (!recordDeletionProbeIfDue(orchDir, sig.ticket, now())) continue;
+    }
     if (eligibleIds.has(sig.ticket)) continue; // (a) eligible → real ticket
     const bgId = sig.liveness?.kind === "bg" ? sig.liveness.value : null;
     // (c) live worker → skip the Linear probe + quarantine. CTL-1336: read the warm
@@ -4209,7 +4300,11 @@ export function schedulerTick(
     // Linear. A live registry entry is a fact (same process as the dispatch), so
     // this can never mis-protect a phantom: phantoms are never registered.
     if (isSdkWorkerLive(sig.ticket)) continue;
-    if (classifyResolution(sig.ticket, { exec }) !== "not-found") continue; // (b) definitive only
+    // CTL-1570: thread the gateway so classifyTicketResolution's descriptor-store
+    // short-circuit (GATEWAY_EXISTS_FRESH_MS) can serve "exists" without a live
+    // linearis read — a held-but-workerless dir costs at most one live read per
+    // freshness window instead of one per tick.
+    if (classifyResolution(sig.ticket, { exec, gateway }) !== "not-found") continue; // (b) definitive only
     if (maybeQuarantinePhantom(orchDir, sig.ticket, sig.phase)) {
       quarantinedPhantoms.push({ ticket: sig.ticket, phase: sig.phase });
       log.warn(

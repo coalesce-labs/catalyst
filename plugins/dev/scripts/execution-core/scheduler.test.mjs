@@ -1421,6 +1421,171 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     expect(classifyCalls).toBe(0); // eligible short-circuits before the Linear probe
   });
 
+  // ── CTL-1570: the sweep must not spend Linear budget on dirs it can resolve locally ──
+
+  test("never probes a phantom recovery-pass:done dir the broker vouches alive (CTL-1570)", () => {
+    // A terminal-success non-pipeline dir is already excluded from slot accounting
+    // (isPhantomWorkerDir, CTL-1323) — probing it every tick bought nothing and
+    // burned one live linearis read per tick per dir (the 2026-07-29 quota incident).
+    writeSignal("PROJ-200", "recovery-pass", "done");
+    let classifyCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: {
+        getDescriptor: (t) =>
+          t === "PROJ-200" ? { removed: false, updatedAt: new Date().toISOString() } : null,
+      },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(0); // FRESH alive descriptor → resolved locally, zero reads
+  });
+
+  test("a STALE alive descriptor cannot suppress deletion verification (CTL-1570)", () => {
+    // Missed removal webhook: the store retains an old { removed:false } row.
+    // Past PHANTOM_DESCRIPTOR_FRESH_MS it may no longer vouch — the dir falls to
+    // the bounded probe path (one live read per window, not zero forever).
+    writeSignal("PROJ-206", "recovery-pass", "done");
+    const staleTs = new Date(Date.now() - 60 * 60_000).toISOString(); // 1h old
+    let classifyCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: {
+        getDescriptor: (t) => (t === "PROJ-206" ? { removed: false, updatedAt: staleTs } : null),
+      },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(1); // stale vouch rejected → bounded verification
+  });
+
+  test("a phantom dir with NO gateway gets bounded deletion verification, not per-tick reads (CTL-1570)", () => {
+    // Gateway miss (standalone no-gateway daemon, unreadable db, missed webhook):
+    // deletion can't be ruled out locally, so ONE probe per cool-down window is
+    // allowed — never one per tick.
+    writeSignal("PROJ-205", "recovery-pass", "done");
+    let classifyCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(1); // bounded: one verification per window
+  });
+
+  test("a phantom dir whose ticket the broker saw DELETED still reaches the probe and quarantines (CTL-1570)", () => {
+    // Bounded deletion-verification: no live read is spent on a phantom dir unless
+    // the descriptor store says the ticket was removed — then the probe proceeds so
+    // the deleted ticket's debris is quarantined instead of persisting forever.
+    writeSignal("PROJ-203", "recovery-pass", "done");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: { getDescriptor: (t) => (t === "PROJ-203" ? { removed: true } : null) },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(1); // removed descriptor re-arms the probe
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "PROJ-203", "phase-recovery-pass.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled"); // quarantined — debris of a deleted ticket
+    expect(sig.stalledReason).toBe("phantom-ticket");
+  });
+
+  test("an inconclusive deletion probe backs off — at most one live read per window (CTL-1570)", () => {
+    // removed:true descriptor + "unknown" probe (rate-limited / outage) leaves the
+    // dir phantom and the tombstone persistent; the marker-file backoff must cap
+    // the retry at one probe per DELETION_PROBE_INTERVAL_MS, not one per tick.
+    writeSignal("PROJ-204", "recovery-pass", "done");
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: { getDescriptor: (t) => (t === "PROJ-204" ? { removed: true } : null) },
+      isBgJobAlive: () => false,
+    };
+    let classifyCalls = 0;
+    const classifyResolution = () => {
+      classifyCalls++;
+      return "unknown"; // inconclusive — dir stays phantom, tombstone persists
+    };
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    expect(classifyCalls).toBe(1); // first tick probes
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    expect(classifyCalls).toBe(1); // subsequent ticks inside the window are throttled
+  });
+
+  test("still probes a HELD (needs-human) recovery-pass dir — not over-skipped (CTL-1570)", () => {
+    // A parked/escalated recovery dir is NOT phantom (operator surface) and keeps
+    // its existence check, so a deleted ticket behind a needs-human dir is still
+    // detectable. Only terminal-success debris is exempt.
+    writeSignal("PROJ-201", "recovery-pass", "needs-human");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(1); // held dir keeps its probe
+  });
+
+  test("threads the gateway into the phantom probe (CTL-1570)", () => {
+    // classifyTicketResolution has a 10-minute gateway short-circuit
+    // (GATEWAY_EXISTS_FRESH_MS) that can only fire when the gateway is passed.
+    // The sweep's call site historically passed only { exec }, so every probe
+    // fell through to a live linearis read.
+    writeSignal("PROJ-202", "implement", "running");
+    const gateway = { getDescriptor: () => null };
+    let seenOpts = null;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway,
+      classifyResolution: (ticket, opts) => {
+        if (ticket === "PROJ-202") seenOpts = opts;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(seenOpts?.gateway).toBe(gateway); // descriptor-store tier is reachable
+  });
+
   // ── CTL-1336: zero-spawn bg-liveness gate. The skip DECISION (fresh+alive / fresh+dead /
   // cold→fail-open / no-bg) is a pure exported helper `bgLivenessProtects`, unit-tested in
   // phantom-worker-dir.test.mjs (CI-gated, no harness interference). Here we only pin the
@@ -6167,7 +6332,7 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
 
   test("advancement sweep demotes rc=0 + missing bg job to failure", () => {
     // FSM owes plan; fakeDispatch returns rc=0 but does NOT write the signal.
-    writeSignal("CTL-200", "research", "done");
+    writeSignal("PROJ-200", "research", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 0, writeSignal: false });
 
@@ -6179,11 +6344,11 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
 
     expect(dispatch.calls).toHaveLength(1);
     // Demotion: no advance recorded.
-    expect(result?.advanced ?? []).not.toContainEqual({ ticket: "CTL-200", phase: "plan" });
+    expect(result?.advanced ?? []).not.toContainEqual({ ticket: "PROJ-200", phase: "plan" });
     // Cool-down marker exists (failure-on-disk effect).
-    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-200", "plan"))).toBe(true);
+    expect(existsSync(dispatchCooldownPath(orchDir, "PROJ-200", "plan"))).toBe(true);
     // Exactly one event emitted with verify_failed reason + code=0.
-    const events = dispatchFailedEvents("CTL-200");
+    const events = dispatchFailedEvents("PROJ-200");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "plan",
@@ -6193,13 +6358,13 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
   });
 
   test("advancement sweep emits phase.dispatch.failed on rc!=0", () => {
-    writeSignal("CTL-201", "research", "done");
+    writeSignal("PROJ-201", "research", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 1 });
 
     schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
 
-    const events = dispatchFailedEvents("CTL-201");
+    const events = dispatchFailedEvents("PROJ-201");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "plan",
@@ -6278,14 +6443,14 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
     const dispatch = fakeDispatch({ code: 1 });
 
     schedulerTick(orchDir, {
-      readEligible: () => eligibleOne("CTL-202"),
+      readEligible: () => eligibleOne("PROJ-202"),
       dispatch,
       now: () => 1_000,
       liveBackgroundCount: () => 0, // CTL-611: deterministic free slot post-CTL-657 rebase
       hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is dispatch.failed event
     });
 
-    const events = dispatchFailedEvents("CTL-202");
+    const events = dispatchFailedEvents("PROJ-202");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "research",
