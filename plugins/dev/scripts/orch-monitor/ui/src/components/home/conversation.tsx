@@ -308,22 +308,33 @@ function ReplyBox({
   ticket,
   draft,
   setDraft,
+  editVersion,
   onReplied,
 }: {
   ticket: string;
   draft: string;
   setDraft: React.Dispatch<React.SetStateAction<string>>;
+  /** Bumped on EVERY draft mutation — typing AND suggestion prefills. Owned by the
+   *  parent so a chip click counts as an edit; see applyDraft. */
+  editVersion: React.MutableRefObject<number>;
   onReplied: (outcome: ReplyOutcome, submitted: string, submittedFor: string) => void;
 }) {
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+
+  // This ReplyBox instance is REUSED across ticket selections, so a failure raised
+  // for ticket A would otherwise keep rendering under ticket B — showing a "Not
+  // sent" diagnosis for a reply that was never attempted on B, and persisting
+  // until the next send. Clear it whenever the selection changes.
+  useEffect(() => {
+    setFailure(null);
+  }, [ticket]);
   // The exact draft at submit time AND the ticket + edit-version it belonged to.
   // Value equality alone cannot prove no edit or ticket switch occurred: if A's
   // reply is pending and the operator selects B and types (or a chip prefills) the
   // same text, A's late setter would clear B's draft.
   const draftAtSend = useRef("");
   const sendTicket = useRef("");
-  const editVersion = useRef(0);
   const versionAtSend = useRef(-1);
 
   const send = useCallback(async () => {
@@ -360,7 +371,7 @@ function ReplyBox({
         : (outcome as { message: string }).message,
     );
     onReplied(outcome, body, ticket);
-  }, [draft, sending, ticket, setDraft, onReplied]);
+  }, [draft, sending, ticket, setDraft, editVersion, onReplied]);
 
   return (
     <section className="mt-5" data-reply-box={ticket}>
@@ -368,10 +379,7 @@ function ReplyBox({
       <textarea
         data-reply-input={ticket}
         value={draft}
-        onChange={(e) => {
-          editVersion.current += 1;
-          setDraft(e.target.value);
-        }}
+        onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
           // ⌘/Ctrl+Enter sends; a bare Enter stays a newline so a considered,
           // multi-line answer is never fired off half-written.
@@ -443,6 +451,16 @@ export function Conversation({
   // us a real comment id, so showing it is reporting a confirmed fact early.
   const [ownTurns, setOwnTurns] = useState<ThreadComment[]>([]);
   const state = useConversation(ticket, enabled, reloadKey);
+
+  // ONE versioned entry point for every draft mutation. Suggestion chips call
+  // `setDraft` too, so if only the textarea bumped the version, prefilling B with
+  // the same text that was submitted on A would let A's late success clear B's
+  // draft — the version would still match and so would the value.
+  const editVersion = useRef(0);
+  const applyDraft = useCallback<React.Dispatch<React.SetStateAction<string>>>((next) => {
+    editVersion.current += 1;
+    setDraft(next);
+  }, []);
 
   // A new selection starts a fresh draft — one operator's half-typed answer must
   // never leak onto a different ticket.
@@ -519,7 +537,7 @@ export function Conversation({
   return (
     <div data-conversation={ticket}>
       {conversation.ask != null && (
-        <AskSummary ask={conversation.ask} onUseSuggestion={setDraft} />
+        <AskSummary ask={conversation.ask} onUseSuggestion={applyDraft} />
       )}
 
       {/* The direct link to the ticket (§3). Absent when the issue never resolved
@@ -543,7 +561,8 @@ export function Conversation({
         <ReplyBox
           ticket={ticket}
           draft={draft}
-          setDraft={setDraft}
+          setDraft={applyDraft}
+          editVersion={editVersion}
           onReplied={handleReplied}
         />
       ) : (

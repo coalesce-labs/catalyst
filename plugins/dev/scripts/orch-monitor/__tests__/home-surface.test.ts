@@ -535,6 +535,20 @@ describe("Inbox conversation surface (CTL-1569)", () => {
     expect(conversationSrc).toContain("editVersion");
   });
 
+  it("round-5 P2 — a reply failure does not leak across ticket selections", () => {
+    // ReplyBox is REUSED across selections, so A's "Not sent" would otherwise
+    // render under B for a reply never attempted on B.
+    expect(conversationSrc).toMatch(/useEffect\(\(\) => \{\s*setFailure\(null\);\s*\}, \[ticket\]\)/);
+  });
+
+  it("round-5 P2 — suggestion prefills count as draft edits", () => {
+    // Chips call setDraft too; if only typing bumped the version, prefilling B with
+    // text submitted on A would let A's late success clear B's draft.
+    expect(conversationSrc).toContain("applyDraft");
+    expect(conversationSrc).toMatch(/onUseSuggestion=\{applyDraft\}/);
+    expect(conversationSrc).toMatch(/setDraft=\{applyDraft\}/);
+  });
+
   it("the surface routes a reply outcome through the ONE optimistic-rollback rule", () => {
     // Reusing the verb's mark + grace window (rather than a second optimistic
     // path) keeps one reconcile rule deciding when a row truly leaves the inbox.
