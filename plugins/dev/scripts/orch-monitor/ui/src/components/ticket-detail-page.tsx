@@ -52,6 +52,9 @@ import { TicketGantt } from "./ticket-gantt";
 import { CommsView } from "./comms-view";
 import { ActivityEventRow } from "./activity-event-row";
 import { useActivityStream } from "@/hooks/use-activity";
+// CTL-1574: the Linear discussion (comments + state changes) behind the
+// Discussion tab.
+import { useTicketDiscussion } from "@/hooks/use-ticket-discussion";
 import { useRepoColors } from "@/hooks/use-repo-colors";
 import { TabsContent } from "./ui/tabs";
 import { PillTabs, type PillTab } from "./pill-tabs";
@@ -69,6 +72,13 @@ import { ExecutionTab } from "./execution-tab";
 // the same fixed-height skeleton as the not-yet-loaded state (no layout jump).
 const TicketDescription = lazy(() =>
   import("./ticket-description").then((m) => ({ default: m.TicketDescription })),
+);
+
+// CTL-1574: the discussion timeline renders comment markdown through the SAME
+// heavy engine, so it is lazy-loaded for the same reason (and because Discussion
+// is not the default tab — the chunk is only fetched once the operator opens it).
+const TicketTimeline = lazy(() =>
+  import("./ticket-discussion").then((m) => ({ default: m.TicketTimeline })),
 );
 
 /** The description block's fixed-height skeleton — shared by the Suspense
@@ -557,6 +567,41 @@ function ActivitySection({ ticketId }: { ticketId: string }) {
   );
 }
 
+// ── DISCUSSION (the Linear conversation) ────────────────────────────────────
+// CTL-1574: comment cards interleaved with the ticket's Linear state-change
+// history, read from the local replica. Distinct from the Activity section above
+// — that one is the EXECUTION event stream; this is what people said and what
+// changed on the ticket. Keyed off the id so it works off-board.
+function DiscussionSection({ ticketId }: { ticketId: string }) {
+  const { comments, activity, available, loading } = useTicketDiscussion(ticketId);
+  return (
+    <section data-ticket-discussion style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <SectionLabel>Discussion</SectionLabel>
+        <span style={{ flex: 1 }} />
+        {available && !loading && (
+          <span style={{ font: `10px ${C.mono}`, color: C.fgDim }}>
+            {comments.length} comment{comments.length === 1 ? "" : "s"} · {activity.length} change
+            {activity.length === 1 ? "" : "s"}
+          </span>
+        )}
+      </div>
+      <Suspense
+        fallback={
+          <div style={{ color: C.fgDim, font: `12px ${C.mono}` }}>Loading discussion…</div>
+        }
+      >
+        <TicketTimeline
+          comments={comments}
+          activity={activity}
+          loaded={!loading}
+          available={available}
+        />
+      </Suspense>
+    </section>
+  );
+}
+
 // ── TELEMETRY strip (CTL-917 / DETAIL6) ─────────────────────────────────────
 /** Fetch the ticket telemetry strip's REAL Prometheus sparklines for this Linear
  *  key. REAL today — no new plumbing. A 503 (Prometheus not configured) yields
@@ -957,6 +1002,15 @@ export function TicketDetailPage({
             </div>
           </TabsContent>
 
+          {/* Discussion: the LINEAR conversation — comment cards interleaved with
+              the ticket's state-change history (CTL-1574). Keyed off the id so it
+              works off-board, same as the Activity tab above. */}
+          <TabsContent value="discussion">
+            <div style={{ paddingTop: 16 }}>
+              <DiscussionSection ticketId={ticket?.id ?? id} />
+            </div>
+          </TabsContent>
+
           {/* Execution: the record of what happened — NOW card, narrative, Gantt,
               artifacts, exceptions & decisions, hop log (CTL-1102). */}
           <TabsContent value="execution">
@@ -975,11 +1029,14 @@ function TAB_IS_VALID(tab: string): tab is "spec" | DetailTab {
   return tab === "spec" || (TAB_VALUES as readonly string[]).includes(tab);
 }
 
-/** The visible tab set (Spec default · Lifecycle · Cost · Activity · Execution). */
+/** The visible tab set (Spec default · Lifecycle · Cost · Activity · Discussion ·
+ *  Execution). "Discussion" is the LINEAR conversation (CTL-1574); "Activity" is
+ *  the execution event stream and keeps its name. */
 const TAB_DEFS: PillTab[] = [
   { value: "spec", label: "Spec" },
   { value: "lifecycle", label: "Lifecycle" },
   { value: "cost", label: "Cost" },
   { value: "activity", label: "Activity" },
+  { value: "discussion", label: "Discussion" },
   { value: "execution", label: "Execution" },
 ];

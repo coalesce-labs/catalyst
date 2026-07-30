@@ -330,6 +330,10 @@ import {
 // request — the rate-limit win, consistent with the BFF1 (CTL-883) decision.
 import { readTicketDetail } from "./lib/ticket-detail-reader.mjs";
 import { readTicketArtifacts, readTicketArtifactContent } from "./lib/ticket-artifacts-reader.mjs";
+// CTL-1574: a ticket's Linear DISCUSSION (comments + issue_history activity) read
+// from the local CTC replica via the shared @catalyst-cloud/read-model builders.
+// Cache-only like the readers above — never a live Linear call per request.
+import { readTicketDiscussion } from "./lib/ticket-discussion-reader.mjs";
 // CTL-974 pattern: supplemental cached Linear {title, description} fetch for the
 // ticket-detail page. Board title is stale-sourced and the durable cache has no
 // description column, so both must be live-fetched (cached, TTL'd, fail-open).
@@ -2677,6 +2681,33 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const artifacts = await readTicketArtifacts(ticket);
           return Response.json(artifacts);
+        }
+
+        // CTL-1574: a ticket's Linear discussion — comments + issue_history
+        // activity events, both read from the local CTC replica through the
+        // shared read-model builders. The reader never throws: an absent/locked
+        // replica or an unmirrored ticket comes back
+        // `{ available:false, comments:[], activity:[] }`, which the UI renders
+        // as an honest empty section (never a fabricated "no comments").
+        const ticketDiscussionMatch = url.pathname.match(
+          /^\/api\/ticket-discussion\/([^/]+)$/,
+        );
+        if (ticketDiscussionMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketDiscussionMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const discussion = await readTicketDiscussion(ticket);
+          return Response.json(discussion);
         }
 
         // CTL-1042: serve a ticket's research/plan artifact CONTENT by kind for
