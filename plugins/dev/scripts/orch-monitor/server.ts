@@ -1577,8 +1577,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // populated BEFORE the no-anchor early-return so it works single-host too.
   const localAdmissionCache: { map: Record<string, NodeAdmission> } = { map: {} };
   let execCoreDeps: Awaited<ReturnType<typeof loadDaemonDeps>> = null;
-  // CTL-1551: the peer transport the LAST poll actually used ("loki" | "anchor").
+  // CTL-1551: the peer transport the LAST poll actually used ("loki" | "anchor"),
+  // plus PER-HOST source memory — an AUTO fallback poll must not hand a RETAINED
+  // Loki-era heartbeat the anchor's looser window (fold rejects the anchor's
+  // stale records, so the retained entry's provenance is still Loki).
   let lastPeerSource: string = "loki";
+  const peerSourceByHost: Record<string, string> = {};
+  // Live windows DERIVED from the configured cadences (an operator raising
+  // MONITOR_ANCHOR_POLL_MS or the cache TTL must not shrink the budget below
+  // the real pipeline): beat/publish cadence + poll interval + cache TTL + margin.
+  const peerPollMs = Number(process.env.MONITOR_ANCHOR_POLL_MS) || 60_000;
+  const lokiCacheTtlMs = (() => {
+    const raw = Number(process.env.EXECUTION_CORE_LOKI_LIVENESS_CACHE_MS);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 20_000;
+  })();
+  const HEARTBEAT_CADENCE_MS = 30_000; // node.heartbeat cadence (execution-core HEARTBEAT_INTERVAL_MS)
+  const ANCHOR_PUBLISH_CADENCE_MS = 120_000; // Linear-anchor publisher cadence (cluster-heartbeat-publisher)
+  const PEER_WINDOW_MARGIN_MS = 10_000;
+  const lokiPeerWindowMs = HEARTBEAT_CADENCE_MS + peerPollMs + lokiCacheTtlMs + PEER_WINDOW_MARGIN_MS;
+  const anchorPeerWindowMs = ANCHOR_PUBLISH_CADENCE_MS + peerPollMs + PEER_WINDOW_MARGIN_MS;
   let anchorPollTimer: ReturnType<typeof setInterval> | null = null;
   const pollAnchorHeartbeats = (): void => {
     try {
@@ -1653,6 +1670,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
         prevCapacity: anchorCapacityCache.map,
         peers,
       });
+      // Stamp provenance ONLY for hosts whose folded heartbeat came from THIS
+      // snapshot — retained entries keep the source that produced them.
+      for (const [host, rec] of Object.entries(peers)) {
+        if (rec?.last_seen && folded.heartbeats[host] === rec.last_seen) {
+          peerSourceByHost[host] = peerSource;
+        }
+      }
       anchorHeartbeatCache.map = folded.heartbeats;
       anchorCapacityCache.map = folded.capacity;
     } catch {
@@ -1664,8 +1688,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       execCoreDeps = d;
       pollAnchorHeartbeats(); // prime immediately once deps resolve
     });
-    const anchorPollMs = Number(process.env.MONITOR_ANCHOR_POLL_MS) || 60_000;
-    anchorPollTimer = setInterval(pollAnchorHeartbeats, anchorPollMs);
+    anchorPollTimer = setInterval(pollAnchorHeartbeats, peerPollMs);
     anchorPollTimer.unref?.();
   }
 
@@ -1706,10 +1729,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
     intervalMsFor: (host: string) => {
       const self = resolveSelfPinnedHost();
       if (self && host === self) return undefined; // default 30s — local log is direct
-      // Budget by the transport the poll ACTUALLY used last (AUTO can fall back
-      // to the anchor): loki ≈ 30s beat + 60s poll + 20s cache → 120s; the
-      // Linear anchor publishes every ~120s + 60s poll → 240s.
-      return lastPeerSource === "anchor" ? 240_000 : 120_000;
+      // Budget by the transport that produced THIS host's cached heartbeat
+      // (per-host provenance; poll-global source only as a fallback), with the
+      // window DERIVED from the configured cadences.
+      const src = peerSourceByHost[host] ?? lastPeerSource;
+      return src === "anchor" ? anchorPeerWindowMs : lokiPeerWindowMs;
     },
     // CTL-1551: the monitor's own identity for the view/signal (SlotDeck's
     // localHost) — resolved per assemble, alias-folded like every other host key.
