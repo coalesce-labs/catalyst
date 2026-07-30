@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.39.0...catalyst-dev-v12.39.1) (2026-07-30)
+## [12.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.39.0...catalyst-dev-v12.39.1)
+
+Jul 30, 2026
+
+<!-- ai-enhanced -->
+
+### Needs-Human Clears on Reply
+
+When a developer responds to a parked ticket, it now immediately drops off the "Needs you" list — no matter whether the worker directory still exists. Previously, most parked tickets were permanently stuck in that state because the clear was gated on a local directory that gets cleaned up after a worker is reaped.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** CTL-1567 clear needs-human the moment a human responds ([#2796](https://github.com/coalesce-labs/catalyst/issues/2796)) ([2f71e13](https://github.com/coalesce-labs/catalyst/commit/2f71e13cfdb24aaf7e1b5e07b50d58e47ef3feea))
 
