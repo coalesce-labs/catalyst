@@ -122,6 +122,7 @@ import {
   defaultClearStall, // CTL-1067: J3 stall-clear seam
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
+import { labelMarkerBase } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth)
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
 import {
   writeBootMarker,
@@ -324,24 +325,55 @@ function ensureState(orchDir) {
   }
 }
 
+// defaultIsManagedTicket — CTL-1567 (Codex P1): does THIS installation manage the
+// ticket? Two independent proofs, either is sufficient:
+//   1. a local `workers/<TICKET>/` dir exists — Catalyst has demonstrably run it; or
+//   2. the ticket's team prefix is a registered project in registry.json — the
+//      ticket is in scope even though its worker dir was reaped (the exact case
+//      this whole change exists to serve).
+// Fails CLOSED: an unreadable/absent registry with no worker dir ⇒ false, so a
+// misconfigured host never mutates labels on tickets it does not own.
+export function defaultIsManagedTicket(ticket, orchDir) {
+  if (!ticket || !orchDir) return false;
+  try {
+    if (existsSync(join(orchDir, "workers", ticket))) return true;
+  } catch {
+    /* fall through to the registry check */
+  }
+  const prefix = String(ticket).split("-")[0];
+  if (!prefix) return false;
+  try {
+    const reg = JSON.parse(readFileSync(join(orchDir, "registry.json"), "utf8"));
+    return (reg?.projects ?? []).some((p) => p?.team === prefix);
+  } catch {
+    return false; // no registry ⇒ prove nothing ⇒ touch nothing
+  }
+}
+
 // clearNeedsHumanMarkers — CTL-1567: delete the once-markers that pair with the
 // `needs-human` Linear label, so a cleared label and the local marker can never
-// disagree. Mirrors the marker path in label-guard.mjs (`labelMarkerBase`) and
-// the pair that clearStalledLabel removes. Best-effort: a missing marker (the
-// common case — most parked tickets have no worker dir at all) is success, not
-// an error. Returns the paths actually removed, for logging/tests.
+// disagree. Uses label-guard's `labelMarkerBase` — the SAME path builder labelOnce
+// and clearStalledLabel use — rather than a second copy of the layout, so the
+// marker naming can never drift between the writer and this reconciler.
+// A missing marker is success, not an error: most parked tickets have no worker
+// dir at all. A REAL failure (permissions, EIO) is surfaced to the caller rather
+// than swallowed, so a marker we could not delete is never reported as reconciled.
 export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}) {
-  const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
+  const base = labelMarkerBase(orchDir, ticket, "needs-human");
   const removed = [];
+  const failed = [];
   for (const suffix of [".applied", ".skipped"]) {
+    const p = `${base}${suffix}`;
     try {
-      rm(`${base}${suffix}`);
-      removed.push(`${base}${suffix}`);
-    } catch {
-      /* absent → nothing to reconcile for this suffix */
+      rm(p);
+      removed.push(p);
+    } catch (err) {
+      // ENOENT is the expected, benign case. Anything else means the marker is
+      // still on disk and the label/marker pair is now inconsistent.
+      if (err?.code !== "ENOENT") failed.push({ path: p, code: err?.code });
     }
   }
-  return removed;
+  return { removed, failed };
 }
 
 // handleCommentWake — CTL-549 re-dispatch hook. Called on each
@@ -364,6 +396,13 @@ export async function handleCommentWake(
     // CTL-764 finding 11: canonical worker.transition emitter for the needs-input→
     // cleared resolution. Injectable for tests; defaults to the real appender.
     appendWorkerTransitionEvent = defaultAppendWorkerTransitionEvent,
+    // CTL-1567 (Codex P1): is this ticket managed by THIS Catalyst installation?
+    // The daemon receives EVERY workspace `linear.comment.created`, so without this
+    // gate the no-worker-dir clear below would strip a same-named `needs-human`
+    // label off a ticket Catalyst has never owned — and burn one Linear write per
+    // workspace comment. Defaults to the real registry check (no wiring required,
+    // so an unwired production path is still SAFE, not silently permissive).
+    isManagedTicket = defaultIsManagedTicket,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -393,19 +432,46 @@ export async function handleCommentWake(
   // is what grows the inbox without bound. Idempotent: removeLabel reports the
   // already-absent case as removed:true, so this is safe to run on every comment
   // and safe to run concurrently on both hosts.
+  //
+  // TWO GATES, both fail CLOSED (Codex P1 ×2). Unlike the self-echo guard above —
+  // which may fail open because its only job is suppressing a re-dispatch — this
+  // path MUTATES Linear on a ticket that may have no local state at all, so
+  // "not sure" must mean "don't touch it":
+  //
+  //  (a) POSITIVE human provenance. `_isBotId` returns false when botUserId is
+  //      unset/malformed OR when authorId is absent, so "not a known bot" does NOT
+  //      imply "a human". In that supported fail-open config the escalation posts
+  //      its own app-actor explanation comment, whose webhook would then strip the
+  //      label it had just applied while the recovery intent stayed latched —
+  //      silently defeating the escalation. Require a known author AND a
+  //      configured bot set before believing a human answered.
+  //  (b) MANAGED ticket. The daemon sees every workspace comment; only clear on
+  //      tickets this installation actually manages.
+  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
   let clearedNeedsHuman = false;
-  try {
-    const res = await removeLabel(ticket, "needs-human");
-    clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
-  } catch {
-    /* fail-open — a Linear write failure must never block the wake path */
+  if (humanProvenance && isManagedTicket(ticket, orchDir)) {
+    try {
+      const res = await removeLabel(ticket, "needs-human");
+      clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
+    } catch {
+      /* fail-open on the WRITE — a Linear 5xx must not block the wake path */
+    }
   }
   if (clearedNeedsHuman) {
     // Keep the once-marker in step with the label. Clearing one without the other
     // is the desync that leaves labelOnce permanently disarmed (or the board
     // showing a park Linear no longer has).
     try {
-      clearNeedsHumanMarkers(orchDir, ticket);
+      const { failed } = clearNeedsHumanMarkers(orchDir, ticket);
+      if (failed.length) {
+        // The label is gone from Linear but a marker survived: labelOnce stays
+        // disarmed for this ticket. Surface it — a silent swallow here is exactly
+        // the desync this change exists to prevent.
+        log.error(
+          { ticket, failed },
+          "handleCommentWake: needs-human marker NOT removed — labelOnce stays disarmed for this ticket"
+        );
+      }
     } catch (err) {
       log.warn(
         { ticket, err: err?.message },

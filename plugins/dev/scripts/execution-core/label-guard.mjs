@@ -42,7 +42,7 @@ import { log } from "./config.mjs";
 // when the transient-failure path keeps re-attempting the write.
 // labelMarkerBase — shared path prefix for the once-marker files used by
 // labelOnce and clearStalledLabel (single source of truth for the marker path).
-function labelMarkerBase(orchDir, ticket, label) {
+export function labelMarkerBase(orchDir, ticket, label) {
   return join(orchDir, "workers", ticket, `.linear-label-${label}`);
 }
 

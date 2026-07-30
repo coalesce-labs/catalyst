@@ -1507,9 +1507,11 @@ describe("handleCommentWake (CTL-549)", () => {
     const orch = tmpOrcDir(); // deliberately no workers/<TICKET>/ at all
     const removed = [];
     await handleCommentWake(
-      { ticket: "CTL-NODIR", body: "here is your answer" },
+      { ticket: "PROJ-NODIR", body: "here is your answer", authorId: "human-1" },
       {
         orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
         dispatch: () => ({ code: 0 }),
         removeLabel: async (ticket, label) => {
           removed.push({ ticket, label });
@@ -1517,20 +1519,22 @@ describe("handleCommentWake (CTL-549)", () => {
       }
     );
     // The label lives in Linear; a reaped worker dir must not make it unclearable.
-    expect(removed).toContainEqual({ ticket: "CTL-NODIR", label: "needs-human" });
+    expect(removed).toContainEqual({ ticket: "PROJ-NODIR", label: "needs-human" });
   });
 
   test("REGRESSION: clears needs-human for a signal with status=needs-human", async () => {
     const orch = tmpOrcDir();
     // recovery-emit.mjs / recovery-reasoning.mjs write THIS status, which matched
     // neither the `stalled` nor the `needs-input` branch.
-    writeSignal(orch, "CTL-NH", "implement", { status: "needs-human" });
+    writeSignal(orch, "PROJ-NH", "implement", { status: "needs-human" });
     const removed = [];
     const cleared = [];
     await handleCommentWake(
-      { ticket: "CTL-NH", body: "answered" },
+      { ticket: "PROJ-NH", body: "answered", authorId: "human-1" },
       {
         orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
         dispatch: () => ({ code: 0 }),
         removeLabel: async (ticket, label) => {
           removed.push({ ticket, label });
@@ -1541,16 +1545,16 @@ describe("handleCommentWake (CTL-549)", () => {
         },
       }
     );
-    expect(removed).toContainEqual({ ticket: "CTL-NH", label: "needs-human" });
+    expect(removed).toContainEqual({ ticket: "PROJ-NH", label: "needs-human" });
     // …and it is treated like `stalled`, so the stall is cleared too.
-    expect(cleared).toContainEqual({ ticket: "CTL-NH", phase: "implement" });
+    expect(cleared).toContainEqual({ ticket: "PROJ-NH", phase: "implement" });
   });
 
   test("the bot's OWN comment still does NOT clear the label (self-echo guard intact)", async () => {
     const orch = tmpOrcDir();
     const removed = [];
     await handleCommentWake(
-      { ticket: "CTL-BOT", body: "parking question", authorId: "bot-uuid" },
+      { ticket: "PROJ-BOT", body: "parking question", authorId: "bot-uuid" },
       {
         orchDir: orch,
         botUserId: "bot-uuid",
@@ -1563,13 +1567,67 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(removed).toHaveLength(0);
   });
 
-  test("a Linear write failure does not throw — the wake path stays fail-open", async () => {
-    const orch = tmpOrcDir();
-    writeSignal(orch, "CTL-ERR", "implement", { status: "needs-human" });
+  // Both new gates FAIL CLOSED — "not sure" must mean "don't mutate Linear".
+  test("does NOT clear when the ticket is not managed by this installation", async () => {
+    const orch = tmpOrcDir(); // no worker dir, and no registry entry for FOREIGN
+    const removed = [];
     await handleCommentWake(
-      { ticket: "CTL-ERR", body: "answered" },
+      { ticket: "FOREIGN-1", body: "unrelated comment", authorId: "human-1" },
       {
         orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+      }
+    );
+    // The daemon sees EVERY workspace comment; an unmanaged ticket's same-named
+    // needs-human label must not be stripped, and no Linear write may be spent.
+    expect(removed).toHaveLength(0);
+  });
+
+  test("does NOT clear without positive human provenance (botUserId unset)", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NOPROV", body: "who wrote this?", authorId: "someone" },
+      {
+        orchDir: orch,
+        // botUserId intentionally omitted: _isBotId fails OPEN, so "not a known
+        // bot" does not prove "a human". The escalation's OWN app-actor comment
+        // would otherwise clear the label it just applied.
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+        isManagedTicket: () => true,
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("does NOT clear when the comment has no author at all", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NOAUTHOR", body: "anonymous" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+        isManagedTicket: () => true,
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("a Linear write failure does not throw — the wake path stays fail-open", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-ERR", "implement", { status: "needs-human" });
+    await handleCommentWake(
+      { ticket: "PROJ-ERR", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
         dispatch: () => ({ code: 0 }),
         removeLabel: async () => {
           throw new Error("linear 503");
