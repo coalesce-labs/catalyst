@@ -76,9 +76,17 @@ export function parseLokiLivenessResponse(body) {
         (meta && meta.catalyst_node_in_flight_tickets) ??
         labels.catalyst_node_in_flight_tickets ??
         "";
+      // CTL-1551: capacity fields — same meta-or-label defensiveness as tickets.
+      // Loki serializes numeric attributes as strings; parse, reject non-finite.
+      const rawMp = (meta && meta.catalyst_node_max_parallel) ?? labels.catalyst_node_max_parallel;
+      const rawIfc = (meta && meta.catalyst_node_in_flight_count) ?? labels.catalyst_node_in_flight_count;
+      const mp = Number(rawMp);
+      const ifc = Number(rawIfc);
       out[host] = {
         last_seen: new Date(tsMs).toISOString(),
         in_flight_tickets: parseInFlight(rawTickets),
+        max_parallel: Number.isInteger(mp) && mp > 0 ? mp : null,
+        in_flight_count: Number.isInteger(ifc) && ifc >= 0 ? ifc : null,
       };
     }
   }
@@ -147,6 +155,26 @@ export async function readClusterLivenessFromLoki({
       }
     } catch (err) {
       logger?.warn?.({ err: err?.message }, "loki-liveness: tickets enrichment failed (ownership → local fallback)");
+    }
+    // CTL-1551 (query C, best-effort): capacity enrichment. Loki only surfaces a
+    // structured-metadata field when the query REFERENCES it (same reason query B
+    // exists), so a third filtered query forces catalyst_node_max_parallel into
+    // the response and its newest values are merged onto A. Failure leaves
+    // capacity null — the monitor renders "no data" zeros, liveness unaffected.
+    try {
+      const cBody = await queryLokiStreams(
+        mkUrl(`${sel} | catalyst_node_max_parallel=~\`.+\``),
+        timeoutMs,
+        fetcher,
+      );
+      const capEnriched = cBody ? parseLokiLivenessResponse(cBody) : {};
+      for (const [host, rec] of Object.entries(capEnriched)) {
+        if (!out[host]) continue;
+        if (rec.max_parallel != null) out[host].max_parallel = rec.max_parallel;
+        if (rec.in_flight_count != null) out[host].in_flight_count = rec.in_flight_count;
+      }
+    } catch (err) {
+      logger?.warn?.({ err: err?.message }, "loki-liveness: capacity enrichment failed (capacity → no-data)");
     }
     return out;
   } catch (err) {

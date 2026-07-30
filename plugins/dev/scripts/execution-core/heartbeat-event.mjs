@@ -47,9 +47,22 @@ export const HEARTBEAT_EVENT = "node.heartbeat";
  * @param {Function} [opts.inFlightTicketsFn]  CTL-1420 (#17): injectable fn returning
  *   this host's in-flight ticket IDs (string[]); the daemon supplies the local
  *   signal-scan list. Defaults to [] for non-daemon callers/tests.
+ * @param {Function} [opts.maxParallelFn]  CTL-1551: injectable fn returning this
+ *   host's live parallel-slot ceiling (positive integer, or null when unknown);
+ *   the daemon supplies readLocalMaxParallel. Carried as a top-level ATTRIBUTE
+ *   (body.payload is stripped before OTLP — otlp.ts:51) so a peer's monitor can
+ *   render per-host capacity from Loki now that the Linear-anchor publish (the
+ *   only prior cross-host max_parallel transport) is retired in loki mode.
  * @returns {object} the envelope object
  */
-export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn, inFlightTicketsFn } = {}) {
+export function buildHeartbeatEnvelope({
+  now,
+  epochFn,
+  governanceFn,
+  admissionFn,
+  inFlightTicketsFn,
+  maxParallelFn,
+} = {}) {
   const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const epoch = epochFn ? epochFn() : Date.now();
   const host = getHostName();
@@ -71,6 +84,12 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn
   const inFlightTickets = Array.isArray(inFlightRaw)
     ? inFlightRaw.filter((t) => typeof t === "string" && t.length > 0)
     : [];
+  // CTL-1551: live slot ceiling as a Loki-reachable attribute (low-card int →
+  // structured metadata, same rationale as in_flight_count). Fail-safe: a
+  // missing/invalid value → attribute omitted, never a fake 0 (the monitor
+  // treats "absent" as no-data, but a literal 0 would render as zero capacity).
+  const mpRaw = maxParallelFn ? maxParallelFn() : null;
+  const maxParallel = Number.isInteger(mpRaw) && mpRaw > 0 ? mpRaw : null;
 
   return {
     ts,
@@ -89,6 +108,8 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn
       // CTL-1420 (#17): Loki-queryable cross-host liveness+ownership signal.
       "catalyst.node.in_flight_tickets": inFlightTickets.join(","),
       "catalyst.node.in_flight_count": inFlightTickets.length,
+      // CTL-1551: Loki-queryable cross-host capacity signal (omitted when unknown).
+      ...(maxParallel != null ? { "catalyst.node.max_parallel": maxParallel } : {}),
     },
     body: {
       payload: {
@@ -117,8 +138,9 @@ export async function emitHeartbeatEvent({
   governanceFn,
   admissionFn,
   inFlightTicketsFn, // CTL-1420 (#17): forward the in-flight-tickets seam to the builder
+  maxParallelFn, // CTL-1551: forward the slot-ceiling seam to the builder
 } = {}) {
-  const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn, inFlightTicketsFn }))}\n`;
+  const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn, inFlightTicketsFn, maxParallelFn }))}\n`;
   try {
     await mkdir(dirname(logPath), { recursive: true });
     await appendFile(logPath, line);
@@ -141,8 +163,9 @@ export async function emitHeartbeatEvent({
  * @param {Function} [opts.admissionFn]  CTL-1322: live admission-state fn (daemon-supplied)
  * @param {Function} [opts.governanceFn] CTL-1062: live governance snapshot fn (optional override)
  * @param {Function} [opts.inFlightTicketsFn] CTL-1420 (#17): live in-flight-tickets fn (daemon-supplied)
+ * @param {Function} [opts.maxParallelFn] CTL-1551: live slot-ceiling fn (daemon-supplied)
  */
-export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, admissionFn, governanceFn, inFlightTicketsFn } = {}) {
+export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, admissionFn, governanceFn, inFlightTicketsFn, maxParallelFn } = {}) {
   const tick = () => {
     // CTL-1280: deterministic liveness heartbeat to daemon.log (Alloy→Loki),
     // riding the same cadence as the node.heartbeat event but on the .log stream
@@ -152,7 +175,7 @@ export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, ad
     // CTL-1517: per-process RSS/heap OTel gauge on the same tick (fire-and-forget; never
     // throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
     emitProcessMemoryMetric({ serviceName: "catalyst.execution-core", log }).catch(() => {});
-    return emitHeartbeatEvent({ logPath, admissionFn, governanceFn, inFlightTicketsFn }).catch(() => {});
+    return emitHeartbeatEvent({ logPath, admissionFn, governanceFn, inFlightTicketsFn, maxParallelFn }).catch(() => {});
   };
   const started = tick(); // emit once at boot; Promise for callers that need to await it
   const timer = setInterval(tick, intervalMs);

@@ -50,7 +50,10 @@ function localClusterGeneration(orchDir, ticket) {
 // a cycle. Fail-open: any miss → null, so the heartbeat still publishes liveness
 // without claiming a slot count it can't prove (the monitor treats null as "no
 // data", never an error).
-function readLocalMaxParallel(orchDir) {
+// CTL-1551: exported so daemon.mjs can thread it into startHeartbeat's
+// maxParallelFn — the node.heartbeat attribute is now the cross-host capacity
+// transport (the Linear-anchor publish below is retired in loki mode).
+export function readLocalMaxParallel(orchDir) {
   if (!orchDir) return null;
   try {
     const n = JSON.parse(readFileSync(join(orchDir, "state.json"), "utf8"))?.maxParallel;

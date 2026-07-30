@@ -39,6 +39,7 @@ import type { NavSignal, DaemonHealth } from "./lib/nav-signal.mjs";
 // project it to the tiny per-node footer signal (cluster-signal.mjs). Single-host
 // is an exact identity no-op (one node — the local daemon).
 import { createClusterEntity } from "./lib/cluster-view.mjs";
+import { readPeerRecords } from "./lib/peer-liveness.mjs"; // CTL-1551: source-aware peer transport selection
 import type { ClusterView } from "./lib/cluster-view.mjs";
 // CTL-1092: alias loading + resolution for the prod capacity/liveness wiring.
 // loadHostAliases reads catalyst.host.aliases (fail-open {}); resolveHostAlias
@@ -1358,7 +1359,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
     getHostName: () => string;
     getClusterHosts: () => string[];
     getLivenessAnchorIssue: () => string | null;
+    getLokiQueryUrl: () => string | null;
     readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
+    readClusterLivenessFromLokiSyncCached: (args: {
+      lokiUrl: string;
+    }) => Record<string, AnchorPeerRec>;
     deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
   } | null> | null = null;
   const loadDaemonDeps = () => {
@@ -1368,7 +1373,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const recoveryMod = ["..", "execution-core", "recovery.mjs"].join("/");
           const configMod = ["..", "execution-core", "config.mjs"].join("/");
           const heartbeatSyncMod = ["..", "execution-core", "cluster-heartbeat-sync.mjs"].join("/");
-          const [recovery, config, heartbeatSync, navSignal] = await Promise.all([
+          const lokiSyncMod = ["..", "execution-core", "loki-liveness-sync.mjs"].join("/");
+          const [recovery, config, heartbeatSync, lokiSync, navSignal] = await Promise.all([
             import(recoveryMod) as Promise<{
               readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
               readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
@@ -1377,9 +1383,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
               getHostName: () => string;
               getClusterHosts: () => string[];
               getLivenessAnchorIssue: () => string | null;
+              getLokiQueryUrl: () => string | null;
             }>,
             import(heartbeatSyncMod) as Promise<{
               readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
+            }>,
+            import(lokiSyncMod) as Promise<{
+              readClusterLivenessFromLokiSyncCached: (args: {
+                lokiUrl: string;
+              }) => Record<string, AnchorPeerRec>;
             }>,
             import("./lib/nav-signal.mjs"),
           ]);
@@ -1389,7 +1401,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
             getHostName: config.getHostName,
             getClusterHosts: config.getClusterHosts,
             getLivenessAnchorIssue: config.getLivenessAnchorIssue,
+            getLokiQueryUrl: config.getLokiQueryUrl,
             readPeerHeartbeatsSync: heartbeatSync.readPeerHeartbeatsSync,
+            readClusterLivenessFromLokiSyncCached: lokiSync.readClusterLivenessFromLokiSyncCached,
             deriveDaemonHealth: navSignal.deriveDaemonHealth,
           };
         } catch {
@@ -1586,13 +1600,37 @@ export function createServer(opts: CreateServerOptions): BunServer {
       } catch {
         /* keep last admission cache */
       }
-      const anchor = execCoreDeps.getLivenessAnchorIssue();
-      if (!anchor) {
-        anchorHeartbeatCache.map = {}; // no anchor configured → no peers
+      // CTL-1551: source-aware peer read. Since CTL-1420 (#17) the daemons publish
+      // cross-host liveness to the event log → Loki and the Linear-anchor publish
+      // is RETIRED in loki mode — so on a loki fleet the anchor is permanently
+      // stale and reading it painted every peer "offline" with weeks-old capacity.
+      // Selection: CATALYST_LIVENESS_READ_SOURCE=loki → Loki only (daemon parity);
+      // =linear → anchor only (legacy fleets); unset → AUTO: prefer Loki whenever
+      // a query URL resolves and it returns peers, else fall back to the anchor.
+      // The Loki record shape ({last_seen, in_flight_tickets, max_parallel,
+      // in_flight_count}) matches AnchorPeerRec, so both caches below populate
+      // identically from either source. URL resolution: the execution-core config
+      // getter first (env-driven), else the monitor's own otel-config lokiUrl —
+      // already resolved for the Telemetry surfaces, so a launchd monitor with a
+      // bare env still finds the same Loki its other pages use.
+      let lokiPeerUrl: string | null = null;
+      try {
+        lokiPeerUrl = execCoreDeps.getLokiQueryUrl?.() ?? null;
+      } catch {
+        lokiPeerUrl = null;
+      }
+      const { peers } = readPeerRecords({
+        rawSource: process.env.CATALYST_LIVENESS_READ_SOURCE,
+        lokiUrl: lokiPeerUrl ?? lokiUrl ?? null,
+        anchorIssue: execCoreDeps.getLivenessAnchorIssue(),
+        readLoki: execCoreDeps.readClusterLivenessFromLokiSyncCached,
+        readAnchor: execCoreDeps.readPeerHeartbeatsSync,
+      }) as { peers: Record<string, AnchorPeerRec> | null; source: string };
+      if (peers == null) {
+        anchorHeartbeatCache.map = {}; // no transport configured → no peers
         anchorCapacityCache.map = {};
         return;
       }
-      const peers = execCoreDeps.readPeerHeartbeatsSync({ anchorIssue: anchor });
       const next: Record<string, string> = {};
       const nextCap: Record<string, { maxParallel: number; inFlightCount: number }> = {};
       for (const [host, rec] of Object.entries(peers)) {
