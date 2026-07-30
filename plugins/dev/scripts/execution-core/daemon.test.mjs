@@ -1496,6 +1496,187 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
   });
 
+  // ─── CTL-1567: a human response clears needs-human FIRST, unconditionally ───
+  //
+  // Both cases below were silently dropped before this fix, which is why the
+  // "Needs you" list only ever grew. Measured on the live fleet 2026-07-29: 10 of
+  // 12 parked tickets had NO worker dir on either host, and the ones that did
+  // carried `status: "needs-human"` — the one status the loop ignored.
+
+  test("REGRESSION: clears needs-human even when the ticket has NO worker directory", async () => {
+    const orch = tmpOrcDir(); // deliberately no workers/<TICKET>/ at all
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NODIR", body: "here is your answer", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    // The label lives in Linear; a reaped worker dir must not make it unclearable.
+    expect(removed).toContainEqual({ ticket: "PROJ-NODIR", label: "needs-human" });
+  });
+
+  test("REGRESSION: clears needs-human for a signal with status=needs-human", async () => {
+    const orch = tmpOrcDir();
+    // recovery-emit.mjs / recovery-reasoning.mjs write THIS status, which matched
+    // neither the `stalled` nor the `needs-input` branch.
+    writeSignal(orch, "PROJ-NH", "implement", { status: "needs-human" });
+    const removed = [];
+    const cleared = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+        clearStall: ({ ticket, phase }) => {
+          cleared.push({ ticket, phase });
+          return true;
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "PROJ-NH", label: "needs-human" });
+    // …and it is treated like `stalled`, so the stall is cleared too.
+    expect(cleared).toContainEqual({ ticket: "PROJ-NH", phase: "implement" });
+  });
+
+  test("the bot's OWN comment still does NOT clear the label (self-echo guard intact)", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-BOT", body: "parking question", authorId: "bot-uuid" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("also clears needs-input — the board treats BOTH labels as Needs-You", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-BOTH", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => { removed.push(l); },
+        isManagedTicket: () => true,
+        forgetIntent: () => true,
+      }
+    );
+    expect(removed).toContain("needs-human");
+    expect(removed).toContain("needs-input");
+  });
+
+  test("re-arms recovery so the response is not suppressed by the escalated latch", async () => {
+    const orch = tmpOrcDir();
+    const forgotten = [];
+    await handleCommentWake(
+      { ticket: "PROJ-REARM", body: "authorized, try again", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true }),
+        isManagedTicket: () => true,
+        forgetIntent: (t) => { forgotten.push(t); return true; },
+      }
+    );
+    // Without this the .recovery-intents latch survives up to 7 days, the terminal
+    // sweep re-applies needs-human, and the retry the human just authorized is
+    // suppressed — the ticket silently returns to the inbox.
+    expect(forgotten).toEqual(["PROJ-REARM"]);
+  });
+
+  // Both new gates FAIL CLOSED — "not sure" must mean "don't mutate Linear".
+  test("does NOT clear when the ticket is not managed by this installation", async () => {
+    const orch = tmpOrcDir(); // no worker dir, and no registry entry for FOREIGN
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "FOREIGN-1", body: "unrelated comment", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+      }
+    );
+    // The daemon sees EVERY workspace comment; an unmanaged ticket's same-named
+    // needs-human label must not be stripped, and no Linear write may be spent.
+    expect(removed).toHaveLength(0);
+  });
+
+  test("does NOT clear without positive human provenance (botUserId unset)", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NOPROV", body: "who wrote this?", authorId: "someone" },
+      {
+        orchDir: orch,
+        // botUserId intentionally omitted: _isBotId fails OPEN, so "not a known
+        // bot" does not prove "a human". The escalation's OWN app-actor comment
+        // would otherwise clear the label it just applied.
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+        isManagedTicket: () => true,
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("does NOT clear when the comment has no author at all", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NOAUTHOR", body: "anonymous" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+        isManagedTicket: () => true,
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("a Linear write failure does not throw — the wake path stays fail-open", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-ERR", "implement", { status: "needs-human" });
+    await handleCommentWake(
+      { ticket: "PROJ-ERR", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => {
+          throw new Error("linear 503");
+        },
+        clearStall: () => true,
+      }
+    );
+    // reaching here without throwing IS the assertion
+    expect(true).toBe(true);
+  });
+
   // CTL-764 finding 11: the daemon removes the durable needs-input label out-of-band and
   // redispatches — the scheduler never sees this edge, so the needs-input→cleared
   // resolution must be recorded here in the canonical worker.transition stream.
