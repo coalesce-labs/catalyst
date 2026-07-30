@@ -195,6 +195,21 @@ describe("capacity enrichment (CTL-1551)", () => {
     expect(out.mini.in_flight_count).toBe(2);
   });
 
+  test("parse: host from per-entry structured metadata when absent from stream labels (CTL-1551)", () => {
+    const out = parseLokiLivenessResponse({
+      data: {
+        result: [
+          {
+            stream: { event_name: "node.heartbeat" }, // no host_name label
+            values: [["1783451090000000000", "node.heartbeat", { host_name: "mini-2" }]],
+          },
+        ],
+      },
+    });
+    expect(out["mini-2"]).toBeDefined();
+    expect(out["mini-2"].last_seen).toBe("2026-07-07T19:04:50.000Z");
+  });
+
   test("parse: capacity from the promoted-stream-label shape", () => {
     const out = parseLokiLivenessResponse({
       data: { result: [capStream("mini-2", "1783451090000000000", { mp: "4", ifc: "0", asLabels: true })] },

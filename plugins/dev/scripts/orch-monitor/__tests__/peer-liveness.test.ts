@@ -125,6 +125,27 @@ describe("readPeerRecords (CTL-1551)", () => {
     expect(r.peers).toBeNull();
   });
 
+  it("retainMissingEntries: a host missing from a partial snapshot keeps its previous entry", async () => {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore — .mjs module
+    const { retainMissingEntries } = await import("../lib/peer-liveness.mjs");
+    const prev = { mini: "2026-07-30T15:00:00Z", "mini-2": "2026-07-30T15:00:10Z" };
+    const next = { mini: "2026-07-30T15:01:00Z" }; // mini-2 absent this snapshot
+    expect(retainMissingEntries(prev, next)).toEqual({
+      mini: "2026-07-30T15:01:00Z", // fresh value wins
+      "mini-2": "2026-07-30T15:00:10Z", // retained — ages out via liveness grace
+    });
+  });
+
+  it("retainMissingEntries: an EMPTY snapshot (Loki outage fail-open) keeps the whole cache", async () => {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore — .mjs module
+    const { retainMissingEntries } = await import("../lib/peer-liveness.mjs");
+    const prev = { mini: { maxParallel: 3, inFlightCount: 1 } };
+    expect(retainMissingEntries(prev, {})).toEqual(prev);
+    expect(retainMissingEntries(prev, null)).toEqual(prev);
+  });
+
   it("a THROWING anchor read propagates (caller's outer catch keeps the last cache)", () => {
     expect(() =>
       readPeerRecords({

@@ -31,3 +31,13 @@ export interface ReadPeerRecordsResult {
 }
 
 export function readPeerRecords(args?: ReadPeerRecordsArgs): ReadPeerRecordsResult;
+
+/**
+ * Retain previous-cache entries for hosts absent from the new snapshot, so a
+ * partial/empty Loki read cannot instantly blank a still-fresh peer (retained
+ * entries age out via the normal node-liveness grace).
+ */
+export function retainMissingEntries<T>(
+  prev: Record<string, T> | null | undefined,
+  next: Record<string, T> | null | undefined
+): Record<string, T>;

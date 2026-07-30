@@ -72,7 +72,7 @@ import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-po
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 import { readAdmissionState } from "./admission-state.mjs"; // CTL-1322: live admission block for the heartbeat
-import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets, readLocalMaxParallel } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list for the Loki heartbeat; CTL-1551: slot ceiling for the Loki heartbeat
+import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list for the Loki heartbeat
 import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
   recoverStartup,
@@ -120,6 +120,7 @@ import {
   readAllEligibleTickets, // CTL-862: boot-log ownership count
   clearHoldStopCooldown, // CTL-768
   defaultClearStall, // CTL-1067: J3 stall-clear seam
+  readMaxParallel, // CTL-1551: the SCHEDULER-ENFORCED slot ceiling for the heartbeat
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { labelMarkerBase } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth)
@@ -1196,8 +1197,11 @@ export function startDaemon({
         inFlightTicketsFn: () => localInFlightTickets(getHostName(), { orchDir }),
         // CTL-1551: carry the live slot ceiling so a peer's monitor can render
         // per-host capacity from Loki (the Linear-anchor capacity transport is
-        // retired in loki mode). Fail-open: null → attribute omitted.
-        maxParallelFn: () => readLocalMaxParallel(orchDir),
+        // retired in loki mode). Uses the SAME readMaxParallel chokepoint the
+        // scheduler enforces (config-precedence + bounds), NOT the raw state.json
+        // value — the two can diverge and peers must render the enforced ceiling.
+        // Fail-open: an invalid result → attribute omitted.
+        maxParallelFn: () => readMaxParallel(orchDir, concurrency),
       });
       // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
       // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.

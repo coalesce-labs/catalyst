@@ -53,3 +53,19 @@ export function readPeerRecords({ rawSource, lokiUrl, anchorIssue, readLoki, rea
   }
   return { peers: readAnchor({ anchorIssue }) ?? {}, source: "anchor" };
 }
+
+// retainMissingEntries — CTL-1551. A successful Loki read can be PARTIAL (eventual
+// consistency, bounded result) or EMPTY-on-outage (the sync bridge fail-opens to
+// {}), and the poll replaces its caches wholesale — so a host merely MISSING from
+// one snapshot would flip offline instantly with zeroed capacity, bypassing the
+// liveness grace. Retain the previous entry for any host absent from the new
+// snapshot: a genuinely dead host's retained last_seen stops advancing, so the
+// node-liveness classifier ages it to offline on the SAME grace it always had —
+// retention only prevents the instant blank, never a false "live forever".
+export function retainMissingEntries(prev, next) {
+  const out = { ...(next ?? {}) };
+  for (const [host, entry] of Object.entries(prev ?? {})) {
+    if (!(host in out)) out[host] = entry;
+  }
+  return out;
+}

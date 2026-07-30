@@ -63,15 +63,19 @@ export function parseLokiLivenessResponse(body) {
   const newestMs = {};
   for (const stream of results) {
     const labels = (stream && stream.stream) || {};
-    const host = labels.host_name;
-    if (typeof host !== "string" || host.length === 0) continue;
     const values = Array.isArray(stream.values) ? stream.values : [];
     for (const v of values) {
       const tsMs = nsToMs(v && v[0]);
       if (!Number.isFinite(tsMs)) continue;
+      // CTL-1551: host resolves label-first (the deployed topology — Loki merges
+      // structured metadata into the response's stream object, verified live),
+      // with a per-entry structured-metadata fallback for a topology that keeps
+      // host_name entry-scoped instead.
+      const meta = (v && v[2]) || null;
+      const host = labels.host_name ?? (meta && meta.host_name);
+      if (typeof host !== "string" || host.length === 0) continue;
       if (host in newestMs && tsMs <= newestMs[host]) continue; // not strictly newer → skip
       newestMs[host] = tsMs;
-      const meta = (v && v[2]) || null;
       const rawTickets =
         (meta && meta.catalyst_node_in_flight_tickets) ??
         labels.catalyst_node_in_flight_tickets ??
@@ -162,8 +166,12 @@ export async function readClusterLivenessFromLoki({
     // the response and its newest values are merged onto A. Failure leaves
     // capacity null — the monitor renders "no data" zeros, liveness unaffected.
     try {
+      // Reference BOTH capacity fields so Loki surfaces them regardless of
+      // whether the topology promotes them into the response stream object —
+      // every mp-bearing heartbeat line also carries the count, so the AND
+      // filter matches the same lines.
       const cBody = await queryLokiStreams(
-        mkUrl(`${sel} | catalyst_node_max_parallel=~\`.+\``),
+        mkUrl(`${sel} | catalyst_node_max_parallel=~\`.+\` | catalyst_node_in_flight_count=~\`.+\``),
         timeoutMs,
         fetcher,
       );
