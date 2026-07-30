@@ -24,14 +24,22 @@ _CATALYST_LINEAR_APP_ACTOR_SH_LOADED=1
 
 linear_app_actor_auth() {
   local _daemon="${1:?linear_app_actor_auth: daemon name required}"
-  local _g="${HOME}/.config/catalyst/config.json" _ocid _ocsec _otok
+  # Layer-2 selection chain — mirrors execution-core/install-lifecycle.mjs (and
+  # linear-remint.mjs defaultLayer2Path): CATALYST_LAYER2_CONFIG_FILE >
+  # CATALYST_MACHINE_CONFIG > $XDG_CONFIG_HOME/catalyst/config.json > ~/.config/….
+  local _g="${CATALYST_LAYER2_CONFIG_FILE:-${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst/config.json}}"
+  local _ocid _ocsec _otok
   _ocid=$(jq -r '.catalyst.linear.bot.orchestrator.clientId // empty' "$_g" 2>/dev/null)
   _ocsec=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "$_g" 2>/dev/null)
   if [[ -n "$_ocid" && -n "$_ocsec" ]]; then
-    _otok=$(curl -s --noproxy '*' -X POST https://api.linear.app/oauth/token \
-      -d grant_type=client_credentials -d "client_id=$_ocid" -d "client_secret=$_ocsec" \
-      -d 'scope=read,write,comments:create,app:assignable,app:mentionable' \
-      -d 'actor=app' 2>/dev/null | jq -r '.access_token // empty' 2>/dev/null)
+    # Secret travels via --data @- on stdin, never argv (process-table hygiene —
+    # house style: linear-remint.mjs buildMintCurlArgs). Connection + transfer
+    # bounded so a hung OAuth endpoint cannot wedge daemon start.
+    _otok=$(printf 'grant_type=client_credentials&client_id=%s&client_secret=%s&scope=read,write,comments:create,app:assignable,app:mentionable&actor=app' \
+      "$_ocid" "$_ocsec" |
+      curl -s --connect-timeout 5 --max-time 30 --noproxy '*' -X POST \
+        https://api.linear.app/oauth/token --data @- 2>/dev/null |
+      jq -r '.access_token // empty' 2>/dev/null)
     if [[ -n "$_otok" ]]; then
       export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
       echo "${_daemon}: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2

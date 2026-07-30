@@ -26,6 +26,7 @@ import {
   upsertTicketDescriptor,
 } from "./broker-state.mjs";
 import { extractLabelNames } from "./backfill-ticket-labels.mjs";
+import { linearReminter, isAuthError } from "../execution-core/linear-remint.mjs";
 
 // Mode knob: env CATALYST_CACHE_RECONCILE overrides Layer-2 config; operators
 // opt in via =shadow (log would-write, touch nothing) then =enforce (write).
@@ -212,6 +213,10 @@ export async function reconcileCacheState({
   getAll = getAllTicketDescriptors,
   fetch = fetchLive,
   upsert = upsertTicketDescriptor,
+  // CTL-1577: the startup mint (catalyst-broker cmd_start) runs ONCE; a broker
+  // crossing the OAuth expiry boundary re-mints here mid-run (cooldown-guarded
+  // singleton — same seam as execution-core's withAuthRemint).
+  reminter = linearReminter,
   logger,
 } = {}) {
   const log = logSink(logger);
@@ -272,6 +277,11 @@ export async function reconcileCacheState({
     }
     if (live.error || (live.state === null && live.labels === null)) {
       failed += 1;
+      // CTL-1577: an auth-shaped failure means the token expired — refresh
+      // process.env so the NEXT linearis spawn (this pass or the label
+      // backfill) inherits a fresh app-actor token. Non-auth failures skip:
+      // a re-mint cannot help a 429/timeout/parse error.
+      if (isAuthError(live.error)) reminter.attempt();
       // CTL-1288 trade-off: the cursor advances to the last TAKEN ticket (not the
       // last SUCCEEDED), so a fetch-failed ticket's retry waits until its tier
       // wraps rather than next interval. This is DELIBERATE forward progress: a
