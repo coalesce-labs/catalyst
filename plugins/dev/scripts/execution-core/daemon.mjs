@@ -123,6 +123,7 @@ import {
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { labelMarkerBase } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth)
+import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
 import {
   writeBootMarker,
@@ -403,6 +404,13 @@ export async function handleCommentWake(
     // workspace comment. Defaults to the real registry check (no wiring required,
     // so an unwired production path is still SAFE, not silently permissive).
     isManagedTicket = defaultIsManagedTicket,
+    // CTL-1567 (Codex P1): a human response must RE-ARM recovery, not just unpark.
+    // Clearing the label alone leaves `.recovery-intents/<TICKET>.json` latched
+    // `escalated:true` for up to 7 days, so the terminal sweep re-applies
+    // needs-human while the latch suppresses any fresh attempt — the ticket
+    // silently returns to the inbox and cannot be retried. A human answering IS
+    // the signal that another attempt is warranted.
+    forgetIntent = defaultForgetIntent,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -455,6 +463,26 @@ export async function handleCommentWake(
       clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
     } catch {
       /* fail-open on the WRITE — a Linear 5xx must not block the wake path */
+    }
+    // CTL-1567 (Codex P1): `needs-input` is the OTHER park label, and the board
+    // treats either as a Needs-You ticket (it synthesizes no-worker-dir cards from
+    // both). Clearing only needs-human left a parked needs-input ticket in the
+    // inbox after the human answered — while this path claimed to be the complete
+    // response. Both labels are the same fact from the operator's side.
+    try {
+      await removeLabel(ticket, "needs-input");
+    } catch {
+      /* fail-open — same reasoning as above */
+    }
+    // Re-arm recovery: without this the latch survives and suppresses the retry
+    // this response was meant to authorize (see the forgetIntent option above).
+    try {
+      forgetIntent(ticket, { orchDir });
+    } catch (err) {
+      log.warn(
+        { ticket, err: err?.message },
+        "handleCommentWake: recovery-intent re-arm failed — a retry may stay suppressed"
+      );
     }
   }
   if (clearedNeedsHuman) {
