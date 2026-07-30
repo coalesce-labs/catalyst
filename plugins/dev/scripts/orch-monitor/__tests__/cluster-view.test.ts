@@ -305,6 +305,32 @@ describe("createClusterEntity — read-model integration (Scenario: the read-mod
     m.stop();
   });
 
+  it("forwards intervalMs so a transport-lagged peer classifies live, not degraded (CTL-1551)", async () => {
+    // The Loki peer pipeline adds ~30s beat + 60s poll + 20s cache of KNOWN lag,
+    // so the server budgets a wider live window. This pins the entity actually
+    // FORWARDING intervalMs (the accepted-but-dropped trap the reader params hit).
+    const snapshot = board([ticket("CTL-1")]);
+    const cluster = createClusterEntity({
+      ownerHostProvider: () => Promise.resolve({ "CTL-1": "mini" }),
+      rosterProvider: () => ["mini", "mini-2"],
+      heartbeatReader: () => ({
+        mini: new Date(now - 1000).toISOString(),
+        "mini-2": new Date(now - 90_000).toISOString(), // 90s old — healthy peer via lagged transport
+      }),
+      intervalMs: 120_000,
+      now: () => now,
+    });
+    const m = createReadModel({
+      assemble: () => Promise.resolve(snapshot),
+      onDemandTtlMs: 5000,
+      entities: { board: { project: (s: BoardPayload) => s }, cluster },
+    });
+    const view = (await m.getEntity("cluster")) as ClusterView;
+    const peer = view.nodes.find((n) => n.host === "mini-2");
+    expect(peer?.status).toBe("live"); // default 30s window would say "degraded"
+    m.stop();
+  });
+
   it("groups by owner_host on a multi-host roster via injected deps", async () => {
     const snapshot = board([ticket("CTL-1"), ticket("CTL-2")]);
     const cluster = createClusterEntity({

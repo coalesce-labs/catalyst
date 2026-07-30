@@ -1674,6 +1674,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // on the anchor — including a Stage-0 SHADOW node that owns zero tickets —
   // decoupled from the dispatch roster (see cluster-view.mjs CTL-1251 header).
   const clusterEntity = createClusterEntity({
+    // CTL-1551: the peer-liveness pipeline adds KNOWN lag on top of heartbeat
+    // age — ~30s beat cadence + the 60s background peer poll + the 20s Loki
+    // sync-cache TTL ≈ 110s worst case — so a healthy peer can NEVER satisfy
+    // the default 30s "live" window and would structurally render "degraded".
+    // Budget the live window for the transport (120s); "degraded" then means
+    // genuinely late (120s–5min), and offline semantics (5min grace) unchanged.
+    intervalMs: 120_000,
     rosterProvider: () => {
       try {
         return execCoreDeps?.getClusterHosts() ?? [];

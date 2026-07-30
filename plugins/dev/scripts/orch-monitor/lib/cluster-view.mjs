@@ -313,6 +313,13 @@ export function createClusterEntity({
   // CTL-1322: injectable admission reader; forwarded verbatim to assembleClusterView.
   // (host) -> { accepting, holdReason, … } | null. Default null = feature off.
   admissionReader = null,
+  // CTL-1551: liveness thresholds, forwarded verbatim to assembleClusterView.
+  // The Loki peer transport adds known pipeline lag (beat cadence + background
+  // poll + sync-cache TTL) on top of heartbeat age, so the server passes a live
+  // window that budgets for it — otherwise a perfectly healthy peer is
+  // STRUCTURALLY classified "degraded". undefined = the node-liveness defaults.
+  intervalMs = undefined,
+  graceMs = undefined,
   now = () => Date.now(),
 } = {}) {
   // Memoize the lazy execution-core import so repeated assembles don't re-import.
@@ -372,6 +379,10 @@ export function createClusterEntity({
         aliases,
         drainReader,
         admissionReader,
+        // CTL-1551: forwarded, not defaulted here — same accepted-but-dropped
+        // trap as the three readers above.
+        intervalMs,
+        graceMs,
       });
     },
   };
