@@ -263,6 +263,13 @@ export function HomeSurface() {
         attention: perSection("attention"),
         blocked: perSection("blocked"),
         waiting: perSection("waiting"),
+        // The AGGREGATE must be recomputed too. `isAllClear` and
+        // `calmHeaderSentence` both read `needsYou`, not the components — so
+        // leaving it spread through meant resolving the LAST attention row still
+        // showed "1 needs you" and withheld the all-clear surface until an SSE
+        // frame arrived. That is precisely the relief moment this feature exists
+        // to deliver, so it must not wait on the network.
+        needsYou: perSection("attention") + perSection("blocked") + perSection("waiting"),
       },
     };
   }, [rawModel, resolvedIds]);

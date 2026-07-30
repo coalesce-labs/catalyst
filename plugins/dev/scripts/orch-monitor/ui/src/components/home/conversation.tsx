@@ -431,6 +431,12 @@ export function Conversation({
 
   // A new selection starts a fresh draft — one operator's half-typed answer must
   // never leak onto a different ticket.
+  // The CURRENT selection, readable from any async callback regardless of which
+  // render captured it. Updated on every render so a late completion always
+  // compares against what the operator is looking at now.
+  const currentTicket = useRef(ticket);
+  currentTicket.current = ticket;
+
   const lastTicket = useRef(ticket);
   useEffect(() => {
     if (lastTicket.current !== ticket) {
@@ -442,12 +448,17 @@ export function Conversation({
 
   const handleReplied = useCallback(
     (outcome: ReplyOutcome, submitted: string, submittedFor: string) => {
-      // A reply to ticket A can land AFTER the operator has selected ticket B. The
-      // outcome must still bubble (B's row… actually A's row… must reconcile), but
-      // the locally rendered turns belong to A only — appending A's comment into
-      // B's thread would show a turn that B's server thread can never contain, and
-      // could mislead the next reply.
-      if (outcome.status === "replied" && submittedFor === ticket) {
+      // A reply to ticket A can land AFTER the operator has selected ticket B.
+      //
+      // Comparing `submittedFor` to the `ticket` captured by this callback does NOT
+      // work: ReplyBox invokes the callback instance captured during A's render, so
+      // BOTH values are A and the guard always passes. The comparison must be
+      // against the CURRENT selection, which only a ref can provide.
+      //
+      // The outcome still bubbles unconditionally so A's row reconciles; only the
+      // locally rendered turns are gated, because appending A's comment into B's
+      // thread would render a turn B's server thread can never contain.
+      if (outcome.status === "replied" && submittedFor === currentTicket.current) {
         // Show the confirmed turn immediately …
         setOwnTurns((prev) => [
           ownReplyEntry(outcome.commentId, submitted, Date.now()),
@@ -459,7 +470,7 @@ export function Conversation({
       }
       onReplied?.(outcome);
     },
-    [onReplied, ticket],
+    [onReplied],
   );
 
   if (!enabled) return null;

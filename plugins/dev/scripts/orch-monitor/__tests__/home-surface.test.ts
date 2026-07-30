@@ -504,10 +504,20 @@ describe("Inbox conversation surface (CTL-1569)", () => {
     expect(conversationCode).not.toMatch(/const body = draft\.trim\(\)/);
   });
 
-  it("re-review P1 — async reply state is scoped to the ticket it was sent for", () => {
+  it("re-review P1 — async reply state is scoped to the CURRENT selection", () => {
     // A reply to A landing after switching to B must not append A's comment to B.
+    // Comparing against the closure-captured `ticket` does NOT work — ReplyBox
+    // invokes the callback captured during A's render, so both values are A and
+    // the guard always passes. Only a ref reads the current selection.
     expect(conversationSrc).toContain("submittedFor");
-    expect(conversationSrc).toMatch(/submittedFor === ticket/);
+    expect(conversationSrc).toMatch(/submittedFor === currentTicket\.current/);
+    expect(conversationSrc).toContain("currentTicket.current = ticket");
+  });
+
+  it("round-3 P2 — the aggregate needsYou count is recomputed too", () => {
+    // isAllClear and calmHeaderSentence read the AGGREGATE, not the components,
+    // so resolving the last attention row must flip the all-clear immediately.
+    expect(homeSurfaceSrc).toMatch(/needsYou: perSection\("attention"\)/);
   });
 
   it("the surface routes a reply outcome through the ONE optimistic-rollback rule", () => {

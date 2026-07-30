@@ -48,6 +48,11 @@ export function defaultReplicaDbPath() {
  *  whole history. Deep history lives in Linear, one click away. */
 export const DEFAULT_THREAD_LIMIT = 8;
 
+/** How deep to scan for an ASK candidate, independent of how many comments are
+ *  DISPLAYED. Still bounded (one indexed local query), but wide enough that a run
+ *  of human replies or GitHub chatter cannot hide the agent's question. */
+export const ASK_SCAN_LIMIT = 40;
+
 /** Bodies longer than this are marked `truncated` so the UI can clamp them with
  *  expand-in-place (§2) instead of letting one wall of agent prose own the pane.
  *  The FULL body is still sent — expansion must not need a second round trip. */
@@ -253,10 +258,20 @@ export async function readTicketThread(
     }
     const bounded = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_THREAD_LIMIT;
     const sql = buildThreadSql({ hasCreatedAt: commentsHasCreatedAt(db) });
-    const rows = db.prepare(sql).all(ticket, bounded) ?? [];
+    // Scan a WIDER window than we display. The display limit is "the last few"
+    // (§2), but the ask fallback needs the newest CATALYST-AGENT comment — and on a
+    // ticket whose recent entries are all human replies or integration chatter, the
+    // agent's question sits just outside the display window. Limiting first would
+    // report "no ask" while the replica plainly holds one.
+    const scanRows = db.prepare(sql).all(ticket, Math.max(bounded, ASK_SCAN_LIMIT)) ?? [];
+    const rows = scanRows.slice(0, bounded);
     const issue = db.prepare(ISSUE_SQL).get(ticket) ?? null;
 
     const comments = (Array.isArray(rows) ? rows : [])
+      .map((r) => normalizeComment(r, { botUserIds }))
+      .filter(Boolean);
+    // Ask candidates come from the WIDE scan, not the displayed slice.
+    const scanned = (Array.isArray(scanRows) ? scanRows : [])
       .map((r) => normalizeComment(r, { botUserIds }))
       .filter(Boolean);
     // The thread is already newest-first, so these stay newest-first too. The full
@@ -266,7 +281,7 @@ export async function readTicketThread(
     // Filtered on `isCatalystAgent`, NOT `isAgent`: integration plumbing (a GitHub
     // sync notice, a Linear automation note) is not the agent asking anything, and
     // letting it into this list makes it the derived ask.
-    const agentComments = comments.filter((c) => c.isCatalystAgent).map((c) => c.body);
+    const agentComments = scanned.filter((c) => c.isCatalystAgent).map((c) => c.body);
 
     return {
       ticket,

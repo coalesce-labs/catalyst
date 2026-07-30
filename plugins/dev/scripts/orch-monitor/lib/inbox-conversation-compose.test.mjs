@@ -364,7 +364,10 @@ describe("P2 — the legacy bot id must reach the READ path", () => {
 
 describe("P2 — an unusable explanation must not mask an older usable one", () => {
   it("recognizes what deriveAsk can actually consume", () => {
-    expect(isUsableExplanation({ ask: { summary: "x" } })).toBe(true);
+    // A structured ask needs a recognized KIND too — askFromStructured requires
+    // both, so summary-only must NOT stop the scan (see the round-3 tests below).
+    expect(isUsableExplanation({ ask: { kind: "approve", summary: "x" } })).toBe(true);
+    expect(isUsableExplanation({ ask: { summary: "x" } })).toBe(false);
     expect(isUsableExplanation({ options: [{ label: "a" }, { label: "b" }] })).toBe(true);
     expect(isUsableExplanation({ call_to_action: "do it" })).toBe(true);
     expect(isUsableExplanation({ what_to_do: "do it" })).toBe(true);
@@ -403,5 +406,25 @@ describe("P2 — an unusable explanation must not mask an older usable one", () 
     });
     expect(out.ask.source).toBe("explanation");
     expect(out.ask.kind).toBe("approve");
+  });
+});
+
+// ── Codex round-3 remediation ────────────────────────────────────────────────
+
+describe("round-3 P2 — isUsableExplanation must mirror askFromStructured", () => {
+  it("rejects a structured ask with a summary but no recognized kind", () => {
+    // askFromStructured requires BOTH, so declaring this usable lets it stop the
+    // scan and then produce nothing — the exact masking this predicate prevents.
+    expect(isUsableExplanation({ ask: { summary: "Waiting for input" } })).toBe(false);
+    expect(isUsableExplanation({ ask: { kind: "nonsense", summary: "x" } })).toBe(false);
+    expect(isUsableExplanation({ ask: { kind: "approve", summary: "Ship?" } })).toBe(true);
+  });
+
+  it("a partial structured ask no longer masks an older usable explanation", () => {
+    const expl = deriveRichExplanation([
+      { explanation: { call_to_action: "the real ask" } },
+      { explanation: { ask: { summary: "Waiting for input" } } },
+    ]);
+    expect(expl.call_to_action).toBe("the real ask");
   });
 });

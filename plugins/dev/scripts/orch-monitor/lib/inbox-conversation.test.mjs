@@ -50,7 +50,8 @@ function fakeDb({ comments = [], issue = null, throwOn = null }) {
       }
       const isIssueQuery = sql.includes("FROM issues");
       return {
-        all: () => (isIssueQuery ? [] : comments),
+        all: (_t, lim) =>
+          isIssueQuery ? [] : comments.slice(0, typeof lim === "number" ? lim : comments.length),
         get: () => (isIssueQuery ? issue : comments[0] ?? null),
       };
     },
@@ -1022,5 +1023,54 @@ describe("replyToTicket", () => {
       },
     );
     expect(out.status).toBe("replied");
+  });
+});
+
+// ── Codex round-3 remediation ────────────────────────────────────────────────
+
+describe("round-3 P2 — an operator-action block always requires action", () => {
+  it("classifies an explicit action block as `action`, not plain `ask`", async () => {
+    const { classifyAskCandidate } = await import("./inbox-ask.mjs");
+    expect(classifyAskCandidate("Action required: rotate the credentials.").class).toBe("action");
+  });
+
+  it("forces act-then-confirm, so the UI never promises a reply alone suffices", async () => {
+    const { deriveAsk: derive } = await import("./inbox-ask.mjs");
+    // The general classifier would call this `clarify` (no act-then-confirm marker),
+    // telling the operator a written reply resolves it — the costliest error here.
+    const ask = derive({ agentComments: ["Action required: rotate the credentials."] });
+    expect(ask.kind).toBe("act-then-confirm");
+    expect(ask.canResolveByReply).toBe(false);
+  });
+
+  it("still ranks an action block above ordinary prose", async () => {
+    const { pickAskCandidate } = await import("./inbox-ask.mjs");
+    const picked = pickAskCandidate([
+      "just some prose about the phase",
+      "Action required: rotate the credentials.",
+    ]);
+    expect(picked.class).toBe("action");
+  });
+});
+
+describe("round-3 P2 — the ask is found beyond the DISPLAY window", () => {
+  it("scans deeper than the display limit for the agent's question", async () => {
+    // A run of human replies / integration chatter must not hide the agent's ask.
+    const humans = Array.from({ length: 8 }, (_, i) => ({
+      id: `h${i}`, body: `human reply ${i}`, is_bot: 0, author_id: "human-uuid", updated_at: 1000 - i,
+    }));
+    const agent = {
+      id: "a1", body: "Which of the 13 findings actually matter?",
+      is_bot: 0, author_id: "bot-uuid", updated_at: 100,
+    };
+    const out = await readTicketThread("PROJ-1", {
+      limit: 4,
+      botUserIds: new Set(["bot-uuid"]),
+      openDb: fakeDb({ comments: [...humans, agent], issue: { url: "u" } }),
+    });
+    // Only the display slice is rendered …
+    expect(out.comments).toHaveLength(4);
+    // … but the agent's question, outside that window, still drives the ask.
+    expect(out.agentComments).toEqual(["Which of the 13 findings actually matter?"]);
   });
 });

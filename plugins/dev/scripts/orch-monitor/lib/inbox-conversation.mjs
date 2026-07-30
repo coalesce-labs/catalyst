@@ -29,7 +29,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { ANCILLARY_EXPLANATION_PHASES, PHASE_ORDER } from "./board-data.mjs";
-import { deriveAsk } from "./inbox-ask.mjs";
+import { askFromStructured, deriveAsk } from "./inbox-ask.mjs";
 import { knownBotUserIds } from "./linear-comment.mjs";
 import { DEFAULT_THREAD_LIMIT, readTicketThread } from "./linear-thread.mjs";
 
@@ -96,10 +96,12 @@ export function deriveRichExplanation(phaseSigs) {
  *  a structured `ask`, enumerated `options`, or the CTA / what-to-do prose. */
 export function isUsableExplanation(expl) {
   if (!expl || typeof expl !== "object") return false;
+  // Mirror askFromStructured EXACTLY: it requires a recognized `kind` AND a
+  // summary, so accepting `{ ask: { summary } }` here declares an explanation
+  // usable that then produces nothing — reproducing the very masking regression
+  // this predicate exists to prevent.
   const ask = expl.ask;
-  if (ask && typeof ask === "object" && typeof ask.summary === "string" && ask.summary.trim() !== "") {
-    return true;
-  }
+  if (ask && typeof ask === "object" && askFromStructured({ ask }) != null) return true;
   if (Array.isArray(expl.options) && expl.options.length >= 2) return true;
   for (const k of ["call_to_action", "what_to_do"]) {
     if (typeof expl[k] === "string" && expl[k].trim() !== "") return true;

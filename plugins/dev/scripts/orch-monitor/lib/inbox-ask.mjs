@@ -283,7 +283,14 @@ export function askFromCandidate(candidate) {
   const summary = condenseSummary(text);
   if (summary == null) return null;
   return buildAsk({
-    kind: candidate.class === "blocker" ? "act-then-confirm" : classifyAskText(text),
+    // `action` and `blocker` both REQUIRE work before the ticket can clear, so the
+    // kind is forced rather than inferred — the classifier cannot be trusted to
+    // find an act-then-confirm marker in prose like "Action required: rotate the
+    // credentials.", and a false "just reply" promise costs the operator a round trip.
+    kind:
+      candidate.class === "blocker" || candidate.class === "action"
+        ? "act-then-confirm"
+        : classifyAskText(text),
     summary,
     // Never a chip from prose: it would be a guess at what the agent accepts, and
     // a wrong chip is worse than a free-text box.
@@ -517,7 +524,7 @@ export function hasSubstantiveAsk(body) {
 
 /** What an agent comment can be as an ask candidate, STRONGEST FIRST — the array
  *  order IS the selection ranking (pickAskCandidate walks it). */
-export const ASK_CANDIDATE_CLASSES = ["ask", "blocker", "prose", "status", "none"];
+export const ASK_CANDIDATE_CLASSES = ["action", "ask", "blocker", "prose", "status", "none"];
 
 /** The prefix of ASK_CANDIDATE_CLASSES that can carry an ask — everything ahead of
  *  the two classes that never can. Sliced rather than re-listed so the ranking has
@@ -548,7 +555,12 @@ export function classifyAskCandidate(body) {
   if (s == null) return { class: "none", text: null };
 
   const actionBlock = extractOperatorActionBlock(s);
-  if (actionBlock != null) return { class: "ask", text: actionBlock };
+  // A distinct class, NOT plain "ask": an operator-action block states work the
+  // human must perform, and routing it through the general text classifier yields
+  // e.g. `clarify` for "Action required: rotate the credentials." — telling the
+  // operator a written reply alone resolves it, which is the single costliest
+  // misclassification this module can make.
+  if (actionBlock != null) return { class: "action", text: actionBlock };
 
   if (isRecoveryStatusNote(s) || isPhaseStatusReport(s)) return { class: "status", text: null };
 
