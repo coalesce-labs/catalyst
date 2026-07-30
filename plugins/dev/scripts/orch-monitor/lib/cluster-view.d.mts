@@ -85,6 +85,10 @@ export interface ClusterEntityDeps {
   intervalMs?: number;
   /** CTL-1551: liveness offline-grace override (ms), forwarded to assembleClusterView. */
   graceMs?: number;
+  /** CTL-1551: per-host live-window resolver — (host) => ms | undefined (undefined =
+   * shared/default window). Lets the server budget PEER transport lag without
+   * loosening the self host's window. */
+  intervalMsFor?: (host: string) => number | undefined;
   /** Injected clock for tests. */
   now?: () => number;
 }

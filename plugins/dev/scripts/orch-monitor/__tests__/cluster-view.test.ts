@@ -305,19 +305,21 @@ describe("createClusterEntity — read-model integration (Scenario: the read-mod
     m.stop();
   });
 
-  it("forwards intervalMs so a transport-lagged peer classifies live, not degraded (CTL-1551)", async () => {
+  it("forwards intervalMsFor: lagged peer classifies live, SELF keeps the tight window (CTL-1551)", async () => {
     // The Loki peer pipeline adds ~30s beat + 60s poll + 20s cache of KNOWN lag,
-    // so the server budgets a wider live window. This pins the entity actually
-    // FORWARDING intervalMs (the accepted-but-dropped trap the reader params hit).
+    // so the server budgets a wider live window for PEERS ONLY — the self host's
+    // heartbeats come straight from the local log and must degrade promptly.
+    // This pins the entity actually FORWARDING intervalMsFor (the
+    // accepted-but-dropped trap the reader params hit).
     const snapshot = board([ticket("CTL-1")]);
     const cluster = createClusterEntity({
       ownerHostProvider: () => Promise.resolve({ "CTL-1": "mini" }),
       rosterProvider: () => ["mini", "mini-2"],
       heartbeatReader: () => ({
-        mini: new Date(now - 1000).toISOString(),
-        "mini-2": new Date(now - 90_000).toISOString(), // 90s old — healthy peer via lagged transport
+        mini: new Date(now - 90_000).toISOString(), // self, 90s silent — a REAL stall
+        "mini-2": new Date(now - 90_000).toISOString(), // peer, 90s = healthy via lagged transport
       }),
-      intervalMs: 120_000,
+      intervalMsFor: (host: string) => (host === "mini" ? undefined : 120_000),
       now: () => now,
     });
     const m = createReadModel({
@@ -326,8 +328,8 @@ describe("createClusterEntity — read-model integration (Scenario: the read-mod
       entities: { board: { project: (s: BoardPayload) => s }, cluster },
     });
     const view = (await m.getEntity("cluster")) as ClusterView;
-    const peer = view.nodes.find((n) => n.host === "mini-2");
-    expect(peer?.status).toBe("live"); // default 30s window would say "degraded"
+    expect(view.nodes.find((n) => n.host === "mini-2")?.status).toBe("live"); // peer budgeted
+    expect(view.nodes.find((n) => n.host === "mini")?.status).toBe("degraded"); // self stays tight
     m.stop();
   });
 

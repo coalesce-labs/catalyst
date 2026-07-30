@@ -1674,13 +1674,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // on the anchor — including a Stage-0 SHADOW node that owns zero tickets —
   // decoupled from the dispatch roster (see cluster-view.mjs CTL-1251 header).
   const clusterEntity = createClusterEntity({
-    // CTL-1551: the peer-liveness pipeline adds KNOWN lag on top of heartbeat
-    // age — ~30s beat cadence + the 60s background peer poll + the 20s Loki
-    // sync-cache TTL ≈ 110s worst case — so a healthy peer can NEVER satisfy
-    // the default 30s "live" window and would structurally render "degraded".
-    // Budget the live window for the transport (120s); "degraded" then means
-    // genuinely late (120s–5min), and offline semantics (5min grace) unchanged.
-    intervalMs: 120_000,
+    // CTL-1551: PER-HOST live window. The SELF host's heartbeats come straight
+    // from the local event log (no transport lag) and keep the default 30s
+    // window — a locally-dead daemon degrades promptly. PEER heartbeats ride a
+    // pipeline with KNOWN lag, so a healthy peer can never satisfy 30s and
+    // would structurally render "degraded"; budget by transport:
+    //   loki (default): ~30s beat + 60s poll + 20s sync cache  → 120s window
+    //   linear anchor:  ~120s publish cadence + 60s poll       → 240s window
+    // "degraded" then means genuinely late; the 5-min offline grace unchanged.
+    intervalMsFor: (host: string) => {
+      let self: string | null;
+      try {
+        self = execCoreDeps?.getHostName?.() ?? null;
+      } catch {
+        self = null;
+      }
+      if (self && host === self) return undefined; // default 30s — local log is direct
+      const src = (process.env.CATALYST_LIVENESS_READ_SOURCE ?? "").trim().toLowerCase();
+      return src === "linear" ? 240_000 : 120_000;
+    },
     rosterProvider: () => {
       try {
         return execCoreDeps?.getClusterHosts() ?? [];

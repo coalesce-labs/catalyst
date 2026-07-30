@@ -68,6 +68,7 @@ const noLivenessReader = () => ({});
  * @param {number} [args.now] epoch ms (injected for tests)
  * @param {number} [args.intervalMs] liveness interval threshold
  * @param {number} [args.graceMs] liveness grace window
+ * @param {Function} [args.intervalMsFor] CTL-1551: per-host live-window resolver (host) => ms | undefined
  * @returns {import("./cluster-view.d.mts").ClusterView}
  */
 export function assembleClusterView({
@@ -80,6 +81,7 @@ export function assembleClusterView({
   now = Date.now(),
   intervalMs,
   graceMs,
+  intervalMsFor,
   // CTL-1095: injectable drain reader. Default → no drain info (fail-open:
   // draining:false). Production wires it from the local isDraining + inFlightCount.
   drainReader = null,
@@ -128,7 +130,7 @@ export function assembleClusterView({
   const heartbeatHosts = lastSeen && typeof lastSeen === "object" ? Object.keys(lastSeen) : [];
   const allHosts = [...new Set([...roster, ...heartbeatHosts])];
   const rosterSet = new Set(roster);
-  const liveness = overlayClusterLiveness(allHosts, lastSeen, { now, intervalMs, graceMs }).filter(
+  const liveness = overlayClusterLiveness(allHosts, lastSeen, { now, intervalMs, graceMs, intervalMsFor }).filter(
     (n) => rosterSet.has(n.host) || n.status !== "offline",
   );
   const displayHosts = liveness.map((n) => n.host);
@@ -314,12 +316,13 @@ export function createClusterEntity({
   // (host) -> { accepting, holdReason, … } | null. Default null = feature off.
   admissionReader = null,
   // CTL-1551: liveness thresholds, forwarded verbatim to assembleClusterView.
-  // The Loki peer transport adds known pipeline lag (beat cadence + background
-  // poll + sync-cache TTL) on top of heartbeat age, so the server passes a live
-  // window that budgets for it — otherwise a perfectly healthy peer is
-  // STRUCTURALLY classified "degraded". undefined = the node-liveness defaults.
+  // intervalMsFor is the PER-HOST resolver — the server budgets peer transport
+  // lag (beat cadence + background poll + sync-cache TTL) without loosening the
+  // SELF host's window (its heartbeats come straight from the local log).
+  // undefined = the node-liveness defaults.
   intervalMs = undefined,
   graceMs = undefined,
+  intervalMsFor = undefined,
   now = () => Date.now(),
 } = {}) {
   // Memoize the lazy execution-core import so repeated assembles don't re-import.
@@ -383,6 +386,7 @@ export function createClusterEntity({
         // trap as the three readers above.
         intervalMs,
         graceMs,
+        intervalMsFor,
       });
     },
   };

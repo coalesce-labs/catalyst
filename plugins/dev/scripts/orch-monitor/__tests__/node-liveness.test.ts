@@ -113,3 +113,36 @@ describe("overlayClusterLiveness (CTL-884 — per-host overlay from lastSeen map
     expect(out[0]).toEqual({ host: "mini", status: "live", lastSeen: out[0].lastSeen });
   });
 });
+
+// ── CTL-1551: per-host live-window resolver ──
+import { overlayClusterLiveness as _overlay } from "../lib/node-liveness.mjs";
+
+describe("overlayClusterLiveness intervalMsFor (CTL-1551)", () => {
+  const NOW = Date.parse("2026-07-30T12:00:00Z");
+  const seen = {
+    self: new Date(NOW - 90_000).toISOString(),
+    peer: new Date(NOW - 90_000).toISOString(),
+  };
+
+  it("applies the per-host window: peer budgeted live, self degrades on the default", () => {
+    const out = _overlay(["self", "peer"], seen, {
+      now: NOW,
+      intervalMsFor: (h: string) => (h === "peer" ? 120_000 : undefined),
+    });
+    expect(out.find((n) => n.host === "peer")?.status).toBe("live");
+    expect(out.find((n) => n.host === "self")?.status).toBe("degraded");
+  });
+
+  it("a throwing/invalid resolver falls back to the shared window, never throws", () => {
+    const out = _overlay(["self", "peer"], seen, {
+      now: NOW,
+      intervalMs: 120_000,
+      intervalMsFor: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(out.find((n) => n.host === "peer")?.status).toBe("live"); // shared window applied
+    const out2 = _overlay(["peer"], seen, { now: NOW, intervalMsFor: () => -5 });
+    expect(out2[0].status).toBe("degraded"); // invalid value → default window
+  });
+});
