@@ -10,7 +10,14 @@ export interface ThreadComment {
   /** True when the author is the AGENT — an integration bot (`is_bot = 1`) OR a
    *  Catalyst app actor, whose comments arrive with `is_bot = 0` because Linear
    *  models an app actor as a user. See normalizeComment's header note. */
+  /** Not the operator — a Catalyst app actor OR an integration bot. */
   isAgent: boolean;
+  /** Only a Catalyst app actor — the one whose question is being answered. This,
+   *  not `isAgent`, is what the ask derivation keys on, so integration plumbing
+   *  can never masquerade as the agent's question. */
+  isCatalystAgent: boolean;
+  /** GitHub/Linear plumbing. Rendered for context; never an ask candidate. */
+  isIntegration: boolean;
   authorName: string;
   authorAvatarUrl: string | null;
   /** Epoch ms, or null when the replica carried no honest timestamp. */

@@ -88,17 +88,36 @@ export function normalizeComment(row, { botUserIds = new Set() } = {}) {
   const id = row.id != null ? String(row.id) : null;
   if (id == null) return null;
   const authorId = row.author_id != null ? String(row.author_id) : null;
-  const isBot =
-    row.is_bot === 1 || row.is_bot === true || (authorId != null && botUserIds.has(authorId));
+
+  // THREE actor classes, not two. An earlier cut collapsed these to a boolean and
+  // it produced a visibly wrong ask: GitHub's "this thread is synced to a
+  // corresponding GitHub issue" notice was classed as the AGENT, so it became the
+  // derived ask summary — the inbox told the operator that a sync notice was the
+  // question they needed to answer.
+  //
+  //   integration — GitHub / Linear plumbing (is_bot=1, null author_id). Shown in
+  //                 the thread for context, but it never speaks FOR the agent and
+  //                 is never an ask candidate.
+  //   agent       — a Catalyst app actor (a configured botUserId). The one whose
+  //                 question the operator is actually answering.
+  //   human       — everyone else, including the operator.
+  const isIntegration = (row.is_bot === 1 || row.is_bot === true) && authorId == null;
+  const isCatalystAgent = authorId != null && botUserIds.has(authorId);
+
   return {
     id,
     body,
-    // The agent/human split the UI renders visibly distinct (§2).
-    isAgent: isBot,
+    // The agent/human split the UI renders visibly distinct (§2). An integration
+    // comment counts as non-human for styling (the operator didn't write it) …
+    isAgent: isCatalystAgent || isIntegration,
+    // … but `isCatalystAgent` is the narrow signal the ask derivation uses, so
+    // plumbing chatter can never masquerade as the agent's question.
+    isCatalystAgent,
+    isIntegration,
     authorName:
       typeof row.author_name === "string" && row.author_name !== ""
         ? row.author_name
-        : isBot
+        : isCatalystAgent || isIntegration
           ? "agent"
           : "you",
     authorAvatarUrl:
@@ -215,7 +234,11 @@ export async function readTicketThread(
     // The thread is already newest-first, so these stay newest-first too. The full
     // ORDERED list is surfaced (not just the newest) because the ask derivation has
     // to skip content-free escalation notices — see inbox-ask.mjs::pickAskComment.
-    const agentComments = comments.filter((c) => c.isAgent).map((c) => c.body);
+    //
+    // Filtered on `isCatalystAgent`, NOT `isAgent`: integration plumbing (a GitHub
+    // sync notice, a Linear automation note) is not the agent asking anything, and
+    // letting it into this list makes it the derived ask.
+    const agentComments = comments.filter((c) => c.isCatalystAgent).map((c) => c.body);
 
     return {
       ticket,

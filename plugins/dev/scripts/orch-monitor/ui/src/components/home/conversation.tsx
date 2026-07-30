@@ -186,27 +186,42 @@ function ThreadEntry({ comment, now }: { comment: ThreadComment; now: number }) 
     <li
       className="flex flex-col gap-1 py-2.5"
       data-thread-comment={comment.id}
-      data-thread-author={comment.isAgent ? "agent" : "human"}
+      data-thread-author={
+        comment.isIntegration ? "integration" : comment.isCatalystAgent ? "agent" : "human"
+      }
     >
       <div className="flex items-center gap-2">
-        {/* The agent/human distinction (§2): a 2px accent + the author name. The
-            agent is the accent color (it is the one asking); the operator is
-            neutral. Not avatars — the pane stays flat and calm. */}
+        {/* Three classes, styled distinctly (§2). The CATALYST AGENT gets the
+            accent — it is the one asking. The operator is neutral-bright.
+            INTEGRATION plumbing (a GitHub sync notice) is fully muted, because
+            styling it as the agent makes automation chatter look like a question
+            that needs answering. */}
         <span
           aria-hidden
           className={cn(
             "h-3 w-0.5 shrink-0 rounded-full",
-            comment.isAgent ? "bg-accent" : "bg-muted/50",
+            comment.isCatalystAgent
+              ? "bg-accent"
+              : comment.isIntegration
+                ? "bg-muted/30"
+                : "bg-muted/50",
           )}
         />
         <span
           className={cn(
             "text-[11.5px] font-medium",
-            comment.isAgent ? "text-accent" : "text-fg",
+            comment.isCatalystAgent
+              ? "text-accent"
+              : comment.isIntegration
+                ? "text-muted/70"
+                : "text-fg",
           )}
         >
           {comment.authorName}
         </span>
+        {comment.isIntegration && (
+          <span className="text-[10px] uppercase tracking-wide text-muted/50">automation</span>
+        )}
         {when != null && <span className="text-[11px] text-muted/70">{when}</span>}
       </div>
 

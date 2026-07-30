@@ -400,9 +400,14 @@ describe("Inbox conversation surface (CTL-1569)", () => {
     expect(conversationCode).not.toMatch(/\.sort\(/);
   });
 
-  it("agent and human comments are visually distinct", () => {
+  it("agent, human and integration comments are visually distinct", () => {
+    // THREE classes, not two. Collapsing them styled a GitHub sync notice as the
+    // agent speaking, which made automation chatter look like a question needing
+    // an answer (and made it the derived ask).
     expect(conversationSrc).toContain("data-thread-author");
-    expect(conversationSrc).toContain("isAgent");
+    expect(conversationSrc).toContain("isCatalystAgent");
+    expect(conversationSrc).toContain("isIntegration");
+    expect(conversationSrc).toContain("integration");
   });
 
   it("long comment bodies clamp with expand-in-place", () => {

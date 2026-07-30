@@ -18,8 +18,10 @@ let baseUrl: string;
 let tmpDir: string;
 
 /** Definitively not a real Linear issue, so route behavior is host-independent
- *  and no live ticket can be written to. */
-const ABSENT_TICKET = "ZZZ-999999";
+ *  and no live ticket can be written to. Uses the `PROJ` fixture prefix per
+ *  AGENTS.md → Version Control (never a real team's prefix, and never the
+ *  `ZZZ-` form some older suites reach for). */
+const ABSENT_TICKET = "PROJ-999999";
 
 beforeAll(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "inbox-conversation-endpoints-"));
@@ -122,15 +124,31 @@ describe("POST /api/ticket/:id/reply (CTL-1569)", () => {
   it("never returns 200 for a ticket that cannot resolve (row must be restored)", async () => {
     // A non-existent issue must NOT read as success — the UI restores the row on
     // any non-2xx, and a false success would silently lose the operator's words.
-    // 404 (no such issue) and 502 (no credential on this host / API failure) are
-    // both acceptable; 200 is not.
-    const res = await post(ABSENT_TICKET, { body: "this must not be reported as sent" });
-    expect(res.status).not.toBe(200);
-    expect([404, 502]).toContain(res.status);
-    const json = (await res.json()) as { status: string; error?: string };
-    expect(json.status).not.toBe("replied");
-    // The failure is explained, not silent.
-    expect(typeof json.error).toBe("string");
+    //
+    // SPENDS NO LINEAR QUOTA: the credential is removed for the duration, so the
+    // post short-circuits at the `no_token` gate BEFORE any network call. Without
+    // this the route would run a real `viewer` query + a real `issue` lookup on
+    // every suite run — two API calls against a shared, rate-limited fleet quota,
+    // on a fleet that has had an active 429 problem. The assertion is the same
+    // either way (a non-resolvable reply is never `replied`), so making it offline
+    // costs no coverage and makes the result host-independent.
+    const prevToken = process.env.LINEAR_API_TOKEN;
+    const prevKey = process.env.LINEAR_API_KEY;
+    delete process.env.LINEAR_API_TOKEN;
+    delete process.env.LINEAR_API_KEY;
+    try {
+      const res = await post(ABSENT_TICKET, { body: "this must not be reported as sent" });
+      expect(res.status).not.toBe(200);
+      expect(res.status).toBe(502); // no_token → the write did not act
+      const json = (await res.json()) as { status: string; error?: string };
+      expect(json.status).not.toBe("replied");
+      expect(json.status).toBe("no_token");
+      // The failure is explained, not silent.
+      expect(typeof json.error).toBe("string");
+    } finally {
+      if (prevToken !== undefined) process.env.LINEAR_API_TOKEN = prevToken;
+      if (prevKey !== undefined) process.env.LINEAR_API_KEY = prevKey;
+    }
   });
 
   it("does not answer the reply route on GET", async () => {

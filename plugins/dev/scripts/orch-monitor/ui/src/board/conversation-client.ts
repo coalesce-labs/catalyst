@@ -21,9 +21,14 @@ import type { AskKind } from "./inbox-ask-model";
 export interface ThreadComment {
   id: string;
   body: string;
-  /** True when the author is the AGENT (an integration bot OR a Catalyst app
-   *  actor — the server owns that distinction; app actors report is_bot=0). */
+  /** True when the author is NOT the operator — a Catalyst app actor OR an
+   *  integration bot. Drives the "someone else wrote this" styling. */
   isAgent: boolean;
+  /** True only for a Catalyst app actor — the one whose question is being
+   *  answered. This, not `isAgent`, is what the ask derivation keys on. */
+  isCatalystAgent: boolean;
+  /** True for GitHub/Linear plumbing. Shown for context; never an ask. */
+  isIntegration: boolean;
   authorName: string;
   authorAvatarUrl: string | null;
   /** Epoch ms, or null when the replica carried no honest timestamp. */

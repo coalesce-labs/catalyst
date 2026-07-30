@@ -20,7 +20,7 @@ import {
   condenseSummary,
   deriveAsk,
 } from "./inbox-ask.mjs";
-import { isEscalationNotice, pickAskComment } from "./inbox-ask.mjs";
+import { isEscalationNotice, isPhaseStatusReport, pickAskComment } from "./inbox-ask.mjs";
 import { normalizeComment, readTicketThread } from "./linear-thread.mjs";
 import {
   knownBotUserIds,
@@ -306,6 +306,31 @@ describe("isEscalationNotice / pickAskComment", () => {
     expect(isEscalationNotice("This ticket is now marked for human review.")).toBe(true);
   });
 
+  it("rejects a PHASE STATUS REPORT as an ask candidate", () => {
+    // These are machine bookkeeping posts, and they are frequently the newest
+    // substantive agent comment. Left in, the classifier reads their imperative
+    // bullets as instructions and emits nonsense like
+    // `act-then-confirm: "Phase Implement — Commits: 7"`.
+    const report = "**Phase Implement**\n- **Branch**: `PROJ-1`\n- **Commits**: 7\n- **Diff**: 29 files changed";
+    expect(isPhaseStatusReport(report)).toBe(true);
+    expect(isEscalationNotice(report)).toBe(true);
+    expect(isPhaseStatusReport("**Plan phase — disposition: duplicate of PROJ-2**")).toBe(true);
+  });
+
+  it("does NOT reject prose that merely mentions a phase", () => {
+    const prose = "The implement phase needs a decision about which lockfile to keep.";
+    expect(isPhaseStatusReport(prose)).toBe(false);
+    expect(isEscalationNotice(prose)).toBe(false);
+  });
+
+  it("prefers a real question over a phase report, even a newer one", () => {
+    const picked = pickAskComment([
+      "**Phase Verify**\n- **Result**: PASS\n- **Findings**: 4",
+      "Which of the 13 findings actually matter?",
+    ]);
+    expect(picked).toBe("Which of the 13 findings actually matter?");
+  });
+
   it("does NOT discard a long comment that merely mentions escalation", () => {
     const long = `Reasoning pass determined this requires human judgment. ${"detail ".repeat(120)}`;
     expect(isEscalationNotice(long)).toBe(false);
@@ -360,6 +385,25 @@ describe("normalizeComment", () => {
     expect(normalizeComment(row, { botUserIds: new Set(["bot-uuid"]) }).isAgent).toBe(true);
   });
 
+  it("classes GitHub/Linear plumbing as INTEGRATION, never as the Catalyst agent", () => {
+    // The defect this prevents, seen live: GitHub's "this thread is synced to a
+    // corresponding GitHub issue" notice was treated as the agent, so it became
+    // the derived ask — the inbox told the operator a sync notice was the question.
+    const gh = normalizeComment({ id: "c1", body: "synced to a GitHub issue", is_bot: 1, author_id: null, author_name: "GitHub" });
+    expect(gh.isIntegration).toBe(true);
+    expect(gh.isCatalystAgent).toBe(false);
+    expect(gh.isAgent).toBe(true); // not the operator → still styled as "not you"
+  });
+
+  it("classes a Catalyst app actor as the agent, and NOT as integration", () => {
+    const c = normalizeComment(
+      { id: "c1", body: "x", is_bot: 0, author_id: "bot-uuid", author_name: "Catalyst" },
+      { botUserIds: new Set(["bot-uuid"]) },
+    );
+    expect(c.isCatalystAgent).toBe(true);
+    expect(c.isIntegration).toBe(false);
+  });
+
   it("keeps a real human human even when bot ids are configured", () => {
     const row = { id: "c2", body: "x", is_bot: 0, author_id: "human-uuid" };
     expect(normalizeComment(row, { botUserIds: new Set(["bot-uuid"]) }).isAgent).toBe(false);
@@ -388,12 +432,15 @@ describe("readTicketThread", () => {
     const out = await readTicketThread("PROJ-1", {
       openDb: fakeDb({
         comments: [
-          { id: "c3", body: "agent asks the question", is_bot: 1, updated_at: 300 },
-          { id: "c2", body: "human replied earlier", is_bot: 0, updated_at: 200 },
-          { id: "c1", body: "older agent note", is_bot: 1, updated_at: 100 },
+          // A Catalyst app actor: is_bot=0 with a configured botUserId. That is
+          // how the real agent's comments actually arrive.
+          { id: "c3", body: "agent asks the question", is_bot: 0, author_id: "bot-uuid", updated_at: 300 },
+          { id: "c2", body: "human replied earlier", is_bot: 0, author_id: "human-uuid", updated_at: 200 },
+          { id: "c1", body: "older agent note", is_bot: 0, author_id: "bot-uuid", updated_at: 100 },
         ],
         issue: { identifier: "PROJ-1", title: "T", url: "https://linear.app/x/PROJ-1" },
       }),
+      botUserIds: new Set(["bot-uuid"]),
     });
     expect(out.available).toBe(true);
     expect(out.comments.map((c) => c.id)).toEqual(["c3", "c2", "c1"]);
@@ -401,6 +448,24 @@ describe("readTicketThread", () => {
     // The full ordered agent list is surfaced so the ask derivation can skip notices.
     expect(out.agentComments).toEqual(["agent asks the question", "older agent note"]);
     expect(out.url).toBe("https://linear.app/x/PROJ-1");
+  });
+
+  it("EXCLUDES integration plumbing from the ask candidates but keeps it in the thread", async () => {
+    const out = await readTicketThread("PROJ-1", {
+      openDb: fakeDb({
+        comments: [
+          { id: "c2", body: "synced to a GitHub issue", is_bot: 1, author_id: null, author_name: "GitHub", updated_at: 200 },
+          { id: "c1", body: "Approve the rollout?", is_bot: 0, author_id: "bot-uuid", author_name: "Catalyst", updated_at: 100 },
+        ],
+        issue: { url: "u" },
+      }),
+      botUserIds: new Set(["bot-uuid"]),
+    });
+    // Both render in the thread (context is preserved) …
+    expect(out.comments).toHaveLength(2);
+    // … but only the Catalyst agent's words are ask candidates.
+    expect(out.agentComments).toEqual(["Approve the rollout?"]);
+    expect(out.lastAgentComment).toBe("Approve the rollout?");
   });
 
   it("distinguishes a GENUINELY EMPTY thread from an UNREADABLE one", async () => {

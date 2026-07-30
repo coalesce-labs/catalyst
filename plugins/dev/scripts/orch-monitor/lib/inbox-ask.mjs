@@ -288,10 +288,40 @@ const ESCALATION_NOTICE_PATTERNS = [
  *  the length floor keeps the filter from discarding real asks. */
 const NOTICE_MAX_CHARS = 400;
 
-/** Is this body a content-free escalation pointer? Exported for direct testing. */
+/**
+ * Markers of a PHASE STATUS REPORT — the per-phase bookkeeping the pipeline posts
+ * ("**Phase Implement** · Branch · Commits: 7 · Diff: 29 files changed").
+ *
+ * These are machine status posts, not questions. They are often the newest
+ * substantive agent comment, so without this filter they become the derived ask —
+ * and the classifier then reads their imperative bullets as an instruction,
+ * producing nonsense like `act-then-confirm: "Phase Implement — Commits: 7"`.
+ * Anchored to the leading phase header so ordinary prose that merely mentions a
+ * phase is unaffected.
+ */
+const PHASE_REPORT_PATTERNS = [
+  /^\s*\**\s*phase\s+(?:triage|research|plan|implement|verify|review|pr|monitor-merge|monitor-deploy|teardown)\b/i,
+  /^\s*\**\s*(?:plan|research|implement|verify|review)\s+phase\s+[—–-]/i,
+];
+
+/** Is this body a phase status report rather than an ask? Exported for testing. */
+export function isPhaseStatusReport(body) {
+  const s = nonEmptyString(body);
+  if (s == null) return false;
+  return matchesAny(s, PHASE_REPORT_PATTERNS);
+}
+
+/**
+ * Is this body unusable as an ask — either a content-free escalation pointer or a
+ * phase status report? Exported for direct testing.
+ *
+ * (Kept under the original name because it is the ask-candidate rejection test;
+ * the escalation pointer was simply the first kind of non-ask we found.)
+ */
 export function isEscalationNotice(body) {
   const s = nonEmptyString(body);
   if (s == null) return true; // an empty body carries no ask either
+  if (isPhaseStatusReport(s)) return true;
   if (s.length > NOTICE_MAX_CHARS) return false;
   return matchesAny(s, ESCALATION_NOTICE_PATTERNS);
 }
