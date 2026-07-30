@@ -1199,9 +1199,13 @@ export function startDaemon({
         // per-host capacity from Loki (the Linear-anchor capacity transport is
         // retired in loki mode). Uses the SAME readMaxParallel chokepoint the
         // scheduler enforces (config-precedence + bounds), NOT the raw state.json
-        // value — the two can diverge and peers must render the enforced ceiling.
-        // Fail-open: an invalid result → attribute omitted.
-        maxParallelFn: () => readMaxParallel(orchDir, concurrency),
+        // value — and RE-RESOLVES the Layer-1+Layer-2 concurrency per beat
+        // (resolveBootConcurrency, the designed hot-reload entry point) so an
+        // operator's live concurrency edit reaches peers without a restart,
+        // matching the scheduler's own per-tick re-read. Fail-open: an invalid
+        // result → attribute omitted.
+        maxParallelFn: () =>
+          readMaxParallel(orchDir, resolveBootConcurrency({ layer1Path: configPath, layer2Path })),
       });
       // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
       // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.

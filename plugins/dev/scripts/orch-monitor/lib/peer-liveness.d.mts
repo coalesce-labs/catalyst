@@ -41,3 +41,21 @@ export function retainMissingEntries<T>(
   prev: Record<string, T> | null | undefined,
   next: Record<string, T> | null | undefined
 ): Record<string, T>;
+
+export interface FoldPeerSnapshotArgs {
+  prevHeartbeats?: Record<string, string>;
+  prevCapacity?: Record<string, { maxParallel: number; inFlightCount: number }>;
+  peers?: Record<string, PeerRecord>;
+}
+
+export interface FoldPeerSnapshotResult {
+  heartbeats: Record<string, string>;
+  capacity: Record<string, { maxParallel: number; inFlightCount: number }>;
+}
+
+/**
+ * Fold one peer snapshot into the poll caches with the CTL-1551 guard set:
+ * per-host newest-wins, capacity only from capacity-bearing records, and
+ * retention for hosts missing from the snapshot.
+ */
+export function foldPeerSnapshot(args?: FoldPeerSnapshotArgs): FoldPeerSnapshotResult;

@@ -69,3 +69,41 @@ export function retainMissingEntries(prev, next) {
   }
   return out;
 }
+
+// foldPeerSnapshot — CTL-1551. Fold one peer snapshot into the poll's caches,
+// with three guards a naive replace lacks (each was a reviewed failure mode):
+//   1. NEWEST-WINS per host (the CTL-1255 principle applied to the caches): an
+//      entry only updates when its last_seen is at least as fresh as the cached
+//      one — so the AUTO anchor fallback after a Loki blip (same host keys,
+//      weeks-old timestamps on a retired-writer anchor) can never regress a
+//      fresher cached heartbeat OR pin stale capacity over it.
+//   2. CAPACITY ONLY FROM CAPACITY-BEARING RECORDS: a failed capacity
+//      enrichment yields max_parallel/in_flight_count = null on every host —
+//      those must retain the previous capacity entry, never zero it.
+//   3. RETENTION for hosts missing from the snapshot (retainMissingEntries).
+// Retained/blocked entries still age to offline via the node-liveness grace —
+// these guards only prevent instant regressions, never a false "live forever".
+// Returns { heartbeats, capacity } — the new cache maps.
+export function foldPeerSnapshot({ prevHeartbeats = {}, prevCapacity = {}, peers = {} } = {}) {
+  const nextHb = {};
+  const nextCap = {};
+  for (const [host, rec] of Object.entries(peers ?? {})) {
+    if (!rec) continue;
+    const hasTs = typeof rec.last_seen === "string" && rec.last_seen.length > 0;
+    const newTs = hasTs ? Date.parse(rec.last_seen) : NaN;
+    const prevTs = Date.parse(prevHeartbeats?.[host] ?? "");
+    const fresher = Number.isFinite(newTs) && (!Number.isFinite(prevTs) || newTs >= prevTs);
+    if (hasTs && fresher) nextHb[host] = rec.last_seen;
+    const hasCapacity = rec.max_parallel != null || rec.in_flight_count != null;
+    if (hasCapacity && fresher) {
+      nextCap[host] = {
+        maxParallel: typeof rec.max_parallel === "number" ? rec.max_parallel : 0,
+        inFlightCount: typeof rec.in_flight_count === "number" ? rec.in_flight_count : 0,
+      };
+    }
+  }
+  return {
+    heartbeats: retainMissingEntries(prevHeartbeats, nextHb),
+    capacity: retainMissingEntries(prevCapacity, nextCap),
+  };
+}

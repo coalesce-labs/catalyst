@@ -39,7 +39,7 @@ import type { NavSignal, DaemonHealth } from "./lib/nav-signal.mjs";
 // project it to the tiny per-node footer signal (cluster-signal.mjs). Single-host
 // is an exact identity no-op (one node — the local daemon).
 import { createClusterEntity } from "./lib/cluster-view.mjs";
-import { readPeerRecords, retainMissingEntries } from "./lib/peer-liveness.mjs"; // CTL-1551: source-aware peer transport selection + partial-snapshot retention
+import { readPeerRecords, foldPeerSnapshot } from "./lib/peer-liveness.mjs"; // CTL-1551: source-aware peer transport selection + guarded snapshot folding
 import type { ClusterView } from "./lib/cluster-view.mjs";
 // CTL-1092: alias loading + resolution for the prod capacity/liveness wiring.
 // loadHostAliases reads catalyst.host.aliases (fail-open {}); resolveHostAlias
@@ -1631,26 +1631,18 @@ export function createServer(opts: CreateServerOptions): BunServer {
         anchorCapacityCache.map = {};
         return;
       }
-      const next: Record<string, string> = {};
-      const nextCap: Record<string, { maxParallel: number; inFlightCount: number }> = {};
-      for (const [host, rec] of Object.entries(peers)) {
-        if (rec && typeof rec.last_seen === "string" && rec.last_seen.length > 0) {
-          next[host] = rec.last_seen;
-        }
-        if (rec) {
-          const mp = typeof rec.max_parallel === "number" ? rec.max_parallel : 0;
-          const ifc = typeof rec.in_flight_count === "number" ? rec.in_flight_count : 0;
-          nextCap[host] = { maxParallel: mp, inFlightCount: ifc };
-        }
-      }
-      // CTL-1551: retain entries for hosts MISSING from this snapshot — a Loki
-      // read can be partial (eventual consistency) or empty-on-outage (the sync
-      // bridge fail-opens to {}), and a wholesale replace would flip such a host
-      // offline instantly with zeroed capacity, bypassing the liveness grace. A
-      // retained last_seen stops advancing, so a genuinely dead host still ages
-      // to offline on the normal node-liveness grace.
-      anchorHeartbeatCache.map = retainMissingEntries(anchorHeartbeatCache.map, next);
-      anchorCapacityCache.map = retainMissingEntries(anchorCapacityCache.map, nextCap);
+      // CTL-1551: fold the snapshot through the pure guard set — per-host
+      // newest-wins (a stale AUTO anchor fallback can't regress fresher cached
+      // entries), capacity only from capacity-bearing records (a failed
+      // enrichment can't zero valid capacity), and retention for hosts missing
+      // from a partial/empty snapshot. See peer-liveness.mjs foldPeerSnapshot.
+      const folded = foldPeerSnapshot({
+        prevHeartbeats: anchorHeartbeatCache.map,
+        prevCapacity: anchorCapacityCache.map,
+        peers,
+      });
+      anchorHeartbeatCache.map = folded.heartbeats;
+      anchorCapacityCache.map = folded.capacity;
     } catch {
       // fail-open: keep the last caches; stale entries age out via node-liveness
     }
