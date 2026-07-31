@@ -81,6 +81,32 @@ export function localInFlightTickets(hostName, { orchDir } = {}) {
   }
 }
 
+// Signal statuses that OCCUPY a dispatch slot. in_flight (above) is the
+// OWNERSHIP set — it also counts parked (needs-human/needs-input) dirs a host
+// must reclaim after death, which hold no slot (the scheduler's own slot
+// accounting agrees). Conflating the two made the Workers header count slots
+// the deck correctly rendered as Open (CTL-1581).
+const ACTIVE_STATUSES = new Set(["running", "dispatched"]);
+
+// localActiveTickets — the ACTIVELY-RUNNING subset of localInFlightTickets:
+// tickets whose newest signal is running/dispatched on this host. This is the
+// slot-occupancy signal the Workers deck renders.
+export function localActiveTickets(hostName, { orchDir } = {}) {
+  if (!orchDir) return [];
+  try {
+    const signals = readWorkerSignals(orchDir);
+    const tickets = new Set();
+    for (const sig of signals) {
+      if (!sig.raw?.host?.name || sig.raw.host.name !== hostName) continue;
+      if (!ACTIVE_STATUSES.has(sig.status)) continue;
+      tickets.add(sig.ticket);
+    }
+    return [...tickets];
+  } catch {
+    return []; // fail-open
+  }
+}
+
 // startLivenessPublisher — arm a periodic cross-host liveness publisher.
 // Fires one publish immediately, then every intervalMs. Returns a stop handle
 // ({ stop() }) so the daemon can tear it down symmetrically with _heartbeat.

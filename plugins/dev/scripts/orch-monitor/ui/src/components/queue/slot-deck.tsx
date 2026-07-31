@@ -22,12 +22,7 @@ import type { ClusterSignal } from "@/lib/cluster-signal";
 import { assignSlots, isLiveWorker, slotLabel } from "./queue-model";
 import { TickerNumber } from "./ticker-number";
 import { buildCapacityBadges } from "./capacity-badges";
-import {
-  aggregateClusterCapacity,
-  assignClusterSlots,
-  filterSlotsByNode,
-  nodeCapacity,
-} from "./cluster-capacity";
+import { assignClusterSlots, filterSlotsByNode } from "./cluster-capacity";
 import type { ClusterSlot } from "./cluster-capacity";
 
 // The state word + its color for a slot's worker (mirrors workerStatusText).
@@ -242,7 +237,8 @@ export function SlotDeck({
 }) {
   const infoById = new Map(tickets.map((t) => [t.id, t]));
 
-  // Cluster-mode path: use aggregateClusterCapacity + assignClusterSlots
+  // Cluster-mode path: assignClusterSlots renders the deck; the header counts
+  // its occupied boxes directly (CTL-1581)
   if (clusterSignal && clusterSignal.nodes.length > 1) {
     // CTL-1551: prefer the signal's explicit self identity — with peers now
     // legitimately "live" (Loki transport), first-live-node picks the wrong
@@ -258,9 +254,16 @@ export function SlotDeck({
       localWorkers: workers,
     });
     const displaySlots = selectedNode === "all" ? allSlots : filterSlotsByNode(allSlots, selectedNode);
-    const cap = selectedNode === "all"
-      ? aggregateClusterCapacity(clusterSignal.nodes as any)
-      : nodeCapacity(clusterSignal.nodes as any, selectedNode);
+    // CTL-1581: the header derives from the SAME slots the deck renders, so the
+    // count and the boxes can never disagree (the old aggregate counted the
+    // heartbeat's ownership number while the boxes rendered occupancy — "1/4 in
+    // use" over a deck of all-Open cards).
+    const occupiedCount = displaySlots.filter((s) => s.occupied).length;
+    const cap = {
+      maxParallel: displaySlots.length,
+      inFlight: occupiedCount,
+      freeSlots: displaySlots.length - occupiedCount,
+    };
 
     return (
       <section>

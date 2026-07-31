@@ -24,8 +24,8 @@ export function NodeFilter({ nodes, selected, onSelect }: NodeFilterProps) {
       dot: statusDot(n.status),
       sub: n.status === "offline"
         ? "offline"
-        : n.inFlightCount != null && n.maxParallel != null
-          ? `${n.inFlightCount}/${n.maxParallel}`
+        : n.maxParallel != null && (n.activeCount ?? n.inFlightCount) != null
+          ? `${n.activeCount ?? n.inFlightCount}/${n.maxParallel}`
           : undefined,
     })),
   ];

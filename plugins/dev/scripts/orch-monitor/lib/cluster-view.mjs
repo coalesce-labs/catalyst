@@ -174,7 +174,15 @@ export function assembleClusterView({
       if (!c) return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
       const mp = c.maxParallel ?? 0;
       const ifc = c.inFlightCount ?? 0;
-      return { maxParallel: mp, inFlightCount: ifc, freeSlots: Math.max(0, mp - ifc) };
+      return {
+        maxParallel: mp,
+        inFlightCount: ifc,
+        freeSlots: Math.max(0, mp - ifc),
+        // CTL-1581: slot-occupancy subset — conditional so an old-daemon peer
+        // contributes no field (consumers fall back to inFlightCount).
+        ...(typeof c.activeCount === "number" ? { activeCount: c.activeCount } : {}),
+        ...(Array.isArray(c.activeTickets) ? { activeTickets: c.activeTickets } : {}),
+      };
     } catch {
       return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
     }

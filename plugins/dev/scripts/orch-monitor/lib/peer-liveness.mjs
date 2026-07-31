@@ -124,6 +124,14 @@ export function foldPeerSnapshot({ prevHeartbeats = {}, prevCapacity = {}, peers
           typeof rec.in_flight_count === "number"
             ? rec.in_flight_count
             : (prevCap?.inFlightCount ?? 0),
+        // CTL-1581: slot-OCCUPANCY signal (running/dispatched subset). null (not
+        // 0) when the heartbeat predates the attribute — consumers fall back to
+        // inFlightCount rather than reading a false "all idle".
+        activeCount:
+          typeof rec.active_count === "number" ? rec.active_count : (prevCap?.activeCount ?? null),
+        activeTickets: Array.isArray(rec.active_tickets)
+          ? rec.active_tickets
+          : (prevCap?.activeTickets ?? null),
       };
     }
   }

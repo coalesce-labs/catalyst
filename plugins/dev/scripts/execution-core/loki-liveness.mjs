@@ -86,11 +86,20 @@ export function parseLokiLivenessResponse(body) {
       const rawIfc = (meta && meta.catalyst_node_in_flight_count) ?? labels.catalyst_node_in_flight_count;
       const mp = Number(rawMp);
       const ifc = Number(rawIfc);
+      // CTL-1581: the slot-OCCUPANCY subset (running/dispatched). null (not [])
+      // when the attribute is absent — an old-daemon heartbeat must read as
+      // "unknown", never as "zero active".
+      const rawActive =
+        (meta && meta.catalyst_node_active_tickets) ?? labels.catalyst_node_active_tickets;
+      const rawAc = (meta && meta.catalyst_node_active_count) ?? labels.catalyst_node_active_count;
+      const ac = Number(rawAc);
       out[host] = {
         last_seen: new Date(tsMs).toISOString(),
         in_flight_tickets: parseInFlight(rawTickets),
         max_parallel: Number.isInteger(mp) && mp > 0 ? mp : null,
         in_flight_count: Number.isInteger(ifc) && ifc >= 0 ? ifc : null,
+        active_tickets: rawActive != null ? parseInFlight(rawActive) : null,
+        active_count: Number.isInteger(ac) && ac >= 0 ? ac : null,
       };
     }
   }

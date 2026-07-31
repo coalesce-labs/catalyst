@@ -10,6 +10,10 @@ export interface ClusterSignalNode {
   status: string;
   maxParallel?: number;
   inFlightCount?: number;
+  /** CTL-1581: running/dispatched subset — the slot-OCCUPANCY count. inFlightCount
+   *  also counts parked (needs-human) dirs, which hold no slot; consumers prefer
+   *  this and fall back to inFlightCount for old-daemon peers. */
+  activeCount?: number | null;
   freeSlots?: number;
   tickets?: string[];
 }
@@ -42,9 +46,12 @@ export function aggregateClusterCapacity(nodes: ClusterSignalNode[]): ClusterCap
   let freeSlots = 0;
   for (const n of nodes) {
     if (n.status === "offline") continue;
+    // CTL-1581: occupancy (activeCount) over ownership (inFlightCount) — a
+    // parked needs-human dir must not count a slot as in use.
+    const occ = n.activeCount ?? n.inFlightCount ?? 0;
     maxParallel += n.maxParallel ?? 0;
-    inFlight += n.inFlightCount ?? 0;
-    freeSlots += n.freeSlots ?? 0;
+    inFlight += occ;
+    freeSlots += Math.max(0, (n.maxParallel ?? 0) - occ);
   }
   return { maxParallel, inFlight, freeSlots };
 }
@@ -103,10 +110,12 @@ export function filterSlotsByNode(slots: ClusterSlot[], host: string): ClusterSl
 export function nodeCapacity(nodes: ClusterSignalNode[], host: string): ClusterCapacity {
   const n = nodes.find((node) => node.host === host);
   if (!n || n.status === "offline") return { maxParallel: 0, inFlight: 0, freeSlots: 0 };
+  // CTL-1581: occupancy over ownership (same rule as aggregateClusterCapacity).
+  const occ = n.activeCount ?? n.inFlightCount ?? 0;
   return {
     maxParallel: n.maxParallel ?? 0,
-    inFlight: n.inFlightCount ?? 0,
-    freeSlots: n.freeSlots ?? 0,
+    inFlight: occ,
+    freeSlots: Math.max(0, (n.maxParallel ?? 0) - occ),
   };
 }
 
