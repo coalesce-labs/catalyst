@@ -133,7 +133,11 @@ import {
   ESCALATION_ASK_CAP, // CTL-1442
   labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
-import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
+import {
+  countReviveEvents as defaultCountReviveEvents,
+  hasCompleteEvent,
+  latestCompleteEventTs,
+} from "./event-scan.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
 const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", import.meta.url));
@@ -2043,7 +2047,22 @@ export function reclaimDeadWorkIfPossible(
     // fan-out worker (suppress). Defaults to the incremental event-scan query;
     // tests inject a stub. Production wiring is correct by default since
     // hasCompleteEvent reads the real event log.
-    completeEventSeen = ({ ticket: t, phase: p }) => hasCompleteEvent({ ticket: t, phase: p }),
+    //
+    // CTL-778 P2 (bug fix): "seen" was unscoped to the CURRENT dispatch attempt —
+    // hasCompleteEvent only answers "has this ticket+phase EVER completed", so a
+    // phase that completed once and is later redispatched (revive, retry, an
+    // operator's resume) had its brand-new worker reclaimed within seconds of
+    // spawning, because the PRIOR attempt's complete event still satisfied this
+    // check. `sinceIso` (the current signal's own startedAt) scopes it: only a
+    // complete event AT OR AFTER this dispatch's own start counts as "this
+    // worker finished" — a stale complete event from a prior attempt no longer
+    // does. Callers that omit sinceIso keep the old (attempt-unscoped) "ever"
+    // behavior; only the CTL-778 reclaim call site below opts in.
+    completeEventSeen = ({ ticket: t, phase: p, sinceIso } = {}) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket: t, phase: p });
+      const ts = latestCompleteEventTs({ ticket: t, phase: p });
+      return typeof ts === "string" && ts >= sinceIso;
+    },
     // CTL-658 — resume-session resolver. Maps the dead worker's bg_job_id to a
     // `claude --resume`-compatible UUID (or null) so the revive can continue the
     // dead session instead of re-walking from phase 0. Default reads the real
@@ -2493,7 +2512,7 @@ export function reclaimDeadWorkIfPossible(
     // (CTL-662/736/809-safe). Mirrors the dead-worker branch (B) below.
     if (
       hasProbe(phase) &&
-      completeEventSeen({ ticket, phase }) &&
+      completeEventSeen({ ticket, phase, sinceIso: signal.raw?.startedAt }) &&
       probes[phase]({ ticket, repoRoot, orchDir })
     ) {
       if (prevBgJobId) {
