@@ -10,6 +10,7 @@ import {
   readCacheReconcileConfig,
   startCacheReconcileTimer,
   rotateWindow,
+  linearisBodyError,
 } from "./cache-reconcile.mjs";
 
 // pinoLikeLogger — methods THROW if invoked with the wrong `this`, exactly like
@@ -518,5 +519,48 @@ describe("reconcileCacheState two-tier selection (CTL-1288)", () => {
       bl.forEach((t) => backlogSeen.add(t));
     }
     expect([...backlogSeen].sort()).toEqual(["CTL-Z1", "CTL-Z2"]); // backlog fully covered, never starved
+  });
+});
+
+describe("reconcileCacheState — mid-run auth re-mint (CTL-1577)", () => {
+  test("auth-shaped fetch failure triggers ONE reminter.attempt", async () => {
+    let attempts = 0;
+    const out = await reconcileCacheState({
+      mode: "shadow",
+      getAll: () => [desc({ ticket: "CTL-1" }), desc({ ticket: "CTL-2" })],
+      fetch: async () => ({ state: null, labels: null, error: "Authentication required, not authenticated (401)" }),
+      upsert: () => { throw new Error("must not write"); },
+      reminter: { attempt: () => { attempts++; return false; } },
+    });
+    expect(out.failed).toBe(2);
+    expect(attempts).toBe(2); // attempt() is called per auth failure; cooldown lives inside the reminter
+  });
+
+  test("non-auth failure (timeout/429) never calls the reminter", async () => {
+    let attempts = 0;
+    const out = await reconcileCacheState({
+      mode: "shadow",
+      getAll: () => [desc()],
+      fetch: async () => ({ state: null, labels: null, error: "timeout after 30s" }),
+      upsert: () => {},
+      reminter: { attempt: () => { attempts++; return true; } },
+    });
+    expect(out.failed).toBe(1);
+    expect(attempts).toBe(0);
+  });
+});
+
+describe("linearisBodyError (CTL-1577 round 2)", () => {
+  test("surfaces an exit-zero error-shaped body as the error string", () => {
+    expect(linearisBodyError({ error: "Authentication required" })).toBe(
+      "Authentication required",
+    );
+  });
+
+  test("null for normal issue payloads, arrays, and empty errors", () => {
+    expect(linearisBodyError({ state: { name: "Todo" }, labels: { nodes: [] } })).toBeNull();
+    expect(linearisBodyError([])).toBeNull();
+    expect(linearisBodyError({ error: "" })).toBeNull();
+    expect(linearisBodyError(null)).toBeNull();
   });
 });
