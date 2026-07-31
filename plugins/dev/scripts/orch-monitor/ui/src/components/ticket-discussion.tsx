@@ -706,17 +706,37 @@ function ActivityBurst({ node, now }: { node: BurstNode; now: number }) {
   );
 }
 
+/** Reverse an ascending stream by TIMESTAMP GROUP: groups of equal-ts nodes swap
+ *  position but keep their internal order, so the same-millisecond tie-break
+ *  ("the state changed, THEN someone commented") still reads top-down. A plain
+ *  Array.reverse() would invert it. */
+function reverseByTimestamp(nodes: TimelineNode[]): TimelineNode[] {
+  const out: TimelineNode[] = [];
+  let end = nodes.length;
+  while (end > 0) {
+    let start = end - 1;
+    while (start > 0 && nodes[start - 1]?.ts === nodes[end - 1]?.ts) start--;
+    for (let i = start; i < end; i++) {
+      const n = nodes[i];
+      if (n) out.push(n);
+    }
+    end = start;
+  }
+  return out;
+}
+
 /** The collapse + display-order math, pure so it stays testable (bun has no DOM).
  *  Collapse keeps the NEWEST `limit` nodes (the stream is oldest-first);
  *  `newestFirst` then flips DISPLAY order only — the underlying timeline stays
- *  ascending, so burst coalescing and the same-ms tie-break are unaffected. */
+ *  ascending, so burst coalescing is unaffected, and equal-ts groups keep their
+ *  tie-break order (see reverseByTimestamp). */
 export function visibleTimelineNodes(
   nodes: TimelineNode[],
   { limit, showAll, newestFirst }: { limit?: number; showAll: boolean; newestFirst: boolean },
 ): { collapsed: boolean; shown: TimelineNode[] } {
   const collapsed = limit != null && !showAll && nodes.length > limit;
   const kept = limit != null && collapsed ? nodes.slice(-limit) : nodes;
-  return { collapsed, shown: newestFirst ? [...kept].reverse() : kept };
+  return { collapsed, shown: newestFirst ? reverseByTimestamp(kept) : kept };
 }
 
 // ── Section ──────────────────────────────────────────────────────────────────
