@@ -1529,26 +1529,23 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
     expect(fetchLiveState).toHaveBeenCalledTimes(1);
   });
 
-  test("the revalidation read is handed the gateway tier (Codex R6)", () => {
+  test("a replica row updated AFTER a cached negative invalidates the marker (Codex R7)", () => {
     enroll("ENG", { status: "Todo", triageStatus: "Triage" });
     const realOrchDir = join(catalystDir, "execution-core");
     const exec = execReturning({ ENG: [] });
     reconcileAll({ exec });
     const dispatch = mock(() => ({ code: 0 }));
-    const seenOpts = [];
-    const gw = { marker: "gw" };
-    sweepMissingTriage({
-      ...baseOpts(realOrchDir, dispatch),
-      gateway: gw,
-      fetchLiveState: (id, o) => {
-        seenOpts.push(o);
-        return "Triage";
-      },
-      runTriageState: triageReturning([triageNode("ENG-GW")]),
-    });
-    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-GW"]);
-    expect(seenOpts).toHaveLength(1);
-    expect(seenOpts[0]?.gateway).toBe(gw);
+    let liveNow = "Research"; // first sweep: genuinely advanced → negative cached
+    const fetchLiveState = mock(() => liveNow);
+    const opts = { ...baseOpts(realOrchDir, dispatch), fetchLiveState };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-BACK")]) });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The ticket re-enters Triage: the replica row is now NEWER than the verdict.
+    liveNow = "Triage";
+    const reentered = { ...triageNode("ENG-BACK"), updatedAt: new Date(Date.now() + 1000).toISOString() };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([reentered]) });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-BACK"]);
+    expect(fetchLiveState).toHaveBeenCalledTimes(2);
   });
 
   test("a recently-touched Triage row is still swept (no updated_at dwell gate — Codex R3)", () => {

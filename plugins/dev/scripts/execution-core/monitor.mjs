@@ -733,6 +733,10 @@ function dispatchTriage(
     // null/undefined (the webhook path, eligible-half candidates) skips the check.
     requireTriageState = null,
     fetchLiveState = defaultFetchTicketState,
+    // CTL-1589 (Codex R7): the candidate row's replica updatedAt (ISO). A row
+    // updated AFTER a cached negative verdict invalidates the marker — the
+    // ticket may have legitimately re-entered Triage.
+    candidateUpdatedAt = null,
   }
 ) {
   if (!orchDir) {
@@ -882,7 +886,11 @@ function dispatchTriage(
     const revalPath = join(revalDir, `${identifier}.json`);
     try {
       const m = JSON.parse(readFileSync(revalPath, "utf8"));
-      if (typeof m?.ts === "number" && Date.now() - m.ts < TRIAGE_REVALIDATE_NEGATIVE_MS) {
+      const rowMs = candidateUpdatedAt ? Date.parse(candidateUpdatedAt) : NaN;
+      // A replica row updated AFTER the verdict invalidates it (Codex R7): the
+      // ticket may have legitimately re-entered Triage since the negative.
+      const invalidated = Number.isFinite(rowMs) && typeof m?.ts === "number" && rowMs > m.ts;
+      if (!invalidated && typeof m?.ts === "number" && Date.now() - m.ts < TRIAGE_REVALIDATE_NEGATIVE_MS) {
         log.debug(
           { identifier, cachedLive: m.live ?? null },
           "dispatchTriage: Triage-board revalidation negative still cached — skipping without a read (CTL-1589)"
@@ -894,11 +902,12 @@ function dispatchTriage(
     }
     let live = null;
     try {
-      // Tiered (Codex R6): the broker's gateway descriptor store (60s state
-      // freshness, an INDEPENDENT webhook-fed source) answers without a
-      // subprocess when it can; only a miss shells the live read. The replica
-      // is deliberately NOT passed — it is the very source being audited.
-      live = fetchLiveState(identifier, { gateway });
+      // AUTHORITATIVE read only (Codex R7): no gateway/replica tier — a ≤60s
+      // cached "Triage" from the webhook-fed descriptor store could approve a
+      // duplicate launch on a just-advanced ticket, and the replica is the very
+      // source being audited. The negative cache above owns the read-rate
+      // bound, so the bare read stays ≤2/hour per stuck candidate.
+      live = fetchLiveState(identifier);
     } catch {
       live = null;
     }
@@ -1342,6 +1351,7 @@ export function sweepMissingTriage({
         // CTL-1589 (Codex R3): Triage-BOARD candidates must still be in the
         // Triage state at launch; eligible-half candidates skip the check.
         requireTriageState: t.fromTriageBoard ? triageStatusName : null,
+        candidateUpdatedAt: t.fromTriageBoard ? (t.updatedAt ?? null) : null,
         fetchLiveState,
         botUserIds,
         botWriteId,
