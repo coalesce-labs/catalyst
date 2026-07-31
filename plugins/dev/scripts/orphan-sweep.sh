@@ -79,6 +79,13 @@ SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 export PATH="${PATH}:${SCRIPT_DIR}"
 
+# CTL-1417: self-protection guard — a final belt (fail-closed lsof + cwd check)
+# on the SAFE / SALVAGE_UNPUSHED --force removals below, covering non-`claude`
+# foreign holders and bash-3.2 (where presweep's mapfile fail-closes without
+# ever reaching the removal). No side effects on source.
+# shellcheck source=lib/worktree-remove-guard.sh
+[ -r "${SCRIPT_DIR}/lib/worktree-remove-guard.sh" ] && source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
+
 # ─── arg parsing ────────────────────────────────────────────────────────────
 
 DRY_RUN="${SWEEP_DRY_RUN:-0}"
@@ -1230,6 +1237,12 @@ sweep_worktrees() {
             }
           fi
           kb="$(_du_kb "$wt")"
+          # CTL-1417: final self-protection belt — skip if the tree is our cwd
+          # or a live process holds a handle under it (never yank a tree an
+          # operator or `make test` is inside).
+          if command -v assert_worktree_removal_safe >/dev/null 2>&1 && ! assert_worktree_removal_safe "$wt"; then
+            log "skip (guard refused — live handle/self): $wt"; _sweep_count activeSkipped; continue
+          fi
           git worktree remove --force "$wt" 2>/dev/null && {
             log "removed worktree (SAFE): $wt"
             _sweep_count removed; removed_count=$((removed_count+1))
@@ -1261,8 +1274,12 @@ sweep_worktrees() {
               if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
                 deferred=$((deferred+1)); continue
               fi
-              git worktree remove --force "$wt" 2>/dev/null \
-                && { log "removed (salvage) worktree: $wt"; emit_reclaim worktree "$wt"; removed_count=$((removed_count+1)); }
+              if command -v assert_worktree_removal_safe >/dev/null 2>&1 && ! assert_worktree_removal_safe "$wt"; then
+                log "skip (guard refused — live handle/self): $wt"
+              else
+                git worktree remove --force "$wt" 2>/dev/null \
+                  && { log "removed (salvage) worktree: $wt"; emit_reclaim worktree "$wt"; removed_count=$((removed_count+1)); }
+              fi
             fi
           else
             log "salvage (unpushed commits, skip+report): $wt"
