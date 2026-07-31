@@ -516,6 +516,17 @@ cmd_start() {
     linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
   fi
 
+  # CATALYST_CONFIG_FILE pins the Layer-1 config path explicitly so the spawned
+  # server's config resolution (orch-monitor/lib/config-path.ts) never falls back
+  # to a cwd-relative `.catalyst/config.json` lookup. Without this, the server
+  # inherits whatever directory the operator happened to be in when they ran
+  # `catalyst-monitor start` / `catalyst-stack start` — if that directory has no
+  # `.catalyst/config.json` (or the wrong one), the team/project roster and the
+  # Layer-2 Linear-token resolution both silently degrade (empty project list,
+  # board views that never resolve, replies failing with "no Linear credential")
+  # even though a correctly-configured `$CATALYST_DIR/.catalyst/config.json`
+  # exists. Only set when the caller hasn't already pointed at a specific file.
+  CATALYST_CONFIG_FILE="${CATALYST_CONFIG_FILE:-$CATALYST_DIR/.catalyst/config.json}" \
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \
   MONITOR_PUBLIC_DIR="${MONITOR_UI_DIST_DIR}" \
