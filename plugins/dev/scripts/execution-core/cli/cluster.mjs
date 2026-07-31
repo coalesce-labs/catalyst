@@ -408,11 +408,15 @@ export function runTune(argv = []) {
 
 export function runSync(argv = []) {
   const res = clusterSync();
+  // CTL-1595 (Codex P2): a profile decrypt/write shortfall must fail the manual
+  // sync loudly — operators use this command to restore worker credentials.
+  const profilesFailed =
+    res.profiles?.reason === "decrypt-failed" || (res.profiles?.failed?.length ?? 0) > 0;
   if (argv.includes("--json")) {
     process.stdout.write(JSON.stringify(res) + "\n");
-    return res.sync.ok ? 0 : 1;
+    return res.sync.ok && !profilesFailed ? 0 : 1;
   }
-  const { pull, sync, files } = res;
+  const { pull, sync, files, profiles } = res;
   const lines = [
     `cluster-sync: pull ${pull.pulled ? "ok" : `skipped (${pull.reason ?? ""})`}`,
   ];
@@ -425,8 +429,12 @@ export function runSync(argv = []) {
     );
   }
   lines.push(`  secret-files: ${files.written.length} written`);
+  lines.push(
+    `  profiles: ${profiles?.written?.length ?? 0} written` +
+      (profilesFailed ? ` (FAILED: ${profiles?.reason ?? profiles?.failed?.join(",")})` : ""),
+  );
   process.stdout.write(lines.join("\n") + "\n");
-  return sync.ok ? 0 : 1;
+  return sync.ok && !profilesFailed ? 0 : 1;
 }
 
 // ── ownership — CTL-1211: make the HRW partition SEEABLE (no-contention proof) ─

@@ -19,6 +19,7 @@ import {
   syncClusterSecrets,
   syncSecretFiles,
   syncProfileFiles,
+  defaultProfilesDir,
   pullClusterRepo,
   destForSecret,
   // CTL-1393: durable change-detection + periodic refresh.
@@ -241,6 +242,17 @@ describe("pullClusterRepo (CTL-1211)", () => {
       logger: QUIET,
     });
     expect(res).toEqual({ pulled: false, reason: "pull-failed" });
+  });
+});
+
+describe("defaultProfilesDir (CTL-1595 Codex P2 — XDG-aware)", () => {
+  test("honors XDG_CONFIG_HOME when set (check-setup.sh parity)", () => {
+    expect(defaultProfilesDir({ XDG_CONFIG_HOME: "/xdg" })).toBe(resolve("/xdg", "direnv", "profiles"));
+  });
+  test("falls back to ~/.config when XDG_CONFIG_HOME is unset/empty", () => {
+    const home = defaultProfilesDir({});
+    expect(home.endsWith(join(".config", "direnv", "profiles"))).toBe(true);
+    expect(defaultProfilesDir({ XDG_CONFIG_HOME: "" })).toBe(home);
   });
 });
 
@@ -762,6 +774,9 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(readFileSync(join(profilesDir, "catalyst-cloud.env"), "utf8")).toContain("LINEAR_API_KEY");
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
     expect(emits.map((e) => e.name)).toContain("refreshed");
+    // Codex P2: the refreshed payload must name the materialized profiles.
+    const refreshed = emits.find((e) => e.name === "refreshed");
+    expect(refreshed.payload.profiles).toEqual(["catalyst-cloud.env"]);
     // a profile rotation needs NO daemon restart (direnv re-evaluates per spawn)
     expect(emits.map((e) => e.name)).not.toContain("restart-required");
   });
@@ -960,6 +975,43 @@ describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
     expect(res).toHaveProperty("pull");
     expect(res).toHaveProperty("sync");
     expect(res).toHaveProperty("files");
+  });
+
+  test("boot PROFILE shortfall with a SAME-SHA marker → marker INVALIDATED so the refresh retries (Codex P2)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    // A prior marker already records the clone's CURRENT head — without
+    // invalidation the refresh fast-path would return head-unchanged forever.
+    writeFileSync(
+      statePath,
+      JSON.stringify({ lastDecryptedSha: "NEWSHA", lastDecryptedAt: "old", written: [], synced: [] }),
+    );
+
+    const emits = [];
+    clusterSync({
+      clusterDir,
+      configDir,
+      profilesDir: join(configDir, "profiles"),
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA"),
+      decrypt: (p) => {
+        if (p.endsWith("profile-files.sops.json")) throw new Error("bad mac");
+        return { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } };
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(emits[0].payload.reason).toBe("profile-decrypt-failed");
+    // The same-SHA marker is GONE — the periodic refresh will re-attempt.
+    expect(readClusterSyncState(statePath)).toBeNull();
   });
 
   test("boot decrypt SUCCEEDS → marker seeded to HEAD, no refresh-failed (guard against over-correcting)", () => {

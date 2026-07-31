@@ -37,6 +37,7 @@ import {
   appendFileSync,
   chmodSync,
   mkdirSync,
+  rmSync,
 } from "node:fs";
 import { resolve, basename, dirname, delimiter } from "node:path";
 import { homedir } from "node:os";
@@ -326,8 +327,14 @@ export function syncSecretFiles(opts = {}) {
 // these were HAND-provisioned per host — mini carried six legacy files, mini-2
 // carried none, and catalyst-cloud.env existed nowhere, so catalyst-cloud
 // workers booted tokenless fleet-wide (the CTC-284 verdict-less-death class).
-function defaultProfilesDir() {
-  return resolve(homedir(), ".config", "direnv", "profiles");
+// XDG-aware (Codex P2): check-setup.sh derives the active direnv path from
+// ${XDG_CONFIG_HOME:-$HOME/.config}/direnv — writing anywhere else would report
+// success while use_profile still finds nothing. Exported for doctor/tests.
+export function defaultProfilesDir(env = process.env) {
+  const xdg = typeof env.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.length > 0
+    ? env.XDG_CONFIG_HOME
+    : resolve(homedir(), ".config");
+  return resolve(xdg, "direnv", "profiles");
 }
 
 // syncProfileFiles — decrypt secrets/profile-files.sops.json (a { "<name>.env":
@@ -730,7 +737,7 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
       name: "refreshed",
       node,
       now,
-      payload: { fromSha: lastSha, toSha: head, written: status.written, synced: status.synced },
+      payload: { fromSha: lastSha, toSha: head, written: status.written, synced: status.synced, profiles: status.profiles },
     });
   }
 
@@ -816,6 +823,22 @@ export function clusterSync(opts = {}) {
     } else if (head && !fullSuccess) {
       // Boot materialization shortfall: DON'T seed the marker (so the periodic
       // refresh keeps retrying and doctor keeps flagging), make it LOUD.
+      // Codex P2 (CTL-1595): "don't seed" is NOT enough when a PRIOR marker
+      // already records this same HEAD — the refresh fast-path would return
+      // head-unchanged forever and never retry after the fs/key issue heals.
+      // Invalidate a same-SHA marker so the next refresh re-attempts. (Generic:
+      // the same wedge existed for bare-file boot shortfalls.)
+      try {
+        const prior = readClusterSyncState(statePath);
+        if (prior?.lastDecryptedSha === head) {
+          rmSync(statePath, { force: true });
+          logger?.warn?.(
+            "[cluster-sync] invalidated same-SHA change marker after boot shortfall — the refresh timer will re-attempt",
+          );
+        }
+      } catch {
+        /* best-effort; worst case is the pre-existing wedge */
+      }
       logger?.warn?.(
         `[cluster-sync] boot decrypt did not fully succeed (${shortfall}) — ` +
           "NOT seeding the change-detection marker; keeping node-local plaintext and retrying on the refresh timer",
