@@ -12694,7 +12694,7 @@ describe("computeDeadHosts (CTL-1524 C4a)", () => {
 // ── CTL-1580: non-phantom probe cool-down + replica threading ──
 describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
   test("a stuck dir's classify is bounded to one per DELETION_PROBE_INTERVAL_MS", () => {
-    writeSignal("OTL-52", "implement", "running");
+    writeSignal("PROJ-52", "implement", "running");
     let classifies = 0;
     const deps = {
       readEligible: () => [],
@@ -12711,7 +12711,7 @@ describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
     schedulerTick(orchDir, deps);
     // First tick probes (and records the marker); the next two are inside the
     // cool-down window and must NOT re-probe — this was the every-tick live
-    // read of a quiet stuck ticket (the OTL-52 burn).
+    // read of a quiet stuck ticket (the PROJ-52 burn).
     expect(classifies).toBe(1);
   });
 

@@ -2601,8 +2601,8 @@ describe("classifyTicketResolution replica tier (CTL-1580)", () => {
       execs++;
       return { code: 0, stdout: "null", stderr: "" };
     };
-    const replica = { lookup: () => ({ terminal: false, state: "Implement" }) };
-    expect(classifyTicketResolution("OTL-52", { exec, replica })).toBe("exists");
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Implement" }) };
+    expect(classifyTicketResolution("PROJ-52", { exec, replica })).toBe("exists");
     expect(execs).toBe(0);
   });
 
@@ -2612,14 +2612,14 @@ describe("classifyTicketResolution replica tier (CTL-1580)", () => {
       execs++;
       return { code: 0, stdout: "null", stderr: "" };
     };
-    const replica = { lookup: () => ({ terminal: true, state: "Done" }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: true, state: "Done" }) };
     expect(classifyTicketResolution("CTL-1", { exec, replica })).toBe("exists");
     expect(execs).toBe(0);
   });
 
   test("replica MISS falls through to the live read (deletion still definitive)", () => {
     const exec = fakeExec({ code: 0, stdout: "null" });
-    const replica = { lookup: () => undefined };
+    const replica = { isFresh: () => true, lookup: () => undefined };
     expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
   });
 
@@ -2629,5 +2629,19 @@ describe("classifyTicketResolution replica tier (CTL-1580)", () => {
       stdout: JSON.stringify({ identifier: "CTL-100", state: { name: "Ready" } }),
     });
     expect(classifyTicketResolution("CTL-100", { exec })).toBe("exists");
+  });
+});
+
+describe("classifyTicketResolution replica-tier freshness gate (CTL-1580 review)", () => {
+  test("a STALE replica row never suppresses the definitive live check", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { isFresh: () => false, lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("a reader without the isFresh accessor is treated as unfresh (fail-closed)", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
   });
 });
