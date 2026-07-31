@@ -10,6 +10,7 @@ import {
   readCacheReconcileConfig,
   startCacheReconcileTimer,
   rotateWindow,
+  linearisBodyError,
 } from "./cache-reconcile.mjs";
 
 // pinoLikeLogger — methods THROW if invoked with the wrong `this`, exactly like
@@ -546,5 +547,20 @@ describe("reconcileCacheState — mid-run auth re-mint (CTL-1577)", () => {
     });
     expect(out.failed).toBe(1);
     expect(attempts).toBe(0);
+  });
+});
+
+describe("linearisBodyError (CTL-1577 round 2)", () => {
+  test("surfaces an exit-zero error-shaped body as the error string", () => {
+    expect(linearisBodyError({ error: "Authentication required" })).toBe(
+      "Authentication required",
+    );
+  });
+
+  test("null for normal issue payloads, arrays, and empty errors", () => {
+    expect(linearisBodyError({ state: { name: "Todo" }, labels: { nodes: [] } })).toBeNull();
+    expect(linearisBodyError([])).toBeNull();
+    expect(linearisBodyError({ error: "" })).toBeNull();
+    expect(linearisBodyError(null)).toBeNull();
   });
 });

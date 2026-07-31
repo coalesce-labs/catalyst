@@ -4,7 +4,7 @@
 // otherwise fail every Linear call until restarted. Secrets hygiene: the
 // clientSecret/token are read into variables and never logged (house style:
 // ratelimit-poller.mjs).
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -34,11 +34,19 @@ export function isBatchAuthError(errors) {
   );
 }
 
-// defaultLayer2Path — mirrors daemon.mjs boot resolution (env override for tests).
+// defaultLayer2Path — the FULL Layer-2 selection chain (install-lifecycle.mjs
+// order: CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG >
+// $XDG_CONFIG_HOME/catalyst/config.json > ~/.config/catalyst/config.json).
+// CTL-1577 round 2: previously only the first env override was honored, so a
+// daemon launched with MACHINE_CONFIG/XDG would startup-mint fine (the bash
+// helper resolves the chain) but find NO creds at re-mint time.
 function defaultLayer2Path() {
   return (
     process.env.CATALYST_LAYER2_CONFIG_FILE ||
-    resolve(homedir(), ".config", "catalyst", "config.json")
+    process.env.CATALYST_MACHINE_CONFIG ||
+    (process.env.XDG_CONFIG_HOME
+      ? resolve(process.env.XDG_CONFIG_HOME, "catalyst", "config.json")
+      : resolve(homedir(), ".config", "catalyst", "config.json"))
   );
 }
 
@@ -142,6 +150,65 @@ export function createReminter({
 
 // Process-wide singleton (same pattern as linearBreaker).
 export const linearReminter = createReminter();
+
+// defaultMintAsync — non-blocking mint (spawn, not spawnSync) for daemons whose
+// event loop must stay free during a slow OAuth endpoint (the broker routes
+// webhooks and tails the event log; a 30s spawnSync would freeze both —
+// CTL-1577 round 2). Same argv/payload as defaultMint; secret rides stdin.
+function defaultMintAsync(creds) {
+  const { args, payload } = buildMintCurlArgs(creds);
+  return new Promise((resolveMint) => {
+    let child;
+    try {
+      child = spawn("curl", args, { stdio: ["pipe", "pipe", "ignore"] });
+    } catch {
+      resolveMint(null);
+      return;
+    }
+    let out = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+    });
+    child.on("error", () => resolveMint(null));
+    child.on("close", (code) =>
+      resolveMint(parseMintResponse({ code: code ?? 1, stdout: out })),
+    );
+    child.stdin.end(payload);
+  });
+}
+
+// createAsyncReminter — the async twin of createReminter (identical cooldown +
+// fail-open contract; attempt() resolves true iff a new token was minted AND
+// applied). The cooldown stamp is taken BEFORE the await so overlapping callers
+// within one window collapse to a single mint.
+export function createAsyncReminter({
+  readCreds = readOrchestratorCreds,
+  mint = defaultMintAsync,
+  applyToken = defaultApplyToken,
+  cooldownMs = DEFAULT_COOLDOWN_MS,
+  logger = log,
+} = {}) {
+  let lastAttempt = -Infinity;
+  return {
+    async attempt(now = Date.now()) {
+      if (now - lastAttempt < cooldownMs) return false;
+      lastAttempt = now;
+      const creds = readCreds();
+      if (!creds) return false;
+      const token = await mint(creds);
+      if (!token) {
+        logger.warn({}, "ctl-785: orchestrator token re-mint FAILED — keeping current token");
+        return false;
+      }
+      applyToken(token);
+      logger.info({}, "ctl-785: orchestrator token re-minted after auth error");
+      return true;
+    },
+  };
+}
+
+// Process-wide singleton for async consumers (the broker's cache reconcile).
+export const linearAsyncReminter = createAsyncReminter();
 
 // withAuthRemint — wrap a raw exec: on an auth-error failure, attempt ONE
 // re-mint; if a fresh token was applied, retry the call once (the spawned

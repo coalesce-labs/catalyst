@@ -33,10 +33,15 @@ linear_app_actor_auth() {
   _ocsec=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "$_g" 2>/dev/null)
   if [[ -n "$_ocid" && -n "$_ocsec" ]]; then
     # Secret travels via --data @- on stdin, never argv (process-table hygiene —
-    # house style: linear-remint.mjs buildMintCurlArgs). Connection + transfer
-    # bounded so a hung OAuth endpoint cannot wedge daemon start.
+    # house style: linear-remint.mjs buildMintCurlArgs), values URL-encoded via
+    # jq @uri (parity with the re-minter's URLSearchParams — a form-reserved
+    # char in a credential must not silently corrupt the body). Connection +
+    # transfer bounded so a hung OAuth endpoint cannot wedge daemon start.
+    local _eid _esec
+    _eid=$(jq -rn --arg v "$_ocid" '$v|@uri' 2>/dev/null)
+    _esec=$(jq -rn --arg v "$_ocsec" '$v|@uri' 2>/dev/null)
     _otok=$(printf 'grant_type=client_credentials&client_id=%s&client_secret=%s&scope=read,write,comments:create,app:assignable,app:mentionable&actor=app' \
-      "$_ocid" "$_ocsec" |
+      "$_eid" "$_esec" |
       curl -s --connect-timeout 5 --max-time 30 --noproxy '*' -X POST \
         https://api.linear.app/oauth/token --data @- 2>/dev/null |
       jq -r '.access_token // empty' 2>/dev/null)

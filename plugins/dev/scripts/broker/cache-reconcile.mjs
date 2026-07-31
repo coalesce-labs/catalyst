@@ -26,7 +26,7 @@ import {
   upsertTicketDescriptor,
 } from "./broker-state.mjs";
 import { extractLabelNames } from "./backfill-ticket-labels.mjs";
-import { linearReminter, isAuthError } from "../execution-core/linear-remint.mjs";
+import { linearAsyncReminter, isAuthError } from "../execution-core/linear-remint.mjs";
 
 // Mode knob: env CATALYST_CACHE_RECONCILE overrides Layer-2 config; operators
 // opt in via =shadow (log would-write, touch nothing) then =enforce (write).
@@ -139,6 +139,16 @@ export function decideReconcile({ current, fetchedState, fetchedLabels }) {
   };
 }
 
+// linearisBodyError — the error string when a linearis JSON body is error-shaped
+// (`{"error": "..."}`) despite a zero exit, else null. Exported for tests
+// (CTL-1577 round 2: an exit-zero auth body must not read as a silent null row).
+export function linearisBodyError(json) {
+  if (json && typeof json === "object" && !Array.isArray(json) && typeof json.error === "string" && json.error) {
+    return json.error;
+  }
+  return null;
+}
+
 // fetchLive — ASYNC `linearis issues read <ticket>` (CTL-1282). Uses non-blocking
 // `spawn` (NOT spawnSync) so a pass never freezes the broker's event loop:
 // webhook routing keeps flowing while we await each read. linearis emits JSON by
@@ -175,6 +185,14 @@ function fetchLive(ticket) {
         json = JSON.parse(out);
       } catch (e) {
         finish({ state: null, labels: null, error: `unparseable JSON: ${String(e)}` });
+        return;
+      }
+      // linearis can exit ZERO with an error-shaped JSON body (observed contract:
+      // execution-core/linear-query.test.mjs) — surface it as the error, so an
+      // auth failure reaches the re-minter instead of reading as a null row.
+      const bodyError = linearisBodyError(json);
+      if (bodyError) {
+        finish({ state: null, labels: null, error: bodyError });
         return;
       }
       finish({ state: extractState(json), labels: extractLabelNames(json), error: null });
@@ -215,8 +233,9 @@ export async function reconcileCacheState({
   upsert = upsertTicketDescriptor,
   // CTL-1577: the startup mint (catalyst-broker cmd_start) runs ONCE; a broker
   // crossing the OAuth expiry boundary re-mints here mid-run (cooldown-guarded
-  // singleton — same seam as execution-core's withAuthRemint).
-  reminter = linearReminter,
+  // ASYNC singleton — spawn, not spawnSync, so a slow OAuth endpoint never
+  // freezes webhook routing on the broker event loop).
+  reminter = linearAsyncReminter,
   logger,
 } = {}) {
   const log = logSink(logger);
@@ -280,8 +299,9 @@ export async function reconcileCacheState({
       // CTL-1577: an auth-shaped failure means the token expired — refresh
       // process.env so the NEXT linearis spawn (this pass or the label
       // backfill) inherits a fresh app-actor token. Non-auth failures skip:
-      // a re-mint cannot help a 429/timeout/parse error.
-      if (isAuthError(live.error)) reminter.attempt();
+      // a re-mint cannot help a 429/timeout/parse error. Awaited so the pass
+      // retries with the fresh token on its very next read.
+      if (isAuthError(live.error)) await reminter.attempt();
       // CTL-1288 trade-off: the cursor advances to the last TAKEN ticket (not the
       // last SUCCEEDED), so a fetch-failed ticket's retry waits until its tier
       // wraps rather than next interval. This is DELIBERATE forward progress: a
