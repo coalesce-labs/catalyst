@@ -610,12 +610,12 @@ function seedEligibleLabeled() {
   db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
   db.run(`CREATE TABLE relations (type TEXT, issue_identifier TEXT, related_identifier TEXT)`);
   db.run(`CREATE TABLE projects (id TEXT, name TEXT)`);
-  db.run(`CREATE TABLE labels (id TEXT, name TEXT)`);
+  db.run(`CREATE TABLE labels (id TEXT, name TEXT, removed_at TEXT)`);
   db.run(`CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)`);
   db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
   db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
-  db.run(`INSERT INTO labels VALUES ('lab-bug', 'bug')`);
-  db.run(`INSERT INTO labels VALUES ('lab-chore', 'chore')`);
+  db.run(`INSERT INTO labels VALUES ('lab-bug', 'bug', NULL)`);
+  db.run(`INSERT INTO labels VALUES ('lab-chore', 'chore', NULL)`);
   // CTL-200 labeled 'bug'; CTL-201 labeled 'chore'; both Todo.
   db.run(
     `INSERT INTO issues VALUES ('id-200', 'CTL-200', 'Bug ticket', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, NULL, 3000, 100)`,
@@ -925,5 +925,41 @@ describe("createReplicaReader.stateAndLabels (CTL-1571 — one-snapshot pair)", 
     seedPair();
     reader = createReplicaReader({ dbPath });
     expect(reader.stateAndLabels("CTL-999")).toBeUndefined();
+  });
+});
+
+// ── labelsBatch (CTL-1588 #2845) — one snapshot, one IN query ────────────────
+describe("createReplicaReader.labelsBatch", () => {
+  test("returns {identifier: [names]} for the id set in one call; absent ids have no key", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    const out = reader.labelsBatch(["CTL-200", "CTL-201", "CTL-999"]);
+    expect(out).toEqual({ "CTL-200": ["bug"], "CTL-201": ["chore"] });
+  });
+
+  test("a tombstoned label is excluded (same live-label predicate as labels())", () => {
+    seedEligibleLabeled();
+    const db = new Database(dbPath);
+    db.run(`UPDATE labels SET removed_at = '2026-07-31T00:00:00Z' WHERE name = 'bug'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labelsBatch(["CTL-200", "CTL-201"])).toEqual({ "CTL-201": ["chore"] });
+  });
+
+  test("empty/absent input → {} without touching the db", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labelsBatch([])).toEqual({});
+    expect(reader.labelsBatch(undefined)).toEqual({});
+  });
+
+  test("stale writer (no freshness) → undefined (fall through, never a stale answer)", () => {
+    seedEligibleLabeled();
+    // Backdate the DB + -wal well past the default 5-min staleness threshold.
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(dbPath, old, old);
+    try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labelsBatch(["CTL-200"])).toBeUndefined();
   });
 });
