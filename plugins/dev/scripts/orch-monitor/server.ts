@@ -243,7 +243,7 @@ import { createEventRing } from "./lib/event-ring";
 import { createMemoizedRead } from "./lib/memoize-fresh.mjs";
 import { readSubStepEvents } from "./lib/substep-reader";
 import { loadOtelConfig } from "./lib/otel-config";
-import { loadWebhookConfig } from "./lib/webhook-config";
+import { loadLinearBotUserIds, loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey, detectProjectKeyFromConfig } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
 // Shared Layer-1 config-path resolver (env pointer > cwd) — keeps
@@ -5297,6 +5297,13 @@ if (import.meta.main) {
     configPath,
     projectKey,
   );
+  // Loaded independently of loadWebhookConfig: that loader returns null when no
+  // webhook transport is configured, discarding the ids — but read surfaces
+  // (the discussion timeline) still need them to classify agent comments.
+  const linearBotIdsForReads = loadLinearBotUserIds(
+    process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
+    configPath,
+  );
   const webhookConfig =
     fullWebhookConfig &&
     fullWebhookConfig.smeeChannel.length > 0 &&
@@ -5394,10 +5401,7 @@ if (import.meta.main) {
       linearWebhookConfig,
       // Independent of webhook wiring: configured app-actor ids classify agent
       // comments on the discussion surface even when webhooks are disabled.
-      linearBotUserIds:
-        fullWebhookConfig && fullWebhookConfig.linearBotUserIds.size > 0
-          ? fullWebhookConfig.linearBotUserIds
-          : undefined,
+      linearBotUserIds: linearBotIdsForReads.size > 0 ? linearBotIdsForReads : undefined,
       projectsConfigPath: configPath,
       monitorConfigPath: configPath,
     });

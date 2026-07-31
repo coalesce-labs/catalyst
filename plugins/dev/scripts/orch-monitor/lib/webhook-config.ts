@@ -363,6 +363,42 @@ export function loadLinearAgentConfig(
  *
  * Returns `null` if either the channel or secret cannot be resolved.
  */
+/** Linear app-actor user ids: worker + orchestrator botUserIds from the Layer-2
+ *  global config.json, plus the Layer-1 back-compat
+ *  `catalyst.monitor.linear.botUserId`. Exported SEPARATELY from
+ *  loadWebhookConfig because these ids also classify agent comments on read
+ *  surfaces (the discussion timeline) — a monitor with no webhook transport
+ *  configured must still recognize its app actors, and loadWebhookConfig's
+ *  no-transport early-return would otherwise discard them (CTL-1574 review). */
+export function loadLinearBotUserIds(
+  homeConfigDir: string,
+  projectConfigPath: string,
+): ReadonlySet<string> {
+  const linearBotUserIds = new Set<string>();
+  // NEW: Layer-2 global config.json carries worker + orchestrator botUserIds.
+  try {
+    const globalParsed: unknown = JSON.parse(readFileSync(join(homeConfigDir, "config.json"), "utf8"));
+    if (isRecord(globalParsed) && isRecord(globalParsed.catalyst)) {
+      const bot = globalParsed.catalyst.linear;
+      if (isRecord(bot) && isRecord(bot.bot)) {
+        const botSection = bot.bot;
+        if (isRecord(botSection.worker) && typeof botSection.worker.botUserId === "string") {
+          const id = botSection.worker.botUserId;
+          if (id.length > 0) linearBotUserIds.add(id);
+        }
+        if (isRecord(botSection.orchestrator) && typeof botSection.orchestrator.botUserId === "string") {
+          const id = botSection.orchestrator.botUserId;
+          if (id.length > 0) linearBotUserIds.add(id);
+        }
+      }
+    }
+  } catch { /* absent / malformed — continue to Layer-1 fallback */ }
+  // OLD Layer-1 back-compat: catalyst.monitor.linear.botUserId.
+  const layer1BotUserId = readGithubSection(projectConfigPath)?.linearBotUserId ?? "";
+  if (layer1BotUserId.length > 0) linearBotUserIds.add(layer1BotUserId);
+  return linearBotUserIds;
+}
+
 export function loadWebhookConfig(
   homeConfigDir: string,
   projectConfigPath: string,
@@ -430,29 +466,7 @@ export function loadWebhookConfig(
       : (fileLinearSmeeChannel ?? "");
 
   // Collect all known Linear bot user UUIDs for loop prevention. CTL-263.
-  // NEW: Layer-2 global config.json carries worker + orchestrator botUserIds.
-  // OLD: Layer-1 project config carries catalyst.monitor.linear.botUserId (back-compat).
-  const linearBotUserIds = new Set<string>();
-  try {
-    const globalParsed: unknown = JSON.parse(readFileSync(join(homeConfigDir, "config.json"), "utf8"));
-    if (isRecord(globalParsed) && isRecord(globalParsed.catalyst)) {
-      const bot = globalParsed.catalyst.linear;
-      if (isRecord(bot) && isRecord(bot.bot)) {
-        const botSection = bot.bot;
-        if (isRecord(botSection.worker) && typeof botSection.worker.botUserId === "string") {
-          const id = botSection.worker.botUserId;
-          if (id.length > 0) linearBotUserIds.add(id);
-        }
-        if (isRecord(botSection.orchestrator) && typeof botSection.orchestrator.botUserId === "string") {
-          const id = botSection.orchestrator.botUserId;
-          if (id.length > 0) linearBotUserIds.add(id);
-        }
-      }
-    }
-  } catch { /* absent / malformed — continue to Layer-1 fallback */ }
-  // OLD Layer-1 back-compat: catalyst.monitor.linear.botUserId.
-  const layer1BotUserId = projectExtract?.linearBotUserId ?? "";
-  if (layer1BotUserId.length > 0) linearBotUserIds.add(layer1BotUserId);
+  const linearBotUserIds = loadLinearBotUserIds(homeConfigDir, projectConfigPath);
 
   // Linear team→repo roster. CTL-1214 Phase 2: resolved through the shared
   // readClusterProjects() — cluster.json.projects[] first, Layer-1
