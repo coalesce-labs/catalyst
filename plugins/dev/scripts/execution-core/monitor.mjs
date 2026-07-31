@@ -53,6 +53,7 @@ import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry
 import {
   runEligibleQuery,
   runTriageStateQuery as defaultRunTriageStateQuery, // CTL-1589: level-triggered Triage-state read
+  fetchTicketState as defaultFetchTicketState, // CTL-1589: last-moment stale-row revalidation
   fetchTicketAssignee,
   isAssigneeClaimable,
   isClaimable,
@@ -1086,6 +1087,45 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
   return true;
 }
 
+// ── CTL-1589 (Codex R2): cached live-state revalidation for Triage-board rows ─
+// A Triage-board candidate rides a replica row that can have MISSED the
+// ticket's exit from Triage (a per-ticket delivery hole leaves an OLD
+// timestamp, so the dwell guard passes) — and applyTriageStatus's backward-write
+// guard refuses only TERMINAL states, so a stale row could drag an advanced
+// ticket back to Triage. Revalidate against the LIVE state before dispatch, but
+// CACHE the verdict in a marker for 30 min so a candidate the sweep revisits
+// every cycle (non-owner host, capped ticket, failing dispatch) costs at most
+// two live reads an hour — never the per-tick probe storm CTL-1580 eliminated.
+// A failed read (null) proceeds: recovery bias.
+const TRIAGE_REVALIDATE_COOLDOWN_MS = 30 * 60 * 1000;
+
+export function revalidatedTriageLiveState(orchDir, ticket, { fetchLiveState, now = Date.now } = {}) {
+  const dir = join(orchDir, ".triage-revalidate");
+  const path = join(dir, `${ticket}.json`);
+  const nowMs = now();
+  try {
+    const m = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof m?.ts === "number" && nowMs - m.ts < TRIAGE_REVALIDATE_COOLDOWN_MS) {
+      return m.live ?? null;
+    }
+  } catch {
+    /* absent/corrupt marker -> live read */
+  }
+  let live = null;
+  try {
+    live = fetchLiveState(ticket) ?? null;
+  } catch {
+    live = null;
+  }
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, JSON.stringify({ ts: nowMs, live }));
+  } catch {
+    /* marker write is best-effort; worst case is an extra read next sweep */
+  }
+  return live;
+}
+
 // triageStateTickets — the CTL-1589 half of the sweep's ticket source: the
 // tickets currently SITTING IN this team's Triage state, read from the local
 // replica. Fail-open — an unavailable board yields [] and the sweep degrades to
@@ -1120,10 +1160,15 @@ function triageStateTickets(entry, { replica, runTriageState, now = Date.now }) 
     // the dwell window — see TRIAGE_STATE_MIN_DWELL_MS. Unparseable/absent
     // timestamps stay sweepable.
     const nowMs = now();
-    return rows.filter((t) => {
-      const ms = t?.updatedAt ? Date.parse(t.updatedAt) : NaN;
-      return !Number.isFinite(ms) || nowMs - ms >= TRIAGE_STATE_MIN_DWELL_MS;
-    });
+    return rows
+      .filter((t) => {
+        const ms = t?.updatedAt ? Date.parse(t.updatedAt) : NaN;
+        return !Number.isFinite(ms) || nowMs - ms >= TRIAGE_STATE_MIN_DWELL_MS;
+      })
+      // Tag the source so the sweep can live-revalidate ONLY this half (Codex
+      // R2): an eligible-projection candidate never needs it, a replica Triage
+      // row might be a delivery-hole survivor.
+      .map((t) => ({ ...t, fromTriageBoard: true }));
   } catch (err) {
     log.warn(
       { team: query.team, err: err.message },
@@ -1203,6 +1248,8 @@ export function sweepMissingTriage({
   // from the local replica with no Linear call at all.
   replica = _injectedEligibleReplica,
   runTriageState = defaultRunTriageStateQuery,
+  // CTL-1589 (Codex R2): live-state read for stale-row revalidation; injectable.
+  fetchLiveState = defaultFetchTicketState,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1219,6 +1266,7 @@ export function sweepMissingTriage({
     hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
+    const triageStatusName = resolveEligibleQuery(p)?.triageStatus ?? null;
     // CTL-1589: Triage-state board ∪ eligible set, deduped by ticket id. The
     // STRANDED half walks first (Codex R1): under sustained admission load an
     // eligible-first walk let fresh Todo tickets drain the per-sweep budget
@@ -1241,6 +1289,18 @@ export function sweepMissingTriage({
       // budget gate); everything else waits for the next sweep.
       if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      // CTL-1589 (Codex R2): stale-row revalidation — see
+      // revalidatedTriageLiveState for the mechanism and the read-rate bound.
+      if (t.fromTriageBoard && triageStatusName) {
+        const live = revalidatedTriageLiveState(orchDir, t.identifier, { fetchLiveState });
+        if (live != null && live !== triageStatusName) {
+          log.info(
+            { ticket: t.identifier, live, expected: triageStatusName },
+            "sweepMissingTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
+          );
+          continue;
+        }
+      }
       // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
       // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
       // where the stale completion signal is retired immediately before a real

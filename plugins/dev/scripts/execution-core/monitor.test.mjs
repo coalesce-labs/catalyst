@@ -1344,6 +1344,9 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
     appendEvent: () => {},
     readMaxParallelFn: () => 6,
     liveBackgroundCount: () => 0,
+    // CTL-1589 Codex R2: never let the revalidation shell a real linearis read
+    // from a unit test; null = unreadable -> proceed (recovery bias).
+    fetchLiveState: () => null,
   });
 
   test("dispatches a ticket that exists ONLY in the Triage state (never in the eligible set)", () => {
@@ -1390,6 +1393,43 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
       runTriageState: triageReturning([triageNode("ENG-STRANDED")]),
     });
     expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-STRANDED", "ENG-TODO"]);
+  });
+
+  test("a stale Triage row (live state already advanced) is skipped, and the verdict is cached", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Research"); // replica row lies; Linear says advanced
+    const opts = { ...baseOpts(realOrchDir, dispatch), fetchLiveState, runTriageState: triageReturning([triageNode("ENG-STALE")]) };
+    sweepMissingTriage(opts);
+    expect(dispatch).not.toHaveBeenCalled();
+    // Second sweep inside the cooldown: the cached verdict answers — no second live read.
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-STALE")]) });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(fetchLiveState).toHaveBeenCalledTimes(1);
+  });
+
+  test("a Triage row confirmed live in Triage dispatches; an unreadable live state proceeds (recovery bias)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState: () => "Triage",
+      runTriageState: triageReturning([triageNode("ENG-CONFIRMED")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-CONFIRMED"]);
+    const dispatch2 = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch2),
+      fetchLiveState: () => null,
+      runTriageState: triageReturning([triageNode("ENG-UNREADABLE")]),
+    });
+    expect(dispatch2.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-UNREADABLE"]);
   });
 
   test("a Triage row younger than the dwell window is NOT swept (webhook-path territory)", () => {
