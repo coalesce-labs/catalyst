@@ -14,6 +14,7 @@ import {
   coalesceBursts,
   creationEventId,
   describeOrNull,
+  visibleTimelineNodes,
   type CommentNode,
   type EventNode,
 } from "./ticket-discussion";
@@ -129,6 +130,56 @@ describe("buildTimeline", () => {
 
   it("returns [] for a ticket with no comments and no activity", () => {
     expect(buildTimeline([], [])).toEqual([]);
+  });
+});
+
+describe("visibleTimelineNodes", () => {
+  const six = buildTimeline(
+    [],
+    [1, 2, 3, 4, 5, 6].map((n) =>
+      // Alternate actors so the run never coalesces into a burst.
+      event({ id: `e${n}`, created_at: n * 1000, actor_id: `a${n % 2}`, actor_name: `u${n % 2}`, to_state: "Todo" }),
+    ),
+  );
+
+  it("collapse keeps the NEWEST limit nodes, ascending by default", () => {
+    const { collapsed, shown } = visibleTimelineNodes(six, { limit: 5, showAll: false, newestFirst: false });
+    expect(collapsed).toBe(true);
+    expect(shown.map((n) => n.ts)).toEqual([2000, 3000, 4000, 5000, 6000]);
+  });
+
+  it("newestFirst flips DISPLAY order only — collapse still keeps the newest", () => {
+    const { shown } = visibleTimelineNodes(six, { limit: 5, showAll: false, newestFirst: true });
+    expect(shown.map((n) => n.ts)).toEqual([6000, 5000, 4000, 3000, 2000]);
+  });
+
+  it("showAll expands the full stream and newestFirst still reverses it", () => {
+    const { collapsed, shown } = visibleTimelineNodes(six, { limit: 5, showAll: true, newestFirst: true });
+    expect(collapsed).toBe(false);
+    expect(shown.map((n) => n.ts)).toEqual([6000, 5000, 4000, 3000, 2000, 1000]);
+  });
+
+  it("no limit means nothing collapses and input order is preserved", () => {
+    const { collapsed, shown } = visibleTimelineNodes(six, { limit: undefined, showAll: false, newestFirst: false });
+    expect(collapsed).toBe(false);
+    expect(shown.map((n) => n.ts)).toEqual([1000, 2000, 3000, 4000, 5000, 6000]);
+  });
+
+  it("newestFirst keeps the same-millisecond tie-break (event still above its comment)", () => {
+    // t=1000 event+comment (tie-broken event-first), then a newer t=2000 comment.
+    const nodes = buildTimeline(
+      [comment({ id: "c1", updated_at: 1000 }), comment({ id: "c2", updated_at: 2000 })],
+      [event({ id: "e1", created_at: 1000, actor_name: "ryan", to_state: "Done" })],
+    );
+    const { shown } = visibleTimelineNodes(nodes, { limit: undefined, showAll: false, newestFirst: true });
+    // The t=2000 group leads; the t=1000 group follows with event BEFORE comment.
+    expect(shown.map((n) => `${n.ts}:${n.kind}`)).toEqual(["2000:comment", "1000:event", "1000:comment"]);
+  });
+
+  it("does not mutate the ascending source when reversing", () => {
+    const before = six.map((n) => n.ts);
+    visibleTimelineNodes(six, { limit: undefined, showAll: false, newestFirst: true });
+    expect(six.map((n) => n.ts)).toEqual(before);
   });
 });
 
