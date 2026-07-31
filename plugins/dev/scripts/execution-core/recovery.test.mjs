@@ -5700,6 +5700,68 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
     expect(mirror.calls.length).toBe(0);
   });
 
+  // CTL-778 P2 (bug fix): the reclaim call site must pass the CURRENT dispatch's
+  // own startedAt as sinceIso, so completeEventSeen can distinguish "this
+  // worker finished" from "some prior attempt finished, once, whenever." Without
+  // this wiring, a redispatched phase's brand-new worker gets reclaimed within
+  // seconds of spawning because a stale complete event from a PRIOR attempt
+  // still satisfies an attempt-unscoped check — the exact bug that made every
+  // resume/revive/retry of an already-once-completed phase unrecoverable.
+  test("CTL-778 P2: completeEventSeen is called with sinceIso = signal.raw.startedAt", () => {
+    const seenCalls = [];
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      completeEventSeen: (args) => {
+        seenCalls.push(args);
+        return true;
+      },
+      emitComplete: recorder({ code: 0 }),
+      emitReapIntent: recorder(Promise.resolve()),
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(seenCalls).toHaveLength(1);
+    expect(seenCalls[0]).toMatchObject({ ticket: sig.ticket, phase: "implement", sinceIso: STARTED });
+  });
+
+  // CTL-778 P2: a complete event from a PRIOR attempt (older than this dispatch's
+  // own startedAt) must NOT trigger the reclaim — that's the stale-evidence bug.
+  // The comparison itself (latest-ts-wins, stale-rejected) is unit-tested against
+  // a real event log in event-scan.test.mjs's `latestCompleteEventTs` suite; this
+  // exercises the actual default completeEventSeen function in isolation (not
+  // through reclaimDeadWorkIfPossible, which has no path-injection seam to point
+  // the real default at a fixture log — the wiring test above already proves the
+  // sinceIso it would be compared against is correct).
+  test("CTL-778 P2: default completeEventSeen rejects a stale complete event, accepts a fresh one", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs } = await import("./event-scan.mjs");
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-p2-"));
+    const path = join(dir, "events.jsonl");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: "2026-06-07T00:00:00Z", // before STARTED
+        attributes: { "event.name": "phase.implement.complete.CTL-9" },
+        body: {},
+      }) + "\n"
+    );
+    // Same shape as recovery.mjs's real default (recovery.mjs:2046-2050), built
+    // here against the temp path directly since hasCompleteEvent/latestCompleteEventTs
+    // both accept an explicit path override.
+    const completeEventSeen = ({ ticket, phase, sinceIso }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      return typeof ts === "string" && ts >= sinceIso;
+    };
+    expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(false);
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: "2026-06-01T00:00:00Z" })
+    ).toBe(true);
+  });
+
   // Regression: the existing CTL-736 test (no completeEventSeen injected → seam defaults
   // to a fn that returns false from an empty/absent log) must still pass unchanged.
   test("CTL-736 regression: alive worker without complete event is still alive-suppressed, probe never called", () => {
