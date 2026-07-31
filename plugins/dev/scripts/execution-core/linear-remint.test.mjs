@@ -11,6 +11,7 @@ import {
   buildMintCurlArgs,
   parseMintResponse,
   createReminter,
+  createAsyncReminter,
   withAuthRemint,
 } from "./linear-remint.mjs";
 import { createLinearBreaker, withBreaker } from "./linear-breaker.mjs";
@@ -444,5 +445,58 @@ describe("breaker + remint composition", () => {
     expect(callN).toBe(2);
     expect(applied).toEqual(["new-tok"]);
     expect(breaker.isOpen(0)).toBe(false); // success closed the path
+  });
+});
+
+// ── createAsyncReminter (CTL-1577) ───────────────────────────────────────────
+describe("createAsyncReminter", () => {
+  test("mints, applies, and honors the cooldown across overlapping attempts", async () => {
+    let mints = 0;
+    let applied = null;
+    const r = createAsyncReminter({
+      readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+      mint: async () => {
+        mints++;
+        return "tok-async";
+      },
+      applyToken: (t) => {
+        applied = t;
+      },
+      cooldownMs: 60_000,
+      logger: silentLogger,
+    });
+    expect(await r.attempt(1_000)).toBe(true);
+    expect(applied).toBe("tok-async");
+    // Within the cooldown window: no second mint, even after a success.
+    expect(await r.attempt(30_000)).toBe(false);
+    expect(mints).toBe(1);
+    // Past the window: mints again.
+    expect(await r.attempt(70_000)).toBe(true);
+    expect(mints).toBe(2);
+  });
+
+  test("failed mint is fail-open (false, token untouched) and still cooled down", async () => {
+    let applied = false;
+    const r = createAsyncReminter({
+      readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+      mint: async () => null,
+      applyToken: () => {
+        applied = true;
+      },
+      cooldownMs: 60_000,
+      logger: silentLogger,
+    });
+    expect(await r.attempt(1_000)).toBe(false);
+    expect(applied).toBe(false);
+    expect(await r.attempt(2_000)).toBe(false); // cooled down — no storm on revoked creds
+  });
+
+  test("no creds configured is a permanent no-op", async () => {
+    const r = createAsyncReminter({
+      readCreds: () => null,
+      mint: async () => "tok",
+      logger: silentLogger,
+    });
+    expect(await r.attempt(1_000)).toBe(false);
   });
 });
