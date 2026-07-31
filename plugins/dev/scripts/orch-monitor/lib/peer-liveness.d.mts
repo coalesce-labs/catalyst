@@ -9,6 +9,19 @@ export interface PeerRecord {
   in_flight_tickets?: string[];
   max_parallel?: number | null;
   in_flight_count?: number | null;
+  /** CTL-1581: slot-occupancy subset (running/dispatched). null/absent on
+   *  old-daemon heartbeats — consumers fall back to in_flight_count. */
+  active_count?: number | null;
+  active_tickets?: string[] | null;
+}
+
+/** Per-host capacity cache entry (CTL-1551 + the CTL-1581 occupancy fields). */
+export interface PeerCapacityEntry {
+  maxParallel: number;
+  inFlightCount: number;
+  /** CTL-1581: occupancy — null = unknown (old daemon / failed enrichment). */
+  activeCount?: number | null;
+  activeTickets?: string[] | null;
 }
 
 export interface ReadPeerRecordsArgs {
@@ -44,7 +57,7 @@ export function retainMissingEntries<T>(
 
 export interface FoldPeerSnapshotArgs {
   prevHeartbeats?: Record<string, string>;
-  prevCapacity?: Record<string, { maxParallel: number; inFlightCount: number }>;
+  prevCapacity?: Record<string, PeerCapacityEntry>;
   peers?: Record<string, PeerRecord>;
   /** Poll clock (injectable for tests) — used for the future-skew trust check. */
   nowMs?: number;
@@ -52,7 +65,7 @@ export interface FoldPeerSnapshotArgs {
 
 export interface FoldPeerSnapshotResult {
   heartbeats: Record<string, string>;
-  capacity: Record<string, { maxParallel: number; inFlightCount: number }>;
+  capacity: Record<string, PeerCapacityEntry>;
 }
 
 /**
