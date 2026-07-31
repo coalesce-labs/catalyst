@@ -18,6 +18,8 @@ import { join, resolve } from "node:path";
 import {
   syncClusterSecrets,
   syncSecretFiles,
+  syncProfileFiles,
+  defaultProfilesDir,
   pullClusterRepo,
   destForSecret,
   // CTL-1393: durable change-detection + periodic refresh.
@@ -133,6 +135,15 @@ describe("syncClusterSecrets (CTL-1211)", () => {
     expect(res.synced).toEqual(["config.json"]);
     expect(existsSync(join(configDir, "node-secret-files.json"))).toBe(false);
   });
+
+  test("does NOT process profile-files.sops.json (owned by syncProfileFiles, CTL-1595)", () => {
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    touchSecret("profile-files.sops.json");
+    const res = syncClusterSecrets({ clusterDir, configDir, decrypt: () => ({ x: 1 }) });
+    expect(res.synced).toEqual(["config.json"]);
+    expect(existsSync(join(configDir, "profile-files.json"))).toBe(false);
+  });
 });
 
 describe("syncSecretFiles (CTL-1211)", () => {
@@ -231,6 +242,105 @@ describe("pullClusterRepo (CTL-1211)", () => {
       logger: QUIET,
     });
     expect(res).toEqual({ pulled: false, reason: "pull-failed" });
+  });
+});
+
+describe("defaultProfilesDir (CTL-1595 Codex P2 — XDG-aware)", () => {
+  test("honors XDG_CONFIG_HOME when set (check-setup.sh parity)", () => {
+    expect(defaultProfilesDir({ XDG_CONFIG_HOME: "/xdg" })).toBe(resolve("/xdg", "direnv", "profiles"));
+  });
+  test("falls back to ~/.config when XDG_CONFIG_HOME is unset/empty", () => {
+    const home = defaultProfilesDir({});
+    expect(home.endsWith(join(".config", "direnv", "profiles"))).toBe(true);
+    expect(defaultProfilesDir({ XDG_CONFIG_HOME: "" })).toBe(home);
+  });
+});
+
+describe("syncProfileFiles (CTL-1595)", () => {
+  const writeProfileBundle = () =>
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+  const profilesDirOf = () => join(configDir, "profiles");
+
+  test("materializes each map entry as a 0600 file under profilesDir", () => {
+    writeProfileBundle();
+    const decrypt = () => ({
+      "catalyst-cloud.env": "export GH_TEMP_PAT=x\nexport LINEAR_API_KEY=y\n",
+    });
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt });
+    expect(res.written).toEqual(["catalyst-cloud.env"]);
+    expect(readFileSync(join(profilesDirOf(), "catalyst-cloud.env"), "utf8")).toContain("GH_TEMP_PAT");
+    expect(statSync(join(profilesDirOf(), "catalyst-cloud.env")).mode & 0o777).toBe(0o600);
+  });
+
+  test("refuses path-traversal / dotfile names (no escape from profilesDir)", () => {
+    writeProfileBundle();
+    const decrypt = () => ({ "../escape.env": "x", ".ssh": "x", "ok.env": "good" });
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt, logger: QUIET });
+    expect(res.written).toEqual(["ok.env"]);
+  });
+
+  test("absent profile bundle → reason absent (no-op — not every cluster ships profiles)", () => {
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt: () => ({}) });
+    expect(res.reason).toBe("absent");
+    expect(res.written).toEqual([]);
+  });
+
+  test("decrypt failure → skipped, fail-open (never throws)", () => {
+    writeProfileBundle();
+    const res = syncProfileFiles({
+      clusterDir,
+      profilesDir: profilesDirOf(),
+      decrypt: () => {
+        throw new Error("bad mac");
+      },
+      logger: QUIET,
+    });
+    expect(res.skipped).toBe(true);
+    expect(res.reason).toBe("decrypt-failed");
+  });
+
+  test("rejects a bundle key without the .env suffix (use_profile can never find it)", () => {
+    writeProfileBundle();
+    const decrypt = () => ({ "catalyst-cloud": "x", "good.env": "y" });
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt, logger: QUIET });
+    expect(res.written).toEqual(["good.env"]);
+    expect(existsSync(join(profilesDirOf(), "catalyst-cloud"))).toBe(false);
+  });
+
+  test("removes a profile deleted from the bundle; node-local profiles untouched (Codex R2)", () => {
+    writeProfileBundle();
+    const dir = profilesDirOf();
+    // Sync 1: two managed profiles.
+    let res = syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1", "b.env": "2" }),
+      logger: QUIET,
+    });
+    expect(res.written.sort()).toEqual(["a.env", "b.env"]);
+    // A hand-provisioned node-local profile the mechanism must never touch.
+    writeFileSync(join(dir, "local.env"), "hand-made");
+    // Sync 2: b.env deleted from the bundle → removed from disk; local.env stays.
+    res = syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1" }),
+      logger: QUIET,
+    });
+    expect(res.removed).toEqual(["b.env"]);
+    expect(existsSync(join(dir, "b.env"))).toBe(false);
+    expect(existsSync(join(dir, "a.env"))).toBe(true);
+    expect(readFileSync(join(dir, "local.env"), "utf8")).toBe("hand-made");
+  });
+
+  test("partial write failure → records the name in failed[], keeps the rest", () => {
+    writeProfileBundle();
+    const decrypt = () => ({ "good.env": "x", "bad.env": "y" });
+    const writeFile = (path) => {
+      if (path.endsWith("bad.env")) throw new Error("EIO");
+    };
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt, writeFile, logger: QUIET });
+    expect(res.written).toEqual(["good.env"]);
+    expect(res.failed).toEqual(["bad.env"]);
+    expect(res.reason).toBeNull();
   });
 });
 
@@ -629,6 +739,80 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(emits.map((e) => e.name)).not.toContain("restart-required");
   });
 
+  test("(p1) partial PROFILE write failure → marker NOT advanced, refresh-failed(profile-write-failed)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+    const profilesDir = join(configDir, "profiles");
+    // Force a write failure: pre-create a DIRECTORY at the profile's destination.
+    mkdirSync(join(profilesDir, "catalyst-cloud.env"), { recursive: true });
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      profilesDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("profile-files.sops.json")
+          ? { "catalyst-cloud.env": "export GH_TEMP_PAT=x\n" }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("profile-write-failed");
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("(p2) FULL success incl. profile bundle → profiles materialized, marker advances", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+    const profilesDir = join(configDir, "profiles");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      profilesDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("profile-files.sops.json")
+          ? { "catalyst-cloud.env": "export GH_TEMP_PAT=x\nexport LINEAR_API_KEY=y\n" }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.profiles).toEqual(["catalyst-cloud.env"]);
+    expect(readFileSync(join(profilesDir, "catalyst-cloud.env"), "utf8")).toContain("LINEAR_API_KEY");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+    expect(emits.map((e) => e.name)).toContain("refreshed");
+    // Codex P2: the refreshed payload must name the materialized profiles.
+    const refreshed = emits.find((e) => e.name === "refreshed");
+    expect(refreshed.payload.profiles).toEqual(["catalyst-cloud.env"]);
+    // a profile rotation needs NO daemon restart (direnv re-evaluates per spawn)
+    expect(emits.map((e) => e.name)).not.toContain("restart-required");
+  });
+
   // ── Codex-B: a rotated ENV-BACKED secret needs a daemon restart to apply ──────
 
   test("(f) env-backed secret (claude-accounts.env) changed → restart-required emitted (distinct from refreshed)", () => {
@@ -823,6 +1007,43 @@ describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
     expect(res).toHaveProperty("pull");
     expect(res).toHaveProperty("sync");
     expect(res).toHaveProperty("files");
+  });
+
+  test("boot PROFILE shortfall with a SAME-SHA marker → marker INVALIDATED so the refresh retries (Codex P2)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    // A prior marker already records the clone's CURRENT head — without
+    // invalidation the refresh fast-path would return head-unchanged forever.
+    writeFileSync(
+      statePath,
+      JSON.stringify({ lastDecryptedSha: "NEWSHA", lastDecryptedAt: "old", written: [], synced: [] }),
+    );
+
+    const emits = [];
+    clusterSync({
+      clusterDir,
+      configDir,
+      profilesDir: join(configDir, "profiles"),
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA"),
+      decrypt: (p) => {
+        if (p.endsWith("profile-files.sops.json")) throw new Error("bad mac");
+        return { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } };
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(emits[0].payload.reason).toBe("profile-decrypt-failed");
+    // The same-SHA marker is GONE — the periodic refresh will re-attempt.
+    expect(readClusterSyncState(statePath)).toBeNull();
   });
 
   test("boot decrypt SUCCEEDS → marker seeded to HEAD, no refresh-failed (guard against over-correcting)", () => {

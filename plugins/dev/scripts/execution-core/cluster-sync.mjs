@@ -37,6 +37,7 @@ import {
   appendFileSync,
   chmodSync,
   mkdirSync,
+  rmSync,
 } from "node:fs";
 import { resolve, basename, dirname, delimiter } from "node:path";
 import { homedir } from "node:os";
@@ -210,11 +211,15 @@ export function syncClusterSecrets(opts = {}) {
   const secretsDir = resolve(clusterDir, "secrets");
   let files;
   try {
-    // node-secret-files.sops.json is the bare-file bundle handled by
-    // syncSecretFiles(), NOT a JSON config — exclude it here so it isn't
+    // node-secret-files.sops.json (bare-file bundle → syncSecretFiles) and
+    // profile-files.sops.json (direnv-profile bundle → syncProfileFiles,
+    // CTL-1595) are NOT JSON configs — exclude both so neither is
     // double-processed into a stray config-style file.
     files = readdirSync(secretsDir).filter(
-      (f) => f.endsWith(".sops.json") && f !== "node-secret-files.sops.json",
+      (f) =>
+        f.endsWith(".sops.json") &&
+        f !== "node-secret-files.sops.json" &&
+        f !== "profile-files.sops.json",
     );
   } catch {
     result.ok = false;
@@ -311,6 +316,134 @@ export function syncSecretFiles(opts = {}) {
       // materialize. Surfaced so the marker does not advance over it (Codex-A).
       result.failed.push(name);
     }
+  }
+  return result;
+}
+
+// ─── CTL-1595: cluster-synced direnv profiles ────────────────────────────────
+
+// The direnv profile surface worker repos' .envrc files consume via
+// `use_profile <name>` (~/.config/direnv/profiles/<name>.env). Before CTL-1595
+// these were HAND-provisioned per host — mini carried six legacy files, mini-2
+// carried none, and catalyst-cloud.env existed nowhere, so catalyst-cloud
+// workers booted tokenless fleet-wide (the CTC-284 verdict-less-death class).
+// XDG-aware (Codex P2): check-setup.sh derives the active direnv path from
+// ${XDG_CONFIG_HOME:-$HOME/.config}/direnv — writing anywhere else would report
+// success while use_profile still finds nothing. Exported for doctor/tests.
+export function defaultProfilesDir(env = process.env) {
+  const xdg = typeof env.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.length > 0
+    ? env.XDG_CONFIG_HOME
+    : resolve(homedir(), ".config");
+  return resolve(xdg, "direnv", "profiles");
+}
+
+// syncProfileFiles — decrypt secrets/profile-files.sops.json (a { "<name>.env":
+// content } map of cluster-shared direnv profiles) and materialize each as a
+// 0o600 file under ~/.config/direnv/profiles. Same contract as syncSecretFiles:
+// fail-open, never throws, basename-only (no path traversal), `failed[]` = a
+// REQUESTED file whose write threw (blocks the marker), absent bundle = no-op.
+// No restart-required surface: direnv re-evaluates per worker spawn, so a
+// rotated profile is live for the NEXT worker without touching the daemon.
+// Sidecar manifest naming the profiles THIS mechanism manages, so a profile
+// deleted from the bundle is REMOVED from disk (stale plaintext credentials
+// must not outlive their rotation) while hand-provisioned node-local profiles
+// are never touched (they are not in the manifest). Codex R2.
+const PROFILES_MANIFEST = ".cluster-managed.json";
+
+export function syncProfileFiles(opts = {}) {
+  const {
+    clusterDir = getClusterRepoDir(),
+    profilesDir = defaultProfilesDir(),
+    ageKeyFile = defaultAgeKeyFile(),
+    decrypt = makeSopsDecrypt(ageKeyFile),
+    writeFile = defaultWriteFile,
+    logger = log,
+  } = opts;
+
+  const result = { written: [], failed: [], removed: [], skipped: false, reason: null };
+  const src = resolve(clusterDir, "secrets", "profile-files.sops.json");
+  if (!existsSync(src)) {
+    result.reason = "absent";
+    return result;
+  }
+  let map;
+  try {
+    map = decrypt(src);
+  } catch (err) {
+    logger.warn(
+      `[cluster-sync] decrypt profile-files failed (${err?.message ?? err}); keeping node-local`,
+    );
+    result.skipped = true;
+    result.reason = "decrypt-failed";
+    return result;
+  }
+  if (!map || typeof map !== "object") {
+    result.reason = "empty";
+    return result;
+  }
+  try {
+    mkdirSync(profilesDir, { recursive: true });
+  } catch {
+    /* profilesDir may exist; ignore */
+  }
+  for (const [name, content] of Object.entries(map)) {
+    // Refuse anything that isn't a bare, non-dotfile basename — no path
+    // traversal — AND require the ".env" suffix (Codex R2): `use_profile x`
+    // looks up profiles/x.env, so a suffix-less key would "succeed" while
+    // remaining invisible to every consumer, and the advanced marker would
+    // never retry the bad SHA.
+    if (
+      typeof name !== "string" ||
+      name !== basename(name) ||
+      name.startsWith(".") ||
+      name.length === 0 ||
+      !name.endsWith(".env")
+    ) {
+      logger.warn(`[cluster-sync] refusing unsafe/non-.env profile-file name "${name}"`);
+      continue;
+    }
+    if (typeof content !== "string") continue;
+    try {
+      writeFile(resolve(profilesDir, name), content);
+      result.written.push(name);
+    } catch (err) {
+      logger.warn(`[cluster-sync] write profile ${name} failed (${err?.message ?? err})`);
+      result.failed.push(name);
+    }
+  }
+
+  // Reconcile removals (Codex R2): a profile PREVIOUSLY managed by this
+  // mechanism but absent from the current bundle is deleted — stale plaintext
+  // credentials must not outlive their rotation. Node-local files (never in
+  // the manifest) are untouched. A failed removal joins failed[] so the
+  // change-detection marker does not advance over the surviving stale file.
+  const manifestPath = resolve(profilesDir, PROFILES_MANIFEST);
+  let prevManaged = [];
+  try {
+    const m = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (Array.isArray(m)) prevManaged = m.filter((n) => typeof n === "string" && n === basename(n) && !n.startsWith("."));
+  } catch {
+    /* absent/corrupt manifest → nothing previously managed */
+  }
+  const current = new Set(Object.keys(map).filter((n) => typeof n === "string"));
+  for (const name of prevManaged) {
+    if (current.has(name)) continue;
+    try {
+      rmSync(resolve(profilesDir, name), { force: true });
+      result.removed.push(name);
+      logger.warn(`[cluster-sync] removed profile ${name} (deleted from the cluster bundle)`);
+    } catch (err) {
+      logger.warn(`[cluster-sync] remove profile ${name} failed (${err?.message ?? err})`);
+      result.failed.push(name);
+    }
+  }
+  // Manifest = everything currently materialized + anything we failed to
+  // remove (so the next sync retries the removal). Best-effort.
+  try {
+    const keep = [...new Set([...result.written, ...prevManaged.filter((n) => !current.has(n) && !result.removed.includes(n))])];
+    writeFile(manifestPath, JSON.stringify(keep));
+  } catch {
+    /* best-effort; worst case a later removal is missed until the next full sync */
   }
   return result;
 }
@@ -475,10 +608,11 @@ export const ENV_BACKED_SECRET_FILES = new Set(["claude-accounts.env", "executio
 //   config-refused   — syncClusterSecrets refused (sync.ok === false), empty skipped
 //   secrets-skipped  — a JSON secret was skipped while another succeeded (partial)
 //   bare-write-failed — a bare file decrypted but its write failed (partial)
-function assessMaterialization({ sync, files }) {
+function assessMaterialization({ sync, files, profiles }) {
   const synced = Array.isArray(sync?.synced) ? sync.synced : [];
   const skipped = Array.isArray(sync?.skipped) ? sync.skipped : [];
   const bareFailed = Array.isArray(files?.failed) ? files.failed : [];
+  const profileFailed = Array.isArray(profiles?.failed) ? profiles.failed : [];
 
   // 1. Bare-bundle wholesale failure — the whole node-secret-files.sops.json bundle
   //    failed to decrypt. Checked BEFORE schemaSkipped so a too-new JSON schema can
@@ -490,6 +624,15 @@ function assessMaterialization({ sync, files }) {
   //    checked BEFORE schemaSkipped (same masking rationale).
   if (bareFailed.length > 0) {
     return { fullSuccess: false, reason: "bare-write-failed" };
+  }
+  // 2b. CTL-1595: the profile bundle mirrors the bare bundle — same masking
+  //     rationale, same pre-schemaSkipped placement. An ABSENT bundle is a
+  //     no-op (reason "absent" — not every cluster ships profiles).
+  if (profiles?.reason === "decrypt-failed") {
+    return { fullSuccess: false, reason: "profile-decrypt-failed" };
+  }
+  if (profileFailed.length > 0) {
+    return { fullSuccess: false, reason: "profile-write-failed" };
   }
   // 3. Schema too-new is fail-CLOSED by design — treat as success for the marker.
   //    Reaching here means the bare-file part is already confirmed OK (1–2 above), so
@@ -603,8 +746,12 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // 6. Re-decrypt + materialize (reuse the existing CTL-1211 machinery).
   const sync = syncClusterSecrets({ clusterDir, configDir, ageKeyFile, decrypt: sopsDecrypt, logger });
   const files = syncSecretFiles({ clusterDir, configDir, ageKeyFile, decrypt: sopsDecrypt, logger });
+  // CTL-1595: the direnv-profile bundle rides the same refresh; profilesDir
+  // intentionally NOT overridable from here (tests inject via clusterSync/opts).
+  const profiles = syncProfileFiles({ clusterDir, profilesDir: opts.profilesDir, ageKeyFile, decrypt: sopsDecrypt, logger });
   status.synced = Array.isArray(sync?.synced) ? sync.synced : [];
   status.written = Array.isArray(files?.written) ? files.written : [];
+  status.profiles = Array.isArray(profiles?.written) ? profiles.written : [];
 
   // 7. Advance the marker ONLY on FULL materialization success (Codex-A). A PARTIAL
   // shortfall (a single JSON secret skipped while another succeeded, the config sync
@@ -612,7 +759,7 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // a failure too: advancing the marker over it would make lastSha===HEAD skip the
   // retry forever, stranding the un-applied rotation. On ANY shortfall: emit
   // refresh-failed naming the shortfall, do NOT advance the marker, return ok:false.
-  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files });
+  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles });
   if (!fullSuccess) {
     status.ok = false;
     status.reason = shortfall;
@@ -635,12 +782,12 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   status.changed = true;
   status.reason = "refreshed";
   // Emit only on a real change: sha advanced AND something was materialized.
-  if (lastSha !== head && (status.written.length > 0 || status.synced.length > 0)) {
+  if (lastSha !== head && (status.written.length > 0 || status.synced.length > 0 || status.profiles.length > 0)) {
     emit({
       name: "refreshed",
       node,
       now,
-      payload: { fromSha: lastSha, toSha: head, written: status.written, synced: status.synced },
+      payload: { fromSha: lastSha, toSha: head, written: status.written, synced: status.synced, profiles: status.profiles },
     });
   }
 
@@ -694,6 +841,7 @@ export function clusterSync(opts = {}) {
   const pull = pullClusterRepo(opts);
   const sync = syncClusterSecrets(opts);
   const files = syncSecretFiles(opts);
+  const profiles = syncProfileFiles(opts); // CTL-1595: direnv profile bundle
 
   // Seed the marker ONLY when boot materialization FULLY succeeded — the SAME
   // hardened predicate the periodic refresh uses (Codex-A). A WHOLESALE failure (sops
@@ -704,7 +852,7 @@ export function clusterSync(opts = {}) {
   // stays fail-CLOSED (intentional, not a failure) and still seeds. An empty secrets
   // repo (nothing to decrypt) is full success and still seeds.
   const synced = Array.isArray(sync?.synced) ? sync.synced : [];
-  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files });
+  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles });
 
   try {
     const head = gitRevParseHead({ clusterDir, gitCapture });
@@ -717,12 +865,30 @@ export function clusterSync(opts = {}) {
           lastDecryptedAt: now(),
           written: Array.isArray(files?.written) ? files.written : [],
           synced,
+          // CTL-1595: additive — which direnv profiles this node materialized.
+          profiles: Array.isArray(profiles?.written) ? profiles.written : [],
         },
         logger,
       );
     } else if (head && !fullSuccess) {
       // Boot materialization shortfall: DON'T seed the marker (so the periodic
       // refresh keeps retrying and doctor keeps flagging), make it LOUD.
+      // Codex P2 (CTL-1595): "don't seed" is NOT enough when a PRIOR marker
+      // already records this same HEAD — the refresh fast-path would return
+      // head-unchanged forever and never retry after the fs/key issue heals.
+      // Invalidate a same-SHA marker so the next refresh re-attempts. (Generic:
+      // the same wedge existed for bare-file boot shortfalls.)
+      try {
+        const prior = readClusterSyncState(statePath);
+        if (prior?.lastDecryptedSha === head) {
+          rmSync(statePath, { force: true });
+          logger?.warn?.(
+            "[cluster-sync] invalidated same-SHA change marker after boot shortfall — the refresh timer will re-attempt",
+          );
+        }
+      } catch {
+        /* best-effort; worst case is the pre-existing wedge */
+      }
       logger?.warn?.(
         `[cluster-sync] boot decrypt did not fully succeed (${shortfall}) — ` +
           "NOT seeding the change-detection marker; keeping node-local plaintext and retrying on the refresh timer",
@@ -732,7 +898,7 @@ export function clusterSync(opts = {}) {
   } catch (err) {
     logger?.warn?.(`[cluster-sync] boot marker seed failed (${err?.message ?? err})`);
   }
-  return { pull, sync, files };
+  return { pull, sync, files, profiles };
 }
 
 // Exposed for doctor + tests.
