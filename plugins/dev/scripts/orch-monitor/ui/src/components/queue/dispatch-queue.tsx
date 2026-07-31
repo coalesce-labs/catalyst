@@ -152,6 +152,19 @@ export function DispatchQueue({
   const globalRankById = new Map<string, number>();
   dispatchQueue.forEach((q, i) => globalRankById.set(q.id, i + 1));
 
+  const renderHeldRow = (q: BoardQueueItem, indexInList: number) => (
+    <DispatchRow
+      key={q.id}
+      q={q}
+      globalRank={null}
+      dispatchable={false}
+      isFirstDispatch={false}
+      multiHost={multiHost}
+      withTopHairline={indexInList > 0}
+      onOpenTicket={onOpenTicket}
+    />
+  );
+
   const renderRow = (q: BoardQueueItem, indexInList: number) => {
     const globalRank = globalRankById.get(q.id) ?? indexInList + 1;
     const dispatchable = globalRank <= dispatchCount;
@@ -219,27 +232,30 @@ export function DispatchQueue({
       )}
 
       {/* CTL-1588: held tail — eligible tickets the admission gate is holding for
-          the operator. Dim, un-ranked, never tinted as an imminent dispatch. */}
+          the operator. Dim, un-ranked, never tinted as an imminent dispatch.
+          Honors the same By-node grouping as the dispatchable list above. */}
       {heldQueue.length > 0 && (
         <div data-dispatch-held-section style={{ marginTop: 10 }}>
           <div style={{ padding: "6px 8px", background: C.s1, borderRadius: 6 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: C.fgMuted }}>Held — awaiting you</span>
             <span style={{ fontSize: 12, color: C.fgDim }}> · {heldQueue.length}</span>
           </div>
-          <AnimatePresence initial={false}>
-            {heldQueue.map((q, i) => (
-              <DispatchRow
-                key={q.id}
-                q={q}
-                globalRank={null}
-                dispatchable={false}
-                isFirstDispatch={false}
-                multiHost={multiHost}
-                withTopHairline={i > 0}
-                onOpenTicket={onOpenTicket}
-              />
-            ))}
-          </AnimatePresence>
+          {grouped ? (
+            groupQueueByHost(heldQueue).map((g: QueueHostGroup) => (
+              <Fragment key={`held-${g.host?.id ?? g.label}`}>
+                <div style={{ padding: "4px 8px" }}>
+                  <span style={{ fontSize: 12, color: C.fgDim }}>{g.label} · {g.items.length} held</span>
+                </div>
+                <AnimatePresence initial={false}>
+                  {g.items.map((q, i) => renderHeldRow(q, i))}
+                </AnimatePresence>
+              </Fragment>
+            ))
+          ) : (
+            <AnimatePresence initial={false}>
+              {heldQueue.map((q, i) => renderHeldRow(q, i))}
+            </AnimatePresence>
+          )}
         </div>
       )}
     </section>

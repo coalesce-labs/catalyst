@@ -131,6 +131,21 @@ describe("assignClusterSlots (CTL-1092)", () => {
     expect(over[0]?.ticket).toBe("CTL-2");
   });
 
+  it("caps heartbeat-only additions by activeCount so worker turnover never double-counts (CTL-1588)", () => {
+    // Stale cached heartbeat still names CTL-OLD; a fresh local worker already
+    // replaced it with CTL-NEW. activeCount (1) is authoritative — no phantom
+    // second slot, no phantom OVER card.
+    const out = assignClusterSlots({
+      nodes: [{ host: "mini", status: "live", maxParallel: 4, inFlightCount: 1, activeCount: 1, freeSlots: 3, tickets: ["CTL-OLD"] }],
+      localHost: "mini",
+      localWorkers: [worker("w1", "mini", "CTL-NEW")],
+    });
+    const occupied = out.filter((s) => s.occupied);
+    expect(occupied.length).toBe(1);
+    expect(occupied[0]?.worker?.ticket).toBe("CTL-NEW");
+    expect(out.filter((s) => s.over).length).toBe(0);
+  });
+
   it("offline node produces no slot cards", () => {
     const out = assignClusterSlots({
       nodes: [liveNode("mini", 3, 1), offlineNode("laptop")],

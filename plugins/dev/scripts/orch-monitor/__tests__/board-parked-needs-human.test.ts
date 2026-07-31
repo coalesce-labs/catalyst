@@ -199,7 +199,7 @@ describe("CTL-1588: queue humanHold annotation (source contract)", () => {
   it("assembleBoard builds the humanHold map from parkedNeedsHuman", () => {
     expect(nospace(boardDataSrc)).toContain(nospace("const humanHoldByTicket = new Map("));
     expect(nospace(boardDataSrc)).toContain(
-      nospace(`p.labels.includes("needs-input") ? "needs-input" : "needs-human"`),
+      nospace(`p.labels.includes("needs-human") ? "needs-human" : "needs-input"`),
     );
   });
 

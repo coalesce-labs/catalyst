@@ -2282,7 +2282,9 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   const humanHoldByTicket = new Map(
     parkedNeedsHuman.map((p) => [
       p.ticket,
-      p.labels.includes("needs-input") ? "needs-input" : "needs-human",
+      // needs-human outranks needs-input on a dual-labeled ticket — same
+      // precedence as the parked cards / status counts / holding buckets.
+      p.labels.includes("needs-human") ? "needs-human" : "needs-input",
     ])
   );
 

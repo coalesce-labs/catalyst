@@ -98,7 +98,15 @@ export function assignClusterSlots({
         if (w.ticket) covered.add(w.ticket);
         for (const t of w.tickets ?? []) covered.add(t);
       }
-      const heartbeatOnly = (n.tickets ?? []).filter((t) => !covered.has(t));
+      let heartbeatOnly = (n.tickets ?? []).filter((t) => !covered.has(t));
+      // Bound the union by the authoritative occupancy COUNT: across a worker
+      // turnover the cached heartbeat can still name a ticket a fresh local
+      // worker already replaced — capping additions to the positive difference
+      // keeps turnover from double-counting (or minting a phantom OVER card).
+      const occ = n.activeCount;
+      if (occ != null) {
+        heartbeatOnly = heartbeatOnly.slice(0, Math.max(0, occ - localOccupied.length));
+      }
       const totalOccupied = localOccupied.length + heartbeatOnly.length;
       for (let i = 0; i < localOccupied.length; i++) {
         slots.push({
