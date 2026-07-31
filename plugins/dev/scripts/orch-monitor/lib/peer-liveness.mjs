@@ -111,7 +111,14 @@ export function foldPeerSnapshot({ prevHeartbeats = {}, prevCapacity = {}, peers
       Number.isFinite(prevTs) && prevTs <= nowMs + FUTURE_SKEW_TOLERANCE_MS;
     const fresher = Number.isFinite(newTs) && (!prevTrusted || newTs >= prevTs);
     if (hasTs && fresher) nextHb[host] = rec.last_seen;
-    const hasCapacity = rec.max_parallel != null || rec.in_flight_count != null;
+    const hasCapacity =
+      rec.max_parallel != null ||
+      rec.in_flight_count != null ||
+      // CTL-1581: an occupancy-only record (query C failed, query D succeeded)
+      // must still fold — requiring the capacity pair would leave retention
+      // serving stale activeCount/activeTickets indefinitely.
+      rec.active_count != null ||
+      Array.isArray(rec.active_tickets);
     if (hasCapacity && fresher) {
       // Per-FIELD merge: a record can carry one capacity field and not the other
       // (partial structured metadata); the absent field retains its previous

@@ -105,6 +105,10 @@ export function localActiveTickets(hostName, { orchDir } = {}) {
       if (!sig.raw?.host?.name || sig.raw.host.name !== hostName) continue;
       if (!ACTIVE_STATUSES.has(sig.status)) continue;
       if (sig.phase === "triage") continue;
+      // A held-STOPPED needs-input worker (idle job stopped by the hold sweep,
+      // status kept + stoppedForHold:true — scheduler.mjs slot accounting's own
+      // carve-out) has released its process and its slot.
+      if (sig.status === "needs-input" && sig.raw?.stoppedForHold === true) continue;
       tickets.add(sig.ticket);
     }
     return [...tickets];

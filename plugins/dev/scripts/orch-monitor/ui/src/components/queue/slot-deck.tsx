@@ -258,15 +258,20 @@ export function SlotDeck({
       localWorkers: workers,
     });
     const displaySlots = selectedNode === "all" ? allSlots : filterSlotsByNode(allSlots, selectedNode);
-    // CTL-1581: the header derives from the SAME slots the deck renders, so the
-    // count and the boxes can never disagree (the old aggregate counted the
-    // heartbeat's ownership number while the boxes rendered occupancy — "1/4 in
-    // use" over a deck of all-Open cards).
+    // CTL-1581: the occupied count derives from the SAME slots the deck
+    // renders, so the count and the boxes can never disagree (the old aggregate
+    // counted the heartbeat's ownership number while the boxes rendered
+    // occupancy — "1/4 in use" over a deck of all-Open cards). The DENOMINATOR
+    // stays the CONFIGURED capacity: over-capacity boxes are extra cards, and
+    // counting them in the denominator would launder a real 5/4 into 5/5.
     const occupiedCount = displaySlots.filter((s) => s.occupied).length;
+    const displayNodes = (clusterSignal.nodes as { host: string; status: string; maxParallel?: number }[])
+      .filter((n) => n.status !== "offline" && (selectedNode === "all" || n.host === selectedNode));
+    const configuredCap = displayNodes.reduce((sum, n) => sum + (n.maxParallel ?? 0), 0);
     const cap = {
-      maxParallel: displaySlots.length,
+      maxParallel: configuredCap,
       inFlight: occupiedCount,
-      freeSlots: displaySlots.length - occupiedCount,
+      freeSlots: Math.max(0, configuredCap - occupiedCount),
     };
 
     return (

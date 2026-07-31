@@ -208,6 +208,14 @@ export async function readClusterLivenessFromLoki({
       const activeEnriched = dBody ? parseLokiLivenessResponse(dBody) : {};
       for (const [host, rec] of Object.entries(activeEnriched)) {
         if (!out[host]) continue;
+        // Only merge occupancy from a line AT LEAST as new as A's liveness line:
+        // on a rollback (or a brief old+new dual-publish), A's newest can be an
+        // old-daemon line while D's newest attribute-bearing line is older —
+        // merging that would pin STALE occupancy onto fresher liveness. Skipped
+        // → fields stay null → consumers fall back to inFlightCount honestly.
+        const aMs = Date.parse(out[host].last_seen);
+        const dMs = Date.parse(rec.last_seen);
+        if (!(Number.isFinite(dMs) && Number.isFinite(aMs) && dMs >= aMs)) continue;
         if (rec.active_count != null) out[host].active_count = rec.active_count;
         if (Array.isArray(rec.active_tickets)) out[host].active_tickets = rec.active_tickets;
       }

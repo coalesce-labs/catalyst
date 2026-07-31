@@ -174,11 +174,16 @@ export function assembleClusterView({
       if (!c) return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
       const mp = c.maxParallel ?? 0;
       const ifc = c.inFlightCount ?? 0;
+      // CTL-1581: freeSlots derives from OCCUPANCY when known — a host owning
+      // parked work has inFlightCount > activeCount, and mp − ifc would report
+      // contradictory capacity (activeCount: 0 with freeSlots: 3 on a 4-slot
+      // node) to /api/cluster consumers that trust the projection as-is.
+      const occ = typeof c.activeCount === "number" ? c.activeCount : ifc;
       return {
         maxParallel: mp,
         inFlightCount: ifc,
-        freeSlots: Math.max(0, mp - ifc),
-        // CTL-1581: slot-occupancy subset — conditional so an old-daemon peer
+        freeSlots: Math.max(0, mp - occ),
+        // Slot-occupancy subset — conditional so an old-daemon peer
         // contributes no field (consumers fall back to inFlightCount).
         ...(typeof c.activeCount === "number" ? { activeCount: c.activeCount } : {}),
         ...(Array.isArray(c.activeTickets) ? { activeTickets: c.activeTickets } : {}),
