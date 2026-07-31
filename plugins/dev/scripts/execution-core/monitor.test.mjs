@@ -1378,9 +1378,28 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
       // ENG-2 appears in BOTH sources; ENG-3 only in Triage.
       runTriageState: triageReturning([triageNode("ENG-2"), triageNode("ENG-3")]),
     });
-    // Stranded-first (Codex R1): the Triage-state half walks BEFORE the eligible
-    // half so sustained admission load can't starve the recovery; ENG-2 dedupes.
-    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-2", "ENG-3", "ENG-1"]);
+    // Stranded-first (Codex R1) for Triage-ONLY rows; a dual-present ticket
+    // keeps its ELIGIBLE copy (Codex R5: the live-confirmed source, no
+    // revalidation) so ENG-2 dispatches from the eligible half.
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-3", "ENG-1", "ENG-2"]);
+  });
+
+  test("a dual-present ticket with a STALE Triage row still dispatches via its eligible copy (Codex R5)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-DUAL")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    // The stale row would fail revalidation (live=Todo) — but the eligible copy
+    // must win the dedup and dispatch without ever consulting the live read.
+    const fetchLiveState = mock(() => "Todo");
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([triageNode("ENG-DUAL")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-DUAL"]);
+    expect(fetchLiveState).not.toHaveBeenCalled();
   });
 
   test("stranded Triage tickets walk before the eligible half (starvation guard)", () => {

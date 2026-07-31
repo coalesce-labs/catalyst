@@ -1256,12 +1256,21 @@ export function sweepMissingTriage({
     // is busy. The stranded set is small and self-draining (one successful
     // triage removes the ticket permanently), while the eligible half retries
     // on the next 60s sweep — so stranded-first costs the Todo path at most one
-    // sweep of latency. Dual-presence is impossible in practice (a ticket has
-    // one state); dedup is belt-and-suspenders.
+    // sweep of latency. DUAL-PRESENCE (Codex R5): a feed hole can leave a stale
+    // Triage row for a ticket the live-confirmed eligible query reports as
+    // Todo — the Triage copy would walk first, fail launch revalidation, and
+    // its `seen` entry would then skip the genuinely dispatchable eligible
+    // copy every sweep. The eligible copy is the authoritative one (it came
+    // from a live-confirmed source and pays no revalidation), so a
+    // dual-present ticket keeps ONLY that copy.
+    const eligibleSet = getEligibleSet(p.team);
+    const eligibleIds = new Set(eligibleSet.map((t) => t.identifier));
     const seen = new Set();
     const candidates = [
-      ...triageStateTickets(p, { replica, runTriageState }),
-      ...getEligibleSet(p.team),
+      ...triageStateTickets(p, { replica, runTriageState }).filter(
+        (t) => !eligibleIds.has(t.identifier)
+      ),
+      ...eligibleSet,
     ];
     for (const t of candidates) {
       if (seen.has(t.identifier)) continue;
