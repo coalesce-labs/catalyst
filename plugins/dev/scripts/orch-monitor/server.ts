@@ -243,7 +243,7 @@ import { createEventRing } from "./lib/event-ring";
 import { createMemoizedRead } from "./lib/memoize-fresh.mjs";
 import { readSubStepEvents } from "./lib/substep-reader";
 import { loadOtelConfig } from "./lib/otel-config";
-import { loadWebhookConfig } from "./lib/webhook-config";
+import { loadLinearBotUserIds, loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey, detectProjectKeyFromConfig } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
 // Shared Layer-1 config-path resolver (env pointer > cwd) — keeps
@@ -330,6 +330,10 @@ import {
 // request — the rate-limit win, consistent with the BFF1 (CTL-883) decision.
 import { readTicketDetail } from "./lib/ticket-detail-reader.mjs";
 import { readTicketArtifacts, readTicketArtifactContent } from "./lib/ticket-artifacts-reader.mjs";
+// CTL-1574: a ticket's Linear DISCUSSION (comments + issue_history activity) read
+// from the local CTC replica via the shared @catalyst-cloud/read-model builders.
+// Cache-only like the readers above — never a live Linear call per request.
+import { readTicketDiscussion } from "./lib/ticket-discussion-reader.mjs";
 // CTL-974 pattern: supplemental cached Linear {title, description} fetch for the
 // ticket-detail page. Board title is stale-sourced and the durable cache has no
 // description column, so both must be live-fetched (cached, TTL'd, fail-open).
@@ -521,6 +525,11 @@ export interface CreateServerOptions {
      * events. Empty / absent = no enrichment (pre-CTL-362 behaviour). */
     linearTeams?: Array<{ key: string; vcsRepo: string }>;
   } | null;
+  /** App-actor user ids for agent classification on READ surfaces (the
+   *  discussion timeline). Independent of webhook ingestion — configured bot
+   *  ids must classify even when no Linear webhook secret/smee channel is set
+   *  (linearWebhookConfig null). Falls back to linearWebhookConfig?.botUserIds. */
+  linearBotUserIds?: ReadonlySet<string>;
   // CTL-1167: PWA push notifications
   /** false disables the server-side push bridge startup task (useful in tests). Default: true. */
   pushBridge?: boolean;
@@ -849,6 +858,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     commsReader: commsReaderOpt,
     webhookConfig,
     linearWebhookConfig,
+    linearBotUserIds,
     daemonHealthReader: daemonHealthReaderOpt,
     clusterReader: clusterReaderOpt,
     screenLogsExec: screenLogsExecOpt,
@@ -2677,6 +2687,45 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const artifacts = await readTicketArtifacts(ticket);
           return Response.json(artifacts);
+        }
+
+        // CTL-1574: a ticket's Linear discussion — comments + issue_history
+        // activity events, both read from the local CTC replica through the
+        // shared read-model builders. The reader never throws: an absent/locked
+        // replica or an unmirrored ticket comes back
+        // `{ available:false, comments:[], activity:[] }`, which the UI renders
+        // as an honest empty section (never a fabricated "no comments").
+        const ticketDiscussionMatch = url.pathname.match(
+          /^\/api\/ticket-discussion\/([^/]+)$/,
+        );
+        if (ticketDiscussionMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketDiscussionMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const discussion = await readTicketDiscussion(ticket, {
+            catalystDir: CATALYST_DIR,
+          });
+          // Agent classification is `is_bot` OR a configured app-actor author —
+          // Catalyst worker/orchestrator app actors are stored as users with
+          // is_bot=0 (the linear-thread.mjs contract), so is_bot alone would
+          // badge every agent comment as human.
+          const botIds = linearBotUserIds ?? linearWebhookConfig?.botUserIds;
+          if (botIds && discussion.comments.length > 0) {
+            discussion.comments = discussion.comments.map((c) =>
+              c.author_id != null && botIds.has(c.author_id) ? { ...c, is_bot: 1 } : c,
+            );
+          }
+          return Response.json(discussion);
         }
 
         // CTL-1042: serve a ticket's research/plan artifact CONTENT by kind for
@@ -5248,6 +5297,13 @@ if (import.meta.main) {
     configPath,
     projectKey,
   );
+  // Loaded independently of loadWebhookConfig: that loader returns null when no
+  // webhook transport is configured, discarding the ids — but read surfaces
+  // (the discussion timeline) still need them to classify agent comments.
+  const linearBotIdsForReads = loadLinearBotUserIds(
+    process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
+    configPath,
+  );
   const webhookConfig =
     fullWebhookConfig &&
     fullWebhookConfig.smeeChannel.length > 0 &&
@@ -5343,6 +5399,9 @@ if (import.meta.main) {
       inboxSummaryProvider,
       webhookConfig,
       linearWebhookConfig,
+      // Independent of webhook wiring: configured app-actor ids classify agent
+      // comments on the discussion surface even when webhooks are disabled.
+      linearBotUserIds: linearBotIdsForReads.size > 0 ? linearBotIdsForReads : undefined,
       projectsConfigPath: configPath,
       monitorConfigPath: configPath,
     });

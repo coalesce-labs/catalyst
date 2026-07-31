@@ -22,7 +22,7 @@
 // StatusIcon glyph are the HOME2 Catalyst hand-rolls. Emphasis is a whisper of
 // background TINT + a left accent BAR (the attention-bar pattern) — NEVER a
 // bordered sub-card, never cyan (cyan is reserved for the live signal).
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { CheckCircle2, ExternalLink as ExternalLinkIcon } from "lucide-react";
 
 // CTL-1041: a small, restrained Claude logomark for the View-in-Claude pill — the
@@ -86,6 +86,13 @@ import {
 // what actually clears `needs-human`, per CTL-1567).
 import { Conversation } from "./conversation";
 import type { ReplyOutcome } from "@/board/conversation-client";
+// CTL-1574: the Linear discussion timeline — comment cards interleaved with the
+// ticket's state-change history, read from the local replica. LAZY: it renders
+// comment markdown, and a static import would put the whole marked/highlight.js
+// stack on the home route's critical path (see pane-discussion.tsx).
+const PaneDiscussion = lazy(() =>
+  import("./pane-discussion").then((m) => ({ default: m.PaneDiscussion })),
+);
 
 // ── inbox summary fetch-on-select (CTL-1042) ──────────────────────────────────
 type InboxSummaryState =
@@ -524,6 +531,17 @@ export function ReadingPane({
 
         {/* About — summary, goal, and the where-it's-at phase strip (for ANY item). */}
         <About row={effectiveRow} />
+
+        {/* Discussion — the Linear conversation: comment cards interleaved with
+            the ticket's state-change history (CTL-1574). Carried by ANY item, so
+            running and done rows get the context the needs-you-only Conversation
+            block above never reaches them with. Collapsed to the newest few turns
+            so the pane stays scannable; "Show all N" opens the full stream. */}
+        <Suspense fallback={null}>
+          {/* key: remount per ticket so the previous selection's fetched
+              discussion never paints under the new ticket's header. */}
+          <PaneDiscussion key={row.id} ticket={row.id} />
+        </Suspense>
       </div>
     </ScrollArea>
   );

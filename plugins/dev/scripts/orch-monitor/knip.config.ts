@@ -29,6 +29,15 @@ const config: KnipConfig = {
         "bin/gen-phosphor-icons.ts",
       ],
       project: ["**/*.{ts,tsx}", "!ui/**", "!public/**"],
+      ignoreDependencies: [
+        // CTL-1574: reached ONLY through the computed-specifier lazy `import()`
+        // in lib/ticket-discussion-reader.mjs. That specifier must stay computed
+        // (a literal would let esbuild pull the module — and bun:sqlite with it —
+        // into the Node-evaluated vite config bundle and break `vite build`; see
+        // the long note in that file). knip resolves static specifiers only, so
+        // it cannot see the usage.
+        "@catalyst-cloud/read-model",
+      ],
     },
     ui: {
       entry: ["index.html", "board.html", "src/board/main.tsx", "src/components/ui/*.{ts,tsx}", "src/components/kibo-ui/**/*.{ts,tsx}"],
