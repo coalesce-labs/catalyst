@@ -2593,3 +2593,91 @@ describe("fetchTicketState — onExec span seam (CTL-1364)", () => {
     expect(fetchTicketState("CTL-9", { exec, onExec })).toBe("Done");
   });
 });
+
+describe("classifyTicketResolution replica tier (CTL-1580)", () => {
+  test("replica HIT (any present row) → exists with ZERO live execs", () => {
+    let execs = 0;
+    const exec = () => {
+      execs++;
+      return { code: 0, stdout: "null", stderr: "" };
+    };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Implement" }) };
+    expect(classifyTicketResolution("PROJ-52", { exec, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+
+  test("replica HIT on a terminal row also serves exists (still zero execs)", () => {
+    let execs = 0;
+    const exec = () => {
+      execs++;
+      return { code: 0, stdout: "null", stderr: "" };
+    };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: true, state: "Done" }) };
+    expect(classifyTicketResolution("CTL-1", { exec, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+
+  test("replica MISS falls through to the live read (deletion still definitive)", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { isFresh: () => true, lookup: () => undefined };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("no replica → byte-identical live behavior", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-100", state: { name: "Ready" } }),
+    });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("exists");
+  });
+});
+
+describe("classifyTicketResolution replica-tier freshness gate (CTL-1580 review)", () => {
+  test("a STALE replica row never suppresses the definitive live check", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { isFresh: () => false, lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("a reader without the isFresh accessor is treated as unfresh (fail-closed)", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+});
+
+describe("classifyTicketResolution gateway-tombstone veto (CTL-1580 round 5)", () => {
+  test("a fresh removed:true descriptor bypasses the replica tier — deletion pays the live read", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" }); // live says: gone
+    const gateway = { getDescriptor: () => ({ removed: true, updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }) }; // stale drift row
+    expect(classifyTicketResolution("CTL-9", { exec, gateway, replica })).toBe("not-found");
+  });
+
+  test("a fresh removed:false descriptor still short-circuits before either tier", () => {
+    let execs = 0;
+    const exec = () => { execs++; return { code: 0, stdout: "null", stderr: "" }; };
+    const gateway = { getDescriptor: () => ({ removed: false, state: "Todo", updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => undefined };
+    expect(classifyTicketResolution("CTL-10", { exec, gateway, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+});
+
+describe("classifyTicketResolution bypassCaches (CTL-1580 round 6)", () => {
+  test("bypassCaches skips BOTH tiers even when production injection forces them in", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" }); // live: gone
+    const gateway = { getDescriptor: () => ({ removed: false, state: "Todo", updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, gateway, replica, bypassCaches: true })).toBe("not-found");
+  });
+});
+
+describe("runEligibleQuery structural body validation (CTL-1580 round 6)", () => {
+  test("an exit-0 body without nodes[] throws instead of zeroing the board", () => {
+    const exec = () => ({ code: 0, stdout: JSON.stringify({ error: "Authentication required" }), stderr: "" });
+    expect(() =>
+      runEligibleQuery({ team: "PROJ", status: "Todo" }, { exec, now: () => 0 })
+    ).toThrow(/nodes/);
+  });
+});

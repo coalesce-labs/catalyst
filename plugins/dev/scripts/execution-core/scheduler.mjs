@@ -2589,6 +2589,41 @@ function recordDeletionProbeIfDue(orchDir, ticket, now) {
   }
 }
 
+// CTL-1580 (Codex round 3): a replica-vouched "exists" must still pay a LIVE
+// verification at a long cadence. The replica's freshness gate proves the
+// WRITER is alive, not that THIS ticket's deletion applied (the ~0.7%
+// apply-drift class, CTL-1402) — without a periodic live recheck, a deleted
+// workerless ticket whose stale row keeps vouching would occupy a slot
+// indefinitely. Marker mirrors .deletion-probes; fail-OPEN on write failure
+// (keep the cheap replica tier, skip the recheck) — the opposite of the
+// probe marker's fail-closed, because here the failure mode is one more
+// replica read, not a quota loop.
+// Env-tunable (Codex round 5): the correctness↔quota trade-off is per-fleet —
+// a quota-constrained deployment lengthens it, one prioritizing stale-deletion
+// latency shortens it. Non-finite/≤0 → default 6h.
+const REPLICA_VOUCH_RECHECK_MS = (() => {
+  const raw = Number(process.env.SCHEDULER_REPLICA_VOUCH_RECHECK_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 6 * 3_600_000; // one live re-verify per ticket per 6h
+})();
+function replicaVouchRecheckPath(orchDir, ticket) {
+  return join(orchDir, ".replica-vouch-rechecks", ticket);
+}
+function recordReplicaVouchRecheckIfDue(orchDir, ticket, now) {
+  try {
+    const at = JSON.parse(readFileSync(replicaVouchRecheckPath(orchDir, ticket), "utf8"))?.probedAt;
+    if (typeof at === "number" && now - at < REPLICA_VOUCH_RECHECK_MS) return false;
+  } catch {
+    /* absent / malformed → due */
+  }
+  try {
+    mkdirSync(join(orchDir, ".replica-vouch-rechecks"), { recursive: true });
+    writeFileSync(replicaVouchRecheckPath(orchDir, ticket), JSON.stringify({ ticket, probedAt: now }));
+    return true;
+  } catch {
+    return false; // fail-open: replica tier stays on; live recheck deferred
+  }
+}
+
 // CTL-611: post-dispatch verifier. A dispatch is only really successful if
 // workers/<T>/phase-<P>.json was written with a non-empty bg_job_id and a
 // runnable status. A --dry-run leak (no signal at all) or a mark_launch_failed
@@ -4304,13 +4339,64 @@ export function schedulerTick(
     // short-circuit (GATEWAY_EXISTS_FRESH_MS) can serve "exists" without a live
     // linearis read — a held-but-workerless dir costs at most one live read per
     // freshness window instead of one per tick.
-    if (classifyResolution(sig.ticket, { exec, gateway }) !== "not-found") continue; // (b) definitive only
+    // CTL-1580: that bound was illusory for a QUIET stuck ticket — no webhooks →
+    // the descriptor ages past the freshness window and is NEVER refreshed
+    // (gateway-read is read-only), so classify paid a live read EVERY tick (the
+    // PROJ-52 burn). Two additive guards: (1) thread the replica so a present row
+    // serves "exists" for free (fail-safe — it only ever PREVENTS quarantine);
+    // (2) extend the CTL-1570 probe cool-down to the non-phantom branch, so even
+    // a replica-miss ticket costs at most one classify per
+    // DELETION_PROBE_INTERVAL_MS (the phantom branch already gated above).
+    if (!isPhantomWorkerDir(phaseSignals) && !recordDeletionProbeIfDue(orchDir, sig.ticket, now()))
+      continue;
+    // CTL-1580 (Codex rounds 3–4): every REPLICA_VOUCH_RECHECK_MS BOTH cached
+    // tiers (replica AND gateway) are bypassed so the recheck is a genuine live
+    // read — a stale replica row from a missed deletion apply, or a
+    // fresh-but-wrong gateway descriptor, must not vouch forever.
+    const liveRecheckDue = recordReplicaVouchRecheckIfDue(orchDir, sig.ticket, now());
+    // bypassCaches (not option-omission): production injection spreads
+    // `{ ...opts, gateway }` over these options, so only a dedicated flag
+    // survives to actually force the live read (Codex round 6).
+    const verdict = classifyResolution(
+      sig.ticket,
+      liveRecheckDue ? { exec, bypassCaches: true } : { exec, gateway, replica }
+    );
+    if (liveRecheckDue && verdict === "unknown") {
+      // An INCONCLUSIVE recheck (timeout/429/auth) must not spend the 6h stamp —
+      // surrender the marker so the next 10-min probe re-attempts the live
+      // verification instead of re-vouching from the replica for a full window.
+      try {
+        rmSync(replicaVouchRecheckPath(orchDir, sig.ticket), { force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (verdict !== "not-found") continue; // (b) definitive only
     if (maybeQuarantinePhantom(orchDir, sig.ticket, sig.phase)) {
       quarantinedPhantoms.push({ ticket: sig.ticket, phase: sig.phase });
       log.warn(
         { ticket: sig.ticket, phase: sig.phase },
         "scheduler: quarantined phantom worker dir (not-found + not-eligible + dead bg) — CTL-671"
       );
+    } else {
+      // CTL-1580 (Codex rounds 3–4): a definitive not-found whose quarantine
+      // write failed must not sit out EITHER cool-down — clear the probe marker
+      // (next tick retries immediately) AND the vouch-recheck marker (so that
+      // retry pays the live path again instead of being re-vouched by the very
+      // stale row the recheck just disproved).
+      // Independent removals (Codex round 5): a transient failure on the first
+      // must not skip the second — a retained vouch marker would re-vouch the
+      // very row the recheck just disproved when the probe retries.
+      try {
+        rmSync(deletionProbePath(orchDir, sig.ticket), { force: true });
+      } catch {
+        /* best-effort — worst case the retry waits out the cool-down */
+      }
+      try {
+        rmSync(replicaVouchRecheckPath(orchDir, sig.ticket), { force: true });
+      } catch {
+        /* best-effort */
+      }
     }
   }
 
