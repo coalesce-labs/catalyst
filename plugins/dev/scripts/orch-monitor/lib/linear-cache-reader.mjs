@@ -301,6 +301,21 @@ export async function readReplicaHumanHolds({
     }
     reader = factory({ dbPath });
     const out = {};
+    // Batched path (#2845 Codex): ONE transaction + ONE freshness check for the
+    // whole id set — per-id labels() would cost N transactions per assemble on
+    // the board's refresh cadence. Fall back to per-id for injected readers
+    // that predate labelsBatch.
+    if (typeof reader.labelsBatch === "function") {
+      const byId = reader.labelsBatch(wanted);
+      if (byId && typeof byId === "object") {
+        for (const [id, names] of Object.entries(byId)) {
+          if (!Array.isArray(names)) continue;
+          if (names.includes("needs-human")) out[id] = "needs-human";
+          else if (names.includes("needs-input")) out[id] = "needs-input";
+        }
+      }
+      return out; // undefined batch (stale writer / mid-reseed) → {} — fail-open
+    }
     for (const id of wanted) {
       let nodes;
       try {

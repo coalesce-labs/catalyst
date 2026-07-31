@@ -927,3 +927,29 @@ describe("createReplicaReader.stateAndLabels (CTL-1571 — one-snapshot pair)", 
     expect(reader.stateAndLabels("CTL-999")).toBeUndefined();
   });
 });
+
+// ── labelsBatch (CTL-1588 #2845) — one snapshot, one IN query ────────────────
+describe("createReplicaReader.labelsBatch", () => {
+  test("returns {identifier: [names]} for the id set in one call; absent ids have no key", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    const out = reader.labelsBatch(["CTL-200", "CTL-201", "CTL-999"]);
+    expect(out).toEqual({ "CTL-200": ["bug"], "CTL-201": ["chore"] });
+  });
+
+  test("empty/absent input → {} without touching the db", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labelsBatch([])).toEqual({});
+    expect(reader.labelsBatch(undefined)).toEqual({});
+  });
+
+  test("stale writer (no freshness) → undefined (fall through, never a stale answer)", () => {
+    seedEligibleLabeled();
+    // Backdate the DB + -wal well past the default 5-min staleness threshold.
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(dbPath, old, old);
+    try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labelsBatch(["CTL-200"])).toBeUndefined();
+  });
+});

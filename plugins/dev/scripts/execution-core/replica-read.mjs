@@ -510,6 +510,38 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
+  // labelsBatch(identifiers) → { identifier: [name…] } | undefined (CTL-1588
+  // #2845): ONE freshness check + ONE deferred snapshot + ONE IN query for a
+  // bounded id set. The monitor's queue hold-annotation reads every
+  // not-in-flight ticket per board assemble — per-id labels() calls would cost
+  // N transactions (and N freshness stats) on a 3s refresh cadence. undefined =
+  // fall through (stale writer / mid-reseed / throw). An id with no rows simply
+  // has no key: no label knowledge is fabricated for absent/removed tickets.
+  const labelsBatch = (identifiers) => {
+    const wanted = [...new Set((Array.isArray(identifiers) ? identifiers : []).filter(Boolean))];
+    if (wanted.length === 0) return {};
+    if (!isReplicaFresh(dbPath)) return undefined;
+    try {
+      const handle = open();
+      const rows = handle.transaction(() => {
+        if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined; // mid-reseed
+        const ph = wanted.map(() => "?").join(",");
+        return handle
+          .prepare(
+            `SELECT i.identifier AS identifier, l.name AS name FROM issues i JOIN issue_labels il ON il.issue_id = i.id JOIN labels l ON l.id = il.label_id WHERE i.identifier IN (${ph}) AND i.removed_at IS NULL`
+          )
+          .all(...wanted);
+      })();
+      if (!rows) return undefined;
+      const out = {};
+      for (const r of rows) (out[r.identifier] ??= []).push(r.name);
+      return out;
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
   return {
     lookup,
     freshness,
@@ -517,6 +549,7 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     eligible,
     ownership,
     labels,
+    labelsBatch,
     stateAndLabels,
     // isFresh — WRITER-LIVENESS gate (the `.writer.lock` heartbeat), bound to
     // this reader's dbPath. Callers composing replica-first reads (the broker's

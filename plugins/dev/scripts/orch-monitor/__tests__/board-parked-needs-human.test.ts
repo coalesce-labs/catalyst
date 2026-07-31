@@ -280,3 +280,42 @@ describe("CTL-1588 follow-up: queue humanHold merges replica holds (source contr
     expect(nospace(boardDataSrc)).toContain(nospace("...Object.entries(replicaHolds),"));
   });
 });
+
+describe("readReplicaHumanHolds — batched path (#2845 Codex)", () => {
+  const readReplicaHumanHolds = (cacheMod as Record<string, unknown>)
+    .readReplicaHumanHolds as (opts?: {
+    ids?: string[];
+    readerFactory?: (o: { dbPath: string }) => unknown;
+  }) => Promise<Record<string, string>>;
+
+  it("prefers labelsBatch (one call) over per-id labels", async () => {
+    let batchCalls = 0;
+    let perIdCalls = 0;
+    const out = await readReplicaHumanHolds({
+      ids: ["CRM-1", "CRM-5", "CRM-9"],
+      readerFactory: () => ({
+        labelsBatch: (ids: string[]) => {
+          batchCalls += 1;
+          expect(ids.sort()).toEqual(["CRM-1", "CRM-5", "CRM-9"]);
+          return { "CRM-1": ["needs-human"], "CRM-5": ["etl", "needs-input"] };
+        },
+        labels: () => {
+          perIdCalls += 1;
+          return [];
+        },
+        close: () => {},
+      }),
+    });
+    expect(out).toEqual({ "CRM-1": "needs-human", "CRM-5": "needs-input" });
+    expect(batchCalls).toBe(1);
+    expect(perIdCalls).toBe(0);
+  });
+
+  it("an undefined batch (stale writer / mid-reseed) fails open to {}", async () => {
+    const out = await readReplicaHumanHolds({
+      ids: ["CRM-1"],
+      readerFactory: () => ({ labelsBatch: () => undefined, close: () => {} }),
+    });
+    expect(out).toEqual({});
+  });
+});
