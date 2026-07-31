@@ -18,6 +18,7 @@ import { join, resolve } from "node:path";
 import {
   syncClusterSecrets,
   syncSecretFiles,
+  syncProfileFiles,
   pullClusterRepo,
   destForSecret,
   // CTL-1393: durable change-detection + periodic refresh.
@@ -133,6 +134,15 @@ describe("syncClusterSecrets (CTL-1211)", () => {
     expect(res.synced).toEqual(["config.json"]);
     expect(existsSync(join(configDir, "node-secret-files.json"))).toBe(false);
   });
+
+  test("does NOT process profile-files.sops.json (owned by syncProfileFiles, CTL-1595)", () => {
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    touchSecret("profile-files.sops.json");
+    const res = syncClusterSecrets({ clusterDir, configDir, decrypt: () => ({ x: 1 }) });
+    expect(res.synced).toEqual(["config.json"]);
+    expect(existsSync(join(configDir, "profile-files.json"))).toBe(false);
+  });
 });
 
 describe("syncSecretFiles (CTL-1211)", () => {
@@ -231,6 +241,62 @@ describe("pullClusterRepo (CTL-1211)", () => {
       logger: QUIET,
     });
     expect(res).toEqual({ pulled: false, reason: "pull-failed" });
+  });
+});
+
+describe("syncProfileFiles (CTL-1595)", () => {
+  const writeProfileBundle = () =>
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+  const profilesDirOf = () => join(configDir, "profiles");
+
+  test("materializes each map entry as a 0600 file under profilesDir", () => {
+    writeProfileBundle();
+    const decrypt = () => ({
+      "catalyst-cloud.env": "export GH_TEMP_PAT=x\nexport LINEAR_API_KEY=y\n",
+    });
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt });
+    expect(res.written).toEqual(["catalyst-cloud.env"]);
+    expect(readFileSync(join(profilesDirOf(), "catalyst-cloud.env"), "utf8")).toContain("GH_TEMP_PAT");
+    expect(statSync(join(profilesDirOf(), "catalyst-cloud.env")).mode & 0o777).toBe(0o600);
+  });
+
+  test("refuses path-traversal / dotfile names (no escape from profilesDir)", () => {
+    writeProfileBundle();
+    const decrypt = () => ({ "../escape.env": "x", ".ssh": "x", "ok.env": "good" });
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt, logger: QUIET });
+    expect(res.written).toEqual(["ok.env"]);
+  });
+
+  test("absent profile bundle → reason absent (no-op — not every cluster ships profiles)", () => {
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt: () => ({}) });
+    expect(res.reason).toBe("absent");
+    expect(res.written).toEqual([]);
+  });
+
+  test("decrypt failure → skipped, fail-open (never throws)", () => {
+    writeProfileBundle();
+    const res = syncProfileFiles({
+      clusterDir,
+      profilesDir: profilesDirOf(),
+      decrypt: () => {
+        throw new Error("bad mac");
+      },
+      logger: QUIET,
+    });
+    expect(res.skipped).toBe(true);
+    expect(res.reason).toBe("decrypt-failed");
+  });
+
+  test("partial write failure → records the name in failed[], keeps the rest", () => {
+    writeProfileBundle();
+    const decrypt = () => ({ "good.env": "x", "bad.env": "y" });
+    const writeFile = (path) => {
+      if (path.endsWith("bad.env")) throw new Error("EIO");
+    };
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt, writeFile, logger: QUIET });
+    expect(res.written).toEqual(["good.env"]);
+    expect(res.failed).toEqual(["bad.env"]);
+    expect(res.reason).toBeNull();
   });
 });
 
@@ -626,6 +692,77 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(emits.map((e) => e.name)).toContain("refreshed");
     expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
     // a non-env-backed bare file does NOT trigger a restart-required signal
+    expect(emits.map((e) => e.name)).not.toContain("restart-required");
+  });
+
+  test("(p1) partial PROFILE write failure → marker NOT advanced, refresh-failed(profile-write-failed)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+    const profilesDir = join(configDir, "profiles");
+    // Force a write failure: pre-create a DIRECTORY at the profile's destination.
+    mkdirSync(join(profilesDir, "catalyst-cloud.env"), { recursive: true });
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      profilesDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("profile-files.sops.json")
+          ? { "catalyst-cloud.env": "export GH_TEMP_PAT=x\n" }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("profile-write-failed");
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("(p2) FULL success incl. profile bundle → profiles materialized, marker advances", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+    const profilesDir = join(configDir, "profiles");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      profilesDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("profile-files.sops.json")
+          ? { "catalyst-cloud.env": "export GH_TEMP_PAT=x\nexport LINEAR_API_KEY=y\n" }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.profiles).toEqual(["catalyst-cloud.env"]);
+    expect(readFileSync(join(profilesDir, "catalyst-cloud.env"), "utf8")).toContain("LINEAR_API_KEY");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+    expect(emits.map((e) => e.name)).toContain("refreshed");
+    // a profile rotation needs NO daemon restart (direnv re-evaluates per spawn)
     expect(emits.map((e) => e.name)).not.toContain("restart-required");
   });
 
