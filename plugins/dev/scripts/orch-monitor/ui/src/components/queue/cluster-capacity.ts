@@ -94,7 +94,7 @@ export function assignClusterSlots({
           slotIndex: i,
           occupied: true,
           worker: localOccupied[i],
-          ...(i >= mp ? { over: true } : {}),
+          ...(mp > 0 && i >= mp ? { over: true } : {}),
         });
       }
       for (let i = 0; i < emptyCount; i++) {
@@ -111,7 +111,7 @@ export function assignClusterSlots({
             slotIndex: i,
             occupied: true,
             ticket: n.tickets[i],
-            ...(i >= mp ? { over: true } : {}),
+            ...(mp > 0 && i >= mp ? { over: true } : {}),
           });
         } else {
           slots.push({ host: n.host, slotIndex: i, occupied: false });
@@ -128,7 +128,7 @@ export function assignClusterSlots({
           host: n.host,
           slotIndex: i,
           occupied: i < occ,
-          ...(i < occ && i >= mp ? { over: true } : {}),
+          ...(mp > 0 && i < occ && i >= mp ? { over: true } : {}),
         });
       }
     }
