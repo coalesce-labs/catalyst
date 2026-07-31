@@ -857,6 +857,37 @@ function dispatchTriage(
   // the triage worker as CATALYST_CLUSTER_GENERATION (mirrors CTL-864 scheduler
   // path). null on single-host → writeClusterGeneration and dispatchTicket both
   // treat null as a no-op (fence token is omitted from the env).
+  // CTL-1589 (Codex R3+R4): live revalidation for a Triage-BOARD candidate.
+  // Placement is deliberate on BOTH sides: AFTER the drain/HRW/delegate/cap
+  // gates (R3 P1 — the bare live read fires only for a dispatch this host would
+  // genuinely make, so the rate is bounded by launch attempts, never a
+  // per-sweep/per-candidate probe) and BEFORE the cross-host claim (R4 P1 — a
+  // skip must not bump the fence generation out from under a live later-phase
+  // worker holding the current one). A replica row can have MISSED the ticket's
+  // exit from Triage (delivery hole), and the CTL-758 guard refuses only
+  // TERMINAL backward writes — without this check the later status write could
+  // drag an advanced ticket back to Triage. FAIL-CLOSED (R4 P1): an unreadable
+  // live state skips this sweep — a stranded ticket loses one cycle (the next
+  // sweep retries), while proceeding blind could double-launch AND regress the
+  // ticket's state. No verdict caching: a cached positive could go stale after
+  // a failed dispatch and redispatch an advanced ticket on the next sweep.
+  if (requireTriageState) {
+    let live = null;
+    try {
+      live = fetchLiveState(identifier);
+    } catch {
+      live = null;
+    }
+    if (live !== requireTriageState) {
+      log.info(
+        { identifier, live, expected: requireTriageState },
+        live == null
+          ? "dispatchTriage: Triage-board candidate's live state unreadable — holding this sweep (CTL-1589)"
+          : "dispatchTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
+      );
+      return false;
+    }
+  }
   let clusterGeneration = null;
   if (multiHost) {
     const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
@@ -868,31 +899,6 @@ function dispatchTriage(
       return false;
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
-  }
-  // CTL-1589 (Codex R3): live revalidation for a Triage-BOARD candidate, placed
-  // launch-imminent (post-drain/HRW/delegate/claim gates) so the bare live read
-  // fires only for a dispatch this host is genuinely about to launch — bounded
-  // by real launches, never a per-sweep/per-candidate probe. A replica row can
-  // have MISSED the ticket's exit from Triage (delivery hole), and the CTL-758
-  // guard refuses only TERMINAL backward writes — without this check the later
-  // status write could drag an advanced ticket back to Triage. No verdict is
-  // cached: a cached positive could go stale after a failed dispatch and
-  // redispatch an advanced ticket on the next sweep. Unreadable (null) proceeds
-  // — recovery bias; the status write re-reads.
-  if (requireTriageState) {
-    let live = null;
-    try {
-      live = fetchLiveState(identifier);
-    } catch {
-      /* unreadable → proceed */
-    }
-    if (live != null && live !== requireTriageState) {
-      log.info(
-        { identifier, live, expected: requireTriageState },
-        "dispatchTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
-      );
-      return false;
-    }
   }
   // CTL-1441 guard (a), placed HERE (post-gates, post-claim, launch imminent —
   // Codex R3): a done phase-triage.json with triage.json missing is the
@@ -1265,6 +1271,12 @@ export function sweepMissingTriage({
       // budget gate); everything else waits for the next sweep.
       if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      // CTL-1589 (Codex R4): a Triage-STATE ticket whose triage worker is
+      // in-flight right now has no artifact yet and would route to an
+      // idempotent no-op launch — which still decrements the sweep budget
+      // (code 0) and would pay a pointless live revalidation read. Skip it
+      // here; the eligible half keeps its pre-existing behavior.
+      if (t.fromTriageBoard && isTriageInFlight(readTriageSignalStatus(orchDir, t.identifier))) continue;
       // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
       // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
       // where the stale completion signal is retired immediately before a real

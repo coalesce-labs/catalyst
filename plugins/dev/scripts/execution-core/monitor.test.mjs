@@ -1344,9 +1344,10 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
     appendEvent: () => {},
     readMaxParallelFn: () => 6,
     liveBackgroundCount: () => 0,
-    // CTL-1589 Codex R2: never let the revalidation shell a real linearis read
-    // from a unit test; null = unreadable -> proceed (recovery bias).
-    fetchLiveState: () => null,
+    // CTL-1589: never let the revalidation shell a real linearis read from a
+    // unit test. Default = live-confirms Triage (the happy path); tests that
+    // exercise stale/unreadable semantics override it.
+    fetchLiveState: () => "Triage",
   });
 
   test("dispatches a ticket that exists ONLY in the Triage state (never in the eligible set)", () => {
@@ -1427,7 +1428,7 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
     expect(fetchLiveState).not.toHaveBeenCalled();
   });
 
-  test("a Triage row confirmed live in Triage dispatches; an unreadable live state proceeds (recovery bias)", () => {
+  test("a Triage row confirmed live in Triage dispatches; an unreadable live state HOLDS (fail-closed, Codex R4)", () => {
     enroll("ENG", { status: "Todo", triageStatus: "Triage" });
     const realOrchDir = join(catalystDir, "execution-core");
     const exec = execReturning({ ENG: [] });
@@ -1439,13 +1440,59 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
       runTriageState: triageReturning([triageNode("ENG-CONFIRMED")]),
     });
     expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-CONFIRMED"]);
+    // Unreadable → HOLD this sweep (a blind proceed could double-launch and the
+    // later status write could drag an advanced ticket back to Triage).
     const dispatch2 = mock(() => ({ code: 0 }));
     sweepMissingTriage({
       ...baseOpts(realOrchDir, dispatch2),
       fetchLiveState: () => null,
       runTriageState: triageReturning([triageNode("ENG-UNREADABLE")]),
     });
-    expect(dispatch2.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-UNREADABLE"]);
+    expect(dispatch2).not.toHaveBeenCalled();
+  });
+
+  test("a stale Triage row is skipped BEFORE the cross-host claim (fence untouched, Codex R4)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimCalls = [];
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      hosts: ["mini", "mini-2"],
+      hostName: "mini",
+      survivingRosterOverride: ["mini", "mini-2"],
+      claimDispatch: (arg) => {
+        claimCalls.push(arg);
+        return { won: true, generation: 7 };
+      },
+      fetchLiveState: () => "Research",
+      runTriageState: triageReturning([triageNode("ENG-3000")]),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The skip must never bump the fence generation out from under a live
+    // later-phase worker — the claim is only taken when a launch will follow.
+    expect(claimCalls).toHaveLength(0);
+  });
+
+  test("an in-flight Triage-board candidate is skipped without a live read or budget spend (Codex R4)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dir = join(realOrchDir, "workers", "ENG-RUN");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "running" }));
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Triage");
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([triageNode("ENG-RUN")]),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(fetchLiveState).not.toHaveBeenCalled();
   });
 
   test("a recently-touched Triage row is still swept (no updated_at dwell gate — Codex R3)", () => {
