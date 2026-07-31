@@ -2593,3 +2593,41 @@ describe("fetchTicketState — onExec span seam (CTL-1364)", () => {
     expect(fetchTicketState("CTL-9", { exec, onExec })).toBe("Done");
   });
 });
+
+describe("classifyTicketResolution replica tier (CTL-1580)", () => {
+  test("replica HIT (any present row) → exists with ZERO live execs", () => {
+    let execs = 0;
+    const exec = () => {
+      execs++;
+      return { code: 0, stdout: "null", stderr: "" };
+    };
+    const replica = { lookup: () => ({ terminal: false, state: "Implement" }) };
+    expect(classifyTicketResolution("OTL-52", { exec, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+
+  test("replica HIT on a terminal row also serves exists (still zero execs)", () => {
+    let execs = 0;
+    const exec = () => {
+      execs++;
+      return { code: 0, stdout: "null", stderr: "" };
+    };
+    const replica = { lookup: () => ({ terminal: true, state: "Done" }) };
+    expect(classifyTicketResolution("CTL-1", { exec, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+
+  test("replica MISS falls through to the live read (deletion still definitive)", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { lookup: () => undefined };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("no replica → byte-identical live behavior", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-100", state: { name: "Ready" } }),
+    });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("exists");
+  });
+});

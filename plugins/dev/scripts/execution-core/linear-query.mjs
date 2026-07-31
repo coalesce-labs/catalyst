@@ -263,12 +263,12 @@ const GATEWAY_STATE_FRESH_MS = 60_000;
 // and the batch reads — are NOT yet instrumented, so catalyst_linear_read_total
 // undercounts those lower-frequency direct-read contexts. Tracked as a follow-up
 // (extend recordDaemonRead to those call sites) rather than expanded here.
-function recordDaemonRead(source, result, identifier, ageMs = null) {
+function recordDaemonRead(source, result, identifier, ageMs = null, op = "read_ticket") {
   try {
     emitLinearReadEvent({
       source,
       result,
-      op: "read_ticket",
+      op,
       entity: identifier,
       ageMs,
       serviceName: "catalyst.execution-core",
@@ -737,7 +737,7 @@ export function readTicketLabelNodes(identifier, { exec = defaultExec } = {}) {
 // retained for back-compat with any deployment still on the 2026-05-27 contract.
 export function classifyTicketResolution(
   identifier,
-  { exec = defaultExec, gateway, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
+  { exec = defaultExec, gateway, replica, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
 ) {
   // CTL-823: serve ONLY the cheap not-quarantine verdict from the durable
   // store — a fresh, present, not-removed descriptor proves existence.
@@ -748,12 +748,35 @@ export function classifyTicketResolution(
     const d = gateway.getDescriptor(identifier);
     if (d && !d.removed && descriptorAgeMs(d) <= gatewayFreshMs) return "exists";
   }
+  // CTL-1580: replica tier (mirrors fetchTicketState's CTL-1340 tier). A
+  // present, non-tombstoned replica row proves existence — the SAFE direction
+  // (it can only PREVENT quarantine). A removed/absent row reads as MISS
+  // (lookup → undefined) and falls through, so a true deletion still pays the
+  // definitive live read below. No `replica` → skipped (byte-identical).
+  // This matters for QUIET stuck tickets: their gateway descriptor ages out
+  // permanently (no webhooks refresh it), which made every Pass 0a tick a live
+  // read (the OTL-52 burn).
+  if (replica) {
+    if (replica.lookup(identifier) !== undefined) {
+      recordDaemonRead("replica", "ok", identifier, null, "classify_resolution");
+      return "exists";
+    }
+  }
   // CTL-1339: hot per-signal terminal read (phantom-sweep) — cap the wall-clock
   // so a 429-stalled linearis can't block the synchronous tick. A timed-out read
   // fails SAFE via the code-127 → "unknown" branch (never a false quarantine).
   const { code, stdout, stderr } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
+  // CTL-1580 + CTL-1403: this path was named-but-uninstrumented — every live
+  // classify now lands in catalyst.linear.read (op=classify_resolution).
+  recordDaemonRead(
+    replica ? "linearis_miss" : "linearis",
+    code !== 0 ? "failed" : "ok",
+    identifier,
+    null,
+    "classify_resolution"
+  );
   if (code !== 0) {
     // CTL-1504: the CLI now exits 1 for a genuinely-missing ticket, with the
     // not-found body on stderr. A definitive not-found is the ONLY nonzero that
@@ -1132,6 +1155,7 @@ export function runEligibleQuery(
       // populated delegate, so no GraphQL batch is needed).
       if (tickets.length > 0) {
         onSource?.("replica", tickets.length);
+        recordDaemonRead("replica", "ok", query.team, null, "eligible_list"); // CTL-1580
         return tickets;
       }
       // CTL-1397 (3/n) — a SEED-COMPLETE replica-empty. The reader only returns a
@@ -1160,6 +1184,7 @@ export function runEligibleQuery(
       //     trusts an unconfirmed empty as authoritative during a storm).
       if (now() - (_eligibleEmptyConfirmAt.get(query.team) ?? 0) < reconfirmMs) {
         onSource?.("replica", 0);
+        recordDaemonRead("replica", "ok", query.team, null, "eligible_list"); // CTL-1580
         return tickets; // [] — a recently linearis-confirmed empty, trusted (breaker-immune)
       }
       // CTL-1420 (freeze-avoidance): when the CTL-679 breaker is OPEN, the
@@ -1215,6 +1240,18 @@ export function runEligibleQuery(
   // monitor.reconcile.failing alert — exactly the failure mode CTL-1339 designed
   // against. `{ uncapped: true }` opts this spawn out of the default floor.
   const { code, stdout, stderr } = exec("linearis", buildLinearisArgs(query), { uncapped: true });
+  // CTL-1580 + CTL-1403: the eligible-list live spawn was completely invisible
+  // to catalyst.linear.read (only the plain eligible_source log line saw it) —
+  // instrument every outcome so Loki accounts for this burn. Source taxonomy:
+  // replica tier present but fell through (MISS / unconfirmed empty) →
+  // linearis_miss; no replica tier at all → linearis.
+  recordDaemonRead(
+    replica?.eligible ? "linearis_miss" : "linearis",
+    code !== 0 ? "failed" : "ok",
+    query.team,
+    null,
+    "eligible_list"
+  );
   if (code !== 0) {
     throw new Error(`linearis issues list failed (exit ${code}): ${(stderr || "").trim()}`);
   }

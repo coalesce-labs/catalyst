@@ -4304,7 +4304,17 @@ export function schedulerTick(
     // short-circuit (GATEWAY_EXISTS_FRESH_MS) can serve "exists" without a live
     // linearis read — a held-but-workerless dir costs at most one live read per
     // freshness window instead of one per tick.
-    if (classifyResolution(sig.ticket, { exec, gateway }) !== "not-found") continue; // (b) definitive only
+    // CTL-1580: that bound was illusory for a QUIET stuck ticket — no webhooks →
+    // the descriptor ages past the freshness window and is NEVER refreshed
+    // (gateway-read is read-only), so classify paid a live read EVERY tick (the
+    // OTL-52 burn). Two additive guards: (1) thread the replica so a present row
+    // serves "exists" for free (fail-safe — it only ever PREVENTS quarantine);
+    // (2) extend the CTL-1570 probe cool-down to the non-phantom branch, so even
+    // a replica-miss ticket costs at most one classify per
+    // DELETION_PROBE_INTERVAL_MS (the phantom branch already gated above).
+    if (!isPhantomWorkerDir(phaseSignals) && !recordDeletionProbeIfDue(orchDir, sig.ticket, now()))
+      continue;
+    if (classifyResolution(sig.ticket, { exec, gateway, replica }) !== "not-found") continue; // (b) definitive only
     if (maybeQuarantinePhantom(orchDir, sig.ticket, sig.phase)) {
       quarantinedPhantoms.push({ ticket: sig.ticket, phase: sig.phase });
       log.warn(

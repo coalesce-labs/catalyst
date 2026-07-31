@@ -12690,3 +12690,46 @@ describe("computeDeadHosts (CTL-1524 C4a)", () => {
     ).toEqual([]);
   });
 });
+
+// ── CTL-1580: non-phantom probe cool-down + replica threading ──
+describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
+  test("a stuck dir's classify is bounded to one per DELETION_PROBE_INTERVAL_MS", () => {
+    writeSignal("OTL-52", "implement", "running");
+    let classifies = 0;
+    const deps = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifies++;
+        return "exists"; // real stuck ticket — never quarantined
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, deps);
+    schedulerTick(orchDir, deps);
+    schedulerTick(orchDir, deps);
+    // First tick probes (and records the marker); the next two are inside the
+    // cool-down window and must NOT re-probe — this was the every-tick live
+    // read of a quiet stuck ticket (the OTL-52 burn).
+    expect(classifies).toBe(1);
+  });
+
+  test("the replica reader is threaded into classifyResolution's options", () => {
+    writeSignal("CTL-77", "implement", "running");
+    const replica = { lookup: () => ({ terminal: false, state: "Implement" }) };
+    let seenReplica = null;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: (_t, opts) => {
+        seenReplica = opts?.replica ?? null;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+      replica,
+    });
+    expect(seenReplica).toBe(replica);
+  });
+});
