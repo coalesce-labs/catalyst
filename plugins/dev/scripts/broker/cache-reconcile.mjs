@@ -30,6 +30,8 @@ import { linearAsyncReminter, isAuthError } from "../execution-core/linear-remin
 // Node-safe by design (its header commits to node-builtin-only imports) — unlike
 // replica-read.mjs, which must stay behind a lazy guarded import (see below).
 import { emitLinearReadEvent } from "../execution-core/linear-read-event.mjs";
+// Already a static broker dependency via index.mjs — safe under the node fallback.
+import { readLinearReplica } from "../execution-core/config.mjs";
 
 // Mode knob: env CATALYST_CACHE_RECONCILE overrides Layer-2 config; operators
 // opt in via =shadow (log would-write, touch nothing) then =enforce (write).
@@ -158,6 +160,13 @@ export function decideReconcile({ current, fetchedState, fetchedLabels }) {
 const REPLICA_READ_MODULE = ["..", "execution-core", "replica-read.mjs"].join("/");
 let replicaReaderPromise;
 function getReplicaReader() {
+  // Kill-switch first (Codex review): CATALYST_LINEAR_REPLICA / Layer-2
+  // linearReplica.mode is the replica tier's operator off-switch everywhere
+  // else (daemon tier included) — an operator who disabled a suspect replica
+  // must not have the enforce reconciler keep writing broker cache fields from
+  // it. Checked per call (not memoized) so a restartless env flip is honored;
+  // config.mjs is already a static broker dependency (index.mjs), node-safe.
+  if (readLinearReplica().mode !== "on") return Promise.resolve(null);
   if (replicaReaderPromise === undefined) {
     replicaReaderPromise = import(REPLICA_READ_MODULE)
       .then((m) => m.createReplicaReader())
@@ -209,7 +218,12 @@ export function createReplicaFetcher({ getReader = getReplicaReader, fallback = 
     }
     const stateHit = reader.lookup(ticket);
     const labelsHit = reader.labels(ticket);
-    if (stateHit === undefined && labelsHit === undefined) {
+    // BOTH projections must resolve (Codex review): lookup() has no
+    // seed-completeness gate, so during a forced re-seed it can serve a
+    // batch-inserted row while the gated labels() correctly refuses — accepting
+    // that partial pair would reconcile state from a half-seeded snapshot and
+    // silently leave labels stale. Either side undefined → the live fallback.
+    if (stateHit === undefined || labelsHit === undefined) {
       log("warn", { ticket }, "cache-reconcile: replica MISS — falling back to live linearis");
       const live = await fallback(ticket);
       recordReconcileRead("linearis_miss", live.error ? "failed" : "ok", ticket);
@@ -217,15 +231,16 @@ export function createReplicaFetcher({ getReader = getReplicaReader, fallback = 
     }
     recordReconcileRead("replica", "ok", ticket);
     return {
-      state: stateHit !== undefined ? stateHit.state : null,
-      labels: labelsHit !== undefined ? labelsHit.map((l) => l.name) : null,
+      state: stateHit.state,
+      labels: labelsHit.map((l) => l.name),
       error: null,
     };
   };
 }
 
-// Production default — reconcileCacheState picks this up with no wiring change.
-export const fetchWithReplicaFirst = createReplicaFetcher();
+// NOTE: no module-level default fetcher — reconcileCacheState constructs one
+// per pass with ITS logger (Codex review: a module-level instance permanently
+// captured a no-op sink, silencing the required loud stale/MISS fallback).
 
 // linearisBodyError — the error string when a linearis JSON body is error-shaped
 // (`{"error": "..."}`) despite a zero exit, else null. Exported for tests
@@ -317,16 +332,18 @@ export async function reconcileCacheState({
   // exceeds its budget, and Backlog always gets a reserved floor of the cap.
   cursor = { active: null, backlog: null },
   getAll = getAllTicketDescriptors,
+  logger,
   // CTL-1571: replica-first — live linearis only as the loud fallback for a
   // stale replica / uncarried ticket. A healthy pass costs zero API reads.
-  fetch = fetchWithReplicaFirst,
+  // Constructed HERE (not module-level) so the pass's own logger reaches the
+  // fetcher's loud stale/MISS warnings.
+  fetch = createReplicaFetcher({ logger }),
   upsert = upsertTicketDescriptor,
   // CTL-1577: the startup mint (catalyst-broker cmd_start) runs ONCE; a broker
   // crossing the OAuth expiry boundary re-mints here mid-run (cooldown-guarded
   // ASYNC singleton — spawn, not spawnSync, so a slow OAuth endpoint never
   // freezes webhook routing on the broker event loop).
   reminter = linearAsyncReminter,
-  logger,
 } = {}) {
   const log = logSink(logger);
   const inCursor = cursor ?? { active: null, backlog: null };
