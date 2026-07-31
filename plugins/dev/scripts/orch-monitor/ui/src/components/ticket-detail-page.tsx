@@ -931,10 +931,13 @@ export function TicketDetailPage({
         </div>
       )}
 
-      {/* ── TABS — Spec (default) · Lifecycle · Cost · Activity ── */}
+      {/* ── TABS — Detail (default) · Lifecycle · Cost · Activity ── */}
       <div style={{ marginTop: 20 }} data-ticket-tabs data-active-tab={value}>
         <PillTabs value={value} onValueChange={setTab} tabs={TAB_DEFS}>
-          {/* Spec: the description prose — works from the live fetch on/off board. */}
+          {/* Detail (internal value "spec"): the description prose — works from
+              the live fetch on/off board — with the Linear discussion inline
+              below it (chronological), so the conversation is visible without
+              hunting for the Discussion tab. */}
           <TabsContent value="spec">
             <div data-ticket-spec style={{ paddingTop: 16 }}>
               {(linear.description || linear.loaded) && (
@@ -944,6 +947,9 @@ export function TicketDetailPage({
                   </Suspense>
                 </section>
               )}
+              <div style={{ marginTop: 24 }}>
+                <DiscussionSection key={ticket?.id ?? id} ticketId={ticket?.id ?? id} />
+              </div>
             </div>
           </TabsContent>
 
@@ -1033,11 +1039,13 @@ function TAB_IS_VALID(tab: string): tab is "spec" | DetailTab {
   return tab === "spec" || (TAB_VALUES as readonly string[]).includes(tab);
 }
 
-/** The visible tab set (Spec default · Lifecycle · Cost · Activity · Discussion ·
+/** The visible tab set (Detail default · Lifecycle · Cost · Activity · Discussion ·
  *  Execution). "Discussion" is the LINEAR conversation (CTL-1574); "Activity" is
- *  the execution event stream and keeps its name. */
+ *  the execution event stream and keeps its name. The default tab is LABELED
+ *  "Detail" (CTL-1585) but keeps the internal value "spec" so persisted entry
+ *  state and old ?tab=spec links keep resolving. */
 const TAB_DEFS: PillTab[] = [
-  { value: "spec", label: "Spec" },
+  { value: "spec", label: "Detail" },
   { value: "lifecycle", label: "Lifecycle" },
   { value: "cost", label: "Cost" },
   { value: "activity", label: "Activity" },

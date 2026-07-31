@@ -24,7 +24,14 @@ export function PaneDiscussion({ ticket }: { ticket: string }) {
 
   return (
     <section className="mt-6" data-pane-discussion={ticket}>
-      <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Discussion</p>
+      <p className="text-[11px] font-medium uppercase tracking-wide text-muted">
+        Discussion
+        {/* The pane inverts to newest-first (the next thing to react to sits on
+            top); say so, since the ticket page reads chronologically. */}
+        <span className="ml-2 font-normal normal-case tracking-normal text-fg-dim">
+          newest first
+        </span>
+      </p>
       <div className="mt-3">
         {/* key: the reading pane keeps ONE instance across inbox selections, so
             without it the previous ticket's "Show all" expansion leaks into the
@@ -37,6 +44,7 @@ export function PaneDiscussion({ ticket }: { ticket: string }) {
           loaded
           available
           limit={COLLAPSED_LIMIT}
+          newestFirst
         />
       </div>
     </section>
