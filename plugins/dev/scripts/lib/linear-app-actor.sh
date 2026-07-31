@@ -37,9 +37,11 @@ linear_app_actor_auth() {
     # jq @uri (parity with the re-minter's URLSearchParams — a form-reserved
     # char in a credential must not silently corrupt the body). Connection +
     # transfer bounded so a hung OAuth endpoint cannot wedge daemon start.
+    # Encoder input rides stdin too (jq -sRr) — `--arg` would put the secret
+    # right back into a process-table argv, the exposure this block avoids.
     local _eid _esec
-    _eid=$(jq -rn --arg v "$_ocid" '$v|@uri' 2>/dev/null)
-    _esec=$(jq -rn --arg v "$_ocsec" '$v|@uri' 2>/dev/null)
+    _eid=$(printf '%s' "$_ocid" | jq -sRr '@uri' 2>/dev/null)
+    _esec=$(printf '%s' "$_ocsec" | jq -sRr '@uri' 2>/dev/null)
     _otok=$(printf 'grant_type=client_credentials&client_id=%s&client_secret=%s&scope=read,write,comments:create,app:assignable,app:mentionable&actor=app' \
       "$_eid" "$_esec" |
       curl -s --connect-timeout 5 --max-time 30 --noproxy '*' -X POST \

@@ -173,7 +173,15 @@ function defaultMintAsync(creds) {
     child.on("close", (code) =>
       resolveMint(parseMintResponse({ code: code ?? 1, stdout: out })),
     );
-    child.stdin.end(payload);
+    // A curl that dies before draining stdin EPIPEs this pipe; unhandled, that
+    // is an uncaught 'error' that would kill the daemon instead of taking the
+    // fail-open null path. Swallow it — the close handler still resolves.
+    child.stdin.on("error", () => {});
+    try {
+      child.stdin.end(payload);
+    } catch {
+      /* stream already destroyed — close handler resolves the mint as failed */
+    }
   });
 }
 
