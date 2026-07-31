@@ -168,11 +168,22 @@ export async function readTicketDiscussion(identifier, { dbPath, openDb, catalys
     } catch {
       /* pragma unsupported on this handle — proceed without the wait */
     }
-    // Seed-completeness: a missing/empty cursor row means a re-seed is in
-    // flight and the tables may be half-truncated. (A missing sync_meta table
-    // throws → the outer catch reports unavailable, which is also correct.)
-    if (db.query(SEED_COMPLETE_SELECT).all().length === 0) return unavailable();
-    const detail = buildIssueDetail(bunSqlExecutor(db), identifier);
+    // Seed-completeness gate + ALL detail reads inside ONE deferred read
+    // transaction (replica-read.mjs CTL-1397 P1 pattern): as separate autocommit
+    // reads, a forced re-seed could slip between the cursor check and
+    // buildIssueDetail's SELECTs (writer deletes the cursor + truncates +
+    // repopulates) and a half-repopulated discussion would serve as
+    // available:true — the exact state the gate exists to reject. bun:sqlite's
+    // transaction() defaults to BEGIN DEFERRED (read-only-safe); the test
+    // opener seam has no transaction() and runs autocommit, as before.
+    // (A missing sync_meta table throws → outer catch → unavailable.)
+    const readDetail = () => {
+      if (db.query(SEED_COMPLETE_SELECT).all().length === 0) return undefined; // mid-reseed
+      return buildIssueDetail(bunSqlExecutor(db), identifier);
+    };
+    const detail =
+      typeof db.transaction === "function" ? db.transaction(readDetail)() : readDetail();
+    if (detail === undefined) return unavailable();
     // Unknown / removed ticket → buildIssueDetail returns null. That is a
     // successful read of a ticket with no mirrored row, but we report it as
     // unavailable:false-with-nothing because the UI has nothing honest to show

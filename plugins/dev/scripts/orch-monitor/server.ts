@@ -525,6 +525,11 @@ export interface CreateServerOptions {
      * events. Empty / absent = no enrichment (pre-CTL-362 behaviour). */
     linearTeams?: Array<{ key: string; vcsRepo: string }>;
   } | null;
+  /** App-actor user ids for agent classification on READ surfaces (the
+   *  discussion timeline). Independent of webhook ingestion — configured bot
+   *  ids must classify even when no Linear webhook secret/smee channel is set
+   *  (linearWebhookConfig null). Falls back to linearWebhookConfig?.botUserIds. */
+  linearBotUserIds?: ReadonlySet<string>;
   // CTL-1167: PWA push notifications
   /** false disables the server-side push bridge startup task (useful in tests). Default: true. */
   pushBridge?: boolean;
@@ -853,6 +858,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     commsReader: commsReaderOpt,
     webhookConfig,
     linearWebhookConfig,
+    linearBotUserIds,
     daemonHealthReader: daemonHealthReaderOpt,
     clusterReader: clusterReaderOpt,
     screenLogsExec: screenLogsExecOpt,
@@ -2713,7 +2719,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // Catalyst worker/orchestrator app actors are stored as users with
           // is_bot=0 (the linear-thread.mjs contract), so is_bot alone would
           // badge every agent comment as human.
-          const botIds = linearWebhookConfig?.botUserIds;
+          const botIds = linearBotUserIds ?? linearWebhookConfig?.botUserIds;
           if (botIds && discussion.comments.length > 0) {
             discussion.comments = discussion.comments.map((c) =>
               c.author_id != null && botIds.has(c.author_id) ? { ...c, is_bot: 1 } : c,
@@ -5386,6 +5392,12 @@ if (import.meta.main) {
       inboxSummaryProvider,
       webhookConfig,
       linearWebhookConfig,
+      // Independent of webhook wiring: configured app-actor ids classify agent
+      // comments on the discussion surface even when webhooks are disabled.
+      linearBotUserIds:
+        fullWebhookConfig && fullWebhookConfig.linearBotUserIds.size > 0
+          ? fullWebhookConfig.linearBotUserIds
+          : undefined,
       projectsConfigPath: configPath,
       monitorConfigPath: configPath,
     });
