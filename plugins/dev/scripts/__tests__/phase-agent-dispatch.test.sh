@@ -19,6 +19,22 @@ PASSES=0
 SCRATCH="$(mktemp -d -t phase-agent-dispatch-test-XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# CTL-1417: hermeticity floor. Isolate HOME and neuter global/system git config
+# so no production code path that computes $HOME/catalyst/wt/... (e.g. the CTL-707
+# recreate's create-worktree.sh) can resolve to the operator's REAL worktree —
+# the worktree self-deletion vector. Mirrors the orphan-sweep.test.sh /
+# worktree-rebase.test.sh gold standard. Also pin the recreate worktree base
+# under scratch as a belt to Test 38's own CATALYST_RECREATE_WORKTREE_DIR.
+export HOME="${SCRATCH}/home"
+mkdir -p "$HOME"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+export CATALYST_RECREATE_WORKTREE_DIR="${SCRATCH}/recreate-wt"
+# Red canary: fail loudly if the isolation is ever not in effect.
+[[ "$HOME" == "$SCRATCH"/* ]] || {
+	echo "FAIL: HOME not isolated to scratch"
+	exit 1
+}
+
 fail() {
 	FAILURES=$((FAILURES + 1))
 	echo "  FAIL: $1"
