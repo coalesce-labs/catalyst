@@ -876,3 +876,54 @@ describe("createReplicaReader.labels (CTL-1481 — worker-label visibility read)
     expect(reader.labels(undefined)).toBeUndefined();
   });
 });
+
+describe("createReplicaReader.isFresh (CTL-1571)", () => {
+  test("true with a recent writer.lock heartbeat, false when stale or absent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "replica-isfresh-"));
+    const dbPath = join(dir, "catalyst-replica.db");
+    new Database(dbPath).close();
+    const reader = createReplicaReader({ dbPath });
+    // absent lock → falls back to the db/-wal mtime proxy; db just created → fresh
+    expect(reader.isFresh()).toBe(true);
+    // fresh heartbeat
+    writeFileSync(`${dbPath}.writer.lock`, "1");
+    expect(reader.isFresh()).toBe(true);
+    // stale heartbeat (1h old, threshold 5min) — a PRESENT lock is authoritative,
+    // so this is false even though the db file's own mtime is fresh
+    const old = (Date.now() - 3_600_000) / 1000;
+    utimesSync(`${dbPath}.writer.lock`, old, old);
+    expect(reader.isFresh()).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("createReplicaReader.stateAndLabels (CTL-1571 — one-snapshot pair)", () => {
+  function seedPair() {
+    const db = new Database(dbPath, { create: true });
+    db.run(`CREATE TABLE issues (id TEXT, identifier TEXT, state TEXT, completed_at TEXT, canceled_at TEXT, removed_at TEXT, updated_at INTEGER)`);
+    db.run(`CREATE TABLE labels (id TEXT, name TEXT, removed_at TEXT)`);
+    db.run(`CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)`);
+    db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+    db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+    db.run(`INSERT INTO issues VALUES ('id-1', 'CTL-1', 'Implement', NULL, NULL, NULL, 1000)`);
+    db.run(`INSERT INTO labels VALUES ('lab-a', 'monitor', NULL)`);
+    db.run(`INSERT INTO issue_labels VALUES ('id-1', 'lab-a')`);
+    db.close();
+    freshen();
+  }
+
+  test("HIT returns state + labels as one defined pair", () => {
+    seedPair();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.stateAndLabels("CTL-1")).toEqual({
+      state: { terminal: false, state: "Implement" },
+      labels: [{ id: "lab-a", name: "monitor" }],
+    });
+  });
+
+  test("absent row → undefined — never a partial pair", () => {
+    seedPair();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.stateAndLabels("CTL-999")).toBeUndefined();
+  });
+});

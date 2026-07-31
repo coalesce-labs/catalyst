@@ -263,12 +263,12 @@ const GATEWAY_STATE_FRESH_MS = 60_000;
 // and the batch reads — are NOT yet instrumented, so catalyst_linear_read_total
 // undercounts those lower-frequency direct-read contexts. Tracked as a follow-up
 // (extend recordDaemonRead to those call sites) rather than expanded here.
-function recordDaemonRead(source, result, identifier, ageMs = null) {
+function recordDaemonRead(source, result, identifier, ageMs = null, op = "read_ticket") {
   try {
     emitLinearReadEvent({
       source,
       result,
-      op: "read_ticket",
+      op,
       entity: identifier,
       ageMs,
       serviceName: "catalyst.execution-core",
@@ -737,16 +737,57 @@ export function readTicketLabelNodes(identifier, { exec = defaultExec } = {}) {
 // retained for back-compat with any deployment still on the 2026-05-27 contract.
 export function classifyTicketResolution(
   identifier,
-  { exec = defaultExec, gateway, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
+  // bypassCaches (CTL-1580 round 6): a DUE live recheck must skip BOTH cached
+  // tiers. It is a dedicated flag — not the absence of gateway/replica —
+  // because production injection (daemon.mjs runTick) deliberately spreads
+  // `{ ...opts, gateway }` so callers cannot accidentally drop the reader; a
+  // flag survives that spread where option omission does not.
+  { exec = defaultExec, gateway, replica, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS, bypassCaches = false } = {}
 ) {
   // CTL-823: serve ONLY the cheap not-quarantine verdict from the durable
   // store — a fresh, present, not-removed descriptor proves existence.
   // removed/absent/stale NEVER short-circuit: quarantine is a destructive
   // write, so those verdicts always pay a fresh live read
   // (fresh-before-quarantine).
-  if (gateway) {
+  if (gateway && !bypassCaches) {
     const d = gateway.getDescriptor(identifier);
     if (d && !d.removed && descriptorAgeMs(d) <= gatewayFreshMs) return "exists";
+  }
+  // CTL-1580: replica tier (mirrors fetchTicketState's CTL-1340 tier). A
+  // present, non-tombstoned replica row proves existence — the SAFE direction
+  // (it can only PREVENT quarantine). A removed/absent row reads as MISS
+  // (lookup → undefined) and falls through, so a true deletion still pays the
+  // definitive live read below. No `replica` → skipped (byte-identical).
+  // This matters for QUIET stuck tickets: their gateway descriptor ages out
+  // permanently (no webhooks refresh it), which made every Pass 0a tick a live
+  // read (the PROJ-52 burn).
+  //
+  // FRESHNESS-GATED (Codex review): lookup() itself has no writer-liveness
+  // gate, so a DEAD replica writer's stale non-tombstoned row would otherwise
+  // suppress the definitive deletion check indefinitely. Gate on the reader's
+  // isFresh() (the .writer.lock heartbeat accessor, CTL-1571) and fail CLOSED
+  // when the accessor is absent (an older reader object) — the tier stays
+  // inert rather than trusting an ungated row; the Pass 0a probe cool-down
+  // still bounds the live fallback to one read per window.
+  // Gateway TOMBSTONE veto (Codex round 5): a fresh { removed: true }
+  // descriptor is webhook-observed evidence of deletion; when the same deletion
+  // failed to apply to the replica (the CTL-1402 drift class), the stale
+  // non-tombstoned row must not serve "exists" — skip the replica tier and pay
+  // the definitive live read below.
+  const freshGatewayTombstone = (() => {
+    if (!gateway) return false;
+    try {
+      const d = gateway.getDescriptor(identifier);
+      return Boolean(d && d.removed === true && descriptorAgeMs(d) <= gatewayFreshMs);
+    } catch {
+      return false; // descriptor read is best-effort — never blocks the tier
+    }
+  })();
+  if (!bypassCaches && !freshGatewayTombstone && replica && typeof replica.isFresh === "function" && replica.isFresh()) {
+    if (replica.lookup(identifier) !== undefined) {
+      recordDaemonRead("replica", "ok", identifier, null, "classify_resolution");
+      return "exists";
+    }
   }
   // CTL-1339: hot per-signal terminal read (phantom-sweep) — cap the wall-clock
   // so a 429-stalled linearis can't block the synchronous tick. A timed-out read
@@ -754,27 +795,44 @@ export function classifyTicketResolution(
   const { code, stdout, stderr } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
+  // CTL-1580 + CTL-1403: this path was named-but-uninstrumented — every live
+  // classify now lands in catalyst.linear.read (op=classify_resolution).
+  // Result semantics (Codex rounds 2–3): "ok" ⟺ the read produced a USABLE
+  // verdict (exists / not-found — the CTL-1504 exit-1 not-found included);
+  // "unknown" (nonzero exit, unparseable body, transient/auth error body) is a
+  // failed classify — recording it ok would conceal auth/CLI drift.
+  const classifySrc = replica ? "linearis_miss" : "linearis";
+  const finishClassify = (verdict) => {
+    recordDaemonRead(
+      classifySrc,
+      verdict === "unknown" ? "failed" : "ok",
+      identifier,
+      null,
+      "classify_resolution"
+    );
+    return verdict;
+  };
   if (code !== 0) {
     // CTL-1504: the CLI now exits 1 for a genuinely-missing ticket, with the
     // not-found body on stderr. A definitive not-found is the ONLY nonzero that
     // may quarantine; every other nonzero (429/network/auth/timeout/invalid-format)
     // stays ambiguous → "unknown" so a Linear outage never quarantines a real ticket.
-    return bodyLooksNotFound(stderr, stdout) ? "not-found" : "unknown";
+    return finishClassify(bodyLooksNotFound(stderr, stdout) ? "not-found" : "unknown");
   }
   let node;
   try {
     node = JSON.parse(stdout);
   } catch {
-    return "unknown"; // unparseable — fail safe, re-check next tick
+    return finishClassify("unknown"); // unparseable — fail safe, re-check next tick
   }
-  if (node == null) return "not-found";
+  if (node == null) return finishClassify("not-found");
   // The real missing-ticket shape: exit 0 + { error: "...not found" }. Only a
   // "not found" error is definitive; any other error body is transient.
   if (typeof node.error === "string") {
-    return /not\s*found/i.test(node.error) ? "not-found" : "unknown";
+    return finishClassify(/not\s*found/i.test(node.error) ? "not-found" : "unknown");
   }
   const id = node?.identifier ?? node?.id ?? null;
-  return id ? "exists" : "not-found";
+  return finishClassify(id ? "exists" : "not-found");
 }
 
 // fetchTicketAssignee — the CTL-781 respect-assignment read: the ticket's
@@ -1115,11 +1173,15 @@ export function runEligibleQuery(
 ) {
   // CTL-1397: replica-backed board-list tier. Fail-open: a throw out of
   // eligible() is swallowed → local undefined → fall through to linearis.
+  // CTL-1580: the throw is remembered so the live-list telemetry can carry the
+  // canonical linearis_exception source (distinct from an ordinary miss).
+  let replicaThrew = false;
   if (replica?.eligible) {
     let local;
     try {
       local = replica.eligible(query);
     } catch {
+      replicaThrew = true;
       local = undefined; // any replica failure → fall through to linearis
     }
     if (local && Array.isArray(local.nodes)) {
@@ -1132,6 +1194,9 @@ export function runEligibleQuery(
       // populated delegate, so no GraphQL batch is needed).
       if (tickets.length > 0) {
         onSource?.("replica", tickets.length);
+        // CTL-1580: entity null — event.label is a single-ticket field by
+        // contract; list/search ops must omit it.
+        recordDaemonRead("replica", "ok", null, null, "eligible_list");
         return tickets;
       }
       // CTL-1397 (3/n) — a SEED-COMPLETE replica-empty. The reader only returns a
@@ -1160,6 +1225,7 @@ export function runEligibleQuery(
       //     trusts an unconfirmed empty as authoritative during a storm).
       if (now() - (_eligibleEmptyConfirmAt.get(query.team) ?? 0) < reconfirmMs) {
         onSource?.("replica", 0);
+        recordDaemonRead("replica", "ok", null, null, "eligible_list"); // CTL-1580
         return tickets; // [] — a recently linearis-confirmed empty, trusted (breaker-immune)
       }
       // CTL-1420 (freeze-avoidance): when the CTL-679 breaker is OPEN, the
@@ -1178,6 +1244,11 @@ export function runEligibleQuery(
       // only ever trusts a genuinely-empty board; real Todo work still dispatches.
       if (breakerIsOpen()) {
         onSource?.("replica-empty-breaker-open", 0);
+        // CTL-1580 (Codex review): this branch fires exactly during the
+        // quota-exhaustion condition the counters exist for — an unrecorded
+        // replica serve here would distort the replica-hit ratio when it
+        // matters most.
+        recordDaemonRead("replica", "ok", null, null, "eligible_list");
         return tickets; // [] — trusted under quota exhaustion (freeze-avoidance)
       }
       // No recent confirmation AND breaker closed → fall through to the linearis
@@ -1215,20 +1286,52 @@ export function runEligibleQuery(
   // monitor.reconcile.failing alert — exactly the failure mode CTL-1339 designed
   // against. `{ uncapped: true }` opts this spawn out of the default floor.
   const { code, stdout, stderr } = exec("linearis", buildLinearisArgs(query), { uncapped: true });
+  // CTL-1580 + CTL-1403: the eligible-list live spawn was completely invisible
+  // to catalyst.linear.read (only the plain eligible_source log line saw it) —
+  // instrument every outcome so Loki accounts for this burn. Source taxonomy:
+  // replica tier present but fell through (MISS / unconfirmed empty) →
+  // linearis_miss; no replica tier at all → linearis. Entity is null (the
+  // event.label field is single-ticket by contract; list ops omit it), and
+  // "ok" is recorded only AFTER a successful parse — an exit-0 garbage body is
+  // a failed read, not a healthy one.
+  const liveListSource = replicaThrew
+    ? "linearis_exception"
+    : replica?.eligible
+      ? "linearis_miss"
+      : "linearis";
   if (code !== 0) {
+    recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
     throw new Error(`linearis issues list failed (exit ${code}): ${(stderr || "").trim()}`);
   }
   let parsed;
   try {
     parsed = JSON.parse(stdout);
   } catch (err) {
+    recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
     throw new Error(`linearis stdout is not JSON: ${err.message}`);
   }
-  let tickets = (parsed.nodes ?? []).map(normalizeTicket);
-  // Priority is a floor: keep tickets whose priority is more-urgent-or-equal
-  // (1=Urgent … 4=Low). 0 ("No priority") is always below any floor.
-  if (query.priority != null) {
-    tickets = tickets.filter((t) => t.priority >= 1 && t.priority <= query.priority);
+  // Structural validation (Codex round 6): an exit-0 body WITHOUT nodes[] (a
+  // parseable auth-error object, '{}') must not normalize to an EMPTY BOARD —
+  // that would set the empty-confirm marker and zero admission for the trust
+  // window. Reject + record failed; reconcileProject preserves the prior set.
+  if (!Array.isArray(parsed?.nodes)) {
+    recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
+    throw new Error("linearis issues list body lacks nodes[] — structurally invalid");
+  }
+  let tickets;
+  try {
+    tickets = parsed.nodes.map(normalizeTicket);
+    // Priority is a floor: keep tickets whose priority is more-urgent-or-equal
+    // (1=Urgent … 4=Low). 0 ("No priority") is always below any floor.
+    if (query.priority != null) {
+      tickets = tickets.filter((t) => t.priority >= 1 && t.priority <= query.priority);
+    }
+  } catch (err) {
+    // Structurally invalid body (e.g. {"nodes":{}}): syntactically valid JSON
+    // whose shape throws in normalization — a failed read, recorded as such
+    // before the throw reaches reconcileProject (Codex round 3).
+    recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
+    throw err;
   }
   // CTL-1174: best-effort delegate enrichment from a single batched GraphQL POST.
   // Never throws — a delegate hiccup must not block the state/priority refresh.
@@ -1259,5 +1362,6 @@ export function runEligibleQuery(
   // CTL-1397: mark the source (linearis) for the same verification seam as the
   // replica HIT above, so the daemon can log eligible_source for both paths.
   onSource?.("linearis", tickets.length);
+  recordDaemonRead(liveListSource, "ok", null, null, "eligible_list"); // CTL-1580: only after a clean parse
   return tickets;
 }
