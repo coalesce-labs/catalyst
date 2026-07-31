@@ -1587,7 +1587,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // can never skew from the liveness overlay. null max_parallel (a peer that never
   // published a slot count) is coerced to 0 to match the reader contract.
   const anchorCapacityCache: {
-    map: Record<string, { maxParallel: number; inFlightCount: number }>;
+    map: Record<
+      string,
+      {
+        maxParallel: number;
+        inFlightCount: number;
+        // CTL-1581: occupancy subset — null when the peer's daemon predates it.
+        activeCount?: number | null;
+        activeTickets?: string[] | null;
+      }
+    >;
   } = { map: {} };
   // CTL-1322: LOCAL-node admission cache, read from the local event log's
   // node.heartbeat admission block (readClusterAdmission). Local-only by design —

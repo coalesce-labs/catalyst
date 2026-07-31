@@ -9,6 +9,16 @@ export type ClusterNodeStatus = "live" | "degraded" | "offline";
 export interface ClusterSignalNode {
   host: string;
   status: ClusterNodeStatus;
+  maxParallel?: number;
+  inFlightCount?: number;
+  freeSlots?: number;
+  /** CTL-1581: running/dispatched subset — the slot-OCCUPANCY count (inFlightCount
+   *  also counts parked dirs, which hold no slot). Absent on old-daemon peers. */
+  activeCount?: number;
+  /** CTL-1581: the ACTIVE ticket ids — the SlotDeck's remote-occupancy labels. */
+  tickets?: string[];
+  accepting?: boolean;
+  holdReason?: "drain" | "liveness-cold" | null;
 }
 
 /** The tiny per-node footer-health wire shape projected off the ClusterView. */

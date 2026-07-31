@@ -110,8 +110,21 @@ export function foldPeerSnapshot({ prevHeartbeats = {}, prevCapacity = {}, peers
     const prevTrusted =
       Number.isFinite(prevTs) && prevTs <= nowMs + FUTURE_SKEW_TOLERANCE_MS;
     const fresher = Number.isFinite(newTs) && (!prevTrusted || newTs >= prevTs);
+    // CTL-1581 (Codex round 4): occupancy-clearing needs STRICT advancement — a
+    // re-fold of the SAME heartbeat (same last_seen, e.g. query D failed on this
+    // poll while C succeeded) must not erase enrichment learned from an earlier
+    // poll of that same beat. Only a strictly newer beat without active fields
+    // clears to null (the rollback/old-daemon case).
+    const strictlyNewer = Number.isFinite(newTs) && (!prevTrusted || newTs > prevTs);
     if (hasTs && fresher) nextHb[host] = rec.last_seen;
-    const hasCapacity = rec.max_parallel != null || rec.in_flight_count != null;
+    const hasCapacity =
+      rec.max_parallel != null ||
+      rec.in_flight_count != null ||
+      // CTL-1581: an occupancy-only record (query C failed, query D succeeded)
+      // must still fold — requiring the capacity pair would leave retention
+      // serving stale activeCount/activeTickets indefinitely.
+      rec.active_count != null ||
+      Array.isArray(rec.active_tickets);
     if (hasCapacity && fresher) {
       // Per-FIELD merge: a record can carry one capacity field and not the other
       // (partial structured metadata); the absent field retains its previous
@@ -124,6 +137,21 @@ export function foldPeerSnapshot({ prevHeartbeats = {}, prevCapacity = {}, peers
           typeof rec.in_flight_count === "number"
             ? rec.in_flight_count
             : (prevCap?.inFlightCount ?? 0),
+        // CTL-1581: slot-OCCUPANCY follows the BEAT — a STRICTLY newer record
+        // without active fields (query D failed / old-daemon rollback) clears
+        // to null so consumers degrade to the honest inFlightCount fallback;
+        // a re-fold of the SAME beat retains what an earlier poll learned.
+        activeCount:
+          typeof rec.active_count === "number"
+            ? rec.active_count
+            : strictlyNewer
+              ? null
+              : (prevCap?.activeCount ?? null),
+        activeTickets: Array.isArray(rec.active_tickets)
+          ? rec.active_tickets
+          : strictlyNewer
+            ? null
+            : (prevCap?.activeTickets ?? null),
       };
     }
   }

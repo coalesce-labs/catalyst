@@ -33,7 +33,11 @@ describe("SlotDeck cluster-mode (CTL-1092)", () => {
     expect(sdSrc).toContain("assignClusterSlots");
   });
 
-  it("uses aggregateClusterCapacity for cluster headline", () => {
-    expect(sdSrc).toContain("aggregateClusterCapacity");
+  it("derives the cluster headline from the deck's own occupied slots (CTL-1581)", () => {
+    // The header must count the SAME boxes the deck renders — the old
+    // aggregateClusterCapacity headline counted the heartbeat's ownership
+    // number while the boxes rendered occupancy ("1/4 in use", all boxes Open).
+    expect(sdSrc).toContain("displaySlots.filter((s) => s.occupied)");
+    expect(sdSrc).not.toContain("aggregateClusterCapacity(");
   });
 });
