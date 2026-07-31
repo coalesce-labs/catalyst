@@ -528,7 +528,7 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
         const ph = wanted.map(() => "?").join(",");
         return handle
           .prepare(
-            `SELECT i.identifier AS identifier, l.name AS name FROM issues i JOIN issue_labels il ON il.issue_id = i.id JOIN labels l ON l.id = il.label_id WHERE i.identifier IN (${ph}) AND i.removed_at IS NULL`
+            `SELECT i.identifier AS identifier, l.name AS name FROM issues i JOIN issue_labels il ON il.issue_id = i.id JOIN labels l ON l.id = il.label_id WHERE i.identifier IN (${ph}) AND i.removed_at IS NULL AND l.removed_at IS NULL`
           )
           .all(...wanted);
       })();
