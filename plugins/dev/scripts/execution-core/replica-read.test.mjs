@@ -876,3 +876,23 @@ describe("createReplicaReader.labels (CTL-1481 — worker-label visibility read)
     expect(reader.labels(undefined)).toBeUndefined();
   });
 });
+
+describe("createReplicaReader.isFresh (CTL-1571)", () => {
+  test("true with a recent writer.lock heartbeat, false when stale or absent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "replica-isfresh-"));
+    const dbPath = join(dir, "catalyst-replica.db");
+    new Database(dbPath).close();
+    const reader = createReplicaReader({ dbPath });
+    // absent lock → falls back to the db/-wal mtime proxy; db just created → fresh
+    expect(reader.isFresh()).toBe(true);
+    // fresh heartbeat
+    writeFileSync(`${dbPath}.writer.lock`, "1");
+    expect(reader.isFresh()).toBe(true);
+    // stale heartbeat (1h old, threshold 5min) — a PRESENT lock is authoritative,
+    // so this is false even though the db file's own mtime is fresh
+    const old = (Date.now() - 3_600_000) / 1000;
+    utimesSync(`${dbPath}.writer.lock`, old, old);
+    expect(reader.isFresh()).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

@@ -485,5 +485,19 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  return { lookup, freshness, titles, eligible, ownership, labels, close: dropHandle };
+  return {
+    lookup,
+    freshness,
+    titles,
+    eligible,
+    ownership,
+    labels,
+    // isFresh — WRITER-LIVENESS gate (the `.writer.lock` heartbeat), bound to
+    // this reader's dbPath. Callers composing replica-first reads (the broker's
+    // cache-reconcile, CTL-1571) gate on THIS, not on freshness(): freshness()
+    // measures data-staleness (MAX(updated_at)), which reads a quiet-but-current
+    // feed as stale — the exact false-negative CTL-1397 fixed for -wal mtime.
+    isFresh: () => isReplicaFresh(dbPath),
+    close: dropHandle,
+  };
 }

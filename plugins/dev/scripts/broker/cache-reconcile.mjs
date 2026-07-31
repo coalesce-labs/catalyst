@@ -27,6 +27,9 @@ import {
 } from "./broker-state.mjs";
 import { extractLabelNames } from "./backfill-ticket-labels.mjs";
 import { linearAsyncReminter, isAuthError } from "../execution-core/linear-remint.mjs";
+// Node-safe by design (its header commits to node-builtin-only imports) — unlike
+// replica-read.mjs, which must stay behind a lazy guarded import (see below).
+import { emitLinearReadEvent } from "../execution-core/linear-read-event.mjs";
 
 // Mode knob: env CATALYST_CACHE_RECONCILE overrides Layer-2 config; operators
 // opt in via =shadow (log would-write, touch nothing) then =enforce (write).
@@ -139,6 +142,91 @@ export function decideReconcile({ current, fetchedState, fetchedLabels }) {
   };
 }
 
+// ── Replica-first fetch (CTL-1571) ───────────────────────────────────────────
+// The reconcile's drift source is the LOCAL replica, not live Linear: the
+// replica already mirrors state+labels for every cached ticket (webhook +
+// cloud-sync fed), so walking it costs zero API budget. Live linearis remains
+// ONLY the loud fallback for a stale replica or a ticket the replica does not
+// carry.
+//
+// replica-read.mjs top-level-imports bun:sqlite, and the broker's launcher
+// (catalyst-broker resolve_runtime) falls back to NODE when bun is absent — a
+// static import here would crash broker start on such a host (the constraint
+// execution-core/monitor.mjs:42 documents). Hence the memoized, computed-
+// specifier, guarded dynamic import: a runtime that cannot load it degrades to
+// pure live fetch (source="linearis" bypass), never a crash.
+const REPLICA_READ_MODULE = ["..", "execution-core", "replica-read.mjs"].join("/");
+let replicaReaderPromise;
+function getReplicaReader() {
+  if (replicaReaderPromise === undefined) {
+    replicaReaderPromise = import(REPLICA_READ_MODULE)
+      .then((m) => m.createReplicaReader())
+      .catch(() => null);
+  }
+  return replicaReaderPromise;
+}
+
+// recordReconcileRead — CTL-1403 telemetry for every reconcile read, replica
+// hits included, so the burn (and the savings) are visible in Loki. op is
+// "cache_reconcile" (distinct from the daemon's "read_ticket") and the service
+// is the broker's own. Best-effort — never breaks the fetch.
+function recordReconcileRead(source, result, ticket) {
+  try {
+    emitLinearReadEvent({
+      source,
+      result,
+      op: "cache_reconcile",
+      entity: ticket,
+      serviceName: "catalyst.broker",
+    });
+  } catch {
+    /* telemetry must never break a reconcile read */
+  }
+}
+
+/**
+ * createReplicaFetcher — compose the replica-first fetch with a live fallback.
+ * Same contract as fetchLive: resolves { state, labels, error }, never rejects.
+ * Fallback taxonomy (mirrors linear-query.mjs): reader unavailable on this
+ * host/runtime → source "linearis" (bypass); reader present but stale replica
+ * or ticket MISS → source "linearis_miss" (loud — a healthy fleet should see
+ * ~none of these). Injectable seams for tests.
+ */
+export function createReplicaFetcher({ getReader = getReplicaReader, fallback = fetchLive, logger } = {}) {
+  const log = logSink(logger);
+  return async function fetchWithReplicaFirst(ticket) {
+    const reader = await getReader();
+    if (!reader) {
+      const live = await fallback(ticket);
+      recordReconcileRead("linearis", live.error ? "failed" : "ok", ticket);
+      return live;
+    }
+    if (!reader.isFresh()) {
+      log("warn", { ticket }, "cache-reconcile: replica STALE — falling back to live linearis");
+      const live = await fallback(ticket);
+      recordReconcileRead("linearis_miss", live.error ? "failed" : "ok", ticket);
+      return live;
+    }
+    const stateHit = reader.lookup(ticket);
+    const labelsHit = reader.labels(ticket);
+    if (stateHit === undefined && labelsHit === undefined) {
+      log("warn", { ticket }, "cache-reconcile: replica MISS — falling back to live linearis");
+      const live = await fallback(ticket);
+      recordReconcileRead("linearis_miss", live.error ? "failed" : "ok", ticket);
+      return live;
+    }
+    recordReconcileRead("replica", "ok", ticket);
+    return {
+      state: stateHit !== undefined ? stateHit.state : null,
+      labels: labelsHit !== undefined ? labelsHit.map((l) => l.name) : null,
+      error: null,
+    };
+  };
+}
+
+// Production default — reconcileCacheState picks this up with no wiring change.
+export const fetchWithReplicaFirst = createReplicaFetcher();
+
 // linearisBodyError — the error string when a linearis JSON body is error-shaped
 // (`{"error": "..."}`) despite a zero exit, else null. Exported for tests
 // (CTL-1577 round 2: an exit-zero auth body must not read as a silent null row).
@@ -229,7 +317,9 @@ export async function reconcileCacheState({
   // exceeds its budget, and Backlog always gets a reserved floor of the cap.
   cursor = { active: null, backlog: null },
   getAll = getAllTicketDescriptors,
-  fetch = fetchLive,
+  // CTL-1571: replica-first — live linearis only as the loud fallback for a
+  // stale replica / uncarried ticket. A healthy pass costs zero API reads.
+  fetch = fetchWithReplicaFirst,
   upsert = upsertTicketDescriptor,
   // CTL-1577: the startup mint (catalyst-broker cmd_start) runs ONCE; a broker
   // crossing the OAuth expiry boundary re-mints here mid-run (cooldown-guarded
