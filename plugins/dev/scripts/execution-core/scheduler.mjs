@@ -4343,12 +4343,13 @@ export function schedulerTick(
     // DELETION_PROBE_INTERVAL_MS (the phantom branch already gated above).
     if (!isPhantomWorkerDir(phaseSignals) && !recordDeletionProbeIfDue(orchDir, sig.ticket, now()))
       continue;
-    // CTL-1580 (Codex round 3): every REPLICA_VOUCH_RECHECK_MS the replica tier
-    // is bypassed so one LIVE read re-verifies existence — a stale row from a
-    // missed deletion apply (writer alive, isFresh green) must not vouch forever.
+    // CTL-1580 (Codex rounds 3–4): every REPLICA_VOUCH_RECHECK_MS BOTH cached
+    // tiers (replica AND gateway) are bypassed so the recheck is a genuine live
+    // read — a stale replica row from a missed deletion apply, or a
+    // fresh-but-wrong gateway descriptor, must not vouch forever.
     const liveRecheckDue = recordReplicaVouchRecheckIfDue(orchDir, sig.ticket, now());
     if (
-      classifyResolution(sig.ticket, { exec, gateway, replica: liveRecheckDue ? undefined : replica }) !==
+      classifyResolution(sig.ticket, liveRecheckDue ? { exec } : { exec, gateway, replica }) !==
       "not-found"
     )
       continue; // (b) definitive only
@@ -4359,11 +4360,14 @@ export function schedulerTick(
         "scheduler: quarantined phantom worker dir (not-found + not-eligible + dead bg) — CTL-671"
       );
     } else {
-      // CTL-1580 (Codex round 3): a definitive not-found whose quarantine write
-      // failed must not sit out the probe cool-down — clear the marker so the
-      // next tick retries the (local, read-free) quarantine immediately.
+      // CTL-1580 (Codex rounds 3–4): a definitive not-found whose quarantine
+      // write failed must not sit out EITHER cool-down — clear the probe marker
+      // (next tick retries immediately) AND the vouch-recheck marker (so that
+      // retry pays the live path again instead of being re-vouched by the very
+      // stale row the recheck just disproved).
       try {
         rmSync(deletionProbePath(orchDir, sig.ticket), { force: true });
+        rmSync(replicaVouchRecheckPath(orchDir, sig.ticket), { force: true });
       } catch {
         /* best-effort — worst case the retry waits out the cool-down */
       }
