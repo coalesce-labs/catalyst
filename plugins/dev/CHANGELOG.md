@@ -1,5 +1,28 @@
 # Changelog
 
+## [12.40.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.39.1...catalyst-dev-v12.40.0)
+
+Jul 31, 2026
+
+<!-- ai-enhanced -->
+
+### Inbox Conversation Surface & Linear API Burn Fixes
+
+The inbox is now a full conversation surface: you can read a parked ticket's ask summary, thread, and suggested replies — and post a response as yourself without leaving the inbox. Alongside this, a cluster of Linear API quota fixes lands together: the Workers page now reads peer liveness and capacity from Loki instead of a stale Linear anchor, the broker authenticates as the app actor so reconcile reads no longer bill your personal API bucket, and several scheduler paths that were firing live Linear probes on every tick now use the replica or a cooldown window instead.
+
+
+
+### PRs
+
+* **dev:** CTL-1569 make the inbox a conversation surface (ask summary + thread + inline reply) ([#2801](https://github.com/coalesce-labs/catalyst/issues/2801)) ([1d59e75](https://github.com/coalesce-labs/catalyst/commit/1d59e754b83e37053fcdb565c30a7f52caf3e6e0))
+* **dev:** CTL-1574 ticket activity feed (Discussion) in monitor inbox + ticket page ([#2815](https://github.com/coalesce-labs/catalyst/issues/2815)) ([d22b757](https://github.com/coalesce-labs/catalyst/commit/d22b75720552d8c6697aa88e80f10041d2b31108))
+* **dev:** CTL-1551 budget the peer-liveness live window for transport lag ([#2809](https://github.com/coalesce-labs/catalyst/issues/2809)) ([8ad9ff5](https://github.com/coalesce-labs/catalyst/commit/8ad9ff5fba4b7367bad48ffb9073a98a149580a6))
+* **dev:** CTL-1551 Workers page reads peer liveness+capacity from Loki, not the dead Linear anchor ([#2808](https://github.com/coalesce-labs/catalyst/issues/2808)) ([3b095af](https://github.com/coalesce-labs/catalyst/commit/3b095afe471a1dc03983fc1ef4d9c4be103744f4))
+* **dev:** CTL-1570 stop the phantom sweep spending a live Linear read per tick on workerless dirs ([#2803](https://github.com/coalesce-labs/catalyst/issues/2803)) ([8028469](https://github.com/coalesce-labs/catalyst/commit/8028469e2f4202225c200bfa9c21d69766194529))
+* **dev:** CTL-1571 cache-reconcile reads the replica, not live Linear ([#2824](https://github.com/coalesce-labs/catalyst/issues/2824)) ([59fa625](https://github.com/coalesce-labs/catalyst/commit/59fa625b75409b71c19adde8839c5e3dbd28a8de))
+* **dev:** CTL-1577 broker authenticates to Linear as the app-actor ([#2814](https://github.com/coalesce-labs/catalyst/issues/2814)) ([0a209a1](https://github.com/coalesce-labs/catalyst/commit/0a209a195dd6f79560e9390ef7dafbc372aa6e8d))
+* **dev:** CTL-1580 stop per-tick live probes of stuck tickets; instrument the invisible reads ([#2825](https://github.com/coalesce-labs/catalyst/issues/2825)) ([ea6db1b](https://github.com/coalesce-labs/catalyst/commit/ea6db1b3535f0be33d6cc7407596ad57a088f205))
+
 ## [12.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.39.0...catalyst-dev-v12.39.1)
 
 Jul 30, 2026
