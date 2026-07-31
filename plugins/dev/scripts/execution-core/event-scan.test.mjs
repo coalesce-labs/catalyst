@@ -18,6 +18,7 @@ import {
   countRemediateCycles,
   countRecoveryPassCycles,
   hasCompleteEvent,
+  latestCompleteEventTs,
   __resetEventScanIndexForTest,
   __phaseEventsLengthForTest,
   countTicketEventsInWindow,
@@ -557,5 +558,67 @@ describe("hasCompleteEvent", () => {
     expect(hasCompleteEvent({ ticket: "", phase: "plan", path })).toBe(false);
     expect(hasCompleteEvent({ ticket: "CTL-1", phase: "", path })).toBe(false);
     expect(hasCompleteEvent({ path })).toBe(false);
+  });
+});
+
+// CTL-778 P2: latestCompleteEventTs — the ts of the most recent complete event,
+// so a caller can scope "seen" to a specific dispatch attempt (see recovery.mjs's
+// completeEventSeen sinceIso). hasCompleteEvent only answers "ever"; this is the
+// disambiguator that closes the stale-evidence reclaim bug.
+describe("latestCompleteEventTs", () => {
+  beforeEach(() => __resetEventScanIndexForTest());
+
+  test("null when no complete event exists", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "plan", action: "revive", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(latestCompleteEventTs({ ticket: "CTL-1", phase: "plan", path })).toBeNull();
+  });
+
+  test("null on a missing log (cold start)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "evtscan-"));
+    expect(
+      latestCompleteEventTs({ ticket: "CTL-1", phase: "plan", path: join(dir, "events.jsonl") })
+    ).toBeNull();
+  });
+
+  test("returns the ts of a single complete event", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "verify", action: "complete", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(latestCompleteEventTs({ ticket: "CTL-1", phase: "verify", path })).toBe(
+      "2026-06-08T00:00:00Z"
+    );
+  });
+
+  // THE regression this exists to catch: a phase that completed once (e.g. a
+  // verify run that stalled out on a remediation-cycle cap) and is later
+  // redispatched emits a SECOND complete event for a later sub-run. The MAX must
+  // win — an out-of-order write, or a caller comparing against the wrong one,
+  // would silently reopen the CTL-778 stale-reclaim bug.
+  test("returns the LATEST ts across multiple complete events for the same ticket+phase", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "verify", action: "complete", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+      makeEvent({ phase: "verify", action: "complete", ticket: "CTL-1", ts: "2026-07-31T00:50:36Z" }),
+      makeEvent({ phase: "verify", action: "complete", ticket: "CTL-1", ts: "2026-06-09T00:00:00Z" }),
+    ]);
+    expect(latestCompleteEventTs({ ticket: "CTL-1", phase: "verify", path })).toBe(
+      "2026-07-31T00:50:36Z"
+    );
+  });
+
+  test("ignores complete events for a different ticket or phase", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "verify", action: "complete", ticket: "CTL-2", ts: "2026-06-08T00:00:00Z" }),
+      makeEvent({ phase: "review", action: "complete", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(latestCompleteEventTs({ ticket: "CTL-1", phase: "verify", path })).toBeNull();
+  });
+
+  test("returns null when ticket or phase is missing", () => {
+    const { path } = tempLog([]);
+    expect(latestCompleteEventTs({ ticket: "", phase: "plan", path })).toBeNull();
+    expect(latestCompleteEventTs({ ticket: "CTL-1", phase: "", path })).toBeNull();
+    expect(latestCompleteEventTs({ path })).toBeNull();
   });
 });
