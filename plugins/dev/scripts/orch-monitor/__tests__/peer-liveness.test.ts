@@ -179,6 +179,16 @@ describe("readPeerRecords (CTL-1551)", () => {
     });
     expect(second.capacity.mini.activeCount).toBeNull();
     expect(second.capacity.mini.activeTickets).toBeNull();
+    // A re-fold of the SAME beat (same last_seen) with a failed occupancy
+    // enrichment RETAINS what an earlier poll learned about that beat.
+    const third = foldPeerSnapshot({
+      prevHeartbeats: { mini: "2026-07-30T15:01:00Z" },
+      prevCapacity: first.capacity,
+      peers: { mini: { last_seen: "2026-07-30T15:01:00Z", max_parallel: 4, in_flight_count: 3 } },
+      nowMs: Date.parse("2026-07-30T15:01:45Z"),
+    });
+    expect(third.capacity.mini.activeCount).toBe(1);
+    expect(third.capacity.mini.activeTickets).toEqual(["PROJ-9"]);
   });
 
   it("foldPeerSnapshot: a FUTURE-skewed cached timestamp does not block corrected heartbeats", async () => {
