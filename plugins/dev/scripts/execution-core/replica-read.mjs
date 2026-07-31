@@ -485,5 +485,45 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  return { lookup, freshness, titles, eligible, ownership, labels, close: dropHandle };
+  // stateAndLabels — BOTH projections from ONE deferred read transaction
+  // (CTL-1571 review): a re-seed completing between separate lookup() and
+  // labels() calls could hand the caller a MIXED pair (pre-reseed state +
+  // post-reseed labels), which enforce-mode reconcile would then write — and a
+  // stale terminal state persists, since reconcile skips terminal rows. One
+  // bun:sqlite transaction() (BEGIN DEFERRED — read-only-safe) pins both reads
+  // to a single snapshot. undefined on ANY miss/throw (never a partial pair) —
+  // callers fall through to live.
+  const stateAndLabels = (identifier) => {
+    if (!identifier) return undefined;
+    try {
+      const run = open().transaction(() => {
+        const state = lookup(identifier);
+        if (state === undefined) return undefined;
+        const lbls = labels(identifier);
+        if (lbls === undefined) return undefined;
+        return { state, labels: lbls };
+      });
+      return run();
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  return {
+    lookup,
+    freshness,
+    titles,
+    eligible,
+    ownership,
+    labels,
+    stateAndLabels,
+    // isFresh — WRITER-LIVENESS gate (the `.writer.lock` heartbeat), bound to
+    // this reader's dbPath. Callers composing replica-first reads (the broker's
+    // cache-reconcile, CTL-1571) gate on THIS, not on freshness(): freshness()
+    // measures data-staleness (MAX(updated_at)), which reads a quiet-but-current
+    // feed as stale — the exact false-negative CTL-1397 fixed for -wal mtime.
+    isFresh: () => isReplicaFresh(dbPath),
+    close: dropHandle,
+  };
 }
