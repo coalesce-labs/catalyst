@@ -777,34 +777,43 @@ export function classifyTicketResolution(
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
   // CTL-1580 + CTL-1403: this path was named-but-uninstrumented — every live
-  // classify now lands in catalyst.linear.read (op=classify_resolution). "ok"
-  // is recorded only AFTER a successful parse (Codex round 2): an exit-0
-  // garbage body is a failed read, not a healthy one.
+  // classify now lands in catalyst.linear.read (op=classify_resolution).
+  // Result semantics (Codex rounds 2–3): "ok" ⟺ the read produced a USABLE
+  // verdict (exists / not-found — the CTL-1504 exit-1 not-found included);
+  // "unknown" (nonzero exit, unparseable body, transient/auth error body) is a
+  // failed classify — recording it ok would conceal auth/CLI drift.
   const classifySrc = replica ? "linearis_miss" : "linearis";
+  const finishClassify = (verdict) => {
+    recordDaemonRead(
+      classifySrc,
+      verdict === "unknown" ? "failed" : "ok",
+      identifier,
+      null,
+      "classify_resolution"
+    );
+    return verdict;
+  };
   if (code !== 0) {
-    recordDaemonRead(classifySrc, "failed", identifier, null, "classify_resolution");
     // CTL-1504: the CLI now exits 1 for a genuinely-missing ticket, with the
     // not-found body on stderr. A definitive not-found is the ONLY nonzero that
     // may quarantine; every other nonzero (429/network/auth/timeout/invalid-format)
     // stays ambiguous → "unknown" so a Linear outage never quarantines a real ticket.
-    return bodyLooksNotFound(stderr, stdout) ? "not-found" : "unknown";
+    return finishClassify(bodyLooksNotFound(stderr, stdout) ? "not-found" : "unknown");
   }
   let node;
   try {
     node = JSON.parse(stdout);
   } catch {
-    recordDaemonRead(classifySrc, "failed", identifier, null, "classify_resolution");
-    return "unknown"; // unparseable — fail safe, re-check next tick
+    return finishClassify("unknown"); // unparseable — fail safe, re-check next tick
   }
-  recordDaemonRead(classifySrc, "ok", identifier, null, "classify_resolution");
-  if (node == null) return "not-found";
+  if (node == null) return finishClassify("not-found");
   // The real missing-ticket shape: exit 0 + { error: "...not found" }. Only a
   // "not found" error is definitive; any other error body is transient.
   if (typeof node.error === "string") {
-    return /not\s*found/i.test(node.error) ? "not-found" : "unknown";
+    return finishClassify(/not\s*found/i.test(node.error) ? "not-found" : "unknown");
   }
   const id = node?.identifier ?? node?.id ?? null;
-  return id ? "exists" : "not-found";
+  return finishClassify(id ? "exists" : "not-found");
 }
 
 // fetchTicketAssignee — the CTL-781 respect-assignment read: the ticket's
@@ -1145,11 +1154,15 @@ export function runEligibleQuery(
 ) {
   // CTL-1397: replica-backed board-list tier. Fail-open: a throw out of
   // eligible() is swallowed → local undefined → fall through to linearis.
+  // CTL-1580: the throw is remembered so the live-list telemetry can carry the
+  // canonical linearis_exception source (distinct from an ordinary miss).
+  let replicaThrew = false;
   if (replica?.eligible) {
     let local;
     try {
       local = replica.eligible(query);
     } catch {
+      replicaThrew = true;
       local = undefined; // any replica failure → fall through to linearis
     }
     if (local && Array.isArray(local.nodes)) {
@@ -1262,7 +1275,11 @@ export function runEligibleQuery(
   // event.label field is single-ticket by contract; list ops omit it), and
   // "ok" is recorded only AFTER a successful parse — an exit-0 garbage body is
   // a failed read, not a healthy one.
-  const liveListSource = replica?.eligible ? "linearis_miss" : "linearis";
+  const liveListSource = replicaThrew
+    ? "linearis_exception"
+    : replica?.eligible
+      ? "linearis_miss"
+      : "linearis";
   if (code !== 0) {
     recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
     throw new Error(`linearis issues list failed (exit ${code}): ${(stderr || "").trim()}`);
@@ -1274,11 +1291,20 @@ export function runEligibleQuery(
     recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
     throw new Error(`linearis stdout is not JSON: ${err.message}`);
   }
-  let tickets = (parsed.nodes ?? []).map(normalizeTicket);
-  // Priority is a floor: keep tickets whose priority is more-urgent-or-equal
-  // (1=Urgent … 4=Low). 0 ("No priority") is always below any floor.
-  if (query.priority != null) {
-    tickets = tickets.filter((t) => t.priority >= 1 && t.priority <= query.priority);
+  let tickets;
+  try {
+    tickets = (parsed.nodes ?? []).map(normalizeTicket);
+    // Priority is a floor: keep tickets whose priority is more-urgent-or-equal
+    // (1=Urgent … 4=Low). 0 ("No priority") is always below any floor.
+    if (query.priority != null) {
+      tickets = tickets.filter((t) => t.priority >= 1 && t.priority <= query.priority);
+    }
+  } catch (err) {
+    // Structurally invalid body (e.g. {"nodes":{}}): syntactically valid JSON
+    // whose shape throws in normalization — a failed read, recorded as such
+    // before the throw reaches reconcileProject (Codex round 3).
+    recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
+    throw err;
   }
   // CTL-1174: best-effort delegate enrichment from a single batched GraphQL POST.
   // Never throws — a delegate hiccup must not block the state/priority refresh.
