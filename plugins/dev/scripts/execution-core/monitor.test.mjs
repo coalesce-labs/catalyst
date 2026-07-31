@@ -1374,7 +1374,39 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
       // ENG-2 appears in BOTH sources; ENG-3 only in Triage.
       runTriageState: triageReturning([triageNode("ENG-2"), triageNode("ENG-3")]),
     });
-    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-1", "ENG-2", "ENG-3"]);
+    // Stranded-first (Codex R1): the Triage-state half walks BEFORE the eligible
+    // half so sustained admission load can't starve the recovery; ENG-2 dedupes.
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-2", "ENG-3", "ENG-1"]);
+  });
+
+  test("stranded Triage tickets walk before the eligible half (starvation guard)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-TODO")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-STRANDED")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-STRANDED", "ENG-TODO"]);
+  });
+
+  test("a Triage row younger than the dwell window is NOT swept (webhook-path territory)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const young = { ...triageNode("ENG-YOUNG"), updatedAt: new Date(Date.now() - 60_000).toISOString() };
+    const dwelled = { ...triageNode("ENG-DWELLED"), updatedAt: new Date(Date.now() - 11 * 60_000).toISOString() };
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([young, dwelled]),
+    });
+    // The young row is the →Triage webhook's job (and a lagging replica row must
+    // not re-triage a ticket that already advanced); the dwelled row sweeps.
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-DWELLED"]);
   });
 
   test("a Triage-state ticket that already has triage.json is still skipped (idempotence holds across both sources)", () => {

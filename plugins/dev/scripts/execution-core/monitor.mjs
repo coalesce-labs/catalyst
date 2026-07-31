@@ -1093,7 +1093,16 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
 // unavailable cases are logged at WARN and never silent: with the replica tier
 // off (or its writer dead) this half of the fix is INERT, and a stranded Triage
 // ticket would otherwise look like a mysterious no-op.
-function triageStateTickets(entry, { replica, runTriageState }) {
+// TRIAGE_STATE_MIN_DWELL_MS — only sweep Triage rows that have DWELLED (Codex
+// R1 on #2843): a ticket that entered Triage seconds ago is the webhook fast
+// path's job, and a lagging replica row could otherwise re-triage a ticket that
+// already advanced out of Triage. 10 min comfortably covers replica write lag
+// (seconds-scale under a live writer) while leaving genuinely stranded tickets
+// (hours-to-weeks old) fully covered. A row with no timestamp cannot prove
+// youth — it stays sweepable (recovery bias).
+const TRIAGE_STATE_MIN_DWELL_MS = 10 * 60 * 1000;
+
+function triageStateTickets(entry, { replica, runTriageState, now = Date.now }) {
   const query = resolveEligibleQuery(entry);
   const onSource = (source, count) => {
     const line = { team: query.team, triage_source: source, triage_count: count };
@@ -1106,7 +1115,15 @@ function triageStateTickets(entry, { replica, runTriageState }) {
       );
   };
   try {
-    return runTriageState(query, { replica, onSource });
+    const rows = runTriageState(query, { replica, onSource });
+    // Dwell guard (Codex R1): drop rows whose replica timestamp is younger than
+    // the dwell window — see TRIAGE_STATE_MIN_DWELL_MS. Unparseable/absent
+    // timestamps stay sweepable.
+    const nowMs = now();
+    return rows.filter((t) => {
+      const ms = t?.updatedAt ? Date.parse(t.updatedAt) : NaN;
+      return !Number.isFinite(ms) || nowMs - ms >= TRIAGE_STATE_MIN_DWELL_MS;
+    });
   } catch (err) {
     log.warn(
       { team: query.team, err: err.message },
@@ -1202,13 +1219,19 @@ export function sweepMissingTriage({
     hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
-    // CTL-1589: eligible set ∪ Triage-state board, deduped by ticket id. The
-    // eligible half comes first so a ticket present in both keeps its
-    // projection-backed record.
+    // CTL-1589: Triage-state board ∪ eligible set, deduped by ticket id. The
+    // STRANDED half walks first (Codex R1): under sustained admission load an
+    // eligible-first walk let fresh Todo tickets drain the per-sweep budget
+    // every sweep, starving the level-triggered recovery exactly when the fleet
+    // is busy. The stranded set is small and self-draining (one successful
+    // triage removes the ticket permanently), while the eligible half retries
+    // on the next 60s sweep — so stranded-first costs the Todo path at most one
+    // sweep of latency. Dual-presence is impossible in practice (a ticket has
+    // one state); dedup is belt-and-suspenders.
     const seen = new Set();
     const candidates = [
-      ...getEligibleSet(p.team),
       ...triageStateTickets(p, { replica, runTriageState }),
+      ...getEligibleSet(p.team),
     ];
     for (const t of candidates) {
       if (seen.has(t.identifier)) continue;
