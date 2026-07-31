@@ -182,7 +182,11 @@ function RemoteSlotCard({ slot }: { slot: ClusterSlot }) {
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
         <span style={{ fontSize: 10, color: C.fgDim, background: C.s3, borderRadius: 4, padding: "2px 5px", fontFamily: C.mono }}>{slot.host}</span>
-        <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 600, color: C.blue }}>{slot.ticket}</span>
+        {/* CTL-1581: count-based fallback slots (old-daemon/anchor peers) have no
+            ticket label — an honest "busy" beats a false Open. */}
+        <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 600, color: slot.ticket ? C.blue : C.fgDim }}>
+          {slot.ticket ?? "busy"}
+        </span>
       </div>
     </div>
   );

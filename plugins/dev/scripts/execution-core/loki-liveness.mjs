@@ -193,6 +193,27 @@ export async function readClusterLivenessFromLoki({
     } catch (err) {
       logger?.warn?.({ err: err?.message }, "loki-liveness: capacity enrichment failed (capacity → no-data)");
     }
+    // CTL-1581 (query D, best-effort): slot-occupancy enrichment. Same
+    // reference-to-surface rule as B/C. active_count matches `.+` on every
+    // new-daemon line (a number string, "0" included); active_tickets matches
+    // `.*` because an idle host's list is legitimately EMPTY — a `.+` filter
+    // would hide the "0 active" truth and leave stale occupancy on screen.
+    // Old-daemon lines match neither → fields stay null (unknown, never fake 0).
+    try {
+      const dBody = await queryLokiStreams(
+        mkUrl(`${sel} | catalyst_node_active_count=~\`.+\` | catalyst_node_active_tickets=~\`.*\``),
+        timeoutMs,
+        fetcher,
+      );
+      const activeEnriched = dBody ? parseLokiLivenessResponse(dBody) : {};
+      for (const [host, rec] of Object.entries(activeEnriched)) {
+        if (!out[host]) continue;
+        if (rec.active_count != null) out[host].active_count = rec.active_count;
+        if (Array.isArray(rec.active_tickets)) out[host].active_tickets = rec.active_tickets;
+      }
+    } catch (err) {
+      logger?.warn?.({ err: err?.message }, "loki-liveness: active enrichment failed (occupancy → unknown)");
+    }
     return out;
   } catch (err) {
     // Fail-open: never let a Loki hiccup break liveness. An empty map = "no peers

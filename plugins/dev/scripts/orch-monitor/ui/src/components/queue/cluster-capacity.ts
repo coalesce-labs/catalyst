@@ -74,23 +74,36 @@ export function assignClusterSlots({
   for (const n of nodes) {
     if (n.status === "offline" || !n.maxParallel) continue;
     if (n.host === localHost) {
-      // Rich local slots via existing assignSlots
-      const { occupied, emptyCount } = assignSlots(localWorkers, n.maxParallel);
-      for (let i = 0; i < occupied.length; i++) {
-        slots.push({ host: n.host, slotIndex: i, occupied: true, worker: occupied[i] });
+      // Rich local slots via existing assignSlots. CTL-1581: over-capacity
+      // workers are real processes — surface them as EXTRA occupied slots so
+      // the box-derived headline shows the true 5/4 instead of clamping to 4/4.
+      const { occupied, emptyCount, overCapacity } = assignSlots(localWorkers, n.maxParallel);
+      const localOccupied = [...occupied, ...overCapacity];
+      for (let i = 0; i < localOccupied.length; i++) {
+        slots.push({ host: n.host, slotIndex: i, occupied: true, worker: localOccupied[i] });
       }
       for (let i = 0; i < emptyCount; i++) {
-        slots.push({ host: n.host, slotIndex: occupied.length + i, occupied: false });
+        slots.push({ host: n.host, slotIndex: localOccupied.length + i, occupied: false });
       }
-    } else {
-      // Remote node: ticket labels from in_flight_tickets
-      const remoteTickets = n.tickets ?? [];
-      for (let i = 0; i < n.maxParallel; i++) {
-        if (i < remoteTickets.length) {
-          slots.push({ host: n.host, slotIndex: i, occupied: true, ticket: remoteTickets[i] });
+    } else if (Array.isArray(n.tickets)) {
+      // Remote node with KNOWN occupancy labels ([] = known idle). May exceed
+      // maxParallel (over-dispatch) — render every real ticket, never clamp.
+      const total = Math.max(n.maxParallel, n.tickets.length);
+      for (let i = 0; i < total; i++) {
+        if (i < n.tickets.length) {
+          slots.push({ host: n.host, slotIndex: i, occupied: true, ticket: n.tickets[i] });
         } else {
           slots.push({ host: n.host, slotIndex: i, occupied: false });
         }
+      }
+    } else {
+      // CTL-1581: remote node WITHOUT ticket labels (old daemon / anchor
+      // transport) — fall back to the occupancy COUNT so a busy node renders
+      // label-less occupied boxes instead of a false all-Open deck.
+      const occ = n.activeCount ?? n.inFlightCount ?? 0;
+      const total = Math.max(n.maxParallel, occ);
+      for (let i = 0; i < total; i++) {
+        slots.push({ host: n.host, slotIndex: i, occupied: i < occ });
       }
     }
   }

@@ -448,21 +448,27 @@ describe("localActiveTickets (CTL-1581 — slot-occupancy subset)", () => {
     const { tmpdir: td } = await import("node:os");
     const { join: j } = await import("node:path");
     const dir = mkd(j(td(), "active-tickets-"));
-    const w = (ticket, status) => {
+    const w = (ticket, status, phase = "implement") => {
       mkdirSync(j(dir, "workers", ticket), { recursive: true });
       wf(
-        j(dir, "workers", ticket, "phase-implement.json"),
-        JSON.stringify({ ticket, phase: "implement", status, host: { name: "mini" } })
+        j(dir, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status, host: { name: "mini" } })
       );
     };
     w("PROJ-1", "running");
     w("PROJ-2", "needs-human");
     w("PROJ-3", "dispatched");
     w("PROJ-4", "done");
+    // needs-input holds its slot (job still counted against maxParallel)…
+    w("PROJ-5", "needs-input");
+    // …but a triage worker never occupies (intake — the deck's carve-out).
+    w("PROJ-6", "running", "triage");
     const { localActiveTickets, localInFlightTickets } = await import("./cluster-heartbeat-publisher.mjs");
-    expect(localActiveTickets("mini", { orchDir: dir }).sort()).toEqual(["PROJ-1", "PROJ-3"]);
-    // ownership keeps counting the parked dir
-    expect(localInFlightTickets("mini", { orchDir: dir }).sort()).toEqual(["PROJ-1", "PROJ-2", "PROJ-3"]);
+    expect(localActiveTickets("mini", { orchDir: dir }).sort()).toEqual(["PROJ-1", "PROJ-3", "PROJ-5"]);
+    // ownership keeps counting the parked dir AND triage
+    expect(localInFlightTickets("mini", { orchDir: dir }).sort()).toEqual([
+      "PROJ-1", "PROJ-2", "PROJ-3", "PROJ-5", "PROJ-6",
+    ]);
     rms(dir, { recursive: true, force: true });
   });
 });
