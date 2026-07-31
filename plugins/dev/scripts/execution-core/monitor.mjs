@@ -728,6 +728,11 @@ function dispatchTriage(
     // tests never spawn a real linearis write; default = the label-guard path.
     labelNeedsHuman = (dir, t) =>
       labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, { site: "triage-redispatch-cap" }),
+    // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
+    // ticket's LIVE state must still equal this workflow-state name at launch.
+    // null/undefined (the webhook path, eligible-half candidates) skips the check.
+    requireTriageState = null,
+    fetchLiveState = defaultFetchTicketState,
   }
 ) {
   if (!orchDir) {
@@ -863,6 +868,31 @@ function dispatchTriage(
       return false;
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
+  }
+  // CTL-1589 (Codex R3): live revalidation for a Triage-BOARD candidate, placed
+  // launch-imminent (post-drain/HRW/delegate/claim gates) so the bare live read
+  // fires only for a dispatch this host is genuinely about to launch — bounded
+  // by real launches, never a per-sweep/per-candidate probe. A replica row can
+  // have MISSED the ticket's exit from Triage (delivery hole), and the CTL-758
+  // guard refuses only TERMINAL backward writes — without this check the later
+  // status write could drag an advanced ticket back to Triage. No verdict is
+  // cached: a cached positive could go stale after a failed dispatch and
+  // redispatch an advanced ticket on the next sweep. Unreadable (null) proceeds
+  // — recovery bias; the status write re-reads.
+  if (requireTriageState) {
+    let live = null;
+    try {
+      live = fetchLiveState(identifier);
+    } catch {
+      /* unreadable → proceed */
+    }
+    if (live != null && live !== requireTriageState) {
+      log.info(
+        { identifier, live, expected: requireTriageState },
+        "dispatchTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
+      );
+      return false;
+    }
   }
   // CTL-1441 guard (a), placed HERE (post-gates, post-claim, launch imminent —
   // Codex R3): a done phase-triage.json with triage.json missing is the
@@ -1087,45 +1117,6 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
   return true;
 }
 
-// ── CTL-1589 (Codex R2): cached live-state revalidation for Triage-board rows ─
-// A Triage-board candidate rides a replica row that can have MISSED the
-// ticket's exit from Triage (a per-ticket delivery hole leaves an OLD
-// timestamp, so the dwell guard passes) — and applyTriageStatus's backward-write
-// guard refuses only TERMINAL states, so a stale row could drag an advanced
-// ticket back to Triage. Revalidate against the LIVE state before dispatch, but
-// CACHE the verdict in a marker for 30 min so a candidate the sweep revisits
-// every cycle (non-owner host, capped ticket, failing dispatch) costs at most
-// two live reads an hour — never the per-tick probe storm CTL-1580 eliminated.
-// A failed read (null) proceeds: recovery bias.
-const TRIAGE_REVALIDATE_COOLDOWN_MS = 30 * 60 * 1000;
-
-export function revalidatedTriageLiveState(orchDir, ticket, { fetchLiveState, now = Date.now } = {}) {
-  const dir = join(orchDir, ".triage-revalidate");
-  const path = join(dir, `${ticket}.json`);
-  const nowMs = now();
-  try {
-    const m = JSON.parse(readFileSync(path, "utf8"));
-    if (typeof m?.ts === "number" && nowMs - m.ts < TRIAGE_REVALIDATE_COOLDOWN_MS) {
-      return m.live ?? null;
-    }
-  } catch {
-    /* absent/corrupt marker -> live read */
-  }
-  let live = null;
-  try {
-    live = fetchLiveState(ticket) ?? null;
-  } catch {
-    live = null;
-  }
-  try {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(path, JSON.stringify({ ts: nowMs, live }));
-  } catch {
-    /* marker write is best-effort; worst case is an extra read next sweep */
-  }
-  return live;
-}
-
 // triageStateTickets — the CTL-1589 half of the sweep's ticket source: the
 // tickets currently SITTING IN this team's Triage state, read from the local
 // replica. Fail-open — an unavailable board yields [] and the sweep degrades to
@@ -1133,16 +1124,7 @@ export function revalidatedTriageLiveState(orchDir, ticket, { fetchLiveState, no
 // unavailable cases are logged at WARN and never silent: with the replica tier
 // off (or its writer dead) this half of the fix is INERT, and a stranded Triage
 // ticket would otherwise look like a mysterious no-op.
-// TRIAGE_STATE_MIN_DWELL_MS — only sweep Triage rows that have DWELLED (Codex
-// R1 on #2843): a ticket that entered Triage seconds ago is the webhook fast
-// path's job, and a lagging replica row could otherwise re-triage a ticket that
-// already advanced out of Triage. 10 min comfortably covers replica write lag
-// (seconds-scale under a live writer) while leaving genuinely stranded tickets
-// (hours-to-weeks old) fully covered. A row with no timestamp cannot prove
-// youth — it stays sweepable (recovery bias).
-const TRIAGE_STATE_MIN_DWELL_MS = 10 * 60 * 1000;
-
-function triageStateTickets(entry, { replica, runTriageState, now = Date.now }) {
+function triageStateTickets(entry, { replica, runTriageState }) {
   const query = resolveEligibleQuery(entry);
   const onSource = (source, count) => {
     const line = { team: query.team, triage_source: source, triage_count: count };
@@ -1156,19 +1138,13 @@ function triageStateTickets(entry, { replica, runTriageState, now = Date.now }) 
   };
   try {
     const rows = runTriageState(query, { replica, onSource });
-    // Dwell guard (Codex R1): drop rows whose replica timestamp is younger than
-    // the dwell window — see TRIAGE_STATE_MIN_DWELL_MS. Unparseable/absent
-    // timestamps stay sweepable.
-    const nowMs = now();
-    return rows
-      .filter((t) => {
-        const ms = t?.updatedAt ? Date.parse(t.updatedAt) : NaN;
-        return !Number.isFinite(ms) || nowMs - ms >= TRIAGE_STATE_MIN_DWELL_MS;
-      })
-      // Tag the source so the sweep can live-revalidate ONLY this half (Codex
-      // R2): an eligible-projection candidate never needs it, a replica Triage
-      // row might be a delivery-hole survivor.
-      .map((t) => ({ ...t, fromTriageBoard: true }));
+    // No dwell filter (Codex R3): issues.updated_at is generic last-modified, so
+    // a frequently-touched stranded ticket would never pass an age gate. A young
+    // row racing the →Triage webhook is harmless — dispatchTriage is idempotent
+    // (in-flight signals no-op, artifacts skip) and the launch-imminent live
+    // revalidation (dispatchTriage requireTriageState) is the stale-row guard.
+    // Tag the source so ONLY this half pays that live revalidation.
+    return rows.map((t) => ({ ...t, fromTriageBoard: true }));
   } catch (err) {
     log.warn(
       { team: query.team, err: err.message },
@@ -1289,18 +1265,6 @@ export function sweepMissingTriage({
       // budget gate); everything else waits for the next sweep.
       if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
-      // CTL-1589 (Codex R2): stale-row revalidation — see
-      // revalidatedTriageLiveState for the mechanism and the read-rate bound.
-      if (t.fromTriageBoard && triageStatusName) {
-        const live = revalidatedTriageLiveState(orchDir, t.identifier, { fetchLiveState });
-        if (live != null && live !== triageStatusName) {
-          log.info(
-            { ticket: t.identifier, live, expected: triageStatusName },
-            "sweepMissingTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
-          );
-          continue;
-        }
-      }
       // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
       // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
       // where the stale completion signal is retired immediately before a real
@@ -1312,6 +1276,10 @@ export function sweepMissingTriage({
         appendEvent,
         orchId: t.identifier,
         budget,
+        // CTL-1589 (Codex R3): Triage-BOARD candidates must still be in the
+        // Triage state at launch; eligible-half candidates skip the check.
+        requireTriageState: t.fromTriageBoard ? triageStatusName : null,
+        fetchLiveState,
         botUserIds,
         botWriteId,
         gateway,
