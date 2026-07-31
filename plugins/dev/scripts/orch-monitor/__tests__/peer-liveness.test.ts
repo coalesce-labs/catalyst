@@ -167,15 +167,18 @@ describe("readPeerRecords (CTL-1551)", () => {
       activeCount: 1,
       activeTickets: ["PROJ-9"],
     });
-    // A fresher record WITHOUT the active fields (old daemon) retains them.
+    // A fresher record WITHOUT the active fields (query D failed / old-daemon
+    // rollback) CLEARS them — occupancy follows the record, never retention:
+    // restoring a cached activeCount would pin stale occupancy; null degrades
+    // consumers to the honest inFlightCount fallback.
     const second = foldPeerSnapshot({
       prevHeartbeats: { mini: "2026-07-30T15:01:00Z" },
       prevCapacity: first.capacity,
       peers: { mini: { last_seen: "2026-07-30T15:02:00Z", max_parallel: 4, in_flight_count: 3 } },
       nowMs: Date.parse("2026-07-30T15:02:30Z"),
     });
-    expect(second.capacity.mini.activeCount).toBe(1);
-    expect(second.capacity.mini.activeTickets).toEqual(["PROJ-9"]);
+    expect(second.capacity.mini.activeCount).toBeNull();
+    expect(second.capacity.mini.activeTickets).toBeNull();
   });
 
   it("foldPeerSnapshot: a FUTURE-skewed cached timestamp does not block corrected heartbeats", async () => {

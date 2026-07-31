@@ -175,8 +175,8 @@ function RemoteSlotCard({ slot }: { slot: ClusterSlot }) {
       }}
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 10, color: C.fgDim, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono }}>
-          {slotLabel(slot.slotIndex + 1)}
+        <span style={{ fontSize: 10, color: slot.over ? C.yellow : C.fgDim, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono }}>
+          {slot.over ? "OVER" : slotLabel(slot.slotIndex + 1)}
         </span>
         <span style={{ fontSize: 10, color: C.fgDim, fontFamily: C.mono }}>remote</span>
       </div>
@@ -305,7 +305,7 @@ export function SlotDeck({
                     key={`slot-${slot.worker.name}`}
                     w={slot.worker}
                     ticket={infoById.get(slot.worker.tickets?.[0] ?? "")}
-                    slotLabel={slotLabel(slot.slotIndex + 1)}
+                    slotLabel={slot.over ? "OVER" : slotLabel(slot.slotIndex + 1)}
                     onOpenTicket={onOpenTicket}
                   />
                 );

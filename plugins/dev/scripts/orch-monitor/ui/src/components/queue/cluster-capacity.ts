@@ -33,6 +33,9 @@ export interface ClusterSlot {
   host: string;
   slotIndex: number;
   occupied: boolean;
+  /** CTL-1581: true for boxes beyond the node's configured capacity (the
+   *  single-host deck's OVER classification, preserved cluster-side). */
+  over?: boolean;
   worker?: BoardWorker;
   ticket?: string;
 }
@@ -72,15 +75,27 @@ export function assignClusterSlots({
 }): ClusterSlot[] {
   const slots: ClusterSlot[] = [];
   for (const n of nodes) {
-    if (n.status === "offline" || !n.maxParallel) continue;
+    if (n.status === "offline") continue;
+    // CTL-1581: a capacity-less node (first poll with query C failed) still
+    // renders its KNOWN occupancy — skipping it would hide real workers.
+    const hasOccupancy =
+      Array.isArray(n.tickets) || (n.activeCount ?? n.inFlightCount ?? 0) > 0;
+    if (!n.maxParallel && !hasOccupancy) continue;
+    const mp = n.maxParallel ?? 0;
     if (n.host === localHost) {
       // Rich local slots via existing assignSlots. CTL-1581: over-capacity
       // workers are real processes — surface them as EXTRA occupied slots so
       // the box-derived headline shows the true 5/4 instead of clamping to 4/4.
-      const { occupied, emptyCount, overCapacity } = assignSlots(localWorkers, n.maxParallel);
+      const { occupied, emptyCount, overCapacity } = assignSlots(localWorkers, mp);
       const localOccupied = [...occupied, ...overCapacity];
       for (let i = 0; i < localOccupied.length; i++) {
-        slots.push({ host: n.host, slotIndex: i, occupied: true, worker: localOccupied[i] });
+        slots.push({
+          host: n.host,
+          slotIndex: i,
+          occupied: true,
+          worker: localOccupied[i],
+          ...(i >= mp ? { over: true } : {}),
+        });
       }
       for (let i = 0; i < emptyCount; i++) {
         slots.push({ host: n.host, slotIndex: localOccupied.length + i, occupied: false });
@@ -88,10 +103,16 @@ export function assignClusterSlots({
     } else if (Array.isArray(n.tickets)) {
       // Remote node with KNOWN occupancy labels ([] = known idle). May exceed
       // maxParallel (over-dispatch) — render every real ticket, never clamp.
-      const total = Math.max(n.maxParallel, n.tickets.length);
+      const total = Math.max(mp, n.tickets.length);
       for (let i = 0; i < total; i++) {
         if (i < n.tickets.length) {
-          slots.push({ host: n.host, slotIndex: i, occupied: true, ticket: n.tickets[i] });
+          slots.push({
+            host: n.host,
+            slotIndex: i,
+            occupied: true,
+            ticket: n.tickets[i],
+            ...(i >= mp ? { over: true } : {}),
+          });
         } else {
           slots.push({ host: n.host, slotIndex: i, occupied: false });
         }
@@ -101,9 +122,14 @@ export function assignClusterSlots({
       // transport) — fall back to the occupancy COUNT so a busy node renders
       // label-less occupied boxes instead of a false all-Open deck.
       const occ = n.activeCount ?? n.inFlightCount ?? 0;
-      const total = Math.max(n.maxParallel, occ);
+      const total = Math.max(mp, occ);
       for (let i = 0; i < total; i++) {
-        slots.push({ host: n.host, slotIndex: i, occupied: i < occ });
+        slots.push({
+          host: n.host,
+          slotIndex: i,
+          occupied: i < occ,
+          ...(i < occ && i >= mp ? { over: true } : {}),
+        });
       }
     }
   }
