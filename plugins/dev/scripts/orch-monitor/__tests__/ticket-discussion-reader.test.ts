@@ -13,7 +13,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -120,7 +120,12 @@ function seed(): void {
     "INSERT INTO issue_history (id, issue_id, actor_id, created_at, added_label_ids) VALUES (?,?,?,?,?)",
     ["hist-2", "issue-1", "user-1", 4000, JSON.stringify(["label-1"])],
   );
+  // Freshness-gate substrate (CTL-1574 review): a live writer heartbeat and a
+  // completed seed cursor — the reader refuses stale/mid-reseed replicas.
+  db.run("CREATE TABLE sync_meta (key text PRIMARY KEY NOT NULL, value text)");
+  db.run("INSERT INTO sync_meta (key, value) VALUES ('cursor', 'cursor-1')");
   db.close();
+  writeFileSync(`${dbPath}.writer.lock`, String(process.pid));
 }
 
 beforeEach(() => {
@@ -194,6 +199,40 @@ describe("readTicketDiscussion", () => {
       expect(out.comments).toEqual([]);
       expect(out.activity).toEqual([]);
     }
+  });
+
+  it("reports unavailable when the writer heartbeat is stale (dead cloud-sync)", async () => {
+    seed();
+    const old = (Date.now() - 3_600_000) / 1000; // 1h-old heartbeat, threshold 5min
+    utimesSync(`${dbPath}.writer.lock`, old, old);
+    const out = await readTicketDiscussion("CTL-1574", { dbPath });
+    expect(out.available).toBe(false);
+    expect(out.comments).toEqual([]);
+  });
+
+  it("reports unavailable mid-reseed (sync_meta cursor absent)", async () => {
+    seed();
+    const db = new Database(dbPath);
+    db.run("DELETE FROM sync_meta WHERE key = 'cursor'");
+    db.close();
+    const out = await readTicketDiscussion("CTL-1574", { dbPath });
+    expect(out.available).toBe(false);
+    expect(out.comments).toEqual([]);
+  });
+
+  it("normalizes ISO-string timestamps to ms epoch (mixed writer versions)", async () => {
+    seed();
+    const db = new Database(dbPath);
+    db.run("UPDATE issues SET created_at = ? WHERE id = 'issue-1'", ["2026-07-30T12:00:00.000Z"]);
+    db.run("UPDATE comments SET updated_at = ? WHERE id = 'comment-1'", ["1970-01-01T00:00:01.000Z"]);
+    db.run("UPDATE issue_history SET created_at = ? WHERE id = 'hist-0'", ["1970-01-01T00:00:00.500Z"]);
+    db.close();
+    const out = await readTicketDiscussion("CTL-1574", { dbPath });
+    expect(out.createdAt).toBe(Date.parse("2026-07-30T12:00:00.000Z"));
+    // Look up by id — a string timestamp also perturbs SQLite's ORDER BY
+    // (text sorts after integers), which is exactly why normalization matters.
+    expect(out.comments.find((c) => c.id === "comment-1")).toMatchObject({ updated_at: 1000 });
+    expect(out.activity.find((e) => e.id === "hist-0")).toMatchObject({ created_at: 500 });
   });
 
   it("degrades to unavailable when the replica file is missing", async () => {

@@ -106,6 +106,10 @@ export interface ReadTicketDiscussionOptions {
   /** Replica path override (default: CATALYST_REPLICA_DB, else
    *  $CATALYST_DIR/catalyst-replica.db, else ~/catalyst/catalyst-replica.db). */
   dbPath?: string;
+  /** The server's resolved catalyst dir — takes the place of $CATALYST_DIR in
+   *  the default path resolution (a createServer({catalystDir}) install must
+   *  not read another installation's replica). */
+  catalystDir?: string;
   /** Database opener seam for tests. Must return a bun:sqlite-shaped handle
    *  exposing `query(sql).all(...bindings)` and `close()`. */
   openDb?: (path: string) => {

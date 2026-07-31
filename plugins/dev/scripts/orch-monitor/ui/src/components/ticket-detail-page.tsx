@@ -582,7 +582,7 @@ function DiscussionSection({ ticketId }: { ticketId: string }) {
         <span style={{ flex: 1 }} />
         {available && !loading && (
           <span style={{ font: `10px ${C.mono}`, color: C.fgDim }}>
-            {comments.length} comment{comments.length === 1 ? "" : "s"} · {activity.length} change
+            {comments.length} comment{comments.length === 1 ? "" : "s"} · {activity.length} event
             {activity.length === 1 ? "" : "s"}
           </span>
         )}
@@ -1011,7 +1011,7 @@ export function TicketDetailPage({
               works off-board, same as the Activity tab above. */}
           <TabsContent value="discussion">
             <div style={{ paddingTop: 16 }}>
-              <DiscussionSection ticketId={ticket?.id ?? id} />
+              <DiscussionSection key={ticket?.id ?? id} ticketId={ticket?.id ?? id} />
             </div>
           </TabsContent>
 

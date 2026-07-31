@@ -25,7 +25,8 @@
 // dominant; same-actor BURSTS collapse to one expandable row; the OUTCOME value
 // renders in text-fg with the rest in text-muted. buildTimeline / coalesceBursts /
 // describeOrNull are pure (no React, no Date.now) and exported for tests.
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useState, type ReactNode } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import {
   Archive,
   Bot,
@@ -49,7 +50,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fmtRelativeDuration, statusSemantic, type StatusSemantic } from "@/lib/formatters";
-import { renderTicketDescriptionHtml } from "@/lib/ticket-markdown";
+import { isTicketRef, renderTicketDescriptionHtml } from "@/lib/ticket-markdown";
 import type {
   TicketActivityEvent,
   TicketActivityLabel,
@@ -226,6 +227,15 @@ export function buildTimeline(
   return coalesceBursts(nodes);
 }
 
+/** Same-actor test for burst coalescing: compare `actor_id` when both events
+ *  carry one (two accounts can share a display name — merging them would
+ *  misattribute the whole burst to the first), fall back to the display name
+ *  only when ids are absent. */
+function sameActor(a: TicketActivityEvent, b: TicketActivityEvent): boolean {
+  if (a.actor_id != null && b.actor_id != null) return a.actor_id === b.actor_id;
+  return a.actor_name === b.actor_name;
+}
+
 /** Fold contiguous same-actor event runs longer than BURST_MAX (within
  *  BURST_WINDOW_MS) into one burst node. A comment, a different actor, an
  *  actor-less (system) event, or a window gap breaks a run. Exported for tests. */
@@ -251,7 +261,7 @@ export function coalesceBursts(nodes: Array<CommentNode | EventNode>): TimelineN
       const prev = run[run.length - 1];
       if (
         prev &&
-        (prev.event.actor_name !== node.event.actor_name || node.ts - prev.ts > BURST_WINDOW_MS)
+        (!sameActor(prev.event, node.event) || node.ts - prev.ts > BURST_WINDOW_MS)
       ) {
         flush();
       }
@@ -566,6 +576,23 @@ function CommentItem({ comment, now }: { comment: TicketComment; now: number }) 
   const when = fmtRelativeDuration(now - comment.updated_at);
   const name = comment.author_name ?? UNKNOWN_AUTHOR;
   const isBot = Boolean(comment.is_bot);
+  const navigate = useNavigate();
+  // Soft-navigate ticket-ref pill clicks through TanStack Router — same
+  // interception as ticket-description.tsx, else a pill click is a full document
+  // navigation that discards the monitor's in-memory state.
+  const interceptTicketLinks = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const anchor = target?.closest("a.ticket-ref-pill") as HTMLAnchorElement | null;
+      if (!anchor) return;
+      const ref = (anchor.textContent ?? "").trim();
+      if (!isTicketRef(ref)) return;
+      e.preventDefault();
+      void navigate({ to: "/ticket/$id", params: { id: ref } });
+    },
+    [navigate],
+  );
   return (
     <li
       data-ticket-comment={comment.id}
@@ -590,6 +617,7 @@ function CommentItem({ comment, now }: { comment: TicketComment; now: number }) 
         <div
           data-ticket-comment-body
           className="ticket-desc prose prose-invert"
+          onClick={interceptTicketLinks}
           dangerouslySetInnerHTML={{ __html: renderTicketDescriptionHtml(comment.body) }}
         />
       ) : (

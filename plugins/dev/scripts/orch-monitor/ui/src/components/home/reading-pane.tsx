@@ -538,7 +538,9 @@ export function ReadingPane({
             block above never reaches them with. Collapsed to the newest few turns
             so the pane stays scannable; "Show all N" opens the full stream. */}
         <Suspense fallback={null}>
-          <PaneDiscussion ticket={row.id} />
+          {/* key: remount per ticket so the previous selection's fetched
+              discussion never paints under the new ticket's header. */}
+          <PaneDiscussion key={row.id} ticket={row.id} />
         </Suspense>
       </div>
     </ScrollArea>

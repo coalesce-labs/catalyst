@@ -2706,7 +2706,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
           ) {
             return new Response("Bad Request", { status: 400 });
           }
-          const discussion = await readTicketDiscussion(ticket);
+          const discussion = await readTicketDiscussion(ticket, {
+            catalystDir: CATALYST_DIR,
+          });
+          // Agent classification is `is_bot` OR a configured app-actor author —
+          // Catalyst worker/orchestrator app actors are stored as users with
+          // is_bot=0 (the linear-thread.mjs contract), so is_bot alone would
+          // badge every agent comment as human.
+          const botIds = linearWebhookConfig?.botUserIds;
+          if (botIds && discussion.comments.length > 0) {
+            discussion.comments = discussion.comments.map((c) =>
+              c.author_id != null && botIds.has(c.author_id) ? { ...c, is_bot: 1 } : c,
+            );
+          }
           return Response.json(discussion);
         }
 

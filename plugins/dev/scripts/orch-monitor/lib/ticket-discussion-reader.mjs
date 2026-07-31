@@ -27,6 +27,7 @@
 // could not be read" from "this ticket genuinely has no discussion", so the UI
 // never claims "no comments" about a source it never reached.
 
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -43,11 +44,44 @@ const IDENTIFIER_RE = /^[A-Za-z0-9]+-[0-9]+$/;
 // wins, else $CATALYST_DIR/catalyst-replica.db, else ~/catalyst/…. Resolving
 // this at module load froze the wrong path for CATALYST_DIR-configured nodes
 // once before (the CTL-1378 edge in linear-cache-reader.mjs); don't hoist it.
-function defaultReplicaDbPath() {
+function defaultReplicaDbPath(catalystDir) {
   return (
     process.env.CATALYST_REPLICA_DB ||
-    join(process.env.CATALYST_DIR || join(homedir(), "catalyst"), "catalyst-replica.db")
+    join(catalystDir || process.env.CATALYST_DIR || join(homedir(), "catalyst"), "catalyst-replica.db")
   );
+}
+
+// ── Freshness gate (CTL-1574 review) ─────────────────────────────────────────
+// Mirrors execution-core/replica-read.mjs isReplicaFresh: the `<db>.writer.lock`
+// heartbeat proves the cloud-sync writer is LIVE (the writer touches it every few
+// seconds regardless of feed activity — never gate on the db/-wal mtime), and the
+// `sync_meta` cursor row proves the seed is COMPLETE (the writer deletes it at
+// re-seed start). A stale or mid-reseed replica reads as unavailable — an
+// operator must never compose a reply against an outdated conversation that
+// renders as current.
+const SEED_COMPLETE_SELECT =
+  "SELECT 1 FROM sync_meta WHERE key = 'cursor' AND value IS NOT NULL AND value <> '' LIMIT 1";
+
+function isWriterFresh(dbPath) {
+  const thresholdMs = Number(process.env.CATALYST_LINEAR_REPLICA_STALE_MS) || 300_000;
+  try {
+    return Date.now() - statSync(`${dbPath}.writer.lock`).mtimeMs < thresholdMs;
+  } catch {
+    return false; // no heartbeat file → writer not proven live → unavailable
+  }
+}
+
+// toEpochMs — normalize a replica timestamp to ms epoch. The replica writers
+// have stored both integer epochs and ISO-8601 strings across versions (the
+// read-model's linear-cli path accepts either), and this payload's contract is
+// numeric — a string leaking through breaks every duration/sort in the UI.
+function toEpochMs(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const parsed = Date.parse(v);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
 }
 
 // Both specifiers below are COMPUTED, never string literals, and that is
@@ -112,7 +146,7 @@ function bunSqlExecutor(db) {
  *   • available:false with empty arrays for EVERY failure — never throws into
  *     the route, never fabricates a comment or an event.
  */
-export async function readTicketDiscussion(identifier, { dbPath, openDb } = {}) {
+export async function readTicketDiscussion(identifier, { dbPath, openDb, catalystDir } = {}) {
   if (typeof identifier !== "string" || !IDENTIFIER_RE.test(identifier)) return unavailable();
   let db = null;
   try {
@@ -122,7 +156,22 @@ export async function readTicketDiscussion(identifier, { dbPath, openDb } = {}) 
       open = (p) => new Database(p, { readonly: true });
     }
     const { buildIssueDetail } = await import(READ_MODEL_MODULE);
-    db = open(dbPath ?? defaultReplicaDbPath());
+    const path = dbPath ?? defaultReplicaDbPath(catalystDir);
+    if (!isWriterFresh(path)) return unavailable();
+    db = open(path);
+    // A checkpoint/schema lock can transiently SQLITE_BUSY the first query —
+    // wait briefly instead of reporting the whole discussion unavailable
+    // (same 250ms the linear-thread reader uses). Optional-chained: the test
+    // opener seam exposes only query/close.
+    try {
+      db.run?.("PRAGMA busy_timeout = 250");
+    } catch {
+      /* pragma unsupported on this handle — proceed without the wait */
+    }
+    // Seed-completeness: a missing/empty cursor row means a re-seed is in
+    // flight and the tables may be half-truncated. (A missing sync_meta table
+    // throws → the outer catch reports unavailable, which is also correct.)
+    if (db.query(SEED_COMPLETE_SELECT).all().length === 0) return unavailable();
     const detail = buildIssueDetail(bunSqlExecutor(db), identifier);
     // Unknown / removed ticket → buildIssueDetail returns null. That is a
     // successful read of a ticket with no mirrored row, but we report it as
@@ -136,9 +185,18 @@ export async function readTicketDiscussion(identifier, { dbPath, openDb } = {}) 
       title: detail.title ?? null,
       // Issue creation instant (ms epoch) — the UI's guard against labeling a
       // late bare history row "created this issue" (CTL-1574 review defect 2).
-      createdAt: typeof detail.created_at === "number" ? detail.created_at : null,
-      comments: Array.isArray(detail.comments) ? detail.comments : [],
-      activity: Array.isArray(detail.activity) ? detail.activity : [],
+      createdAt: toEpochMs(detail.created_at),
+      // Timestamps normalized to ms epoch (the payload contract is numeric; the
+      // replica has stored both integers and ISO strings across writer versions).
+      comments: (Array.isArray(detail.comments) ? detail.comments : []).map((c) => ({
+        ...c,
+        updated_at: toEpochMs(c.updated_at),
+        ...(c.created_at != null ? { created_at: toEpochMs(c.created_at) } : {}),
+      })),
+      activity: (Array.isArray(detail.activity) ? detail.activity : []).map((e) => ({
+        ...e,
+        created_at: toEpochMs(e.created_at),
+      })),
     };
   } catch {
     // Absent db file, locked db, a schema the read-model does not recognize, or a

@@ -165,6 +165,21 @@ describe("coalesceBursts", () => {
   const nodesOf = (events: TicketActivityEvent[]): EventNode[] =>
     events.map((e) => ({ kind: "event", ts: e.created_at, event: e, isCreation: false }));
 
+  it("splits a run on actor_id even when the display names collide", () => {
+    // Two accounts named "ryan": merging them would attribute the whole burst
+    // to the first. 5+5 adjacent events must yield two bursts, not one.
+    const a = run("ryan", 5, 0, 1000).map((e) => ({ ...e, actor_id: "user-a" }));
+    const b = run("ryan", 5, 5000, 1000).map((e, i) => ({
+      ...e,
+      id: `b-${i}`,
+      actor_id: "user-b",
+    }));
+    const out = coalesceBursts(nodesOf([...a, ...b]));
+
+    expect(out).toHaveLength(2);
+    expect(out.every((n) => n.kind === "burst")).toBe(true);
+  });
+
   it("leaves a run of exactly 4 expanded (the threshold is EXCEED, not reach)", () => {
     const out = coalesceBursts(nodesOf(run("ryan", 4, 0, 1000)));
 
