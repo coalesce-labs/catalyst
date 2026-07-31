@@ -299,6 +299,38 @@ describe("syncProfileFiles (CTL-1595)", () => {
     expect(res.reason).toBe("decrypt-failed");
   });
 
+  test("rejects a bundle key without the .env suffix (use_profile can never find it)", () => {
+    writeProfileBundle();
+    const decrypt = () => ({ "catalyst-cloud": "x", "good.env": "y" });
+    const res = syncProfileFiles({ clusterDir, profilesDir: profilesDirOf(), decrypt, logger: QUIET });
+    expect(res.written).toEqual(["good.env"]);
+    expect(existsSync(join(profilesDirOf(), "catalyst-cloud"))).toBe(false);
+  });
+
+  test("removes a profile deleted from the bundle; node-local profiles untouched (Codex R2)", () => {
+    writeProfileBundle();
+    const dir = profilesDirOf();
+    // Sync 1: two managed profiles.
+    let res = syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1", "b.env": "2" }),
+      logger: QUIET,
+    });
+    expect(res.written.sort()).toEqual(["a.env", "b.env"]);
+    // A hand-provisioned node-local profile the mechanism must never touch.
+    writeFileSync(join(dir, "local.env"), "hand-made");
+    // Sync 2: b.env deleted from the bundle → removed from disk; local.env stays.
+    res = syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1" }),
+      logger: QUIET,
+    });
+    expect(res.removed).toEqual(["b.env"]);
+    expect(existsSync(join(dir, "b.env"))).toBe(false);
+    expect(existsSync(join(dir, "a.env"))).toBe(true);
+    expect(readFileSync(join(dir, "local.env"), "utf8")).toBe("hand-made");
+  });
+
   test("partial write failure → records the name in failed[], keeps the rest", () => {
     writeProfileBundle();
     const decrypt = () => ({ "good.env": "x", "bad.env": "y" });

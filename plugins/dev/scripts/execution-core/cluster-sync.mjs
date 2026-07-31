@@ -344,6 +344,12 @@ export function defaultProfilesDir(env = process.env) {
 // REQUESTED file whose write threw (blocks the marker), absent bundle = no-op.
 // No restart-required surface: direnv re-evaluates per worker spawn, so a
 // rotated profile is live for the NEXT worker without touching the daemon.
+// Sidecar manifest naming the profiles THIS mechanism manages, so a profile
+// deleted from the bundle is REMOVED from disk (stale plaintext credentials
+// must not outlive their rotation) while hand-provisioned node-local profiles
+// are never touched (they are not in the manifest). Codex R2.
+const PROFILES_MANIFEST = ".cluster-managed.json";
+
 export function syncProfileFiles(opts = {}) {
   const {
     clusterDir = getClusterRepoDir(),
@@ -354,7 +360,7 @@ export function syncProfileFiles(opts = {}) {
     logger = log,
   } = opts;
 
-  const result = { written: [], failed: [], skipped: false, reason: null };
+  const result = { written: [], failed: [], removed: [], skipped: false, reason: null };
   const src = resolve(clusterDir, "secrets", "profile-files.sops.json");
   if (!existsSync(src)) {
     result.reason = "absent";
@@ -381,9 +387,19 @@ export function syncProfileFiles(opts = {}) {
     /* profilesDir may exist; ignore */
   }
   for (const [name, content] of Object.entries(map)) {
-    // Refuse anything that isn't a bare, non-dotfile basename — no path traversal.
-    if (typeof name !== "string" || name !== basename(name) || name.startsWith(".") || name.length === 0) {
-      logger.warn(`[cluster-sync] refusing unsafe profile-file name "${name}"`);
+    // Refuse anything that isn't a bare, non-dotfile basename — no path
+    // traversal — AND require the ".env" suffix (Codex R2): `use_profile x`
+    // looks up profiles/x.env, so a suffix-less key would "succeed" while
+    // remaining invisible to every consumer, and the advanced marker would
+    // never retry the bad SHA.
+    if (
+      typeof name !== "string" ||
+      name !== basename(name) ||
+      name.startsWith(".") ||
+      name.length === 0 ||
+      !name.endsWith(".env")
+    ) {
+      logger.warn(`[cluster-sync] refusing unsafe/non-.env profile-file name "${name}"`);
       continue;
     }
     if (typeof content !== "string") continue;
@@ -394,6 +410,40 @@ export function syncProfileFiles(opts = {}) {
       logger.warn(`[cluster-sync] write profile ${name} failed (${err?.message ?? err})`);
       result.failed.push(name);
     }
+  }
+
+  // Reconcile removals (Codex R2): a profile PREVIOUSLY managed by this
+  // mechanism but absent from the current bundle is deleted — stale plaintext
+  // credentials must not outlive their rotation. Node-local files (never in
+  // the manifest) are untouched. A failed removal joins failed[] so the
+  // change-detection marker does not advance over the surviving stale file.
+  const manifestPath = resolve(profilesDir, PROFILES_MANIFEST);
+  let prevManaged = [];
+  try {
+    const m = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (Array.isArray(m)) prevManaged = m.filter((n) => typeof n === "string" && n === basename(n) && !n.startsWith("."));
+  } catch {
+    /* absent/corrupt manifest → nothing previously managed */
+  }
+  const current = new Set(Object.keys(map).filter((n) => typeof n === "string"));
+  for (const name of prevManaged) {
+    if (current.has(name)) continue;
+    try {
+      rmSync(resolve(profilesDir, name), { force: true });
+      result.removed.push(name);
+      logger.warn(`[cluster-sync] removed profile ${name} (deleted from the cluster bundle)`);
+    } catch (err) {
+      logger.warn(`[cluster-sync] remove profile ${name} failed (${err?.message ?? err})`);
+      result.failed.push(name);
+    }
+  }
+  // Manifest = everything currently materialized + anything we failed to
+  // remove (so the next sync retries the removal). Best-effort.
+  try {
+    const keep = [...new Set([...result.written, ...prevManaged.filter((n) => !current.has(n) && !result.removed.includes(n))])];
+    writeFile(manifestPath, JSON.stringify(keep));
+  } catch {
+    /* best-effort; worst case a later removal is missed until the next full sync */
   }
   return result;
 }
