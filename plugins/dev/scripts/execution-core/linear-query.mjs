@@ -777,15 +777,12 @@ export function classifyTicketResolution(
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
   // CTL-1580 + CTL-1403: this path was named-but-uninstrumented — every live
-  // classify now lands in catalyst.linear.read (op=classify_resolution).
-  recordDaemonRead(
-    replica ? "linearis_miss" : "linearis",
-    code !== 0 ? "failed" : "ok",
-    identifier,
-    null,
-    "classify_resolution"
-  );
+  // classify now lands in catalyst.linear.read (op=classify_resolution). "ok"
+  // is recorded only AFTER a successful parse (Codex round 2): an exit-0
+  // garbage body is a failed read, not a healthy one.
+  const classifySrc = replica ? "linearis_miss" : "linearis";
   if (code !== 0) {
+    recordDaemonRead(classifySrc, "failed", identifier, null, "classify_resolution");
     // CTL-1504: the CLI now exits 1 for a genuinely-missing ticket, with the
     // not-found body on stderr. A definitive not-found is the ONLY nonzero that
     // may quarantine; every other nonzero (429/network/auth/timeout/invalid-format)
@@ -796,8 +793,10 @@ export function classifyTicketResolution(
   try {
     node = JSON.parse(stdout);
   } catch {
+    recordDaemonRead(classifySrc, "failed", identifier, null, "classify_resolution");
     return "unknown"; // unparseable — fail safe, re-check next tick
   }
+  recordDaemonRead(classifySrc, "ok", identifier, null, "classify_resolution");
   if (node == null) return "not-found";
   // The real missing-ticket shape: exit 0 + { error: "...not found" }. Only a
   // "not found" error is definitive; any other error body is transient.
