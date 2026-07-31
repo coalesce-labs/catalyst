@@ -186,3 +186,26 @@ describe("assembleBoard wiring — parked needs-human synthetic tickets", () => 
     expect(boardDataSrc).toContain("...parkedTickets");
   });
 });
+
+// ── CTL-1588: the queue must carry the human-hold annotation ─────────────────
+// "Dispatching next" is the raw eligible projection minus in-flight tickets; a
+// parked needs-human ticket that is still Todo in Linear sits in it and was
+// rendered as an imminent dispatch. The fix stamps `humanHold` from the SAME
+// parked descriptor set the attention cards use (annotate-not-hide — the eligible
+// projection itself must stay untouched: Pass-0a and the scheduler consume it).
+describe("CTL-1588: queue humanHold annotation (source contract)", () => {
+  const nospace = (s: string) => s.replace(/\s+/g, "");
+
+  it("assembleBoard builds the humanHold map from parkedNeedsHuman", () => {
+    expect(nospace(boardDataSrc)).toContain(nospace("const humanHoldByTicket = new Map("));
+    expect(nospace(boardDataSrc)).toContain(
+      nospace(`p.labels.includes("needs-input") ? "needs-input" : "needs-human"`),
+    );
+  });
+
+  it("every queue item is stamped with humanHold (null when dispatchable)", () => {
+    expect(nospace(boardDataSrc)).toContain(
+      nospace("humanHold: humanHoldByTicket.get(e.id) ?? null"),
+    );
+  });
+});

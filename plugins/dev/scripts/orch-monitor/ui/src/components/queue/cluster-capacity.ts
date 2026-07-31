@@ -86,8 +86,20 @@ export function assignClusterSlots({
       // Rich local slots via existing assignSlots. CTL-1581: over-capacity
       // workers are real processes — surface them as EXTRA occupied slots so
       // the box-derived headline shows the true 5/4 instead of clamping to 4/4.
-      const { occupied, emptyCount, overCapacity } = assignSlots(localWorkers, mp);
+      const { occupied, overCapacity } = assignSlots(localWorkers, mp);
       const localOccupied = [...occupied, ...overCapacity];
+      // CTL-1588: SDK/codex-exec executor children carry no bg-job id, so the
+      // board's live-agent worker list is structurally blind to them while the
+      // node's own heartbeat reports them active. Union in heartbeat tickets no
+      // worker covers (ticket-label slots, like a remote node) so the self-host
+      // deck agrees with its pill instead of rendering all-Open under load.
+      const covered = new Set<string>();
+      for (const w of localOccupied) {
+        if (w.ticket) covered.add(w.ticket);
+        for (const t of w.tickets ?? []) covered.add(t);
+      }
+      const heartbeatOnly = (n.tickets ?? []).filter((t) => !covered.has(t));
+      const totalOccupied = localOccupied.length + heartbeatOnly.length;
       for (let i = 0; i < localOccupied.length; i++) {
         slots.push({
           host: n.host,
@@ -97,8 +109,18 @@ export function assignClusterSlots({
           ...(mp > 0 && i >= mp ? { over: true } : {}),
         });
       }
-      for (let i = 0; i < emptyCount; i++) {
-        slots.push({ host: n.host, slotIndex: localOccupied.length + i, occupied: false });
+      for (let i = 0; i < heartbeatOnly.length; i++) {
+        const slotIndex = localOccupied.length + i;
+        slots.push({
+          host: n.host,
+          slotIndex,
+          occupied: true,
+          ticket: heartbeatOnly[i],
+          ...(mp > 0 && slotIndex >= mp ? { over: true } : {}),
+        });
+      }
+      for (let i = 0; i < Math.max(0, mp - totalOccupied); i++) {
+        slots.push({ host: n.host, slotIndex: totalOccupied + i, occupied: false });
       }
     } else if (Array.isArray(n.tickets)) {
       // Remote node with KNOWN occupancy labels ([] = known idle). May exceed
