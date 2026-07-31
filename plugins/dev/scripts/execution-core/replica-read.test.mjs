@@ -327,6 +327,20 @@ function seedEligible() {
   db.run(
     `INSERT INTO issues VALUES ('CTC-100', 'Other team todo', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, NULL, 2700, 60)`,
   );
+  // CTL-1589 (triageState): rows in the TRIAGE state. Invisible to eligible()
+  // (which binds status=Todo) — the exact blind spot that stranded a ticket whose
+  // one-shot →Triage webhook dispatch was consumed.
+  db.run(
+    `INSERT INTO issues VALUES ('CTL-200', 'Sitting in triage', 'Triage', 1, NULL, NULL, NULL, NULL, NULL, NULL, 2900, 50)`,
+  );
+  // Tombstoned Triage row — excluded by removed_at IS NULL.
+  db.run(
+    `INSERT INTO issues VALUES ('CTL-201', 'Removed triage', 'Triage', 1, NULL, NULL, NULL, NULL, NULL, '2026-06-03T00:00:00Z', 2800, 40)`,
+  );
+  // Another team's Triage row — must not leak into a CTL query.
+  db.run(
+    `INSERT INTO issues VALUES ('CTC-200', 'Other team triage', 'Triage', 1, NULL, NULL, NULL, NULL, NULL, NULL, 2700, 30)`,
+  );
   // relations: CTL-100 blocks CTL-9 (forward); CTL-7 blocks CTL-100 (inverse).
   db.run(`INSERT INTO relations VALUES ('blocks', 'CTL-100', 'CTL-9')`);
   db.run(`INSERT INTO relations VALUES ('blocks', 'CTL-7', 'CTL-100')`);
@@ -582,6 +596,130 @@ describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
     expect(second.nodes[0].inverseRelations.nodes).toEqual([
       { type: "blocks", issue: { identifier: "CTL-7" } },
     ]);
+  });
+});
+
+// CTL-1589 — triageState(): the tickets SITTING IN the team's Triage state. The
+// level-triggered half of triage admission; eligible() binds status=Todo, so
+// before this a ticket parked in Triage appeared in no replica read at all. It
+// shares eligible()'s body (readBoardByState), so these tests pin the two things
+// that are genuinely its own — the state binding and the triageStatus contract —
+// plus the shared gates, which must hold identically for both readers.
+describe("createReplicaReader.triageState (CTL-1589)", () => {
+  test("selects by triageStatus, excluding Todo rows, removed rows, and other teams", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.triageState({ team: "CTL", status: "Todo", triageStatus: "Triage" });
+    // CTL-200 only: NOT CTL-100/CTL-101 (Todo), NOT CTL-201 (removed), NOT CTC-200.
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-200"]);
+  });
+
+  test("builds the same node shape eligible() does (normalizeTicket-consumable)", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const n = reader.triageState({ team: "CTL", triageStatus: "Triage" }).nodes[0];
+    expect(n.identifier).toBe("CTL-200");
+    expect(n.state).toBe("Triage");
+    expect(n.priority).toBe(1);
+    expect(n.updatedAt).toBe(new Date(2900).toISOString());
+    expect(n.relations.nodes).toEqual([]);
+    expect(n.inverseRelations.nodes).toEqual([]);
+  });
+
+  test("a custom triageStatus name binds through (not hardcoded to 'Triage')", () => {
+    seedEligible();
+    const db = new Database(dbPath);
+    db.run(`UPDATE issues SET state = 'Needs Triage' WHERE identifier = 'CTL-200'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toEqual({ nodes: [] });
+    expect(
+      reader.triageState({ team: "CTL", triageStatus: "Needs Triage" }).nodes.map((n) => n.identifier)
+    ).toEqual(["CTL-200"]);
+  });
+
+  test("a team with genuinely zero Triage rows → { nodes: [] }, NOT undefined", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "ZZZ", triageStatus: "Triage" })).toEqual({ nodes: [] });
+  });
+
+  // Deliberate divergence from eligible(): a missing STATE is a confirmed empty
+  // here, not a fall-through. A team with no configured Triage state has nothing
+  // to sweep, and there is no live query that could answer "the null state".
+  test("triageStatus null/absent → { nodes: [] } (confirmed empty), never a DB read", () => {
+    // No fixture at all — an absent DB would make any real read return undefined,
+    // so a { nodes: [] } here proves the short-circuit ran first.
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: null })).toEqual({ nodes: [] });
+    expect(reader.triageState({ team: "CTL" })).toEqual({ nodes: [] });
+  });
+
+  test("returns undefined (fall through) when team is missing", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  test("respects the freshness gate identically to eligible(): STALE → undefined", () => {
+    seedEligible();
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(dbPath, old, old);
+    try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+    // …and the sibling reader agrees, so the two can't drift apart.
+    expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
+  });
+
+  test("DEAD WRITER (stale .writer.lock, fresh db) → undefined", () => {
+    seedEligible();
+    const old = new Date(Date.now() - 10 * 60_000);
+    writeFileSync(dbPath + ".writer.lock", "");
+    utimesSync(dbPath + ".writer.lock", old, old);
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  test("cursor row ABSENT (mid-reseed) → undefined (fall through), never a partial board", () => {
+    seedEligible();
+    const db = new Database(dbPath);
+    db.run(`DELETE FROM sync_meta WHERE key = 'cursor'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  test("returns undefined when the replica file is absent", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  test("fail-open: DB without the issues table → undefined (query throws)", () => {
+    const empty = new Database(dbPath, { create: true });
+    empty.run(`CREATE TABLE unrelated (x INTEGER)`);
+    empty.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  // The webhook →Triage predicate filters on team + state ONLY, so the
+  // level-triggered read must not be narrowed by the query's project/label —
+  // otherwise the sweep would admit less than the edge-triggered path already does.
+  test("ignores the query's project/label filters (mirrors the webhook →Triage predicate)", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    // CTL-200 has no project and no labels; a project-scoped query still finds it.
+    const res = reader.triageState({
+      team: "CTL",
+      triageStatus: "Triage",
+      project: "Harden the core",
+      label: "bug",
+    });
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-200"]);
   });
 });
 

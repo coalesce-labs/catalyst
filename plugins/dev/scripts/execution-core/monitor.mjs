@@ -52,6 +52,8 @@ import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
   runEligibleQuery,
+  runTriageStateQuery as defaultRunTriageStateQuery, // CTL-1589: level-triggered Triage-state read
+  fetchTicketState as defaultFetchTicketState, // CTL-1589: last-moment stale-row revalidation
   fetchTicketAssignee,
   isAssigneeClaimable,
   isClaimable,
@@ -726,6 +728,15 @@ function dispatchTriage(
     // tests never spawn a real linearis write; default = the label-guard path.
     labelNeedsHuman = (dir, t) =>
       labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, { site: "triage-redispatch-cap" }),
+    // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
+    // ticket's LIVE state must still equal this workflow-state name at launch.
+    // null/undefined (the webhook path, eligible-half candidates) skips the check.
+    requireTriageState = null,
+    fetchLiveState = defaultFetchTicketState,
+    // CTL-1589 (Codex R7): the candidate row's replica updatedAt (ISO). A row
+    // updated AFTER a cached negative verdict invalidates the marker — the
+    // ticket may have legitimately re-entered Triage.
+    candidateUpdatedAt = null,
   }
 ) {
   if (!orchDir) {
@@ -850,6 +861,79 @@ function dispatchTriage(
   // the triage worker as CATALYST_CLUSTER_GENERATION (mirrors CTL-864 scheduler
   // path). null on single-host → writeClusterGeneration and dispatchTicket both
   // treat null as a no-op (fence token is omitted from the env).
+  // CTL-1589 (Codex R3+R4): live revalidation for a Triage-BOARD candidate.
+  // Placement is deliberate on BOTH sides: AFTER the drain/HRW/delegate/cap
+  // gates (R3 P1 — the bare live read fires only for a dispatch this host would
+  // genuinely make, so the rate is bounded by launch attempts, never a
+  // per-sweep/per-candidate probe) and BEFORE the cross-host claim (R4 P1 — a
+  // skip must not bump the fence generation out from under a live later-phase
+  // worker holding the current one). A replica row can have MISSED the ticket's
+  // exit from Triage (delivery hole), and the CTL-758 guard refuses only
+  // TERMINAL backward writes — without this check the later status write could
+  // drag an advanced ticket back to Triage. FAIL-CLOSED (R4 P1): an unreadable
+  // live state skips this sweep — a stranded ticket loses one cycle (the next
+  // sweep retries), while proceeding blind could double-launch AND regress the
+  // ticket's state. No verdict caching: a cached positive could go stale after
+  // a failed dispatch and redispatch an advanced ticket on the next sweep.
+  if (requireTriageState) {
+    // NEGATIVE-verdict cache (Codex R6): a failed validation is not a launch,
+    // so a persistently-stale row (unhealed delivery hole) would otherwise pay
+    // one bare read per sweep forever. Caching ONLY negatives keeps R4's
+    // no-stale-positive property — a fresh negative marker just extends the
+    // skip of an already-skipped ticket, and expiry re-reads (2 reads/hour cap
+    // per stuck ticket).
+    const revalDir = join(orchDir, ".triage-revalidate");
+    const revalPath = join(revalDir, `${identifier}.json`);
+    try {
+      const m = JSON.parse(readFileSync(revalPath, "utf8"));
+      const rowMs = candidateUpdatedAt ? Date.parse(candidateUpdatedAt) : NaN;
+      // A replica row updated AFTER the verdict invalidates it (Codex R7): the
+      // ticket may have legitimately re-entered Triage since the negative.
+      const invalidated = Number.isFinite(rowMs) && typeof m?.ts === "number" && rowMs > m.ts;
+      if (!invalidated && typeof m?.ts === "number" && Date.now() - m.ts < TRIAGE_REVALIDATE_NEGATIVE_MS) {
+        log.debug(
+          { identifier, cachedLive: m.live ?? null },
+          "dispatchTriage: Triage-board revalidation negative still cached — skipping without a read (CTL-1589)"
+        );
+        return false;
+      }
+    } catch {
+      /* absent/corrupt marker → read */
+    }
+    let live = null;
+    try {
+      // AUTHORITATIVE read only (Codex R7): no gateway/replica tier — a ≤60s
+      // cached "Triage" from the webhook-fed descriptor store could approve a
+      // duplicate launch on a just-advanced ticket, and the replica is the very
+      // source being audited. The negative cache above owns the read-rate
+      // bound, so the bare read stays ≤2/hour per stuck candidate.
+      live = fetchLiveState(identifier);
+    } catch {
+      live = null;
+    }
+    if (live !== requireTriageState) {
+      try {
+        mkdirSync(revalDir, { recursive: true });
+        writeFileSync(revalPath, JSON.stringify({ ts: Date.now(), live }));
+      } catch {
+        /* marker is best-effort; worst case is a re-read next sweep */
+      }
+      log.info(
+        { identifier, live, expected: requireTriageState },
+        live == null
+          ? "dispatchTriage: Triage-board candidate's live state unreadable — holding this sweep (CTL-1589)"
+          : "dispatchTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
+      );
+      return false;
+    }
+    // Positive: clear any expired negative so a healed ticket never waits on
+    // stale forensics. Best-effort.
+    try {
+      renameSync(revalPath, `${revalPath}.cleared`);
+    } catch {
+      /* no marker to clear */
+    }
+  }
   let clusterGeneration = null;
   if (multiHost) {
     const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
@@ -1085,6 +1169,48 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
   return true;
 }
 
+// triageStateTickets — the CTL-1589 half of the sweep's ticket source: the
+// tickets currently SITTING IN this team's Triage state, read from the local
+// replica. Fail-open — an unavailable board yields [] and the sweep degrades to
+// its pre-CTL-1589 eligible-only behavior rather than aborting the pass. The
+// unavailable cases are logged at WARN and never silent: with the replica tier
+// off (or its writer dead) this half of the fix is INERT, and a stranded Triage
+// ticket would otherwise look like a mysterious no-op.
+// TRIAGE_REVALIDATE_NEGATIVE_MS — how long a NEGATIVE launch-revalidation
+// verdict (stale/unreadable) suppresses re-reading a Triage-board candidate.
+// See the negative-verdict cache inside dispatchTriage (Codex R6).
+const TRIAGE_REVALIDATE_NEGATIVE_MS = 30 * 60 * 1000;
+
+function triageStateTickets(entry, { replica, runTriageState }) {
+  const query = resolveEligibleQuery(entry);
+  const onSource = (source, count) => {
+    const line = { team: query.team, triage_source: source, triage_count: count };
+    if (source === "replica") log.info(line, "triage sweep: Triage-state source");
+    else if (source === "no-triage-status") log.debug(line, "triage sweep: team configures no Triage state");
+    else
+      log.warn(
+        line,
+        "triage sweep: Triage-state board unavailable — sweeping the eligible set only (CTL-1589)"
+      );
+  };
+  try {
+    const rows = runTriageState(query, { replica, onSource });
+    // No dwell filter (Codex R3): issues.updated_at is generic last-modified, so
+    // a frequently-touched stranded ticket would never pass an age gate. A young
+    // row racing the →Triage webhook is harmless — dispatchTriage is idempotent
+    // (in-flight signals no-op, artifacts skip) and the launch-imminent live
+    // revalidation (dispatchTriage requireTriageState) is the stale-row guard.
+    // Tag the source so ONLY this half pays that live revalidation.
+    return rows.map((t) => ({ ...t, fromTriageBoard: true }));
+  } catch (err) {
+    log.warn(
+      { team: query.team, err: err.message },
+      "sweepMissingTriage: Triage-state read threw — sweeping the eligible set only (CTL-1589)"
+    );
+    return [];
+  }
+}
+
 // sweepMissingTriage — the reconcile-path analogue of the CTL-625 webhook guard
 // (handleStateChangedEvent →Ready branch). After reconcileAll has (re)populated
 // the eligible sets, dispatch triage for every eligible ticket that lacks a
@@ -1094,6 +1220,18 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
 // research dispatch dead-locks on phase-agent-dispatch's prior_artifact_missing
 // gate, looping prior_artifact_missing → 60s cooldown → retry forever (CTL-711:
 // CTL-704/705/706/710 each needed a manual triage dispatch after a restart).
+//
+// CTL-1589: the eligible set alone is NOT a sufficient source. It is fed by a
+// Todo-only query, so a ticket sitting in the TRIAGE state appears in neither
+// half of the retry loop — and the only path that ever noticed it, the →Triage
+// webhook, is edge-triggered and one-shot. A delegated ticket whose dispatch was
+// consumed and whose worker dir later vanished therefore stranded in Triage
+// forever (live: ADV-1374, ADV-1376, CTL-1381, OTL-5). The sweep now iterates the
+// UNION of the eligible set and the team's Triage-state board, deduped by ticket
+// id — making triage admission level-triggered. Only the sweep's ticket SOURCE
+// widens: Triage-state tickets are NOT added to the eligible projection (the
+// scheduler's new-work pull, the phantom sweep, and the dependency graph all
+// consume that, and a Triage ticket is never scheduler-pulled).
 //
 // Idempotent by construction: hasTriageArtifact skips already-triaged tickets
 // (no duplicate dispatch on normal webhook-driven tickets), and an in-flight
@@ -1138,6 +1276,13 @@ export function sweepMissingTriage({
   // CTL-1481: worker:<host> label-stamp seam — threaded through to
   // dispatchTriage (undefined → real default; tests inject a fake).
   stampWorkerLabel,
+  // CTL-1589: the Triage-state read seams. `replica` defaults to the same
+  // daemon-injected board reader reconcileProject uses, so the sweep is served
+  // from the local replica with no Linear call at all.
+  replica = _injectedEligibleReplica,
+  runTriageState = defaultRunTriageStateQuery,
+  // CTL-1589 (Codex R2): live-state read for stale-row revalidation; injectable.
+  fetchLiveState = defaultFetchTicketState,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1154,12 +1299,44 @@ export function sweepMissingTriage({
     hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
-    for (const t of getEligibleSet(p.team)) {
+    const triageStatusName = resolveEligibleQuery(p)?.triageStatus ?? null;
+    // CTL-1589: Triage-state board ∪ eligible set, deduped by ticket id. The
+    // STRANDED half walks first (Codex R1): under sustained admission load an
+    // eligible-first walk let fresh Todo tickets drain the per-sweep budget
+    // every sweep, starving the level-triggered recovery exactly when the fleet
+    // is busy. The stranded set is small and self-draining (one successful
+    // triage removes the ticket permanently), while the eligible half retries
+    // on the next 60s sweep — so stranded-first costs the Todo path at most one
+    // sweep of latency. DUAL-PRESENCE (Codex R5): a feed hole can leave a stale
+    // Triage row for a ticket the live-confirmed eligible query reports as
+    // Todo — the Triage copy would walk first, fail launch revalidation, and
+    // its `seen` entry would then skip the genuinely dispatchable eligible
+    // copy every sweep. The eligible copy is the authoritative one (it came
+    // from a live-confirmed source and pays no revalidation), so a
+    // dual-present ticket keeps ONLY that copy.
+    const eligibleSet = getEligibleSet(p.team);
+    const eligibleIds = new Set(eligibleSet.map((t) => t.identifier));
+    const seen = new Set();
+    const candidates = [
+      ...triageStateTickets(p, { replica, runTriageState }).filter(
+        (t) => !eligibleIds.has(t.identifier)
+      ),
+      ...eligibleSet,
+    ];
+    for (const t of candidates) {
+      if (seen.has(t.identifier)) continue;
+      seen.add(t.identifier);
       // Codex R4: at a saturated fleet, still ROUTE capped tickets (their park is
       // capacity-independent and dispatchTriage's cap gate runs before its
       // budget gate); everything else waits for the next sweep.
       if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      // CTL-1589 (Codex R4): a Triage-STATE ticket whose triage worker is
+      // in-flight right now has no artifact yet and would route to an
+      // idempotent no-op launch — which still decrements the sweep budget
+      // (code 0) and would pay a pointless live revalidation read. Skip it
+      // here; the eligible half keeps its pre-existing behavior.
+      if (t.fromTriageBoard && isTriageInFlight(readTriageSignalStatus(orchDir, t.identifier))) continue;
       // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
       // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
       // where the stale completion signal is retired immediately before a real
@@ -1171,6 +1348,11 @@ export function sweepMissingTriage({
         appendEvent,
         orchId: t.identifier,
         budget,
+        // CTL-1589 (Codex R3): Triage-BOARD candidates must still be in the
+        // Triage state at launch; eligible-half candidates skip the check.
+        requireTriageState: t.fromTriageBoard ? triageStatusName : null,
+        candidateUpdatedAt: t.fromTriageBoard ? (t.updatedAt ?? null) : null,
+        fetchLiveState,
         botUserIds,
         botWriteId,
         gateway,

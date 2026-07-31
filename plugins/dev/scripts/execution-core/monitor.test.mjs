@@ -1308,6 +1308,337 @@ describe("sweepMissingTriage (CTL-711)", () => {
   });
 });
 
+// --- CTL-1589: level-triggered triage sweep (eligible ∪ Triage-state) --------
+//
+// Triage admission used to be EDGE-triggered only: the →Triage webhook was the
+// sole path that ever noticed a Triage ticket, and the retry sweep iterated a
+// Todo-only eligible set. So a ticket already SITTING in Triage — whose one-shot
+// dispatch was consumed and whose worker dir later vanished — could never be
+// re-noticed (live: ADV-1374, ADV-1376, CTL-1381, OTL-5). The sweep now unions
+// the eligible set with the team's Triage-state board.
+
+describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
+  const triageNode = (identifier, priority = 2) => ({
+    identifier,
+    state: "Triage",
+    priority,
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  // A runTriageState stub standing in for the replica-backed read, recording the
+  // queries it was handed.
+  const triageReturning = (tickets) => {
+    const fn = (query) => {
+      fn.queries.push(query);
+      return tickets;
+    };
+    fn.queries = [];
+    return fn;
+  };
+
+  const baseOpts = (realOrchDir, dispatch) => ({
+    orchDir: realOrchDir,
+    dispatch,
+    applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+    appendEvent: () => {},
+    readMaxParallelFn: () => 6,
+    liveBackgroundCount: () => 0,
+    // CTL-1589: never let the revalidation shell a real linearis read from a
+    // unit test. Default = live-confirms Triage (the happy path); tests that
+    // exercise stale/unreadable semantics override it.
+    fetchLiveState: () => "Triage",
+  });
+
+  test("dispatches a ticket that exists ONLY in the Triage state (never in the eligible set)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] }); // eligible set is EMPTY — the pre-fix blind spot
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-1374")]),
+    });
+    expect(dispatch).toHaveBeenCalledWith({
+      orchDir: realOrchDir,
+      ticket: "ENG-1374",
+      phase: "triage",
+    });
+  });
+
+  test("sweeps the UNION and dedupes a ticket present in both sources", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      // ENG-2 appears in BOTH sources; ENG-3 only in Triage.
+      runTriageState: triageReturning([triageNode("ENG-2"), triageNode("ENG-3")]),
+    });
+    // Stranded-first (Codex R1) for Triage-ONLY rows; a dual-present ticket
+    // keeps its ELIGIBLE copy (Codex R5: the live-confirmed source, no
+    // revalidation) so ENG-2 dispatches from the eligible half.
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-3", "ENG-1", "ENG-2"]);
+  });
+
+  test("a dual-present ticket with a STALE Triage row still dispatches via its eligible copy (Codex R5)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-DUAL")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    // The stale row would fail revalidation (live=Todo) — but the eligible copy
+    // must win the dedup and dispatch without ever consulting the live read.
+    const fetchLiveState = mock(() => "Todo");
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([triageNode("ENG-DUAL")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-DUAL"]);
+    expect(fetchLiveState).not.toHaveBeenCalled();
+  });
+
+  test("stranded Triage tickets walk before the eligible half (starvation guard)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-TODO")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-STRANDED")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-STRANDED", "ENG-TODO"]);
+  });
+
+  test("a stale Triage row (live state already advanced) is skipped at launch", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Research"); // replica row lies; Linear says advanced
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([triageNode("ENG-STALE")]),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(fetchLiveState).toHaveBeenCalledTimes(1);
+  });
+
+  test("eligible-half candidates never pay the live revalidation read", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Todo");
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-1"]);
+    expect(fetchLiveState).not.toHaveBeenCalled();
+  });
+
+  test("a Triage row confirmed live in Triage dispatches; an unreadable live state HOLDS (fail-closed, Codex R4)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState: () => "Triage",
+      runTriageState: triageReturning([triageNode("ENG-CONFIRMED")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-CONFIRMED"]);
+    // Unreadable → HOLD this sweep (a blind proceed could double-launch and the
+    // later status write could drag an advanced ticket back to Triage).
+    const dispatch2 = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch2),
+      fetchLiveState: () => null,
+      runTriageState: triageReturning([triageNode("ENG-UNREADABLE")]),
+    });
+    expect(dispatch2).not.toHaveBeenCalled();
+  });
+
+  test("a stale Triage row is skipped BEFORE the cross-host claim (fence untouched, Codex R4)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimCalls = [];
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      hosts: ["mini", "mini-2"],
+      hostName: "mini",
+      survivingRosterOverride: ["mini", "mini-2"],
+      claimDispatch: (arg) => {
+        claimCalls.push(arg);
+        return { won: true, generation: 7 };
+      },
+      fetchLiveState: () => "Research",
+      runTriageState: triageReturning([triageNode("ENG-3000")]),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The skip must never bump the fence generation out from under a live
+    // later-phase worker — the claim is only taken when a launch will follow.
+    expect(claimCalls).toHaveLength(0);
+  });
+
+  test("an in-flight Triage-board candidate is skipped without a live read or budget spend (Codex R4)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dir = join(realOrchDir, "workers", "ENG-RUN");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "running" }));
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Triage");
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([triageNode("ENG-RUN")]),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(fetchLiveState).not.toHaveBeenCalled();
+  });
+
+  test("a negative revalidation verdict is cached — no repeat bare read per sweep (Codex R6)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Research");
+    const opts = { ...baseOpts(realOrchDir, dispatch), fetchLiveState };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-STUCK")]) });
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-STUCK")]) });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The second sweep is answered by the negative marker — one read total.
+    expect(fetchLiveState).toHaveBeenCalledTimes(1);
+  });
+
+  test("a replica row updated AFTER a cached negative invalidates the marker (Codex R7)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    let liveNow = "Research"; // first sweep: genuinely advanced → negative cached
+    const fetchLiveState = mock(() => liveNow);
+    const opts = { ...baseOpts(realOrchDir, dispatch), fetchLiveState };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-BACK")]) });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The ticket re-enters Triage: the replica row is now NEWER than the verdict.
+    liveNow = "Triage";
+    const reentered = { ...triageNode("ENG-BACK"), updatedAt: new Date(Date.now() + 1000).toISOString() };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([reentered]) });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-BACK"]);
+    expect(fetchLiveState).toHaveBeenCalledTimes(2);
+  });
+
+  test("a recently-touched Triage row is still swept (no updated_at dwell gate — Codex R3)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    // Generic updated_at is last-modified — a stranded ticket touched by label
+    // churn must not be starved by an age gate; the live revalidation is the guard.
+    const touched = { ...triageNode("ENG-TOUCHED"), updatedAt: new Date(Date.now() - 60_000).toISOString() };
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState: () => "Triage",
+      runTriageState: triageReturning([touched]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-TOUCHED"]);
+  });
+
+  test("a Triage-state ticket that already has triage.json is still skipped (idempotence holds across both sources)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    writeTriageArtifact(realOrchDir, "ENG-1374"); // already triaged
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-1374"), triageNode("ENG-1376")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-1376"]);
+  });
+
+  test("the resolved query (team + triageStatus) is handed to the Triage-state read", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Needs Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [] }) });
+    const runTriageState = triageReturning([]);
+    sweepMissingTriage({ ...baseOpts(realOrchDir, mock(() => ({ code: 0 }))), runTriageState });
+    expect(runTriageState.queries).toHaveLength(1);
+    expect(runTriageState.queries[0]).toMatchObject({ team: "ENG", triageStatus: "Needs Triage" });
+  });
+
+  test("an empty Triage board changes nothing — the eligible half sweeps as before", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({ ...baseOpts(realOrchDir, dispatch), runTriageState: triageReturning([]) });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  test("a THROWING Triage-state read degrades to the eligible set — the sweep never aborts", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    expect(() =>
+      sweepMissingTriage({
+        ...baseOpts(realOrchDir, dispatch),
+        runTriageState: () => {
+          throw new Error("replica exploded");
+        },
+      })
+    ).not.toThrow();
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  // The read itself answers a null triageStatus with [] (see runTriageStateQuery);
+  // what matters here is that the sweep does no extra work and stays eligible-only.
+  test("triageStatus explicitly null → no extra dispatches (eligible set only)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: null });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    // The REAL read (no stub) with no replica wired — proves the default seam
+    // makes no Linear call and yields nothing.
+    sweepMissingTriage(baseOpts(realOrchDir, dispatch));
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  test("Triage-state tickets are NOT added to the eligible projection (scheduler pull is untouched)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, mock(() => ({ code: 0 }))),
+      runTriageState: triageReturning([triageNode("ENG-1374")]),
+    });
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
+  });
+});
+
 // --- CTL-1441: triage re-dispatch guard (cap + artifact-mismatch) ------------
 
 describe("triage re-dispatch guard (CTL-1441)", () => {
