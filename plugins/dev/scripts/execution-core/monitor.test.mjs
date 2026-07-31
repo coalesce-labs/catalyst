@@ -1514,6 +1514,43 @@ describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
     expect(fetchLiveState).not.toHaveBeenCalled();
   });
 
+  test("a negative revalidation verdict is cached — no repeat bare read per sweep (Codex R6)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Research");
+    const opts = { ...baseOpts(realOrchDir, dispatch), fetchLiveState };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-STUCK")]) });
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-STUCK")]) });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The second sweep is answered by the negative marker — one read total.
+    expect(fetchLiveState).toHaveBeenCalledTimes(1);
+  });
+
+  test("the revalidation read is handed the gateway tier (Codex R6)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const seenOpts = [];
+    const gw = { marker: "gw" };
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      gateway: gw,
+      fetchLiveState: (id, o) => {
+        seenOpts.push(o);
+        return "Triage";
+      },
+      runTriageState: triageReturning([triageNode("ENG-GW")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-GW"]);
+    expect(seenOpts).toHaveLength(1);
+    expect(seenOpts[0]?.gateway).toBe(gw);
+  });
+
   test("a recently-touched Triage row is still swept (no updated_at dwell gate — Codex R3)", () => {
     enroll("ENG", { status: "Todo", triageStatus: "Triage" });
     const realOrchDir = join(catalystDir, "execution-core");

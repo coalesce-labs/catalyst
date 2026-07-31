@@ -872,13 +872,43 @@ function dispatchTriage(
   // ticket's state. No verdict caching: a cached positive could go stale after
   // a failed dispatch and redispatch an advanced ticket on the next sweep.
   if (requireTriageState) {
+    // NEGATIVE-verdict cache (Codex R6): a failed validation is not a launch,
+    // so a persistently-stale row (unhealed delivery hole) would otherwise pay
+    // one bare read per sweep forever. Caching ONLY negatives keeps R4's
+    // no-stale-positive property — a fresh negative marker just extends the
+    // skip of an already-skipped ticket, and expiry re-reads (2 reads/hour cap
+    // per stuck ticket).
+    const revalDir = join(orchDir, ".triage-revalidate");
+    const revalPath = join(revalDir, `${identifier}.json`);
+    try {
+      const m = JSON.parse(readFileSync(revalPath, "utf8"));
+      if (typeof m?.ts === "number" && Date.now() - m.ts < TRIAGE_REVALIDATE_NEGATIVE_MS) {
+        log.debug(
+          { identifier, cachedLive: m.live ?? null },
+          "dispatchTriage: Triage-board revalidation negative still cached — skipping without a read (CTL-1589)"
+        );
+        return false;
+      }
+    } catch {
+      /* absent/corrupt marker → read */
+    }
     let live = null;
     try {
-      live = fetchLiveState(identifier);
+      // Tiered (Codex R6): the broker's gateway descriptor store (60s state
+      // freshness, an INDEPENDENT webhook-fed source) answers without a
+      // subprocess when it can; only a miss shells the live read. The replica
+      // is deliberately NOT passed — it is the very source being audited.
+      live = fetchLiveState(identifier, { gateway });
     } catch {
       live = null;
     }
     if (live !== requireTriageState) {
+      try {
+        mkdirSync(revalDir, { recursive: true });
+        writeFileSync(revalPath, JSON.stringify({ ts: Date.now(), live }));
+      } catch {
+        /* marker is best-effort; worst case is a re-read next sweep */
+      }
       log.info(
         { identifier, live, expected: requireTriageState },
         live == null
@@ -886,6 +916,13 @@ function dispatchTriage(
           : "dispatchTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
       );
       return false;
+    }
+    // Positive: clear any expired negative so a healed ticket never waits on
+    // stale forensics. Best-effort.
+    try {
+      renameSync(revalPath, `${revalPath}.cleared`);
+    } catch {
+      /* no marker to clear */
     }
   }
   let clusterGeneration = null;
@@ -1130,6 +1167,11 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
 // unavailable cases are logged at WARN and never silent: with the replica tier
 // off (or its writer dead) this half of the fix is INERT, and a stranded Triage
 // ticket would otherwise look like a mysterious no-op.
+// TRIAGE_REVALIDATE_NEGATIVE_MS — how long a NEGATIVE launch-revalidation
+// verdict (stale/unreadable) suppresses re-reading a Triage-board candidate.
+// See the negative-verdict cache inside dispatchTriage (Codex R6).
+const TRIAGE_REVALIDATE_NEGATIVE_MS = 30 * 60 * 1000;
+
 function triageStateTickets(entry, { replica, runTriageState }) {
   const query = resolveEligibleQuery(entry);
   const onSource = (source, count) => {
