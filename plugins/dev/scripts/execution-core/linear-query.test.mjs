@@ -2663,3 +2663,21 @@ describe("classifyTicketResolution gateway-tombstone veto (CTL-1580 round 5)", (
     expect(execs).toBe(0);
   });
 });
+
+describe("classifyTicketResolution bypassCaches (CTL-1580 round 6)", () => {
+  test("bypassCaches skips BOTH tiers even when production injection forces them in", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" }); // live: gone
+    const gateway = { getDescriptor: () => ({ removed: false, state: "Todo", updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, gateway, replica, bypassCaches: true })).toBe("not-found");
+  });
+});
+
+describe("runEligibleQuery structural body validation (CTL-1580 round 6)", () => {
+  test("an exit-0 body without nodes[] throws instead of zeroing the board", () => {
+    const exec = () => ({ code: 0, stdout: JSON.stringify({ error: "Authentication required" }), stderr: "" });
+    expect(() =>
+      runEligibleQuery({ team: "PROJ", status: "Todo" }, { exec, now: () => 0 })
+    ).toThrow(/nodes/);
+  });
+});

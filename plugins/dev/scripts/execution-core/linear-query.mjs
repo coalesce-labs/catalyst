@@ -737,14 +737,19 @@ export function readTicketLabelNodes(identifier, { exec = defaultExec } = {}) {
 // retained for back-compat with any deployment still on the 2026-05-27 contract.
 export function classifyTicketResolution(
   identifier,
-  { exec = defaultExec, gateway, replica, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
+  // bypassCaches (CTL-1580 round 6): a DUE live recheck must skip BOTH cached
+  // tiers. It is a dedicated flag — not the absence of gateway/replica —
+  // because production injection (daemon.mjs runTick) deliberately spreads
+  // `{ ...opts, gateway }` so callers cannot accidentally drop the reader; a
+  // flag survives that spread where option omission does not.
+  { exec = defaultExec, gateway, replica, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS, bypassCaches = false } = {}
 ) {
   // CTL-823: serve ONLY the cheap not-quarantine verdict from the durable
   // store — a fresh, present, not-removed descriptor proves existence.
   // removed/absent/stale NEVER short-circuit: quarantine is a destructive
   // write, so those verdicts always pay a fresh live read
   // (fresh-before-quarantine).
-  if (gateway) {
+  if (gateway && !bypassCaches) {
     const d = gateway.getDescriptor(identifier);
     if (d && !d.removed && descriptorAgeMs(d) <= gatewayFreshMs) return "exists";
   }
@@ -778,7 +783,7 @@ export function classifyTicketResolution(
       return false; // descriptor read is best-effort — never blocks the tier
     }
   })();
-  if (!freshGatewayTombstone && replica && typeof replica.isFresh === "function" && replica.isFresh()) {
+  if (!bypassCaches && !freshGatewayTombstone && replica && typeof replica.isFresh === "function" && replica.isFresh()) {
     if (replica.lookup(identifier) !== undefined) {
       recordDaemonRead("replica", "ok", identifier, null, "classify_resolution");
       return "exists";
@@ -1305,9 +1310,17 @@ export function runEligibleQuery(
     recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
     throw new Error(`linearis stdout is not JSON: ${err.message}`);
   }
+  // Structural validation (Codex round 6): an exit-0 body WITHOUT nodes[] (a
+  // parseable auth-error object, '{}') must not normalize to an EMPTY BOARD —
+  // that would set the empty-confirm marker and zero admission for the trust
+  // window. Reject + record failed; reconcileProject preserves the prior set.
+  if (!Array.isArray(parsed?.nodes)) {
+    recordDaemonRead(liveListSource, "failed", null, null, "eligible_list");
+    throw new Error("linearis issues list body lacks nodes[] — structurally invalid");
+  }
   let tickets;
   try {
-    tickets = (parsed.nodes ?? []).map(normalizeTicket);
+    tickets = parsed.nodes.map(normalizeTicket);
     // Priority is a floor: keep tickets whose priority is more-urgent-or-equal
     // (1=Urgent … 4=Low). 0 ("No priority") is always below any floor.
     if (query.priority != null) {

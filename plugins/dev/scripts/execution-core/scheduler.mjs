@@ -4354,11 +4354,24 @@ export function schedulerTick(
     // read — a stale replica row from a missed deletion apply, or a
     // fresh-but-wrong gateway descriptor, must not vouch forever.
     const liveRecheckDue = recordReplicaVouchRecheckIfDue(orchDir, sig.ticket, now());
-    if (
-      classifyResolution(sig.ticket, liveRecheckDue ? { exec } : { exec, gateway, replica }) !==
-      "not-found"
-    )
-      continue; // (b) definitive only
+    // bypassCaches (not option-omission): production injection spreads
+    // `{ ...opts, gateway }` over these options, so only a dedicated flag
+    // survives to actually force the live read (Codex round 6).
+    const verdict = classifyResolution(
+      sig.ticket,
+      liveRecheckDue ? { exec, bypassCaches: true } : { exec, gateway, replica }
+    );
+    if (liveRecheckDue && verdict === "unknown") {
+      // An INCONCLUSIVE recheck (timeout/429/auth) must not spend the 6h stamp —
+      // surrender the marker so the next 10-min probe re-attempts the live
+      // verification instead of re-vouching from the replica for a full window.
+      try {
+        rmSync(replicaVouchRecheckPath(orchDir, sig.ticket), { force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (verdict !== "not-found") continue; // (b) definitive only
     if (maybeQuarantinePhantom(orchDir, sig.ticket, sig.phase)) {
       quarantinedPhantoms.push({ ticket: sig.ticket, phase: sig.phase });
       log.warn(
