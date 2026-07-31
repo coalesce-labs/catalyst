@@ -2598,7 +2598,13 @@ function recordDeletionProbeIfDue(orchDir, ticket, now) {
 // (keep the cheap replica tier, skip the recheck) — the opposite of the
 // probe marker's fail-closed, because here the failure mode is one more
 // replica read, not a quota loop.
-const REPLICA_VOUCH_RECHECK_MS = 6 * 3_600_000; // one live re-verify per ticket per 6h
+// Env-tunable (Codex round 5): the correctness↔quota trade-off is per-fleet —
+// a quota-constrained deployment lengthens it, one prioritizing stale-deletion
+// latency shortens it. Non-finite/≤0 → default 6h.
+const REPLICA_VOUCH_RECHECK_MS = (() => {
+  const raw = Number(process.env.SCHEDULER_REPLICA_VOUCH_RECHECK_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 6 * 3_600_000; // one live re-verify per ticket per 6h
+})();
 function replicaVouchRecheckPath(orchDir, ticket) {
   return join(orchDir, ".replica-vouch-rechecks", ticket);
 }
@@ -4365,11 +4371,18 @@ export function schedulerTick(
       // (next tick retries immediately) AND the vouch-recheck marker (so that
       // retry pays the live path again instead of being re-vouched by the very
       // stale row the recheck just disproved).
+      // Independent removals (Codex round 5): a transient failure on the first
+      // must not skip the second — a retained vouch marker would re-vouch the
+      // very row the recheck just disproved when the probe retries.
       try {
         rmSync(deletionProbePath(orchDir, sig.ticket), { force: true });
-        rmSync(replicaVouchRecheckPath(orchDir, sig.ticket), { force: true });
       } catch {
         /* best-effort — worst case the retry waits out the cool-down */
+      }
+      try {
+        rmSync(replicaVouchRecheckPath(orchDir, sig.ticket), { force: true });
+      } catch {
+        /* best-effort */
       }
     }
   }

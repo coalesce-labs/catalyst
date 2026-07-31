@@ -1570,6 +1570,13 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     // The sweep's call site historically passed only { exec }, so every probe
     // fell through to a live linearis read.
     writeSignal("PROJ-202", "implement", "running");
+    // CTL-1580: a DUE live recheck deliberately passes only { exec } — pre-seed
+    // a fresh recheck marker so this test observes the steady-state threading.
+    mkdirSync(join(orchDir, ".replica-vouch-rechecks"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".replica-vouch-rechecks", "PROJ-202"),
+      JSON.stringify({ ticket: "PROJ-202", probedAt: Date.now() })
+    );
     const gateway = { getDescriptor: () => null };
     let seenOpts = null;
     schedulerTick(orchDir, {

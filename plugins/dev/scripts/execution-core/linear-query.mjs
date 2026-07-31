@@ -764,7 +764,21 @@ export function classifyTicketResolution(
   // when the accessor is absent (an older reader object) — the tier stays
   // inert rather than trusting an ungated row; the Pass 0a probe cool-down
   // still bounds the live fallback to one read per window.
-  if (replica && typeof replica.isFresh === "function" && replica.isFresh()) {
+  // Gateway TOMBSTONE veto (Codex round 5): a fresh { removed: true }
+  // descriptor is webhook-observed evidence of deletion; when the same deletion
+  // failed to apply to the replica (the CTL-1402 drift class), the stale
+  // non-tombstoned row must not serve "exists" — skip the replica tier and pay
+  // the definitive live read below.
+  const freshGatewayTombstone = (() => {
+    if (!gateway) return false;
+    try {
+      const d = gateway.getDescriptor(identifier);
+      return Boolean(d && d.removed === true && descriptorAgeMs(d) <= gatewayFreshMs);
+    } catch {
+      return false; // descriptor read is best-effort — never blocks the tier
+    }
+  })();
+  if (!freshGatewayTombstone && replica && typeof replica.isFresh === "function" && replica.isFresh()) {
     if (replica.lookup(identifier) !== undefined) {
       recordDaemonRead("replica", "ok", identifier, null, "classify_resolution");
       return "exists";

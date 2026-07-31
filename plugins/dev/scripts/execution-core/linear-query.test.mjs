@@ -2645,3 +2645,21 @@ describe("classifyTicketResolution replica-tier freshness gate (CTL-1580 review)
     expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
   });
 });
+
+describe("classifyTicketResolution gateway-tombstone veto (CTL-1580 round 5)", () => {
+  test("a fresh removed:true descriptor bypasses the replica tier — deletion pays the live read", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" }); // live says: gone
+    const gateway = { getDescriptor: () => ({ removed: true, updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }) }; // stale drift row
+    expect(classifyTicketResolution("CTL-9", { exec, gateway, replica })).toBe("not-found");
+  });
+
+  test("a fresh removed:false descriptor still short-circuits before either tier", () => {
+    let execs = 0;
+    const exec = () => { execs++; return { code: 0, stdout: "null", stderr: "" }; };
+    const gateway = { getDescriptor: () => ({ removed: false, state: "Todo", updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => undefined };
+    expect(classifyTicketResolution("CTL-10", { exec, gateway, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+});
