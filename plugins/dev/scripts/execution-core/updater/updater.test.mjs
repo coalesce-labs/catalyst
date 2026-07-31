@@ -49,6 +49,7 @@ describe("runRefreshOnce (CTL-1348 poll/boot/event refresh)", () => {
       repoConfigPath: "/repo/.catalyst/config.json",
       refreshAllFn,
       resolveRootsFn: (o) => { rootsCalledWith = o; return ["/r/a", "/r/b"]; },
+      installCliFn: () => {}, // hermetic: /r/a is changed:true; without the stub this execs the real install-cli.sh (CTL-1381)
     });
     // Codex P1: repoConfigPath MUST reach both root resolution and the refresh, else a
     // node whose pluginDirs live in the repo config resolves zero roots and pulls nothing.
