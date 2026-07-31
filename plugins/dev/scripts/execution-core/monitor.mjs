@@ -52,6 +52,7 @@ import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
   runEligibleQuery,
+  runTriageStateQuery as defaultRunTriageStateQuery, // CTL-1589: level-triggered Triage-state read
   fetchTicketAssignee,
   isAssigneeClaimable,
   isClaimable,
@@ -1085,6 +1086,36 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
   return true;
 }
 
+// triageStateTickets — the CTL-1589 half of the sweep's ticket source: the
+// tickets currently SITTING IN this team's Triage state, read from the local
+// replica. Fail-open — an unavailable board yields [] and the sweep degrades to
+// its pre-CTL-1589 eligible-only behavior rather than aborting the pass. The
+// unavailable cases are logged at WARN and never silent: with the replica tier
+// off (or its writer dead) this half of the fix is INERT, and a stranded Triage
+// ticket would otherwise look like a mysterious no-op.
+function triageStateTickets(entry, { replica, runTriageState }) {
+  const query = resolveEligibleQuery(entry);
+  const onSource = (source, count) => {
+    const line = { team: query.team, triage_source: source, triage_count: count };
+    if (source === "replica") log.info(line, "triage sweep: Triage-state source");
+    else if (source === "no-triage-status") log.debug(line, "triage sweep: team configures no Triage state");
+    else
+      log.warn(
+        line,
+        "triage sweep: Triage-state board unavailable — sweeping the eligible set only (CTL-1589)"
+      );
+  };
+  try {
+    return runTriageState(query, { replica, onSource });
+  } catch (err) {
+    log.warn(
+      { team: query.team, err: err.message },
+      "sweepMissingTriage: Triage-state read threw — sweeping the eligible set only (CTL-1589)"
+    );
+    return [];
+  }
+}
+
 // sweepMissingTriage — the reconcile-path analogue of the CTL-625 webhook guard
 // (handleStateChangedEvent →Ready branch). After reconcileAll has (re)populated
 // the eligible sets, dispatch triage for every eligible ticket that lacks a
@@ -1094,6 +1125,18 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
 // research dispatch dead-locks on phase-agent-dispatch's prior_artifact_missing
 // gate, looping prior_artifact_missing → 60s cooldown → retry forever (CTL-711:
 // CTL-704/705/706/710 each needed a manual triage dispatch after a restart).
+//
+// CTL-1589: the eligible set alone is NOT a sufficient source. It is fed by a
+// Todo-only query, so a ticket sitting in the TRIAGE state appears in neither
+// half of the retry loop — and the only path that ever noticed it, the →Triage
+// webhook, is edge-triggered and one-shot. A delegated ticket whose dispatch was
+// consumed and whose worker dir later vanished therefore stranded in Triage
+// forever (live: ADV-1374, ADV-1376, CTL-1381, OTL-5). The sweep now iterates the
+// UNION of the eligible set and the team's Triage-state board, deduped by ticket
+// id — making triage admission level-triggered. Only the sweep's ticket SOURCE
+// widens: Triage-state tickets are NOT added to the eligible projection (the
+// scheduler's new-work pull, the phantom sweep, and the dependency graph all
+// consume that, and a Triage ticket is never scheduler-pulled).
 //
 // Idempotent by construction: hasTriageArtifact skips already-triaged tickets
 // (no duplicate dispatch on normal webhook-driven tickets), and an in-flight
@@ -1138,6 +1181,11 @@ export function sweepMissingTriage({
   // CTL-1481: worker:<host> label-stamp seam — threaded through to
   // dispatchTriage (undefined → real default; tests inject a fake).
   stampWorkerLabel,
+  // CTL-1589: the Triage-state read seams. `replica` defaults to the same
+  // daemon-injected board reader reconcileProject uses, so the sweep is served
+  // from the local replica with no Linear call at all.
+  replica = _injectedEligibleReplica,
+  runTriageState = defaultRunTriageStateQuery,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1154,7 +1202,17 @@ export function sweepMissingTriage({
     hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
-    for (const t of getEligibleSet(p.team)) {
+    // CTL-1589: eligible set ∪ Triage-state board, deduped by ticket id. The
+    // eligible half comes first so a ticket present in both keeps its
+    // projection-backed record.
+    const seen = new Set();
+    const candidates = [
+      ...getEligibleSet(p.team),
+      ...triageStateTickets(p, { replica, runTriageState }),
+    ];
+    for (const t of candidates) {
+      if (seen.has(t.identifier)) continue;
+      seen.add(t.identifier);
       // Codex R4: at a saturated fleet, still ROUTE capped tickets (their park is
       // capacity-independent and dispatchTriage's cap gate runs before its
       // budget gate); everything else waits for the next sweep.

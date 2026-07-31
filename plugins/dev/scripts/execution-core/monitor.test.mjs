@@ -1308,6 +1308,149 @@ describe("sweepMissingTriage (CTL-711)", () => {
   });
 });
 
+// --- CTL-1589: level-triggered triage sweep (eligible ∪ Triage-state) --------
+//
+// Triage admission used to be EDGE-triggered only: the →Triage webhook was the
+// sole path that ever noticed a Triage ticket, and the retry sweep iterated a
+// Todo-only eligible set. So a ticket already SITTING in Triage — whose one-shot
+// dispatch was consumed and whose worker dir later vanished — could never be
+// re-noticed (live: ADV-1374, ADV-1376, CTL-1381, OTL-5). The sweep now unions
+// the eligible set with the team's Triage-state board.
+
+describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
+  const triageNode = (identifier, priority = 2) => ({
+    identifier,
+    state: "Triage",
+    priority,
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  // A runTriageState stub standing in for the replica-backed read, recording the
+  // queries it was handed.
+  const triageReturning = (tickets) => {
+    const fn = (query) => {
+      fn.queries.push(query);
+      return tickets;
+    };
+    fn.queries = [];
+    return fn;
+  };
+
+  const baseOpts = (realOrchDir, dispatch) => ({
+    orchDir: realOrchDir,
+    dispatch,
+    applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+    appendEvent: () => {},
+    readMaxParallelFn: () => 6,
+    liveBackgroundCount: () => 0,
+  });
+
+  test("dispatches a ticket that exists ONLY in the Triage state (never in the eligible set)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] }); // eligible set is EMPTY — the pre-fix blind spot
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-1374")]),
+    });
+    expect(dispatch).toHaveBeenCalledWith({
+      orchDir: realOrchDir,
+      ticket: "ENG-1374",
+      phase: "triage",
+    });
+  });
+
+  test("sweeps the UNION and dedupes a ticket present in both sources", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      // ENG-2 appears in BOTH sources; ENG-3 only in Triage.
+      runTriageState: triageReturning([triageNode("ENG-2"), triageNode("ENG-3")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-1", "ENG-2", "ENG-3"]);
+  });
+
+  test("a Triage-state ticket that already has triage.json is still skipped (idempotence holds across both sources)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    writeTriageArtifact(realOrchDir, "ENG-1374"); // already triaged
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-1374"), triageNode("ENG-1376")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-1376"]);
+  });
+
+  test("the resolved query (team + triageStatus) is handed to the Triage-state read", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Needs Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [] }) });
+    const runTriageState = triageReturning([]);
+    sweepMissingTriage({ ...baseOpts(realOrchDir, mock(() => ({ code: 0 }))), runTriageState });
+    expect(runTriageState.queries).toHaveLength(1);
+    expect(runTriageState.queries[0]).toMatchObject({ team: "ENG", triageStatus: "Needs Triage" });
+  });
+
+  test("an empty Triage board changes nothing — the eligible half sweeps as before", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({ ...baseOpts(realOrchDir, dispatch), runTriageState: triageReturning([]) });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  test("a THROWING Triage-state read degrades to the eligible set — the sweep never aborts", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    expect(() =>
+      sweepMissingTriage({
+        ...baseOpts(realOrchDir, dispatch),
+        runTriageState: () => {
+          throw new Error("replica exploded");
+        },
+      })
+    ).not.toThrow();
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  // The read itself answers a null triageStatus with [] (see runTriageStateQuery);
+  // what matters here is that the sweep does no extra work and stays eligible-only.
+  test("triageStatus explicitly null → no extra dispatches (eligible set only)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: null });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    // The REAL read (no stub) with no replica wired — proves the default seam
+    // makes no Linear call and yields nothing.
+    sweepMissingTriage(baseOpts(realOrchDir, dispatch));
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  test("Triage-state tickets are NOT added to the eligible projection (scheduler pull is untouched)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, mock(() => ({ code: 0 }))),
+      runTriageState: triageReturning([triageNode("ENG-1374")]),
+    });
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
+  });
+});
+
 // --- CTL-1441: triage re-dispatch guard (cap + artifact-mismatch) ------------
 
 describe("triage re-dispatch guard (CTL-1441)", () => {

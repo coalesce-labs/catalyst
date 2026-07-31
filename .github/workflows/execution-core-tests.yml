@@ -433,6 +433,7 @@ jobs:
             reconcile-health-event.test.mjs \
             recovery.test.mjs \
             registry.test.mjs \
+            replica-read.test.mjs \
             scan.test.mjs \
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \

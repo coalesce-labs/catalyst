@@ -1365,3 +1365,57 @@ export function runEligibleQuery(
   recordDaemonRead(liveListSource, "ok", null, null, "eligible_list"); // CTL-1580: only after a clean parse
   return tickets;
 }
+
+// runTriageStateQuery — the sibling of runEligibleQuery that lists the tickets
+// currently SITTING IN the team's Triage state (CTL-1589). runEligibleQuery binds
+// `query.status` (Todo), so a ticket parked in Triage was invisible to every list
+// read the daemon does; triage admission was EDGE-triggered only (the →Triage
+// webhook), and a ticket whose one-shot dispatch was consumed could never be
+// re-noticed. sweepMissingTriage unions this read with the eligible set to make
+// that admission level-triggered.
+//
+// REPLICA-ONLY, deliberately — no `linearis issues list` fallback, which is the
+// one structural difference from runEligibleQuery. This read is SUPPLEMENTARY:
+// an unavailable answer costs one 10-minute sweep, where an unavailable eligible
+// board freezes admission fleet-wide (hence that path's linearis confirm +
+// empty-marker + breaker machinery). Adding a per-team live list on the reconcile
+// cadence would re-introduce exactly the shared-quota burn the replica tier exists
+// to remove. So: a DEFINED replica answer is served as-is (its writer-liveness +
+// seed-cursor + snapshot gates already prove it real), and anything else yields
+// [] with a distinguishing `onSource` marker for the caller to log. Consequence:
+// on a host with the replica tier OFF this read is inert and the sweep keeps its
+// pre-CTL-1589 eligible-only behavior — the caller reports that loudly.
+//
+// Also unlike runEligibleQuery: no priority floor, no project/label filter (see
+// replica-read's triageState — this mirrors the webhook →Triage predicate, which
+// applies neither), and no delegate batch (dispatchTriage resolves ownership per
+// ticket at its own claim gate).
+//
+// onSource(source, count) markers: "replica" (served) · "no-triage-status" (the
+// team configures none) · "no-replica" (tier off / no reader wired) ·
+// "replica-miss" (dead writer, mid-reseed, or a throw).
+export function runTriageStateQuery(query, { replica, onSource } = {}) {
+  if (!query?.triageStatus) {
+    onSource?.("no-triage-status", 0);
+    return [];
+  }
+  if (!replica?.triageState) {
+    onSource?.("no-replica", 0);
+    return [];
+  }
+  let local;
+  try {
+    local = replica.triageState(query);
+  } catch {
+    local = undefined;
+  }
+  if (!local || !Array.isArray(local.nodes)) {
+    onSource?.("replica-miss", 0);
+    recordDaemonRead("replica", "failed", null, null, "triage_list");
+    return [];
+  }
+  const tickets = local.nodes.map(normalizeTicket);
+  onSource?.("replica", tickets.length);
+  recordDaemonRead("replica", "ok", null, null, "triage_list");
+  return tickets;
+}
