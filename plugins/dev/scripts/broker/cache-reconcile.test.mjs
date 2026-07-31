@@ -569,11 +569,13 @@ describe("linearisBodyError (CTL-1577 round 2)", () => {
 describe("createReplicaFetcher (CTL-1571)", () => {
   const hitReader = {
     isFresh: () => true,
-    lookup: () => ({ terminal: false, state: "Implement" }),
-    labels: () => [{ id: "l1", name: "monitor" }, { id: "l2", name: "bug" }],
+    stateAndLabels: () => ({
+      state: { terminal: false, state: "Implement" },
+      labels: [{ id: "l1", name: "monitor" }, { id: "l2", name: "bug" }],
+    }),
   };
 
-  test("replica HIT serves state+labels with zero live calls", async () => {
+  test("replica HIT serves state+labels from ONE snapshot with zero live calls", async () => {
     let liveCalls = 0;
     const fetch = createReplicaFetcher({
       getReader: async () => hitReader,
@@ -603,30 +605,28 @@ describe("createReplicaFetcher (CTL-1571)", () => {
     expect(warned).toBe(1);
   });
 
-  test("replica MISS (both lookups undefined) falls back to live", async () => {
+  test("snapshot MISS (undefined — absent row OR half-seeded pair) falls back to live", async () => {
     const fetch = createReplicaFetcher({
-      getReader: async () => ({ isFresh: () => true, lookup: () => undefined, labels: () => undefined }),
+      getReader: async () => ({ isFresh: () => true, stateAndLabels: () => undefined }),
       fallback: async () => ({ state: null, labels: null, error: "timeout after 30s" }),
     });
     expect((await fetch("CTL-4")).error).toBe("timeout after 30s");
   });
 
-  test("partial HIT (labels gated off mid-reseed) falls back — never a half-seeded serve", async () => {
-    // lookup() has no seed-completeness gate; labels() does. A lookup HIT with a
-    // labels MISS is the mid-reseed shape and must take the live fallback.
+  test("an old reader shape without stateAndLabels falls back (never partial reads)", async () => {
     let liveCalls = 0;
     const fetch = createReplicaFetcher({
-      getReader: async () => ({ isFresh: () => true, lookup: () => ({ terminal: true, state: "Done" }), labels: () => undefined }),
-      fallback: async () => { liveCalls++; return { state: "Done", labels: ["x"], error: null }; },
+      getReader: async () => ({ isFresh: () => true, lookup: () => ({ terminal: true, state: "Done" }), labels: () => [] }),
+      fallback: async () => { liveCalls++; return { state: "Done", labels: [], error: null }; },
     });
-    expect(await fetch("CTL-5")).toEqual({ state: "Done", labels: ["x"], error: null });
+    expect(await fetch("CTL-5")).toEqual({ state: "Done", labels: [], error: null });
     expect(liveCalls).toBe(1);
   });
 
   test("empty label set is a defined HIT (no fallback)", async () => {
     let liveCalls = 0;
     const fetch = createReplicaFetcher({
-      getReader: async () => ({ isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }), labels: () => [] }),
+      getReader: async () => ({ isFresh: () => true, stateAndLabels: () => ({ state: { terminal: false, state: "Todo" }, labels: [] }) }),
       fallback: async () => { liveCalls++; return { state: null, labels: null, error: "x" }; },
     });
     expect(await fetch("CTL-6")).toEqual({ state: "Todo", labels: [], error: null });

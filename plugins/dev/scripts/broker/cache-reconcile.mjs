@@ -203,36 +203,40 @@ function recordReconcileRead(source, result, ticket) {
  */
 export function createReplicaFetcher({ getReader = getReplicaReader, fallback = fetchLive, logger } = {}) {
   const log = logSink(logger);
+  // A fallback read "succeeded" only if reconcile can USE it — both-null with
+  // no error is the same unusable shape reconcile counts as failed (Codex
+  // review: an exit-0 `{}` body must not inflate the ok counters).
+  const liveResult = (live) =>
+    live.error || (live.state === null && live.labels === null) ? "failed" : "ok";
   return async function fetchWithReplicaFirst(ticket) {
     const reader = await getReader();
     if (!reader) {
       const live = await fallback(ticket);
-      recordReconcileRead("linearis", live.error ? "failed" : "ok", ticket);
+      recordReconcileRead("linearis", liveResult(live), ticket);
       return live;
     }
     if (!reader.isFresh()) {
       log("warn", { ticket }, "cache-reconcile: replica STALE — falling back to live linearis");
       const live = await fallback(ticket);
-      recordReconcileRead("linearis_miss", live.error ? "failed" : "ok", ticket);
+      recordReconcileRead("linearis_miss", liveResult(live), ticket);
       return live;
     }
-    const stateHit = reader.lookup(ticket);
-    const labelsHit = reader.labels(ticket);
-    // BOTH projections must resolve (Codex review): lookup() has no
-    // seed-completeness gate, so during a forced re-seed it can serve a
-    // batch-inserted row while the gated labels() correctly refuses — accepting
-    // that partial pair would reconcile state from a half-seeded snapshot and
-    // silently leave labels stale. Either side undefined → the live fallback.
-    if (stateHit === undefined || labelsHit === undefined) {
+    // ONE transactional snapshot for BOTH projections (Codex review round 2):
+    // separate lookup()+labels() calls could straddle a completing re-seed and
+    // hand back a MIXED pair; stateAndLabels() pins one snapshot and returns
+    // undefined (never a partial pair) on any miss — including the half-seeded
+    // shape where lookup would serve but the gated labels() refuses.
+    const pair = typeof reader.stateAndLabels === "function" ? reader.stateAndLabels(ticket) : undefined;
+    if (pair === undefined) {
       log("warn", { ticket }, "cache-reconcile: replica MISS — falling back to live linearis");
       const live = await fallback(ticket);
-      recordReconcileRead("linearis_miss", live.error ? "failed" : "ok", ticket);
+      recordReconcileRead("linearis_miss", liveResult(live), ticket);
       return live;
     }
     recordReconcileRead("replica", "ok", ticket);
     return {
-      state: stateHit.state,
-      labels: labelsHit.map((l) => l.name),
+      state: pair.state.state,
+      labels: pair.labels.map((l) => l.name),
       error: null,
     };
   };

@@ -896,3 +896,34 @@ describe("createReplicaReader.isFresh (CTL-1571)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("createReplicaReader.stateAndLabels (CTL-1571 — one-snapshot pair)", () => {
+  function seedPair() {
+    const db = new Database(dbPath, { create: true });
+    db.run(`CREATE TABLE issues (id TEXT, identifier TEXT, state TEXT, completed_at TEXT, canceled_at TEXT, removed_at TEXT, updated_at INTEGER)`);
+    db.run(`CREATE TABLE labels (id TEXT, name TEXT, removed_at TEXT)`);
+    db.run(`CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)`);
+    db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+    db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+    db.run(`INSERT INTO issues VALUES ('id-1', 'CTL-1', 'Implement', NULL, NULL, NULL, 1000)`);
+    db.run(`INSERT INTO labels VALUES ('lab-a', 'monitor', NULL)`);
+    db.run(`INSERT INTO issue_labels VALUES ('id-1', 'lab-a')`);
+    db.close();
+    freshen();
+  }
+
+  test("HIT returns state + labels as one defined pair", () => {
+    seedPair();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.stateAndLabels("CTL-1")).toEqual({
+      state: { terminal: false, state: "Implement" },
+      labels: [{ id: "lab-a", name: "monitor" }],
+    });
+  });
+
+  test("absent row → undefined — never a partial pair", () => {
+    seedPair();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.stateAndLabels("CTL-999")).toBeUndefined();
+  });
+});
