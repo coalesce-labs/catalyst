@@ -750,11 +750,38 @@ install_fake_linearis "$BIN33"
 touch "$LOG33"
 
 run "falls back to default 'Triage' for triage when stateMap missing" \
-  bash -c "FAKE_LINEARIS_LOG='$LOG33' PATH='$BIN33:$PATH' \
+  bash -c "FAKE_LINEARIS_LOG='$LOG33' PATH='$BIN33:$PATH' CATALYST_DIR='$WORK33/no-such-catalyst-dir' \
     '$TRANSITION' --ticket TST-33 --transition triage --config '$WORK33/.catalyst/config.json'"
 
 run "default Triage used for triage when config has no stateMap" \
   expect_contains "$LOG33" "linearis issues update TST-33 --status Triage"
+
+# ─── Test 34: triage honors the registered eligibleQuery.triageStatus ──────
+# A project whose execution-core registry entry customizes eligibleQuery.triageStatus
+# (e.g. "Intake") has no reason to also duplicate that into stateMap.triage —
+# the "triage" transition's true target must follow the registry's customized
+# value, not default_state_for()'s hardcoded "Triage" literal (which
+# applyTriageStatus() would then fail to verify against). Same JSON shape
+# registry.mjs's resolveEligibleQuery reads: {projects: [{team, eligibleQuery}]}.
+WORK34="${SCRATCH}/t34"
+BIN34="${SCRATCH}/t34/bin"
+LOG34="${SCRATCH}/t34/log"
+mkdir -p "${WORK34}/.catalyst" "${WORK34}/catalyst-dir/execution-core"
+cat > "${WORK34}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{}}}
+EOF
+cat > "${WORK34}/catalyst-dir/execution-core/registry.json" <<'EOF'
+{"projects":[{"team":"TST","repoRoot":"/tmp/nonexistent","eligibleQuery":{"triageStatus":"Intake"}}]}
+EOF
+install_fake_linearis "$BIN34"
+touch "$LOG34"
+
+run "triage transition resolves via the registry's customized eligibleQuery.triageStatus" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG34' PATH='$BIN34:$PATH' CATALYST_DIR='$WORK34/catalyst-dir' \
+    '$TRANSITION' --ticket TST-34 --transition triage --config '$WORK34/.catalyst/config.json'"
+
+run "used the registry's 'Intake' override, not the hardcoded 'Triage' default" \
+  expect_contains "$LOG34" "linearis issues update TST-34 --status Intake"
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"

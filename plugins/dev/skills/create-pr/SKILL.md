@@ -148,18 +148,25 @@ fi
 ### 8. Push branch
 
 ```bash
-# Push current HEAD and verify origin == HEAD. On a non-fast-forward (branch
-# rebased/amended after a prior push), retry with --force-with-lease so the PR
-# never points at a stale commit (CTL-1051).
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if ! git push -u origin HEAD; then
-    echo "create-pr: fast-forward push failed; retrying with --force-with-lease" >&2
-    git push --force-with-lease -u origin HEAD
-fi
-git fetch --quiet origin "$BRANCH" || true
-if [[ "$(git rev-parse "origin/${BRANCH}")" != "$(git rev-parse HEAD)" ]]; then
-    echo "create-pr: post-push verify failed — origin/${BRANCH} != HEAD" >&2
-    exit 1
+# Push current HEAD and verify origin == HEAD, through the SAME guarded helper
+# every other push site in this plugin uses (phase-monitor-merge, phase-pr's
+# promote-existing-draft path) — draft_pr_push_verify runs the pre-push safety
+# gate (placeholder-identity / anomalous tree-wide-deletion commits, rc=4)
+# BEFORE the push, does the fast-forward-then-force-with-lease retry, and
+# fetches+verifies origin == HEAD after (CTL-1051). This is the fresh-PR path
+# (no existing draft was found/promoted upstream in phase-pr); it previously
+# called a bare `git push` here with no safety gate at all, so a
+# placeholder-identity or blast-radius-anomalous commit reached the real
+# remote before anything could refuse it.
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+if ! VERIFIED_SHA="$(draft_pr_push_verify)"; then
+    PUSH_VERIFY_RC=$?
+    if [[ $PUSH_VERIFY_RC -eq 4 ]]; then
+        echo "create-pr: push refused by safety gate (see log above)" >&2
+    else
+        echo "create-pr: push-verify failed (rc=${PUSH_VERIFY_RC})" >&2
+    fi
+    exit "$PUSH_VERIFY_RC"
 fi
 ```
 
