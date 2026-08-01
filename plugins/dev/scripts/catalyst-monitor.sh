@@ -357,6 +357,14 @@ cmd_start() {
   catalyst_project_webhook_secret
   catalyst_project_github_token
 
+  # Authenticate the monitor's own Linear calls (peer-heartbeat anchor read,
+  # CTL-1090/CTL-1217) as the Catalyst Orchestrator app-actor, same as the
+  # broker/execution-core start paths (CTL-785/CTL-1577) — without this the
+  # monitor process has no LINEAR_API_TOKEN at all and any direct Linear read
+  # it performs (e.g. readPeerHeartbeatsSync) silently fails closed to {}.
+  source "$SCRIPT_DIR/lib/linear-app-actor.sh"
+  linear_app_actor_auth "catalyst-monitor"
+
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \
   MONITOR_PUBLIC_DIR="${MONITOR_UI_DIST_DIR}" \
