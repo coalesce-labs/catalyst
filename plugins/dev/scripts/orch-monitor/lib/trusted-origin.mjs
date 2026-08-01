@@ -254,12 +254,15 @@ export function buildTrustedOrigins(opts = {}) {
   // does not own <loopback>:<port> — another service can hold it, serve a page
   // whose Origin would otherwise pass, and POST to us. So loopback is trusted
   // only for a wildcard bind, or when the bind IS the loopback address.
-  const boundIsLoopback =
-    isWildcardBind ||
-    normalizeAddr(bind) === "127.0.0.1" ||
-    normalizeAddr(bind) === "::1" ||
-    normalizeAddr(bind) === "localhost" ||
-    normalizeAddr(bind).startsWith("localhost.");
+  // Loopback LITERALS are added only when we KNOW the family: a wildcard bind
+  // (we own both) or a loopback literal bind. A loopback NAME bind
+  // (MONITOR_HOST=localhost) is family-ambiguous — Bun may have bound ::1 — so
+  // adding 127.0.0.1 would be a guess, and another process can own the literal
+  // we guessed wrong about. The NAME itself is still trusted (added via the
+  // hostname-bind path below), which is what the operator actually browses.
+  const boundIsLoopbackLiteral =
+    normalizeAddr(bind) === "127.0.0.1" || normalizeAddr(bind) === "::1";
+  const boundIsLoopback = isWildcardBind || boundIsLoopbackLiteral;
   const loopback = [];
   if (boundIsLoopback) {
     loopback.push("localhost");

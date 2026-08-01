@@ -623,8 +623,9 @@ Own names are trusted **only on the bound port, and only under the scheme the mo
 `:80`) drive the reply route. Comparison keys are full origins (`scheme://host[:port]`), so `http`
 and `https` on the same host are distinct — a compromised plaintext endpoint cannot drive an HTTPS
 route. On macOS the machine's real Bonjour name (`scutil --get LocalHostName`) is included, since it need
-not share the first label of `os.hostname()`; it is resolved once per process (the lookup spawns a
-subprocess, and the allowlist rebuilds on rejected requests). Only `http`/`https` origins are
+not share the first label of `os.hostname()`; it is cached for **5 minutes** (the lookup spawns a
+subprocess and the allowlist rebuilds on rejected requests, so it must not run per-request — but a
+renamed `LocalHostName` then takes effect without a daemon restart). Only `http`/`https` origins are
 accepted — a non-special scheme such as `chrome-extension://` serializes to the opaque `"null"`,
 which would otherwise match every opaque origin.
 

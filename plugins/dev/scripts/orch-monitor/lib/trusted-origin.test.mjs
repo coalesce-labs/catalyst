@@ -519,11 +519,24 @@ describe("bind classification edge cases (CTL-1573 round 13)", () => {
     expect(t.has("http://localhost:7400")).toBe(false);
   });
 
-  test("a `localhost` hostname bind still trusts loopback (else it ships inert)", () => {
+  // A loopback NAME bind is family-ambiguous — Bun may have bound ::1 — so the
+  // literals would be a GUESS, and another process can own the one guessed
+  // wrong. The name itself is what the operator browses, so it is trusted.
+  test("a `localhost` hostname bind trusts the name but not guessed literals", () => {
     const t = buildTrustedOrigins({ port: 7400, hostnames: ["mini"], bindHost: "localhost" });
     expect(t.has("http://localhost:7400")).toBe(true);
-    expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    expect(t.has("http://127.0.0.1:7400")).toBe(false);
+    expect(t.has("http://[::1]:7400")).toBe(false);
     expect(t.has("http://mini:7400")).toBe(false);
+  });
+
+  test("a loopback LITERAL bind trusts that literal (family is known)", () => {
+    const t4 = buildTrustedOrigins({ port: 7400, hostnames: [], bindHost: "127.0.0.1" });
+    expect(t4.has("http://127.0.0.1:7400")).toBe(true);
+    expect(t4.has("http://[::1]:7400")).toBe(false);
+    const t6 = buildTrustedOrigins({ port: 7400, hostnames: [], bindHost: "::1" });
+    expect(t6.has("http://[::1]:7400")).toBe(true);
+    expect(t6.has("http://127.0.0.1:7400")).toBe(false);
   });
 });
 

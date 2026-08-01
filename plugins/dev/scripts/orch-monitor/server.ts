@@ -1944,7 +1944,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
     process.env.MONITOR_DEV_UI_ORIGINS ??
     (process.env.NODE_ENV === "development" ||
     ["1", "true", "yes", "on"].includes((process.env.MONITOR_DEV_UI ?? "").trim().toLowerCase())
-      ? "http://localhost:5173 http://127.0.0.1:5173"
+      ? // ONE spelling: Vite binds a single family, so another process can own the
+        // other family's :5173 and would otherwise get a trusted Origin. This is
+        // Vite's own default host — the URL `bun run dev:ui` prints.
+        "http://localhost:5173"
       : null);
 
   const buildTrusted = (): Set<string> =>

@@ -12,7 +12,26 @@ const DEV_PORT = 5173;
 // 127.0.0.1, NOT localhost: the monitor's MONITOR_STRICT_LOOPBACK mode drops the
 // family-ambiguous `localhost` name while keeping the unambiguous literal, so
 // rewriting to the literal keeps `bun run dev:ui` working in BOTH modes.
-const MONITOR_ORIGIN = "http://127.0.0.1:7400";
+// Derived from the monitor's own env so the proxy follows a non-default
+// MONITOR_HOST/MONITOR_PORT. A wildcard bind is not a connectable address, so
+// it maps to the loopback of that family. Both the proxy TARGET and the Origin
+// we present must be this same value, or dev either misses the listener or
+// presents an untrusted origin.
+function monitorOrigin(): string {
+  const port = Number(process.env.MONITOR_PORT) || 7400;
+  const raw = (process.env.MONITOR_HOST ?? "").trim().replace(/^\[|\]$/g, "");
+  const host =
+    raw === "" || raw === "0.0.0.0"
+      ? "127.0.0.1"
+      : /^[0:]+$/.test(raw) // any IPv6 wildcard spelling
+        ? "[::1]"
+        : raw.includes(":")
+          ? `[${raw}]`
+          : raw;
+  return `http://${host}:${port}`;
+}
+
+const MONITOR_ORIGIN = monitorOrigin();
 // ONE origin, not both loopback spellings. Vite binds a single address family,
 // so another local process can own the other family's :5173; accepting both
 // spellings would let a page there have its Origin laundered into the monitor's.
@@ -103,7 +122,7 @@ export default defineConfig({
     // a busy port instead of silently drifting off the trusted origin.
     strictPort: true,
     proxy: {
-      "/events": "http://localhost:7400",
+      "/events": MONITOR_ORIGIN,
       // CTL-1573: the reply route validates `Origin` against an allowlist of the
       // origins the monitor is legitimately reached by. The dev server runs on
       // :5173, so a proxied POST would arrive as `Origin: http://localhost:5173`
@@ -126,7 +145,7 @@ export default defineConfig({
       // happened. So only a genuine same-origin request from THIS dev server is
       // rewritten; anything else is forwarded verbatim for the monitor to reject.
       "/api": {
-        target: "http://127.0.0.1:7400",
+        target: MONITOR_ORIGIN,
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
             if (shouldRewriteOrigin(req.headers.origin)) {
