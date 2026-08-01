@@ -328,6 +328,14 @@ cmd_start() {
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
 
+  # Authenticate the monitor's own Linear calls (peer-heartbeat anchor read,
+  # CTL-1090/CTL-1217) as the Catalyst Orchestrator app-actor, same as the
+  # broker/execution-core start paths (CTL-785/CTL-1577) — without this the
+  # monitor process has no LINEAR_API_TOKEN at all and any direct Linear read
+  # it performs (e.g. readPeerHeartbeatsSync) silently fails closed to {}.
+  source "$SCRIPT_DIR/lib/linear-app-actor.sh"
+  linear_app_actor_auth "catalyst-monitor"
+
   # CATALYST_CONFIG_FILE pins the Layer-1 config path explicitly so the spawned
   # server's config resolution (orch-monitor/lib/config-path.ts) never falls back
   # to a cwd-relative `.catalyst/config.json` lookup. Without this, the server
