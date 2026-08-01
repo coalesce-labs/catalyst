@@ -1,5 +1,27 @@
 # Changelog
 
+## [12.41.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.40.0...catalyst-dev-v12.41.0)
+
+Jul 31, 2026
+
+<!-- ai-enhanced -->
+
+### Slot Deck Fixes & Direnv Profile Sync
+
+The slot deck now correctly shows which slots are occupied — SDK/executor workers are visible to the deck, held tickets are separated into a "Held — awaiting you" section rather than ranked as imminent dispatches, and header counts derive from the deck's own boxes so the two can never contradict each other. Triage admission is now level-triggered, meaning tickets already sitting in Triage when a worker dir vanishes get picked up on the next sweep instead of stranded. `cluster-sync` also gains a new `syncProfileFiles` step that materializes direnv profiles from a SOPS bundle, so worker repos get the right environment variables on every host without hand-provisioning files.
+
+
+
+### PRs
+
+* **dev:** CTL-1585 discussion newest-first in inbox, inline on detail page, Spec tab renamed Detail ([#2832](https://github.com/coalesce-labs/catalyst/issues/2832)) ([bc34131](https://github.com/coalesce-labs/catalyst/commit/bc3413100fcfda64f70bfa0cf8839254ee5ac17e))
+* **dev:** CTL-1595 cluster-sync materializes direnv profiles from a SOPS bundle ([#2849](https://github.com/coalesce-labs/catalyst/issues/2849)) ([a0daa05](https://github.com/coalesce-labs/catalyst/commit/a0daa05229706f6aec926116ba84cf8179447993))
+* **dev:** CTL-1581 slot deck renders occupancy, not ownership — counts derive from the boxes ([#2826](https://github.com/coalesce-labs/catalyst/issues/2826)) ([719bc9a](https://github.com/coalesce-labs/catalyst/commit/719bc9aa9b7d9e866beb8831dc82808fbc6873e7))
+* **dev:** CTL-1588 queue humanHold falls back to replica labels when the webhook-fed store has gaps ([#2845](https://github.com/coalesce-labs/catalyst/issues/2845)) ([9d40a77](https://github.com/coalesce-labs/catalyst/commit/9d40a777303edc3756ea97d348cd918f9347dd9a))
+* **dev:** CTL-1588 slot deck sees SDK-executor workers; queue partitions human-held tickets ([#2840](https://github.com/coalesce-labs/catalyst/issues/2840)) ([df05fa6](https://github.com/coalesce-labs/catalyst/commit/df05fa6a2a1645a2eb8ff5c15316b1c6526482bc))
+* **dev:** CTL-1589 level-triggered triage sweep — pick up tickets already sitting in Triage ([#2843](https://github.com/coalesce-labs/catalyst/issues/2843)) ([4fc6993](https://github.com/coalesce-labs/catalyst/commit/4fc69936c7c19a094321e45011ea070965a7b2a8))
+* **dev:** CTL-1593 capture the recovery cursor before reconcileAll so boot telemetry can't shift it ([#2844](https://github.com/coalesce-labs/catalyst/issues/2844)) ([45343f8](https://github.com/coalesce-labs/catalyst/commit/45343f8fbb825fcdbf82c95a8e655e260db43b28))
+
 ## [12.40.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.39.1...catalyst-dev-v12.40.0)
 
 Jul 31, 2026
