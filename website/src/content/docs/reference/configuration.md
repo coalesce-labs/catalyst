@@ -604,13 +604,18 @@ it existed for.)
 
 Trusted **by default**, all qualified with the port the server actually bound:
 
-- loopback (only when the bind is a wildcard, or is itself the loopback address — a LAN-bound monitor does not own `<loopback>:<port>`) — `localhost`, plus the literal(s) matching the **bound address family**
+- loopback — on a wildcard bind the **whole `127.0.0.0/8` range** (so `127.0.0.2` and the Debian-conventional `127.0.1.1` work), otherwise only when the bind is itself the loopback address — a LAN-bound monitor does not own `<loopback>:<port>`) — `localhost`, plus the literal(s) matching the **bound address family**
 
 **Residual, and the real fix.** Host *names* (`localhost`, `os.hostname()`) are family-ambiguous — the browser picks. Under a single-family bind, a process squatting the other family's port can serve a page whose `Origin` is one of those names. No allowlist setting closes this; **bind dual-stack** and the squat becomes impossible rather than merely untrusted:
 
 ```bash
-MONITOR_HOST=:: catalyst-monitor start
+MONITOR_HOST=:: catalyst-monitor restart   # `start` no-ops when a monitor is already running
 ```
+
+> **Management-CLI gap (CTL-1599).** `catalyst-monitor.sh` still prints, opens, and health-probes
+> `http://localhost:$PORT` regardless of `MONITOR_HOST`, so a specific non-loopback bind will show a
+> wrong URL and a failing probe even when the monitor is healthy. Wiring the CLI through is tracked
+> separately; the allowlist itself honors the bind correctly.
 
 | Env var | Default | Notes |
 | ------- | ------- | ----- |
@@ -636,7 +641,7 @@ stops being trusted within the TTL rather than lingering until the daemon restar
 | Env var                    | Default | Notes                                                                                                                                                                                                                                                                                                                       |
 | -------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MONITOR_TRUSTED_ORIGINS`  | unset   | Comma- or whitespace-separated extra origins for deployments reached by a name that cannot be derived from `os.hostname()` — a **reverse proxy** or a full **Tailscale MagicDNS** alias. Accepts full origins (`https://catalyst.example`) or bare `host:port` (`mini-2.tail1234.ts.net:7400`). Entries are taken **exactly as given** (not widened to the bound port) and canonicalized the way a browser serializes `Origin`, so an IDN name may be written in either Unicode or punycode. |
-| `MONITOR_DEV_UI=1` / `NODE_ENV=development` | unset | Trusts the Vite dev origins (`http://localhost:5173`, `http://127.0.0.1:5173`). **Not needed for the standard `bun run dev:ui` flow** — the Vite proxy sends the monitor's own origin (`ui/vite.config.ts`), so proxied replies are already trusted. Accepts `1`/`true`/`yes`/`on`. Use only for a dev setup that bypasses that proxy, and note it must be set on the **monitor** process (`dev:ui` starts Vite only; the monitor runs out-of-band). |
+| `MONITOR_DEV_UI=1` / `NODE_ENV=development` | unset | Trusts the Vite dev origin (`http://localhost:5173` — one spelling, since Vite binds a single address family and the other would be available to any local process). **Not needed for the standard `bun run dev:ui` flow** — the Vite proxy sends the monitor's own origin (`ui/vite.config.ts`), so proxied replies are already trusted. Accepts `1`/`true`/`yes`/`on`. Use only for a dev setup that bypasses that proxy, and note it must be set on the **monitor** process (`dev:ui` starts Vite only; the monitor runs out-of-band). |
 | `MONITOR_DEV_UI_ORIGINS` | unset | Overrides the dev origins above (same format), for a non-default Vite port. Same caveat: set it on the monitor process. |
 
 **Set this if replies 403.** A monitor opened through a proxy/alias not in the default set will

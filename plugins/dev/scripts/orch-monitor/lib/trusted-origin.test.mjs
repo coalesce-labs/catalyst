@@ -556,3 +556,48 @@ describe("Bonjour identity expires (CTL-1573 round 13)", () => {
     expect(Number.isFinite(_bonjourTtlMs())).toBe(true);
   });
 });
+
+describe("IPv4 wildcard spellings and the loopback range (CTL-1573 round 15)", () => {
+  for (const spelling of ["0.0.0.0", "0", "0.0", "0.0.0"]) {
+    test(`"${spelling}" is recognized as the IPv4 wildcard`, () => {
+      const t = buildTrustedOrigins({
+        port: 7400,
+        hostnames: ["mini"],
+        addresses: ["192.168.1.50"],
+        bindHost: spelling,
+      });
+      expect(t.has("http://mini:7400")).toBe(true);
+      expect(t.has("http://192.168.1.50:7400")).toBe(true);
+      expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    });
+  }
+
+  // The whole 127.0.0.0/8 range reaches an IPv4 wildcard bind; selfAddresses()
+  // excludes internal interfaces, so these would otherwise 403 a legitimate
+  // operator. 127.0.1.1 is the Debian convention for the host's own name.
+  test("any 127.0.0.0/8 alias is allowed on a wildcard bind", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: "0.0.0.0" });
+    for (const o of [
+      "http://127.0.0.1:7400",
+      "http://127.0.0.2:7400",
+      "http://127.0.1.1:7400",
+      "http://127.255.255.254:7400",
+    ]) {
+      expect(isOriginAllowed(o, t)).toBe(true);
+    }
+  });
+
+  test("the range does not leak to other ports, hosts, or schemes", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: "0.0.0.0" });
+    expect(isOriginAllowed("http://127.0.0.2:8080", t)).toBe(false);
+    expect(isOriginAllowed("https://127.0.0.2:7400", t)).toBe(false);
+    expect(isOriginAllowed("http://128.0.0.1:7400", t)).toBe(false);
+    expect(isOriginAllowed("http://27.0.0.1:7400", t)).toBe(false);
+    expect(isOriginAllowed("http://127.0.0.999:7400", t)).toBe(false);
+  });
+
+  test("a specific bind gets no loopback range", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], bindHost: "192.168.1.50" });
+    expect(isOriginAllowed("http://127.0.0.2:7400", t)).toBe(false);
+  });
+});

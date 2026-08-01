@@ -33,7 +33,10 @@
 import { hostname as osHostname, networkInterfaces, platform } from "node:os";
 import { execFileSync } from "node:child_process";
 
-const DEFAULT_SCHEME = "http"; // the monitor serves plaintext; TLS is a front-end concern
+const DEFAULT_SCHEME = "http";
+// Sentinel for "any 127.0.0.0/8 address on this port". A \u0000 prefix can never
+// collide with a real origin key, which is always `scheme://host[:port]`.
+const LOOPBACK_V4_MARKER = "\u0000loopback-v4:"; // the monitor serves plaintext; TLS is a front-end concern
 
 /** Canonical origin key for a full origin string, or null. */
 function originKey(value) {
@@ -230,7 +233,11 @@ export function buildTrustedOrigins(opts = {}) {
   // hostname bind trusts that name (and loopback if the name IS loopback) and
   // nothing else; anything further belongs in MONITOR_TRUSTED_ORIGINS.
   const isHostnameBind = bind !== "" && !isIpLiteral;
-  const isWildcardBind = bind === "" || bind === "0.0.0.0" || isV6Wildcard;
+  // Bun accepts short IPv4 wildcard spellings too — `0`, `0.0`, `0.0.0` are all
+  // 0.0.0.0. An exact comparison called them SPECIFIC, which then kept only the
+  // unusable unspecified-address origin and 403'd every real one.
+  const isV4Wildcard = /^0(\.0){0,3}$/.test(bind);
+  const isWildcardBind = bind === "" || isV4Wildcard || isV6Wildcard;
   const normalizeAddr = (a) => String(a ?? "").trim().toLowerCase().replace(/^\[|\]$/g, "");
   // Unknown bind -> stay permissive rather than 403 a legitimate operator.
   const bindsV4 = bind === "" || isV6Wildcard || !isV6Literal;
@@ -270,6 +277,14 @@ export function buildTrustedOrigins(opts = {}) {
     if (bindsV6) loopback.push("[::1]");
   }
   for (const h of loopback) addOwn(h);
+  // The ENTIRE 127.0.0.0/8 range reaches an IPv4 wildcard bind — 127.0.0.2 and
+  // the Debian-conventional 127.0.1.1 among them — and selfAddresses() excludes
+  // internal interfaces, so an operator opening the monitor through one would
+  // get a 403. A range cannot be enumerated into a Set, so a marker records the
+  // permission and isOriginAllowed expands it (see LOOPBACK_V4_MARKER).
+  if (isWildcardBind && bindsV4 && boundPort !== null) {
+    out.add(`${LOOPBACK_V4_MARKER}${boundPort}`);
+  }
 
   // This machine's own names. os.hostname() may be an FQDN ("mini.rozich") or a
   // short label; operators browse by either, plus the mDNS ".local" form.
@@ -361,5 +376,12 @@ export function isOriginAllowed(origin, trusted) {
   if (origin == null || origin === "") return true;
   const key = originKey(origin);
   if (key === null) return false; // present but unparseable/opaque -> refuse
-  return trusted.has(key);
+  if (trusted.has(key)) return true;
+  // Expand the 127.0.0.0/8 marker, if the allowlist carries one for this port.
+  const m = /^http:\/\/(127\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::(\d+))?$/.exec(key);
+  if (m === null) return false;
+  const octets = m[1].split(".").map(Number);
+  if (octets.some((o) => o > 255)) return false;
+  const port = m[2] ?? "80";
+  return trusted.has(`${LOOPBACK_V4_MARKER}${port}`);
 }
