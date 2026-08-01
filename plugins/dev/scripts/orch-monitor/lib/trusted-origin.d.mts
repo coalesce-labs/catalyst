@@ -18,6 +18,7 @@ export declare function buildTrustedOrigins(opts?: {
   hostnames?: string[];
   addresses?: string[];
   devOrigins?: string[] | string | null;
+  bindHost?: string | null;
 }): Set<string>;
 
 export declare function isOriginAllowed(

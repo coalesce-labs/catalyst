@@ -300,3 +300,44 @@ describe("opaque / non-http origins (CTL-1573 round 6)", () => {
     }
   });
 });
+
+describe("loopback family follows the bound address (CTL-1573 round 7)", () => {
+  // Binding 0.0.0.0 listens on IPv4 only, but an unrelated service can still
+  // bind [::1] on the same port. Trusting the IPv6 loopback literal would let
+  // content served there POST to the IPv4 monitor and pass the guard.
+  test("binding 0.0.0.0 does not trust the IPv6 loopback literal", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: [],
+      bindHost: "0.0.0.0",
+    });
+    expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    expect(t.has("http://[::1]:7400")).toBe(false);
+  });
+
+  test("binding :: trusts both loopback literals", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: "::" });
+    expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    expect(t.has("http://[::1]:7400")).toBe(true);
+  });
+
+  test("binding ::1 does not trust the IPv4 loopback literal", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: "::1" });
+    expect(t.has("http://[::1]:7400")).toBe(true);
+    expect(t.has("http://127.0.0.1:7400")).toBe(false);
+  });
+
+  test("the localhost NAME stays trusted regardless of family", () => {
+    for (const bind of ["0.0.0.0", "::", "::1", "127.0.0.1"]) {
+      const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: bind });
+      expect(t.has("http://localhost:7400")).toBe(true);
+    }
+  });
+
+  test("an unspecified bindHost stays permissive (both families)", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [] });
+    expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    expect(t.has("http://[::1]:7400")).toBe(true);
+  });
+});

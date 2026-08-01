@@ -604,7 +604,7 @@ it existed for.)
 
 Trusted **by default**, all qualified with the port the server actually bound:
 
-- loopback — `localhost`, `127.0.0.1`, `[::1]`
+- loopback — `localhost`, plus the literal(s) matching the **bound address family** (binding `0.0.0.0` is IPv4-only, so `[::1]` is not trusted: another service can bind `[::1]` on the same port and its origin would otherwise pass)
 - this machine's own names — `os.hostname()` and its short label, plus the **actual** mDNS name on macOS (`scutil --get LocalHostName`). A `<short>.local` alias is **not** synthesized: when it is not the name the system really advertises, nothing owns it, so any LAN host could claim it over mDNS and pass the guard.
 - this machine's own non-loopback addresses (LAN, Tailscale `100.x`)
 
@@ -625,7 +625,7 @@ stops being trusted within the TTL rather than lingering until the daemon restar
 | Env var                    | Default | Notes                                                                                                                                                                                                                                                                                                                       |
 | -------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MONITOR_TRUSTED_ORIGINS`  | unset   | Comma- or whitespace-separated extra origins for deployments reached by a name that cannot be derived from `os.hostname()` — a **reverse proxy** or a full **Tailscale MagicDNS** alias. Accepts full origins (`https://catalyst.example`) or bare `host:port` (`mini-2.tail1234.ts.net:7400`). Entries are taken **exactly as given** (not widened to the bound port) and canonicalized the way a browser serializes `Origin`, so an IDN name may be written in either Unicode or punycode. |
-| `MONITOR_DEV_UI` / `NODE_ENV=development` | unset | Trusts the Vite dev origins (`http://localhost:5173`, `http://127.0.0.1:5173`). **Not needed for the standard `bun run dev:ui` flow** — the Vite proxy sends the monitor's own origin (`ui/vite.config.ts`), so proxied replies are already trusted. Use only for a dev setup that bypasses that proxy, and note it must be set on the **monitor** process (`dev:ui` starts Vite only; the monitor runs out-of-band). |
+| `MONITOR_DEV_UI=1` / `NODE_ENV=development` | unset | Trusts the Vite dev origins (`http://localhost:5173`, `http://127.0.0.1:5173`). **Not needed for the standard `bun run dev:ui` flow** — the Vite proxy sends the monitor's own origin (`ui/vite.config.ts`), so proxied replies are already trusted. Accepts `1`/`true`/`yes`/`on`. Use only for a dev setup that bypasses that proxy, and note it must be set on the **monitor** process (`dev:ui` starts Vite only; the monitor runs out-of-band). |
 | `MONITOR_DEV_UI_ORIGINS` | unset | Overrides the dev origins above (same format), for a non-default Vite port. Same caveat: set it on the monitor process. |
 
 **Set this if replies 403.** A monitor opened through a proxy/alias not in the default set will

@@ -166,11 +166,19 @@ export function selfAddresses() {
  *   hostnames?: string[],
  *   addresses?: string[],
  *   devOrigins?: string[] | string | null,
+ *   bindHost?: string | null,
  * }} opts
  * @returns {Set<string>}
  */
 export function buildTrustedOrigins(opts = {}) {
-  const { port, extraOrigins = null, hostnames, addresses, devOrigins = null } = opts;
+  const {
+    port,
+    extraOrigins = null,
+    hostnames,
+    addresses,
+    devOrigins = null,
+    bindHost = null,
+  } = opts;
   const out = new Set();
   const boundPort = Number.isFinite(port) ? Number(port) : null;
 
@@ -183,7 +191,26 @@ export function buildTrustedOrigins(opts = {}) {
     if (key !== null) out.add(key);
   };
 
-  for (const h of ["localhost", "127.0.0.1", "[::1]"]) addOwn(h);
+  // Loopback, restricted to the address family the server actually BOUND.
+  // Binding 0.0.0.0 listens on IPv4 only, yet Bun lets an unrelated service bind
+  // [::1] on the same port; trusting the IPv6 loopback literal would let content
+  // served from http://[::1]:7400 POST to the IPv4 monitor and pass this guard.
+  // (The `localhost` NAME stays trusted — which family it resolves to is the
+  // browser's choice, and if it resolved to a family we are not on, the operator
+  // could not reach us by that name in the first place.)
+  const bind = (typeof bindHost === "string" ? bindHost.trim().toLowerCase() : "").replace(
+    /^\[|\]$/g,
+    ""
+  );
+  const isV6Wildcard = bind === "::"; // dual-stack: accepts IPv4-mapped too
+  const isV6Loopback = bind === "::1";
+  // Unknown bind -> stay permissive rather than 403 a legitimate operator.
+  const bindsV4 = bind === "" || isV6Wildcard || !bind.includes(":");
+  const bindsV6 = bind === "" || isV6Wildcard || isV6Loopback;
+  const loopback = ["localhost"];
+  if (bindsV4) loopback.push("127.0.0.1");
+  if (bindsV6) loopback.push("[::1]");
+  for (const h of loopback) addOwn(h);
 
   // This machine's own names. os.hostname() may be an FQDN ("mini.rozich") or a
   // short label; operators browse by either, plus the mDNS ".local" form.

@@ -1942,7 +1942,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // 403. Gated: never trusted in a normal (production) launch.
   const devUiOrigins =
     process.env.MONITOR_DEV_UI_ORIGINS ??
-    (process.env.NODE_ENV === "development" || process.env.MONITOR_DEV_UI === "1"
+    (process.env.NODE_ENV === "development" ||
+    ["1", "true", "yes", "on"].includes((process.env.MONITOR_DEV_UI ?? "").trim().toLowerCase())
       ? "http://localhost:5173 http://127.0.0.1:5173"
       : null);
 
@@ -1951,6 +1952,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       port: server?.port ?? port,
       extraOrigins: process.env.MONITOR_TRUSTED_ORIGINS ?? null,
       devOrigins: devUiOrigins,
+      bindHost: hostname,
     });
 
   // Allow, rebuilding the allowlist ONCE on a miss before refusing.
