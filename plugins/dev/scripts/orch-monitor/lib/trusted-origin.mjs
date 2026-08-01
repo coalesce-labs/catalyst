@@ -205,6 +205,11 @@ export function buildTrustedOrigins(opts = {}) {
     ""
   );
   const isV6Wildcard = bind === "::"; // dual-stack: accepts IPv4-mapped too
+  // A hostname bind (not an IP literal) is treated as a wildcard: we cannot
+  // enumerate what it covers, and being permissive beats 403-ing the operator.
+  const isIpLiteral = /^[0-9.]+$/.test(bind) || bind.includes(":");
+  const isWildcardBind = bind === "" || bind === "0.0.0.0" || isV6Wildcard || !isIpLiteral;
+  const normalizeAddr = (a) => String(a ?? "").trim().toLowerCase().replace(/^\[|\]$/g, "");
   const isV6Loopback = bind === "::1";
   // Unknown bind -> stay permissive rather than 403 a legitimate operator.
   const bindsV4 = bind === "" || isV6Wildcard || !bind.includes(":");
@@ -220,7 +225,8 @@ export function buildTrustedOrigins(opts = {}) {
   // that first requires an adversary to run code locally and bind that port.
   // `strictLoopback` is the opt-in for deployments that prefer the opposite
   // trade; binding dual-stack (`::`) removes the squat window entirely.
-  const loopback = strictLoopback && !(bindsV4 && bindsV6) ? [] : ["localhost"];
+  const dropAmbiguousLoopback = strictLoopback && !(bindsV4 && bindsV6);
+  const loopback = dropAmbiguousLoopback ? [] : ["localhost"];
   if (bindsV4) loopback.push("127.0.0.1");
   if (bindsV6) loopback.push("[::1]");
   for (const h of loopback) addOwn(h);
@@ -230,9 +236,13 @@ export function buildTrustedOrigins(opts = {}) {
   const selfNames = hostnames ?? [osHostname()];
   for (const raw of selfNames) {
     if (typeof raw !== "string" || raw === "") continue;
-    addOwn(raw);
-    const short = raw.toLowerCase().split(".")[0];
-    if (short !== "") addOwn(short);
+    // In strict mode a host literally NAMED `localhost` (common in containers)
+    // would re-add the family-ambiguous origin that strictLoopback just removed.
+    const isLoopbackName = (n) => n === "localhost" || n.startsWith("localhost.");
+    const lowered = raw.toLowerCase();
+    if (!(dropAmbiguousLoopback && isLoopbackName(lowered))) addOwn(raw);
+    const short = lowered.split(".")[0];
+    if (short !== "" && !(dropAmbiguousLoopback && isLoopbackName(short))) addOwn(short);
     // NOTE: `${short}.local` is deliberately NOT synthesized. When
     // os.hostname() is `mini.corp.example` but Bonjour advertises
     // `Ryans-Mac-mini.local`, nothing owns `mini.local` — so any LAN host can
@@ -249,8 +259,15 @@ export function buildTrustedOrigins(opts = {}) {
   // for the same reason as the loopback literals: with an IPv4-only bind we do
   // not own this port in the v6 space, so another service could bind an IPv6
   // interface address there and its origin would otherwise be trusted.
-  for (const addr of addresses ?? selfAddresses()) {
-    const isV6 = addr.startsWith("[");
+  // Only a WILDCARD bind owns this port on every local interface. When the
+  // server is bound to one specific address, another service can hold the same
+  // port on a different interface, so trusting all same-family addresses would
+  // hand that service an allowlisted Origin. A specific bind trusts only itself.
+  const boundAddresses = isWildcardBind
+    ? (addresses ?? selfAddresses())
+    : (addresses ?? [bind]).filter((a) => normalizeAddr(a) === normalizeAddr(bind));
+  for (const addr of boundAddresses) {
+    const isV6 = String(addr).startsWith("[") || String(addr).includes(":");
     if (isV6 ? bindsV6 : bindsV4) addOwn(addr);
   }
 

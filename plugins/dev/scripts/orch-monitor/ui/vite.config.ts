@@ -9,7 +9,10 @@ import { assembleBoard } from "../lib/board-data.mjs";
 // conditional Origin rewrite below has an exact, predictable set to match —
 // a "close enough" match here would re-open the laundering hole it closes.
 const DEV_PORT = 5173;
-const MONITOR_ORIGIN = "http://localhost:7400";
+// 127.0.0.1, NOT localhost: the monitor's MONITOR_STRICT_LOOPBACK mode drops the
+// family-ambiguous `localhost` name while keeping the unambiguous literal, so
+// rewriting to the literal keeps `bun run dev:ui` working in BOTH modes.
+const MONITOR_ORIGIN = "http://127.0.0.1:7400";
 const DEV_ORIGINS = new Set([`http://localhost:${DEV_PORT}`, `http://127.0.0.1:${DEV_PORT}`]);
 
 /**
@@ -114,7 +117,7 @@ export default defineConfig({
       // happened. So only a genuine same-origin request from THIS dev server is
       // rewritten; anything else is forwarded verbatim for the monitor to reject.
       "/api": {
-        target: "http://localhost:7400",
+        target: "http://127.0.0.1:7400",
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
             if (shouldRewriteOrigin(req.headers.origin)) {

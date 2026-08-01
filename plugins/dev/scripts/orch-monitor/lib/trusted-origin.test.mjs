@@ -369,14 +369,29 @@ describe("self-addresses follow the bound family (CTL-1573 round 8)", () => {
     expect(t.has("http://[2001:db8::5]:7400")).toBe(true);
   });
 
-  test("an IPv6-only bind does not trust this host's IPv4 interface origins", () => {
+  // A SPECIFIC bind owns the port only on that address. Another service can
+  // hold the same port on a different interface, so trusting all same-family
+  // addresses would hand that service an allowlisted Origin.
+  test("a specific bind trusts only its own address, not every same-family one", () => {
     const t = buildTrustedOrigins({
       port: 7400,
       hostnames: [],
       addresses: ADDRS,
-      bindHost: "::1",
+      bindHost: "192.168.1.50",
     });
-    expect(t.has("http://[2001:db8::5]:7400")).toBe(true);
+    expect(t.has("http://192.168.1.50:7400")).toBe(true);
+    expect(t.has("http://100.65.193.30:7400")).toBe(false);
+    expect(t.has("http://[2001:db8::5]:7400")).toBe(false);
+  });
+
+  test("a loopback-only bind does not trust this host's LAN addresses", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: ADDRS,
+      bindHost: "127.0.0.1",
+    });
+    expect(t.has("http://127.0.0.1:7400")).toBe(true);
     expect(t.has("http://192.168.1.50:7400")).toBe(false);
   });
 });
@@ -412,5 +427,46 @@ describe("strictLoopback opt-in (CTL-1573 round 8)", () => {
       strictLoopback: true,
     });
     expect(t.has("http://localhost:7400")).toBe(true);
+  });
+});
+
+describe("strict mode is not undone by a self-name (CTL-1573 round 9)", () => {
+  // A container whose os.hostname() is literally `localhost` would otherwise
+  // re-add the family-ambiguous origin strictLoopback had just removed.
+  test("a host named localhost does not re-add the ambiguous origin", () => {
+    for (const name of ["localhost", "localhost.localdomain"]) {
+      const t = buildTrustedOrigins({
+        port: 7400,
+        hostnames: [name],
+        addresses: [],
+        bindHost: "0.0.0.0",
+        strictLoopback: true,
+      });
+      expect(t.has("http://localhost:7400")).toBe(false);
+      expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    }
+  });
+
+  test("without strict mode such a host still trusts its own name", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: ["localhost"],
+      addresses: [],
+      bindHost: "0.0.0.0",
+    });
+    expect(t.has("http://localhost:7400")).toBe(true);
+  });
+
+  // The dev proxy rewrites to the LITERAL, which strict mode keeps — so
+  // `bun run dev:ui` works in both modes.
+  test("the dev proxy's rewrite target survives strict mode", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: [],
+      bindHost: "0.0.0.0",
+      strictLoopback: true,
+    });
+    expect(isOriginAllowed("http://127.0.0.1:7400", t)).toBe(true);
   });
 });
