@@ -67,7 +67,22 @@ export default defineConfig({
   server: {
     proxy: {
       "/events": "http://localhost:7400",
-      "/api": "http://localhost:7400",
+      // CTL-1573: the reply route validates `Origin` against an allowlist of the
+      // origins the monitor is legitimately reached by. The dev server runs on
+      // :5173, so a proxied POST would arrive as `Origin: http://localhost:5173`
+      // and 403.
+      //
+      // Fixed HERE rather than by widening the server's allowlist: the proxy is
+      // what makes a same-origin dev request look cross-origin, so the proxy is
+      // what should present the true target origin. Doing it server-side would
+      // mean trusting :5173 in production too, where it is just an ordinary
+      // local port. `dev:ui` also only starts Vite — the monitor runs
+      // out-of-band — so an env gate on the monitor could not activate from
+      // this workflow anyway.
+      "/api": {
+        target: "http://localhost:7400",
+        headers: { Origin: "http://localhost:7400" },
+      },
     },
   },
 });

@@ -3,6 +3,7 @@
 
 import { describe, test, expect } from "bun:test";
 import {
+  _resetBonjourCache,
   bonjourName,
   buildTrustedOrigins,
   isOriginAllowed,
@@ -242,5 +243,34 @@ describe("bonjourName", () => {
     const n = bonjourName();
     expect(n === null || typeof n === "string").toBe(true);
     if (typeof n === "string") expect(n).not.toBe("");
+  });
+
+  // DoS guard: the allowlist rebuilds on EVERY rejected Origin, and this spawns
+  // `scutil` via execFileSync (1s timeout) which blocks Bun's event loop. Without
+  // the memo an unauthenticated client could stall the monitor by looping bad
+  // Origins at the reply route. Repeated calls must not respawn.
+  test("resolves at most once per process (rejected origins must not spawn scutil)", () => {
+    _resetBonjourCache();
+    const t0 = process.hrtime.bigint();
+    bonjourName(); // may spawn once
+    const t1 = process.hrtime.bigint();
+    for (let i = 0; i < 200; i++) bonjourName();
+    const t2 = process.hrtime.bigint();
+    const firstNs = Number(t1 - t0);
+    const next200Ns = Number(t2 - t1);
+    // 200 memoized calls must be far cheaper than one real resolution; on a
+    // non-darwin host the first call is already trivial, so compare against a
+    // flat ceiling too rather than assuming a subprocess happened.
+    expect(next200Ns < Math.max(firstNs, 1_000_000)).toBe(true);
+  });
+
+  test("buildTrustedOrigins does not re-resolve Bonjour on each rebuild", () => {
+    _resetBonjourCache();
+    bonjourName();
+    const t0 = process.hrtime.bigint();
+    for (let i = 0; i < 50; i++) buildTrustedOrigins({ port: 7400, addresses: [] });
+    const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;
+    // 50 rebuilds spawning scutil would be ~seconds; memoized they are ~ms.
+    expect(elapsedMs).toBeLessThan(500);
   });
 });

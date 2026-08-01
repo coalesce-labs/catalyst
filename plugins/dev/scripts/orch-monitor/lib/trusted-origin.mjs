@@ -70,8 +70,20 @@ export function originHost(origin) {
  * one operators actually browse. Reading it is best-effort: any failure falls
  * back to the synthesized form.
  */
+let bonjourCache = null;
+let bonjourResolved = false;
+
 export function bonjourName() {
-  if (platform() !== "darwin") return null;
+  // MEMOIZED FOR THE PROCESS LIFETIME — this is a DoS guard, not a micro-opt.
+  // The allowlist is rebuilt on every rejected Origin, and this spawns `scutil`
+  // via execFileSync with a 1s timeout, which BLOCKS Bun's event loop. Without
+  // the memo, any unauthenticated client could POST to the reply route with a
+  // bad Origin in a loop and stall the whole monitor. The machine's Bonjour
+  // name is stable for a process lifetime, so resolving it once is correct as
+  // well as safe (a rename needs a daemon restart, like any other identity).
+  if (bonjourResolved) return bonjourCache;
+  bonjourResolved = true;
+  if (platform() !== "darwin") return (bonjourCache = null);
   try {
     const out = execFileSync("scutil", ["--get", "LocalHostName"], {
       encoding: "utf8",
@@ -79,10 +91,16 @@ export function bonjourName() {
       stdio: ["ignore", "pipe", "ignore"],
     });
     const name = out.trim().toLowerCase();
-    return name === "" ? null : name;
+    return (bonjourCache = name === "" ? null : name);
   } catch {
-    return null;
+    return (bonjourCache = null);
   }
+}
+
+/** Test seam: forget the memoized Bonjour name. */
+export function _resetBonjourCache() {
+  bonjourCache = null;
+  bonjourResolved = false;
 }
 
 /**
