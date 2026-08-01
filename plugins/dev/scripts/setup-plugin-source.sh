@@ -136,7 +136,7 @@ install_interactive_claude_wrapper() {
 ${start}
 # Interactive \`claude\` loads catalyst plugins LIVE from the plugin-source checkout
 # (never the lagging marketplace cache). Phase workers get this via
-# phase-agent-dispatch's --plugin-dir; this is the interactive equivalent.
+# the phase-agent-dispatch --plugin-dir flag; this is the interactive equivalent.
 claude() {
   case "\${1:-}" in
     plugin|mcp|config|update|doctor|install|migrate-installer|--help|-h|--version|-v)
