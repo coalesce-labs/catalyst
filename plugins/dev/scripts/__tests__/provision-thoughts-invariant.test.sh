@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Regression guard for the clean-config invariant (CTL-1246, Phase 3).
+# Regression guard for the clean-config invariant (CTL-1246, Phase 3; re-scoped
+# 2026-08-01 for the thagale/catalyst fork — see git history for the original
+# upstream coalesce-labs/rightsite-cloud/groundworkapp version, and again for the
+# removal of the hardcoded-org-name default in favor of the
+# CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG override).
 #
-# The groundworkapp-fallback bug (CTL-1214 bug #6) was fixed in
-# provision-thoughts.sh — write_config() now writes a coalesce-labs global
-# thoughtsRepo + defaultProfile and normalizes groundworkapp → rightsite-cloud.
-# This suite LOCKS that invariant so it cannot silently regress: it drives the
-# script's hermetic --dry-run payload-print seam against a registry that contains
-# a groundworkapp/Adva repoRoot and asserts the printed .thoughts payload can
-# NEVER reintroduce a groundworkapp global fallback.
-#
-# No production behavior change — provision-thoughts.sh already satisfies these.
-# If any assertion fails, fix write_config() (provision-thoughts.sh:114-165) /
-# normalize_org() (:44) to restore the invariant.
+# The invariant: when CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG is set, write_config()
+# must ALWAYS use it as the GLOBAL thoughtsRepo/defaultProfile, never drifting to
+# some OTHER org that merely happens to appear in the registry. This suite drives
+# the script's hermetic --dry-run payload-print seam against a registry containing
+# a second, unrelated org and asserts the printed .thoughts payload's global
+# fallback never drifts to it.
 #
 # Run: bash plugins/dev/scripts/__tests__/provision-thoughts-invariant.test.sh
 
@@ -50,6 +49,7 @@ assert_not_grep() {
 run_provision() {
   env -i PATH="$PATH" HOME="$SCRATCH/home" USER="testnode" \
     HLT_ROOT="$SCRATCH/hlt" HL_CONFIG="$HL_CONFIG_FILE" \
+    CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG="operator-org" \
     bash "$PROVISION" --dry-run --no-clone "$@" 2>&1
 }
 extract_json() {
@@ -61,46 +61,35 @@ echo "=== provision-thoughts clean-config invariant guard (CTL-1246) ==="
 echo "SCRIPT: $PROVISION"
 echo ""
 
-# A registry whose ONLY repoRoot is the groundworkapp (Adva) code repo — the exact
-# shape that used to produce the global groundworkapp fallback.
-REG_GW="$SCRATCH/registry-gw.json"
-cat > "$REG_GW" <<EOF
-{"projects":[{"repoRoot":"$SCRATCH/github/groundworkapp/groundwork","team":"ADV"}]}
+# A registry whose ONLY repoRoot is an unrelated second org's code repo — proves
+# the global fallback stays pinned to the configured override rather than
+# drifting to whatever org happens to show up in the registry.
+REG_OTHER="$SCRATCH/registry-other.json"
+cat > "$REG_OTHER" <<EOF
+{"projects":[{"repoRoot":"$SCRATCH/github/some-other-org/widget","team":"WID"}]}
 EOF
 
-OUT="$(run_provision --registry "$REG_GW")"
+OUT="$(run_provision --registry "$REG_OTHER")"
 JSON="$(extract_json "$OUT")"
 
-# 1. Global fallback thoughtsRepo is the coalesce-labs HLT path, never groundworkapp.
-assert_eq "global thoughtsRepo ends with /coalesce-labs/thoughts" \
-  "$(jq -r '.thoughtsRepo' <<<"$JSON")" "$SCRATCH/hlt/coalesce-labs/thoughts"
-assert_not_grep "global thoughtsRepo never contains 'groundworkapp'" \
-  "$(jq -r '.thoughtsRepo' <<<"$JSON")" "groundworkapp"
+# 1. Global fallback thoughtsRepo is the configured override's HLT path, never some-other-org.
+assert_eq "global thoughtsRepo ends with /operator-org/thoughts" \
+  "$(jq -r '.thoughtsRepo' <<<"$JSON")" "$SCRATCH/hlt/operator-org/thoughts"
+assert_not_grep "global thoughtsRepo never contains 'some-other-org'" \
+  "$(jq -r '.thoughtsRepo' <<<"$JSON")" "some-other-org"
 
-# 2. defaultProfile is coalesce-labs.
-assert_eq "defaultProfile == coalesce-labs" "$(jq -r '.defaultProfile' <<<"$JSON")" "coalesce-labs"
+# 2. defaultProfile == the configured override.
+assert_eq "defaultProfile == operator-org" "$(jq -r '.defaultProfile' <<<"$JSON")" "operator-org"
 
-# 3. NO profile thoughtsRepo path contains groundworkapp.
-assert_not_grep "no profile.thoughtsRepo contains 'groundworkapp'" \
-  "$(jq -r '.profiles[].thoughtsRepo' <<<"$JSON")" "groundworkapp"
-
-# 4. No THOUGHTS path or profile mentions groundworkapp. (The repoMappings KEY is
-#    the local source-code repoRoot — e.g. /github/groundworkapp/groundwork — and
-#    legitimately contains the org dir name; that is the code repo path, not a
-#    thoughts path. Strip the keys and assert the rest is groundworkapp-free, plus
-#    assert the repoMapping VALUES (repo/profile) are clean too.)
-assert_not_grep "no thoughts path / profile contains 'groundworkapp' (repoMapping keys excluded)" \
-  "$(jq -c 'del(.repoMappings)' <<<"$JSON")" "groundworkapp"
-assert_not_grep "repoMapping values (.repo/.profile) are groundworkapp-free" \
-  "$(jq -r '.repoMappings[] | "\(.repo) \(.profile)"' <<<"$JSON")" "groundworkapp"
-
-# 5. The Adva (groundworkapp) repoRoot normalizes to profile 'adva' → rightsite-cloud HLT.
-assert_eq "groundworkapp repoRoot resolves to profile 'adva' (normalize_org applied)" \
-  "$(jq -r --arg p "$SCRATCH/github/groundworkapp/groundwork" '.repoMappings[$p].profile // "MISSING"' <<<"$JSON")" \
-  "adva"
-assert_eq "the 'adva' profile points at the rightsite-cloud HLT path" \
-  "$(jq -r '.profiles["adva"].thoughtsRepo // "MISSING"' <<<"$JSON")" \
-  "$SCRATCH/hlt/rightsite-cloud/thoughts"
+# 3. The unrelated org's own repoRoot resolves to its own profile/thoughts path
+#    (org_profile is now identity — profile always == org), not folded into
+#    the override and not dropped.
+assert_eq "some-other-org repoRoot resolves to profile 'some-other-org' (org_profile is identity)" \
+  "$(jq -r --arg p "$SCRATCH/github/some-other-org/widget" '.repoMappings[$p].profile // "MISSING"' <<<"$JSON")" \
+  "some-other-org"
+assert_eq "the 'some-other-org' profile points at its own HLT path" \
+  "$(jq -r '.profiles["some-other-org"].thoughtsRepo // "MISSING"' <<<"$JSON")" \
+  "$SCRATCH/hlt/some-other-org/thoughts"
 
 echo ""
 echo "=== Results ==="
