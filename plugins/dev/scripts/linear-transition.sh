@@ -39,6 +39,7 @@ default_state_for() {
   case "$1" in
     backlog)     echo "Backlog" ;;
     todo)        echo "Todo" ;;
+    triage)      echo "Triage" ;;  # requires the team's native Linear Triage mode enabled (triageEnabled), else no such state exists to resolve
     research)    echo "In Progress" ;;
     planning)    echo "In Progress" ;;
     inProgress)  echo "In Progress" ;;
