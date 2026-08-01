@@ -137,6 +137,7 @@ import {
   countReviveEvents as defaultCountReviveEvents,
   hasCompleteEvent,
   latestCompleteEventTs,
+  latestCompleteEventAttempt,
 } from "./event-scan.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
@@ -2058,10 +2059,25 @@ export function reclaimDeadWorkIfPossible(
     // worker finished" — a stale complete event from a prior attempt no longer
     // does. Callers that omit sinceIso keep the old (attempt-unscoped) "ever"
     // behavior; only the CTL-778 reclaim call site below opts in.
-    completeEventSeen = ({ ticket: t, phase: p, sinceIso } = {}) => {
+    //
+    // CTL-778 follow-up (upstream review, PR #2851): envelope timestamps are
+    // SECOND-precision, so a prior attempt's completion and a same-second
+    // redispatch's startedAt compare EQUAL under `ts >= sinceIso` — the stale
+    // completion still satisfies the check, reintroducing the exact bug this
+    // guard exists to close. `sinceAttempt` (the current signal's own `attempt`,
+    // CTL-736) is the precise discriminator: when both the caller and the latest
+    // complete event carry an attempt number, compare THOSE instead of the
+    // coarser timestamp. Optional and fail-open — omit it (or an event with no
+    // recorded attempt) and behavior is byte-identical to the timestamp-only path.
+    completeEventSeen = ({ ticket: t, phase: p, sinceIso, sinceAttempt } = {}) => {
       if (!sinceIso) return hasCompleteEvent({ ticket: t, phase: p });
       const ts = latestCompleteEventTs({ ticket: t, phase: p });
-      return typeof ts === "string" && ts >= sinceIso;
+      if (typeof ts !== "string") return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket: t, phase: p });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return ts >= sinceIso;
     },
     // CTL-658 — resume-session resolver. Maps the dead worker's bg_job_id to a
     // `claude --resume`-compatible UUID (or null) so the revive can continue the
@@ -2512,7 +2528,12 @@ export function reclaimDeadWorkIfPossible(
     // (CTL-662/736/809-safe). Mirrors the dead-worker branch (B) below.
     if (
       hasProbe(phase) &&
-      completeEventSeen({ ticket, phase, sinceIso: signal.raw?.startedAt }) &&
+      completeEventSeen({
+        ticket,
+        phase,
+        sinceIso: signal.raw?.startedAt,
+        sinceAttempt: signal.raw?.attempt,
+      }) &&
       probes[phase]({ ticket, repoRoot, orchDir })
     ) {
       if (prevBgJobId) {

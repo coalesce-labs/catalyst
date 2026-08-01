@@ -19,13 +19,14 @@ import {
   countRecoveryPassCycles,
   hasCompleteEvent,
   latestCompleteEventTs,
+  latestCompleteEventAttempt,
   __resetEventScanIndexForTest,
   __phaseEventsLengthForTest,
   countTicketEventsInWindow,
 } from "./event-scan.mjs";
 
 // makeEvent — minimal envelope mirroring buildEventEnvelope in recovery.mjs.
-function makeEvent({ phase = "implement", action = "revive", ticket, orchId, ts }) {
+function makeEvent({ phase = "implement", action = "revive", ticket, orchId, ts, attempt }) {
   return JSON.stringify({
     ts,
     attributes: {
@@ -35,6 +36,7 @@ function makeEvent({ phase = "implement", action = "revive", ticket, orchId, ts 
       "event.label": ticket,
       "catalyst.orchestration": orchId ?? ticket,
       "linear.issue.identifier": ticket,
+      ...(typeof attempt === "number" ? { "phase.attempt": attempt } : {}),
     },
     body: { payload: { phase, ticket, status: action } },
   });
@@ -620,5 +622,113 @@ describe("latestCompleteEventTs", () => {
     expect(latestCompleteEventTs({ ticket: "", phase: "plan", path })).toBeNull();
     expect(latestCompleteEventTs({ ticket: "CTL-1", phase: "", path })).toBeNull();
     expect(latestCompleteEventTs({ path })).toBeNull();
+  });
+});
+
+// CTL-778 follow-up (upstream review, PR #2851): envelope timestamps are
+// SECOND-precision, so a prior attempt's completion and a same-second
+// redispatch's startedAt compare EQUAL under `ts >= sinceIso` alone — the
+// precise discriminator recovery.mjs's completeEventSeen needs is the
+// `phase.attempt` the LATEST (by ts) complete event carried, not the ts itself.
+describe("latestCompleteEventAttempt", () => {
+  beforeEach(() => __resetEventScanIndexForTest());
+
+  test("null when no complete event exists", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "plan", action: "revive", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(latestCompleteEventAttempt({ ticket: "CTL-1", phase: "plan", path })).toBeNull();
+  });
+
+  test("null when the complete event carries no phase.attempt (legacy/absent)", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "verify", action: "complete", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(latestCompleteEventAttempt({ ticket: "CTL-1", phase: "verify", path })).toBeNull();
+  });
+
+  test("returns the attempt of a single complete event", () => {
+    const { path } = tempLog([
+      makeEvent({
+        phase: "verify",
+        action: "complete",
+        ticket: "CTL-1",
+        ts: "2026-06-08T00:00:00Z",
+        attempt: 2,
+      }),
+    ]);
+    expect(latestCompleteEventAttempt({ ticket: "CTL-1", phase: "verify", path })).toBe(2);
+  });
+
+  // THE case this exists for: two complete events land in the SAME second (a
+  // prior attempt's completion and a same-second redispatch). ts alone can't
+  // disambiguate them (both compare equal); attempt must, and must track the
+  // SAME "latest" event latestCompleteEventTs would pick, not just the max
+  // attempt number ever seen (which could disagree if attempts aren't emitted
+  // in order).
+  test("same-second complete events: returns the LATER-APPENDED event's attempt, not the earlier one", () => {
+    const { path } = tempLog([
+      // Attempt 1 completes, then a same-second redispatch's attempt 2 also
+      // completes — the realistic write order (attempts increase over time).
+      makeEvent({
+        phase: "verify",
+        action: "complete",
+        ticket: "CTL-1",
+        ts: "2026-06-08T00:00:00Z",
+        attempt: 1,
+      }),
+      makeEvent({
+        phase: "verify",
+        action: "complete",
+        ticket: "CTL-1",
+        ts: "2026-06-08T00:00:00Z",
+        attempt: 2,
+      }),
+    ]);
+    // Both share a ts (second-precision). Events append in real write order, so
+    // the LATER-appended entry is the more recent one in actual wall-clock time
+    // even though the ts strings tie — `ev.ts >= latestTs` (not `>`) is what
+    // makes the tie favor it instead of whichever event was seen first.
+    expect(latestCompleteEventAttempt({ ticket: "CTL-1", phase: "verify", path })).toBe(2);
+  });
+
+  test("returns the attempt of the event with the LATEST distinct ts, ignoring an earlier higher attempt", () => {
+    const { path } = tempLog([
+      makeEvent({
+        phase: "verify",
+        action: "complete",
+        ticket: "CTL-1",
+        ts: "2026-07-31T00:50:36Z",
+        attempt: 9,
+      }),
+      makeEvent({
+        phase: "verify",
+        action: "complete",
+        ticket: "CTL-1",
+        ts: "2026-06-09T00:00:00Z",
+        attempt: 2,
+      }),
+    ]);
+    expect(latestCompleteEventAttempt({ ticket: "CTL-1", phase: "verify", path })).toBe(9);
+  });
+
+  test("ignores complete events for a different ticket or phase", () => {
+    const { path } = tempLog([
+      makeEvent({
+        phase: "verify",
+        action: "complete",
+        ticket: "CTL-2",
+        ts: "2026-06-08T00:00:00Z",
+        attempt: 5,
+      }),
+    ]);
+    expect(latestCompleteEventAttempt({ ticket: "CTL-1", phase: "verify", path })).toBeNull();
+  });
+
+  test("returns null when ticket or phase is missing", () => {
+    const { path } = tempLog([]);
+    expect(latestCompleteEventAttempt({ ticket: "", phase: "plan", path })).toBeNull();
+    expect(latestCompleteEventAttempt({ ticket: "CTL-1", phase: "", path })).toBeNull();
+    expect(latestCompleteEventAttempt({ path })).toBeNull();
   });
 });
