@@ -22,20 +22,66 @@
 // INERTNESS IS THE OTHER FAILURE MODE. If the allowlist omits the name the
 // operator actually browses (mini:7400, mini.local:7400, a Tailscale name), the
 // reply surface 403s for real use and the feature ships dead. So the defaults
-// cover loopback plus this machine's own names, and MONITOR_TRUSTED_ORIGINS is
-// the documented escape hatch for any deployment-specific name.
+// cover loopback plus this machine's own names and addresses, and
+// MONITOR_TRUSTED_ORIGINS is the documented escape hatch for any
+// deployment-specific name (reverse proxy, MagicDNS alias).
 
 import { hostname as osHostname, networkInterfaces } from "node:os";
+
+/**
+ * Parse a host or a full origin into its canonical `{ host, port }`.
+ *
+ * Canonicalization goes through `URL` rather than a bare `toLowerCase()` so
+ * allowlist entries are compared in the SAME form a browser serializes an
+ * Origin in. Without it an IDN entry (`münchen.local`) would be stored verbatim
+ * while the browser sends punycode (`xn--mnchen-3ya.local`), and every
+ * legitimate reply from that host would 403 — the inertness failure mode again.
+ * `URL` also normalizes IPv6 (including IPv4-mapped forms) and drops a
+ * scheme-default port, matching how Origin is serialized.
+ */
+function parseHostish(value) {
+  if (typeof value !== "string") return null;
+  const s = value.trim();
+  if (s === "" || s === "null") return null;
+  // Accept both "https://host:port" and a bare "host:port".
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`;
+  try {
+    const u = new URL(withScheme);
+    if (u.hostname === "") return null;
+    return { host: u.host.toLowerCase(), port: u.port };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Normalize an origin to its comparable `host[:port]`.
+ * Returns null for anything that is not a parseable absolute URL — including
+ * the opaque literal "null", which browsers send for sandboxed/`file:` origins
+ * and which must never be treated as trusted.
+ */
+export function originHost(origin) {
+  if (typeof origin !== "string" || origin === "" || origin === "null") return null;
+  // An Origin is always absolute; a bare "mini:7400" is not a valid Origin and
+  // must not be accepted, so this does NOT reuse parseHostish's bare-host path.
+  try {
+    const u = new URL(origin);
+    if (u.hostname === "" || u.protocol === "file:") return null;
+    return u.host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
 
 /**
  * This machine's own non-loopback IP addresses.
  *
  * Included because operators routinely reach the monitor by IP rather than by
  * name — a LAN address or a Tailscale 100.x — and omitting them would 403 those
- * sessions (the inertness failure mode). These are the addresses the server is
- * bound and reachable on, so trusting them adds no attacker-controlled input:
- * an attacker cannot make `evil.example` resolve to a name in this list, and a
- * rebinding attack still presents its OWN domain in `Origin`, not our IP.
+ * sessions. These are the addresses the server is bound and reachable on, so
+ * trusting them adds no attacker-controlled input: an attacker cannot make
+ * `evil.example` resolve to a name in this list, and a rebinding attack still
+ * presents its OWN domain in `Origin`, not our address.
  */
 export function selfAddresses() {
   const out = [];
@@ -50,39 +96,28 @@ export function selfAddresses() {
       if (!a || typeof a.address !== "string" || a.internal) continue;
       // IPv6 literals are bracketed in a URL host; strip any zone index (%en0),
       // which never appears in an Origin header.
-      out.push(a.family === "IPv6" || a.address.includes(":")
-        ? `[${a.address.split("%")[0]}]`
-        : a.address);
+      out.push(
+        a.family === "IPv6" || a.address.includes(":")
+          ? `[${a.address.split("%")[0]}]`
+          : a.address
+      );
     }
   }
   return out;
 }
 
 /**
- * Normalize an origin to its comparable `host[:port]`.
- * Returns null for anything that is not a parseable absolute URL — including
- * the opaque literal "null", which browsers send for sandboxed/`file:` origins
- * and which must never be treated as trusted.
- */
-export function originHost(origin) {
-  if (typeof origin !== "string" || origin === "" || origin === "null") return null;
-  try {
-    const u = new URL(origin);
-    // A URL like "foo" parses only with a scheme; require a real host so that
-    // e.g. "mailto:x" or a bare word can never produce a match.
-    return u.host === "" ? null : u.host.toLowerCase();
-  } catch {
-    return null;
-  }
-}
-
-/**
  * The set of `host[:port]` values this server is legitimately reached by.
  *
- * Both the bare host and the `host:port` form are included: a browser omits the
- * port from `Origin` when it is the scheme default (80/443), so a monitor
- * fronted by a reverse proxy on :80 sends `Origin: http://mini` while the
- * server's own port is 7400.
+ * PORT-QUALIFIED BY DEFAULT. Own names/addresses are trusted only ON THE BOUND
+ * PORT. Trusting the bare host too would mean any OTHER service on this machine
+ * — `http://mini` on :80 — could drive the reply route, since a browser
+ * serializes that Origin as `http://mini` with no port. That is a strictly
+ * wider surface than the check this replaces, so it is not the default. A
+ * reverse proxy on :80/:443 is a real deployment, but it is expressed
+ * explicitly through `extraOrigins` rather than assumed for everyone. (When the
+ * bound port IS 80/443 the bare form is added, because the browser omits a
+ * scheme-default port and the two forms then denote the same endpoint.)
  *
  * @param {{ port?: number, extraOrigins?: string[] | string | null, hostnames?: string[], addresses?: string[] }} opts
  * @returns {Set<string>}
@@ -90,39 +125,49 @@ export function originHost(origin) {
 export function buildTrustedOrigins(opts = {}) {
   const { port, extraOrigins = null, hostnames, addresses } = opts;
   const out = new Set();
+  const boundPort = Number.isFinite(port) ? Number(port) : null;
 
-  const addHost = (h) => {
-    if (typeof h !== "string") return;
-    const host = h.trim().toLowerCase();
-    if (host === "") return;
-    out.add(host);
-    if (port != null && Number.isFinite(port)) {
-      // IPv6 literals must stay bracketed when a port is appended.
-      out.add(host.includes(":") && !host.startsWith("[") ? `[${host}]:${port}` : `${host}:${port}`);
+  /** Trust `name` only on the bound port (see PORT-QUALIFIED above). */
+  const addOwn = (name) => {
+    const parsed = parseHostish(name);
+    if (parsed === null) return;
+    if (parsed.port !== "") {
+      out.add(parsed.host); // caller pinned a port explicitly
+      return;
     }
+    if (boundPort === null) {
+      out.add(parsed.host);
+      return;
+    }
+    out.add(`${parsed.host}:${boundPort}`);
+    // A browser omits a scheme-default port from Origin, so on 80/443 the bare
+    // form IS the bound endpoint rather than a different service.
+    if (boundPort === 80 || boundPort === 443) out.add(parsed.host);
   };
 
-  for (const h of ["localhost", "127.0.0.1", "::1", "[::1]"]) addHost(h);
+  for (const h of ["localhost", "127.0.0.1", "[::1]"]) addOwn(h);
 
   // This machine's own names. os.hostname() may be an FQDN ("mini.rozich") or a
   // short label; operators browse by either, plus the mDNS ".local" form.
   const selfNames = hostnames ?? [osHostname()];
   for (const raw of selfNames) {
     if (typeof raw !== "string" || raw === "") continue;
-    const name = raw.toLowerCase();
-    addHost(name);
-    const short = name.split(".")[0];
-    addHost(short);
-    addHost(`${short}.local`);
+    addOwn(raw);
+    const short = raw.toLowerCase().split(".")[0];
+    if (short !== "") {
+      addOwn(short);
+      addOwn(`${short}.local`);
+    }
   }
 
-  // This machine's own IPs (LAN, Tailscale 100.x) — operators reach the monitor
-  // by address as often as by name.
-  for (const addr of addresses ?? selfAddresses()) addHost(addr);
+  // This machine's own IPs (LAN, Tailscale 100.x).
+  for (const addr of addresses ?? selfAddresses()) addOwn(addr);
 
-  // Deployment-specific names (reverse proxy, Tailscale MagicDNS, an alias).
-  // Accepts full origins ("https://catalyst.example") or bare hosts, comma- or
-  // whitespace-separated, so the env var is forgiving about format.
+  // Deployment-specific origins (reverse proxy, Tailscale MagicDNS, an alias).
+  // Taken EXACTLY as given, canonicalized: an operator who writes
+  // "https://catalyst.example" means port 443 (bare host in Origin), and one who
+  // writes "mini-2:7400" means that port. We do not add the bound port to these
+  // — the whole point is that they are reached on some other endpoint.
   const extras =
     typeof extraOrigins === "string"
       ? extraOrigins.split(/[,\s]+/)
@@ -130,9 +175,8 @@ export function buildTrustedOrigins(opts = {}) {
         ? extraOrigins
         : [];
   for (const raw of extras) {
-    if (typeof raw !== "string" || raw.trim() === "") continue;
-    const parsed = originHost(raw);
-    addHost(parsed ?? raw);
+    const parsed = parseHostish(raw);
+    if (parsed !== null) out.add(parsed.host);
   }
 
   return out;

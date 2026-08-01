@@ -34,16 +34,42 @@ describe("originHost", () => {
 });
 
 describe("buildTrustedOrigins", () => {
-  test("trusts loopback with and without the bound port", () => {
-    for (const h of ["localhost", "localhost:7400", "127.0.0.1", "127.0.0.1:7400", "[::1]:7400"]) {
+  test("trusts loopback on the bound port", () => {
+    for (const h of ["localhost:7400", "127.0.0.1:7400", "[::1]:7400"]) {
       expect(TRUSTED.has(h)).toBe(true);
     }
   });
 
   test("trusts this machine's own names — FQDN, short label, and .local", () => {
-    for (const h of ["mini.rozich", "mini.rozich:7400", "mini", "mini:7400", "mini.local:7400"]) {
+    for (const h of ["mini.rozich:7400", "mini:7400", "mini.local:7400"]) {
       expect(TRUSTED.has(h)).toBe(true);
     }
+  });
+
+  // A bare own-host would let ANY other service on this machine (e.g. :80)
+  // drive the reply route, since the browser serializes that Origin with no
+  // port. That is wider than the Origin-vs-Host check this replaces.
+  test("does NOT trust an own name without the bound port", () => {
+    for (const h of ["mini", "localhost", "mini.rozich", "127.0.0.1"]) {
+      expect(TRUSTED.has(h)).toBe(false);
+    }
+  });
+
+  test("adds the bare form only when the bound port is a scheme default", () => {
+    const t80 = buildTrustedOrigins({ port: 80, hostnames: ["mini"], addresses: [] });
+    expect(t80.has("mini")).toBe(true);
+    const t443 = buildTrustedOrigins({ port: 443, hostnames: ["mini"], addresses: [] });
+    expect(t443.has("mini")).toBe(true);
+  });
+
+  test("canonicalizes IDN entries to the punycode a browser actually sends", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: [],
+      extraOrigins: "münchen.local:7400",
+    });
+    expect(isOriginAllowed("http://xn--mnchen-3ya.local:7400", t)).toBe(true);
   });
 
   test("tracks a non-default port rather than assuming 7400", () => {
@@ -52,14 +78,18 @@ describe("buildTrustedOrigins", () => {
     expect(t.has("mini:7400")).toBe(false);
   });
 
-  test("accepts deployment-specific names as full origins or bare hosts", () => {
+  test("takes deployment-specific origins exactly as given", () => {
     const t = buildTrustedOrigins({
       port: 7400,
       hostnames: ["mini"],
-      extraOrigins: "https://catalyst.example, mini-2.tail1234.ts.net",
+      addresses: [],
+      extraOrigins: "https://catalyst.example, mini-2.tail1234.ts.net:7400",
     });
+    // A proxy on :443 -> the browser omits the port, so the bare host is right.
     expect(isOriginAllowed("https://catalyst.example", t)).toBe(true);
     expect(isOriginAllowed("http://mini-2.tail1234.ts.net:7400", t)).toBe(true);
+    // ...and an extra is NOT silently widened to the bound port.
+    expect(isOriginAllowed("http://catalyst.example:7400", t)).toBe(false);
   });
 
   test("ignores empty/garbage entries in the extras list", () => {
@@ -78,6 +108,14 @@ describe("isOriginAllowed", () => {
       "http://127.0.0.1:7400",
     ]) {
       expect(isOriginAllowed(o, TRUSTED)).toBe(true);
+    }
+  });
+
+  // The same host on a DIFFERENT port is a different service, and a compromised
+  // one must not be able to drive this route.
+  test("rejects another service on this same machine (bare host / other port)", () => {
+    for (const o of ["http://mini", "http://localhost", "http://mini:8080"]) {
+      expect(isOriginAllowed(o, TRUSTED)).toBe(false);
     }
   });
 

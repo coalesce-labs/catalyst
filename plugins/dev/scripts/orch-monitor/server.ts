@@ -1929,14 +1929,26 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // proxy, Tailscale MagicDNS) — without it a monitor reached by such a name
   // would 403 every reply and the surface would be inert.
   let trustedOriginsCache: Set<string> | null = null;
-  const getTrustedOrigins = (): Set<string> => {
-    if (trustedOriginsCache === null) {
-      trustedOriginsCache = buildTrustedOrigins({
-        port: server?.port ?? port,
-        extraOrigins: process.env.MONITOR_TRUSTED_ORIGINS ?? null,
-      });
-    }
-    return trustedOriginsCache;
+  const buildTrusted = (): Set<string> =>
+    buildTrustedOrigins({
+      port: server?.port ?? port,
+      extraOrigins: process.env.MONITOR_TRUSTED_ORIGINS ?? null,
+    });
+
+  // Allow, rebuilding the allowlist ONCE on a miss before refusing.
+  //
+  // The daemon runs under launchd with KeepAlive=true, so a cached set can long
+  // outlive the network. If Tailscale connects, or DHCP moves the address,
+  // after the set was first built, that new self-address is absent and every
+  // browser reply through it 403s until someone restarts the daemon — the
+  // inertness failure this guard is supposed to avoid. Rebuilding only on the
+  // miss path keeps the hot path a single Set lookup (a rejection is rare, and
+  // an attacker gains nothing: a rebuild re-derives OUR names, never theirs).
+  const originAllowed = (origin: string | null): boolean => {
+    trustedOriginsCache ??= buildTrusted();
+    if (isOriginAllowed(origin, trustedOriginsCache)) return true;
+    trustedOriginsCache = buildTrusted();
+    return isOriginAllowed(origin, trustedOriginsCache);
   };
 
   const server = Bun.serve({
@@ -3955,7 +3967,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // reject the very case it existed for. `Origin` is now checked against
           // an allowlist the attacker cannot influence — see lib/trusted-origin.mjs
           // for the rebinding walkthrough and the inertness trade-off.
-          if (!isOriginAllowed(req.headers.get("origin"), getTrustedOrigins())) {
+          if (!originAllowed(req.headers.get("origin"))) {
             return Response.json(
               { status: "forbidden", error: "cross-origin reply rejected" },
               { status: 403 },

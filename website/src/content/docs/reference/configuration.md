@@ -594,6 +594,37 @@ structural, not configured), so the telemetry that is the feature's whole point 
 | `CATALYST_BH_PROJECT_SILENCE_MS`                        | `86400000` (24 h) | Project-silence threshold (no ticket movement in the project past this window).                                                                                                                                                                                                                                                                                                                                                   |
 | `CATALYST_BH_UNOWNED_INFLIGHT_MS`                       | `86400000` (24 h) | Stale-unowned threshold (CTL-1475). A Linear state like `Implement` is a **claim** that a worker is on the ticket, not a label — and nothing takes the claim back when the worker dies. Past this age with **no live worker signal and no confirmed-open PR**, the ticket is flagged `unownedInFlight` and proposed as a **tier2 (anchorable)** `recover-unowned-in-flight` move, so the delegate dispatches a recovery pass rather than merely reporting it. Such tickets are invisible to every other path: admission only pulls `Todo`, and the recovery census scans worker dirs they have no entry in. Deliberately conservative — any evidence of ownership spares the ticket, since a false negative costs one more scan while a false positive re-dispatches work a human is holding. |
 
+### Monitor reply-route trusted origins (CTL-1573)
+
+`POST /api/ticket/<ticket>/reply` posts operator-authored text to Linear, and the monitor binds
+`0.0.0.0` with no auth. Its cross-origin guard validates the request's `Origin` against an allowlist
+that the caller cannot influence. (It previously compared `Origin` against the request's own `Host`
+header — under DNS rebinding both are attacker-chosen, so that comparison could not reject the case
+it existed for.)
+
+Trusted **by default**, all qualified with the port the server actually bound:
+
+- loopback — `localhost`, `127.0.0.1`, `[::1]`
+- this machine's own names — `os.hostname()`, its short label, and the `.local` (mDNS) form
+- this machine's own non-loopback addresses (LAN, Tailscale `100.x`)
+
+Own names are trusted **only on the bound port**: a bare `http://mini` would let any *other* service
+on the same machine (e.g. something on `:80`) drive the reply route. The bare form is added only
+when the bound port is a scheme default (80/443), where a browser omits the port anyway.
+
+| Env var                    | Default | Notes                                                                                                                                                                                                                                                                                                                       |
+| -------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MONITOR_TRUSTED_ORIGINS`  | unset   | Comma- or whitespace-separated extra origins for deployments reached by a name that cannot be derived from `os.hostname()` — a **reverse proxy** or a full **Tailscale MagicDNS** alias. Accepts full origins (`https://catalyst.example`) or bare `host:port` (`mini-2.tail1234.ts.net:7400`). Entries are taken **exactly as given** (not widened to the bound port) and canonicalized the way a browser serializes `Origin`, so an IDN name may be written in either Unicode or punycode. |
+
+**Set this if replies 403.** A monitor opened through a proxy/alias not in the default set will
+reject every reply until the name is listed here. The allowlist is rebuilt on a rejection, so an
+address that appears later (Tailscale connecting, a DHCP change) is picked up without a restart; a
+*name* the daemon cannot derive still needs this variable.
+
+Requests with **no** `Origin` are allowed — browsers always send it on a POST, so only non-browser
+clients (`curl`, tests) omit it, and those are not CSRF vectors. This guard stops a browser being
+used as a confused deputy; it is not authentication.
+
 ### Ingestion-silence detector (CTL-1122)
 
 The broker tails every event, so it is the surviving process that can notice when an upstream
