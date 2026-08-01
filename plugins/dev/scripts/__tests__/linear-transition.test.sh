@@ -732,6 +732,30 @@ run "CTL-1153 Test 32: lowercase ticket prefix 'ctl-32' resolved to CTL key" \
 run "CTL-1153 Test 32: per-project override applied for lowercased prefix" \
   expect_contains "$LOG32" "linearis issues update ctl-32 --status Code Review"
 
+# ─── Test 33: triage falls back to default 'Triage' when stateMap missing ──
+# Regression guard: "triage" was missing from default_state_for()'s case
+# statement (every other phase — verifying/reviewing/remediating/etc. — had a
+# fallback; triage did not), so a team with no stateMap.triage key got
+# "could not resolve target state (transition='triage')" instead of a resolved
+# state. Requires the team's own Linear Triage mode enabled to actually apply,
+# but the LOCAL name resolution this test guards must succeed regardless.
+WORK33="${SCRATCH}/t33"
+BIN33="${SCRATCH}/t33/bin"
+LOG33="${SCRATCH}/t33/log"
+mkdir -p "${WORK33}/.catalyst"
+cat > "${WORK33}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{}}}
+EOF
+install_fake_linearis "$BIN33"
+touch "$LOG33"
+
+run "falls back to default 'Triage' for triage when stateMap missing" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG33' PATH='$BIN33:$PATH' \
+    '$TRANSITION' --ticket TST-33 --transition triage --config '$WORK33/.catalyst/config.json'"
+
+run "default Triage used for triage when config has no stateMap" \
+  expect_contains "$LOG33" "linearis issues update TST-33 --status Triage"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
