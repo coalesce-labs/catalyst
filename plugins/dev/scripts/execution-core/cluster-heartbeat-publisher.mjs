@@ -81,6 +81,42 @@ export function localInFlightTickets(hostName, { orchDir } = {}) {
   }
 }
 
+// Signal statuses that OCCUPY a dispatch slot. in_flight (above) is the
+// OWNERSHIP set — it also counts parked (needs-human) dirs a host must reclaim
+// after death, which hold no slot (the scheduler's own slot accounting agrees).
+// Conflating the two made the Workers header count slots the deck correctly
+// rendered as Open (CTL-1581). needs-input IS included: the scheduler leaves a
+// needs-input worker's job running and keeps counting it against maxParallel
+// until it is actually stopped, and the local board renders it as occupying —
+// peers must agree.
+const ACTIVE_STATUSES = new Set(["running", "dispatched", "needs-input"]);
+
+// localActiveTickets — the slot-OCCUPYING subset of localInFlightTickets on
+// this host. Triage-phase signals are carved out to match the deck/capacity
+// predicates (queue-model.ts / board-data.mjs): triage is intake and does not
+// consume maxParallel, so a peer must not render it in a remote slot the local
+// monitor omits.
+export function localActiveTickets(hostName, { orchDir } = {}) {
+  if (!orchDir) return [];
+  try {
+    const signals = readWorkerSignals(orchDir);
+    const tickets = new Set();
+    for (const sig of signals) {
+      if (!sig.raw?.host?.name || sig.raw.host.name !== hostName) continue;
+      if (!ACTIVE_STATUSES.has(sig.status)) continue;
+      if (sig.phase === "triage") continue;
+      // A held-STOPPED needs-input worker (idle job stopped by the hold sweep,
+      // status kept + stoppedForHold:true — scheduler.mjs slot accounting's own
+      // carve-out) has released its process and its slot.
+      if (sig.status === "needs-input" && sig.raw?.stoppedForHold === true) continue;
+      tickets.add(sig.ticket);
+    }
+    return [...tickets];
+  } catch {
+    return []; // fail-open
+  }
+}
+
 // startLivenessPublisher — arm a periodic cross-host liveness publisher.
 // Fires one publish immediately, then every intervalMs. Returns a stop handle
 // ({ stop() }) so the daemon can tear it down symmetrically with _heartbeat.

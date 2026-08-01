@@ -267,6 +267,79 @@ export async function readReplicaTitles({
   }
 }
 
+
+// readReplicaHumanHolds — replica-backed needs-human/needs-input holds for a
+// bounded id set (the CTL-1588 queue annotation's SECOND source). The parked
+// descriptor set (filter-state.db) is webhook-fed, and the webhook receiver is
+// single-homed — a label applied while this node's broker missed the delivery
+// leaves a durable gap (live: mini-2 missing CRM-1/2/5/6's needs-human), so the
+// queue kept ranking held tickets as imminent. The CTC replica is the SDK's
+// live Linear mirror and carries every label; one bounded read per assemble
+// (queue ids only — a handful) closes the gap. Same gating + fail-open contract
+// as readReplicaTitles above: file-presence gate, {} on ANY failure, and the
+// reader is closed either way. needs-human outranks needs-input (house
+// precedence).
+export async function readReplicaHumanHolds({
+  ids = [],
+  dbPath = process.env.CATALYST_REPLICA_DB || defaultReplicaDbPath(),
+  readerFactory = null,
+} = {}) {
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+  if (wanted.length === 0) return {};
+  if (!readerFactory) {
+    try {
+      if (!existsSync(dbPath)) return {};
+    } catch {
+      return {};
+    }
+  }
+  let reader = null;
+  try {
+    let factory = readerFactory;
+    if (!factory) {
+      ({ createReplicaReader: factory } = await import(REPLICA_READ_MODULE));
+    }
+    reader = factory({ dbPath });
+    const out = {};
+    // Batched path (#2845 Codex): ONE transaction + ONE freshness check for the
+    // whole id set — per-id labels() would cost N transactions per assemble on
+    // the board's refresh cadence. Fall back to per-id for injected readers
+    // that predate labelsBatch.
+    if (typeof reader.labelsBatch === "function") {
+      const byId = reader.labelsBatch(wanted);
+      if (byId && typeof byId === "object") {
+        for (const [id, names] of Object.entries(byId)) {
+          if (!Array.isArray(names)) continue;
+          if (names.includes("needs-human")) out[id] = "needs-human";
+          else if (names.includes("needs-input")) out[id] = "needs-input";
+        }
+      }
+      return out; // undefined batch (stale writer / mid-reseed) → {} — fail-open
+    }
+    for (const id of wanted) {
+      let nodes;
+      try {
+        nodes = reader.labels(id);
+      } catch {
+        continue; // one bad row must not drop the rest
+      }
+      if (!Array.isArray(nodes)) continue;
+      const names = nodes.map((n) => n?.name).filter(Boolean);
+      if (names.includes("needs-human")) out[id] = "needs-human";
+      else if (names.includes("needs-input")) out[id] = "needs-input";
+    }
+    return out;
+  } catch {
+    return {}; // replica unavailable → the parked-set source stands alone
+  } finally {
+    try {
+      reader?.close?.();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 // Read the scheduler's eligible projections for priority/project/relations on
 // tickets that may not have a ticket_state row yet (queued, not-yet-worked).
 async function readEligibleById(eligibleDir) {

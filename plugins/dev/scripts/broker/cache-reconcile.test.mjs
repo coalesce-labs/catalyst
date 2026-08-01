@@ -11,6 +11,7 @@ import {
   startCacheReconcileTimer,
   rotateWindow,
   linearisBodyError,
+  createReplicaFetcher,
 } from "./cache-reconcile.mjs";
 
 // pinoLikeLogger — methods THROW if invoked with the wrong `this`, exactly like
@@ -562,5 +563,73 @@ describe("linearisBodyError (CTL-1577 round 2)", () => {
     expect(linearisBodyError([])).toBeNull();
     expect(linearisBodyError({ error: "" })).toBeNull();
     expect(linearisBodyError(null)).toBeNull();
+  });
+});
+
+describe("createReplicaFetcher (CTL-1571)", () => {
+  const hitReader = {
+    isFresh: () => true,
+    stateAndLabels: () => ({
+      state: { terminal: false, state: "Implement" },
+      labels: [{ id: "l1", name: "monitor" }, { id: "l2", name: "bug" }],
+    }),
+  };
+
+  test("replica HIT serves state+labels from ONE snapshot with zero live calls", async () => {
+    let liveCalls = 0;
+    const fetch = createReplicaFetcher({
+      getReader: async () => hitReader,
+      fallback: async () => { liveCalls++; return { state: null, labels: null, error: "x" }; },
+    });
+    const out = await fetch("CTL-1");
+    expect(out).toEqual({ state: "Implement", labels: ["monitor", "bug"], error: null });
+    expect(liveCalls).toBe(0);
+  });
+
+  test("no reader on this runtime → pure live fallback", async () => {
+    const fetch = createReplicaFetcher({
+      getReader: async () => null,
+      fallback: async () => ({ state: "Todo", labels: [], error: null }),
+    });
+    expect(await fetch("CTL-2")).toEqual({ state: "Todo", labels: [], error: null });
+  });
+
+  test("stale replica falls back loudly to live", async () => {
+    let warned = 0;
+    const fetch = createReplicaFetcher({
+      getReader: async () => ({ ...hitReader, isFresh: () => false }),
+      fallback: async () => ({ state: "Done", labels: null, error: null }),
+      logger: { warn: () => { warned++; }, info() {}, debug() {} },
+    });
+    expect((await fetch("CTL-3")).state).toBe("Done");
+    expect(warned).toBe(1);
+  });
+
+  test("snapshot MISS (undefined — absent row OR half-seeded pair) falls back to live", async () => {
+    const fetch = createReplicaFetcher({
+      getReader: async () => ({ isFresh: () => true, stateAndLabels: () => undefined }),
+      fallback: async () => ({ state: null, labels: null, error: "timeout after 30s" }),
+    });
+    expect((await fetch("CTL-4")).error).toBe("timeout after 30s");
+  });
+
+  test("an old reader shape without stateAndLabels falls back (never partial reads)", async () => {
+    let liveCalls = 0;
+    const fetch = createReplicaFetcher({
+      getReader: async () => ({ isFresh: () => true, lookup: () => ({ terminal: true, state: "Done" }), labels: () => [] }),
+      fallback: async () => { liveCalls++; return { state: "Done", labels: [], error: null }; },
+    });
+    expect(await fetch("CTL-5")).toEqual({ state: "Done", labels: [], error: null });
+    expect(liveCalls).toBe(1);
+  });
+
+  test("empty label set is a defined HIT (no fallback)", async () => {
+    let liveCalls = 0;
+    const fetch = createReplicaFetcher({
+      getReader: async () => ({ isFresh: () => true, stateAndLabels: () => ({ state: { terminal: false, state: "Todo" }, labels: [] }) }),
+      fallback: async () => { liveCalls++; return { state: null, labels: null, error: "x" }; },
+    });
+    expect(await fetch("CTL-6")).toEqual({ state: "Todo", labels: [], error: null });
+    expect(liveCalls).toBe(0);
   });
 });

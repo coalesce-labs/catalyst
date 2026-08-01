@@ -72,7 +72,7 @@ import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-po
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 import { readAdmissionState } from "./admission-state.mjs"; // CTL-1322: live admission block for the heartbeat
-import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list for the Loki heartbeat
+import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets, localActiveTickets } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list; CTL-1581: active (slot-occupancy) list
 import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
   recoverStartup,
@@ -1195,6 +1195,10 @@ export function startDaemon({
         // so a peer can read liveness + ownership from Loki (retiring the Linear
         // heartbeat attachment). Same local signal-scan source the publisher uses.
         inFlightTicketsFn: () => localInFlightTickets(getHostName(), { orchDir }),
+        // CTL-1581: the running/dispatched SUBSET — the slot-occupancy signal
+        // the Workers deck renders (in_flight also counts parked dirs, which
+        // hold no slot).
+        activeTicketsFn: () => localActiveTickets(getHostName(), { orchDir }),
         // CTL-1551: carry the live slot ceiling so a peer's monitor can render
         // per-host capacity from Loki (the Linear-anchor capacity transport is
         // retired in loki mode). Uses the SAME readMaxParallel chokepoint the

@@ -1570,6 +1570,13 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     // The sweep's call site historically passed only { exec }, so every probe
     // fell through to a live linearis read.
     writeSignal("PROJ-202", "implement", "running");
+    // CTL-1580: a DUE live recheck deliberately passes only { exec } — pre-seed
+    // a fresh recheck marker so this test observes the steady-state threading.
+    mkdirSync(join(orchDir, ".replica-vouch-rechecks"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".replica-vouch-rechecks", "PROJ-202"),
+      JSON.stringify({ ticket: "PROJ-202", probedAt: Date.now() })
+    );
     const gateway = { getDescriptor: () => null };
     let seenOpts = null;
     schedulerTick(orchDir, {
@@ -12688,5 +12695,74 @@ describe("computeDeadHosts (CTL-1524 C4a)", () => {
         },
       })
     ).toEqual([]);
+  });
+});
+
+// ── CTL-1580: non-phantom probe cool-down + replica threading ──
+describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
+  test("a stuck dir's classify is bounded to one per DELETION_PROBE_INTERVAL_MS", () => {
+    writeSignal("PROJ-52", "implement", "running");
+    let classifies = 0;
+    const deps = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifies++;
+        return "exists"; // real stuck ticket — never quarantined
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, deps);
+    schedulerTick(orchDir, deps);
+    schedulerTick(orchDir, deps);
+    // First tick probes (and records the marker); the next two are inside the
+    // cool-down window and must NOT re-probe — this was the every-tick live
+    // read of a quiet stuck ticket (the PROJ-52 burn).
+    expect(classifies).toBe(1);
+  });
+
+  test("the replica reader is threaded into classifyResolution's options (recheck not due)", () => {
+    writeSignal("CTL-77", "implement", "running");
+    // Pre-seed a FRESH live-recheck marker so the periodic replica bypass is
+    // not due — the tier should then be threaded through.
+    mkdirSync(join(orchDir, ".replica-vouch-rechecks"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".replica-vouch-rechecks", "CTL-77"),
+      JSON.stringify({ ticket: "CTL-77", probedAt: Date.now() })
+    );
+    const replica = { lookup: () => ({ terminal: false, state: "Implement" }) };
+    let seenReplica = null;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: (_t, opts) => {
+        seenReplica = opts?.replica ?? null;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+      replica,
+    });
+    expect(seenReplica).toBe(replica);
+  });
+
+  test("a DUE live recheck bypasses the replica tier for one classify (apply-drift guard)", () => {
+    writeSignal("CTL-78", "implement", "running");
+    const replica = { lookup: () => ({ terminal: false, state: "Implement" }) };
+    let seenReplica = "unset";
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: (_t, opts) => {
+        seenReplica = opts?.replica;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+      replica,
+    });
+    // No recheck marker yet → the very first classify pays the live path.
+    expect(seenReplica).toBeUndefined();
   });
 });

@@ -59,6 +59,11 @@ export function deriveClusterSignal(view) {
     if (n.maxParallel != null) node.maxParallel = n.maxParallel;
     if (n.inFlightCount != null) node.inFlightCount = n.inFlightCount;
     if (n.freeSlots != null) node.freeSlots = n.freeSlots;
+    // CTL-1581: slot-occupancy subset — activeCount drives the deck/pill counts;
+    // the ACTIVE ticket ids ride as `tickets` (the SlotDeck's remote-occupancy
+    // field, previously never populated — every remote slot rendered Open).
+    if (n.activeCount != null) node.activeCount = n.activeCount;
+    if (Array.isArray(n.activeTickets)) node.tickets = n.activeTickets;
     // CTL-1322: per-node admission (local node only). Conditional-copy keeps the SSE
     // frame tiny + back-compat — a node without admission omits both fields so the UI
     // renders "live". effectiveCapacity/activeWorkers are intentionally NOT projected.

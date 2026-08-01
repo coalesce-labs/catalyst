@@ -26,6 +26,7 @@ import {
   readLinearCache,
   readParkedNeedsHumanTickets,
   readReplicaTitles,
+  readReplicaHumanHolds,
 } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
 // CTL-1046: supplemental Linear-title fallback for cross-team (e.g. ADV) records.
@@ -2271,6 +2272,30 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   );
   tickets = [...tickets, ...parkedTickets];
 
+  // CTL-1588: annotate-not-hide. A parked needs-human/needs-input ticket can
+  // still be Todo in Linear (so it sits in the eligible projection) while the
+  // admission gate holds it — presenting it as "dispatching next" is misleading.
+  // The parked descriptor set is already loaded above; stamp `humanHold` with the
+  // specific hold label so the UI can partition it out of the dispatchable rank.
+  // (`held` is reserved for the CTL-755 blocked/queued admission pair.) The
+  // eligible projection itself is NOT filtered (Pass-0a and the scheduler
+  // consume eligibleIds — daemon behavior must not change from a display fix).
+  // Second source (CTL-1588 follow-up): the parked set is webhook-fed and the
+  // receiver is single-homed, so a label this node's broker never saw leaves a
+  // durable gap (live: mini-2 ranked CRM-1/2/5/6 as imminent while the replica
+  // carried their needs-human). Replica labels fill the gaps; the parked
+  // descriptor (fresher on THIS node's webhook stream) wins on conflict.
+  const replicaHolds = await readReplicaHumanHolds({ ids: notInFlight.map((e) => e.id) });
+  const humanHoldByTicket = new Map([
+    ...Object.entries(replicaHolds),
+    ...parkedNeedsHuman.map((p) => [
+      p.ticket,
+      // needs-human outranks needs-input on a dual-labeled ticket — same
+      // precedence as the parked cards / status counts / holding buckets.
+      p.labels.includes("needs-human") ? "needs-human" : "needs-input",
+    ]),
+  ]);
+
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
   const queue = await Promise.all(
     notInFlight.sort(compareDispatchOrder).map(async (e, i) => {
@@ -2304,6 +2329,9 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         host: deriveHost([], linfo[e.id] ?? {}),
         // CTL-1066: active dispatch retry cool-down; null when not cooling down.
         dispatchCooldown: cooldowns.get(e.id) ?? null,
+        // CTL-1588: the human-hold keeping this ticket from dispatching
+        // ("needs-human" | "needs-input"), or null when genuinely dispatchable.
+        humanHold: humanHoldByTicket.get(e.id) ?? null,
       };
     })
   );

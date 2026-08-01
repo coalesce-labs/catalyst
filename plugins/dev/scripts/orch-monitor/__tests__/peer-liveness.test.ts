@@ -135,7 +135,60 @@ describe("readPeerRecords (CTL-1551)", () => {
       peers: { mini: { last_seen: "2026-07-30T15:01:00Z", max_parallel: 4, in_flight_count: null } },
       nowMs: Date.parse("2026-07-30T15:01:30Z"),
     });
-    expect(out.capacity.mini).toEqual({ maxParallel: 4, inFlightCount: 2 }); // ifc retained
+    expect(out.capacity.mini).toEqual({
+      maxParallel: 4,
+      inFlightCount: 2, // ifc retained
+      activeCount: null, // CTL-1581: no prior + absent on record → null (unknown, not 0)
+      activeTickets: null,
+    });
+  });
+
+  it("foldPeerSnapshot: active occupancy fields carry through and retain per-field (CTL-1581)", async () => {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore — .mjs module
+    const { foldPeerSnapshot } = await import("../lib/peer-liveness.mjs");
+    const first = foldPeerSnapshot({
+      prevHeartbeats: {},
+      prevCapacity: {},
+      peers: {
+        mini: {
+          last_seen: "2026-07-30T15:01:00Z",
+          max_parallel: 4,
+          in_flight_count: 3,
+          active_count: 1,
+          active_tickets: ["PROJ-9"],
+        },
+      },
+      nowMs: Date.parse("2026-07-30T15:01:30Z"),
+    });
+    expect(first.capacity.mini).toEqual({
+      maxParallel: 4,
+      inFlightCount: 3,
+      activeCount: 1,
+      activeTickets: ["PROJ-9"],
+    });
+    // A fresher record WITHOUT the active fields (query D failed / old-daemon
+    // rollback) CLEARS them — occupancy follows the record, never retention:
+    // restoring a cached activeCount would pin stale occupancy; null degrades
+    // consumers to the honest inFlightCount fallback.
+    const second = foldPeerSnapshot({
+      prevHeartbeats: { mini: "2026-07-30T15:01:00Z" },
+      prevCapacity: first.capacity,
+      peers: { mini: { last_seen: "2026-07-30T15:02:00Z", max_parallel: 4, in_flight_count: 3 } },
+      nowMs: Date.parse("2026-07-30T15:02:30Z"),
+    });
+    expect(second.capacity.mini.activeCount).toBeNull();
+    expect(second.capacity.mini.activeTickets).toBeNull();
+    // A re-fold of the SAME beat (same last_seen) with a failed occupancy
+    // enrichment RETAINS what an earlier poll learned about that beat.
+    const third = foldPeerSnapshot({
+      prevHeartbeats: { mini: "2026-07-30T15:01:00Z" },
+      prevCapacity: first.capacity,
+      peers: { mini: { last_seen: "2026-07-30T15:01:00Z", max_parallel: 4, in_flight_count: 3 } },
+      nowMs: Date.parse("2026-07-30T15:01:45Z"),
+    });
+    expect(third.capacity.mini.activeCount).toBe(1);
+    expect(third.capacity.mini.activeTickets).toEqual(["PROJ-9"]);
   });
 
   it("foldPeerSnapshot: a FUTURE-skewed cached timestamp does not block corrected heartbeats", async () => {
@@ -226,7 +279,7 @@ describe("readPeerRecords (CTL-1551)", () => {
       peers: { mini: { last_seen: "2026-07-30T15:01:00Z", max_parallel: 4, in_flight_count: 0 } },
     });
     expect(out.heartbeats.mini).toBe("2026-07-30T15:01:00Z");
-    expect(out.capacity.mini).toEqual({ maxParallel: 4, inFlightCount: 0 });
+    expect(out.capacity.mini).toEqual({ maxParallel: 4, inFlightCount: 0, activeCount: null, activeTickets: null });
   });
 
   it("a THROWING anchor read propagates (caller's outer catch keeps the last cache)", () => {

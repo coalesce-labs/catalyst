@@ -3214,12 +3214,11 @@ export function reclaimDeadWorkIfPossible(
 export function recoverStartup({ orchDir, exec, statJob, detectCold = detectColdStart } = {}) {
   if (!orchDir) throw new Error("recoverStartup: orchDir is required");
 
-  // (1) Routing state — reconcileAll re-reads the registry + polls Linear per
-  //     team; reconcileProject internally swallows poll/write failures.
-  reconcileAll({ exec });
-  const projects = listProjects().map((p) => p.team);
-
-  // (2) Durable event-log cursor — what the monitor's fast path will resume at.
+  // (1) Durable event-log cursor — what the monitor's fast path will resume at.
+  //     Captured BEFORE reconcileAll: since CTL-1580 the eligible-list query
+  //     emits catalyst.linear.read telemetry into this same log, so measuring
+  //     after reconcile would fold the boot's OWN telemetry into the resume
+  //     cursor and a fresh boot could never observe "no prior log" (CTL-1593).
   const logPath = getEventLogPath();
   let fileSize = 0;
   try {
@@ -3231,6 +3230,11 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
   }
   const cursor = loadCursor();
   const startOffset = resolveStartOffset({ cursor, logPath, fileSize });
+
+  // (2) Routing state — reconcileAll re-reads the registry + polls Linear per
+  //     team; reconcileProject internally swallows poll/write failures.
+  reconcileAll({ exec });
+  const projects = listProjects().map((p) => p.team);
 
   // (3) Dispatch/worker state — classify in-flight claude --bg workers.
   const workers = reconstructWorkerState(orchDir, { statJob });
