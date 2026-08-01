@@ -137,6 +137,7 @@ import {
   loadProjectConfig,
 } from "./lib/inbox-conversation.mjs";
 import { replyToTicket } from "./lib/reply-ticket.mjs";
+import { buildTrustedOrigins, isOriginAllowed } from "./lib/trusted-origin.mjs";
 /** Canonical ticket key for the conversation routes: a team prefix that may carry
  *  digits/underscores (`OPS_2-17`), then `-<number>`. Anchored, and containing no
  *  path characters, so it cannot express a traversal. */
@@ -1916,6 +1917,27 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const MONITOR_REQUEST_TIMING = process.env.CATALYST_TICK_TIMING !== "off";
   const MONITOR_SLOW_REQUEST_MS =
     Number(process.env.CATALYST_MONITOR_SLOW_REQUEST_MS) || 250;
+
+  // CTL-1573 P1: the allowlist must use the port the server ACTUALLY bound, not
+  // the requested one — `port: 0` asks the OS for an ephemeral port (the test
+  // harness does exactly this), so building from `port` would trust
+  // `localhost:0` and 403 every legitimate request. `server.port` is only known
+  // after Bun.serve() returns, so this is built lazily on first use; by then a
+  // request has arrived, which means the server is bound. Cached thereafter.
+  //
+  // MONITOR_TRUSTED_ORIGINS extends it for deployment-specific names (reverse
+  // proxy, Tailscale MagicDNS) — without it a monitor reached by such a name
+  // would 403 every reply and the surface would be inert.
+  let trustedOriginsCache: Set<string> | null = null;
+  const getTrustedOrigins = (): Set<string> => {
+    if (trustedOriginsCache === null) {
+      trustedOriginsCache = buildTrustedOrigins({
+        port: server?.port ?? port,
+        extraOrigins: process.env.MONITOR_TRUSTED_ORIGINS ?? null,
+      });
+    }
+    return trustedOriginsCache;
+  };
 
   const server = Bun.serve({
     port,
@@ -3925,24 +3947,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // regardless of Content-Type, so a plain `text/plain` form POST from any
           // page the operator visits would otherwise be a valid request — the
           // browser could not read the response, but the comment would still be
-          // posted as them to any guessable ticket. A same-origin check closes that:
-          // browsers always attach `Origin` to a cross-origin POST, while
-          // same-origin fetches from our own UI match the Host. Non-browser clients
-          // (curl, tests) send no Origin and are unaffected.
-          const origin = req.headers.get("origin");
-          if (origin != null && origin !== "") {
-            let sameOrigin = false;
-            try {
-              sameOrigin = new URL(origin).host === (req.headers.get("host") ?? url.host);
-            } catch {
-              sameOrigin = false;
-            }
-            if (!sameOrigin) {
-              return Response.json(
-                { status: "forbidden", error: "cross-origin reply rejected" },
-                { status: 403 },
-              );
-            }
+          // posted as them to any guessable ticket.
+          //
+          // CTL-1573 P1: this used to compare `Origin` against the request's own
+          // `Host` header. Both are attacker-chosen under DNS rebinding (the page
+          // and the target then share one origin), so that comparison could not
+          // reject the very case it existed for. `Origin` is now checked against
+          // an allowlist the attacker cannot influence — see lib/trusted-origin.mjs
+          // for the rebinding walkthrough and the inertness trade-off.
+          if (!isOriginAllowed(req.headers.get("origin"), getTrustedOrigins())) {
+            return Response.json(
+              { status: "forbidden", error: "cross-origin reply rejected" },
+              { status: 403 },
+            );
           }
           let body: Record<string, unknown>;
           try {

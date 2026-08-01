@@ -165,3 +165,58 @@ describe("POST /api/ticket/:id/reply (CTL-1569)", () => {
     expect(res.status).not.toBe(200);
   });
 });
+
+// CTL-1573 P1 — the cross-origin guard, exercised over REAL HTTP against the
+// mounted route. The unit tests in lib/trusted-origin.test.mjs cover the
+// allowlist logic; these prove the guard is actually WIRED to the route, which
+// unit tests alone cannot show.
+describe("POST /api/ticket/:id/reply cross-origin guard (CTL-1573 P1)", () => {
+  const post = (origin: string | null) =>
+    fetch(`${baseUrl}/api/ticket/${ABSENT_TICKET}/reply`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(origin === null ? {} : { Origin: origin }),
+      },
+      body: JSON.stringify({ body: "should never be posted" }),
+    });
+
+  it("rejects an ordinary cross-origin page with 403", async () => {
+    const res = await post("https://evil.example");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ status: "forbidden" });
+  });
+
+  // The regression: under DNS rebinding Origin and Host are BOTH the attacker's
+  // domain, so the old `Origin === Host` comparison passed. Sending an Origin
+  // that matches the Host this request is addressed to reproduces that shape.
+  it("rejects a rebinding-shaped Origin that matches the request Host", async () => {
+    const res = await fetch(`${baseUrl}/api/ticket/${ABSENT_TICKET}/reply`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Origin: `http://evil.example:${server.port}`,
+        Host: `evil.example:${server.port}`,
+      },
+      body: JSON.stringify({ body: "should never be posted" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects a present-but-opaque Origin rather than falling open", async () => {
+    expect((await post("null")).status).toBe(403);
+  });
+
+  // Inertness guard. The harness binds an EPHEMERAL port (port: 0), so this
+  // also pins that the allowlist is built from the port actually bound —
+  // building it from the requested port would trust `localhost:0` and 403 here.
+  it("allows the server's own origin on its real (ephemeral) bound port", async () => {
+    const res = await post(`http://localhost:${server.port}`);
+    expect(res.status).not.toBe(403);
+  });
+
+  it("allows a request with no Origin (curl / non-browser clients)", async () => {
+    const res = await post(null);
+    expect(res.status).not.toBe(403);
+  });
+});
