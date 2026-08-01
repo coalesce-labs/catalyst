@@ -229,14 +229,29 @@ export function buildTrustedOrigins(opts = {}) {
   // `strictLoopback` is the opt-in for deployments that prefer the opposite
   // trade; binding dual-stack (`::`) removes the squat window entirely.
   const dropAmbiguousLoopback = strictLoopback && !(bindsV4 && bindsV6);
-  const loopback = dropAmbiguousLoopback ? [] : ["localhost"];
-  if (bindsV4) loopback.push("127.0.0.1");
-  if (bindsV6) loopback.push("[::1]");
+  // A SPECIFIC bind owns exactly one socket. Bound to a LAN address, the monitor
+  // does not own <loopback>:<port> — another service can hold it, serve a page
+  // whose Origin would otherwise pass, and POST to us. So loopback is trusted
+  // only for a wildcard bind, or when the bind IS the loopback address.
+  const boundIsLoopback =
+    isWildcardBind || normalizeAddr(bind) === "127.0.0.1" || normalizeAddr(bind) === "::1";
+  const loopback = [];
+  if (boundIsLoopback) {
+    if (!dropAmbiguousLoopback) loopback.push("localhost");
+    if (bindsV4) loopback.push("127.0.0.1");
+    if (bindsV6) loopback.push("[::1]");
+  }
   for (const h of loopback) addOwn(h);
 
   // This machine's own names. os.hostname() may be an FQDN ("mini.rozich") or a
   // short label; operators browse by either, plus the mDNS ".local" form.
-  const selfNames = hostnames ?? [osHostname()];
+  // Own NAMES resolve to whichever interface DNS/mDNS picks, which need not be
+  // the one a specific bind listens on — so they are trusted only for a
+  // wildcard bind. Bound to 127.0.0.1, trusting `mini` would accept a page
+  // served by another process holding that port on the LAN interface.
+  // `hostnames` is a test seam for what os.hostname() returns — it must not
+  // exempt the caller from the bind rule, so the gate is applied either way.
+  const selfNames = isWildcardBind ? (hostnames ?? [osHostname()]) : [];
   for (const raw of selfNames) {
     if (typeof raw !== "string" || raw === "") continue;
     // In strict mode a host literally NAMED `localhost` (common in containers)
@@ -255,7 +270,7 @@ export function buildTrustedOrigins(opts = {}) {
     // trusted (below); anything else belongs in MONITOR_TRUSTED_ORIGINS.
   }
   // The REAL Bonjour name, which need not share os.hostname()'s first label.
-  const bonjour = hostnames === undefined ? bonjourName() : null;
+  const bonjour = hostnames === undefined && isWildcardBind ? bonjourName() : null;
   if (bonjour !== null) addOwn(bonjour.endsWith(".local") ? bonjour : `${bonjour}.local`);
 
   // This machine's own IPs (LAN, Tailscale 100.x), filtered to the bound family

@@ -501,3 +501,51 @@ describe("specific IPv6 binds (CTL-1573 round 10)", () => {
     expect(t.has("http://127.0.0.1:7400")).toBe(false);
   });
 });
+
+describe("a specific bind owns exactly one socket (CTL-1573 round 11)", () => {
+  // Bound to a LAN address, the monitor does NOT own <loopback>:<port> — another
+  // service can hold it, serve a page, and POST to us with a passing Origin.
+  test("a LAN-bound monitor does not trust loopback", () => {
+    const t = buildTrustedOrigins({ port: 7400, bindHost: "192.168.1.50" });
+    expect(t.has("http://192.168.1.50:7400")).toBe(true);
+    expect(t.has("http://127.0.0.1:7400")).toBe(false);
+    expect(t.has("http://localhost:7400")).toBe(false);
+  });
+
+  // ...and the converse: a loopback-bound monitor must still be reachable by
+  // the names an operator actually types, or the surface ships inert.
+  test("a loopback-bound monitor still trusts localhost and the literal", () => {
+    const t = buildTrustedOrigins({ port: 7400, bindHost: "127.0.0.1" });
+    expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    expect(t.has("http://localhost:7400")).toBe(true);
+  });
+
+  // Own NAMES resolve to whichever interface DNS/mDNS picks, not necessarily
+  // the bound one.
+  test("a specific bind does not trust this host's own names", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: ["mini"], bindHost: "127.0.0.1" });
+    expect(t.has("http://mini:7400")).toBe(false);
+    expect(t.has("http://127.0.0.1:7400")).toBe(true);
+  });
+
+  test("a wildcard bind still trusts own names and loopback", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: ["mini"],
+      addresses: [],
+      bindHost: "0.0.0.0",
+    });
+    expect(t.has("http://mini:7400")).toBe(true);
+    expect(t.has("http://localhost:7400")).toBe(true);
+    expect(t.has("http://127.0.0.1:7400")).toBe(true);
+  });
+
+  test("explicit extras still apply under a specific bind", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      bindHost: "192.168.1.50",
+      extraOrigins: "https://catalyst.example",
+    });
+    expect(isOriginAllowed("https://catalyst.example", t)).toBe(true);
+  });
+});
