@@ -167,7 +167,6 @@ export function selfAddresses() {
  *   addresses?: string[],
  *   devOrigins?: string[] | string | null,
  *   bindHost?: string | null,
- *   strictLoopback?: boolean,
  * }} opts
  * @returns {Set<string>}
  */
@@ -179,7 +178,6 @@ export function buildTrustedOrigins(opts = {}) {
     addresses,
     devOrigins = null,
     bindHost = null,
-    strictLoopback = false,
   } = opts;
   const out = new Set();
   const boundPort = Number.isFinite(port) ? Number(port) : null;
@@ -217,18 +215,18 @@ export function buildTrustedOrigins(opts = {}) {
   // like 2001:db8::1. Treating only ::/::1 as v6 dropped the server's OWN
   // address from the allowlist and 403'd every legitimate reply to it.
   const bindsV6 = bind === "" || isV6Wildcard || isV6Literal;
-  // The `localhost` NAME is family-ambiguous: the browser chooses. Under an
-  // IPv4-only bind, a service squatting [::1]:<port> can serve a page whose
-  // Origin is `http://localhost:<port>` and POST to our IPv4 address, so the
-  // name is strictly weaker than the literals above.
+  // RESIDUAL, ACCEPTED: the `localhost` NAME (and this host's own names) are
+  // family-ambiguous — the browser chooses. Under a single-family bind, a
+  // process squatting the OTHER family's <port> can serve a page whose Origin
+  // is one of these names and POST to us.
   //
-  // It is trusted by DEFAULT anyway, because dropping it would 403 the single
-  // most common local access path (`http://localhost:7400`) on every IPv4-only
-  // deployment — a certain, universal inertness failure — to close an attack
-  // that first requires an adversary to run code locally and bind that port.
-  // `strictLoopback` is the opt-in for deployments that prefer the opposite
-  // trade; binding dual-stack (`::`) removes the squat window entirely.
-  const dropAmbiguousLoopback = strictLoopback && !(bindsV4 && bindsV6);
+  // This is not closed by an allowlist knob, and an earlier opt-in that tried
+  // (MONITOR_STRICT_LOOPBACK) was removed: it was off by default, so it
+  // protected nobody, while every name source it touched needed its own
+  // family-scoping and it silently broke both container hosts named `localhost`
+  // and the dev proxy. The real fix is to BIND DUAL-STACK (`::`), which makes
+  // the squat impossible rather than merely untrusted — documented in the
+  // configuration reference.
   // A SPECIFIC bind owns exactly one socket. Bound to a LAN address, the monitor
   // does not own <loopback>:<port> — another service can hold it, serve a page
   // whose Origin would otherwise pass, and POST to us. So loopback is trusted
@@ -237,7 +235,7 @@ export function buildTrustedOrigins(opts = {}) {
     isWildcardBind || normalizeAddr(bind) === "127.0.0.1" || normalizeAddr(bind) === "::1";
   const loopback = [];
   if (boundIsLoopback) {
-    if (!dropAmbiguousLoopback) loopback.push("localhost");
+    loopback.push("localhost");
     if (bindsV4) loopback.push("127.0.0.1");
     if (bindsV6) loopback.push("[::1]");
   }
@@ -254,13 +252,9 @@ export function buildTrustedOrigins(opts = {}) {
   const selfNames = isWildcardBind ? (hostnames ?? [osHostname()]) : [];
   for (const raw of selfNames) {
     if (typeof raw !== "string" || raw === "") continue;
-    // In strict mode a host literally NAMED `localhost` (common in containers)
-    // would re-add the family-ambiguous origin that strictLoopback just removed.
-    const isLoopbackName = (n) => n === "localhost" || n.startsWith("localhost.");
-    const lowered = raw.toLowerCase();
-    if (!(dropAmbiguousLoopback && isLoopbackName(lowered))) addOwn(raw);
-    const short = lowered.split(".")[0];
-    if (short !== "" && !(dropAmbiguousLoopback && isLoopbackName(short))) addOwn(short);
+    addOwn(raw);
+    const short = raw.toLowerCase().split(".")[0];
+    if (short !== "") addOwn(short);
     // NOTE: `${short}.local` is deliberately NOT synthesized. When
     // os.hostname() is `mini.corp.example` but Bonjour advertises
     // `Ryans-Mac-mini.local`, nothing owns `mini.local` — so any LAN host can

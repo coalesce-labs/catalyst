@@ -23,7 +23,18 @@ let tmpDir: string;
  *  `ZZZ-` form some older suites reach for). */
 const ABSENT_TICKET = "PROJ-999999";
 
+// The origin allowlist is built from the environment at first request, so an
+// invoking host that exports these would change what this suite asserts. Cleared
+// BEFORE createServer and restored after, so the endpoint results depend on the
+// code under test rather than on the developer's or runner's monitor config.
+const ORIGIN_ENV = ["MONITOR_TRUSTED_ORIGINS", "MONITOR_DEV_UI", "MONITOR_DEV_UI_ORIGINS"];
+const prevOriginEnv: Record<string, string | undefined> = {};
+
 beforeAll(() => {
+  for (const k of ORIGIN_ENV) {
+    prevOriginEnv[k] = process.env[k];
+    delete process.env[k];
+  }
   tmpDir = mkdtempSync(join(tmpdir(), "inbox-conversation-endpoints-"));
   const wtDir = join(tmpDir, "wt");
   mkdirSync(wtDir, { recursive: true });
@@ -32,6 +43,10 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  for (const k of ORIGIN_ENV) {
+    if (prevOriginEnv[k] !== undefined) process.env[k] = prevOriginEnv[k];
+    else delete process.env[k];
+  }
   void server?.stop(true);
   if (tmpDir) {
     try {
@@ -235,7 +250,7 @@ describe("POST /api/ticket/:id/reply cross-origin guard (CTL-1573 P1)", () => {
   // also pins that the allowlist is built from the port actually bound —
   // building it from the requested port would trust `localhost:0` and 403 here.
   it("allows the server's own origin on its real (ephemeral) bound port", async () => {
-    const res = await postOffline(`http://localhost:${server.port}`);
+    const res = await postOffline(`http://127.0.0.1:${server.port}`);
     expect(res.status).not.toBe(403);
     // Proves it got PAST the guard into the (credential-less) reply path.
     expect(res.status).toBe(502);

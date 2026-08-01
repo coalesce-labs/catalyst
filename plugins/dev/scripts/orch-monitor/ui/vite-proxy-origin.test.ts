@@ -12,8 +12,13 @@ import { shouldRewriteOrigin } from "./vite.config.ts";
 describe("shouldRewriteOrigin", () => {
   test("rewrites a genuine same-origin request from this dev server", () => {
     expect(shouldRewriteOrigin("http://localhost:5173")).toBe(true);
-    expect(shouldRewriteOrigin("http://127.0.0.1:5173")).toBe(true);
     expect(shouldRewriteOrigin("HTTP://LOCALHOST:5173")).toBe(true);
+  });
+
+  // Vite binds ONE address family, so another local process can own the other
+  // family's :5173; accepting both spellings would launder its Origin.
+  test("does not rewrite the other loopback spelling", () => {
+    expect(shouldRewriteOrigin("http://127.0.0.1:5173")).toBe(false);
   });
 
   test("does NOT rewrite another local service's origin", () => {

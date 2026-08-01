@@ -1953,9 +1953,6 @@ export function createServer(opts: CreateServerOptions): BunServer {
       extraOrigins: process.env.MONITOR_TRUSTED_ORIGINS ?? null,
       devOrigins: devUiOrigins,
       bindHost: hostname,
-      strictLoopback: ["1", "true", "yes", "on"].includes(
-        (process.env.MONITOR_STRICT_LOOPBACK ?? "").trim().toLowerCase()
-      ),
     });
 
   // Allow, rebuilding the allowlist ONCE on a miss before refusing.

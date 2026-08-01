@@ -396,80 +396,7 @@ describe("self-addresses follow the bound family (CTL-1573 round 8)", () => {
   });
 });
 
-describe("strictLoopback opt-in (CTL-1573 round 8)", () => {
-  // `localhost` is family-ambiguous, so under a single-family bind a squatter on
-  // the other family can serve a page whose Origin is http://localhost:<port>.
-  // Trusted by default (dropping it would 403 the commonest local path); this
-  // is the lever for deployments that prefer the stricter trade.
-  test("default trusts the localhost name", () => {
-    const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: "0.0.0.0" });
-    expect(t.has("http://localhost:7400")).toBe(true);
-  });
 
-  test("strict drops the ambiguous name under a single-family bind", () => {
-    const t = buildTrustedOrigins({
-      port: 7400,
-      hostnames: [],
-      addresses: [],
-      bindHost: "0.0.0.0",
-      strictLoopback: true,
-    });
-    expect(t.has("http://localhost:7400")).toBe(false);
-    expect(t.has("http://127.0.0.1:7400")).toBe(true); // the literal is unambiguous
-  });
-
-  test("strict keeps the name on a dual-stack bind (no squat window)", () => {
-    const t = buildTrustedOrigins({
-      port: 7400,
-      hostnames: [],
-      addresses: [],
-      bindHost: "::",
-      strictLoopback: true,
-    });
-    expect(t.has("http://localhost:7400")).toBe(true);
-  });
-});
-
-describe("strict mode is not undone by a self-name (CTL-1573 round 9)", () => {
-  // A container whose os.hostname() is literally `localhost` would otherwise
-  // re-add the family-ambiguous origin strictLoopback had just removed.
-  test("a host named localhost does not re-add the ambiguous origin", () => {
-    for (const name of ["localhost", "localhost.localdomain"]) {
-      const t = buildTrustedOrigins({
-        port: 7400,
-        hostnames: [name],
-        addresses: [],
-        bindHost: "0.0.0.0",
-        strictLoopback: true,
-      });
-      expect(t.has("http://localhost:7400")).toBe(false);
-      expect(t.has("http://127.0.0.1:7400")).toBe(true);
-    }
-  });
-
-  test("without strict mode such a host still trusts its own name", () => {
-    const t = buildTrustedOrigins({
-      port: 7400,
-      hostnames: ["localhost"],
-      addresses: [],
-      bindHost: "0.0.0.0",
-    });
-    expect(t.has("http://localhost:7400")).toBe(true);
-  });
-
-  // The dev proxy rewrites to the LITERAL, which strict mode keeps — so
-  // `bun run dev:ui` works in both modes.
-  test("the dev proxy's rewrite target survives strict mode", () => {
-    const t = buildTrustedOrigins({
-      port: 7400,
-      hostnames: [],
-      addresses: [],
-      bindHost: "0.0.0.0",
-      strictLoopback: true,
-    });
-    expect(isOriginAllowed("http://127.0.0.1:7400", t)).toBe(true);
-  });
-});
 
 describe("specific IPv6 binds (CTL-1573 round 10)", () => {
   // Treating only ::/::1 as IPv6-capable dropped the server's OWN address when
@@ -547,5 +474,12 @@ describe("a specific bind owns exactly one socket (CTL-1573 round 11)", () => {
       extraOrigins: "https://catalyst.example",
     });
     expect(isOriginAllowed("https://catalyst.example", t)).toBe(true);
+  });
+});
+
+describe("dev proxy rewrite target (CTL-1573)", () => {
+  test("the origin the Vite proxy rewrites to is trusted on a wildcard bind", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: "0.0.0.0" });
+    expect(isOriginAllowed("http://127.0.0.1:7400", t)).toBe(true);
   });
 });

@@ -13,7 +13,16 @@ const DEV_PORT = 5173;
 // family-ambiguous `localhost` name while keeping the unambiguous literal, so
 // rewriting to the literal keeps `bun run dev:ui` working in BOTH modes.
 const MONITOR_ORIGIN = "http://127.0.0.1:7400";
-const DEV_ORIGINS = new Set([`http://localhost:${DEV_PORT}`, `http://127.0.0.1:${DEV_PORT}`]);
+// ONE origin, not both loopback spellings. Vite binds a single address family,
+// so another local process can own the other family's :5173; accepting both
+// spellings would let a page there have its Origin laundered into the monitor's.
+// This is Vite's own default host, i.e. the URL `bun run dev:ui` prints.
+//
+// Residual, accepted: a process squatting the SAME spelling on the other family
+// is still laundered. That requires local code execution, affects only a running
+// dev server, and cannot be distinguished from here — the browser does not tell
+// us which family it connected over.
+const DEV_ORIGINS = new Set([`http://localhost:${DEV_PORT}`]);
 
 /**
  * Should the proxy replace this request's `Origin` with the monitor's own?
