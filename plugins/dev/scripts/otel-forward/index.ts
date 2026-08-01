@@ -179,19 +179,31 @@ export function getStats() {
   return { ...stats };
 }
 
+// Drain a buffer into chunks of at most `size`, so every request honors the
+// configured batchSize. Before this, flush() spliced the WHOLE buffer into one
+// request and batchSize was config-only — flushes of 263 events were observed
+// against a configured bound of 100. Under normal cadence the overshoot is
+// modest, but an unbounded buffer (the whole-month backlog read on a cold
+// start, or a large DLQ replay) can build a request body big enough for the
+// collector to reject outright, which sends the entire batch to the DLQ.
+// `size` is floored at 1 because a 0 would splice nothing and loop forever.
+export function drainInChunks(buf: CanonicalEvent[], size: number): CanonicalEvent[][] {
+  const chunkSize = Math.max(1, size);
+  const chunks: CanonicalEvent[][] = [];
+  while (buf.length > 0) chunks.push(buf.splice(0, chunkSize));
+  return chunks;
+}
+
 async function flush(): Promise<void> {
   const tasks: Promise<void>[] = [];
   if (senders.otlp && buffers.otlp.length > 0) {
-    const batch = buffers.otlp.splice(0);
-    tasks.push(senders.otlp.flush(batch));
+    for (const batch of drainInChunks(buffers.otlp, cfg.otlp.batchSize)) tasks.push(senders.otlp.flush(batch));
   }
   if (senders.posthog && buffers.posthog.length > 0) {
-    const batch = buffers.posthog.splice(0);
-    tasks.push(senders.posthog.flush(batch));
+    for (const batch of drainInChunks(buffers.posthog, cfg.posthog.batchSize)) tasks.push(senders.posthog.flush(batch));
   }
   if (senders.cae && buffers.cae.length > 0) {
-    const batch = buffers.cae.splice(0);
-    tasks.push(senders.cae.flush(batch));
+    for (const batch of drainInChunks(buffers.cae, cfg.cloudflareAE.batchSize)) tasks.push(senders.cae.flush(batch));
   }
   await Promise.allSettled(tasks);
 }

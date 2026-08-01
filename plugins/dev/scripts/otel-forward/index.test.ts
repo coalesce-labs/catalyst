@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTailer } from "./lib/tail.ts";
 import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
-import { computeLagMs, buildLagEvent } from "./index.ts";
+import { computeLagMs, buildLagEvent, drainInChunks } from "./index.ts";
 
 describe("computeLagMs (CTL-1060 Phase 3)", () => {
   test("returns ms delta between localNewestTs and lastForwardedTs", () => {
@@ -188,5 +188,53 @@ describe("pino records through tailer shouldForward (CTL-1424)", () => {
     const parsed = JSON.parse(emitted[0]);
     expect(parsed.level).toBe(40);
     rmSync(dir, { recursive: true });
+  });
+});
+
+describe("drainInChunks (CTL-1597 — honor batchSize on every flush)", () => {
+  // The buffer only ever holds CanonicalEvents, but drainInChunks is purely
+  // positional — it never reads a field — so plain markers keep the intent
+  // (which events land in which request) legible.
+  const buffer = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ marker: i })) as unknown as Parameters<
+      typeof drainInChunks
+    >[0];
+
+  test("splits a buffer larger than batchSize into bounded requests", () => {
+    const chunks = drainInChunks(buffer(250), 100);
+    expect(chunks.map((c) => c.length)).toEqual([100, 100, 50]);
+    // No request may exceed the configured bound — this is the whole point.
+    expect(Math.max(...chunks.map((c) => c.length))).toBeLessThanOrEqual(100);
+  });
+
+  test("preserves every event exactly once, in order", () => {
+    const chunks = drainInChunks(buffer(250), 100);
+    const flat = chunks.flat() as unknown as { marker: number }[];
+    expect(flat.map((e) => e.marker)).toEqual(Array.from({ length: 250 }, (_, i) => i));
+  });
+
+  test("drains the buffer it was given (splice, not copy)", () => {
+    const buf = buffer(250);
+    drainInChunks(buf, 100);
+    expect(buf.length).toBe(0);
+  });
+
+  test("a buffer at or below batchSize still produces a single request", () => {
+    expect(drainInChunks(buffer(100), 100).map((c) => c.length)).toEqual([100]);
+    expect(drainInChunks(buffer(7), 100).map((c) => c.length)).toEqual([7]);
+  });
+
+  test("an exact multiple produces no trailing empty request", () => {
+    expect(drainInChunks(buffer(300), 100).map((c) => c.length)).toEqual([100, 100, 100]);
+  });
+
+  test("an empty buffer produces no requests", () => {
+    expect(drainInChunks(buffer(0), 100)).toEqual([]);
+  });
+
+  test("floors chunk size at 1 so a 0/negative batchSize terminates", () => {
+    // A 0 would splice(0, 0) -> empty chunk -> buffer never shrinks -> infinite loop.
+    expect(drainInChunks(buffer(3), 0).map((c) => c.length)).toEqual([1, 1, 1]);
+    expect(drainInChunks(buffer(3), -5).map((c) => c.length)).toEqual([1, 1, 1]);
   });
 });
