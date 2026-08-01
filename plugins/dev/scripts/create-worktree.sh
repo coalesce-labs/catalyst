@@ -22,6 +22,38 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# catalyst_git_exclude_worktree_artifacts <worktree_path> — keep Catalyst's own
+# worktree-local runtime bookkeeping out of every project's git status, without
+# ever touching that project's TRACKED .gitignore. Mirrors the existing pattern
+# already used for .agents/ (codex-run-phase-agent.mjs's gitExcludeAgents +
+# resolveGitExcludePath): writes to this worktree's LOCAL, uncommitted
+# `git rev-parse --git-path info/exclude`, so it applies only here, never
+# leaks into the project's history, and needs no per-project PR.
+#
+# Before this, every onboarded project had to carry its own .gitignore entries
+# for these paths — miss one and `git status` shows Catalyst's own noise as
+# dirty, which is exactly what stalled a real ticket's verify phase (rebase
+# refused a "dirty" tree that was only dirty because of thoughts/ and
+# .catalyst/.workflow-context.json). Idempotent + best-effort: failures here
+# must never abort worktree creation.
+catalyst_git_exclude_worktree_artifacts() {
+	local worktree_path="$1" exclude_path pattern
+	exclude_path=$(git -C "$worktree_path" rev-parse --git-path info/exclude 2>/dev/null) || return 0
+	[[ "$exclude_path" = /* ]] || exclude_path="${worktree_path}/${exclude_path}"
+	mkdir -p "$(dirname "$exclude_path")" 2>/dev/null || return 0
+	[ -f "$exclude_path" ] || : >"$exclude_path"
+	for pattern in \
+		"thoughts/" \
+		".catalyst/.workflow-context.json" \
+		".catalyst/.workflow-context.json.bak" \
+		".catalyst/worktree-provenance.json" \
+		".needs-cleanup" \
+		".orphaned_at" \
+		".trunk"; do
+		grep -qxF "$pattern" "$exclude_path" 2>/dev/null || printf '%s\n' "$pattern" >>"$exclude_path"
+	done
+}
+
 # Parse flags (collect positional args separately)
 POSITIONAL=()
 OVERRIDE_WORKTREE_DIR=""
@@ -340,6 +372,13 @@ if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 		echo "📋 Orchestration context set: ${ORCHESTRATION_NAME}"
 	fi
 fi
+
+# Keep Catalyst's own worktree-local runtime artifacts (thoughts/,
+# .catalyst/.workflow-context.json, etc.) out of `git status` for every
+# project, unconditionally — via this worktree's local git exclude, never the
+# project's tracked .gitignore. Runs regardless of executor (bg/sdk/codex-exec)
+# and regardless of whether thoughts-init below even runs.
+catalyst_git_exclude_worktree_artifacts "$WORKTREE_PATH"
 
 # Generate .envrc for OTEL context (source_up inherits parent profiles)
 # Note: direnv allow runs AFTER setup hooks to avoid re-blocking if hooks modify .envrc
