@@ -594,6 +594,73 @@ structural, not configured), so the telemetry that is the feature's whole point 
 | `CATALYST_BH_PROJECT_SILENCE_MS`                        | `86400000` (24 h) | Project-silence threshold (no ticket movement in the project past this window).                                                                                                                                                                                                                                                                                                                                                   |
 | `CATALYST_BH_UNOWNED_INFLIGHT_MS`                       | `86400000` (24 h) | Stale-unowned threshold (CTL-1475). A Linear state like `Implement` is a **claim** that a worker is on the ticket, not a label — and nothing takes the claim back when the worker dies. Past this age with **no live worker signal and no confirmed-open PR**, the ticket is flagged `unownedInFlight` and proposed as a **tier2 (anchorable)** `recover-unowned-in-flight` move, so the delegate dispatches a recovery pass rather than merely reporting it. Such tickets are invisible to every other path: admission only pulls `Todo`, and the recovery census scans worker dirs they have no entry in. Deliberately conservative — any evidence of ownership spares the ticket, since a false negative costs one more scan while a false positive re-dispatches work a human is holding. |
 
+### Monitor reply-route trusted origins (CTL-1573)
+
+`POST /api/ticket/<ticket>/reply` posts operator-authored text to Linear, and the monitor binds
+`0.0.0.0` with no auth. Its cross-origin guard validates the request's `Origin` against an allowlist
+that the caller cannot influence. (It previously compared `Origin` against the request's own `Host`
+header — under DNS rebinding both are attacker-chosen, so that comparison could not reject the case
+it existed for.)
+
+Trusted **by default**, all qualified with the port the server actually bound:
+
+- loopback — on a wildcard bind the **whole `127.0.0.0/8` range** (so `127.0.0.2` and the Debian-conventional `127.0.1.1` work), otherwise only when the bind is itself the loopback address — a LAN-bound monitor does not own `<loopback>:<port>`) — `localhost`, plus the literal(s) matching the **bound address family**
+
+**Residual, and the real fix.** Host *names* (`localhost`, `os.hostname()`) are family-ambiguous — the browser picks. Under a single-family bind, a process squatting the other family's port can serve a page whose `Origin` is one of those names. No allowlist setting closes this; **bind dual-stack** and the squat becomes impossible rather than merely untrusted:
+
+```bash
+MONITOR_HOST=:: catalyst-monitor restart   # `start` no-ops when a monitor is already running
+```
+
+> **Dev-server note.** A prefix assignment (`MONITOR_HOST=:: catalyst-monitor restart`) exists only
+> for that command. `bun run dev:ui` is a separate process, so **export** `MONITOR_HOST` (and
+> `MONITOR_PORT`) in the shell that runs it, or the Vite proxy will target the default `127.0.0.1:7400`
+> instead of the monitor's actual bind.
+
+> **Management-CLI gap (CTL-1599).** `catalyst-monitor.sh` still prints, opens, and health-probes
+> `http://localhost:$PORT` regardless of `MONITOR_HOST`, so a specific non-loopback bind will show a
+> wrong URL and a failing probe even when the monitor is healthy. Wiring the CLI through is tracked
+> separately; the allowlist itself honors the bind correctly.
+
+| Env var | Default | Notes |
+| ------- | ------- | ----- |
+| `MONITOR_HOST` | `0.0.0.0` | Bind address. `::` binds dual-stack (accepts IPv4-mapped too) and is the remedy above. A **specific** address or hostname narrows the allowlist to that socket only — the monitor stops trusting other local interfaces and this host's own names, since it no longer owns those sockets. (binding `0.0.0.0` is IPv4-only, so `[::1]` is not trusted: another service can bind `[::1]` on the same port and its origin would otherwise pass)
+- this machine's own names, **wildcard binds only** (the bare label of an FQDN is included so `http://mini:7400` works when `os.hostname()` is `mini.corp.example`; this trusts whatever that label resolves to, so on a network where a search domain or stale record maps it elsewhere, prefer a specific bind or an explicit `MONITOR_TRUSTED_ORIGINS`) (a name resolves to whichever interface DNS/mDNS picks, which need not be the one a specific bind listens on) — `os.hostname()` and its short label, plus the **actual** mDNS name on macOS (`scutil --get LocalHostName`). A `<short>.local` alias is **not** synthesized: when it is not the name the system really advertises, nothing owns it, so any LAN host could claim it over mDNS and pass the guard.
+- this machine's own non-loopback addresses (LAN, Tailscale `100.x`) — but **only for a wildcard bind** (`0.0.0.0`/`::`). A server bound to one specific address trusts only that address, since another service can hold the same port on a different interface
+
+Own names are trusted **only on the bound port, and only under the scheme the monitor serves
+(`http`)**: a bare `http://mini` would let any *other* service on the same machine (e.g. something on
+`:80`) drive the reply route. Comparison keys are full origins (`scheme://host[:port]`), so `http`
+and `https` on the same host are distinct — a compromised plaintext endpoint cannot drive an HTTPS
+route. On macOS the machine's real Bonjour name (`scutil --get LocalHostName`) is included, since it need
+not share the first label of `os.hostname()`; it is cached for **5 minutes** (the lookup spawns a
+subprocess and the allowlist rebuilds on rejected requests, so it must not run per-request — but a
+renamed `LocalHostName` then takes effect without a daemon restart). Only `http`/`https` origins are
+accepted — a non-special scheme such as `chrome-extension://` serializes to the opaque `"null"`,
+which would otherwise match every opaque origin.
+
+The allowlist is rebuilt on a **60s TTL** and again on any rejection, so an address that appears
+later (Tailscale connecting, a DHCP change) is trusted without a restart, and one that is *removed*
+stops being trusted within the TTL rather than lingering until the daemon restarts.
+
+| Env var                    | Default | Notes                                                                                                                                                                                                                                                                                                                       |
+| -------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MONITOR_TRUSTED_ORIGINS`  | unset   | Comma- or whitespace-separated extra origins for deployments reached by a name that cannot be derived from `os.hostname()` — a **reverse proxy** or a full **Tailscale MagicDNS** alias. Accepts full origins (`https://catalyst.example`) or bare `host:port` (`mini-2.tail1234.ts.net:7400`). Entries are taken **exactly as given** (not widened to the bound port) and canonicalized the way a browser serializes `Origin`, so an IDN name may be written in either Unicode or punycode. |
+| `MONITOR_DEV_UI=1` / `NODE_ENV=development` | unset | Trusts the Vite dev origin (`http://localhost:5173` — one spelling, since Vite binds a single address family and the other would be available to any local process). **Not needed for the standard `bun run dev:ui` flow** — the Vite proxy sends the monitor's own origin (`ui/vite.config.ts`), so proxied replies are already trusted. Accepts `1`/`true`/`yes`/`on`. Use only for a dev setup that bypasses that proxy, and note it must be set on the **monitor** process (`dev:ui` starts Vite only; the monitor runs out-of-band). |
+| `MONITOR_DEV_UI_ORIGINS` | unset | Overrides the dev origins above (same format), for a non-default Vite port. Same caveat: set it on the monitor process. |
+
+**Set this if replies 403.** A monitor opened through a proxy/alias not in the default set will
+reject every reply until the name is listed here. Addresses are re-derived automatically (see the
+TTL above); a *name* the daemon cannot derive still needs this variable.
+
+Prefer writing a **full origin** (`https://catalyst.example`) over a bare host: a full origin pins
+the scheme, whereas a bare `host[:port]` cannot state one and is therefore trusted under both
+`http` and `https`.
+
+Requests with **no** `Origin` are allowed — browsers always send it on a POST, so only non-browser
+clients (`curl`, tests) omit it, and those are not CSRF vectors. This guard stops a browser being
+used as a confused deputy; it is not authentication.
+
 ### Ingestion-silence detector (CTL-1122)
 
 The broker tails every event, so it is the surviving process that can notice when an upstream
