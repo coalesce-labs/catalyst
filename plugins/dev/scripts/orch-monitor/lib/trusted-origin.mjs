@@ -79,7 +79,13 @@ export function originHost(origin) {
  */
 let bonjourCache = null;
 let bonjourResolved = false;
+let bonjourResolvedAt = 0;
 let bonjourResolveCount = 0; // test seam: how many times we actually resolved
+// Long enough that a request flood cannot turn this into a subprocess DoS
+// (the reason it is memoized at all), short enough that a renamed LocalHostName
+// stops being trusted while the KeepAlive daemon keeps running — otherwise the
+// retired `.local` name stays allowlisted forever and is claimable once freed.
+const BONJOUR_TTL_MS = 300_000;
 
 export function bonjourName() {
   // MEMOIZED FOR THE PROCESS LIFETIME — this is a DoS guard, not a micro-opt.
@@ -89,8 +95,11 @@ export function bonjourName() {
   // bad Origin in a loop and stall the whole monitor. The machine's Bonjour
   // name is stable for a process lifetime, so resolving it once is correct as
   // well as safe (a rename needs a daemon restart, like any other identity).
-  if (bonjourResolved) return bonjourCache;
+  if (bonjourResolved && performance.now() - bonjourResolvedAt < BONJOUR_TTL_MS) {
+    return bonjourCache;
+  }
   bonjourResolved = true;
+  bonjourResolvedAt = performance.now();
   bonjourResolveCount++;
   if (platform() !== "darwin") return (bonjourCache = null);
   try {
@@ -110,7 +119,13 @@ export function bonjourName() {
 export function _resetBonjourCache() {
   bonjourCache = null;
   bonjourResolved = false;
+  bonjourResolvedAt = 0;
   bonjourResolveCount = 0;
+}
+
+/** Test seam: the memo TTL, so a test can assert it is bounded. */
+export function _bonjourTtlMs() {
+  return BONJOUR_TTL_MS;
 }
 
 /** Test seam: how many times the underlying lookup actually ran. */
@@ -202,12 +217,20 @@ export function buildTrustedOrigins(opts = {}) {
     /^\[|\]$/g,
     ""
   );
-  const isV6Wildcard = bind === "::"; // dual-stack: accepts IPv4-mapped too
   const isV6Literal = bind.includes(":"); // ANY v6 literal, not just ::/::1
-  // A hostname bind (not an IP literal) is treated as a wildcard: we cannot
-  // enumerate what it covers, and being permissive beats 403-ing the operator.
+  // Every spelling of the IPv6 unspecified address is the dual-stack wildcard:
+  // `::`, `::0`, and the fully expanded `0:0:0:0:0:0:0:0`. An exact-string
+  // check treated the latter two as a SPECIFIC address, which then kept only
+  // the unusable unspecified-address origin and 403'd every real one.
+  const isV6Wildcard = isV6Literal && /^[0:]+$/.test(bind);
   const isIpLiteral = /^[0-9.]+$/.test(bind) || isV6Literal;
-  const isWildcardBind = bind === "" || bind === "0.0.0.0" || isV6Wildcard || !isIpLiteral;
+  // A HOSTNAME bind resolves to a specific interface, so it is NOT a wildcard —
+  // treating it as one trusted every local address and self-name while the
+  // server owned only one socket. We cannot enumerate what it resolves to, so a
+  // hostname bind trusts that name (and loopback if the name IS loopback) and
+  // nothing else; anything further belongs in MONITOR_TRUSTED_ORIGINS.
+  const isHostnameBind = bind !== "" && !isIpLiteral;
+  const isWildcardBind = bind === "" || bind === "0.0.0.0" || isV6Wildcard;
   const normalizeAddr = (a) => String(a ?? "").trim().toLowerCase().replace(/^\[|\]$/g, "");
   // Unknown bind -> stay permissive rather than 403 a legitimate operator.
   const bindsV4 = bind === "" || isV6Wildcard || !isV6Literal;
@@ -232,7 +255,11 @@ export function buildTrustedOrigins(opts = {}) {
   // whose Origin would otherwise pass, and POST to us. So loopback is trusted
   // only for a wildcard bind, or when the bind IS the loopback address.
   const boundIsLoopback =
-    isWildcardBind || normalizeAddr(bind) === "127.0.0.1" || normalizeAddr(bind) === "::1";
+    isWildcardBind ||
+    normalizeAddr(bind) === "127.0.0.1" ||
+    normalizeAddr(bind) === "::1" ||
+    normalizeAddr(bind) === "localhost" ||
+    normalizeAddr(bind).startsWith("localhost.");
   const loopback = [];
   if (boundIsLoopback) {
     loopback.push("localhost");
@@ -275,11 +302,15 @@ export function buildTrustedOrigins(opts = {}) {
   // server is bound to one specific address, another service can hold the same
   // port on a different interface, so trusting all same-family addresses would
   // hand that service an allowlisted Origin. A specific bind trusts only itself.
+  // A hostname bind trusts the NAME the operator bound, and nothing derived.
+  if (isHostnameBind) addOwn(bind);
   const boundAddresses = isWildcardBind
     ? (addresses ?? selfAddresses())
-    : (addresses ?? [isV6Literal ? `[${bind}]` : bind]).filter(
-        (a) => normalizeAddr(a) === normalizeAddr(bind)
-      );
+    : isHostnameBind
+      ? []
+      : (addresses ?? [isV6Literal ? `[${bind}]` : bind]).filter(
+          (a) => normalizeAddr(a) === normalizeAddr(bind)
+        );
   for (const addr of boundAddresses) {
     const isV6 = String(addr).startsWith("[") || String(addr).includes(":");
     if (isV6 ? bindsV6 : bindsV4) addOwn(addr);

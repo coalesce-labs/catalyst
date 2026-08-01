@@ -4,6 +4,7 @@
 import { describe, test, expect } from "bun:test";
 import {
   _bonjourResolveCount,
+  _bonjourTtlMs,
   _resetBonjourCache,
   bonjourName,
   buildTrustedOrigins,
@@ -481,5 +482,64 @@ describe("dev proxy rewrite target (CTL-1573)", () => {
   test("the origin the Vite proxy rewrites to is trusted on a wildcard bind", () => {
     const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: "0.0.0.0" });
     expect(isOriginAllowed("http://127.0.0.1:7400", t)).toBe(true);
+  });
+});
+
+describe("bind classification edge cases (CTL-1573 round 13)", () => {
+  // Every spelling of the IPv6 unspecified address is the dual-stack wildcard.
+  // An exact-string check treated ::0 and the expanded form as SPECIFIC, which
+  // kept only the unusable unspecified-address origin and 403'd every real one.
+  for (const spelling of ["::", "::0", "0:0:0:0:0:0:0:0"]) {
+    test(`"${spelling}" is recognized as the dual-stack wildcard`, () => {
+      const t = buildTrustedOrigins({
+        port: 7400,
+        hostnames: ["mini"],
+        addresses: ["192.168.1.50"],
+        bindHost: spelling,
+      });
+      expect(t.has("http://mini:7400")).toBe(true);
+      expect(t.has("http://192.168.1.50:7400")).toBe(true);
+      expect(t.has("http://localhost:7400")).toBe(true);
+      expect(t.has("http://[::1]:7400")).toBe(true);
+    });
+  }
+
+  // A hostname bind resolves to ONE interface, so it is not a wildcard: it must
+  // not pull in every local address and self-name.
+  test("a hostname bind trusts that name and nothing derived", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: ["mini"],
+      addresses: ["192.168.1.50"],
+      bindHost: "monitor.internal",
+    });
+    expect(t.has("http://monitor.internal:7400")).toBe(true);
+    expect(t.has("http://192.168.1.50:7400")).toBe(false);
+    expect(t.has("http://mini:7400")).toBe(false);
+    expect(t.has("http://localhost:7400")).toBe(false);
+  });
+
+  test("a `localhost` hostname bind still trusts loopback (else it ships inert)", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: ["mini"], bindHost: "localhost" });
+    expect(t.has("http://localhost:7400")).toBe(true);
+    expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    expect(t.has("http://mini:7400")).toBe(false);
+  });
+});
+
+describe("Bonjour identity expires (CTL-1573 round 13)", () => {
+  // A renamed LocalHostName must stop being trusted while the KeepAlive daemon
+  // runs, or the retired `.local` stays allowlisted forever and is claimable
+  // once freed. But it must still not re-spawn per rejected request (the DoS).
+  test("memoizes within the TTL", () => {
+    _resetBonjourCache();
+    bonjourName();
+    for (let i = 0; i < 200; i++) bonjourName();
+    expect(_bonjourResolveCount()).toBe(1);
+  });
+
+  test("the TTL is bounded, not process-lifetime", () => {
+    expect(_bonjourTtlMs()).toBeGreaterThan(0);
+    expect(Number.isFinite(_bonjourTtlMs())).toBe(true);
   });
 });

@@ -606,7 +606,15 @@ Trusted **by default**, all qualified with the port the server actually bound:
 
 - loopback (only when the bind is a wildcard, or is itself the loopback address — a LAN-bound monitor does not own `<loopback>:<port>`) — `localhost`, plus the literal(s) matching the **bound address family**
 
-**Residual, and the real fix.** Host *names* (`localhost`, `os.hostname()`) are family-ambiguous — the browser picks. Under a single-family bind, a process squatting the other family's port can serve a page whose `Origin` is one of those names. No allowlist setting closes this; **bind dual-stack (`::`)** and the squat becomes impossible rather than merely untrusted. (binding `0.0.0.0` is IPv4-only, so `[::1]` is not trusted: another service can bind `[::1]` on the same port and its origin would otherwise pass)
+**Residual, and the real fix.** Host *names* (`localhost`, `os.hostname()`) are family-ambiguous — the browser picks. Under a single-family bind, a process squatting the other family's port can serve a page whose `Origin` is one of those names. No allowlist setting closes this; **bind dual-stack** and the squat becomes impossible rather than merely untrusted:
+
+```bash
+MONITOR_HOST=:: catalyst-monitor start
+```
+
+| Env var | Default | Notes |
+| ------- | ------- | ----- |
+| `MONITOR_HOST` | `0.0.0.0` | Bind address. `::` binds dual-stack (accepts IPv4-mapped too) and is the remedy above. A **specific** address or hostname narrows the allowlist to that socket only — the monitor stops trusting other local interfaces and this host's own names, since it no longer owns those sockets. (binding `0.0.0.0` is IPv4-only, so `[::1]` is not trusted: another service can bind `[::1]` on the same port and its origin would otherwise pass)
 - this machine's own names, **wildcard binds only** (a name resolves to whichever interface DNS/mDNS picks, which need not be the one a specific bind listens on) — `os.hostname()` and its short label, plus the **actual** mDNS name on macOS (`scutil --get LocalHostName`). A `<short>.local` alias is **not** synthesized: when it is not the name the system really advertises, nothing owns it, so any LAN host could claim it over mDNS and pass the guard.
 - this machine's own non-loopback addresses (LAN, Tailscale `100.x`) — but **only for a wildcard bind** (`0.0.0.0`/`::`). A server bound to one specific address trusts only that address, since another service can hold the same port on a different interface
 

@@ -1965,7 +1965,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // miss path keeps the hot path a single Set lookup (a rejection is rare, and
   // an attacker gains nothing: a rebuild re-derives OUR names, never theirs).
   const originAllowed = (origin: string | null): boolean => {
-    const now = Date.now();
+    // performance.now() is MONOTONIC. Date.now() steps with the wall clock, so
+    // an NTP correction or a VM snapshot restore could hold `now - builtAt`
+    // below the threshold indefinitely and keep a removed address trusted far
+    // past the documented 60s bound in this long-lived daemon.
+    const now = performance.now();
     if (trustedOriginsCache === null || now - trustedOriginsBuiltAt >= TRUSTED_ORIGINS_TTL_MS) {
       trustedOriginsCache = buildTrusted();
       trustedOriginsBuiltAt = now;
@@ -5330,6 +5334,11 @@ if (import.meta.main) {
   const RUNS_DIR = `${CATALYST_DIR}/runs`;
   const parsedPort = parseInt(process.env.MONITOR_PORT ?? "", 10);
   const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : DEFAULT_PORT;
+  // CTL-1573: the bind address. Default stays 0.0.0.0 (IPv4) for compatibility.
+  // Exposed because the reference doc names `::` (dual-stack) as the real remedy
+  // for the family-squatting residual — an undocumented remedy nobody can apply
+  // is not a remedy.
+  const HOST = (process.env.MONITOR_HOST ?? "").trim() || "0.0.0.0";
   const DB_PATH =
     process.env.CATALYST_DB_FILE ?? `${CATALYST_DIR}/catalyst.db`;
 
@@ -5450,6 +5459,7 @@ if (import.meta.main) {
     );
     const srv = createServer({
       port: PORT,
+      hostname: HOST,
       wtDir: WT_DIR,
       runsDir: RUNS_DIR,
       dbPath: DB_PATH,
