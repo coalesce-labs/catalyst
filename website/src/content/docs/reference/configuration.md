@@ -608,18 +608,30 @@ Trusted **by default**, all qualified with the port the server actually bound:
 - this machine's own names — `os.hostname()`, its short label, and the `.local` (mDNS) form
 - this machine's own non-loopback addresses (LAN, Tailscale `100.x`)
 
-Own names are trusted **only on the bound port**: a bare `http://mini` would let any *other* service
-on the same machine (e.g. something on `:80`) drive the reply route. The bare form is added only
-when the bound port is a scheme default (80/443), where a browser omits the port anyway.
+Own names are trusted **only on the bound port, and only under the scheme the monitor serves
+(`http`)**: a bare `http://mini` would let any *other* service on the same machine (e.g. something on
+`:80`) drive the reply route. Comparison keys are full origins (`scheme://host[:port]`), so `http`
+and `https` on the same host are distinct — a compromised plaintext endpoint cannot drive an HTTPS
+route. On macOS the machine's real Bonjour name (`scutil --get LocalHostName`) is included, since it
+need not share the first label of `os.hostname()`.
+
+The allowlist is rebuilt on a **60s TTL** and again on any rejection, so an address that appears
+later (Tailscale connecting, a DHCP change) is trusted without a restart, and one that is *removed*
+stops being trusted within the TTL rather than lingering until the daemon restarts.
 
 | Env var                    | Default | Notes                                                                                                                                                                                                                                                                                                                       |
 | -------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MONITOR_TRUSTED_ORIGINS`  | unset   | Comma- or whitespace-separated extra origins for deployments reached by a name that cannot be derived from `os.hostname()` — a **reverse proxy** or a full **Tailscale MagicDNS** alias. Accepts full origins (`https://catalyst.example`) or bare `host:port` (`mini-2.tail1234.ts.net:7400`). Entries are taken **exactly as given** (not widened to the bound port) and canonicalized the way a browser serializes `Origin`, so an IDN name may be written in either Unicode or punycode. |
+| `MONITOR_DEV_UI` / `NODE_ENV=development` | unset | Trusts the Vite dev origins (`http://localhost:5173`, `http://127.0.0.1:5173`). `bun run dev:ui` serves the UI on :5173 and proxies `/api` to the monitor **without rewriting `Origin`**, so replies 403 without this. Never trusted in a normal launch. |
+| `MONITOR_DEV_UI_ORIGINS` | unset | Overrides the dev origins above (same format), for a non-default Vite port. |
 
 **Set this if replies 403.** A monitor opened through a proxy/alias not in the default set will
-reject every reply until the name is listed here. The allowlist is rebuilt on a rejection, so an
-address that appears later (Tailscale connecting, a DHCP change) is picked up without a restart; a
-*name* the daemon cannot derive still needs this variable.
+reject every reply until the name is listed here. Addresses are re-derived automatically (see the
+TTL above); a *name* the daemon cannot derive still needs this variable.
+
+Prefer writing a **full origin** (`https://catalyst.example`) over a bare host: a full origin pins
+the scheme, whereas a bare `host[:port]` cannot state one and is therefore trusted under both
+`http` and `https`.
 
 Requests with **no** `Origin` are allowed — browsers always send it on a POST, so only non-browser
 clients (`curl`, tests) omit it, and those are not CSRF vectors. This guard stops a browser being

@@ -1929,10 +1929,28 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // proxy, Tailscale MagicDNS) — without it a monitor reached by such a name
   // would 403 every reply and the surface would be inert.
   let trustedOriginsCache: Set<string> | null = null;
+  let trustedOriginsBuiltAt = 0;
+  // Bounded freshness. A miss-only refresh picks up ADDED addresses but never
+  // notices a REMOVED one: after DHCP/Tailscale moves us from A to B, a cache
+  // hit keeps trusting A, so once A is reassigned to another host a page there
+  // could drive this route. A short TTL bounds that window without putting an
+  // interface scan on every request.
+  const TRUSTED_ORIGINS_TTL_MS = 60_000;
+
+  // The Vite dev server proxies /api to this monitor without rewriting Origin,
+  // so `bun run dev:ui` posts from http://localhost:5173 and would otherwise
+  // 403. Gated: never trusted in a normal (production) launch.
+  const devUiOrigins =
+    process.env.MONITOR_DEV_UI_ORIGINS ??
+    (process.env.NODE_ENV === "development" || process.env.MONITOR_DEV_UI === "1"
+      ? "http://localhost:5173 http://127.0.0.1:5173"
+      : null);
+
   const buildTrusted = (): Set<string> =>
     buildTrustedOrigins({
       port: server?.port ?? port,
       extraOrigins: process.env.MONITOR_TRUSTED_ORIGINS ?? null,
+      devOrigins: devUiOrigins,
     });
 
   // Allow, rebuilding the allowlist ONCE on a miss before refusing.
@@ -1945,9 +1963,18 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // miss path keeps the hot path a single Set lookup (a rejection is rare, and
   // an attacker gains nothing: a rebuild re-derives OUR names, never theirs).
   const originAllowed = (origin: string | null): boolean => {
-    trustedOriginsCache ??= buildTrusted();
+    const now = Date.now();
+    if (trustedOriginsCache === null || now - trustedOriginsBuiltAt >= TRUSTED_ORIGINS_TTL_MS) {
+      trustedOriginsCache = buildTrusted();
+      trustedOriginsBuiltAt = now;
+    }
     if (isOriginAllowed(origin, trustedOriginsCache)) return true;
+    // Rebuild once more on a miss so a JUST-added address (Tailscale connecting)
+    // is honored immediately rather than waiting out the TTL. A rebuild
+    // re-derives OUR names and addresses, never the caller's, so a rejected
+    // caller gains nothing by forcing it.
     trustedOriginsCache = buildTrusted();
+    trustedOriginsBuiltAt = now;
     return isOriginAllowed(origin, trustedOriginsCache);
   };
 

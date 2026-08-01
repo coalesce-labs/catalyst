@@ -6,11 +6,14 @@ export declare function originHost(origin: unknown): string | null;
 
 export declare function selfAddresses(): string[];
 
+export declare function bonjourName(): string | null;
+
 export declare function buildTrustedOrigins(opts?: {
   port?: number;
   extraOrigins?: string[] | string | null;
   hostnames?: string[];
   addresses?: string[];
+  devOrigins?: string[] | string | null;
 }): Set<string>;
 
 export declare function isOriginAllowed(

@@ -16,58 +16,70 @@
 //
 // Both sides of that comparison are attacker-chosen, so comparing them to each
 // other can never reject it. The fix is to compare `Origin` against a value the
-// ATTACKER CANNOT INFLUENCE: the set of names this server is legitimately
-// reached by. `evil.example:7400` is not one of them, so step 5 becomes a 403.
+// ATTACKER CANNOT INFLUENCE: the set of origins this server is legitimately
+// reached by.
 //
-// INERTNESS IS THE OTHER FAILURE MODE. If the allowlist omits the name the
-// operator actually browses (mini:7400, mini.local:7400, a Tailscale name), the
-// reply surface 403s for real use and the feature ships dead. So the defaults
-// cover loopback plus this machine's own names and addresses, and
-// MONITOR_TRUSTED_ORIGINS is the documented escape hatch for any
-// deployment-specific name (reverse proxy, MagicDNS alias).
+// KEYS ARE FULL ORIGINS (`scheme://host[:port]`), not bare hosts. Reducing to a
+// host silently merges http and https, so a compromised plaintext endpoint on a
+// proxied hostname could drive the HTTPS reply route. `URL.origin` also drops a
+// scheme-default port, which is exactly how a browser serializes `Origin`.
+//
+// INERTNESS IS THE OTHER FAILURE MODE, and it is the one that has bitten this
+// codebase repeatedly: an allowlist missing the origin the operator actually
+// browses 403s every reply and ships the surface dead. Hence loopback, own
+// names (including the real Bonjour name on macOS), own addresses, the Vite dev
+// origin under a dev gate, and MONITOR_TRUSTED_ORIGINS as the escape hatch.
 
-import { hostname as osHostname, networkInterfaces } from "node:os";
+import { hostname as osHostname, networkInterfaces, platform } from "node:os";
+import { execFileSync } from "node:child_process";
 
-/**
- * Parse a host or a full origin into its canonical `{ host, port }`.
- *
- * Canonicalization goes through `URL` rather than a bare `toLowerCase()` so
- * allowlist entries are compared in the SAME form a browser serializes an
- * Origin in. Without it an IDN entry (`münchen.local`) would be stored verbatim
- * while the browser sends punycode (`xn--mnchen-3ya.local`), and every
- * legitimate reply from that host would 403 — the inertness failure mode again.
- * `URL` also normalizes IPv6 (including IPv4-mapped forms) and drops a
- * scheme-default port, matching how Origin is serialized.
- */
-function parseHostish(value) {
+const DEFAULT_SCHEME = "http"; // the monitor serves plaintext; TLS is a front-end concern
+
+/** Canonical origin key for a full origin string, or null. */
+function originKey(value) {
   if (typeof value !== "string") return null;
   const s = value.trim();
   if (s === "" || s === "null") return null;
-  // Accept both "https://host:port" and a bare "host:port".
-  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`;
   try {
-    const u = new URL(withScheme);
-    if (u.hostname === "") return null;
-    return { host: u.host.toLowerCase(), port: u.port };
+    const u = new URL(s);
+    if (u.hostname === "" || u.protocol === "file:") return null;
+    // `URL.origin` is the browser's own serialization: lowercased, punycode for
+    // IDN, bracketed IPv6, scheme-default port omitted.
+    return u.origin.toLowerCase();
   } catch {
     return null;
   }
 }
 
 /**
- * Normalize an origin to its comparable `host[:port]`.
+ * Normalize an `Origin` header to its canonical key.
  * Returns null for anything that is not a parseable absolute URL — including
  * the opaque literal "null", which browsers send for sandboxed/`file:` origins
  * and which must never be treated as trusted.
  */
 export function originHost(origin) {
-  if (typeof origin !== "string" || origin === "" || origin === "null") return null;
-  // An Origin is always absolute; a bare "mini:7400" is not a valid Origin and
-  // must not be accepted, so this does NOT reuse parseHostish's bare-host path.
+  return originKey(origin);
+}
+
+/**
+ * The machine's real mDNS/Bonjour name on macOS.
+ *
+ * `os.hostname()` can be a DHCP-provided FQDN (`mini.corp.example`) whose first
+ * label differs from what Bonjour advertises (`Ryans-Mac-mini.local`), so
+ * synthesizing `${short}.local` can trust a name nobody uses while omitting the
+ * one operators actually browse. Reading it is best-effort: any failure falls
+ * back to the synthesized form.
+ */
+export function bonjourName() {
+  if (platform() !== "darwin") return null;
   try {
-    const u = new URL(origin);
-    if (u.hostname === "" || u.protocol === "file:") return null;
-    return u.host.toLowerCase();
+    const out = execFileSync("scutil", ["--get", "LocalHostName"], {
+      encoding: "utf8",
+      timeout: 1000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const name = out.trim().toLowerCase();
+    return name === "" ? null : name;
   } catch {
     return null;
   }
@@ -79,8 +91,7 @@ export function originHost(origin) {
  * Included because operators routinely reach the monitor by IP rather than by
  * name — a LAN address or a Tailscale 100.x — and omitting them would 403 those
  * sessions. These are the addresses the server is bound and reachable on, so
- * trusting them adds no attacker-controlled input: an attacker cannot make
- * `evil.example` resolve to a name in this list, and a rebinding attack still
+ * trusting them adds no attacker-controlled input: a rebinding attack still
  * presents its OWN domain in `Origin`, not our address.
  */
 export function selfAddresses() {
@@ -107,42 +118,36 @@ export function selfAddresses() {
 }
 
 /**
- * The set of `host[:port]` values this server is legitimately reached by.
+ * The set of origins this server is legitimately reached by.
  *
- * PORT-QUALIFIED BY DEFAULT. Own names/addresses are trusted only ON THE BOUND
- * PORT. Trusting the bare host too would mean any OTHER service on this machine
- * — `http://mini` on :80 — could drive the reply route, since a browser
- * serializes that Origin as `http://mini` with no port. That is a strictly
- * wider surface than the check this replaces, so it is not the default. A
- * reverse proxy on :80/:443 is a real deployment, but it is expressed
- * explicitly through `extraOrigins` rather than assumed for everyone. (When the
- * bound port IS 80/443 the bare form is added, because the browser omits a
- * scheme-default port and the two forms then denote the same endpoint.)
+ * PORT-QUALIFIED. Own names/addresses are trusted only ON THE BOUND PORT.
+ * Trusting the bare host too would let any OTHER service on this machine
+ * (`http://mini` on :80) drive the reply route, since a browser omits a
+ * scheme-default port — a strictly wider surface than the check this replaces.
+ * A proxy on :80/:443 is a real deployment, but it is stated explicitly through
+ * `extraOrigins` rather than assumed for everyone.
  *
- * @param {{ port?: number, extraOrigins?: string[] | string | null, hostnames?: string[], addresses?: string[] }} opts
+ * @param {{
+ *   port?: number,
+ *   extraOrigins?: string[] | string | null,
+ *   hostnames?: string[],
+ *   addresses?: string[],
+ *   devOrigins?: string[] | string | null,
+ * }} opts
  * @returns {Set<string>}
  */
 export function buildTrustedOrigins(opts = {}) {
-  const { port, extraOrigins = null, hostnames, addresses } = opts;
+  const { port, extraOrigins = null, hostnames, addresses, devOrigins = null } = opts;
   const out = new Set();
   const boundPort = Number.isFinite(port) ? Number(port) : null;
 
-  /** Trust `name` only on the bound port (see PORT-QUALIFIED above). */
-  const addOwn = (name) => {
-    const parsed = parseHostish(name);
-    if (parsed === null) return;
-    if (parsed.port !== "") {
-      out.add(parsed.host); // caller pinned a port explicitly
-      return;
-    }
-    if (boundPort === null) {
-      out.add(parsed.host);
-      return;
-    }
-    out.add(`${parsed.host}:${boundPort}`);
-    // A browser omits a scheme-default port from Origin, so on 80/443 the bare
-    // form IS the bound endpoint rather than a different service.
-    if (boundPort === 80 || boundPort === 443) out.add(parsed.host);
+  /** Trust `host` on the bound port, under the scheme the monitor serves. */
+  const addOwn = (host) => {
+    if (typeof host !== "string" || host.trim() === "") return;
+    const h = host.trim();
+    const authority = boundPort === null ? h : `${h}:${boundPort}`;
+    const key = originKey(`${DEFAULT_SCHEME}://${authority}`);
+    if (key !== null) out.add(key);
   };
 
   for (const h of ["localhost", "127.0.0.1", "[::1]"]) addOwn(h);
@@ -159,24 +164,33 @@ export function buildTrustedOrigins(opts = {}) {
       addOwn(`${short}.local`);
     }
   }
+  // The REAL Bonjour name, which need not share os.hostname()'s first label.
+  const bonjour = hostnames === undefined ? bonjourName() : null;
+  if (bonjour !== null) addOwn(bonjour.endsWith(".local") ? bonjour : `${bonjour}.local`);
 
   // This machine's own IPs (LAN, Tailscale 100.x).
   for (const addr of addresses ?? selfAddresses()) addOwn(addr);
 
-  // Deployment-specific origins (reverse proxy, Tailscale MagicDNS, an alias).
-  // Taken EXACTLY as given, canonicalized: an operator who writes
-  // "https://catalyst.example" means port 443 (bare host in Origin), and one who
-  // writes "mini-2:7400" means that port. We do not add the bound port to these
-  // — the whole point is that they are reached on some other endpoint.
-  const extras =
-    typeof extraOrigins === "string"
-      ? extraOrigins.split(/[,\s]+/)
-      : Array.isArray(extraOrigins)
-        ? extraOrigins
-        : [];
-  for (const raw of extras) {
-    const parsed = parseHostish(raw);
-    if (parsed !== null) out.add(parsed.host);
+  const split = (v) =>
+    typeof v === "string" ? v.split(/[,\s]+/) : Array.isArray(v) ? v : [];
+
+  // Deployment-specific origins (reverse proxy, MagicDNS alias) and dev-server
+  // origins. Taken EXACTLY as given — a full origin keeps its scheme, so
+  // `https://catalyst.example` does NOT also trust the plaintext endpoint on
+  // that host. A bare `host[:port]` cannot state a scheme, so it trusts both
+  // (documented), which is why a full origin is the safer way to write one.
+  for (const raw of [...split(extraOrigins), ...split(devOrigins)]) {
+    if (typeof raw !== "string" || raw.trim() === "") continue;
+    const s = raw.trim();
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+      const key = originKey(s);
+      if (key !== null) out.add(key);
+    } else {
+      for (const scheme of ["http", "https"]) {
+        const key = originKey(`${scheme}://${s}`);
+        if (key !== null) out.add(key);
+      }
+    }
   }
 
   return out;
@@ -197,7 +211,7 @@ export function buildTrustedOrigins(opts = {}) {
  */
 export function isOriginAllowed(origin, trusted) {
   if (origin == null || origin === "") return true;
-  const host = originHost(origin);
-  if (host === null) return false; // present but unparseable/opaque -> refuse
-  return trusted.has(host);
+  const key = originKey(origin);
+  if (key === null) return false; // present but unparseable/opaque -> refuse
+  return trusted.has(key);
 }

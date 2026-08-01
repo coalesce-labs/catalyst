@@ -3,6 +3,7 @@
 
 import { describe, test, expect } from "bun:test";
 import {
+  bonjourName,
   buildTrustedOrigins,
   isOriginAllowed,
   originHost,
@@ -16,10 +17,12 @@ const TRUSTED = buildTrustedOrigins({
 });
 
 describe("originHost", () => {
-  test("reduces an origin to its comparable host[:port]", () => {
-    expect(originHost("http://mini:7400")).toBe("mini:7400");
-    expect(originHost("https://Catalyst.Example")).toBe("catalyst.example");
-    expect(originHost("http://127.0.0.1:7400")).toBe("127.0.0.1:7400");
+  test("reduces an origin to its canonical origin key (scheme preserved)", () => {
+    expect(originHost("http://mini:7400")).toBe("http://mini:7400");
+    expect(originHost("https://Catalyst.Example")).toBe("https://catalyst.example");
+    expect(originHost("http://127.0.0.1:7400")).toBe("http://127.0.0.1:7400");
+    // a scheme-default port is dropped, exactly as a browser serializes Origin
+    expect(originHost("http://mini:80")).toBe("http://mini");
   });
 
   test("rejects the opaque 'null' origin browsers send for sandboxed/file: pages", () => {
@@ -27,7 +30,7 @@ describe("originHost", () => {
   });
 
   test("rejects unparseable, empty, and non-string values", () => {
-    for (const bad of ["", "not a url", "mini:7400", undefined, null, 42, {}]) {
+    for (const bad of ["", "not a url", undefined, null, 42, {}]) {
       expect(originHost(bad)).toBeNull();
     }
   });
@@ -35,13 +38,13 @@ describe("originHost", () => {
 
 describe("buildTrustedOrigins", () => {
   test("trusts loopback on the bound port", () => {
-    for (const h of ["localhost:7400", "127.0.0.1:7400", "[::1]:7400"]) {
+    for (const h of ["http://localhost:7400", "http://127.0.0.1:7400", "http://[::1]:7400"]) {
       expect(TRUSTED.has(h)).toBe(true);
     }
   });
 
   test("trusts this machine's own names — FQDN, short label, and .local", () => {
-    for (const h of ["mini.rozich:7400", "mini:7400", "mini.local:7400"]) {
+    for (const h of ["http://mini.rozich:7400", "http://mini:7400", "http://mini.local:7400"]) {
       expect(TRUSTED.has(h)).toBe(true);
     }
   });
@@ -50,16 +53,14 @@ describe("buildTrustedOrigins", () => {
   // drive the reply route, since the browser serializes that Origin with no
   // port. That is wider than the Origin-vs-Host check this replaces.
   test("does NOT trust an own name without the bound port", () => {
-    for (const h of ["mini", "localhost", "mini.rozich", "127.0.0.1"]) {
+    for (const h of ["http://mini", "http://localhost", "http://mini.rozich"]) {
       expect(TRUSTED.has(h)).toBe(false);
     }
   });
 
-  test("adds the bare form only when the bound port is a scheme default", () => {
+  test("collapses to the bare form when the bound port is a scheme default", () => {
     const t80 = buildTrustedOrigins({ port: 80, hostnames: ["mini"], addresses: [] });
-    expect(t80.has("mini")).toBe(true);
-    const t443 = buildTrustedOrigins({ port: 443, hostnames: ["mini"], addresses: [] });
-    expect(t443.has("mini")).toBe(true);
+    expect(t80.has("http://mini")).toBe(true);
   });
 
   test("canonicalizes IDN entries to the punycode a browser actually sends", () => {
@@ -73,9 +74,9 @@ describe("buildTrustedOrigins", () => {
   });
 
   test("tracks a non-default port rather than assuming 7400", () => {
-    const t = buildTrustedOrigins({ port: 9999, hostnames: ["mini"] });
-    expect(t.has("mini:9999")).toBe(true);
-    expect(t.has("mini:7400")).toBe(false);
+    const t = buildTrustedOrigins({ port: 9999, hostnames: ["mini"], addresses: [] });
+    expect(t.has("http://mini:9999")).toBe(true);
+    expect(t.has("http://mini:7400")).toBe(false);
   });
 
   test("takes deployment-specific origins exactly as given", () => {
@@ -136,7 +137,7 @@ describe("isOriginAllowed", () => {
   test("rejects a DNS-rebinding origin whose Origin and Host would match", () => {
     const rebound = "http://evil.example:7400";
     // Precondition: the OLD guard's comparison would have accepted this.
-    expect(originHost(rebound)).toBe("evil.example:7400"); // === the Host header
+    expect(originHost(rebound)).toBe("http://evil.example:7400"); // host === the Host header
     expect(isOriginAllowed(rebound, TRUSTED)).toBe(false);
   });
 
@@ -182,5 +183,64 @@ describe("selfAddresses", () => {
       if (a.includes(":")) expect(a.startsWith("[")).toBe(true);
       expect(a.includes("%")).toBe(false); // zone index stripped
     }
+  });
+});
+
+describe("scheme is part of the key (CTL-1573 round 3)", () => {
+  // Reducing to a bare host merged http and https, so a compromised plaintext
+  // endpoint on a proxied hostname could drive the HTTPS reply route.
+  test("a full https origin does NOT also trust its plaintext endpoint", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: [],
+      extraOrigins: "https://catalyst.example",
+    });
+    expect(isOriginAllowed("https://catalyst.example", t)).toBe(true);
+    expect(isOriginAllowed("http://catalyst.example", t)).toBe(false);
+  });
+
+  test("a bare host entry cannot state a scheme, so it trusts both", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: [],
+      extraOrigins: "proxy.example",
+    });
+    expect(isOriginAllowed("https://proxy.example", t)).toBe(true);
+    expect(isOriginAllowed("http://proxy.example", t)).toBe(true);
+  });
+
+  test("own names are trusted only under the scheme the monitor serves", () => {
+    expect(isOriginAllowed("https://mini:7400", TRUSTED)).toBe(false);
+    expect(isOriginAllowed("http://mini:7400", TRUSTED)).toBe(true);
+  });
+});
+
+describe("dev-server origin gate (CTL-1573 round 3)", () => {
+  // `bun run dev:ui` serves the UI on :5173 and Vite proxies /api to the
+  // monitor WITHOUT rewriting Origin, so replies 403 unless it is trusted.
+  test("the Vite dev origin is trusted only when passed explicitly", () => {
+    const prod = buildTrustedOrigins({ port: 7400, hostnames: ["mini"], addresses: [] });
+    expect(isOriginAllowed("http://localhost:5173", prod)).toBe(false);
+
+    const dev = buildTrustedOrigins({
+      port: 7400,
+      hostnames: ["mini"],
+      addresses: [],
+      devOrigins: "http://localhost:5173 http://127.0.0.1:5173",
+    });
+    expect(isOriginAllowed("http://localhost:5173", dev)).toBe(true);
+    expect(isOriginAllowed("http://127.0.0.1:5173", dev)).toBe(true);
+    // the gate must not widen anything else
+    expect(isOriginAllowed("http://evil.example:5173", dev)).toBe(false);
+  });
+});
+
+describe("bonjourName", () => {
+  test("returns null off darwin, and never throws", () => {
+    const n = bonjourName();
+    expect(n === null || typeof n === "string").toBe(true);
+    if (typeof n === "string") expect(n).not.toBe("");
   });
 });
