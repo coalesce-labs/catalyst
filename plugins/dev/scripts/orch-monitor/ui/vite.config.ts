@@ -4,6 +4,24 @@ import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { assembleBoard } from "../lib/board-data.mjs";
 
+// CTL-1573: the dev server's own origins, and the origin the monitor knows
+// itself by. Pinned (rather than left to Vite's port fallback) so the proxy's
+// conditional Origin rewrite below has an exact, predictable set to match —
+// a "close enough" match here would re-open the laundering hole it closes.
+const DEV_PORT = 5173;
+const MONITOR_ORIGIN = "http://localhost:7400";
+const DEV_ORIGINS = new Set([`http://localhost:${DEV_PORT}`, `http://127.0.0.1:${DEV_PORT}`]);
+
+/**
+ * Should the proxy replace this request's `Origin` with the monitor's own?
+ * Exported so the rule is unit-tested rather than asserted in a comment.
+ */
+export function shouldRewriteOrigin(origin: string | undefined | null): boolean {
+  return typeof origin === "string" && DEV_ORIGINS.has(origin.toLowerCase());
+}
+
+export { MONITOR_ORIGIN };
+
 // CTL-1088: build out of the pristine plugin clone. When the wrapper provides a
 // dist dir, writes outside the tracked public/; falls back to ../public so plain
 // `bunx vite build` from a checkout still behaves as before.
@@ -65,6 +83,7 @@ export default defineConfig({
     },
   },
   server: {
+    port: DEV_PORT,
     proxy: {
       "/events": "http://localhost:7400",
       // CTL-1573: the reply route validates `Origin` against an allowlist of the
@@ -79,9 +98,25 @@ export default defineConfig({
       // local port. `dev:ui` also only starts Vite — the monitor runs
       // out-of-band — so an env gate on the monitor could not activate from
       // this workflow anyway.
+      //
+      // The rewrite is CONDITIONAL. A blanket `headers: { Origin }` would make
+      // this proxy an origin-laundering service while `dev:ui` is running: any
+      // other page (another localhost port, a LAN host) could POST a simple
+      // `text/plain` JSON body to http://localhost:5173/api/ticket/X/reply, have
+      // its hostile Origin replaced with a trusted one, and get the Linear side
+      // effect — CORS would hide the response, but the write would already have
+      // happened. So only a genuine same-origin request from THIS dev server is
+      // rewritten; anything else is forwarded verbatim for the monitor to reject.
       "/api": {
         target: "http://localhost:7400",
-        headers: { Origin: "http://localhost:7400" },
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq, req) => {
+            if (shouldRewriteOrigin(req.headers.origin)) {
+              proxyReq.setHeader("origin", MONITOR_ORIGIN);
+            }
+            // No Origin (curl) or a foreign one: pass through untouched.
+          });
+        },
       },
     },
   },
