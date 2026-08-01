@@ -3,6 +3,7 @@
 
 import { describe, test, expect } from "bun:test";
 import {
+  _bonjourResolveCount,
   _resetBonjourCache,
   bonjourName,
   buildTrustedOrigins,
@@ -44,10 +45,17 @@ describe("buildTrustedOrigins", () => {
     }
   });
 
-  test("trusts this machine's own names — FQDN, short label, and .local", () => {
-    for (const h of ["http://mini.rozich:7400", "http://mini:7400", "http://mini.local:7400"]) {
+  test("trusts this machine's own names — FQDN and short label", () => {
+    for (const h of ["http://mini.rozich:7400", "http://mini:7400"]) {
       expect(TRUSTED.has(h)).toBe(true);
     }
+  });
+
+  // A `${short}.local` nobody advertises is CLAIMABLE over mDNS by any LAN
+  // host, which could then serve a page on our port and pass the guard. Only a
+  // `.local` the system actually advertises may be trusted.
+  test("does NOT fabricate a ${short}.local alias", () => {
+    expect(TRUSTED.has("http://mini.local:7400")).toBe(false);
   });
 
   // A bare own-host would let ANY other service on this machine (e.g. :80)
@@ -104,7 +112,6 @@ describe("isOriginAllowed", () => {
   test("allows the operator's real browsing origins (must not ship inert)", () => {
     for (const o of [
       "http://mini:7400",
-      "http://mini.local:7400",
       "http://mini.rozich:7400",
       "http://localhost:7400",
       "http://127.0.0.1:7400",
@@ -251,26 +258,45 @@ describe("bonjourName", () => {
   // Origins at the reply route. Repeated calls must not respawn.
   test("resolves at most once per process (rejected origins must not spawn scutil)", () => {
     _resetBonjourCache();
-    const t0 = process.hrtime.bigint();
-    bonjourName(); // may spawn once
-    const t1 = process.hrtime.bigint();
+    expect(_bonjourResolveCount()).toBe(0);
+    bonjourName();
+    expect(_bonjourResolveCount()).toBe(1);
     for (let i = 0; i < 200; i++) bonjourName();
-    const t2 = process.hrtime.bigint();
-    const firstNs = Number(t1 - t0);
-    const next200Ns = Number(t2 - t1);
-    // 200 memoized calls must be far cheaper than one real resolution; on a
-    // non-darwin host the first call is already trivial, so compare against a
-    // flat ceiling too rather than assuming a subprocess happened.
-    expect(next200Ns < Math.max(firstNs, 1_000_000)).toBe(true);
+    // Counting the underlying resolution, NOT elapsed time: a wall-clock
+    // threshold fails spuriously when an oversubscribed CI worker deschedules
+    // the process mid-loop.
+    expect(_bonjourResolveCount()).toBe(1);
   });
 
   test("buildTrustedOrigins does not re-resolve Bonjour on each rebuild", () => {
     _resetBonjourCache();
     bonjourName();
-    const t0 = process.hrtime.bigint();
+    expect(_bonjourResolveCount()).toBe(1);
     for (let i = 0; i < 50; i++) buildTrustedOrigins({ port: 7400, addresses: [] });
-    const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;
-    // 50 rebuilds spawning scutil would be ~seconds; memoized they are ~ms.
-    expect(elapsedMs).toBeLessThan(500);
+    expect(_bonjourResolveCount()).toBe(1);
+  });
+});
+
+describe("opaque / non-http origins (CTL-1573 round 6)", () => {
+  // A non-special scheme serializes URL.origin as the literal "null", so
+  // accepting one would put "null" in the trusted set — and then EVERY opaque
+  // origin (any other extension, any sandboxed frame) matches it.
+  test("a configured chrome-extension origin does not poison the set", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: [],
+      extraOrigins: "chrome-extension://trustedid",
+    });
+    expect(t.has("null")).toBe(false);
+    expect(isOriginAllowed("chrome-extension://evilid", t)).toBe(false);
+    expect(isOriginAllowed("chrome-extension://trustedid", t)).toBe(false);
+    expect(isOriginAllowed("null", t)).toBe(false);
+  });
+
+  test("originHost rejects non-http(s) schemes outright", () => {
+    for (const o of ["chrome-extension://abc", "file:///etc/passwd", "ftp://host", "data:,x"]) {
+      expect(originHost(o)).toBeNull();
+    }
   });
 });

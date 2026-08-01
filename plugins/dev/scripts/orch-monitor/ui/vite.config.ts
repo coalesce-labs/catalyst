@@ -84,6 +84,12 @@ export default defineConfig({
   },
   server: {
     port: DEV_PORT,
+    // Vite falls back to the NEXT FREE port unless strictPort is set. Without
+    // this the UI could come up on 5174 while DEV_ORIGINS still only matches
+    // 5173, so the proxy would leave Origin untouched and every reply would
+    // 403 — the exact inertness this config exists to prevent. Fail loudly on
+    // a busy port instead of silently drifting off the trusted origin.
+    strictPort: true,
     proxy: {
       "/events": "http://localhost:7400",
       // CTL-1573: the reply route validates `Origin` against an allowlist of the

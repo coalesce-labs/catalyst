@@ -207,16 +207,43 @@ describe("POST /api/ticket/:id/reply cross-origin guard (CTL-1573 P1)", () => {
     expect((await post("null")).status).toBe(403);
   });
 
+  // ALLOW-PATH CASES MUST STAY OFFLINE. Passing the guard means the request
+  // continues into the real reply helper, which — on a developer machine with
+  // Layer-2 credentials present — issues live Linear `viewer` / `issue(id:)`
+  // queries. That would spend shared fleet quota and make an Origin-wiring test
+  // depend on Linear being up. Neutralizing BOTH credential sources (env and the
+  // Layer-2 project lookup) makes it fail fast at `no_token` instead, which is
+  // all these cases need: the assertion is only "not 403".
+  const postOffline = async (origin: string | null) => {
+    const prevToken = process.env.LINEAR_API_TOKEN;
+    const prevKey = process.env.LINEAR_API_KEY;
+    const prevProject = process.env.CATALYST_PROJECT_KEY;
+    delete process.env.LINEAR_API_TOKEN;
+    delete process.env.LINEAR_API_KEY;
+    process.env.CATALYST_PROJECT_KEY = "__no_such_project_for_test__";
+    try {
+      return await post(origin);
+    } finally {
+      if (prevToken !== undefined) process.env.LINEAR_API_TOKEN = prevToken;
+      if (prevKey !== undefined) process.env.LINEAR_API_KEY = prevKey;
+      if (prevProject !== undefined) process.env.CATALYST_PROJECT_KEY = prevProject;
+      else delete process.env.CATALYST_PROJECT_KEY;
+    }
+  };
+
   // Inertness guard. The harness binds an EPHEMERAL port (port: 0), so this
   // also pins that the allowlist is built from the port actually bound —
   // building it from the requested port would trust `localhost:0` and 403 here.
   it("allows the server's own origin on its real (ephemeral) bound port", async () => {
-    const res = await post(`http://localhost:${server.port}`);
+    const res = await postOffline(`http://localhost:${server.port}`);
     expect(res.status).not.toBe(403);
+    // Proves it got PAST the guard into the (credential-less) reply path.
+    expect(res.status).toBe(502);
   });
 
   it("allows a request with no Origin (curl / non-browser clients)", async () => {
-    const res = await post(null);
+    const res = await postOffline(null);
     expect(res.status).not.toBe(403);
+    expect(res.status).toBe(502);
   });
 });

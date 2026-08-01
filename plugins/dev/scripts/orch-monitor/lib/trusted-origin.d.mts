@@ -10,6 +10,8 @@ export declare function bonjourName(): string | null;
 
 export declare function _resetBonjourCache(): void;
 
+export declare function _bonjourResolveCount(): number;
+
 export declare function buildTrustedOrigins(opts?: {
   port?: number;
   extraOrigins?: string[] | string | null;

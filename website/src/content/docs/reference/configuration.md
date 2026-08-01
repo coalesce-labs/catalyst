@@ -605,15 +605,18 @@ it existed for.)
 Trusted **by default**, all qualified with the port the server actually bound:
 
 - loopback — `localhost`, `127.0.0.1`, `[::1]`
-- this machine's own names — `os.hostname()`, its short label, and the `.local` (mDNS) form
+- this machine's own names — `os.hostname()` and its short label, plus the **actual** mDNS name on macOS (`scutil --get LocalHostName`). A `<short>.local` alias is **not** synthesized: when it is not the name the system really advertises, nothing owns it, so any LAN host could claim it over mDNS and pass the guard.
 - this machine's own non-loopback addresses (LAN, Tailscale `100.x`)
 
 Own names are trusted **only on the bound port, and only under the scheme the monitor serves
 (`http`)**: a bare `http://mini` would let any *other* service on the same machine (e.g. something on
 `:80`) drive the reply route. Comparison keys are full origins (`scheme://host[:port]`), so `http`
 and `https` on the same host are distinct — a compromised plaintext endpoint cannot drive an HTTPS
-route. On macOS the machine's real Bonjour name (`scutil --get LocalHostName`) is included, since it
-need not share the first label of `os.hostname()`.
+route. On macOS the machine's real Bonjour name (`scutil --get LocalHostName`) is included, since it need
+not share the first label of `os.hostname()`; it is resolved once per process (the lookup spawns a
+subprocess, and the allowlist rebuilds on rejected requests). Only `http`/`https` origins are
+accepted — a non-special scheme such as `chrome-extension://` serializes to the opaque `"null"`,
+which would otherwise match every opaque origin.
 
 The allowlist is rebuilt on a **60s TTL** and again on any rejection, so an address that appears
 later (Tailscale connecting, a DHCP change) is trusted without a restart, and one that is *removed*

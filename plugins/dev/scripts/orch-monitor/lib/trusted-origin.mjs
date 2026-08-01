@@ -42,10 +42,17 @@ function originKey(value) {
   if (s === "" || s === "null") return null;
   try {
     const u = new URL(s);
-    if (u.hostname === "" || u.protocol === "file:") return null;
+    // Only the schemes a browser can actually reach this server over. A
+    // "non-special" scheme (chrome-extension:, custom:) serializes `URL.origin`
+    // as the literal string "null", so accepting one would put "null" in the
+    // trusted set — and EVERY opaque origin then matches it. Restricting the
+    // scheme closes that; the explicit "null" guard below is the belt-and-braces.
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (u.hostname === "") return null;
     // `URL.origin` is the browser's own serialization: lowercased, punycode for
     // IDN, bracketed IPv6, scheme-default port omitted.
-    return u.origin.toLowerCase();
+    const origin = u.origin.toLowerCase();
+    return origin === "null" ? null : origin;
   } catch {
     return null;
   }
@@ -72,6 +79,7 @@ export function originHost(origin) {
  */
 let bonjourCache = null;
 let bonjourResolved = false;
+let bonjourResolveCount = 0; // test seam: how many times we actually resolved
 
 export function bonjourName() {
   // MEMOIZED FOR THE PROCESS LIFETIME — this is a DoS guard, not a micro-opt.
@@ -83,6 +91,7 @@ export function bonjourName() {
   // well as safe (a rename needs a daemon restart, like any other identity).
   if (bonjourResolved) return bonjourCache;
   bonjourResolved = true;
+  bonjourResolveCount++;
   if (platform() !== "darwin") return (bonjourCache = null);
   try {
     const out = execFileSync("scutil", ["--get", "LocalHostName"], {
@@ -101,6 +110,12 @@ export function bonjourName() {
 export function _resetBonjourCache() {
   bonjourCache = null;
   bonjourResolved = false;
+  bonjourResolveCount = 0;
+}
+
+/** Test seam: how many times the underlying lookup actually ran. */
+export function _bonjourResolveCount() {
+  return bonjourResolveCount;
 }
 
 /**
@@ -177,10 +192,14 @@ export function buildTrustedOrigins(opts = {}) {
     if (typeof raw !== "string" || raw === "") continue;
     addOwn(raw);
     const short = raw.toLowerCase().split(".")[0];
-    if (short !== "") {
-      addOwn(short);
-      addOwn(`${short}.local`);
-    }
+    if (short !== "") addOwn(short);
+    // NOTE: `${short}.local` is deliberately NOT synthesized. When
+    // os.hostname() is `mini.corp.example` but Bonjour advertises
+    // `Ryans-Mac-mini.local`, nothing owns `mini.local` — so any LAN host can
+    // claim it over mDNS, serve a page on the monitor's port, and its
+    // `Origin: http://mini.local:7400` would pass an allowlist that had
+    // fabricated that name. Only a `.local` the system actually advertises is
+    // trusted (below); anything else belongs in MONITOR_TRUSTED_ORIGINS.
   }
   // The REAL Bonjour name, which need not share os.hostname()'s first label.
   const bonjour = hostnames === undefined ? bonjourName() : null;
