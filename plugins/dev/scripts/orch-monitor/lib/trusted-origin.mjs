@@ -205,15 +205,18 @@ export function buildTrustedOrigins(opts = {}) {
     ""
   );
   const isV6Wildcard = bind === "::"; // dual-stack: accepts IPv4-mapped too
+  const isV6Literal = bind.includes(":"); // ANY v6 literal, not just ::/::1
   // A hostname bind (not an IP literal) is treated as a wildcard: we cannot
   // enumerate what it covers, and being permissive beats 403-ing the operator.
-  const isIpLiteral = /^[0-9.]+$/.test(bind) || bind.includes(":");
+  const isIpLiteral = /^[0-9.]+$/.test(bind) || isV6Literal;
   const isWildcardBind = bind === "" || bind === "0.0.0.0" || isV6Wildcard || !isIpLiteral;
   const normalizeAddr = (a) => String(a ?? "").trim().toLowerCase().replace(/^\[|\]$/g, "");
-  const isV6Loopback = bind === "::1";
   // Unknown bind -> stay permissive rather than 403 a legitimate operator.
-  const bindsV4 = bind === "" || isV6Wildcard || !bind.includes(":");
-  const bindsV6 = bind === "" || isV6Wildcard || isV6Loopback;
+  const bindsV4 = bind === "" || isV6Wildcard || !isV6Literal;
+  // ANY IPv6 literal bind is IPv6-capable — including a specific global address
+  // like 2001:db8::1. Treating only ::/::1 as v6 dropped the server's OWN
+  // address from the allowlist and 403'd every legitimate reply to it.
+  const bindsV6 = bind === "" || isV6Wildcard || isV6Literal;
   // The `localhost` NAME is family-ambiguous: the browser chooses. Under an
   // IPv4-only bind, a service squatting [::1]:<port> can serve a page whose
   // Origin is `http://localhost:<port>` and POST to our IPv4 address, so the
@@ -265,7 +268,9 @@ export function buildTrustedOrigins(opts = {}) {
   // hand that service an allowlisted Origin. A specific bind trusts only itself.
   const boundAddresses = isWildcardBind
     ? (addresses ?? selfAddresses())
-    : (addresses ?? [bind]).filter((a) => normalizeAddr(a) === normalizeAddr(bind));
+    : (addresses ?? [isV6Literal ? `[${bind}]` : bind]).filter(
+        (a) => normalizeAddr(a) === normalizeAddr(bind)
+      );
   for (const addr of boundAddresses) {
     const isV6 = String(addr).startsWith("[") || String(addr).includes(":");
     if (isV6 ? bindsV6 : bindsV4) addOwn(addr);

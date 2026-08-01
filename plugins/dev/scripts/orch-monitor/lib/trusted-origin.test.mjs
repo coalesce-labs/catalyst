@@ -470,3 +470,34 @@ describe("strict mode is not undone by a self-name (CTL-1573 round 9)", () => {
     expect(isOriginAllowed("http://127.0.0.1:7400", t)).toBe(true);
   });
 });
+
+describe("specific IPv6 binds (CTL-1573 round 10)", () => {
+  // Treating only ::/::1 as IPv6-capable dropped the server's OWN address when
+  // bound to a specific global v6 address — 403-ing every legitimate reply.
+  test("a specific global IPv6 bind trusts its own address", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      bindHost: "2001:db8::1",
+    });
+    expect(t.has("http://[2001:db8::1]:7400")).toBe(true);
+  });
+
+  test("a bracketed specific IPv6 bind behaves identically", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], bindHost: "[2001:db8::1]" });
+    expect(t.has("http://[2001:db8::1]:7400")).toBe(true);
+  });
+
+  test("a specific IPv6 bind does not trust IPv4 loopback or other v6 addresses", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: ["[2001:db8::1]", "[2001:db8::9]", "192.168.1.50"],
+      bindHost: "2001:db8::1",
+    });
+    expect(t.has("http://[2001:db8::1]:7400")).toBe(true);
+    expect(t.has("http://[2001:db8::9]:7400")).toBe(false);
+    expect(t.has("http://192.168.1.50:7400")).toBe(false);
+    expect(t.has("http://127.0.0.1:7400")).toBe(false);
+  });
+});
