@@ -186,26 +186,66 @@ export function getStats() {
 // modest, but an unbounded buffer (the whole-month backlog read on a cold
 // start, or a large DLQ replay) can build a request body big enough for the
 // collector to reject outright, which sends the entire batch to the DLQ.
-// `size` is floored at 1 because a 0 would splice nothing and loop forever.
+//
+// TERMINATION: this loop shrinks `buf` only via splice(0, chunkSize), so
+// chunkSize MUST be a finite integer >= 1. loadForwarderConfig() spreads raw
+// JSON over the defaults with no runtime validation, so a config carrying
+// `"batchSize": "bad"` (or null, or 0) reaches here unvalidated — and
+// splice(0, NaN) coerces to splice(0, 0), removing nothing and spinning this
+// loop forever on the first buffered event, wedging the daemon. Normalizing
+// here (not only at the call site) keeps the function total for every caller.
 export function drainInChunks(buf: CanonicalEvent[], size: number): CanonicalEvent[][] {
-  const chunkSize = Math.max(1, size);
+  const n = Math.floor(Number(size));
+  const chunkSize = Number.isFinite(n) && n >= 1 ? n : 1;
   const chunks: CanonicalEvent[][] = [];
   while (buf.length > 0) chunks.push(buf.splice(0, chunkSize));
   return chunks;
 }
 
+// Send one destination's buffer as bounded, SEQUENTIAL requests.
+//
+// Sequential is load-bearing, not stylistic. Each sender.flush() ends with
+// drainDlqBounded(), which snapshots that destination's DLQ file, awaits
+// network delivery, then rewrites or unlinks it — with no locking. Firing the
+// chunks concurrently would put N unsynchronized drains on the same file, so a
+// stale snapshot could replay batches already delivered or clobber entries a
+// sibling drain had just written. Chunking a single flush into N requests is
+// exactly what introduced that hazard, so the chunks are awaited in order.
+//
+// Destinations still run concurrently with each other (see flush) — they own
+// separate DLQ files, so there is no shared state between them.
+export async function flushDestination(
+  sender: { flush(batch: CanonicalEvent[]): Promise<void> } | null | undefined,
+  buf: CanonicalEvent[],
+  batchSize: number
+): Promise<void> {
+  if (!sender || buf.length === 0) return;
+  for (const batch of drainInChunks(buf, batchSize)) {
+    await sender.flush(batch);
+  }
+}
+
+// Re-entrancy guard: setInterval(flush, FLUSH_MS) fires on a fixed cadence and
+// does NOT await the previous flush, so a flush slower than FLUSH_MS would
+// overlap with the next tick — reintroducing the concurrent-DLQ-drain hazard
+// across cycles that flushDestination prevents within one. Chunking makes a
+// long flush materially more likely (N sequential requests plus their drains),
+// so the guard is required for the serialization above to actually hold.
+// Skipping a tick is safe: the buffer is not drained, so the next tick sends it.
+let flushing = false;
+
 async function flush(): Promise<void> {
-  const tasks: Promise<void>[] = [];
-  if (senders.otlp && buffers.otlp.length > 0) {
-    for (const batch of drainInChunks(buffers.otlp, cfg.otlp.batchSize)) tasks.push(senders.otlp.flush(batch));
+  if (flushing) return;
+  flushing = true;
+  try {
+    await Promise.allSettled([
+      flushDestination(senders.otlp, buffers.otlp, cfg.otlp.batchSize),
+      flushDestination(senders.posthog, buffers.posthog, cfg.posthog.batchSize),
+      flushDestination(senders.cae, buffers.cae, cfg.cloudflareAE.batchSize),
+    ]);
+  } finally {
+    flushing = false;
   }
-  if (senders.posthog && buffers.posthog.length > 0) {
-    for (const batch of drainInChunks(buffers.posthog, cfg.posthog.batchSize)) tasks.push(senders.posthog.flush(batch));
-  }
-  if (senders.cae && buffers.cae.length > 0) {
-    for (const batch of drainInChunks(buffers.cae, cfg.cloudflareAE.batchSize)) tasks.push(senders.cae.flush(batch));
-  }
-  await Promise.allSettled(tasks);
 }
 
 if (import.meta.main) {

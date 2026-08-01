@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTailer } from "./lib/tail.ts";
 import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
-import { computeLagMs, buildLagEvent, drainInChunks } from "./index.ts";
+import { computeLagMs, buildLagEvent, drainInChunks, flushDestination } from "./index.ts";
 
 describe("computeLagMs (CTL-1060 Phase 3)", () => {
   test("returns ms delta between localNewestTs and lastForwardedTs", () => {
@@ -236,5 +236,69 @@ describe("drainInChunks (CTL-1597 — honor batchSize on every flush)", () => {
     // A 0 would splice(0, 0) -> empty chunk -> buffer never shrinks -> infinite loop.
     expect(drainInChunks(buffer(3), 0).map((c) => c.length)).toEqual([1, 1, 1]);
     expect(drainInChunks(buffer(3), -5).map((c) => c.length)).toEqual([1, 1, 1]);
+  });
+
+  // loadForwarderConfig() spreads raw JSON over the defaults without validating
+  // it, so these reach drainInChunks unsanitized. Each one made splice(0, size)
+  // a no-op, spinning the while-loop forever and wedging the daemon.
+  test("terminates on a nonnumeric / non-finite batchSize instead of spinning forever", () => {
+    for (const bad of ["bad", null, undefined, NaN, Infinity, -Infinity, {}]) {
+      const chunks = drainInChunks(buffer(3), bad as unknown as number);
+      expect(chunks.map((c) => c.length)).toEqual([1, 1, 1]);
+    }
+  });
+
+  test("truncates a fractional batchSize to a whole number of events", () => {
+    expect(drainInChunks(buffer(5), 2.7).map((c) => c.length)).toEqual([2, 2, 1]);
+  });
+});
+
+describe("flushDestination (CTL-1597 — serialize chunk flushes per destination)", () => {
+  const buffer = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ marker: i })) as unknown as Parameters<
+      typeof drainInChunks
+    >[0];
+
+  // Each sender.flush() ends with an unlocked drainDlqBounded() over that
+  // destination's DLQ file, so two in flight at once can replay or clobber
+  // entries. This asserts the chunks never overlap.
+  test("never runs two flushes concurrently for one destination", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const sender = {
+      async flush() {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 1));
+        inFlight--;
+      },
+    };
+    await flushDestination(sender, buffer(250), 100);
+    expect(maxInFlight).toBe(1);
+  });
+
+  test("delivers every chunk, in order, each within batchSize", async () => {
+    const seen: number[][] = [];
+    const sender = {
+      async flush(batch: unknown[]) {
+        seen.push((batch as { marker: number }[]).map((e) => e.marker));
+      },
+    };
+    await flushDestination(sender as never, buffer(250), 100);
+    expect(seen.map((c) => c.length)).toEqual([100, 100, 50]);
+    expect(seen.flat()).toEqual(Array.from({ length: 250 }, (_, i) => i));
+  });
+
+  test("is a no-op for an empty buffer or an absent sender", async () => {
+    let calls = 0;
+    const sender = { async flush() { calls++; } };
+    await flushDestination(sender, buffer(0), 100);
+    await flushDestination(undefined, buffer(5), 100);
+    expect(calls).toBe(0);
+  });
+
+  test("propagates a sender failure without swallowing it", async () => {
+    const sender = { async flush() { throw new Error("boom"); } };
+    await expect(flushDestination(sender, buffer(5), 100)).rejects.toThrow("boom");
   });
 });
