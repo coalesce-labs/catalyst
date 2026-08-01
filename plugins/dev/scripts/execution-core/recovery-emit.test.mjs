@@ -26,6 +26,8 @@ const CLI = fileURLToPath(new URL("./recovery-emit.mjs", import.meta.url));
 let catalystDir; // CATALYST_DIR → events land at <catalystDir>/events/YYYY-MM.jsonl
 let orchDir; // --orch-dir → ledger at <orchDir>/.recovery-intents/<ticket>.json
 let captureFile; // the stub comment helper appends "<ticket>\n---\n<body>" here
+let labelStateFile; // CTL-1568: labels the stub linearis has "applied", one set per line
+let linearisCallsFile; // CTL-1568: every stub linearis invocation, one per line
 
 function eventLogPath() {
   const now = new Date();
@@ -62,6 +64,13 @@ function runCli(args, envOverride = {}) {
       CATALYST_DIR: catalystDir,
       CATALYST_COMMENT_POST_HELPER: pathJoin(catalystDir, "stub-comment-post.sh"),
       CATALYST_RECOVERY_PASS: "enforce",
+      // CTL-1568: PATH is pinned to a stub `linearis` FIRST. The shim now applies the
+      // needs-human label, which shells `linearis issues update` + a read-back. With
+      // the real binary on PATH these tests wrote to LIVE Linear — verified: a run of
+      // this suite applied needs-human to the real CTL-520 and CTL-521. Stubbing the
+      // comment helper alone was never enough; the transport is what must be sealed.
+      // Runtime is the tell (seconds ⇒ real network, milliseconds ⇒ stubbed).
+      PATH: `${pathJoin(catalystDir, "bin")}:/usr/bin:/bin`,
       ...envOverride,
     },
   });
@@ -75,6 +84,52 @@ beforeEach(() => {
   const stub = pathJoin(catalystDir, "stub-comment-post.sh");
   writeFileSync(stub, `#!/bin/bash\nprintf '%s\\n---\\n%s\\n' "$1" "$2" >> "${captureFile}"\n`);
   chmodSync(stub, 0o755);
+
+  // CTL-1568: hermetic `linearis` stub — see the PATH note in runCli. Records every
+  // invocation, then serves the two verbs the label path needs:
+  //   issues update … --labels X --label-mode add   → exit 0 (the write)
+  //   issues read <id>                              → the read-back applyLabel
+  //     verifies against; echoes back whatever labels have been "added" so far, so
+  //     applied:true is reached only when the write genuinely preceded it.
+  // Default-exit 1 on any unrecognized verb, so a new shell-out surfaces loudly here
+  // instead of silently reaching the network.
+  mkdirSync(pathJoin(catalystDir, "bin"), { recursive: true });
+  labelStateFile = pathJoin(catalystDir, "linearis-labels.txt");
+  linearisCallsFile = pathJoin(catalystDir, "linearis-calls.txt");
+  const linearisStub = pathJoin(catalystDir, "bin", "linearis");
+  writeFileSync(
+    linearisStub,
+    `#!/bin/bash
+printf '%s\\n' "$*" >> "${linearisCallsFile}"
+if [[ "$1" == "issues" && "$2" == "update" ]]; then
+  for i in "$@"; do prev_is_labels=\${is_labels:-}; done
+  # capture the value following --labels
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--labels" ]]; then printf '%s\\n' "$2" >> "${labelStateFile}"; fi
+    shift
+  done
+  exit 0
+fi
+if [[ "$1" == "issues" && "$2" == "read" ]]; then
+  nodes=""
+  if [[ -f "${labelStateFile}" ]]; then
+    while IFS= read -r line; do
+      IFS=',' read -ra parts <<< "$line"
+      for p in "\${parts[@]}"; do
+        [[ -z "$p" ]] && continue
+        [[ -n "$nodes" ]] && nodes="$nodes,"
+        nodes="$nodes{\\"id\\":\\"id-$p\\",\\"name\\":\\"$p\\"}"
+      done
+    done < "${labelStateFile}"
+  fi
+  printf '{"identifier":"%s","labels":{"nodes":[%s]}}\\n' "$3" "$nodes"
+  exit 0
+fi
+echo "stub linearis: unexpected invocation: $*" >&2
+exit 1
+`,
+  );
+  chmodSync(linearisStub, 0o755);
 });
 
 afterEach(() => {
@@ -222,5 +277,62 @@ describe("recovery-emit escalated — comment surfacing (CTL-1439 P0a)", () => {
     expect(res.status).toBe(0);
     expect(existsSync(captureFile)).toBe(false);
     expect(readLedger("CTL-521").escalated).toBe(true);
+  });
+});
+
+// ─── CTL-1568: the escalation comment and the needs-human LABEL are one act ───
+// Fake ticket ids throughout: the PATH stub seals the transport, but these ids must
+// never name a real ticket even if that seal is one day removed.
+describe("recovery-emit escalated — needs-human label (CTL-1568)", () => {
+  const escalation = JSON.stringify({
+    escalation_type: "decision",
+    problem: "the loop cannot close",
+    call_to_action: "decide whether to keep retrying",
+  });
+  const linearisCalls = () =>
+    existsSync(linearisCallsFile) ? readFileSync(linearisCallsFile, "utf8") : "";
+
+  test("escalated APPLIES needs-human — without it an agent reply cannot return the row", () => {
+    const res = runCli([
+      "escalated", "--ticket", "TST-900", "--orch-dir", orchDir,
+      "--phase", "recovery-pass", "--escalation", escalation,
+    ]);
+    expect(res.status).toBe(0);
+    // the label write actually reached the transport…
+    expect(linearisCalls()).toContain("issues update TST-900 --labels needs-human --label-mode add");
+    // …and the comment is posted, because the label landed
+    expect(readFileSync(captureFile, "utf8")).toContain("TST-900");
+    expect(res.stdout).toContain("needs-human=applied");
+  });
+
+  test("a FAILED label write withholds the comment and raises recovery.escalation.split", () => {
+    // Break only the label write: the stub exits non-zero for `issues update`.
+    writeFileSync(
+      pathJoin(catalystDir, "bin", "linearis"),
+      `#!/bin/bash\nif [[ "$1" == "issues" && "$2" == "update" ]]; then echo "rate limited" >&2; exit 1; fi\nprintf '{"identifier":"%s","labels":{"nodes":[]}}\\n' "$3"\nexit 0\n`,
+    );
+    chmodSync(pathJoin(catalystDir, "bin", "linearis"), 0o755);
+    const res = runCli([
+      "escalated", "--ticket", "TST-901", "--orch-dir", orchDir,
+      "--phase", "recovery-pass", "--escalation", escalation,
+    ]);
+    // O1: exit stays 0 — the skill invokes this as a bare bash call with no
+    // exit-code contract, so a non-zero exit could retry the whole pass.
+    expect(res.status).toBe(0);
+    expect(existsSync(captureFile)).toBe(false); // ← the CTL-1568 defect, fixed
+    expect(readEvents().some((e) => e.attributes?.["event.name"] === "recovery.escalation.split")).toBe(true);
+    // the durable surfaces still landed
+    expect(readEvents().some((e) => e.attributes?.["event.name"] === "recovery.escalated")).toBe(true);
+    expect(readLedger("TST-901").escalated).toBe(true);
+  });
+
+  test("shadow mode writes NEITHER label nor comment", () => {
+    const res = runCli(
+      ["escalated", "--ticket", "TST-902", "--orch-dir", orchDir, "--escalation", escalation],
+      { CATALYST_RECOVERY_PASS: "shadow" },
+    );
+    expect(res.status).toBe(0);
+    expect(linearisCalls()).not.toContain("--labels needs-human");
+    expect(existsSync(captureFile)).toBe(false);
   });
 });
