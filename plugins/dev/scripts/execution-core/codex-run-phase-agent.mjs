@@ -319,9 +319,39 @@ function resolveThoughtsRoot(worktreePath) {
   }
 }
 
+// resolveWorktreeGitDirs — the REAL git metadata paths for a linked worktree.
+// For a linked worktree (every ticket worktree under wt/<TICKET>), `git commit`
+// writes per-worktree state (HEAD, index, index.lock, COMMIT_EDITMSG) under
+// `--absolute-git-dir`, which lives OUTSIDE the worktree tree entirely (in the
+// main checkout's `.git/worktrees/<name>/`) — and updates the object database +
+// refs under `--git-common-dir` (the shared `.git`, also outside the worktree).
+// Neither was previously in the sandbox's writable_roots, so `git commit` inside
+// a codex-exec worktree was refused with a permission error on `index.lock`.
+// Mirrors resolveGitExcludePath's spawnSync-and-fall-through style. Returns
+// { gitDir, commonDir }, either null on any resolution failure — best-effort,
+// never throws.
+function resolveWorktreeGitDirs(worktreePath) {
+  const run = (args) => {
+    try {
+      const res = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+      if (res && res.status === 0 && typeof res.stdout === "string" && res.stdout.trim()) {
+        return res.stdout.trim();
+      }
+    } catch {
+      /* best-effort */
+    }
+    return null;
+  };
+  return {
+    gitDir: run(["rev-parse", "--absolute-git-dir"]),
+    commonDir: run(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+  };
+}
+
 // resolveWritableRoots — the de-duplicated, absolute writable-root set for the
 // `-c sandbox_workspace_write.writable_roots=[…]` override: the configured roots
-// ∪ {orchDir} ∪ {the resolved thoughts real-root of the worktree if present}.
+// ∪ {orchDir} ∪ {the resolved thoughts real-root of the worktree if present}
+// ∪ {the worktree's real git-dir and git-common-dir, for linked worktrees}.
 // Order-preserving; drops non-absolute / empty / duplicate entries.
 function resolveWritableRoots(cfg, { orchDir, worktreePath } = {}) {
   const out = [];
@@ -335,6 +365,9 @@ function resolveWritableRoots(cfg, { orchDir, worktreePath } = {}) {
   for (const r of cfg?.writableRoots ?? []) add(r);
   add(orchDir);
   add(resolveThoughtsRoot(worktreePath));
+  const { gitDir, commonDir } = resolveWorktreeGitDirs(worktreePath);
+  add(gitDir);
+  add(commonDir);
   return out;
 }
 

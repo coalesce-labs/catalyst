@@ -407,6 +407,53 @@ describe("buildCodexArgs", () => {
     expect(args.slice(0, 2)).toEqual(["exec", "--json"]);
     expect(args).not.toContain("resume");
   });
+
+  // CTL-1457 follow-up: for a LINKED worktree (every real ticket worktree), the
+  // actual git-dir (HEAD/index/index.lock) and git-common-dir (object db + refs)
+  // live OUTSIDE the worktree tree entirely — `git commit` there was refused with
+  // a permission error because neither was ever in writable_roots. Uses a real
+  // `git worktree add` (not just `git init`) so `--absolute-git-dir` genuinely
+  // resolves outside `wt`, exercising the actual bug scenario.
+  test("linked worktree → writable_roots includes the real --absolute-git-dir and --git-common-dir (both live outside the worktree tree)", () => {
+    const main = mkdtempSync(join(tmpdir(), "codex-main-"));
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@t.invalid",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@t.invalid",
+    };
+    Bun.spawnSync(["git", "init", "-b", "main"], { cwd: main });
+    Bun.spawnSync(["git", "commit", "--allow-empty", "-m", "init"], { cwd: main, env });
+    // `git worktree add` requires the target path not to already exist yet, so
+    // mkdtemp-then-remove just to mint a unique path (mirrors the mkdtemp pattern
+    // used elsewhere in this file for real-git fixtures).
+    const wt = mkdtempSync(join(tmpdir(), "codex-linked-wt-"));
+    rmSync(wt, { recursive: true, force: true });
+    Bun.spawnSync(["git", "worktree", "add", "-b", "feature", wt], { cwd: main });
+
+    const spec = makeCodexSpec();
+    const args = buildCodexArgs(spec, { ...CFG, writableRoots: [] }, { orchDir: "/ec", worktreePath: wt });
+    const firstC = args.indexOf("-c");
+    const roots = JSON.parse(args[firstC + 1].slice("sandbox_workspace_write.writable_roots=".length));
+
+    const gitDir = Bun.spawnSync(["git", "-C", wt, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" })
+      .stdout.toString()
+      .trim();
+    const commonDir = Bun.spawnSync(
+      ["git", "-C", wt, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { encoding: "utf8" },
+    )
+      .stdout.toString()
+      .trim();
+
+    expect(gitDir.startsWith(wt)).toBe(false); // proves it's genuinely OUTSIDE the worktree tree
+    expect(roots).toContain(gitDir);
+    expect(roots).toContain(commonDir);
+
+    Bun.spawnSync(["git", "worktree", "remove", "--force", wt], { cwd: main });
+    rmSync(main, { recursive: true, force: true });
+  });
 });
 
 // ── buildCodexEnv ───────────────────────────────────────────────────────────
