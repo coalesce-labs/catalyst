@@ -167,6 +167,7 @@ export function selfAddresses() {
  *   addresses?: string[],
  *   devOrigins?: string[] | string | null,
  *   bindHost?: string | null,
+ *   strictLoopback?: boolean,
  * }} opts
  * @returns {Set<string>}
  */
@@ -178,6 +179,7 @@ export function buildTrustedOrigins(opts = {}) {
     addresses,
     devOrigins = null,
     bindHost = null,
+    strictLoopback = false,
   } = opts;
   const out = new Set();
   const boundPort = Number.isFinite(port) ? Number(port) : null;
@@ -207,7 +209,18 @@ export function buildTrustedOrigins(opts = {}) {
   // Unknown bind -> stay permissive rather than 403 a legitimate operator.
   const bindsV4 = bind === "" || isV6Wildcard || !bind.includes(":");
   const bindsV6 = bind === "" || isV6Wildcard || isV6Loopback;
-  const loopback = ["localhost"];
+  // The `localhost` NAME is family-ambiguous: the browser chooses. Under an
+  // IPv4-only bind, a service squatting [::1]:<port> can serve a page whose
+  // Origin is `http://localhost:<port>` and POST to our IPv4 address, so the
+  // name is strictly weaker than the literals above.
+  //
+  // It is trusted by DEFAULT anyway, because dropping it would 403 the single
+  // most common local access path (`http://localhost:7400`) on every IPv4-only
+  // deployment — a certain, universal inertness failure — to close an attack
+  // that first requires an adversary to run code locally and bind that port.
+  // `strictLoopback` is the opt-in for deployments that prefer the opposite
+  // trade; binding dual-stack (`::`) removes the squat window entirely.
+  const loopback = strictLoopback && !(bindsV4 && bindsV6) ? [] : ["localhost"];
   if (bindsV4) loopback.push("127.0.0.1");
   if (bindsV6) loopback.push("[::1]");
   for (const h of loopback) addOwn(h);
@@ -232,8 +245,14 @@ export function buildTrustedOrigins(opts = {}) {
   const bonjour = hostnames === undefined ? bonjourName() : null;
   if (bonjour !== null) addOwn(bonjour.endsWith(".local") ? bonjour : `${bonjour}.local`);
 
-  // This machine's own IPs (LAN, Tailscale 100.x).
-  for (const addr of addresses ?? selfAddresses()) addOwn(addr);
+  // This machine's own IPs (LAN, Tailscale 100.x), filtered to the bound family
+  // for the same reason as the loopback literals: with an IPv4-only bind we do
+  // not own this port in the v6 space, so another service could bind an IPv6
+  // interface address there and its origin would otherwise be trusted.
+  for (const addr of addresses ?? selfAddresses()) {
+    const isV6 = addr.startsWith("[");
+    if (isV6 ? bindsV6 : bindsV4) addOwn(addr);
+  }
 
   const split = (v) =>
     typeof v === "string" ? v.split(/[,\s]+/) : Array.isArray(v) ? v : [];

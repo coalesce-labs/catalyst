@@ -341,3 +341,76 @@ describe("loopback family follows the bound address (CTL-1573 round 7)", () => {
     expect(t.has("http://[::1]:7400")).toBe(true);
   });
 });
+
+describe("self-addresses follow the bound family (CTL-1573 round 8)", () => {
+  const ADDRS = ["192.168.1.50", "[fe80::1]", "100.65.193.30", "[2001:db8::5]"];
+
+  test("an IPv4-only bind does not trust this host's IPv6 interface origins", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: ADDRS,
+      bindHost: "0.0.0.0",
+    });
+    expect(t.has("http://192.168.1.50:7400")).toBe(true);
+    expect(t.has("http://100.65.193.30:7400")).toBe(true);
+    expect(t.has("http://[fe80::1]:7400")).toBe(false);
+    expect(t.has("http://[2001:db8::5]:7400")).toBe(false);
+  });
+
+  test("a dual-stack bind trusts both families", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: ADDRS,
+      bindHost: "::",
+    });
+    expect(t.has("http://192.168.1.50:7400")).toBe(true);
+    expect(t.has("http://[2001:db8::5]:7400")).toBe(true);
+  });
+
+  test("an IPv6-only bind does not trust this host's IPv4 interface origins", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: ADDRS,
+      bindHost: "::1",
+    });
+    expect(t.has("http://[2001:db8::5]:7400")).toBe(true);
+    expect(t.has("http://192.168.1.50:7400")).toBe(false);
+  });
+});
+
+describe("strictLoopback opt-in (CTL-1573 round 8)", () => {
+  // `localhost` is family-ambiguous, so under a single-family bind a squatter on
+  // the other family can serve a page whose Origin is http://localhost:<port>.
+  // Trusted by default (dropping it would 403 the commonest local path); this
+  // is the lever for deployments that prefer the stricter trade.
+  test("default trusts the localhost name", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: [], addresses: [], bindHost: "0.0.0.0" });
+    expect(t.has("http://localhost:7400")).toBe(true);
+  });
+
+  test("strict drops the ambiguous name under a single-family bind", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: [],
+      bindHost: "0.0.0.0",
+      strictLoopback: true,
+    });
+    expect(t.has("http://localhost:7400")).toBe(false);
+    expect(t.has("http://127.0.0.1:7400")).toBe(true); // the literal is unambiguous
+  });
+
+  test("strict keeps the name on a dual-stack bind (no squat window)", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: [],
+      addresses: [],
+      bindHost: "::",
+      strictLoopback: true,
+    });
+    expect(t.has("http://localhost:7400")).toBe(true);
+  });
+});
