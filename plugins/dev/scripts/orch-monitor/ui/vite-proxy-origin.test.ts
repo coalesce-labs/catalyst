@@ -52,7 +52,14 @@ describe("shouldRewriteOrigin", () => {
 // sends /api to an address the monitor is not listening on and fails before the
 // Origin guard is even reached.
 describe("monitorOrigin", () => {
-  const withEnv = async (env: Record<string, string | undefined>) => {
+  // Every key is explicitly set or cleared, so an ambient MONITOR_PORT/HOST on
+  // the developer's or runner's shell cannot leak into these assertions.
+  const withEnv = async (partial: Record<string, string | undefined>) => {
+    const env: Record<string, string | undefined> = {
+      MONITOR_HOST: undefined,
+      MONITOR_PORT: undefined,
+      ...partial,
+    };
     const prev: Record<string, string | undefined> = {};
     for (const [k, v] of Object.entries(env)) {
       prev[k] = process.env[k];
@@ -77,10 +84,13 @@ describe("monitorOrigin", () => {
     );
   });
 
-  test("maps a wildcard bind to the loopback of that family", async () => {
-    expect(await withEnv({ MONITOR_HOST: "0.0.0.0" })).toBe("http://127.0.0.1:7400");
-    expect(await withEnv({ MONITOR_HOST: "::" })).toBe("http://[::1]:7400");
-    expect(await withEnv({ MONITOR_HOST: "::0" })).toBe("http://[::1]:7400");
+  test("maps every wildcard spelling to the loopback of that family", async () => {
+    for (const v4 of ["0.0.0.0", "0", "0.0", "0.0.0", "00", "0x0"]) {
+      expect(await withEnv({ MONITOR_HOST: v4 })).toBe("http://127.0.0.1:7400");
+    }
+    for (const v6 of ["::", "::0", "0:0:0:0:0:0:0:0"]) {
+      expect(await withEnv({ MONITOR_HOST: v6 })).toBe("http://[::1]:7400");
+    }
   });
 
   test("follows a specific host and port", async () => {

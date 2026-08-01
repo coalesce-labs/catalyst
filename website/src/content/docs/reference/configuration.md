@@ -612,6 +612,11 @@ Trusted **by default**, all qualified with the port the server actually bound:
 MONITOR_HOST=:: catalyst-monitor restart   # `start` no-ops when a monitor is already running
 ```
 
+> **Dev-server note.** A prefix assignment (`MONITOR_HOST=:: catalyst-monitor restart`) exists only
+> for that command. `bun run dev:ui` is a separate process, so **export** `MONITOR_HOST` (and
+> `MONITOR_PORT`) in the shell that runs it, or the Vite proxy will target the default `127.0.0.1:7400`
+> instead of the monitor's actual bind.
+
 > **Management-CLI gap (CTL-1599).** `catalyst-monitor.sh` still prints, opens, and health-probes
 > `http://localhost:$PORT` regardless of `MONITOR_HOST`, so a specific non-loopback bind will show a
 > wrong URL and a failing probe even when the monitor is healthy. Wiring the CLI through is tracked
@@ -620,7 +625,7 @@ MONITOR_HOST=:: catalyst-monitor restart   # `start` no-ops when a monitor is al
 | Env var | Default | Notes |
 | ------- | ------- | ----- |
 | `MONITOR_HOST` | `0.0.0.0` | Bind address. `::` binds dual-stack (accepts IPv4-mapped too) and is the remedy above. A **specific** address or hostname narrows the allowlist to that socket only — the monitor stops trusting other local interfaces and this host's own names, since it no longer owns those sockets. (binding `0.0.0.0` is IPv4-only, so `[::1]` is not trusted: another service can bind `[::1]` on the same port and its origin would otherwise pass)
-- this machine's own names, **wildcard binds only** (a name resolves to whichever interface DNS/mDNS picks, which need not be the one a specific bind listens on) — `os.hostname()` and its short label, plus the **actual** mDNS name on macOS (`scutil --get LocalHostName`). A `<short>.local` alias is **not** synthesized: when it is not the name the system really advertises, nothing owns it, so any LAN host could claim it over mDNS and pass the guard.
+- this machine's own names, **wildcard binds only** (the bare label of an FQDN is included so `http://mini:7400` works when `os.hostname()` is `mini.corp.example`; this trusts whatever that label resolves to, so on a network where a search domain or stale record maps it elsewhere, prefer a specific bind or an explicit `MONITOR_TRUSTED_ORIGINS`) (a name resolves to whichever interface DNS/mDNS picks, which need not be the one a specific bind listens on) — `os.hostname()` and its short label, plus the **actual** mDNS name on macOS (`scutil --get LocalHostName`). A `<short>.local` alias is **not** synthesized: when it is not the name the system really advertises, nothing owns it, so any LAN host could claim it over mDNS and pass the guard.
 - this machine's own non-loopback addresses (LAN, Tailscale `100.x`) — but **only for a wildcard bind** (`0.0.0.0`/`::`). A server bound to one specific address trusts only that address, since another service can hold the same port on a different interface
 
 Own names are trusted **only on the bound port, and only under the scheme the monitor serves

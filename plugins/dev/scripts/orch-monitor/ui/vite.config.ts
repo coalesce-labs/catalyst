@@ -20,12 +20,20 @@ const DEV_PORT = 5173;
 function monitorOrigin(): string {
   const port = Number(process.env.MONITOR_PORT) || 7400;
   const raw = (process.env.MONITOR_HOST ?? "").trim().replace(/^\[|\]$/g, "");
+  // Wildcards are not connectable, so they map to the loopback of their family.
+  // Must accept the SAME spellings the monitor's allowlist treats as wildcards
+  // (`0`, `0.0`, `0.0.0`, `00`, `0x0`, `::`, `::0`, ...), or dev proxies to an
+  // unreachable origin such as http://0:7400.
+  const isV6 = raw.includes(":");
+  const isV4Wildcard =
+    !isV6 && raw !== "" && raw.split(".").length <= 4 &&
+    raw.split(".").every((p) => p !== "" && Number(p) === 0);
   const host =
-    raw === "" || raw === "0.0.0.0"
+    raw === "" || isV4Wildcard
       ? "127.0.0.1"
-      : /^[0:]+$/.test(raw) // any IPv6 wildcard spelling
+      : isV6 && /^[0:]+$/.test(raw) // any IPv6 wildcard spelling
         ? "[::1]"
-        : raw.includes(":")
+        : isV6
           ? `[${raw}]`
           : raw;
   return `http://${host}:${port}`;

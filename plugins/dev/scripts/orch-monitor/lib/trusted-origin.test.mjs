@@ -601,3 +601,25 @@ describe("IPv4 wildcard spellings and the loopback range (CTL-1573 round 15)", (
     expect(isOriginAllowed("http://127.0.0.2:7400", t)).toBe(false);
   });
 });
+
+describe("exotic IPv4 wildcard spellings (CTL-1573 round 16)", () => {
+  for (const spelling of ["00", "0x0", "0.00.0.0"]) {
+    test(`"${spelling}" is recognized as the IPv4 wildcard`, () => {
+      const t = buildTrustedOrigins({
+        port: 7400,
+        hostnames: ["mini"],
+        addresses: [],
+        bindHost: spelling,
+      });
+      expect(t.has("http://mini:7400")).toBe(true);
+      expect(t.has("http://127.0.0.1:7400")).toBe(true);
+    });
+  }
+
+  test("a real address is still specific", () => {
+    const t = buildTrustedOrigins({ port: 7400, hostnames: ["mini"], bindHost: "10.0.0.1" });
+    expect(t.has("http://10.0.0.1:7400")).toBe(true);
+    expect(t.has("http://mini:7400")).toBe(false);
+    expect(t.has("http://127.0.0.1:7400")).toBe(false);
+  });
+});

@@ -38,6 +38,22 @@ const DEFAULT_SCHEME = "http";
 // collide with a real origin key, which is always `scheme://host[:port]`.
 const LOOPBACK_V4_MARKER = "\u0000loopback-v4:"; // the monitor serves plaintext; TLS is a front-end concern
 
+/**
+ * Is `bind` some spelling of the IPv4 unspecified address (0.0.0.0)?
+ *
+ * Bun accepts short and non-decimal forms — `0`, `0.0`, `0.0.0`, `00`, `0x0` —
+ * and they are all the wildcard. Classifying one as SPECIFIC is the damaging
+ * direction: the specific-bind branches then keep only the unusable
+ * `http://0.0.0.0:<port>` origin and 403 every reachable one. Parsed
+ * numerically rather than pattern-matched so new spellings cannot slip through.
+ */
+function isUnspecifiedV4(bind) {
+  if (bind === "" || bind.includes(":")) return false;
+  const parts = bind.split(".");
+  if (parts.length > 4) return false;
+  return parts.every((p) => p !== "" && Number(p) === 0);
+}
+
 /** Canonical origin key for a full origin string, or null. */
 function originKey(value) {
   if (typeof value !== "string") return null;
@@ -236,7 +252,7 @@ export function buildTrustedOrigins(opts = {}) {
   // Bun accepts short IPv4 wildcard spellings too — `0`, `0.0`, `0.0.0` are all
   // 0.0.0.0. An exact comparison called them SPECIFIC, which then kept only the
   // unusable unspecified-address origin and 403'd every real one.
-  const isV4Wildcard = /^0(\.0){0,3}$/.test(bind);
+  const isV4Wildcard = isUnspecifiedV4(bind);
   const isWildcardBind = bind === "" || isV4Wildcard || isV6Wildcard;
   const normalizeAddr = (a) => String(a ?? "").trim().toLowerCase().replace(/^\[|\]$/g, "");
   // Unknown bind -> stay permissive rather than 403 a legitimate operator.
