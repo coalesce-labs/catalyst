@@ -17,6 +17,8 @@ import {
   maybeResetForResolveConflictCycle,
   defaultEscalateCapExhausted,
   defaultCollectResolveConflictCompletions,
+  defaultCollectResolveConflictFailures,
+  defaultRevertStallAndResetCycle,
   runResolveConflictSweepPass,
   emitResolveConflictEvent,
   RESOLVE_CONFLICT_SWEEP_EVENT_TYPES,
@@ -720,11 +722,221 @@ describe("defaultCollectResolveConflictCompletions", () => {
   });
 });
 
+// #1461 escalation-gap fix (final-review follow-up, not an automated reviewer
+// this time): defaultCollectResolveConflictCompletions ONLY ever recognized
+// status:"done" — a status:"failed" phase-resolve-conflict.json was invisible
+// to every collector, so the ticket's RESOLVED_MARKER_REASON marker never
+// reverted after a genuine failure and the ticket silently fell out of
+// candidacy forever, no matter how high the (correctly-incrementing) cap
+// counter climbed. This describe block covers the new failure census.
+describe("defaultCollectResolveConflictFailures (#1461 escalation-gap fix)", () => {
+  function fakeFs({ workerDirs, files }) {
+    return {
+      readdirSync: (p, opts) => (opts?.withFileTypes ? (workerDirs[p] ?? []).map((n) => ({ name: n, isDirectory: () => true })) : (files[p] ?? [])),
+      readFileSync: (p) => { if (!(p in files)) throw new Error(`ENOENT: ${p}`); return files[p]; },
+    };
+  }
+
+  test("finds a ticket whose resolve-conflict phase FAILED, the brief names the stalled phase, and that phase is still marked resolving", () => {
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["CTL-1"] },
+      files: {
+        "/orch/workers/CTL-1": ["phase-resolve-conflict.json", "resolve-conflict-brief.json", "phase-implement.json"],
+        "/orch/workers/CTL-1/phase-resolve-conflict.json": JSON.stringify({ status: "failed" }),
+        "/orch/workers/CTL-1/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+        "/orch/workers/CTL-1/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_resolvable" }),
+      },
+    });
+    const out = defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs });
+    expect(out).toEqual([{ ticket: "CTL-1", stalledPhase: "implement", workerDir: "/orch/workers/CTL-1" }]);
+  });
+
+  test("skips a ticket whose resolve-conflict phase is 'done' (that's the completions collector's job, not this one)", () => {
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["CTL-1"] },
+      files: {
+        "/orch/workers/CTL-1": ["phase-resolve-conflict.json", "resolve-conflict-brief.json", "phase-implement.json"],
+        "/orch/workers/CTL-1/phase-resolve-conflict.json": JSON.stringify({ status: "done" }),
+        "/orch/workers/CTL-1/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+        "/orch/workers/CTL-1/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_resolvable" }),
+      },
+    });
+    expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs })).toEqual([]);
+  });
+
+  // Safety-critical (c): an actually in-flight run must NEVER be touched by the
+  // new failure-handling path — proven here at the collector level, since the
+  // collector is what feeds the driver's failures sub-pass.
+  for (const inFlightStatus of ["dispatched", "running"]) {
+    test(`skips a ticket whose resolve-conflict phase is '${inFlightStatus}' (actually in flight — never touched)`, () => {
+      const fs = fakeFs({
+        workerDirs: { "/orch/workers": ["CTL-2"] },
+        files: {
+          "/orch/workers/CTL-2": ["phase-resolve-conflict.json", "resolve-conflict-brief.json", "phase-implement.json"],
+          "/orch/workers/CTL-2/phase-resolve-conflict.json": JSON.stringify({ status: inFlightStatus }),
+          "/orch/workers/CTL-2/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+          "/orch/workers/CTL-2/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_resolvable" }),
+        },
+      });
+      expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs })).toEqual([]);
+    });
+  }
+
+  test("skips a ticket with no resolve-conflict signal at all", () => {
+    const fs = fakeFs({ workerDirs: { "/orch/workers": ["CTL-3"] }, files: { "/orch/workers/CTL-3": ["phase-implement.json"] } });
+    expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs })).toEqual([]);
+  });
+
+  test("skips a failed signal with no brief — cannot know which phase to act on", () => {
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["CTL-4"] },
+      files: {
+        "/orch/workers/CTL-4": ["phase-resolve-conflict.json"],
+        "/orch/workers/CTL-4/phase-resolve-conflict.json": JSON.stringify({ status: "failed" }),
+      },
+    });
+    expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs })).toEqual([]);
+  });
+
+  // Idempotence guard — mirrors defaultCollectResolveConflictCompletions's own
+  // Fix-1 guard exactly, so the SAME failure is not re-collected forever once
+  // this sweep's failure-handling path has acted on it (reverted or escalated).
+  describe("idempotence guard", () => {
+    function filesFor(stalledSignalRaw) {
+      const files = {
+        "/orch/workers/CTL-1": ["phase-resolve-conflict.json", "resolve-conflict-brief.json", "phase-implement.json"],
+        "/orch/workers/CTL-1/phase-resolve-conflict.json": JSON.stringify({ status: "failed" }),
+        "/orch/workers/CTL-1/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+      };
+      if (stalledSignalRaw !== undefined) {
+        files["/orch/workers/CTL-1/phase-implement.json"] = JSON.stringify(stalledSignalRaw);
+      }
+      return files;
+    }
+
+    test("(a) a failure is collected once when the stalled phase is still marked RESOLVED_MARKER_REASON", () => {
+      const fs = fakeFs({
+        workerDirs: { "/orch/workers": ["CTL-1"] },
+        files: filesFor({ status: "stalled", failureReason: "source_conflict_resolvable" }),
+      });
+      expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs }))
+        .toEqual([{ ticket: "CTL-1", stalledPhase: "implement", workerDir: "/orch/workers/CTL-1" }]);
+    });
+
+    test("(b) NOT re-collected once the stalled-phase reason has been reverted back to RESOLVE_CONFLICT_STALL_REASON (simulates defaultRevertStallAndResetCycle having run)", () => {
+      const fs = fakeFs({
+        workerDirs: { "/orch/workers": ["CTL-1"] },
+        files: filesFor({ status: "stalled", failureReason: RESOLVE_CONFLICT_STALL_REASON }),
+      });
+      expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs })).toEqual([]);
+    });
+
+    test("(c) NOT re-collected once escalated (CAP_EXHAUSTED_REASON)", () => {
+      const fs = fakeFs({
+        workerDirs: { "/orch/workers": ["CTL-1"] },
+        files: filesFor({ status: "stalled", failureReason: CAP_EXHAUSTED_REASON }),
+      });
+      expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs })).toEqual([]);
+    });
+
+    test("(d) NOT re-collected once the stalled-phase signal file is gone entirely", () => {
+      const files = filesFor(undefined);
+      const fs = fakeFs({ workerDirs: { "/orch/workers": ["CTL-1"] }, files });
+      expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs })).toEqual([]);
+    });
+  });
+});
+
+describe("defaultRevertStallAndResetCycle (#1461 escalation-gap fix)", () => {
+  const orchDir = "/orch";
+  const ticket = "CTL-1";
+  const workerDir = `${orchDir}/workers/${ticket}`;
+
+  test("reverts failureReason from RESOLVED_MARKER_REASON back to RESOLVE_CONFLICT_STALL_REASON, preserves other fields", () => {
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-implement.json`]: JSON.stringify({ status: "stalled", failureReason: RESOLVED_MARKER_REASON, bg_job_id: "abc123" }),
+    });
+    const ok = defaultRevertStallAndResetCycle(orchDir, ticket, "implement", deps);
+    expect(ok).toBe(true);
+    const written = JSON.parse(files[`${workerDir}/phase-implement.json`]);
+    expect(written.status).toBe("stalled");
+    expect(written.failureReason).toBe(RESOLVE_CONFLICT_STALL_REASON);
+    expect(written.bg_job_id).toBe("abc123"); // untouched
+  });
+
+  test("reverts the legacy stalledReason field the same way", () => {
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-implement.json`]: JSON.stringify({ status: "stalled", stalledReason: RESOLVED_MARKER_REASON }),
+    });
+    defaultRevertStallAndResetCycle(orchDir, ticket, "implement", deps);
+    expect(JSON.parse(files[`${workerDir}/phase-implement.json`]).stalledReason).toBe(RESOLVE_CONFLICT_STALL_REASON);
+  });
+
+  // REUSES maybeResetForResolveConflictCycle verbatim: the stale terminal
+  // phase-resolve-conflict.json (+ brief + claim tombstones/progress marker) is
+  // cleared in the same call, so a later re-classification doesn't immediately
+  // hit phase-agent-dispatch's own idempotency no-op.
+  test("also clears the stale terminal phase-resolve-conflict.json + brief + claim tombstone via the existing cycle-reset logic", () => {
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-implement.json`]: JSON.stringify({ status: "stalled", failureReason: RESOLVED_MARKER_REASON }),
+      [`${workerDir}/phase-resolve-conflict.json`]: JSON.stringify({ status: "failed", generation: 1 }),
+      [`${workerDir}/resolve-conflict-brief.json`]: JSON.stringify({ stalledPhase: "implement", attempt: 1 }),
+      [`${workerDir}/resolve-conflict.claim.1`]: "{}",
+      [`${workerDir}/.progress-resolve-conflict`]: "3",
+    });
+    const ok = defaultRevertStallAndResetCycle(orchDir, ticket, "implement", deps);
+    expect(ok).toBe(true);
+    expect(`${workerDir}/phase-resolve-conflict.json` in files).toBe(false);
+    expect(`${workerDir}/resolve-conflict-brief.json` in files).toBe(false);
+    expect(`${workerDir}/resolve-conflict.claim.1` in files).toBe(false);
+    expect(`${workerDir}/.progress-resolve-conflict` in files).toBe(false);
+  });
+
+  test("malformed original signal JSON returns false instead of throwing, and never touches the reset", () => {
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-implement.json`]: "{not valid json",
+      [`${workerDir}/phase-resolve-conflict.json`]: JSON.stringify({ status: "failed" }),
+    });
+    expect(() => defaultRevertStallAndResetCycle(orchDir, ticket, "implement", deps)).not.toThrow();
+    const ok = defaultRevertStallAndResetCycle(orchDir, ticket, "implement", deps);
+    expect(ok).toBe(false);
+    // The step-1 revert failed, so the reset (step 2) is skipped — the stale
+    // signal is left exactly as it was, for the next tick to retry cleanly.
+    expect(`${workerDir}/phase-resolve-conflict.json` in files).toBe(true);
+  });
+
+  // Safety-critical (c): even if this function were ever reached for a
+  // genuinely in-flight resolve-conflict run (it shouldn't be — the failures
+  // collector's status:"failed" filter is the real guarantee), the cycle-reset
+  // it reuses (maybeResetForResolveConflictCycle) independently refuses to
+  // touch a dispatched/running signal. Proven directly here for defense in depth.
+  test("never touches an in-flight ('running') phase-resolve-conflict.json, even if reached", () => {
+    const runningSignal = JSON.stringify({ status: "running", generation: 1 });
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-implement.json`]: JSON.stringify({ status: "stalled", failureReason: RESOLVED_MARKER_REASON }),
+      [`${workerDir}/phase-resolve-conflict.json`]: runningSignal,
+    });
+    defaultRevertStallAndResetCycle(orchDir, ticket, "implement", deps);
+    expect(files[`${workerDir}/phase-resolve-conflict.json`]).toBe(runningSignal);
+  });
+});
+
 describe("runResolveConflictSweepPass", () => {
   test("mode 'off' skips everything, no census called", () => {
     const collectCandidates = () => { throw new Error("must not be called"); };
     const report = runResolveConflictSweepPass({ mode: "off", collectCandidates });
-    expect(report).toEqual({ marked: [], wouldMark: [], escalated: [], wouldEscalate: [], cleared: [], wouldClear: [], skipped: [], failed: [] });
+    expect(report).toEqual({
+      marked: [],
+      wouldMark: [],
+      escalated: [],
+      wouldEscalate: [],
+      cleared: [],
+      wouldClear: [],
+      retried: [],
+      wouldRetry: [],
+      skipped: [],
+      failed: [],
+    });
   });
 
   test("shadow mode classifies and emits would-mark, takes no action", async () => {
@@ -846,6 +1058,125 @@ describe("runResolveConflictSweepPass", () => {
     });
     expect(report.marked).toEqual([]);
     expect(report.failed).toEqual([]);
+  });
+
+  // #1461 escalation-gap fix: the failures sub-pass. A status:"failed"
+  // phase-resolve-conflict.json is a NEW, parallel path — never clearStall
+  // (which would let the original phase redispatch fresh with no memory of the
+  // failed attempt, silently discarding the failure without ever checking the
+  // cap).
+  describe("failures sub-pass (#1461 escalation-gap fix)", () => {
+    test("(a) UNDER the cap: reverts the original stall + resets the stale cycle via revertStallAndResetCycle, does NOT escalate", async () => {
+      const reverted = [];
+      const report = await runResolveConflictSweepPass({
+        mode: "enforce",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => [{ ticket: "CTL-1", stalledPhase: "implement", workerDir: "/w" }],
+        cycleCountOf: () => RESOLVE_CONFLICT_CYCLE_CAP - 1, // under the cap
+        revertStallAndResetCycle: (f) => { reverted.push(f); return true; },
+        escalateCapExhausted: () => { throw new Error("must not escalate — under the cap"); },
+        emit: async () => true,
+      });
+      expect(report.retried).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+      expect(report.escalated).toEqual([]);
+      expect(reverted).toEqual([{ ticket: "CTL-1", stalledPhase: "implement" }]);
+    });
+
+    test("(b) AT the cap: escalates via escalateCapExhausted instead of reverting", async () => {
+      const escalated = [];
+      const report = await runResolveConflictSweepPass({
+        mode: "enforce",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => [{ ticket: "CTL-2", stalledPhase: "verify", workerDir: "/w2" }],
+        cycleCountOf: () => RESOLVE_CONFLICT_CYCLE_CAP, // at the cap
+        revertStallAndResetCycle: () => { throw new Error("must not revert — at/over the cap"); },
+        escalateCapExhausted: (c) => { escalated.push(c); return true; },
+        emit: async () => true,
+      });
+      expect(report.escalated).toEqual([{ ticket: "CTL-2", phase: "verify" }]);
+      expect(report.retried).toEqual([]);
+      expect(escalated).toEqual([{ ticket: "CTL-2", phase: "verify", workerDir: "/w2", cycleCount: RESOLVE_CONFLICT_CYCLE_CAP }]);
+    });
+
+    test("OVER the cap also escalates (not just exactly-at)", async () => {
+      const escalated = [];
+      const report = await runResolveConflictSweepPass({
+        mode: "enforce",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => [{ ticket: "CTL-3", stalledPhase: "implement", workerDir: "/w3" }],
+        cycleCountOf: () => RESOLVE_CONFLICT_CYCLE_CAP + 5,
+        revertStallAndResetCycle: () => { throw new Error("must not revert — over the cap"); },
+        escalateCapExhausted: (c) => { escalated.push(c); return true; },
+        emit: async () => true,
+      });
+      expect(report.escalated).toEqual([{ ticket: "CTL-3", phase: "implement" }]);
+    });
+
+    test("shadow mode emits would-retry for an under-cap failure, takes no action", async () => {
+      const emitted = [];
+      const report = await runResolveConflictSweepPass({
+        mode: "shadow",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => [{ ticket: "CTL-1", stalledPhase: "implement", workerDir: "/w" }],
+        cycleCountOf: () => 0,
+        revertStallAndResetCycle: () => { throw new Error("must not be called in shadow"); },
+        emit: (type) => emitted.push(type),
+      });
+      expect(report.wouldRetry).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+      expect(emitted).toContain("resolve-conflict.would.retry");
+    });
+
+    test("shadow mode emits would-escalate for an at-cap failure, takes no action", async () => {
+      const emitted = [];
+      const report = await runResolveConflictSweepPass({
+        mode: "shadow",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => [{ ticket: "CTL-1", stalledPhase: "implement", workerDir: "/w" }],
+        cycleCountOf: () => RESOLVE_CONFLICT_CYCLE_CAP,
+        escalateCapExhausted: () => { throw new Error("must not be called in shadow"); },
+        emit: (type) => emitted.push(type),
+      });
+      expect(report.wouldEscalate).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+      expect(emitted).toContain("resolve-conflict.would.escalate");
+    });
+
+    test("a revertStallAndResetCycle returning false is reported as a failure, not silently swallowed", async () => {
+      const report = await runResolveConflictSweepPass({
+        mode: "enforce",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => [{ ticket: "CTL-1", stalledPhase: "implement", workerDir: "/w" }],
+        cycleCountOf: () => 0,
+        revertStallAndResetCycle: () => false,
+        emit: async () => true,
+      });
+      expect(report.retried).toEqual([]);
+      expect(report.failed).toEqual([{ ticket: "CTL-1", phase: "implement", reason: "revert-stall-and-reset-cycle-returned-false" }]);
+    });
+
+    test("a throwing collectFailures degrades to an empty failures sub-pass, never aborts the rest of the tick", async () => {
+      const dispatched = [];
+      const report = await runResolveConflictSweepPass({
+        mode: "enforce",
+        collectFailures: () => { throw new Error("failures census exploded"); },
+        collectCandidates: () => [{ ticket: "CTL-4", phase: "implement", workerDir: "/w", raw: { failureReason: RESOLVE_CONFLICT_STALL_REASON }, worktreePath: "/wt", base: "main" }],
+        collectCompletions: () => [],
+        cycleCountOf: () => 0,
+        classifyLive: async () => ({ resolvable: true, conflictFiles: [], conflictTypes: [] }),
+        markAndDispatch: (c) => { dispatched.push(c.ticket); return { success: true, dispatched: true }; },
+        emit: async () => true,
+      });
+      expect(report.retried).toEqual([]);
+      expect(report.failed).toEqual([]);
+      // the candidates sub-pass still ran normally — a throwing failures census
+      // degrades ONLY its own sub-pass, never the whole tick.
+      expect(dispatched).toEqual(["CTL-4"]);
+    });
   });
 });
 
@@ -978,6 +1309,149 @@ describe("#1461 follow-up: resolve-conflict cycle-cap end-to-end reachability", 
       expect(JSON.parse(files[`${workerDir}/phase-implement.json`]).failureReason).toBe(CAP_EXHAUSTED_REASON);
       expect(posted).toHaveLength(1);
       expect(posted[0][1]).toMatch(new RegExp(`cycle cap \\(${RESOLVE_CONFLICT_CYCLE_CAP}\\)`));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// #1461 escalation-gap fix, test (d): the end-to-end mirror of the E2E test
+// above, but for REPEATED FAILURES specifically (never a successful "done").
+// Before this fix, cycle 1's failure permanently stranded the ticket: the cap
+// counter kept climbing (countResolveConflictAttempts correctly counts BOTH
+// complete AND failed events — that part already worked), but nothing ever
+// reverted the original stalled-phase's RESOLVED_MARKER_REASON marker, so
+// classifyResolveConflictCandidate never got a fresh classify pass again and
+// defaultEscalateCapExhausted never fired no matter how high the counter got.
+// This test drives real dispatch → real failure → real revert-and-retry for
+// RESOLVE_CONFLICT_CYCLE_CAP - 1 cycles (each one genuinely redispatched, never
+// swallowed as an idempotent no-op), then proves the FINAL failure (the one
+// that pushes the durable counter to the cap) escalates instead of reverting.
+describe("#1461 escalation-gap fix: FAILURE cycle-cap end-to-end reachability", () => {
+  test("repeated FAILED (never completed) resolve-conflict cycles revert+retry under the cap, then escalate once the cap is reached", () => {
+    const dir = mkdtempSync(join(tmpdir(), "resolve-conflict-failure-e2e-"));
+    const eventLogPath = join(dir, "events.jsonl");
+    try {
+      const orchDir = "/orch";
+      const ticket = "CTL-FAIL-E2E";
+      const workerDir = `${orchDir}/workers/${ticket}`;
+      const { files, deps } = inMemoryFsForE2E();
+      deps.isThenable = () => false;
+
+      let dispatchGen = 0;
+      let idempotentNoOps = 0;
+      let realDispatches = 0;
+      deps.dispatch = (_orchDir, tk, phase) => {
+        const sigPath = `${workerDir}/phase-${phase}.json`;
+        let existingStatus = null;
+        if (sigPath in files) {
+          try {
+            existingStatus = JSON.parse(files[sigPath]).status;
+          } catch {
+            existingStatus = null;
+          }
+        }
+        if (["dispatched", "running", "done"].includes(existingStatus)) {
+          idempotentNoOps++;
+          return { code: 0, signal: { idempotent: true } };
+        }
+        dispatchGen++;
+        realDispatches++;
+        // Simulate the worker running and then genuinely FAILING this cycle —
+        // writes status:"failed" + emits the durable
+        // phase.resolve-conflict.failed.<ticket> event, exactly what the real
+        // /catalyst-dev:phase-resolve-conflict skill does on a hard failure.
+        files[sigPath] = JSON.stringify({ status: "failed", generation: dispatchGen });
+        appendFileSync(
+          eventLogPath,
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            attributes: { "event.name": `phase.resolve-conflict.failed.${tk}`, "event.label": tk, "catalyst.orchestration": tk },
+          }) + "\n",
+        );
+        return { code: 0, signal: { bg_job_id: `job-${dispatchGen}` } };
+      };
+
+      function freshStall() {
+        files[`${workerDir}/phase-implement.json`] = JSON.stringify({
+          status: "stalled",
+          failureReason: RESOLVE_CONFLICT_STALL_REASON,
+        });
+      }
+
+      let escalatedPosted = null;
+
+      for (let i = 0; i < RESOLVE_CONFLICT_CYCLE_CAP; i++) {
+        freshStall();
+        const cycleCountBefore = countResolveConflictAttempts({ ticket, path: eventLogPath });
+        expect(cycleCountBefore).toBe(i); // the durable counter genuinely advancing on failures alone
+        const decision = classifyResolveConflictCandidate({
+          stalledReasonMatches: true,
+          alreadyResolving: false,
+          cycleCount: cycleCountBefore,
+          classification: { resolvable: true, conflictFiles: [], conflictTypes: [] },
+        });
+        expect(decision.action).toBe("mark-and-dispatch");
+        const result = defaultMarkAndDispatch(
+          {
+            ticket,
+            phase: "implement",
+            workerDir,
+            worktreePath: `/wt/${ticket}`,
+            base: "main",
+            classification: { resolvable: true, conflictFiles: [], conflictTypes: [] },
+            cycleCount: cycleCountBefore,
+            orchDir,
+          },
+          deps,
+        );
+        expect(result.success).toBe(true);
+        expect(result.dispatched).toBe(true);
+        // markStalledSignalResolving ran as part of this dispatch — the original
+        // phase is now marked RESOLVED_MARKER_REASON, awaiting completion.
+        expect(JSON.parse(files[`${workerDir}/phase-implement.json`]).failureReason).toBe(RESOLVED_MARKER_REASON);
+
+        // The dispatch above already simulated the worker FAILING (see deps.dispatch)
+        // — a later tick's failure handling now runs.
+        const cycleCountAfter = countResolveConflictAttempts({ ticket, path: eventLogPath });
+        expect(cycleCountAfter).toBe(i + 1);
+
+        if (cycleCountAfter >= RESOLVE_CONFLICT_CYCLE_CAP) {
+          // The cap was reached BY this failure — must escalate, must NOT revert.
+          const posted = [];
+          const escDeps = { ...deps, postComment: (tk, body) => { posted.push([tk, body]); return true; } };
+          const escalated = defaultEscalateCapExhausted(
+            { ticket, phase: "implement", workerDir, cycleCount: cycleCountAfter },
+            escDeps,
+          );
+          expect(escalated).toBe(true);
+          escalatedPosted = posted;
+          break;
+        }
+
+        // Still under the cap — this task's fix: revert the original stall back
+        // to the ORIGINAL reason + reset the stale terminal cycle (REUSING
+        // maybeResetForResolveConflictCycle), so the ticket genuinely becomes a
+        // candidate again on the NEXT loop iteration instead of being
+        // permanently stuck at RESOLVED_MARKER_REASON.
+        const reverted = defaultRevertStallAndResetCycle(orchDir, ticket, "implement", deps);
+        expect(reverted).toBe(true);
+        expect(JSON.parse(files[`${workerDir}/phase-implement.json`]).failureReason).toBe(RESOLVE_CONFLICT_STALL_REASON);
+        // the stale phase-resolve-conflict.json is gone — the NEXT dispatch
+        // (loop's next iteration) will not be silently swallowed as idempotent.
+        expect(`${workerDir}/phase-resolve-conflict.json` in files).toBe(false);
+      }
+
+      // Every cycle was a REAL dispatch that genuinely failed — none were
+      // silently swallowed as a stale idempotent no-op (the pre-fix bug, now
+      // proven closed for the FAILURE path specifically).
+      expect(realDispatches).toBe(RESOLVE_CONFLICT_CYCLE_CAP);
+      expect(idempotentNoOps).toBe(0);
+
+      // The escalation genuinely fired, exactly once, at the cap.
+      expect(escalatedPosted).toHaveLength(1);
+      expect(escalatedPosted[0][1]).toMatch(new RegExp(`cycle cap \\(${RESOLVE_CONFLICT_CYCLE_CAP}\\)`));
+      expect(JSON.parse(files[`${workerDir}/phase-implement.json`]).failureReason).toBe(CAP_EXHAUSTED_REASON);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

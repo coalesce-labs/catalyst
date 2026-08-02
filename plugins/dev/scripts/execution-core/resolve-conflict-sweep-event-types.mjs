@@ -18,4 +18,9 @@ export const RESOLVE_CONFLICT_SWEEP_EVENT_TYPES = Object.freeze([
   // Cycle cap exhausted without a clean resolution — escalated to the operator.
   "resolve-conflict.escalated",
   "resolve-conflict.would.escalate", // shadow twin
+  // #1461 escalation-gap fix: a FAILED (not done) resolve-conflict run, still
+  // under the cycle cap — the original stall reason reverted + the stale cycle
+  // reset so the ticket becomes a genuine candidate again on a later tick.
+  "resolve-conflict.retry-armed",
+  "resolve-conflict.would.retry", // shadow twin
 ]);

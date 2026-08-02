@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { RESOLVE_CONFLICT_SWEEP_EVENT_TYPES } from "./resolve-conflict-sweep-event-types.mjs";
 
 describe("RESOLVE_CONFLICT_SWEEP_EVENT_TYPES", () => {
-  test("is a frozen array of exactly these 8 strings", () => {
+  test("is a frozen array of exactly these 10 strings", () => {
     expect(Object.isFrozen(RESOLVE_CONFLICT_SWEEP_EVENT_TYPES)).toBe(true);
     expect(RESOLVE_CONFLICT_SWEEP_EVENT_TYPES).toEqual([
       "resolve-conflict.marked.resolvable",
@@ -13,6 +13,9 @@ describe("RESOLVE_CONFLICT_SWEEP_EVENT_TYPES", () => {
       "resolve-conflict.would.clear",
       "resolve-conflict.escalated",
       "resolve-conflict.would.escalate",
+      // #1461 escalation-gap fix
+      "resolve-conflict.retry-armed",
+      "resolve-conflict.would.retry",
     ]);
   });
 
