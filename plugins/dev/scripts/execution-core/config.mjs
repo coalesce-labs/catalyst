@@ -2130,6 +2130,24 @@ export function readCoordinationConfig(env = process.env) {
   return { mode, hubUrl };
 }
 
+// #1461: resolve-conflict-sweep mode reader. Mirrors readRecoveryPassConfig
+// exactly: env (CATALYST_RESOLVE_CONFLICT_SWEEP) is the single operator knob,
+// default 'off' (ADR-023) — operators opt in to shadow then enforce.
+const RESOLVE_CONFLICT_SWEEP_MODES = new Set(["off", "shadow", "enforce"]);
+
+export function readResolveConflictSweepConfig(envObj = process.env) {
+  const env = envObj.CATALYST_RESOLVE_CONFLICT_SWEEP;
+  let mode;
+  if (env === "0") {
+    mode = "off";
+  } else if (typeof env === "string" && RESOLVE_CONFLICT_SWEEP_MODES.has(env)) {
+    mode = env;
+  } else {
+    mode = "off"; // safe default: off — operators opt into shadow then enforce
+  }
+  return { mode };
+}
+
 // CTL-1488: the local-first coordination mirror. coordination-publish writes the
 // ordered coordination subset here (with local_seq) synchronously before any
 // network call; the inbound mirror-tail client merges other hosts' rows in.
