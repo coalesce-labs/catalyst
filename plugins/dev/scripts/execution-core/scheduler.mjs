@@ -7078,6 +7078,20 @@ export function schedulerTick(
           // linger (hygiene — the recovery router already drops terminal tickets).
           recoveryForgetIntent(ticket, { orchDir });
         } else {
+          // #1461: exempt a ticket resolve-conflict-sweep is actively resolving
+          // (failureReason/stalledReason === source_conflict_resolvable) from
+          // immediate needs-human labeling — otherwise every candidate is
+          // flagged needs-human the same tick the fix is already in flight. A
+          // cap-exhausted stall (resolve-conflict-cycle-cap-exhausted) is a
+          // NORMAL stalled reason and is NOT exempted — it surfaces exactly
+          // like remediate-cycle-cap-exhausted already does.
+          const activeSignal = signalByTicket.get(ticket);
+          const activeReason =
+            activeSignal?.raw?.failureReason ?? activeSignal?.raw?.stalledReason ?? null;
+          if (activeReason === "source_conflict_resolvable") {
+            emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
+            continue;
+          }
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
           if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {

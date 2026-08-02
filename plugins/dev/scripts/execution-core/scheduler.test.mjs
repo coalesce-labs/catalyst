@@ -5011,6 +5011,67 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
     expect(orphans.some((o) => o.ticket === TICKET)).toBe(true);
   });
 
+  // #1461: resolve-conflict-sweep marks the active signal failureReason
+  // source_conflict_resolvable while a fix is in flight — the terminal sweep must NOT
+  // immediately needs-human this ticket (every candidate would otherwise be flagged
+  // needs-human the same tick the fix is already dispatched). Mirrors T3's fixture
+  // (stalled signal, non-terminal Linear state) but swaps in the resolve-conflict
+  // reason via writeSignalRaw so the raw JSON carries failureReason.
+  test("#1461: does not apply needs-human while resolve-conflict-sweep is actively resolving a ticket", () => {
+    const TICKET = "CTL-1461-T1";
+    writeSignalRaw(TICKET, "implement", {
+      ticket: TICKET,
+      phase: "implement",
+      status: "stalled",
+      failureReason: "source_conflict_resolvable",
+    });
+
+    const applied = [];
+    const removed = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true };
+      },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
+    };
+    const gateway = {
+      getDescriptor: (id) =>
+        id === TICKET ? { state: "In Progress", removed: false, updatedAt: FRESH } : null,
+    };
+    const orphans = [];
+    const appendOrphanDetectedEvent = (e) => {
+      orphans.push(e);
+      return true;
+    };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      gateway,
+      appendOrphanDetectedEvent,
+      // Force single-host determinism: this dev host's real cluster-repo roster
+      // (aldebaran/sophon/vega) otherwise leaks into getClusterHosts() and makes
+      // fenceGuard fail closed regardless of this test's own logic (a false green
+      // pre-implementation). T3's sibling fixture doesn't need this override
+      // because it isn't sensitive to the confound the same way this test is —
+      // see task-11-report.md for the full explanation.
+      hosts: ["solo"],
+      hostName: "solo",
+    });
+
+    // needs-human must never be applied while the fix is in flight.
+    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(false);
+    expect(removed.filter((r) => r.t === TICKET && r.l === "needs-human")).toHaveLength(0);
+    // Still surfaced as an orphan for dashboard visibility.
+    expect(orphans.some((o) => o.ticket === TICKET)).toBe(true);
+  });
+
   // T4: steady-state-zero-writes — no stalled/failed, no marker → zero needs-human writes
   // (The terminal-or-merged probe only runs inside the anyStalled||anyFailed branch, so a
   // ticket with only done/running phases must produce zero needs-human label API calls.)
