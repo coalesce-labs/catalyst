@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -14,12 +14,14 @@ import {
   writeResolveConflictBrief,
   markStalledSignalResolving,
   defaultMarkAndDispatch,
+  maybeResetForResolveConflictCycle,
   defaultEscalateCapExhausted,
   defaultCollectResolveConflictCompletions,
   runResolveConflictSweepPass,
   emitResolveConflictEvent,
   RESOLVE_CONFLICT_SWEEP_EVENT_TYPES,
 } from "./resolve-conflict-sweep.mjs";
+import { countResolveConflictAttempts } from "./event-scan.mjs";
 
 describe("constants", () => {
   test("stall reason strings match the real producer + do not collide with the enum", () => {
@@ -374,6 +376,230 @@ describe("defaultMarkAndDispatch", () => {
   });
 });
 
+// #1461 follow-up (final whole-branch re-review): the cycle-reset gap. Without
+// maybeResetForResolveConflictCycle, a SECOND genuine stall on the same ticket
+// calls dispatch() again while workers/<T>/phase-resolve-conflict.json still
+// shows a status from the FIRST cycle — phase-agent-dispatch's own idempotency
+// guard (dispatched|running|done → no-op) then silently swallows the redispatch,
+// no real resolution work ever happens on cycle 2+, and RESOLVE_CONFLICT_CYCLE_CAP
+// can never trip.
+//
+// inMemoryFs — a minimal in-memory filesystem double shared by the tests below.
+// Deliberately simple (flat map keyed by full path) so the reset logic's own
+// readdirSync(workerDir) call (a plain listing, no withFileTypes) can be
+// exercised faithfully alongside readFileSync/writeFileSync/renameSync/rmSync.
+function inMemoryFs(initial = {}) {
+  const files = { ...initial };
+  const deps = {
+    readFileSync: (p) => {
+      if (!(p in files)) throw new Error(`ENOENT: ${p}`);
+      return files[p];
+    },
+    writeFileSync: (p, body) => {
+      files[p] = body;
+    },
+    renameSync: (from, to) => {
+      files[to] = files[from];
+      delete files[from];
+    },
+    mkdirSync: () => {},
+    rmSync: (p) => {
+      delete files[p];
+    },
+    readdirSync: (dir) => {
+      const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+      return Object.keys(files)
+        .filter((f) => f.startsWith(prefix) && !f.slice(prefix.length).includes("/"))
+        .map((f) => f.slice(prefix.length));
+    },
+  };
+  return { files, deps };
+}
+
+describe("maybeResetForResolveConflictCycle (#1461 follow-up)", () => {
+  const orchDir = "/orch";
+  const ticket = "CTL-1";
+  const workerDir = `${orchDir}/workers/${ticket}`;
+  const signalPath = `${workerDir}/phase-resolve-conflict.json`;
+  const briefPath = `${workerDir}/resolve-conflict-brief.json`;
+
+  test("(a) no existing signal at all → false, no-op (the common first-cycle case)", () => {
+    const { deps } = inMemoryFs({});
+    expect(maybeResetForResolveConflictCycle(orchDir, ticket, deps)).toBe(false);
+  });
+
+  test("(b) terminal 'done' → deletes the signal + brief + claim tombstones + progress marker, returns true", () => {
+    const { files, deps } = inMemoryFs({
+      [signalPath]: JSON.stringify({ status: "done", generation: 1 }),
+      [briefPath]: JSON.stringify({ stalledPhase: "implement", attempt: 1 }),
+      [`${workerDir}/resolve-conflict.claim.1`]: "{}",
+      [`${workerDir}/.progress-resolve-conflict`]: "3",
+      // an unrelated phase's claim + progress marker must survive
+      [`${workerDir}/implement.claim.1`]: "{}",
+      [`${workerDir}/.progress-implement`]: "9",
+    });
+    expect(maybeResetForResolveConflictCycle(orchDir, ticket, deps)).toBe(true);
+    expect(signalPath in files).toBe(false);
+    expect(briefPath in files).toBe(false);
+    expect(`${workerDir}/resolve-conflict.claim.1` in files).toBe(false);
+    expect(`${workerDir}/.progress-resolve-conflict` in files).toBe(false);
+    expect(`${workerDir}/implement.claim.1` in files).toBe(true);
+    expect(`${workerDir}/.progress-implement` in files).toBe(true);
+  });
+
+  test("(b) terminal 'failed' → resets", () => {
+    const { files, deps } = inMemoryFs({ [signalPath]: JSON.stringify({ status: "failed" }) });
+    expect(maybeResetForResolveConflictCycle(orchDir, ticket, deps)).toBe(true);
+    expect(signalPath in files).toBe(false);
+  });
+
+  test("(b) terminal 'stalled' (phase-agent-dispatch's mark_launch_failed path) → resets", () => {
+    const { files, deps } = inMemoryFs({ [signalPath]: JSON.stringify({ status: "stalled" }) });
+    expect(maybeResetForResolveConflictCycle(orchDir, ticket, deps)).toBe(true);
+    expect(signalPath in files).toBe(false);
+  });
+
+  test("(c) 'dispatched' (actually in-flight) → NEVER touched, returns false", () => {
+    const { files, deps } = inMemoryFs({
+      [signalPath]: JSON.stringify({ status: "dispatched", generation: 1 }),
+      [briefPath]: JSON.stringify({ stalledPhase: "implement" }),
+      [`${workerDir}/resolve-conflict.claim.1`]: "{}",
+    });
+    expect(maybeResetForResolveConflictCycle(orchDir, ticket, deps)).toBe(false);
+    expect(signalPath in files).toBe(true);
+    expect(briefPath in files).toBe(true);
+    expect(`${workerDir}/resolve-conflict.claim.1` in files).toBe(true);
+  });
+
+  test("(c) 'running' (actually in-flight) → NEVER touched, returns false", () => {
+    const { files, deps } = inMemoryFs({ [signalPath]: JSON.stringify({ status: "running" }) });
+    expect(maybeResetForResolveConflictCycle(orchDir, ticket, deps)).toBe(false);
+    expect(signalPath in files).toBe(true);
+  });
+
+  test("malformed signal JSON → treated like absent, returns false (never throws)", () => {
+    const { deps } = inMemoryFs({ [signalPath]: "{not json" });
+    expect(() => maybeResetForResolveConflictCycle(orchDir, ticket, deps)).not.toThrow();
+    expect(maybeResetForResolveConflictCycle(orchDir, ticket, deps)).toBe(false);
+  });
+});
+
+describe("defaultMarkAndDispatch — #1461 cycle-reset integration", () => {
+  const orchDir = "/orch";
+  const ticket = "CTL-1";
+  const workerDir = `${orchDir}/workers/${ticket}`;
+
+  // A fake `dispatch` that mirrors phase-agent-dispatch's OWN idempotency guard
+  // (EXISTING_STATUS in dispatched|running|done → no-op `idempotent:true`,
+  // otherwise write status:"dispatched" at a fresh generation) — reading the
+  // SAME in-memory files defaultMarkAndDispatch itself just wrote/deleted. This
+  // is what proves the reset actually changes what phase-agent-dispatch would see,
+  // not just that some internal seam was called.
+  function fakeDispatchLikeRealPhaseAgentDispatch(files) {
+    let calls = 0;
+    const fn = (_orchDir, tk, phase) => {
+      calls++;
+      const sigPath = `${workerDir}/phase-${phase}.json`;
+      let existingStatus = null;
+      if (sigPath in files) {
+        try {
+          existingStatus = JSON.parse(files[sigPath]).status;
+        } catch {
+          existingStatus = null;
+        }
+      }
+      if (["dispatched", "running", "done"].includes(existingStatus)) {
+        return { code: 0, signal: { idempotent: true } };
+      }
+      files[sigPath] = JSON.stringify({ status: "dispatched", generation: calls + 1 });
+      return { code: 0, signal: { bg_job_id: `job-${calls}` } };
+    };
+    fn.callCount = () => calls;
+    return fn;
+  }
+
+  test("(a) first cycle (no prior phase-resolve-conflict.json) — dispatches cleanly, no regression", () => {
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-implement.json`]: JSON.stringify({ status: "stalled", failureReason: RESOLVE_CONFLICT_STALL_REASON }),
+    });
+    deps.isThenable = () => false;
+    deps.dispatch = fakeDispatchLikeRealPhaseAgentDispatch(files);
+    const result = defaultMarkAndDispatch(
+      { ticket, phase: "implement", workerDir, worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: [], conflictTypes: [] }, cycleCount: 0, orchDir },
+      deps,
+    );
+    expect(result.success).toBe(true);
+    expect(result.dispatched).toBe(true);
+    expect(result.bgJobId).toBe("job-1");
+  });
+
+  // (b) — the actual gap this task fixes: a SECOND genuine stall, with a STALE
+  // "done" phase-resolve-conflict.json left over from a completed first cycle,
+  // must still result in a REAL dispatch (not an idempotent no-op).
+  test("(b) second genuine stall after a completed first cycle resets the stale terminal signal before redispatching", () => {
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-resolve-conflict.json`]: JSON.stringify({ status: "done", generation: 1 }),
+      [`${workerDir}/resolve-conflict-brief.json`]: JSON.stringify({ stalledPhase: "implement", attempt: 1 }),
+      [`${workerDir}/resolve-conflict.claim.1`]: "{}",
+      // a FRESH stall on the original phase — a genuinely new, different conflict
+      [`${workerDir}/phase-implement.json`]: JSON.stringify({ status: "stalled", failureReason: RESOLVE_CONFLICT_STALL_REASON }),
+    });
+    deps.isThenable = () => false;
+    const dispatch = fakeDispatchLikeRealPhaseAgentDispatch(files);
+    deps.dispatch = dispatch;
+
+    const result = defaultMarkAndDispatch(
+      { ticket, phase: "implement", workerDir, worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: [], conflictTypes: [] }, cycleCount: 1, orchDir },
+      deps,
+    );
+
+    // Proves the redispatch was NOT swallowed as idempotent: a real bg_job_id
+    // came back, not `{idempotent:true}`.
+    expect(result.success).toBe(true);
+    expect(result.dispatched).toBe(true);
+    expect(result.bgJobId).toBe("job-1");
+    expect(dispatch.callCount()).toBe(1);
+    // the stale gen-1 claim tombstone from cycle 1 is gone — the fresh
+    // gen-1 claim phase-agent-dispatch would attempt is exclusive, not colliding.
+    expect(`${workerDir}/resolve-conflict.claim.1` in files).toBe(false);
+    // phase-resolve-conflict.json now reflects the NEW dispatch, not the stale "done".
+    expect(JSON.parse(files[`${workerDir}/phase-resolve-conflict.json`]).status).toBe("dispatched");
+  });
+
+  // Defensive safety net: in production, an in-flight phase-resolve-conflict.json
+  // means the original stalled-phase signal is still RESOLVED_MARKER_REASON, which
+  // classifyResolveConflictCandidate routes to "skip: already-resolving" — this
+  // function is never reached. This test exercises defaultMarkAndDispatch's own
+  // reset call directly anyway, to prove the safety property holds even if it
+  // were ever reached: the in-flight signal is left byte-for-byte untouched.
+  test("(c) an actually in-flight ('running') phase-resolve-conflict.json is never touched by the reset", () => {
+    const runningSignal = JSON.stringify({ status: "running", generation: 1 });
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-resolve-conflict.json`]: runningSignal,
+      [`${workerDir}/resolve-conflict-brief.json`]: JSON.stringify({ stalledPhase: "implement", attempt: 1 }),
+      [`${workerDir}/resolve-conflict.claim.1`]: "{}",
+      [`${workerDir}/phase-implement.json`]: JSON.stringify({ status: "stalled", failureReason: RESOLVED_MARKER_REASON }),
+    });
+    deps.isThenable = () => false;
+    deps.dispatch = fakeDispatchLikeRealPhaseAgentDispatch(files);
+
+    defaultMarkAndDispatch(
+      { ticket, phase: "implement", workerDir, worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: [], conflictTypes: [] }, cycleCount: 1, orchDir },
+      deps,
+    );
+
+    // Safety-critical: the reset must never have fired — the running signal,
+    // its brief, and its claim tombstone all survive completely untouched.
+    // (dispatch() is still invoked by defaultMarkAndDispatch itself — that call
+    // is unconditional in this function — but per phase-agent-dispatch's OWN
+    // idempotency guard it would correctly no-op against the untouched "running"
+    // signal rather than double-launching a worker.)
+    expect(files[`${workerDir}/phase-resolve-conflict.json`]).toBe(runningSignal);
+    expect(`${workerDir}/resolve-conflict-brief.json` in files).toBe(true);
+    expect(`${workerDir}/resolve-conflict.claim.1` in files).toBe(true);
+  });
+});
+
 describe("defaultEscalateCapExhausted", () => {
   test("marks the signal cap-exhausted and posts the escalation comment", () => {
     const reads = { "/w/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_resolvable" }) };
@@ -622,6 +848,173 @@ describe("runResolveConflictSweepPass", () => {
     expect(report.failed).toEqual([]);
   });
 });
+
+// #1461 follow-up (final whole-branch re-review), test (d): a true end-to-end
+// proof that RESOLVE_CONFLICT_CYCLE_CAP is now REACHABLE via genuinely repeated
+// cycles — not the pre-fix world where cycle 2+ was silently swallowed as an
+// idempotent no-op forever. Drives defaultMarkAndDispatch through
+// RESOLVE_CONFLICT_CYCLE_CAP real cycles, using the REAL countResolveConflictAttempts
+// (event-scan.mjs) against a real temp events.jsonl as the durable counter — the
+// exact function production wires as cycleCountOf — and a fake `dispatch` that
+// mirrors phase-agent-dispatch's own idempotency guard byte-for-byte, so a
+// silently-swallowed redispatch would show up as a call returning
+// `{idempotent:true}` instead of a fresh bg_job_id.
+describe("#1461 follow-up: resolve-conflict cycle-cap end-to-end reachability", () => {
+  test("N genuinely-redispatched cycles advance the durable counter until the cap trips and escalates", () => {
+    const dir = mkdtempSync(join(tmpdir(), "resolve-conflict-e2e-"));
+    const eventLogPath = join(dir, "events.jsonl");
+    try {
+      const orchDir = "/orch";
+      const ticket = "CTL-E2E";
+      const workerDir = `${orchDir}/workers/${ticket}`;
+      const { files, deps } = inMemoryFsForE2E();
+      deps.isThenable = () => false;
+
+      let dispatchGen = 0;
+      let idempotentNoOps = 0;
+      let realDispatches = 0;
+      deps.dispatch = (_orchDir, tk, phase) => {
+        const sigPath = `${workerDir}/phase-${phase}.json`;
+        let existingStatus = null;
+        if (sigPath in files) {
+          try {
+            existingStatus = JSON.parse(files[sigPath]).status;
+          } catch {
+            existingStatus = null;
+          }
+        }
+        if (["dispatched", "running", "done"].includes(existingStatus)) {
+          idempotentNoOps++;
+          return { code: 0, signal: { idempotent: true } };
+        }
+        dispatchGen++;
+        realDispatches++;
+        // Simulate the worker completing this cycle: writes status:"done" and
+        // emits the durable phase.resolve-conflict.complete.<ticket> event —
+        // exactly what the real /catalyst-dev:phase-resolve-conflict skill does.
+        files[sigPath] = JSON.stringify({ status: "done", generation: dispatchGen });
+        appendFileSync(
+          eventLogPath,
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            attributes: { "event.name": `phase.resolve-conflict.complete.${tk}`, "event.label": tk, "catalyst.orchestration": tk },
+          }) + "\n",
+        );
+        return { code: 0, signal: { bg_job_id: `job-${dispatchGen}` } };
+      };
+
+      function freshStall() {
+        // A brand-new stall on the ORIGINAL phase — as if defaultClearStall
+        // already deleted the prior cycle's marked signal and a fresh dispatch
+        // of that phase later stalled again for a genuinely NEW conflict.
+        files[`${workerDir}/phase-implement.json`] = JSON.stringify({
+          status: "stalled",
+          failureReason: RESOLVE_CONFLICT_STALL_REASON,
+        });
+      }
+
+      for (let cycle = 0; cycle < RESOLVE_CONFLICT_CYCLE_CAP; cycle++) {
+        freshStall();
+        const cycleCount = countResolveConflictAttempts({ ticket, path: eventLogPath });
+        expect(cycleCount).toBe(cycle); // the durable counter is genuinely advancing
+        const decision = classifyResolveConflictCandidate({
+          stalledReasonMatches: true,
+          alreadyResolving: false,
+          cycleCount,
+          classification: { resolvable: true, conflictFiles: [], conflictTypes: [] },
+        });
+        expect(decision.action).toBe("mark-and-dispatch");
+        const result = defaultMarkAndDispatch(
+          {
+            ticket,
+            phase: "implement",
+            workerDir,
+            worktreePath: `/wt/${ticket}`,
+            base: "main",
+            classification: { resolvable: true, conflictFiles: [], conflictTypes: [] },
+            cycleCount,
+            orchDir,
+          },
+          deps,
+        );
+        expect(result.success).toBe(true);
+        expect(result.dispatched).toBe(true);
+        // Simulate defaultCollectResolveConflictCompletions + clearStall having
+        // run in a later tick: the original stalled-phase signal is deleted.
+        delete files[`${workerDir}/phase-implement.json`];
+      }
+
+      // Every cycle was a REAL dispatch — the reset made sure none of them were
+      // silently swallowed as a stale idempotent no-op (the pre-fix bug).
+      expect(realDispatches).toBe(RESOLVE_CONFLICT_CYCLE_CAP);
+      expect(idempotentNoOps).toBe(0);
+
+      // The (cap+1)th stall: the durable counter now reflects CAP completed
+      // cycles → the classifier must route to cap-exhausted, not mark-and-dispatch.
+      freshStall();
+      const finalCount = countResolveConflictAttempts({ ticket, path: eventLogPath });
+      expect(finalCount).toBe(RESOLVE_CONFLICT_CYCLE_CAP);
+      const finalDecision = classifyResolveConflictCandidate({
+        stalledReasonMatches: true,
+        alreadyResolving: false,
+        cycleCount: finalCount,
+        classification: { resolvable: true, conflictFiles: [], conflictTypes: [] },
+      });
+      expect(finalDecision.action).toBe("cap-exhausted");
+
+      // And the escalation actually fires via the existing defaultEscalateCapExhausted seam.
+      const posted = [];
+      const escDeps = {
+        readFileSync: (p) => files[p],
+        writeFileSync: (p, body) => { files[p] = body; },
+        renameSync: (from, to) => { files[to] = files[from]; delete files[from]; },
+        postComment: (tk, body) => { posted.push([tk, body]); return true; },
+      };
+      const escalated = defaultEscalateCapExhausted(
+        { ticket, phase: "implement", workerDir, cycleCount: finalCount },
+        escDeps,
+      );
+      expect(escalated).toBe(true);
+      expect(JSON.parse(files[`${workerDir}/phase-implement.json`]).failureReason).toBe(CAP_EXHAUSTED_REASON);
+      expect(posted).toHaveLength(1);
+      expect(posted[0][1]).toMatch(new RegExp(`cycle cap \\(${RESOLVE_CONFLICT_CYCLE_CAP}\\)`));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// inMemoryFsForE2E — same shape as inMemoryFs above, duplicated locally so this
+// describe block reads standalone (no cross-describe-block state coupling).
+function inMemoryFsForE2E() {
+  const files = {};
+  return {
+    files,
+    deps: {
+      readFileSync: (p) => {
+        if (!(p in files)) throw new Error(`ENOENT: ${p}`);
+        return files[p];
+      },
+      writeFileSync: (p, body) => {
+        files[p] = body;
+      },
+      renameSync: (from, to) => {
+        files[to] = files[from];
+        delete files[from];
+      },
+      mkdirSync: () => {},
+      rmSync: (p) => {
+        delete files[p];
+      },
+      readdirSync: (dir) => {
+        const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+        return Object.keys(files)
+          .filter((f) => f.startsWith(prefix) && !f.slice(prefix.length).includes("/"))
+          .map((f) => f.slice(prefix.length));
+      },
+    },
+  };
+}
 
 // #1461 Fix 4 (IMPORTANT final-review finding): emitResolveConflictEvent — the
 // dedicated unified-log emitter, mirroring emitUnstuckEvent's own test suite

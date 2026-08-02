@@ -12,7 +12,7 @@
 // recovery-reasoning.mjs) checking `stalledReason`. This module checks BOTH
 // fields defensively so it actually finds real candidates in production.
 
-import { readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync, appendFileSync } from "node:fs";
+import { readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync, appendFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
@@ -219,6 +219,104 @@ export function markStalledSignalResolving(
 // markStalledSignalResolving rewrites.
 const RESOLVE_CONFLICT_DISPATCH_PHASE = "resolve-conflict";
 
+// RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES — a workers/<T>/phase-resolve-conflict.json
+// in one of these statuses represents a FINISHED prior cycle — success (`done`),
+// a hard failure (`failed`), or a dead/never-launched attempt (`stalled`, the
+// launch-failure path — phase-agent-dispatch's mark_launch_failed). Safe to reset.
+// `dispatched`/`running` are deliberately excluded: those mean a worker may
+// still be genuinely in flight, and resetting would pull the rug out from under
+// real in-progress work — see maybeResetForResolveConflictCycle below.
+const RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES = new Set(["done", "failed", "stalled"]);
+
+// maybeResetForResolveConflictCycle — final-whole-branch-re-review follow-up
+// (#1461). Mirrors scheduler.mjs's maybeResetForRemediateCycle (CTL-653)
+// exactly in spirit, adapted to resolve-conflict-sweep's shape: there is no
+// verify⇄remediate PAIR here — just the single `resolve-conflict` dispatch
+// phase, re-entered every time the SAME ticket stalls again for a genuinely NEW
+// source conflict.
+//
+// The gap: defaultMarkAndDispatch calls dispatch(orchDir, ticket,
+// "resolve-conflict") on every mark-and-dispatch decision. phase-agent-dispatch's
+// own idempotency guard (phase-agent-dispatch: `if EXISTING_STATUS ==
+// dispatched|running|done → no-op idempotent`) treats a SECOND dispatch call as
+// a no-op whenever workers/<T>/phase-resolve-conflict.json still shows a status
+// from the FIRST cycle — because nothing ever deletes that file once the cycle
+// finishes (defaultClearStall only ever deletes the ORIGINAL stalled-phase
+// signal, e.g. phase-implement.json, never phase-resolve-conflict.json itself).
+// defaultCollectResolveConflictCompletions then reads the STALE "done" as a
+// fresh completion and clearStall fires with zero real resolution work having
+// happened on cycle 2+. Repeats forever: no phase.resolve-conflict.complete/
+// failed event is ever emitted for cycle 2+, so countResolveConflictAttempts
+// never advances past cycle 1's contribution and RESOLVE_CONFLICT_CYCLE_CAP can
+// never trip — an unresolvable, recurring conflict spins forever instead of
+// ever escalating to a human.
+//
+// The fix: before defaultMarkAndDispatch initiates a NEW dispatch for a
+// candidate, delete the STALE workers/<T>/phase-resolve-conflict.json (+ its
+// resolve-conflict-brief.json artifact) IF AND ONLY IF the signal is in a
+// terminal status (RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES) — a completed/dead
+// prior cycle, never an in-flight one. Also drops the phase's CTL-736
+// single-flight claim tombstones (`resolve-conflict.claim.<gen>`) so
+// phase-agent-dispatch's fresh (no-signal ⇒ gen 1) claim is exclusive instead of
+// colliding with a leftover gen-1 tombstone from the prior cycle (GATE-0,
+// mirrored from maybeResetForRemediateCycle's own claim-tombstone clear) — and
+// any `.progress-resolve-conflict` high-water marker, so a fresh attempt is
+// measured from zero rather than false-STOPPED by the prior cycle's progress.
+//
+// Safety-critical: an in-flight (`dispatched`/`running`) signal is left
+// completely untouched — this function only ever fires immediately before
+// defaultMarkAndDispatch's own fresh dispatch call, never on an independent
+// schedule that could race with an actual live worker.
+//
+// Returns true when a reset happened (there was a terminal signal to clear);
+// false when there was nothing to reset — no signal at all (the common first-
+// cycle case), an unreadable/malformed signal, or an in-flight one (left alone).
+export function maybeResetForResolveConflictCycle(
+  orchDir,
+  ticket,
+  { rmSync: rm = rmSync, readFileSync: readFile = readFileSync, readdirSync: readdir = readdirSync } = {},
+) {
+  const workerDir = join(orchDir, "workers", ticket);
+  const signalPath = join(workerDir, `phase-${RESOLVE_CONFLICT_DISPATCH_PHASE}.json`);
+  let sig;
+  try {
+    sig = JSON.parse(readFile(signalPath, "utf8"));
+  } catch {
+    return false; // absent/unreadable — nothing to reset (first cycle, or already clean)
+  }
+  if (!RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES.has(sig?.status)) {
+    return false; // dispatched/running (or any other non-terminal status) — never touch
+  }
+  try {
+    rm(signalPath, { force: true });
+  } catch {
+    // best-effort — a missing file is the desired end state anyway
+  }
+  try {
+    rm(join(workerDir, "resolve-conflict-brief.json"), { force: true });
+  } catch {
+    /* best-effort */
+  }
+  let workerEntries;
+  try {
+    workerEntries = readdir(workerDir);
+  } catch {
+    workerEntries = []; // worker dir gone — nothing left to clean
+  }
+  for (const f of workerEntries) {
+    const isClaim = f.startsWith(`${RESOLVE_CONFLICT_DISPATCH_PHASE}.claim.`);
+    const isProgress = f === `.progress-${RESOLVE_CONFLICT_DISPATCH_PHASE}`;
+    if (isClaim || isProgress) {
+      try {
+        rm(join(workerDir, f), { force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+  return true;
+}
+
 // defaultMarkAndDispatch — the "mark-and-dispatch" action seam. Mirrors
 // defaultInvokeRecoveryPass's dispatch section (recovery-reasoning.mjs:1650-
 // 1828) exactly: lazy-require dispatch.mjs (avoids loading the dispatch graph
@@ -237,6 +335,24 @@ export function defaultMarkAndDispatch(
   { ticket, phase, workerDir, worktreePath, base, classification, cycleCount, orchDir },
   deps = {},
 ) {
+  // #1461 follow-up (final whole-branch re-review): reset a STALE terminal
+  // workers/<T>/phase-resolve-conflict.json (+ its claim tombstones/artifact)
+  // left over from a completed prior cycle, so THIS fresh dispatch is not
+  // silently swallowed as idempotent by phase-agent-dispatch's own guard. Runs
+  // immediately before initiating the dispatch below — never on an independent
+  // schedule — and never touches an in-flight (dispatched/running) signal; see
+  // maybeResetForResolveConflictCycle for the full rationale. Best-effort: a
+  // reset failure must not block the dispatch attempt (same degrade-and-
+  // continue discipline as the rest of this function).
+  try {
+    maybeResetForResolveConflictCycle(orchDir, ticket, deps);
+  } catch (err) {
+    log.warn(
+      { ticket, phase, err: err?.message },
+      "resolve-conflict-sweep: cycle-reset failed (#1461) — proceeding with dispatch anyway"
+    );
+  }
+
   const signalPath = join(workerDir, `phase-${phase}.json`);
   try {
     markStalledSignalResolving(signalPath, deps);
