@@ -12,9 +12,11 @@
 // recovery-reasoning.mjs) checking `stalledReason`. This module checks BOTH
 // fields defensively so it actually finds real candidates in production.
 
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { isTicketKey } from "./ticket-key.mjs";
+import { classifyMergeTree } from "./stale-pr-rescue.mjs";
+import { defaultMergeTree } from "./stale-pr-rescue-timer.mjs";
 
 export const RESOLVE_CONFLICT_STALL_REASON = "source_conflict_ctl708_unavailable";
 export const RESOLVED_MARKER_REASON = "source_conflict_resolvable";
@@ -111,4 +113,38 @@ export function defaultCollectResolveConflictCandidates({
     }
   }
   return out;
+}
+
+// classifyLiveConflict — re-run git merge-tree against the LIVE worktree (never
+// trust stale census evidence — mirrors sourceConflictActSeam's own re-check
+// discipline in unstuck-act-seams.mjs) and classify with the existing,
+// UNMODIFIED classifyMergeTree. Returns null (not a classification) on any
+// probe failure or missing worktree — the caller's classifier then reads that
+// as "classification-unavailable" and retries next tick; it never guesses.
+export async function classifyLiveConflict({ worktreePath, base, head }, { mergeTree = defaultMergeTree } = {}) {
+  if (!worktreePath) return null;
+  try {
+    const mt = await mergeTree(worktreePath, base, head);
+    return classifyMergeTree(mt);
+  } catch {
+    return null;
+  }
+}
+
+// writeResolveConflictBrief — atomic tmp+rename of resolve-conflict-brief.json,
+// mirroring writeRecoveryBrief (recovery-reasoning.mjs). This is the
+// phase-resolve-conflict skill's prior-phase artifact (Task 9 wires
+// `signal:resolve-conflict-brief.json` into phase-artifact-gate.sh).
+export function writeResolveConflictBrief(
+  orchDir,
+  ticket,
+  brief,
+  { mkdirSync: mkdir = mkdirSync, writeFileSync: writeFile = writeFileSync, renameSync: rename = renameSync } = {},
+) {
+  const p = join(orchDir, "workers", ticket, "resolve-conflict-brief.json");
+  mkdir(dirname(p), { recursive: true });
+  const tmp = `${p}.tmp.${process.pid}`;
+  writeFile(tmp, JSON.stringify({ schema: "resolve-conflict-brief/v1", writtenAt: new Date().toISOString(), ...brief }, null, 2));
+  rename(tmp, p);
+  return p;
 }
