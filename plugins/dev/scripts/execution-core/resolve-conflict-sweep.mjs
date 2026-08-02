@@ -15,6 +15,7 @@
 import { readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { isTicketKey } from "./ticket-key.mjs";
 import { classifyMergeTree } from "./stale-pr-rescue.mjs";
 import { defaultMergeTree } from "./stale-pr-rescue-timer.mjs";
@@ -272,4 +273,38 @@ export function defaultMarkAndDispatch(
     reason: r?.stderr ?? `dispatch failed (code ${r?.code ?? "unknown"})`,
     pendingSdk: r?.async ? r.pending ?? null : null,
   };
+}
+
+// defaultPostResolveConflictComment — thin wrapper over the shared
+// linear-comment-post.sh helper, mirroring defaultRunCommentPost in
+// unstuck-sweep.mjs. Best-effort: never throws.
+function defaultPostResolveConflictComment(ticket, body) {
+  const helperPath = join(process.env.PLUGIN_ROOT ?? process.cwd(), "scripts/lib/linear-comment-post.sh");
+  const res = spawnSync(helperPath, [ticket, body], { encoding: "utf8", timeout: 10_000 });
+  return !res.error && (res.status ?? 1) === 0;
+}
+
+// defaultEscalateCapExhausted — the cap-exhaustion escalate seam. Rewrites the
+// stalled phase's signal to CAP_EXHAUSTED_REASON (a NEW, non-colliding reason —
+// this is a normal `stalled` status, so the existing terminal-label sweep
+// (scheduler.mjs) applies needs-human to it exactly like
+// remediate-cycle-cap-exhausted already does; Task 10's exemption is scoped
+// ONLY to RESOLVED_MARKER_REASON, never to this one). Posts the escalation
+// comment mirroring recovery-emit.mjs's header convention VISUALLY (not wired
+// into inbox-ask.mjs's parser — see this plan's Global Constraints).
+export function defaultEscalateCapExhausted(
+  { ticket, phase, workerDir, cycleCount },
+  { readFileSync: readFile = readFileSync, writeFileSync: writeFile = writeFileSync, renameSync: rename = renameSync, postComment = defaultPostResolveConflictComment } = {},
+) {
+  const signalPath = join(workerDir, `phase-${phase}.json`);
+  const sig = JSON.parse(readFile(signalPath, "utf8"));
+  if ("stalledReason" in sig) sig.stalledReason = CAP_EXHAUSTED_REASON;
+  else sig.failureReason = CAP_EXHAUSTED_REASON;
+  sig.updatedAt = new Date().toISOString();
+  const tmp = `${signalPath}.tmp.${process.pid}`;
+  writeFile(tmp, JSON.stringify(sig, null, 2));
+  rename(tmp, signalPath);
+
+  const body = `🔼 **phase-resolve-conflict** escalated this to the operator — ${ticket}/${phase} hit the resolve-conflict cycle cap (${RESOLVE_CONFLICT_CYCLE_CAP}) after ${cycleCount} attempt(s) without a clean resolution; manual conflict resolution needed.`;
+  return postComment(ticket, body);
 }
