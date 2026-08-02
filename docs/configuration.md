@@ -466,7 +466,7 @@ means "unknown", deliberately distinct from `false` ("mismatch"). `listProjects(
 mismatch and `checkRegistryTeamIdentity()` in `doctor.mjs` grades it (WARN mismatch / INFO
 unverified / PASS all-verified, never FAIL).
 
-See ADR-028 for Catalyst's own CAT registration.
+See ADR-029 for Catalyst's own CAT registration.
 
 ---
 

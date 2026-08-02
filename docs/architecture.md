@@ -78,7 +78,7 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
   seam (swappable to a hosted table without touching callers). Each entry's `team` must match its
   `repoRoot`'s Layer-1 `catalyst.linear.teamKey`; `listProjects()` warns on a mismatch and
   `catalyst doctor` grades it with the advisory `registry-team-identity` check. Catalyst's own CAT
-  registration is recorded in ADR-028.
+  registration is recorded in ADR-029.
 - **Heartbeat** — orchestrators write `lastHeartbeat` every 2–3 min; entries stale >10 min are GC'd
   as `abandoned`.
 
