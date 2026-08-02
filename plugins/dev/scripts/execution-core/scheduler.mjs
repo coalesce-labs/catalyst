@@ -232,6 +232,7 @@ import {
   defaultCollectTerminalSignalGcCandidates, // CTL-1242 J4
   defaultGcTerminalSignals, // CTL-1242 J4
   defaultNoEvict, // CTL-1605: guarded fast-path eviction seam default (no-op)
+  makeEvictWorkerDir, // CTL-1605: armed live-session-fenced eviction seam (runTick)
 } from "./stall-janitor.mjs";
 // CTL-1064: unstuck-sweep (Pass 0u) — throttled classify-then-act sweep for
 // the stalled/needs-human ticket backlog. Pure classifiers + action driver in
@@ -7593,6 +7594,27 @@ function runTick() {
       // tests inject a stub through startScheduler so a daemon tick never shells out.
       fetchBatch: runningOpts.fetchBatch,
       appendPhaseAdvanceHeldEvent: runningOpts.appendPhaseAdvanceHeldEvent,
+      // CTL-1605: arm the guarded fast-path eviction seam for the STEP A terminal
+      // short-circuit. Reuses the SAME warm agents snapshot + freshness + worktree
+      // resolver the J4 census uses (never removes a dir whose worktree hosts a live
+      // session; defers when the snapshot is not fresh). A test may inject its own
+      // via startScheduler({ evictWorkerDir }); a bare unit tick gets defaultNoEvict.
+      evictWorkerDir:
+        runningOpts.evictWorkerDir ??
+        (() => {
+          const agentsSnap = getAgentsCached();
+          return makeEvictWorkerDir({
+            orchDir: runningOpts.orchDir,
+            agents: agentsSnap.agents,
+            agentsFresh: agentsSnap.isFresh,
+            resolveWorktreePath: (ticket) => {
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+              }
+              return null;
+            },
+          });
+        })(),
       // CTL-764 Phase 5: the LIVE worker.transition emitter (Sink-3, feeding OTLP
       // Sink-4 via otel-forward). schedulerTick defaults this to null, so a bare
       // unit tick stays silent; production MUST thread the real emitter here or

@@ -27,6 +27,8 @@ import {
   defaultCollectTerminalSignalGcCandidates,
   defaultGcTerminalSignals,
   defaultTicketFromCwd,
+  makeEvictWorkerDir,
+  defaultNoEvict,
 } from "./stall-janitor.mjs";
 
 // ---------------------------------------------------------------------------
@@ -1216,5 +1218,63 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
       agentsFresh: true,
     });
     expect(out.some((c) => c.ticket === "CTL-3008")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CTL-1605 — makeEvictWorkerDir (guarded fast-path worker-dir eviction seam)
+// ---------------------------------------------------------------------------
+describe("CTL-1605 makeEvictWorkerDir", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1605-evict-"));
+  });
+  afterEach(() => rmSync(orchDir, { recursive: true, force: true }));
+
+  function seedWorkerDir(ticket) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ ticket, status: "done" }));
+    return dir;
+  }
+
+  test("no live session + fresh snapshot → rmSync the worker dir, returns true", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(false);
+  });
+
+  test("live session in worktree → NO removal, returns false", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [{ cwd: "/wt/CTL-9/src" }],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(true);
+  });
+
+  test("snapshot NOT fresh → NO removal (never evict blind), returns false", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: false,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(true);
+  });
+
+  test("default evictWorkerDir seam (bare unit tick) is a no-op returning false", () => {
+    expect(defaultNoEvict("CTL-9")).toBe(false);
   });
 });

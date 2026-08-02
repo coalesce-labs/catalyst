@@ -497,11 +497,43 @@ function cwdUnder(cwd, root) {
 // ─── CTL-1605: guarded fast-path worker-dir eviction seam ───
 //
 // Safe default consumed by bare unit ticks / un-wired callers: a no-op that
-// removes nothing and reports "did not evict". The armed factory is
-// makeEvictWorkerDir (added in Phase 3); until a caller injects that, the
-// terminal short-circuit clears the label but leaves the dir (the J4 census
-// stays the slow backstop).
+// removes nothing and reports "did not evict". Until a caller injects the armed
+// makeEvictWorkerDir factory below, the terminal short-circuit clears the label
+// but leaves the dir (the J4 census stays the slow backstop).
 export const defaultNoEvict = () => false;
+
+// makeEvictWorkerDir (CTL-1605) — the guarded fast-path eviction seam consumed by
+// the STEP A terminal short-circuit (resolveAndApplyWorkerStatusLabel). Mirrors the
+// J4 census fences (classifyTerminalSignalGc + the agentsFresh bail): never remove
+// a dir whose worktree hosts a live session, and never evict when the liveness
+// snapshot is not fresh (defer to a trustworthy tick). Best-effort rmSync — never
+// throws. A no-op default (defaultNoEvict) protects any un-wired caller.
+export function makeEvictWorkerDir({
+  orchDir,
+  agents = [],
+  agentsFresh = true,
+  resolveWorktreePath = () => null,
+}) {
+  return (ticket) => {
+    if (!agentsFresh) return false; // never evict blind (CTL-1315 discipline)
+    let worktreePath = null;
+    try {
+      worktreePath = resolveWorktreePath(ticket);
+    } catch {
+      /* conservative — treat as unresolved */
+    }
+    const liveSession =
+      !!worktreePath && Array.isArray(agents) && agents.some((a) => cwdUnder(a?.cwd, worktreePath));
+    if (liveSession) return false; // a live worker owns this dir
+    try {
+      rmSync(join(orchDir, "workers", ticket), { recursive: true, force: true });
+      return true;
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "ctl-1605: fast-path evict rmSync failed — skipping");
+      return false;
+    }
+  };
+}
 
 // defaultCollectOrphanCandidates — enumerate every ticket whose pipeline reached
 // terminal Done (the .terminal-done.applied marker) and build the J1 classify ctx
