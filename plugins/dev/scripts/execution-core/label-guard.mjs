@@ -484,7 +484,26 @@ export function resolveAndApplyWorkerStatusLabel(
     } else {
       try {
         const res = writeStatus?.removeLabel?.(ticket, label);
-        if (res == null || res?.removed !== false) fire();
+        // undefined (sync test stub) → success; else require removed !== false.
+        // Mirror clearStalledLabel / convergeHeldLabel: the production removeLabel
+        // is async, so fire onTerminalCleared when the write RESOLVES (post-tick),
+        // never eagerly off the Promise object (which would emit a false clear
+        // transition before a rejected/failed removal — audit-stream correctness).
+        const finalize = (r) => {
+          if (r == null || r?.removed !== false) fire();
+        };
+        if (res && typeof res.then === "function") {
+          res
+            .then(finalize)
+            .catch((err) =>
+              log.warn(
+                { ticket, label, err: err?.message },
+                "resolveAndApplyWorkerStatusLabel: removeLabel rejected — continuing"
+              )
+            );
+        } else {
+          finalize(res);
+        }
       } catch (err) {
         log.warn(
           { ticket, label, err: err?.message },

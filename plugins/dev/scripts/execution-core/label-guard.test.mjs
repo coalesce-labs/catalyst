@@ -1005,4 +1005,44 @@ describe("resolveAndApplyWorkerStatusLabel", () => {
     });
     expect(new Set(cleared)).toEqual(new Set(["queued", "needs-human"]));
   });
+
+  test("async removeLabel resolving removed:true → onTerminalCleared fires on resolve, not eagerly", async () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-14", {
+      desired: null,
+      currentLabels: ["blocked"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: () => Promise.resolve({ removed: true }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (l) => cleared.push(l),
+      applyDesired: mock(() => {}),
+    });
+    // NOT fired synchronously off the Promise object.
+    expect(cleared).toEqual([]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cleared).toEqual(["blocked"]);
+  });
+
+  test("async removeLabel resolving removed:false → onTerminalCleared NEVER fires (no false clear)", async () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-15", {
+      desired: null,
+      currentLabels: ["blocked"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: () => Promise.resolve({ removed: false, reason: "rate-limited" }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (l) => cleared.push(l),
+      applyDesired: mock(() => {}),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cleared).toEqual([]);
+  });
 });

@@ -7597,8 +7597,10 @@ function runTick() {
       // CTL-1605: arm the guarded fast-path eviction seam for the STEP A terminal
       // short-circuit. Reuses the SAME warm agents snapshot + freshness + worktree
       // resolver the J4 census uses (never removes a dir whose worktree hosts a live
-      // session; defers when the snapshot is not fresh). A test may inject its own
-      // via startScheduler({ evictWorkerDir }); a bare unit tick gets defaultNoEvict.
+      // session; defers when the snapshot is not fresh). Tests inject their own by
+      // calling schedulerTick({ evictWorkerDir }) directly (see the CTL-1605 STEP A
+      // tests); the `runningOpts.evictWorkerDir` read is a forward-compat hook (not
+      // wired through startScheduler today). A bare unit tick gets defaultNoEvict.
       evictWorkerDir:
         runningOpts.evictWorkerDir ??
         (() => {
