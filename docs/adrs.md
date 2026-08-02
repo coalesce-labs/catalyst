@@ -767,8 +767,11 @@ proposed, cannot reach them without threading the in-flight gate itself.
    `countResolveConflictCycles` mirroring `countRecoveryPassCycles` — a standalone-sweep cap, not a
    `workflow.default.json` FSM-cycle entry, since this isn't a bidirectional FSM edge like
    verify⇄remediate. Cap exhausted → `stalledReason: resolve-conflict-cycle-cap-exhausted` (new),
-   escalation comment in the `🔼 **phase-resolve-conflict** escalated...` header convention (parsed by
-   `orch-monitor/lib/inbox-ask.mjs`).
+   escalation comment in the `🔼 **phase-resolve-conflict** escalated...` header convention (visual
+   style only — `orch-monitor/lib/inbox-ask.mjs`'s header regexes are hardcoded to the literal string
+   `recovery-pass`, so this does not parse into the structured inbox without a separate follow-up
+   generalizing those regexes; not attempted here given the file's own documented history of subtle
+   parsing regressions).
 
 Two small, targeted edits to shared files (not a redesign of either): `unstuck-sweep.mjs`'s
 `STALL_CATEGORY_MAP` gets a `source_conflict_resolvable → skip` entry so CTL-855's seam doesn't fight
