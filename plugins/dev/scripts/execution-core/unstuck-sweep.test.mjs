@@ -92,6 +92,16 @@ describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
   });
 });
 
+describe("STALL_CATEGORY_MAP — #1461 additions", () => {
+  test("source_conflict_resolvable routes to skip (resolve-conflict-sweep already owns it)", () => {
+    expect(classifyStalledTicket({ reason: "source_conflict_resolvable" })).toEqual({ category: "skip", action: "skip" });
+  });
+
+  test("resolve-conflict-cycle-cap-exhausted routes to escalate", () => {
+    expect(classifyStalledTicket({ reason: "resolve-conflict-cycle-cap-exhausted" })).toEqual({ category: "resolve-conflict-cap", action: "escalate" });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // UNSTUCK_SWEEP_INTENT_KIND constant
 // ---------------------------------------------------------------------------
@@ -356,6 +366,17 @@ describe("defaultCollectUnstuckCandidates — shared census builder (CTL-1064)",
     const candidates = defaultCollectUnstuckCandidates({ orchDir });
     expect(candidates).toHaveLength(1);
     expect(candidates[0].evidence.reason).toBe("orphan-sweep-stale");
+  });
+
+  test("finds source_conflict_ctl708_unavailable via failureReason (the real producer field), not just stalledReason", () => {
+    const readdirSync = (p, opts) => {
+      if (p.endsWith("/workers")) return [{ name: "CTL-1", isDirectory: () => true }];
+      return [{ name: "phase-implement.json", isDirectory: () => false }];
+    };
+    const readFileSync = () => JSON.stringify({ status: "stalled", failureReason: "source_conflict_ctl708_unavailable" });
+    const out = defaultCollectUnstuckCandidates({ orchDir: "/orch", readdirSync, readFileSync });
+    expect(out).toHaveLength(1);
+    expect(out[0].evidence.reason).toBe("source_conflict_ctl708_unavailable");
   });
 
   test("skips running/done signals and tickets with wrong status", () => {

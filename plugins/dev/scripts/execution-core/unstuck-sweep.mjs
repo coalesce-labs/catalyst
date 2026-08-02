@@ -93,6 +93,13 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   // terminal sweep + alert) and is waiting on an operator approval — the
   // unstuck sweep must stay quiet, not re-escalate it every interval.
   "boot-resume-gate-expired":         { category: "skip",           action: "skip" },
+  // #1461: resolve-conflict-sweep already owns a ticket once it marks
+  // source_conflict_resolvable — the unstuck sweep must stay quiet, not
+  // force-push over a ticket the dedicated sweep is actively resolving.
+  "source_conflict_resolvable":       { category: "skip",              action: "skip" },
+  // #1461: mirrors remediate-cycle-cap-exhausted's own entry shape — a
+  // typed category label for telemetry rather than falling to 'unknown'.
+  "resolve-conflict-cycle-cap-exhausted": { category: "resolve-conflict-cap", action: "escalate" },
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.
@@ -149,10 +156,15 @@ export function defaultCollectUnstuckCandidates({
           signal = JSON.parse(readFile(signalPath, "utf8"));
         } catch { continue; }
 
-        // Accept both status shapes (CTL-1064 §Confirmed gaps).
+        // Accept both status shapes (CTL-1064 §Confirmed gaps), PLUS the real
+        // producer field for a dispatch-time-rebase stall (#1461 finding:
+        // phase-agent-dispatch writes status:"stalled" + .failureReason, NOT
+        // .stalledReason, for source_conflict_ctl708_unavailable — this
+        // category's force-push-if-clean action has never fired in production
+        // without this fix).
         let reason = null;
-        if (signal.status === "stalled" && signal.stalledReason) {
-          reason = signal.stalledReason;
+        if (signal.status === "stalled" && (signal.stalledReason || signal.failureReason)) {
+          reason = signal.stalledReason ?? signal.failureReason;
         } else if (signal.status === "failed" && signal.failureReason === "orphan-sweep-stale") {
           reason = "orphan-sweep-stale";
         } else {
