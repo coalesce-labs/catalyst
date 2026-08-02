@@ -12,13 +12,16 @@
 // recovery-reasoning.mjs) checking `stalledReason`. This module checks BOTH
 // fields defensively so it actually finds real candidates in production.
 
-import { readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync, appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { isTicketKey } from "./ticket-key.mjs";
 import { classifyMergeTree } from "./stale-pr-rescue.mjs";
-import { defaultMergeTree } from "./stale-pr-rescue-timer.mjs";
+import { log, getEventLogPath } from "./config.mjs";
+import { RESOLVE_CONFLICT_SWEEP_EVENT_TYPES } from "./resolve-conflict-sweep-event-types.mjs";
+
+export { RESOLVE_CONFLICT_SWEEP_EVENT_TYPES };
 
 const _require = createRequire(import.meta.url);
 
@@ -32,7 +35,10 @@ export const RESOLVE_CONFLICT_CYCLE_CAP =
 //   stalledReasonMatches — the candidate's raw reason === RESOLVE_CONFLICT_STALL_REASON
 //   alreadyResolving     — the candidate's raw reason === RESOLVED_MARKER_REASON
 //                           (already marked + dispatched this cycle; awaiting completion)
-//   cycleCount            — countResolveConflictCycles({ticket}) — event-counted, durable
+//   cycleCount            — countResolveConflictAttempts({ticket}) — event-counted,
+//                           durable; counts BOTH complete and failed dispatch
+//                           attempts (#1461 Fix 2), so a repeatedly-FAILING run
+//                           still reaches RESOLVE_CONFLICT_CYCLE_CAP and escalates
 //   classification         — classifyMergeTree(...) result, or null if the merge-tree
 //                            probe has not run yet / failed this tick
 export function classifyResolveConflictCandidate(ctx = {}) {
@@ -119,16 +125,52 @@ export function defaultCollectResolveConflictCandidates({
   return out;
 }
 
-// classifyLiveConflict — re-run git merge-tree against the LIVE worktree (never
-// trust stale census evidence — mirrors sourceConflictActSeam's own re-check
-// discipline in unstuck-act-seams.mjs) and classify with the existing,
-// UNMODIFIED classifyMergeTree. Returns null (not a classification) on any
-// probe failure or missing worktree — the caller's classifier then reads that
-// as "classification-unavailable" and retries next tick; it never guesses.
-export async function classifyLiveConflict({ worktreePath, base, head }, { mergeTree = defaultMergeTree } = {}) {
+// defaultLocalMergeTree — #1461 Fix 5 (final-review finding, human-approved
+// design): `git merge-tree --write-tree origin/<base> HEAD` run DIRECTLY in
+// the ticket's worktree — comparing the LIVE LOCAL worktree state (HEAD)
+// against the base, never the pushed remote ticket branch. The prior
+// classifyLiveConflict called stale-pr-rescue-timer.mjs's defaultMergeTree,
+// which fetches AND diffs origin/<base> against origin/<ticket> (the PUSHED
+// branch) — that only works once a ticket's branch has actually been pushed.
+// Dispatch-time pre-flight rebase stalls (this whole sweep's actual trigger)
+// typically happen on the IMPLEMENT phase, BEFORE the branch has ever been
+// pushed, so fetching origin/<ticket> always failed for that common case and
+// classifyLiveConflict permanently returned null (ADR-028's "reachable from
+// implement/verify/review" goal was defeated for its most common case). HEAD
+// is already local and never needs fetching; only origin/<base> is fetched
+// first, so a stale local remote-tracking ref can't produce a false
+// "resolvable" read against a base that has since moved on. Not injectable
+// via classifyLiveConflict's own `mergeTree` seam misuse — this is a NEW,
+// separate seam (do not reuse defaultMergeTree, which insists on fetching a
+// remote ref by the `head` name — fetching a literal remote "HEAD" would be
+// wrong). Returns the same {exitCode, output} shape classifyMergeTree expects.
+export async function defaultLocalMergeTree(worktreePath, base) {
+  const fetchRes = spawnSync("git", ["-C", worktreePath, "fetch", "origin", base], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  if (fetchRes.status !== 0) {
+    throw new Error(`git fetch origin ${base} failed (exit ${fetchRes.status}): ${fetchRes.stderr ?? ""}`);
+  }
+  const res = spawnSync(
+    "git",
+    ["-C", worktreePath, "merge-tree", "--write-tree", `origin/${base}`, "HEAD"],
+    { encoding: "utf8", timeout: 30_000 }
+  );
+  return { exitCode: res.status ?? 128, output: res.stdout ?? "" };
+}
+
+// classifyLiveConflict — re-run git merge-tree against the LIVE local worktree
+// (HEAD vs origin/<base> — never trust stale census evidence, and never the
+// pushed remote ticket branch; see defaultLocalMergeTree above for why) and
+// classify with the existing, UNMODIFIED classifyMergeTree. Returns null (not
+// a classification) on any probe failure or missing worktree — the caller's
+// classifier then reads that as "classification-unavailable" and retries next
+// tick; it never guesses.
+export async function classifyLiveConflict({ worktreePath, base }, { mergeTree = defaultLocalMergeTree } = {}) {
   if (!worktreePath) return null;
   try {
-    const mt = await mergeTree(worktreePath, base, head);
+    const mt = await mergeTree(worktreePath, base);
     return classifyMergeTree(mt);
   } catch {
     return null;
@@ -171,7 +213,8 @@ export function markStalledSignalResolving(
 }
 
 // The phase name resolve-conflict dispatches TO (phase-agent-dispatch resolves
-// this to the /catalyst-dev:resolve-conflict skill) — distinct from the STALLED
+// this, via skill_for_phase's default `phase-<PHASE>` convention, to the
+// /catalyst-dev:phase-resolve-conflict skill) — distinct from the STALLED
 // phase (`phase` param below, e.g. "implement"), whose own signal file is the one
 // markStalledSignalResolving rewrites.
 const RESOLVE_CONFLICT_DISPATCH_PHASE = "resolve-conflict";
@@ -312,6 +355,37 @@ export function defaultEscalateCapExhausted(
 // defaultCollectResolveConflictCompletions — find every ticket whose
 // resolve-conflict phase signal is "done" and read which original phase to
 // clear from resolve-conflict-brief.json's stalledPhase. Read-only.
+//
+// #1461 Fix 1 (CRITICAL final-review finding): this census used to key a
+// "completion" off ONLY {status:"done" on phase-resolve-conflict.json} + a
+// present resolve-conflict-brief.json — neither file is ever removed or
+// marked after a successful clear, so the SAME completion was re-collected on
+// EVERY subsequent tick forever (until the whole worker dir is archived at
+// pipeline teardown), and defaultClearStall does real, destructive work
+// UNCONDITIONALLY on every call: it deletes workers/<T>/phase-<stalledPhase>.json
+// (destroying a FRESH signal from a newly-redispatched live worker on every
+// tick after the first), deletes the escalation-cooldown marker every tick
+// (permanently defeating CTL-1442's ask-budget), deletes
+// .orphan-detected.applied every tick (spuriously re-emitting orphan-detected),
+// and calls clearStalledLabel every tick (a Linear API write per tick per
+// already-cleared ticket, forever).
+//
+// The fix: a completion is now reported ONLY when the ORIGINAL stalled-phase
+// signal (workers/<T>/phase-<stalledPhase>.json) is STILL PRESENT and STILL
+// carries the exact RESOLVED_MARKER_REASON this sweep itself wrote via
+// markStalledSignalResolving. defaultClearStall's own first step
+// unconditionally deletes that exact file, so once a clear has actually run,
+// the file is gone and this census naturally stops re-firing for that ticket —
+// no separate marker file needed (a second file that must ALSO be correctly
+// re-armed across a future, genuinely-new stall/resolve cycle on the same
+// ticket+phase would just be a second thing to keep in sync; the existing
+// signal file already carries the exact state needed). Three cases: (a) file
+// present + reason still RESOLVED_MARKER_REASON → genuine, not-yet-cleared
+// completion, report it; (b) file absent (clearStall already deleted it, or a
+// teardown/reap removed the worker) → already handled, do not re-report; (c)
+// file present but some OTHER process already changed the reason (e.g. a
+// manual operator re-arm, or CAP_EXHAUSTED_REASON from a parallel cap-exhaust
+// path) → something else already owns this ticket's stall, do not re-fire.
 export function defaultCollectResolveConflictCompletions({
   orchDir,
   readdirSync: readdir = readdirSync,
@@ -344,6 +418,18 @@ export function defaultCollectResolveConflictCompletions({
         continue; // done signal but no brief — cannot know which phase to clear
       }
       if (!brief?.stalledPhase) continue;
+
+      // Idempotence guard (Fix 1): only a still-marked, not-yet-cleared stall
+      // is a genuine completion to act on.
+      let stalledRaw;
+      try {
+        stalledRaw = JSON.parse(readFile(join(workerDir, `phase-${brief.stalledPhase}.json`), "utf8"));
+      } catch {
+        continue; // absent/unreadable — a prior clearStall already removed it
+      }
+      const stalledReason = stalledRaw?.failureReason ?? stalledRaw?.stalledReason ?? null;
+      if (stalledReason !== RESOLVED_MARKER_REASON) continue; // already changed/cleared by something else
+
       out.push({ ticket, stalledPhase: brief.stalledPhase });
     } catch {
       continue;
@@ -431,9 +517,12 @@ export function runResolveConflictSweepPass({
         const cycleCount = cycleCountOf(c.ticket);
         // Only probe merge-tree for a reason this sweep actually owns — never
         // spawn git for a not-our-stall candidate (classifier would skip it anyway).
+        // #1461 Fix 5: no `head` arg any more — classification is always against
+        // the LOCAL worktree's HEAD, not the pushed ticket branch (see
+        // classifyLiveConflict / defaultLocalMergeTree above).
         const classification =
           stalledReasonMatches && cycleCount < RESOLVE_CONFLICT_CYCLE_CAP
-            ? await classifyLive({ worktreePath: c.worktreePath, base: c.base, head: c.ticket })
+            ? await classifyLive({ worktreePath: c.worktreePath, base: c.base })
             : null;
         const decision = classifyResolveConflictCandidate({ stalledReasonMatches, alreadyResolving, cycleCount, classification });
 
@@ -457,6 +546,13 @@ export function runResolveConflictSweepPass({
         // mark-and-dispatch
         if (!enforce) {
           fire("resolve-conflict.would.mark", { ticket: c.ticket, phase: c.phase });
+          // #1461 Fix 4: the enforce path fires TWO distinct events for this
+          // action (marked.resolvable, then dispatched once markAndDispatch
+          // actually dispatches) — resolve-conflict.would.dispatch was in the
+          // closed vocabulary but never fired on the shadow twin, leaving it
+          // dead on both ends. Fire it alongside would.mark so shadow mode has
+          // full observability parity with what enforce would actually do.
+          fire("resolve-conflict.would.dispatch", { ticket: c.ticket, phase: c.phase });
           report.wouldMark.push({ ticket: c.ticket, phase: c.phase });
           continue;
         }
@@ -483,4 +579,42 @@ export function runResolveConflictSweepPass({
 
     return report;
   })();
+}
+
+// emitResolveConflictEvent — #1461 Fix 4 (IMPORTANT final-review finding):
+// dedicated unified-log emitter for the resolve-conflict-sweep vocabulary,
+// mirroring emitUnstuckEvent (unstuck-sweep.mjs) exactly. Without this, the
+// production `runTick` never set an `emit` seam, so runResolveConflictSweepPass
+// fell back to its own internal no-op default (`emit = async () => true`) —
+// shadow mode produced ZERO event output, defeating ADR-023's shadow-then-
+// enforce discipline: an operator flipping CATALYST_RESOLVE_CONFLICT_SWEEP=shadow
+// had no way to see what the sweep WOULD have done. Validates against this
+// sweep's OWN closed vocabulary (RESOLVE_CONFLICT_SWEEP_EVENT_TYPES) and
+// appends to the same unified log getEventLogPath() resolves to. Logs (does
+// NOT silently swallow) an append failure — this also closes the related
+// deferred finding that the driver's own `fire()` helper swallows emit
+// rejections with zero observability: now that a real logging emitter is
+// wired, an append failure is at least visible in the daemon's own logs.
+export async function emitResolveConflictEvent(eventType, fields = {}) {
+  if (!RESOLVE_CONFLICT_SWEEP_EVENT_TYPES.includes(eventType)) {
+    throw new Error(`unknown resolve-conflict-sweep event type: ${eventType}`);
+  }
+  const payload = {
+    ts: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    event: eventType,
+  };
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined || v === null || v === "") continue;
+    payload[k] = v;
+  }
+  const line = JSON.stringify(payload) + "\n";
+  const logPath = getEventLogPath();
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, line);
+    return true;
+  } catch (err) {
+    log.error({ err: err?.message, eventType }, "emitResolveConflictEvent: append failed (#1461)");
+    return false;
+  }
 }

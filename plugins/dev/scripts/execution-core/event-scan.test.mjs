@@ -18,6 +18,7 @@ import {
   countRemediateCycles,
   countRecoveryPassCycles,
   countResolveConflictCycles,
+  countResolveConflictAttempts,
   hasCompleteEvent,
   __resetEventScanIndexForTest,
   __phaseEventsLengthForTest,
@@ -300,6 +301,63 @@ describe("countResolveConflictCycles", () => {
 
   test("throws without a ticket", () => {
     expect(() => countResolveConflictCycles({ path })).toThrow("countResolveConflictCycles: ticket required");
+  });
+});
+
+// #1461 Fix 2 (CRITICAL final-review finding): countResolveConflictAttempts —
+// complete + failed, not completions-only. A repeatedly-FAILING resolve-conflict
+// run never increments countResolveConflictCycles (completions-only), leaving
+// the cap counter pinned at 0 forever; countResolveConflictAttempts closes that
+// gap so a failed dispatch attempt counts toward the cap exactly like a
+// completed one.
+describe("countResolveConflictAttempts", () => {
+  const path = "/tmp/resolve-conflict-attempts-test.jsonl";
+
+  beforeEach(() => {
+    __resetEventScanIndexForTest();
+    try { unlinkSync(path); } catch {}
+  });
+
+  test("counts phase.resolve-conflict.failed.<ticket> envelopes (not just complete)", () => {
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ ts: "2026-08-02T00:00:00Z", attributes: { "event.name": "phase.resolve-conflict.failed.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:01:00Z", attributes: { "event.name": "phase.resolve-conflict.failed.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:02:00Z", attributes: { "event.name": "phase.resolve-conflict.failed.CTL-1" } }),
+      ].join("\n") + "\n",
+    );
+    // countResolveConflictCycles (completions-only) sees ZERO — this is the bug.
+    expect(countResolveConflictCycles({ ticket: "CTL-1", path })).toBe(0);
+    // countResolveConflictAttempts sees all 3 failed dispatch attempts.
+    expect(countResolveConflictAttempts({ ticket: "CTL-1", path })).toBe(3);
+  });
+
+  test("sums complete AND failed envelopes for the same ticket", () => {
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ ts: "2026-08-02T00:00:00Z", attributes: { "event.name": "phase.resolve-conflict.failed.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:01:00Z", attributes: { "event.name": "phase.resolve-conflict.failed.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:02:00Z", attributes: { "event.name": "phase.resolve-conflict.complete.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:03:00Z", attributes: { "event.name": "phase.resolve-conflict.failed.CTL-2" } }),
+      ].join("\n") + "\n",
+    );
+    expect(countResolveConflictAttempts({ ticket: "CTL-1", path })).toBe(3);
+    expect(countResolveConflictAttempts({ ticket: "CTL-2", path })).toBe(1);
+    expect(countResolveConflictAttempts({ ticket: "CTL-9", path })).toBe(0);
+  });
+
+  test("does not match a suffix-only ticket (CTL-1 vs CTL-10)", () => {
+    writeFileSync(
+      path,
+      JSON.stringify({ ts: "2026-08-02T00:00:00Z", attributes: { "event.name": "phase.resolve-conflict.failed.CTL-10" } }) + "\n",
+    );
+    expect(countResolveConflictAttempts({ ticket: "CTL-1", path })).toBe(0);
+  });
+
+  test("throws without a ticket", () => {
+    expect(() => countResolveConflictAttempts({ path })).toThrow("countResolveConflictAttempts: ticket required");
   });
 });
 
