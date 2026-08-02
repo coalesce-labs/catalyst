@@ -47,6 +47,8 @@ import {
   isTerminal,
   REMEDIATE_PHASE,
   REMEDIATE_CYCLE_CAP,
+  phaseIndex, // isTicketInFlight's own supersede guard, mirroring the CTL-606 guard below
+  isKnownPhase, // same
 } from "../lib/phase-fsm.mjs";
 // CTL workflow descriptor (provenance swap): the pipeline-shape constants
 // (STAGE_RANK, TERMINAL_PHASE, NEW_WORK_ENTRY_PHASE, NON_PREEMPTABLE_PHASES) are
@@ -970,10 +972,31 @@ export function readPhaseSignals(orchDir, ticket) {
 // same as SETTLED_STATUSES in abort-worker.mjs — a non-terminal `done` is
 // settled-as-a-signal there but still in-flight here. The divergence is
 // intentional; do not collapse the two into one shared constant.
+// SUPERSEDE GUARD: readPhaseSignals returns every workers/<T>/phase-*.json this
+// ticket has EVER had, not just the current one. Without this, a direct
+// out-of-order re-dispatch (e.g. recovery-pass re-dispatching a LATER phase to
+// unstick a ticket without clearing the earlier phase's now-stale signal) left
+// a permanently-failed predecessor that vetoed isTicketInFlight forever, even
+// once a later phase had completed and moved the ticket on — silently walling
+// it off from the advancement sweep (verify/remediate never re-checked; the
+// ticket just sat there). Mirrors the existing CTL-606 supersede guard
+// (recovery.mjs) so the two "has this ticket moved past this signal" checks
+// agree: a KNOWN phase whose phaseIndex is behind the ticket's latest-
+// dispatched KNOWN phase is superseded and its status no longer counts.
+function latestKnownPhaseIndex(phases) {
+  return phases.reduce((max, p) => {
+    if (!isKnownPhase(p)) return max; // unknown/non-pipeline signal — ignore for ordering
+    const i = phaseIndex(p);
+    return i > max ? i : max;
+  }, -1);
+}
+
 export function isTicketInFlight(signals) {
   const phases = Object.keys(signals ?? {});
   if (phases.length === 0) return false;
+  const latestIdx = latestKnownPhaseIndex(phases);
   for (const [phase, status] of Object.entries(signals)) {
+    if (isKnownPhase(phase) && phaseIndex(phase) < latestIdx) continue; // superseded — ignore
     if (status === "failed" || status === "stalled" || status === "aborted") return false;
     // CTL-512: monitor-deploy `skipped` is terminal-success — the producer
     // emits it when no deployment_status event arrived before the timeout

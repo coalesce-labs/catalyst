@@ -272,6 +272,48 @@ describe("isTicketInFlight", () => {
   test("no signals at all → NOT in-flight", () => {
     expect(isTicketInFlight({})).toBe(false);
   });
+
+  describe("supersede guard — a stale earlier-phase failure must not veto a later-completed phase", () => {
+    test("implement failed, but verify (later) done → in-flight", () => {
+      // The real-world shape: a direct out-of-order re-dispatch skipped
+      // straight to verify without clearing implement's stale failed signal.
+      expect(isTicketInFlight({ implement: "failed", verify: "done" })).toBe(true);
+    });
+    test("implement failed, verify (later) still running → in-flight", () => {
+      expect(isTicketInFlight({ implement: "failed", verify: "running" })).toBe(true);
+    });
+    test("implement failed with NO later phase → still NOT in-flight", () => {
+      // implement is the latest-dispatched phase here, so its own failure
+      // still vetoes — this is the ordinary (non-superseded) stall case.
+      expect(isTicketInFlight({ triage: "done", implement: "failed" })).toBe(false);
+    });
+    test("two stale predecessors (research aborted, plan stalled), implement (latest) done → in-flight", () => {
+      expect(
+        isTicketInFlight({ research: "aborted", plan: "stalled", implement: "done" })
+      ).toBe(true);
+    });
+    test("the LATEST phase failing still vetoes even with earlier successes", () => {
+      expect(isTicketInFlight({ research: "done", implement: "done", verify: "failed" })).toBe(
+        false
+      );
+    });
+    test("remediate ranks at verify's index — a failed verify is NOT superseded by a later remediate attempt", () => {
+      // remediate is ancillary (ranks at verify's phaseIndex, not after it), so
+      // a failed verify alongside a remediate signal is NOT treated as stale —
+      // remediate cycling with verify must not accidentally supersede it away.
+      expect(isTicketInFlight({ verify: "failed", remediate: "done" })).toBe(false);
+    });
+    test("an unknown/non-pipeline phase name never supersedes or is superseded", () => {
+      // e.g. a recovery-pass inspection signal — isPhantomWorkerDir handles
+      // that separately; isTicketInFlight's ordering logic must ignore it.
+      expect(
+        isTicketInFlight({ implement: "failed", "recovery-pass": "done" })
+      ).toBe(false);
+    });
+    test("teardown (terminal, outside phaseIndex) alongside a stale earlier failure is still terminal", () => {
+      expect(isTicketInFlight({ implement: "failed", teardown: "done" })).toBe(false);
+    });
+  });
 });
 
 describe("listInFlightTickets / readMaxParallel / computeFreeSlots", () => {
