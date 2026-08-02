@@ -4940,7 +4940,13 @@ export function schedulerTick(
     const rcMode = _resolveConflictMode ?? readResolveConflictSweepConfig().mode;
     if (
       rcMode !== "off" &&
-      (_collectResolveConflictCandidates || _collectResolveConflictCompletions) &&
+      // M3 (review follow-up): the gate must also recognize the failures
+      // collector — without this, a caller injecting ONLY collectFailures
+      // (e.g. a test isolating the failure path, or a future census-only
+      // wiring) would silently no-op the WHOLE sweep, including the
+      // candidates/completions sub-passes that collector's own default is
+      // never consulted for.
+      (_collectResolveConflictCandidates || _collectResolveConflictCompletions || _collectResolveConflictFailures) &&
       !_resolveConflictSweepInFlight
     ) {
       _resolveConflictSweepInFlight = true;

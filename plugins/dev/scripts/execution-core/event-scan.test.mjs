@@ -356,6 +356,23 @@ describe("countResolveConflictAttempts", () => {
     expect(countResolveConflictAttempts({ ticket: "CTL-1", path })).toBe(0);
   });
 
+  // Escalation-gap fix (#1461 review follow-up): a maxTurns cutoff is a THIRD
+  // terminal shape — defaultEmitBackstop emits phase.resolve-conflict.
+  // turn-cap-exhausted.<ticket> (not .failed.) to match the on-disk
+  // status:"turn-cap-exhausted" it also writes. Before this fix, isRelevant
+  // never even retained this event name, so it was invisible to every counter.
+  test("counts phase.resolve-conflict.turn-cap-exhausted.<ticket> envelopes too", () => {
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ ts: "2026-08-02T00:00:00Z", attributes: { "event.name": "phase.resolve-conflict.turn-cap-exhausted.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:01:00Z", attributes: { "event.name": "phase.resolve-conflict.failed.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:02:00Z", attributes: { "event.name": "phase.resolve-conflict.complete.CTL-1" } }),
+      ].join("\n") + "\n",
+    );
+    expect(countResolveConflictAttempts({ ticket: "CTL-1", path })).toBe(3);
+  });
+
   test("throws without a ticket", () => {
     expect(() => countResolveConflictAttempts({ path })).toThrow("countResolveConflictAttempts: ticket required");
   });

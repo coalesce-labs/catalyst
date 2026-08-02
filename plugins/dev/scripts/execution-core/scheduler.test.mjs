@@ -10858,6 +10858,7 @@ describe("#1461: resolve-conflict-sweep — scheduler wiring", () => {
   test("runs every tick when mode is not off, uses the injected collectors", () => {
     let candidatesCalled = false;
     let completionsCalled = false;
+    let failuresCalled = false;
     schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch: fakeDispatch({ code: 0 }),
@@ -10875,10 +10876,74 @@ describe("#1461: resolve-conflict-sweep — scheduler wiring", () => {
           completionsCalled = true;
           return [];
         },
+        // #1461 escalation-gap fix (I2 review follow-up): the failures census
+        // seam must be reachable through schedulerTick's real call path exactly
+        // like the candidates/completions seams already are.
+        collectFailures: () => {
+          failuresCalled = true;
+          return [];
+        },
       },
     });
     expect(candidatesCalled).toBe(true);
     expect(completionsCalled).toBe(true);
+    expect(failuresCalled).toBe(true);
+  });
+
+  // #1461 escalation-gap fix (I2 review follow-up): a genuine end-to-end
+  // reachability check for BOTH new seams (collectFailures,
+  // revertStallAndResetCycle) through schedulerTick's real production wiring —
+  // not just the "was it called" smoke test above. Drives an under-cap failure
+  // in enforce mode and asserts the revert seam receives exactly the
+  // {ticket, stalledPhase} shape defaultCollectResolveConflictFailures produces.
+  test("collectFailures + revertStallAndResetCycle are both reachable through schedulerTick in enforce mode", async () => {
+    const reverted = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "enforce",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => [{ ticket: "CTL-9201", stalledPhase: "implement", workerDir: join(orchDir, "workers", "CTL-9201") }],
+        cycleCountOf: () => 0, // under the cap
+        revertStallAndResetCycle: (f) => {
+          reverted.push(f);
+          return true;
+        },
+      },
+    });
+    // The resolve-conflict-sweep pass is fire-and-forget (see schedulerTick's own
+    // comment on _resolveConflictSweepInFlight) — let its microtask chain drain.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(reverted).toEqual([{ ticket: "CTL-9201", stalledPhase: "implement" }]);
+  });
+
+  // M3 (review follow-up): injecting ONLY the failures collector (no
+  // candidates/completions override) must NOT silently no-op the whole sweep —
+  // the mode-gate has to recognize collectFailures too.
+  test("does not skip the sweep when ONLY collectFailures is injected (M3 gate fix)", () => {
+    let failuresCalled = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "shadow",
+        collectFailures: () => {
+          failuresCalled = true;
+          return [];
+        },
+      },
+    });
+    expect(failuresCalled).toBe(true);
   });
 
   test("is skipped entirely when mode is off", () => {

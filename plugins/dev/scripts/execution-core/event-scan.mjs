@@ -66,6 +66,16 @@ const RESOLVE_CONFLICT_NAME_PREFIX = "phase.resolve-conflict.complete.";
 // repeated failures eventually reach RESOLVE_CONFLICT_CYCLE_CAP and escalate,
 // exactly like a repeated cycle would.
 const RESOLVE_CONFLICT_FAILED_PREFIX = "phase.resolve-conflict.failed.";
+// Escalation-gap fix (#1461 review follow-up): a resolve-conflict dispatch that
+// hits its maxTurns cutoff lands in a THIRD terminal shape distinct from both
+// "done" and "failed" — defaultEmitBackstop (sdk-run-phase-agent.mjs) emits
+// phase.resolve-conflict.turn-cap-exhausted.<ticket> (not .failed.) to keep the
+// event name matching the on-disk status:"turn-cap-exhausted" it also writes.
+// Without this prefix, isRelevant (below) never retained the event at all, so
+// countResolveConflictAttempts silently undercounted this specific failure
+// shape — the durable cap counter never climbed for it, no matter how many
+// times it recurred.
+const RESOLVE_CONFLICT_TURN_CAP_PREFIX = "phase.resolve-conflict.turn-cap-exhausted.";
 
 // CTL-802 — countTicketEventsInWindow (the CTL-671 runaway detector) used to scan
 // the WHOLE log from offset 0 on every call — and it is called once per in-flight
@@ -106,6 +116,7 @@ function isRelevant(name) {
       name.startsWith(REMEDIATE_NAME_PREFIX) ||
       name.startsWith(RESOLVE_CONFLICT_NAME_PREFIX) ||
       name.startsWith(RESOLVE_CONFLICT_FAILED_PREFIX) ||
+      name.startsWith(RESOLVE_CONFLICT_TURN_CAP_PREFIX) ||
       COMPLETE_NAME_RE.test(name))
   );
 }
@@ -242,19 +253,25 @@ export function countResolveConflictCycles({ ticket, orchId, since, path = getEv
 
 // countResolveConflictAttempts — #1461 Fix 2 (final-review finding): number of
 // phase.resolve-conflict.complete.<ticket> PLUS phase.resolve-conflict.failed.
-// <ticket> envelopes — every DISPATCH ATTEMPT, not just successful completions.
-// countResolveConflictCycles (above) is completion-only, which let a
-// repeatedly-FAILING resolve-conflict run never spend cap budget: the marker
-// (RESOLVED_MARKER_REASON) stuck around forever with cycleCount pinned at 0.
-// This is the counter the resolve-conflict-sweep wiring feeds into
-// classifyResolveConflictCandidate's cycleCount so a failed run counts toward
-// RESOLVE_CONFLICT_CYCLE_CAP exactly like a completed one, and repeated
-// failures eventually route through the SAME cap-exhaustion escalate path.
+// <ticket> PLUS phase.resolve-conflict.turn-cap-exhausted.<ticket> envelopes —
+// every DISPATCH ATTEMPT, not just successful completions. The turn-cap-exhausted
+// term was added by the escalation-gap review follow-up (#1461): a maxTurns
+// cutoff is a THIRD terminal shape distinct from both "done" and "failed" (see
+// RESOLVE_CONFLICT_TURN_CAP_PREFIX above), and was previously invisible to this
+// counter entirely (not even matched by isRelevant, so it never entered the
+// retained index at all). countResolveConflictCycles (above) is completion-only,
+// which let a repeatedly-FAILING resolve-conflict run never spend cap budget:
+// the marker (RESOLVED_MARKER_REASON) stuck around forever with cycleCount
+// pinned at 0. This is the counter the resolve-conflict-sweep wiring feeds into
+// classifyResolveConflictCandidate's cycleCount so a failed OR turn-cap-exhausted
+// run counts toward RESOLVE_CONFLICT_CYCLE_CAP exactly like a completed one, and
+// repeated failures eventually route through the SAME cap-exhaustion escalate path.
 export function countResolveConflictAttempts({ ticket, orchId, since, path = getEventLogPath() } = {}) {
   if (!ticket) throw new Error("countResolveConflictAttempts: ticket required");
   return (
     countByExactName(`${RESOLVE_CONFLICT_NAME_PREFIX}${ticket}`, { orchId, since, path }) +
-    countByExactName(`${RESOLVE_CONFLICT_FAILED_PREFIX}${ticket}`, { orchId, since, path })
+    countByExactName(`${RESOLVE_CONFLICT_FAILED_PREFIX}${ticket}`, { orchId, since, path }) +
+    countByExactName(`${RESOLVE_CONFLICT_TURN_CAP_PREFIX}${ticket}`, { orchId, since, path })
   );
 }
 
