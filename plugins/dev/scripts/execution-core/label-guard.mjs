@@ -411,6 +411,108 @@ export function labelNeedsHumanUnlessBeliefOwner(
   return applied;
 }
 
+// ─── CTL-1605: the worker-status label group (Axis 2) — single source of truth. ───
+// Precedence lives in worker-disposition.mjs; this is the flat membership set the
+// terminal chokepoint clears. Includes the legacy "waiting" so a terminal ticket
+// still wearing it is drained too.
+export const WORKER_STATUS_LABELS = Object.freeze([
+  "needs-human",
+  "needs-input",
+  "blocked",
+  "queued",
+  "waiting",
+]);
+
+// resolveAndApplyWorkerStatusLabel — the ONE terminal-aware chokepoint every
+// worker-status apply site routes through (CTL-1605). It reads live Linear Status
+// via the injected `isTerminal` probe (isTicketTerminalOrMerged in production —
+// fail-safe NOT-terminal, never throws). If the ticket is terminal it removes every
+// worker-status label present on the ticket and calls the injected `evictWorkerDir`
+// seam (guarded, live-session-safe — Phase 3), then returns { terminal:true } WITHOUT
+// applying `desired`. Otherwise it invokes the caller's existing `applyDesired`
+// closure (labelOnce / convergeHeldLabel / clearStalledLabel) unchanged and returns
+// { terminal:false }. All effects are seams → pure/leaf, fully unit-testable.
+//
+// `needs-human` is cleared through clearStalledLabel (re-arms markers + CTL-1078
+// backoff); the held labels through writeStatus.removeLabel. `onTerminalCleared(label)`
+// fires per label so the caller can recordTransition the clear.
+export function resolveAndApplyWorkerStatusLabel(
+  orchDir,
+  ticket,
+  {
+    desired = null,
+    currentLabels = [],
+    isTerminal,
+    writeStatus,
+    evictWorkerDir = null,
+    applyDesired = null,
+    onTerminalCleared = null,
+    now = () => Date.now(),
+  } = {}
+) {
+  // `desired` is a caller intent marker (which label WOULD be applied on the
+  // non-terminal path); the apply itself is owned by the caller's applyDesired
+  // closure, so we only read it for clarity — it is intentionally not used here.
+  void desired;
+  let verdict = { terminal: false };
+  try {
+    if (typeof isTerminal === "function") verdict = isTerminal(ticket) ?? { terminal: false };
+  } catch (err) {
+    // Fail-safe NOT-terminal — a throw must never manufacture a terminal verdict
+    // (mirrors isTicketTerminalOrMerged). Caller proceeds with its normal apply.
+    log.warn(
+      { ticket, err: err?.message },
+      "resolveAndApplyWorkerStatusLabel: isTerminal threw — treating NOT-terminal"
+    );
+    verdict = { terminal: false };
+  }
+
+  if (!verdict?.terminal) {
+    if (typeof applyDesired === "function") applyDesired();
+    return { terminal: false };
+  }
+
+  // Terminal: refuse the write. Clear every worker-status label present, then evict.
+  const present = new Set(currentLabels ?? []);
+  for (const label of WORKER_STATUS_LABELS) {
+    if (!present.has(label)) continue; // steady-state zero-write on a clean terminal ticket
+    const fire = () => {
+      if (typeof onTerminalCleared === "function") onTerminalCleared(label);
+    };
+    if (label === "needs-human") {
+      clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemoved: fire, now });
+    } else {
+      try {
+        const res = writeStatus?.removeLabel?.(ticket, label);
+        if (res == null || res?.removed !== false) fire();
+      } catch (err) {
+        log.warn(
+          { ticket, label, err: err?.message },
+          "resolveAndApplyWorkerStatusLabel: removeLabel threw — continuing"
+        );
+      }
+    }
+  }
+
+  let evicted = false;
+  if (typeof evictWorkerDir === "function") {
+    try {
+      evicted = evictWorkerDir(ticket) === true;
+    } catch (err) {
+      log.warn(
+        { ticket, err: err?.message },
+        "resolveAndApplyWorkerStatusLabel: evict threw — continuing"
+      );
+    }
+  }
+  return {
+    terminal: true,
+    reason: verdict.reason ?? "linear-terminal",
+    state: verdict.state ?? null,
+    evicted,
+  };
+}
+
 export function recordEscalation(orchDir, ticket, phase, reason, now) {
   const dir = join(orchDir, ".escalation-cooldowns");
   try {

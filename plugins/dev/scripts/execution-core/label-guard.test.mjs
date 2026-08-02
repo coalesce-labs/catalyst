@@ -2,7 +2,7 @@
 // escalation cool-down primitives (CTL-638). Run:
 //   cd plugins/dev/scripts/execution-core && bun test label-guard.test.mjs
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,8 @@ import {
   inRemovalBackoff,
   beliefOwnsNeedsHuman,
   labelNeedsHumanUnlessBeliefOwner,
+  resolveAndApplyWorkerStatusLabel,
+  WORKER_STATUS_LABELS,
 } from "./label-guard.mjs";
 
 let orchDir;
@@ -892,5 +894,115 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
       log: { info: () => {} },
     });
     expect(wrote).toBe(true);
+  });
+});
+
+// ─── CTL-1605: terminal-aware worker-status chokepoint ───
+
+describe("resolveAndApplyWorkerStatusLabel", () => {
+  test("WORKER_STATUS_LABELS is the frozen group source-of-truth", () => {
+    expect(Object.isFrozen(WORKER_STATUS_LABELS)).toBe(true);
+    expect(new Set(WORKER_STATUS_LABELS)).toEqual(
+      new Set(["needs-human", "needs-input", "blocked", "queued", "waiting"])
+    );
+  });
+
+  test("terminal → clears every present label, evicts, no apply", () => {
+    const removed = [];
+    const evicted = [];
+    const applyDesired = mock(() => {});
+    const writeStatus = {
+      removeLabel: (t, l) => {
+        removed.push(l);
+        return { removed: true };
+      },
+      applyLabel: mock(() => {}),
+    };
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-9", {
+      desired: "blocked",
+      currentLabels: ["blocked", "needs-human"],
+      isTerminal: () => ({ terminal: true, reason: "linear-terminal", state: "Done" }),
+      writeStatus,
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+      applyDesired,
+    });
+    expect(res).toMatchObject({ terminal: true, evicted: true });
+    expect(new Set(removed)).toEqual(new Set(["blocked", "needs-human"]));
+    expect(applyDesired).not.toHaveBeenCalled();
+    expect(evicted).toEqual(["CTL-9"]);
+    expect(writeStatus.applyLabel).not.toHaveBeenCalled();
+  });
+
+  test("non-terminal → invokes applyDesired, no clear, no evict", () => {
+    const applyDesired = mock(() => {});
+    const evict = mock(() => true);
+    const writeStatus = {
+      removeLabel: mock(() => ({ removed: true })),
+      applyLabel: mock(() => {}),
+    };
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-10", {
+      desired: "blocked",
+      currentLabels: [],
+      isTerminal: () => ({ terminal: false }),
+      writeStatus,
+      evictWorkerDir: evict,
+      applyDesired,
+    });
+    expect(res).toMatchObject({ terminal: false });
+    expect(applyDesired).toHaveBeenCalledTimes(1);
+    expect(evict).not.toHaveBeenCalled();
+    expect(writeStatus.removeLabel).not.toHaveBeenCalled();
+  });
+
+  test("terminal but no worker-status label present → evicts, zero removeLabel", () => {
+    const writeStatus = {
+      removeLabel: mock(() => ({ removed: true })),
+      applyLabel: mock(() => {}),
+    };
+    const evict = mock(() => true);
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-11", {
+      desired: null,
+      currentLabels: ["some-unrelated-label"],
+      isTerminal: () => ({ terminal: true, state: "Canceled" }),
+      writeStatus,
+      evictWorkerDir: evict,
+      applyDesired: mock(() => {}),
+    });
+    expect(res.terminal).toBe(true);
+    expect(writeStatus.removeLabel).not.toHaveBeenCalled();
+    expect(evict).toHaveBeenCalledTimes(1);
+  });
+
+  test("isTerminal throws → fail-safe NOT-terminal, applyDesired runs", () => {
+    const applyDesired = mock(() => {});
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-12", {
+      desired: "queued",
+      currentLabels: [],
+      isTerminal: () => {
+        throw new Error("linear 400");
+      },
+      writeStatus: { removeLabel: mock(() => ({ removed: true })), applyLabel: mock(() => {}) },
+      evictWorkerDir: mock(() => true),
+      applyDesired,
+    });
+    expect(res.terminal).toBe(false);
+    expect(applyDesired).toHaveBeenCalledTimes(1);
+  });
+
+  test("terminal clear fires onTerminalCleared per removed label", () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-13", {
+      desired: null,
+      currentLabels: ["queued", "needs-human"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: { removeLabel: () => ({ removed: true }), applyLabel: mock(() => {}) },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (l) => cleared.push(l),
+      applyDesired: mock(() => {}),
+    });
+    expect(new Set(cleared)).toEqual(new Set(["queued", "needs-human"]));
   });
 });
