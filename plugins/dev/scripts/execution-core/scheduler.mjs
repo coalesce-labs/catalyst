@@ -66,7 +66,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
-import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
+import { countRemediateCycles, countTicketEventsInWindow, countResolveConflictCycles } from "./event-scan.mjs"; // #1461: countResolveConflictCycles
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import {
@@ -252,6 +252,19 @@ import {
   defaultCollectUnstuckCandidates,
   emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
+// #1461: resolve-conflict-sweep (ADR-028) — every-tick classify-then-act pass
+// over the resolvable-source-conflict stalled backlog. Structurally mirrors
+// unstuck-sweep.mjs (pure classifier + injected action driver); the census
+// producers + live-classify seam are wired below. Mode='off' by default;
+// operators opt in via CATALYST_RESOLVE_CONFLICT_SWEEP=shadow then =enforce.
+import {
+  runResolveConflictSweepPass,
+  defaultCollectResolveConflictCandidates,
+  defaultCollectResolveConflictCompletions,
+  classifyLiveConflict,
+  defaultMarkAndDispatch,
+  defaultEscalateCapExhausted,
+} from "./resolve-conflict-sweep.mjs";
 // CTL-1176: Pass 0r — LLM reasoning recovery pass. Ships off by default (ADR-023);
 // operators opt in via CATALYST_RECOVERY_PASS=shadow then =enforce.
 //
@@ -320,6 +333,7 @@ import {
   getLokiQueryUrl,
   readReclaimGatewayFreshMs,
   isThrottled,
+  readResolveConflictSweepConfig, // #1461
 } from "./config.mjs";
 import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
 // CAT-57: Loki-source peer read for the productivity signal, so nodeProductivity is
@@ -4426,6 +4440,23 @@ export function schedulerTick(
       postComment: _unstuckPostComment = undefined,
       nowMs: _unstuckNowMs = undefined,
     } = {},
+    // #1461: resolve-conflict-sweep seams (ADR-028). Mode resolves from
+    // readResolveConflictSweepConfig() (env CATALYST_RESOLVE_CONFLICT_SWEEP >
+    // Layer-2 > 'off') unless overridden. Defaults keep a bare tick fully
+    // inert — no census producer means nothing to collect. Production wires
+    // the real census (defaultCollectResolveConflictCandidates /
+    // defaultCollectResolveConflictCompletions) + act seams via startScheduler.
+    resolveConflictSweep: {
+      mode: _resolveConflictMode = undefined,
+      collectCandidates: _collectResolveConflictCandidates = undefined,
+      collectCompletions: _collectResolveConflictCompletions = undefined,
+      classifyLive: _resolveConflictClassifyLive = undefined,
+      cycleCountOf: _resolveConflictCycleCountOf = undefined,
+      markAndDispatch: _resolveConflictMarkAndDispatch = undefined,
+      escalateCapExhausted: _resolveConflictEscalate = undefined,
+      clearStall: _resolveConflictClearStall = undefined,
+      emit: _resolveConflictEmit = undefined,
+    } = {},
     // CTL-1176: Pass 0r — recovery-reasoning pass seams. Default undefined keeps
     // a bare tick fully inert. Production passes mode from env > Layer-2.
     recoveryPass: { mode: _recoveryPassMode = undefined } = {},
@@ -5472,6 +5503,71 @@ export function schedulerTick(
   }
 
   tick?.lap("unstuck-sweep");
+
+  // #1461: resolve-conflict-sweep — every tick (no throttle: candidates are
+  // rare and the classify step only spawns git for a candidate this sweep
+  // actually owns). Mode='off' by default (ADR-023/ADR-028); operators opt in
+  // via CATALYST_RESOLVE_CONFLICT_SWEEP=shadow then =enforce.
+  //
+  // runResolveConflictSweepPass is intentionally NOT awaited here: schedulerTick
+  // is a plain synchronous function (no `await` anywhere in this file — see
+  // runTick's bare `schedulerTick(...)` call below), so a top-level `await`
+  // would not compile. The pass itself is synchronous in mode='off' (returns
+  // the report directly) and returns a Promise only in shadow/enforce (it needs
+  // `await classifyLive(...)` per-candidate); either way `collectCandidates()` /
+  // `collectCompletions()` run synchronously BEFORE that first internal await
+  // (see resolve-conflict-sweep.mjs), so census wiring is still exercised
+  // deterministically within this tick. The eventual settlement (marked/
+  // escalated/cleared counts for the info log, or a failure for the warn log)
+  // is handled fire-and-forget via .then()/.catch(), mirroring this file's
+  // existing best-effort async discipline (e.g. the delegate-queue enqueue path).
+  {
+    const rcMode = _resolveConflictMode ?? readResolveConflictSweepConfig().mode;
+    if (rcMode !== "off" && (_collectResolveConflictCandidates || _collectResolveConflictCompletions)) {
+      try {
+        const rcResult = runResolveConflictSweepPass({
+          mode: rcMode,
+          collectCandidates: _collectResolveConflictCandidates ?? (() => defaultCollectResolveConflictCandidates({ orchDir })),
+          collectCompletions: _collectResolveConflictCompletions ?? (() => defaultCollectResolveConflictCompletions({ orchDir })),
+          classifyLive: _resolveConflictClassifyLive ?? classifyLiveConflict,
+          cycleCountOf: _resolveConflictCycleCountOf ?? ((ticket) => countResolveConflictCycles({ ticket })),
+          markAndDispatch: _resolveConflictMarkAndDispatch ?? ((c) => defaultMarkAndDispatch({ ...c, orchDir })),
+          escalateCapExhausted: _resolveConflictEscalate ?? defaultEscalateCapExhausted,
+          clearStall: _resolveConflictClearStall ?? defaultClearStall(orchDir, writeStatus),
+          emit: _resolveConflictEmit,
+        });
+        const logRcReport = (rcReport) => {
+          if (
+            rcReport.marked.length ||
+            rcReport.escalated.length ||
+            rcReport.cleared.length ||
+            rcReport.wouldMark.length ||
+            rcReport.wouldEscalate.length ||
+            rcReport.wouldClear.length
+          ) {
+            log.info(
+              { mode: rcMode, marked: rcReport.marked.length, escalated: rcReport.escalated.length, cleared: rcReport.cleared.length },
+              "scheduler: resolve-conflict-sweep pass (#1461)",
+            );
+          }
+        };
+        if (rcResult && typeof rcResult.then === "function") {
+          rcResult.then(logRcReport).catch((err) => {
+            log.warn(
+              { step: "resolve-conflict-sweep", err: err?.message },
+              "scheduler: resolve-conflict-sweep pass failed — continuing tick (#1461)",
+            );
+          });
+        } else {
+          logRcReport(rcResult);
+        }
+      } catch (err) {
+        log.warn({ step: "resolve-conflict-sweep", err: err.message }, "scheduler: resolve-conflict-sweep pass failed — continuing tick (#1461)");
+      }
+    }
+  }
+
+  tick?.lap("resolve-conflict-sweep");
 
   // CTL-1176: Pass 0r — LLM reasoning recovery pass. Low-frequency autonomous
   // triage of the stalled/failed/needs-human/UNKNOWN backlog. Mode resolves from
