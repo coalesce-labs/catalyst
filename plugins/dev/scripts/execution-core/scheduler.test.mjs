@@ -105,7 +105,7 @@ import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
 import { getDrainFlagPath, getEventLogPath } from "./config.mjs"; // CTL-1678: drain-disabled override integration test
-import { RESOLVED_MARKER_REASON } from "./resolve-conflict-sweep.mjs"; // #1461: shared marker reason, not a re-typed literal
+import { RESOLVED_MARKER_REASON, RESOLVE_CONFLICT_STALL_REASON } from "./resolve-conflict-sweep.mjs"; // #1461: shared marker reasons, not re-typed literals
 
 let orchDir;
 let catalystDir;
@@ -10928,6 +10928,8 @@ describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass
 // (no throttle). These smoke tests only assert the wiring itself — the pure
 // classify/act behavior is covered by resolve-conflict-sweep.test.mjs.
 describe("#1461: resolve-conflict-sweep — scheduler wiring", () => {
+  afterEach(() => __resetForTests()); // reset the module-level in-flight guard between tests
+
   test("runs every tick when mode is not off, uses the injected collectors", () => {
     let candidatesCalled = false;
     let completionsCalled = false;
@@ -10972,6 +10974,67 @@ describe("#1461: resolve-conflict-sweep — scheduler wiring", () => {
       },
     });
     expect(called).toBe(false);
+  });
+
+  // TOCTOU guard (review follow-up): the pass is fire-and-forget with NO
+  // per-tick throttle, so its async classifyLive work can still be pending
+  // when the next tick fires. A module-level in-flight flag must make an
+  // overlapping tick skip starting a second pass entirely — otherwise the
+  // same still-unmarked candidate would be re-collected/re-classified.
+  test("an overlapping tick does not start a second pass while the first is still pending", async () => {
+    let candidatesCalls = 0;
+    const CANDIDATE = {
+      ticket: "CTL-1461-INFLIGHT",
+      phase: "implement",
+      workerDir: join(orchDir, "workers", "CTL-1461-INFLIGHT"),
+      worktreePath: "/tmp/does-not-matter",
+      base: "main",
+      raw: { failureReason: RESOLVE_CONFLICT_STALL_REASON },
+    };
+    // A controllable classifyLive promise this test settles by hand — keeps
+    // tick 1's pass genuinely "in flight" until we say otherwise.
+    let resolveClassify;
+    const pendingClassify = new Promise((res) => {
+      resolveClassify = res;
+    });
+
+    const baseOpts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "shadow",
+        collectCandidates: () => {
+          candidatesCalls++;
+          return [CANDIDATE];
+        },
+        collectCompletions: () => [],
+        classifyLive: () => pendingClassify,
+        cycleCountOf: () => 0,
+      },
+    };
+
+    // Tick 1: starts the pass; classifyLive's promise is still unsettled.
+    schedulerTick(orchDir, baseOpts);
+    expect(candidatesCalls).toBe(1);
+
+    // Tick 2: fires WHILE tick 1's pass is still pending. The in-flight guard
+    // must skip starting a second pass — collectCandidates must NOT be
+    // called again.
+    schedulerTick(orchDir, baseOpts);
+    expect(candidatesCalls).toBe(1);
+
+    // Settle tick 1's pass and let the whole .then/.catch/.finally chain drain.
+    resolveClassify({ resolvable: false, conflictFiles: [], conflictTypes: [] });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Tick 3: the prior pass has now settled (the guard cleared) — a new tick
+    // starts a fresh pass.
+    schedulerTick(orchDir, baseOpts);
+    expect(candidatesCalls).toBe(2);
   });
 });
 

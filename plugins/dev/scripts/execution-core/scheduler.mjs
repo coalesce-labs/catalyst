@@ -5521,9 +5521,25 @@ export function schedulerTick(
   // escalated/cleared counts for the info log, or a failure for the warn log)
   // is handled fire-and-forget via .then()/.catch(), mirroring this file's
   // existing best-effort async discipline (e.g. the delegate-queue enqueue path).
+  //
+  // TOCTOU guard: because this pass is fire-and-forget with NO per-tick
+  // throttle (by design — see above), its async work (classifyLive's real
+  // `git merge-tree` spawn, then markAndDispatch's marker write) can still be
+  // pending when the NEXT tick fires. Without a guard, an overlapping tick
+  // would call collectCandidates() again, see the same still-unmarked
+  // candidate, and re-classify/re-dispatch it. _resolveConflictSweepInFlight
+  // (module-level, declared near _unstuckLastRunMs) makes a new tick skip
+  // starting a new pass while the previous one's promise is still pending; it
+  // is set the instant we decide to run and cleared once the promise settles
+  // (or synchronously below on a pre-Promise throw).
   {
     const rcMode = _resolveConflictMode ?? readResolveConflictSweepConfig().mode;
-    if (rcMode !== "off" && (_collectResolveConflictCandidates || _collectResolveConflictCompletions)) {
+    if (
+      rcMode !== "off" &&
+      (_collectResolveConflictCandidates || _collectResolveConflictCompletions) &&
+      !_resolveConflictSweepInFlight
+    ) {
+      _resolveConflictSweepInFlight = true;
       try {
         const rcResult = runResolveConflictSweepPass({
           mode: rcMode,
@@ -5552,16 +5568,27 @@ export function schedulerTick(
           }
         };
         if (rcResult && typeof rcResult.then === "function") {
-          rcResult.then(logRcReport).catch((err) => {
-            log.warn(
-              { step: "resolve-conflict-sweep", err: err?.message },
-              "scheduler: resolve-conflict-sweep pass failed — continuing tick (#1461)",
-            );
-          });
+          rcResult
+            .then(logRcReport)
+            .catch((err) => {
+              log.warn(
+                { step: "resolve-conflict-sweep", err: err?.message },
+                "scheduler: resolve-conflict-sweep pass failed — continuing tick (#1461)",
+              );
+            })
+            .finally(() => {
+              _resolveConflictSweepInFlight = false;
+            });
         } else {
+          // Defensive only — unreachable given the outer `rcMode !== "off"`
+          // gate (runResolveConflictSweepPass always takes the async-IIFE
+          // branch once mode isn't "off"), but keep the flag correct if that
+          // ever changes.
           logRcReport(rcResult);
+          _resolveConflictSweepInFlight = false;
         }
       } catch (err) {
+        _resolveConflictSweepInFlight = false; // threw before any promise was created
         log.warn({ step: "resolve-conflict-sweep", err: err.message }, "scheduler: resolve-conflict-sweep pass failed — continuing tick (#1461)");
       }
     }
@@ -8426,6 +8453,22 @@ let _unstuckLastRunMs = 0;
 // daemon restart (module reload) or via __resetForTests.
 let _stallJanitorCensusLastRunMs = 0;
 
+// #1461: resolve-conflict-sweep in-flight guard. runResolveConflictSweepPass is
+// fire-and-forget (see the wiring block above) — its async work (a real `git
+// merge-tree` subprocess in classifyLive, then the marker write in
+// markAndDispatch) settles strictly AFTER schedulerTick has already returned
+// to the setInterval-driven daemon loop, with no back-pressure between ticks.
+// Since this sweep runs every tick with NO throttle (by design, ADR-028 —
+// unlike unstuck-sweep's 15-min isThrottled gate), an overlapping tick could
+// otherwise re-collect + re-classify + re-dispatch the SAME still-unmarked
+// candidate before the previous tick's pass settles. This flag makes a new
+// tick skip starting a new pass while the prior one is still pending; cleared
+// in the settlement .then()/.catch() (or synchronously for mode='off', which
+// never goes async). Module-level so it persists across ticks without a db
+// write, mirroring _unstuckLastRunMs/_stallJanitorCensusLastRunMs above.
+// Reset to false on daemon restart (module reload) or via __resetForTests.
+let _resolveConflictSweepInFlight = false;
+
 function runTick() {
   try {
     // CTL-1330 Tier 1: emit the event-loop delay accumulated since the previous
@@ -9004,6 +9047,46 @@ function runTick() {
           typeof runningOpts.unstuckPostComment === "function"
             ? runningOpts.unstuckPostComment
             : undefined,
+      },
+      // #1461: wire the real resolve-conflict-sweep census + act seams (ADR-028).
+      // Like stallJanitor/unstuckSweep above, a bare schedulerTick (unit test)
+      // passes no `resolveConflictSweep` so the pass stays inert. Mode/emit
+      // default INSIDE schedulerTick (readResolveConflictSweepConfig() → 'off'
+      // unless CATALYST_RESOLVE_CONFLICT_SWEEP/Layer-2 opts in) — mirrors
+      // stallJanitor/unstuckSweep's own fallback blocks, which likewise never
+      // set `mode` here. Without this block, setting
+      // CATALYST_RESOLVE_CONFLICT_SWEEP=shadow/enforce would have zero effect
+      // in the running daemon (schedulerTick would still see undefined
+      // collectors and skip the pass every tick).
+      resolveConflictSweep: runningOpts.resolveConflictSweep ?? {
+        collectCandidates: () =>
+          defaultCollectResolveConflictCandidates({
+            orchDir: runningOpts.orchDir,
+            // Thread the worktree resolver from each worker's signal so
+            // classifyLiveConflict actually has a path to run `git merge-tree`
+            // against — mirrors the identical resolveWorktreePath closure used
+            // by the unstuckSweep census and stallJanitor J4 GC census above.
+            // Without this, resolveWorktreePath defaults to () => null and
+            // every candidate classifies as "classification-unavailable"
+            // forever (resolve-conflict-sweep.mjs's own header comment flags
+            // this as exactly what Task 12's production wiring must inject).
+            resolveWorktreePath: (ticket) => {
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+              }
+              return null;
+            },
+          }),
+        collectCompletions: () =>
+          defaultCollectResolveConflictCompletions({ orchDir: runningOpts.orchDir }),
+        classifyLive: classifyLiveConflict,
+        cycleCountOf: (ticket) => countResolveConflictCycles({ ticket }),
+        markAndDispatch: (c) => defaultMarkAndDispatch({ ...c, orchDir: runningOpts.orchDir }),
+        escalateCapExhausted: defaultEscalateCapExhausted,
+        // clearStall: same real seam as the stallJanitor/unstuckSweep fallback
+        // blocks above (defaultClearStall bound to this tick's real orchDir +
+        // the real writeStatus/linear-write seam) — not a new dependency.
+        clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
       },
       // CTL-1150: thread the triage-artifact predicate (undefined → inline
       // existsSync default in schedulerTick; test seam via startScheduler).
@@ -9618,6 +9701,7 @@ export function __resetForTests() {
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
   _stallJanitorCensusLastRunMs = 0; // CTL-1324: reset Pass 0j census throttle between tests
+  _resolveConflictSweepInFlight = false; // #1461: reset the in-flight guard between tests
   // rankedAboveSince is cleared by stopScheduler above (CTL-705)
 }
 
