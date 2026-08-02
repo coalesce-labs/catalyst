@@ -10,6 +10,7 @@ import {
   writeResolveConflictBrief,
   markStalledSignalResolving,
   defaultMarkAndDispatch,
+  defaultEscalateCapExhausted,
 } from "./resolve-conflict-sweep.mjs";
 
 describe("constants", () => {
@@ -315,5 +316,27 @@ describe("defaultMarkAndDispatch", () => {
     expect(result.success).toBe(false);
     expect(result.dispatched).toBe(false);
     expect(result.reason).toMatch(/mark\/brief write failed/);
+  });
+});
+
+describe("defaultEscalateCapExhausted", () => {
+  test("marks the signal cap-exhausted and posts the escalation comment", () => {
+    const reads = { "/w/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_resolvable" }) };
+    const writes = [];
+    const posted = [];
+    const deps = {
+      readFileSync: (p) => reads[p],
+      writeFileSync: (p, body) => writes.push([p, body]),
+      renameSync: () => {},
+      postComment: (ticket, body) => { posted.push([ticket, body]); return true; },
+    };
+    const ok = defaultEscalateCapExhausted({ ticket: "CTL-1", phase: "implement", workerDir: "/w", cycleCount: 3 }, deps);
+    expect(ok).toBe(true);
+    const written = JSON.parse(writes[0][1]);
+    expect(written.failureReason).toBe("resolve-conflict-cycle-cap-exhausted");
+    expect(posted).toHaveLength(1);
+    expect(posted[0][0]).toBe("CTL-1");
+    expect(posted[0][1]).toMatch(/^🔼 \*\*phase-resolve-conflict\*\* escalated/);
+    expect(posted[0][1]).toMatch(/cycle cap \(3\)/);
   });
 });
