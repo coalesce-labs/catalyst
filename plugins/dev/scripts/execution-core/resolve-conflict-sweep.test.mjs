@@ -1,4 +1,7 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   classifyResolveConflictCandidate,
   RESOLVE_CONFLICT_STALL_REASON,
@@ -7,12 +10,15 @@ import {
   RESOLVE_CONFLICT_CYCLE_CAP,
   defaultCollectResolveConflictCandidates,
   classifyLiveConflict,
+  defaultLocalMergeTree,
   writeResolveConflictBrief,
   markStalledSignalResolving,
   defaultMarkAndDispatch,
   defaultEscalateCapExhausted,
   defaultCollectResolveConflictCompletions,
   runResolveConflictSweepPass,
+  emitResolveConflictEvent,
+  RESOLVE_CONFLICT_SWEEP_EVENT_TYPES,
 } from "./resolve-conflict-sweep.mjs";
 
 describe("constants", () => {
@@ -38,6 +44,19 @@ describe("classifyResolveConflictCandidate", () => {
   test("already marked/dispatched this cycle → skip (dispatch is in flight)", () => {
     expect(classifyResolveConflictCandidate({ stalledReasonMatches: false, alreadyResolving: true, cycleCount: 0, classification: null }))
       .toEqual({ action: "skip", reason: "already-resolving" });
+  });
+
+  // #1461 Fix 2 (CRITICAL final-review finding): the cap check runs BEFORE the
+  // already-resolving check — this is exactly what lets a repeatedly-FAILING
+  // resolve-conflict run eventually escalate instead of being permanently
+  // invisible. Once cycleCount (now counting BOTH complete AND failed dispatch
+  // attempts, via countResolveConflictAttempts) reaches the cap, a candidate
+  // that's STILL marked "already-resolving" (the original stalled-phase signal
+  // never got de-marked because the dispatched runs kept failing, not
+  // completing) routes to cap-exhausted instead of skip-forever.
+  test("cap exhausted even while still marked already-resolving → cap-exhausted, not skip (Fix 2: repeated failures escalate)", () => {
+    expect(classifyResolveConflictCandidate({ stalledReasonMatches: false, alreadyResolving: true, cycleCount: 3, classification: null }))
+      .toEqual({ action: "cap-exhausted", reason: "cycle-cap-exhausted" });
   });
 
   test("classification unavailable (merge-tree probe failed this tick) → skip, retry next tick", () => {
@@ -143,27 +162,61 @@ describe("defaultCollectResolveConflictCandidates", () => {
   });
 });
 
+// #1461 Fix 5 (final-review finding, human-approved design): classifyLiveConflict
+// now diffs LOCAL HEAD (in the ticket's worktree) against origin/<base> — NOT
+// origin/<base> vs origin/<ticket> (the pushed remote branch). The `mergeTree`
+// seam is now a 2-arg (worktreePath, base) call — no `head`/ticket-branch arg —
+// since a dispatch-time pre-flight rebase stall typically happens BEFORE the
+// ticket's branch has ever been pushed, and local HEAD never needs fetching.
 describe("classifyLiveConflict", () => {
-  test("delegates to the injected mergeTree seam then classifyMergeTree", async () => {
-    const mergeTree = async (wt, base, head) => {
+  test("delegates to the injected 2-arg (worktreePath, base) mergeTree seam then classifyMergeTree", async () => {
+    const mergeTree = async (wt, base) => {
       expect(wt).toBe("/wt/CTL-1");
       expect(base).toBe("main");
-      expect(head).toBe("CTL-1");
       return { exitCode: 1, output: "CONFLICT (content): Merge conflict in a.ts" };
     };
-    const result = await classifyLiveConflict({ worktreePath: "/wt/CTL-1", base: "main", head: "CTL-1" }, { mergeTree });
+    const result = await classifyLiveConflict({ worktreePath: "/wt/CTL-1", base: "main" }, { mergeTree });
     expect(result).toEqual({ resolvable: true, conflictFiles: ["a.ts"], conflictTypes: ["content"] });
+  });
+
+  // Proves classification now works against a LOCAL, UNPUSHED worktree state:
+  // the fake mergeTree seam never receives (or needs) a ticket/head branch name
+  // at all — it only ever sees the worktree path + base, exactly what a
+  // pre-push implement-phase stall can supply.
+  test("classifies a local unpushed worktree's HEAD without ever referencing a ticket branch name", async () => {
+    let sawArgs;
+    const mergeTree = async (...args) => {
+      sawArgs = args;
+      // Simulates `git merge-tree --write-tree origin/main HEAD` finding a
+      // clean, additive resolution — no fetch/diff of any origin/<ticket> ref.
+      return { exitCode: 0, output: "" };
+    };
+    const result = await classifyLiveConflict({ worktreePath: "/wt/CTL-unpushed", base: "main" }, { mergeTree });
+    expect(sawArgs).toEqual(["/wt/CTL-unpushed", "main"]);
+    expect(result).toEqual({ resolvable: true, conflictFiles: [], conflictTypes: [] });
   });
 
   test("returns null when the mergeTree seam throws (probe failed this tick)", async () => {
     const mergeTree = async () => { throw new Error("fetch failed"); };
-    const result = await classifyLiveConflict({ worktreePath: "/wt/CTL-1", base: "main", head: "CTL-1" }, { mergeTree });
+    const result = await classifyLiveConflict({ worktreePath: "/wt/CTL-1", base: "main" }, { mergeTree });
     expect(result).toBeNull();
   });
 
   test("returns null when worktreePath is missing (never spawn git blind)", async () => {
-    const result = await classifyLiveConflict({ worktreePath: null, base: "main", head: "CTL-1" }, { mergeTree: async () => ({ exitCode: 0, output: "" }) });
+    const result = await classifyLiveConflict({ worktreePath: null, base: "main" }, { mergeTree: async () => ({ exitCode: 0, output: "" }) });
     expect(result).toBeNull();
+  });
+});
+
+// defaultLocalMergeTree — the real (non-injected) seam classifyLiveConflict
+// defaults to. Unit-testable only at the argv-shape level without spawning
+// real git (a real-git integration test, mirroring stale-pr-rescue-timer.test.mjs's
+// "defaultMergeTree (real git)" suite, is out of scope for this pass — the
+// task's own guidance is "inject a fake git-runner seam, don't spawn real git").
+describe("defaultLocalMergeTree", () => {
+  test("is exported and is an async function distinct from defaultMergeTree's remote-fetch shape", () => {
+    expect(typeof defaultLocalMergeTree).toBe("function");
+    expect(defaultLocalMergeTree.constructor.name).toBe("AsyncFunction");
   });
 });
 
@@ -351,13 +404,16 @@ describe("defaultCollectResolveConflictCompletions", () => {
     };
   }
 
-  test("finds a ticket whose resolve-conflict phase is done and reads stalledPhase from the brief", () => {
+  // #1461 Fix 1: a completion is now reported ONLY when the ORIGINAL
+  // stalled-phase signal is STILL present and STILL carries RESOLVED_MARKER_REASON.
+  test("finds a ticket whose resolve-conflict phase is done, the brief names the stalled phase, and that phase is still marked resolving", () => {
     const fs = fakeFs({
       workerDirs: { "/orch/workers": ["CTL-1"] },
       files: {
-        "/orch/workers/CTL-1": ["phase-resolve-conflict.json", "resolve-conflict-brief.json"],
+        "/orch/workers/CTL-1": ["phase-resolve-conflict.json", "resolve-conflict-brief.json", "phase-implement.json"],
         "/orch/workers/CTL-1/phase-resolve-conflict.json": JSON.stringify({ status: "done" }),
         "/orch/workers/CTL-1/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+        "/orch/workers/CTL-1/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_resolvable" }),
       },
     });
     const out = defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fs });
@@ -379,6 +435,62 @@ describe("defaultCollectResolveConflictCompletions", () => {
   test("skips a ticket with no resolve-conflict signal at all", () => {
     const fs = fakeFs({ workerDirs: { "/orch/workers": ["CTL-3"] }, files: { "/orch/workers/CTL-3": ["phase-implement.json"] } });
     expect(defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fs })).toEqual([]);
+  });
+
+  // #1461 Fix 1 (CRITICAL final-review finding): idempotence guard tests.
+  describe("Fix 1 idempotence guard", () => {
+    function filesFor(stalledSignalRaw) {
+      const files = {
+        "/orch/workers/CTL-1": ["phase-resolve-conflict.json", "resolve-conflict-brief.json", "phase-implement.json"],
+        "/orch/workers/CTL-1/phase-resolve-conflict.json": JSON.stringify({ status: "done" }),
+        "/orch/workers/CTL-1/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+      };
+      if (stalledSignalRaw !== undefined) {
+        files["/orch/workers/CTL-1/phase-implement.json"] = JSON.stringify(stalledSignalRaw);
+      }
+      return files;
+    }
+
+    test("(a) a completion is collected once when the stalled phase is still marked RESOLVED_MARKER_REASON", () => {
+      const fs = fakeFs({
+        workerDirs: { "/orch/workers": ["CTL-1"] },
+        files: filesFor({ status: "stalled", failureReason: "source_conflict_resolvable" }),
+      });
+      expect(defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fs }))
+        .toEqual([{ ticket: "CTL-1", stalledPhase: "implement" }]);
+    });
+
+    test("(b) the SAME ticket is NOT collected again once the stalled-phase signal file is gone (simulates defaultClearStall deleting it)", () => {
+      // First call: still present + marked → collected.
+      const fsBefore = fakeFs({
+        workerDirs: { "/orch/workers": ["CTL-1"] },
+        files: filesFor({ status: "stalled", failureReason: "source_conflict_resolvable" }),
+      });
+      expect(defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fsBefore }))
+        .toEqual([{ ticket: "CTL-1", stalledPhase: "implement" }]);
+
+      // Second call: defaultClearStall's own first step (rmSync phase-implement.json)
+      // has run — the file is gone. Must NOT be re-collected.
+      const filesAfterClear = filesFor(undefined);
+      delete filesAfterClear["/orch/workers/CTL-1/phase-implement.json"];
+      const fsAfter = fakeFs({ workerDirs: { "/orch/workers": ["CTL-1"] }, files: filesAfterClear });
+      expect(defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fsAfter })).toEqual([]);
+    });
+
+    test("(c) not re-collected when something else already re-marked the stalled phase with a DIFFERENT reason", () => {
+      const fs = fakeFs({
+        workerDirs: { "/orch/workers": ["CTL-1"] },
+        files: filesFor({ status: "stalled", failureReason: "resolve-conflict-cycle-cap-exhausted" }),
+      });
+      expect(defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fs })).toEqual([]);
+    });
+
+    test("not collected when the stalled-phase signal is unreadable/corrupt (treated like absent)", () => {
+      const files = filesFor(undefined);
+      files["/orch/workers/CTL-1/phase-implement.json"] = "{not valid json";
+      const fs = fakeFs({ workerDirs: { "/orch/workers": ["CTL-1"] }, files });
+      expect(defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fs })).toEqual([]);
+    });
   });
 });
 
@@ -402,6 +514,27 @@ describe("runResolveConflictSweepPass", () => {
     });
     expect(report.wouldMark).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
     expect(emitted).toContain("resolve-conflict.would.mark");
+    // #1461 Fix 4: resolve-conflict.would.dispatch was in the closed vocabulary
+    // but never actually fired by the driver on the shadow twin — the enforce
+    // path fires TWO distinct events for this action (marked.resolvable, then
+    // dispatched), so shadow now fires both twins for observability parity.
+    expect(emitted).toContain("resolve-conflict.would.dispatch");
+  });
+
+  // #1461 Fix 4: shadow-mode "would escalate" observability parity — the cap-
+  // exhausted path's shadow twin must actually fire, not just the enforce path.
+  test("shadow mode emits would-escalate for a cap-exhausted candidate, takes no action", async () => {
+    const emitted = [];
+    const report = await runResolveConflictSweepPass({
+      mode: "shadow",
+      collectCandidates: () => [{ ticket: "CTL-1", phase: "implement", workerDir: "/w", raw: { failureReason: "source_conflict_resolvable" }, worktreePath: "/wt", base: "main" }],
+      collectCompletions: () => [],
+      cycleCountOf: () => 3,
+      escalateCapExhausted: () => { throw new Error("must not be called in shadow"); },
+      emit: (type) => emitted.push(type),
+    });
+    expect(report.wouldEscalate).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(emitted).toContain("resolve-conflict.would.escalate");
   });
 
   test("enforce mode marks + dispatches a resolvable candidate", async () => {
@@ -434,6 +567,37 @@ describe("runResolveConflictSweepPass", () => {
     expect(escalated).toEqual(["CTL-1"]);
   });
 
+  // #1461 Fix 2 (CRITICAL final-review finding): a REPEATEDLY-FAILING
+  // resolve-conflict run (never a successful completion) must still reach the
+  // cap and escalate via the SAME defaultEscalateCapExhausted path — driven end
+  // to end by cycleCountOf reflecting countResolveConflictAttempts (complete +
+  // failed), not the completion-only countResolveConflictCycles.
+  test("a candidate whose cycleCountOf reflects FAILED (not completed) dispatch attempts still escalates at the cap", async () => {
+    const escalated = [];
+    const cycleCountCalls = [];
+    // Simulates the real wiring: cycleCountOf === countResolveConflictAttempts,
+    // which has counted 3 `phase.resolve-conflict.failed.<ticket>` events (zero
+    // `.complete.` events) for this ticket — the run never once completed.
+    const cycleCountOf = (ticket) => {
+      cycleCountCalls.push(ticket);
+      return 3; // RESOLVE_CONFLICT_CYCLE_CAP reached via failures alone
+    };
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      // Still marked "already-resolving" — nothing ever de-marked it, because
+      // every dispatched attempt FAILED rather than completing.
+      collectCandidates: () => [{ ticket: "CTL-2", phase: "implement", workerDir: "/w", raw: { failureReason: "source_conflict_resolvable" }, worktreePath: "/wt", base: "main" }],
+      collectCompletions: () => [],
+      cycleCountOf,
+      classifyLive: async () => { throw new Error("must not classify — cap check precedes classification"); },
+      escalateCapExhausted: (c) => { escalated.push(c.ticket); return true; },
+      emit: async () => true,
+    });
+    expect(cycleCountCalls).toEqual(["CTL-2"]);
+    expect(report.escalated).toEqual([{ ticket: "CTL-2", phase: "implement" }]);
+    expect(escalated).toEqual(["CTL-2"]);
+  });
+
   test("enforce mode clears a completion via the injected clearStall seam", async () => {
     const cleared = [];
     const report = await runResolveConflictSweepPass({
@@ -456,5 +620,50 @@ describe("runResolveConflictSweepPass", () => {
     });
     expect(report.marked).toEqual([]);
     expect(report.failed).toEqual([]);
+  });
+});
+
+// #1461 Fix 4 (IMPORTANT final-review finding): emitResolveConflictEvent — the
+// dedicated unified-log emitter, mirroring emitUnstuckEvent's own test suite
+// (unstuck-sweep.test.mjs "emitUnstuckEvent — dedicated unified-log emitter").
+describe("emitResolveConflictEvent — dedicated unified-log emitter (#1461)", () => {
+  let SCRATCH, LOG_PATH, prevDir;
+  beforeEach(() => {
+    SCRATCH = mkdtempSync(join(tmpdir(), "resolve-conflict-emit-"));
+    const ym = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, "0")}`;
+    LOG_PATH = join(SCRATCH, "events", `${ym}.jsonl`);
+    prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = SCRATCH;
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(SCRATCH, { recursive: true, force: true });
+  });
+
+  test("appends a valid resolve-conflict.* line to the unified log", async () => {
+    const ok = await emitResolveConflictEvent("resolve-conflict.would.mark", {
+      ticket: "CTL-Z",
+      phase: "implement",
+    });
+    expect(ok).toBe(true);
+    expect(existsSync(LOG_PATH)).toBe(true);
+    const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+    expect(last.event).toBe("resolve-conflict.would.mark");
+    expect(last.ticket).toBe("CTL-Z");
+    expect(last.phase).toBe("implement");
+    expect(last.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
+  test("accepts every type in the sweep's own closed vocabulary", async () => {
+    for (const t of RESOLVE_CONFLICT_SWEEP_EVENT_TYPES) {
+      expect(await emitResolveConflictEvent(t, { ticket: "CTL-Z" })).toBe(true);
+    }
+  });
+
+  test("rejects an event type outside the sweep's closed vocabulary (does not silently no-op)", async () => {
+    await expect(emitResolveConflictEvent("unstuck.would.clear-noise", {})).rejects.toThrow(
+      /unknown resolve-conflict-sweep event type/
+    );
   });
 });
