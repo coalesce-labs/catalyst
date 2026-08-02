@@ -2395,13 +2395,17 @@ export function restampNoClockEscalations(opts = {}) {
   for (const f of files) {
     const ticket = f.replace(/\.json$/, "");
     if (!defaultLatchHasNoClock(ticket, { orchDir })) continue;
-    changed.push(ticket);
-    if (dryRun) continue;
-    const p = join(dir, f);
-    const data = JSON.parse(readFileSync(p, "utf8"));
-    const ts = now();
-    data.ts = ts; data.lastTs = ts;
-    writeFileSync(p, JSON.stringify(data));
+    if (dryRun) { changed.push(ticket); continue; }
+    // Per-file try/catch: a single unreadable/unwritable file must not abort
+    // the scan — remaining entries must still be healed (CTL-1610 Codex P2).
+    try {
+      const p = join(dir, f);
+      const data = JSON.parse(readFileSync(p, "utf8"));
+      const ts = now();
+      data.ts = ts; data.lastTs = ts;
+      writeFileSync(p, JSON.stringify(data));
+      changed.push(ticket);
+    } catch { /* best-effort per-file — continue to next */ }
   }
   return changed;
 }

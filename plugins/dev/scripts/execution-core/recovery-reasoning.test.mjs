@@ -1303,6 +1303,29 @@ describe("restampNoClockEscalations (CTL-1610 Phase 3)", () => {
     // idempotent: a second run finds nothing to do
     expect(restampNoClockEscalations({ orchDir, now })).toEqual([]);
   });
+
+  test("(CTL-1610 Codex P2) a per-file write failure does not abort the scan — remaining entries are healed", () => {
+    const t0 = 1_000_000_000_000;
+    // Three no-clock escalated entries; all seeded as timestamp-less latches.
+    for (const ticket of ["CTL-1610-H", "CTL-1610-I", "CTL-1610-J"]) {
+      defaultRecordIntent(ticket, { decision: "escalate" }, { orchDir, now: () => t0 });
+      const p = pathJoin(orchDir, ".recovery-intents", `${ticket}.json`);
+      const d = JSON.parse(readFileSync(p, "utf8")); delete d.ts; delete d.lastTs; writeFileSync(p, JSON.stringify(d));
+    }
+    // Overwrite H with invalid JSON — readFileSync succeeds but JSON.parse throws,
+    // simulating a mid-scan race (TOCTOU) or a corrupt file.
+    writeFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-H.json"), "NOT_JSON{{{");
+    // Overwrite J with a directory — readFileSync throws, also per-file isolated.
+    const pJ = pathJoin(orchDir, ".recovery-intents", "CTL-1610-J.json");
+    rmSync(pJ); mkdirSync(pJ);
+
+    const now = () => t0 + 5;
+    const changed = restampNoClockEscalations({ orchDir, now });
+    // I must be healed even though H (bad JSON) and J (directory) failed.
+    expect(changed).toContain("CTL-1610-I");
+    const afterI = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-I.json"), "utf8"));
+    expect(afterI.ts).toBe(t0 + 5);
+  });
 });
 
 // ─── CTL-1439 (P0a): verdict persistence — recordVerdict + leave-alone ──────
