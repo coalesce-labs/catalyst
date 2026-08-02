@@ -348,6 +348,10 @@ import {
   WORKER_STATUS_LABELS,
 } from "./label-guard.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs"; // CTL-1605: precedence order for the onTerminalCleared aggregate-arg → pre-clear `from` resolution
+// #1461: the resolve-conflict-sweep in-flight marker reason, shared so the
+// terminal-sweep exemption below (~line 6942) can never silently desync from
+// the literal the sweep itself writes (resolve-conflict-sweep.mjs:26).
+import { RESOLVED_MARKER_REASON } from "./resolve-conflict-sweep.mjs";
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
 import {
@@ -7079,16 +7083,16 @@ export function schedulerTick(
           recoveryForgetIntent(ticket, { orchDir });
         } else {
           // #1461: exempt a ticket resolve-conflict-sweep is actively resolving
-          // (failureReason/stalledReason === source_conflict_resolvable) from
-          // immediate needs-human labeling — otherwise every candidate is
-          // flagged needs-human the same tick the fix is already in flight. A
-          // cap-exhausted stall (resolve-conflict-cycle-cap-exhausted) is a
-          // NORMAL stalled reason and is NOT exempted — it surfaces exactly
-          // like remediate-cycle-cap-exhausted already does.
+          // (failureReason/stalledReason === RESOLVED_MARKER_REASON, imported from
+          // resolve-conflict-sweep.mjs) from immediate needs-human labeling —
+          // otherwise every candidate is flagged needs-human the same tick the fix
+          // is already in flight. A cap-exhausted stall (resolve-conflict-sweep.mjs's
+          // CAP_EXHAUSTED_REASON) is a NORMAL stalled reason and is NOT exempted —
+          // it surfaces exactly like remediate-cycle-cap-exhausted already does.
           const activeSignal = signalByTicket.get(ticket);
           const activeReason =
             activeSignal?.raw?.failureReason ?? activeSignal?.raw?.stalledReason ?? null;
-          if (activeReason === "source_conflict_resolvable") {
+          if (activeReason === RESOLVED_MARKER_REASON) {
             emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
             continue;
           }
