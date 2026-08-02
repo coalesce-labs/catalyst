@@ -30,6 +30,8 @@ import {
   clusterSync,
   buildClusterSecretEnvelope,
   ENV_BACKED_SECRET_FILES,
+  // CTL-1612: the boot-captured predicate that widened the restart-required set.
+  isEnvBackedSecretFile,
 } from "./cluster-sync.mjs";
 
 const QUIET = { warn() {}, info() {} };
@@ -719,7 +721,11 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
       gitCapture: makeGitCapture("NEWSHA", true),
       decrypt: (p) =>
         p.endsWith("node-secret-files.sops.json")
-          ? { "github-token": "tok" }
+          ? // CTL-1612: was "github-token", which is now BOOT-CAPTURED and so legitimately
+            // emits restart-required. Re-pointed (not deleted) to cma-api-key — a genuine
+            // bare bundle file that nothing sources or boot-reads — so this stays a valid
+            // NEGATIVE CONTROL proving isEnvBackedSecretFile is not over-broad.
+            { "cma-api-key": "cma_xyz" }
           : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
       emit: (e) => emits.push(e),
       now: () => "t",
@@ -730,12 +736,12 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(res.ok).toBe(true);
     expect(res.changed).toBe(true);
     expect(res.synced).toEqual(["config.json"]);
-    expect(res.written).toEqual(["github-token"]);
+    expect(res.written).toEqual(["cma-api-key"]);
     // full success advances the marker (guard against over-correcting the predicate)
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
     expect(emits.map((e) => e.name)).toContain("refreshed");
     expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
-    // a non-env-backed bare file does NOT trigger a restart-required signal
+    // a non-boot-captured bare file does NOT trigger a restart-required signal
     expect(emits.map((e) => e.name)).not.toContain("restart-required");
   });
 
@@ -849,6 +855,137 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     const rr = emits.find((e) => e.name === "restart-required");
     expect(rr.payload).toMatchObject({ file: "claude-accounts.env", fromSha: "OLDSHA", toSha: "NEWSHA" });
     // the marker still advances — the file IS materialized; only the env needs a restart
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  // ── CTL-1612: the widened boot-captured enrollment, exercised THROUGH the call
+  //    site. isEnvBackedSecretFile is unit-tested below, but a correct predicate
+  //    that is never wired into the restartRequired filter is exactly the 2026-08-02
+  //    outage shape — cluster-sync rewrote github-token, recorded it in `written`,
+  //    emitted plain `refreshed`, and every running daemon kept 401ing on the value
+  //    it had captured at boot. These three assert the wiring, not the predicate.
+  //    (The negative control lives in test (e) above: a bare cma-api-key rotation
+  //    must still emit NO restart-required.) ────────────────────────────────────
+
+  test("(f1) github-token rotated → restart-required emitted (CTL-1612 — the outage file)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? { "github-token": "fake-github-token-for-tests" }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.written).toEqual(["github-token"]);
+    expect(res.restartRequired).toEqual(["github-token"]);
+    const names = emits.map((e) => e.name);
+    expect(names).toContain("refreshed");
+    expect(names).toContain("restart-required");
+    const rr = emits.find((e) => e.name === "restart-required");
+    expect(rr.payload).toMatchObject({ file: "github-token", fromSha: "OLDSHA", toSha: "NEWSHA" });
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  test("(f2) linear-webhook-secret-<team> rotated → restart-required emitted (FAMILY wired at the call site)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? { "linear-webhook-secret-ctl": "fake-webhook-secret-for-tests" }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.written).toEqual(["linear-webhook-secret-ctl"]);
+    // the open-ended per-team family resolves through the predicate, not a fixed Set
+    expect(res.restartRequired).toEqual(["linear-webhook-secret-ctl"]);
+    const names = emits.map((e) => e.name);
+    expect(names).toContain("refreshed");
+    expect(names).toContain("restart-required");
+    const rr = emits.find((e) => e.name === "restart-required");
+    expect(rr.payload).toMatchObject({
+      file: "linear-webhook-secret-ctl",
+      fromSha: "OLDSHA",
+      toSha: "NEWSHA",
+    });
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  test("(f3) MIXED rotation → restart-required for the boot-captured file ONLY (predicate not over-broad)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? {
+              // one boot-captured, one plain bare file — same rotation
+              "webhook-secret": "fake-webhook-secret-for-tests",
+              "cma-api-key": "fake-cma-key-for-tests",
+            }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    // BOTH files materialize…
+    expect(res.written).toEqual(["webhook-secret", "cma-api-key"]);
+    // …but only the boot-captured one needs a restart to apply
+    expect(res.restartRequired).toEqual(["webhook-secret"]);
+    const restarts = emits.filter((e) => e.name === "restart-required");
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0].payload).toMatchObject({
+      file: "webhook-secret",
+      fromSha: "OLDSHA",
+      toSha: "NEWSHA",
+    });
+    expect(emits.map((e) => e.name)).toContain("refreshed");
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
   });
 
@@ -1181,5 +1318,47 @@ describe("cluster-secret event severity + env-backed set (Codex re-review)", () 
     // Membership rule: every file the daemon launcher `source`s into its boot env.
     expect(ENV_BACKED_SECRET_FILES.has("claude-accounts.env")).toBe(true);
     expect(ENV_BACKED_SECRET_FILES.has("execution-core.env")).toBe(true);
+  });
+});
+
+// CTL-1612. The predicate that decides which rotated files get a `restart-required`
+// signal. Membership rule: "CAPTURED AT PROCESS START, therefore NOT live in a running
+// process until it restarts" — whether captured by `source` into the boot env or by a
+// single boot-time read closed over per request. Explicit truth table, because BOTH
+// columns are load-bearing: too narrow re-creates the 2026-08-02 silent-stale outage,
+// too broad turns every bundle rotation into a restart nag nobody reads.
+describe("isEnvBackedSecretFile", () => {
+  test("TRUE — every boot-captured file, incl. the linear-webhook-secret-<team> family", () => {
+    // (a) `source`d into the daemon's boot env by catalyst-execution-core
+    expect(isEnvBackedSecretFile("claude-accounts.env")).toBe(true);
+    expect(isEnvBackedSecretFile("execution-core.env")).toBe(true);
+    expect(isEnvBackedSecretFile("github-token")).toBe(true);
+    // (b) read ONCE at orch-monitor boot (loadWebhookConfig), then closed over per
+    //     request — never re-read per delivery, so a rotation is inert until restart
+    expect(isEnvBackedSecretFile("webhook-secret")).toBe(true);
+    expect(isEnvBackedSecretFile("linear-webhook-secret")).toBe(true);
+    // the per-team FAMILY: names are built from Layer-2 team keys, so the set is
+    // open-ended — an exact-match Set can never enumerate it
+    expect(isEnvBackedSecretFile("linear-webhook-secret-ctl")).toBe(true);
+    expect(isEnvBackedSecretFile("linear-webhook-secret-adv")).toBe(true);
+    // …and team keys are NOT guaranteed lowercase. The case-insensitivity IS the
+    // point: an anchored /^linear-webhook-secret-[a-z0-9-]+$/ would silently no-op
+    // on "CTL" — exactly the miss this predicate exists to prevent.
+    expect(isEnvBackedSecretFile("linear-webhook-secret-CTL")).toBe(true);
+  });
+
+  test("FALSE — family near-misses, plain bundle files, and non-string inputs", () => {
+    // bare prefix, nothing after the dash — not a team secret, just the prefix
+    expect(isEnvBackedSecretFile("linear-webhook-secret-")).toBe(false);
+    // run-on with no dash separator — a prefix match alone must not be enough
+    expect(isEnvBackedSecretFile("linear-webhook-secretXXX")).toBe(false);
+    // genuine bundle files that nothing sources or boot-reads (over-broad guard)
+    expect(isEnvBackedSecretFile("cma-api-key")).toBe(false);
+    expect(isEnvBackedSecretFile("age.key")).toBe(false);
+    // defensive: a decrypt map is attacker-adjacent input — never throw on junk
+    expect(isEnvBackedSecretFile("")).toBe(false);
+    expect(isEnvBackedSecretFile(null)).toBe(false);
+    expect(isEnvBackedSecretFile(undefined)).toBe(false);
+    expect(isEnvBackedSecretFile(42)).toBe(false);
   });
 });

@@ -120,6 +120,74 @@ run_bootstrap() {
     '
 }
 
+# CTL-1612: install a stub bun that dumps the child environment to
+# $root/env-captured and exits, so cmd_start's env projection can be inspected
+# without actually running the server.
+install_bun_env_capture() {
+  local root="$1"
+  cat > "$root/bin/bun" <<STUB_BUN
+#!/usr/bin/env bash
+printenv > "$root/env-captured"
+STUB_BUN
+  chmod +x "$root/bin/bun"
+}
+
+# CTL-1612: run cmd_start() with bootstrap skipped and the env-capture stub bun.
+# Ambient webhook-secret state is scrubbed with `env -u` FIRST so a developer's own
+# shell export can never leak in and make a "nothing inherited" case pass for the
+# wrong reason; extra NAME=VALUE args (after $root) are re-applied on top of the
+# scrubbed env. CATALYST_WEBHOOK_SECRET_FILE is always pinned into the sandbox by
+# the caller, so the real ~/.config/catalyst/webhook-secret is never read.
+run_cmd_start() {
+  local root="$1"
+  shift
+  env -u CATALYST_WEBHOOK_SECRET -u CATALYST_WEBHOOK_SECRET_FILE -u CATALYST_CONFIG_DIR \
+    PATH="$root/bin:$PATH" \
+    CATALYST_DIR="$root/catalyst" \
+    MONITOR_SERVER_SCRIPT="$root/srv/server.ts" \
+    MONITOR_UI_DIST_DIR="$root/dist" \
+    MONITOR_SKIP_BOOTSTRAP=1 \
+    "$@" \
+    bash -c '
+      source "'"$MONITOR_SH"'" url >/dev/null 2>&1
+      cmd_start >/dev/null 2>&1 || true
+    ' 2>/dev/null || true
+  sleep 0.2
+}
+
+# CTL-1612 assertions over the captured child env. Secret VALUES are never echoed —
+# a mismatch reports only that the value differs, so a leaked real secret can never
+# reach the test log.
+assert_captured_secret() {
+  local root="$1" expected="$2" label="$3"
+  local capture="$root/env-captured"
+  if [[ ! -f "$capture" ]]; then
+    fail "$label — stub bun did not capture env (cmd_start may not have launched the server)"
+    return
+  fi
+  if grep -qxF "CATALYST_WEBHOOK_SECRET=$expected" "$capture" 2>/dev/null; then
+    pass "$label"
+  elif grep -q '^CATALYST_WEBHOOK_SECRET=' "$capture" 2>/dev/null; then
+    fail "$label — CATALYST_WEBHOOK_SECRET set to a different value (redacted)"
+  else
+    fail "$label — CATALYST_WEBHOOK_SECRET not present in the server env"
+  fi
+}
+
+assert_no_captured_secret() {
+  local root="$1" label="$2"
+  local capture="$root/env-captured"
+  if [[ ! -f "$capture" ]]; then
+    fail "$label — stub bun did not capture env (cmd_start may not have launched the server)"
+    return
+  fi
+  if grep -q '^CATALYST_WEBHOOK_SECRET=' "$capture" 2>/dev/null; then
+    fail "$label — CATALYST_WEBHOOK_SECRET was exported (value redacted); an empty secret makes webhook-config treat the GitHub route as unconfigured"
+  else
+    pass "$label"
+  fi
+}
+
 # ─── Test 1: build is redirected to dist dir ────────────────────────────────
 echo "Test 1: bootstrap redirects vite build to MONITOR_UI_DIST_DIR"
 ROOT="$(make_sandbox)"
@@ -475,6 +543,58 @@ if [[ ! -f "$ROOT/dist/.source-sha" ]]; then
 else
   fail "dist/.source-sha written despite empty git SHA (should be skipped)"
 fi
+rm -rf "$ROOT"
+
+# ─── Test 13: cmd_start projects CATALYST_WEBHOOK_SECRET from the secret file ─
+# CTL-1612. webhook-config.ts resolves the GitHub HMAC key from process.env ONLY,
+# so cmd_start must project it from the SOPS-managed file the same way the launchd
+# wrapper does — file-wins, whitespace-stripped, and NEVER exported as "".
+# Every value below is an obviously-fake literal; no real secret is ever read
+# (CATALYST_WEBHOOK_SECRET_FILE is pinned into the sandbox in all five sub-cases).
+echo ""
+echo "Test 13: cmd_start projects CATALYST_WEBHOOK_SECRET from the secret file (CTL-1612)"
+
+# (a) file has a secret, nothing inherited → projected verbatim
+ROOT="$(make_sandbox)"
+install_bun_env_capture "$ROOT"
+echo "whsec_fake_1" > "$ROOT/webhook-secret"
+run_cmd_start "$ROOT" CATALYST_WEBHOOK_SECRET_FILE="$ROOT/webhook-secret"
+assert_captured_secret "$ROOT" "whsec_fake_1" "13a: file value projected into the server env"
+rm -rf "$ROOT"
+
+# (b) FILE WINS over a stale value already exported by the invoking shell
+ROOT="$(make_sandbox)"
+install_bun_env_capture "$ROOT"
+echo "whsec_fake_2" > "$ROOT/webhook-secret"
+run_cmd_start "$ROOT" \
+  CATALYST_WEBHOOK_SECRET_FILE="$ROOT/webhook-secret" \
+  CATALYST_WEBHOOK_SECRET=whsec_stale
+assert_captured_secret "$ROOT" "whsec_fake_2" "13b: file wins over a stale inherited export"
+rm -rf "$ROOT"
+
+# (c) whitespace-only file → no-op; the inherited value must survive, not be clobbered
+ROOT="$(make_sandbox)"
+install_bun_env_capture "$ROOT"
+printf '   \n\t\n' > "$ROOT/webhook-secret"
+run_cmd_start "$ROOT" \
+  CATALYST_WEBHOOK_SECRET_FILE="$ROOT/webhook-secret" \
+  CATALYST_WEBHOOK_SECRET=whsec_stale
+assert_captured_secret "$ROOT" "whsec_stale" "13c: whitespace-only file leaves the inherited value intact"
+rm -rf "$ROOT"
+
+# (d) EMPTY file, nothing inherited → variable absent entirely (never exported as "")
+ROOT="$(make_sandbox)"
+install_bun_env_capture "$ROOT"
+: > "$ROOT/webhook-secret"
+run_cmd_start "$ROOT" CATALYST_WEBHOOK_SECRET_FILE="$ROOT/webhook-secret"
+assert_no_captured_secret "$ROOT" "13d: empty file exports nothing (no empty-string secret)"
+rm -rf "$ROOT"
+
+# (e) absent file, nothing inherited → likewise absent
+ROOT="$(make_sandbox)"
+install_bun_env_capture "$ROOT"
+run_cmd_start "$ROOT" CATALYST_WEBHOOK_SECRET_FILE="$ROOT/no-such-webhook-secret"
+assert_no_captured_secret "$ROOT" "13e: absent file exports nothing (no empty-string secret)"
 rm -rf "$ROOT"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────

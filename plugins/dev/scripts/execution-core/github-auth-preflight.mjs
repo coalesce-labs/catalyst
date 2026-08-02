@@ -1,0 +1,124 @@
+// github-auth-preflight.mjs — CTL-1612. Daemon-boot GitHub credential preflight.
+//
+// WHY THIS EXISTS. A daemon captures its GitHub credential at process start and never
+// re-reads it, so a revoked credential is invisible from inside the daemon: every `gh`
+// API call simply 401s forever. On 2026-08-02 both minis booted holding a revoked token
+// and produced 102 authentication failures over 5+ hours with NO operator-visible signal
+// — the only trace was a repeated warning line in daemon.log. This module turns that
+// silent, indefinite failure into ONE loud alert at boot.
+//
+// POSTURE: strictly ADVISORY. It never throws, never blocks boot, and never gates
+// dispatch. A daemon with a bad credential still starts (plenty of its work needs no
+// GitHub at all) — it just says so.
+//
+// THE THREE-STATE RESULT IS LOAD-BEARING. "Could not prove the credential is good" is NOT
+// the same as "the credential is bad". A DNS blip, a GitHub 5xx, a missing `gh` binary, or
+// the probe timeout must stay SILENT; only a definitive 401 alerts. Collapsing these into
+// a boolean would page the whole fleet on any transient network hiccup.
+//
+// Run: cd plugins/dev/scripts/execution-core && bun test github-auth-preflight.test.mjs
+import { spawnSync } from "node:child_process";
+
+import { log as defaultLog } from "./config.mjs";
+import { emitGithubAuthUnusable } from "./dispatch-alert.mjs";
+
+// Bounded so a hung/unreachable api.github.com can never wedge daemon boot.
+export const GITHUB_PROBE_TIMEOUT_MS = 10_000;
+
+// isUnauthorizedOutput — a DEFINITIVE credential rejection, as `gh` reports it.
+// `gh api` on a bad token writes e.g. `gh: Bad credentials (HTTP 401)` to stderr.
+// Deliberately narrow: anything not matched here is treated as transient/unknown and
+// stays silent. A 403 is NOT included — that is a scope/rate problem, not a dead
+// credential, and it must not fire the "replace your credential" alert.
+export function isUnauthorizedOutput(text) {
+  const s = String(text ?? "");
+  return /\bHTTP 401\b/i.test(s) || /\bbad credentials\b/i.test(s);
+}
+
+// defaultProbeGithubAuth — one bounded, read-only probe. NEVER throws.
+// `/rate_limit` is the cheapest authenticated endpoint: it does not count against the
+// rate limit it reports, so a restart loop cannot burn quota.
+//
+// `env` is threaded explicitly all the way into spawnSync so tests can inject a
+// credential-bearing environment without touching process.env. It must carry a PATH or
+// `gh` will not resolve.
+export function defaultProbeGithubAuth(env = process.env) {
+  try {
+    const r = spawnSync("gh", ["api", "/rate_limit", "--silent"], {
+      encoding: "utf8",
+      env,
+      timeout: GITHUB_PROBE_TIMEOUT_MS,
+    });
+    if (r.error) {
+      // ENOENT (no gh on PATH), ETIMEDOUT, spawn failure → unknown, never an alert.
+      return { ok: false, unauthorized: false, transient: true, reason: r.error.message };
+    }
+    if (r.status === 0) return { ok: true, unauthorized: false, transient: false, reason: null };
+    const combined = `${r.stderr ?? ""}\n${r.stdout ?? ""}`;
+    if (isUnauthorizedOutput(combined)) {
+      return { ok: false, unauthorized: true, transient: false, reason: "HTTP 401" };
+    }
+    return {
+      ok: false,
+      unauthorized: false,
+      transient: true,
+      reason: `gh exited ${r.status}`,
+    };
+  } catch (err) {
+    return { ok: false, unauthorized: false, transient: true, reason: err?.message ?? String(err) };
+  }
+}
+
+// resolveGithubBootAuth — the daemon-boot entrypoint. Returns a small verdict object
+// for logging/testing; the caller ignores it. NEVER throws.
+//
+// Emits the alert on `unauthorized` ONLY. The credential's provenance breadcrumb
+// (CATALYST_GITHUB_TOKEN_SOURCE, exported by catalyst-execution-core's
+// _project_shared_github_token) rides along so an operator can tell at a glance whether
+// the daemon was running the shared SOPS file, an inherited value, or nothing at all —
+// which is precisely the distinction that took hours to establish during the outage.
+export function resolveGithubBootAuth({
+  env = process.env,
+  probe = defaultProbeGithubAuth,
+  emitAlert = emitGithubAuthUnusable,
+  log = defaultLog,
+} = {}) {
+  const tokenSource = env?.CATALYST_GITHUB_TOKEN_SOURCE ?? "unknown";
+  let result;
+  try {
+    result = probe(env);
+  } catch (err) {
+    // A throwing injected probe must not take the daemon down with it.
+    log?.warn?.(
+      { err: err?.message },
+      "github-auth-preflight: probe threw — skipping (advisory only)",
+    );
+    return { checked: false, ok: false, unauthorized: false, tokenSource };
+  }
+
+  if (result?.ok) {
+    log?.debug?.({ tokenSource }, "github-auth-preflight: GitHub credential accepted");
+    return { checked: true, ok: true, unauthorized: false, tokenSource };
+  }
+
+  if (result?.unauthorized === true) {
+    log?.error?.(
+      { tokenSource },
+      "github-auth-preflight: GitHub credential REJECTED (401) — every gh API call from " +
+        "this daemon and its workers will fail until it is replaced and the daemon restarted",
+    );
+    try {
+      emitAlert({ tokenSource, reason: result?.reason ?? undefined });
+    } catch (err) {
+      log?.warn?.({ err: err?.message }, "github-auth-preflight: alert emit failed (continuing)");
+    }
+    return { checked: true, ok: false, unauthorized: true, tokenSource };
+  }
+
+  // Transient/unknown → log quietly and stay silent. Not proof of a bad credential.
+  log?.warn?.(
+    { tokenSource, reason: result?.reason ?? null },
+    "github-auth-preflight: could not verify the GitHub credential (transient) — no alert",
+  );
+  return { checked: true, ok: false, unauthorized: false, tokenSource };
+}

@@ -234,6 +234,21 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/review-comments-headless.test.sh
 
+      - name: monitor launcher / dist-redirect test (incl. CTL-1612 webhook-secret projection)
+        # Previously ungated in CI (run-tests.sh globs it locally, but the CI job uses an
+        # explicit allowlist). Now covers the cmd_start CATALYST_WEBHOOK_SECRET projection
+        # that brings the stack launch path to parity with the launchd wrapper.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-monitor-dist-redirect.test.sh
+
+      - name: daemon shared-GitHub-credential projection test (CTL-1612)
+        # Covers _project_shared_github_token: the shared SOPS file WINS over a stale
+        # inherited GITHUB_TOKEN/GH_TOKEN (the 2026-08-02 fleet outage), an
+        # empty/whitespace/absent file is a total no-op that never exports "", and the
+        # GITHUB_TOKEN-only case reconciles GH_TOKEN so a stale one cannot outrank it.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-execution-core-github-token.test.sh
+
       - name: migrate-dual-harness test (CTL-1530)
         # Covers the dual-harness classification (dual-ok / codex-only /
         # claude-only-monolithic / no-harness), the skills-dir state machine
@@ -481,4 +496,6 @@ jobs:
             linear-read-event.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
-            updater/updater-tracing.test.mjs
+            updater/updater-tracing.test.mjs \
+            github-auth-preflight.test.mjs \
+            cluster-sync.test.mjs

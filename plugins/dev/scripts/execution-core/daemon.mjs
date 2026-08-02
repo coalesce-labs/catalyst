@@ -132,6 +132,7 @@ import {
   resolvePhaseSessionId,
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
+import { resolveGithubBootAuth } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
 import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
@@ -736,6 +737,9 @@ export function startDaemon({
   // CTL-854: injectable for the boot empty-registry health check. Tests inject
   // a deterministic fake; production uses the real registry reader.
   listProjects: listProjectsFn = realListProjects,
+  // CTL-1612: injectable GitHub-credential boot preflight. Tests inject a fake; in
+  // production it probes `gh` for real. Advisory — never throws, never blocks boot.
+  githubAuthPreflight = resolveGithubBootAuth,
   // CTL-862: injectable seams for the ownership boot-log. Tests inject a fixed
   // roster and eligible list; production resolves them from the real modules.
   readAllEligible = readAllEligibleTickets,
@@ -948,6 +952,10 @@ export function startDaemon({
       env: process.env,
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
     }).ok;
+    // CTL-1612: prove the GitHub credential this daemon captured at start is actually
+    // usable, and say so LOUDLY if it is not. Purely advisory — never throws, never
+    // blocks boot, alerts only on a definitive 401 (a transient failure stays silent).
+    githubAuthPreflight({ env: process.env, log });
     const dispatchFn = makePhaseAwareDispatchFn({
       bootExecutor: executor,
       codexBootEligible: codexElig.eligible,

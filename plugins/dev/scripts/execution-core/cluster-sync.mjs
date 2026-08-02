@@ -579,7 +579,47 @@ export function emitClusterSecretEvent(opts = {}, io = {}) {
 // execution-core.env is machine-local (not in the bundle), so this entry is an inert
 // no-op — it only ever matches when execution-core.env appears in `status.written` —
 // but encoding it keeps the set faithful to its own contract and future-proofs that path.
-export const ENV_BACKED_SECRET_FILES = new Set(["claude-accounts.env", "execution-core.env"]);
+// CTL-1612: the membership rule generalizes from "sourced into the boot env" to
+// "CAPTURED AT PROCESS START, and therefore NOT live in a running process until it
+// restarts". Two capture mechanisms qualify, and both were previously unenrolled:
+//   (a) `source`d into the daemon's boot env — claude-accounts.env, execution-core.env,
+//       and now github-token (catalyst-execution-core's CTL-1612 _project_shared_github_token).
+//   (b) read ONCE from disk at server boot — webhook-secret and the linear-webhook-secret*
+//       family, resolved inside orch-monitor's loadWebhookConfig() at startup and then
+//       closed over per request (webhook-config.ts), never re-read per delivery.
+// Leaving these out is what let the 2026-08-02 outage look "applied": cluster-sync
+// rewrote github-token, recorded it in `written`, and emitted plain `refreshed` while
+// every running daemon kept 401ing on the revoked value it had captured at boot.
+const ENV_BACKED_SECRET_EXACT = new Set([
+  "claude-accounts.env",
+  "execution-core.env",
+  "github-token",
+  "webhook-secret",
+  "linear-webhook-secret",
+]);
+
+// The per-team Linear webhook secrets are a FAMILY, not fixed names: webhook-config.ts
+// builds `linear-webhook-secret-${key}` from the Layer-2 config's team keys, so the set of
+// filenames is open-ended and NOT guaranteed lowercase. An exact-match Set or a
+// `/^linear-webhook-secret-[a-z0-9-]+$/` regex would silently no-op on a team key like
+// "CTL" — exactly the miss this predicate exists to prevent. Match case-insensitively on
+// the prefix, requiring at least one character after the dash so the bare prefix
+// "linear-webhook-secret-" and a run-on like "linear-webhook-secretXXX" both stay OUT.
+const LINEAR_WEBHOOK_SECRET_PREFIX = "linear-webhook-secret-";
+
+// isEnvBackedSecretFile — the boot-captured predicate. Prefer this over direct Set
+// membership; ENV_BACKED_SECRET_FILES stays exported for back-compat with callers/tests
+// that only need the fixed names.
+export function isEnvBackedSecretFile(file) {
+  if (typeof file !== "string" || file.length === 0) return false;
+  const name = file.toLowerCase();
+  if (ENV_BACKED_SECRET_EXACT.has(name)) return true;
+  return (
+    name.startsWith(LINEAR_WEBHOOK_SECRET_PREFIX) && name.length > LINEAR_WEBHOOK_SECRET_PREFIX.length
+  );
+}
+
+export const ENV_BACKED_SECRET_FILES = ENV_BACKED_SECRET_EXACT;
 
 // assessMaterialization — Codex-A. Decide whether a refresh/boot decrypt FULLY
 // succeeded, given the syncClusterSecrets (`sync`) and syncSecretFiles (`files`)
@@ -798,12 +838,12 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // applied". This is the timer's restart-required surface (the daemon timer calls
   // this fn); best-effort like every other emit here. Auto-restart is out of scope
   // (CTL-1398 re-sources the file on the next start, so a manual restart re-arms it).
-  const restartRequired = status.written.filter((f) => ENV_BACKED_SECRET_FILES.has(f));
+  const restartRequired = status.written.filter((f) => isEnvBackedSecretFile(f));
   status.restartRequired = restartRequired;
   for (const file of restartRequired) {
     logger?.warn?.(
-      `[cluster-sync] env-backed secret rotated (${file}) — daemon restart required to apply ` +
-        "(CLAUDE_CODE_OAUTH_TOKEN is read from process.env at boot)",
+      `[cluster-sync] boot-captured secret rotated (${file}) — restart the daemon(s) that ` +
+        "read it to apply (its value is captured at process start, not per use)",
     );
     emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
   }
