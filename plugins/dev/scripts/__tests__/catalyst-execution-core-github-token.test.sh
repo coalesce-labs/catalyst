@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CTL-1612: `_project_shared_github_token` — the shared GitHub credential projection
+# CTL-1612: `catalyst_project_github_token` — the shared GitHub credential projection
 # that catalyst-execution-core's cmd_start runs BEFORE sourcing execution-core.env.
 #
 # The 2026-08-02 live breakage: a daemon started from a shell that carried a STALE
@@ -12,7 +12,7 @@
 # JS `process.env.X ?? fallback` both treat "" as SET and would defeat gh's fallback.
 #
 # CTL-1612 (Codex P2) adds a SECOND helper to the same ladder,
-# `_reconcile_github_token_aliases`, which runs AFTER execution-core.env is sourced.
+# `catalyst_reconcile_github_token_aliases`, which runs AFTER execution-core.env is sourced.
 # The override was honored only by ordering, and an execution-core.env that set just
 # GITHUB_TOKEN left GH_TOKEN still holding the shared-file value — and `gh` resolves
 # GH_TOKEN FIRST, so the operator override was silently ignored while the provenance
@@ -74,18 +74,25 @@ FAKE_AMBIENT_GH='FAKE-CTL1612-ambient-gh-token-CCCC'
 FAKE_OVERRIDE_TOKEN='FAKE-CTL1612-operator-override-token-DDDD'
 FAKE_XDG_TOKEN='FAKE-CTL1612-xdg-config-home-token-EEEE'
 FAKE_HOME_CONFIG_TOKEN='FAKE-CTL1612-home-dotconfig-token-FFFF'
+# CTL-1612 round 3: fixtures that carry INTERNAL whitespace. A secret is an opaque byte
+# string — nothing forbids a space or a tab inside one — so these are the values the old
+# `tr -d '[:space:]'` reader silently mangled (see tests 21-23).
+FAKE_INTERNAL_SPACE='FAKE-CTL1612 internal space token-GGGG'
+FAKE_INTERNAL_TAB=$'FAKE-CTL1612\tinternal\ttab\ttoken-HHHH'
+FAKE_HMAC_INTERNAL=$'FAKE-CTL1612-hmac key\twith spacing-IIII'
 
-# ─── Extract the helpers under test ───────────────────────────────────────────
-sed -n '/^_project_shared_github_token() {/,/^}/p' "$SCRIPT" > "$T/helper.sh"
-if [[ ! -s "$T/helper.sh" ]] || ! grep -q 'CATALYST_GITHUB_TOKEN_SOURCE' "$T/helper.sh"; then
-  echo "FATAL: could not extract _project_shared_github_token from $SCRIPT" >&2
+# ─── The helpers under test ───────────────────────────────────────────────────
+# CTL-1612: the projection/reconcile pair now lives in ONE shared library sourced by both
+# daemon launchers, instead of being hand-written inline in each. Point the probe straight
+# at it — there is nothing to extract, and testing the real file is what makes these
+# assertions meaningful for BOTH the execution-core and monitor launch paths.
+LIB="$(dirname "$SCRIPT")/lib/catalyst-secret-env.sh"
+if [[ ! -r "$LIB" ]] || ! grep -q 'catalyst_project_github_token' "$LIB"; then
+  echo "FATAL: shared secret-env lib missing or unrecognized at $LIB" >&2
   exit 1
 fi
-sed -n '/^_reconcile_github_token_aliases() {/,/^}/p' "$SCRIPT" > "$T/reconcile.sh"
-if [[ ! -s "$T/reconcile.sh" ]] || ! grep -q 'operator-override' "$T/reconcile.sh"; then
-  echo "FATAL: could not extract _reconcile_github_token_aliases from $SCRIPT" >&2
-  exit 1
-fi
+cp "$LIB" "$T/helper.sh"
+cp "$LIB" "$T/reconcile.sh"
 
 # ─── Probe: run the helper, report booleans/digests only ──────────────────────
 cat > "$T/probe.sh" <<'PROBE'
@@ -96,17 +103,16 @@ set -uo pipefail
 
 # shellcheck disable=SC1090
 source "$HELPER"
-_project_shared_github_token >"$STDOUT_CAP" 2>"$STDERR_CAP"
+catalyst_project_github_token >"$STDOUT_CAP" 2>"$STDERR_CAP"
 
 # CTL-1612 (Codex P2) stage 2 — opt-in, inert unless the case supplies RECONCILE, so
 # tests 1-9 run byte-identically. Replays cmd_start's post-projection sequence: source
 # execution-core.env (the operator override), THEN reconcile the two names.
 if [[ -n "${RECONCILE:-}" ]]; then
-  # shellcheck disable=SC1090
-  source "$RECONCILE"
+  # (already sourced above — the lib is idempotent-source guarded)
   # shellcheck disable=SC1090
   [[ -n "${ENV_FILE:-}" && -f "${ENV_FILE}" ]] && source "$ENV_FILE"
-  _reconcile_github_token_aliases >>"$STDOUT_CAP" 2>>"$STDERR_CAP"
+  catalyst_reconcile_github_token_aliases >>"$STDOUT_CAP" 2>>"$STDERR_CAP"
 fi
 
 gt=unset; [[ -n ${GITHUB_TOKEN+x} ]] && gt=set
@@ -356,12 +362,12 @@ fi
 # ─── 11: wiring — invoked inside cmd_start BEFORE execution-core.env ──────────
 echo ""
 echo "test 11: helper is WIRED into cmd_start before the execution-core.env source"
-CALL_LINES="$(grep -nE '^[[:space:]]*_project_shared_github_token[[:space:]]*$' "$SCRIPT" | cut -d: -f1)"
+CALL_LINES="$(grep -nE '^[[:space:]]*catalyst_project_github_token([[:space:]]|$)' "$SCRIPT" | cut -d: -f1)"
 CALL_COUNT="$(printf '%s\n' "$CALL_LINES" | grep -c '[0-9]' || true)"
 CMD_START_LINE="$(grep -n '^cmd_start() {' "$SCRIPT" | head -1 | cut -d: -f1)"
 ENV_SOURCE_LINE="$(grep -n 'source "\$_daemon_env"' "$SCRIPT" | head -1 | cut -d: -f1)"
 if [[ "$CALL_COUNT" == "1" ]]; then
-  pass "T11 exactly one _project_shared_github_token invocation site"
+  pass "T11 exactly one catalyst_project_github_token invocation site"
 else
   fail "T11 expected exactly one invocation site" "found $CALL_COUNT (lines: $(tr '\n' ' ' <<<"$CALL_LINES"))"
 fi
@@ -471,12 +477,12 @@ assert_line "$OUT" "exported=none" "T16c nothing exported when the XDG path hold
 
 # ─── 17: wiring — reconcile runs AFTER the execution-core.env source ──────────
 echo ""
-echo "test 17: _reconcile_github_token_aliases is WIRED into cmd_start AFTER the execution-core.env source"
-RECONCILE_CALL_LINES="$(grep -nE '^[[:space:]]*_reconcile_github_token_aliases[[:space:]]*$' "$SCRIPT" | cut -d: -f1)"
+echo "test 17: catalyst_reconcile_github_token_aliases is WIRED into cmd_start AFTER the execution-core.env source"
+RECONCILE_CALL_LINES="$(grep -nE '^[[:space:]]*catalyst_reconcile_github_token_aliases([[:space:]]|$)' "$SCRIPT" | cut -d: -f1)"
 RECONCILE_CALL_COUNT="$(printf '%s\n' "$RECONCILE_CALL_LINES" | grep -c '[0-9]' || true)"
 RECONCILE_CALL_LINE="$(printf '%s\n' "$RECONCILE_CALL_LINES" | head -1)"
 if [[ "$RECONCILE_CALL_COUNT" == "1" ]]; then
-  pass "T17 exactly one _reconcile_github_token_aliases invocation site"
+  pass "T17 exactly one catalyst_reconcile_github_token_aliases invocation site"
 else
   fail "T17 expected exactly one invocation site" \
     "found $RECONCILE_CALL_COUNT (lines: $(tr '\n' ' ' <<<"$RECONCILE_CALL_LINES"))"
@@ -578,9 +584,9 @@ OUT="$(
       source "$HELPER"
       # shellcheck disable=SC1090
       source "$RECONCILE"
-      _project_shared_github_token
+      catalyst_project_github_token
       GH_TOKEN=ghp_GHONLY-FAKE-OVERRIDE-000000000   # execution-core.env sets ONLY GH_TOKEN
-      _reconcile_github_token_aliases
+      catalyst_reconcile_github_token_aliases
       echo "source=$CATALYST_GITHUB_TOKEN_SOURCE"
       [ "$GH_TOKEN" = ghp_GHONLY-FAKE-OVERRIDE-000000000 ] && echo "gh_is_override=yes" || echo "gh_is_override=no"
       [ "$GITHUB_TOKEN" = "$GH_TOKEN" ] && echo "agree=yes" || echo "agree=no"
@@ -601,9 +607,9 @@ OUT="$(
       source "$HELPER"
       # shellcheck disable=SC1090
       source "$RECONCILE"
-      _project_shared_github_token
+      catalyst_project_github_token
       GH_TOKEN=""
-      _reconcile_github_token_aliases
+      catalyst_reconcile_github_token_aliases
       echo "source=$CATALYST_GITHUB_TOKEN_SOURCE"
       [ -n "$GITHUB_TOKEN" ] && echo "primary_still_set=yes" || echo "primary_still_set=no"
     '
@@ -612,6 +618,146 @@ printf '### T20b\n%s\n' "$OUT" >> "$ALL_OUT"
 assert_line "$OUT" "source=shared-file" "T20b a blanked alias does not claim operator-override"
 assert_line "$OUT" "primary_still_set=yes" "T20b the working projected credential is preserved"
 
+# ─── 21: Codex round-3 — INTERNAL whitespace is PRESERVED, only the edges trimmed ─
+# The reader used to be `tr -d '[:space:]'`, which deletes EVERY space/tab/newline in the
+# file, not just the trailing one the writer appends. A secret is an opaque byte string,
+# so any value containing a space or a tab was silently truncated into a different, wrong
+# credential — and the failure mode is invisible: the variable looks present, `gh` simply
+# 401s and the launcher reports source=shared-file either way. T9 pinned the trailing
+# newline; these pin the bytes in the MIDDLE, which is the half `tr -d` got wrong.
+#
+# The assertion is a digest comparison against the exact expected string (plus the probe's
+# own in-process EXPECT_VALUE equality). Under the old reader both the digest and the
+# equality flip, so this is a real discriminator — and neither ever prints the value.
+echo ""
+echo "test 21: internal whitespace survives the read (the tr -d '[:space:]' corruption)"
+printf '\n  %s  \n\n' "$FAKE_INTERNAL_SPACE" > "$T/internal-space.token"
+EXPECT_DIGEST="$(printf '%s' "$FAKE_INTERNAL_SPACE" | shasum | cut -c1-12)"
+OUT="$(probe T21a CATALYST_GITHUB_TOKEN_FILE="$T/internal-space.token" \
+  EXPECT_VALUE="$FAKE_INTERNAL_SPACE")"
+assert_line "$OUT" "source=shared-file" "T21a source=shared-file"
+assert_line "$OUT" "match_github=yes" "T21a GITHUB_TOKEN keeps its internal SPACES"
+assert_line "$OUT" "match_gh=yes" "T21a GH_TOKEN keeps its internal SPACES"
+assert_line "$OUT" "digest_github=$EXPECT_DIGEST" "T21a GITHUB_TOKEN digests to the exact expected string"
+assert_line "$OUT" "digest_gh=$EXPECT_DIGEST" "T21a GH_TOKEN digests to the exact expected string"
+
+printf '\t %s \t\n' "$FAKE_INTERNAL_TAB" > "$T/internal-tab.token"
+EXPECT_DIGEST="$(printf '%s' "$FAKE_INTERNAL_TAB" | shasum | cut -c1-12)"
+OUT="$(probe T21b CATALYST_GITHUB_TOKEN_FILE="$T/internal-tab.token" \
+  EXPECT_VALUE="$FAKE_INTERNAL_TAB")"
+assert_line "$OUT" "match_github=yes" "T21b GITHUB_TOKEN keeps its internal TABS"
+assert_line "$OUT" "match_gh=yes" "T21b GH_TOKEN keeps its internal TABS"
+assert_line "$OUT" "digest_github=$EXPECT_DIGEST" "T21b leading/trailing tabs stripped, internal tabs kept (exact digest)"
+assert_line "$OUT" "digest_gh=$EXPECT_DIGEST" "T21b same exact digest under the GH_TOKEN alias"
+
+# The trim must not be reintroduced as a delete. The lib documents the old call in prose,
+# so strip comments before grepping — otherwise the explanation trips its own guard.
+LIB_CODE="$(grep -vE '^[[:space:]]*(#|$)' "$T/helper.sh")"
+if grep -qE "tr[[:space:]]+-d" <<<"$LIB_CODE"; then
+  fail "T21c the shared lib deletes characters with \`tr -d\` again (internal-whitespace corrupter)"
+else
+  pass "T21c the shared lib trims edges only — no \`tr -d\` character deletion"
+fi
+
+# ─── 22: whitespace-only is still EMPTY — with nothing inherited to fall back to ──
+# The trim must not soften the emptiness test: a file holding only spaces/tabs is a
+# non-credential, and exporting its trimmed "" would be worse than not reading it at all
+# (bash ${X:-default} and JS ?? both treat "" as SET). T4 pins the `inherited` arm of the
+# same ladder; this pins the `none` arm, where there is nothing to fall back to.
+echo ""
+echo "test 22: whitespace-only file + nothing inherited → still empty, source=none"
+printf ' \t \n\t\n  ' > "$T/ws-only.token"
+OUT="$(probe T22 CATALYST_GITHUB_TOKEN_FILE="$T/ws-only.token")"
+assert_line "$OUT" "source=none" "T22 whitespace-only file is not a credential (source=none)"
+assert_line "$OUT" "github_token=unset" "T22 GITHUB_TOKEN left unset"
+assert_line "$OUT" "gh_token=unset" "T22 GH_TOKEN left unset"
+assert_line "$OUT" "empty_export=no" "T22 the trimmed-to-empty value is never exported as \"\""
+assert_line "$OUT" "exported=none" "T22 neither name reaches a child process"
+
+# ─── 23: the same reader under the HMAC signing key, via catalyst_read_secret_file ─
+# This is where the corruption actually bites hardest. The webhook secret is an HMAC
+# signing key: a single mangled byte makes every inbound GitHub delivery fail signature
+# verification, with no error logged anywhere — the monitor just goes quiet. Both the
+# low-level reader and the webhook projection are exercised by name here, since
+# catalyst_project_webhook_secret is the other consumer of the shared chain.
+echo ""
+echo "test 23: catalyst_read_secret_file preserves internal whitespace for the HMAC key"
+printf '\n %s \n' "$FAKE_HMAC_INTERNAL" > "$T/webhook-secret-internal"
+EXPECT_DIGEST="$(printf '%s' "$FAKE_HMAC_INTERNAL" | shasum | cut -c1-12)"
+OUT="$(
+  env -i PATH="$PATH" HOME="$T/home" HELPER="$T/helper.sh" \
+    CATALYST_LAYER2_CONFIG_FILE="$T/layer2.json" \
+    SECRET_FILE="$T/webhook-secret-internal" \
+    bash -c '
+      # shellcheck disable=SC1090
+      source "$HELPER"
+      raw=""
+      rc=1
+      raw="$(catalyst_read_secret_file "webhook-secret" "$SECRET_FILE")" && rc=0
+      echo "read_rc=$rc"
+      echo "digest_read=$(printf "%s" "$raw" | shasum | cut -c1-12)"
+      CATALYST_WEBHOOK_SECRET_FILE="$SECRET_FILE" catalyst_project_webhook_secret
+      s=unset; [ -n "${CATALYST_WEBHOOK_SECRET+x}" ] && s=set
+      echo "webhook_secret=$s"
+      d=none; [ "$s" = set ] && d="$(printf "%s" "$CATALYST_WEBHOOK_SECRET" | shasum | cut -c1-12)"
+      echo "digest_webhook=$d"
+    '
+)"
+printf '### T23\n%s\n' "$OUT" >> "$ALL_OUT"
+assert_line "$OUT" "read_rc=0" "T23 catalyst_read_secret_file found the file"
+assert_line "$OUT" "digest_read=$EXPECT_DIGEST" "T23 the reader returns the exact bytes (edges trimmed, middle intact)"
+assert_line "$OUT" "webhook_secret=set" "T23 catalyst_project_webhook_secret exported the key"
+assert_line "$OUT" "digest_webhook=$EXPECT_DIGEST" "T23 the exported HMAC key is byte-identical to the file value"
+
+echo "test 23b: a whitespace-only HMAC file exports nothing (an empty secret DISABLES the route)"
+printf '  \n\t\n' > "$T/webhook-secret-ws"
+OUT="$(
+  env -i PATH="$PATH" HOME="$T/home" HELPER="$T/helper.sh" \
+    CATALYST_LAYER2_CONFIG_FILE="$T/layer2.json" \
+    CATALYST_WEBHOOK_SECRET_FILE="$T/webhook-secret-ws" \
+    bash -c '
+      # shellcheck disable=SC1090
+      source "$HELPER"
+      catalyst_project_webhook_secret
+      s=unset; [ -n "${CATALYST_WEBHOOK_SECRET+x}" ] && s=set
+      echo "webhook_secret=$s"
+      echo "exported=$(bash -c "printf %s \"\${CATALYST_WEBHOOK_SECRET+W}\"")"
+    '
+)"
+printf '### T23b\n%s\n' "$OUT" >> "$ALL_OUT"
+assert_line "$OUT" "webhook_secret=unset" "T23b whitespace-only HMAC file leaves the name unset, never \"\""
+assert_line "$OUT" "exported=" "T23b nothing reaches the monitor child (webhook-config would read \"\" as unconfigured)"
+
+# ─── 24: hygiene re-scan covering the round-3 whitespace fixtures ──────────────
+echo ""
+echo "test 24: secret hygiene re-scan across the full transcript (incl. tests 21-23)"
+TOTAL_STDOUT_LINES="$(grep -c '^stdout_bytes=' "$ALL_OUT" 2>/dev/null || echo 0)"
+ZERO_STDOUT_LINES="$(grep -c '^stdout_bytes=0$' "$ALL_OUT" 2>/dev/null || echo 0)"
+TOTAL_STDERR_LINES="$(grep -c '^stderr_bytes=' "$ALL_OUT" 2>/dev/null || echo 0)"
+ZERO_STDERR_LINES="$(grep -c '^stderr_bytes=0$' "$ALL_OUT" 2>/dev/null || echo 0)"
+if [[ "$TOTAL_STDOUT_LINES" -gt 0 && "$TOTAL_STDOUT_LINES" == "$ZERO_STDOUT_LINES" \
+  && "$TOTAL_STDERR_LINES" == "$ZERO_STDERR_LINES" ]]; then
+  pass "T24 the helpers stayed silent in all $TOTAL_STDOUT_LINES probe cases"
+else
+  fail "T24 the helpers must never write to stdout/stderr" \
+    "cases=$TOTAL_STDOUT_LINES silent_out=$ZERO_STDOUT_LINES silent_err=$ZERO_STDERR_LINES"
+fi
+LEAKED=""
+for fixture in "$FAKE_FILE_TOKEN" "$FAKE_AMBIENT_GITHUB" "$FAKE_AMBIENT_GH" \
+  "$FAKE_OVERRIDE_TOKEN" "$FAKE_XDG_TOKEN" "$FAKE_HOME_CONFIG_TOKEN" \
+  "$FAKE_INTERNAL_SPACE" "$FAKE_INTERNAL_TAB" "$FAKE_HMAC_INTERNAL"; do
+  grep -qF "$fixture" "$ALL_OUT" && LEAKED="yes"
+done
+if [[ -z "$LEAKED" ]]; then
+  pass "T24 no fixture VALUE appears in the transcript, including the whitespace-bearing ones"
+else
+  fail "T24 a secret value leaked into the transcript"
+fi
+if grep -qE 'ghp_|gho_|ghu_|ghs_|ghr_|github_pat_' "$ALL_OUT"; then
+  fail "T24 transcript contains a token-shaped string"
+else
+  pass "T24 transcript contains no token-shaped string (no gh* prefix)"
+fi
 
 echo ""
 echo "─────────────────────────────────────────────"

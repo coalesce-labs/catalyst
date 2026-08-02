@@ -128,7 +128,11 @@ export function rearmGithubTokenFromFile({
         continue; // not on this host — try the next candidate
       }
       found = true;
-      const candidate = String(raw ?? "").replace(/\s+/g, "");
+      // TRIM only — never strip internal whitespace. `.replace(/\s+/g,"")` would silently
+      // corrupt any credential containing a space/tab/newline (an HMAC key would then
+      // reject every delivery with no error anywhere). Mirrors _catalyst_trim in
+      // lib/catalyst-secret-env.sh.
+      const candidate = String(raw ?? "").trim();
       if (candidate) {
         tok = candidate;
         break;

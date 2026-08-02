@@ -1,31 +1,20 @@
 #!/usr/bin/env bash
-# Wrapper script for launchd (macOS). Reads CATALYST_WEBHOOK_SECRET from the
-# secret file at startup so the value never needs to appear in the plist.
+# Wrapper script for launchd (macOS). A thin exec into catalyst-monitor.sh, which
+# projects the cluster-synced secrets itself — no secret value ever appears in the plist.
 #
 # Usage: copy this file to an absolute path on disk, edit the SCRIPT_DIR line
 # if needed, then reference it from your LaunchAgent plist.
 #
 # See: website/src/content/docs/observability/webhooks.md — "Persistent setup"
 
-# CTL-1612: only export a NON-EMPTY value. The previous `-f`-guarded `$(cat)` exported
-# CATALYST_WEBHOOK_SECRET="" for an empty or whitespace-only file, and an empty secret
-# makes webhook-config treat the GitHub route as unconfigured — silently disabling
-# inbound webhook verification rather than falling back. catalyst-monitor.sh cmd_start
-# now performs the same projection, so both launch paths agree.
-# Resolution CHAIN — the two writers disagree: setup-webhooks.sh writes to
-# ${XDG_CONFIG_HOME:-$HOME/.config}/catalyst, cluster-sync to a hardcoded
-# ~/.config/catalyst. Take the first readable NON-EMPTY file (an empty secret makes
-# webhook-config treat the GitHub route as unconfigured, silently disabling it).
-_wh_val=""
-for _wh_file in \
-  "${HOME}/.config/catalyst/webhook-secret" \
-  "${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst/webhook-secret"; do
-  [[ -r "$_wh_file" ]] || continue
-  _wh_val="$(tr -d '[:space:]' <"$_wh_file" 2>/dev/null)"
-  [[ -n "$_wh_val" ]] && break
-done
-[[ -n "$_wh_val" ]] && export CATALYST_WEBHOOK_SECRET="$_wh_val"
-unset _wh_val _wh_file
+# CTL-1612: the secret projection was REMOVED from this wrapper deliberately.
+# catalyst-monitor.sh cmd_start now performs it via lib/catalyst-secret-env.sh, honoring
+# CATALYST_WEBHOOK_SECRET_FILE / CATALYST_CONFIG_DIR / CATALYST_LAYER2_CONFIG_FILE. This
+# wrapper always preloaded the HOME/XDG default and ignored those overrides, so a
+# LaunchAgent pointing at a custom path still got the default value — and the wrapper's
+# `$(cat ...)` also exported an empty string for an empty file, which makes
+# webhook-config treat the GitHub route as unconfigured and silently disables it.
+# One projection, one chain, both launch paths.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "${SCRIPT_DIR}/../catalyst-monitor.sh" start

@@ -41,6 +41,19 @@ const FAKE_TOKEN = "ghp_THIS-IS-NOT-A-REAL-TOKEN-000000000000";
 // disk. Both are obvious fakes; neither is ever expected in a log line.
 const STALE_TOKEN = "ghp_STALE-FAKE-TOKEN-000000000000000000";
 const ROTATED_TOKEN = "ghp_ROTATED-FAKE-TOKEN-11111111111111";
+// A SECOND rotation, for the timer tests: proving the re-arm keeps working long
+// after boot, not just the first time it runs.
+const ROTATED_AGAIN_TOKEN = "ghp_ROTATED-AGAIN-FAKE-TOKEN-22222222";
+
+// Obviously-fake credentials that CONTAIN whitespace. The reader used to strip ALL
+// whitespace (`.replace(/\s+/g,"")` here, `tr -d '[:space:]'` on the shell side), which
+// silently WELDS these into a different string — the value looks present and is simply
+// wrong. A GitHub PAT never contains a space, but the same reader shape projects the
+// webhook HMAC signing key, where a corrupted key rejects every inbound delivery with no
+// error anywhere. `.trim()` is the fix; these literals pin it.
+const SPACED_TOKEN = "ghp_FAKE TOKEN-WITH-A-SPACE-0000000";
+const TABBED_TOKEN = "ghp_FAKE\tTOKEN-WITH-A-TAB-00000000000";
+const MULTILINE_TOKEN = "ghp_FAKE-LINE-1-0000000\nghp_FAKE-LINE-2-0000000";
 
 // A path that is NEVER opened — `readFile` is injected in every re-arm test, so
 // this is only ever a map key and an assertion target.
@@ -592,6 +605,252 @@ describe("rearmGithubTokenFromFile", () => {
   });
 });
 
+// ── rearmGithubTokenFromFile: whitespace fidelity ─────────────────────────────
+//
+// THE ROUND-3 DATA-CORRUPTION REGRESSION. The reader used to normalize the file with
+// `.replace(/\s+/g, "")` — which does NOT mean "drop the trailing newline", it means
+// "delete every whitespace character anywhere in the value". A secret containing a
+// space, a tab or an internal newline was therefore installed as a DIFFERENT string
+// than the one on disk: present, plausible-looking, and wrong. There is no error
+// anywhere in that failure mode — the credential is simply rejected forever.
+//
+// The contract is now exactly `.trim()`: surrounding whitespace goes (so a cosmetic
+// trailing newline is never mistaken for a rotation), internal whitespace stays
+// (so the installed value is byte-for-byte what the writer wrote).
+
+describe("rearmGithubTokenFromFile preserves INTERNAL whitespace", () => {
+  const withInternalWhitespace = [
+    ["a space", SPACED_TOKEN],
+    ["a tab", TABBED_TOKEN],
+    ["an internal newline", MULTILINE_TOKEN],
+  ];
+
+  for (const [label, value] of withInternalWhitespace) {
+    test(`REGRESSION: a credential containing ${label} installs BYTE-FOR-BYTE`, () => {
+      const env = {
+        CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+        CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+        GITHUB_TOKEN: STALE_TOKEN,
+        GH_TOKEN: STALE_TOKEN,
+      };
+      const { out, rec } = rearmWith({ env, files: { [TOKEN_FILE]: value } });
+
+      expect(out).toEqual({ rearmed: true, reason: "rotated" });
+      expect(env.GITHUB_TOKEN).toBe(value);
+      expect(env.GH_TOKEN).toBe(value); // both names, both intact
+      // The exact shape the strip-everything reader produced. Asserting the negative
+      // is what makes this a regression test rather than a restatement of `.trim()`.
+      expect(env.GITHUB_TOKEN).not.toBe(value.replace(/\s+/g, ""));
+      expect(rec.loggedText()).not.toContain(value); // still never echoes the value
+    });
+  }
+
+  test("REGRESSION: surrounding whitespace is stripped while the INTERNAL run survives", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      GITHUB_TOKEN: STALE_TOKEN,
+      GH_TOKEN: STALE_TOKEN,
+    };
+    // The realistic on-disk shape: the writer's payload plus a cosmetic newline.
+    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `\n  ${SPACED_TOKEN} \t\n` } });
+
+    expect(out).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GITHUB_TOKEN).toBe(SPACED_TOKEN);
+    expect(env.GITHUB_TOKEN).toBe(env.GITHUB_TOKEN.trim()); // nothing clinging to either end
+    expect(env.GITHUB_TOKEN).toContain(" "); // …but the internal space is untouched
+    expect(env.GH_TOKEN).toBe(SPACED_TOKEN);
+  });
+
+  test("an internal-whitespace credential already installed is 'unchanged' — no churn per tick", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+      GITHUB_TOKEN: SPACED_TOKEN,
+      GH_TOKEN: SPACED_TOKEN,
+    };
+    // Trailing newline only — the comparison must see through it, or every tick would
+    // "rotate" and log a rotation warning that never happened.
+    const { out, rec } = rearmWith({ env, files: { [TOKEN_FILE]: `${SPACED_TOKEN}\n` } });
+
+    expect(out).toEqual({ rearmed: false, reason: "unchanged" });
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file"); // breadcrumb NOT rewritten
+    expect(rec.state.logs).toHaveLength(0);
+  });
+
+  // Whitespace is not a credential. Trimming to "" must land on the `empty` guard, not
+  // install a blank that reads as SET to `??` / `${X:-}` and defeats gh's own fallback.
+  test("a whitespace-ONLY file is still empty — no install, {rearmed:false, reason:'empty'}", () => {
+    for (const content of [" ", "\t", "\r\n", "\n\n\n", " \t \r\n  "]) {
+      const env = {
+        CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+        CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+        GITHUB_TOKEN: STALE_TOKEN,
+        GH_TOKEN: STALE_TOKEN,
+      };
+      const { out } = rearmWith({ env, files: { [TOKEN_FILE]: content } });
+
+      expect(out).toEqual({ rearmed: false, reason: "empty" });
+      expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+      expect(env.GH_TOKEN).toBe(STALE_TOKEN);
+      expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file");
+    }
+  });
+});
+
+// ── rearmGithubTokenFromFile on EVERY cluster-sync tick ───────────────────────
+//
+// CTL-1612 round 3: the re-arm moved from boot-only to every periodic cluster-sync
+// timer tick. Boot-only would have converted a silent failure into a loud one that
+// STILL needs hands — a credential rotated at 03:00 on a daemon that booted at 00:00
+// stays dead until a human restarts it. Running per tick makes two properties
+// load-bearing that a boot-only call never had to satisfy:
+//   1. IDEMPOTENCE — the steady-state tick must mutate nothing and say nothing, or the
+//      daemon rewrites its own env and logs a phantom rotation every interval;
+//   2. LATENESS — a rotation that first appears on the Nth tick must still re-arm,
+//      exactly as the first one did.
+// These call the real function repeatedly against one env, which is what the timer does.
+
+describe("rearmGithubTokenFromFile on every timer tick", () => {
+  // writeRecordingEnv — an env that records every assignment, so "mutates nothing" is
+  // asserted directly rather than inferred from values that happen to still match.
+  function writeRecordingEnv(initial) {
+    const writes = [];
+    const env = new Proxy(
+      { ...initial },
+      {
+        set(target, key, value) {
+          writes.push(key);
+          target[key] = value;
+          return true;
+        },
+      },
+    );
+    return { env, writes };
+  }
+
+  // tickHarness — one env plus a mutable stand-in for the disk. `disk.content = null`
+  // means the file does not exist yet (readFile throws, as readFileSync would).
+  function tickHarness(initial, content) {
+    const { env, writes } = writeRecordingEnv(initial);
+    const disk = { content };
+    const rec = recorder();
+    const tick = () =>
+      rearmGithubTokenFromFile({
+        env,
+        readFile: () => {
+          if (disk.content === null) {
+            const err = new Error(`ENOENT: no such file or directory, open '${TOKEN_FILE}'`);
+            err.code = "ENOENT";
+            throw err;
+          }
+          return disk.content;
+        },
+        log: rec.log,
+      });
+    return { env, writes, disk, rec, tick };
+  }
+
+  const BASE = { CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE, CATALYST_GITHUB_TOKEN_SOURCE: "shared-file" };
+
+  test("REGRESSION: a steady-state second tick mutates NOTHING and returns reason:'unchanged'", () => {
+    const { env, writes, rec, tick } = tickHarness(
+      { ...BASE, GITHUB_TOKEN: STALE_TOKEN, GH_TOKEN: STALE_TOKEN },
+      `${ROTATED_TOKEN}\n`,
+    );
+
+    expect(tick()).toEqual({ rearmed: true, reason: "rotated" }); // tick 1 installs
+    const afterFirst = writes.length;
+    expect(afterFirst).toBe(3); // GITHUB_TOKEN, GH_TOKEN, CATALYST_GITHUB_TOKEN_SOURCE
+
+    expect(tick()).toEqual({ rearmed: false, reason: "unchanged" }); // tick 2 no-ops
+    expect(tick()).toEqual({ rearmed: false, reason: "unchanged" }); // …and stays no-op
+    expect(writes).toHaveLength(afterFirst); // not one further assignment
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file-resynced");
+    expect(rec.state.logs.filter((l) => l.level === "warn")).toHaveLength(1); // one rotation, one line
+  });
+
+  test("REGRESSION: a rotation landing on a LATER tick re-arms and stamps 'shared-file-resynced'", () => {
+    const { env, disk, rec, tick } = tickHarness(
+      { ...BASE, GITHUB_TOKEN: STALE_TOKEN, GH_TOKEN: STALE_TOKEN },
+      `${ROTATED_TOKEN}\n`,
+    );
+
+    expect(tick()).toEqual({ rearmed: true, reason: "rotated" });
+    expect(tick()).toEqual({ rearmed: false, reason: "unchanged" });
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+
+    // 03:00: cluster-sync materializes the NEXT rotation onto disk under a long-running
+    // daemon. Boot already happened hours ago; only the timer can catch this.
+    disk.content = `${ROTATED_AGAIN_TOKEN}\n`;
+
+    expect(tick()).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_AGAIN_TOKEN);
+    expect(env.GH_TOKEN).toBe(ROTATED_AGAIN_TOKEN);
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file-resynced");
+    expect(rec.state.logs.filter((l) => l.level === "warn")).toHaveLength(2); // one per real rotation
+    expect(rec.loggedText()).not.toContain(ROTATED_TOKEN);
+    expect(rec.loggedText()).not.toContain(ROTATED_AGAIN_TOKEN);
+  });
+
+  test("a file that does not exist at boot but appears LATER is picked up by a subsequent tick", () => {
+    const { env, writes, disk, tick } = tickHarness(
+      { ...BASE, GITHUB_TOKEN: STALE_TOKEN, GH_TOKEN: STALE_TOKEN },
+      null, // nothing on disk yet — cluster-sync has not materialized it
+    );
+
+    expect(tick()).toEqual({ rearmed: false, reason: "absent" });
+    expect(writes).toHaveLength(0); // absent must not touch the env at all
+    expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+
+    disk.content = ROTATED_TOKEN;
+
+    expect(tick()).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
+  });
+
+  test("an operator override is honored on EVERY tick — never clobbered by a later rotation", () => {
+    const { env, writes, disk, tick } = tickHarness(
+      {
+        CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+        CATALYST_GITHUB_TOKEN_SOURCE: "operator-override",
+        GITHUB_TOKEN: STALE_TOKEN,
+        GH_TOKEN: STALE_TOKEN,
+      },
+      `${ROTATED_TOKEN}\n`,
+    );
+
+    for (let i = 0; i < 3; i += 1) {
+      expect(tick()).toEqual({ rearmed: false, reason: "operator-override" });
+    }
+    disk.content = `${ROTATED_AGAIN_TOKEN}\n`;
+    expect(tick()).toEqual({ rearmed: false, reason: "operator-override" });
+
+    expect(writes).toHaveLength(0);
+    expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("operator-override");
+  });
+
+  test("an internal-whitespace credential survives repeated ticks unchanged (no per-tick corruption)", () => {
+    const { env, writes, rec, tick } = tickHarness(
+      { ...BASE, GITHUB_TOKEN: STALE_TOKEN, GH_TOKEN: STALE_TOKEN },
+      `${TABBED_TOKEN}\n`,
+    );
+
+    expect(tick()).toEqual({ rearmed: true, reason: "rotated" });
+    const afterFirst = writes.length;
+    // Under the strip-everything reader the installed value never equals the file, so
+    // every subsequent tick would "rotate" again forever.
+    expect(tick()).toEqual({ rearmed: false, reason: "unchanged" });
+    expect(tick()).toEqual({ rearmed: false, reason: "unchanged" });
+    expect(writes).toHaveLength(afterFirst);
+    expect(env.GITHUB_TOKEN).toBe(TABBED_TOKEN);
+    expect(rec.state.logs.filter((l) => l.level === "warn")).toHaveLength(1);
+  });
+});
+
 // ── resolveGithubBootAuth ⟷ rearm wiring ──────────────────────────────────────
 //
 // Re-arming AFTER the probe would be worthless: the preflight must verify the
@@ -719,27 +978,54 @@ describe("resolveGithubBootAuth re-arms before probing", () => {
 describe("daemon boot ordering", () => {
   const daemonSrc = readFileSync(new URL("./daemon.mjs", import.meta.url), "utf8").split("\n");
   const lineOf = (needle) => daemonSrc.findIndex((l) => l.includes(needle));
+  const countOf = (needle) => daemonSrc.filter((l) => l.includes(needle)).length;
 
-  test("the boot cluster-sync runs BEFORE the credential preflight", () => {
+  // The boot sequence must be: clusterSync -> RE-ARM -> dispatch -> PROBE.
+  // Both halves are load-bearing and both have been wrong once:
+  //   * re-arm must precede dispatch, or a boot-resumed worker inherits a credential the
+  //     sync just superseded and keeps it for its whole lifetime;
+  //   * the probe must FOLLOW dispatch, because it spawns `gh` with a 10s timeout and a
+  //     network round-trip ahead of crash recovery delays re-dispatching in-flight work
+  //     for no diagnostic benefit.
+  test("the boot cluster-sync runs BEFORE the credential re-arm", () => {
     const sync = lineOf("const bootSync = clusterSync()");
-    const preflight = lineOf("githubAuthPreflight({ env: process.env, log })");
+    const rearm = lineOf("rearmGithubTokenFromFile({ env: process.env, log })");
     expect(sync).toBeGreaterThan(-1);
-    expect(preflight).toBeGreaterThan(-1);
-    expect(sync).toBeLessThan(preflight);
+    expect(rearm).toBeGreaterThan(-1);
+    expect(sync).toBeLessThan(rearm);
   });
 
-  test("the credential preflight runs BEFORE anything dispatches a worker", () => {
-    const preflight = lineOf("githubAuthPreflight({ env: process.env, log })");
+  test("the credential RE-ARM runs BEFORE anything dispatches a worker", () => {
+    const rearm = lineOf("rearmGithubTokenFromFile({ env: process.env, log })");
     const bootResume = lineOf("const bootResume = reconcileBoot(");
     const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn })");
     expect(bootResume).toBeGreaterThan(-1);
     expect(approved).toBeGreaterThan(-1);
-    expect(preflight).toBeLessThan(bootResume);
-    expect(preflight).toBeLessThan(approved);
+    expect(rearm).toBeLessThan(bootResume);
+    expect(rearm).toBeLessThan(approved);
   });
 
-  test("the preflight is wired exactly once (no leftover duplicate call site)", () => {
-    const hits = daemonSrc.filter((l) => l.includes("githubAuthPreflight({")).length;
-    expect(hits).toBe(1);
+  test("the `gh` PROBE runs AFTER the dispatches (never delays crash recovery)", () => {
+    const probe = lineOf("githubAuthPreflight({ env: process.env, log })");
+    const bootResume = lineOf("const bootResume = reconcileBoot(");
+    const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn })");
+    expect(probe).toBeGreaterThan(bootResume);
+    expect(probe).toBeGreaterThan(approved);
+  });
+
+  test("the probe is wired exactly once (no leftover duplicate call site)", () => {
+    expect(countOf("githubAuthPreflight({")).toBe(1);
+  });
+
+  // Without this the entire fix is boot-only: a credential rotated at 03:00 on a daemon
+  // that booted at 00:00 stays dead until a human restarts it.
+  test("the re-arm is ALSO wired into the periodic cluster-sync timer", () => {
+    const timer = lineOf("_clusterSyncTimer = setInterval(");
+    expect(timer).toBeGreaterThan(-1);
+    const rearmCalls = daemonSrc
+      .map((l, i) => (l.includes("rearmGithubTokenFromFile({ env: process.env, log })") ? i : -1))
+      .filter((i) => i >= 0);
+    expect(rearmCalls.length).toBe(2); // once at boot, once per timer tick
+    expect(rearmCalls.some((i) => i > timer)).toBe(true);
   });
 });

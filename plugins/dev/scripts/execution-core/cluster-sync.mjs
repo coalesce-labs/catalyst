@@ -817,6 +817,35 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // a failure too: advancing the marker over it would make lastSha===HEAD skip the
   // retry forever, stranding the un-applied rotation. On ANY shortfall: emit
   // refresh-failed naming the shortfall, do NOT advance the marker, return ok:false.
+  // 8b. Codex-B: a rotated boot-captured secret file is NOT live in a running process
+  // until it restarts (its value was captured at process start, not read per use). Emit a
+  // DISTINCT loud signal so "refreshed" is never mistaken for "the env secret is applied".
+  //
+  // Key off the files whose CONTENT actually changed, not every file rewritten (Codex P2):
+  // any commit touching secrets/ makes syncSecretFiles re-decrypt and rewrite the WHOLE
+  // bundle, so `written` names every bare file even when one unrelated entry rotated, and
+  // filtering on it would demand a restart on every routine secret update. Fall back to
+  // `written` for a caller-injected syncSecretFiles that predates the `changed` field —
+  // noisier, but a MISSED rotation notice is the silent-stale failure this exists to catch.
+  //
+  // Emitted BEFORE the shortfall early-return, deliberately (Codex P1, round 3). The
+  // rotated secret is already ON DISK at this point; whether some UNRELATED JSON or
+  // profile entry failed to materialize has no bearing on the fact that a restart is now
+  // required. Returning first would drop the notice permanently: the marker stays at the
+  // old sha, so the next attempt re-decrypts and rewrites the same bytes, `changed` comes
+  // back EMPTY, and once the unrelated failure clears the marker advances having never
+  // asked for the restart — leaving the daemon on the old credential forever.
+  const rotated = Array.isArray(files?.changed) ? files.changed : status.written;
+  const restartRequired = rotated.filter((f) => isEnvBackedSecretFile(f));
+  status.restartRequired = restartRequired;
+  for (const file of restartRequired) {
+    logger?.warn?.(
+      `[cluster-sync] boot-captured secret rotated (${file}) — restart the daemon(s) that ` +
+        "read it to apply (its value is captured at process start, not per use)",
+    );
+    emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
+  }
+
   const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles });
   if (!fullSuccess) {
     status.ok = false;
@@ -849,30 +878,6 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
     });
   }
 
-  // 8b. Codex-B: a rotated ENV-BACKED secret file (sourced into process.env at boot)
-  // is NOT live in the running daemon until a restart — the SDK path reads
-  // CLAUDE_CODE_OAUTH_TOKEN from process.env, captured at boot. Emit a DISTINCT loud
-  // signal so the "refreshed" event above is never mistaken for "the env secret is
-  // applied". This is the timer's restart-required surface (the daemon timer calls
-  // this fn); best-effort like every other emit here. Auto-restart is out of scope
-  // (CTL-1398 re-sources the file on the next start, so a manual restart re-arms it).
-  //
-  // Key off the files whose CONTENT actually changed, not every file rewritten (Codex
-  // P2). Any commit touching secrets/ makes syncSecretFiles re-decrypt and rewrite the
-  // whole bundle, so `written` names every bare file even when a single unrelated entry
-  // rotated — filtering on it would demand a daemon+monitor restart on every routine
-  // secret update. Fall back to `written` when a caller-injected syncSecretFiles predates
-  // the `changed` field, preserving the old (noisier but never-missing) behavior.
-  const rotated = Array.isArray(files?.changed) ? files.changed : status.written;
-  const restartRequired = rotated.filter((f) => isEnvBackedSecretFile(f));
-  status.restartRequired = restartRequired;
-  for (const file of restartRequired) {
-    logger?.warn?.(
-      `[cluster-sync] boot-captured secret rotated (${file}) — restart the daemon(s) that ` +
-        "read it to apply (its value is captured at process start, not per use)",
-    );
-    emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
-  }
   return status;
 }
 

@@ -132,7 +132,7 @@ import {
   resolvePhaseSessionId,
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
-import { resolveGithubBootAuth } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
+import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
 import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
@@ -1000,9 +1000,12 @@ export function startDaemon({
         log.warn({ err: err?.message }, "execution-core daemon: boot cluster-sync threw (continuing)");
       }
     }
-    // Probe the credential we will actually hand to those workers, re-arming first from
-    // whatever the sync just put on disk. Advisory: never throws, never blocks boot.
-    githubAuthPreflight({ env: process.env, log });
+    // Re-arm ONLY (no probe) before anything dispatches: this is a cheap local file read,
+    // and it is what stops a boot-resumed worker inheriting a credential the sync just
+    // superseded. The probe is deliberately NOT here — it spawns `gh` with a 10s timeout,
+    // and putting a network round-trip ahead of crash recovery would delay re-dispatching
+    // in-flight work for no diagnostic benefit. It runs after the dispatches instead.
+    rearmGithubTokenFromFile({ env: process.env, log });
 
     const bootResume = reconcileBoot({
       orchDir,
@@ -1018,6 +1021,10 @@ export function startDaemon({
     // dispatch entry point and previously defaulted to defaultDispatch, so an
     // approved-resume ticket launched via bg even under executor=sdk (split-brain).
     processApprovedResumes({ orchDir, dispatch: dispatchFn });
+    // CTL-1612: NOW probe the credential — after the dispatches, so a 10s `gh` timeout can
+    // never delay crash recovery. Advisory only: never throws, never blocks boot, and
+    // alerts solely on a definitive 401.
+    githubAuthPreflight({ env: process.env, log });
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
@@ -1260,6 +1267,19 @@ export function startDaemon({
           refreshClusterSecrets();
         } catch (err) {
           log.warn({ err: err?.message }, "cluster-sync timer: refresh threw (continuing)");
+        }
+        // CTL-1612: re-arm from disk on EVERY tick, unconditionally. Without this the
+        // whole fix is boot-only: a credential rotated at 03:00 on a daemon that booted at
+        // 00:00 stays dead until a human restarts it, and we would merely have converted a
+        // silent failure into a loud one that still needs hands. Deliberately NOT gated on
+        // the refresh result — refreshClusterSecretsIfChanged short-circuits on
+        // `head-unchanged` without re-reading the file, and the rotation may also have been
+        // materialized by the OTHER writer (cluster-sync at boot, or an operator). The call
+        // is a cheap local read, no-ops when the value is unchanged, and never throws.
+        try {
+          rearmGithubTokenFromFile({ env: process.env, log });
+        } catch (err) {
+          log.warn({ err: err?.message }, "cluster-sync timer: credential re-arm threw (continuing)");
         }
       }, clusterSyncIntervalMs);
       _clusterSyncTimer.unref?.();

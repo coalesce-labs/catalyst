@@ -339,27 +339,23 @@ cmd_start() {
   # FILE-WINS for the same reason as the daemon's GitHub credential: a stale shell export
   # is exactly what we are correcting. Empty/whitespace/absent = no-op, never export ""
   # (an empty secret makes webhook-config treat the route as unconfigured).
-  # Resolution CHAIN, because two writers disagree: setup-webhooks.sh:23 writes to
-  # ${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/webhook-secret, while cluster-sync
-  # materializes bare secrets into dirname(getLayer2ConfigPath()) — hardcoded
-  # ~/.config/catalyst, NOT XDG-aware. Reading only one of them would silently miss the
-  # other and leave the GitHub webhook route disabled. Take the first readable non-empty.
-  local _wh_val="" _wh_file="" _wh_cands=()
-  if [[ -n "${CATALYST_WEBHOOK_SECRET_FILE:-}" ]]; then
-    _wh_cands=("$CATALYST_WEBHOOK_SECRET_FILE")
-  elif [[ -n "${CATALYST_CONFIG_DIR:-}" ]]; then
-    _wh_cands=("${CATALYST_CONFIG_DIR}/webhook-secret")
-  else
-    local _l2="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
-    _wh_cands+=("$(dirname "$_l2")/webhook-secret")
-    _wh_cands+=("${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst/webhook-secret")
-  fi
-  for _wh_file in "${_wh_cands[@]}"; do
-    [[ -r "$_wh_file" ]] || continue
-    _wh_val="$(tr -d '[:space:]' <"$_wh_file" 2>/dev/null)"
-    [[ -n "$_wh_val" ]] && break
-  done
-  [[ -n "$_wh_val" ]] && export CATALYST_WEBHOOK_SECRET="$_wh_val"
+  # CTL-1612: arm BOTH cluster-synced credentials this daemon needs, via the one shared
+  # resolution chain (lib/catalyst-secret-env.sh).
+  #
+  # webhook-secret: webhook-config.ts resolves the GitHub HMAC key from process.env ONLY
+  # (no file fallback, unlike the Linear per-team secrets) and captures it once at boot, so
+  # a monitor started without it runs with the GitHub webhook route silently DISABLED.
+  #
+  # github-token: the monitor makes 13 `gh` calls across 5 files (pr-status, preview-status,
+  # webhook-subscriber, webhook-replay, repo-icon-fetcher) and contains ZERO references to
+  # GITHUB_TOKEN/GH_TOKEN — its GitHub auth is purely ambient inheritance, which is exactly
+  # the bug this ticket exists to fix. doctor.mjs checkRepoIconTokenScope already exists to
+  # warn about this inherited token. Projecting here fixes all 13 sites at once, because they
+  # all inherit this launcher's env; none of them need to change.
+  # shellcheck disable=SC1090
+  source "$SCRIPT_DIR/lib/catalyst-secret-env.sh"
+  catalyst_project_webhook_secret
+  catalyst_project_github_token
 
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \

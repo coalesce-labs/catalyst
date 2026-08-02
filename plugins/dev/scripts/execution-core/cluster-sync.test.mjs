@@ -1190,6 +1190,224 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(selectRotated(current, current.written)).toEqual([]);
   });
 
+  // ── CTL-1612 (Codex P1, round 3): the restart notice is emitted BEFORE the
+  //    materialization-shortfall early-return. The rotated boot-captured secret is
+  //    already ON DISK by then, so an UNRELATED JSON/profile entry failing to
+  //    materialize has no bearing on "a restart is now required".
+  //
+  //    Returning first lost the notice PERMANENTLY, and the loss is invisible to any
+  //    single-run test: the marker stays at the old sha, so the next attempt
+  //    re-decrypts and rewrites the SAME bytes, `changed` comes back EMPTY, and once
+  //    the unrelated failure clears the marker advances having never asked for the
+  //    restart — daemon left 401ing on the old credential forever. (g1) is the reason
+  //    run 2 is silent: a byte-identical rewrite is correctly not a rotation. So the
+  //    only run that can ever carry the notice is the one that also failed. ─────────
+
+  test("(h1) shortfall run (unrelated JSON secret skipped) → restart-required STILL emitted for the rotated github-token", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json"); // succeeds → config.json
+    touchSecret("config-adva.sops.json"); // fails → skipped (the UNRELATED failure)
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    // the credential this node is running on today — the bundle rotates it below
+    writeFileSync(join(configDir, "github-token"), "fake-github-token-v1");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) => {
+        if (p.endsWith("node-secret-files.sops.json")) return { "github-token": "fake-github-token-v2" };
+        if (p.endsWith("config-adva.sops.json")) throw new Error("bad mac");
+        return { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } };
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    // the refresh DID fall short, and the marker correctly stays behind so the next
+    // tick retries the skipped JSON secret
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("secrets-skipped");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+
+    // …and the rotated boot-captured file still landed on disk, so the restart notice
+    // is owed REGARDLESS of the unrelated shortfall
+    expect(readFileSync(join(configDir, "github-token"), "utf8")).toBe("fake-github-token-v2");
+    expect(res.restartRequired).toEqual(["github-token"]);
+    const names = emits.map((e) => e.name);
+    expect(names).toContain("restart-required");
+    expect(names).toContain("refresh-failed");
+    const rr = emits.find((e) => e.name === "restart-required");
+    expect(rr.payload).toMatchObject({ file: "github-token", fromSha: "OLDSHA", toSha: "NEWSHA" });
+    // a shortfall run never claims success
+    expect(names).not.toContain("refreshed");
+  });
+
+  test("(h2) ORDERING — on a shortfall run restart-required is emitted BEFORE refresh-failed (profile-write variant)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+    const profilesDir = join(configDir, "profiles");
+    // Force the UNRELATED failure on the profile side this time: a DIRECTORY at the
+    // profile's destination makes its write throw EISDIR.
+    mkdirSync(join(profilesDir, "catalyst-cloud.env"), { recursive: true });
+    writeFileSync(join(configDir, "webhook-secret"), "fake-hmac-key-v1");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      profilesDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) => {
+        if (p.endsWith("node-secret-files.sops.json")) return { "webhook-secret": "fake-hmac-key-v2" };
+        if (p.endsWith("profile-files.sops.json")) return { "catalyst-cloud.env": "export GH_TEMP_PAT=x\n" };
+        return { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } };
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("profile-write-failed");
+    expect(res.restartRequired).toEqual(["webhook-secret"]);
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+
+    // The sequence is the assertion: emitting restart-required only AFTER the
+    // shortfall gate would mean never emitting it at all (the early-return returns).
+    const names = emits.map((e) => e.name);
+    expect(names.indexOf("restart-required")).toBeGreaterThanOrEqual(0);
+    expect(names.indexOf("refresh-failed")).toBeGreaterThanOrEqual(0);
+    expect(names.indexOf("restart-required")).toBeLessThan(names.indexOf("refresh-failed"));
+    expect(names).toEqual(["restart-required", "refresh-failed"]);
+  });
+
+  test("(h3) END-TO-END — shortfall run then clean run: the marker advances and the restart notice was NOT lost", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    touchSecret("config-adva.sops.json"); // the unrelated entry — fails on run 1 only
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    writeFileSync(join(configDir, "github-token"), "fake-github-token-v1");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    // `adva` decrypts only once the (unrelated) failure has cleared.
+    let advaHealthy = false;
+    const runRefresh = (emits) =>
+      refreshClusterSecretsIfChanged({
+        clusterDir,
+        configDir,
+        statePath,
+        git: baseGit,
+        gitCapture: makeGitCapture("NEWSHA", true),
+        decrypt: (p) => {
+          // the bundle serves the SAME rotated bytes on both runs — run 1 puts them on
+          // disk, so run 2's read-back sees no content change (see (g1))
+          if (p.endsWith("node-secret-files.sops.json")) return { "github-token": "fake-github-token-v2" };
+          if (p.endsWith("config-adva.sops.json")) {
+            if (!advaHealthy) throw new Error("bad mac");
+            return { ok: true };
+          }
+          return { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } };
+        },
+        emit: (e) => emits.push(e),
+        now: () => "t",
+        node: "test-node",
+        logger: QUIET,
+      });
+
+    // ── run 1: the rotation lands on disk, but an unrelated JSON secret fails ──
+    const run1Emits = [];
+    const run1 = runRefresh(run1Emits);
+    expect(run1.ok).toBe(false);
+    expect(run1.reason).toBe("secrets-skipped");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA"); // held back
+    expect(readFileSync(join(configDir, "github-token"), "utf8")).toBe("fake-github-token-v2");
+
+    // ── run 2: the unrelated failure clears; the token bytes are now IDENTICAL ──
+    advaHealthy = true;
+    const run2Emits = [];
+    const run2 = runRefresh(run2Emits);
+    expect(run2.ok).toBe(true);
+    // the marker advances — from here on the fast-path returns head-unchanged, so this
+    // is the LAST run that could ever have carried the notice
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+    // …and run 2 is silent about the restart, correctly: nothing moved on disk
+    expect(run2.restartRequired).toEqual([]);
+    expect(run2Emits.map((e) => e.name)).not.toContain("restart-required");
+
+    // THE REGRESSION. Across the WHOLE sequence the operator was told to restart at
+    // least once. A test that inspected only run 2 would pass against the old code,
+    // which returned at the shortfall gate and dropped the notice forever.
+    const allEmits = [...run1Emits, ...run2Emits];
+    const restarts = allEmits.filter(
+      (e) => e.name === "restart-required" && e.payload?.file === "github-token",
+    );
+    expect(restarts.length).toBeGreaterThanOrEqual(1);
+    expect(restarts[0].payload).toMatchObject({ fromSha: "OLDSHA", toSha: "NEWSHA" });
+  });
+
+  test("(h4) NEGATIVE CONTROL — a shortfall run whose only bare change is non-boot-captured emits NO restart-required", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    touchSecret("config-adva.sops.json"); // the unrelated failure → secrets-skipped
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    // github-token is present and does NOT move; only the plain bare file rotates
+    writeFileSync(join(configDir, "github-token"), "fake-github-token-v1");
+    writeFileSync(join(configDir, "cma-api-key"), "fake-cma-key-v1");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) => {
+        if (p.endsWith("node-secret-files.sops.json")) {
+          return {
+            "github-token": "fake-github-token-v1", // unchanged
+            "cma-api-key": "fake-cma-key-v2", // the actual rotation
+          };
+        }
+        if (p.endsWith("config-adva.sops.json")) throw new Error("bad mac");
+        return { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } };
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("secrets-skipped");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+    // hoisting the emit above the early-return must NOT turn every shortfall run into
+    // a restart nag — the predicate still gates on a boot-captured file that MOVED
+    expect(res.restartRequired).toEqual([]);
+    expect(emits.map((e) => e.name)).toEqual(["refresh-failed"]);
+  });
+
   // ── CTL-1393 (Codex P2 re-review of caf6b0e2): a too-new cluster.json
   //    (schemaSkipped) must NOT mask a FAILED bare bundle. The schemaSkipped
   //    short-circuit used to run FIRST and advance the marker over the un-applied
