@@ -548,6 +548,18 @@ export function createWebhookHandler(
             event.number,
           );
         }
+        if (deps.prCache) {
+          // CTL-1606: persist per-PR status on every pull_request action so
+          // getAllPrStatuses() has data even when filter_state is empty.
+          // Normalize to the values board-health.mjs expects: "open", "merged", "closed".
+          const status =
+            event.action === "closed" && event.merged
+              ? "merged"
+              : event.action === "closed"
+              ? "closed"
+              : "open";
+          deps.prCache.putStatus(event.repo, event.number, status);
+        }
         await deps.prFetcher.force({ repo: event.repo, number: event.number });
         break;
       }

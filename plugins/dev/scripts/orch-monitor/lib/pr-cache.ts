@@ -6,9 +6,19 @@ import { mkdirSync } from "node:fs";
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
 const DEFAULT_DB_PATH = resolve(CATALYST_DIR, "filter-state.db");
 
+export interface PrStatusRow {
+  repo: string;
+  pr_number: number;
+  status: string;
+  updated_at: string;
+}
+
 export interface PrCacheLike {
   put(repo: string, headSha: string, headBranch: string, prNumber: number): void;
   get(repo: string, headSha: string): number | null;
+  // CTL-1606: persistent per-PR status, keyed on (repo, pr_number).
+  putStatus(repo: string, prNumber: number, status: string): void;
+  getAllStatuses(): PrStatusRow[];
 }
 
 export function createFileBasedPrCache(dbPath = DEFAULT_DB_PATH): PrCacheLike {
@@ -25,12 +35,29 @@ export function createFileBasedPrCache(dbPath = DEFAULT_DB_PATH): PrCacheLike {
       PRIMARY KEY (repo, head_sha)
     )
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS pr_status_cache (
+      repo       TEXT NOT NULL,
+      pr_number  INTEGER NOT NULL,
+      status     TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (repo, pr_number)
+    )
+  `);
   const insertStmt = db.prepare(
     `INSERT OR REPLACE INTO pr_cache (repo, head_sha, head_branch, pr_number, updated_at)
      VALUES (?, ?, ?, ?, ?)`,
   );
   const selectStmt = db.prepare<{ pr_number: number }, [string, string]>(
     `SELECT pr_number FROM pr_cache WHERE repo = ? AND head_sha = ?`,
+  );
+  const upsertStatusStmt = db.prepare(
+    `INSERT INTO pr_status_cache (repo, pr_number, status, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(repo, pr_number) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
+  );
+  const allStatusStmt = db.prepare<PrStatusRow, []>(
+    `SELECT repo, pr_number, status, updated_at FROM pr_status_cache`,
   );
   return {
     put(repo, headSha, headBranch, prNumber) {
@@ -39,6 +66,12 @@ export function createFileBasedPrCache(dbPath = DEFAULT_DB_PATH): PrCacheLike {
     get(repo, headSha) {
       const row = selectStmt.get(repo, headSha);
       return row?.pr_number ?? null;
+    },
+    putStatus(repo, prNumber, status) {
+      upsertStatusStmt.run(repo, prNumber, status, new Date().toISOString());
+    },
+    getAllStatuses() {
+      return allStatusStmt.all();
     },
   };
 }

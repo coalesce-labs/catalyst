@@ -79,12 +79,19 @@ class FakeEventLog implements EventLogWriter {
 class FakePrCache implements PrCacheLike {
   store = new Map<string, number>();
   puts: Array<{ repo: string; headSha: string; headBranch: string; prNumber: number }> = [];
+  statusPuts: Array<{ repo: string; prNumber: number; status: string }> = [];
   put(repo: string, headSha: string, headBranch: string, prNumber: number): void {
     this.store.set(`${repo}:${headSha}`, prNumber);
     this.puts.push({ repo, headSha, headBranch, prNumber });
   }
   get(repo: string, headSha: string): number | null {
     return this.store.get(`${repo}:${headSha}`) ?? null;
+  }
+  putStatus(repo: string, prNumber: number, status: string): void {
+    this.statusPuts.push({ repo, prNumber, status });
+  }
+  getAllStatuses() {
+    return [];
   }
 }
 
@@ -740,6 +747,83 @@ describe("createWebhookHandler — pr-cache (CTL-396)", () => {
     );
     expect(eventLog.appends.length).toBe(1);
     expect(eventLog.appends[0]?.attributes["vcs.pr.number"]).toBeUndefined();
+  });
+});
+
+// CTL-1606: pr_status_cache write path — putStatus called for every pull_request action
+describe("createWebhookHandler — pr_status_cache (CTL-1606)", () => {
+  function makeHandler(prCache: FakePrCache) {
+    return createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      prCache,
+    });
+  }
+
+  it("pull_request.opened → putStatus('open')", async () => {
+    const prCache = new FakePrCache();
+    await makeHandler(prCache).handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: { number: 55, merged: false, head: { ref: "b", sha: "a1" } },
+      }),
+    );
+    // "opened" normalizes to "open" so board-health's "open" check works
+    expect(prCache.statusPuts).toContainEqual({ repo: "owner/repo", prNumber: 55, status: "open" });
+  });
+
+  it("pull_request.closed + merged → putStatus('merged')", async () => {
+    const prCache = new FakePrCache();
+    await makeHandler(prCache).handle(
+      makeReq({
+        ...REPO,
+        action: "closed",
+        pull_request: { number: 55, merged: true, merged_at: "2026-08-01T00:00:00Z", head: { ref: "b", sha: "a2" } },
+      }),
+    );
+    expect(prCache.statusPuts.at(-1)).toEqual({ repo: "owner/repo", prNumber: 55, status: "merged" });
+  });
+
+  it("pull_request.closed + not merged → putStatus('closed')", async () => {
+    const prCache = new FakePrCache();
+    await makeHandler(prCache).handle(
+      makeReq({
+        ...REPO,
+        action: "closed",
+        pull_request: { number: 56, merged: false, head: { ref: "b", sha: "b1" } },
+      }),
+    );
+    expect(prCache.statusPuts.at(-1)).toEqual({ repo: "owner/repo", prNumber: 56, status: "closed" });
+  });
+
+  it("pull_request.reopened → putStatus('open') regardless of headSha", async () => {
+    const prCache = new FakePrCache();
+    await makeHandler(prCache).handle(
+      makeReq({
+        ...REPO,
+        action: "reopened",
+        pull_request: { number: 57, merged: false, head: { ref: "b" /* no sha */ } },
+      }),
+    );
+    // "reopened" normalizes to "open" — status keys on (repo, number), not SHA
+    expect(prCache.statusPuts.at(-1)).toEqual({ repo: "owner/repo", prNumber: 57, status: "open" });
+  });
+
+  it("does not call putStatus when no prCache provided", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+    });
+    // should not throw
+    const res = await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: { number: 99, merged: false, head: { ref: "b", sha: "s" } },
+      }),
+    );
+    expect(res.status).toBe(200);
   });
 });
 
