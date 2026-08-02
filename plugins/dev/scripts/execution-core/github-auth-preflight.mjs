@@ -83,6 +83,13 @@ export function defaultProbeGithubAuth(env = process.env) {
 // the XDG location, and take the first readable non-empty file.
 export function githubTokenFileCandidates(env = process.env) {
   if (env?.CATALYST_GITHUB_TOKEN_FILE) return [env.CATALYST_GITHUB_TOKEN_FILE];
+  // CTL-1612: honor CATALYST_CONFIG_DIR exactly as the launcher's
+  // catalyst_read_secret_file does. Without this the two disagree — the launcher arms from
+  // the configured directory and labels it "shared-file", then this re-arm (boot AND every
+  // timer tick) replaces both aliases from the DEFAULT directory. If that copy is stale the
+  // daemon silently reverts to 401s, which is the exact divergence the shared library was
+  // introduced to eliminate, recreated across the bash/JS boundary.
+  if (env?.CATALYST_CONFIG_DIR) return [join(env.CATALYST_CONFIG_DIR, "github-token")];
   const home = env?.HOME ?? homedir();
   const layer2 = env?.CATALYST_LAYER2_CONFIG_FILE ?? join(home, ".config", "catalyst", "config.json");
   const out = [join(dirname(layer2), "github-token")];
@@ -128,12 +135,15 @@ export function rearmGithubTokenFromFile({
         continue; // not on this host — try the next candidate
       }
       found = true;
-      // TRIM only — never strip internal whitespace. `.replace(/\s+/g,"")` would silently
-      // corrupt any credential containing a space/tab/newline (an HMAC key would then
-      // reject every delivery with no error anywhere). Mirrors _catalyst_trim in
-      // lib/catalyst-secret-env.sh.
-      const candidate = String(raw ?? "").trim();
-      if (candidate) {
+      // Strip ONLY the trailing line terminator; preserve every other byte.
+      // `.replace(/\s+/g,"")` corrupted internal whitespace, and a full `.trim()` corrupts
+      // SIGNIFICANT BOUNDARY whitespace — both produce a different credential that looks
+      // present and is silently wrong. Mirrors _catalyst_strip_eol in
+      // lib/catalyst-secret-env.sh so the bash and JS readers cannot disagree.
+      const candidate = String(raw ?? "").replace(/\r?\n$/, "");
+      // Blank-check, not truthiness: a whitespace-only file must keep falling through to
+      // the next candidate (a truthy "   " would break here and mask a valid fallback).
+      if (candidate.trim()) {
         tok = candidate;
         break;
       }
@@ -141,7 +151,10 @@ export function rearmGithubTokenFromFile({
     if (!found) return { rearmed: false, reason: "absent" }; // no shared file anywhere
     // Never install an empty value: "" reads as SET to `??`/`${X:-}` and would defeat
     // gh's hosts.yml/keyring fallback for hosts that rely on it.
-    if (!tok) return { rearmed: false, reason: "empty" };
+    // Blank-check WITHOUT mutating: a whitespace-only file counts as absent (never install
+    // "", which reads as SET to `??` and would defeat gh's hosts.yml/keyring fallback),
+    // while a value with significant boundary whitespace is installed byte-for-byte.
+    if (!tok.trim()) return { rearmed: false, reason: "empty" };
     if (tok === env.GITHUB_TOKEN && tok === env.GH_TOKEN) {
       return { rearmed: false, reason: "unchanged" };
     }

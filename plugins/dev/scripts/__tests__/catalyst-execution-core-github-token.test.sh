@@ -631,23 +631,30 @@ assert_line "$OUT" "primary_still_set=yes" "T20b the working projected credentia
 # equality flip, so this is a real discriminator — and neither ever prints the value.
 echo ""
 echo "test 21: internal whitespace survives the read (the tr -d '[:space:]' corruption)"
-printf '\n  %s  \n\n' "$FAKE_INTERNAL_SPACE" > "$T/internal-space.token"
-EXPECT_DIGEST="$(printf '%s' "$FAKE_INTERNAL_SPACE" | shasum | cut -c1-12)"
+# CTL-1612 (round 4): the contract is EOL-ONLY stripping. A credential may legitimately
+# begin or end with a space/tab, and trimming those bytes yields a different key — for an
+# HMAC secret that silently rejects every correctly-signed delivery. So the fixture carries
+# significant boundary whitespace AND one trailing newline, and the expectation keeps the
+# edges while losing only the newline.
+SPACE_WITH_EDGES="  ${FAKE_INTERNAL_SPACE}  "
+printf '%s\n' "$SPACE_WITH_EDGES" > "$T/internal-space.token"
+EXPECT_DIGEST="$(printf '%s' "$SPACE_WITH_EDGES" | shasum | cut -c1-12)"
 OUT="$(probe T21a CATALYST_GITHUB_TOKEN_FILE="$T/internal-space.token" \
-  EXPECT_VALUE="$FAKE_INTERNAL_SPACE")"
+  EXPECT_VALUE="$SPACE_WITH_EDGES")"
 assert_line "$OUT" "source=shared-file" "T21a source=shared-file"
-assert_line "$OUT" "match_github=yes" "T21a GITHUB_TOKEN keeps its internal SPACES"
-assert_line "$OUT" "match_gh=yes" "T21a GH_TOKEN keeps its internal SPACES"
+assert_line "$OUT" "match_github=yes" "T21a GITHUB_TOKEN keeps internal AND boundary spaces"
+assert_line "$OUT" "match_gh=yes" "T21a GH_TOKEN keeps internal AND boundary spaces"
 assert_line "$OUT" "digest_github=$EXPECT_DIGEST" "T21a GITHUB_TOKEN digests to the exact expected string"
 assert_line "$OUT" "digest_gh=$EXPECT_DIGEST" "T21a GH_TOKEN digests to the exact expected string"
 
-printf '\t %s \t\n' "$FAKE_INTERNAL_TAB" > "$T/internal-tab.token"
-EXPECT_DIGEST="$(printf '%s' "$FAKE_INTERNAL_TAB" | shasum | cut -c1-12)"
+TAB_WITH_EDGES="\t${FAKE_INTERNAL_TAB}\t"
+printf '%b\n' "$TAB_WITH_EDGES" > "$T/internal-tab.token"
+EXPECT_DIGEST="$(printf '%b' "$TAB_WITH_EDGES" | shasum | cut -c1-12)"
 OUT="$(probe T21b CATALYST_GITHUB_TOKEN_FILE="$T/internal-tab.token" \
-  EXPECT_VALUE="$FAKE_INTERNAL_TAB")"
-assert_line "$OUT" "match_github=yes" "T21b GITHUB_TOKEN keeps its internal TABS"
-assert_line "$OUT" "match_gh=yes" "T21b GH_TOKEN keeps its internal TABS"
-assert_line "$OUT" "digest_github=$EXPECT_DIGEST" "T21b leading/trailing tabs stripped, internal tabs kept (exact digest)"
+  EXPECT_VALUE="$(printf %b "$TAB_WITH_EDGES")")"
+assert_line "$OUT" "match_github=yes" "T21b GITHUB_TOKEN keeps internal AND boundary tabs"
+assert_line "$OUT" "match_gh=yes" "T21b GH_TOKEN keeps internal AND boundary tabs"
+assert_line "$OUT" "digest_github=$EXPECT_DIGEST" "T21b only the EOL is stripped — boundary tabs survive (exact digest)"
 assert_line "$OUT" "digest_gh=$EXPECT_DIGEST" "T21b same exact digest under the GH_TOKEN alias"
 
 # The trim must not be reintroduced as a delete. The lib documents the old call in prose,
@@ -682,8 +689,12 @@ assert_line "$OUT" "exported=none" "T22 neither name reaches a child process"
 # catalyst_project_webhook_secret is the other consumer of the shared chain.
 echo ""
 echo "test 23: catalyst_read_secret_file preserves internal whitespace for the HMAC key"
-printf '\n %s \n' "$FAKE_HMAC_INTERNAL" > "$T/webhook-secret-internal"
-EXPECT_DIGEST="$(printf '%s' "$FAKE_HMAC_INTERNAL" | shasum | cut -c1-12)"
+# CTL-1612 (round 4): EOL-ONLY. An HMAC key may legitimately begin or end with a space —
+# trimming it produces a different key and silently rejects every correctly-signed
+# delivery, which is the same failure class as the `tr -d` corruption this replaced.
+HMAC_WITH_EDGES=" ${FAKE_HMAC_INTERNAL} "
+printf '%s\n' "$HMAC_WITH_EDGES" > "$T/webhook-secret-internal"
+EXPECT_DIGEST="$(printf '%s' "$HMAC_WITH_EDGES" | shasum | cut -c1-12)"
 OUT="$(
   env -i PATH="$PATH" HOME="$T/home" HELPER="$T/helper.sh" \
     CATALYST_LAYER2_CONFIG_FILE="$T/layer2.json" \
@@ -705,7 +716,7 @@ OUT="$(
 )"
 printf '### T23\n%s\n' "$OUT" >> "$ALL_OUT"
 assert_line "$OUT" "read_rc=0" "T23 catalyst_read_secret_file found the file"
-assert_line "$OUT" "digest_read=$EXPECT_DIGEST" "T23 the reader returns the exact bytes (edges trimmed, middle intact)"
+assert_line "$OUT" "digest_read=$EXPECT_DIGEST" "T23 the reader returns the exact bytes (only the EOL removed)"
 assert_line "$OUT" "webhook_secret=set" "T23 catalyst_project_webhook_secret exported the key"
 assert_line "$OUT" "digest_webhook=$EXPECT_DIGEST" "T23 the exported HMAC key is byte-identical to the file value"
 

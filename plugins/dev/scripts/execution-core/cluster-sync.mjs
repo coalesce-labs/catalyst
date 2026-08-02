@@ -70,6 +70,12 @@ function defaultConfigDir() {
 // silently ENOENTs and decrypt fails fail-open — a node then runs forever on stale
 // secrets with no signal. Resolving an ABSOLUTE path (and augmenting the spawn
 // PATH) makes that impossible.
+// CTL-1612: hard ceiling on every external spawn this module makes (git, sops). The boot
+// sync is synchronous and now precedes crash recovery, so an unbounded child would block
+// the daemon's startup path with the PID file already on disk — "running" to the launcher,
+// wedged in reality. Generous enough for a cold clone on a slow link; finite is the point.
+const CLUSTER_SYNC_SPAWN_TIMEOUT_MS = Number(process.env.CATALYST_CLUSTER_SYNC_TIMEOUT_MS) || 120_000;
+
 const SOPS_CANDIDATES = ["/opt/homebrew/bin/sops", "/usr/local/bin/sops", "/usr/bin/sops"];
 
 // Directories prepended to the spawn env PATH so sops itself — and any helper it
@@ -134,6 +140,11 @@ function makeSopsDecrypt(ageKeyFile, deps = {}) {
         env: { ...process.env, SOPS_AGE_KEY_FILE: ageKeyFile, PATH: augmentedPath() },
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        // CTL-1612: BOUNDED. clusterSync() now runs synchronously before boot recovery
+        // (so resumed workers never inherit a superseded credential), and the PID file is
+        // already written by then — an unbounded spawn would let the launcher report the
+        // daemon "up" while crash recovery is blocked indefinitely on a stalled sops.
+        timeout: CLUSTER_SYNC_SPAWN_TIMEOUT_MS,
       },
     );
     return JSON.parse(out);
@@ -142,7 +153,13 @@ function makeSopsDecrypt(ageKeyFile, deps = {}) {
 
 // Real `git` runner. Injected as `git` so tests never shell out.
 function defaultGit(args) {
-  execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  // CTL-1612: BOUNDED — see the sops timeout above. A `git pull` that hangs on a
+  // credential prompt or an unreachable remote must not wedge daemon boot.
+  execFileSync("git", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: CLUSTER_SYNC_SPAWN_TIMEOUT_MS,
+  });
 }
 
 // destForSecret — map a secrets/ filename to its ~/.config/catalyst destination.
@@ -476,7 +493,7 @@ const defaultNow = () => new Date().toISOString();
 // returns { status, stdout }. Injected as `gitCapture` so tests never shell out.
 // (defaultGit above is the MUTATING runner used by pullClusterRepo.)
 function defaultGitCapture(args) {
-  const r = spawnSync("git", args, { encoding: "utf8" });
+  const r = spawnSync("git", args, { encoding: "utf8", timeout: CLUSTER_SYNC_SPAWN_TIMEOUT_MS });
   return { status: r.status ?? (r.error ? 1 : 0), stdout: r.stdout ?? "" };
 }
 

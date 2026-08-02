@@ -485,26 +485,30 @@ describe("rearmGithubTokenFromFile", () => {
     expect(rec.state.logs).toHaveLength(0); // a steady-state boot stays quiet
   });
 
-  test("a cosmetic trailing newline is stripped before comparison — not mistaken for a rotation", () => {
+  test("a cosmetic trailing newline is stripped — not mistaken for a rotation", () => {
     const env = {
       CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      GITHUB_TOKEN: FAKE_TOKEN,
+      GH_TOKEN: FAKE_TOKEN,
       CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
-      GITHUB_TOKEN: STALE_TOKEN,
-      GH_TOKEN: STALE_TOKEN,
     };
-    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `  ${STALE_TOKEN}\n` } });
-
+    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `${FAKE_TOKEN}\n` } });
     expect(out).toEqual({ rearmed: false, reason: "unchanged" });
     expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file");
   });
 
-  test("trailing whitespace is stripped on the REAL rotation path too (the installed value is clean)", () => {
-    const env = { CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE, GITHUB_TOKEN: STALE_TOKEN, GH_TOKEN: STALE_TOKEN };
-    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `${ROTATED_TOKEN}\n\n` } });
-
-    expect(out.rearmed).toBe(true);
-    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN); // no stray "\n"
-    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
+  // CTL-1612 (round 4): ONLY the line terminator is stripped. A credential may legitimately
+  // begin or end with a space or tab, and trimming those bytes yields a different key —
+  // for an HMAC secret that silently rejects every correctly-signed delivery. The `$(cat)`
+  // this replaced preserved boundary spaces, so trimming them would be a regression.
+  test("the trailing NEWLINE is stripped but significant boundary whitespace survives", () => {
+    const env = { CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE, GITHUB_TOKEN: STALE_TOKEN };
+    const withEdges = `  ${ROTATED_TOKEN}\t`;
+    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `${withEdges}\n` } });
+    expect(out).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GITHUB_TOKEN).toBe(withEdges); // byte-for-byte, edges intact
+    expect(env.GH_TOKEN).toBe(withEdges);
+    expect(env.GITHUB_TOKEN.endsWith("\n")).toBe(false); // the EOL is gone
   });
 
   // An empty install is WORSE than no install: "" reads as SET to `??` and
@@ -645,20 +649,15 @@ describe("rearmGithubTokenFromFile preserves INTERNAL whitespace", () => {
     });
   }
 
-  test("REGRESSION: surrounding whitespace is stripped while the INTERNAL run survives", () => {
-    const env = {
-      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
-      GITHUB_TOKEN: STALE_TOKEN,
-      GH_TOKEN: STALE_TOKEN,
-    };
-    // The realistic on-disk shape: the writer's payload plus a cosmetic newline.
-    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `\n  ${SPACED_TOKEN} \t\n` } });
-
+  test("REGRESSION: internal AND boundary whitespace both survive; only the EOL is removed", () => {
+    const env = { CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE, GITHUB_TOKEN: STALE_TOKEN };
+    const value = " tok with a space \t";
+    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `${value}\n` } });
     expect(out).toEqual({ rearmed: true, reason: "rotated" });
-    expect(env.GITHUB_TOKEN).toBe(SPACED_TOKEN);
-    expect(env.GITHUB_TOKEN).toBe(env.GITHUB_TOKEN.trim()); // nothing clinging to either end
-    expect(env.GITHUB_TOKEN).toContain(" "); // …but the internal space is untouched
-    expect(env.GH_TOKEN).toBe(SPACED_TOKEN);
+    expect(env.GITHUB_TOKEN).toBe(value);
+    expect(env.GITHUB_TOKEN).toContain(" ");
+    expect(env.GITHUB_TOKEN).not.toBe(value.replace(/\s+/g, "")); // not the old corruption
+    expect(env.GITHUB_TOKEN).not.toBe(value.trim()); // and not the round-3 over-trim
   });
 
   test("an internal-whitespace credential already installed is 'unchanged' — no churn per tick", () => {

@@ -25,18 +25,34 @@
 [[ -n "${_CATALYST_SECRET_ENV_SH_LOADED:-}" ]] && return 0
 _CATALYST_SECRET_ENV_SH_LOADED=1
 
-# _catalyst_trim — strip LEADING and TRAILING whitespace only.
+# _catalyst_strip_eol — remove ONLY the line terminator a text file ends with.
 #
-# Deliberately NOT `tr -d '[:space:]'`: that deletes INTERNAL whitespace too, which would
-# silently corrupt any secret containing a space, tab or newline. For an HMAC signing key
-# that means every inbound webhook is rejected with no error anywhere — the value looks
-# present and is simply wrong. Command substitution already eats trailing newlines; this
-# handles the rest.
-_catalyst_trim() {
+# Two failure modes had to be avoided here, and they pull in opposite directions:
+#
+#   `tr -d '[:space:]'` deletes INTERNAL whitespace, silently corrupting any secret
+#   containing a space or tab. For an HMAC key that rejects every inbound delivery with no
+#   error anywhere — the value looks present and is simply wrong.
+#
+#   A full leading/trailing trim is subtler but the same class: a signing secret may
+#   legitimately BEGIN or END with a space or tab, and trimming those bytes produces a
+#   different key and the identical silent rejection. The `$(cat …)` this replaced removed
+#   trailing newlines but preserved boundary spaces, so trimming them would be a regression.
+#
+# So: strip only the trailing newline(s) a file inevitably carries, and preserve every other
+# byte exactly. Command substitution has already eaten trailing \n; this also handles a
+# CRLF file. Callers apply their own "is it blank?" check for the whitespace-only case.
+_catalyst_strip_eol() {
   local s="$1"
-  s="${s#"${s%%[![:space:]]*}"}"
-  s="${s%"${s##*[![:space:]]}"}"
+  s="${s%$'\n'}"
+  s="${s%$'\r'}"
   printf '%s' "$s"
+}
+
+# _catalyst_is_blank — true when the value carries no non-whitespace byte. Used so a
+# whitespace-only file still counts as "absent" (never exported) WITHOUT mutating a value
+# that merely has significant boundary whitespace.
+_catalyst_is_blank() {
+  [[ -z "${1//[[:space:]]/}" ]]
 }
 
 # catalyst_secret_dirs — the directories to search, in priority order.
@@ -70,8 +86,10 @@ catalyst_read_secret_file() {
   for _f in "${_cands[@]}"; do
     [[ -r "$_f" ]] || continue
     _raw="$(cat "$_f" 2>/dev/null)" || continue
-    _val="$(_catalyst_trim "$_raw")"
-    if [[ -n "$_val" ]]; then
+    _val="$(_catalyst_strip_eol "$_raw")"
+    # Blank-check WITHOUT mutating: a whitespace-only file is treated as absent, while a
+    # value with significant boundary whitespace is emitted byte-for-byte.
+    if ! _catalyst_is_blank "$_val"; then
       printf '%s' "$_val"
       return 0
     fi
@@ -80,13 +98,33 @@ catalyst_read_secret_file() {
 }
 
 # catalyst_env_file_assigns <env-file> <var>
-#   Does this env file ASSIGN the variable at all? Used instead of a value comparison,
-#   because an operator override that happens to pin the SAME value as the shared file is
-#   still an override — a byte-comparison would miss it and a later re-arm would then
-#   overwrite the explicit machine-local pin.
+#   Does sourcing this env file ACTUALLY assign the variable on THIS host?
+#
+#   Not a value comparison: an override that pins the SAME value the shared file holds is
+#   still an override, and a byte-comparison would miss it, letting a later re-arm overwrite
+#   the operator's machine-local pin.
+#
+#   And not a raw-text grep either. A grep matches an assignment inside a branch that never
+#   runs on this host (`if [[ $(hostname) == other ]]; then GITHUB_TOKEN=…; fi`) and would
+#   report the alias as pinned when sourcing changed nothing — marking the projected token
+#   `operator-override` and making the post-sync re-arm stand down, so an offline node keeps
+#   its stale credential and hands it to resumed workers. Exactly the bug we are fixing.
+#
+#   So: OBSERVE the assignment. Source the file in a subshell with the variable pre-set to a
+#   sentinel and see whether the sentinel survived. Hermetic (the subshell cannot touch our
+#   env), and it reports what the shell actually did rather than what the text looks like.
 catalyst_env_file_assigns() {
-  [[ -r "${1:-}" ]] || return 1
-  grep -qE "^[[:space:]]*(export[[:space:]]+)?${2}=" "$1" 2>/dev/null
+  local _file="${1:-}" _var="${2:?catalyst_env_file_assigns: var required}"
+  [[ -r "$_file" ]] || return 1
+  local _sentinel="__catalyst_unset_sentinel_$$__"
+  local _observed
+  _observed="$(
+    export "$_var=$_sentinel"
+    # shellcheck disable=SC1090
+    source "$_file" >/dev/null 2>&1 || true
+    printf '%s' "${!_var}"
+  )"
+  [[ "$_observed" != "$_sentinel" ]]
 }
 
 # catalyst_project_github_token
