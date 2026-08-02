@@ -85,6 +85,21 @@ source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 # shellcheck source=lib/phase-artifact-gate.sh
 source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 
+# _removal_guard_ok <path> — the single fail-closed predicate the recreate
+# `git worktree remove --force` site gates on (CTL-1417). Returns 0 (safe to
+# force-remove) ONLY when the guard function loaded AND cleared the path.
+# Guard-ABSENCE is a REFUSAL, not a bypass. (The lib is sourced unconditionally
+# above, so this normally can't fail on absence — but the predicate stays
+# fail-closed for parity with the other removal sites.)
+_removal_guard_ok() {
+	local _wt="${1:-}"
+	if ! command -v assert_worktree_removal_safe >/dev/null 2>&1; then
+		echo "worktree-remove-guard: unavailable — refusing forced removal of ${_wt}" >&2
+		return 1
+	fi
+	assert_worktree_removal_safe "$_wt"
+}
+
 die() {
 	echo "phase-agent-dispatch: $*" >&2
 	exit 1
@@ -1059,8 +1074,17 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 				# git -C "$_REPO_ROOT" … calls are cwd-independent and create-worktree
 				# runs in a (cd "$_REPO_ROOT" && …) subshell, so the cd-out is safe.
 				cd "$_REPO_ROOT" || true
-				if ! assert_worktree_removal_safe "$_WT_PATH"; then
-					echo "phase-agent-dispatch: recreate: guard refused removal of ${_WT_PATH}; parking instead" >&2
+				if ! _removal_guard_ok "$_WT_PATH"; then
+					echo "phase-agent-dispatch: recreate: guard refused/unavailable for ${_WT_PATH}; parking instead" >&2
+					# CTL-1417: the removal was refused because a live process holds
+					# the doomed worktree (or the guard is unavailable) — NOT a source
+					# conflict. Overwrite the generic reason so the downstream
+					# unstuck-sweep explanation reflects the true blocker (a live
+					# handle) instead of routing to force-push-if-clean. This new
+					# reason is deliberately absent from unstuck-sweep's
+					# STALL_CATEGORY_MAP, so it falls through to escalate rather than
+					# any auto-remediation path.
+					STALL_REASON="worktree_live_handle_guard_refused"
 				else
 					git -C "$_REPO_ROOT" worktree remove --force "$_WT_PATH" 2>/dev/null || true
 					git -C "$_REPO_ROOT" branch -f "$TICKET" "origin/${BASE_BRANCH}" 2>/dev/null || true

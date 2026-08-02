@@ -86,6 +86,21 @@ export PATH="${PATH}:${SCRIPT_DIR}"
 # shellcheck source=lib/worktree-remove-guard.sh
 [ -r "${SCRIPT_DIR}/lib/worktree-remove-guard.sh" ] && source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 
+# _removal_guard_ok <path> — the SINGLE fail-closed predicate every `git worktree
+# remove --force` site gates on (CTL-1417). Returns 0 (safe to force-remove) ONLY
+# when the guard function loaded AND it cleared the path. If the guard lib was
+# missing/unreadable at source-time, `assert_worktree_removal_safe` is undefined —
+# and guard-ABSENCE is treated as a REFUSAL (fail-closed), not a bypass, so a
+# stripped/broken checkout can never reopen the data-loss path. Reason on stderr.
+_removal_guard_ok() {
+  local _wt="${1:-}"
+  if ! command -v assert_worktree_removal_safe >/dev/null 2>&1; then
+    echo "worktree-remove-guard: unavailable — refusing forced removal of ${_wt}" >&2
+    return 1
+  fi
+  assert_worktree_removal_safe "$_wt"
+}
+
 # ─── arg parsing ────────────────────────────────────────────────────────────
 
 DRY_RUN="${SWEEP_DRY_RUN:-0}"
@@ -1240,8 +1255,8 @@ sweep_worktrees() {
           # CTL-1417: final self-protection belt — skip if the tree is our cwd
           # or a live process holds a handle under it (never yank a tree an
           # operator or `make test` is inside).
-          if command -v assert_worktree_removal_safe >/dev/null 2>&1 && ! assert_worktree_removal_safe "$wt"; then
-            log "skip (guard refused — live handle/self): $wt"; _sweep_count activeSkipped; continue
+          if ! _removal_guard_ok "$wt"; then
+            log "skip (guard refused/unavailable — live handle/self): $wt"; _sweep_count activeSkipped; continue
           fi
           git worktree remove --force "$wt" 2>/dev/null && {
             log "removed worktree (SAFE): $wt"
@@ -1274,11 +1289,12 @@ sweep_worktrees() {
               if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
                 deferred=$((deferred+1)); continue
               fi
-              if command -v assert_worktree_removal_safe >/dev/null 2>&1 && ! assert_worktree_removal_safe "$wt"; then
-                # Mirror the SAFE path (L1244): a guard refusal RETAINS the tree,
-                # so count it as an active skip or activeSkipped undercounts the
-                # worktrees left behind exactly when the guard fires (CTL-1417).
-                log "skip (guard refused — live handle/self): $wt"; _sweep_count activeSkipped
+              if ! _removal_guard_ok "$wt"; then
+                # Mirror the SAFE path: a guard refusal (or an unavailable guard)
+                # RETAINS the tree, so count it as an active skip or activeSkipped
+                # undercounts the worktrees left behind exactly when the guard
+                # fires/is absent (CTL-1417).
+                log "skip (guard refused/unavailable — live handle/self): $wt"; _sweep_count activeSkipped
               else
                 git worktree remove --force "$wt" 2>/dev/null \
                   && { log "removed (salvage) worktree: $wt"; emit_reclaim worktree "$wt"; removed_count=$((removed_count+1)); }

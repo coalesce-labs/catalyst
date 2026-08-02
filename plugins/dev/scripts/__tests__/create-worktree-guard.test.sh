@@ -37,10 +37,12 @@ if grep -q 'source "\${SCRIPT_DIR}/lib/worktree-remove-guard.sh"' "$CREATE_WT"; 
 else
 	fail "create-worktree.sh does NOT source lib/worktree-remove-guard.sh"
 fi
-# Every `git worktree remove --force` must be preceded (within a few lines) by an
-# assert_worktree_removal_safe gate. Count force-removes vs guard calls.
+# Every `git worktree remove --force` must be gated by the fail-closed
+# _removal_guard_ok predicate (CTL-1417: guard-ABSENCE now REFUSES, so the sites
+# gate on the helper rather than a bare `command -v ... || assert...` fail-open
+# form). Count force-removes vs guard-predicate calls.
 N_FORCE="$(grep -c 'git worktree remove --force "\$WORKTREE_PATH"' "$CREATE_WT" || true)"
-N_GUARD="$(grep -c 'assert_worktree_removal_safe "\$WORKTREE_PATH"' "$CREATE_WT" || true)"
+N_GUARD="$(grep -c '_removal_guard_ok "\$WORKTREE_PATH"' "$CREATE_WT" || true)"
 assert_eq "$N_FORCE" "$N_GUARD" "each rollback force-remove has a matching guard call (${N_FORCE} force / ${N_GUARD} guard)"
 [[ "$N_FORCE" -ge 2 ]] && pass "both rollback sites present (${N_FORCE})" || fail "expected >=2 rollback force-removes, found ${N_FORCE}"
 
@@ -72,13 +74,22 @@ WORKTREE_PATH="$SCRATCH/wt/CTL-100"
 WORKTREE_NAME="CTL-100"
 mkdir -p "$WORKTREE_PATH"
 
-# Replicate create-worktree.sh's exact guarded-removal gate.
+# Replicate create-worktree.sh's exact guarded-removal gate — the fail-closed
+# _removal_guard_ok predicate (guard-ABSENCE ⇒ refuse).
+_removal_guard_ok() {
+	local _wt="${1:-}"
+	if ! command -v assert_worktree_removal_safe >/dev/null 2>&1; then
+		echo "worktree-remove-guard: unavailable — refusing forced removal of ${_wt}" >&2
+		return 1
+	fi
+	assert_worktree_removal_safe "$_wt"
+}
 guarded_remove() {
-	if ! command -v assert_worktree_removal_safe >/dev/null 2>&1 || assert_worktree_removal_safe "$WORKTREE_PATH"; then
+	if _removal_guard_ok "$WORKTREE_PATH"; then
 		"$MOCK_GIT" worktree remove --force "$WORKTREE_PATH"
 		"$MOCK_GIT" branch -D "$WORKTREE_NAME" 2>/dev/null || true
 	else
-		echo "create-worktree: guard refused removal of ${WORKTREE_PATH}; leaving for reaper" >&2
+		echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
 	fi
 }
 
@@ -98,6 +109,21 @@ if grep -q 'worktree remove --force' "$GIT_LOG"; then
 	pass "clear-probe rollback force-removes as before (guard allowed)"
 else
 	fail "clear-probe rollback did NOT remove (guard over-refused)"
+fi
+
+# (c) CTL-1417 fail-closed: guard function UNAVAILABLE → refuse (NO remove). Run
+# the gate in a subshell where assert_worktree_removal_safe is unset, proving
+# guard-absence is treated as a refusal rather than a bypass.
+: >"$GIT_LOG"
+(
+	cd "$SCRATCH"
+	unset -f assert_worktree_removal_safe
+	guarded_remove
+) 2>/dev/null
+if grep -q 'worktree remove' "$GIT_LOG"; then
+	fail "guard-absent rollback force-removed the worktree (fail-OPEN regression)"
+else
+	pass "guard-absent rollback SKIPS the force-remove (fail-closed)"
 fi
 
 echo ""

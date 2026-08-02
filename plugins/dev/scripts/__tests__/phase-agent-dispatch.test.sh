@@ -1508,6 +1508,11 @@ assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "recreate-g
 assert_eq "yes" "$([[ -d $GWORK_C ]] && echo yes || echo no)" "recreate-guard: worktree survives on disk (not force-removed)"
 assert_eq "$ORIG_HEAD_C" "$(cd "$GWORK_C" && git rev-parse HEAD 2>/dev/null || echo missing)" \
 	"recreate-guard: worktree HEAD unchanged (not destroyed/recreated)"
+# CTL-1417: a guard refusal caused by a LIVE HANDLE must park with a dedicated
+# reason (NOT the generic source_conflict_ctl708_unavailable, which unstuck-sweep
+# routes to force-push-if-clean and would explain the wrong blocker).
+assert_eq "worktree_live_handle_guard_refused" "$(jq -r '.failureReason' "$SIGNAL_C" 2>/dev/null)" \
+	"recreate-guard: failureReason = worktree_live_handle_guard_refused (accurate blocker)"
 unset CATALYST_DIR
 unset CATALYST_RECREATE_WORKTREE_DIR
 

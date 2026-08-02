@@ -631,15 +631,26 @@ run "T24: empty symbolic-ref falls back to origin/main (EMPTY-SYMREF removed as 
 
 # T24g (CTL-1417): SAFE tree with a live foreign holder -> guard REFUSES the
 # force-remove (skip + activeSkipped), never force-removes an in-use worktree.
-# Override lsof so the guard's `-nP +D <path>` probe reports a live holder
-# (rc=0 + non-empty). The proc-kill vector still passes PID args, so keep its
+# Override lsof so the guard's `-nP -F pn +D <path>` probe reports a live
+# holder in the field-output format the guard now parses: one `p<pid>` line
+# per holder plus an `n<path>` line. The pid is a FABRICATED foreign pid
+# (99999 — not this shell or an ancestor), so the guard's self-exclusion
+# cannot mistake it for its own process tree and it refuses (rc=0 + a
+# foreign `p` line). The proc-kill vector still passes PID args, so keep its
 # original 1001/1002 mapping as the fallback branch.
 cat > "$MOCKBIN/lsof" <<'EOF'
 #!/usr/bin/env bash
+# The path being probed is the argument immediately after `+D`.
+target=""; prev=""
+for a in "$@"; do
+  [[ "$prev" == "+D" ]] && target="$a"
+  prev="$a"
+done
 for a in "$@"; do
   if [[ "$a" == "+D" ]]; then
-    # worktree-remove-guard foreign-liveness probe: report a live holder.
-    echo "claude 9999 user cwd DIR held-open"
+    # worktree-remove-guard foreign-liveness probe: report a live holder in
+    # `-F pn` format — a foreign pid line + the held path under the target.
+    printf 'p99999\nn%s/held-open\n' "${target:-$PWD}"
     exit 0
   fi
 done
@@ -659,7 +670,7 @@ rm -f "$GIT_LOG"
 run "T24g: guard-refused SAFE tree logs skip (live handle)" \
   bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'guard refused'"
 run "T24g-b: guard-refused GUARD-REFUSE NOT in git worktree remove log" \
-  bash -c "! grep -E 'worktree remove.*GUARD-REFUSE|GUARD-REFUSE.*worktree remove' '${GIT_LOG}' 2>/dev/null; true"
+  bash -c "! grep -E 'worktree remove.*GUARD-REFUSE|GUARD-REFUSE.*worktree remove' '${GIT_LOG}' 2>/dev/null"
 run "T24g-c: guard-refused tree survives on disk" test -d "${GUARD_WT}"
 # Restore the standard lsof mock for subsequent phases.
 cat > "$MOCKBIN/lsof" <<'EOF'
