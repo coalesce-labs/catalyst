@@ -252,6 +252,11 @@ import {
   runResolveConflictSweepPass,
   defaultCollectResolveConflictCandidates,
   defaultCollectResolveConflictCompletions,
+  // #1461 escalation-gap fix: failure census + its revert-and-reset action seam
+  // (a FAILED, not "done", resolve-conflict run — see resolve-conflict-sweep.mjs
+  // for the full rationale).
+  defaultCollectResolveConflictFailures,
+  defaultRevertStallAndResetCycle,
   classifyLiveConflict,
   defaultMarkAndDispatch,
   defaultEscalateCapExhausted,
@@ -3840,6 +3845,12 @@ export function schedulerTick(
       mode: _resolveConflictMode = undefined,
       collectCandidates: _collectResolveConflictCandidates = undefined,
       collectCompletions: _collectResolveConflictCompletions = undefined,
+      // #1461 escalation-gap fix: failure census + revert-and-reset action seam.
+      // Defaults undefined → inert (bare unit tick has no census → skip
+      // cleanly); production wires defaultCollectResolveConflictFailures +
+      // defaultRevertStallAndResetCycle below.
+      collectFailures: _collectResolveConflictFailures = undefined,
+      revertStallAndResetCycle: _resolveConflictRevertStallAndResetCycle = undefined,
       classifyLive: _resolveConflictClassifyLive = undefined,
       cycleCountOf: _resolveConflictCycleCountOf = undefined,
       markAndDispatch: _resolveConflictMarkAndDispatch = undefined,
@@ -4924,7 +4935,13 @@ export function schedulerTick(
     const rcMode = _resolveConflictMode ?? readResolveConflictSweepConfig().mode;
     if (
       rcMode !== "off" &&
-      (_collectResolveConflictCandidates || _collectResolveConflictCompletions) &&
+      // M3 (review follow-up): the gate must also recognize the failures
+      // collector — without this, a caller injecting ONLY collectFailures
+      // (e.g. a test isolating the failure path, or a future census-only
+      // wiring) would silently no-op the WHOLE sweep, including the
+      // candidates/completions sub-passes that collector's own default is
+      // never consulted for.
+      (_collectResolveConflictCandidates || _collectResolveConflictCompletions || _collectResolveConflictFailures) &&
       !_resolveConflictSweepInFlight
     ) {
       _resolveConflictSweepInFlight = true;
@@ -4933,6 +4950,14 @@ export function schedulerTick(
           mode: rcMode,
           collectCandidates: _collectResolveConflictCandidates ?? (() => defaultCollectResolveConflictCandidates({ orchDir })),
           collectCompletions: _collectResolveConflictCompletions ?? (() => defaultCollectResolveConflictCompletions({ orchDir })),
+          // #1461 escalation-gap fix: a FAILED (status:"failed") resolve-conflict
+          // run — census + the revert-and-reset action seam (escalateCapExhausted
+          // is REUSED below for the at/over-cap outcome, same as the candidates
+          // sub-pass's own cap-exhausted branch).
+          collectFailures: _collectResolveConflictFailures ?? (() => defaultCollectResolveConflictFailures({ orchDir })),
+          revertStallAndResetCycle:
+            _resolveConflictRevertStallAndResetCycle ??
+            ((f) => defaultRevertStallAndResetCycle(orchDir, f.ticket, f.stalledPhase)),
           classifyLive: _resolveConflictClassifyLive ?? classifyLiveConflict,
           cycleCountOf: _resolveConflictCycleCountOf ?? ((ticket) => countResolveConflictAttempts({ ticket })),
           markAndDispatch: _resolveConflictMarkAndDispatch ?? ((c) => defaultMarkAndDispatch({ ...c, orchDir })),
@@ -4945,12 +4970,20 @@ export function schedulerTick(
             rcReport.marked.length ||
             rcReport.escalated.length ||
             rcReport.cleared.length ||
+            rcReport.retried.length ||
             rcReport.wouldMark.length ||
             rcReport.wouldEscalate.length ||
-            rcReport.wouldClear.length
+            rcReport.wouldClear.length ||
+            rcReport.wouldRetry.length
           ) {
             log.info(
-              { mode: rcMode, marked: rcReport.marked.length, escalated: rcReport.escalated.length, cleared: rcReport.cleared.length },
+              {
+                mode: rcMode,
+                marked: rcReport.marked.length,
+                escalated: rcReport.escalated.length,
+                cleared: rcReport.cleared.length,
+                retried: rcReport.retried.length,
+              },
               "scheduler: resolve-conflict-sweep pass (#1461)",
             );
           }

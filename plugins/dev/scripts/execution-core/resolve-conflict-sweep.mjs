@@ -221,12 +221,21 @@ const RESOLVE_CONFLICT_DISPATCH_PHASE = "resolve-conflict";
 
 // RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES — a workers/<T>/phase-resolve-conflict.json
 // in one of these statuses represents a FINISHED prior cycle — success (`done`),
-// a hard failure (`failed`), or a dead/never-launched attempt (`stalled`, the
-// launch-failure path — phase-agent-dispatch's mark_launch_failed). Safe to reset.
-// `dispatched`/`running` are deliberately excluded: those mean a worker may
-// still be genuinely in flight, and resetting would pull the rug out from under
-// real in-progress work — see maybeResetForResolveConflictCycle below.
-const RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES = new Set(["done", "failed", "stalled"]);
+// a hard failure (`failed`), a dead/never-launched attempt (`stalled`, the
+// launch-failure path — phase-agent-dispatch's mark_launch_failed, OR the
+// backstopOnRejection/defaultEmitBackstop rejection path — defaultWriteSignalStalled
+// writes the SAME `status:"stalled"` shape for a rejected async/codex dispatch),
+// or a maxTurns cutoff (`turn-cap-exhausted` — defaultEmitBackstop's OTHER
+// terminal shape, written by defaultWriteSignalTerminal to keep the on-disk
+// status matching its own distinct terminal event name). All four are safe to
+// reset. `dispatched`/`running` are deliberately excluded: those mean a worker
+// may still be genuinely in flight, and resetting would pull the rug out from
+// under real in-progress work — see maybeResetForResolveConflictCycle below.
+// Escalation-gap fix (#1461 review follow-up): this is also the exact set
+// defaultCollectResolveConflictFailures (below) reuses to recognize a FAILED
+// resolve-conflict cycle in any of its real shapes, not just the in-skill
+// `status:"failed"` hard-error path.
+const RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES = new Set(["done", "failed", "stalled", "turn-cap-exhausted"]);
 
 // maybeResetForResolveConflictCycle — final-whole-branch-re-review follow-up
 // (#1461). Mirrors scheduler.mjs's maybeResetForRemediateCycle (CTL-653)
@@ -554,13 +563,217 @@ export function defaultCollectResolveConflictCompletions({
   return out;
 }
 
+// defaultCollectResolveConflictFailures — escalation-gap fix (#1461 final-
+// review follow-up). Census sibling of defaultCollectResolveConflictCompletions,
+// same read-only discipline, but keyed on `phase-resolve-conflict.json` landing
+// in any FAILURE-shaped terminal status instead of "done". Before this function
+// existed, a FAILED resolve-conflict run was invisible to every collector in
+// this file: the cap counter (countResolveConflictAttempts, event-scan.mjs)
+// already incremented correctly on the ticket's `phase.resolve-conflict.failed.
+// <ticket>` event, but nothing ever reverted the ORIGINAL stalled phase's
+// RESOLVED_MARKER_REASON marker that markStalledSignalResolving wrote before
+// dispatch — so the ticket could never again satisfy
+// classifyResolveConflictCandidate's stalledReasonMatches/alreadyResolving-at-cap
+// branches on a FRESH classify pass once it had been re-armed. See
+// runResolveConflictSweepPass's failures sub-pass (below) for the two outcomes
+// this feeds: escalate (at/over cap) or revert + reset (under cap).
+//
+// CTL review follow-up (post-fb135a0c): a bare `status === "failed"` check only
+// matched the in-skill hard-error path (phase-agent-emit-complete
+// --status failed). It MISSED the other two real failure shapes a resolve-
+// conflict dispatch can land in on-disk:
+//   - phase-agent-dispatch's mark_launch_failed (a dead/never-launched
+//     attempt) writes `status:"stalled"` (+ `attentionReason`, NOT
+//     `failureReason`/`stalledReason`) and emits phase.resolve-conflict.failed
+//     with --no-signal-update — so the durable counter climbs but the on-disk
+//     signal reads "stalled", not "failed".
+//   - dispatch.mjs's backstopOnRejection → defaultEmitBackstop writes the SAME
+//     `status:"stalled"` shape (via defaultWriteSignalStalled) for a REJECTED
+//     async/codex dispatch — this is defaultMarkAndDispatch's OWN `onSettled`
+//     handler (see below), so under an all-codex/all-sdk executor routing this
+//     is the LIVE production dispatch-failure path, and the ORIGINAL bare
+//     check missed it entirely.
+//   - the same backstop's maxTurns outcome writes `status:"turn-cap-exhausted"`
+//     (a THIRD terminal shape, kept distinct from "stalled" so its status
+//     matches its own differently-named terminal event).
+// Fix: match RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES (the same set
+// maybeResetForResolveConflictCycle already uses to decide this exact file is
+// resettable) minus "done" — i.e. {failed, stalled, turn-cap-exhausted} — so
+// every real failure shape is recognized, not just the narrowest one. This is
+// safe: mark_launch_failed / defaultWriteSignalStalled write `attentionReason`,
+// not `failureReason`/`stalledReason`, so defaultCollectResolveConflictCandidates
+// resolves this SAME file's `reason` to null and never double-treats
+// phase-resolve-conflict.json itself as a candidate; `dispatched`/`running` stay
+// correctly excluded either way (not in the terminal set).
+//
+// Same idempotence guard as Fix 1's completions collector, and for the exact
+// same reason: report a genuine, not-yet-acted-on failure ONLY while the
+// original stalled-phase signal still carries RESOLVED_MARKER_REASON. Once this
+// sweep's failure-handling path acts — reverting the reason back to
+// RESOLVE_CONFLICT_STALL_REASON, or escalating it to CAP_EXHAUSTED_REASON — the
+// reason no longer matches and this census naturally stops re-firing for the
+// same failure. No separate once-marker file needed; the existing signal
+// already carries the state.
+//
+// Includes `workerDir` in each item (unlike defaultCollectResolveConflictCompletions,
+// which omits it since its only consumer — clearStall — is pre-bound to orchDir
+// by the scheduler wiring) because this census's own consumer path calls the
+// SHARED escalateCapExhausted seam directly, and that seam's contract
+// (defaultEscalateCapExhausted) requires an explicit workerDir field, exactly
+// like the candidates census already supplies for its own cap-exhausted branch.
+export function defaultCollectResolveConflictFailures({
+  orchDir,
+  readdirSync: readdir = readdirSync,
+  readFileSync: readFile = readFileSync,
+} = {}) {
+  const out = [];
+  let workerDirs;
+  try {
+    workerDirs = readdir(join(orchDir, "workers"), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const d of workerDirs) {
+    if (!d.isDirectory()) continue;
+    const ticket = d.name;
+    if (!isTicketKey(ticket)) continue;
+    try {
+      const workerDir = join(orchDir, "workers", ticket);
+      let sig;
+      try {
+        sig = JSON.parse(readFile(join(workerDir, "phase-resolve-conflict.json"), "utf8"));
+      } catch {
+        continue; // no resolve-conflict signal for this ticket
+      }
+      if (sig?.status === "done") continue; // that's defaultCollectResolveConflictCompletions's job
+      if (!RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES.has(sig?.status)) continue; // dispatched/running/undefined/etc. — not a finished failure
+      let brief;
+      try {
+        brief = JSON.parse(readFile(join(workerDir, "resolve-conflict-brief.json"), "utf8"));
+      } catch {
+        continue; // failed signal but no brief — cannot know which phase to act on
+      }
+      if (!brief?.stalledPhase) continue;
+
+      let stalledRaw;
+      try {
+        stalledRaw = JSON.parse(readFile(join(workerDir, `phase-${brief.stalledPhase}.json`), "utf8"));
+      } catch {
+        continue; // absent/unreadable — already reverted/escalated, or never existed
+      }
+      const stalledReason = stalledRaw?.failureReason ?? stalledRaw?.stalledReason ?? null;
+      if (stalledReason !== RESOLVED_MARKER_REASON) continue; // already acted on by this sweep or something else
+
+      out.push({ ticket, stalledPhase: brief.stalledPhase, workerDir });
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+// defaultRevertStallAndResetCycle — escalation-gap fix (#1461 final-review
+// follow-up), the UNDER-cap outcome for a FAILED resolve-conflict run. Two
+// steps:
+//   1. Revert the ORIGINAL stalled phase's signal reason from
+//      RESOLVED_MARKER_REASON back to RESOLVE_CONFLICT_STALL_REASON —
+//      read-modify-write, the exact mirror of markStalledSignalResolving but in
+//      reverse (every other field, e.g. bg_job_id, untouched).
+//   2. REUSE maybeResetForResolveConflictCycle verbatim (no duplicated deletion
+//      logic) to clear the stale terminal phase-resolve-conflict.json + its
+//      resolve-conflict-brief.json + claim tombstones/progress marker — the
+//      exact same reset defaultMarkAndDispatch already runs before a fresh
+//      cycle-2+ dispatch. Without step 2, a later successful re-classification
+//      of this ticket as a genuine candidate would immediately hit the SAME
+//      phase-agent-dispatch idempotency no-op maybeResetForResolveConflictCycle
+//      was originally built to prevent (see that function's own header comment).
+//
+// Once step 1 lands, defaultCollectResolveConflictFailures's own idempotence
+// guard stops re-reporting this failure (the reason no longer matches
+// RESOLVED_MARKER_REASON). Because runResolveConflictSweepPass's candidates
+// sub-pass runs synchronously right after the failures sub-pass IN THE SAME
+// TICK (collectCandidates() re-reads the filesystem fresh, after this revert
+// has already landed on disk), defaultCollectResolveConflictCandidates can
+// pick the ticket back up as a genuine RESOLVE_CONFLICT_STALL_REASON candidate
+// in that SAME tick — classifyResolveConflictCandidate then re-evaluates it
+// fresh, exactly as if this were the ticket's first stall, and a fresh
+// mark-and-dispatch can fire before this tick even ends (not merely "a later
+// tick" — this revert is often invisible for less than one scheduler tick).
+//
+// Best-effort per step, mirroring defaultMarkAndDispatch's cycle-reset call:
+// step 2 failing must not undo step 1 (the revert is the safety-critical part —
+// worst case a stale reset leaves one extra idempotent no-op on the NEXT
+// dispatch, which itself re-runs this same reset before dispatching).
+export function defaultRevertStallAndResetCycle(
+  orchDir,
+  ticket,
+  stalledPhase,
+  {
+    readFileSync: readFile = readFileSync,
+    writeFileSync: writeFile = writeFileSync,
+    renameSync: rename = renameSync,
+    rmSync: rm = rmSync,
+    readdirSync: readdir = readdirSync,
+  } = {},
+) {
+  const workerDir = join(orchDir, "workers", ticket);
+  const signalPath = join(workerDir, `phase-${stalledPhase}.json`);
+  try {
+    const sig = JSON.parse(readFile(signalPath, "utf8"));
+    // M2 (review follow-up): defensive re-check — only overwrite the reason if
+    // it's STILL RESOLVED_MARKER_REASON at the moment of the write. The
+    // collector already guards on this at census time, but a narrow window
+    // exists between that read and this write in which a concurrent writer
+    // (an operator re-arming the ticket, or a parallel recovery-pass/cap-
+    // exhaustion path) could have already changed the reason — e.g. to
+    // CAP_EXHAUSTED_REASON. Silently clobbering that with a stale revert would
+    // resurrect a ticket that was just correctly terminal-escalated. A
+    // mismatch here is not an error — something else already owns this
+    // ticket's stall — so this returns false (not-acted), same shape as any
+    // other no-op outcome, and never throws.
+    const currentReason = ("stalledReason" in sig ? sig.stalledReason : sig.failureReason) ?? null;
+    if (currentReason !== RESOLVED_MARKER_REASON) {
+      log.warn(
+        { ticket, stalledPhase, currentReason },
+        "resolve-conflict-sweep: stall reason changed out from under the revert (#1461 escalation-gap fix) — leaving it to whatever owns it now"
+      );
+      return false;
+    }
+    if ("stalledReason" in sig) sig.stalledReason = RESOLVE_CONFLICT_STALL_REASON;
+    else sig.failureReason = RESOLVE_CONFLICT_STALL_REASON;
+    sig.updatedAt = new Date().toISOString();
+    const tmp = `${signalPath}.tmp.${process.pid}`;
+    writeFile(tmp, JSON.stringify(sig, null, 2));
+    rename(tmp, signalPath);
+  } catch (err) {
+    log.warn(
+      { ticket, stalledPhase, err: err?.message },
+      "resolve-conflict-sweep: stall-reason revert failed (#1461 escalation-gap fix) — leaving failed cycle unresolved this tick"
+    );
+    return false;
+  }
+  try {
+    maybeResetForResolveConflictCycle(orchDir, ticket, { rmSync: rm, readFileSync: readFile, readdirSync: readdir });
+  } catch (err) {
+    log.warn(
+      { ticket, stalledPhase, err: err?.message },
+      "resolve-conflict-sweep: cycle-reset after stall-reason revert failed (#1461 escalation-gap fix) — proceeding anyway"
+    );
+  }
+  return true;
+}
+
 // runResolveConflictSweepPass — the action driver. Every side-effect seam is
 // injected; mirrors runUnstuckSweepPass's off/shadow/enforce shape + report.
-// Two independent sub-passes per tick: (1) candidates → classify → mark-and-
-// dispatch or cap-exhausted-escalate; (2) completions → clearStall. Order is
-// completions-then-candidates so a just-completed ticket's stall is cleared
-// before that same tick's candidate scan would otherwise re-see it (defensive;
-// either order is safe since a cleared ticket has no more stalled signal).
+// Three independent sub-passes per tick: (1) candidates → classify → mark-and-
+// dispatch or cap-exhausted-escalate; (2) completions (status:"done") →
+// clearStall; (3) failures (status:"failed", #1461 escalation-gap fix) →
+// cap-exhausted-escalate or revert-and-reset-cycle. Order is
+// completions-then-failures-then-candidates so a just-completed or
+// just-failed ticket's stall is cleared/reverted before that same tick's
+// candidate scan would otherwise re-see it (defensive; either order is safe
+// since an acted-on ticket no longer carries the marker the candidate census
+// keys on).
 // NOTE: deliberately NOT declared `async` at the top level. Mode "off" must
 // return the plain report object synchronously (no Promise wrapper) so a
 // caller can check it without awaiting; shadow/enforce need `await
@@ -571,14 +784,27 @@ export function runResolveConflictSweepPass({
   mode = "off",
   collectCandidates = () => [],
   collectCompletions = () => [],
+  collectFailures = () => [],
   classifyLive = async () => null,
   cycleCountOf = () => 0,
   markAndDispatch = () => ({ success: false, dispatched: false }),
   escalateCapExhausted = () => false,
   clearStall = () => false,
+  revertStallAndResetCycle = () => false,
   emit = async () => true,
 } = {}) {
-  const report = { marked: [], wouldMark: [], escalated: [], wouldEscalate: [], cleared: [], wouldClear: [], skipped: [], failed: [] };
+  const report = {
+    marked: [],
+    wouldMark: [],
+    escalated: [],
+    wouldEscalate: [],
+    cleared: [],
+    wouldClear: [],
+    retried: [],
+    wouldRetry: [],
+    skipped: [],
+    failed: [],
+  };
   if (mode === "off") return report;
   const enforce = mode === "enforce";
 
@@ -615,6 +841,55 @@ export function runResolveConflictSweepPass({
         report.cleared.push({ ticket: c.ticket, phase: c.stalledPhase });
       } catch (err) {
         report.failed.push({ ticket: c?.ticket, phase: c?.stalledPhase, reason: err?.message });
+      }
+    }
+
+    // ---- failures (#1461 escalation-gap fix): a FAILED resolve-conflict run
+    // either escalates (at/over cap, via the SAME escalateCapExhausted seam the
+    // candidates sub-pass below uses) or reverts the original stall + resets the
+    // stale cycle (under cap) so the ticket becomes a genuine candidate again —
+    // and since collectCandidates() below runs synchronously right after this
+    // loop, in the SAME tick, a reverted ticket can be re-classified and
+    // re-dispatched before this tick even ends, not merely "on a later tick".
+    // See defaultCollectResolveConflictFailures / defaultRevertStallAndResetCycle
+    // above for the full rationale — this is a NEW, parallel path; it never
+    // touches a "done" completion (that's the completions sub-pass above) and
+    // never touches a dispatched/running signal (the collector's own
+    // idempotence guard + terminal-status filter exclude those entirely).
+    let failures = [];
+    try {
+      failures = collectFailures() ?? [];
+    } catch {
+      failures = [];
+    }
+    for (const f of failures) {
+      try {
+        const cycleCount = cycleCountOf(f.ticket);
+        if (cycleCount >= RESOLVE_CONFLICT_CYCLE_CAP) {
+          if (!enforce) {
+            fire("resolve-conflict.would.escalate", { ticket: f.ticket, phase: f.stalledPhase });
+            report.wouldEscalate.push({ ticket: f.ticket, phase: f.stalledPhase });
+            continue;
+          }
+          const posted = escalateCapExhausted({ ticket: f.ticket, phase: f.stalledPhase, workerDir: f.workerDir, cycleCount });
+          fire("resolve-conflict.escalated", { ticket: f.ticket, phase: f.stalledPhase, posted });
+          report.escalated.push({ ticket: f.ticket, phase: f.stalledPhase });
+          continue;
+        }
+        if (!enforce) {
+          fire("resolve-conflict.would.retry", { ticket: f.ticket, phase: f.stalledPhase });
+          report.wouldRetry.push({ ticket: f.ticket, phase: f.stalledPhase });
+          continue;
+        }
+        const ok = revertStallAndResetCycle({ ticket: f.ticket, stalledPhase: f.stalledPhase });
+        if (ok === false) {
+          report.failed.push({ ticket: f.ticket, phase: f.stalledPhase, reason: "revert-stall-and-reset-cycle-returned-false" });
+          continue;
+        }
+        fire("resolve-conflict.retry-armed", { ticket: f.ticket, phase: f.stalledPhase });
+        report.retried.push({ ticket: f.ticket, phase: f.stalledPhase });
+      } catch (err) {
+        report.failed.push({ ticket: f?.ticket, phase: f?.stalledPhase, reason: err?.message });
       }
     }
 
