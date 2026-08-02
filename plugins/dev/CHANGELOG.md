@@ -1,15 +1,20 @@
 # Changelog
 
-## [12.42.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.41.0...catalyst-dev-v12.42.0) (2026-08-02)
+## [12.42.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.41.0...catalyst-dev-v12.42.0)
+
+Aug 02, 2026
+
+<!-- ai-enhanced -->
+
+### Worktree Guard & DNS Rebinding Fix
+
+The monitor's reply endpoint now validates `Origin` against a trusted allowlist of loopback addresses, local hostnames, and non-loopback IPs — closing a DNS rebinding hole where an attacker-controlled page could post Linear comments as the operator. Separately, every shell-side `git worktree remove --force` call now runs a safety check that refuses removal if your current directory is inside the target or any process holds an open handle under it, protecting against accidental self-deletion that the Node reaper never covered.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1417 — worktree-removal self-protection guard ([#2556](https://github.com/coalesce-labs/catalyst/issues/2556)) ([24b9a76](https://github.com/coalesce-labs/catalyst/commit/24b9a76e19630d214d3993220be98a5ed0cb0ad5))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1573 validate reply Origin against a trusted allowlist, not the request Host ([#2857](https://github.com/coalesce-labs/catalyst/issues/2857)) ([10ecce7](https://github.com/coalesce-labs/catalyst/commit/10ecce7513d6d4cc40e30f5e0ca9256b048fed01))
 
 ## [12.41.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.40.0...catalyst-dev-v12.41.0)
