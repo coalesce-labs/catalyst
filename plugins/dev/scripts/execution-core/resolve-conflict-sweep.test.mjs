@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, appendFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -461,6 +461,15 @@ describe("maybeResetForResolveConflictCycle (#1461 follow-up)", () => {
     expect(signalPath in files).toBe(false);
   });
 
+  // C1 review follow-up: 'turn-cap-exhausted' (the maxTurns backstop shape) is
+  // also a FINISHED prior cycle — must reset, not no-op, or a fresh dispatch
+  // attempt collides with phase-agent-dispatch's own idempotency guard.
+  test("(b) terminal 'turn-cap-exhausted' (maxTurns backstop path) → resets", () => {
+    const { files, deps } = inMemoryFs({ [signalPath]: JSON.stringify({ status: "turn-cap-exhausted" }) });
+    expect(maybeResetForResolveConflictCycle(orchDir, ticket, deps)).toBe(true);
+    expect(signalPath in files).toBe(false);
+  });
+
   test("(c) 'dispatched' (actually in-flight) → NEVER touched, returns false", () => {
     const { files, deps } = inMemoryFs({
       [signalPath]: JSON.stringify({ status: "dispatched", generation: 1 }),
@@ -764,6 +773,45 @@ describe("defaultCollectResolveConflictFailures (#1461 escalation-gap fix)", () 
     expect(defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs })).toEqual([]);
   });
 
+  // C1 (review follow-up, CRITICAL): a bare `status === "failed"` check only
+  // caught the in-skill hard-error path. These two cases are the OTHER real
+  // on-disk shapes a resolve-conflict dispatch failure lands in — both must be
+  // recognized too, or the ticket is silently stranded exactly like before this
+  // fix, just via a different failure mode.
+  test("finds a ticket whose resolve-conflict phase is 'stalled' with an attentionReason — the mark_launch_failed / backstopOnRejection shape (C1 fix)", () => {
+    // Exactly what phase-agent-dispatch's mark_launch_failed AND
+    // dispatch.mjs's backstopOnRejection → defaultEmitBackstop →
+    // defaultWriteSignalStalled actually write on disk: status:"stalled" with
+    // `attentionReason`, NOT `failureReason`/`stalledReason`. Under an
+    // all-codex/all-sdk executor routing, the backstop path is the LIVE
+    // production dispatch-failure shape.
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["CTL-5"] },
+      files: {
+        "/orch/workers/CTL-5": ["phase-resolve-conflict.json", "resolve-conflict-brief.json", "phase-implement.json"],
+        "/orch/workers/CTL-5/phase-resolve-conflict.json": JSON.stringify({ status: "stalled", attentionReason: "sdk-backstop" }),
+        "/orch/workers/CTL-5/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+        "/orch/workers/CTL-5/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_resolvable" }),
+      },
+    });
+    const out = defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs });
+    expect(out).toEqual([{ ticket: "CTL-5", stalledPhase: "implement", workerDir: "/orch/workers/CTL-5" }]);
+  });
+
+  test("finds a ticket whose resolve-conflict phase is 'turn-cap-exhausted' — the maxTurns backstop shape (C1 fix)", () => {
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["CTL-6"] },
+      files: {
+        "/orch/workers/CTL-6": ["phase-resolve-conflict.json", "resolve-conflict-brief.json", "phase-implement.json"],
+        "/orch/workers/CTL-6/phase-resolve-conflict.json": JSON.stringify({ status: "turn-cap-exhausted", attentionReason: "sdk-error-max-turns" }),
+        "/orch/workers/CTL-6/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+        "/orch/workers/CTL-6/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_resolvable" }),
+      },
+    });
+    const out = defaultCollectResolveConflictFailures({ orchDir: "/orch", ...fs });
+    expect(out).toEqual([{ ticket: "CTL-6", stalledPhase: "implement", workerDir: "/orch/workers/CTL-6" }]);
+  });
+
   // Safety-critical (c): an actually in-flight run must NEVER be touched by the
   // new failure-handling path — proven here at the collector level, since the
   // collector is what feeds the driver's failures sub-pass.
@@ -918,6 +966,144 @@ describe("defaultRevertStallAndResetCycle (#1461 escalation-gap fix)", () => {
     });
     defaultRevertStallAndResetCycle(orchDir, ticket, "implement", deps);
     expect(files[`${workerDir}/phase-resolve-conflict.json`]).toBe(runningSignal);
+  });
+});
+
+// I1 (review follow-up, IMPORTANT): a REAL end-to-end chain over a REAL
+// filesystem (temp dir, no injected/faked deps at all), driving
+// runResolveConflictSweepPass with the ACTUAL defaultCollectResolveConflictFailures
+// + defaultRevertStallAndResetCycle, then verifying with the ACTUAL
+// defaultCollectResolveConflictCandidates — not hand-supplied classifier flags,
+// and not a hand-authored `{status:"failed"}` shortcut. The seeded
+// phase-resolve-conflict.json fixture is the shape mark_launch_failed /
+// backstopOnRejection ACTUALLY write on disk (status:"stalled" +
+// `attentionReason`, no failureReason/stalledReason) — exactly the shape the
+// pre-C1-fix bare `=== "failed"` predicate missed. This test is the proof the
+// chain is real: with the old predicate it would have found zero failures,
+// never reverted anything, and the final candidates assertion below would have
+// seen the ticket still stuck at RESOLVED_MARKER_REASON (an "already-resolving"
+// candidate) instead of a genuine RESOLVE_CONFLICT_STALL_REASON one.
+describe("#1461 escalation-gap fix: real end-to-end chain over a real filesystem (I1)", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "resolve-conflict-real-fs-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  for (const shape of [
+    { label: "mark_launch_failed / backstopOnRejection shape", status: "stalled", attentionReason: "sdk-backstop" },
+    { label: "maxTurns backstop shape", status: "turn-cap-exhausted", attentionReason: "sdk-error-max-turns" },
+  ]) {
+    test(`a real ${shape.label} on disk is collected, reverted, and the ticket becomes a genuine candidate again — in the SAME runResolveConflictSweepPass call`, async () => {
+      const orchDir = dir;
+      const ticket = "CTL-9101";
+      const workerDir = join(orchDir, "workers", ticket);
+      mkdirSync(workerDir, { recursive: true });
+
+      // The ORIGINAL phase already went through markStalledSignalResolving —
+      // marked RESOLVED_MARKER_REASON, awaiting the resolve-conflict worker.
+      writeFileSync(
+        join(workerDir, "phase-implement.json"),
+        JSON.stringify({ status: "stalled", failureReason: RESOLVED_MARKER_REASON, bg_job_id: "job-1" }),
+      );
+      writeFileSync(
+        join(workerDir, "resolve-conflict-brief.json"),
+        JSON.stringify({ stalledPhase: "implement", attempt: 1, maxAttempts: RESOLVE_CONFLICT_CYCLE_CAP }),
+      );
+      // The REAL on-disk shape the dispatch-failure path actually writes —
+      // NOT a hand-authored {status:"failed"} shortcut.
+      writeFileSync(
+        join(workerDir, "phase-resolve-conflict.json"),
+        JSON.stringify({ status: shape.status, attentionReason: shape.attentionReason, generation: 1 }),
+      );
+      writeFileSync(join(workerDir, "resolve-conflict.claim.1"), "{}");
+
+      // Drive the REAL driver with the REAL census + action functions, all bound
+      // to this real orchDir — no fakes anywhere in this call.
+      const report = await runResolveConflictSweepPass({
+        mode: "enforce",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => defaultCollectResolveConflictFailures({ orchDir }),
+        cycleCountOf: () => 0, // under the cap
+        revertStallAndResetCycle: (f) => defaultRevertStallAndResetCycle(orchDir, f.ticket, f.stalledPhase),
+        emit: async () => true,
+      });
+
+      expect(report.retried).toEqual([{ ticket, phase: "implement" }]);
+      expect(report.escalated).toEqual([]);
+
+      // The revert genuinely landed on disk.
+      const revertedSignal = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
+      expect(revertedSignal.failureReason).toBe(RESOLVE_CONFLICT_STALL_REASON);
+      expect(revertedSignal.bg_job_id).toBe("job-1"); // untouched
+
+      // The stale terminal signal + brief + claim are genuinely gone (the
+      // reused maybeResetForResolveConflictCycle reset).
+      expect(existsSync(join(workerDir, "phase-resolve-conflict.json"))).toBe(false);
+      expect(existsSync(join(workerDir, "resolve-conflict-brief.json"))).toBe(false);
+      expect(existsSync(join(workerDir, "resolve-conflict.claim.1"))).toBe(false);
+
+      // The REAL candidates census (not hand-supplied classifier flags) now
+      // finds this ticket as a genuine RESOLVE_CONFLICT_STALL_REASON candidate
+      // — proving the full chain: a real failure shape → collected → reverted
+      // → re-classifiable, all within this ONE runResolveConflictSweepPass call
+      // plus a direct candidates census call (mirroring how collectCandidates()
+      // would see it on the very next scheduler pass, same tick or the next).
+      const candidates = defaultCollectResolveConflictCandidates({ orchDir });
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toMatchObject({ ticket, phase: "implement" });
+      expect(candidates[0].raw.failureReason).toBe(RESOLVE_CONFLICT_STALL_REASON);
+
+      const decision = classifyResolveConflictCandidate({
+        stalledReasonMatches: candidates[0].raw.failureReason === RESOLVE_CONFLICT_STALL_REASON,
+        alreadyResolving: false,
+        cycleCount: 0,
+        classification: { resolvable: true, conflictFiles: [], conflictTypes: [] },
+      });
+      expect(decision.action).toBe("mark-and-dispatch");
+    });
+  }
+
+  test("at/over the cap, the same real failure shape escalates instead of reverting — phase-implement.json is left at RESOLVED_MARKER_REASON until escalateCapExhausted flips it", async () => {
+    const orchDir = dir;
+    const ticket = "CTL-9102";
+    const workerDir = join(orchDir, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ status: "stalled", failureReason: RESOLVED_MARKER_REASON }),
+    );
+    writeFileSync(join(workerDir, "resolve-conflict-brief.json"), JSON.stringify({ stalledPhase: "implement" }));
+    writeFileSync(
+      join(workerDir, "phase-resolve-conflict.json"),
+      JSON.stringify({ status: "stalled", attentionReason: "sdk-backstop" }),
+    );
+
+    const escalated = [];
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [],
+      collectCompletions: () => [],
+      collectFailures: () => defaultCollectResolveConflictFailures({ orchDir }),
+      cycleCountOf: () => RESOLVE_CONFLICT_CYCLE_CAP,
+      revertStallAndResetCycle: () => { throw new Error("must not revert — at the cap"); },
+      escalateCapExhausted: (c) => { escalated.push(c); return true; },
+      emit: async () => true,
+    });
+
+    expect(report.escalated).toEqual([{ ticket, phase: "implement" }]);
+    expect(escalated).toEqual([{ ticket, phase: "implement", workerDir, cycleCount: RESOLVE_CONFLICT_CYCLE_CAP }]);
+    // phase-resolve-conflict.json's own reset never runs on the escalate path —
+    // only defaultEscalateCapExhausted (not exercised by this stub) would flip
+    // phase-implement.json to CAP_EXHAUSTED_REASON. The real function is
+    // covered directly by the "defaultEscalateCapExhausted" describe block and
+    // the existing E2E cap tests; here we're proving the driver ROUTES to it,
+    // not re-testing its own body.
+    const stillMarked = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
+    expect(stillMarked.failureReason).toBe(RESOLVED_MARKER_REASON);
   });
 });
 
