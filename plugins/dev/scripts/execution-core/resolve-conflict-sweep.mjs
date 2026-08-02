@@ -308,3 +308,179 @@ export function defaultEscalateCapExhausted(
   const body = `🔼 **phase-resolve-conflict** escalated this to the operator — ${ticket}/${phase} hit the resolve-conflict cycle cap (${RESOLVE_CONFLICT_CYCLE_CAP}) after ${cycleCount} attempt(s) without a clean resolution; manual conflict resolution needed.`;
   return postComment(ticket, body);
 }
+
+// defaultCollectResolveConflictCompletions — find every ticket whose
+// resolve-conflict phase signal is "done" and read which original phase to
+// clear from resolve-conflict-brief.json's stalledPhase. Read-only.
+export function defaultCollectResolveConflictCompletions({
+  orchDir,
+  readdirSync: readdir = readdirSync,
+  readFileSync: readFile = readFileSync,
+} = {}) {
+  const out = [];
+  let workerDirs;
+  try {
+    workerDirs = readdir(join(orchDir, "workers"), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const d of workerDirs) {
+    if (!d.isDirectory()) continue;
+    const ticket = d.name;
+    if (!isTicketKey(ticket)) continue;
+    try {
+      const workerDir = join(orchDir, "workers", ticket);
+      let sig;
+      try {
+        sig = JSON.parse(readFile(join(workerDir, "phase-resolve-conflict.json"), "utf8"));
+      } catch {
+        continue; // no resolve-conflict signal for this ticket
+      }
+      if (sig?.status !== "done") continue;
+      let brief;
+      try {
+        brief = JSON.parse(readFile(join(workerDir, "resolve-conflict-brief.json"), "utf8"));
+      } catch {
+        continue; // done signal but no brief — cannot know which phase to clear
+      }
+      if (!brief?.stalledPhase) continue;
+      out.push({ ticket, stalledPhase: brief.stalledPhase });
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+// runResolveConflictSweepPass — the action driver. Every side-effect seam is
+// injected; mirrors runUnstuckSweepPass's off/shadow/enforce shape + report.
+// Two independent sub-passes per tick: (1) candidates → classify → mark-and-
+// dispatch or cap-exhausted-escalate; (2) completions → clearStall. Order is
+// completions-then-candidates so a just-completed ticket's stall is cleared
+// before that same tick's candidate scan would otherwise re-see it (defensive;
+// either order is safe since a cleared ticket has no more stalled signal).
+// NOTE: deliberately NOT declared `async` at the top level. Mode "off" must
+// return the plain report object synchronously (no Promise wrapper) so a
+// caller can check it without awaiting; shadow/enforce need `await
+// classifyLive(...)` internally, so that path is delegated to an inner async
+// IIFE and its Promise is returned instead. Either way the caller may safely
+// `await` the result — awaiting a non-Promise is a no-op.
+export function runResolveConflictSweepPass({
+  mode = "off",
+  collectCandidates = () => [],
+  collectCompletions = () => [],
+  classifyLive = async () => null,
+  cycleCountOf = () => 0,
+  markAndDispatch = () => ({ success: false, dispatched: false }),
+  escalateCapExhausted = () => false,
+  clearStall = () => false,
+  emit = async () => true,
+} = {}) {
+  const report = { marked: [], wouldMark: [], escalated: [], wouldEscalate: [], cleared: [], wouldClear: [], skipped: [], failed: [] };
+  if (mode === "off") return report;
+  const enforce = mode === "enforce";
+
+  return (async () => {
+    const fire = (type, fields) => {
+      try {
+        const p = emit(type, fields);
+        if (p && typeof p.catch === "function") p.catch(() => {});
+      } catch {
+        /* best-effort */
+      }
+    };
+
+    // ---- completions: clear the stall for a finished resolve-conflict run ----
+    let completions = [];
+    try {
+      completions = collectCompletions() ?? [];
+    } catch {
+      completions = [];
+    }
+    for (const c of completions) {
+      try {
+        if (!enforce) {
+          fire("resolve-conflict.would.clear", { ticket: c.ticket, phase: c.stalledPhase });
+          report.wouldClear.push({ ticket: c.ticket, phase: c.stalledPhase });
+          continue;
+        }
+        const ok = clearStall({ ticket: c.ticket, phase: c.stalledPhase });
+        if (ok === false) {
+          report.failed.push({ ticket: c.ticket, phase: c.stalledPhase, reason: "clearStall-returned-false" });
+          continue;
+        }
+        fire("resolve-conflict.cleared", { ticket: c.ticket, phase: c.stalledPhase });
+        report.cleared.push({ ticket: c.ticket, phase: c.stalledPhase });
+      } catch (err) {
+        report.failed.push({ ticket: c?.ticket, phase: c?.stalledPhase, reason: err?.message });
+      }
+    }
+
+    // ---- candidates: classify then mark-and-dispatch / cap-exhausted ----
+    let candidates = [];
+    try {
+      candidates = collectCandidates() ?? [];
+    } catch {
+      return report; // a throwing census degrades to "nothing to do" this tick
+    }
+    for (const c of candidates) {
+      try {
+        const reason = c.raw?.failureReason ?? c.raw?.stalledReason ?? null;
+        const stalledReasonMatches = reason === RESOLVE_CONFLICT_STALL_REASON;
+        const alreadyResolving = reason === RESOLVED_MARKER_REASON;
+        const cycleCount = cycleCountOf(c.ticket);
+        // Only probe merge-tree for a reason this sweep actually owns — never
+        // spawn git for a not-our-stall candidate (classifier would skip it anyway).
+        const classification =
+          stalledReasonMatches && cycleCount < RESOLVE_CONFLICT_CYCLE_CAP
+            ? await classifyLive({ worktreePath: c.worktreePath, base: c.base, head: c.ticket })
+            : null;
+        const decision = classifyResolveConflictCandidate({ stalledReasonMatches, alreadyResolving, cycleCount, classification });
+
+        if (decision.action === "skip") {
+          report.skipped.push({ ticket: c.ticket, phase: c.phase, reason: decision.reason });
+          continue;
+        }
+
+        if (decision.action === "cap-exhausted") {
+          if (!enforce) {
+            fire("resolve-conflict.would.escalate", { ticket: c.ticket, phase: c.phase });
+            report.wouldEscalate.push({ ticket: c.ticket, phase: c.phase });
+            continue;
+          }
+          const posted = escalateCapExhausted({ ticket: c.ticket, phase: c.phase, workerDir: c.workerDir, cycleCount });
+          fire("resolve-conflict.escalated", { ticket: c.ticket, phase: c.phase, posted });
+          report.escalated.push({ ticket: c.ticket, phase: c.phase });
+          continue;
+        }
+
+        // mark-and-dispatch
+        if (!enforce) {
+          fire("resolve-conflict.would.mark", { ticket: c.ticket, phase: c.phase });
+          report.wouldMark.push({ ticket: c.ticket, phase: c.phase });
+          continue;
+        }
+        const result = markAndDispatch({
+          ticket: c.ticket,
+          phase: c.phase,
+          workerDir: c.workerDir,
+          worktreePath: c.worktreePath,
+          base: c.base,
+          classification,
+          cycleCount,
+        });
+        if (!result?.success) {
+          report.failed.push({ ticket: c.ticket, phase: c.phase, reason: result?.reason ?? "mark-and-dispatch-failed" });
+          continue;
+        }
+        fire("resolve-conflict.marked.resolvable", { ticket: c.ticket, phase: c.phase });
+        if (result.dispatched) fire("resolve-conflict.dispatched", { ticket: c.ticket, phase: c.phase });
+        report.marked.push({ ticket: c.ticket, phase: c.phase });
+      } catch (err) {
+        report.failed.push({ ticket: c?.ticket, phase: c?.phase, reason: err?.message });
+      }
+    }
+
+    return report;
+  })();
+}
