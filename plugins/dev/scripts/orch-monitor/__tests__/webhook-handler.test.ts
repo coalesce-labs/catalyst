@@ -810,6 +810,45 @@ describe("createWebhookHandler — pr_status_cache (CTL-1606)", () => {
     expect(prCache.statusPuts.at(-1)).toEqual({ repo: "owner/repo", prNumber: 57, status: "open" });
   });
 
+  it("pull_request.labeled on a merged PR → putStatus('merged') (does NOT flip to 'open')", async () => {
+    // GitHub fires non-terminal actions (labeled/unlabeled/edited) on already-merged
+    // PRs. Status must derive from the PR state (merged:true), not the action —
+    // otherwise a post-merge label flips the cached status back to "open" and
+    // board-health falsely flags the merged PR as an orphaned open PR (the very
+    // phantom-orphan bug CTL-1606 fixes).
+    const prCache = new FakePrCache();
+    await makeHandler(prCache).handle(
+      makeReq({
+        ...REPO,
+        action: "labeled",
+        pull_request: {
+          number: 55,
+          merged: true,
+          merged_at: "2026-08-01T00:00:00Z",
+          head: { ref: "b", sha: "a3" },
+        },
+      }),
+    );
+    expect(prCache.statusPuts.at(-1)).toEqual({ repo: "owner/repo", prNumber: 55, status: "merged" });
+  });
+
+  it("pull_request.edited on a merged PR → putStatus('merged')", async () => {
+    const prCache = new FakePrCache();
+    await makeHandler(prCache).handle(
+      makeReq({
+        ...REPO,
+        action: "edited",
+        pull_request: {
+          number: 58,
+          merged: true,
+          merged_at: "2026-08-01T00:00:00Z",
+          head: { ref: "b", sha: "a4" },
+        },
+      }),
+    );
+    expect(prCache.statusPuts.at(-1)).toEqual({ repo: "owner/repo", prNumber: 58, status: "merged" });
+  });
+
   it("does not call putStatus when no prCache provided", async () => {
     const handler = createWebhookHandler({
       secret: SECRET,

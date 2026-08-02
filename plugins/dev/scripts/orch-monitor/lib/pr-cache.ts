@@ -25,6 +25,14 @@ export function createFileBasedPrCache(dbPath = DEFAULT_DB_PATH): PrCacheLike {
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = new Database(dbPath, { create: true });
   db.run("PRAGMA journal_mode=WAL");
+  // CTL-1606: the broker + orch-monitor hold concurrent handles on this same
+  // filter-state.db, and putStatus now fires on EVERY pull_request webhook
+  // (far more frequent than the opened/synchronize-gated put), raising WAL
+  // write-contention. Without busy_timeout (default 0 = fail-immediately),
+  // an SQLITE_BUSY throw in putStatus aborts dispatch()'s write and is silently
+  // swallowed by the webhook try/catch. Mirror broker-state.mjs (CTL-821) so
+  // transient lock contention retries instead of dropping the status write.
+  db.run("PRAGMA busy_timeout = 5000");
   db.run(`
     CREATE TABLE IF NOT EXISTS pr_cache (
       repo        TEXT NOT NULL,
