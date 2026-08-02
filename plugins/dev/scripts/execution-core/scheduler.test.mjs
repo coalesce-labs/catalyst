@@ -10751,6 +10751,61 @@ describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass
   });
 });
 
+// ── #1461: resolve-conflict-sweep — scheduler wiring (Task 12) ─────────────────
+//
+// schedulerTick wires runResolveConflictSweepPass in exactly like unstuck-sweep:
+// a `resolveConflictSweep` options group (mode/collectCandidates/
+// collectCompletions/... seams), gated on mode !== "off", running every tick
+// (no throttle). These smoke tests only assert the wiring itself — the pure
+// classify/act behavior is covered by resolve-conflict-sweep.test.mjs.
+describe("#1461: resolve-conflict-sweep — scheduler wiring", () => {
+  test("runs every tick when mode is not off, uses the injected collectors", () => {
+    let candidatesCalled = false;
+    let completionsCalled = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "shadow",
+        collectCandidates: () => {
+          candidatesCalled = true;
+          return [];
+        },
+        collectCompletions: () => {
+          completionsCalled = true;
+          return [];
+        },
+      },
+    });
+    expect(candidatesCalled).toBe(true);
+    expect(completionsCalled).toBe(true);
+  });
+
+  test("is skipped entirely when mode is off", () => {
+    let called = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "off",
+        collectCandidates: () => {
+          called = true;
+          return [];
+        },
+      },
+    });
+    expect(called).toBe(false);
+  });
+});
+
 // ── CTL-1191: Pass 0r reasoning — terminal-state filter (PR #2163 verify flag) ──
 //
 // The reasoning pass must NOT reason over a ticket already finished (terminal
