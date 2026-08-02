@@ -5057,7 +5057,7 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
       gateway,
       appendOrphanDetectedEvent,
       // Force single-host determinism: this dev host's real cluster-repo roster
-      // (aldebaran/sophon/vega) otherwise leaks into getClusterHosts() and makes
+      // (real fleet hostnames) otherwise leaks into getClusterHosts() and makes
       // fenceGuard fail closed regardless of this test's own logic (a false green
       // pre-implementation, since the new guard runs BEFORE fenceGuard and the
       // observable "no needs-human" outcome is identical either way). T3's sibling
