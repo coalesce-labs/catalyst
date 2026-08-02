@@ -105,6 +105,7 @@ import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
 import { getDrainFlagPath, getEventLogPath } from "./config.mjs"; // CTL-1678: drain-disabled override integration test
+import { RESOLVED_MARKER_REASON } from "./resolve-conflict-sweep.mjs"; // #1461: shared marker reason, not a re-typed literal
 
 let orchDir;
 let catalystDir;
@@ -5155,7 +5156,7 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
   });
 
   // #1461: resolve-conflict-sweep marks the active signal failureReason
-  // source_conflict_resolvable while a fix is in flight — the terminal sweep must NOT
+  // RESOLVED_MARKER_REASON while a fix is in flight — the terminal sweep must NOT
   // immediately needs-human this ticket (every candidate would otherwise be flagged
   // needs-human the same tick the fix is already dispatched). Mirrors T3's fixture
   // (stalled signal, non-terminal Linear state) but swaps in the resolve-conflict
@@ -5166,7 +5167,7 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
       ticket: TICKET,
       phase: "implement",
       status: "stalled",
-      failureReason: "source_conflict_resolvable",
+      failureReason: RESOLVED_MARKER_REASON,
     });
 
     const applied = [];
@@ -5201,9 +5202,16 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
       // Force single-host determinism: this dev host's real cluster-repo roster
       // (aldebaran/sophon/vega) otherwise leaks into getClusterHosts() and makes
       // fenceGuard fail closed regardless of this test's own logic (a false green
-      // pre-implementation). T3's sibling fixture doesn't need this override
-      // because it isn't sensitive to the confound the same way this test is —
-      // see task-11-report.md for the full explanation.
+      // pre-implementation, since the new guard runs BEFORE fenceGuard and the
+      // observable "no needs-human" outcome is identical either way). T3's sibling
+      // fixture does NOT pin hosts/hostName either, and is EQUALLY exposed to this
+      // same confound — run in isolation it fails against unmodified code for the
+      // identical reason (verified; see task-11-report.md). It reads as "passing"
+      // only in specific run orders/process states (test-order and/or
+      // getClusterHosts()-caching dependent), not because it is immune. This test
+      // pins hosts/hostName explicitly so it does NOT depend on that same
+      // order/caching-dependent behavior — see task-11-report.md for the full
+      // investigation.
       hosts: ["solo"],
       hostName: "solo",
     });
