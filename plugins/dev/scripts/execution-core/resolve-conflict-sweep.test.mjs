@@ -6,6 +6,8 @@ import {
   CAP_EXHAUSTED_REASON,
   RESOLVE_CONFLICT_CYCLE_CAP,
   defaultCollectResolveConflictCandidates,
+  classifyLiveConflict,
+  writeResolveConflictBrief,
 } from "./resolve-conflict-sweep.mjs";
 
 describe("constants", () => {
@@ -133,5 +135,51 @@ describe("defaultCollectResolveConflictCandidates", () => {
 
   test("a missing workers dir returns []", () => {
     expect(defaultCollectResolveConflictCandidates({ orchDir: "/nope", readdirSync: () => { throw new Error("ENOENT"); } })).toEqual([]);
+  });
+});
+
+describe("classifyLiveConflict", () => {
+  test("delegates to the injected mergeTree seam then classifyMergeTree", async () => {
+    const mergeTree = async (wt, base, head) => {
+      expect(wt).toBe("/wt/CTL-1");
+      expect(base).toBe("main");
+      expect(head).toBe("CTL-1");
+      return { exitCode: 1, output: "CONFLICT (content): Merge conflict in a.ts" };
+    };
+    const result = await classifyLiveConflict({ worktreePath: "/wt/CTL-1", base: "main", head: "CTL-1" }, { mergeTree });
+    expect(result).toEqual({ resolvable: true, conflictFiles: ["a.ts"], conflictTypes: ["content"] });
+  });
+
+  test("returns null when the mergeTree seam throws (probe failed this tick)", async () => {
+    const mergeTree = async () => { throw new Error("fetch failed"); };
+    const result = await classifyLiveConflict({ worktreePath: "/wt/CTL-1", base: "main", head: "CTL-1" }, { mergeTree });
+    expect(result).toBeNull();
+  });
+
+  test("returns null when worktreePath is missing (never spawn git blind)", async () => {
+    const result = await classifyLiveConflict({ worktreePath: null, base: "main", head: "CTL-1" }, { mergeTree: async () => ({ exitCode: 0, output: "" }) });
+    expect(result).toBeNull();
+  });
+});
+
+describe("writeResolveConflictBrief", () => {
+  test("writes the v1 brief atomically and returns the path", () => {
+    const writes = [];
+    const renames = [];
+    const deps = {
+      mkdirSync: () => {},
+      writeFileSync: (p, body) => writes.push([p, body]),
+      renameSync: (from, to) => renames.push([from, to]),
+    };
+    const brief = { ticket: "CTL-1", stalledPhase: "implement", conflictFiles: ["a.ts"], conflictTypes: ["content"], attempt: 1, maxAttempts: 3 };
+    const p = writeResolveConflictBrief("/orch", "CTL-1", brief, deps);
+    expect(p).toBe("/orch/workers/CTL-1/resolve-conflict-brief.json");
+    expect(writes).toHaveLength(1);
+    expect(writes[0][0]).toMatch(/\.tmp\./);
+    const written = JSON.parse(writes[0][1]);
+    expect(written.schema).toBe("resolve-conflict-brief/v1");
+    expect(written.ticket).toBe("CTL-1");
+    expect(written.stalledPhase).toBe("implement");
+    expect(renames).toEqual([[writes[0][0], p]]);
   });
 });
