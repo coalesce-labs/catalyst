@@ -14,9 +14,12 @@
 
 import { readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { createRequire } from "node:module";
 import { isTicketKey } from "./ticket-key.mjs";
 import { classifyMergeTree } from "./stale-pr-rescue.mjs";
 import { defaultMergeTree } from "./stale-pr-rescue-timer.mjs";
+
+const _require = createRequire(import.meta.url);
 
 export const RESOLVE_CONFLICT_STALL_REASON = "source_conflict_ctl708_unavailable";
 export const RESOLVED_MARKER_REASON = "source_conflict_resolvable";
@@ -147,4 +150,77 @@ export function writeResolveConflictBrief(
   writeFile(tmp, JSON.stringify({ schema: "resolve-conflict-brief/v1", writtenAt: new Date().toISOString(), ...brief }, null, 2));
   rename(tmp, p);
   return p;
+}
+
+// markStalledSignalResolving — atomic read-modify-write of the STALLED phase's
+// own signal file: rewrite failureReason (or stalledReason, whichever is
+// present) to RESOLVED_MARKER_REASON. Every other field (bg_job_id, status,
+// etc.) is preserved untouched — read-modify-write, never a blind overwrite.
+export function markStalledSignalResolving(
+  signalPath,
+  { readFileSync: readFile = readFileSync, writeFileSync: writeFile = writeFileSync, renameSync: rename = renameSync } = {},
+) {
+  const sig = JSON.parse(readFile(signalPath, "utf8"));
+  if ("stalledReason" in sig) sig.stalledReason = RESOLVED_MARKER_REASON;
+  else sig.failureReason = RESOLVED_MARKER_REASON;
+  sig.updatedAt = new Date().toISOString();
+  const tmp = `${signalPath}.tmp.${process.pid}`;
+  writeFile(tmp, JSON.stringify(sig, null, 2));
+  rename(tmp, signalPath);
+}
+
+// defaultMarkAndDispatch — the "mark-and-dispatch" action seam. Mirrors
+// defaultInvokeRecoveryPass's dispatch section (recovery-reasoning.mjs:1650-
+// 1828) exactly: lazy-require dispatch.mjs (avoids loading the dispatch graph
+// on the off/shadow paths), settle an sdk-fleet Promise synchronously via
+// isThenable/settleDispatchSync so the success check works identically for bg
+// and sdk executors.
+export function defaultMarkAndDispatch(
+  { ticket, phase, workerDir, worktreePath, base, classification, cycleCount, orchDir },
+  deps = {},
+) {
+  const signalPath = join(workerDir, `phase-${phase}.json`);
+  markStalledSignalResolving(signalPath, deps);
+
+  writeResolveConflictBrief(
+    orchDir,
+    ticket,
+    {
+      stalledPhase: phase,
+      conflictFiles: classification.conflictFiles,
+      conflictTypes: classification.conflictTypes,
+      worktreePath,
+      base,
+      attempt: cycleCount + 1,
+      maxAttempts: RESOLVE_CONFLICT_CYCLE_CAP,
+    },
+    deps,
+  );
+
+  let dispatchTicket, isThenable, settleDispatchSync;
+  try {
+    ({ dispatchTicket, isThenable, settleDispatchSync } = deps.dispatchMod ?? _require("./dispatch.mjs"));
+  } catch (err) {
+    return { success: false, dispatched: false, reason: `dispatch module load failed: ${err.message}` };
+  }
+  const dispatch = deps.dispatch ?? dispatchTicket;
+  const thenableCheck = deps.isThenable ?? isThenable;
+
+  let r;
+  try {
+    const rawR = dispatch(orchDir, ticket, "resolve-conflict");
+    if (thenableCheck && thenableCheck(rawR)) {
+      const settle = deps.settleDispatchSync ?? settleDispatchSync;
+      r = settle(rawR, { verifySync: () => true });
+    } else {
+      r = rawR;
+    }
+  } catch (err) {
+    return { success: false, dispatched: false, reason: `dispatch threw: ${err.message}` };
+  }
+
+  if (r && r.code === 0) {
+    return { success: true, dispatched: true, bgJobId: r.signal?.bg_job_id ?? null };
+  }
+  return { success: false, dispatched: false, reason: r?.stderr ?? `dispatch failed (code ${r?.code ?? "unknown"})` };
 }

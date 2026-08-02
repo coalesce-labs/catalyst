@@ -8,6 +8,8 @@ import {
   defaultCollectResolveConflictCandidates,
   classifyLiveConflict,
   writeResolveConflictBrief,
+  markStalledSignalResolving,
+  defaultMarkAndDispatch,
 } from "./resolve-conflict-sweep.mjs";
 
 describe("constants", () => {
@@ -181,5 +183,59 @@ describe("writeResolveConflictBrief", () => {
     expect(written.ticket).toBe("CTL-1");
     expect(written.stalledPhase).toBe("implement");
     expect(renames).toEqual([[writes[0][0], p]]);
+  });
+});
+
+describe("markStalledSignalResolving", () => {
+  test("rewrites failureReason to RESOLVED_MARKER_REASON, preserves other fields", () => {
+    const reads = { "/w/phase-implement.json": JSON.stringify({ status: "stalled", failureReason: "source_conflict_ctl708_unavailable", bg_job_id: "abc123" }) };
+    const writes = [];
+    const renames = [];
+    markStalledSignalResolving("/w/phase-implement.json", {
+      readFileSync: (p) => reads[p],
+      writeFileSync: (p, body) => writes.push([p, body]),
+      renameSync: (from, to) => renames.push([from, to]),
+    });
+    const written = JSON.parse(writes[0][1]);
+    expect(written.status).toBe("stalled");
+    expect(written.failureReason).toBe("source_conflict_resolvable");
+    expect(written.bg_job_id).toBe("abc123"); // untouched
+    expect(renames).toHaveLength(1);
+  });
+});
+
+describe("defaultMarkAndDispatch", () => {
+  function baseDeps(overrides = {}) {
+    return {
+      readFileSync: () => JSON.stringify({ status: "stalled", failureReason: "source_conflict_ctl708_unavailable" }),
+      writeFileSync: () => {},
+      renameSync: () => {},
+      mkdirSync: () => {},
+      dispatch: () => ({ code: 0, signal: { bg_job_id: "job-1" } }),
+      isThenable: () => false,
+      ...overrides,
+    };
+  }
+
+  test("marks the signal, writes the brief, dispatches — returns success:true", () => {
+    const dispatched = [];
+    const deps = baseDeps({ dispatch: (orchDir, ticket, phase) => { dispatched.push([orchDir, ticket, phase]); return { code: 0 }; } });
+    const result = defaultMarkAndDispatch(
+      { ticket: "CTL-1", phase: "implement", workerDir: "/orch/workers/CTL-1", worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: ["a.ts"], conflictTypes: ["content"] }, cycleCount: 0, orchDir: "/orch" },
+      deps,
+    );
+    expect(result.success).toBe(true);
+    expect(result.dispatched).toBe(true);
+    expect(dispatched).toEqual([["/orch", "CTL-1", "resolve-conflict"]]);
+  });
+
+  test("returns success:false when dispatch reports a non-zero code", () => {
+    const deps = baseDeps({ dispatch: () => ({ code: 1, stderr: "boom" }) });
+    const result = defaultMarkAndDispatch(
+      { ticket: "CTL-1", phase: "implement", workerDir: "/orch/workers/CTL-1", worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: [], conflictTypes: [] }, cycleCount: 0, orchDir: "/orch" },
+      deps,
+    );
+    expect(result.success).toBe(false);
+    expect(result.dispatched).toBe(false);
   });
 });
