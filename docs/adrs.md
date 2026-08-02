@@ -690,3 +690,68 @@ relying on them.
 **Follow-up, independent of this decision** — the unauthenticated orch-monitor control plane on
 `0.0.0.0` is a standing finding, currently contained only by the tailnet perimeter. Untickted as of
 this ADR.
+
+## ADR-028: Deterministic resolvable-conflict sweep (`phase-resolve-conflict`, #1461)
+
+**Proposed 2026-08-02.** Sibling-PR-merge source conflicts stall a ticket with `stalledReason:
+source_conflict_ctl708_unavailable` — written generically at dispatch-time pre-flight rebase, for
+whichever phase (implement/verify/review) was about to run. Two existing mechanisms only partially
+cover this. The CTL-855 `sourceConflictActSeam` (`unstuck-sweep`, ADR-024) force-pushes an
+already-clean branch past a stale flag but throws on any genuine conflict — it was never a resolver.
+`recovery-pass` (ADR-025, CTL-1176, shadow fleet-wide since 2026-08-01) tells its LLM to "resolve it
+yourself" ad hoc on rc=2 — no `classifyMergeTree` gate, no dedicated typed phase, no cycle cap,
+violating ADR-025's own guardrail ("DETERMINISTIC when stuck-type is typed and fix mechanical...
+LLM only with a structured brief + downstream deterministic re-check + hard cycle cap"). Separately,
+`isTicketInFlight` excludes any `stalled` ticket, so `deriveAdvancement`'s verify⇄remediate-style
+detour (CTL-653) never sees these tickets at all — a `deriveAdvancement` branch, as #1461 originally
+proposed, cannot reach them without threading the in-flight gate itself.
+
+**Decision** — a new dedicated tick-loop sweep, `resolve-conflict-sweep.mjs`, structurally mirroring
+`stall-janitor`/`unstuck-sweep` (ADR-024) and governed by ADR-023 (off/shadow/enforce, default
+`off`, every tick — candidates are rare and the classify step is cheap):
+
+1. Scan for phase signals `status:"stalled"`, `stalledReason:"source_conflict_ctl708_unavailable"`,
+   not already marked `source_conflict_resolvable`, under cap.
+2. Classify live: re-run `git merge-tree`, reuse the existing, untouched `classifyMergeTree` from
+   `stale-pr-rescue.mjs` (no reimplementation). Not resolvable → leave for the existing needs-human
+   surfacing (ADR-025 pt. 2). Resolvable → mark `source_conflict_resolvable` (new, non-colliding
+   reason) and dispatch.
+3. Dispatch through the standard `dispatch.mjs → phase-agent-dispatch` envelope (the one recovery-pass
+   already uses) to a new skill, `phase-resolve-conflict`, cloned from `phase-remediate`'s envelope but
+   reading a `resolve-conflict-brief.json` (mirrors `recovery-pass.json` v2 shape) instead of
+   `verify.json`. Rebases additively per the brief's conflict files/types, runs targeted gates,
+   commits, emits `phase.resolve-conflict.complete.<ticket>`.
+4. Once complete, the sweep — not the skill — mechanically clears the original phase's stalled
+   signal, mirroring `maybeResetForRemediateCycle`, dropping the ticket back into `isTicketInFlight`
+   so the ordinary dispatch loop redispatches the phase that stalled. **No `deriveAdvancement` /
+   `resolveReapPredecessor` changes needed**: because the stall reason is already written generically
+   at dispatch time for whichever phase is about to run, the sweep covers implement/verify/review
+   uniformly by construction — the three-predecessor generalization #1461 asked for turns out not to
+   require touching the FSM's predecessor logic at all.
+5. Capped via `RESOLVE_CONFLICT_CYCLE_CAP` (env override, default 3), event-counted via a new
+   `countResolveConflictCycles` mirroring `countRecoveryPassCycles` — a standalone-sweep cap, not a
+   `workflow.default.json` FSM-cycle entry, since this isn't a bidirectional FSM edge like
+   verify⇄remediate. Cap exhausted → `stalledReason: resolve-conflict-cycle-cap-exhausted` (new),
+   escalation comment in the `🔼 **phase-resolve-conflict** escalated...` header convention (parsed by
+   `orch-monitor/lib/inbox-ask.mjs`).
+
+Two small, targeted edits to shared files (not a redesign of either): `unstuck-sweep.mjs`'s
+`STALL_CATEGORY_MAP` gets a `source_conflict_resolvable → skip` entry so CTL-855's seam doesn't fight
+over a ticket this sweep already owns; the terminal-label sweep (`scheduler.mjs`) exempts
+`source_conflict_resolvable` from immediate `needs-human` labeling, so a ticket isn't flagged
+needs-human on the same tick the fix is already in flight.
+
+**Rationale** — matches ADR-025's own deterministic-vs-flexible boundary better than the status quo
+(recovery-pass currently freelances this without the structured-brief/cycle-cap/deterministic-recheck
+guardrail its own ADR requires); reuses `classifyMergeTree` and the standard phase-agent-dispatch
+envelope rather than inventing new conflict-classification or dispatch machinery; sidesteps the
+in-flight gate rather than widening it, per #1461's own scoping comment
+(`#1461#issuecomment-5155144010`).
+
+**Consequences** — `recovery-pass/SKILL.md`'s "resolve it yourself" instruction for rc=2 should
+eventually defer to this sweep's typed path instead of ad hoc LLM resolution; noted here as a
+follow-up, not blocking, since recovery-pass ships shadow-only today and this sweep ships
+independently at `off`. **Rejected**: widening CTL-855's `sourceConflictActSeam` into a real resolver
+(solves a structurally narrower problem — force-push-past-staleness, not merge-conflict resolution);
+a `deriveAdvancement` detour as #1461 originally described (unreachable — stalled tickets are excluded
+from `isTicketInFlight` before `deriveAdvancement` ever runs).
