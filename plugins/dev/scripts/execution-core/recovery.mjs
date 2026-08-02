@@ -133,7 +133,12 @@ import {
   ESCALATION_ASK_CAP, // CTL-1442
   labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
-import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
+import {
+  countReviveEvents as defaultCountReviveEvents,
+  hasCompleteEvent,
+  latestCompleteEventTs,
+  latestCompleteEventAttempt,
+} from "./event-scan.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
 const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", import.meta.url));
@@ -2043,7 +2048,37 @@ export function reclaimDeadWorkIfPossible(
     // fan-out worker (suppress). Defaults to the incremental event-scan query;
     // tests inject a stub. Production wiring is correct by default since
     // hasCompleteEvent reads the real event log.
-    completeEventSeen = ({ ticket: t, phase: p }) => hasCompleteEvent({ ticket: t, phase: p }),
+    //
+    // CTL-778 P2 (bug fix): "seen" was unscoped to the CURRENT dispatch attempt —
+    // hasCompleteEvent only answers "has this ticket+phase EVER completed", so a
+    // phase that completed once and is later redispatched (revive, retry, an
+    // operator's resume) had its brand-new worker reclaimed within seconds of
+    // spawning, because the PRIOR attempt's complete event still satisfied this
+    // check. `sinceIso` (the current signal's own startedAt) scopes it: only a
+    // complete event AT OR AFTER this dispatch's own start counts as "this
+    // worker finished" — a stale complete event from a prior attempt no longer
+    // does. Callers that omit sinceIso keep the old (attempt-unscoped) "ever"
+    // behavior; only the CTL-778 reclaim call site below opts in.
+    //
+    // CTL-778 follow-up (upstream review, PR #2851): envelope timestamps are
+    // SECOND-precision, so a prior attempt's completion and a same-second
+    // redispatch's startedAt compare EQUAL under `ts >= sinceIso` — the stale
+    // completion still satisfies the check, reintroducing the exact bug this
+    // guard exists to close. `sinceAttempt` (the current signal's own `attempt`,
+    // CTL-736) is the precise discriminator: when both the caller and the latest
+    // complete event carry an attempt number, compare THOSE instead of the
+    // coarser timestamp. Optional and fail-open — omit it (or an event with no
+    // recorded attempt) and behavior is byte-identical to the timestamp-only path.
+    completeEventSeen = ({ ticket: t, phase: p, sinceIso, sinceAttempt } = {}) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket: t, phase: p });
+      const ts = latestCompleteEventTs({ ticket: t, phase: p });
+      if (typeof ts !== "string") return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket: t, phase: p });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return ts >= sinceIso;
+    },
     // CTL-658 — resume-session resolver. Maps the dead worker's bg_job_id to a
     // `claude --resume`-compatible UUID (or null) so the revive can continue the
     // dead session instead of re-walking from phase 0. Default reads the real
@@ -2493,7 +2528,12 @@ export function reclaimDeadWorkIfPossible(
     // (CTL-662/736/809-safe). Mirrors the dead-worker branch (B) below.
     if (
       hasProbe(phase) &&
-      completeEventSeen({ ticket, phase }) &&
+      completeEventSeen({
+        ticket,
+        phase,
+        sinceIso: signal.raw?.startedAt,
+        sinceAttempt: signal.raw?.attempt,
+      }) &&
       probes[phase]({ ticket, repoRoot, orchDir })
     ) {
       if (prevBgJobId) {

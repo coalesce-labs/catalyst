@@ -328,6 +328,36 @@ cmd_start() {
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
 
+  # Authenticate the monitor's own Linear calls (peer-heartbeat anchor read,
+  # CTL-1090/CTL-1217) as the Catalyst Orchestrator app-actor, same as the
+  # broker/execution-core start paths (CTL-785/CTL-1577) — without this the
+  # monitor process has no LINEAR_API_TOKEN at all and any direct Linear read
+  # it performs (e.g. readPeerHeartbeatsSync) silently fails closed to {}.
+  source "$SCRIPT_DIR/lib/linear-app-actor.sh"
+  linear_app_actor_auth "catalyst-monitor"
+
+  # CATALYST_CONFIG_FILE pins the Layer-1 config path explicitly so the spawned
+  # server's config resolution (orch-monitor/lib/config-path.ts) never falls back
+  # to a cwd-relative `.catalyst/config.json` lookup. Without this, the server
+  # inherits whatever directory the operator happened to be in when they ran
+  # `catalyst-monitor start` / `catalyst-stack start` — if that directory has no
+  # `.catalyst/config.json` (or the wrong one), the team/project roster and the
+  # Layer-2 Linear-token resolution both silently degrade (empty project list,
+  # board views that never resolve, replies failing with "no Linear credential")
+  # even though a correctly-configured `$CATALYST_DIR/.catalyst/config.json`
+  # exists. Only default it when the caller hasn't already pointed at a specific
+  # file via EITHER var — config-path.ts's documented precedence is
+  # CATALYST_CONFIG_FILE > CATALYST_CONFIG_PATH > cwd fallback, so defaulting
+  # CATALYST_CONFIG_FILE here whenever it's merely unset would silently override
+  # an operator's explicit CATALYST_CONFIG_PATH-only override — and only when the
+  # CATALYST_DIR-relative candidate actually exists, so a relocated CATALYST_DIR
+  # (state-only root, e.g. /var/lib/catalyst) still falls through to the spawned
+  # server's own cwd-relative resolution instead of pinning a nonexistent path.
+  _cm_config_file="${CATALYST_CONFIG_FILE:-}"
+  if [[ -z "$_cm_config_file" && -z "${CATALYST_CONFIG_PATH:-}" && -f "$CATALYST_DIR/.catalyst/config.json" ]]; then
+    _cm_config_file="$CATALYST_DIR/.catalyst/config.json"
+  fi
+  CATALYST_CONFIG_FILE="$_cm_config_file" \
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \
   MONITOR_PUBLIC_DIR="${MONITOR_UI_DIST_DIR}" \
