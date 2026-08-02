@@ -5214,6 +5214,19 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
       // investigation.
       hosts: ["solo"],
       hostName: "solo",
+      // #1461 (final-review finding): this ticket's status:"stalled" signal
+      // ALSO matches the CTL-1176 recovery-pass filter (needs-human/failed/
+      // stalled/unknown), so on a host whose ambient CATALYST_CONFIG_FILE
+      // Layer-2 config has recovery.pass.mode=shadow (e.g. a dev machine
+      // enrolled in the fleet-wide shadow rollout), readRecoveryPassConfig()
+      // picks that up and the recovery-reasoning pass actually runs — and its
+      // OWN default postComment seam shells out to the real
+      // lib/linear-comment-post.sh, making a genuine network call (observed
+      // as "linear-comment-post: token mint failed" in test log output) that
+      // has nothing to do with what THIS test verifies (the terminal-sweep's
+      // needs-human exemption). Pin recovery-pass off explicitly so this test
+      // is hermetic regardless of ambient env/Layer-2 config.
+      recoveryPass: { mode: "off" },
     });
 
     // needs-human must never be applied while the fix is in flight.
@@ -5221,6 +5234,87 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
     expect(removed.filter((r) => r.t === TICKET && r.l === "needs-human")).toHaveLength(0);
     // Still surfaced as an orphan for dashboard visibility.
     expect(orphans.some((o) => o.ticket === TICKET)).toBe(true);
+  });
+
+  // #1461 Fix 3 (final-review finding): the RESOLVED_MARKER_REASON exemption
+  // above used to `continue`, skipping the ENTIRE rest of the loop iteration —
+  // including convergeStartedHeldLabels (CTL-1068 orphaned held-label
+  // retraction) and the CTL-695 terminal-worker reap nomination, neither of
+  // which has anything to do with needs-human labeling. The fix narrows the
+  // exemption to ONLY the needs-human label call. This test proves both OTHER
+  // steps still run for a ticket under active resolve-conflict resolution.
+  //
+  // convergeDispositionLabel (CTL-764 finding 5) is NOT combined into this
+  // same integration test: it requires a needs-input phase signal, and
+  // byActivePhase (signal-reader.mjs) always ranks a NON-terminal phase (like
+  // needs-input) ahead of a terminal one (like the "stalled" phase carrying
+  // RESOLVED_MARKER_REASON) when picking the ticket's canonical active signal
+  // — so a ticket that would ever trip the OLD `continue` (i.e. whose
+  // canonical signal IS the RESOLVED_MARKER_REASON stall) structurally cannot
+  // simultaneously have a needs-input phase outrank it. Verified by code
+  // inspection instead: convergeDispositionLabel's block sits AFTER the whole
+  // if/else this fix touches, at the SAME loop-body nesting level — the fix
+  // (removing the `continue`, narrowing the skip to just the
+  // labelNeedsHumanUnlessBeliefOwner call) makes it unconditionally reachable
+  // for every ticket exactly like convergeStartedHeldLabels/reap-nomination
+  // below, which ARE directly integration-tested here.
+  test("#1461 Fix 3: RESOLVED_MARKER_REASON exemption is narrowly scoped — held-label retraction and reap nomination still run", () => {
+    const TICKET = "CTL-1461-T2";
+    // The stall this sweep is actively resolving (exempted from needs-human).
+    // Carries a bg_job_id so the CTL-695 reap nomination has something to act on.
+    writeSignalRaw(TICKET, "implement", {
+      ticket: TICKET,
+      phase: "implement",
+      status: "stalled",
+      failureReason: RESOLVED_MARKER_REASON,
+      bg_job_id: "resconf01",
+    });
+    // A stale "queued" held-label marker — exercises convergeStartedHeldLabels'
+    // retraction (CTL-1068), independent of the exemption.
+    const workerDir = join(orchDir, "workers", TICKET);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-queued.applied"), "");
+
+    const applied = [];
+    const removed = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true };
+      },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
+    };
+    const gateway = {
+      getDescriptor: (id) =>
+        id === TICKET ? { state: "In Progress", removed: false, updatedAt: FRESH, labels: [] } : null,
+    };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      gateway,
+      hosts: ["solo"],
+      hostName: "solo",
+      recoveryPass: { mode: "off" }, // see T1's own comment above for why
+    });
+
+    // needs-human exemption still holds.
+    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(false);
+
+    // (1) CTL-1068 held-label retraction still runs.
+    expect(removed.some((r) => r.t === TICKET && r.l === "queued")).toBe(true);
+    expect(existsSync(join(workerDir, ".linear-label-queued.applied"))).toBe(false);
+
+    // (2) CTL-695 terminal-worker reap nomination still runs.
+    const reapEvts = readEventLog().filter(
+      (e) => e.event === "phase.terminal.reap-requested" && e.bg_job_id === "resconf01"
+    );
+    expect(reapEvts.length).toBe(1);
   });
 
   // T4: steady-state-zero-writes — no stalled/failed, no marker → zero needs-human writes
