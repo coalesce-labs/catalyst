@@ -984,6 +984,26 @@ export function startDaemon({
     // CTL-1365b: dispatch === dispatchFn so the crash-recovery re-dispatch honors
     // the executor flag (defaultDispatch under bg — reconcileBootResume's own
     // default — so byte-identical to today).
+    // CTL-1612 (Codex P1, round 2): materialize cluster secrets and arm the GitHub
+    // credential BEFORE anything dispatches. reconcileBoot and processApprovedResumes
+    // below launch workers synchronously, and dispatch.mjs spawns them with
+    // ...process.env — so a node returning after a rotation would hand every resumed
+    // worker the stale credential and they would keep it for their whole lifetime, even
+    // though the daemon's own env gets corrected later. clusterSync() takes no arguments
+    // and is fail-open, so hoisting it here is safe; the periodic refresh timer is still
+    // armed further down, next to the other timers.
+    if (enableClusterSync) {
+      try {
+        const bootSync = clusterSync();
+        log.info({ pull: bootSync?.pull }, "execution-core daemon: cluster-repo synced at boot");
+      } catch (err) {
+        log.warn({ err: err?.message }, "execution-core daemon: boot cluster-sync threw (continuing)");
+      }
+    }
+    // Probe the credential we will actually hand to those workers, re-arming first from
+    // whatever the sync just put on disk. Advisory: never throws, never blocks boot.
+    githubAuthPreflight({ env: process.env, log });
+
     const bootResume = reconcileBoot({
       orchDir,
       report,
@@ -1232,15 +1252,9 @@ export function startDaemon({
     // NEVER abort daemon boot or wedge a timer tick. Refresh is a no-op ("no-head")
     // when no clone exists, and skips the sops spawn entirely when HEAD is unchanged.
     if (enableClusterSync) {
-      try {
-        const bootSync = clusterSync();
-        log.info({ pull: bootSync?.pull }, "execution-core daemon: cluster-repo synced at boot");
-      } catch (err) {
-        log.warn(
-          { err: err?.message },
-          "execution-core daemon: boot cluster-sync threw (continuing)"
-        );
-      }
+      // CTL-1612: the BOOT sync moved earlier (before the boot-resume dispatches, so
+      // resumed workers never inherit a stale credential). Only the periodic refresh
+      // is armed here, alongside the other timers.
       _clusterSyncTimer = setInterval(() => {
         try {
           refreshClusterSecrets();
@@ -1251,13 +1265,6 @@ export function startDaemon({
       _clusterSyncTimer.unref?.();
     }
 
-    // CTL-1612: prove the GitHub credential this daemon will actually use is usable, and
-    // say so LOUDLY if it is not. Deliberately placed AFTER the boot clusterSync (Codex
-    // P1): a node that was offline during a rotation starts on the stale local copy, and
-    // the sync above is what puts the replacement on disk — so re-arm from the file and
-    // probe THAT, or the daemon would 401 until a second manual restart. Purely advisory
-    // — never throws, never blocks boot, alerts only on a definitive 401.
-    githubAuthPreflight({ env: process.env, log });
   } catch (err) {
     stopDaemon();
     throw err;

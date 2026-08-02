@@ -17,12 +17,13 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test github-auth-preflight.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   GITHUB_PROBE_TIMEOUT_MS,
   defaultGithubTokenFile,
+  githubTokenFileCandidates,
   defaultProbeGithubAuth,
   isUnauthorizedOutput,
   rearmGithubTokenFromFile,
@@ -372,10 +373,31 @@ describe("defaultGithubTokenFile", () => {
     ).toBe("/etc/catalyst/explicit-github-token");
   });
 
-  test("XDG_CONFIG_HOME is honored ahead of $HOME/.config (matches setup-webhooks.sh:23)", () => {
+  // CTL-1612 (Codex P1, round 2): cluster-sync — the thing that actually WRITES this
+  // file — resolves its destination from dirname(getLayer2ConfigPath()), whose default is
+  // hardcoded ~/.config/catalyst and is NOT XDG-aware. Preferring the XDG path would make
+  // an XDG host miss every rotation, which is strictly worse than the hardcoded read it
+  // replaced. So the writer's destination is FIRST and XDG is a fallback.
+  test("the cluster-sync destination outranks XDG_CONFIG_HOME (the writer is not XDG-aware)", () => {
     expect(defaultGithubTokenFile({ XDG_CONFIG_HOME: "/xdg-config", HOME: "/home/fake" })).toBe(
-      join("/xdg-config", "catalyst", "github-token"),
+      join("/home/fake", ".config", "catalyst", "github-token"),
     );
+  });
+
+  test("XDG_CONFIG_HOME is still offered as a FALLBACK candidate, after the writer's dir", () => {
+    expect(githubTokenFileCandidates({ XDG_CONFIG_HOME: "/xdg-config", HOME: "/home/fake" })).toEqual([
+      join("/home/fake", ".config", "catalyst", "github-token"),
+      join("/xdg-config", "catalyst", "github-token"),
+    ]);
+  });
+
+  test("CATALYST_LAYER2_CONFIG_FILE moves the primary candidate, mirroring the writer", () => {
+    expect(
+      githubTokenFileCandidates({
+        CATALYST_LAYER2_CONFIG_FILE: "/opt/cfg/catalyst/config.json",
+        HOME: "/home/fake",
+      })[0],
+    ).toBe(join("/opt/cfg/catalyst", "github-token"));
   });
 
   test("falls back to $HOME/.config when XDG_CONFIG_HOME is unset", () => {
@@ -528,10 +550,31 @@ describe("rearmGithubTokenFromFile", () => {
     expect(reads).toHaveLength(0); // short-circuits before any read
   });
 
-  test("resolves the file through the XDG-aware path, not a hardcoded ~/.config", () => {
+  test("tries the cluster-sync destination FIRST, then falls back to the XDG path", () => {
     const env = { XDG_CONFIG_HOME: "/xdg-config", HOME: "/home/fake" };
     const { reads } = rearmWith({ env, files: {} });
-    expect(reads).toEqual([join("/xdg-config", "catalyst", "github-token")]);
+    expect(reads).toEqual([
+      join("/home/fake", ".config", "catalyst", "github-token"),
+      join("/xdg-config", "catalyst", "github-token"),
+    ]);
+  });
+
+  // The writers disagree, so a host can legitimately have the credential in EITHER
+  // place. Whichever exists must be found — this is the XDG-host rotation case.
+  test("finds the credential when only the XDG copy exists", () => {
+    const env = { XDG_CONFIG_HOME: "/xdg-config", HOME: "/home/fake", GITHUB_TOKEN: STALE_TOKEN };
+    const xdgPath = join("/xdg-config", "catalyst", "github-token");
+    const out = rearmGithubTokenFromFile({
+      env,
+      readFile: (p) => {
+        if (p === xdgPath) return ROTATED_TOKEN;
+        throw new Error("ENOENT");
+      },
+      log: null,
+    });
+    expect(out).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
   });
 
   test("advisory only: a missing log never breaks the re-arm", () => {
@@ -659,5 +702,44 @@ describe("resolveGithubBootAuth re-arms before probing", () => {
     expect(rec.state.alerts[0].tokenSource).toBe("shared-file-resynced");
     expect(rec.loggedText()).not.toContain(ROTATED_TOKEN);
     expect(JSON.stringify(rec.state.alerts)).not.toContain(ROTATED_TOKEN);
+  });
+});
+
+// ── daemon boot ORDERING (CTL-1612, Codex P1 round 2) ─────────────────────────
+//
+// The preflight's placement in daemon.mjs is load-bearing, and both directions have
+// already been wrong once:
+//   * originally it ran BEFORE the boot clusterSync, so a node offline during a rotation
+//     probed the stale credential and never saw the replacement the sync put on disk;
+//   * moving it after the sync then left it AFTER reconcileBoot/processApprovedResumes,
+//     which dispatch workers synchronously — and dispatch.mjs spawns them with
+//     ...process.env, so every resumed worker inherited the stale credential for life.
+// The only correct window is: clusterSync → preflight → any dispatch. A structural
+// assertion is the honest way to pin that; a unit test cannot observe boot ordering.
+describe("daemon boot ordering", () => {
+  const daemonSrc = readFileSync(new URL("./daemon.mjs", import.meta.url), "utf8").split("\n");
+  const lineOf = (needle) => daemonSrc.findIndex((l) => l.includes(needle));
+
+  test("the boot cluster-sync runs BEFORE the credential preflight", () => {
+    const sync = lineOf("const bootSync = clusterSync()");
+    const preflight = lineOf("githubAuthPreflight({ env: process.env, log })");
+    expect(sync).toBeGreaterThan(-1);
+    expect(preflight).toBeGreaterThan(-1);
+    expect(sync).toBeLessThan(preflight);
+  });
+
+  test("the credential preflight runs BEFORE anything dispatches a worker", () => {
+    const preflight = lineOf("githubAuthPreflight({ env: process.env, log })");
+    const bootResume = lineOf("const bootResume = reconcileBoot(");
+    const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn })");
+    expect(bootResume).toBeGreaterThan(-1);
+    expect(approved).toBeGreaterThan(-1);
+    expect(preflight).toBeLessThan(bootResume);
+    expect(preflight).toBeLessThan(approved);
+  });
+
+  test("the preflight is wired exactly once (no leftover duplicate call site)", () => {
+    const hits = daemonSrc.filter((l) => l.includes("githubAuthPreflight({")).length;
+    expect(hits).toBe(1);
   });
 });

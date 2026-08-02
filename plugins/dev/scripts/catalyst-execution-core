@@ -154,12 +154,28 @@ _default_otel_from_user_settings() {
 # whitespace-only value IS sent and 401s, which is why we strip before testing.)
 # Minimal-touch: reads the file into a local, exports it, and NEVER logs or echoes the value.
 _project_shared_github_token() {
-	# XDG-aware, matching setup-webhooks.sh:23 and lib/linear-app-actor.sh:30 — on a host
-	# with XDG_CONFIG_HOME set, cluster-sync materializes the file there, and a hardcoded
-	# ~/.config would silently miss it.
-	local _f="${CATALYST_GITHUB_TOKEN_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst/github-token}"
-	local _tok=""
-	[[ -r "$_f" ]] && _tok="$(tr -d '[:space:]' <"$_f" 2>/dev/null)"
+	# Resolution CHAIN, because the writers disagree (Codex P1, round 2). cluster-sync
+	# materializes bare secrets into dirname(getLayer2ConfigPath()), whose default is
+	# HARDCODED ~/.config/catalyst (config.mjs) — it is NOT XDG-aware. Other tooling
+	# (setup-webhooks.sh:23, lib/linear-app-actor.sh:30) IS. Reading only the XDG path
+	# would therefore miss every rotation on an XDG host, which is strictly worse than
+	# the hardcoded read it replaced. So try the cluster-sync destination FIRST, then the
+	# XDG location, and take the first readable non-empty file.
+	local _tok="" _f=""
+	local _cands=()
+	if [[ -n "${CATALYST_GITHUB_TOKEN_FILE:-}" ]]; then
+		_cands=("$CATALYST_GITHUB_TOKEN_FILE")
+	else
+		# cluster-sync's own destination (honors the Layer-2 override the writer honors).
+		local _l2="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+		_cands+=("$(dirname "$_l2")/github-token")
+		_cands+=("${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst/github-token")
+	fi
+	for _f in "${_cands[@]}"; do
+		[[ -r "$_f" ]] || continue
+		_tok="$(tr -d '[:space:]' <"$_f" 2>/dev/null)"
+		[[ -n "$_tok" ]] && break
+	done
 	if [[ -n "$_tok" ]]; then
 		export GITHUB_TOKEN="$_tok" GH_TOKEN="$_tok"
 		export CATALYST_GITHUB_TOKEN_SOURCE="shared-file"
@@ -180,8 +196,10 @@ _project_shared_github_token() {
 		export CATALYST_GITHUB_TOKEN_SOURCE="none"
 	fi
 	# Remember what WE projected so the post-source reconcile below can tell an operator
-	# override apart from our own value.
+	# override apart from our own value. BOTH names are tracked: an override may set
+	# either one, and GH_TOKEN is the one `gh` actually reads first.
 	_CATALYST_PROJECTED_GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+	_CATALYST_PROJECTED_GH_TOKEN="${GH_TOKEN:-}"
 }
 
 # _reconcile_github_token_aliases — CTL-1612 (Codex P2). MUST run AFTER
@@ -193,13 +211,23 @@ _project_shared_github_token() {
 # the override would be silently ignored and the provenance breadcrumb would still claim
 # "shared-file". Re-point the alias at the winning value and correct the breadcrumb.
 _reconcile_github_token_aliases() {
-	# Nothing changed the primary name → the projection's own pairing already holds.
-	[[ "${GITHUB_TOKEN:-}" == "${_CATALYST_PROJECTED_GITHUB_TOKEN:-}" ]] && return 0
-	if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-		export GITHUB_TOKEN
-		export GH_TOKEN="$GITHUB_TOKEN"
-		export CATALYST_GITHUB_TOKEN_SOURCE="operator-override"
+	local _gh_changed=0 _gt_changed=0 _win=""
+	[[ "${GH_TOKEN:-}" != "${_CATALYST_PROJECTED_GH_TOKEN:-}" ]] && _gh_changed=1
+	[[ "${GITHUB_TOKEN:-}" != "${_CATALYST_PROJECTED_GITHUB_TOKEN:-}" ]] && _gt_changed=1
+	# Neither name moved → the projection's own pairing already holds.
+	(( _gh_changed || _gt_changed )) || return 0
+	# An override may set EITHER name. GH_TOKEN wins when it moved, because that is the
+	# name `gh` resolves first — so an operator who set only GH_TOKEN clearly meant it,
+	# and mirroring GITHUB_TOKEN onto it would silently defeat the override.
+	if (( _gh_changed )) && [[ -n "${GH_TOKEN:-}" ]]; then
+		_win="$GH_TOKEN"
+	elif (( _gt_changed )) && [[ -n "${GITHUB_TOKEN:-}" ]]; then
+		_win="$GITHUB_TOKEN"
 	fi
+	# An override that BLANKS a name is not a credential — leave the pair as projected.
+	[[ -n "$_win" ]] || return 0
+	export GITHUB_TOKEN="$_win" GH_TOKEN="$_win"
+	export CATALYST_GITHUB_TOKEN_SOURCE="operator-override"
 }
 
 # CTL-846: is host:port accepting TCP connections? bash /dev/tcp first, nc fallback.

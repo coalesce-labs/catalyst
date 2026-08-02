@@ -20,7 +20,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { log as defaultLog } from "./config.mjs";
 import { emitGithubAuthUnusable } from "./dispatch-alert.mjs";
@@ -72,12 +72,28 @@ export function defaultProbeGithubAuth(env = process.env) {
   }
 }
 
-// defaultGithubTokenFile — XDG-aware, mirroring the launcher's
-// _project_shared_github_token and setup-webhooks.sh:23.
+// githubTokenFileCandidates — the resolution CHAIN, in priority order. Mirrors the
+// launcher's _project_shared_github_token exactly.
+//
+// The writers disagree (Codex P1, round 2): cluster-sync materializes bare secrets into
+// dirname(getLayer2ConfigPath()), whose default is HARDCODED ~/.config/catalyst and is
+// NOT XDG-aware, while other tooling (setup-webhooks.sh:23, lib/linear-app-actor.sh:30)
+// IS. Reading only the XDG path would miss every rotation on an XDG host — strictly worse
+// than the hardcoded read. So prefer cluster-sync's own destination, then fall back to
+// the XDG location, and take the first readable non-empty file.
+export function githubTokenFileCandidates(env = process.env) {
+  if (env?.CATALYST_GITHUB_TOKEN_FILE) return [env.CATALYST_GITHUB_TOKEN_FILE];
+  const home = env?.HOME ?? homedir();
+  const layer2 = env?.CATALYST_LAYER2_CONFIG_FILE ?? join(home, ".config", "catalyst", "config.json");
+  const out = [join(dirname(layer2), "github-token")];
+  const xdg = join(env?.XDG_CONFIG_HOME || join(home, ".config"), "catalyst", "github-token");
+  if (!out.includes(xdg)) out.push(xdg);
+  return out;
+}
+
+// defaultGithubTokenFile — the highest-priority candidate (cluster-sync's destination).
 export function defaultGithubTokenFile(env = process.env) {
-  if (env?.CATALYST_GITHUB_TOKEN_FILE) return env.CATALYST_GITHUB_TOKEN_FILE;
-  const base = env?.XDG_CONFIG_HOME || join(env?.HOME ?? homedir(), ".config");
-  return join(base, "catalyst", "github-token");
+  return githubTokenFileCandidates(env)[0];
 }
 
 // rearmGithubTokenFromFile — CTL-1612 (Codex P1). Re-read the shared credential from
@@ -102,14 +118,23 @@ export function rearmGithubTokenFromFile({
     if (env?.CATALYST_GITHUB_TOKEN_SOURCE === "operator-override") {
       return { rearmed: false, reason: "operator-override" };
     }
-    const file = defaultGithubTokenFile(env);
-    let raw;
-    try {
-      raw = readFile(file);
-    } catch {
-      return { rearmed: false, reason: "absent" }; // no shared file on this host → no-op
+    let tok = "";
+    let found = false;
+    for (const file of githubTokenFileCandidates(env)) {
+      let raw;
+      try {
+        raw = readFile(file);
+      } catch {
+        continue; // not on this host — try the next candidate
+      }
+      found = true;
+      const candidate = String(raw ?? "").replace(/\s+/g, "");
+      if (candidate) {
+        tok = candidate;
+        break;
+      }
     }
-    const tok = String(raw ?? "").replace(/\s+/g, "");
+    if (!found) return { rearmed: false, reason: "absent" }; // no shared file anywhere
     // Never install an empty value: "" reads as SET to `??`/`${X:-}` and would defeat
     // gh's hosts.yml/keyring fallback for hosts that rely on it.
     if (!tok) return { rearmed: false, reason: "empty" };

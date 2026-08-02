@@ -532,6 +532,87 @@ else
   pass "T18 transcript contains no token-shaped string (no gh* prefix)"
 fi
 
+# ─── 19: Codex round-2 P1 #6 — the cluster-sync destination outranks XDG ───────
+# cluster-sync WRITES bare secrets into dirname(getLayer2ConfigPath()), whose default is
+# a HARDCODED ~/.config/catalyst — it is NOT XDG-aware. Reading only the XDG path (the
+# round-1 fix) would miss every rotation on an XDG host: strictly worse than the
+# hardcoded read it replaced. The reader is now a CHAIN: writer's dir first, XDG second.
+echo "test 19: resolution chain — cluster-sync destination outranks XDG_CONFIG_HOME"
+# The probe harness pins CATALYST_LAYER2_CONFIG_FILE="$T/layer2.json", so the
+# cluster-sync destination this reader must prefer is dirname(that) = "$T" — the same
+# resolution the WRITER uses. Placing the fixture there proves the reader follows the
+# Layer-2 override exactly as cluster-sync does, not merely a hardcoded ~/.config.
+mkdir -p "$T/xdghome/catalyst"
+printf '%s' "$FAKE_FILE_TOKEN" > "$T/github-token"
+printf 'ghp_XDG-FAKE-DECOY-0000000000000000000' > "$T/xdghome/catalyst/github-token"
+OUT="$(probe T19a XDG_CONFIG_HOME="$T/xdghome" EXPECT_VALUE="$FAKE_FILE_TOKEN" \
+  FORBID_VALUE='ghp_XDG-FAKE-DECOY-0000000000000000000')"
+assert_line "$OUT" "source=shared-file" "T19a armed from a file"
+assert_line "$OUT" "match_github=yes" "T19a took the cluster-sync destination, not the XDG decoy"
+assert_line "$OUT" "forbid_hit=no" "T19a the XDG copy did NOT win"
+
+# ...but the XDG copy is still a FALLBACK: on a host where only it exists, it must be found.
+echo "test 19b: XDG copy is still found when the cluster-sync destination is absent"
+rm -f "$T/github-token"
+printf '%s' "$FAKE_FILE_TOKEN" > "$T/xdghome/catalyst/github-token"
+OUT="$(probe T19b XDG_CONFIG_HOME="$T/xdghome" EXPECT_VALUE="$FAKE_FILE_TOKEN")"
+assert_line "$OUT" "source=shared-file" "T19b armed from the XDG fallback"
+assert_line "$OUT" "match_github=yes" "T19b XDG fallback value used"
+rm -f "$T/xdghome/catalyst/github-token"
+
+# ─── 20: Codex round-2 P2 #8 — a GH_TOKEN-only operator override must survive ──
+# execution-core.env may override EITHER alias. Round-1 only handled the
+# GITHUB_TOKEN-only case: a GH_TOKEN-only override left GITHUB_TOKEN equal to the
+# projected value, so the reconcile early-returned, provenance stayed "shared-file", and
+# the post-sync re-arm then overwrote BOTH names with the shared-file value — silently
+# defeating an explicit operator override. GH_TOKEN wins when it is the one that moved,
+# because that is the name `gh` resolves first.
+echo "test 20: a GH_TOKEN-only operator override wins and is mirrored onto GITHUB_TOKEN"
+printf '%s' "$FAKE_FILE_TOKEN" > "$T/file.token"
+OUT="$(
+  env -i PATH="$PATH" HOME="$T/home" HELPER="$T/helper.sh" \
+    CATALYST_GITHUB_TOKEN_FILE="$T/file.token" RECONCILE="$T/reconcile.sh" \
+    CATALYST_LAYER2_CONFIG_FILE="$T/layer2.json" \
+    bash -c '
+      # shellcheck disable=SC1090
+      source "$HELPER"
+      # shellcheck disable=SC1090
+      source "$RECONCILE"
+      _project_shared_github_token
+      GH_TOKEN=ghp_GHONLY-FAKE-OVERRIDE-000000000   # execution-core.env sets ONLY GH_TOKEN
+      _reconcile_github_token_aliases
+      echo "source=$CATALYST_GITHUB_TOKEN_SOURCE"
+      [ "$GH_TOKEN" = ghp_GHONLY-FAKE-OVERRIDE-000000000 ] && echo "gh_is_override=yes" || echo "gh_is_override=no"
+      [ "$GITHUB_TOKEN" = "$GH_TOKEN" ] && echo "agree=yes" || echo "agree=no"
+    '
+)"
+printf '### T20\n%s\n' "$OUT" >> "$ALL_OUT"
+assert_line "$OUT" "source=operator-override" "T20 provenance corrected to operator-override"
+assert_line "$OUT" "gh_is_override=yes" "T20 the GH_TOKEN-only override survived"
+assert_line "$OUT" "agree=yes" "T20 GITHUB_TOKEN mirrored onto the winning override"
+
+echo "test 20b: an override that BLANKS a name is not treated as a credential"
+OUT="$(
+  env -i PATH="$PATH" HOME="$T/home" HELPER="$T/helper.sh" \
+    CATALYST_GITHUB_TOKEN_FILE="$T/file.token" RECONCILE="$T/reconcile.sh" \
+    CATALYST_LAYER2_CONFIG_FILE="$T/layer2.json" \
+    bash -c '
+      # shellcheck disable=SC1090
+      source "$HELPER"
+      # shellcheck disable=SC1090
+      source "$RECONCILE"
+      _project_shared_github_token
+      GH_TOKEN=""
+      _reconcile_github_token_aliases
+      echo "source=$CATALYST_GITHUB_TOKEN_SOURCE"
+      [ -n "$GITHUB_TOKEN" ] && echo "primary_still_set=yes" || echo "primary_still_set=no"
+    '
+)"
+printf '### T20b\n%s\n' "$OUT" >> "$ALL_OUT"
+assert_line "$OUT" "source=shared-file" "T20b a blanked alias does not claim operator-override"
+assert_line "$OUT" "primary_still_set=yes" "T20b the working projected credential is preserved"
+
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "catalyst-execution-core-github-token: ${PASSES} passed, ${FAILURES} failed"
