@@ -12805,3 +12805,23 @@ describe("holisticBoardHealthAct — latchedNoClock (CTL-1610)", () => {
     expect(r.latchedNoClock).toBe(false);
   });
 });
+
+// ─── CTL-1610 (Phase 3): latchedNoClock triggers repair at call site ──────────
+describe("holisticBoardHealthAct — Phase 3 repair signal (CTL-1610)", () => {
+  test("(CTL-1610) latchedNoClock:true is the repair trigger — caller invokes restampNoClockEscalations", () => {
+    // The repair fn is called by the production `act` callback in scheduler.mjs when
+    // latchedNoClock is true (see the recoveryRestampNoClockEscalations call site).
+    // Verify the signal comes through so the caller can act on it.
+    const r = holisticBoardHealthAct(
+      { candidates: ["CTL-X"], decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: () => true,
+        invokeRecoveryPass: () => ({}),
+        recordIntent: () => {},
+      },
+    );
+    expect(r.latchedNoClock).toBe(true); // caller checks this and calls restampNoClockEscalations
+  });
+});

@@ -277,6 +277,7 @@ import {
   defaultWriteEscalationSignal as recoveryWriteEscalationSignal,
   defaultReadIntentAttempts as recoveryReadIntentAttempts,
   defaultLatchHasNoClock as recoveryLatchHasNoClock, // CTL-1610 (Phase 2)
+  restampNoClockEscalations as recoveryRestampNoClockEscalations, // CTL-1610 (Phase 3)
 } from "./recovery-reasoning.mjs";
 // CTL-1331: the async board-health delegate queue. countQueuedDelegates is the
 // slot reservation (a queued/claimed delegate has taken a slot its `claude --bg`
@@ -7885,7 +7886,7 @@ function runTick() {
             dispatchTicket: (o, t, p) =>
               dispatchTicket(o, t, p, { dispatch: runningOpts.dispatch }),
           };
-          return holisticBoardHealthAct(
+          const actResult = holisticBoardHealthAct(
             { anchor, candidates, boardContext, decision },
             {
               // CTL-1440 (Codex R1): holistic:true — a board-health defer is
@@ -7899,6 +7900,13 @@ function runTick() {
               recordIntent: (cand, intent) => recoveryRecordIntent(cand, intent, deps),
             }
           );
+          // CTL-1610 (Phase 3): when we detect a no-clock latch (timestamp-less
+          // escalated intent that can never age out), re-stamp it immediately so
+          // it becomes TTL-bounded. Fail-open — repair failure never blocks dispatch.
+          if (actResult?.latchedNoClock) {
+            try { recoveryRestampNoClockEscalations(deps); } catch { /* best-effort */ }
+          }
+          return actResult;
         },
       },
     });
