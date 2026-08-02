@@ -1789,3 +1789,51 @@ describe("buildBoardScanEvent — act.skippedReasonNoClock round-trip (CTL-1610)
     expect(ev.details.act.skippedReasonNoClock).toBe(true);
   });
 });
+
+// ─── CTL-1610 (Phase 3): boardHealthPass maps actResult.latchedNoClock →
+//     the emitted scan's skippedReasonNoClock (the glue seam between
+//     holisticBoardHealthAct's return and checkActuationLiveness). Added by
+//     phase-verify to close the one line (board-health.mjs:1496) that neither
+//     the holisticBoardHealthAct nor the buildBoardScanEvent test exercised. ──
+describe("boardHealthPass — latchedNoClock → scan.skippedReasonNoClock (CTL-1610)", () => {
+  test("(CTL-1610) an exhausted act with latchedNoClock:true emits skippedReasonNoClock:true", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: true }),
+      }),
+    );
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("all-candidates-exhausted");
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(true);
+  });
+
+  test("(CTL-1610) a well-formed exhausted act (latchedNoClock:false) stays skippedReasonNoClock:false", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: false }),
+      }),
+    );
+    expect(emits[0].details.act.skippedReason).toBe("all-candidates-exhausted");
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
+  });
+
+  test("(CTL-1610) a dispatched act forces skippedReasonNoClock:false regardless of latch signal", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: true, candidate: "CTL-1", latchedNoClock: true }),
+      }),
+    );
+    expect(emits[0].details.act.dispatched).toBe(true);
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
+  });
+});
