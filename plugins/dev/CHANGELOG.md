@@ -1,5 +1,17 @@
 # Changelog
 
+## [12.42.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.41.0...catalyst-dev-v12.42.0) (2026-08-02)
+
+
+### Features
+
+* **dev:** CTL-1417 — worktree-removal self-protection guard ([#2556](https://github.com/coalesce-labs/catalyst/issues/2556)) ([24b9a76](https://github.com/coalesce-labs/catalyst/commit/24b9a76e19630d214d3993220be98a5ed0cb0ad5))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1573 validate reply Origin against a trusted allowlist, not the request Host ([#2857](https://github.com/coalesce-labs/catalyst/issues/2857)) ([10ecce7](https://github.com/coalesce-labs/catalyst/commit/10ecce7513d6d4cc40e30f5e0ca9256b048fed01))
+
 ## [12.41.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.40.0...catalyst-dev-v12.41.0)
 
 Jul 31, 2026
