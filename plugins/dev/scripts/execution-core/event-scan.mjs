@@ -50,6 +50,22 @@ const REMEDIATE_NAME_PREFIX = "phase.remediate.complete.";
 // one phase.recovery-pass.complete.<ticket> event. Durable (survives signal
 // resets), so the cap holds across ticks/restarts.
 const RECOVERY_PASS_NAME_PREFIX = "phase.recovery-pass.complete.";
+// CTL-1176-adjacent, #1461: the resolve-conflict-sweep dispatch budget, event-
+// counted exactly like countRemediateCycles/countRecoveryPassCycles. One
+// completed resolve-conflict run == one phase.resolve-conflict.complete.<ticket>
+// event. Durable (survives the stalled-signal clear), so the cap holds across
+// ticks/restarts.
+const RESOLVE_CONFLICT_NAME_PREFIX = "phase.resolve-conflict.complete.";
+// #1461 Fix 2 (final-review finding): a resolve-conflict run that FAILS (the
+// skill's documented hard-error path, `phase.resolve-conflict.failed.<ticket>`)
+// never incremented the cap counter under the complete-only prefix above —
+// countResolveConflictCycles counts successes only, so a failed/never-completing
+// run left the ticket marked RESOLVED_MARKER_REASON forever with no path to the
+// cap-exhaustion escalate route (permanently invisible to every operator
+// surface). countResolveConflictAttempts (below) counts BOTH prefixes so
+// repeated failures eventually reach RESOLVE_CONFLICT_CYCLE_CAP and escalate,
+// exactly like a repeated cycle would.
+const RESOLVE_CONFLICT_FAILED_PREFIX = "phase.resolve-conflict.failed.";
 
 // CTL-802 — countTicketEventsInWindow (the CTL-671 runaway detector) used to scan
 // the WHOLE log from offset 0 on every call — and it is called once per in-flight
@@ -86,7 +102,11 @@ const _index = new Map(); // path -> { cursor, leftover, events: [...], phaseEve
 function isRelevant(name) {
   return (
     typeof name === "string" &&
-    (REVIVE_NAME_RE.test(name) || name.startsWith(REMEDIATE_NAME_PREFIX) || COMPLETE_NAME_RE.test(name))
+    (REVIVE_NAME_RE.test(name) ||
+      name.startsWith(REMEDIATE_NAME_PREFIX) ||
+      name.startsWith(RESOLVE_CONFLICT_NAME_PREFIX) ||
+      name.startsWith(RESOLVE_CONFLICT_FAILED_PREFIX) ||
+      COMPLETE_NAME_RE.test(name))
   );
 }
 
@@ -211,6 +231,32 @@ export function countRemediateCycles({ ticket, orchId, since, path = getEventLog
 export function countRecoveryPassCycles({ ticket, orchId, since, path = getEventLogPath() } = {}) {
   if (!ticket) throw new Error("countRecoveryPassCycles: ticket required");
   return countByExactName(`${RECOVERY_PASS_NAME_PREFIX}${ticket}`, { orchId, since, path });
+}
+
+// countResolveConflictCycles — number of phase.resolve-conflict.complete.<ticket>
+// envelopes (#1461). The event-counted resolve-conflict-sweep dispatch budget,
+// mirroring countRemediateCycles/countRecoveryPassCycles exactly.
+export function countResolveConflictCycles({ ticket, orchId, since, path = getEventLogPath() } = {}) {
+  if (!ticket) throw new Error("countResolveConflictCycles: ticket required");
+  return countByExactName(`${RESOLVE_CONFLICT_NAME_PREFIX}${ticket}`, { orchId, since, path });
+}
+
+// countResolveConflictAttempts — #1461 Fix 2 (final-review finding): number of
+// phase.resolve-conflict.complete.<ticket> PLUS phase.resolve-conflict.failed.
+// <ticket> envelopes — every DISPATCH ATTEMPT, not just successful completions.
+// countResolveConflictCycles (above) is completion-only, which let a
+// repeatedly-FAILING resolve-conflict run never spend cap budget: the marker
+// (RESOLVED_MARKER_REASON) stuck around forever with cycleCount pinned at 0.
+// This is the counter the resolve-conflict-sweep wiring feeds into
+// classifyResolveConflictCandidate's cycleCount so a failed run counts toward
+// RESOLVE_CONFLICT_CYCLE_CAP exactly like a completed one, and repeated
+// failures eventually route through the SAME cap-exhaustion escalate path.
+export function countResolveConflictAttempts({ ticket, orchId, since, path = getEventLogPath() } = {}) {
+  if (!ticket) throw new Error("countResolveConflictAttempts: ticket required");
+  return (
+    countByExactName(`${RESOLVE_CONFLICT_NAME_PREFIX}${ticket}`, { orchId, since, path }) +
+    countByExactName(`${RESOLVE_CONFLICT_FAILED_PREFIX}${ticket}`, { orchId, since, path })
+  );
 }
 
 // countDistinctRevivingTickets — unique tickets that have any revive event

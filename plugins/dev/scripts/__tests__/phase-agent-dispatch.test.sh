@@ -19,6 +19,22 @@ PASSES=0
 SCRATCH="$(mktemp -d -t phase-agent-dispatch-test-XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# CTL-1417: hermeticity floor. Isolate HOME and neuter global/system git config
+# so no production code path that computes $HOME/catalyst/wt/... (e.g. the CTL-707
+# recreate's create-worktree.sh) can resolve to the operator's REAL worktree —
+# the worktree self-deletion vector. Mirrors the orphan-sweep.test.sh /
+# worktree-rebase.test.sh gold standard. Also pin the recreate worktree base
+# under scratch as a belt to Test 38's own CATALYST_RECREATE_WORKTREE_DIR.
+export HOME="${SCRATCH}/home"
+mkdir -p "$HOME"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+export CATALYST_RECREATE_WORKTREE_DIR="${SCRATCH}/recreate-wt"
+# Red canary: fail loudly if the isolation is ever not in effect.
+[[ "$HOME" == "$SCRATCH"/* ]] || {
+	echo "FAIL: HOME not isolated to scratch"
+	exit 1
+}
+
 fail() {
 	FAILURES=$((FAILURES + 1))
 	echo "  FAIL: $1"
@@ -138,6 +154,24 @@ fresh_env() {
 	unset CLAUDE_STUB_EXIT
 	export PATH="${STUB_DIR}:${PATH}"
 }
+
+# ─── CTL-1417: deterministic lsof seam for the worktree-removal guard ─────────
+# phase-agent-dispatch's recreate path now routes its `git worktree remove
+# --force` through assert_worktree_removal_safe, whose foreign-liveness check
+# shells out to lsof. Point it at a mock whose rc/stdout are env-driven
+# (MOCK_LSOF_RC / MOCK_LSOF_OUT) so the recreate tests are deterministic and
+# never probe the real process table against $SCRATCH. Default rc=1 + empty =
+# "nothing under the tree" = guard ALLOWS (the legitimate recreate). Without
+# this seam the test's own `(cd "$GWORK" && …)` subshell holds a live cwd handle
+# under the tree, so real lsof would (correctly) make the guard refuse.
+MOCK_LSOF="${SCRATCH}/mock-lsof"
+cat >"$MOCK_LSOF" <<'MLSOF'
+#!/usr/bin/env bash
+[[ -n "${MOCK_LSOF_OUT:-}" ]] && printf '%s\n' "$MOCK_LSOF_OUT"
+exit "${MOCK_LSOF_RC:-1}"
+MLSOF
+chmod +x "$MOCK_LSOF"
+export WT_GUARD_LSOF="$MOCK_LSOF"
 
 # ─── Test 1: dispatcher writes the per-phase signal file with the right schema
 echo "Test 1: dispatcher writes signal file with correct schema"
@@ -1411,6 +1445,74 @@ assert_not_contains "$LOG38" "--resume" "recreate: no --resume-session in claude
 NEW_HEAD="$(cd "$GWORK" && git rev-parse HEAD 2>/dev/null || echo missing)"
 assert_eq "yes" "$([[ $NEW_HEAD != "$ORIG_HEAD" ]] && echo yes || echo no)" \
 	"recreate: worktree HEAD changed (recreated from origin/main)"
+# T38b (CTL-1417): with the guard's lsof seam reporting rc=1/empty (nothing under
+# the tree), the recreate proceeded normally — the guard did NOT block the
+# legitimate destroy+recreate. The claude-invoked + HEAD-changed asserts above
+# ARE the happy-path proof.
+unset CATALYST_DIR
+unset CATALYST_RECREATE_WORKTREE_DIR
+
+# ─── Test 38c (CTL-1417): recreate REFUSED when a foreign holder is present ───
+# Same source-conflict-on-research fixture as Test 38, but the guard's lsof seam
+# reports a live handle under the doomed worktree (rc=0 + non-empty). The
+# recreate must NOT force-remove the tree; it parks `stalled`, does not
+# re-dispatch, and the worktree survives on disk.
+echo ""
+echo "Test 38c (CTL-1417): recreate refused (foreign holder) → parks stalled, worktree survives"
+fresh_env t38c_recreate_guard
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+
+T38C_ORIGIN="${TEST_DIR}/t38c-origin.git"
+T38C_UP="${TEST_DIR}/t38c-up"
+T38C_MAIN="${TEST_DIR}/t38c-main"
+T38C_WT_BASE="${TEST_DIR}/t38c-wt"
+GWORK_C="${T38C_WT_BASE}/CTL-100"
+git init --quiet --bare -b main "$T38C_ORIGIN"
+git clone --quiet "$T38C_ORIGIN" "$T38C_UP" 2>/dev/null
+(
+	cd "$T38C_UP"
+	printf 'base-line\n' >shared.txt
+	mkdir -p .catalyst
+	git add -A && git commit --quiet -m "initial"
+	git push --quiet origin main
+)
+git clone --quiet "$T38C_ORIGIN" "$T38C_MAIN" 2>/dev/null
+mkdir -p "$T38C_WT_BASE"
+(cd "$T38C_MAIN" && git worktree add --quiet -b CTL-100 "$GWORK_C" main 2>/dev/null)
+(
+	cd "$GWORK_C"
+	printf 'local-edit\n' >shared.txt
+	git add shared.txt && git commit --quiet -m "local source change"
+)
+(
+	cd "$T38C_UP" && git checkout --quiet main
+	printf 'upstream-edit\n' >shared.txt
+	mkdir -p thoughts/shared/research
+	printf '# research\n' >thoughts/shared/research/2026-05-28-ctl-100.md
+	git add -A && git commit --quiet -m "upstream: conflict + research artifact"
+	git push --quiet origin main
+)
+export CATALYST_RECREATE_WORKTREE_DIR="$T38C_WT_BASE"
+printf '{"ticket":"CTL-100","phase":"triage","status":"done"}\n' >"${WORKER_DIR}/triage.json"
+ORIG_HEAD_C="$(cd "$GWORK_C" && git rev-parse HEAD)"
+# MOCK_LSOF_RC=0 + non-empty output → guard sees a live foreign holder → refuse.
+(cd "$GWORK_C" && CATALYST_BASE_BRANCH=main MOCK_LSOF_RC=0 MOCK_LSOF_OUT="p9999" \
+	"$DISPATCH" --phase research --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t38c.out" 2>/dev/null)
+RC38C=$?
+SIGNAL_C="${WORKER_DIR}/phase-research.json"
+assert_eq "1" "$RC38C" "recreate-guard: dispatcher exits 1 (parked, not re-dispatched)"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL_C" 2>/dev/null)" "recreate-guard: signal status = stalled"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "recreate-guard: claude --bg was NOT invoked"
+assert_eq "yes" "$([[ -d $GWORK_C ]] && echo yes || echo no)" "recreate-guard: worktree survives on disk (not force-removed)"
+assert_eq "$ORIG_HEAD_C" "$(cd "$GWORK_C" && git rev-parse HEAD 2>/dev/null || echo missing)" \
+	"recreate-guard: worktree HEAD unchanged (not destroyed/recreated)"
+# CTL-1417: a guard refusal caused by a LIVE HANDLE must park with a dedicated
+# reason (NOT the generic source_conflict_ctl708_unavailable, which unstuck-sweep
+# routes to force-push-if-clean and would explain the wrong blocker).
+assert_eq "worktree_live_handle_guard_refused" "$(jq -r '.failureReason' "$SIGNAL_C" 2>/dev/null)" \
+	"recreate-guard: failureReason = worktree_live_handle_guard_refused (accurate blocker)"
 unset CATALYST_DIR
 unset CATALYST_RECREATE_WORKTREE_DIR
 
@@ -2231,6 +2333,37 @@ for FIELD in .env .prompt .settings .model .turnCap .sessionName .pluginDirs; do
 	PL_VAL=$(echo "$SPEC" | jq -cS "$FIELD")
 	assert_eq "$DRY_VAL" "$PL_VAL" "prelaunch ${FIELD} == dry-run ${FIELD} (pre-launch composition byte-identical)"
 done
+
+echo ""
+echo "Test 71 (#1461): resolve-conflict dispatches with turnCap 40 + resolve-conflict-brief.json prior gate"
+fresh_env t71_resolve_conflict
+# resolve-conflict's prior artifact is resolve-conflict-brief.json (the
+# classification + which-phase-stalled envelope resolve-conflict-sweep.mjs
+# writes before dispatch) — create it so the gate passes.
+printf '%s\n' '{"schema":"resolve-conflict-brief/v1","stalledPhase":"implement","conflictFiles":["a.ts"],"conflictTypes":["content"],"base":"main","attempt":1,"maxAttempts":3}' \
+	>"${WORKER_DIR}/resolve-conflict-brief.json"
+"$DISPATCH" --phase resolve-conflict --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1
+SIGNAL_RC="${WORKER_DIR}/phase-resolve-conflict.json"
+if [[ ! -f $SIGNAL_RC ]]; then
+	fail "resolve-conflict signal file created: $SIGNAL_RC"
+else
+	pass "resolve-conflict signal file created"
+	assert_eq "resolve-conflict" "$(jq -r '.phase' "$SIGNAL_RC")" "signal.phase = resolve-conflict"
+	assert_eq "40" "$(jq -r '.turnCap' "$SIGNAL_RC")" "signal.turnCap = 40 (resolve-conflict, fix-scoped like remediate)"
+fi
+
+echo ""
+echo "Test 72 (#1461): resolve-conflict refuses when resolve-conflict-brief.json (prior artifact) is missing"
+fresh_env t72_resolve_conflict
+# No resolve-conflict-brief.json → the prior-artifact gate must refuse (exit 2, no signal).
+"$DISPATCH" --phase resolve-conflict --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/rc.out" 2>/dev/null
+RC_RC=$?
+assert_eq "2" "$RC_RC" "exit code 2 when resolve-conflict's resolve-conflict-brief.json is missing"
+assert_eq "refused" "$(jq -r '.status' "${TEST_DIR}/rc.out" 2>/dev/null || echo "")" \
+	"resolve-conflict stdout JSON status = refused"
+[[ -f "${WORKER_DIR}/phase-resolve-conflict.json" ]] && SIG_RC_EXISTS="yes" || SIG_RC_EXISTS="no"
+assert_eq "no" "$SIG_RC_EXISTS" "no phase-resolve-conflict.json signal written on refusal"
 
 echo ""
 echo "─────────────────────────────────────────────"

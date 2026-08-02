@@ -390,6 +390,11 @@ elif [[ "$KEEP_WT" != "true" ]]; then
 
     if [[ "$PWD" == "$PRIMARY_WT" ]]; then
       PRESWEEP_BIN="${PLUGIN_ROOT}/scripts/lib/worktree-presweep.sh"
+      # CTL-1417: source the shared self-protection guard for the extra belt
+      # in the removal chain below (defense-in-depth alongside the existing
+      # primary-worktree + presweep guards; no side effects on source).
+      WT_GUARD_LIB="${PLUGIN_ROOT}/scripts/lib/worktree-remove-guard.sh"
+      [ -r "$WT_GUARD_LIB" ] && source "$WT_GUARD_LIB"
       # CTL-649: do NOT swallow presweep stderr — its "N session(s) still alive
       # in <path>" diagnostic is the precise leak signal this teardown exists to
       # surface. Let it flow straight through to the operator.
@@ -401,6 +406,8 @@ elif [[ "$KEEP_WT" != "true" ]]; then
         echo "phase-teardown: worktree-presweep.sh missing/non-executable at $PRESWEEP_BIN; auto-teardown skipped (fail-closed)" >&2
       elif ! "$PRESWEEP_BIN" "$WORKTREE_PATH"; then
         echo "phase-teardown: presweep failed for $WORKTREE_PATH; auto-teardown skipped" >&2
+      elif command -v assert_worktree_removal_safe >/dev/null 2>&1 && ! assert_worktree_removal_safe "$WORKTREE_PATH"; then
+        echo "phase-teardown: guard refused removal of $WORKTREE_PATH (live handle/self); auto-teardown skipped" >&2
       else
         # Capture the real `git worktree remove` stderr so a failed teardown
         # reports the actual cause (dirty tree, locked, submodule, etc.) rather

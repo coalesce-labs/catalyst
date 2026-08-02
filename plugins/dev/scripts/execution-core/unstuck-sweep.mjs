@@ -18,6 +18,11 @@ import { spawnSync } from "node:child_process";
 import { log, getEventLogPath } from "./config.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "./unstuck-sweep-event-types.mjs";
 import { isTicketKey } from "./ticket-key.mjs";
+// #1461 (final-review cleanup item): import the shared marker-reason constants
+// from resolve-conflict-sweep.mjs instead of re-typing the literal strings —
+// mirrors what scheduler.mjs already does for the same constants. No import
+// cycle: resolve-conflict-sweep.mjs does not import unstuck-sweep.mjs.
+import { RESOLVED_MARKER_REASON, CAP_EXHAUSTED_REASON } from "./resolve-conflict-sweep.mjs";
 
 export { UNSTUCK_SWEEP_EVENT_TYPES };
 
@@ -93,6 +98,30 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   // terminal sweep + alert) and is waiting on an operator approval — the
   // unstuck sweep must stay quiet, not re-escalate it every interval.
   "boot-resume-gate-expired":         { category: "skip",           action: "skip" },
+  // #1461: resolve-conflict-sweep already owns a ticket once it marks
+  // source_conflict_resolvable — the unstuck sweep must stay quiet, not
+  // force-push over a ticket the dedicated sweep is actively resolving.
+  [RESOLVED_MARKER_REASON]:           { category: "skip",              action: "skip" },
+  // #1461: mirrors remediate-cycle-cap-exhausted's own entry shape — a
+  // typed category label for telemetry rather than falling to 'unknown'.
+  [CAP_EXHAUSTED_REASON]:             { category: "resolve-conflict-cap", action: "escalate" },
+  // #1461 Fix 6 (final-review finding, human-approved design): the
+  // failureReason/stalledReason field-name bugfix above (defaultCollectUnstuckCandidates
+  // now checks BOTH fields) was needed so source_conflict_ctl708_unavailable would
+  // actually match real production signals — but as a side effect it also admits 5
+  // OTHER previously-invisible stall reasons phase-agent-dispatch writes via the SAME
+  // code path (REBASE_LAST_STALL_REASON, lib/worktree-rebase.sh). None of these have a
+  // validated, safe automated remediation today, so each gets a distinct, descriptive
+  // category paired with action:"escalate" (a TYPED escalate, matching
+  // remediate-cycle-cap-exhausted / escalation-ask-cap's own shape) rather than falling
+  // through to the generic 'unknown' bucket — this preserves today's actual behavior
+  // (nothing new gets auto-remediated) while making the categorization explicit and
+  // intentional instead of an accidental fallthrough.
+  thoughts_conflict_with_origin_main: { category: "thoughts-conflict",        action: "escalate" },
+  worktree_live_handle_guard_refused: { category: "worktree-guard-refused",  action: "escalate" },
+  continue_failed:                    { category: "rebase-continue-failed", action: "escalate" },
+  no_rebase_in_progress:              { category: "no-rebase-in-progress",  action: "escalate" },
+  thoughts_symlink_broken:            { category: "thoughts-symlink-broken", action: "escalate" },
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.
@@ -149,10 +178,27 @@ export function defaultCollectUnstuckCandidates({
           signal = JSON.parse(readFile(signalPath, "utf8"));
         } catch { continue; }
 
-        // Accept both status shapes (CTL-1064 §Confirmed gaps).
+        // Accept both status shapes (CTL-1064 §Confirmed gaps), PLUS the real
+        // producer field for a dispatch-time-rebase stall (#1461 finding:
+        // phase-agent-dispatch writes status:"stalled" + .failureReason, NOT
+        // .stalledReason, for source_conflict_ctl708_unavailable — this
+        // category's force-push-if-clean action has never fired in production
+        // without this fix).
+        //
+        // #1461 Fix 6 (deferred-minor finding): use `??` consistently for BOTH
+        // the presence guard and the value selection — a single computation,
+        // not a `||` guard paired with a `??` selection. The prior mismatch
+        // (`stalledReason || failureReason` for presence, `stalledReason ??
+        // failureReason` for the value) meant a `stalledReason === ""` edge
+        // case would fall through to failureReason for the GUARD (empty
+        // string is falsy) but resolve to the empty string for the VALUE
+        // (`??` treats "" as present) — an inconsistent, confusing read.
+        // `stalledReason` still takes precedence over `failureReason` when
+        // both are present (the `??` chain's left-to-right order).
         let reason = null;
-        if (signal.status === "stalled" && signal.stalledReason) {
-          reason = signal.stalledReason;
+        const candidateReason = signal.stalledReason ?? signal.failureReason ?? null;
+        if (signal.status === "stalled" && candidateReason != null) {
+          reason = candidateReason;
         } else if (signal.status === "failed" && signal.failureReason === "orphan-sweep-stale") {
           reason = "orphan-sweep-stale";
         } else {

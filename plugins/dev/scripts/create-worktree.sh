@@ -283,6 +283,24 @@ fi
 # This ensures .catalyst/.workflow-context.json exists with currentTicket set
 # so that direnv's use_otel_context can read it when someone enters the directory.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# CTL-1417: self-protection guard for the rollback --force removals below.
+# shellcheck source=lib/worktree-remove-guard.sh
+[ -r "${SCRIPT_DIR}/lib/worktree-remove-guard.sh" ] && source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
+
+# _removal_guard_ok <path> — the SINGLE fail-closed predicate the rollback
+# `git worktree remove --force` sites gate on (CTL-1417). Returns 0 (safe to
+# force-remove) ONLY when the guard function loaded AND cleared the path.
+# Guard-ABSENCE (lib missing/unreadable at source-time → function undefined) is a
+# REFUSAL, not a bypass — a stripped/broken checkout can never reopen the
+# data-loss path. Reason on stderr.
+_removal_guard_ok() {
+	local _wt="${1:-}"
+	if ! command -v assert_worktree_removal_safe >/dev/null 2>&1; then
+		echo "worktree-remove-guard: unavailable — refusing forced removal of ${_wt}" >&2
+		return 1
+	fi
+	assert_worktree_removal_safe "$_wt"
+}
 if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 	# Remove stale workflow-context.json if copied from main repo
 	rm -f "${WORKTREE_PATH}/.catalyst/.workflow-context.json"
@@ -430,8 +448,15 @@ else
 			SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 			[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
 				"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-			git worktree remove --force "$WORKTREE_PATH"
-			git branch -D "$WORKTREE_NAME" 2>/dev/null || true
+			# CTL-1417: skip the force-remove if the tree is in use / is our cwd
+			# OR the guard is unavailable (fail-closed), leaving it for the reaper
+			# rather than deleting an in-use worktree.
+			if _removal_guard_ok "$WORKTREE_PATH"; then
+				git worktree remove --force "$WORKTREE_PATH"
+				git branch -D "$WORKTREE_NAME" 2>/dev/null || true
+			else
+				echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
+			fi
 			exit 1
 		fi
 	elif [ -f "package.json" ]; then
@@ -502,8 +527,15 @@ if [ "$THOUGHTS_INIT_EXPECTED" = true ] && { [ ! -L "thoughts/shared" ] || [ ! -
 	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 	[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
 		"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-	git worktree remove --force "$WORKTREE_PATH"
-	git branch -D "$WORKTREE_NAME" 2>/dev/null || true
+	# CTL-1417: skip the force-remove if the tree is in use / is our cwd OR the
+	# guard is unavailable (fail-closed), leaving it for the reaper rather than
+	# deleting an in-use worktree.
+	if _removal_guard_ok "$WORKTREE_PATH"; then
+		git worktree remove --force "$WORKTREE_PATH"
+		git branch -D "$WORKTREE_NAME" 2>/dev/null || true
+	else
+		echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
+	fi
 	exit 1
 fi
 
