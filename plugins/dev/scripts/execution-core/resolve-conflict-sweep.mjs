@@ -169,49 +169,88 @@ export function markStalledSignalResolving(
   rename(tmp, signalPath);
 }
 
+// The phase name resolve-conflict dispatches TO (phase-agent-dispatch resolves
+// this to the /catalyst-dev:resolve-conflict skill) — distinct from the STALLED
+// phase (`phase` param below, e.g. "implement"), whose own signal file is the one
+// markStalledSignalResolving rewrites.
+const RESOLVE_CONFLICT_DISPATCH_PHASE = "resolve-conflict";
+
 // defaultMarkAndDispatch — the "mark-and-dispatch" action seam. Mirrors
 // defaultInvokeRecoveryPass's dispatch section (recovery-reasoning.mjs:1650-
 // 1828) exactly: lazy-require dispatch.mjs (avoids loading the dispatch graph
 // on the off/shadow paths), settle an sdk-fleet Promise synchronously via
-// isThenable/settleDispatchSync so the success check works identically for bg
-// and sdk executors.
+// isThenable/settleDispatchSync, verify the settled signal is actually runnable
+// via sdkSignalRunnable (NOT a blind verifySync:true — a resolved {code:1} or a
+// signal that never went runnable must not be reported as success), and wire
+// backstopOnRejection as the onSettled handler so a REJECTED sdk dispatch flips
+// the stalled phase's signal to failed + emits phase.<phase>.failed instead of
+// stranding silently. The signal-mark + brief-write are wrapped in their own
+// try/catch (malformed JSON, filesystem errors) so a write failure returns a
+// structured {success:false, reason} instead of throwing out of the function —
+// exactly like defaultInvokeRecoveryPass's own brief-write guard
+// (recovery-reasoning.mjs:1733-1743).
 export function defaultMarkAndDispatch(
   { ticket, phase, workerDir, worktreePath, base, classification, cycleCount, orchDir },
   deps = {},
 ) {
   const signalPath = join(workerDir, `phase-${phase}.json`);
-  markStalledSignalResolving(signalPath, deps);
-
-  writeResolveConflictBrief(
-    orchDir,
-    ticket,
-    {
-      stalledPhase: phase,
-      conflictFiles: classification.conflictFiles,
-      conflictTypes: classification.conflictTypes,
-      worktreePath,
-      base,
-      attempt: cycleCount + 1,
-      maxAttempts: RESOLVE_CONFLICT_CYCLE_CAP,
-    },
-    deps,
-  );
-
-  let dispatchTicket, isThenable, settleDispatchSync;
   try {
-    ({ dispatchTicket, isThenable, settleDispatchSync } = deps.dispatchMod ?? _require("./dispatch.mjs"));
+    markStalledSignalResolving(signalPath, deps);
+
+    writeResolveConflictBrief(
+      orchDir,
+      ticket,
+      {
+        stalledPhase: phase,
+        conflictFiles: classification.conflictFiles,
+        conflictTypes: classification.conflictTypes,
+        worktreePath,
+        base,
+        attempt: cycleCount + 1,
+        maxAttempts: RESOLVE_CONFLICT_CYCLE_CAP,
+      },
+      deps,
+    );
+  } catch (err) {
+    return { success: false, dispatched: false, reason: `mark/brief write failed: ${err.message}` };
+  }
+
+  let dispatchTicket, isThenable, settleDispatchSync, backstopOnRejection, sdkSignalRunnable;
+  try {
+    ({ dispatchTicket, isThenable, settleDispatchSync, backstopOnRejection, sdkSignalRunnable } =
+      deps.dispatchMod ?? _require("./dispatch.mjs"));
   } catch (err) {
     return { success: false, dispatched: false, reason: `dispatch module load failed: ${err.message}` };
   }
   const dispatch = deps.dispatch ?? dispatchTicket;
   const thenableCheck = deps.isThenable ?? isThenable;
+  const verifyRunnable = deps.sdkSignalRunnable ?? sdkSignalRunnable;
+  const backstop = deps.backstopOnRejection ?? backstopOnRejection;
 
   let r;
   try {
-    const rawR = dispatch(orchDir, ticket, "resolve-conflict");
+    const rawR = dispatch(orchDir, ticket, RESOLVE_CONFLICT_DISPATCH_PHASE);
     if (thenableCheck && thenableCheck(rawR)) {
       const settle = deps.settleDispatchSync ?? settleDispatchSync;
-      r = settle(rawR, { verifySync: () => true });
+      // onSettled mirrors defaultInvokeRecoveryPass (recovery-reasoning.mjs:1759-
+      // 1786): fail on EITHER a rejection OR a resolved non-zero code, and on
+      // failure route through backstopOnRejection so the stalled phase's signal
+      // gets a terminal failed event instead of stranding at "dispatched".
+      const onSettled = (_res, err) => {
+        const failed = err || (_res && Number.isFinite(_res.code) && _res.code !== 0);
+        if (!failed) return; // clean resolution → the worker/skill owns its terminal event
+        try {
+          backstop?.(
+            { orchDir, ticket, phase: RESOLVE_CONFLICT_DISPATCH_PHASE },
+          )(_res, err ?? new Error(`sdk resolve-conflict resolved code=${_res?.code}`));
+        } catch {
+          /* best-effort — a failing backstop must not surface as an unhandled rejection */
+        }
+      };
+      r = settle(rawR, {
+        verifySync: () => (verifyRunnable ? verifyRunnable(orchDir, ticket, RESOLVE_CONFLICT_DISPATCH_PHASE) : true),
+        onSettled,
+      });
     } else {
       r = rawR;
     }
@@ -220,7 +259,17 @@ export function defaultMarkAndDispatch(
   }
 
   if (r && r.code === 0) {
-    return { success: true, dispatched: true, bgJobId: r.signal?.bg_job_id ?? null };
+    return {
+      success: true,
+      dispatched: true,
+      bgJobId: r.signal?.bg_job_id ?? null,
+      pendingSdk: r.async ? r.pending ?? null : null,
+    };
   }
-  return { success: false, dispatched: false, reason: r?.stderr ?? `dispatch failed (code ${r?.code ?? "unknown"})` };
+  return {
+    success: false,
+    dispatched: false,
+    reason: r?.stderr ?? `dispatch failed (code ${r?.code ?? "unknown"})`,
+    pendingSdk: r?.async ? r.pending ?? null : null,
+  };
 }

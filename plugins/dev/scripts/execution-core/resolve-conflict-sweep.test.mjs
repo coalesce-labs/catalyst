@@ -238,4 +238,82 @@ describe("defaultMarkAndDispatch", () => {
     expect(result.success).toBe(false);
     expect(result.dispatched).toBe(false);
   });
+
+  // fakeSettleDispatchSync — a minimal stand-in for the real settleDispatchSync
+  // (dispatch.mjs) that honors verifySync + onSettled exactly like the real one:
+  // the synchronous provisional code reflects verifySync(), and onSettled fires
+  // when the underlying promise resolves/rejects.
+  function fakeSettleDispatchSync(result, { verifySync, onSettled } = {}) {
+    const ok = verifySync ? verifySync() !== false : true;
+    const pending = Promise.resolve(result).then(
+      (r) => { onSettled?.(r, null); return r; },
+      (err) => { onSettled?.(null, err); return { code: 1, error: err }; },
+    );
+    return { code: ok ? 0 : 1, async: true, pending };
+  }
+
+  test("sdk dispatch path: verifySync (sdkSignalRunnable) false → reports failure, not a blind success", () => {
+    const deps = baseDeps({
+      dispatch: () => Promise.resolve({ code: 0 }),
+      isThenable: (x) => x != null && typeof x.then === "function",
+      settleDispatchSync: fakeSettleDispatchSync,
+      sdkSignalRunnable: () => false, // the prelaunch signal never went runnable
+    });
+    const result = defaultMarkAndDispatch(
+      { ticket: "CTL-1", phase: "implement", workerDir: "/orch/workers/CTL-1", worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: [], conflictTypes: [] }, cycleCount: 0, orchDir: "/orch" },
+      deps,
+    );
+    expect(result.success).toBe(false);
+    expect(result.dispatched).toBe(false);
+  });
+
+  test("sdk dispatch path: a rejected promise triggers backstopOnRejection", async () => {
+    const backstopCalls = [];
+    const deps = baseDeps({
+      dispatch: () => Promise.reject(new Error("boom")),
+      isThenable: (x) => x != null && typeof x.then === "function",
+      settleDispatchSync: fakeSettleDispatchSync,
+      sdkSignalRunnable: () => true,
+      backstopOnRejection: (ctx) => (_res, err) => { backstopCalls.push([ctx, err.message]); },
+    });
+    const result = defaultMarkAndDispatch(
+      { ticket: "CTL-1", phase: "implement", workerDir: "/orch/workers/CTL-1", worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: [], conflictTypes: [] }, cycleCount: 0, orchDir: "/orch" },
+      deps,
+    );
+    expect(result.pendingSdk).toBeTruthy();
+    await result.pendingSdk;
+    expect(backstopCalls).toHaveLength(1);
+    expect(backstopCalls[0][0]).toMatchObject({ ticket: "CTL-1", phase: "resolve-conflict" });
+    expect(backstopCalls[0][1]).toBe("boom");
+  });
+
+  test("malformed signal JSON returns a structured failure instead of throwing", () => {
+    const deps = baseDeps({ readFileSync: () => "{not json" });
+    const args = [
+      { ticket: "CTL-1", phase: "implement", workerDir: "/orch/workers/CTL-1", worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: [], conflictTypes: [] }, cycleCount: 0, orchDir: "/orch" },
+      deps,
+    ];
+    expect(() => defaultMarkAndDispatch(...args)).not.toThrow();
+    const result = defaultMarkAndDispatch(...args);
+    expect(result.success).toBe(false);
+    expect(result.dispatched).toBe(false);
+    expect(result.reason).toMatch(/mark\/brief write failed/);
+  });
+
+  test("brief write failure returns a structured failure instead of throwing", () => {
+    const deps = baseDeps({
+      writeFileSync: (p) => {
+        if (String(p).includes("resolve-conflict-brief")) throw new Error("disk full");
+      },
+    });
+    const args = [
+      { ticket: "CTL-1", phase: "implement", workerDir: "/orch/workers/CTL-1", worktreePath: "/wt/CTL-1", base: "main", classification: { resolvable: true, conflictFiles: [], conflictTypes: [] }, cycleCount: 0, orchDir: "/orch" },
+      deps,
+    ];
+    expect(() => defaultMarkAndDispatch(...args)).not.toThrow();
+    const result = defaultMarkAndDispatch(...args);
+    expect(result.success).toBe(false);
+    expect(result.dispatched).toBe(false);
+    expect(result.reason).toMatch(/mark\/brief write failed/);
+  });
 });
