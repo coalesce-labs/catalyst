@@ -12825,3 +12825,33 @@ describe("holisticBoardHealthAct — Phase 3 repair signal (CTL-1610)", () => {
     expect(r.latchedNoClock).toBe(true); // caller checks this and calls restampNoClockEscalations
   });
 });
+
+// ─── CTL-1610 (Phase 3): startScheduler runs repair at startup ────────────────
+describe("startScheduler — Phase 3 startup repair (CTL-1610)", () => {
+  afterEach(() => __resetForTests());
+
+  test("(CTL-1610) startScheduler re-stamps no-clock escalations at startup, independent of board-health mode", () => {
+    // Seed a no-clock escalated intent on disk.
+    const intentDir = join(orchDir, ".recovery-intents");
+    mkdirSync(intentDir, { recursive: true });
+    writeFileSync(
+      join(intentDir, "CTL-1610-STARTUP.json"),
+      JSON.stringify({ escalated: true, decision: "escalate" }) // no ts/lastTs
+    );
+
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    startScheduler({
+      orchDir,
+      dispatch: fakeDispatch(),
+      readEligible: () => [],
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+
+    // After startup, the no-clock entry must have ts/lastTs re-stamped.
+    const after = JSON.parse(readFileSync(join(intentDir, "CTL-1610-STARTUP.json"), "utf8"));
+    expect(typeof after.ts).toBe("number");
+    expect(typeof after.lastTs).toBe("number");
+  });
+});

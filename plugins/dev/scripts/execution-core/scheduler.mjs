@@ -8220,6 +8220,18 @@ export function startScheduler({
     log.info({ err: err.message }, "scheduler: preflight wrapper threw — swallowed");
   }
 
+  // CTL-1610 (Phase 3): one-time heal for timestamp-less escalated intents.
+  // Runs at scheduler startup, independent of board-health mode/actuation, so
+  // any pre-fix latched entries are re-stamped even on shadow/off installations.
+  try {
+    const healed = recoveryRestampNoClockEscalations({ orchDir });
+    if (healed.length > 0) {
+      log.warn({ tickets: healed }, "scheduler: re-stamped no-clock escalated intents (CTL-1610)");
+    }
+  } catch (err) {
+    log.info({ err: err?.message }, "scheduler: restampNoClockEscalations threw — swallowed (CTL-1610)");
+  }
+
   // CTL-1330 Tier 1 wiring (ON by default).
   if (tickTimingEnabled()) {
     // Liveness-refresh observability is independent of perf_hooks — wire it
