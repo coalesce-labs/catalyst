@@ -12766,3 +12766,92 @@ describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
     expect(seenReplica).toBeUndefined();
   });
 });
+
+// ─── CTL-1610 (Phase 2): holisticBoardHealthAct latchedNoClock ───────────────
+describe("holisticBoardHealthAct — latchedNoClock (CTL-1610)", () => {
+  test("(CTL-1610) all-candidates-exhausted with a no-clock latch → latchedNoClock:true", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A", "B"], boardContext: {}, decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: (t) => t === "A",
+        invokeRecoveryPass: () => ({ dispatched: false }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r).toMatchObject({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: true });
+  });
+
+  test("(CTL-1610) well-formed exhausted cohort (all clocked) → latchedNoClock:false", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A", "B"], boardContext: {}, decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: () => false,
+        invokeRecoveryPass: () => ({ dispatched: false }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r).toMatchObject({ reason: "all-candidates-exhausted", latchedNoClock: false });
+  });
+
+  test("(CTL-1610) latchHasNoClock defaults to a safe no-op (bare tick → latchedNoClock:false)", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A"], decision: {} },
+      { shouldSkipItem: () => true, skipReason: () => "escalated", invokeRecoveryPass: () => ({}), recordIntent: () => {} },
+    );
+    expect(r.latchedNoClock).toBe(false);
+  });
+});
+
+// ─── CTL-1610 (Phase 3): latchedNoClock triggers repair at call site ──────────
+describe("holisticBoardHealthAct — Phase 3 repair signal (CTL-1610)", () => {
+  test("(CTL-1610) latchedNoClock:true is the repair trigger — caller invokes restampNoClockEscalations", () => {
+    // The repair fn is called by the production `act` callback in scheduler.mjs when
+    // latchedNoClock is true (see the recoveryRestampNoClockEscalations call site).
+    // Verify the signal comes through so the caller can act on it.
+    const r = holisticBoardHealthAct(
+      { candidates: ["CTL-X"], decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: () => true,
+        invokeRecoveryPass: () => ({}),
+        recordIntent: () => {},
+      },
+    );
+    expect(r.latchedNoClock).toBe(true); // caller checks this and calls restampNoClockEscalations
+  });
+});
+
+// ─── CTL-1610 (Phase 3): startScheduler runs repair at startup ────────────────
+describe("startScheduler — Phase 3 startup repair (CTL-1610)", () => {
+  afterEach(() => __resetForTests());
+
+  test("(CTL-1610) startScheduler re-stamps no-clock escalations at startup, independent of board-health mode", () => {
+    // Seed a no-clock escalated intent on disk.
+    const intentDir = join(orchDir, ".recovery-intents");
+    mkdirSync(intentDir, { recursive: true });
+    writeFileSync(
+      join(intentDir, "CTL-1610-STARTUP.json"),
+      JSON.stringify({ escalated: true, decision: "escalate" }) // no ts/lastTs
+    );
+
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    startScheduler({
+      orchDir,
+      dispatch: fakeDispatch(),
+      readEligible: () => [],
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+
+    // After startup, the no-clock entry must have ts/lastTs re-stamped.
+    const after = JSON.parse(readFileSync(join(intentDir, "CTL-1610-STARTUP.json"), "utf8"));
+    expect(typeof after.ts).toBe("number");
+    expect(typeof after.lastTs).toBe("number");
+  });
+});
