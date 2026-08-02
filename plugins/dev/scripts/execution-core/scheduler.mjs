@@ -231,6 +231,7 @@ import {
   defaultCollectStallClearCandidates, // CTL-1005 J3
   defaultCollectTerminalSignalGcCandidates, // CTL-1242 J4
   defaultGcTerminalSignals, // CTL-1242 J4
+  defaultNoEvict, // CTL-1605: guarded fast-path eviction seam default (no-op)
 } from "./stall-janitor.mjs";
 // CTL-1064: unstuck-sweep (Pass 0u) — throttled classify-then-act sweep for
 // the stalled/needs-human ticket backlog. Pure classifiers + action driver in
@@ -333,7 +334,12 @@ import { isLinearTerminal, isTicketTerminalOrMerged } from "./terminal-state.mjs
 // labelOnce here would force recovery.mjs → scheduler.mjs to import it, but
 // scheduler.mjs already imports reclaimDeadWorkIfPossible from recovery.mjs —
 // a cycle. label-guard.mjs is the leaf module both can import.
-import { labelOnce, clearStalledLabel, labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
+import {
+  labelOnce,
+  clearStalledLabel,
+  labelNeedsHumanUnlessBeliefOwner,
+  resolveAndApplyWorkerStatusLabel,
+} from "./label-guard.mjs";
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
 import {
@@ -3591,6 +3597,13 @@ export function schedulerTick(
     // both hydrateOutOfSetBlockers calls. Defaults to the real batch helper;
     // tests inject a stub `(ids) => Map<id, descriptor>` so a tick never shells out.
     fetchBatch = fetchTicketsBatch,
+    // CTL-1605: guarded fast-path worker-dir eviction seam. STEP A routes a
+    // Linear-terminal triaged-waiting ticket through resolveAndApplyWorkerStatusLabel,
+    // which clears any stale worker-status label and calls this to evict the stale
+    // local worker dir. Default is defaultNoEvict (no-op returning false) so a bare
+    // unit tick / un-wired host never deletes anything; production wires the armed
+    // makeEvictWorkerDir (live-session-fenced) via runTick.
+    evictWorkerDir = defaultNoEvict,
     // CTL-755: held-indicator audit emitter — phase.advance.held.<ticket>.
     // Best-effort, only-on-state-change. Mirrors appendDispatchRequestedEvent.
     appendPhaseAdvanceHeldEvent = defaultAppendPhaseAdvanceHeldEvent,
@@ -5475,6 +5488,48 @@ export function schedulerTick(
       // pseudo-issue descriptors in the buildDependencyEdges shape (state
       // re-nested into {name} — the descriptor carries a flat string state).
       const relByTicket = fetchBatch(triagedWaiting, { cache });
+
+      // CTL-1605: terminal-stale short-circuit. A triaged-waiting ticket whose LIVE
+      // Linear state (from the A.3 batch — ZERO extra reads) is terminal is a stale
+      // local record (the CTL-1603 reproducer: triage:done + no research signal on a
+      // ticket another host already finished). Route it through the terminal-aware
+      // chokepoint — clear any stale worker-status label + evict the stale dir — and
+      // drop it from the admission pool BEFORE it can reach convergeHeldLabel (A.7)
+      // and be re-stamped blocked/queued. Non-terminal tickets pass through unchanged.
+      const liveTriagedWaiting = [];
+      for (const ticket of triagedWaiting) {
+        const rel = relByTicket.get(ticket) ?? null;
+        const res = resolveAndApplyWorkerStatusLabel(orchDir, ticket, {
+          desired: null, // STEP A never APPLIES here; it only refuses + clears when terminal
+          currentLabels: rel?.labels ?? [],
+          isTerminal: () => ({
+            terminal: isLinearTerminal(rel?.state),
+            reason: "linear-terminal",
+            state: rel?.state,
+          }),
+          writeStatus,
+          evictWorkerDir,
+          onTerminalCleared: (label) => {
+            const from = label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label;
+            recordTransition({
+              ticket,
+              fromDisposition: from,
+              toDisposition: null,
+              source: "terminal-stale-evict",
+            });
+          },
+        });
+        if (res.terminal) {
+          lastHeldEmitState.delete(ticket); // drop stale held emit-state; dir is being evicted
+          continue; // do NOT let this ticket reach A.3 hydration / A.7 convergeHeldLabel
+        }
+        liveTriagedWaiting.push(ticket);
+      }
+      // Replace the working set for the remainder of STEP A (mutate in place — the
+      // existing A.3 loop and STEP E read the same `triagedWaiting` binding).
+      triagedWaiting.length = 0;
+      triagedWaiting.push(...liveTriagedWaiting);
+
       const waitingDescriptors = [];
       const labelsByTicket = new Map(); // ticket → current Linear label set
       const readFailedTickets = new Set(); // fail-safe: missing read → held

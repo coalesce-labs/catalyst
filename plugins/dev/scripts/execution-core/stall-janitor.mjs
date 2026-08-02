@@ -494,6 +494,15 @@ function cwdUnder(cwd, root) {
   return c === r || c.startsWith(r + "/");
 }
 
+// ─── CTL-1605: guarded fast-path worker-dir eviction seam ───
+//
+// Safe default consumed by bare unit ticks / un-wired callers: a no-op that
+// removes nothing and reports "did not evict". The armed factory is
+// makeEvictWorkerDir (added in Phase 3); until a caller injects that, the
+// terminal short-circuit clears the label but leaves the dir (the J4 census
+// stays the slow backstop).
+export const defaultNoEvict = () => false;
+
 // defaultCollectOrphanCandidates — enumerate every ticket whose pipeline reached
 // terminal Done (the .terminal-done.applied marker) and build the J1 classify ctx
 // from read-only probes. `projects` supplies [{team, repoRoot}] for the worktree

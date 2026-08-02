@@ -12855,3 +12855,88 @@ describe("startScheduler — Phase 3 startup repair (CTL-1610)", () => {
     expect(typeof after.lastTs).toBe("number");
   });
 });
+
+// ── CTL-1605: terminal-stale worker-status short-circuit (STEP A) ──
+describe("CTL-1605: STEP A terminal-stale short-circuit", () => {
+  afterEach(() => __resetForTests());
+
+  // A writeStatus spy recording label add/remove (mirrors the admission-gate labelSpy).
+  function labelSpy() {
+    const applied = [];
+    const removed = [];
+    const ws = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true, reason: null };
+      },
+      removeLabel: (ticket, label) => {
+        removed.push({ ticket, label });
+        return { removed: true };
+      },
+    };
+    return { ws, applied, removed };
+  }
+
+  test("stale-local Done ticket in triagedWaiting → no blocked/queued applied, dir evicted", () => {
+    // The CTL-1603 stale record: triage:done, NO research signal. The candidate is
+    // blocked-by-an-open-dep and UNLABELED, so WITHOUT the fix STEP A would stamp
+    // "blocked" on a ticket that is already Done. It also wears a stale "queued"
+    // held label to prove the terminal clear fires.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-9", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const evicted = [];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // A.3 batch: live TERMINAL state (Done), blocked by an open dep, wearing a
+      // stale "queued" label that the terminal clear must drain.
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP", { state: "Done", labels: ["queued"] }), {
+        "CTL-DEP": "In Progress",
+      }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    // No held re-stamp — the terminal ticket never reaches convergeHeldLabel.
+    expect(applied.some((a) => a.label === "blocked" || a.label === "queued")).toBe(false);
+    // The stale held label is cleared and the worker dir is evicted.
+    expect(removed).toContainEqual({ ticket: "CTL-9", label: "queued" });
+    expect(evicted).toContain("CTL-9");
+    // Not promoted (dropped from the admission pool before STEP B).
+    expect(r.advanced).toEqual([]);
+    expect(dispatch.calls).toEqual([]);
+  });
+
+  test("non-terminal triagedWaiting ticket → unchanged (still converges 'queued'), no evict", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-10", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const evicted = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1, // saturated → ready-but-unadmitted → "queued"
+      fetchBatch: mkBatch(() => relUnblocked({ state: "Todo" })),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    // Behavior byte-for-byte as before this change: capacity hold converges "queued".
+    expect(applied).toContainEqual({ ticket: "CTL-10", label: "queued" });
+    // A live ticket is never evicted.
+    expect(evicted).toEqual([]);
+  });
+});
