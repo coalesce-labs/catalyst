@@ -137,6 +137,7 @@ import {
   loadProjectConfig,
 } from "./lib/inbox-conversation.mjs";
 import { replyToTicket } from "./lib/reply-ticket.mjs";
+import { buildTrustedOrigins, isOriginAllowed } from "./lib/trusted-origin.mjs";
 /** Canonical ticket key for the conversation routes: a team prefix that may carry
  *  digits/underscores (`OPS_2-17`), then `-<number>`. Anchored, and containing no
  *  path characters, so it cannot express a traversal. */
@@ -1916,6 +1917,75 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const MONITOR_REQUEST_TIMING = process.env.CATALYST_TICK_TIMING !== "off";
   const MONITOR_SLOW_REQUEST_MS =
     Number(process.env.CATALYST_MONITOR_SLOW_REQUEST_MS) || 250;
+
+  // CTL-1573 P1: the allowlist must use the port the server ACTUALLY bound, not
+  // the requested one — `port: 0` asks the OS for an ephemeral port (the test
+  // harness does exactly this), so building from `port` would trust
+  // `localhost:0` and 403 every legitimate request. `server.port` is only known
+  // after Bun.serve() returns, so this is built lazily on first use; by then a
+  // request has arrived, which means the server is bound. Cached thereafter.
+  //
+  // MONITOR_TRUSTED_ORIGINS extends it for deployment-specific names (reverse
+  // proxy, Tailscale MagicDNS) — without it a monitor reached by such a name
+  // would 403 every reply and the surface would be inert.
+  let trustedOriginsCache: Set<string> | null = null;
+  let trustedOriginsBuiltAt = 0;
+  // Bounded freshness. A miss-only refresh picks up ADDED addresses but never
+  // notices a REMOVED one: after DHCP/Tailscale moves us from A to B, a cache
+  // hit keeps trusting A, so once A is reassigned to another host a page there
+  // could drive this route. A short TTL bounds that window without putting an
+  // interface scan on every request.
+  const TRUSTED_ORIGINS_TTL_MS = 60_000;
+
+  // The Vite dev server proxies /api to this monitor without rewriting Origin,
+  // so `bun run dev:ui` posts from http://localhost:5173 and would otherwise
+  // 403. Gated: never trusted in a normal (production) launch.
+  const devUiOrigins =
+    process.env.MONITOR_DEV_UI_ORIGINS ??
+    (process.env.NODE_ENV === "development" ||
+    ["1", "true", "yes", "on"].includes((process.env.MONITOR_DEV_UI ?? "").trim().toLowerCase())
+      ? // ONE spelling: Vite binds a single family, so another process can own the
+        // other family's :5173 and would otherwise get a trusted Origin. This is
+        // Vite's own default host — the URL `bun run dev:ui` prints.
+        "http://localhost:5173"
+      : null);
+
+  const buildTrusted = (): Set<string> =>
+    buildTrustedOrigins({
+      port: server?.port ?? port,
+      extraOrigins: process.env.MONITOR_TRUSTED_ORIGINS ?? null,
+      devOrigins: devUiOrigins,
+      bindHost: hostname,
+    });
+
+  // Allow, rebuilding the allowlist ONCE on a miss before refusing.
+  //
+  // The daemon runs under launchd with KeepAlive=true, so a cached set can long
+  // outlive the network. If Tailscale connects, or DHCP moves the address,
+  // after the set was first built, that new self-address is absent and every
+  // browser reply through it 403s until someone restarts the daemon — the
+  // inertness failure this guard is supposed to avoid. Rebuilding only on the
+  // miss path keeps the hot path a single Set lookup (a rejection is rare, and
+  // an attacker gains nothing: a rebuild re-derives OUR names, never theirs).
+  const originAllowed = (origin: string | null): boolean => {
+    // performance.now() is MONOTONIC. Date.now() steps with the wall clock, so
+    // an NTP correction or a VM snapshot restore could hold `now - builtAt`
+    // below the threshold indefinitely and keep a removed address trusted far
+    // past the documented 60s bound in this long-lived daemon.
+    const now = performance.now();
+    if (trustedOriginsCache === null || now - trustedOriginsBuiltAt >= TRUSTED_ORIGINS_TTL_MS) {
+      trustedOriginsCache = buildTrusted();
+      trustedOriginsBuiltAt = now;
+    }
+    if (isOriginAllowed(origin, trustedOriginsCache)) return true;
+    // Rebuild once more on a miss so a JUST-added address (Tailscale connecting)
+    // is honored immediately rather than waiting out the TTL. A rebuild
+    // re-derives OUR names and addresses, never the caller's, so a rejected
+    // caller gains nothing by forcing it.
+    trustedOriginsCache = buildTrusted();
+    trustedOriginsBuiltAt = now;
+    return isOriginAllowed(origin, trustedOriginsCache);
+  };
 
   const server = Bun.serve({
     port,
@@ -3925,24 +3995,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // regardless of Content-Type, so a plain `text/plain` form POST from any
           // page the operator visits would otherwise be a valid request — the
           // browser could not read the response, but the comment would still be
-          // posted as them to any guessable ticket. A same-origin check closes that:
-          // browsers always attach `Origin` to a cross-origin POST, while
-          // same-origin fetches from our own UI match the Host. Non-browser clients
-          // (curl, tests) send no Origin and are unaffected.
-          const origin = req.headers.get("origin");
-          if (origin != null && origin !== "") {
-            let sameOrigin = false;
-            try {
-              sameOrigin = new URL(origin).host === (req.headers.get("host") ?? url.host);
-            } catch {
-              sameOrigin = false;
-            }
-            if (!sameOrigin) {
-              return Response.json(
-                { status: "forbidden", error: "cross-origin reply rejected" },
-                { status: 403 },
-              );
-            }
+          // posted as them to any guessable ticket.
+          //
+          // CTL-1573 P1: this used to compare `Origin` against the request's own
+          // `Host` header. Both are attacker-chosen under DNS rebinding (the page
+          // and the target then share one origin), so that comparison could not
+          // reject the very case it existed for. `Origin` is now checked against
+          // an allowlist the attacker cannot influence — see lib/trusted-origin.mjs
+          // for the rebinding walkthrough and the inertness trade-off.
+          if (!originAllowed(req.headers.get("origin"))) {
+            return Response.json(
+              { status: "forbidden", error: "cross-origin reply rejected" },
+              { status: 403 },
+            );
           }
           let body: Record<string, unknown>;
           try {
@@ -5272,6 +5337,11 @@ if (import.meta.main) {
   const RUNS_DIR = `${CATALYST_DIR}/runs`;
   const parsedPort = parseInt(process.env.MONITOR_PORT ?? "", 10);
   const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : DEFAULT_PORT;
+  // CTL-1573: the bind address. Default stays 0.0.0.0 (IPv4) for compatibility.
+  // Exposed because the reference doc names `::` (dual-stack) as the real remedy
+  // for the family-squatting residual — an undocumented remedy nobody can apply
+  // is not a remedy.
+  const HOST = (process.env.MONITOR_HOST ?? "").trim() || "0.0.0.0";
   const DB_PATH =
     process.env.CATALYST_DB_FILE ?? `${CATALYST_DIR}/catalyst.db`;
 
@@ -5392,6 +5462,7 @@ if (import.meta.main) {
     );
     const srv = createServer({
       port: PORT,
+      hostname: HOST,
       wtDir: WT_DIR,
       runsDir: RUNS_DIR,
       dbPath: DB_PATH,
