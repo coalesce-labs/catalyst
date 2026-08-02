@@ -48,6 +48,11 @@ prior_artifact_for_phase() {
 	# (the analogue of verify.json for remediate). The skill reads it as its
 	# prior-phase artifact.
 	recovery-pass) echo "signal:recovery-pass.json" ;;
+	# #1461: resolve-conflict's brief is resolve-conflict-brief.json — the
+	# classification + which-phase-stalled envelope resolve-conflict-sweep.mjs
+	# writes before dispatch (the analogue of recovery-pass.json for recovery-pass,
+	# verify.json for remediate). The skill reads it as its prior-phase artifact.
+	resolve-conflict) echo "signal:resolve-conflict-brief.json" ;;
 	teardown) echo "signal:phase-monitor-deploy.json" ;;
 	*) echo "" ;;
 	esac
