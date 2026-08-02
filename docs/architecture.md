@@ -332,7 +332,7 @@ CTL-707 replaced the binary CTL-667 rebase with a 4-layer strategy:
   `stalled`/`source_conflict_ctl708_unavailable` (see below, no longer a dead end); thoughts conflict
   (rc=3) → park on all phases.
 - **`resolve-conflict-sweep` (#1461, ADR-028)** — a tick-loop sweep (`execution-core/resolve-conflict-
-  sweep.mjs`, off/shadow/enforce, default off) that scans DIRECTLY for `source_conflict_ctl708_unavailable`
+  sweep.mjs`, off/shadow/enforce, default off, env `CATALYST_RESOLVE_CONFLICT_SWEEP`) that scans DIRECTLY for `source_conflict_ctl708_unavailable`
   stalls (bypassing the in-flight gate `deriveAdvancement` uses, since a stalled ticket is excluded from
   it), classifies resolvability live via the existing `classifyMergeTree` (`stale-pr-rescue.mjs`), and
   dispatches `phase-resolve-conflict` (cloned from `phase-remediate`'s envelope) through the standard
