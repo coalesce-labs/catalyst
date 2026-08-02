@@ -9,7 +9,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test event-scan.test.mjs
 
 import { describe, test, expect, beforeEach } from "bun:test";
-import { writeFileSync, appendFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, appendFileSync, mkdtempSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -17,6 +17,7 @@ import {
   countDistinctRevivingTickets,
   countRemediateCycles,
   countRecoveryPassCycles,
+  countResolveConflictCycles,
   hasCompleteEvent,
   latestCompleteEventTs,
   latestCompleteEventAttempt,
@@ -267,6 +268,41 @@ describe("CTL-1176: countRecoveryPassCycles", () => {
 
   test("throws without ticket", () => {
     expect(() => countRecoveryPassCycles({})).toThrow();
+  });
+});
+
+describe("countResolveConflictCycles", () => {
+  const path = "/tmp/resolve-conflict-cycles-test.jsonl";
+
+  beforeEach(() => {
+    __resetEventScanIndexForTest();
+    try { unlinkSync(path); } catch {}
+  });
+
+  test("counts phase.resolve-conflict.complete.<ticket> envelopes", () => {
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ ts: "2026-08-02T00:00:00Z", attributes: { "event.name": "phase.resolve-conflict.complete.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:01:00Z", attributes: { "event.name": "phase.resolve-conflict.complete.CTL-1" } }),
+        JSON.stringify({ ts: "2026-08-02T00:02:00Z", attributes: { "event.name": "phase.resolve-conflict.complete.CTL-2" } }),
+      ].join("\n") + "\n",
+    );
+    expect(countResolveConflictCycles({ ticket: "CTL-1", path })).toBe(2);
+    expect(countResolveConflictCycles({ ticket: "CTL-2", path })).toBe(1);
+    expect(countResolveConflictCycles({ ticket: "CTL-9", path })).toBe(0);
+  });
+
+  test("does not match a suffix-only ticket (CTL-1 vs CTL-10)", () => {
+    writeFileSync(
+      path,
+      JSON.stringify({ ts: "2026-08-02T00:00:00Z", attributes: { "event.name": "phase.resolve-conflict.complete.CTL-10" } }) + "\n",
+    );
+    expect(countResolveConflictCycles({ ticket: "CTL-1", path })).toBe(0);
+  });
+
+  test("throws without a ticket", () => {
+    expect(() => countResolveConflictCycles({ path })).toThrow("countResolveConflictCycles: ticket required");
   });
 });
 

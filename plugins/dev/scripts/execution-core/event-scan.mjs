@@ -50,6 +50,12 @@ const REMEDIATE_NAME_PREFIX = "phase.remediate.complete.";
 // one phase.recovery-pass.complete.<ticket> event. Durable (survives signal
 // resets), so the cap holds across ticks/restarts.
 const RECOVERY_PASS_NAME_PREFIX = "phase.recovery-pass.complete.";
+// CTL-1176-adjacent, #1461: the resolve-conflict-sweep dispatch budget, event-
+// counted exactly like countRemediateCycles/countRecoveryPassCycles. One
+// completed resolve-conflict run == one phase.resolve-conflict.complete.<ticket>
+// event. Durable (survives the stalled-signal clear), so the cap holds across
+// ticks/restarts.
+const RESOLVE_CONFLICT_NAME_PREFIX = "phase.resolve-conflict.complete.";
 
 // CTL-802 — countTicketEventsInWindow (the CTL-671 runaway detector) used to scan
 // the WHOLE log from offset 0 on every call — and it is called once per in-flight
@@ -86,7 +92,10 @@ const _index = new Map(); // path -> { cursor, leftover, events: [...], phaseEve
 function isRelevant(name) {
   return (
     typeof name === "string" &&
-    (REVIVE_NAME_RE.test(name) || name.startsWith(REMEDIATE_NAME_PREFIX) || COMPLETE_NAME_RE.test(name))
+    (REVIVE_NAME_RE.test(name) ||
+      name.startsWith(REMEDIATE_NAME_PREFIX) ||
+      name.startsWith(RESOLVE_CONFLICT_NAME_PREFIX) ||
+      COMPLETE_NAME_RE.test(name))
   );
 }
 
@@ -211,6 +220,14 @@ export function countRemediateCycles({ ticket, orchId, since, path = getEventLog
 export function countRecoveryPassCycles({ ticket, orchId, since, path = getEventLogPath() } = {}) {
   if (!ticket) throw new Error("countRecoveryPassCycles: ticket required");
   return countByExactName(`${RECOVERY_PASS_NAME_PREFIX}${ticket}`, { orchId, since, path });
+}
+
+// countResolveConflictCycles — number of phase.resolve-conflict.complete.<ticket>
+// envelopes (#1461). The event-counted resolve-conflict-sweep dispatch budget,
+// mirroring countRemediateCycles/countRecoveryPassCycles exactly.
+export function countResolveConflictCycles({ ticket, orchId, since, path = getEventLogPath() } = {}) {
+  if (!ticket) throw new Error("countResolveConflictCycles: ticket required");
+  return countByExactName(`${RESOLVE_CONFLICT_NAME_PREFIX}${ticket}`, { orchId, since, path });
 }
 
 // countDistinctRevivingTickets — unique tickets that have any revive event
