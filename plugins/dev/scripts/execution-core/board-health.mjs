@@ -325,6 +325,7 @@ function deriveRing(events, nowMs) {
         // (no-owned-anchor, gate-hold) — including the deferred-only proceed path
         // where proposedMoves is 0.
         skippedReason: d.act?.skippedReason ?? null,
+        skippedReasonNoClock: d.act?.skippedReasonNoClock === true, // CTL-1610
       });
     }
   }
@@ -751,9 +752,14 @@ function checkActuationLiveness(b, t) {
   // owned-but-undispatched wedge (skippedReason ∈ WEDGE_SKIP_REASONS). This catches
   // the deferred-only proceed path (proposedMoves 0) the old proposedMoves>0
   // predicate missed (Codex P2), and ignores benign no-owned-anchor/gate-hold scans.
-  const wedged = recent.every(
-    (s) => s.dispatched !== true && WEDGE_SKIP_REASONS.has(s.skippedReason),
-  );
+  // CTL-1610: all-candidates-exhausted is a wedge ONLY when the cohort has no
+  // running human-review clock (skippedReasonNoClock) — a well-formed exhausted
+  // cohort (valid ts) stays the CTL-1440 benign non-wedge.
+  const isWedgeScan = (s) =>
+    s.dispatched !== true &&
+    (WEDGE_SKIP_REASONS.has(s.skippedReason) ||
+      (s.skippedReason === "all-candidates-exhausted" && s.skippedReasonNoClock === true));
+  const wedged = recent.every(isWedgeScan);
   return invariant(
     !wedged,
     wedged ? 1 : 0,
@@ -1341,6 +1347,7 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null }) 
     dispatched: act?.dispatched === true,
     anchor: act?.anchor ?? null,
     skippedReason: act?.skippedReason ?? (act?.dispatched === true ? null : "shadow"),
+    skippedReasonNoClock: act?.skippedReasonNoClock === true, // CTL-1610
   };
   return {
     type: "recovery.board-scan",
@@ -1486,6 +1493,7 @@ export function boardHealthPass({
             // [0] anchor and dispatch a later one); fall back to the intended anchor.
             anchor: (dispatched ? actResult?.candidate : null) ?? anchor,
             skippedReason: dispatched ? null : actResult?.reason ?? "all-candidates-cooldown",
+            skippedReasonNoClock: dispatched ? false : (actResult?.latchedNoClock === true), // CTL-1610
           };
         }
       } catch (err) {

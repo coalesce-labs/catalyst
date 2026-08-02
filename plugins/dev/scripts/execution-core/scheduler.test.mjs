@@ -12766,3 +12766,42 @@ describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
     expect(seenReplica).toBeUndefined();
   });
 });
+
+// ─── CTL-1610 (Phase 2): holisticBoardHealthAct latchedNoClock ───────────────
+describe("holisticBoardHealthAct — latchedNoClock (CTL-1610)", () => {
+  test("(CTL-1610) all-candidates-exhausted with a no-clock latch → latchedNoClock:true", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A", "B"], boardContext: {}, decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: (t) => t === "A",
+        invokeRecoveryPass: () => ({ dispatched: false }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r).toMatchObject({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: true });
+  });
+
+  test("(CTL-1610) well-formed exhausted cohort (all clocked) → latchedNoClock:false", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A", "B"], boardContext: {}, decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: () => false,
+        invokeRecoveryPass: () => ({ dispatched: false }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r).toMatchObject({ reason: "all-candidates-exhausted", latchedNoClock: false });
+  });
+
+  test("(CTL-1610) latchHasNoClock defaults to a safe no-op (bare tick → latchedNoClock:false)", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A"], decision: {} },
+      { shouldSkipItem: () => true, skipReason: () => "escalated", invokeRecoveryPass: () => ({}), recordIntent: () => {} },
+    );
+    expect(r.latchedNoClock).toBe(false);
+  });
+});

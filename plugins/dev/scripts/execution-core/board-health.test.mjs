@@ -1157,7 +1157,7 @@ describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
   test("no act param → default shadow outcome; actDispatched 0", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
     const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decisionFor(invs) });
-    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow", skippedReasonNoClock: false });
     expect(ev.details.actDispatched).toBe(0);
   });
 
@@ -1169,7 +1169,7 @@ describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
       decision: decisionFor(invs),
       act: { dispatched: true, anchor: "CTL-7", skippedReason: null },
     });
-    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null });
+    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null, skippedReasonNoClock: false });
     expect(ev.details.actDispatched).toBe(1);
     expect(ev.reason).toContain("dispatched CTL-7");
   });
@@ -1253,7 +1253,7 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
     boardHealthPass(
       flaggedDeps({ mode: "shadow", emit: (e) => emits.push(e), act: () => { throw new Error("shadow must not act"); } }),
     );
-    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow", skippedReasonNoClock: false });
   });
 
   test("Codex round-2: enforce with NO act seam → skippedReason:no-actuator (a miswired-actuator wedge)", () => {
@@ -1322,7 +1322,7 @@ describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 
     });
     expect(board.ring.boardScans[0]).toEqual({
       tsMs: Date.parse("2026-06-20T11:59:00Z"),
-      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null,
+      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null, skippedReasonNoClock: false,
     });
   });
 });
@@ -1748,5 +1748,44 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   test("buildBoardContext defaults the cohort to [] when green (shadow-safe)", () => {
     const b = board({ ticketsById: one({ updatedAt: at(2) }) });
     expect(buildBoardContext(b, evaluateInvariants(b)).unownedInFlight).toEqual([]);
+  });
+});
+
+// ─── CTL-1610 (Phase 2): skippedReasonNoClock threading ─────────────────────
+describe("checkActuationLiveness — skippedReasonNoClock (CTL-1610)", () => {
+  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, skippedReason: "all-candidates-cooldown", skippedReasonNoClock: false, ...o });
+
+  test("(CTL-1610) all-candidates-exhausted with skippedReasonNoClock:true across the window → flags (wedge)", () => {
+    const boardScans = Array.from({ length: 6 }, () =>
+      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(true);
+    expect(r.actuationLiveness.ok).toBe(false);
+  });
+
+  test("(CTL-1610) all-candidates-exhausted with a valid clock (skippedReasonNoClock:false) stays BENIGN (not flagged)", () => {
+    const boardScans = Array.from({ length: 6 }, () =>
+      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: false }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("(CTL-1610) a dispatched scan within a no-clock-latch window still clears the wedge", () => {
+    const boardScans = [
+      ...Array.from({ length: 5 }, () => mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true })),
+      mkScan({ dispatched: true, skippedReason: null }),
+    ];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+});
+
+describe("buildBoardScanEvent — act.skippedReasonNoClock round-trip (CTL-1610)", () => {
+  test("(CTL-1610) buildBoardScanEvent carries act.skippedReasonNoClock", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const ev = buildBoardScanEvent({ mode: "enforce", invariants: invs, decision,
+      act: { dispatched: false, anchor: null, skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true } });
+    expect(ev.details.act.skippedReasonNoClock).toBe(true);
   });
 });

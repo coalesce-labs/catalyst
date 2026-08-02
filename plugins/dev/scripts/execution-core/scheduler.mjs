@@ -276,6 +276,7 @@ import {
   // own process, so the env-resolving defaults would otherwise no-op.
   defaultWriteEscalationSignal as recoveryWriteEscalationSignal,
   defaultReadIntentAttempts as recoveryReadIntentAttempts,
+  defaultLatchHasNoClock as recoveryLatchHasNoClock, // CTL-1610 (Phase 2)
 } from "./recovery-reasoning.mjs";
 // CTL-1331: the async board-health delegate queue. countQueuedDelegates is the
 // slot reservation (a queued/claimed delegate has taken a slot its `claude --bg`
@@ -7893,6 +7894,7 @@ function runTick() {
               // it moments ago); the per-item pass keeps the lastTs throttle.
               shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, { ...deps, holistic: true }),
               skipReason: (cand) => recoverySkipReason(cand, { ...deps, holistic: true }), // CTL-1440 (P0b)
+              latchHasNoClock: (cand) => recoveryLatchHasNoClock(cand, deps), // CTL-1610 (Phase 2)
               invokeRecoveryPass: (cand, ctx) => recoveryInvokeRecoveryPass(cand, ctx, deps),
               recordIntent: (cand, intent) => recoveryRecordIntent(cand, intent, deps),
             }
@@ -8003,7 +8005,7 @@ function scheduleDebouncedTick(debounceMs) {
 // result, or {dispatched:false, reason:"all-candidates-cooldown"} when none dispatched.
 export function holisticBoardHealthAct(
   { anchor = null, candidates = [], boardContext, decision } = {},
-  { shouldSkipItem, invokeRecoveryPass, recordIntent, skipReason = null } = {}
+  { shouldSkipItem, invokeRecoveryPass, recordIntent, skipReason = null, latchHasNoClock = () => false } = {}
 ) {
   const ordered = candidates.length ? candidates : anchor ? [anchor] : [];
   // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
@@ -8013,6 +8015,7 @@ export function holisticBoardHealthAct(
   // misnomer that made C1/C2 lie — audit RC1).
   let ledgerSkips = 0;
   let terminalSkips = 0;
+  let noClockLatches = 0; // CTL-1610: count timestamp-less escalated latches
   let invoked = 0;
   // Codex R1: the terminal set includes "escalated" (the exhaustion sweep runs
   // BEFORE this act and rewrites exhausted ledgers to escalated — the cohort is
@@ -8023,7 +8026,10 @@ export function holisticBoardHealthAct(
     // (a) cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
     if (shouldSkipItem(cand)) {
       ledgerSkips += 1;
-      if (TERMINAL_SKIPS.has(skipReason?.(cand))) terminalSkips += 1;
+      if (TERMINAL_SKIPS.has(skipReason?.(cand))) {
+        terminalSkips += 1;
+        if (latchHasNoClock(cand)) noClockLatches += 1; // CTL-1610
+      }
       continue;
     }
     invoked += 1;
@@ -8059,12 +8065,13 @@ export function holisticBoardHealthAct(
   // non-wedge). Any invoke (even a non-dispatch result — cycle cap, latched)
   // or any retryable skip keeps the cooldown reason (Codex R1: an actionable
   // candidate that merely failed to dispatch is NOT a terminal cohort).
+  const exhausted = invoked === 0 && ledgerSkips > 0 && terminalSkips === ledgerSkips;
   return {
     dispatched: false,
-    reason:
-      invoked === 0 && ledgerSkips > 0 && terminalSkips === ledgerSkips
-        ? "all-candidates-exhausted"
-        : "all-candidates-cooldown",
+    reason: exhausted ? "all-candidates-exhausted" : "all-candidates-cooldown",
+    // CTL-1610: the exhausted cohort has ≥1 timestamp-less latch (no human-review
+    // clock running) → a real wedge for checkActuationLiveness, not a benign handoff.
+    latchedNoClock: exhausted && noClockLatches > 0,
   };
 }
 
