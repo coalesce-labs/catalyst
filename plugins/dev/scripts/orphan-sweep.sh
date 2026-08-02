@@ -1275,7 +1275,10 @@ sweep_worktrees() {
                 deferred=$((deferred+1)); continue
               fi
               if command -v assert_worktree_removal_safe >/dev/null 2>&1 && ! assert_worktree_removal_safe "$wt"; then
-                log "skip (guard refused — live handle/self): $wt"
+                # Mirror the SAFE path (L1244): a guard refusal RETAINS the tree,
+                # so count it as an active skip or activeSkipped undercounts the
+                # worktrees left behind exactly when the guard fires (CTL-1417).
+                log "skip (guard refused — live handle/self): $wt"; _sweep_count activeSkipped
               else
                 git worktree remove --force "$wt" 2>/dev/null \
                   && { log "removed (salvage) worktree: $wt"; emit_reclaim worktree "$wt"; removed_count=$((removed_count+1)); }

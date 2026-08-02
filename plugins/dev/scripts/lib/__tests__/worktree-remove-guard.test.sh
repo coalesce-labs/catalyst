@@ -30,7 +30,12 @@ fail() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; }
 STUB_LSOF="$SCRATCH/mock-lsof"
 cat >"$STUB_LSOF" <<'EOF'
 #!/usr/bin/env bash
+# STUB_LSOF_OUT → stdout (the guard parses `-F p` PID lines like "p1234").
+# STUB_LSOF_ERR → stderr (simulates lsof's traversal/permission DIAGNOSTIC).
+# STUB_LSOF_SLEEP → block this many seconds before returning (timeout test).
+[[ -n "${STUB_LSOF_SLEEP:-}" ]] && sleep "$STUB_LSOF_SLEEP"
 [[ -n "${STUB_LSOF_OUT:-}" ]] && printf '%s\n' "$STUB_LSOF_OUT"
+[[ -n "${STUB_LSOF_ERR:-}" ]] && printf '%s\n' "$STUB_LSOF_ERR" >&2
 exit "${STUB_LSOF_RC:-1}"
 EOF
 chmod +x "$STUB_LSOF"
@@ -80,13 +85,38 @@ mkdir -p "$SCRATCH/other"
 rc=0; (cd "$SCRATCH" && STUB_LSOF_RC=1 STUB_LSOF_OUT="" assert_worktree_removal_safe "$SCRATCH/other") 2>/dev/null || rc=$?
 assert_rc_zero "$rc" "unrelated target, lsof clear"
 
-# (b) foreign holder present (lsof rc=0 + output) → refused even though cwd is elsewhere
+# (b) foreign holder present (lsof rc=0 + a foreign PID line) → refused even though cwd is elsewhere
 rc=0; (cd "$SCRATCH" && STUB_LSOF_RC=0 STUB_LSOF_OUT="p1234" assert_worktree_removal_safe "$SCRATCH/other") 2>/dev/null || rc=$?
 assert_rc_nonzero "$rc" "foreign holder present"
 
 # (b) fail-closed: lsof probe errors (rc=127 / missing binary) → refused
 rc=0; (cd "$SCRATCH" && WT_GUARD_LSOF=/nonexistent/lsof assert_worktree_removal_safe "$SCRATCH/other") 2>/dev/null || rc=$?
 assert_rc_nonzero "$rc" "fail-closed on missing lsof"
+
+# (b/#1) self-exclusion: the ONLY holder is our own process ($$) → ALLOWED.
+# During teardown the worker's cwd is the tree; the guard must exempt its own
+# session's process tree, not detect itself and refuse. The subshell's $$ is
+# the guard's own shell (a member of _wtg_self_pids), so `p$$` must be dropped.
+rc=0; (cd "$SCRATCH" && STUB_LSOF_RC=0 STUB_LSOF_OUT="p$$" assert_worktree_removal_safe "$SCRATCH/other") 2>/dev/null || rc=$?
+assert_rc_zero "$rc" "self-only holder is exempted"
+
+# (b/#1) mixed holders: self PID + a foreign PID → still refused (foreign wins).
+rc=0; (cd "$SCRATCH" && STUB_LSOF_RC=0 STUB_LSOF_OUT="$(printf 'p%s\np1234\n' "$$")" assert_worktree_removal_safe "$SCRATCH/other") 2>/dev/null || rc=$?
+assert_rc_nonzero "$rc" "self + foreign holder still refused"
+
+# (b/#3) inconclusive: lsof exits 1 with a stderr DIAGNOSTIC (not clean-empty) → refused.
+# rc=1 + empty stdout would otherwise read as "nothing under the tree"; the
+# stderr diagnostic must flip that to fail-closed.
+rc=0; (cd "$SCRATCH" && STUB_LSOF_RC=1 STUB_LSOF_OUT="" STUB_LSOF_ERR="lsof: WARNING: can't stat() apfs file system" assert_worktree_removal_safe "$SCRATCH/other") 2>/dev/null || rc=$?
+assert_rc_nonzero "$rc" "lsof stderr diagnostic is inconclusive → refuse"
+
+# (b/#2) bound: an lsof that blocks past the 10s cap → timeout → refused.
+# Guarded behind WT_GUARD_TEST_SLOW=1 so the normal fast suite stays sub-second;
+# opt in when you want to exercise the wall-clock cap end-to-end.
+if [[ "${WT_GUARD_TEST_SLOW:-0}" == "1" ]]; then
+	rc=0; (cd "$SCRATCH" && STUB_LSOF_RC=0 STUB_LSOF_OUT="p1234" STUB_LSOF_SLEEP=12 assert_worktree_removal_safe "$SCRATCH/other") 2>/dev/null || rc=$?
+	assert_rc_nonzero "$rc" "lsof exceeding 10s cap → timeout → refuse"
+fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
