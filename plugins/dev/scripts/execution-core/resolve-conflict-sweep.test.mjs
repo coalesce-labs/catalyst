@@ -11,6 +11,8 @@ import {
   markStalledSignalResolving,
   defaultMarkAndDispatch,
   defaultEscalateCapExhausted,
+  defaultCollectResolveConflictCompletions,
+  runResolveConflictSweepPass,
 } from "./resolve-conflict-sweep.mjs";
 
 describe("constants", () => {
@@ -338,5 +340,121 @@ describe("defaultEscalateCapExhausted", () => {
     expect(posted[0][0]).toBe("CTL-1");
     expect(posted[0][1]).toMatch(/^🔼 \*\*phase-resolve-conflict\*\* escalated/);
     expect(posted[0][1]).toMatch(/cycle cap \(3\)/);
+  });
+});
+
+describe("defaultCollectResolveConflictCompletions", () => {
+  function fakeFs({ workerDirs, files }) {
+    return {
+      readdirSync: (p, opts) => (opts?.withFileTypes ? (workerDirs[p] ?? []).map((n) => ({ name: n, isDirectory: () => true })) : (files[p] ?? [])),
+      readFileSync: (p) => { if (!(p in files)) throw new Error(`ENOENT: ${p}`); return files[p]; },
+    };
+  }
+
+  test("finds a ticket whose resolve-conflict phase is done and reads stalledPhase from the brief", () => {
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["CTL-1"] },
+      files: {
+        "/orch/workers/CTL-1": ["phase-resolve-conflict.json", "resolve-conflict-brief.json"],
+        "/orch/workers/CTL-1/phase-resolve-conflict.json": JSON.stringify({ status: "done" }),
+        "/orch/workers/CTL-1/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "implement" }),
+      },
+    });
+    const out = defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fs });
+    expect(out).toEqual([{ ticket: "CTL-1", stalledPhase: "implement" }]);
+  });
+
+  test("skips a ticket whose resolve-conflict phase is not done", () => {
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["CTL-2"] },
+      files: {
+        "/orch/workers/CTL-2": ["phase-resolve-conflict.json", "resolve-conflict-brief.json"],
+        "/orch/workers/CTL-2/phase-resolve-conflict.json": JSON.stringify({ status: "running" }),
+        "/orch/workers/CTL-2/resolve-conflict-brief.json": JSON.stringify({ stalledPhase: "verify" }),
+      },
+    });
+    expect(defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fs })).toEqual([]);
+  });
+
+  test("skips a ticket with no resolve-conflict signal at all", () => {
+    const fs = fakeFs({ workerDirs: { "/orch/workers": ["CTL-3"] }, files: { "/orch/workers/CTL-3": ["phase-implement.json"] } });
+    expect(defaultCollectResolveConflictCompletions({ orchDir: "/orch", ...fs })).toEqual([]);
+  });
+});
+
+describe("runResolveConflictSweepPass", () => {
+  test("mode 'off' skips everything, no census called", () => {
+    const collectCandidates = () => { throw new Error("must not be called"); };
+    const report = runResolveConflictSweepPass({ mode: "off", collectCandidates });
+    expect(report).toEqual({ marked: [], wouldMark: [], escalated: [], wouldEscalate: [], cleared: [], wouldClear: [], skipped: [], failed: [] });
+  });
+
+  test("shadow mode classifies and emits would-mark, takes no action", async () => {
+    const emitted = [];
+    const report = await runResolveConflictSweepPass({
+      mode: "shadow",
+      collectCandidates: () => [{ ticket: "CTL-1", phase: "implement", workerDir: "/w", raw: { failureReason: "source_conflict_ctl708_unavailable" }, worktreePath: "/wt", base: "main" }],
+      collectCompletions: () => [],
+      cycleCountOf: () => 0,
+      classifyLive: async () => ({ resolvable: true, conflictFiles: [], conflictTypes: [] }),
+      markAndDispatch: () => { throw new Error("must not be called in shadow"); },
+      emit: (type) => emitted.push(type),
+    });
+    expect(report.wouldMark).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(emitted).toContain("resolve-conflict.would.mark");
+  });
+
+  test("enforce mode marks + dispatches a resolvable candidate", async () => {
+    const dispatched = [];
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [{ ticket: "CTL-1", phase: "implement", workerDir: "/w", raw: { failureReason: "source_conflict_ctl708_unavailable" }, worktreePath: "/wt", base: "main" }],
+      collectCompletions: () => [],
+      cycleCountOf: () => 0,
+      classifyLive: async () => ({ resolvable: true, conflictFiles: ["a.ts"], conflictTypes: ["content"] }),
+      markAndDispatch: (c) => { dispatched.push(c.ticket); return { success: true, dispatched: true }; },
+      emit: async () => true,
+    });
+    expect(report.marked).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(dispatched).toEqual(["CTL-1"]);
+  });
+
+  test("enforce mode escalates a cap-exhausted candidate", async () => {
+    const escalated = [];
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [{ ticket: "CTL-1", phase: "implement", workerDir: "/w", raw: { failureReason: "source_conflict_resolvable" }, worktreePath: "/wt", base: "main" }],
+      collectCompletions: () => [],
+      cycleCountOf: () => 3,
+      classifyLive: async () => ({ resolvable: true, conflictFiles: [], conflictTypes: [] }),
+      escalateCapExhausted: (c) => { escalated.push(c.ticket); return true; },
+      emit: async () => true,
+    });
+    expect(report.escalated).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(escalated).toEqual(["CTL-1"]);
+  });
+
+  test("enforce mode clears a completion via the injected clearStall seam", async () => {
+    const cleared = [];
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [],
+      collectCompletions: () => [{ ticket: "CTL-1", stalledPhase: "implement" }],
+      clearStall: (c) => { cleared.push(c); return true; },
+      emit: async () => true,
+    });
+    expect(report.cleared).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(cleared).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+  });
+
+  test("a throwing census degrades to an empty pass, never aborts", async () => {
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      collectCandidates: () => { throw new Error("census exploded"); },
+      collectCompletions: () => [],
+      emit: async () => true,
+    });
+    expect(report.marked).toEqual([]);
+    expect(report.failed).toEqual([]);
   });
 });
