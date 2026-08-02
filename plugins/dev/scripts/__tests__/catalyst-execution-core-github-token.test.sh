@@ -11,7 +11,19 @@
 # genuinely unset rather than exported as "" (T5/T6), because bash `${X:-default}` and
 # JS `process.env.X ?? fallback` both treat "" as SET and would defeat gh's fallback.
 #
-# Method: the helper is extracted out of catalyst-execution-core with sed and exercised
+# CTL-1612 (Codex P2) adds a SECOND helper to the same ladder,
+# `_reconcile_github_token_aliases`, which runs AFTER execution-core.env is sourced.
+# The override was honored only by ordering, and an execution-core.env that set just
+# GITHUB_TOKEN left GH_TOKEN still holding the shared-file value — and `gh` resolves
+# GH_TOKEN FIRST, so the operator override was silently ignored while the provenance
+# breadcrumb still claimed "shared-file". T12 is that regression; T13-T15 pin the
+# no-op cases the guard has to preserve.
+#
+# CTL-1612 (Codex P2) also makes the projection XDG-aware: the default path is
+# ${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/github-token, matching setup-webhooks.sh:23
+# (which is what generates the sibling secret). T16 pins both arms of that `:-`.
+#
+# Method: the helpers are extracted out of catalyst-execution-core with sed and exercised
 # in isolation, so nothing here boots a daemon, opens a socket, or mints an OAuth token.
 # Every case runs under `env -i` (strictly stronger than `env -u GITHUB_TOKEN -u GH_TOKEN`)
 # with HOME pointed at the sandbox, so a developer's real shell token or real
@@ -59,11 +71,19 @@ echo '{}' > "$T/layer2.json"
 FAKE_FILE_TOKEN='FAKE-CTL1612-shared-file-token-AAAA'
 FAKE_AMBIENT_GITHUB='FAKE-CTL1612-ambient-github-token-BBBB'
 FAKE_AMBIENT_GH='FAKE-CTL1612-ambient-gh-token-CCCC'
+FAKE_OVERRIDE_TOKEN='FAKE-CTL1612-operator-override-token-DDDD'
+FAKE_XDG_TOKEN='FAKE-CTL1612-xdg-config-home-token-EEEE'
+FAKE_HOME_CONFIG_TOKEN='FAKE-CTL1612-home-dotconfig-token-FFFF'
 
-# ─── Extract the helper under test ────────────────────────────────────────────
+# ─── Extract the helpers under test ───────────────────────────────────────────
 sed -n '/^_project_shared_github_token() {/,/^}/p' "$SCRIPT" > "$T/helper.sh"
 if [[ ! -s "$T/helper.sh" ]] || ! grep -q 'CATALYST_GITHUB_TOKEN_SOURCE' "$T/helper.sh"; then
   echo "FATAL: could not extract _project_shared_github_token from $SCRIPT" >&2
+  exit 1
+fi
+sed -n '/^_reconcile_github_token_aliases() {/,/^}/p' "$SCRIPT" > "$T/reconcile.sh"
+if [[ ! -s "$T/reconcile.sh" ]] || ! grep -q 'operator-override' "$T/reconcile.sh"; then
+  echo "FATAL: could not extract _reconcile_github_token_aliases from $SCRIPT" >&2
   exit 1
 fi
 
@@ -77,6 +97,17 @@ set -uo pipefail
 # shellcheck disable=SC1090
 source "$HELPER"
 _project_shared_github_token >"$STDOUT_CAP" 2>"$STDERR_CAP"
+
+# CTL-1612 (Codex P2) stage 2 — opt-in, inert unless the case supplies RECONCILE, so
+# tests 1-9 run byte-identically. Replays cmd_start's post-projection sequence: source
+# execution-core.env (the operator override), THEN reconcile the two names.
+if [[ -n "${RECONCILE:-}" ]]; then
+  # shellcheck disable=SC1090
+  source "$RECONCILE"
+  # shellcheck disable=SC1090
+  [[ -n "${ENV_FILE:-}" && -f "${ENV_FILE}" ]] && source "$ENV_FILE"
+  _reconcile_github_token_aliases >>"$STDOUT_CAP" 2>>"$STDERR_CAP"
+fi
 
 gt=unset; [[ -n ${GITHUB_TOKEN+x} ]] && gt=set
 gh=unset; [[ -n ${GH_TOKEN+x} ]] && gh=set
@@ -347,6 +378,158 @@ if [[ -n "$CALL_LINE" && -n "$ENV_SOURCE_LINE" ]] && [[ "$CALL_LINE" -lt "$ENV_S
 else
   fail "T11 invocation must precede the execution-core.env source" \
     "call=$CALL_LINE env_source=$ENV_SOURCE_LINE"
+fi
+
+# ─── execution-core.env fixtures (what cmd_start sources AFTER the projection) ─
+# The load-bearing one sets ONLY GITHUB_TOKEN — that is exactly the shape that used to
+# leave GH_TOKEN pointed at the shared-file value while `gh` read GH_TOKEN first.
+printf "export GITHUB_TOKEN='%s'\n" "$FAKE_OVERRIDE_TOKEN" > "$T/env-override-github-only.env"
+printf 'export CATALYST_FIXTURE_UNRELATED=1\n' > "$T/env-no-token.env"
+printf "export GITHUB_TOKEN=''\n" > "$T/env-override-empty.env"
+
+# ─── 12: operator override sets only GITHUB_TOKEN → GH_TOKEN re-pointed ───────
+echo ""
+echo "test 12: execution-core.env sets ONLY GITHUB_TOKEN → GH_TOKEN re-pointed at the override (Codex P2 regression)"
+OUT="$(probe T12 CATALYST_GITHUB_TOKEN_FILE="$T/file.token" \
+  RECONCILE="$T/reconcile.sh" ENV_FILE="$T/env-override-github-only.env" \
+  EXPECT_VALUE="$FAKE_OVERRIDE_TOKEN" FORBID_VALUE="$FAKE_FILE_TOKEN")"
+assert_line "$OUT" "match_github=yes" "T12 GITHUB_TOKEN = the operator override"
+assert_line "$OUT" "match_gh=yes" "T12 GH_TOKEN re-pointed at the override (gh reads GH_TOKEN first)"
+assert_line "$OUT" "forbid_hit=no" "T12 the projected shared-file value survives under NEITHER name"
+assert_line "$OUT" "source=operator-override" "T12 breadcrumb corrected to operator-override"
+assert_line "$OUT" "agree=yes" "T12 the two names agree"
+assert_line "$OUT" "exported=GH" "T12 both names still reach the nohup'd child"
+
+# ─── 13: reconcile is a NO-OP when execution-core.env sets no token ───────────
+echo ""
+echo "test 13: execution-core.env sets no token → reconcile is a no-op (source stays shared-file)"
+OUT="$(probe T13 CATALYST_GITHUB_TOKEN_FILE="$T/file.token" \
+  RECONCILE="$T/reconcile.sh" ENV_FILE="$T/env-no-token.env" \
+  EXPECT_VALUE="$FAKE_FILE_TOKEN" FORBID_VALUE="$FAKE_OVERRIDE_TOKEN")"
+assert_line "$OUT" "source=shared-file" "T13 breadcrumb NOT falsely flipped to operator-override"
+assert_line "$OUT" "match_github=yes" "T13 GITHUB_TOKEN still the shared-file value"
+assert_line "$OUT" "match_gh=yes" "T13 GH_TOKEN still the shared-file value"
+assert_line "$OUT" "forbid_hit=no" "T13 no override value materialized from nowhere"
+assert_line "$OUT" "agree=yes" "T13 the two names agree"
+
+# ─── 14: reconcile never installs an EMPTY override ───────────────────────────
+echo ""
+echo "test 14: execution-core.env sets GITHUB_TOKEN='' → reconcile installs nothing empty"
+OUT="$(probe T14 CATALYST_GITHUB_TOKEN_FILE="$T/file.token" \
+  RECONCILE="$T/reconcile.sh" ENV_FILE="$T/env-override-empty.env" \
+  EXPECT_VALUE="$FAKE_FILE_TOKEN")"
+assert_line "$OUT" "gh_token=set" "T14 GH_TOKEN not blanked by an empty primary"
+assert_line "$OUT" "match_gh=yes" "T14 GH_TOKEN keeps the projected value (still authenticates)"
+assert_line "$OUT" "source=shared-file" "T14 an empty primary is not an operator override"
+# Deliberate asymmetry: the operator's own empty GITHUB_TOKEN must NOT drag the working
+# GH_TOKEN down with it — a reconcile that mirrored "" would leave `gh` with no credential.
+assert_line "$OUT" "agree=no" "T14 the empty primary is not mirrored onto GH_TOKEN"
+
+# ─── 15: reconcile is a no-op in the "inherited" and "none" ladders ───────────
+echo ""
+echo "test 15: reconcile is a no-op when there is no shared file (inherited / none)"
+OUT="$(probe T15a CATALYST_GITHUB_TOKEN_FILE="$MISSING_TOKEN_FILE" \
+  GITHUB_TOKEN="$FAKE_AMBIENT_GITHUB" \
+  RECONCILE="$T/reconcile.sh" ENV_FILE="$T/env-no-token.env" \
+  EXPECT_VALUE="$FAKE_AMBIENT_GITHUB")"
+assert_line "$OUT" "source=inherited" "T15a inherited breadcrumb survives the reconcile"
+assert_line "$OUT" "match_github=yes" "T15a inherited GITHUB_TOKEN untouched"
+assert_line "$OUT" "match_gh=yes" "T15a inherited GH_TOKEN untouched"
+OUT="$(probe T15b CATALYST_GITHUB_TOKEN_FILE="$MISSING_TOKEN_FILE" \
+  RECONCILE="$T/reconcile.sh" ENV_FILE="$T/env-no-token.env")"
+assert_line "$OUT" "source=none" "T15b none breadcrumb survives the reconcile"
+assert_line "$OUT" "github_token=unset" "T15b GITHUB_TOKEN still unset"
+assert_line "$OUT" "gh_token=unset" "T15b GH_TOKEN still unset"
+assert_line "$OUT" "exported=none" "T15b reconcile manufactures nothing for a child to see"
+
+# ─── 16: XDG_CONFIG_HOME resolution of the default token path ─────────────────
+echo ""
+echo "test 16: default path is \${XDG_CONFIG_HOME:-\$HOME/.config}/catalyst/github-token (matches setup-webhooks.sh:23)"
+mkdir -p "$T/xdg-home/.config/catalyst" "$T/xdg-config/catalyst" "$T/xdg-empty/catalyst"
+printf '%s\n' "$FAKE_HOME_CONFIG_TOKEN" > "$T/xdg-home/.config/catalyst/github-token"
+printf '%s\n' "$FAKE_XDG_TOKEN" > "$T/xdg-config/catalyst/github-token"
+# XDG set → read from there, NOT from ~/.config (the pre-fix hardcoded path).
+OUT="$(probe T16a HOME="$T/xdg-home" XDG_CONFIG_HOME="$T/xdg-config" \
+  EXPECT_VALUE="$FAKE_XDG_TOKEN" FORBID_VALUE="$FAKE_HOME_CONFIG_TOKEN")"
+assert_line "$OUT" "source=shared-file" "T16a XDG_CONFIG_HOME token file is found"
+assert_line "$OUT" "match_github=yes" "T16a GITHUB_TOKEN = the XDG_CONFIG_HOME file"
+assert_line "$OUT" "match_gh=yes" "T16a GH_TOKEN = the XDG_CONFIG_HOME file"
+assert_line "$OUT" "forbid_hit=no" "T16a ~/.config is NOT consulted when XDG_CONFIG_HOME is set"
+# XDG unset → the ~/.config fallback arm of the `:-` still works.
+OUT="$(probe T16b HOME="$T/xdg-home" \
+  EXPECT_VALUE="$FAKE_HOME_CONFIG_TOKEN" FORBID_VALUE="$FAKE_XDG_TOKEN")"
+assert_line "$OUT" "source=shared-file" "T16b ~/.config fallback still resolves when XDG_CONFIG_HOME is unset"
+assert_line "$OUT" "match_github=yes" "T16b GITHUB_TOKEN = the ~/.config file"
+assert_line "$OUT" "match_gh=yes" "T16b GH_TOKEN = the ~/.config file"
+assert_line "$OUT" "forbid_hit=no" "T16b no cross-talk from the XDG dir"
+# XDG set but empty → REPLACES ~/.config (XDG semantics), so nothing is found.
+OUT="$(probe T16c HOME="$T/xdg-home" XDG_CONFIG_HOME="$T/xdg-empty" \
+  FORBID_VALUE="$FAKE_HOME_CONFIG_TOKEN")"
+assert_line "$OUT" "source=none" "T16c XDG_CONFIG_HOME REPLACES ~/.config (no silent second lookup)"
+assert_line "$OUT" "forbid_hit=no" "T16c the ~/.config token is not smuggled in behind XDG"
+assert_line "$OUT" "exported=none" "T16c nothing exported when the XDG path holds no file"
+
+# ─── 17: wiring — reconcile runs AFTER the execution-core.env source ──────────
+echo ""
+echo "test 17: _reconcile_github_token_aliases is WIRED into cmd_start AFTER the execution-core.env source"
+RECONCILE_CALL_LINES="$(grep -nE '^[[:space:]]*_reconcile_github_token_aliases[[:space:]]*$' "$SCRIPT" | cut -d: -f1)"
+RECONCILE_CALL_COUNT="$(printf '%s\n' "$RECONCILE_CALL_LINES" | grep -c '[0-9]' || true)"
+RECONCILE_CALL_LINE="$(printf '%s\n' "$RECONCILE_CALL_LINES" | head -1)"
+if [[ "$RECONCILE_CALL_COUNT" == "1" ]]; then
+  pass "T17 exactly one _reconcile_github_token_aliases invocation site"
+else
+  fail "T17 expected exactly one invocation site" \
+    "found $RECONCILE_CALL_COUNT (lines: $(tr '\n' ' ' <<<"$RECONCILE_CALL_LINES"))"
+fi
+if [[ -n "$RECONCILE_CALL_LINE" && -n "$ENV_SOURCE_LINE" ]] \
+  && [[ "$RECONCILE_CALL_LINE" -gt "$ENV_SOURCE_LINE" ]]; then
+  pass "T17 invoked AFTER execution-core.env is sourced (line $RECONCILE_CALL_LINE > $ENV_SOURCE_LINE)"
+else
+  fail "T17 invocation must FOLLOW the execution-core.env source" \
+    "reconcile=$RECONCILE_CALL_LINE env_source=$ENV_SOURCE_LINE"
+fi
+if [[ -n "$RECONCILE_CALL_LINE" && -n "$CALL_LINE" ]] && [[ "$RECONCILE_CALL_LINE" -gt "$CALL_LINE" ]]; then
+  pass "T17 full ladder order holds: project ($CALL_LINE) < env source ($ENV_SOURCE_LINE) < reconcile ($RECONCILE_CALL_LINE)"
+else
+  fail "T17 reconcile must follow the projection" \
+    "project=$CALL_LINE reconcile=$RECONCILE_CALL_LINE"
+fi
+# The guard is only meaningful if the projection records what IT exported — without this
+# breadcrumb every projection would look like an operator override.
+if grep -q '_CATALYST_PROJECTED_GITHUB_TOKEN=' "$T/helper.sh"; then
+  pass "T17 the projection records _CATALYST_PROJECTED_GITHUB_TOKEN (the no-op guard's input)"
+else
+  fail "T17 projection must record _CATALYST_PROJECTED_GITHUB_TOKEN for the reconcile guard"
+fi
+
+# ─── 18: secret hygiene re-scan, now covering the reconcile + XDG cases ───────
+echo ""
+echo "test 18: secret hygiene re-scan across the full transcript (incl. tests 12-16)"
+TOTAL_STDOUT_LINES="$(grep -c '^stdout_bytes=' "$ALL_OUT" 2>/dev/null || echo 0)"
+ZERO_STDOUT_LINES="$(grep -c '^stdout_bytes=0$' "$ALL_OUT" 2>/dev/null || echo 0)"
+TOTAL_STDERR_LINES="$(grep -c '^stderr_bytes=' "$ALL_OUT" 2>/dev/null || echo 0)"
+ZERO_STDERR_LINES="$(grep -c '^stderr_bytes=0$' "$ALL_OUT" 2>/dev/null || echo 0)"
+if [[ "$TOTAL_STDOUT_LINES" -gt 0 && "$TOTAL_STDOUT_LINES" == "$ZERO_STDOUT_LINES" \
+  && "$TOTAL_STDERR_LINES" == "$ZERO_STDERR_LINES" ]]; then
+  pass "T18 both helpers stayed silent in all $TOTAL_STDOUT_LINES cases (stdout + stderr)"
+else
+  fail "T18 the helpers must never write to stdout/stderr" \
+    "cases=$TOTAL_STDOUT_LINES silent_out=$ZERO_STDOUT_LINES silent_err=$ZERO_STDERR_LINES"
+fi
+LEAKED=""
+for fixture in "$FAKE_FILE_TOKEN" "$FAKE_AMBIENT_GITHUB" "$FAKE_AMBIENT_GH" \
+  "$FAKE_OVERRIDE_TOKEN" "$FAKE_XDG_TOKEN" "$FAKE_HOME_CONFIG_TOKEN"; do
+  grep -qF "$fixture" "$ALL_OUT" && LEAKED="yes"
+done
+if [[ -z "$LEAKED" ]]; then
+  pass "T18 no fixture token VALUE appears in the transcript (booleans/digests only)"
+else
+  fail "T18 a token value leaked into the transcript"
+fi
+if grep -qE 'ghp_|gho_|ghu_|ghs_|ghr_|github_pat_' "$ALL_OUT"; then
+  fail "T18 transcript contains a token-shaped string"
+else
+  pass "T18 transcript contains no token-shaped string (no gh* prefix)"
 fi
 
 echo ""

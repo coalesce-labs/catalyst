@@ -154,7 +154,10 @@ _default_otel_from_user_settings() {
 # whitespace-only value IS sent and 401s, which is why we strip before testing.)
 # Minimal-touch: reads the file into a local, exports it, and NEVER logs or echoes the value.
 _project_shared_github_token() {
-	local _f="${CATALYST_GITHUB_TOKEN_FILE:-${HOME}/.config/catalyst/github-token}"
+	# XDG-aware, matching setup-webhooks.sh:23 and lib/linear-app-actor.sh:30 — on a host
+	# with XDG_CONFIG_HOME set, cluster-sync materializes the file there, and a hardcoded
+	# ~/.config would silently miss it.
+	local _f="${CATALYST_GITHUB_TOKEN_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst/github-token}"
 	local _tok=""
 	[[ -r "$_f" ]] && _tok="$(tr -d '[:space:]' <"$_f" 2>/dev/null)"
 	if [[ -n "$_tok" ]]; then
@@ -175,6 +178,27 @@ _project_shared_github_token() {
 		# Neither file nor inherited value: leave BOTH unset so `gh` falls through to
 		# hosts.yml / the keyring (how mini authenticates today). Never export "".
 		export CATALYST_GITHUB_TOKEN_SOURCE="none"
+	fi
+	# Remember what WE projected so the post-source reconcile below can tell an operator
+	# override apart from our own value.
+	_CATALYST_PROJECTED_GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+}
+
+# _reconcile_github_token_aliases — CTL-1612 (Codex P2). MUST run AFTER
+# execution-core.env is sourced.
+#
+# The operator override is honored by ORDERING: we project first, the machine-local env
+# sources second and wins. But an override that sets only GITHUB_TOKEN would leave
+# GH_TOKEN still holding OUR shared-file value — and since `gh` resolves GH_TOKEN first,
+# the override would be silently ignored and the provenance breadcrumb would still claim
+# "shared-file". Re-point the alias at the winning value and correct the breadcrumb.
+_reconcile_github_token_aliases() {
+	# Nothing changed the primary name → the projection's own pairing already holds.
+	[[ "${GITHUB_TOKEN:-}" == "${_CATALYST_PROJECTED_GITHUB_TOKEN:-}" ]] && return 0
+	if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+		export GITHUB_TOKEN
+		export GH_TOKEN="$GITHUB_TOKEN"
+		export CATALYST_GITHUB_TOKEN_SOURCE="operator-override"
 	fi
 }
 
@@ -221,6 +245,10 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1612 (Codex P2): the operator override just won on GITHUB_TOKEN — re-point
+	# GH_TOKEN at it, or `gh` (which reads GH_TOKEN first) would keep using the value we
+	# projected and silently ignore the override.
+	_reconcile_github_token_aliases
 	# CTL-1404: after the machine-local env wins, fill any unset OTLP telemetry keys from
 	# ~/.claude/settings.json so the SDK-path child `claude` CLI can export claude_code_* metrics
 	# (token/cost/session). No-op when the keys are already set or settings.json/jq are absent.

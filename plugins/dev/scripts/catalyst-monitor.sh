@@ -339,7 +339,11 @@ cmd_start() {
   # FILE-WINS for the same reason as the daemon's GitHub credential: a stale shell export
   # is exactly what we are correcting. Empty/whitespace/absent = no-op, never export ""
   # (an empty secret makes webhook-config treat the route as unconfigured).
-  local _wh_file="${CATALYST_WEBHOOK_SECRET_FILE:-${CATALYST_CONFIG_DIR:-${HOME}/.config/catalyst}/webhook-secret}"
+  # XDG-aware: setup-webhooks.sh:23 writes the secret to
+  # ${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/webhook-secret, so a hardcoded ~/.config
+  # would silently miss a freshly-generated secret on an XDG host and leave the GitHub
+  # webhook route disabled.
+  local _wh_file="${CATALYST_WEBHOOK_SECRET_FILE:-${CATALYST_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst}/webhook-secret}"
   local _wh_val=""
   [[ -r "$_wh_file" ]] && _wh_val="$(tr -d '[:space:]' <"$_wh_file" 2>/dev/null)"
   [[ -n "$_wh_val" ]] && export CATALYST_WEBHOOK_SECRET="$_wh_val"

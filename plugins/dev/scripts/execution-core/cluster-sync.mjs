@@ -271,10 +271,25 @@ export function syncSecretFiles(opts = {}) {
     ageKeyFile = defaultAgeKeyFile(),
     decrypt = makeSopsDecrypt(ageKeyFile),
     writeFile = defaultWriteFile,
+    // CTL-1612 (Codex P2): read-back seam so we can tell a REWRITE from a real CHANGE.
+    // Never throws — an unreadable/absent destination simply counts as changed.
+    readFile = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return null;
+      }
+    },
     logger = log,
   } = opts;
 
-  const result = { written: [], failed: [], skipped: false, reason: null };
+  // `written` = every entry we (re)materialized; `changed` = the subset whose CONTENT
+  // actually differs from what was already on disk. They diverge constantly: any commit
+  // touching secrets/ makes syncSecretFiles re-decrypt and rewrite the WHOLE bundle, so
+  // `written` lists every bare file even when one unrelated entry rotated. Restart alarms
+  // must key off `changed`, or a routine rotation of some other secret would demand a
+  // daemon+monitor restart for credentials that did not move (Codex P2).
+  const result = { written: [], changed: [], failed: [], skipped: false, reason: null };
   const src = resolve(clusterDir, "secrets", "node-secret-files.sops.json");
   if (!existsSync(src)) {
     result.reason = "absent";
@@ -308,8 +323,11 @@ export function syncSecretFiles(opts = {}) {
     }
     if (typeof content !== "string") continue;
     try {
-      writeFile(resolve(configDir, name), content);
+      const dest = resolve(configDir, name);
+      const prior = readFile(dest); // null = absent/unreadable → treat as changed
+      writeFile(dest, content);
       result.written.push(name);
+      if (prior !== content) result.changed.push(name);
     } catch (err) {
       logger.warn(`[cluster-sync] write ${name} failed (${err?.message ?? err})`);
       // Partial bare-file failure: a REQUESTED file decrypted but did not
@@ -838,7 +856,15 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // applied". This is the timer's restart-required surface (the daemon timer calls
   // this fn); best-effort like every other emit here. Auto-restart is out of scope
   // (CTL-1398 re-sources the file on the next start, so a manual restart re-arms it).
-  const restartRequired = status.written.filter((f) => isEnvBackedSecretFile(f));
+  //
+  // Key off the files whose CONTENT actually changed, not every file rewritten (Codex
+  // P2). Any commit touching secrets/ makes syncSecretFiles re-decrypt and rewrite the
+  // whole bundle, so `written` names every bare file even when a single unrelated entry
+  // rotated — filtering on it would demand a daemon+monitor restart on every routine
+  // secret update. Fall back to `written` when a caller-injected syncSecretFiles predates
+  // the `changed` field, preserving the old (noisier but never-missing) behavior.
+  const rotated = Array.isArray(files?.changed) ? files.changed : status.written;
+  const restartRequired = rotated.filter((f) => isEnvBackedSecretFile(f));
   status.restartRequired = restartRequired;
   for (const file of restartRequired) {
     logger?.warn?.(

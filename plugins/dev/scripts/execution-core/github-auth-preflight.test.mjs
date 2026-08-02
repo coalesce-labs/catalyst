@@ -1,9 +1,10 @@
 // github-auth-preflight.test.mjs — CTL-1612. FULLY OFFLINE: every test injects
-// `probe` / `emitAlert` / `log` and an EXPLICIT `env` object, so no test ever
-// reads process.env, spawns `gh`, appends to the event log, or touches the
-// network. The one test that exercises the real `defaultProbeGithubAuth` points
-// its injected PATH at an EMPTY temp dir, so `gh` cannot resolve and the probe
-// classifies locally (never a request). Inherits test-setup.mjs.
+// `probe` / `emitAlert` / `log` / `rearm` (or `readFile`) and an EXPLICIT `env`
+// object, so no test ever reads process.env, spawns `gh`, reads the real shared
+// credential file, appends to the event log, or touches the network. The one
+// test that exercises the real `defaultProbeGithubAuth` points its injected PATH
+// at an EMPTY temp dir, so `gh` cannot resolve and the probe classifies locally
+// (never a request). Inherits test-setup.mjs.
 //
 // The contract under test is the ANTI-PAGING one: a definitive 401 alerts EXACTLY
 // once; every other outcome — spawn failure, non-401 exit, timeout, a throwing
@@ -21,8 +22,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   GITHUB_PROBE_TIMEOUT_MS,
+  defaultGithubTokenFile,
   defaultProbeGithubAuth,
   isUnauthorizedOutput,
+  rearmGithubTokenFromFile,
   resolveGithubBootAuth,
 } from "./github-auth-preflight.mjs";
 
@@ -31,6 +34,22 @@ import {
 // An obviously-fake credential literal. It exists ONLY so the hygiene test can
 // prove no code path ever echoes a credential value into a log or an alert.
 const FAKE_TOKEN = "ghp_THIS-IS-NOT-A-REAL-TOKEN-000000000000";
+
+// The rotation pair for the re-arm tests: what the node booted holding (it was
+// offline when the credential was rotated) vs what cluster-sync then wrote to
+// disk. Both are obvious fakes; neither is ever expected in a log line.
+const STALE_TOKEN = "ghp_STALE-FAKE-TOKEN-000000000000000000";
+const ROTATED_TOKEN = "ghp_ROTATED-FAKE-TOKEN-11111111111111";
+
+// A path that is NEVER opened — `readFile` is injected in every re-arm test, so
+// this is only ever a map key and an assertion target.
+const TOKEN_FILE = "/nowhere/catalyst/github-token";
+
+// NO_REARM — the hermetic stand-in for `rearmGithubTokenFromFile` in the tests
+// that are about `resolveGithubBootAuth`'s probe/alert contract. Without it the
+// real re-arm would `readFileSync` the operator's actual shared credential file,
+// making those tests host-dependent (present on a fleet node, absent on a laptop).
+const NO_REARM = () => ({ rearmed: false, reason: "absent" });
 
 // The three-state probe results, spelled out exactly as defaultProbeGithubAuth
 // builds them — the shapes resolveGithubBootAuth must discriminate.
@@ -64,15 +83,40 @@ function recorder() {
 
 // resolveWith — the standard injection harness: an explicit env + a fixed probe
 // result + recording alert/log seams. `probe` may be overridden with a thrower.
-function resolveWith(result, { env = {}, probe, emitAlert } = {}) {
+function resolveWith(result, { env = {}, probe, emitAlert, rearm = NO_REARM } = {}) {
   const rec = recorder();
   const out = resolveGithubBootAuth({
     env,
     probe: probe ?? rec.probeFor(result),
     emitAlert: emitAlert ?? rec.emitAlert,
     log: rec.log,
+    rearm,
   });
   return { out, rec };
+}
+
+// rearmWith — the injection harness for rearmGithubTokenFromFile: an explicit
+// env (mutated in place, as production does) plus a `files` map standing in for
+// the disk. A path absent from the map throws ENOENT, exactly as readFileSync
+// would. `reads` records the paths asked for, so a test can prove the file was
+// never even opened on the override path.
+function rearmWith({ env, files = {} } = {}) {
+  const rec = recorder();
+  const reads = [];
+  const out = rearmGithubTokenFromFile({
+    env,
+    readFile: (p) => {
+      reads.push(p);
+      if (!(p in files)) {
+        const err = new Error(`ENOENT: no such file or directory, open '${p}'`);
+        err.code = "ENOENT";
+        throw err;
+      }
+      return files[p];
+    },
+    log: rec.log,
+  });
+  return { out, rec, reads };
 }
 
 // ── isUnauthorizedOutput ──────────────────────────────────────────────────────
@@ -151,6 +195,7 @@ describe("defaultProbeGithubAuth", () => {
         probe: defaultProbeGithubAuth,
         emitAlert: rec.emitAlert,
         log: rec.log,
+        rearm: NO_REARM,
       });
       expect(rec.state.alerts).toHaveLength(0); // a missing binary NEVER pages the fleet
       expect(out).toEqual({ checked: true, ok: false, unauthorized: false, tokenSource: "shared-file" });
@@ -234,7 +279,13 @@ describe("resolveGithubBootAuth", () => {
       const rec = recorder();
       let out;
       expect(() => {
-        out = resolveGithubBootAuth({ env: {}, probe: () => bogus, emitAlert: rec.emitAlert, log: rec.log });
+        out = resolveGithubBootAuth({
+          env: {},
+          probe: () => bogus,
+          emitAlert: rec.emitAlert,
+          log: rec.log,
+          rearm: NO_REARM,
+        });
       }).not.toThrow();
       expect(rec.state.alerts).toHaveLength(0); // only unauthorized === true alerts
       expect(out.unauthorized).toBe(false);
@@ -252,6 +303,7 @@ describe("resolveGithubBootAuth", () => {
         },
         emitAlert: rec.emitAlert,
         log: rec.log,
+        rearm: NO_REARM,
       });
     }).not.toThrow();
     expect(out).toEqual({ checked: false, ok: false, unauthorized: false, tokenSource: "shared-file" });
@@ -270,6 +322,7 @@ describe("resolveGithubBootAuth", () => {
           throw new Error("event log write boom");
         },
         log: rec.log,
+        rearm: NO_REARM,
       });
     }).not.toThrow();
     expect(out).toEqual({ checked: true, ok: false, unauthorized: true, tokenSource: "shared-file" });
@@ -277,12 +330,11 @@ describe("resolveGithubBootAuth", () => {
   });
 
   test("advisory only: a missing log object and a no-op emitAlert never break boot", () => {
-    expect(() => resolveGithubBootAuth({ env: {}, probe: () => OK, emitAlert: () => {}, log: null })).not.toThrow();
-    expect(() => resolveGithubBootAuth({ env: {}, probe: () => TIMED_OUT, emitAlert: () => {}, log: {} })).not.toThrow();
+    const base = { env: {}, emitAlert: () => {}, rearm: NO_REARM };
+    expect(() => resolveGithubBootAuth({ ...base, probe: () => OK, log: null })).not.toThrow();
+    expect(() => resolveGithubBootAuth({ ...base, probe: () => TIMED_OUT, log: {} })).not.toThrow();
     // Even the unauthorized path with a no-op log survives.
-    expect(() =>
-      resolveGithubBootAuth({ env: {}, probe: () => UNAUTHORIZED, emitAlert: () => {}, log: {} }),
-    ).not.toThrow();
+    expect(() => resolveGithubBootAuth({ ...base, probe: () => UNAUTHORIZED, log: {} })).not.toThrow();
   });
 
   // Secret hygiene: the credential VALUE lives in the env we hand the probe. It
@@ -299,5 +351,313 @@ describe("resolveGithubBootAuth", () => {
     expect(rec.loggedText()).not.toContain(FAKE_TOKEN);
     expect(JSON.stringify(rec.state.alerts)).not.toContain(FAKE_TOKEN);
     expect(JSON.stringify(rec.state.alerts)).toContain("shared-file");
+  });
+});
+
+// ── defaultGithubTokenFile ────────────────────────────────────────────────────
+//
+// The resolution order must match the shell side byte for byte — the launcher's
+// _project_shared_github_token and setup-webhooks.sh:23. A hardcoded ~/.config
+// here would look at a DIFFERENT file than the one the operator's tooling wrote
+// whenever XDG_CONFIG_HOME is set, and the re-arm would silently no-op.
+
+describe("defaultGithubTokenFile", () => {
+  test("CATALYST_GITHUB_TOKEN_FILE wins outright — even over XDG_CONFIG_HOME and HOME", () => {
+    expect(
+      defaultGithubTokenFile({
+        CATALYST_GITHUB_TOKEN_FILE: "/etc/catalyst/explicit-github-token",
+        XDG_CONFIG_HOME: "/xdg-config",
+        HOME: "/home/fake",
+      }),
+    ).toBe("/etc/catalyst/explicit-github-token");
+  });
+
+  test("XDG_CONFIG_HOME is honored ahead of $HOME/.config (matches setup-webhooks.sh:23)", () => {
+    expect(defaultGithubTokenFile({ XDG_CONFIG_HOME: "/xdg-config", HOME: "/home/fake" })).toBe(
+      join("/xdg-config", "catalyst", "github-token"),
+    );
+  });
+
+  test("falls back to $HOME/.config when XDG_CONFIG_HOME is unset", () => {
+    expect(defaultGithubTokenFile({ HOME: "/home/fake" })).toBe(
+      join("/home/fake", ".config", "catalyst", "github-token"),
+    );
+  });
+
+  test("an EMPTY XDG_CONFIG_HOME is ignored (falsy, exactly like ${XDG_CONFIG_HOME:-...})", () => {
+    expect(defaultGithubTokenFile({ XDG_CONFIG_HOME: "", HOME: "/home/fake" })).toBe(
+      join("/home/fake", ".config", "catalyst", "github-token"),
+    );
+  });
+});
+
+// ── rearmGithubTokenFromFile ──────────────────────────────────────────────────
+//
+// THE CTL-1612 P1 REGRESSION. A node that was OFFLINE during a credential
+// rotation boots holding the stale local copy; daemon boot then runs clusterSync,
+// which materializes the replacement onto disk — and, before this, nothing
+// re-read it. The daemon 401'd until a SECOND manual restart. Every test here
+// injects `readFile` and mutates an EXPLICIT env object: the real shared
+// credential file is never opened.
+
+describe("rearmGithubTokenFromFile", () => {
+  test("REGRESSION: a rotation materialized after launch re-arms BOTH env names in place", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+      GITHUB_TOKEN: STALE_TOKEN,
+      GH_TOKEN: STALE_TOKEN,
+    };
+    const { out, rec, reads } = rearmWith({ env, files: { [TOKEN_FILE]: ROTATED_TOKEN } });
+
+    expect(out).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN); // both — `gh` resolves GH_TOKEN first
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file-resynced");
+    expect(reads).toEqual([TOKEN_FILE]); // read the resolved path, exactly once
+    // Hygiene: the re-arm is loud about the FACT of a rotation, never its value.
+    expect(rec.loggedText()).not.toContain(ROTATED_TOKEN);
+    expect(rec.loggedText()).not.toContain(STALE_TOKEN);
+    expect(rec.state.logs.filter((l) => l.level === "warn")).toHaveLength(1);
+  });
+
+  test("a LAGGING GH_TOKEN alone still re-arms (gh reads GH_TOKEN first — a half-match is a live 401)", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      GITHUB_TOKEN: ROTATED_TOKEN, // already current
+      GH_TOKEN: STALE_TOKEN, // …but this is the one `gh` actually uses
+    };
+    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: ROTATED_TOKEN } });
+
+    expect(out).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+  });
+
+  test("content identical to BOTH env names → no mutation at all, {rearmed:false, reason:'unchanged'}", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+      GITHUB_TOKEN: STALE_TOKEN,
+      GH_TOKEN: STALE_TOKEN,
+    };
+    const { out, rec } = rearmWith({ env, files: { [TOKEN_FILE]: STALE_TOKEN } });
+
+    expect(out).toEqual({ rearmed: false, reason: "unchanged" });
+    expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+    expect(env.GH_TOKEN).toBe(STALE_TOKEN);
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file"); // breadcrumb NOT rewritten
+    expect(rec.state.logs).toHaveLength(0); // a steady-state boot stays quiet
+  });
+
+  test("a cosmetic trailing newline is stripped before comparison — not mistaken for a rotation", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+      GITHUB_TOKEN: STALE_TOKEN,
+      GH_TOKEN: STALE_TOKEN,
+    };
+    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `  ${STALE_TOKEN}\n` } });
+
+    expect(out).toEqual({ rearmed: false, reason: "unchanged" });
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file");
+  });
+
+  test("trailing whitespace is stripped on the REAL rotation path too (the installed value is clean)", () => {
+    const env = { CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE, GITHUB_TOKEN: STALE_TOKEN, GH_TOKEN: STALE_TOKEN };
+    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `${ROTATED_TOKEN}\n\n` } });
+
+    expect(out.rearmed).toBe(true);
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN); // no stray "\n"
+    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
+  });
+
+  // An empty install is WORSE than no install: "" reads as SET to `??` and
+  // `${X:-}`, so it would defeat gh's hosts.yml/keyring fallback.
+  test("an empty / whitespace-only file NEVER installs '' — env untouched, {rearmed:false, reason:'empty'}", () => {
+    for (const content of ["", "\n", "   \t\n  "]) {
+      const env = {
+        CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+        CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+        GITHUB_TOKEN: STALE_TOKEN,
+        GH_TOKEN: STALE_TOKEN,
+      };
+      const { out } = rearmWith({ env, files: { [TOKEN_FILE]: content } });
+
+      expect(out).toEqual({ rearmed: false, reason: "empty" });
+      expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+      expect(env.GH_TOKEN).toBe(STALE_TOKEN);
+      expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file");
+    }
+  });
+
+  test("an ABSENT file (readFile throws) → {rearmed:false, reason:'absent'}, env untouched, never throws", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      CATALYST_GITHUB_TOKEN_SOURCE: "inherited",
+      GITHUB_TOKEN: STALE_TOKEN,
+      GH_TOKEN: STALE_TOKEN,
+    };
+    let out;
+    expect(() => {
+      ({ out } = rearmWith({ env, files: {} })); // nothing on disk → ENOENT
+    }).not.toThrow();
+
+    expect(out).toEqual({ rearmed: false, reason: "absent" });
+    expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+    expect(env.GH_TOKEN).toBe(STALE_TOKEN);
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("inherited");
+  });
+
+  // The operator override is the whole point of the T2 ordering fix: a human who
+  // pinned a credential in execution-core.env must not have it clobbered by the
+  // shared file, no matter what cluster-sync just materialized.
+  test("an operator override SURVIVES — no mutation, and the file is never even opened", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      CATALYST_GITHUB_TOKEN_SOURCE: "operator-override",
+      GITHUB_TOKEN: STALE_TOKEN,
+      GH_TOKEN: STALE_TOKEN,
+    };
+    const { out, reads } = rearmWith({ env, files: { [TOKEN_FILE]: ROTATED_TOKEN } });
+
+    expect(out).toEqual({ rearmed: false, reason: "operator-override" });
+    expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+    expect(env.GH_TOKEN).toBe(STALE_TOKEN);
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("operator-override");
+    expect(reads).toHaveLength(0); // short-circuits before any read
+  });
+
+  test("resolves the file through the XDG-aware path, not a hardcoded ~/.config", () => {
+    const env = { XDG_CONFIG_HOME: "/xdg-config", HOME: "/home/fake" };
+    const { reads } = rearmWith({ env, files: {} });
+    expect(reads).toEqual([join("/xdg-config", "catalyst", "github-token")]);
+  });
+
+  test("advisory only: a missing log never breaks the re-arm", () => {
+    const env = { CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE, GITHUB_TOKEN: STALE_TOKEN, GH_TOKEN: STALE_TOKEN };
+    let out;
+    expect(() => {
+      out = rearmGithubTokenFromFile({
+        env,
+        readFile: () => ROTATED_TOKEN,
+        log: null,
+      });
+    }).not.toThrow();
+    expect(out).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
+  });
+});
+
+// ── resolveGithubBootAuth ⟷ rearm wiring ──────────────────────────────────────
+//
+// Re-arming AFTER the probe would be worthless: the preflight must verify the
+// credential it will actually use, not the one the launcher happened to project.
+
+describe("resolveGithubBootAuth re-arms before probing", () => {
+  test("REGRESSION: rearm runs BEFORE probe, and the probe observes the RE-ARMED credential", () => {
+    const order = [];
+    const env = {
+      CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+      GITHUB_TOKEN: STALE_TOKEN,
+      GH_TOKEN: STALE_TOKEN,
+    };
+    const rec = recorder();
+    let seenByProbe;
+
+    const out = resolveGithubBootAuth({
+      env,
+      rearm: ({ env: e }) => {
+        order.push("rearm");
+        e.GITHUB_TOKEN = ROTATED_TOKEN;
+        e.GH_TOKEN = ROTATED_TOKEN;
+        e.CATALYST_GITHUB_TOKEN_SOURCE = "shared-file-resynced";
+        return { rearmed: true, reason: "rotated" };
+      },
+      probe: (e) => {
+        order.push("probe");
+        seenByProbe = { ...e };
+        return OK;
+      },
+      emitAlert: rec.emitAlert,
+      log: rec.log,
+    });
+
+    expect(order).toEqual(["rearm", "probe"]); // ordering is the fix
+    expect(seenByProbe.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+    expect(seenByProbe.GH_TOKEN).toBe(ROTATED_TOKEN);
+    // And the verdict reports the POST-rearm provenance, not the launcher's.
+    expect(out).toEqual({
+      checked: true,
+      ok: true,
+      unauthorized: false,
+      tokenSource: "shared-file-resynced",
+    });
+    expect(rec.state.alerts).toHaveLength(0);
+  });
+
+  test("rearm receives the SAME env object it must mutate, plus the injected log", () => {
+    const env = { CATALYST_GITHUB_TOKEN_SOURCE: "shared-file" };
+    const rec = recorder();
+    const seen = [];
+
+    resolveGithubBootAuth({
+      env,
+      rearm: (args) => {
+        seen.push(args);
+        return { rearmed: false, reason: "unchanged" };
+      },
+      probe: () => OK,
+      emitAlert: rec.emitAlert,
+      log: rec.log,
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].env).toBe(env); // identity — in-place mutation must be visible
+    expect(seen[0].log).toBe(rec.log);
+  });
+
+  test("a rearm that THROWS does not break boot — the probe still runs and a verdict is returned", () => {
+    const rec = recorder();
+    let out;
+    expect(() => {
+      out = resolveGithubBootAuth({
+        env: { CATALYST_GITHUB_TOKEN_SOURCE: "shared-file" },
+        rearm: () => {
+          throw new Error("cluster-sync wrote a half-file");
+        },
+        probe: rec.probeFor(OK),
+        emitAlert: rec.emitAlert,
+        log: rec.log,
+      });
+    }).not.toThrow();
+
+    expect(rec.state.probeEnvs).toHaveLength(1); // the probe was NOT skipped
+    expect(out).toEqual({ checked: true, ok: true, unauthorized: false, tokenSource: "shared-file" });
+    expect(rec.state.alerts).toHaveLength(0);
+    expect(rec.state.logs.filter((l) => l.level === "warn")).toHaveLength(1); // logged, not swallowed
+  });
+
+  test("a re-armed credential that is STILL rejected alerts once, carrying the resynced breadcrumb", () => {
+    const rec = recorder();
+    const env = { CATALYST_GITHUB_TOKEN_SOURCE: "shared-file", GITHUB_TOKEN: STALE_TOKEN };
+    const out = resolveGithubBootAuth({
+      env,
+      rearm: ({ env: e }) => {
+        e.GITHUB_TOKEN = ROTATED_TOKEN;
+        e.GH_TOKEN = ROTATED_TOKEN;
+        e.CATALYST_GITHUB_TOKEN_SOURCE = "shared-file-resynced";
+        return { rearmed: true, reason: "rotated" };
+      },
+      probe: () => UNAUTHORIZED,
+      emitAlert: rec.emitAlert,
+      log: rec.log,
+    });
+
+    expect(out.unauthorized).toBe(true);
+    expect(rec.state.alerts).toHaveLength(1);
+    expect(rec.state.alerts[0].tokenSource).toBe("shared-file-resynced");
+    expect(rec.loggedText()).not.toContain(ROTATED_TOKEN);
+    expect(JSON.stringify(rec.state.alerts)).not.toContain(ROTATED_TOKEN);
   });
 });

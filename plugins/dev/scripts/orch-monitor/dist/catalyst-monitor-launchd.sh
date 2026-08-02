@@ -12,7 +12,8 @@
 # makes webhook-config treat the GitHub route as unconfigured — silently disabling
 # inbound webhook verification rather than falling back. catalyst-monitor.sh cmd_start
 # now performs the same projection, so both launch paths agree.
-SECRET_FILE="${HOME}/.config/catalyst/webhook-secret"
+# XDG-aware to match setup-webhooks.sh:23, which is what generates this file.
+SECRET_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst/webhook-secret"
 if [[ -r "$SECRET_FILE" ]]; then
   _wh_val="$(tr -d '[:space:]' <"$SECRET_FILE" 2>/dev/null)"
   [[ -n "$_wh_val" ]] && export CATALYST_WEBHOOK_SECRET="$_wh_val"

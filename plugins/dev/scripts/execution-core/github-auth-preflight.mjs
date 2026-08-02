@@ -18,6 +18,9 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test github-auth-preflight.test.mjs
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { log as defaultLog } from "./config.mjs";
 import { emitGithubAuthUnusable } from "./dispatch-alert.mjs";
@@ -69,6 +72,65 @@ export function defaultProbeGithubAuth(env = process.env) {
   }
 }
 
+// defaultGithubTokenFile — XDG-aware, mirroring the launcher's
+// _project_shared_github_token and setup-webhooks.sh:23.
+export function defaultGithubTokenFile(env = process.env) {
+  if (env?.CATALYST_GITHUB_TOKEN_FILE) return env.CATALYST_GITHUB_TOKEN_FILE;
+  const base = env?.XDG_CONFIG_HOME || join(env?.HOME ?? homedir(), ".config");
+  return join(base, "catalyst", "github-token");
+}
+
+// rearmGithubTokenFromFile — CTL-1612 (Codex P1). Re-read the shared credential from
+// disk and update this process's env if it has changed.
+//
+// WHY THIS IS NEEDED even though the launcher already projected the file: a node that
+// was OFFLINE during a rotation boots with the stale local copy, and only afterwards does
+// daemon boot run clusterSync() — which pulls and materializes the replacement onto disk.
+// Nothing re-reads it, and because the boot sync seeds the change-detection marker at the
+// new HEAD, the periodic refresh then reports "head-unchanged" and never fires
+// restart-required. Without this the daemon 401s until a SECOND, manual restart — the
+// exact silent-stale shape this ticket exists to close, just one layer deeper.
+//
+// Call AFTER clusterSync. Respects an explicit operator override (the launcher marks it
+// CATALYST_GITHUB_TOKEN_SOURCE=operator-override) and never throws.
+export function rearmGithubTokenFromFile({
+  env = process.env,
+  readFile = (p) => readFileSync(p, "utf8"),
+  log = defaultLog,
+} = {}) {
+  try {
+    if (env?.CATALYST_GITHUB_TOKEN_SOURCE === "operator-override") {
+      return { rearmed: false, reason: "operator-override" };
+    }
+    const file = defaultGithubTokenFile(env);
+    let raw;
+    try {
+      raw = readFile(file);
+    } catch {
+      return { rearmed: false, reason: "absent" }; // no shared file on this host → no-op
+    }
+    const tok = String(raw ?? "").replace(/\s+/g, "");
+    // Never install an empty value: "" reads as SET to `??`/`${X:-}` and would defeat
+    // gh's hosts.yml/keyring fallback for hosts that rely on it.
+    if (!tok) return { rearmed: false, reason: "empty" };
+    if (tok === env.GITHUB_TOKEN && tok === env.GH_TOKEN) {
+      return { rearmed: false, reason: "unchanged" };
+    }
+    env.GITHUB_TOKEN = tok;
+    env.GH_TOKEN = tok; // both, because `gh` resolves GH_TOKEN first
+    env.CATALYST_GITHUB_TOKEN_SOURCE = "shared-file-resynced";
+    log?.warn?.(
+      {},
+      "github-auth-preflight: the shared GitHub credential changed on disk after launch " +
+        "(cluster-sync materialized a rotation) — re-armed in-process, no restart needed",
+    );
+    return { rearmed: true, reason: "rotated" };
+  } catch (err) {
+    log?.warn?.({ err: err?.message }, "github-auth-preflight: re-arm failed (continuing)");
+    return { rearmed: false, reason: "error" };
+  }
+}
+
 // resolveGithubBootAuth — the daemon-boot entrypoint. Returns a small verdict object
 // for logging/testing; the caller ignores it. NEVER throws.
 //
@@ -82,7 +144,15 @@ export function resolveGithubBootAuth({
   probe = defaultProbeGithubAuth,
   emitAlert = emitGithubAuthUnusable,
   log = defaultLog,
+  rearm = rearmGithubTokenFromFile,
 } = {}) {
+  // CTL-1612 (Codex P1): pick up a rotation that cluster-sync materialized AFTER the
+  // launcher projected the file, so we probe the credential we will actually use.
+  try {
+    rearm({ env, log });
+  } catch (err) {
+    log?.warn?.({ err: err?.message }, "github-auth-preflight: re-arm threw (continuing)");
+  }
   const tokenSource = env?.CATALYST_GITHUB_TOKEN_SOURCE ?? "unknown";
   let result;
   try {

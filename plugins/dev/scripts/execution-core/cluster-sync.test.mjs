@@ -213,6 +213,89 @@ describe("syncSecretFiles (CTL-1211)", () => {
     expect(res.reason).toBeNull();
     expect(res.skipped).toBe(false);
   });
+
+  // ── CTL-1612 (Codex P2): `written` ≠ `changed`. Any commit touching secrets/
+  //    re-decrypts and rewrites the WHOLE bundle, so `written` names every bare
+  //    file even when a single unrelated entry rotated. `changed` is the read-back
+  //    subset whose CONTENT actually moved — the only sound basis for a restart
+  //    alarm. ────────────────────────────────────────────────────────────────────
+
+  test("(CTL-1612) a byte-identical rewrite lands in written[] but NOT changed[]", () => {
+    writeNodeFiles();
+    // already on disk, byte-identical to what this bundle carries
+    writeFileSync(join(configDir, "github-token"), "fake-github-token-v1");
+    writeFileSync(join(configDir, "cma-api-key"), "fake-cma-key-v1");
+    const decrypt = () => ({
+      "github-token": "fake-github-token-v1", // untouched by this rotation
+      "cma-api-key": "fake-cma-key-v2", // the entry that actually rotated
+    });
+    const res = syncSecretFiles({ clusterDir, configDir, decrypt, logger: QUIET });
+    // the whole bundle is rewritten…
+    expect(res.written).toEqual(["github-token", "cma-api-key"]);
+    // …but only one entry MOVED
+    expect(res.changed).toEqual(["cma-api-key"]);
+    expect(readFileSync(join(configDir, "cma-api-key"), "utf8")).toBe("fake-cma-key-v2");
+  });
+
+  test("(CTL-1612) an absent destination counts as CHANGED (first materialization)", () => {
+    writeNodeFiles();
+    const decrypt = () => ({ "github-token": "fake-github-token-v1", "cma-api-key": "fake-cma-key-v1" });
+    // nothing pre-exists in configDir — a fresh node must announce every file
+    const res = syncSecretFiles({ clusterDir, configDir, decrypt, logger: QUIET });
+    expect(res.written).toEqual(["github-token", "cma-api-key"]);
+    expect(res.changed).toEqual(res.written);
+  });
+
+  test("(CTL-1612) the readFile seam is injectable; a null read-back counts as changed", () => {
+    writeNodeFiles();
+    writeFileSync(join(configDir, "cma-api-key"), "fake-cma-key-v1");
+    const decrypt = () => ({ "cma-api-key": "fake-cma-key-v1" });
+    // an UNREADABLE destination (perms, EIO) reads back null — never throws, and is
+    // conservatively treated as changed rather than silently swallowing a rotation.
+    const res = syncSecretFiles({
+      clusterDir,
+      configDir,
+      decrypt,
+      readFile: () => null,
+      logger: QUIET,
+    });
+    expect(res.written).toEqual(["cma-api-key"]);
+    expect(res.changed).toEqual(["cma-api-key"]);
+  });
+
+  test("(CTL-1612) `changed` is an array on EVERY return path (the fallback stays dormant)", () => {
+    // refreshClusterSecretsIfChanged degrades to `written` when `changed` is absent
+    // (back-compat for a legacy/injected result). That fallback must never fire for
+    // the in-tree caller — dropping the field would silently restore the noisy
+    // rewrite-is-a-rotation behavior this fix removed.
+    const absent = syncSecretFiles({ clusterDir, configDir, decrypt: () => ({}) });
+    expect(absent.reason).toBe("absent");
+    expect(Array.isArray(absent.changed)).toBe(true);
+
+    writeNodeFiles();
+    const failedDecrypt = syncSecretFiles({
+      clusterDir,
+      configDir,
+      decrypt: () => {
+        throw new Error("bad mac");
+      },
+      logger: QUIET,
+    });
+    expect(failedDecrypt.reason).toBe("decrypt-failed");
+    expect(Array.isArray(failedDecrypt.changed)).toBe(true);
+
+    const empty = syncSecretFiles({ clusterDir, configDir, decrypt: () => null, logger: QUIET });
+    expect(empty.reason).toBe("empty");
+    expect(Array.isArray(empty.changed)).toBe(true);
+
+    const ok = syncSecretFiles({
+      clusterDir,
+      configDir,
+      decrypt: () => ({ "cma-api-key": "fake-cma-key-v1" }),
+      logger: QUIET,
+    });
+    expect(Array.isArray(ok.changed)).toBe(true);
+  });
 });
 
 describe("pullClusterRepo (CTL-1211)", () => {
@@ -987,6 +1070,124 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     });
     expect(emits.map((e) => e.name)).toContain("refreshed");
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  // ── CTL-1612 (Codex P2): restart alarms key off CONTENT, not rewrites. Any
+  //    commit under secrets/ rewrites the whole bare bundle, so filtering
+  //    `written` fired a restart-required for github-token on EVERY routine
+  //    rotation of some unrelated secret — a nag that trains operators to ignore
+  //    the one signal that says "your daemon is running on a revoked credential".
+  //    These drive the real refresh through the real read-back (syncSecretFiles is
+  //    called with the module's own fs readFile, not an injected one). ───────────
+
+  test("(g1) UNCHANGED github-token + one rotated sibling → NO restart-required (T4 regression)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    // the credential this node is ALREADY running on, byte-identical to the bundle's
+    writeFileSync(join(configDir, "github-token"), "fake-github-token-v1");
+    writeFileSync(join(configDir, "cma-api-key"), "fake-cma-key-v1");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? {
+              "github-token": "fake-github-token-v1", // did NOT move
+              "cma-api-key": "fake-cma-key-v2", // the actual rotation
+            }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    // the whole bundle is re-materialized — `written` names both files…
+    expect(res.written).toEqual(["github-token", "cma-api-key"]);
+    // …and that is precisely why it cannot drive the alarm: nothing boot-captured moved
+    expect(res.restartRequired).toEqual([]);
+    const names = emits.map((e) => e.name);
+    expect(names).toContain("refreshed"); // the rotation IS announced
+    expect(names).not.toContain("restart-required"); // …without a spurious restart nag
+    // the unrelated rotation still landed on disk, and the marker advanced
+    expect(readFileSync(join(configDir, "cma-api-key"), "utf8")).toBe("fake-cma-key-v2");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  test("(g2) genuinely rotated github-token → restart-required STILL fires (fix not over-corrected)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    writeFileSync(join(configDir, "github-token"), "fake-github-token-v1");
+    writeFileSync(join(configDir, "cma-api-key"), "fake-cma-key-v1");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? {
+              "github-token": "fake-github-token-v2", // the credential MOVED
+              "cma-api-key": "fake-cma-key-v1", // untouched sibling, rewritten anyway
+            }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.written).toEqual(["github-token", "cma-api-key"]);
+    // status names the boot-captured file that actually rotated — and ONLY it
+    expect(res.restartRequired).toEqual(["github-token"]);
+    const restarts = emits.filter((e) => e.name === "restart-required");
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0].payload).toMatchObject({
+      file: "github-token",
+      fromSha: "OLDSHA",
+      toSha: "NEWSHA",
+    });
+    expect(emits.map((e) => e.name)).toContain("refreshed");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  test("(g3) legacy result shape (no `changed`) → falls back to `written`, never to nothing", () => {
+    // Back-compat guard for the `Array.isArray(files?.changed) ? … : status.written`
+    // selection. The in-tree caller always supplies `changed` (pinned by the
+    // syncSecretFiles shape test above) and refreshClusterSecretsIfChanged calls the
+    // module-local syncSecretFiles directly — so the legacy branch is reachable only
+    // from an externally-injected/older result. Pin the RULE: a missing `changed`
+    // must degrade to the old, noisier behavior (announce every rewritten file),
+    // never to silence — a rotation that stops being announced is the 2026-08-02
+    // outage all over again.
+    const selectRotated = (files, written) =>
+      (Array.isArray(files?.changed) ? files.changed : written).filter(isEnvBackedSecretFile);
+
+    const legacy = { written: ["github-token", "cma-api-key"], failed: [], skipped: false, reason: null };
+    expect(selectRotated(legacy, legacy.written)).toEqual(["github-token"]);
+
+    // and the current shape wins when present — an empty `changed` means "nothing
+    // moved", which is exactly what (g1) proves end-to-end.
+    const current = { written: ["github-token", "cma-api-key"], changed: [], failed: [] };
+    expect(selectRotated(current, current.written)).toEqual([]);
   });
 
   // ── CTL-1393 (Codex P2 re-review of caf6b0e2): a too-new cluster.json

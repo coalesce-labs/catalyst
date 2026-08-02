@@ -952,10 +952,6 @@ export function startDaemon({
       env: process.env,
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
     }).ok;
-    // CTL-1612: prove the GitHub credential this daemon captured at start is actually
-    // usable, and say so LOUDLY if it is not. Purely advisory — never throws, never
-    // blocks boot, alerts only on a definitive 401 (a transient failure stays silent).
-    githubAuthPreflight({ env: process.env, log });
     const dispatchFn = makePhaseAwareDispatchFn({
       bootExecutor: executor,
       codexBootEligible: codexElig.eligible,
@@ -1254,6 +1250,14 @@ export function startDaemon({
       }, clusterSyncIntervalMs);
       _clusterSyncTimer.unref?.();
     }
+
+    // CTL-1612: prove the GitHub credential this daemon will actually use is usable, and
+    // say so LOUDLY if it is not. Deliberately placed AFTER the boot clusterSync (Codex
+    // P1): a node that was offline during a rotation starts on the stale local copy, and
+    // the sync above is what puts the replacement on disk — so re-arm from the file and
+    // probe THAT, or the daemon would 401 until a second manual restart. Purely advisory
+    // — never throws, never blocks boot, alerts only on a definitive 401.
+    githubAuthPreflight({ env: process.env, log });
   } catch (err) {
     stopDaemon();
     throw err;
