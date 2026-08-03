@@ -2407,13 +2407,21 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
     // beforeEach/afterEach scope) — an ambient CATALYST_WEBHOOK_SECRET /
     // CATALYST_SMEE_SECRET would otherwise make ghEnvSecret true regardless of
     // the file-search divergence this block is isolating.
-    const SHADOW_SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_SMEE_SECRET", "CATALYST_CONFIG_DIR"];
+    const SHADOW_SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_SMEE_SECRET", "CATALYST_CONFIG_DIR", "CATALYST_DEPLOYMENT_MODE"];
     let savedEnv = {};
     let tmpDir;
     beforeEach(() => {
       for (const k of SHADOW_SECRET_ENVS) { savedEnv[k] = process.env[k]; delete process.env[k]; }
       tmpDir = mkdtempSync(join(tmpdir(), "ctl1616-webhook-shadow-"));
       process.env.CATALYST_CONFIG_DIR = tmpDir;
+      // #2916 round-2 (Codex P2): PIN the deployment mode via the env override
+      // (highest resolver precedence) — this block uses the REAL resolveSecret,
+      // and on a host whose machine config declares cloud (without a bootstrap
+      // token) the engine's cloud short-circuit would report webhook-secret
+      // absent despite the temp file, swallowing the expected disagreement row.
+      // Pinning single-host isolates the fixture from the host's declared mode
+      // while keeping real secret-file resolution.
+      process.env.CATALYST_DEPLOYMENT_MODE = "single-host";
       // A real, non-empty webhook-secret file at the CATALYST_CONFIG_DIR path —
       // secretFileCandidates (and so resolveSecret) honor this override;
       // defaultWebhookConfigDir() does NOT (design §7's cited divergence).
