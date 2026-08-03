@@ -210,6 +210,34 @@ marker_set_failed() {
     mv "$tmp" "$MARKER_FILE" || rm -f "$tmp"
 }
 
+# Drop a stage from completedStages so a resume re-executes it. Used when a
+# LATER stage discovers that this stage's output is what needs refreshing
+# (e.g. config-merge failing on a Layer-1 typo that lives in the
+# setup-plugin-source checkout — a plain resume would re-read the same stale
+# clone forever; see the webhook-wiring gate).
+marker_remove_stage() {
+  local stage="$1"
+  [[ -f "$MARKER_FILE" ]] || return 0
+  local tmp
+  tmp="$(mktemp "${MARKER_DIR}/.marker.XXXXXX")"
+  jq --arg s "$stage" '.completedStages -= [$s]' "$MARKER_FILE" > "$tmp" && \
+    mv "$tmp" "$MARKER_FILE" || rm -f "$tmp"
+}
+
+# Record that the webhook-wiring gate deliberately deferred wiring (Stage-0
+# roster guard) so activation tooling / an operator inspecting the marker can
+# see the node is intentionally unwired. config-merge still completes — this
+# breadcrumb, the gate's log note, and doctor's webhook-ingestion FAIL once
+# the node is activated at roster>1 are the recovery signals.
+marker_note_deferred_wiring() {
+  local reason="$1"
+  [[ -f "$MARKER_FILE" ]] || return 0
+  local tmp
+  tmp="$(mktemp "${MARKER_DIR}/.marker.XXXXXX")"
+  jq --arg r "$reason" '.webhookWiringDeferred = {reason: $r}' "$MARKER_FILE" > "$tmp" && \
+    mv "$tmp" "$MARKER_FILE" || rm -f "$tmp"
+}
+
 marker_record_bundle() {
   local bundle_path="$1"
   [[ -f "$MARKER_FILE" ]] || return 0
@@ -758,6 +786,15 @@ merge_shared_config() {
     esac
     fail "webhook-wiring gate (CTL-1617 PR5): declared deployment mode is UNRECOGNIZED: value=\"${raw_mode}\" source=${CATALYST_DEPLOYMENT_MODE_SOURCE}."
     fail "Valid values: single-host|cluster|cloud. Fix the value and re-run catalyst-join.sh — it resumes from the config-merge stage."
+    # When the garbage value came from the LAYER-1 plugin-source checkout, a
+    # plain resume cannot heal: setup-plugin-source is already in
+    # completedStages, so its ff-only pull never re-runs and the same stale
+    # clone is re-read forever, even after the fix is committed upstream.
+    # Invalidate that stage so the resume re-pulls the checkout first.
+    if [[ "$CATALYST_DEPLOYMENT_MODE_SOURCE" == "layer1" ]]; then
+      marker_remove_stage "setup-plugin-source"
+      fail "The bad value lives in the plugin-source checkout (${pluginsrc_config}); the setup-plugin-source stage has been invalidated so the re-run refreshes the checkout before re-evaluating."
+    fi
     return 1
   fi
 
@@ -783,7 +820,13 @@ merge_shared_config() {
       decision="wire"
     elif [[ "$CATALYST_DEPLOYMENT_MODE_RESOLVED" == "cluster" ]]; then
       decision="skip"
-      note="stage0-roster-guard: mode=cluster but roster_len=${roster_len:-0} (<=1) -- runtime dispatch fencing is roster-derived (execution-core/monitor.mjs multiHost=roster.length>1), so wiring here would double-dispatch; deferring webhook wiring until the roster grows"
+      note="stage0-roster-guard: mode=cluster but roster_len=${roster_len:-0} (<=1) -- runtime dispatch fencing is roster-derived (execution-core/monitor.mjs multiHost=roster.length>1), so wiring here would double-dispatch; deferred: after activating this node in the committed roster, re-run catalyst-join.sh --no-resume to wire (until then doctor FAILs webhook-ingestion on this node once roster>1)"
+      # Post-merge Codex finding (#2914 P1): config-merge still completes on
+      # this branch, so nothing re-evaluates the decision when the roster
+      # later grows. Leave a durable breadcrumb in the progress marker for
+      # the activation flow / operator; the loud fleet-level signal is
+      # doctor's webhook-ingestion FAIL on the activated-but-unwired node.
+      marker_note_deferred_wiring "stage0-roster-guard (mode=cluster, roster_len=${roster_len:-0}): re-run catalyst-join.sh --no-resume after roster activation"
     else
       decision="skip"
     fi

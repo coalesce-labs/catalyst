@@ -755,6 +755,8 @@ run "T2.8b mode=cluster declared but roster<=1 SKIPS with roster-guard note (Sta
   echo \"\$out\" | grep -qF 'inferred=false' && \
   echo \"\$out\" | grep -qF 'heuristic_would=skip' && \
   echo \"\$out\" | grep -qF 'note=stage0-roster-guard' && \
+  echo \"\$out\" | grep -qF -- '--no-resume' && \
+  jq -e '.webhookWiringDeferred.reason | test(\"stage0-roster-guard\")' \"\$catdir/cluster/join-progress.json\" >/dev/null && \
   ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$h/.config/catalyst/config.json\" >/dev/null"
 
 # T2.8b-agree: the companion case — mode=cluster declared AND roster>1 AND
@@ -938,6 +940,67 @@ run "T2.9e resume after fixing the typo re-executes config-merge and wires (FIX 
   echo \"\$out\" | grep -qF 'decision=wire' && \
   echo \"\$out\" | grep -qF 'mode=cluster' && \
   jq -e '.completedStages | index(\"config-merge\") != null' \"\$marker\" >/dev/null && \
+  jq -e '.failedStage == null' \"\$marker\" >/dev/null && \
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
+
+# T2.9f: (#2914 Codex P2) when the UNRECOGNIZED mode came from the LAYER-1
+# plugin-source checkout (not env/layer2), failing config-merge alone is not
+# enough for a self-healing resume: setup-plugin-source is already in
+# completedStages, so a plain resume would re-read the same stale clone
+# forever even after the typo is fixed upstream. The failure branch must ALSO
+# invalidate the setup-plugin-source stage (drop it from completedStages) and
+# say so.
+run "T2.9f layer1-sourced typo ALSO invalidates setup-plugin-source for the resume (#2914 P2)" bash -c "
+  h='${SCRATCH}/h29f'
+  catdir='${SCRATCH}/c29f'
+  mkdir -p \"\$h/catalyst/plugin-source/.catalyst\"
+  printf '{\"catalyst\":{\"deployment\":{\"mode\":\"clutser\"}}}' > \"\$h/catalyst/plugin-source/.catalyst/config.json\"
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1); ec=\$?
+  marker=\"\$catdir/cluster/join-progress.json\"
+  [[ \$ec -ne 0 ]] && \
+  echo \"\$out\" | grep -qF 'UNRECOGNIZED' && \
+  echo \"\$out\" | grep -qF 'value=\"clutser\"' && \
+  echo \"\$out\" | grep -qF 'source=layer1' && \
+  echo \"\$out\" | grep -qF 'setup-plugin-source stage has been invalidated' && \
+  jq -e '.failedStage == \"config-merge\"' \"\$marker\" >/dev/null && \
+  jq -e '.completedStages | index(\"setup-plugin-source\") == null' \"\$marker\" >/dev/null"
+
+# T2.9g: the resume half of T2.9f — after the upstream fix lands in the
+# checkout (simulated by correcting the seeded file, standing in for the
+# re-run setup-plugin-source stage's ff-only pull), the SAME dirs re-run:
+# setup-plugin-source re-executes (it was invalidated), config-merge
+# re-evaluates the gate against the refreshed Layer-1, and roster>1 wires.
+run "T2.9g resume after upstream layer1 fix re-pulls and wires (#2914 P2)" bash -c "
+  h='${SCRATCH}/h29f'
+  catdir='${SCRATCH}/c29f'
+  printf '{\"catalyst\":{\"deployment\":{\"mode\":\"cluster\"}}}' > \"\$h/catalyst/plugin-source/.catalyst/config.json\"
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1); ec=\$?
+  marker=\"\$catdir/cluster/join-progress.json\"
+  [[ \$ec -eq 0 ]] && \
+  echo \"\$out\" | grep -qF 'Running stage: setup-plugin-source' && \
+  echo \"\$out\" | grep -qF 'decision=wire' && \
+  echo \"\$out\" | grep -qF 'mode=cluster' && \
+  jq -e '.completedStages | index(\"setup-plugin-source\") != null' \"\$marker\" >/dev/null && \
   jq -e '.failedStage == null' \"\$marker\" >/dev/null && \
   jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
 

@@ -143,6 +143,19 @@ To activate mini-2 and begin accepting work:
    catalyst cluster status
    ```
 
+2b. **Re-run the join on the activated node to wire webhook ingestion** — the
+   Stage-0 join deliberately skipped webhook wiring (`stage0-roster-guard` in
+   the webhook-wiring gate: wiring a roster≤1 node would double-dispatch, since
+   runtime fencing is roster-derived). The join's progress marker records
+   `webhookWiringDeferred` for this case. Once the node is in the committed
+   roster:
+   ```bash
+   bash catalyst-join.sh --no-resume   # re-evaluates the gate at roster>1 and wires
+   ```
+   Until this runs, `catalyst-doctor` FAILs `webhook-ingestion` on the
+   activated node — that FAIL is the loud signal this step was missed, not a
+   new problem.
+
 3. **Watch for zero double-dispatch** — the moment mini-2 enters the roster, the sync gate activates (`roster>1`), and phase-research/phase-plan blocks on `humanlayer thoughts sync`. Verify:
    - No duplicate phase-researchers spawned
    - No tickets assigned twice
