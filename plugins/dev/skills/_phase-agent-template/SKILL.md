@@ -89,7 +89,40 @@ CHANNEL="orch-${ORCH_ID}"
 SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
 [[ -f "$SIGNAL_FILE" ]] || { echo "phase-${PHASE}: signal file missing" >&2; exit 1; }
 
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-/Users/ryan/.claude/plugins/cache/catalyst/catalyst-dev/$(jq -r .version "${CLAUDE_PLUGIN_ROOT:-.}/.claude-plugin/plugin.json" 2>/dev/null || echo 0.0.0)}"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+if [[ -z "$PLUGIN_ROOT" ]]; then
+  # CTL-1628 Phase A2 bug fix: CLAUDE_PLUGIN_ROOT is normally set by the
+  # runtime that launched this phase agent. This branch used to fall back to
+  # a hardcoded personal absolute path
+  # (/Users/ryan/.claude/plugins/cache/catalyst/catalyst-dev/<version>), which
+  # is wrong on every OTHER machine/user and, worse, fails SILENTLY: a bad
+  # PLUGIN_ROOT here means `[[ -x "$YIELD_CHECK" ]]` below just evaluates
+  # false and the CTL-615 duplicate-worker yield gate is skipped without any
+  # warning. Resolve properly via lib/catalyst-runtime-root.sh's
+  # catalyst_dev_scripts (same probe every other catalyst-dev consumer uses:
+  # cwd sibling → marketplace clone → versioned cache), and make a genuine
+  # miss LOUD instead of silently proceeding with a broken PLUGIN_ROOT.
+  RUNTIME_ROOT_LIB=""
+  for __rr_cand in \
+    "./plugins/dev/scripts/lib/catalyst-runtime-root.sh" \
+    "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/catalyst-runtime-root.sh \
+    "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/catalyst-runtime-root.sh \
+  ; do
+    if [[ -f "$__rr_cand" ]]; then RUNTIME_ROOT_LIB="$__rr_cand"; break; fi
+  done
+  unset __rr_cand
+  DEV_SCRIPTS=""
+  if [[ -n "$RUNTIME_ROOT_LIB" ]]; then
+    # shellcheck disable=SC1090
+    . "$RUNTIME_ROOT_LIB"
+    DEV_SCRIPTS="$(catalyst_dev_scripts 2>/dev/null || true)"
+  fi
+  if [[ -z "$DEV_SCRIPTS" ]]; then
+    echo "phase-${PHASE}: FATAL — CLAUDE_PLUGIN_ROOT unset and catalyst_dev_scripts probe missed too; refusing to silently skip the CTL-615 yield gate with a guessed PLUGIN_ROOT" >&2
+    exit 1
+  fi
+  PLUGIN_ROOT="$(dirname "$DEV_SCRIPTS")"
+fi
 
 # 0. Codified bg_job_id yield (CTL-615). If the signal file's bg_job_id
 #    names a DIFFERENT live bg job, we are a redispatch duplicate of a
