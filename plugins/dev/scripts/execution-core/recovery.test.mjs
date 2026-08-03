@@ -2435,6 +2435,38 @@ describe("reclaimDeadWorkIfPossible — CTL-736 progress gate", () => {
     expect(writeProgressMark.calls.length).toBe(0); // no new high-water on a stop
   });
 
+  // 2026-08-03 fix: confirmed live across 11 real tickets — every no-progress
+  // escalation's human-facing text/observed field read "escalated after 0
+  // attempt(s)" regardless of how many REAL ask/retry cycles actually ran,
+  // because escalateOnce's finalAttemptCount param historically received the
+  // CTL-736 progress QUANTITY (always 0 here — that's what triggers the STOP
+  // branch), not an attempt count, while the `attempts` array was correctly
+  // built from the real ask history. This is the 3rd-cycle case (2 prior asks
+  // on record, this ask trips the ask-cap): the count must now read 3
+  // everywhere, matching `attempts.length`.
+  test("no-progress escalation on its 3rd real cycle reports final_attempt_count:3 (not 0), matching the real ask history", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2, // no forward progress → no-progress STOP
+      appendEscalatedEvent,
+      readEscalationRecordFn: () => ({ reason: "no-progress", askCount: 2, asks: [111, 222] }),
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const call = appendEscalatedEvent.calls[0][0];
+    expect(call.reason).toBe("no-progress");
+    // The bug: this used to always be 0 (the progress quantity), never the
+    // real ask count — even when `attempts` (below) correctly showed 3.
+    expect(call.final_attempt_count).toBe(3);
+    const explanation = call.extras.explanation;
+    expect(explanation.problem).toBe("implement escalated after 3 attempt(s): no-progress");
+    expect(explanation.risk).toBe("continued retries risk wasting budget; 3 attempt(s) already made");
+    expect(explanation.observed.final_attempt_count).toBe(3);
+    expect(explanation.why_asking).toBe("no forward progress after 3 attempt(s) — stop-and-escalate");
+    // The real ask history: 2 prior + this one = 3, exactly matching the count above.
+    expect(explanation.attempts).toEqual([111, 222, 1_000_000]);
+  });
+
   test("first death with no prior mark (readProgressMark -1) always gets one revive — even at zero progress", () => {
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
