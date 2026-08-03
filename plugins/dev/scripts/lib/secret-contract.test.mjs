@@ -9,6 +9,7 @@ import {
   getSecretRow,
   isSecretFamilyMember,
   resolveLayer2Path,
+  resolveLegacyPerTeamConfigPath,
   explicitFileOverrideEnvName,
   secretFileCandidates,
   resolveSecret,
@@ -407,6 +408,312 @@ describe("resolveSecret — config-json delivery (linear-orchestrator-actor, gro
   });
 });
 
+// ─── resolveSecret — linear-worker-actor's CTL-1616 PR4 credentialEnvPair + legacyConfigTiers
+// fold (linear-comment-post.sh's THREE config tiers + its env-pair tier, preserved verbatim).
+// Every precedence fixture below is mirrored byte-for-byte in
+// __tests__/secret-contract-parity.test.sh so bash and JS are proven to agree, not merely
+// each internally self-consistent.
+describe("resolveSecret — linear-worker-actor credentialEnvPair + legacyConfigTiers (CTL-1616 PR4)", () => {
+  test("credentialEnvPair wins over every config tier when both halves are present", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      JSON.stringify({ catalyst: { linear: { bot: { worker: { clientId: "CFG", clientSecret: "CFGSEC" } } } } }),
+    );
+    const r = resolveSecret("linear-worker-actor", {
+      env: {
+        CATALYST_LAYER2_CONFIG_FILE: l2,
+        CATALYST_LINEAR_AGENT_CLIENT_ID: "EID",
+        CATALYST_LINEAR_AGENT_CLIENT_SECRET: "ESEC",
+      },
+    });
+    expect(r).toMatchObject({ value: '{"clientId":"EID","clientSecret":"ESEC"}', source: "inherited" });
+  });
+
+  test("credentialEnvPair with only ONE half set does not win — falls through to the config tiers", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      JSON.stringify({ catalyst: { linear: { bot: { worker: { clientId: "CFG", clientSecret: "CFGSEC" } } } } }),
+    );
+    const r = resolveSecret("linear-worker-actor", {
+      env: { CATALYST_LAYER2_CONFIG_FILE: l2, CATALYST_LINEAR_AGENT_CLIENT_ID: "EID" },
+    });
+    expect(r).toMatchObject({ value: '{"clientId":"CFG","clientSecret":"CFGSEC"}', source: "config-json" });
+  });
+
+  test("primary configJsonPath (NEW global bot.worker) wins over both legacy tiers when all three are present", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: { worker: { clientId: "NEW", clientSecret: "NEWSEC" } },
+            agent: { clientId: "GLOBALLEGACY", clientSecret: "GLOBALLEGACYSEC" },
+          },
+        },
+      }),
+    );
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFile(dir, "repo/.catalyst/config.json", JSON.stringify({ catalyst: { projectKey: "proj1" } }));
+    writeFile(dir, "config-proj1.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "PERTEAM", clientSecret: "PERTEAMSEC" } } } }));
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: repo });
+    expect(r).toMatchObject({ value: '{"clientId":"NEW","clientSecret":"NEWSEC"}', source: "config-json" });
+  });
+
+  test("per-team-legacy tier wins when the primary tier misses (only per-team agent creds present)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({}));
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFile(dir, "repo/.catalyst/config.json", JSON.stringify({ catalyst: { projectKey: "proj1" } }));
+    writeFile(dir, "config-proj1.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "PERTEAM", clientSecret: "PERTEAMSEC" } } } }));
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: repo });
+    expect(r).toMatchObject({
+      value: '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}',
+      source: "legacy-config-json",
+      legacyScope: "per-team-legacy",
+    });
+  });
+
+  test("global-legacy tier wins when the primary tier AND the per-team tier both miss (projectKey resolves, but the per-team file lacks agent creds; only the global file's legacy agent key is set)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "GLOBALLEGACY", clientSecret: "GLOBALLEGACYSEC" } } } }));
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFile(dir, "repo/.catalyst/config.json", JSON.stringify({ catalyst: { projectKey: "proj1" } }));
+    // No config-proj1.json at all — the per-team-legacy tier's own file is simply absent.
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: repo });
+    expect(r).toMatchObject({
+      value: '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}',
+      source: "legacy-config-json",
+      legacyScope: "global-legacy",
+    });
+  });
+
+  test("no projectKey found anywhere in the ancestry: the per-team-legacy tier itself falls back to the canonical global path, so a global-only legacy layout still resolves via legacyScope 'per-team-legacy' (matches the pre-fold script's own fallthrough exactly — tier 2's LAYER2_CONFIG degenerates to the same file tier 3 would have read)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "GL", clientSecret: "GLSEC" } } } }));
+    const cwdNoAncestry = resolve(dir, "no-ancestry-dir");
+    mkdirSync(cwdNoAncestry, { recursive: true });
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: cwdNoAncestry });
+    expect(r).toMatchObject({ value: '{"clientId":"GL","clientSecret":"GLSEC"}', source: "legacy-config-json", legacyScope: "per-team-legacy" });
+  });
+
+  test("nothing present anywhere (no env pair, no config tiers) resolves to none", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({}));
+    const cwdNoAncestry = resolve(dir, "empty-dir");
+    mkdirSync(cwdNoAncestry, { recursive: true });
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: cwdNoAncestry });
+    expect(r).toMatchObject({ value: null, source: "none" });
+  });
+
+  // ─── B1 REGRESSION FIXTURES (CTL-1616 PR4 remediation): the OLD linear-comment-post.sh
+  // advanced to the NEXT tier whenever clientId OR clientSecret was empty after a tier's
+  // read; canonicalizeConfigJsonValue's "any non-null value wins" rule let a CREDENTIAL-FREE
+  // or PARTIALLY-POPULATED object at a tier's path capture resolution instead, silently
+  // starving a deeper, fully-populated tier — the caller then hard-failed on the empty
+  // fields rather than falling through. Each fixture names the winning tier the OLD script
+  // would have picked (the deeper FULL-credential tier) and proves the fixed engine agrees.
+  // Mirrored byte-for-byte in __tests__/secret-contract-parity.test.sh and
+  // __tests__/catalyst-secret-contract.test.sh.
+  test("B1: primary tier holds only clientId (no clientSecret) — per-team-legacy (full) wins, not the partial primary", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { linear: { bot: { worker: { clientId: "partial-cid" } } } } }));
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFile(dir, "repo/.catalyst/config.json", JSON.stringify({ catalyst: { projectKey: "proj1" } }));
+    writeFile(dir, "config-proj1.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "PERTEAM", clientSecret: "PERTEAMSEC" } } } }));
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: repo });
+    expect(r).toMatchObject({
+      value: '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}',
+      source: "legacy-config-json",
+      legacyScope: "per-team-legacy",
+    });
+  });
+
+  test("B1: primary tier holds a CREDENTIAL-FREE object ({webhookSecret, botUserId} — a realistic production shape) — per-team-legacy (full) wins", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { linear: { bot: { worker: { webhookSecret: "whs", botUserId: "uuid-123" } } } } }));
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFile(dir, "repo/.catalyst/config.json", JSON.stringify({ catalyst: { projectKey: "proj1" } }));
+    writeFile(dir, "config-proj1.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "PERTEAM", clientSecret: "PERTEAMSEC" } } } }));
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: repo });
+    expect(r).toMatchObject({
+      value: '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}',
+      source: "legacy-config-json",
+      legacyScope: "per-team-legacy",
+    });
+  });
+
+  test("B1: primary tier holds empty-string clientId/clientSecret — global-legacy (full) wins", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: { worker: { clientId: "", clientSecret: "" } },
+            agent: { clientId: "GLOBALLEGACY", clientSecret: "GLOBALLEGACYSEC" },
+          },
+        },
+      }),
+    );
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFile(dir, "repo/.catalyst/config.json", JSON.stringify({ catalyst: { projectKey: "proj-noagent" } }));
+    // No config-proj-noagent.json file at all — the per-team-legacy tier's own file is absent,
+    // so that tier misses naturally and the chain falls all the way to global-legacy.
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: repo });
+    expect(r).toMatchObject({
+      value: '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}',
+      source: "legacy-config-json",
+      legacyScope: "global-legacy",
+    });
+  });
+
+  test("B1: primary tier absent, per-team-legacy holds only clientId (no clientSecret) — global-legacy (full) wins", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "GLOBALLEGACY", clientSecret: "GLOBALLEGACYSEC" } } } }));
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFile(dir, "repo/.catalyst/config.json", JSON.stringify({ catalyst: { projectKey: "proj1" } }));
+    writeFile(dir, "config-proj1.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "pid-only" } } } }));
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: repo });
+    expect(r).toMatchObject({
+      value: '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}',
+      source: "legacy-config-json",
+      legacyScope: "global-legacy",
+    });
+  });
+
+  // ─── B2 REGRESSION FIXTURE: no prior fixture populated BOTH legacy tiers with DISTINCT
+  // credentials at once, so a swap of _CSC_LEGACY_TIERS's order survived every suite. This
+  // fixture pins per-team-legacy BEFORE global-legacy — see the "MUTATION TEST" section in
+  // __tests__/catalyst-secret-contract.test.sh, which actually swaps the bash array order,
+  // confirms this exact scenario's bash cell fails, then restores it.
+  test("B2: BOTH legacy tiers present with DISTINCT full credentials — per-team-legacy wins (pins tier ORDER: per-team before global)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "GLOBALAGENT", clientSecret: "GLOBALAGENTSEC" } } } }));
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFile(dir, "repo/.catalyst/config.json", JSON.stringify({ catalyst: { projectKey: "proj1" } }));
+    writeFile(dir, "config-proj1.json", JSON.stringify({ catalyst: { linear: { agent: { clientId: "TEAMAGENT", clientSecret: "TEAMAGENTSEC" } } } }));
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: repo });
+    expect(r).toMatchObject({
+      value: '{"clientId":"TEAMAGENT","clientSecret":"TEAMAGENTSEC"}',
+      source: "legacy-config-json",
+      legacyScope: "per-team-legacy",
+    });
+  });
+
+  // ─── ROUND-2 B3 REGRESSION FIXTURES (both shapes empirically pinned against
+  // `git show origin/main:.../linear-comment-post.sh` in a hermetic fixture — see the
+  // requiredObjectFields row-field comment in secret-contract.mjs for the two canon rules and
+  // their pre-fold empirical results). Mirrored byte-for-byte in
+  // __tests__/secret-contract-parity.test.sh and __tests__/catalyst-secret-contract.test.sh.
+  // Each fixture ALSO populates a real legacy tier, so the assertion proves genuine
+  // FALL-THROUGH to a deeper tier — not merely "resolves to none" (which a totally broken
+  // engine could also produce).
+  test("CANON RULE 1: a bare STRING value at the primary tier's path — even one whose OWN TEXT parses as a full {clientId,clientSecret} object — falls through to the next tier, never wins on string content", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: { worker: '{"clientId":"str-cid","clientSecret":"str-csec"}' },
+            agent: { clientId: "GLOBALLEGACY", clientSecret: "GLOBALLEGACYSEC" },
+          },
+        },
+      }),
+    );
+    const cwdNoAncestry = resolve(dir, "no-ancestry-dir");
+    mkdirSync(cwdNoAncestry, { recursive: true });
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: cwdNoAncestry });
+    expect(r).toMatchObject({
+      value: '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}',
+      source: "legacy-config-json",
+    });
+  });
+
+  test("CANON RULE 2: newline-only clientId/clientSecret at the primary tier ('\\n', which the OLD script's $() capture stripped to empty) falls through to the next tier, never wins on raw non-zero length", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: { worker: { clientId: "\n", clientSecret: "\n" } },
+            agent: { clientId: "GLOBALLEGACY", clientSecret: "GLOBALLEGACYSEC" },
+          },
+        },
+      }),
+    );
+    const cwdNoAncestry = resolve(dir, "no-ancestry-dir-2");
+    mkdirSync(cwdNoAncestry, { recursive: true });
+    const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 }, cwd: cwdNoAncestry });
+    expect(r).toMatchObject({
+      value: '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}',
+      source: "legacy-config-json",
+    });
+  });
+});
+
+describe("resolveLegacyPerTeamConfigPath — linear-comment-post.sh's _find_layer2_config, CTL-1616 PR4", () => {
+  test("nested .catalyst.projectKey resolves to a sibling config-<key>.json next to the canonical Layer-2 path", () => {
+    const dir = fixtureDir();
+    const l2 = resolve(dir, "config.json");
+    const repo = resolve(dir, "a", "b", "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFileSync(resolve(repo, ".catalyst", "config.json"), JSON.stringify({ catalyst: { projectKey: "proj1" } }));
+    const path = resolveLegacyPerTeamConfigPath({ CATALYST_LAYER2_CONFIG_FILE: l2 }, repo);
+    expect(path).toBe(resolve(dir, "config-proj1.json"));
+  });
+
+  test("bare top-level .projectKey (legacy layout) is also honored", () => {
+    const dir = fixtureDir();
+    const l2 = resolve(dir, "config.json");
+    const repo = resolve(dir, "repo");
+    mkdirSync(resolve(repo, ".catalyst"), { recursive: true });
+    writeFileSync(resolve(repo, ".catalyst", "config.json"), JSON.stringify({ projectKey: "legacy-key" }));
+    const path = resolveLegacyPerTeamConfigPath({ CATALYST_LAYER2_CONFIG_FILE: l2 }, repo);
+    expect(path).toBe(resolve(dir, "config-legacy-key.json"));
+  });
+
+  test("walks past a malformed ancestor .catalyst/config.json to find a projectKey further up", () => {
+    const dir = fixtureDir();
+    const l2 = resolve(dir, "config.json");
+    const mid = resolve(dir, "mid");
+    const leaf = resolve(mid, "leaf");
+    mkdirSync(resolve(mid, ".catalyst"), { recursive: true });
+    mkdirSync(resolve(leaf, ".catalyst"), { recursive: true });
+    writeFileSync(resolve(leaf, ".catalyst", "config.json"), "not-json");
+    writeFileSync(resolve(mid, ".catalyst", "config.json"), JSON.stringify({ catalyst: { projectKey: "mid-key" } }));
+    const path = resolveLegacyPerTeamConfigPath({ CATALYST_LAYER2_CONFIG_FILE: l2 }, leaf);
+    expect(path).toBe(resolve(dir, "config-mid-key.json"));
+  });
+
+  test("no projectKey found anywhere in the ancestry falls back to the canonical global path itself", () => {
+    const dir = fixtureDir();
+    const l2 = resolve(dir, "config.json");
+    const noAncestry = resolve(dir, "no", "ancestry", "dir");
+    mkdirSync(noAncestry, { recursive: true });
+    const path = resolveLegacyPerTeamConfigPath({ CATALYST_LAYER2_CONFIG_FILE: l2 }, noAncestry);
+    expect(path).toBe(l2);
+  });
+});
+
 // hasLiveLoneHighSurrogateEscape is an unexported module-internal helper (same convention as
 // every other readJsonField primitive in this file — containsNul, stripEol, etc. are never
 // exported either); these tests exercise its documented semantics through the one public
@@ -639,7 +946,21 @@ describe("registry validation (§6) — the rearm-hook honesty rules", () => {
     expect(registerRearmHook("github-token", null)).toBe(false);
   });
 
-  test("PR1 STATE (self-documenting, expected to shrink as later PRs wire real hooks): every SEED re-armable row currently has NO hook registered, so armSecret degrades ALL of them to the same shape a boot-only row gets", () => {
+  test("IN THIS ZERO-IMPORT LEAF (no consumer imported, this file's own beforeEach clears every hook): every SEED re-armable row degrades to the hookless shape a boot-only row gets — the underlying degrade mechanism, proven independently of any production wiring", () => {
+    // UPDATE (CTL-1616 PR4, exactly the update this test's own PR1-era comment anticipated:
+    // "that list must shrink as later PRs call registerRearmHook, and the test will need
+    // updating then — that is by design, not an oversight"): linear-orchestrator-actor now
+    // HAS a real production hook — registered in execution-core/linear-remint.mjs against
+    // the process-wide linearReminter singleton (see linear-remint.test.mjs's own
+    // "rearm-hook wiring" suite for that integration, exercised with an injected fake
+    // reminter — never the real singleton, to avoid a hermetic test triggering a genuine
+    // network mint). This file stays a zero-import leaf and never imports linear-remint.mjs,
+    // so from ITS isolated perspective (and this describe block's own beforeEach, which
+    // unconditionally clears every row's hook before each test) every re-armable row still
+    // degrades identically here — this test proves that degrade mechanism in isolation, not
+    // "no hook exists anywhere in the codebase" (which is no longer true for
+    // linear-orchestrator-actor). github-token and linear-api-token remain genuinely
+    // hookless everywhere in the codebase as of this PR.
     const reArmable = SECRET_REGISTRY.filter((r) => r.rotation.class === "re-armable");
     expect(reArmable.map((r) => r.id).sort()).toEqual(
       ["github-token", "linear-api-token", "linear-orchestrator-actor"].sort(),

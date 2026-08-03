@@ -270,6 +270,128 @@ printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":["nope"]}}}}' > "${TMP
 OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" 'catalyst_resolve_secret linear-orchestrator-actor')"
 expect_eq "linear-orchestrator-actor: an ARRAY is rejected (not a valid credential shape)" "|none|config-json" "$OUT"
 
+# --- linear-worker-actor: credentialEnvPair + legacyConfigTiers (CTL-1616 PR4) ----------
+# Every fixture here is mirrored byte-for-byte in __tests__/secret-contract-parity.test.sh's
+# linear-worker-actor cells and in lib/secret-contract.test.mjs's own describe block, proving
+# bash and JS agree — not merely each internally self-consistent.
+WA_DIR="${TMP_DIR}/wa"
+mkdir -p "$WA_DIR"
+WA_L2="${WA_DIR}/config.json"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"CFG","clientSecret":"CFGSEC"}}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "CATALYST_LINEAR_AGENT_CLIENT_ID=EID" "CATALYST_LINEAR_AGENT_CLIENT_SECRET=ESEC" 'catalyst_resolve_secret linear-worker-actor')"
+expect_eq "linear-worker-actor: credentialEnvPair wins over every config tier when both halves present" \
+  '{"clientId":"EID","clientSecret":"ESEC"}|inherited|config-json' "$OUT"
+
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "CATALYST_LINEAR_AGENT_CLIENT_ID=EID" 'catalyst_resolve_secret linear-worker-actor')"
+expect_eq "linear-worker-actor: credentialEnvPair with only ONE half set does not win — falls through" \
+  '{"clientId":"CFG","clientSecret":"CFGSEC"}|config-json|config-json' "$OUT"
+
+WA_REPO="${WA_DIR}/repo"
+mkdir -p "${WA_REPO}/.catalyst"
+printf '%s' '{"catalyst":{"projectKey":"proj1"}}' > "${WA_REPO}/.catalyst/config.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}}}}' > "${WA_DIR}/config-proj1.json"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"NEW","clientSecret":"NEWSEC"}},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_REPO}' && catalyst_resolve_secret linear-worker-actor")"
+expect_eq "linear-worker-actor: all-tiers-present — primary (NEW global bot.worker) wins" \
+  '{"clientId":"NEW","clientSecret":"NEWSEC"}|config-json|config-json' "$OUT"
+
+printf '%s' '{}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_REPO}' && catalyst_resolve_secret linear-worker-actor")"
+expect_eq "linear-worker-actor: only-per-team-legacy-present — per-team tier wins" \
+  '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}|legacy-config-json|config-json' "$OUT"
+
+WA_REPO2="${WA_DIR}/repo2"
+mkdir -p "${WA_REPO2}/.catalyst"
+printf '%s' '{"catalyst":{"projectKey":"proj-no-file"}}' > "${WA_REPO2}/.catalyst/config.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_REPO2}' && catalyst_resolve_secret linear-worker-actor")"
+expect_eq "linear-worker-actor: only-global-legacy-present (projectKey resolves but its own per-team file is absent) — global-legacy tier wins" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' "$OUT"
+
+WA_NOANCESTRY="${WA_DIR}/no-ancestry"
+mkdir -p "$WA_NOANCESTRY"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_NOANCESTRY}' && catalyst_resolve_secret linear-worker-actor" 2>/dev/null)"
+expect_eq "linear-worker-actor: no projectKey found anywhere — per-team tier's own fallback-to-global-path still resolves the global-only legacy layout" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' "$OUT"
+
+printf '%s' '{}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_NOANCESTRY}' && catalyst_resolve_secret linear-worker-actor" 2>/dev/null)"
+expect_eq "linear-worker-actor: nothing present anywhere resolves to none" "|none|config-json" "$OUT"
+
+# --- B1 REGRESSION FIXTURES (CTL-1616 PR4 remediation): the OLD linear-comment-post.sh
+# advanced to the NEXT tier whenever clientId OR clientSecret was empty after a tier's read;
+# canonicalizeConfigJsonValue's "any non-null value wins" rule let a CREDENTIAL-FREE or
+# PARTIALLY-POPULATED object at a tier's path capture resolution instead, silently starving a
+# deeper, fully-populated tier — the caller then hard-failed on the empty fields rather than
+# falling through. Each fixture names the winning tier the OLD script would have picked (the
+# deeper FULL-credential tier) and proves the fixed engine agrees. Mirrored byte-for-byte in
+# lib/secret-contract.test.mjs and __tests__/secret-contract-parity.test.sh.
+WA_B1_REPO="${WA_DIR}/b1-repo"
+mkdir -p "${WA_B1_REPO}/.catalyst"
+printf '%s' '{"catalyst":{"projectKey":"proj1"}}' > "${WA_B1_REPO}/.catalyst/config.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}}}}' > "${WA_DIR}/config-proj1.json"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"partial-cid"}}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_B1_REPO}' && catalyst_resolve_secret linear-worker-actor")"
+expect_eq "B1: primary tier holds only clientId (no clientSecret) — per-team-legacy (full) wins" \
+  '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}|legacy-config-json|config-json' "$OUT"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"webhookSecret":"whs","botUserId":"uuid-123"}}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_B1_REPO}' && catalyst_resolve_secret linear-worker-actor")"
+expect_eq "B1: primary tier holds a CREDENTIAL-FREE object ({webhookSecret,botUserId}) — per-team-legacy (full) wins" \
+  '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}|legacy-config-json|config-json' "$OUT"
+
+WA_B1_REPO_NOAGENT="${WA_DIR}/b1-repo-noagent"
+mkdir -p "${WA_B1_REPO_NOAGENT}/.catalyst"
+printf '%s' '{"catalyst":{"projectKey":"proj-noagent"}}' > "${WA_B1_REPO_NOAGENT}/.catalyst/config.json"
+# No config-proj-noagent.json file at all — the per-team-legacy tier's own file is absent.
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"","clientSecret":""}},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_B1_REPO_NOAGENT}' && catalyst_resolve_secret linear-worker-actor")"
+expect_eq "B1: primary tier holds empty-string clientId/clientSecret — global-legacy (full) wins" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' "$OUT"
+
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"pid-only"}}}}' > "${WA_DIR}/config-proj1.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_B1_REPO}' && catalyst_resolve_secret linear-worker-actor")"
+expect_eq "B1: primary tier absent, per-team-legacy holds only clientId (no clientSecret) — global-legacy (full) wins" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' "$OUT"
+# Restore config-proj1.json to its full-credential shape for the B2 fixture below.
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"TEAMAGENT","clientSecret":"TEAMAGENTSEC"}}}}' > "${WA_DIR}/config-proj1.json"
+
+# --- B2 REGRESSION FIXTURE: no prior fixture populated BOTH legacy tiers with DISTINCT
+# credentials at once, so a swap of _CSC_LEGACY_TIERS's order survived every suite. (The
+# actual order-swap MUTATION is performed manually against this file on disk — see the
+# CTL-1616 PR4 remediation notes — since `_run` re-sources $LIB fresh in a child process for
+# every cell; mutating this suite's own in-memory _CSC_LEGACY_TIERS array would never reach
+# that child process and would silently no-op.)
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"GLOBALAGENT","clientSecret":"GLOBALAGENTSEC"}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_B1_REPO}' && catalyst_resolve_secret linear-worker-actor")"
+expect_eq "B2: BOTH legacy tiers present with DISTINCT full credentials — per-team-legacy wins (pins tier order)" \
+  '{"clientId":"TEAMAGENT","clientSecret":"TEAMAGENTSEC"}|legacy-config-json|config-json' "$OUT"
+
+# --- ROUND-2 B3 REGRESSION FIXTURES (both shapes empirically pinned against
+# `git show origin/main:.../linear-comment-post.sh` in a hermetic fixture — see the
+# requiredObjectFields row-field comment in lib/secret-contract.mjs for the two canon rules
+# and their pre-fold empirical results). Mirrored byte-for-byte in
+# __tests__/secret-contract-parity.test.sh and lib/secret-contract.test.mjs. Each fixture
+# ALSO populates a real legacy tier so the assertion proves genuine FALL-THROUGH to a deeper
+# tier, not merely "resolves to none".
+WA_NOANCESTRY_B3="${WA_DIR}/no-ancestry-b3"
+mkdir -p "$WA_NOANCESTRY_B3"
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":"{\"clientId\":\"str-cid\",\"clientSecret\":\"str-csec\"}"},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_NOANCESTRY_B3}' && catalyst_resolve_secret linear-worker-actor" 2>/dev/null)"
+expect_eq "CANON RULE 1: a bare STRING value at the primary tier — even one whose own text parses as a full credential object — falls through, never wins on string content" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' "$OUT"
+
+WA_NOANCESTRY_B3B="${WA_DIR}/no-ancestry-b3b"
+mkdir -p "$WA_NOANCESTRY_B3B"
+printf '%s\n' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"\n","clientSecret":"\n"}},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$WA_L2"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${WA_L2}" "cd '${WA_NOANCESTRY_B3B}' && catalyst_resolve_secret linear-worker-actor" 2>/dev/null)"
+expect_eq "CANON RULE 2: newline-only clientId/clientSecret at the primary tier falls through, never wins on raw non-zero length" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' "$OUT"
+
 # --- TRAILING NEWLINES IN JSON VALUES (Codex finding fix) -------------------
 printf '%s' '{"groq":{"apiKey":"abc\n"}}' > "${TMP_DIR}/l2cfg/config.json"
 OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" 'catalyst_resolve_secret groq-api-key')"

@@ -163,12 +163,86 @@ export const SECRET_REGISTRY = Object.freeze(
       id: "linear-worker-actor",
       envNames: [],
       delivery: "config-json",
-      // Primary tier only. linear-comment-post.sh's 3-tier chain (bot.worker → legacy
-      // catalyst.linear.agent → legacy per-team) is preserved VERBATIM in its own file per
-      // design §8 PR4 — this row's single configJsonPath is the primary tier; the legacy
-      // tiers are a PR4 concern, not duplicated here (design explicitly defers their
-      // deprecation to a follow-up ticket, design §6/§12 Q6).
+      // Primary (NEW global) tier: catalyst.linear.bot.worker.
       configJsonPath: "catalyst.linear.bot.worker",
+      // CTL-1616 PR4 (append-only row extension, design §8/§9): the row shipped in PR1/PR3
+      // encoded only the primary tier — linear-comment-post.sh's OWN four-rung chain (an
+      // env-credential-pair tier checked BEFORE any config read, then two MORE legacy
+      // config-json tiers below the primary) is folded on here VERBATIM rather than left as
+      // a parallel hand-rolled chain in that script. Deprecating the legacy tiers is an
+      // explicit follow-up ticket (design §12 Q6) — every tier below is preserved exactly,
+      // not collapsed.
+      //
+      // credentialEnvPair — CATALYST_LINEAR_AGENT_CLIENT_ID/_SECRET, checked FIRST (ahead of
+      // even the primary configJsonPath tier), mirroring linear-comment-post.sh's own
+      // precedence: an operator-set env pair always wins over every config file. Resolved as
+      // a canonical {clientId, clientSecret} object (source "inherited"), the same shape a
+      // config-json tier resolves to — see resolveConfigJson's ENV-PAIR TIER.
+      credentialEnvPair: {
+        clientId: "CATALYST_LINEAR_AGENT_CLIENT_ID",
+        clientSecret: "CATALYST_LINEAR_AGENT_CLIENT_SECRET",
+      },
+      // requiredObjectFields — CTL-1616 PR4 remediation (B1 fix). The old linear-comment-post.sh
+      // advanced to the NEXT tier whenever clientId OR clientSecret was empty after a tier's
+      // read (`[[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]`); canonicalizeConfigJsonValue's
+      // "any non-null value wins" rule (needed elsewhere so a legitimately-empty `{}` or a
+      // credential-free object like {webhookSecret, botUserId} — a REALISTIC production
+      // shape — still round-trips through the engine) let a tier holding exactly one of
+      // those shapes capture resolution instead of falling through, so the caller then
+      // hard-failed on the empty fields rather than reaching a deeper, fully-populated
+      // tier. Declaring the row's required object fields HERE (a data fact any config-json
+      // tier resolver can consult generically via meetsRequiredObjectFields, below — never a
+      // hardcoded `row.id === "linear-worker-actor"` special case) restores the old
+      // script's per-tier advance rule for every tier this row declares (env pair, primary,
+      // and both legacy tiers) without changing behavior for any row that does NOT declare
+      // this field (e.g. linear-orchestrator-actor, which has no fallback chain to advance
+      // down in the first place).
+      //
+      // TWO CROSS-ENGINE CANON RULES (round-2 remediation, B3 fix — both empirically pinned
+      // against `git show origin/main:.../linear-comment-post.sh` run in a hermetic fixture,
+      // see __tests__/secret-contract-parity.test.sh's "string-shape" / "newline-only"
+      // cells):
+      //
+      // 1. A bare STRING value at a gated tier's path ALWAYS falls through, even when that
+      //    string's own CONTENT happens to parse as JSON holding every required field (e.g.
+      //    the tier stores '"{\"clientId\":\"x\",\"clientSecret\":\"y\"}"' — a STRING, not an
+      //    object). meetsRequiredObjectFields's `typeof raw !== "object"` guard already
+      //    rejects this on the JS side (raw is the untouched parsed value — a string is never
+      //    reinterpreted as JSON here). The bash mirror needed an explicit fix for this: its
+      //    _csc_meets_required_object_fields pipes the ALREADY-DECODED value back into `jq`
+      //    for the field check, and jq happily re-parses a string's own text as JSON —
+      //    incorrectly treating object-shaped string CONTENT as a winning object. The fix
+      //    (_csc_config_json_tag_accepted) gates on the `_csc_read_json_string` TAG itself
+      //    (@OBJ64: vs @STR64:) — which losslessly records the ORIGINAL value's type — instead
+      //    of re-deriving type from decoded text, so a tagged-@STR64 value can never reach the
+      //    object field-check at all when the row declares requiredObjectFields. (Empirically,
+      //    the actual PRE-FOLD script does NEITHER "win" NOR "cleanly fall through" for this
+      //    exact shape: `jq -r '.clientId // empty'` errors trying to index a string, and under
+      //    the script's own `set -euo pipefail` that CRASHES the whole process (verified: exit
+      //    5) rather than advancing to the next tier. "Falls through" is the safer canon this
+      //    contract picks for both engines — matching current JS and never crashing — since a
+      //    hard abort is not a reproducible-in-both-engines behavior to mirror.)
+      //
+      // 2. A field is "empty" (fails the gate) using the SAME trailing-EOL-stripped emptiness
+      //    stripEol() already applies to bare-file values — NOT raw `.length > 0`. Pinned
+      //    empirically: the OLD script's `CLIENT_ID=$(jq -r '...clientId // empty' "$FILE")`
+      //    command-substitution silently strips ALL trailing newline bytes from jq's captured
+      //    output, so a field holding the single character "\n" captures as CLIENT_ID="" and
+      //    `[[ -z "$CLIENT_ID" ]]` correctly advances to the next tier. A bare JS
+      //    `raw[field].length > 0` check does NOT reproduce this (a lone "\n" has length 1 —
+      //    JS previously WON a tier the old script would have advanced past). See
+      //    meetsRequiredObjectFields below, which now runs each field through stripEol()
+      //    before the length check.
+      requiredObjectFields: ["clientId", "clientSecret"],
+      // legacyConfigTiers — tried, in order, ONLY once credentialEnvPair AND the primary
+      // configJsonPath tier both miss. "per-team-legacy" mirrors _find_layer2_config's
+      // directory walk-up for a projectKey-keyed config-<key>.json (see
+      // resolveLegacyPerTeamConfigPath); "global-legacy" reads the SAME global catalyst.linear
+      // agent key from the canonical Layer-2 file the primary tier already reads.
+      legacyConfigTiers: [
+        { scope: "per-team-legacy", configJsonPath: "catalyst.linear.agent" },
+        { scope: "global-legacy", configJsonPath: "catalyst.linear.agent" },
+      ],
       // Boot-only (per-call mint) per the seed table — distinct from the orchestrator actor,
       // which is proactively re-armed on a timer-adjacent cooldown reminter.
       rotation: { class: "boot-only" },
@@ -282,6 +356,45 @@ export function resolveLayer2Path(env = process.env) {
   const home = typeof env?.HOME === "string" && env.HOME.length > 0 ? env.HOME : homedir();
   const xdg = typeof env?.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.length > 0 ? env.XDG_CONFIG_HOME : join(home, ".config");
   return join(xdg, "catalyst", "config.json");
+}
+
+// resolveLegacyPerTeamConfigPath — CTL-1616 PR4. Mirrors linear-comment-post.sh's
+// _find_layer2_config VERBATIM: walk `cwd` upward looking for a `.catalyst/config.json`,
+// read its `.catalyst.projectKey` (nested) or bare top-level `.projectKey` (legacy layout),
+// and build the sibling per-team file name `config-<key>.json`. The ONE deliberate
+// generalization (matching every other row's dirname(layer2)-relative-to-canonical-chain
+// convention, e.g. secretFileCandidates): the sibling file lives next to the CANONICAL
+// resolveLayer2Path(env) directory, not a hardcoded `${HOME}/.config/catalyst` literal — this
+// row's own PRIMARY tier already reads through resolveLayer2Path (a decision that predates
+// this PR), so the per-team legacy file tracks the same directory rather than reintroducing a
+// second, independently-hardcoded location.
+//
+// Falls back to resolveLayer2Path(env) itself when no projectKey is found anywhere in the
+// ancestry (matching the script's own "falls back to the global path" behavior) — this
+// function stays silent (zero-import-leaf convention: no console output from this file); the
+// LOUD stderr warning the pre-fold script emits on that fallback is the CALLER's
+// responsibility (lib/catalyst-secret-contract.sh's mirror keeps it, since it is what
+// linear-comment-post.sh's test suite asserts against).
+export function resolveLegacyPerTeamConfigPath(env = process.env, cwd = process.cwd()) {
+  let dir = cwd;
+  for (;;) {
+    const cfg = join(dir, ".catalyst", "config.json");
+    if (existsSync(cfg)) {
+      try {
+        const parsed = JSON.parse(readFileSync(cfg, "utf8"));
+        const key = parsed?.catalyst?.projectKey ?? parsed?.projectKey;
+        if (typeof key === "string" && key.length > 0) {
+          return join(dirname(resolveLayer2Path(env)), `config-${key}.json`);
+        }
+      } catch {
+        /* malformed ancestor config — keep walking, matches the script's `|| true` swallow */
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break; // reached the filesystem root
+    dir = parent;
+  }
+  return resolveLayer2Path(env);
 }
 
 // readJsonField — pull a dotted-path value out of a JSON file EXACTLY as written (whatever
@@ -451,6 +564,33 @@ function canonicalizeConfigJsonValue(raw) {
   return null;
 }
 
+// meetsRequiredObjectFields — CTL-1616 PR4 remediation (B1 fix; round-2 B3 fix below). A row
+// that declares requiredObjectFields (currently only linear-worker-actor's {clientId,
+// clientSecret} shape) must have EVERY named field present in the RAW parsed value as a
+// non-empty (post-EOL-strip — see round-2 fix below) string before a config-json tier is
+// allowed to WIN — mirrors linear-comment-post.sh's own
+// `[[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]` per-tier advance check exactly. A row with
+// no requiredObjectFields declared is unaffected (returns true unconditionally, matching
+// today's behavior for every other config-json row).
+//
+// `typeof raw !== "object"` (below) is also what implements CANON RULE 1 from the
+// requiredObjectFields row-field comment above: a bare STRING raw value (even one whose own
+// text parses as a fully-populated credential object) is rejected here WITHOUT ever being
+// reparsed as JSON — this function only ever inspects the type jq/JSON.parse already gave the
+// value at the config path, never the string's own contents. Operates on the RAW value
+// (before canonicalizeConfigJsonValue's string-serialization), so this gate composes cleanly
+// with that function rather than re-parsing its output.
+//
+// ROUND-2 B3 FIX: each field's emptiness check now runs the value through stripEol() first —
+// CANON RULE 2 above — instead of a bare `.length > 0`. A field holding only a trailing
+// newline (e.g. "\n") now correctly fails the gate (falls through) exactly like the OLD
+// script's command-substitution-stripped capture did, rather than winning on raw length.
+function meetsRequiredObjectFields(row, raw) {
+  if (!row.requiredObjectFields) return true;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return false;
+  return row.requiredObjectFields.every((field) => typeof raw[field] === "string" && stripEol(raw[field]).length > 0);
+}
+
 // ─── Bare-file candidate search — generalizes githubTokenFileCandidates ─────
 
 // explicitFileOverrideEnvName — the per-row explicit-override env var, e.g. "github-token" →
@@ -589,7 +729,23 @@ function resolveEnvFilePresence(row, env) {
   return { value: null, source: "none", provider: row.delivery, rotation: row.rotation };
 }
 
-function resolveConfigJson(row, env) {
+function resolveConfigJson(row, env, cwd) {
+  // ENV-PAIR TIER (CTL-1616 PR4, linear-worker-actor only): checked BEFORE the primary
+  // configJsonPath tier — mirrors linear-comment-post.sh's own precedence, where
+  // CATALYST_LINEAR_AGENT_CLIENT_ID/_SECRET win over every config file. BOTH halves of the
+  // pair must be present (an id with no secret, or vice versa, is not a usable credential —
+  // matches the script's `[[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]` guard exactly).
+  if (row.credentialEnvPair) {
+    const idVal = env?.[row.credentialEnvPair.clientId];
+    const secretVal = env?.[row.credentialEnvPair.clientSecret];
+    if (
+      typeof idVal === "string" && idVal.length > 0 &&
+      typeof secretVal === "string" && secretVal.length > 0
+    ) {
+      const canon = canonicalJsonStringify({ clientId: idVal, clientSecret: secretVal });
+      return { value: canon, source: "inherited", provider: row.delivery, rotation: row.rotation };
+    }
+  }
   if ((row.envNames ?? []).length > 0) {
     const viaEnv = resolveEnvAliasOnly(row, env);
     if (viaEnv.value != null) return viaEnv;
@@ -597,8 +753,33 @@ function resolveConfigJson(row, env) {
   const path = resolveLayer2Path(env);
   const raw = readJsonField(path, row.configJsonPath);
   const resolved = canonicalizeConfigJsonValue(raw);
-  if (resolved != null) {
+  if (resolved != null && meetsRequiredObjectFields(row, raw)) {
     return { value: resolved, source: "config-json", provider: row.delivery, rotation: row.rotation, filePath: path };
+  }
+  // LEGACY TIERS (CTL-1616 PR4, linear-worker-actor only): tried, in order, ONLY once the
+  // primary tier misses — preserves linear-comment-post.sh's fallthrough exactly (design §8
+  // PR4 / §9's "all three tiers preserved verbatim"). B1 fix: "misses" now means EITHER
+  // absent OR (for a row declaring requiredObjectFields) present-but-incomplete — a lone
+  // clientId, a credential-free object, or empty-string fields all continue the chain
+  // instead of falsely capturing it.
+  if (row.legacyConfigTiers) {
+    for (const tier of row.legacyConfigTiers) {
+      const tierPath = tier.scope === "per-team-legacy"
+        ? resolveLegacyPerTeamConfigPath(env, cwd)
+        : resolveLayer2Path(env);
+      const tierRaw = readJsonField(tierPath, tier.configJsonPath);
+      const tierResolved = canonicalizeConfigJsonValue(tierRaw);
+      if (tierResolved != null && meetsRequiredObjectFields(row, tierRaw)) {
+        return {
+          value: tierResolved,
+          source: "legacy-config-json",
+          provider: row.delivery,
+          rotation: row.rotation,
+          filePath: tierPath,
+          legacyScope: tier.scope,
+        };
+      }
+    }
   }
   return { value: null, source: "none", provider: row.delivery, rotation: row.rotation };
 }
@@ -678,7 +859,7 @@ function resolveLocalOnlyPresence(row, env) {
 // is exempt (it must resolve on its own terms) and resolveCloudTokenName never triggers this
 // check (recursion terminates in one level: cloud-token's own resolution never consults
 // `deploymentMode`).
-export function resolveSecret(id, { env = process.env, deploymentMode } = {}) {
+export function resolveSecret(id, { env = process.env, deploymentMode, cwd = process.cwd() } = {}) {
   const row = getSecretRow(id);
   if (!row) return { value: null, source: null, provider: null, rotation: null };
 
@@ -720,7 +901,7 @@ export function resolveSecret(id, { env = process.env, deploymentMode } = {}) {
     case "env-alias":
       return resolveEnvAliasOnly(row, env);
     case "config-json":
-      return resolveConfigJson(row, env);
+      return resolveConfigJson(row, env, cwd);
     case "platform-env":
       return resolveCloudTokenName(row, env);
     case "local-only":

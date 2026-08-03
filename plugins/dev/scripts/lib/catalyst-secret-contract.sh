@@ -60,6 +60,55 @@ _CSC_FAMILY_PREFIX=(
 _CSC_DEFAULT_LOCAL_PATH=(
   "" "" "" "" "" "" "" "" "" "" ".config/catalyst/age.key"
 )
+# CTL-1616 PR4 (append-only, linear-worker-actor only): the env-credential-pair tier
+# ("IDVAR:SECRETVAR") and the two legacy config-json fallback tiers
+# ("scope:path|scope:path"), mirroring secret-contract.mjs's credentialEnvPair/
+# legacyConfigTiers row fields exactly. Empty string for every row that doesn't declare one.
+_CSC_CREDENTIAL_ENV_PAIR=(
+  "" "" "" "" "" "" "" "CATALYST_LINEAR_AGENT_CLIENT_ID:CATALYST_LINEAR_AGENT_CLIENT_SECRET" "" "" ""
+)
+_CSC_LEGACY_TIERS=(
+  "" "" "" "" "" "" "" "per-team-legacy:catalyst.linear.agent|global-legacy:catalyst.linear.agent" "" "" ""
+)
+# _CSC_REQUIRED_OBJECT_FIELDS — CTL-1616 PR4 remediation (B1 fix). Space-joined field names
+# a row's OBJECT-shaped config-json value must hold, ALL non-empty, before a tier is allowed
+# to WIN — mirrors secret-contract.mjs's row-declared requiredObjectFields exactly (a
+# generic, row-declared gate, never a hardcoded id check). Empty string for every row that
+# doesn't declare one (only linear-worker-actor does today).
+_CSC_REQUIRED_OBJECT_FIELDS=(
+  "" "" "" "" "" "" "" "clientId clientSecret" "" "" ""
+)
+
+# catalyst_secret_required_object_fields ID — echoes the space-joined required field list
+# (may echo nothing).
+catalyst_secret_required_object_fields() {
+  local _i
+  _i="$(_csc_index_of "$1")" || { printf ''; return 1; }
+  printf '%s' "${_CSC_REQUIRED_OBJECT_FIELDS[$_i]}"
+}
+
+# catalyst_secret_credential_env_pair ID — echoes "IDVAR SECRETVAR" (space-joined) or nothing.
+catalyst_secret_credential_env_pair() {
+  local _i _v
+  _i="$(_csc_index_of "$1")" || return 1
+  _v="${_CSC_CREDENTIAL_ENV_PAIR[$_i]}"
+  [[ -n "$_v" ]] && printf '%s' "${_v/:/ }"
+  return 0
+}
+
+# catalyst_secret_legacy_tiers ID — prints one "scope|configJsonPath" per line, in order
+# (may print nothing).
+catalyst_secret_legacy_tiers() {
+  local _i _v _tier
+  _i="$(_csc_index_of "$1")" || return 1
+  _v="${_CSC_LEGACY_TIERS[$_i]}"
+  [[ -n "$_v" ]] || return 0
+  local -a _tiers=()
+  IFS='|' read -r -a _tiers <<< "$_v"
+  for _tier in "${_tiers[@]}"; do
+    printf '%s\n' "${_tier/:/|}"
+  done
+}
 
 # _csc_index_of ID — echoes the row index or returns 1 (never prints on miss).
 _csc_index_of() {
@@ -492,9 +541,124 @@ _csc_resolve_env_file_presence() {
   _csc_set_result "" "none" "$_delivery"
 }
 
+# _csc_resolve_legacy_per_team_path — CTL-1616 PR4 (linear-worker-actor only). Mirrors
+# linear-comment-post.sh's _find_layer2_config VERBATIM, including its loud stderr warning
+# (that warning is exactly what __tests__/linear-comment-post.test.sh's CTL-1111 cells 13/14
+# assert on, so it stays here, not in secret-contract.mjs's zero-side-effect JS mirror): walk
+# $PWD upward for a .catalyst/config.json, read .catalyst.projectKey (nested) or a bare
+# top-level .projectKey (legacy layout), and build the sibling config-<key>.json NEXT TO the
+# canonical Layer-2 directory (dirname of catalyst_secret_resolve_layer2_path) — not a
+# hardcoded ${HOME}/.config/catalyst literal, consistent with this row's own primary tier
+# already reading through the canonical chain. Falls back to the canonical global path itself
+# when no projectKey is found anywhere in the ancestry.
+_csc_resolve_legacy_per_team_path() {
+  local _dir="$PWD" _cfg _key
+  while [[ "$_dir" != "/" ]]; do
+    _cfg="$_dir/.catalyst/config.json"
+    if [[ -f "$_cfg" ]]; then
+      _key="$(jq -r '.catalyst.projectKey // .projectKey // empty' "$_cfg" 2>/dev/null)" || true
+      if [[ -n "$_key" ]]; then
+        printf '%s/config-%s.json' "$(dirname "$(catalyst_secret_resolve_layer2_path)")" "$_key"
+        return 0
+      fi
+    fi
+    _dir="$(dirname "$_dir")"
+  done
+  echo "catalyst-secret-contract: no projectKey in any .catalyst/config.json from $PWD upward — per-team config-<key>.json NOT resolved; falling back to global config.json" >&2
+  catalyst_secret_resolve_layer2_path
+}
+
+# _csc_meets_required_object_fields ID JSON — CTL-1616 PR4 remediation (B1 fix; round-2 B3
+# fix below). Mirrors lib/secret-contract.mjs's meetsRequiredObjectFields: a row with no
+# requiredObjectFields declared passes trivially (echoes nothing declared -> return 0); a
+# row that DOES declare fields requires JSON to be a JSON OBJECT with every named field
+# present as a non-empty (post-EOL-strip — CANON RULE 2, see
+# _CSC_REQUIRED_OBJECT_FIELDS above) string. JSON here is always an already-decoded
+# canonical value handed in ONLY when the caller (_csc_config_json_tag_accepted) has already
+# confirmed the ORIGINAL tag was "@OBJ64:" — never a plain "@STR64:" string reinterpreted as
+# JSON (CANON RULE 1: see the tag-gating fix on that function; a JSON.parse/jq round-trip of
+# a STRING's own text is exactly the B3 bug this avoids). Never aborts the caller (jq errors
+# are swallowed via 2>/dev/null, matching every other jq call site in this file).
+#
+# ROUND-2 B3 FIX: the field value is now stripped of a TRAILING RUN of \r/\n bytes INSIDE the
+# same jq invocation (`sub("[\r\n]+$";"")`, Oniguruma regex, byte-for-byte the same rule as
+# JS's `stripEol`'s `.replace(/[\r\n]+$/, "")`) before the emptiness check — not left to bash's
+# own $() capture, which only ever strips trailing "\n" bytes and would silently leave a
+# trailing lone "\r" (or a "\r\n\r\n" mixed run) unstripped, an LF/CR asymmetry a purely-
+# implicit $() reliance would introduce between the two engines.
+_csc_meets_required_object_fields() {
+  local _id="$1" _json="$2" _fields _field _val
+  _fields="$(catalyst_secret_required_object_fields "$_id")"
+  [[ -n "$_fields" ]] || return 0
+  local -a _farr=()
+  IFS=' ' read -r -a _farr <<< "$_fields"
+  for _field in "${_farr[@]}"; do
+    _val="$(printf '%s' "$_json" | jq -r --arg f "$_field" '
+      if type == "object" and ((.[$f] | type) == "string") then
+        (.[$f] | sub("[\r\n]+$"; ""))
+      else "" end
+    ' 2>/dev/null)"
+    [[ -n "$_val" ]] || return 1
+  done
+  return 0
+}
+
+# _csc_config_json_tag_accepted ID TAG — ROUND-2 B3 FIX. Returns 0 (accept) iff TAG (an
+# "@OBJ64:"/"@STR64:"/"@ABSENT"/"@NONSTR" value from _csc_read_json_string) is eligible to be
+# decoded and checked against ID's requiredObjectFields gate; 1 (reject, fall through
+# immediately) otherwise. CANON RULE 1 (see the requiredObjectFields row-field comment in
+# lib/secret-contract.mjs): when ID declares requiredObjectFields, ONLY "@OBJ64:" is
+# eligible — a bare "@STR64:" (the ORIGINAL value was a JSON STRING) is rejected here
+# unconditionally, before ever being decoded, REGARDLESS of what its own text would parse to.
+#
+# WHY GATE ON THE TAG, NOT ON DECODED CONTENT: the previous implementation accepted both tags
+# and asked _csc_meets_required_object_fields to sort it out — but that function pipes the
+# ALREADY-DECODED text back into `jq`, which happily RE-PARSES a string's own text as JSON.
+# A tier storing '"{\"clientId\":\"x\",\"clientSecret\":\"y\"}"' (a JSON STRING whose content
+# looks like a full credential object) would decode to that exact object-shaped text, jq would
+# re-parse it as an object, and the gate would incorrectly WIN — while
+# lib/secret-contract.mjs's meetsRequiredObjectFields never reparses (it inspects
+# `typeof raw`, the type JSON.parse/jq already assigned the value, once) and correctly falls
+# through. The "@OBJ64:"/"@STR64:" tag already carries that original-type fact losslessly (set
+# by _csc_read_json_string BEFORE any decoding), so gating on the TAG closes the divergence at
+# its source instead of trying to out-guess jq's stdin-is-always-JSON re-parsing behavior.
+#
+# A row with no requiredObjectFields declared is unaffected — both tags stay eligible here,
+# matching every other config-json row's pre-existing (pre-PR4) behavior; the ACTOR ROW SHAPE
+# FIX this file's own history documents (accepting @STR64 for the generic groq-api-key shape)
+# is untouched.
+_csc_config_json_tag_accepted() {
+  local _id="$1" _tag="$2" _req_fields
+  case "$_tag" in
+    "@OBJ64:"*) return 0 ;;
+    "@STR64:"*)
+      _req_fields="$(catalyst_secret_required_object_fields "$_id")"
+      [[ -z "$_req_fields" ]]
+      return $?
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 _csc_resolve_config_json() {
   local _id="$1" _delivery _path _l2 _tagged
   _delivery="$(catalyst_secret_delivery "$_id")"
+  # ENV-PAIR TIER (CTL-1616 PR4, linear-worker-actor only): checked BEFORE the primary
+  # configJsonPath tier — mirrors linear-comment-post.sh's own precedence exactly. BOTH
+  # halves must be present (an id with no secret, or vice versa, is not a usable credential).
+  local _pair _idvar _secvar _idval _secval
+  if _pair="$(catalyst_secret_credential_env_pair "$_id")" && [[ -n "$_pair" ]]; then
+    _idvar="${_pair%% *}"
+    _secvar="${_pair#* }"
+    _idval="${!_idvar-}"
+    _secval="${!_secvar-}"
+    if [[ -n "$_idval" && -n "$_secval" ]]; then
+      local _obj
+      _obj="$(jq -nc --arg id "$_idval" --arg sec "$_secval" '{clientId:$id, clientSecret:$sec}')"
+      _csc_set_result "$_obj" "inherited" "$_delivery"
+      return 0
+    fi
+  fi
   if [[ -n "$(catalyst_secret_env_names "$_id")" ]]; then
     # SUBSHELL-EXPORT CAVEAT (mirrors lib/catalyst-deployment-mode.sh's own documented fix):
     # calling _csc_resolve_env_alias_only inside a $(...) command substitution would run it
@@ -521,20 +685,51 @@ _csc_resolve_config_json() {
   # lib/secret-contract.mjs's `raw.length > 0`); an empty object decodes to the 2-byte
   # canonical string "{}" (non-empty — DOES resolve, matching
   # canonicalizeConfigJsonValue's "empty object still resolves" behavior).
-  case "$_tagged" in
-    "@STR64:"*|"@OBJ64:"*)
-      local _decoded
-      _csc_b64_decode_var _decoded "${_tagged#@*:}"
-      if [[ -n "$_decoded" ]]; then
-        _csc_set_result "$_decoded" "config-json" "$_delivery"
-      else
-        _csc_set_result "" "none" "$_delivery"
+  #
+  # ROUND-2 B3 FIX: the "accepts BOTH tags" claim above is now GATED by
+  # _csc_config_json_tag_accepted, not a bare case-pattern match — for a row that declares
+  # requiredObjectFields, a "@STR64:" tag is rejected unconditionally (CANON RULE 1), never
+  # reaching _csc_meets_required_object_fields at all. See that helper's docstring.
+  if _csc_config_json_tag_accepted "$_id" "$_tagged"; then
+    local _decoded
+    _csc_b64_decode_var _decoded "${_tagged#@*:}"
+    # B1 FIX: a decoded-but-INCOMPLETE credential object (e.g. {clientId} alone, or a
+    # credential-free object like {webhookSecret,botUserId}) must NOT capture resolution
+    # here — falls through to the legacy tiers below instead, mirroring the OLD script's
+    # per-tier `[[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]` advance rule exactly. A row
+    # with no requiredObjectFields declared is unaffected (the gate passes trivially).
+    if [[ -n "$_decoded" ]] && _csc_meets_required_object_fields "$_id" "$_decoded"; then
+      _csc_set_result "$_decoded" "config-json" "$_delivery"
+      return 0
+    fi
+  fi
+  # LEGACY TIERS (CTL-1616 PR4, linear-worker-actor only): tried, in order, ONLY once the
+  # primary tier misses above — preserves linear-comment-post.sh's fallthrough exactly
+  # (design §8 PR4 / §9's "all three tiers preserved verbatim"). B1 fix: "misses" now means
+  # EITHER absent OR (for a row declaring requiredObjectFields) present-but-incomplete.
+  local _tier_line _tier_scope _tier_path _tier_l2 _tier_tagged _tier_decoded
+  while IFS= read -r _tier_line; do
+    [[ -n "$_tier_line" ]] || continue
+    _tier_scope="${_tier_line%%|*}"
+    _tier_path="${_tier_line#*|}"
+    if [[ "$_tier_scope" == "per-team-legacy" ]]; then
+      _tier_l2="$(_csc_resolve_legacy_per_team_path)"
+    else
+      _tier_l2="$(catalyst_secret_resolve_layer2_path)"
+    fi
+    _tier_tagged="$(_csc_read_json_string "$_tier_l2" "$_tier_path")"
+    # ROUND-2 B3 FIX: same tag-gating as the primary tier above (CANON RULE 1) — a legacy
+    # tier's own "@STR64:" value is equally rejected unconditionally when ID declares
+    # requiredObjectFields, never reaching _csc_meets_required_object_fields.
+    if _csc_config_json_tag_accepted "$_id" "$_tier_tagged"; then
+      _csc_b64_decode_var _tier_decoded "${_tier_tagged#@*:}"
+      if [[ -n "$_tier_decoded" ]] && _csc_meets_required_object_fields "$_id" "$_tier_decoded"; then
+        _csc_set_result "$_tier_decoded" "legacy-config-json" "$_delivery"
+        return 0
       fi
-      ;;
-    *)
-      _csc_set_result "" "none" "$_delivery"
-      ;;
-  esac
+    fi
+  done < <(catalyst_secret_legacy_tiers "$_id")
+  _csc_set_result "" "none" "$_delivery"
 }
 
 # _csc_resolve_cloud_token_name — cloud-token's two-step resolution: NAME (env override →

@@ -4,11 +4,14 @@
 // otherwise fail every Linear call until restarted. Secrets hygiene: the
 // clientSecret/token are read into variables and never logged (house style:
 // ratelimit-poller.mjs).
+//
+// CTL-1616 PR4: defaultLayer2Path/readOrchestratorCreds are folded onto the shared secret
+// contract (resolveLayer2Path / resolveSecret("linear-orchestrator-actor")) so the Layer-2
+// chain + config-path read are defined ONCE; the mint mechanics below (buildMintCurlArgs,
+// defaultMint/defaultMintAsync) are UNCHANGED.
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
 import { log } from "./config.mjs";
+import { registerRearmHook, resolveLayer2Path, resolveSecret } from "../lib/secret-contract.mjs";
 
 const OAUTH_ENDPOINT = "https://api.linear.app/oauth/token";
 const MINT_SCOPE = "read,write,comments:create,app:assignable,app:mentionable";
@@ -34,36 +37,40 @@ export function isBatchAuthError(errors) {
   );
 }
 
-// defaultLayer2Path — the FULL Layer-2 selection chain (install-lifecycle.mjs
-// order: CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG >
-// $XDG_CONFIG_HOME/catalyst/config.json > ~/.config/catalyst/config.json).
-// CTL-1577 round 2: previously only the first env override was honored, so a
-// daemon launched with MACHINE_CONFIG/XDG would startup-mint fine (the bash
-// helper resolves the chain) but find NO creds at re-mint time.
-function defaultLayer2Path() {
-  return (
-    process.env.CATALYST_LAYER2_CONFIG_FILE ||
-    process.env.CATALYST_MACHINE_CONFIG ||
-    (process.env.XDG_CONFIG_HOME
-      ? resolve(process.env.XDG_CONFIG_HOME, "catalyst", "config.json")
-      : resolve(homedir(), ".config", "catalyst", "config.json"))
-  );
+// defaultLayer2Path — CTL-1616 PR4: delegates to the shared secret contract's
+// resolveLayer2Path, which implements this SAME chain (CATALYST_LAYER2_CONFIG_FILE >
+// CATALYST_MACHINE_CONFIG > $XDG_CONFIG_HOME/catalyst/config.json >
+// ~/.config/catalyst/config.json — install-lifecycle.mjs order). Kept as a named export
+// (rather than inlined at its one call site) for back-compat with any existing import.
+export function defaultLayer2Path() {
+  return resolveLayer2Path();
 }
 
-export function readOrchestratorCreds(layer2Path = defaultLayer2Path()) {
+// readOrchestratorCreds — CTL-1616 PR4: the config-path + clientId/clientSecret READ is
+// folded onto resolveSecret("linear-orchestrator-actor"), which resolves through the
+// IDENTICAL Layer-2 chain and reads the SAME catalyst.linear.bot.orchestrator dotted path.
+// `layer2Path` is accepted (and still honored) for back-compat with any existing caller that
+// passes an explicit override path — it is threaded through as
+// CATALYST_LAYER2_CONFIG_FILE (the highest-priority link in the chain, so an explicit
+// override here still wins over ambient env).
+export function readOrchestratorCreds(layer2Path) {
+  const env = layer2Path
+    ? { ...process.env, CATALYST_LAYER2_CONFIG_FILE: layer2Path }
+    : process.env;
+  const resolved = resolveSecret("linear-orchestrator-actor", { env });
+  if (typeof resolved.value !== "string" || resolved.value.length === 0) return null;
   try {
-    const parsed = JSON.parse(readFileSync(layer2Path, "utf8"));
-    const o = parsed?.catalyst?.linear?.bot?.orchestrator;
+    const parsed = JSON.parse(resolved.value);
     if (
-      typeof o?.clientId === "string" &&
-      o.clientId &&
-      typeof o?.clientSecret === "string" &&
-      o.clientSecret
+      typeof parsed?.clientId === "string" &&
+      parsed.clientId &&
+      typeof parsed?.clientSecret === "string" &&
+      parsed.clientSecret
     ) {
-      return { clientId: o.clientId, clientSecret: o.clientSecret };
+      return { clientId: parsed.clientId, clientSecret: parsed.clientSecret };
     }
   } catch {
-    /* unreadable/malformed → null (fail-open) */
+    /* malformed canonicalized value — should be unreachable; fail-open */
   }
   return null;
 }
@@ -150,6 +157,34 @@ export function createReminter({
 
 // Process-wide singleton (same pattern as linearBreaker).
 export const linearReminter = createReminter();
+
+// createOrchestratorActorRearmHook — CTL-1616 PR4: adapts ANY reminter's `.attempt()` (the
+// createReminter/createAsyncReminter cooldown/read/mint/apply contract is UNCHANGED — this
+// wraps it, never replaces it) into the registerRearmHook seam's synchronous
+// `({env, deploymentMode}) => {rearmed}` contract. A pure function so it is unit-testable
+// against a fully fake reminter — never the real `linearReminter` singleton — with zero risk
+// of a hermetic test triggering a genuine network mint against api.linear.app.
+export function createOrchestratorActorRearmHook(reminter) {
+  return () => ({ rearmed: reminter.attempt() });
+}
+
+// Wire the process-wide sync reminter into the secret contract's rearm-hook seam (design
+// §8/§9: "the cooldown reminters register as the row's on-401 rearm hook, unchanged in
+// shape"). This is the reminter's mechanics UNCHANGED — only its existing .attempt() is now
+// ALSO reachable through armSecret("linear-orchestrator-actor"), the same reminter
+// withAuthRemint already drives reactively on an observed 401 below. registerRearmHook's own
+// capability-ceiling check (design §6 rule 1) is what keeps a hookless re-armable row honest;
+// this call is what satisfies it for this row.
+//
+// linearAsyncReminter (below) is DELIBERATELY NOT registered through this seam:
+// registerRearmHook's contract is synchronous (armSecret reads `hook(...).rearmed`
+// immediately, never awaiting), while the async reminter exists specifically so the broker's
+// event loop is never blocked by a slow OAuth endpoint (CTL-1577 round 2) — forcing it
+// through a synchronous hook would mean either blocking that event loop (defeating the
+// reason it is async) or misreporting `rearmed` while a mint is still in flight. It keeps
+// functioning exactly as today via withAuthRemint(rawExec, { reminter: linearAsyncReminter })
+// in the broker's cache-reconcile path, untouched by this PR.
+registerRearmHook("linear-orchestrator-actor", createOrchestratorActorRearmHook(linearReminter));
 
 // defaultMintAsync — non-blocking mint (spawn, not spawnSync) for daemons whose
 // event loop must stay free during a slow OAuth endpoint (the broker routes

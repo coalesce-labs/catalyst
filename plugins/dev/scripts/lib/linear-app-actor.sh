@@ -22,16 +22,26 @@
 [[ -n "${_CATALYST_LINEAR_APP_ACTOR_SH_LOADED:-}" ]] && return 0
 _CATALYST_LINEAR_APP_ACTOR_SH_LOADED=1
 
+# CTL-1616 PR4: the Layer-2 selection chain + clientId/clientSecret READ are folded onto the
+# shared secret contract (catalyst_resolve_secret linear-orchestrator-actor) so the chain is
+# defined ONCE — this file no longer hand-rolls its own copy of the
+# CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG > XDG > ~/.config/… chain (this row's
+# chain IS that canonical chain; the registry adopted it, not vice versa — design §2/§8). MINT
+# mechanics below (the curl POST) are UNCHANGED.
+_LAA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${_LAA_LIB_DIR}/catalyst-secret-contract.sh"
+
 linear_app_actor_auth() {
   local _daemon="${1:?linear_app_actor_auth: daemon name required}"
-  # Layer-2 selection chain — mirrors execution-core/install-lifecycle.mjs (and
-  # linear-remint.mjs defaultLayer2Path): CATALYST_LAYER2_CONFIG_FILE >
-  # CATALYST_MACHINE_CONFIG > $XDG_CONFIG_HOME/catalyst/config.json > ~/.config/….
-  local _g="${CATALYST_LAYER2_CONFIG_FILE:-${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/catalyst/config.json}}"
-  local _ocid _ocsec _otok
-  _ocid=$(jq -r '.catalyst.linear.bot.orchestrator.clientId // empty' "$_g" 2>/dev/null)
-  _ocsec=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "$_g" 2>/dev/null)
-  if [[ -n "$_ocid" && -n "$_ocsec" ]]; then
+  local _ocid _ocsec _otok _creds
+  catalyst_resolve_secret linear-orchestrator-actor >/dev/null
+  _creds="$CATALYST_SECRET_LAST_VALUE"
+  if [[ -n "$_creds" ]]; then
+    _ocid=$(printf '%s' "$_creds" | jq -r '.clientId // empty' 2>/dev/null)
+    _ocsec=$(printf '%s' "$_creds" | jq -r '.clientSecret // empty' 2>/dev/null)
+  fi
+  if [[ -n "${_ocid:-}" && -n "${_ocsec:-}" ]]; then
     # Secret travels via --data @- on stdin, never argv (process-table hygiene —
     # house style: linear-remint.mjs buildMintCurlArgs), values URL-encoded via
     # jq @uri (parity with the re-minter's URLSearchParams — a form-reserved

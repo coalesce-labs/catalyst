@@ -168,7 +168,11 @@ const id = process.env.CSC_PROBE_ID;
 const depMode = process.env.CSC_PROBE_DEP_MODE;
 const depInferred = process.env.CSC_PROBE_DEP_INFERRED;
 const deploymentMode = depMode ? { mode: depMode, inferred: depInferred === "true" } : undefined;
-const r = resolveSecret(id, { deploymentMode });
+// CTL-1616 PR4: linear-worker-actor's per-team-legacy tier walks cwd upward — CSC_PROBE_CWD
+// threads the same working directory the bash side is cd'd into (see _cell_in_dir) so both
+// sides walk from the IDENTICAL starting point.
+const cwd = process.env.CSC_PROBE_CWD;
+const r = resolveSecret(id, cwd ? { deploymentMode, cwd } : { deploymentMode });
 process.stdout.write((r.value ?? "") + "|" + (r.source ?? "") + "|" + (r.provider ?? ""));
 EOF
 
@@ -185,6 +189,23 @@ _cell() {
     catalyst_resolve_secret \"\$CSC_PROBE_ID\" \"\${CSC_PROBE_DEP_MODE:-}\" \"\${CSC_PROBE_DEP_INFERRED:-true}\"
   ")"
   NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" node "$PROBE_RESOLVE_JS" 2>&1)"
+  expect_eq "$_name (bash==expected)" "$_expected" "$BASH_OUT"
+  expect_eq "$_name (node==expected)" "$_expected" "$NODE_OUT"
+}
+
+# _cell_in_dir DIR NAME EXPECTED [ENV_VAR=VAL ...] -- like _cell, but both languages resolve
+# with their working-directory equivalent (bash $PWD / JS cwd option) set to DIR first —
+# exercises linear-worker-actor's per-team-legacy tier (CTL-1616 PR4), which walks that
+# directory upward for a .catalyst/config.json.
+_cell_in_dir() {
+  local _dir="$1" _name="$2" _expected="$3"
+  shift 3
+  local BASH_OUT NODE_OUT
+  BASH_OUT="$(cd "$_dir" && env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" bash -c "
+    source '$LIB'
+    catalyst_resolve_secret \"\$CSC_PROBE_ID\" \"\${CSC_PROBE_DEP_MODE:-}\" \"\${CSC_PROBE_DEP_INFERRED:-true}\"
+  ")"
+  NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" CSC_PROBE_CWD="$_dir" "$@" node "$PROBE_RESOLVE_JS" 2>&1)"
   expect_eq "$_name (bash==expected)" "$_expected" "$BASH_OUT"
   expect_eq "$_name (node==expected)" "$_expected" "$NODE_OUT"
 }
@@ -340,12 +361,156 @@ _cell "config-json: ACTOR ROW SHAPE — an ARRAY is rejected on both sides (not 
 
 # B5: previously-uncovered row — linear-worker-actor (config-json, distinct configJsonPath
 # from linear-orchestrator-actor — the judge-unanimous "never collapse these two" graft).
-printf '%s' '{"catalyst":{"linear":{"bot":{"worker":"{\"apiKey\":\"w\"}"}}}}' > "$L2_FILE"
-_cell "config-json: reads the dotted path (linear-worker-actor)" \
-  '{"apiKey":"w"}|config-json|config-json' \
+# CTL-1616 PR4 remediation (B1 fix): this row now declares requiredObjectFields
+# ({clientId, clientSecret}), so — unlike linear-orchestrator-actor above — a bare STRING
+# value at its path can never WIN the gate, in EITHER engine (round-2 CANON RULE 1, see the
+# requiredObjectFields row-field comment in lib/secret-contract.mjs) — it always falls
+# through to the next tier, even when the string's own text parses as a full credential
+# object (see the dedicated "CANON RULE 1" cell below, which pins that exact shape).
+# CORRECTION (round-2): the claim that used to live here — that the OLD script's own
+# `jq '.clientId // empty'` on a string primitive "errors and yields empty" — is only half
+# right. Verified empirically (`git show origin/main:.../linear-comment-post.sh` run in a
+# hermetic fixture): jq exits 5 trying to INDEX a string with `.clientId`, and under that
+# script's own `set -euo pipefail` this is NOT a quiet per-tier fallthrough — it CRASHES the
+# whole script (nonzero exit, comment never posted). "Falls through" is the canon this
+# contract deliberately picks for BOTH engines instead (matches current JS, never aborts) —
+# it is not a literal reproduction of the pre-fold script's crash. Fixture below updated to
+# the row's real credential-object shape to keep exercising "distinct configJsonPath,
+# resolved independently of orchestrator's" without contradicting the B1 fix.
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"w-cid","clientSecret":"w-csec"}}}}}' > "$L2_FILE"
+_cell "config-json: reads the dotted path (linear-worker-actor, credential-object shape)" \
+  '{"clientId":"w-cid","clientSecret":"w-csec"}|config-json|config-json' \
   CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
 printf '%s' '{}' > "$L2_FILE"
 _cell "config-json: linear-worker-actor absent path falls through to none" "|none|config-json" \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# ─── linear-worker-actor: credentialEnvPair + legacyConfigTiers (CTL-1616 PR4) ────────────
+# linear-comment-post.sh's THREE config tiers (NEW global bot.worker → OLD per-team agent →
+# OLD global agent) + its env-credential-pair tier, folded onto this row. Precedence fixtures
+# for ALL-TIERS-PRESENT / ONLY-LEGACY-PRESENT / ONLY-ENV-PRESENT / NOTHING-PRESENT (design
+# §9 PR4 success criterion), proven byte-for-byte identical bash==JS — the point of this
+# suite. Mirrored in lib/secret-contract.test.mjs and
+# __tests__/catalyst-secret-contract.test.sh.
+_cell "linear-worker-actor: only-env-present — credentialEnvPair wins" \
+  '{"clientId":"EID","clientSecret":"ESEC"}|inherited|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}" \
+  "CATALYST_LINEAR_AGENT_CLIENT_ID=EID" "CATALYST_LINEAR_AGENT_CLIENT_SECRET=ESEC"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"CFG","clientSecret":"CFGSEC"}}}}}' > "$L2_FILE"
+_cell "linear-worker-actor: credentialEnvPair with only ONE half set does not win — falls through to config" \
+  '{"clientId":"CFG","clientSecret":"CFGSEC"}|config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}" \
+  "CATALYST_LINEAR_AGENT_CLIENT_ID=EID"
+
+WA_REPO="${L2_DIR}/wa-repo"
+mkdir -p "${WA_REPO}/.catalyst"
+printf '%s' '{"catalyst":{"projectKey":"proj1"}}' > "${WA_REPO}/.catalyst/config.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}}}}' > "${L2_DIR}/config-proj1.json"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"NEW","clientSecret":"NEWSEC"}},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_REPO" "linear-worker-actor: all-tiers-present — primary (NEW global bot.worker) wins" \
+  '{"clientId":"NEW","clientSecret":"NEWSEC"}|config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+printf '%s' '{}' > "$L2_FILE"
+_cell_in_dir "$WA_REPO" "linear-worker-actor: only-per-team-legacy-present — per-team tier wins" \
+  '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+WA_REPO2="${L2_DIR}/wa-repo2"
+mkdir -p "${WA_REPO2}/.catalyst"
+printf '%s' '{"catalyst":{"projectKey":"proj-no-file"}}' > "${WA_REPO2}/.catalyst/config.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_REPO2" "linear-worker-actor: only-global-legacy-present (own per-team file absent) — global-legacy tier wins" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+WA_NOANCESTRY="${L2_DIR}/wa-no-ancestry"
+mkdir -p "$WA_NOANCESTRY"
+_cell_in_dir "$WA_NOANCESTRY" "linear-worker-actor: no projectKey anywhere — per-team tier's own fallback-to-global-path still resolves a global-only legacy layout" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+printf '%s' '{}' > "$L2_FILE"
+_cell_in_dir "$WA_NOANCESTRY" "linear-worker-actor: nothing-present — resolves to none" \
+  "|none|config-json" \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# ─── B1 REGRESSION FIXTURES (CTL-1616 PR4 remediation): the OLD linear-comment-post.sh
+# advanced to the NEXT tier whenever clientId OR clientSecret was empty after a tier's read;
+# canonicalizeConfigJsonValue's "any non-null value wins" rule let a CREDENTIAL-FREE or
+# PARTIALLY-POPULATED object at a tier's path capture resolution instead, silently starving a
+# deeper, fully-populated tier — the caller then hard-failed on the empty fields rather than
+# falling through. Each fixture names the winning tier the OLD script would have picked (the
+# deeper FULL-credential tier) and proves the fixed engine agrees. Mirrored byte-for-byte in
+# lib/secret-contract.test.mjs and __tests__/catalyst-secret-contract.test.sh.
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"partial-cid"}}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_REPO" "B1: primary tier holds only clientId (no clientSecret) — per-team-legacy (full) wins" \
+  '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"webhookSecret":"whs","botUserId":"uuid-123"}}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_REPO" "B1: primary tier holds a CREDENTIAL-FREE object ({webhookSecret,botUserId}) — per-team-legacy (full) wins" \
+  '{"clientId":"PERTEAM","clientSecret":"PERTEAMSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+WA_REPO_NOAGENT="${L2_DIR}/wa-repo-noagent"
+mkdir -p "${WA_REPO_NOAGENT}/.catalyst"
+printf '%s' '{"catalyst":{"projectKey":"proj-noagent"}}' > "${WA_REPO_NOAGENT}/.catalyst/config.json"
+# No config-proj-noagent.json file at all — the per-team-legacy tier's own file is absent.
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"","clientSecret":""}},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_REPO_NOAGENT" "B1: primary tier holds empty-string clientId/clientSecret — global-legacy (full) wins" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"pid-only"}}}}' > "${L2_DIR}/config-proj1.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_REPO" "B1: primary tier absent, per-team-legacy holds only clientId (no clientSecret) — global-legacy (full) wins" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+# Restore config-proj1.json to its full-credential shape for the B2 fixture below.
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"TEAMAGENT","clientSecret":"TEAMAGENTSEC"}}}}' > "${L2_DIR}/config-proj1.json"
+
+# ─── B2 REGRESSION FIXTURE: no prior fixture populated BOTH legacy tiers with DISTINCT
+# credentials at once, so a swap of _CSC_LEGACY_TIERS's order survived every suite.
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"GLOBALAGENT","clientSecret":"GLOBALAGENTSEC"}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_REPO" "B2: BOTH legacy tiers present with DISTINCT full credentials — per-team-legacy wins (pins tier order)" \
+  '{"clientId":"TEAMAGENT","clientSecret":"TEAMAGENTSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# ─── ROUND-2 B3 REGRESSION FIXTURES: the two proven cross-engine divergences on
+# linear-worker-actor's requiredObjectFields gate (both empirically pinned against
+# `git show origin/main:.../linear-comment-post.sh` in a hermetic fixture — see the
+# requiredObjectFields row-field comment in lib/secret-contract.mjs for the two canon rules
+# and their pre-fold empirical results). Mirrored byte-for-byte in
+# __tests__/catalyst-secret-contract.test.sh and lib/secret-contract.test.mjs. Each fixture
+# ALSO populates a real legacy tier so the assertion proves genuine FALL-THROUGH to a deeper
+# tier on BOTH sides — not merely "resolves to none" (which a broken engine could also
+# produce by a different, wrong path).
+WA_NOANCESTRY_B3="${L2_DIR}/no-ancestry-b3"
+mkdir -p "$WA_NOANCESTRY_B3"
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":"{\"clientId\":\"str-cid\",\"clientSecret\":\"str-csec\"}"},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_NOANCESTRY_B3" "CANON RULE 1: a bare STRING value at the primary tier — even one whose own text parses as a full credential object — falls through, never wins on string content" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+WA_NOANCESTRY_B3B="${L2_DIR}/no-ancestry-b3b"
+mkdir -p "$WA_NOANCESTRY_B3B"
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"\n","clientSecret":"\n"}},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_NOANCESTRY_B3B" "CANON RULE 2: newline-only clientId/clientSecret at the primary tier falls through, never wins on raw non-zero length" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' \
+  CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# CANON RULE 2, CR-ONLY variant (round-3 verify advisory A-CR-COVERAGE): a bash $()
+# capture strips only trailing \n, NOT \r — the exact asymmetry the jq sub("[\r\n]+$")
+# approach exists to close. Without this cell, reverting the bash field check to a
+# $()-capture form survives the whole suite while diverging cross-engine on "\r".
+WA_NOANCESTRY_B3C="${L2_DIR}/no-ancestry-b3c"
+mkdir -p "$WA_NOANCESTRY_B3C"
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"\r","clientSecret":"\r"}},"agent":{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}}}}' > "$L2_FILE"
+_cell_in_dir "$WA_NOANCESTRY_B3C" "CANON RULE 2 (CR-only): carriage-return-only fields fall through identically — pins the jq-side EOL strip against a \$()-capture regression" \
+  '{"clientId":"GLOBALLEGACY","clientSecret":"GLOBALLEGACYSEC"}|legacy-config-json|config-json' \
   CSC_PROBE_ID=linear-worker-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
 
 # Hostile probe: a JSON string value carrying an embedded NUL escape. jq's own parser
