@@ -4955,9 +4955,10 @@ export function schedulerTick(
           mode: rcMode,
           collectCandidates: _collectResolveConflictCandidates ?? (() => defaultCollectResolveConflictCandidates({ orchDir })),
           collectCompletions: _collectResolveConflictCompletions ?? (() => defaultCollectResolveConflictCompletions({ orchDir })),
-          // #1461 escalation-gap fix: a FAILED (status:"failed") resolve-conflict
-          // run — census + the revert-and-reset action seam (escalateCapExhausted
-          // is REUSED below for the at/over-cap outcome, same as the candidates
+          // #1461 escalation-gap fix: a resolve-conflict run that lands in ANY
+          // failure shape (failed, stalled, or turn-cap-exhausted — see
+          // RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES) — census + the revert-and-reset action seam
+          // (escalateCapExhausted is REUSED below for the at/over-cap outcome, same as the candidates
           // sub-pass's own cap-exhausted branch).
           collectFailures: _collectResolveConflictFailures ?? (() => defaultCollectResolveConflictFailures({ orchDir })),
           revertStallAndResetCycle:
