@@ -1348,7 +1348,12 @@ setup_project_config() {
 	local deployment_mode="single-host"
 	if [[ -f "$config_file" ]]; then
 		local _existing_mode
-		_existing_mode=$(jq -r '.catalyst.deployment.mode // empty' "$config_file" 2>/dev/null)
+		# Preserve the value whenever the key is PRESENT — including an explicit
+		# `false`/null/garbage — rather than `// empty` (which jq treats `false` as
+		# absent, silently resetting a misconfig to single-host and masking the
+		# resolver's recognized:false / `catalyst doctor` failure). Deferred
+		# validation (resolver + doctor) is what surfaces a bad value later.
+		_existing_mode=$(jq -r 'if (.catalyst.deployment | objects | has("mode")) then (.catalyst.deployment.mode | tostring) else empty end' "$config_file" 2>/dev/null)
 		[[ -n "$_existing_mode" ]] && deployment_mode="$_existing_mode"
 	fi
 
@@ -1362,6 +1367,14 @@ setup_project_config() {
 	echo "  per-host via ~/.config/catalyst/config.json (Layer-2)."
 	echo ""
 	deployment_mode=$(prompt_value "Enter deployment mode (single-host|cluster|cloud) [${deployment_mode}]:" "${deployment_mode}")
+
+	# JSON-encode the (deliberately-unvalidated) deployment value before it lands
+	# in the heredoc below, so a pasted quote/backslash/newline can't produce a
+	# malformed .catalyst/config.json that the next jq consumer aborts on — after
+	# the file has already been overwritten. jq -Rn emits the value WITH its
+	# surrounding quotes, so the heredoc interpolates it bare (no wrapping "").
+	local deployment_mode_json
+	deployment_mode_json=$(jq -Rn --arg v "$deployment_mode" '$v')
 
 	# Create/update config
 	cat >"$config_file" <<EOF
@@ -1377,7 +1390,7 @@ setup_project_config() {
       "name": "${project_name}"
     },
     "deployment": {
-      "mode": "${deployment_mode}"
+      "mode": ${deployment_mode_json}
     },
     "linear": {
       "teamKey": "${ticket_prefix}",

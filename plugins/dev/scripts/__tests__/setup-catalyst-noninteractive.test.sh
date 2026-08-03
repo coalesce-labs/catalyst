@@ -325,6 +325,54 @@ else
   pass "setup_project_config interactive + resolver (SKIP — node not available)"
 fi
 
+# T34 (Codex P2): a present-but-`false` deployment.mode is PRESERVED as an explicit
+# error on re-write, not silently reset to single-host. Pre-write a config whose
+# projectKey differs (forces the update/re-write path) with deployment.mode:false;
+# assert the regenerated config still carries the error value so the resolver keeps
+# reporting recognized:false instead of masking it.
+spc_scratch=$(mktemp -d)
+mkdir -p "$spc_scratch/proj/.catalyst"
+printf '{"catalyst":{"projectKey":"old-org","deployment":{"mode":false}}}\n' \
+  > "$spc_scratch/proj/.catalyst/config.json"
+spc_t34=$(env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=1
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=new-org
+  PROJECT_DIR='$spc_scratch/proj'
+  setup_project_config >/dev/null 2>&1
+  jq -r '.catalyst.deployment.mode' \"\$PROJECT_DIR/.catalyst/config.json\"
+" 2>/dev/null)
+rm -rf "$spc_scratch"
+[[ "$spc_t34" == "false" ]] \
+  && pass "setup_project_config preserves an explicit invalid deployment.mode (false) on re-write" \
+  || fail "setup_project_config preserves an explicit invalid deployment.mode (false) on re-write" "$spc_t34"
+
+# T35 (Codex P2): an interactively-typed deployment value containing a double quote
+# is JSON-encoded, so the written .catalyst/config.json stays valid JSON and the
+# value round-trips verbatim (rather than corrupting the file the next jq consumer
+# reads). Pipe ticket_prefix→default, project_name→default, deployment_mode→clu"ster.
+spc_scratch=$(mktemp -d)
+printf '\n\nclu"ster\n' | env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=0
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=acme-org
+  PROJECT_DIR='$spc_scratch/proj'
+  mkdir -p \"\$PROJECT_DIR\"
+  setup_project_config >/dev/null 2>&1
+" 2>/dev/null
+spc_cfg="$spc_scratch/proj/.catalyst/config.json"
+if jq empty "$spc_cfg" >/dev/null 2>&1 \
+   && [[ "$(jq -r '.catalyst.deployment.mode' "$spc_cfg" 2>/dev/null)" == 'clu"ster' ]]; then
+  pass "setup_project_config JSON-encodes a deployment value containing a quote"
+else
+  fail "setup_project_config JSON-encodes a deployment value containing a quote" "$(cat "$spc_cfg" 2>/dev/null)"
+fi
+rm -rf "$spc_scratch"
+
 echo ""
 echo "=== Phase 4: Documentation shape ==="
 
