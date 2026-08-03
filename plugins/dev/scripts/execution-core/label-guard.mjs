@@ -19,6 +19,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
+import { DISPOSITIONS } from "./worker-disposition.mjs";
 
 // ─── labelOnce — moved from scheduler.mjs (CTL-585, then CTL-638 re-home) ───
 //
@@ -146,16 +147,37 @@ export function labelOnce(
 // After REMOVAL_ESCALATION_THRESHOLD consecutive failures, activates a back-off
 // window (inRemovalBackoff) that short-circuits before calling removeLabel — the
 // storm-break. Escalates once with a log.error on the threshold trip.
+//
+// CTL-1605: accepts optional `onSettled(confirmed)` — fired EXACTLY ONCE per call
+// with the CONFIRMED removal outcome, on every exit path (backoff-skip, sync
+// success/failure, async resolve, async reject, sync throw). Unlike `onRemoved`
+// (which only fires on a confirmed removal, for marker/transition bookkeeping),
+// `onSettled` always fires so a caller can aggregate "did this removal land"
+// across several labels without inferring absence-of-call as failure — see
+// resolveAndApplyWorkerStatusLabel's eviction gate below. Never throws.
 export function clearStalledLabel(
   orchDir,
   ticket,
   label,
   writeStatus,
-  { onRemoved = null, now = () => Date.now() } = {}
+  { onRemoved = null, onSettled = null, now = () => Date.now() } = {}
 ) {
   const base = labelMarkerBase(orchDir, ticket, label);
+  const settle = (confirmed) => {
+    if (typeof onSettled === "function") {
+      try {
+        onSettled(confirmed);
+      } catch (err) {
+        log.warn(
+          { ticket, label, err: err?.message },
+          "clearStalledLabel: onSettled threw — continuing"
+        );
+      }
+    }
+  };
   // CTL-1078: guard at entry — if we're in backoff, skip the doomed removeLabel.
   if (inRemovalBackoff(orchDir, ticket, label, now())) {
+    settle(false); // backoff-skip is NOT a confirmed removal
     return;
   }
   try {
@@ -188,6 +210,7 @@ export function clearStalledLabel(
             );
           }
         }
+        settle(true);
       } else if (r?.removed === false) {
         // CTL-1078: record failure and escalate once at threshold.
         const { count } = recordRemovalFailure(orchDir, ticket, label, r.reason, now());
@@ -197,22 +220,27 @@ export function clearStalledLabel(
             "clearStalledLabel: removal failed threshold times — entering back-off (CTL-1078)"
           );
         }
+        settle(false);
+      } else {
+        settle(false);
       }
     };
     if (res && typeof res.then === "function") {
       res
         .then(finalize)
-        .catch((err) =>
+        .catch((err) => {
           log.warn(
             { ticket, label, err: err?.message },
             "clearStalledLabel: removeLabel rejected — continuing"
-          )
-        );
+          );
+          settle(false);
+        });
     } else {
       finalize(res);
     }
   } catch (err) {
     log.warn({ ticket, label, err: err.message }, "clearStalledLabel: threw — continuing tick");
+    settle(false);
   }
 }
 
@@ -409,6 +437,183 @@ export function labelNeedsHumanUnlessBeliefOwner(
     },
   });
   return applied;
+}
+
+// ─── CTL-1605: the worker-status label group (Axis 2) — single source of truth. ───
+// Membership DERIVES from worker-disposition.mjs's canonical DISPOSITIONS (its
+// header contract: "Import constants and functions from this module; never
+// instantiate them elsewhere"), plus the legacy "waiting" so a terminal ticket
+// still wearing it is drained too. worker-disposition.mjs is a pure leaf, so
+// this import creates no cycle.
+export const WORKER_STATUS_LABELS = Object.freeze([...DISPOSITIONS, "waiting"]);
+
+// resolveAndApplyWorkerStatusLabel — the ONE terminal-aware chokepoint every
+// worker-status apply site routes through (CTL-1605). It reads live Linear Status
+// via the injected `isTerminal` probe (isTicketTerminalOrMerged in production —
+// fail-safe NOT-terminal, never throws). If the ticket is terminal it removes every
+// worker-status label present on the ticket and calls the injected `evictWorkerDir`
+// seam (guarded, live-session-safe — Phase 3), then returns { terminal:true } WITHOUT
+// applying `desired`. Otherwise it invokes the caller's existing `applyDesired`
+// closure (labelOnce / convergeHeldLabel / clearStalledLabel) unchanged and returns
+// { terminal:false }. All effects are seams → pure/leaf, fully unit-testable.
+//
+// `needs-human` is cleared through clearStalledLabel (re-arms markers + CTL-1078
+// backoff); the held labels through writeStatus.removeLabel. `onTerminalCleared(arg)`
+// fires EXACTLY ONCE per call — after every present label's removal has settled,
+// the same aggregation point that gates eviction (CTL-1605 Codex thread,
+// scheduler.mjs:5518) — not once per label. A per-label firing let a single
+// confirmed removal on a multi-label ticket (e.g. "blocked") report a clear even
+// when a sibling label (e.g. the sticky "needs-human") was backoff-skipped or
+// failed to confirm, falsely telling the caller the ticket's disposition was
+// clear while a worker-status label was still live on Linear. `arg` is `null`
+// when every present label confirmed removed, or the highest-precedence
+// surviving label (DISPOSITIONS order; legacy "waiting" ranks last, since it
+// carries no precedence of its own) otherwise.
+export function resolveAndApplyWorkerStatusLabel(
+  orchDir,
+  ticket,
+  {
+    desired = null,
+    currentLabels = [],
+    isTerminal,
+    writeStatus,
+    evictWorkerDir = null,
+    applyDesired = null,
+    onTerminalCleared = null,
+    now = () => Date.now(),
+  } = {}
+) {
+  // `desired` is a caller intent marker (which label WOULD be applied on the
+  // non-terminal path); the apply itself is owned by the caller's applyDesired
+  // closure, so we only read it for clarity — it is intentionally not used here.
+  void desired;
+  let verdict = { terminal: false };
+  try {
+    if (typeof isTerminal === "function") verdict = isTerminal(ticket) ?? { terminal: false };
+  } catch (err) {
+    // Fail-safe NOT-terminal — a throw must never manufacture a terminal verdict
+    // (mirrors isTicketTerminalOrMerged). Caller proceeds with its normal apply.
+    log.warn(
+      { ticket, err: err?.message },
+      "resolveAndApplyWorkerStatusLabel: isTerminal threw — treating NOT-terminal"
+    );
+    verdict = { terminal: false };
+  }
+
+  if (!verdict?.terminal) {
+    if (typeof applyDesired === "function") applyDesired();
+    return { terminal: false };
+  }
+
+  // Terminal: refuse the write. Clear every worker-status label present, then evict
+  // — but ONLY once every present label's removal is CONFIRMED (CTL-1605 finding:
+  // evicting on the mere ISSUING of async removals destroys the only retry record,
+  // since STEP A / J3 / J4 all key their candidate sets off workers/<T>/ existing on
+  // disk). Each present label contributes a {settled, confirmed} outcome, tracked
+  // synchronously when the underlying write resolves synchronously (the common sync
+  // test-stub / already-settled-promise-free case) and asynchronously otherwise.
+  const present = new Set(currentLabels ?? []);
+  const outcomes = []; // [{ label, settled: boolean, confirmed: boolean, promise: Promise<boolean> }]
+  const evictOnce = () => {
+    if (typeof evictWorkerDir !== "function") return false;
+    try {
+      return evictWorkerDir(ticket) === true;
+    } catch (err) {
+      log.warn(
+        { ticket, err: err?.message },
+        "resolveAndApplyWorkerStatusLabel: evict threw — continuing"
+      );
+      return false;
+    }
+  };
+  // rankOf / fireTerminalCleared — the single aggregation point for
+  // onTerminalCleared (see the header comment above). Only called once every
+  // present label's outcome has settled, and only when at least one label was
+  // present (mirrors the old per-label loop's zero-iteration no-op on a clean
+  // terminal ticket — nothing to report, nothing fires).
+  const rankOf = (label) => {
+    const idx = DISPOSITIONS.indexOf(label);
+    return idx === -1 ? DISPOSITIONS.length : idx; // legacy "waiting" ranks last
+  };
+  const fireTerminalCleared = () => {
+    if (outcomes.length === 0) return;
+    if (typeof onTerminalCleared !== "function") return;
+    const survivors = outcomes.filter((o) => !o.confirmed).map((o) => o.label);
+    const arg =
+      survivors.length === 0
+        ? null
+        : survivors.reduce((best, label) => (rankOf(label) < rankOf(best) ? label : best));
+    onTerminalCleared(arg);
+  };
+  for (const label of WORKER_STATUS_LABELS) {
+    if (!present.has(label)) continue; // steady-state zero-write on a clean terminal ticket
+    const outcome = { label, settled: false, confirmed: false, promise: null };
+    outcomes.push(outcome);
+    let resolveOutcome;
+    outcome.promise = new Promise((resolve) => {
+      resolveOutcome = resolve;
+    });
+    const settle = (confirmed) => {
+      outcome.settled = true;
+      outcome.confirmed = confirmed;
+      resolveOutcome(confirmed);
+    };
+    if (label === "needs-human") {
+      clearStalledLabel(orchDir, ticket, label, writeStatus, { onSettled: settle, now });
+    } else {
+      try {
+        const res = writeStatus?.removeLabel?.(ticket, label);
+        // undefined (sync test stub) → success; else require removed !== false.
+        const finalize = (r) => {
+          const confirmed = r == null || r?.removed !== false;
+          settle(confirmed);
+        };
+        if (res && typeof res.then === "function") {
+          res
+            .then(finalize)
+            .catch((err) => {
+              log.warn(
+                { ticket, label, err: err?.message },
+                "resolveAndApplyWorkerStatusLabel: removeLabel rejected — continuing"
+              );
+              settle(false);
+            });
+        } else {
+          finalize(res);
+        }
+      } catch (err) {
+        log.warn(
+          { ticket, label, err: err?.message },
+          "resolveAndApplyWorkerStatusLabel: removeLabel threw — continuing"
+        );
+        settle(false);
+      }
+    }
+  }
+
+  // Every outcome settled synchronously (the sync test-stub / no-present-labels
+  // case) → evict (or not) and fire the aggregate callback in THIS tick,
+  // preserving the prior synchronous contract. Any outcome still pending (a
+  // real async removeLabel) → defer BOTH to the aggregated resolution; the
+  // worker dir stays put — and thus retryable by STEP A / J3 / J4 — until every
+  // present label has settled.
+  const allSettled = outcomes.every((o) => o.settled);
+  let evicted = false;
+  if (allSettled) {
+    if (outcomes.every((o) => o.confirmed)) evicted = evictOnce();
+    fireTerminalCleared();
+  } else {
+    Promise.all(outcomes.map((o) => o.promise)).then((results) => {
+      if (results.every(Boolean)) evictOnce();
+      fireTerminalCleared();
+    });
+  }
+  return {
+    terminal: true,
+    reason: verdict.reason ?? "linear-terminal",
+    state: verdict.state ?? null,
+    evicted,
+  };
 }
 
 export function recordEscalation(orchDir, ticket, phase, reason, now) {
