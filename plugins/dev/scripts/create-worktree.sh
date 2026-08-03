@@ -422,8 +422,14 @@ else
 		fi
 	elif [ -f "package.json" ]; then
 		if command -v bun >/dev/null 2>&1; then
-			echo "  Running: bun install"
-			bun install
+			# CTL-1628: root package.json (the bun workspace, Phase A1) arms this
+			# branch on every worktree creation. Use --frozen-lockfile so the
+			# fresh worktree installs exactly what's committed in bun.lock
+			# rather than silently re-resolving and rewriting the lockfile
+			# before the worker's first commit (which could otherwise ride
+			# unrelated lockfile drift into the ticket's diff).
+			echo "  Running: bun install --frozen-lockfile"
+			bun install --frozen-lockfile
 		else
 			echo "  Running: npm install"
 			npm install

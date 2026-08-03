@@ -362,7 +362,7 @@ describe("CTL-1616 PR3: secret-contract fold — LINEAR_API_KEY-only fixture", (
       process.env.LINEAR_API_KEY = "lin_api_fromkey";
       const result = await fillEstimateFallback(["CTL-774"]);
       expect(result["CTL-774"]).toBe(8);
-      expect(seenAuth).toBe("lin_api_fromkey");
+      expect(seenAuth as string | null).toBe("lin_api_fromkey");
     } finally {
       globalThis.fetch = originalFetch;
       if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;

@@ -197,14 +197,31 @@ bootstrap() {
   fi
 
   if [[ -d "$MONITOR_DIR" ]]; then
-    if [[ ! -d "$MONITOR_DIR/node_modules" ]] || [[ "$MONITOR_DIR/bun.lock" -nt "$MONITOR_DIR/node_modules" ]]; then
+    # CTL-1628: since the 8 per-package bun.lock files were consolidated into a
+    # single root workspace lockfile, $MONITOR_DIR/bun.lock (and ui/bun.lock) no
+    # longer exist, so the plain "-nt" checks below are permanently false (a
+    # nonexistent left operand never compares newer). Resolve the actual
+    # workspace-root lockfile via `git rev-parse --show-toplevel` at runtime and
+    # OR its mtime into the gate so a root dep bump still triggers reinstall. The
+    # original per-dir checks are left in place (harmless no-ops once the lock
+    # files are gone) so this stays a superset — it also still fires correctly
+    # in a non-git sandbox that supplies its own per-dir bun.lock (CTL-1223 tests).
+    local monitor_root_lockfile
+    monitor_root_lockfile="$(git -C "$MONITOR_DIR" rev-parse --show-toplevel 2>/dev/null)"
+    [[ -n "$monitor_root_lockfile" ]] && monitor_root_lockfile="$monitor_root_lockfile/bun.lock"
+    if [[ ! -d "$MONITOR_DIR/node_modules" ]] || [[ "$MONITOR_DIR/bun.lock" -nt "$MONITOR_DIR/node_modules" ]] || { [[ -n "$monitor_root_lockfile" ]] && [[ "$monitor_root_lockfile" -nt "$MONITOR_DIR/node_modules" ]]; }; then
       echo "Installing orch-monitor dependencies..."
       (cd "$MONITOR_DIR" && bun install --frozen-lockfile 2>/dev/null || bun install)
     fi
 
-    if [[ -d "$MONITOR_DIR/ui" ]] && { [[ ! -d "$MONITOR_DIR/ui/node_modules" ]] || [[ "$MONITOR_DIR/ui/bun.lock" -nt "$MONITOR_DIR/ui/node_modules" ]]; }; then
-      echo "Installing orch-monitor UI dependencies..."
-      (cd "$MONITOR_DIR/ui" && bun install --frozen-lockfile 2>/dev/null || bun install)
+    if [[ -d "$MONITOR_DIR/ui" ]]; then
+      local ui_root_lockfile
+      ui_root_lockfile="$(git -C "$MONITOR_DIR/ui" rev-parse --show-toplevel 2>/dev/null)"
+      [[ -n "$ui_root_lockfile" ]] && ui_root_lockfile="$ui_root_lockfile/bun.lock"
+      if [[ ! -d "$MONITOR_DIR/ui/node_modules" ]] || [[ "$MONITOR_DIR/ui/bun.lock" -nt "$MONITOR_DIR/ui/node_modules" ]] || { [[ -n "$ui_root_lockfile" ]] && [[ "$ui_root_lockfile" -nt "$MONITOR_DIR/ui/node_modules" ]]; }; then
+        echo "Installing orch-monitor UI dependencies..."
+        (cd "$MONITOR_DIR/ui" && bun install --frozen-lockfile 2>/dev/null || bun install)
+      fi
     fi
 
     if [[ -d "$MONITOR_DIR/ui" ]]; then

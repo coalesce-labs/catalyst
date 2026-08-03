@@ -30,8 +30,11 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install desktop deps
-        working-directory: plugins/dev/scripts/orch-monitor/desktop
-        run: bun install
+        # CTL-1628: a single root bun workspace/lockfile now covers
+        # orch-monitor/desktop as a workspace member — install once at the
+        # repo root (the job has no working-directory default, so this step
+        # already runs there) instead of a per-package install.
+        run: bun install --frozen-lockfile
 
       - uses: tauri-apps/tauri-action@v0
         env:

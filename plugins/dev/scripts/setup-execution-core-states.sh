@@ -156,8 +156,13 @@ ensure_execution_core_deps() {
 		return 1
 	fi
 	echo "Installing execution-core dependencies in ${exec_dir} (CTL-578)..." >&2
-	if ! (cd "$exec_dir" && bun install --frozen-lockfile >&2); then
-		echo "ERROR: bun install --frozen-lockfile failed in ${exec_dir}" >&2
+	# CTL-1628: execution-core is now a member of the root bun workspace — a
+	# frozen-lockfile install here resolves the single root bun.lock (bun walks
+	# up from $exec_dir to find it). Fall back to a plain install, mirroring
+	# catalyst-monitor.sh's pattern, for the rare case a checkout has no root
+	# lockfile to freeze against (e.g. a bare marketplace-cache copy).
+	if ! (cd "$exec_dir" && { bun install --frozen-lockfile >&2 2>/dev/null || bun install >&2; }); then
+		echo "ERROR: bun install failed in ${exec_dir}" >&2
 		return 1
 	fi
 	return 0
