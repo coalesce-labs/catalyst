@@ -20,7 +20,6 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jobLifecycle } from "./recovery.mjs";
-import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
