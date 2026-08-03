@@ -115,7 +115,11 @@ if [[ -z "$PLUGIN_ROOT" ]]; then
   if [[ -n "$RUNTIME_ROOT_LIB" ]]; then
     # shellcheck disable=SC1090
     . "$RUNTIME_ROOT_LIB"
-    DEV_SCRIPTS="$(catalyst_dev_scripts 2>/dev/null || true)"
+    # catalyst_dev_scripts exports CATALYST_DEV_SCRIPTS as a side effect
+    # (it does not print the path) — same contract require-catalyst-dev.sh
+    # has always had, so read the exported var, not a command substitution.
+    catalyst_dev_scripts >/dev/null 2>&1 || true
+    DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
   fi
   if [[ -z "$DEV_SCRIPTS" ]]; then
     echo "phase-${PHASE}: FATAL — CLAUDE_PLUGIN_ROOT unset and catalyst_dev_scripts probe missed too; refusing to silently skip the CTL-615 yield gate with a guessed PLUGIN_ROOT" >&2
