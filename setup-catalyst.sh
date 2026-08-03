@@ -124,11 +124,15 @@ prompt_value() {
 	local reply=""
 	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
 		echo "$prompt [${default}] → ${default} (non-interactive)" >&2
-		echo "$default"
+		# printf, not echo: a value of exactly -n/-e/-E is an echo option and would
+		# emit nothing, silently blanking that field (e.g. an explicit invalid
+		# deployment mode would round-trip to "" and read as unset instead of the
+		# recognized:false error). printf '%s' treats the value as data, never a flag.
+		printf '%s\n' "$default"
 		return 0
 	fi
 	read -p "$prompt " -r reply || reply=""
-	echo "${reply:-$default}"
+	printf '%s\n' "${reply:-$default}"
 }
 
 # Merge a patch object into .catalyst.<section> of a config JSON string (CTL-843).

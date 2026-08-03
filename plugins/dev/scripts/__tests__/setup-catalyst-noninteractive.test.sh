@@ -398,6 +398,30 @@ rm -rf "$spc_scratch"
   && pass "setup_project_config treats a null deployment.mode as unset (not the string \"null\")" \
   || fail "setup_project_config treats a null deployment.mode as unset (not the string \"null\")" "$spc_t36"
 
+# T37 (Codex P2): prompt_value emits values via printf, not echo, so an explicit
+# invalid deployment.mode of exactly "-n" (an echo option) is NOT silently blanked
+# to "" (which the resolver would read as unset/inferred, masking the error). Pre-write
+# "-n" with a mismatched projectKey (forces re-write); assert it survives verbatim so
+# the resolver still reports recognized:false.
+spc_scratch=$(mktemp -d)
+mkdir -p "$spc_scratch/proj/.catalyst"
+printf '{"catalyst":{"projectKey":"old-org","deployment":{"mode":"-n"}}}\n' \
+  > "$spc_scratch/proj/.catalyst/config.json"
+spc_t37=$(env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=1
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=new-org
+  PROJECT_DIR='$spc_scratch/proj'
+  setup_project_config >/dev/null 2>&1
+  jq -r '.catalyst.deployment.mode' \"\$PROJECT_DIR/.catalyst/config.json\"
+" 2>/dev/null)
+rm -rf "$spc_scratch"
+[[ "$spc_t37" == "-n" ]] \
+  && pass "setup_project_config preserves an option-like deployment.mode (-n), not blanked by echo" \
+  || fail "setup_project_config preserves an option-like deployment.mode (-n), not blanked by echo" "$spc_t37"
+
 echo ""
 echo "=== Phase 4: Documentation shape ==="
 
