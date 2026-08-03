@@ -719,17 +719,24 @@ run "T2.9 single-host roster + inferred mode FALLS BACK to heuristic and skips �
 # behavior change: a declared mode overrides roster length in BOTH directions, and a
 # declared non-cluster mode other than single-host (cloud) skips too.
 
-# T2.8b: mode=cluster declared WIRES regardless of roster. SINGLEHOST_WH_BUNDLE
-# (roster=1 — the heuristic alone would SKIP here, per T2.9) paired with a
-# plugin-source checkout config declaring catalyst.deployment.mode=cluster (the
-# CTL-1617 PR4 declaration this repo's Layer-1 actually carries) → mode=cluster,
-# source=layer1, inferred=false → rule=mode-declared, decision=wire. Proves the
-# mode-declared rule overrides the heuristic, not just agrees with it.
-run "T2.8b mode=cluster declared WIRES despite roster=1 (CTL-1617 PR5 flip)" bash -c "
+# T2.8b (FLIPPED again by the post-merge Codex follow-up, FIX 1 — P1 Stage-0
+# double-dispatch guard): mode=cluster declared no longer wires unconditionally.
+# Runtime dispatch fencing is itself roster-derived (execution-core/monitor.mjs:
+# multiHost = roster.length > 1 gates the claimDispatch soft-CAS), so wiring
+# webhooks on a roster<=1 node — a Stage-0 shadow node joined but not yet on the
+# roster — creates an unfenced double-dispatch hazard even though the FLEET
+# declares "cluster". SINGLEHOST_WH_BUNDLE (roster=1) paired with a plugin-source
+# checkout config declaring catalyst.deployment.mode=cluster (the CTL-1617 PR4
+# declaration this repo's Layer-1 actually carries, at the $HOME-side default
+# path setup-plugin-source.sh provisions — FIX 2 path parity) now settles on
+# rule=mode-declared / decision=skip, with an explicit stage0-roster-guard note
+# explaining why (mode=cluster alone is not sufficient — this is the hazard the
+# guard exists to prevent, not an "it's not cluster" skip).
+run "T2.8b mode=cluster declared but roster<=1 SKIPS with roster-guard note (Stage-0 double-dispatch guard)" bash -c "
   h='${SCRATCH}/h28b'
   catdir='${SCRATCH}/c28b'
-  mkdir -p \"\$catdir/plugin-source/.catalyst\"
-  printf '{\"catalyst\":{\"deployment\":{\"mode\":\"cluster\"}}}' > \"\$catdir/plugin-source/.catalyst/config.json\"
+  mkdir -p \"\$h/catalyst/plugin-source/.catalyst\"
+  printf '{\"catalyst\":{\"deployment\":{\"mode\":\"cluster\"}}}' > \"\$h/catalyst/plugin-source/.catalyst/config.json\"
   out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
     CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
@@ -741,12 +748,76 @@ run "T2.8b mode=cluster declared WIRES despite roster=1 (CTL-1617 PR5 flip)" bas
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$SINGLEHOST_WH_BUNDLE' 2>&1)
-  echo \"\$out\" | grep -qF 'decision=wire' && \
+  echo \"\$out\" | grep -qF 'decision=skip' && \
   echo \"\$out\" | grep -qF 'rule=mode-declared' && \
   echo \"\$out\" | grep -qF 'mode=cluster' && \
   echo \"\$out\" | grep -qF 'source=layer1' && \
   echo \"\$out\" | grep -qF 'inferred=false' && \
   echo \"\$out\" | grep -qF 'heuristic_would=skip' && \
+  echo \"\$out\" | grep -qF 'note=stage0-roster-guard' && \
+  ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$h/.config/catalyst/config.json\" >/dev/null"
+
+# T2.8b-agree: the companion case — mode=cluster declared AND roster>1 AND
+# monitorWebhooks present STILL wires (the case T2.8b used to cover only
+# implicitly, before the roster-guard flip made roster length load-bearing
+# again for the mode-declared rule too). MULTIHOST_WH_BUNDLE (roster=2) paired
+# with the same plugin-source Layer-1 mode=cluster declaration (seeded at the
+# $HOME-side default path — FIX 2).
+run "T2.8b-agree mode=cluster declared AND roster>1 STILL wires (agreement case)" bash -c "
+  h='${SCRATCH}/h28ba'
+  catdir='${SCRATCH}/c28ba'
+  mkdir -p \"\$h/catalyst/plugin-source/.catalyst\"
+  printf '{\"catalyst\":{\"deployment\":{\"mode\":\"cluster\"}}}' > \"\$h/catalyst/plugin-source/.catalyst/config.json\"
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
+  echo \"\$out\" | grep -qF 'decision=wire' && \
+  echo \"\$out\" | grep -qF 'rule=mode-declared' && \
+  echo \"\$out\" | grep -qF 'mode=cluster' && \
+  echo \"\$out\" | grep -qF 'source=layer1' && \
+  echo \"\$out\" | grep -qF 'inferred=false' && \
+  echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
+  ! echo \"\$out\" | grep -qF 'note=stage0-roster-guard' && \
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
+
+# T2.8c: (FIX 2 — P2 provisioner path parity) CATALYST_PLUGIN_SOURCE, when set,
+# overrides the $HOME-side default — mirroring setup-plugin-source.sh's own
+# DEFAULT_PATH expression exactly. Seed the Layer-1 mode=cluster declaration at
+# a CUSTOM path (neither the $HOME default nor \$CATALYST_DIR/plugin-source) and
+# point CATALYST_PLUGIN_SOURCE at it; if the gate ignored the override (the
+# pre-fix \${CATALYST_DIR}/plugin-source guess, or a bare \$HOME default) it
+# would find no config there, settle on inferred/heuristic, and this would
+# report rule=heuristic-fallback instead.
+run "T2.8c CATALYST_PLUGIN_SOURCE override is honored by the gate (FIX 2)" bash -c "
+  h='${SCRATCH}/h28c'
+  catdir='${SCRATCH}/c28c'
+  custom='${SCRATCH}/custom-plugin-source-28c'
+  mkdir -p \"\$custom/.catalyst\"
+  printf '{\"catalyst\":{\"deployment\":{\"mode\":\"cluster\"}}}' > \"\$custom/.catalyst/config.json\"
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" CATALYST_PLUGIN_SOURCE=\"\$custom\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
+  echo \"\$out\" | grep -qF 'decision=wire' && \
+  echo \"\$out\" | grep -qF 'rule=mode-declared' && \
+  echo \"\$out\" | grep -qF 'mode=cluster' && \
+  echo \"\$out\" | grep -qF 'source=layer1' && \
+  echo \"\$out\" | grep -qF 'inferred=false' && \
   jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
 
 # T2.9b: mode=single-host declared SKIPS despite roster>1 — the new behavior the
@@ -805,15 +876,17 @@ run "T2.9c mode=cloud declared SKIPS despite roster>1 (CTL-1617 PR5 flip)" bash 
   echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
   ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$h/.config/catalyst/config.json\" >/dev/null"
 
-# T2.9d: a declared-but-UNRECOGNIZED mode (typo) also lands on the mode-declared
-# rule and SKIPS despite roster>1. The resolver degrades an unrecognized string
-# to single-host with recognized=false but inferred=false — it is still an
-# explicit answer, NOT the absent-key case, so the heuristic fallback must NOT
-# fire. A cluster fleet with a Layer-1 typo therefore loses webhook wiring at
-# join (safe-degradation direction, design §4) until doctor's recognized=false
-# FAIL flags the typo — this test pins that the degradation routes through
-# mode-declared/skip rather than silently falling back to the heuristic.
-run "T2.9d unrecognized mode (typo) degrades to mode-declared SKIP despite roster>1 (CTL-1617 PR5 flip)" bash -c "
+# T2.9d: (REWRITTEN by the post-merge Codex follow-up, FIX 3 — P2 resume
+# idempotency) a declared-but-UNRECOGNIZED mode (typo) no longer silently
+# degrades to mode-declared/skip and lets the config-merge STAGE report
+# success — that would let run_stage mark "config-merge" completed, and a
+# resume after the operator fixes the typo would skip the stage forever and
+# never re-evaluate the wire/skip decision. It now FAILS the config-merge
+# stage outright: join exits non-zero, an actionable error names the garbage
+# value + its source + the valid enum + the resume hint, the progress marker
+# records config-merge as .failedStage, and — because the fail happens before
+# the decision is even computed — no webhook block is written.
+run "T2.9d unrecognized mode (typo) FAILS the config-merge stage (CTL-1617 PR5 follow-up FIX 3)" bash -c "
   h='${SCRATCH}/h29d'
   catdir='${SCRATCH}/c29d'
   out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
@@ -827,14 +900,46 @@ run "T2.9d unrecognized mode (typo) degrades to mode-declared SKIP despite roste
     CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
-    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
-  echo \"\$out\" | grep -qF 'decision=skip' && \
-  echo \"\$out\" | grep -qF 'rule=mode-declared' && \
-  echo \"\$out\" | grep -qF 'mode=single-host' && \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1); ec=\$?
+  marker=\"\$catdir/cluster/join-progress.json\"
+  [[ \$ec -ne 0 ]] && \
+  echo \"\$out\" | grep -qF 'UNRECOGNIZED' && \
+  echo \"\$out\" | grep -qF 'value=\"clutser\"' && \
   echo \"\$out\" | grep -qF 'source=env' && \
-  echo \"\$out\" | grep -qF 'inferred=false' && \
-  echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
-  ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$h/.config/catalyst/config.json\" >/dev/null"
+  echo \"\$out\" | grep -qF 'single-host|cluster|cloud' && \
+  echo \"\$out\" | grep -qF 'resumes from the config-merge stage' && \
+  jq -e '.failedStage == \"config-merge\"' \"\$marker\" >/dev/null && \
+  ( [[ ! -f \"\$h/.config/catalyst/config.json\" ]] || \
+    ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$h/.config/catalyst/config.json\" >/dev/null )"
+
+# T2.9e: resume after fixing the typo — same host/catalyst dirs as T2.9d, same
+# marker (config-merge recorded as failedStage, no completed config-merge
+# entry), re-run with CATALYST_DEPLOYMENT_MODE corrected to 'cluster' plus
+# MULTIHOST_WH_BUNDLE (roster=2) → run_stage re-executes config-merge from
+# scratch (it was never added to completedStages) and this time the decision
+# actually gets computed: rule=mode-declared, mode=cluster, roster>1 → wires.
+run "T2.9e resume after fixing the typo re-executes config-merge and wires (FIX 3)" bash -c "
+  h='${SCRATCH}/h29d'
+  catdir='${SCRATCH}/c29d'
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_DEPLOYMENT_MODE='cluster' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1); ec=\$?
+  marker=\"\$catdir/cluster/join-progress.json\"
+  [[ \$ec -eq 0 ]] && \
+  echo \"\$out\" | grep -qF 'decision=wire' && \
+  echo \"\$out\" | grep -qF 'mode=cluster' && \
+  jq -e '.completedStages | index(\"config-merge\") != null' \"\$marker\" >/dev/null && \
+  jq -e '.failedStage == null' \"\$marker\" >/dev/null && \
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
 
 # T2.10 / T2.11: (CTL-1293) provision-thoughts that CLONES OK but fails push-auth
 # is FATAL on a multiHost member (roster>1 owns work → must sync thoughts to
