@@ -413,6 +413,38 @@ PSNC=$(jq -r '.phaseSkippedNonCurrent' "$OUT_JSON")
   || fail "phaseSkippedNonCurrent == 1 (predecessor)" "got '$PSNC' summary: $(cat "$OUT_JSON")"
 scratch_teardown
 
+# ─── Test I (#1461 follow-up): phase-resolve-conflict.json is never reachable
+# by the CTL-607 current-phase guard, but the ORIGINAL stalled phase's reused
+# RESOLVED_MARKER_REASON in .failureReason IS read by phase_is_truly_failed as
+# a genuine failure and escalated — not redispatched, not a silent no-op.
+echo "test I (#1461): resolve-conflict marker interaction with orchestrate-revive"
+scratch_setup
+WORKTREE_BASE="${SCRATCH}/worktrees"
+set_repo_root_for_revive
+make_per_phase_signal "T-RC" "implement" "stalled" '.failureReason = "source_conflict_resolvable"'
+make_per_phase_signal "T-RC" "resolve-conflict" "stalled" '.attentionReason = "sdk-backstop"'
+run_revive
+if grep -q "dispatch-called.*--phase resolve-conflict.*T-RC" "$DISPATCH_LOG"; then
+  fail "resolve-conflict phase must NEVER be dispatched by orchestrate-revive" "log: $(cat "$DISPATCH_LOG")"
+else
+  pass "resolve-conflict phase never dispatched (CTL-607 excludes it structurally)"
+fi
+PSNC=$(jq -r '.phaseSkippedNonCurrent' "$OUT_JSON")
+[ "$PSNC" = "1" ] \
+  && pass "phaseSkippedNonCurrent == 1 (resolve-conflict skipped as non-current)" \
+  || fail "phaseSkippedNonCurrent == 1" "got '$PSNC' summary: $(cat "$OUT_JSON")"
+if grep -q "phase-failed-unrecoverable.*T-RC" "$STATE_LOG"; then
+  pass "documented: RESOLVED_MARKER_REASON on the original phase reads as truly-failed and escalates"
+else
+  fail "expected an escalate call for T-RC/implement (RESOLVED_MARKER_REASON read as truly-failed)" "state log: $(cat "$STATE_LOG")"
+fi
+if grep -q "dispatch-called.*--phase implement.*T-RC" "$DISPATCH_LOG"; then
+  fail "implement must NOT be redispatched (it escalates instead, per phase_is_truly_failed)" "log: $(cat "$DISPATCH_LOG")"
+else
+  pass "implement not redispatched — escalated instead"
+fi
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"
