@@ -373,6 +373,31 @@ else
 fi
 rm -rf "$spc_scratch"
 
+# T36 (Codex P2): JSON `null` deployment.mode is the resolver's "unset" sentinel
+# (fallthrough → recognized:true, doctor passes) and must be treated like an ABSENT
+# key on re-write, NOT preserved as the string "null" (an unrecognized value that
+# flips doctor to FAIL). Pre-write null with a mismatched projectKey (forces the
+# re-write path); assert the regenerated mode is the plain default "single-host"
+# (i.e. null fell through to the default, it was not coerced to "null").
+spc_scratch=$(mktemp -d)
+mkdir -p "$spc_scratch/proj/.catalyst"
+printf '{"catalyst":{"projectKey":"old-org","deployment":{"mode":null}}}\n' \
+  > "$spc_scratch/proj/.catalyst/config.json"
+spc_t36=$(env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=1
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=new-org
+  PROJECT_DIR='$spc_scratch/proj'
+  setup_project_config >/dev/null 2>&1
+  jq -r '.catalyst.deployment.mode' \"\$PROJECT_DIR/.catalyst/config.json\"
+" 2>/dev/null)
+rm -rf "$spc_scratch"
+[[ "$spc_t36" == "single-host" ]] \
+  && pass "setup_project_config treats a null deployment.mode as unset (not the string \"null\")" \
+  || fail "setup_project_config treats a null deployment.mode as unset (not the string \"null\")" "$spc_t36"
+
 echo ""
 echo "=== Phase 4: Documentation shape ==="
 

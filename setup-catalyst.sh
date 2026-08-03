@@ -1348,12 +1348,16 @@ setup_project_config() {
 	local deployment_mode="single-host"
 	if [[ -f "$config_file" ]]; then
 		local _existing_mode
-		# Preserve the value whenever the key is PRESENT — including an explicit
-		# `false`/null/garbage — rather than `// empty` (which jq treats `false` as
-		# absent, silently resetting a misconfig to single-host and masking the
-		# resolver's recognized:false / `catalyst doctor` failure). Deferred
-		# validation (resolver + doctor) is what surfaces a bad value later.
-		_existing_mode=$(jq -r 'if (.catalyst.deployment | objects | has("mode")) then (.catalyst.deployment.mode | tostring) else empty end' "$config_file" 2>/dev/null)
+		# Preserve the value whenever the key is PRESENT and NON-NULL — including an
+		# explicit `false`/number/garbage — rather than `// empty` (which jq treats
+		# `false` as absent, silently resetting a misconfig to single-host and masking
+		# the resolver's recognized:false / `catalyst doctor` failure). JSON `null` is
+		# excluded on purpose: the resolver treats null as the "unset" sentinel
+		# (fallthrough → inferred:true, recognized:true, doctor passes), so it must be
+		# handled like an absent key here — `tostring` would coerce it to the string
+		# "null", an unrecognized value that flips doctor to FAIL after regeneration.
+		# Deferred validation (resolver + doctor) is what surfaces a genuinely bad value.
+		_existing_mode=$(jq -r 'if (.catalyst.deployment | objects | has("mode")) and (.catalyst.deployment.mode != null) then (.catalyst.deployment.mode | tostring) else empty end' "$config_file" 2>/dev/null)
 		[[ -n "$_existing_mode" ]] && deployment_mode="$_existing_mode"
 	fi
 
