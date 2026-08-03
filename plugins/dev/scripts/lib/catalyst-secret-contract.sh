@@ -487,7 +487,13 @@ _csc_set_result() {
   CATALYST_SECRET_LAST_SOURCE="$2"
   # shellcheck disable=SC2034
   CATALYST_SECRET_LAST_PROVIDER="$3"
-  export CATALYST_SECRET_LAST_VALUE CATALYST_SECRET_LAST_SOURCE CATALYST_SECRET_LAST_PROVIDER
+  # SECRET HYGIENE (#2924 post-merge Codex P2): the VALUE is deliberately NOT
+  # exported — every reader is same-shell, and an exported value would be
+  # inherited by every child of a long-lived daemon shell (catalyst-broker /
+  # catalyst-execution-core launch their runtimes from the resolving shell),
+  # putting the credential in each child's environment. The non-secret
+  # SOURCE/PROVIDER breadcrumbs stay exported for logging convenience.
+  export CATALYST_SECRET_LAST_SOURCE CATALYST_SECRET_LAST_PROVIDER
   printf '%s|%s|%s' "$1" "$2" "$3"
 }
 

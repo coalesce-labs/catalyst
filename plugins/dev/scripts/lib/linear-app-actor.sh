@@ -37,6 +37,11 @@ linear_app_actor_auth() {
   local _ocid _ocsec _otok _creds
   catalyst_resolve_secret linear-orchestrator-actor >/dev/null
   _creds="$CATALYST_SECRET_LAST_VALUE"
+  # Clear the breadcrumb the moment it's copied (#2924 post-merge Codex P2):
+  # this shell goes on to exec the long-lived daemon runtime, and a lingering
+  # credential variable in the daemon shell serves nobody. (The lib no longer
+  # exports the VALUE at all; this unset is belt-and-braces for THIS shell.)
+  unset CATALYST_SECRET_LAST_VALUE
   if [[ -n "$_creds" ]]; then
     _ocid=$(printf '%s' "$_creds" | jq -r '.clientId // empty' 2>/dev/null)
     _ocsec=$(printf '%s' "$_creds" | jq -r '.clientSecret // empty' 2>/dev/null)
