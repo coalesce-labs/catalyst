@@ -222,6 +222,110 @@ rm -rf "$spc_scratch"
   || fail "setup_project_config thoughts.directory/profile non-empty" "$spc_nonempty"
 
 echo ""
+echo "=== Phase 7: setup_project_config deployment-mode block (CTL-1622) ==="
+
+# T30: NI writes the default deployment mode (Scenario 2).
+# In a scratch repo with NON_INTERACTIVE=1 and no existing config, assert
+# .catalyst.deployment.mode == "single-host".
+spc_scratch=$(mktemp -d)
+spc_t30=$(env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=1
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=acme-org
+  PROJECT_DIR='$spc_scratch/proj'
+  mkdir -p \"\$PROJECT_DIR\"
+  setup_project_config >/dev/null 2>&1
+  jq -r '.catalyst.deployment.mode' \"\$PROJECT_DIR/.catalyst/config.json\"
+" 2>/dev/null)
+rm -rf "$spc_scratch"
+[[ "$spc_t30" == "single-host" ]] \
+  && pass "setup_project_config NI writes deployment.mode=single-host" \
+  || fail "setup_project_config NI writes deployment.mode=single-host" "$spc_t30"
+
+# T31: written value is a recognized enum member (single-host|cluster|cloud).
+# Guards against a malformed heredoc substitution producing a null or garbage value.
+spc_scratch=$(mktemp -d)
+spc_t31=$(env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=1
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=acme-org
+  PROJECT_DIR='$spc_scratch/proj'
+  mkdir -p \"\$PROJECT_DIR\"
+  setup_project_config >/dev/null 2>&1
+  jq -r 'if .catalyst.deployment.mode == \"single-host\" or .catalyst.deployment.mode == \"cluster\" or .catalyst.deployment.mode == \"cloud\" then \"recognized\" else \"unrecognized:\" + (.catalyst.deployment.mode // \"null\") end' \"\$PROJECT_DIR/.catalyst/config.json\"
+" 2>/dev/null)
+rm -rf "$spc_scratch"
+[[ "$spc_t31" == "recognized" ]] \
+  && pass "setup_project_config writes a recognized deployment.mode enum value" \
+  || fail "setup_project_config writes a recognized deployment.mode enum value" "$spc_t31"
+
+# T32: preservation on re-write. Pre-write a config whose projectKey differs from PROJECT_KEY
+# and whose .catalyst.deployment.mode is "cluster". In NI mode ask_yes_no defaults to y,
+# so setup_project_config takes the update path and re-writes — but must NOT clobber "cluster".
+spc_scratch=$(mktemp -d)
+mkdir -p "$spc_scratch/proj/.catalyst"
+printf '{"catalyst":{"projectKey":"old-org","deployment":{"mode":"cluster"}}}\n' \
+  > "$spc_scratch/proj/.catalyst/config.json"
+spc_t32=$(env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=1
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=new-org
+  PROJECT_DIR='$spc_scratch/proj'
+  setup_project_config >/dev/null 2>&1
+  jq -r '.catalyst.deployment.mode' \"\$PROJECT_DIR/.catalyst/config.json\"
+" 2>/dev/null)
+rm -rf "$spc_scratch"
+[[ "$spc_t32" == "cluster" ]] \
+  && pass "setup_project_config preserves existing deployment.mode on re-write" \
+  || fail "setup_project_config preserves existing deployment.mode on re-write" "$spc_t32"
+
+# T33: interactive path captures typed deployment mode + resolveDeploymentMode round-trip.
+# Pipe three ordered answers (ticket_prefix→empty/default, project_name→empty/default,
+# deployment_mode→"cluster") into setup_project_config with NON_INTERACTIVE=0.
+# Asserts .catalyst.deployment.mode == "cluster" and that resolveDeploymentMode returns
+# inferred:false, recognized:true — proving the written key is the path the resolver reads.
+# Skipped with a PASS notice when node is absent.
+if command -v node >/dev/null 2>&1; then
+  NODE_BIN="$(command -v node)"
+  spc_scratch=$(mktemp -d)
+  printf '\n\ncluster\n' | env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+    source '$SETUP'
+    NON_INTERACTIVE=0
+    ORG_NAME=acme-org
+    REPO_NAME=acme-repo
+    PROJECT_KEY=acme-org
+    PROJECT_DIR='$spc_scratch/proj'
+    mkdir -p \"\$PROJECT_DIR\"
+    setup_project_config >/dev/null 2>&1
+  " 2>/dev/null
+  spc_t33_mode=$(jq -r '.catalyst.deployment.mode' "$spc_scratch/proj/.catalyst/config.json" 2>/dev/null)
+  if [[ "$spc_t33_mode" != "cluster" ]]; then
+    fail "setup_project_config interactive captures typed deployment.mode=cluster" "$spc_t33_mode"
+    rm -rf "$spc_scratch"
+  else
+    cfg="$spc_scratch/proj/.catalyst/config.json"
+    if "$NODE_BIN" --input-type=module -e "
+import { resolveDeploymentMode } from '${REPO_ROOT}/plugins/dev/scripts/lib/deployment-mode.mjs';
+const r = resolveDeploymentMode({ env: {}, layer1ConfigPath: '${cfg}', layer2ConfigPath: '/nonexistent/layer2.json' });
+process.exit(r.inferred === false && r.recognized === true && r.mode === 'cluster' ? 0 : 1);
+" 2>/dev/null; then
+      pass "setup_project_config interactive + resolveDeploymentMode resolves inferred:false, recognized:true, mode:cluster"
+    else
+      fail "setup_project_config interactive + resolveDeploymentMode resolves inferred:false, recognized:true, mode:cluster"
+    fi
+    rm -rf "$spc_scratch"
+  fi
+else
+  pass "setup_project_config interactive + resolver (SKIP — node not available)"
+fi
+
+echo ""
 echo "=== Phase 4: Documentation shape ==="
 
 # T18: usage header documents the new flags

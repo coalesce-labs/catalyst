@@ -1340,6 +1340,29 @@ setup_project_config() {
 		[[ -n "$_existing_prof" ]] && thoughts_profile="$_existing_prof"
 	fi
 
+	# Deployment mode (CTL-1622): default single-host, but PRESERVE an existing
+	# committed value (mirrors the thoughts preservation above) so a config
+	# regeneration never clobbers a fleet's declared cluster/cloud back to
+	# single-host. Validation is deferred to the resolver + `catalyst doctor`
+	# (same as ticket prefix), so accept any value here.
+	local deployment_mode="single-host"
+	if [[ -f "$config_file" ]]; then
+		local _existing_mode
+		_existing_mode=$(jq -r '.catalyst.deployment.mode // empty' "$config_file" 2>/dev/null)
+		[[ -n "$_existing_mode" ]] && deployment_mode="$_existing_mode"
+	fi
+
+	echo ""
+	echo "Deployment Mode Configuration:"
+	echo "  Declares this project's fleet topology (CTL-1617):"
+	echo "    single-host  one machine runs everything (default; dev clones)"
+	echo "    cluster      multiple machines share ticket ownership"
+	echo "    cloud        hosted control plane (no local smee tunnel)"
+	echo "  Written to .catalyst/config.json as the fleet default; override"
+	echo "  per-host via ~/.config/catalyst/config.json (Layer-2)."
+	echo ""
+	deployment_mode=$(prompt_value "Enter deployment mode (single-host|cluster|cloud) [${deployment_mode}]:" "${deployment_mode}")
+
 	# Create/update config
 	cat >"$config_file" <<EOF
 {
@@ -1352,6 +1375,9 @@ setup_project_config() {
     "project": {
       "ticketPrefix": "${ticket_prefix}",
       "name": "${project_name}"
+    },
+    "deployment": {
+      "mode": "${deployment_mode}"
     },
     "linear": {
       "teamKey": "${ticket_prefix}",
@@ -1382,6 +1408,7 @@ EOF
 	echo "✓ ticketPrefix: ${ticket_prefix}"
 	echo "✓ linear.teamKey: ${ticket_prefix}"
 	echo "✓ linear.stateMap: defaults (will be updated with actual Linear states after API setup)"
+	echo "✓ deployment.mode: ${deployment_mode}"
 	echo ""
 }
 
