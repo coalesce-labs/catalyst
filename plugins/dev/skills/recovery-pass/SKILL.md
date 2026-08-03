@@ -335,9 +335,9 @@ a CONTEXT item — that node owns it, and acting would cause cross-host
 double-action. Reconstruct + fix only the YOURS items; read CONTEXT items for
 context. At N=1 every item is YOURS.
 
-**The pipeline model.** Catalyst ships work through a 9-phase pipeline — triage →
+**The pipeline model.** Catalyst ships work through a 10-phase pipeline — triage →
 research → plan → implement → verify → review → pr → monitor-merge →
-monitor-deploy. Each phase runs as one short-lived `claude --bg` worker. A worker
+monitor-deploy → teardown. Each phase runs as one short-lived `claude --bg` worker. A worker
 writes its state to a signal file at `${ORCH_DIR}/workers/<ticket>/phase-*.json`
 (`status`, `failureReason`, `bg_job_id`). A ticket is "stuck" when a phase signal
 sits at `needs-human`/`failed`/`stalled`, or its worker died with the signal frozen.
