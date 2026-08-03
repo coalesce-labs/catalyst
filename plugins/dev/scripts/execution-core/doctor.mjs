@@ -25,7 +25,7 @@
 // Exit code: number of FAIL-level checks (0 = all clear).
 
 import { readFileSync, statSync, existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -3528,14 +3528,36 @@ export function checkLayer2PathDivergence(deps = {}) {
       env.CATALYST_LAYER2_CONFIG_FILE || resolve(homedir(), ".config", "catalyst", "config.json"),
     canonicalPathFn = () => resolveLayer2Path(env),
   } = deps;
-  let legacyPath;
-  let canonicalPath;
+  let legacyRaw;
+  let canonicalRaw;
   try {
-    legacyPath = legacyPathFn();
-    canonicalPath = canonicalPathFn();
+    legacyRaw = legacyPathFn();
+    canonicalRaw = canonicalPathFn();
   } catch {
     return []; // fail-open: a throwing resolver must not invent a divergence
   }
+  // #2938 round-2 (Codex P2): a RELATIVE configured path must never be
+  // cwd-normalized into agreement — resolveLayer2Path preserves the relative
+  // string and canonical consumers read it against THEIR cwd, so a supervised
+  // service with a different cwd reads a different (or missing) file. Reject
+  // it outright instead of comparing.
+  if (!isAbsolute(legacyRaw) || !isAbsolute(canonicalRaw)) {
+    return [
+      mkCheck(
+        "layer2-path-divergence",
+        STATUS.FAIL,
+        `Layer-2 config path is RELATIVE ("${!isAbsolute(legacyRaw) ? legacyRaw : canonicalRaw}") — ` +
+          `each consumer resolves it against its own working directory, so different services read ` +
+          `different files; configure an ABSOLUTE path (CATALYST_LAYER2_CONFIG_FILE / ` +
+          `CATALYST_MACHINE_CONFIG must be absolute)`,
+      ),
+    ];
+  }
+  // #2931 round-2 (Codex P2): NORMALIZE (absolute-only — cwd-independent)
+  // before comparing, so an equivalent absolute spelling (e.g.
+  // "$HOME/.config/catalyst/../catalyst/config.json") is not a false FAIL.
+  const legacyPath = resolve(legacyRaw);
+  const canonicalPath = resolve(canonicalRaw);
   if (legacyPath === canonicalPath) return [];
   return [
     mkCheck(
@@ -3547,7 +3569,11 @@ export function checkLayer2PathDivergence(deps = {}) {
         `and cloud-token name resolution) — a credential rotation would land where half the ` +
         `readers never look. This CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME-divergent layout is ` +
         `unsupported until the canonical reader/writer sweep; set CATALYST_LAYER2_CONFIG_FILE ` +
-        `(tier 1 of BOTH chains) to pin every reader and writer to one file`,
+        `(tier 1 of BOTH chains) in the environment of EVERY supervised service AND interactive ` +
+        `shell — no single env file covers them all today (execution-core sources ` +
+        `execution-core.env, the monitor's start path sources lib/catalyst-secret-env.sh, shells ` +
+        `have their own profile), so the pin must reach each service's own environment source; a ` +
+        `pin visible only to this doctor run would pass the check while running services still split`,
     ),
   ];
 }
