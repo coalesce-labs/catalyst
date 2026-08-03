@@ -108,15 +108,29 @@ if [[ -z "$PLUGIN_ROOT" ]]; then
   # db315537 fixes in god-gather.sh:187. Align with the `sort -V | tail -1`
   # newest-wins convention every other cache/marketplace probe in this repo
   # uses (require-catalyst-dev.sh, lib/catalyst-runtime-root.sh itself, …).
+  # CTL-1628 A2 verify-round-3 bug fix: this whole prelude runs under
+  # `set -euo pipefail` (line 76), and these two assignments are bare
+  # top-level statements — NOT wrapped in a function called via
+  # `$(fn || true)` the way every sibling probe in this PR is (lib
+  # `__cd_resolve || true`, both require-catalyst-dev.sh shims'
+  # `__rcd_bootstrap_find || true` / `__rcd_resolve || true`, god-gather.sh's
+  # own `|| true`). On a total miss `ls -d <no-match-glob>` exits 1;
+  # `pipefail` carries that through `sort -V | tail -1`; with no `|| true`
+  # the failing assignment trips errexit and the shell dies HERE, silently
+  # (ls's own diagnostic is `2>/dev/null`'d and errexit itself prints
+  # nothing) — before the cache rung is ever probed and before the FATAL
+  # miss message below can ever print, defeating this very fix's LOUD-miss
+  # requirement. Guard each assignment with `|| true` like every sibling
+  # probe already does.
   RUNTIME_ROOT_LIB=""
   if [[ -f "./plugins/dev/scripts/lib/catalyst-runtime-root.sh" ]]; then
     RUNTIME_ROOT_LIB="./plugins/dev/scripts/lib/catalyst-runtime-root.sh"
   else
-    __rr_mkt="$( ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 )"
+    __rr_mkt="$( ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 || true )"
     if [[ -n "$__rr_mkt" && -f "$__rr_mkt" ]]; then
       RUNTIME_ROOT_LIB="$__rr_mkt"
     else
-      __rr_cache="$( ls -d "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 )"
+      __rr_cache="$( ls -d "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 || true )"
       [[ -n "$__rr_cache" && -f "$__rr_cache" ]] && RUNTIME_ROOT_LIB="$__rr_cache"
       unset __rr_cache
     fi
