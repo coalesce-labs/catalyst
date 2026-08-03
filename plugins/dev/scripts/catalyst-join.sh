@@ -48,6 +48,17 @@ DOCTOR_SCRIPT="${CATALYST_JOIN_DOCTOR_SCRIPT:-${SELF_DIR}/catalyst-doctor}"
 REACH_PROBE="${CATALYST_JOIN_REACH_PROBE:-}"
 # CATALYST_JOIN_FETCH_CMD — used in acquire_bundle(); resolved there
 
+# CTL-1617 PR5: the bash mirror of the deployment-mode resolver. Sourced
+# unconditionally here (a normal top-of-script lib dependency, same as every
+# other lib/*.sh a script in this tree relies on). Consulted from exactly one
+# place — merge_shared_config's webhook-wiring gate, below — which decides
+# whether to wire webhook ingestion into this node's Layer-2 config based on
+# the declared deployment mode (falling back to the pre-CTL-1617 roster-
+# length heuristic when the mode is undeclared). See that function's header
+# comment for the full decision rule.
+# shellcheck source=lib/catalyst-deployment-mode.sh
+. "${SELF_DIR}/lib/catalyst-deployment-mode.sh"
+
 # ── Logging helpers ───────────────────────────────────────────────────────────
 info() { echo "[join] $*"; }
 warn() { echo "[join] WARN: $*" >&2; }
@@ -625,7 +636,82 @@ merge_shared_config() {
   local roster_len monitor_wh
   roster_len="$(echo "$BUNDLE_JSON" | jq '(.hostsRoster // []) | length')"
   monitor_wh="$(echo "$BUNDLE_JSON" | jq '.monitorWebhooks // null')"
+
+  # CTL-1617 PR5 — FLIPPED (migration plan §9 PR5): the gate below now
+  # decides on the declared deployment mode, not the roster_len heuristic.
+  # The shadow cycle that gated this flip (one full join cycle, both the
+  # multi-host/wire shape and the single-host/skip shape) reported
+  # verdict=AGREE in both; see the PR5 shadow-cycle evidence in the ticket
+  # thread for the exact log lines.
+  #
+  # Rule (design §6 row 2 / §9 PR5):
+  #   - mode resolves to "cluster" (recognized, NOT inferred)      → wire
+  #   - mode resolves to a recognized non-cluster value            → skip
+  #   - mode is ABSENT (inferred:true — a join bundle/repo predating this
+  #     migration) → FALL BACK to the old roster_len heuristic. A newly-
+  #     joining cluster member must never silently lose webhook wiring just
+  #     because neither side of the join has declared a deployment mode yet.
+  #
+  # WHAT THE RESOLVER SEES HERE, mid-join (read this before touching the
+  # block below):
+  #   - Layer-2 candidate is $cfg ITSELF — the very file this function is
+  #     mid-write on. The SHARED-config merge above has already landed
+  #     catalyst.cluster/catalyst.linear/etc into it, but nothing in
+  #     catalyst-join.sh ever writes catalyst.deployment.mode, so Layer-2
+  #     is @ABSENT for this key on every join today — it always falls
+  #     through to Layer-1.
+  #   - catalyst_resolve_deployment_mode's OWN default Layer-1 path is
+  #     CWD-relative (${CATALYST_CONFIG_FILE:-$(pwd)/.catalyst/config.json}),
+  #     and $PWD at config-merge time is wherever the operator invoked
+  #     catalyst-join.sh from (docs/cluster-onboarding.md's one-liner) — it is
+  #     NEVER the plugin-source checkout. That checkout is what the
+  #     setup-plugin-source stage (already run — step 4, before this one)
+  #     clones to ${CATALYST_DIR}/plugin-source, and — since it is a clone of
+  #     THIS repo's main branch — its .catalyst/config.json is the file that
+  #     actually declares "cluster" for this fleet, as of PR4 (#2901). Left at
+  #     its own default, the resolver would see neither file and report
+  #     "default" (inferred:true) on every real join, no matter what this
+  #     repo declares. So the call below points CATALYST_CONFIG_FILE
+  #     explicitly at that checkout's config — a single-command-scoped
+  #     override (restored the instant the call returns; see the bash
+  #     semantics this relies on) — so the gate reads a live Layer-1 signal
+  #     instead of unconditionally reading "default".
+  local pluginsrc_config="${CATALYST_DIR}/plugin-source/.catalyst/config.json"
+  CATALYST_CONFIG_FILE="$pluginsrc_config" catalyst_resolve_deployment_mode >/dev/null
+
+  local heuristic_verdict monitor_wh_state rule decision
   if [[ "${roster_len:-0}" -gt 1 && "$monitor_wh" != "null" ]]; then
+    heuristic_verdict="wire"
+  else
+    heuristic_verdict="skip"
+  fi
+  if [[ "$monitor_wh" != "null" ]]; then monitor_wh_state="present"; else monitor_wh_state="absent"; fi
+
+  if [[ "$CATALYST_DEPLOYMENT_MODE_INFERRED" == "true" ]]; then
+    # Mode key absent everywhere (pre-migration bundle/repo) — fall back to
+    # the original roster-length heuristic rather than silently skipping.
+    rule="heuristic-fallback"
+    decision="$heuristic_verdict"
+  else
+    # Mode declared (recognized "cluster"/"single-host"/"cloud", or degraded
+    # to "single-host" from an unrecognized typo — either way, an explicit,
+    # non-inferred answer) — it alone decides, regardless of roster length.
+    rule="mode-declared"
+    if [[ "$CATALYST_DEPLOYMENT_MODE_RESOLVED" == "cluster" ]]; then
+      decision="wire"
+    else
+      decision="skip"
+    fi
+  fi
+  # A "wire" decision with no monitorWebhooks in the bundle has nothing to
+  # write — degrade to skip so the log line always matches the actual
+  # outcome (mirrors the heuristic's original implicit `monitor_wh != null`
+  # conjunct, now applied uniformly to both rules).
+  [[ "$decision" == "wire" && "$monitor_wh" == "null" ]] && decision="skip"
+
+  info "webhook-wiring gate (CTL-1617 PR5): decision=${decision} rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} source=${CATALYST_DEPLOYMENT_MODE_SOURCE} inferred=${CATALYST_DEPLOYMENT_MODE_INFERRED} | heuristic_would=${heuristic_verdict} roster_len=${roster_len:-0} monitorWebhooks=${monitor_wh_state}"
+
+  if [[ "$decision" == "wire" ]]; then
     local tmp2
     tmp2="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
     # Deep-merge ($wh * existing): existing node-local values WIN (non-clobber),
@@ -634,9 +720,9 @@ merge_shared_config() {
         .catalyst //= {}
         | .catalyst.monitor = ($wh * (.catalyst.monitor // {}))
       ' "$cfg" > "$tmp2" && mv "$tmp2" "$cfg" || { rm -f "$tmp2"; return 1; }
-    info "webhook ingestion wired (multiHost roster=${roster_len})"
+    info "webhook ingestion wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
   else
-    info "webhook ingestion NOT wired (roster=${roster_len:-0}) — single-host double-dispatch guard"
+    info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
   fi
 }
 
