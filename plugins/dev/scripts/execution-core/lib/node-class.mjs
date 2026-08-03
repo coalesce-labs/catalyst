@@ -45,15 +45,17 @@ export function getLayer2ConfigPath() {
   if (legacyPath !== canonicalPath) {
     const msg =
       `layer2 config path shadow-diff (CTL-1616 PR6): legacy chain resolved "${legacyPath}" ` +
-      `but the canonical chain resolved "${canonicalPath}" — using "${canonicalPath}" (legacy ` +
-      `ignores CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME; set CATALYST_LAYER2_CONFIG_FILE to pin ` +
-      `explicitly if this is unexpected)`;
+      `but the canonical chain resolved "${canonicalPath}" — KEEPING the legacy path until the ` +
+      `full reader/writer sweep (set CATALYST_LAYER2_CONFIG_FILE to pin explicitly)`;
     if (!_warnedLayer2PathDrift.has(msg)) {
       _warnedLayer2PathDrift.add(msg);
       console.warn(`[node-class] ${msg}`);
     }
   }
-  return canonicalPath;
+  // #2929 post-merge Codex P1: legacy wins (observe-only shadow) — this must
+  // stay path-consistent with config.mjs getLayer2ConfigPath and every
+  // un-swept legacy reader; the canonical cutover lands as one sweep.
+  return legacyPath;
 }
 
 // readLayer2NodeClass — the raw catalyst.node.class value from the Layer-2 file EXACTLY as

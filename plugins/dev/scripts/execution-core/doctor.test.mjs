@@ -1851,6 +1851,10 @@ describe("checkCloudTokenEnv", () => {
   });
 
   it("never returns a FAIL status (the token is optional)", () => {
+    // Hermeticity (#2929 follow-up): pin an inferred mode so an ambient
+    // CATALYST_DEPLOYMENT_MODE=cloud on the host cannot arm the PR6
+    // escalation inside this pre-PR6 invariant test.
+    const pinnedMode = { mode: "single-host", source: "default", inferred: true, recognized: false };
     // Every branch must be at most WARN — absence/drift must not block activation.
     const branches = [
       reader({}),
@@ -1858,7 +1862,7 @@ describe("checkCloudTokenEnv", () => {
       reader({ cloud: clusterCloud("new"), env: exportLine("old") + "\n" }),
     ];
     for (const readFile of branches) {
-      const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile, resolveSecretContract: agreeingCloudTokenContract });
+      const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile, resolveSecretContract: agreeingCloudTokenContract, deploymentMode: pinnedMode });
       for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
     }
   });
@@ -1971,6 +1975,31 @@ describe("checkCloudTokenEnv", () => {
         expect(checks.find((c) => c.name === "cloud-token-bootstrap")).toBeUndefined();
         expect(checks.find((c) => c.name === "cloud-token-bootstrap-secret-contract-shadow")).toBeUndefined();
       }
+    });
+
+    it("declared cloud + platform token + NO cluster-sync file: coherent report — bootstrap PASS and the primary INFO names the platform env as the source (#2929 P2)", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: { mode: "cloud", source: "layer1", inferred: false, recognized: true },
+        // Dual-shape fixture: name fields satisfy the name-shadow (agrees with
+        // the hardcoded literal), value satisfies the bootstrap resolution.
+        resolveSecretContract: () => ({
+          value: "platform-injected",
+          source: "platform-env",
+          provider: "platform-env",
+          envVar: "CATALYST_CLOUD_TOKEN",
+          envVarSource: "default",
+        }),
+      });
+      const bootstrap = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(bootstrap).toBeDefined();
+      expect(bootstrap.status).toBe(STATUS.PASS);
+      const primary = checks.find((c) => c.name === "cloud-token");
+      expect(primary.status).toBe(STATUS.INFO);
+      expect(primary.detail).toContain("expected on a declared-cloud node");
+      expect(primary.detail).not.toContain("local-only");
     });
 
     it("fails OPEN to today's INFO-only behavior when the injected deploymentMode itself is undefined/throws (never crashes checkCloudTokenEnv)", () => {
@@ -2705,13 +2734,22 @@ describe("secret-contract cutover — checkPeerUniqueness/checkBotCredentials (C
     it("LINEAR_API_KEY-only fixture (real resolveSecret default): honors the alias, proceeds past the token gate", async () => {
       const savedToken = process.env.LINEAR_API_TOKEN;
       const savedKey = process.env.LINEAR_API_KEY;
+      const savedMode = process.env.CATALYST_DEPLOYMENT_MODE;
       try {
         delete process.env.LINEAR_API_TOKEN;
+        // Hermeticity (#2929 follow-up): an ambient declared-cloud host mode
+        // would arm the engine's cloud guard through the REAL resolver and
+        // short-circuit linear-api-token — this test is about the alias.
+        delete process.env.CATALYST_DEPLOYMENT_MODE;
         process.env.LINEAR_API_KEY = "lin_api_fromkey";
         const checks = await checkPeerUniqueness(base);
         expect(checks).toHaveLength(1);
         expect(checks[0].detail).toContain("empty"); // past the token gate
       } finally {
+        if (savedMode === undefined) delete process.env.CATALYST_DEPLOYMENT_MODE;
+        else process.env.CATALYST_DEPLOYMENT_MODE = savedMode;
+        if (savedMode === undefined) delete process.env.CATALYST_DEPLOYMENT_MODE;
+        else process.env.CATALYST_DEPLOYMENT_MODE = savedMode;
         if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
         else process.env.LINEAR_API_TOKEN = savedToken;
         if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
@@ -2750,8 +2788,13 @@ describe("secret-contract cutover — checkPeerUniqueness/checkBotCredentials (C
     it("LINEAR_API_KEY-only fixture (real resolveSecret default): honors the alias, reaches the connectivity probe", async () => {
       const savedToken = process.env.LINEAR_API_TOKEN;
       const savedKey = process.env.LINEAR_API_KEY;
+      const savedMode = process.env.CATALYST_DEPLOYMENT_MODE;
       try {
         delete process.env.LINEAR_API_TOKEN;
+        // Hermeticity (#2929 follow-up): an ambient declared-cloud host mode
+        // would arm the engine's cloud guard through the REAL resolver and
+        // short-circuit linear-api-token — this test is about the alias.
+        delete process.env.CATALYST_DEPLOYMENT_MODE;
         process.env.LINEAR_API_KEY = "lin_api_fromkey";
         const checks = await checkBotCredentials({
           readLinearBotUserIds: () => new Set(["bot-user-123"]),

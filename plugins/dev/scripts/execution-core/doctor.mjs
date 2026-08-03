@@ -2567,6 +2567,12 @@ export function checkAgentBrowser(deps = {}) {
 // function's original ADVISORY/never-FAIL contract is UNCHANGED for single-host,
 // cluster, and inferred nodes — i.e. every live host today. All reads are injectable +
 // fail-open.
+// _isDeclaredCloud — the one gate PR6's escalation and the local-only wording
+// share: a genuinely DECLARED cloud mode (recognized, not inferred).
+function _isDeclaredCloud(dm) {
+  return Boolean(dm && dm.mode === "cloud" && dm.inferred === false && dm.recognized !== false);
+}
+
 export function checkCloudTokenEnv(deps = {}) {
   const {
     configDir = process.env.CATALYST_CONFIG_DIR || resolve(homedir(), ".config", "catalyst"),
@@ -2594,8 +2600,15 @@ export function checkCloudTokenEnv(deps = {}) {
     // resolver fails OPEN to today's INFO-only behavior (the escalation below
     // is gated on this being genuinely {mode:"cloud", inferred:false, ...} —
     // undefined never satisfies that gate).
-    deploymentMode = resolveDeploymentModeForShadow(),
+    // NOTE (#2929 post-merge Codex P2): the default must apply only when the
+    // caller OMITTED the key — a destructure default also fires on an
+    // explicitly-supplied `deploymentMode: undefined`, silently re-resolving
+    // the HOST's mode and making injected-state tests host-dependent. Hence
+    // the `in`-guarded assignment below instead of a destructure default.
+    deploymentMode: _deploymentModeDep,
   } = deps;
+  const deploymentMode =
+    "deploymentMode" in deps ? _deploymentModeDep : resolveDeploymentModeForShadow();
   const checks = [];
 
   // CTL-1616 PR6 §7 FAIL ESCALATION (design §5): "the one FAIL doctor cannot
@@ -2624,7 +2637,7 @@ export function checkCloudTokenEnv(deps = {}) {
   // correctly on inferred alone.
   const cloudBootstrapEscalationChecks = [];
   const dm = deploymentMode;
-  if (dm && dm.mode === "cloud" && dm.inferred === false && dm.recognized !== false) {
+  if (_isDeclaredCloud(dm)) {
     const bootstrapResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
       env: process.env,
       deploymentMode: dm,
@@ -2731,7 +2744,9 @@ export function checkCloudTokenEnv(deps = {}) {
       mkCheck(
         "cloud-token",
         STATUS.INFO,
-        "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
+        _isDeclaredCloud(deploymentMode)
+          ? "no cluster-sync cloud token file — expected on a declared-cloud node (the platform environment is the token source; see cloud-token-bootstrap)"
+          : "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
       ),
     );
     checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
