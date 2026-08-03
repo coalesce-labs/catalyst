@@ -105,11 +105,20 @@ function expandStarGlob(pattern) {
   return current.filter((p) => existsSync(p));
 }
 
-function newestValidDevScriptsDir(paths) {
-  const valid = paths.filter(isValidDevScriptsDir);
-  if (valid.length === 0) return null;
-  valid.sort(versionCompare);
-  return valid[valid.length - 1];
+// newestDevScriptsDir — CTL-1628 A2 verify-round-2 parity fix: mirrors the
+// bash twin's rung semantics exactly. lib/catalyst-runtime-root.sh's
+// catalyst_dev_scripts picks the newest path FIRST (`sort -V | tail -1`)
+// and only THEN sentinel-validates it — if that single newest entry is
+// broken, the whole rung fails (falls through to the next rung) rather than
+// trying the next-newest candidate. This used to filter to valid paths
+// first and pick the newest of those, which silently accepted a
+// second-newest-but-valid dir where the bash lib returns nothing for the
+// rung — a same-inputs, different-output divergence between the twins.
+function newestDevScriptsDir(paths) {
+  if (paths.length === 0) return null;
+  const sorted = [...paths].sort(versionCompare);
+  const newest = sorted[sorted.length - 1];
+  return isValidDevScriptsDir(newest) ? newest : null;
 }
 
 // catalystDevScripts([requestingPlugin], [opts]) — Q1. Resolves the shared
@@ -151,12 +160,12 @@ export function catalystDevScripts(requestingPlugin, { env = process.env, cwd = 
   const cwdRoot = resolvePath(cwd, "plugins/dev/scripts");
   if (isValidDevScriptsDir(cwdRoot)) return { path: cwdRoot, source: "cwd" };
 
-  const marketplace = newestValidDevScriptsDir(
+  const marketplace = newestDevScriptsDir(
     expandStarGlob(join(home, ".claude/plugins/marketplaces/*/plugins/dev/scripts")),
   );
   if (marketplace) return { path: marketplace, source: "marketplace" };
 
-  const cache = newestValidDevScriptsDir(
+  const cache = newestDevScriptsDir(
     expandStarGlob(join(home, ".claude/plugins/cache/*/catalyst-dev/*/scripts")),
   );
   if (cache) return { path: cache, source: "cache" };
@@ -218,11 +227,12 @@ export function catalystRuntimeLayout(dir, { env = process.env } = {}) {
   }
   if (!real) return "unknown";
 
-  const marketplaceBase = resolvePath(home, ".claude/plugins/marketplaces");
-  const cacheBase = resolvePath(home, ".claude/plugins/cache");
-
-  if (isUnderMarketplaceLayout(real, marketplaceBase)) return "marketplace";
-  if (isUnderCacheLayout(real, cacheBase)) return "cache";
+  if (matchesGlobPattern(real, join(home, ".claude/plugins/marketplaces/*/plugins/dev/scripts"))) {
+    return "marketplace";
+  }
+  if (matchesGlobPattern(real, join(home, ".claude/plugins/cache/*/catalyst-dev/*/scripts"))) {
+    return "cache";
+  }
 
   let d = real;
   for (;;) {
@@ -234,16 +244,21 @@ export function catalystRuntimeLayout(dir, { env = process.env } = {}) {
   return "unknown";
 }
 
-// isUnderMarketplaceLayout — real === <base>/<one-segment>/plugins/dev/scripts.
-function isUnderMarketplaceLayout(real, base) {
-  if (!real.startsWith(base + "/")) return false;
-  const rest = real.slice(base.length + 1).split("/");
-  return rest.length === 4 && rest[0].length > 0 && rest[1] === "plugins" && rest[2] === "dev" && rest[3] === "scripts";
-}
-
-// isUnderCacheLayout — real === <base>/<one-segment>/catalyst-dev/<one-segment>/scripts.
-function isUnderCacheLayout(real, base) {
-  if (!real.startsWith(base + "/")) return false;
-  const rest = real.slice(base.length + 1).split("/");
-  return rest.length === 4 && rest[1] === "catalyst-dev" && rest[3] === "scripts" && rest[0].length > 0 && rest[2].length > 0;
+// matchesGlobPattern — CTL-1628 A2 verify-round-2 parity fix: mirrors the
+// bash twin's `case "$dir" in "$HOME"/.../*/plugins/dev/scripts) ... esac`
+// classification exactly. Shell `case` pattern matching does NOT set
+// FNM_PATHNAME, so a bare `*` matches any sequence of characters INCLUDING
+// `/` — e.g. ".../marketplaces/a/b/plugins/dev/scripts" (a two-segment
+// middle) classifies as "marketplace" in the bash lib. The prior
+// implementation here (isUnderMarketplaceLayout/isUnderCacheLayout)
+// enforced exactly one path segment per `*`, which is stricter than the
+// bash lib and could classify the identical input differently across the
+// twins. Translate the glob to a regex the same way, with `*` -> "any
+// characters" (including `/`), so both twins agree on every input.
+function matchesGlobPattern(str, pattern) {
+  const escaped = pattern
+    .split("*")
+    .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${escaped}$`).test(str);
 }

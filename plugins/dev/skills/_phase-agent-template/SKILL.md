@@ -102,15 +102,26 @@ if [[ -z "$PLUGIN_ROOT" ]]; then
   # catalyst_dev_scripts (same probe every other catalyst-dev consumer uses:
   # cwd sibling → marketplace clone → versioned cache), and make a genuine
   # miss LOUD instead of silently proceeding with a broken PLUGIN_ROOT.
+  # CTL-1628 A2 verify-round-2 bug fix: was a for-loop over unsorted glob
+  # expansion, which takes the LEXICALLY FIRST match per rung (e.g. "1.10.0"
+  # sorts before "1.9.0" lexically) — the same oldest-wins glob defect
+  # db315537 fixes in god-gather.sh:187. Align with the `sort -V | tail -1`
+  # newest-wins convention every other cache/marketplace probe in this repo
+  # uses (require-catalyst-dev.sh, lib/catalyst-runtime-root.sh itself, …).
   RUNTIME_ROOT_LIB=""
-  for __rr_cand in \
-    "./plugins/dev/scripts/lib/catalyst-runtime-root.sh" \
-    "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/catalyst-runtime-root.sh \
-    "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/catalyst-runtime-root.sh \
-  ; do
-    if [[ -f "$__rr_cand" ]]; then RUNTIME_ROOT_LIB="$__rr_cand"; break; fi
-  done
-  unset __rr_cand
+  if [[ -f "./plugins/dev/scripts/lib/catalyst-runtime-root.sh" ]]; then
+    RUNTIME_ROOT_LIB="./plugins/dev/scripts/lib/catalyst-runtime-root.sh"
+  else
+    __rr_mkt="$( ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 )"
+    if [[ -n "$__rr_mkt" && -f "$__rr_mkt" ]]; then
+      RUNTIME_ROOT_LIB="$__rr_mkt"
+    else
+      __rr_cache="$( ls -d "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 )"
+      [[ -n "$__rr_cache" && -f "$__rr_cache" ]] && RUNTIME_ROOT_LIB="$__rr_cache"
+      unset __rr_cache
+    fi
+    unset __rr_mkt
+  fi
   DEV_SCRIPTS=""
   if [[ -n "$RUNTIME_ROOT_LIB" ]]; then
     # shellcheck disable=SC1090

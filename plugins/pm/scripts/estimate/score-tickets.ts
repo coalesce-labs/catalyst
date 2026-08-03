@@ -118,27 +118,76 @@ async function loadCatalystRuntimeRoot(): Promise<CatalystRuntimeRootModule> {
 }
 
 async function loadResolveSecret(): Promise<ResolveSecretFn> {
-  const runtimeRoot = await loadCatalystRuntimeRoot();
-  const { path: devScripts } = runtimeRoot.catalystDevScripts(process.env.CLAUDE_PLUGIN_ROOT, {
-    cwd: process.cwd(),
-  });
-  if (!devScripts) {
-    // catalystDevScripts already printed its own LOUD stderr diagnostic.
-    throw new Error(
-      "score-tickets --check-labels requires the catalyst-dev plugin (shared secret contract lib/secret-contract.mjs); " +
-        "catalystDevScripts could not resolve the catalyst-dev scripts dir. " +
-        "Fix: install/enable catalyst-dev — claude plugin install catalyst-dev@catalyst",
-    );
+  try {
+    const runtimeRoot = await loadCatalystRuntimeRoot();
+    const { path: devScripts } = runtimeRoot.catalystDevScripts(process.env.CLAUDE_PLUGIN_ROOT, {
+      cwd: process.cwd(),
+    });
+    if (!devScripts) {
+      // catalystDevScripts already printed its own LOUD stderr diagnostic.
+      throw new Error("catalystDevScripts could not resolve the catalyst-dev scripts dir");
+    }
+    const secretContractPath = resolve(devScripts, "lib/secret-contract.mjs");
+    if (!existsSync(secretContractPath)) {
+      throw new Error(`resolved catalyst-dev scripts dir (${devScripts}) has no lib/secret-contract.mjs`);
+    }
+    const mod = await import(secretContractPath);
+    if (typeof mod.resolveSecret !== "function") {
+      throw new Error(`${secretContractPath} does not export resolveSecret`);
+    }
+    return mod.resolveSecret as ResolveSecretFn;
+  } catch {
+    // CTL-1628 A2 verify-round-2 fix: the primary path above only searches
+    // for THIS PR's own new lib/catalyst-runtime-root.mjs (via
+    // loadCatalystRuntimeRoot). A cache-installed catalyst-dev that predates
+    // this fold — the CTL-1536 cross-plugin sidecar/mutating-pair
+    // version-skew window, where catalyst-pm's cache updates before
+    // catalyst-dev's cache refreshes — has lib/secret-contract.mjs but NOT
+    // yet lib/catalyst-runtime-root.mjs, so the primary path throws before
+    // ever reaching secret-contract.mjs. Round 1 compensated for the
+    // identical window in the bash shims (require-catalyst-dev.sh); this
+    // mirrors that fix here: fall back to the exact pre-fold direct glob
+    // ladder for lib/secret-contract.mjs instead of hard-failing.
+    return loadResolveSecretPreFold();
   }
-  const secretContractPath = resolve(devScripts, "lib/secret-contract.mjs");
-  if (!existsSync(secretContractPath)) {
-    throw new Error(
-      `score-tickets --check-labels: resolved catalyst-dev scripts dir (${devScripts}) has no lib/secret-contract.mjs`,
-    );
+}
+
+// Pre-fold fallback (CTL-1628 A2 verify-round-2): the EXACT search this file
+// used before the CTL-1628 fold — same order, same per-glob try/catch — so
+// score-tickets still resolves the secret contract in the CTL-1536 skew
+// window described above, wherever the pre-fold inline resolver did.
+async function loadResolveSecretPreFold(): Promise<ResolveSecretFn> {
+  const glob = (await import("node:fs")).globSync ?? null;
+  const candidates: string[] = [];
+  const devScripts = process.env.CATALYST_DEV_SCRIPTS;
+  if (devScripts) candidates.push(resolve(devScripts, "lib/secret-contract.mjs"));
+  candidates.push(
+    resolve(import.meta.dir, "../../../dev/scripts/lib/secret-contract.mjs"),
+    resolve(process.cwd(), "plugins/dev/scripts/lib/secret-contract.mjs"),
+  );
+  if (glob) {
+    for (const pat of [
+      `${homedir()}/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/secret-contract.mjs`,
+      `${homedir()}/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/secret-contract.mjs`,
+    ]) {
+      try {
+        candidates.push(...glob(pat).sort().reverse());
+      } catch {
+        /* absent optional layout root — skip */
+      }
+    }
   }
-  const mod = await import(secretContractPath);
-  if (typeof mod.resolveSecret === "function") return mod.resolveSecret as ResolveSecretFn;
-  throw new Error(`score-tickets --check-labels: ${secretContractPath} does not export resolveSecret`);
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      const mod = await import(p);
+      if (typeof mod.resolveSecret === "function") return mod.resolveSecret as ResolveSecretFn;
+    }
+  }
+  throw new Error(
+    "score-tickets --check-labels requires the catalyst-dev plugin (shared secret contract lib/secret-contract.mjs); " +
+      "it was not found in the source checkout, repo cwd, marketplace clone, or versioned cache. " +
+      "Fix: install/enable catalyst-dev — claude plugin install catalyst-dev@catalyst",
+  );
 }
 
 // -- Types -------------------------------------------------------------------
