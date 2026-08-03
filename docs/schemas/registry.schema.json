@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://catalyst.coalesce-labs.com/schemas/registry.schema.json",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/registry.schema.json",
   "title": "Execution-Core Registry",
   "description": "Schema for ~/catalyst/execution-core/registry.json — the per-project enrollment records read by the execution-core daemon scheduler. Each entry tells the daemon which Linear team and git repository constitute a 'project', and what Linear state to use when querying for eligible tickets. This file supersedes the deprecated catalyst.orchestration.executionCore.eligibleQuery field in .catalyst/config.json.",
   "type": "object",

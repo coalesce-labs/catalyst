@@ -1,7 +1,7 @@
 ---
 name: phase-verify
 description: |
-  Phase agent for the verify step of the 9-phase orchestrator pipeline (CTL-450).
+  Phase agent for the verify step of the 10-phase orchestrator pipeline (CTL-450).
   NEW skill — has no canonical wrapper. Runs read-only adversarial verification
   against the implement-phase diff: tsc, tests, lint, security scan, reward-hacking
   scan, code review, test coverage, silent-failure hunt. Writes
