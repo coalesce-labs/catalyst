@@ -820,13 +820,13 @@ merge_shared_config() {
       decision="wire"
     elif [[ "$CATALYST_DEPLOYMENT_MODE_RESOLVED" == "cluster" ]]; then
       decision="skip"
-      note="stage0-roster-guard: mode=cluster but roster_len=${roster_len:-0} (<=1) -- runtime dispatch fencing is roster-derived (execution-core/monitor.mjs multiHost=roster.length>1), so wiring here would double-dispatch; deferred: after activating this node in the committed roster, re-run catalyst-join.sh --no-resume to wire (until then doctor FAILs webhook-ingestion on this node once roster>1)"
+      note="stage0-roster-guard: mode=cluster but roster_len=${roster_len:-0} (<=1) -- runtime dispatch fencing is roster-derived (execution-core/monitor.mjs multiHost=roster.length>1), so wiring here would double-dispatch; deferred: after activating this node in the committed roster, re-run catalyst-join.sh --no-resume with a FRESH join token (catalyst cluster join-token; the original is single-use) or a retained --bundle (until then doctor FAILs webhook-ingestion on this node once roster>1)"
       # Post-merge Codex finding (#2914 P1): config-merge still completes on
       # this branch, so nothing re-evaluates the decision when the roster
       # later grows. Leave a durable breadcrumb in the progress marker for
       # the activation flow / operator; the loud fleet-level signal is
       # doctor's webhook-ingestion FAIL on the activated-but-unwired node.
-      marker_note_deferred_wiring "stage0-roster-guard (mode=cluster, roster_len=${roster_len:-0}): re-run catalyst-join.sh --no-resume after roster activation"
+      marker_note_deferred_wiring "stage0-roster-guard (mode=cluster, roster_len=${roster_len:-0}): after roster activation re-run catalyst-join.sh --no-resume with a fresh join token (catalyst cluster join-token) or a retained --bundle"
     else
       decision="skip"
     fi
