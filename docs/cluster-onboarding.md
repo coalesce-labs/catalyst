@@ -24,9 +24,10 @@ CATALYST_JOIN_GITHUB_TOKEN=<ghp_…> \
 config-merge → **doctor** (the CTL-1186 `catalyst-doctor` gate) → stack. It is
 idempotent — re-run after any failure and it resumes from the failed stage.
 
-**Result:** the node is provisioned and the stack is running under launchd, but the
-committed `.catalyst/hosts.json` is untouched, so it owns **zero tickets** (Stage-0
-SHADOW). Activation (adding it to the roster) is a deliberate later step — see
+**Result:** the node is provisioned and the stack is running under launchd, but its name
+has not been added to the committed roster (`cluster.json` `roster[]` in the private
+`catalyst-cluster` repo), so it owns **zero tickets** (Stage-0 SHADOW). Activation
+(adding it to the roster) is a deliberate later step — see
 [Activation](#activation-m2--future).
 
 ### Convenience wrapper (seed-driven)
@@ -110,7 +111,7 @@ Runs the final join stages:
 - ✅ Catalyst stack running (auto-restart on reboot)
 - ✅ Thoughts synced (all 3 orgs verified)
 - ✅ Local roster entry created (mini-2 registered locally)
-- ❌ Committed roster untouched (`hosts.json` still `["mini"]`) — node owns zero tickets
+- ❌ Committed roster untouched (`cluster.json` `roster[]` in `catalyst-cluster` still excludes it) — node owns zero tickets
 
 ### Phase 5: Verification
 
@@ -130,13 +131,17 @@ Check the onboard script's verification output:
 
 To activate mini-2 and begin accepting work:
 
-1. **Add to committed roster:**
+1. **Add to committed roster:** in the private `catalyst-cluster` repo, add the node's name to
+   `cluster.json` `roster[]` and push:
    ```bash
-   cd ~/catalyst
-   jq '.hosts += ["mini-2"]' .catalyst/hosts.json > /tmp/hosts.json && mv /tmp/hosts.json .catalyst/hosts.json
-   git add .catalyst/hosts.json && git commit -m "feat: activate mini-2 to cluster roster (CTL-1217)"
+   # in the catalyst-cluster repo
+   jq '.roster += ["mini-2"]' cluster.json > /tmp/cluster.json && mv /tmp/cluster.json cluster.json
+   git add cluster.json && git commit -m "feat: activate mini-2 to cluster roster (CTL-1217)"
    git push
    ```
+   `cluster-sync` pulls the update on every node and the next scheduler tick honors it — no restart
+   needed. See the [config-mirror contract](../website/src/content/docs/reference/cluster-config-mirror.md)
+   for the full SHARED/PER-NODE classification.
 
 2. **Verify all nodes pull the update:**
    ```bash
@@ -311,7 +316,8 @@ catalyst-stack install-services
 - **Node user:** local system user (ryan on mini, ryan on mini-2, etc.)
 - **HumanLayer global fallback:** `coalesce-labs` (primary org, never groundworkapp)
 - **Worktree location:** `~/catalyst/wt/catalyst-workspace/` (not ~/conductor)
-- **SHADOW mode:** nodes own zero tickets until added to committed `hosts.json`
+- **SHADOW mode:** nodes own zero tickets until added to the committed `cluster.json` `roster[]` in
+  the private `catalyst-cluster` repo
 
 ## Related Tickets
 

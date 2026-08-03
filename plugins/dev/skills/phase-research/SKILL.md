@@ -1,7 +1,7 @@
 ---
 name: phase-research
 description: |
-  Phase agent for the research step of the 9-phase orchestrator pipeline (CTL-450).
+  Phase agent for the research step of the 10-phase orchestrator pipeline (CTL-450).
   Wraps /catalyst-dev:research-codebase and produces
   thoughts/shared/research/<date>-<ticket>.md, then emits phase.research.complete.<ticket>.
   Reads triage.json from the worker dir as its prior-phase artifact.
