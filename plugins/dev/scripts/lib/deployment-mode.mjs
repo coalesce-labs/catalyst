@@ -114,38 +114,69 @@ function resolveLayer1Path(env, layer1ConfigPath) {
 // absent/malformed/unreadable OR the key is simply not present — both count
 // as "nothing here, try the next layer" (the readLayer2NodeClass contract,
 // execution-core/config.mjs:312-325). Never throws.
-// UNPAIRED_SURROGATE — a UTF-16 code unit in the surrogate range that is not
-// part of a valid high+low pair. JSON.parse accepts lone-surrogate escapes
-// (`"clu\ud800ster"`) but jq rejects the WHOLE document (exit 5), so the bash
-// mirror can never see ANY value out of such a file. Parity rule: an unpaired
-// surrogate escape ANYWHERE in the document makes the LAYER malformed in BOTH
-// languages — fall through, exactly as bash does after jq's whole-document
-// rejection. (Codex on #2903 proved checking only the extracted mode string
-// diverges: {"mode":"cloud","other":"\ud800"} fell through in bash but
-// resolved cloud in JS.) Valid surrogate PAIRS (astral characters) parse fine
-// in both and are simply non-members.
-//
-// The RAW-TEXT scan matches escape SEQUENCES (`\uD800` as six source chars,
-// case-insensitive, not preceded by a pair-forming high escape / not followed
-// by a low escape). Literal surrogate BYTES cannot occur: they are not valid
-// UTF-8, so a file containing them fails both parsers anyway. An even number
-// of preceding backslashes means the escape is live; this scan deliberately
-// over-rejects the pathological `\\ud800` (escaped-backslash-then-text) case —
-// a config whose text spells a surrogate escape at all is treated as malformed
-// at that layer, which only ever degrades toward fall-through, never toward
-// activating a mode.
-const UNPAIRED_SURROGATE =
-  /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/;
-const UNPAIRED_SURROGATE_ESCAPE =
-  /(?:\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?:(?<!\\u[dD][89abAB][0-9a-fA-F]{2})\\u[dD][c-fC-F][0-9a-fA-F]{2})/;
+// JSON acceptance mirrors jq's ACTUAL parser (the bash mirror's engine), not an
+// approximation. The earlier regex guard here over-rejected two ways the
+// CTL-1616 verifier disproved empirically against jq 1.7.1:
+//   - jq ACCEPTS a lone LOW surrogate escape (\uDC00-\uDFFF), substituting
+//     U+FFFD — only a lone HIGH escape rejects the whole document (exit 5);
+//   - a backslash run of EVEN length before `uXXXX` is literal text (the JSON
+//     source `"\\ud800"` parses to the harmless 7-char string), not a live
+//     escape — the old regex was blind to the run and killed the whole read.
+// This scanner + toWellFormed pair is intentionally kept in lockstep with
+// lib/secret-contract.mjs's identical pair (both files are zero-import leaves,
+// so neither may import the other; the shared semantics are pinned by each
+// file's own parity suite against the same jq binary).
+function hasLiveLoneHighSurrogateEscape(text) {
+  const re = /(\\+)u([0-9a-fA-F]{4})/g;
+  const liveMatches = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1].length % 2 !== 1) continue; // even run ⇒ literal backslashes + text
+    liveMatches.push({ index: m.index, end: m.index + m[0].length, code: parseInt(m[2], 16) });
+  }
+  for (let i = 0; i < liveMatches.length; i++) {
+    const cur = liveMatches[i];
+    if (cur.code < 0xd800 || cur.code > 0xdbff) continue; // not a HIGH surrogate
+    const next = liveMatches[i + 1];
+    const isPaired =
+      next != null && next.index === cur.end && next.code >= 0xdc00 && next.code <= 0xdfff;
+    if (!isPaired) return true;
+  }
+  return false;
+}
+
+// toWellFormedString — a lone LOW surrogate that survives into the parsed mode
+// string becomes U+FFFD, the same byte sequence jq substitutes at parse time
+// (JSON.parse carries the raw lone code unit through). Applied only at the
+// mode-extraction boundary.
+function toWellFormedString(str) {
+  if (typeof str.toWellFormed === "function") return str.toWellFormed();
+  let out = "";
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = str.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += str[i] + str[i + 1];
+        i++;
+      } else {
+        out += "�";
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      out += "�";
+    } else {
+      out += str[i];
+    }
+  }
+  return out;
+}
 
 function readDeploymentModeField(filePath) {
   try {
     const text = readFileSync(filePath, "utf8");
-    if (UNPAIRED_SURROGATE_ESCAPE.test(text)) return undefined;
+    if (hasLiveLoneHighSurrogateEscape(text)) return undefined;
     const mode = JSON.parse(text)?.catalyst?.deployment?.mode;
-    if (typeof mode === "string" && UNPAIRED_SURROGATE.test(mode)) return undefined;
-    return mode;
+    return typeof mode === "string" ? toWellFormedString(mode) : mode;
   } catch {
     return undefined;
   }
