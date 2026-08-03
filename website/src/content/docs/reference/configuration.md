@@ -591,9 +591,13 @@ registry**, `SECRET_REGISTRY` in `plugins/dev/scripts/lib/secret-contract.mjs`. 
 used to be independently hand-rolled resolution ladders per secret (the 2026-08-02 fleet 401
 outage was four divergent copies of one chain) — the Linear-token read and the Linear OAuth-mint
 trio are live consumers of it, but the `github-token`/`webhook-secret` rows and the `groq-api-key`
-row are modeled in the registry only: the live GitHub-token/webhook-secret paths (CTL-1612's
-`catalyst-secret-env.sh` / `github-auth-preflight.mjs`) and Groq's pre-existing
-`lib/api-key-health.mjs` ladder remain their own, unrepointed implementations (`docs/architecture.md`'s
+row are not yet RESOLVED through the registry: the live GitHub-token/webhook-secret value paths
+(CTL-1612's `catalyst-secret-env.sh` / `github-auth-preflight.mjs`) and Groq's pre-existing
+`lib/api-key-health.mjs` ladder remain their own, unrepointed implementations — but the
+`github-token`/`webhook-secret` ROWS do have one live production consumer already:
+`execution-core/cluster-sync.mjs` imports `SECRET_REGISTRY` and derives its boot-captured secret
+membership (which changed credentials require daemon-restart signaling) from these rows' delivery
+types, so their fields are load-bearing even before the resolution cutover (`docs/architecture.md`'s
 Secret Contract section has the full per-row cutover status). Bash cannot import a JS leaf, so the registry has a
 second, independently-maintained encoding — `plugins/dev/scripts/lib/catalyst-secret-contract.sh` —
 kept honest by a cross-stack **three-way parity test**
@@ -754,8 +758,12 @@ by `execution-core/linear-remint.mjs` against its cooldown-guarded reminter); `g
 
 `linear-worker-actor` is the one row with a multi-tier fallback chain, folded from
 `lib/linear-comment-post.sh`'s pre-existing four-rung precedence with every rung's precedence order
-preserved and one deliberate generalization (deprecating the legacy tiers is an explicit, separate
-follow-up — not part of this fold):
+preserved. Note the fold GENERALIZED every file-backed tier's location, not just one: pre-fold, the
+primary and global-legacy tiers read a hardcoded `$HOME/.config/catalyst/config.json` and the
+per-team sibling sat beside it — post-fold all three resolve relative to the canonical
+`resolveLayer2Path(env)`, so a `CATALYST_LAYER2_CONFIG_FILE`/`CATALYST_MACHINE_CONFIG` override
+moves all three together. (Deprecating the legacy tiers is an explicit, separate follow-up — not
+part of this fold.)
 
 1. `credentialEnvPair` — `CATALYST_LINEAR_AGENT_CLIENT_ID`/`CATALYST_LINEAR_AGENT_CLIENT_SECRET`,
    checked first; both must be non-empty.
