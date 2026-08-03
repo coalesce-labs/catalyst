@@ -316,6 +316,33 @@ HOSTILE=$((HOSTILE+1))
 expect_eq "hostile: lone-surrogate Layer-2 JSON (bash==expected, falls through)" "$EXPECTED" "$BASH_OUT"
 expect_eq "hostile: lone-surrogate Layer-2 JSON (node==expected, falls through — JS narrowed to match jq)" "$EXPECTED" "$NODE_OUT"
 
+# --- Probe 4b: lone surrogate in an UNRELATED field (Codex on #2903) --------
+# {"mode":"cloud","other":"\ud800"}: jq rejects the WHOLE document, so bash
+# falls through — the JS reader must scan the RAW TEXT for unpaired surrogate
+# escapes (not just the extracted mode string) to match. A valid recognized
+# mode beside a poisoned sibling field must fall through on BOTH sides.
+rm -f "$L2_PATH" "$L1_PATH"
+printf '%s' "{\"catalyst\":{\"deployment\":{\"mode\":\"cloud\",\"other\":\"x${BACKSLASH}ud800\"}}}" > "$L2_PATH"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$L1_PATH"
+EXPECTED="cluster|layer1|true|false"
+BASH_OUT="$(run_bash_probe)"
+NODE_OUT="$(run_node_probe)"
+HOSTILE=$((HOSTILE+1))
+expect_eq "hostile: lone surrogate in an UNRELATED field (bash==expected, whole document rejected)" "$EXPECTED" "$BASH_OUT"
+expect_eq "hostile: lone surrogate in an UNRELATED field (node==expected, raw-text scan matches jq)" "$EXPECTED" "$NODE_OUT"
+
+# Control: a VALID surrogate PAIR anywhere in the document parses in BOTH
+# languages — the raw-text scan must not over-reject astral characters.
+rm -f "$L2_PATH" "$L1_PATH"
+printf '%s' "{\"catalyst\":{\"deployment\":{\"mode\":\"cloud\",\"other\":\"x${BACKSLASH}ud83d${BACKSLASH}ude00\"}}}" > "$L2_PATH"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$L1_PATH"
+EXPECTED="cloud|layer2|true|false"
+BASH_OUT="$(run_bash_probe)"
+NODE_OUT="$(run_node_probe)"
+HOSTILE=$((HOSTILE+1))
+expect_eq "control: valid surrogate PAIR in a sibling field parses (bash==expected)" "$EXPECTED" "$BASH_OUT"
+expect_eq "control: valid surrogate PAIR in a sibling field parses (node==expected)" "$EXPECTED" "$NODE_OUT"
+
 # --- Probe 5: multi-document Layer-2 JSON — FIXED, bash==node==expected ---
 # Two valid top-level documents. Bare jq streams both (exit 0, two tags,
 # bypassing the exit-status guard); JSON.parse rejects the file. The bash
@@ -344,7 +371,7 @@ HOSTILE=$((HOSTILE+1))
 expect_eq "hostile: BOM-prefixed Layer-2 JSON (bash==expected, falls through)" "$EXPECTED" "$BASH_OUT"
 expect_eq "hostile: BOM-prefixed Layer-2 JSON (node==expected, falls through)" "$EXPECTED" "$NODE_OUT"
 
-echo "Hostile probes run: $HOSTILE (NUL-escape / NBSP-padded-env / malformed-trailing-content / lone-surrogate / multi-document / BOM; 2 assertions/probe)"
+echo "Hostile probes run: $HOSTILE (NUL-escape / NBSP-padded-env / malformed-trailing-content / lone-surrogate x2 + pair-control / multi-document / BOM; 2 assertions/probe)"
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES, Skipped: $SKIPPED"
 exit "$FAILURES"
