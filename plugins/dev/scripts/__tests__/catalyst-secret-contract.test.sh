@@ -622,6 +622,16 @@ case "$(declare -p CATALYST_SECRET_LAST_SOURCE 2>/dev/null)" in "declare -x"*) p
 expect_eq "hygiene: VALUE readable same-shell, NOT exported; SOURCE breadcrumb exported" \
   "tok-hygiene|notexported|exported" "$HYGIENE_OUT"
 
+# Sticky-export regression (#2925 post-merge P2): if the shell INHERITED the
+# breadcrumb already-exported (rolling upgrade from the pre-fix lib), plain
+# reassignment keeps bash's -x attribute — _csc_set_result must clear it.
+# The stale exported value is seeded via _run's assigns slot (env -i exports it).
+HYGIENE_STICKY="$(_run LINEAR_API_TOKEN=tok-hygiene CATALYST_SECRET_LAST_VALUE=stale-exported 'catalyst_resolve_secret linear-api-token >/dev/null
+printf "%s|" "${CATALYST_SECRET_LAST_VALUE:-ABSENT}"
+case "$(declare -p CATALYST_SECRET_LAST_VALUE 2>/dev/null)" in "declare -x"*) printf "exported" ;; *) printf "notexported" ;; esac')"
+expect_eq "hygiene: inherited-exported breadcrumb loses -x on the next resolve (sticky-export cleared)" \
+  "tok-hygiene|notexported" "$HYGIENE_STICKY"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES, Skipped: 0"
 exit "$FAILURES"
