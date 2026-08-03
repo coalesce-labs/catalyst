@@ -191,9 +191,15 @@ export function detectSessionRateLimitHit(
   bgJobId,
   {
     resolveSession = resolvePhaseSessionId,
-    findTranscript: findT = findTranscript,
+    // Both seams below are named distinctly (no `key: alias = outerName`
+    // destructuring-default shape) so the event-log-read-guard's module-
+    // global, name-keyed heuristic has no ambiguous `key = value` line to
+    // misread as a taint-relevant assignment — see the CTL-1442 allowlist
+    // entry in event-log-read-guard.test.mjs for the reads this file's
+    // scanner already flags for unrelated reasons.
+    findTranscriptFn = findTranscript,
     projectsDir = defaultProjectsDir(),
-    readFileSync: readFile = readFileSync,
+    readTranscriptFn = readFileSync,
     // Only the tail of the transcript is inspected — a genuine rate-limit hit
     // ends the session immediately, so the tell-tale text is at or near the
     // end even for a longer-lived worker that hit the limit mid-run.
@@ -210,14 +216,17 @@ export function detectSessionRateLimitHit(
   if (!sessionId) return false;
   let transcriptPath;
   try {
-    transcriptPath = findT(sessionId, projectsDir);
+    transcriptPath = findTranscriptFn(sessionId, projectsDir);
   } catch {
     return false;
   }
   if (!transcriptPath) return false;
   let lines;
   try {
-    lines = readFile(transcriptPath, "utf8").split("\n").filter((l) => l.trim() !== "");
+    // EVENT-LOG-FULL-READ-OK(CTL-1442): NOT the shared event log — one dead
+    // worker's own session transcript, bounded by that single run's turn
+    // count, checked once per no-progress STOP (a cold, rare path).
+    lines = readTranscriptFn(transcriptPath, "utf8").split("\n").filter((l) => l.trim() !== "");
   } catch {
     return false;
   }
@@ -1663,6 +1672,8 @@ export function readBootSince(orchDir) {
 // refreshes), this is THIS exec-core instance's own start time — written
 // atomically by writeBootMarker at startDaemon line 1, before detectColdStart
 // runs. Any --bg worker whose state.json mtime predates it is provably dead.
+// EVENT-LOG-FULL-READ-OK(CTL-1442): daemon-boot.json is a single small JSON
+// object ({bootedAt}), never a JSONL log.
 export function readExecCoreBootEpoch(orchDir, { read = (p) => readFileSync(p, "utf8") } = {}) {
   if (!orchDir) return 0;
   try {
@@ -1743,6 +1754,8 @@ export function clearProgressMarks(orchDir, { rm = rmSync } = {}) {
 //   linux:  /proc/stat line "btime <n>" (absolute boot epoch seconds; stable,
 //           unlike /proc/uptime which drifts with clock adjustments).
 // Injectable platform/spawn/readFile for deterministic tests. Never throws.
+// EVENT-LOG-FULL-READ-OK(CTL-1442): the linux branch reads /proc/stat, a
+// kernel pseudo-file, never a JSONL log.
 export function readBootEpoch({
   platform = process.platform,
   spawn = spawnSync,
