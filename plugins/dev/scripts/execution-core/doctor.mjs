@@ -3097,7 +3097,7 @@ export function checkNodeClass(deps = {}) {
 // ─── CTL-1617: deployment-mode consistency grading ───────────────────────────
 
 // checkDeploymentModeConsistency — grade catalyst.deployment.mode (CTL-1617
-// design §7, checks 1-3 only — check 4 tunnel-consistency is PR6). Every
+// design §7, all four sub-checks). Every
 // message says "deployment mode" fully qualified: this codebase already has
 // three unrelated "mode" concepts (catalyst.orchestration.dispatchMode, the
 // executor-derived dispatch-mode telemetry, readLinearReplica().mode), so
@@ -3128,17 +3128,41 @@ export function checkNodeClass(deps = {}) {
 //      → WARN. WARN, never FAIL: a transient cluster-repo git-fetch hiccup,
 //      or the declare-then-join migration window, must not flip a healthy
 //      node's doctor red.
+//   4. deployment-mode-tunnel-consistency — GATED on `dm.mode === "cloud"`.
+//      Structurally provably inert for single-host/cluster/inferred: the
+//      resolver's constant default is always "single-host" (§4 of the
+//      design — nothing ever infers "cloud"), so `mode === "cloud"` can only
+//      be true via an EXPLICIT, RECOGNIZED value — this one gate covers both
+//      "only fires in cloud mode" and "only fires when explicit" from the
+//      design in one condition, with no separate `inferred`/`recognized`
+//      check needed. Probes the LOCAL monitor's
+//      `GET /api/status/webhook-tunnel` (port-resolution spike, CTL-1617 §11
+//      Q2: `MONITOR_PORT` env or 7400 — the exact pattern already live in
+//      checkMonitorProductionBuild (defined later in this file); deliberately NOT
+//      checkReadReplicaReachable's baseUrl, which targets a REMOTE
+//      read-replica by design and FAILs on localhost on purpose).
+//      `connected: true` → WARN: a live smee tunnel on a declared-cloud node
+//      is contrary-to-mode (the cloud SDK connection is the expected event
+//      source). Unreachable monitor / any probe failure → INFO "could not
+//      verify" — NEVER FAIL; a down local monitor must not contaminate this
+//      check (same advisory posture as checkMonitorProductionBuild's
+//      INFO-skip).
 //
 // Injected deps (all have real defaults):
-//   deploymentMode — the resolveDeploymentMode() result object
-//                    ({mode,source,inferred,recognized,raw})
-//   resolveRoster  — () => { hosts, source, multiHost }
-//   strict         — bool, default false (see check 1 above)
-export function checkDeploymentModeConsistency(deps = {}) {
+//   deploymentMode      — the resolveDeploymentMode() result object
+//                          ({mode,source,inferred,recognized,raw})
+//   resolveRoster       — () => { hosts, source, multiHost }
+//   strict              — bool, default false (see check 1 above)
+//   webhookTunnelBaseUrl — check 4 only: local monitor base URL, default
+//                          `http://localhost:${MONITOR_PORT || 7400}`
+//   fetch               — check 4 only: default globalThis.fetch
+export async function checkDeploymentModeConsistency(deps = {}) {
   const {
     deploymentMode: dm = resolveDeploymentMode(),
     resolveRoster = resolveClusterHosts,
     strict = false,
+    webhookTunnelBaseUrl = `http://localhost:${process.env.MONITOR_PORT || 7400}`,
+    fetch: _fetch = globalThis.fetch,
   } = deps;
 
   const checks = [];
@@ -3221,6 +3245,63 @@ export function checkDeploymentModeConsistency(deps = {}) {
           STATUS.PASS,
           `${declaredPhrase} "${dm.mode}" is consistent with the resolved roster ` +
             `(source=${rosterSource}, multiHost=${Boolean(roster.multiHost)})`,
+        ),
+      );
+    }
+  }
+
+  // 4. deployment-mode-tunnel-consistency — gated on mode==="cloud" only (see
+  // the doc comment above: structurally provably inert otherwise, since the
+  // resolver never infers "cloud").
+  if (dm.mode === "cloud") {
+    const base = (typeof webhookTunnelBaseUrl === "string" ? webhookTunnelBaseUrl : "").replace(
+      /\/+$/,
+      "",
+    );
+    try {
+      const res = await _fetch(base + "/api/status/webhook-tunnel", {
+        method: "GET",
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!(res?.ok ?? false)) {
+        checks.push(
+          mkCheck(
+            "deployment-mode-tunnel-consistency",
+            STATUS.INFO,
+            `could not verify webhook-tunnel state for deployment mode "cloud" — ` +
+              `${base}/api/status/webhook-tunnel returned HTTP ${res?.status ?? "?"}`,
+          ),
+        );
+      } else {
+        const body = await res.json();
+        if (body?.connected === true) {
+          checks.push(
+            mkCheck(
+              "deployment-mode-tunnel-consistency",
+              STATUS.WARN,
+              `smee webhook tunnel is live on a node with declared deployment mode ` +
+                `"cloud" — expected event ingestion is the cloud SDK connection, not the ` +
+                `smee tunnel`,
+            ),
+          );
+        } else {
+          checks.push(
+            mkCheck(
+              "deployment-mode-tunnel-consistency",
+              STATUS.PASS,
+              `no smee webhook tunnel is live on this declared-cloud node — consistent ` +
+                `with deployment mode "cloud"`,
+            ),
+          );
+        }
+      }
+    } catch (err) {
+      checks.push(
+        mkCheck(
+          "deployment-mode-tunnel-consistency",
+          STATUS.INFO,
+          `could not verify webhook-tunnel state for deployment mode "cloud" — local ` +
+            `monitor at ${base} could not be verified (unreachable or malformed response: ${err?.message ?? err})`,
         ),
       );
     }
