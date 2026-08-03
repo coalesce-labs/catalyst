@@ -135,12 +135,15 @@ export function rearmGithubTokenFromFile({
         continue; // not on this host — try the next candidate
       }
       found = true;
-      // Strip ONLY the trailing line terminator; preserve every other byte.
+      // Strip ONLY trailing line terminators; preserve every other byte.
       // `.replace(/\s+/g,"")` corrupted internal whitespace, and a full `.trim()` corrupts
       // SIGNIFICANT BOUNDARY whitespace — both produce a different credential that looks
-      // present and is silently wrong. Mirrors _catalyst_strip_eol in
-      // lib/catalyst-secret-env.sh so the bash and JS readers cannot disagree.
-      const candidate = String(raw ?? "").replace(/\r?\n$/, "");
+      // present and is silently wrong. ALL trailing terminators, not just the last one:
+      // the bash launcher reads via `$(cat …)`, which eats every trailing newline, so a
+      // file ending in `\n\n` must re-arm to the same bare token the launcher installed.
+      // Mirrors _catalyst_strip_eol in lib/catalyst-secret-env.sh so the bash and JS
+      // readers cannot disagree.
+      const candidate = String(raw ?? "").replace(/[\r\n]+$/, "");
       // Blank-check, not truthiness: a whitespace-only file must keep falling through to
       // the next candidate (a truthy "   " would break here and mask a valid fallback).
       if (candidate.trim()) {

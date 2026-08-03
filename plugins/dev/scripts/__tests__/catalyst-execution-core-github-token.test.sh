@@ -739,6 +739,65 @@ printf '### T23b\n%s\n' "$OUT" >> "$ALL_OUT"
 assert_line "$OUT" "webhook_secret=unset" "T23b whitespace-only HMAC file leaves the name unset, never \"\""
 assert_line "$OUT" "exported=" "T23b nothing reaches the monitor child (webhook-config would read \"\" as unconfigured)"
 
+# ─── 23c: Codex round-5 — ALL trailing line terminators strip, not just the last ─
+# The bash read path (`$(cat …)`) eats every trailing \n, but a CRLF file ending in
+# `\r\n\r\n` left `token\r\n` behind under the old single-pass strip — and the JS re-arm
+# (github-auth-preflight.mjs) had the same single-terminator bug against `\n\n`, so a
+# rotation re-armed to `token\n` and 401'd. Both sides now strip /[\r\n]+$/; this pins
+# the bash half (the .mjs suite pins the JS half).
+echo ""
+echo "test 23c: a CRLF-CRLF file yields the bare token — every trailing terminator removed"
+printf '%s\r\n\r\n' "$FAKE_FILE_TOKEN" > "$T/crlf-multi.token"
+EXPECT_DIGEST="$(printf '%s' "$FAKE_FILE_TOKEN" | shasum | cut -c1-12)"
+OUT="$(probe T23c CATALYST_GITHUB_TOKEN_FILE="$T/crlf-multi.token" EXPECT_VALUE="$FAKE_FILE_TOKEN")"
+assert_line "$OUT" "source=shared-file" "T23c source=shared-file"
+assert_line "$OUT" "match_github=yes" "T23c GITHUB_TOKEN is the bare token"
+assert_line "$OUT" "match_gh=yes" "T23c GH_TOKEN is the bare token"
+assert_line "$OUT" "digest_github=$EXPECT_DIGEST" "T23c exact digest — no residual CR or LF byte"
+assert_line "$OUT" "digest_gh=$EXPECT_DIGEST" "T23c same digest under the GH_TOKEN alias"
+
+# ─── 23d: Codex round-5 — the assignment probe sources the env file ONCE, not per alias ─
+# An env file may carry executed commands (a command substitution fetching a token, a
+# rate-limited credential-helper call). cmd_start sources it once for real; the round-4
+# per-alias sentinel probe then re-sourced it once per name, tripling every side effect
+# on each daemon start. The batch probe keeps detection semantics but adds exactly ONE
+# extra execution, so the file runs twice total here: the real source + one probe.
+echo ""
+echo "test 23d: executed-override detection costs ONE extra env-file execution, not one per alias"
+FAKE_ENVFILE_TOKEN='FAKE-CTL1612-envfile-side-effect-token-JJJJ'
+printf '%s\n' "$FAKE_FILE_TOKEN" > "$T/file.token"
+: > "$T/side-effects.log"
+cat > "$T/side-effect.env" <<'ENVF'
+echo ran >> "$CATALYST_TEST_SIDE_EFFECT_LOG"
+GITHUB_TOKEN="$FAKE_ENVFILE_TOKEN_VALUE"
+ENVF
+OUT="$(
+  env -i PATH="$PATH" HOME="$T/home" HELPER="$T/helper.sh" \
+    CATALYST_GITHUB_TOKEN_FILE="$T/file.token" \
+    CATALYST_LAYER2_CONFIG_FILE="$T/layer2.json" \
+    CATALYST_TEST_SIDE_EFFECT_LOG="$T/side-effects.log" \
+    FAKE_ENVFILE_TOKEN_VALUE="$FAKE_ENVFILE_TOKEN" \
+    ENV_FILE="$T/side-effect.env" \
+    bash -c '
+      # shellcheck disable=SC1090
+      source "$HELPER"
+      catalyst_project_github_token
+      # cmd_start sources the operator env file for real…
+      # shellcheck disable=SC1090
+      source "$ENV_FILE"
+      # …then reconcile probes it — which must add exactly ONE more execution.
+      catalyst_reconcile_github_token_aliases "$ENV_FILE"
+      echo "source=$CATALYST_GITHUB_TOKEN_SOURCE"
+      echo "executions=$(wc -l < "$CATALYST_TEST_SIDE_EFFECT_LOG" | tr -d " ")"
+      m=no; [ "$GITHUB_TOKEN" = "$FAKE_ENVFILE_TOKEN_VALUE" ] && [ "$GH_TOKEN" = "$FAKE_ENVFILE_TOKEN_VALUE" ] && m=yes
+      echo "override_won=$m"
+    '
+)"
+printf '### T23d\n%s\n' "$OUT" >> "$ALL_OUT"
+assert_line "$OUT" "source=operator-override" "T23d the executed assignment is still detected by the batch probe"
+assert_line "$OUT" "override_won=yes" "T23d both aliases re-pointed at the operator's value"
+assert_line "$OUT" "executions=2" "T23d env file ran twice (real source + ONE batch probe), not once per alias"
+
 # ─── 24: hygiene re-scan covering the round-3 whitespace fixtures ──────────────
 echo ""
 echo "test 24: secret hygiene re-scan across the full transcript (incl. tests 21-23)"

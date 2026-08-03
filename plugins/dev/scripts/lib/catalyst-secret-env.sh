@@ -43,8 +43,14 @@ _CATALYST_SECRET_ENV_SH_LOADED=1
 # CRLF file. Callers apply their own "is it blank?" check for the whitespace-only case.
 _catalyst_strip_eol() {
   local s="$1"
-  s="${s%$'\n'}"
-  s="${s%$'\r'}"
+  # ALL trailing terminators, not just the last pair: callers that read via `$(cat …)`
+  # already had every trailing \n eaten by command substitution, and the JS re-arm
+  # (github-auth-preflight.mjs) strips /[\r\n]+$/ — a file ending in `\r\n\r\n` must
+  # resolve to the same bytes on every path.
+  while [[ "$s" == *$'\n' || "$s" == *$'\r' ]]; do
+    s="${s%$'\n'}"
+    s="${s%$'\r'}"
+  done
   printf '%s' "$s"
 }
 
@@ -110,21 +116,40 @@ catalyst_read_secret_file() {
 #   `operator-override` and making the post-sync re-arm stand down, so an offline node keeps
 #   its stale credential and hands it to resumed workers. Exactly the bug we are fixing.
 #
-#   So: OBSERVE the assignment. Source the file in a subshell with the variable pre-set to a
-#   sentinel and see whether the sentinel survived. Hermetic (the subshell cannot touch our
-#   env), and it reports what the shell actually did rather than what the text looks like.
-catalyst_env_file_assigns() {
-  local _file="${1:-}" _var="${2:?catalyst_env_file_assigns: var required}"
-  [[ -r "$_file" ]] || return 1
+#   So: OBSERVE the assignment. Source the file in a subshell with every probed variable
+#   pre-set to a sentinel and see which sentinels survived. Hermetic (the subshell cannot
+#   touch our env), and it reports what the shell actually did rather than what the text
+#   looks like.
+#
+#   ONE source for ALL names: the launcher has already sourced this file for real, and an
+#   env file may legitimately carry executed commands (a command substitution fetching a
+#   token, a `mkdir`, a rate-limited credential-helper call). Probing per-name would re-run
+#   those side effects once per alias on every daemon start; batching keeps the probe to a
+#   single extra execution.
+#
+# catalyst_env_file_assigned_names <env-file> <var>...
+#   Prints (one per line) the names that sourcing the file assigned.
+catalyst_env_file_assigned_names() {
+  local _file="${1:-}"
+  shift || true
+  [[ -r "$_file" && $# -gt 0 ]] || return 1
   local _sentinel="__catalyst_unset_sentinel_$$__"
-  local _observed
-  _observed="$(
-    export "$_var=$_sentinel"
+  (
+    local _v
+    for _v in "$@"; do export "$_v=$_sentinel"; done
     # shellcheck disable=SC1090
     source "$_file" >/dev/null 2>&1 || true
-    printf '%s' "${!_var}"
-  )"
-  [[ "$_observed" != "$_sentinel" ]]
+    for _v in "$@"; do
+      [[ "${!_v}" != "$_sentinel" ]] && printf '%s\n' "$_v"
+    done
+    true
+  )
+}
+
+# catalyst_env_file_assigns <env-file> <var> — single-name convenience wrapper.
+catalyst_env_file_assigns() {
+  local _file="${1:-}" _var="${2:?catalyst_env_file_assigns: var required}"
+  [[ "$(catalyst_env_file_assigned_names "$_file" "$_var")" == "$_var" ]]
 }
 
 # catalyst_project_github_token
@@ -174,10 +199,16 @@ catalyst_reconcile_github_token_aliases() {
   local _gh_changed=0 _gt_changed=0 _win=""
   [[ "${GH_TOKEN:-}" != "${_CATALYST_PROJECTED_GH_TOKEN:-}" ]] && _gh_changed=1
   [[ "${GITHUB_TOKEN:-}" != "${_CATALYST_PROJECTED_GITHUB_TOKEN:-}" ]] && _gt_changed=1
-  local _gh_pinned=0 _gt_pinned=0
+  local _gh_pinned=0 _gt_pinned=0 _name
   if [[ -n "$_env_file" ]]; then
-    catalyst_env_file_assigns "$_env_file" GH_TOKEN && _gh_pinned=1
-    catalyst_env_file_assigns "$_env_file" GITHUB_TOKEN && _gt_pinned=1
+    # One hermetic source covering both aliases — see catalyst_env_file_assigned_names for
+    # why probing per-alias would multiply the env file's side effects.
+    while IFS= read -r _name; do
+      case "$_name" in
+        GH_TOKEN) _gh_pinned=1 ;;
+        GITHUB_TOKEN) _gt_pinned=1 ;;
+      esac
+    done < <(catalyst_env_file_assigned_names "$_env_file" GH_TOKEN GITHUB_TOKEN || true)
   fi
   (( _gh_changed || _gt_changed || _gh_pinned || _gt_pinned )) || return 0
   # GH_TOKEN wins when it is the one the operator touched — it is the name gh resolves first.

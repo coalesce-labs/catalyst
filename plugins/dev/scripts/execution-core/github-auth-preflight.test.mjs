@@ -497,6 +497,30 @@ describe("rearmGithubTokenFromFile", () => {
     expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("shared-file");
   });
 
+  // CTL-1612 (round 5): ALL trailing terminators, not just the last. The bash launcher
+  // reads via `$(cat …)`, which eats EVERY trailing newline — a file ending in `\n\n`
+  // installed the bare token at boot, but a single-terminator re-arm produced `token\n`,
+  // handing boot-resumed workers and every subsequent `gh` call an invalid credential.
+  test("REGRESSION: multiple trailing newlines (LF and CRLF) all strip — re-arm matches the launcher", () => {
+    for (const tail of ["\n\n", "\n\n\n", "\r\n\r\n"]) {
+      const env = { CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE, GITHUB_TOKEN: STALE_TOKEN };
+      const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `${ROTATED_TOKEN}${tail}` } });
+      expect(out).toEqual({ rearmed: true, reason: "rotated" });
+      expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN); // bare token, no residual terminator
+      expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
+    }
+    // And the no-op direction: a multi-newline file whose bare value matches the env
+    // must read as "unchanged", not as a phantom rotation.
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      GITHUB_TOKEN: FAKE_TOKEN,
+      GH_TOKEN: FAKE_TOKEN,
+      CATALYST_GITHUB_TOKEN_SOURCE: "shared-file",
+    };
+    const { out } = rearmWith({ env, files: { [TOKEN_FILE]: `${FAKE_TOKEN}\n\n` } });
+    expect(out).toEqual({ rearmed: false, reason: "unchanged" });
+  });
+
   // CTL-1612 (round 4): ONLY the line terminator is stripped. A credential may legitimately
   // begin or end with a space or tab, and trimming those bytes yields a different key —
   // for an HMAC secret that silently rejects every correctly-signed delivery. The `$(cat)`
