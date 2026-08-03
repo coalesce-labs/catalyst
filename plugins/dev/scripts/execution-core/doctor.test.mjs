@@ -2527,12 +2527,22 @@ describe("checkLayer2PathDivergence (#2930 round-2)", () => {
     expect(checks).toHaveLength(0);
   });
 
-  it("names the machine-wide pin requirement in the remedy (shell-only export is not enough)", () => {
+  it("REJECTS a relative configured path instead of cwd-normalizing it into agreement (#2938 round-2)", () => {
+    const checks = checkLayer2PathDivergence({
+      env: { CATALYST_MACHINE_CONFIG: "config.json" },
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("RELATIVE");
+    expect(checks[0].detail).toContain("ABSOLUTE");
+  });
+
+  it("remedy names the every-supervised-service pin requirement without a committed ticket prefix", () => {
     const checks = checkLayer2PathDivergence({
       env: { CATALYST_MACHINE_CONFIG: "/machine/split-test/config.json" },
     });
-    expect(checks[0].detail).toContain("MACHINE-WIDE");
-    expect(checks[0].detail).toContain("execution-core.env");
+    expect(checks[0].detail).toContain("EVERY supervised service");
+    expect(checks[0].detail).not.toMatch(/CTL-\d+/);
   });
 
   it("fails OPEN (zero rows) when a resolver throws", () => {
