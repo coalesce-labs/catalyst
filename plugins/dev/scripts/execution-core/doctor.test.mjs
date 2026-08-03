@@ -622,6 +622,13 @@ describe("checkWebhookIngestion", () => {
     "CATALYST_SMEE_SECRET",
     "GH_WH_CUSTOM", // custom github env name used in tests below
     "LIN_WH_CUSTOM", // custom linear env name used in Phase 2 tests
+    // Layer-1 config pointers: the default env-name readers now resolve via
+    // resolveDoctorLayer1Path() (CTL-1618 Codex P1), which honors these. A test
+    // runner that inherits them pointing at a project with custom webhookSecretEnv
+    // names would otherwise make the cases that omit githubSecretEnvName/
+    // linearSecretEnvName environment-dependent (Codex P2). Clear both here.
+    "CATALYST_CONFIG_FILE",
+    "CATALYST_CONFIG_PATH",
   ];
   let savedEnv = {};
   beforeEach(() => {
