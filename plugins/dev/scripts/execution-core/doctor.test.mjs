@@ -2242,6 +2242,33 @@ describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)"
     expect(typeof seen[0].mode).toBe("string");
   });
 
+  it("DEFAULT deploymentMode derives from the INJECTED env, not the host process.env (#2916 round-3)", () => {
+    // env declares cloud with no bootstrap token; deploymentMode dep omitted.
+    // Both halves must resolve from the same injected env: the bootstrap
+    // short-circuit must fire even though the HOST's mode is not cloud.
+    const env = { CATALYST_DEPLOYMENT_MODE: "cloud", GROQ_API_KEY: "gk-live", LINEAR_API_TOKEN: "lin-live" };
+    const checks = checkSecretContract({ env, resolveSecretFn: resolveSecretReal });
+    for (const c of checks) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("no resolution");
+    }
+  });
+
+  it("non-Error resolver throws (Symbol, null-proto object) stay inside the shadow (#2916 round-3 P3)", () => {
+    for (const thrown of [Symbol("boom"), Object.create(null)]) {
+      const checks = checkSecretContract({
+        resolveSecretFn: () => {
+          throw thrown;
+        },
+      });
+      expect(checks.length).toBe(2);
+      for (const c of checks) {
+        expect(c.status).toBe(STATUS.INFO);
+        expect(c.detail).toContain("SHADOW RESOLVER THREW");
+      }
+    }
+  });
+
   it("END-TO-END: declared cloud mode activates the engine's bootstrap short-circuit through checkSecretContract", () => {
     // Real engine, cloud mode declared, NO platform bootstrap token in env:
     // every non-bootstrap resolution must short-circuit to no-resolution
@@ -2407,7 +2434,7 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
     // beforeEach/afterEach scope) — an ambient CATALYST_WEBHOOK_SECRET /
     // CATALYST_SMEE_SECRET would otherwise make ghEnvSecret true regardless of
     // the file-search divergence this block is isolating.
-    const SHADOW_SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_SMEE_SECRET", "CATALYST_CONFIG_DIR", "CATALYST_DEPLOYMENT_MODE"];
+    const SHADOW_SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_SMEE_SECRET", "CATALYST_CONFIG_DIR", "CATALYST_DEPLOYMENT_MODE", "CATALYST_WEBHOOK_SECRET_FILE"];
     let savedEnv = {};
     let tmpDir;
     beforeEach(() => {
@@ -2477,6 +2504,40 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
   });
 
   describe("checkCloudTokenEnv — hardcoded env-var NAME vs the contract's resolved name", () => {
+  it("replica-name divergence: resolveNodeCloudTokenEnv disagrees with the contract → loud INFO row (#2916 round-3)", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: "/cfg",
+      zshenvPath: "/home/.zshenv",
+      readFile: () => {
+        throw new Error("ENOENT");
+      },
+      resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+      resolveReplicaTokenEnv: () => "OTHER_TOKEN",
+    });
+    const shadow = checks.find(
+      (c) => c.name === "cloud-token-secret-contract-shadow" && c.detail.includes("replica-token resolver"),
+    );
+    expect(shadow).toBeDefined();
+    expect(shadow.status).toBe(STATUS.INFO);
+    expect(shadow.detail).toContain('"OTHER_TOKEN"');
+    // primary grade untouched
+    const primary = checks.find((c) => c.name === "cloud-token");
+    expect(primary.status).toBe(STATUS.INFO);
+  });
+
+  it("replica-name agreement: no replica-divergence row", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: "/cfg",
+      zshenvPath: "/home/.zshenv",
+      readFile: () => {
+        throw new Error("ENOENT");
+      },
+      resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+      resolveReplicaTokenEnv: () => "CATALYST_CLOUD_TOKEN",
+    });
+    expect(checks.some((c) => (c.detail ?? "").includes("replica-token resolver"))).toBe(false);
+  });
+
     it("agree: contract resolves the same default name → no shadow row", () => {
       const checks = checkCloudTokenEnv({
         configDir: "/cfg",

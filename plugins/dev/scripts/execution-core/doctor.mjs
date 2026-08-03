@@ -145,9 +145,12 @@ export const mkCheck = (name, status, detail) => ({ name, status, detail });
 // shadow exists to detect. Throw-safe by the same B1 discipline: a throwing
 // mode resolver degrades to undefined (= the engine's non-cloud path), never
 // a crash.
-function resolveDeploymentModeForShadow() {
+function resolveDeploymentModeForShadow(env = process.env) {
   try {
-    return resolveDeploymentMode();
+    // #2916 round-3 (Codex P2): resolve from the SAME env the secrets resolve
+    // from — a caller-injected env must drive both halves of the shadow, or a
+    // fixture env declaring cloud would resolve secrets under the HOST's mode.
+    return resolveDeploymentMode({ env });
   } catch {
     return undefined;
   }
@@ -165,11 +168,25 @@ function safeResolveSecretContract(resolveFn, secretId, opts) {
 // (comparison-based and direct-read alike): LOUD STATUS.INFO, names the
 // secret, quotes the resolver's error, and says explicitly the grade is
 // unaffected — never silenced, never a grade change.
+// shadowErrString — coercion-safe rendering of a caught throw (#2916 round-3
+// Codex P3): a resolver may legally throw a Symbol or a null-prototype object,
+// and interpolating those into a template literal itself throws — which would
+// defeat the very throw-isolation this path exists for.
+function shadowErrString(err) {
+  try {
+    const m = err?.message;
+    if (typeof m === "string" && m) return m;
+    return String(err);
+  } catch {
+    return Object.prototype.toString.call(err);
+  }
+}
+
 function shadowThrowCheck(checkName, secretId, err) {
   return mkCheck(
     `${checkName}-secret-contract-shadow`,
     STATUS.INFO,
-    `SHADOW RESOLVER THREW secret="${secretId}": ${err?.message ?? err} — shadow disabled for this check, grade unaffected`,
+    `SHADOW RESOLVER THREW secret="${secretId}": ${shadowErrString(err)} — shadow disabled for this check, grade unaffected`,
   );
 }
 
@@ -190,7 +207,7 @@ function shadowThrowCheck(checkName, secretId, err) {
 // resolver call itself is isolated via safeResolveSecretContract (B1) — a
 // throwing resolver surfaces as a shadowThrowCheck INFO row instead of
 // propagating up through the caller.
-function buildContractShadowCheck({ checkName, secretId, handRolled, resolveSecretContract, env = process.env, deploymentMode = resolveDeploymentModeForShadow() }) {
+function buildContractShadowCheck({ checkName, secretId, handRolled, resolveSecretContract, env = process.env, deploymentMode = resolveDeploymentModeForShadow(env) }) {
   const resolution = safeResolveSecretContract(resolveSecretContract, secretId, { env, deploymentMode });
   if (!resolution.ok) return shadowThrowCheck(checkName, secretId, resolution.error);
   const contractResolved = resolution.value;
@@ -2483,6 +2500,13 @@ export function checkCloudTokenEnv(deps = {}) {
     // → default). Consulted and COMPARED below, never used to decide this
     // check's grade — stays INFO-only (design §7).
     resolveSecretContract = resolveSecret,
+    // #2916 round-3 (Codex P2): the OTHER hand-rolled cloud-token name path —
+    // checkCloudSync's replica-token presence check resolves its env-var name
+    // via resolveNodeCloudTokenEnv(), which can diverge from the contract
+    // (e.g. a CATALYST_MACHINE_CONFIG pointer vs the home Layer-2). Shadowed
+    // here alongside the literal-name comparison so a clean shadow cycle
+    // cannot mask that divergence.
+    resolveReplicaTokenEnv = resolveNodeCloudTokenEnv,
   } = deps;
   const checks = [];
 
@@ -2494,22 +2518,47 @@ export function checkCloudTokenEnv(deps = {}) {
   // wrap rather than going through buildContractShadowCheck — a throwing
   // resolver surfaces as a shadowThrowCheck INFO row instead of crashing
   // this check.
-  let cloudShadowCheck = null;
+  const cloudShadowChecks = [];
   const contractResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
     env: process.env,
     deploymentMode: resolveDeploymentModeForShadow(),
   });
   if (!contractResolution.ok) {
-    cloudShadowCheck = shadowThrowCheck("cloud-token", "cloud-token", contractResolution.error);
+    cloudShadowChecks.push(shadowThrowCheck("cloud-token", "cloud-token", contractResolution.error));
   } else {
     const contractResolved = contractResolution.value;
     if (typeof contractResolved?.envVar === "string" && contractResolved.envVar !== "CATALYST_CLOUD_TOKEN") {
-      cloudShadowCheck = mkCheck(
-        "cloud-token-secret-contract-shadow",
-        STATUS.INFO,
-        `SHADOW DISAGREEMENT secret="cloud-token": hand-rolled hardcodes env-var name ` +
-          `"CATALYST_CLOUD_TOKEN" but the contract resolves "${contractResolved.envVar}" ` +
-          `(source=${contractResolved.envVarSource ?? "unknown"}) — never changes this check's grade or exit code`,
+      cloudShadowChecks.push(
+        mkCheck(
+          "cloud-token-secret-contract-shadow",
+          STATUS.INFO,
+          `SHADOW DISAGREEMENT secret="cloud-token": hand-rolled hardcodes env-var name ` +
+            `"CATALYST_CLOUD_TOKEN" but the contract resolves "${contractResolved.envVar}" ` +
+            `(source=${contractResolved.envVarSource ?? "unknown"}) — never changes this check's grade or exit code`,
+        ),
+      );
+    }
+    // Second comparison (#2916 round-3): contract name vs checkCloudSync's
+    // replica-token name path. Throw-safe like every shadow call.
+    let replicaName = null;
+    try {
+      replicaName = resolveReplicaTokenEnv();
+    } catch (err) {
+      cloudShadowChecks.push(shadowThrowCheck("cloud-token-replica-name", "cloud-token", err));
+    }
+    if (
+      typeof contractResolved?.envVar === "string" &&
+      typeof replicaName === "string" &&
+      replicaName !== contractResolved.envVar
+    ) {
+      cloudShadowChecks.push(
+        mkCheck(
+          "cloud-token-secret-contract-shadow",
+          STATUS.INFO,
+          `SHADOW DISAGREEMENT secret="cloud-token": replica-token resolver (resolveNodeCloudTokenEnv) ` +
+            `resolves env-var name "${replicaName}" but the contract resolves "${contractResolved.envVar}" ` +
+            `(source=${contractResolved.envVarSource ?? "unknown"}) — never changes this check's grade or exit code`,
+        ),
       );
     }
   }
@@ -2531,7 +2580,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
       ),
     );
-    if (cloudShadowCheck) checks.push(cloudShadowCheck);
+    checks.push(...cloudShadowChecks);
     return checks;
   }
 
@@ -2551,7 +2600,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cloud token decrypted but NOT projected to ~/.config/catalyst/cluster.env — run 'catalyst-stack sync-cloud-env'",
       ),
     );
-    if (cloudShadowCheck) checks.push(cloudShadowCheck);
+    checks.push(...cloudShadowChecks);
     return checks;
   }
   if (!clusterEnv.includes(expected)) {
@@ -2562,7 +2611,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cluster.env CATALYST_CLOUD_TOKEN is STALE vs cluster-cloud.json — run 'catalyst-stack sync-cloud-env' and restart cloud daemons",
       ),
     );
-    if (cloudShadowCheck) checks.push(cloudShadowCheck);
+    checks.push(...cloudShadowChecks);
     return checks;
   }
 
@@ -2580,7 +2629,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cluster.env present but ~/.zshenv lacks the source-guard — shells (and shell-launched cloud daemons) won't inherit CATALYST_CLOUD_TOKEN",
       ),
     );
-    if (cloudShadowCheck) checks.push(cloudShadowCheck);
+    checks.push(...cloudShadowChecks);
     return checks;
   }
 
@@ -2591,7 +2640,7 @@ export function checkCloudTokenEnv(deps = {}) {
       "cluster cloud token projected to machine-level env (cluster.env + ~/.zshenv guard)",
     ),
   );
-  if (cloudShadowCheck) checks.push(cloudShadowCheck);
+  checks.push(...cloudShadowChecks);
   return checks;
 }
 
@@ -3537,7 +3586,7 @@ export async function checkDeploymentModeConsistency(deps = {}) {
 // this PR only proves the contract can be consulted safely, side by side with
 // every hand-rolled reader, without changing a single grade.
 export function checkSecretContract(deps = {}) {
-  const { env = process.env, deploymentMode = resolveDeploymentModeForShadow(), resolveSecretFn = resolveSecret } = deps;
+  const { env = process.env, deploymentMode = resolveDeploymentModeForShadow(env), resolveSecretFn = resolveSecret } = deps;
   const checks = [];
   for (const id of ["linear-api-token", "groq-api-key"]) {
     // CTL-1616 PR2 (B1): isolated via safeResolveSecretContract — a throwing
