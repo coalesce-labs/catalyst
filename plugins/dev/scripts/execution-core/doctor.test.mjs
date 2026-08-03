@@ -714,6 +714,23 @@ describe("checkWebhookIngestion", () => {
     expect(checks[0].status).toBe(STATUS.PASS);
   });
 
+  it("GitHub: custom webhookSecretEnv set to EMPTY string, CATALYST_SMEE_SECRET set → FAIL (?? parity: empty primary does NOT fall through)", () => {
+    // Runtime webhook-config.ts:429 is `process.env[name] ?? CATALYST_SMEE_SECRET ?? ""`.
+    // An empty (but defined) primary is not nullish, so `??` short-circuits to "" and
+    // the route is DISABLED (secret.length === 0) — the SMEE fallback is never reached.
+    // A `||`-of-length chain would wrongly pick up SMEE and false-PASS here.
+    process.env.GH_WH_CUSTOM = ""; // explicitly empty
+    process.env.CATALYST_SMEE_SECRET = "legacy-hmac";
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "GH_WH_CUSTOM",
+      secretFileNonEmpty: noSecrets,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("NO webhook route");
+  });
+
   it("PASSes a multiHost node with a keyed Linear route fully wired", () => {
     const checks = checkWebhookIngestion({
       resolveRoster: multiHost,
@@ -760,6 +777,27 @@ describe("checkWebhookIngestion", () => {
       secretFileNonEmpty: noSecrets,
     });
     expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("Linear: per-key env set to EMPTY string, no global → FAIL half-wired (?? parity: empty per-key does NOT fall through)", () => {
+    // resolveSecret (webhook-config.ts:157-171) is
+    // `(perKeyEnv) ?? CATALYST_LINEAR_WEBHOOK_SECRET ?? ""`. An empty (defined)
+    // per-key var short-circuits to "" and the key is dropped — the global is
+    // never reached. Here there is no global either, so the key is dangling.
+    process.env.LIN_WH_CUSTOM = ""; // explicitly empty
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" }, // github wired so failure is the dangling key
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
+      },
+      githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
+      linearSecretEnvName: "LIN_WH_CUSTOM",
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // github ok, ctl absent everywhere
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("half-wired");
+    expect(checks[0].detail).toContain("ctl");
   });
 
   it("Linear: no file, per-key env name configured but unset, no global → FAIL half-wired", () => {

@@ -977,9 +977,15 @@ export function checkWebhookIngestion(deps = {}) {
   // the CTL-1612 projection lifts the on-disk `webhook-secret` file into the
   // DEFAULT name only, so the file is a valid proxy solely for the default. CTL-1618.
   const ghSmee = typeof m.github?.smeeChannel === "string" ? m.github.smeeChannel : "";
+  // Resolve the env secret with the SAME `??` chain as the runtime
+  // (webhook-config.ts:429): `process.env[name] ?? CATALYST_SMEE_SECRET ?? ""`.
+  // `??` (not `||`) matters — an env var explicitly set to "" is NOT nullish, so
+  // it short-circuits and the legacy CATALYST_SMEE_SECRET fallback is NOT reached,
+  // exactly as the monitor computes it. A prior `||`-of-length chain would let an
+  // empty primary fall through to a set SMEE secret and falsely report the route
+  // wired when the runtime disables it (secret.length === 0). CTL-1618.
   const ghEnvSecret =
-    (process.env[githubSecretEnvName] ?? "").length > 0 ||
-    (process.env.CATALYST_SMEE_SECRET ?? "").length > 0;
+    (process.env[githubSecretEnvName] ?? process.env.CATALYST_SMEE_SECRET ?? "").length > 0;
   const ghFileSecret =
     githubSecretEnvName === "CATALYST_WEBHOOK_SECRET" &&
     secretFileNonEmpty(configDir, "webhook-secret");
@@ -997,15 +1003,21 @@ export function checkWebhookIngestion(deps = {}) {
       typeof e.webhookId === "string" && e.webhookId.length > 0
     );
   });
-  // Linear per-key secret resolved as webhook-config.ts:157-171 does:
-  // file → per-key env (linearWebhookSecretEnv) → global CATALYST_LINEAR_WEBHOOK_SECRET. CTL-1618.
+  // Linear per-key secret resolved as webhook-config.ts:157-171 does: file →
+  // per-key env (linearWebhookSecretEnv) → global CATALYST_LINEAR_WEBHOOK_SECRET.
+  // The env leg uses the runtime's exact `??` chain, so an empty-string per-key
+  // env var short-circuits (does NOT fall through to the global) — matching
+  // resolveSecret, which returns "" and drops the key. CTL-1618.
   const keySecretWired = (k) =>
     secretFileNonEmpty(
       configDir,
       k === "workspace" ? "linear-webhook-secret" : `linear-webhook-secret-${k}`,
     ) ||
-    (linearSecretEnvName !== null && (process.env[linearSecretEnvName] ?? "").length > 0) ||
-    (process.env.CATALYST_LINEAR_WEBHOOK_SECRET ?? "").length > 0;
+    (
+      (linearSecretEnvName !== null ? process.env[linearSecretEnvName] : undefined) ??
+      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
+      ""
+    ).length > 0;
   const wiredKeys = webhookKeys.filter(keySecretWired);
   const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
   const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
