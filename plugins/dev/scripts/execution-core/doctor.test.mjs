@@ -684,6 +684,7 @@ describe("checkWebhookIngestion", () => {
 
   it("PASSes a single-host node regardless of monitor config (double-dispatch guard)", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: singleHost,
       monitor: null,
       secretFileNonEmpty: noSecrets,
@@ -695,6 +696,7 @@ describe("checkWebhookIngestion", () => {
 
   it("FAILs a multiHost node with no webhook route enabled", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "" }, linear: {} },
       secretFileNonEmpty: noSecrets,
@@ -706,6 +708,7 @@ describe("checkWebhookIngestion", () => {
 
   it("PASSes a multiHost node with the GitHub route fully wired", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" } },
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
@@ -718,6 +721,7 @@ describe("checkWebhookIngestion", () => {
     // Runtime reads process.env['GH_WH_CUSTOM']; the projection only exports the
     // default CATALYST_WEBHOOK_SECRET, so the file is NOT a valid proxy here.
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "GH_WH_CUSTOM",
@@ -731,6 +735,7 @@ describe("checkWebhookIngestion", () => {
   it("GitHub: custom webhookSecretEnv whose env var IS set → PASS (doctor reads the configured name)", () => {
     process.env.GH_WH_CUSTOM = "hmac-value";
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "GH_WH_CUSTOM",
@@ -743,6 +748,7 @@ describe("checkWebhookIngestion", () => {
   it("GitHub: CATALYST_SMEE_SECRET legacy fallback set (no file, default name unset) → PASS", () => {
     process.env.CATALYST_SMEE_SECRET = "legacy-hmac";
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
@@ -754,6 +760,7 @@ describe("checkWebhookIngestion", () => {
 
   it("GitHub: default name + on-disk file present → PASS (regression guard — projection wires the default)", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
@@ -771,6 +778,7 @@ describe("checkWebhookIngestion", () => {
     process.env.GH_WH_CUSTOM = ""; // explicitly empty
     process.env.CATALYST_SMEE_SECRET = "legacy-hmac";
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "GH_WH_CUSTOM",
@@ -783,6 +791,7 @@ describe("checkWebhookIngestion", () => {
 
   it("PASSes a multiHost node with a keyed Linear route fully wired", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
       secretFileNonEmpty: (_dir, name) => name === "linear-webhook-secret-ctl",
@@ -794,6 +803,7 @@ describe("checkWebhookIngestion", () => {
 
   it("FAILs a multiHost node with a half-wired webhookId (id set, secret file missing)", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       // github route IS wired (so the failure is specifically the dangling key)
       monitor: {
@@ -811,6 +821,7 @@ describe("checkWebhookIngestion", () => {
   it("Linear: keyed webhook wired purely via per-key linearWebhookSecretEnv env var → PASS", () => {
     process.env.LIN_WH_CUSTOM = "lin-hmac";
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
       linearSecretEnvName: "LIN_WH_CUSTOM",
@@ -824,6 +835,7 @@ describe("checkWebhookIngestion", () => {
   it("Linear: per-key env name configured but empty, global CATALYST_LINEAR_WEBHOOK_SECRET set → PASS", () => {
     process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "global-hmac";
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
       linearSecretEnvName: "LIN_WH_CUSTOM", // set as a name, but the var itself is unset
@@ -840,6 +852,7 @@ describe("checkWebhookIngestion", () => {
     // never reached. Here there is no global either, so the key is dangling.
     process.env.LIN_WH_CUSTOM = ""; // explicitly empty
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: {
         github: { smeeChannel: "https://smee.io/GH" }, // github wired so failure is the dangling key
@@ -857,6 +870,7 @@ describe("checkWebhookIngestion", () => {
 
   it("Linear: no file, per-key env name configured but unset, no global → FAIL half-wired", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: {
         github: { smeeChannel: "https://smee.io/GH" }, // github wired so failure is the dangling key
@@ -874,6 +888,7 @@ describe("checkWebhookIngestion", () => {
 
   it("PASSes when all routes and keyed secrets resolve", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: {
         github: { smeeChannel: "https://smee.io/GH" },
@@ -2366,6 +2381,98 @@ describe("checksForClass — checkSecretContract registration (CTL-1616 PR2)", (
 // NOTHING — every disagreement surfaces as an extra INFO row; every agreement
 // surfaces nothing extra. These tests prove both halves plus the invariant
 // that grades/exit-code are IDENTICAL either way.
+describe("checkWebhookIngestion — deployment-mode alignment (CTL-1617, #2913 Codex P1)", () => {
+  // Hermeticity: the linear/github env legs read process.env directly — an
+  // ambient CATALYST_LINEAR_WEBHOOK_SECRET would wire the half-wired fixture.
+  const MODE_ALIGN_ENVS = [
+    "CATALYST_WEBHOOK_SECRET",
+    "CATALYST_SMEE_SECRET",
+    "CATALYST_LINEAR_WEBHOOK_SECRET",
+    "CATALYST_DEPLOYMENT_MODE",
+  ];
+  let savedModeAlignEnv = {};
+  beforeEach(() => {
+    savedModeAlignEnv = {};
+    for (const k of MODE_ALIGN_ENVS) {
+      savedModeAlignEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+  afterEach(() => {
+    for (const k of MODE_ALIGN_ENVS) {
+      if (savedModeAlignEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedModeAlignEnv[k];
+    }
+  });
+  const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const NO_ROUTE_DEPS = {
+    resolveRoster: multiHost,
+    monitor: { github: {}, linear: {} },
+    secretFileNonEmpty: () => false,
+    resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+  };
+  const mode = (m, extra = {}) => ({ mode: m, source: "layer1", inferred: false, recognized: true, ...extra });
+
+  it("declared single-host: multiHost roster + no route is the ALIGNED PASS", () => {
+    const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("single-host") });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.PASS);
+    expect(primary.detail).toContain('declared deployment mode "single-host"');
+    expect(primary.detail).toContain("intentionally not wired");
+  });
+
+  it("declared cloud: same aligned PASS (wire iff cluster, not skip iff single-host)", () => {
+    const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("cloud") });
+    expect(checks.find((c) => c.name === "webhook-ingestion").status).toBe(STATUS.PASS);
+  });
+
+  it("declared CLUSTER keeps the FAIL — the missed-activation-step-2b signal must survive", () => {
+    const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("cluster") });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.FAIL);
+    expect(primary.detail).toContain("NO webhook route");
+  });
+
+  it("inferred mode keeps the FAIL — pre-migration guarantee unchanged", () => {
+    const checks = checkWebhookIngestion({
+      ...NO_ROUTE_DEPS,
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+    });
+    expect(checks.find((c) => c.name === "webhook-ingestion").status).toBe(STATUS.FAIL);
+  });
+
+  it("throwing mode resolver degrades to the FAIL (grading fails closed)", () => {
+    const checks = checkWebhookIngestion({
+      ...NO_ROUTE_DEPS,
+      resolveDeploymentModeFn: () => {
+        throw new Error("resolver exploded");
+      },
+    });
+    expect(checks.find((c) => c.name === "webhook-ingestion").status).toBe(STATUS.FAIL);
+  });
+
+  it("half-wired Linear webhooks stay FAIL even under a declared non-cluster mode (config residue is an error)", () => {
+    // github route wired (so the no-route alignment branch is NOT taken),
+    // linear key dangling — the half-wired FAIL must survive the declared
+    // non-cluster mode: partially-present config is an error, only the
+    // fully-absent route is the aligned state.
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" },
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
+      },
+      secretFileNonEmpty: (dir, name) => name === "webhook-secret",
+      linearSecretEnvName: null,
+      resolveSecretContract: () => ({ value: "x", source: "file", provider: "bare-file" }),
+      resolveDeploymentModeFn: () => mode("single-host"),
+    });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.FAIL);
+    expect(primary.detail).toContain("half-wired");
+  });
+});
+
 describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
   describe("checkPeerUniqueness", () => {
     const base = {
@@ -2476,7 +2583,13 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
         // honor CATALYST_CONFIG_DIR via secretFileCandidates and finds the file above.
       });
       const primary = checks.find((c) => c.name === "webhook-ingestion");
-      expect(primary.status).toBe(STATUS.FAIL); // unchanged: hand-rolled still sees no secret
+      // CTL-1617 mode-alignment: this fixture pins CATALYST_DEPLOYMENT_MODE=
+      // single-host (declared, recognized), so a multiHost roster with no
+      // route is now the ALIGNED PASS ("intentionally not wired"), not a
+      // FAIL. The point of this test is the shadow divergence row below,
+      // which is unaffected by the primary's grade.
+      expect(primary.status).toBe(STATUS.PASS);
+      expect(primary.detail).toContain("intentionally not wired");
       const shadow = checks.find((c) => c.name === "webhook-ingestion-secret-contract-shadow");
       expect(shadow).toBeDefined();
       expect(shadow.status).toBe(STATUS.INFO);
