@@ -9,14 +9,26 @@
 # on the env token drains the operator's interactive quota fleet-wide (the
 # broker's cache-reconcile board walk was the CTL-1577 RCA).
 #
-# linear_app_actor_auth <daemon-name>
+# linear_app_actor_auth <daemon-name> [target-env-var]
 #   Mints a fresh client_credentials token from
-#   catalyst.linear.bot.orchestrator.{clientId,clientSecret} in the global config
-#   and exports it as LINEAR_API_TOKEN + LINEAR_API_KEY. --noproxy keeps the mint
-#   off the audit MITM (curl can't trust its CA). Fail-open (parity with CTL-785):
-#   a failed mint logs a loud warning and leaves the existing env token intact so
-#   the daemon still starts; a missing orchestrator app config is a silent no-op.
-#   <daemon-name> prefixes the log lines so each daemon's log stays attributable.
+#   catalyst.linear.bot.orchestrator.{clientId,clientSecret} in the global config.
+#   --noproxy keeps the mint off the audit MITM (curl can't trust its CA).
+#   Fail-open (parity with CTL-785): a failed mint logs a loud warning and leaves
+#   the existing env token intact so the daemon still starts; a missing
+#   orchestrator app config is a silent no-op. <daemon-name> prefixes the log
+#   lines so each daemon's log stays attributable.
+#
+#   Default (no target-env-var): exports LINEAR_API_TOKEN + LINEAR_API_KEY —
+#   the broker/execution-core behavior, UNCHANGED.
+#
+#   With <target-env-var>: exports ONLY that variable, leaving
+#   LINEAR_API_TOKEN/LINEAR_API_KEY untouched. CTL-1612: catalyst-monitor uses
+#   this scoped form (target var CATALYST_MONITOR_APP_ACTOR_TOKEN) because the
+#   monitor is two-identity — its inline-reply path (linear-comment.mjs
+#   resolveLinearToken) must keep resolving the OPERATOR's personal token, and a
+#   blanket LINEAR_API_TOKEN export here outranks that resolution (env beats
+#   Layer-2), making every reply 502 bot_identity. Only the monitor's own
+#   self-reads (the peer-heartbeat anchor read) opt into the scoped var.
 #
 # Idempotent-source guard — safe to source multiple times.
 [[ -n "${_CATALYST_LINEAR_APP_ACTOR_SH_LOADED:-}" ]] && return 0
@@ -34,6 +46,7 @@ source "${_LAA_LIB_DIR}/catalyst-secret-contract.sh"
 
 linear_app_actor_auth() {
   local _daemon="${1:?linear_app_actor_auth: daemon name required}"
+  local _target_var="${2:-}"
   local _ocid _ocsec _otok _creds
   catalyst_resolve_secret linear-orchestrator-actor >/dev/null
   _creds="$CATALYST_SECRET_LAST_VALUE"
@@ -63,10 +76,21 @@ linear_app_actor_auth() {
         https://api.linear.app/oauth/token --data @- 2>/dev/null |
       jq -r '.access_token // empty' 2>/dev/null)
     if [[ -n "$_otok" ]]; then
-      export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
-      echo "${_daemon}: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2
+      if [[ -n "$_target_var" ]]; then
+        # Scoped mint: export ONLY the named var — LINEAR_API_TOKEN/LINEAR_API_KEY
+        # are deliberately left untouched (see the header comment above).
+        export "${_target_var}=${_otok}"
+        echo "${_daemon}: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket, scoped to \$${_target_var})" >&2
+      else
+        export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
+        echo "${_daemon}: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2
+      fi
     else
-      echo "${_daemon}: WARNING orchestrator token mint failed — daemon using existing LINEAR_API_TOKEN" >&2
+      if [[ -n "$_target_var" ]]; then
+        echo "${_daemon}: WARNING orchestrator token mint failed — \$${_target_var} not set (self-reads fall back to existing resolution)" >&2
+      else
+        echo "${_daemon}: WARNING orchestrator token mint failed — daemon using existing LINEAR_API_TOKEN" >&2
+      fi
     fi
   fi
 }

@@ -360,10 +360,21 @@ cmd_start() {
   # Authenticate the monitor's own Linear calls (peer-heartbeat anchor read,
   # CTL-1090/CTL-1217) as the Catalyst Orchestrator app-actor, same as the
   # broker/execution-core start paths (CTL-785/CTL-1577) — without this the
-  # monitor process has no LINEAR_API_TOKEN at all and any direct Linear read
+  # monitor process has no app-actor token at all and any direct Linear read
   # it performs (e.g. readPeerHeartbeatsSync) silently fails closed to {}.
+  #
+  # CTL-1612 (Codex P1 follow-up): the monitor is TWO-IDENTITY, unlike the
+  # broker/execution-core. Its inline-reply path (orch-monitor/lib/linear-comment.mjs
+  # resolveLinearToken) resolves env (LINEAR_API_TOKEN/LINEAR_API_KEY) BEFORE the
+  # operator's Layer-2 personal token, and REFUSES to post as the app-actor
+  # (bot_identity gate) — so exporting the mint under LINEAR_API_TOKEN/LINEAR_API_KEY
+  # here, as the broker/execution-core do, would silently 502 every operator inline
+  # reply. Mint into a SCOPED var instead; only the monitor's own self-read
+  # (readPeerHeartbeatsSync, wired in server.ts) consumes it. Personal-token paths
+  # (linear-comment.mjs, inbox-conversation*.mjs, estimate/title fallbacks) are
+  # untouched — they never look at this variable.
   source "$SCRIPT_DIR/lib/linear-app-actor.sh"
-  linear_app_actor_auth "catalyst-monitor"
+  linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
 
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \

@@ -148,12 +148,28 @@ STUB_BUN
 # _CATALYST_SECRET_ENV_SH_LOADED is scrubbed too: it is the shared lib's
 # idempotent-source guard, and an exported one would make cmd_start's `source` a no-op,
 # leaving every projection silently unperformed.
+#
+# CTL-1612 (Codex P2 follow-up): cmd_start now ALSO mints the monitor's scoped
+# app-actor token (linear_app_actor_auth "catalyst-monitor"
+# CATALYST_MONITOR_APP_ACTOR_TOKEN), which resolves
+# catalyst.linear.bot.orchestrator.{clientId,clientSecret} through the shared
+# secret-contract chain and — if creds resolve — POSTs a REAL client_credentials
+# request to https://api.linear.app/oauth/token. Tests 13/14 invoke cmd_start 11
+# times; on a host with real orchestrator creds configured (any dev machine that
+# runs the broker/execution-core) that is 11 live network calls per test run.
+# CATALYST_LAYER2_CONFIG_FILE is checked FIRST in that chain (unconditionally,
+# before CATALYST_MACHINE_CONFIG/XDG/~/.config — catalyst-secret-contract.sh
+# catalyst_secret_resolve_layer2_path), so pinning it to an absent sandbox path
+# seals the read: catalyst_resolve_secret finds no creds, and
+# linear_app_actor_auth's mint block silently no-ops (documented fail-open) —
+# no curl, no export, byte-identical to "orchestrator app not configured".
 run_cmd_start() {
   local root="$1"
   shift
   env -u CATALYST_WEBHOOK_SECRET -u CATALYST_WEBHOOK_SECRET_FILE -u CATALYST_CONFIG_DIR \
     -u GITHUB_TOKEN -u GH_TOKEN -u CATALYST_GITHUB_TOKEN_FILE \
     -u CATALYST_GITHUB_TOKEN_SOURCE -u _CATALYST_SECRET_ENV_SH_LOADED \
+    -u CATALYST_MACHINE_CONFIG -u CATALYST_MONITOR_APP_ACTOR_TOKEN \
     PATH="$root/bin:$PATH" \
     CATALYST_DIR="$root/catalyst" \
     MONITOR_SERVER_SCRIPT="$root/srv/server.ts" \
@@ -161,6 +177,7 @@ run_cmd_start() {
     MONITOR_SKIP_BOOTSTRAP=1 \
     CATALYST_WEBHOOK_SECRET_FILE="$root/absent-webhook-secret" \
     CATALYST_GITHUB_TOKEN_FILE="$root/absent-github-token" \
+    CATALYST_LAYER2_CONFIG_FILE="$root/absent-layer2-config.json" \
     "$@" \
     bash -c '
       source "'"$MONITOR_SH"'" url >/dev/null 2>&1

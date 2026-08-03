@@ -1395,13 +1395,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
     getClusterHosts: () => string[];
     getLivenessAnchorIssue: () => string | null;
     getLokiQueryUrl: () => string | null;
-    readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
+    // CTL-1612: opts.env lets the monitor's own call site (below) hand this
+    // spawnSync a scoped app-actor env WITHOUT mutating process.env globally —
+    // see the readAnchor wrapper in pollAnchorHeartbeats for why.
+    readPeerHeartbeatsSync: (
+      args: { anchorIssue: string },
+      opts?: { env?: NodeJS.ProcessEnv },
+    ) => Record<string, AnchorPeerRec>;
     readClusterLivenessFromLokiSyncCached: (args: {
       lokiUrl: string;
     }) => Record<string, AnchorPeerRec>;
     readStickyIdentity: (args: { dir: string }) => string | null;
     getCatalystRepoDir: () => string;
     deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
+    // CTL-1612 (finding #2): cooldown-gated proactive re-mint of the monitor's
+    // scoped app-actor token (CATALYST_MONITOR_APP_ACTOR_TOKEN). Returns true iff
+    // a fresh token was minted and applied; a no-op within the cooldown window or
+    // with no orchestrator creds configured returns false (fail-open).
+    remintAppActorToken: () => boolean;
   } | null> | null = null;
   const loadDaemonDeps = () => {
     if (!daemonDepsPromise) {
@@ -1412,31 +1423,75 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const heartbeatSyncMod = ["..", "execution-core", "cluster-heartbeat-sync.mjs"].join("/");
           const lokiSyncMod = ["..", "execution-core", "loki-liveness-sync.mjs"].join("/");
           const hostStickyMod = ["..", "execution-core", "host-sticky.mjs"].join("/");
-          const [recovery, config, heartbeatSync, lokiSync, hostSticky, navSignal] = await Promise.all([
-            import(recoveryMod) as Promise<{
-              readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
-              readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
-            }>,
-            import(configMod) as Promise<{
-              getHostName: () => string;
-              getClusterHosts: () => string[];
-              getLivenessAnchorIssue: () => string | null;
-              getLokiQueryUrl: () => string | null;
-              getCatalystRepoDir: () => string;
-            }>,
-            import(heartbeatSyncMod) as Promise<{
-              readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
-            }>,
-            import(lokiSyncMod) as Promise<{
-              readClusterLivenessFromLokiSyncCached: (args: {
-                lokiUrl: string;
-              }) => Record<string, AnchorPeerRec>;
-            }>,
-            import(hostStickyMod) as Promise<{
-              readStickyIdentity: (args: { dir: string }) => string | null;
-            }>,
-            import("./lib/nav-signal.mjs"),
-          ]);
+          // CTL-1612 (finding #2): the same re-mint machinery execution-core/broker
+          // already use for a mid-run 401 (linear-remint.mjs), loaded lazily
+          // alongside the other execution-core deps (VITE-GRAPH GUARD).
+          const linearRemintMod = ["..", "execution-core", "linear-remint.mjs"].join("/");
+          const [recovery, config, heartbeatSync, lokiSync, hostSticky, navSignal, linearRemint] =
+            await Promise.all([
+              import(recoveryMod) as Promise<{
+                readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
+                readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
+              }>,
+              import(configMod) as Promise<{
+                getHostName: () => string;
+                getClusterHosts: () => string[];
+                getLivenessAnchorIssue: () => string | null;
+                getLokiQueryUrl: () => string | null;
+                getCatalystRepoDir: () => string;
+              }>,
+              import(heartbeatSyncMod) as Promise<{
+                readPeerHeartbeatsSync: (
+                  args: { anchorIssue: string },
+                  opts?: { env?: NodeJS.ProcessEnv },
+                ) => Record<string, AnchorPeerRec>;
+              }>,
+              import(lokiSyncMod) as Promise<{
+                readClusterLivenessFromLokiSyncCached: (args: {
+                  lokiUrl: string;
+                }) => Record<string, AnchorPeerRec>;
+              }>,
+              import(hostStickyMod) as Promise<{
+                readStickyIdentity: (args: { dir: string }) => string | null;
+              }>,
+              import("./lib/nav-signal.mjs"),
+              import(linearRemintMod) as Promise<{
+                createReminter: (opts?: {
+                  readCreds?: () => { clientId: string; clientSecret: string } | null;
+                  applyToken?: (token: string) => void;
+                  cooldownMs?: number;
+                  logger?: {
+                    warn: (obj: unknown, msg: string) => void;
+                    info: (obj: unknown, msg: string) => void;
+                  };
+                }) => { attempt: (now?: number) => boolean };
+                readOrchestratorCreds: () => { clientId: string; clientSecret: string } | null;
+              }>,
+            ]);
+          // CTL-1612 (finding #2): proactive, cooldown-gated re-mint of the
+          // monitor's SCOPED app-actor token (never LINEAR_API_TOKEN/LINEAR_API_KEY
+          // — see the CATALYST_MONITOR_APP_ACTOR_TOKEN comment in catalyst-monitor.sh
+          // cmd_start). This substitutes for a REACTIVE on-401 re-mint (the pattern
+          // broker/cache-reconcile.mjs uses via isAuthError(...)) because it is not
+          // available here: the anchor "read" subcommand
+          // (execution-core/cluster-heartbeat.mjs readPeerHeartbeats, called from
+          // runCli's "read" case) catches EVERY post() failure — including an
+          // expired-token 401 — and still writes `{}` + exits 0, so there is no
+          // stderr/exit-code signal this call site could react to. A cooldown
+          // (default 45min, comfortably inside Linear's OAuth token lifetime) keeps
+          // the real mint call cheap even though it is checked on every poll tick.
+          const monitorAppActorReminter = linearRemint.createReminter({
+            readCreds: linearRemint.readOrchestratorCreds,
+            applyToken: (token: string) => {
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN = token;
+            },
+            cooldownMs:
+              Number(process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS) || 45 * 60_000,
+            logger: {
+              warn: (_obj: unknown, msg: string) => console.warn(`[server] ${msg}`),
+              info: (_obj: unknown, msg: string) => console.info(`[server] ${msg}`),
+            },
+          });
           return {
             readClusterHeartbeats: recovery.readClusterHeartbeats,
             readClusterAdmission: recovery.readClusterAdmission,
@@ -1449,6 +1504,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
             readStickyIdentity: hostSticky.readStickyIdentity,
             getCatalystRepoDir: config.getCatalystRepoDir,
             deriveDaemonHealth: navSignal.deriveDaemonHealth,
+            remintAppActorToken: () => monitorAppActorReminter.attempt(),
           };
         } catch {
           return null; // execution-core unavailable → degrade to offline
@@ -1712,7 +1768,26 @@ export function createServer(opts: CreateServerOptions): BunServer {
         lokiUrl: explicitLokiUrl ?? lokiUrl ?? cfgLokiUrl ?? null,
         anchorIssue: execCoreDeps.getLivenessAnchorIssue(),
         readLoki: execCoreDeps.readClusterLivenessFromLokiSyncCached,
-        readAnchor: execCoreDeps.readPeerHeartbeatsSync,
+        // CTL-1612: re-mint (cooldown-gated, cheap no-op most ticks — see the
+        // comment on remintAppActorToken above) before every anchor read, then
+        // layer the scoped app-actor token (CATALYST_MONITOR_APP_ACTOR_TOKEN)
+        // onto a COPY of process.env for just this subprocess call. This never
+        // touches the real process.env.LINEAR_API_TOKEN/LINEAR_API_KEY, so
+        // linear-comment.mjs's operator-token resolution is untouched. Absent a
+        // scoped token (mint never succeeded), falls back to plain process.env —
+        // i.e. whatever this call would have resolved before CTL-1612.
+        readAnchor: (args: { anchorIssue: string }) => {
+          try {
+            execCoreDeps?.remintAppActorToken();
+          } catch {
+            /* fail-open: keep whatever scoped token (if any) is already set */
+          }
+          const scoped = process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN?.trim();
+          const anchorEnv = scoped
+            ? { ...process.env, LINEAR_API_TOKEN: scoped, LINEAR_API_KEY: scoped }
+            : process.env;
+          return execCoreDeps?.readPeerHeartbeatsSync(args, { env: anchorEnv }) ?? {};
+        },
       }) as { peers: Record<string, AnchorPeerRec> | null; source: string };
       // CTL-1551: remember which transport ACTUALLY served this poll — the
       // liveness window resolver budgets by real transport, not by env intent
