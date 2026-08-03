@@ -33,6 +33,7 @@ import {
   checkNodeClass,
   checkDeploymentModeConsistency,
   checkSecretContract,
+  checkLayer2PathDivergence,
   checkReadReplicaReachable,
   checkMonitorProductionBuild,
   checkWontOwnWork,
@@ -2498,6 +2499,36 @@ describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)"
   });
 });
 
+describe("checkLayer2PathDivergence (#2930 round-2)", () => {
+  it("returns zero rows when the chains agree (every live host)", () => {
+    expect(checkLayer2PathDivergence({ env: {} })).toHaveLength(0);
+    expect(
+      checkLayer2PathDivergence({ env: { CATALYST_LAYER2_CONFIG_FILE: "/pin/config.json" } }),
+    ).toHaveLength(0);
+  });
+
+  it("FAILs a MACHINE_CONFIG-divergent host, naming both paths and the CATALYST_LAYER2_CONFIG_FILE pin", () => {
+    const checks = checkLayer2PathDivergence({
+      env: { CATALYST_MACHINE_CONFIG: "/machine/split-test/config.json" },
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("/machine/split-test/config.json");
+    expect(checks[0].detail).toContain("CATALYST_LAYER2_CONFIG_FILE");
+  });
+
+  it("fails OPEN (zero rows) when a resolver throws", () => {
+    expect(
+      checkLayer2PathDivergence({
+        env: {},
+        canonicalPathFn: () => {
+          throw new Error("boom");
+        },
+      }),
+    ).toHaveLength(0);
+  });
+});
+
 describe("checkSecretContract (CTL-1616 PR2)", () => {
   it("emits one INFO observation per shadow-covered secret id (linear-api-token, groq-api-key)", () => {
     const checks = checkSecretContract({
@@ -2803,6 +2834,8 @@ describe("secret-contract cutover — checkPeerUniqueness/checkBotCredentials (C
         const connectivity = checks.find((c) => c.name === "linear-connectivity");
         expect(connectivity.status).toBe(STATUS.PASS);
       } finally {
+        if (savedMode === undefined) delete process.env.CATALYST_DEPLOYMENT_MODE;
+        else process.env.CATALYST_DEPLOYMENT_MODE = savedMode;
         if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
         else process.env.LINEAR_API_TOKEN = savedToken;
         if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
