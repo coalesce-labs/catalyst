@@ -1118,6 +1118,13 @@ export function checkWebhookIngestion(deps = {}) {
     // ~/.config/catalyst, ignoring CATALYST_CONFIG_DIR / CATALYST_LAYER2_CONFIG_FILE
     // / XDG overrides that secretFileCandidates (and so resolveSecret) honors.
     resolveSecretContract = resolveSecret,
+    // CTL-1617 mode-alignment (#2913 Codex P1): the join's webhook-wiring gate
+    // now skips wiring when a RECOGNIZED non-cluster mode is declared — so a
+    // multiHost-roster node with no route is CONSISTENT config on such a node,
+    // not a failure. Injectable for tests; a throwing resolver degrades to
+    // undefined = the pre-alignment FAIL behavior (grading must fail closed,
+    // unlike the INFO-only shadow's throw handling).
+    resolveDeploymentModeFn = resolveDeploymentMode,
   } = deps;
 
   const roster = resolveRoster();
@@ -1199,6 +1206,35 @@ export function checkWebhookIngestion(deps = {}) {
   const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
 
   if (!githubWired && !linearWired) {
+    // Mode-alignment: a DECLARED (recognized, not inferred) non-cluster mode
+    // means the join gate intentionally skipped wiring — no-route is the
+    // correct state, and the mode/roster mismatch itself is graded by the
+    // deployment-mode checks, not here. Everything else — declared cluster,
+    // inferred/absent mode, or an unresolvable mode — keeps the FAIL: on a
+    // declared-cluster node this FAIL is the intentional loud signal for a
+    // missed activation step 2b (docs/cluster-onboarding.md), and a
+    // pre-migration node must keep its original guarantee.
+    let declaredMode;
+    try {
+      declaredMode = resolveDeploymentModeFn();
+    } catch {
+      declaredMode = undefined;
+    }
+    if (
+      declaredMode &&
+      declaredMode.inferred === false &&
+      declaredMode.recognized === true &&
+      declaredMode.mode !== "cluster"
+    ) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.PASS,
+          `declared deployment mode "${declaredMode.mode}" (source=${declaredMode.source}) — webhook ingestion intentionally not wired despite multiHost roster; the mode/roster mismatch is graded by the deployment-mode checks`,
+        ),
+        ...webhookShadow,
+      ];
+    }
     return [
       mkCheck(
         "webhook-ingestion",
