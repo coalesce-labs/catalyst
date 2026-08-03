@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import {
   STATUS,
@@ -2515,6 +2515,24 @@ describe("checkLayer2PathDivergence (#2930 round-2)", () => {
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("/machine/split-test/config.json");
     expect(checks[0].detail).toContain("CATALYST_LAYER2_CONFIG_FILE");
+  });
+
+  it("does NOT fail on an alias-equivalent spelling of the same file (#2931 round-2)", () => {
+    const home = homedir();
+    const checks = checkLayer2PathDivergence({
+      env: {
+        CATALYST_MACHINE_CONFIG: join(home, ".config", "catalyst", "..", "catalyst", "config.json"),
+      },
+    });
+    expect(checks).toHaveLength(0);
+  });
+
+  it("names the machine-wide pin requirement in the remedy (shell-only export is not enough)", () => {
+    const checks = checkLayer2PathDivergence({
+      env: { CATALYST_MACHINE_CONFIG: "/machine/split-test/config.json" },
+    });
+    expect(checks[0].detail).toContain("MACHINE-WIDE");
+    expect(checks[0].detail).toContain("execution-core.env");
   });
 
   it("fails OPEN (zero rows) when a resolver throws", () => {

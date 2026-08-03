@@ -3531,8 +3531,12 @@ export function checkLayer2PathDivergence(deps = {}) {
   let legacyPath;
   let canonicalPath;
   try {
-    legacyPath = legacyPathFn();
-    canonicalPath = canonicalPathFn();
+    // #2931 round-2 (Codex P2): NORMALIZE before comparing — an equivalent
+    // absolute spelling (e.g. "$HOME/.config/catalyst/../catalyst/config.json")
+    // reaches the same file through both chains; a raw string compare would
+    // FAIL a valid host and block its catalyst-join activation gate.
+    legacyPath = resolve(legacyPathFn());
+    canonicalPath = resolve(canonicalPathFn());
   } catch {
     return []; // fail-open: a throwing resolver must not invent a divergence
   }
@@ -3547,7 +3551,10 @@ export function checkLayer2PathDivergence(deps = {}) {
         `and cloud-token name resolution) — a credential rotation would land where half the ` +
         `readers never look. This CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME-divergent layout is ` +
         `unsupported until the canonical reader/writer sweep; set CATALYST_LAYER2_CONFIG_FILE ` +
-        `(tier 1 of BOTH chains) to pin every reader and writer to one file`,
+        `(tier 1 of BOTH chains) MACHINE-WIDE — e.g. in the durable execution-core.env the ` +
+        `daemons source — not just the invoking shell: supervised launchd services do not ` +
+        `inherit a shell-only export, so a shell-scoped pin would pass this check while the ` +
+        `running services still split (see #2931 review; the full remedy is the CTL-1624 sweep)`,
     ),
   ];
 }
