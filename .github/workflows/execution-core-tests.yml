@@ -257,6 +257,22 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/migrate-dual-harness.test.sh
 
+      - name: catalyst-runtime-root Bash resolver unit tests (CTL-1628 Phase A2)
+        # Pins lib/catalyst-runtime-root.sh's catalyst_dev_scripts (probe order,
+        # sentinel, sort -V newest-wins, LOUD miss), catalyst_plugin_root (Q3
+        # ancestor walk), and catalyst_runtime_layout classification. Was
+        # previously unwired (no allowlist entry) so this contract had no CI guard.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-runtime-root.test.sh
+
+      - name: catalyst-runtime-root mjs resolver unit tests (bun, CTL-1628 Phase A2)
+        # The .mjs twin of the suite above. Own step (not the "Run stable unit
+        # tests" allowlist below) because that step's working-directory is
+        # execution-core/ and this lib is a deliberately zero-import leaf
+        # outside that tree (mirrors the deployment-mode step's own rationale).
+        working-directory: plugins/dev/scripts/lib
+        run: bun test catalyst-runtime-root.test.mjs
+
       - name: deployment-mode resolver unit tests (bun, CTL-1617)
         # Codex remediation: neither of the three deployment-mode suites was
         # named anywhere in this workflow (nor any other), so required CI
