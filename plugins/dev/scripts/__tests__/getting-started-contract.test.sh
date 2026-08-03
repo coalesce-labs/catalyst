@@ -44,7 +44,7 @@ assert_doc_has "index: install-cli step has a not-found guard" \
 
 # CTL-1386 — index cross-links the consolidated CLI command reference
 assert_doc_has "index: cross-links the consolidated CLI reference (CTL-1386)" \
-  "$GS/index.md" "/reference/cli/"
+  "$GS/index.md" "/reference/catalyst-cli/"
 
 # Issue 8 — qualified skill name
 assert_doc_has "index: try-it uses qualified skill name" \
