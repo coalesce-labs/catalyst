@@ -2542,9 +2542,11 @@ describe("checkLayer2PathDivergence (#2930 round-2)", () => {
       env: { CATALYST_MACHINE_CONFIG: "/machine/split-test/config.json" },
     });
     expect(checks[0].detail).toContain("EVERY supervised service");
-    // Prefix-agnostic ticket matcher — the assertion itself must not commit a
+    // Prefix-agnostic ticket matcher mirroring the repo's canonical ticket
+    // grammar (ticket-key.mjs TICKET_KEY_RE: one-letter keys, digits and
+    // underscores allowed) — the assertion itself must not commit a
     // repo-specific prefix (the very rule it enforces).
-    expect(checks[0].detail).not.toMatch(/\b[A-Z]{2,}-\d+\b/);
+    expect(checks[0].detail).not.toMatch(/\b[A-Z][A-Z0-9_]*-\d+\b/);
   });
 
   it("fails OPEN (zero rows) when a resolver throws", () => {
