@@ -70,13 +70,30 @@ const DEPLOYMENT_MODE_DEFAULT = "single-host";
 // Mirrors execution-core/config.mjs getLayer2ConfigPath(), but reads the
 // injected `env` (not process.env directly) so the whole resolution stays
 // pure and testable without mutating the real environment.
+//
+// PARITY DECISION — RESOLVE ~ FROM THE INJECTED ENV, NOT THE REAL PROCESS:
+// the final fallback used to call node:os's homedir(), which always reads
+// the REAL process's home directory regardless of what `env` a caller
+// injected. A caller that supplies { env: { HOME: fixtureHome } } — the
+// documented isolation contract this function's own docstring promises —
+// intending to sandbox Layer-2 resolution to a fixture directory would
+// instead have this fallback silently read the ACTUAL current user's
+// machine config and resolve its deployment mode, ignoring the fixture
+// entirely (reproduced: a cloud config under the fixture home was ignored
+// in favor of the real home). Fixed by preferring env.HOME (when it is a
+// non-empty string) over homedir(), so an injected env — the same mechanism
+// resolveLayer1Path and the CATALYST_LAYER2_CONFIG_FILE override above
+// already honor — is honored on this path too. Every production call site
+// still calls resolveDeploymentMode() with no args, so env defaults to
+// process.env and env.HOME is the real user's home exactly as before.
 function resolveLayer2Path(env, layer2ConfigPath) {
   if (typeof layer2ConfigPath === "string" && layer2ConfigPath.length > 0) {
     return layer2ConfigPath;
   }
   const override = env?.CATALYST_LAYER2_CONFIG_FILE;
   if (typeof override === "string" && override.length > 0) return override;
-  return resolve(homedir(), ".config", "catalyst", "config.json");
+  const home = typeof env?.HOME === "string" && env.HOME.length > 0 ? env.HOME : homedir();
+  return resolve(home, ".config", "catalyst", "config.json");
 }
 
 // resolveLayer1Path — an explicit layer1ConfigPath wins; otherwise
@@ -97,9 +114,21 @@ function resolveLayer1Path(env, layer1ConfigPath) {
 // absent/malformed/unreadable OR the key is simply not present — both count
 // as "nothing here, try the next layer" (the readLayer2NodeClass contract,
 // execution-core/config.mjs:312-325). Never throws.
+// UNPAIRED_SURROGATE — a UTF-16 code unit in the surrogate range that is not
+// part of a valid high+low pair. JSON.parse accepts lone-surrogate escapes
+// (`"clu\ud800ster"`) but jq rejects the WHOLE document (exit 5), so the bash
+// mirror can never see such a value. Parity rule: a mode string carrying an
+// unpaired surrogate makes the LAYER malformed in BOTH languages — fall
+// through, exactly as bash does after jq's rejection. Valid surrogate PAIRS
+// (astral characters) parse fine in both and are simply non-members.
+const UNPAIRED_SURROGATE =
+  /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/;
+
 function readDeploymentModeField(filePath) {
   try {
-    return JSON.parse(readFileSync(filePath, "utf8"))?.catalyst?.deployment?.mode;
+    const mode = JSON.parse(readFileSync(filePath, "utf8"))?.catalyst?.deployment?.mode;
+    if (typeof mode === "string" && UNPAIRED_SURROGATE.test(mode)) return undefined;
+    return mode;
   } catch {
     return undefined;
   }
@@ -117,8 +146,12 @@ function readDeploymentModeField(filePath) {
 //   - present but NOT a string (true, 123, [], {}) ⇒ explicit
 //     misconfiguration, never silently absent ⇒ degrade to single-host,
 //     recognized:false, AT this layer's source.
-//   - string ⇒ trim + lowercase. Empty after trim ⇒ treated as cleared ⇒
-//     fall through (mirrors an empty env var).
+//   - string ⇒ ASCII-only trim + lowercase. Empty after trim ⇒ treated as
+//     cleared ⇒ fall through (mirrors an empty env var). The trim is
+//     DELIBERATELY narrower than String.prototype.trim(): bash [[:space:]]
+//     under the C locale cannot see Unicode whitespace, and cross-language
+//     parity beats Unicode hospitality — an NBSP-padded value stays a
+//     non-member and degrades identically on both sides.
 //   - member of DEPLOYMENT_MODES ⇒ recognized:true.
 //   - non-member (typo) ⇒ degrade to single-host, recognized:false, AT this
 //     layer's source — doctor FAILs until corrected.
@@ -129,7 +162,7 @@ function classifyCandidate(raw, source) {
       result: { mode: DEPLOYMENT_MODE_DEFAULT, source, inferred: false, recognized: false, raw },
     };
   }
-  const normalized = raw.trim().toLowerCase();
+  const normalized = raw.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "").toLowerCase();
   if (normalized.length === 0) return { fallthrough: true };
   if (DEPLOYMENT_MODES.includes(normalized)) {
     return { result: { mode: normalized, source, inferred: false, recognized: true, raw } };

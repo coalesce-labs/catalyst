@@ -50,7 +50,10 @@ MISSING="${TMP_DIR}/does-not-exist.json"
 expect_eq "idempotent-source guard set" "1" "${_CATALYST_DEPLOYMENT_MODE_SH_LOADED:-}"
 
 # --- frozen enum -----------------------------------------------------------
-expect_eq "enum is the 3 canonical values" "single-host cluster cloud" "$_CATALYST_DEPLOYMENT_MODES"
+# _CATALYST_DEPLOYMENT_MODES is an array (IFS-independent membership fix,
+# CTL-1617 Codex remediation) — join with "${arr[*]}", not a bare "$arr"
+# (which would only yield the first element).
+expect_eq "enum is the 3 canonical values" "single-host cluster cloud" "${_CATALYST_DEPLOYMENT_MODES[*]}"
 if _catalyst_deployment_mode_is_member "single-host" && _catalyst_deployment_mode_is_member "cluster" \
    && _catalyst_deployment_mode_is_member "cloud"; then
   ok "all three canonical values are members"
@@ -163,6 +166,15 @@ OUT="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_DEPLOYMENT_MODE="cluster" \
   CATALYST_LAYER2_CONFIG_FILE="$MISSING" CATALYST_CONFIG_FILE="$MISSING" \
   bash -c "source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s' \"\$CATALYST_DEPLOYMENT_MODE_INFERRED\"")"
 expect_eq "inferred=false when env settles the question" "false" "$OUT"
+
+# --- F8: enum membership is independent of caller IFS -----------------------
+# A sourcing script running under strict-shell IFS=$'\n\t' (no space) must
+# not break membership: the enum lives in a bash array iterated as
+# "${arr[@]}", so no word-splitting is ever involved.
+OUT="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_DEPLOYMENT_MODE="cluster" \
+  CATALYST_LAYER2_CONFIG_FILE="$MISSING" CATALYST_CONFIG_FILE="$MISSING" \
+  bash -c "IFS=\$'\n\t'; source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s|%s|%s' \"\$CATALYST_DEPLOYMENT_MODE_RESOLVED\" \"\$CATALYST_DEPLOYMENT_MODE_SOURCE\" \"\$CATALYST_DEPLOYMENT_MODE_RECOGNIZED\"")"
+expect_eq "IFS=\$'\\n\\t' in the sourcing shell cannot break enum membership" "cluster|env|true" "$OUT"
 
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"

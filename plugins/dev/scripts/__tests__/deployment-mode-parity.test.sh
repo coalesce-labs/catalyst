@@ -204,5 +204,119 @@ done
 
 echo "Fixture cells run: $CELLS (7 env x 6 layer2 x 4 layer1 = 168; 2 assertions/cell)"
 echo ""
+
+# --- Hostile-probe extensions (Codex remediation on PR #2895, CTL-1617) ---
+#
+# Four divergence classes the 168-cell matrix above never exercised, because
+# each needs a fixture value the matrix's simple string-literal arrays can't
+# hold cleanly: an embedded NUL byte, Unicode (not ASCII) whitespace
+# padding, a syntactically-valid-JSON-PREFIX-then-garbage file, and a
+# JSON escape sequence (a lone UTF-16 surrogate) that only ONE of the two
+# parsers accepts. All four are FIXED and assert bash==node==expected, same
+# shape as the matrix above: the JS resolver was deliberately NARROWED to
+# what bash/jq can match (ASCII-only trim; unpaired-surrogate strings treated
+# as layer-malformed), so every exotic input degrades or falls through
+# IDENTICALLY on both sides. See the LONE-SURROGATE PARITY comment atop
+# _catalyst_deployment_mode_from_file in lib/catalyst-deployment-mode.sh for
+# the full rationale.
+HOSTILE=0
+
+run_bash_probe() {
+  # run_bash_probe [ENV_VAR=VAL ...] -- invokes catalyst_resolve_deployment_mode
+  # against $L2_PATH/$L1_PATH under a hermetic env -i, same shape as the
+  # per-cell BASH_ARGS above.
+  env -i PATH="$PATH" HOME="$HOME" "$@" \
+    CATALYST_LAYER2_CONFIG_FILE="$L2_PATH" CATALYST_CONFIG_FILE="$L1_PATH" \
+    bash -c "source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s|%s|%s|%s' \"\$CATALYST_DEPLOYMENT_MODE_RESOLVED\" \"\$CATALYST_DEPLOYMENT_MODE_SOURCE\" \"\$CATALYST_DEPLOYMENT_MODE_RECOGNIZED\" \"\$CATALYST_DEPLOYMENT_MODE_INFERRED\""
+}
+run_node_probe() {
+  env -i PATH="$PATH" HOME="$HOME" "$@" \
+    CATALYST_LAYER2_CONFIG_FILE="$L2_PATH" CATALYST_CONFIG_FILE="$L1_PATH" \
+    node "$PROBE_JS" 2>&1
+}
+
+# --- Probe 1: NUL-escape in JSON (Layer-2) — FIXED, bash==node==expected ---
+# {"catalyst":{"deployment":{"mode":"c<NUL>loud"}}} — built via jq's own
+# `[0] | implode` (a one-character string whose sole codepoint is 0) rather
+# than a literal escape sequence typed directly into this file, since a
+# JSON \u-style escape cannot survive this file's own authoring toolchain
+# intact (the same reason lib/catalyst-deployment-mode.sh's NUL-BYTE
+# CANDIDATE fix uses the same `[0] | implode` construction). Layer-1 holds a
+# VALID "cluster" so a
+# regression that wrongly falls through (instead of settling degraded at
+# layer2) is caught, not masked by an equally-valid default.
+rm -f "$L2_PATH" "$L1_PATH"
+jq -n '{catalyst:{deployment:{mode: ("c" + ([0] | implode) + "loud")}}}' > "$L2_PATH"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$L1_PATH"
+EXPECTED="single-host|layer2|false|false"
+BASH_OUT="$(run_bash_probe)"
+NODE_OUT="$(run_node_probe)"
+HOSTILE=$((HOSTILE+1))
+expect_eq "hostile: NUL-escape in Layer-2 JSON (bash==expected)" "$EXPECTED" "$BASH_OUT"
+expect_eq "hostile: NUL-escape in Layer-2 JSON (node==expected)" "$EXPECTED" "$NODE_OUT"
+
+# --- Probe 2: NBSP-padded env value — FIXED, bash==node==expected ---
+# CATALYST_DEPLOYMENT_MODE = NBSP + "cluster" + NBSP (U+00A0 on both sides).
+# Built via `[160,...] | implode` for the same authoring reason as Probe 1
+# (NBSP is representable in a bash variable — unlike NUL, env vars can hold
+# it — so it's built once and passed straight through as env, not a file).
+# BOTH trims are ASCII-only by design (parity beats Unicode hospitality), so
+# the NBSP padding survives on both sides, fails enum membership on both
+# sides, and SETTLES degraded at env on both sides.
+rm -f "$L2_PATH" "$L1_PATH"
+NBSP_PADDED_CLUSTER="$(jq -n -r '[160,99,108,117,115,116,101,114,160] | implode')"
+EXPECTED="single-host|env|false|false"
+BASH_OUT="$(run_bash_probe "CATALYST_DEPLOYMENT_MODE=${NBSP_PADDED_CLUSTER}")"
+NODE_OUT="$(run_node_probe "CATALYST_DEPLOYMENT_MODE=${NBSP_PADDED_CLUSTER}")"
+HOSTILE=$((HOSTILE+1))
+expect_eq "hostile: NBSP-padded env value (bash==expected)" "$EXPECTED" "$BASH_OUT"
+expect_eq "hostile: NBSP-padded env value (node==expected)" "$EXPECTED" "$NODE_OUT"
+
+# --- Probe 3: malformed-trailing-content JSON (Layer-2) — FIXED,
+# bash==node==expected --- A syntactically valid object immediately
+# followed by stray non-JSON text. jq can print a tag for the valid PREFIX
+# before erroring on the trailing garbage; the fix discards that partial
+# output rather than concatenating it with a fallback "@ABSENT". Layer-1
+# holds a valid "cluster" so the malformed Layer-2 file must fall all the
+# way through to it.
+rm -f "$L2_PATH" "$L1_PATH"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cloud"}}} this is not valid trailing json' > "$L2_PATH"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$L1_PATH"
+EXPECTED="cluster|layer1|true|false"
+BASH_OUT="$(run_bash_probe)"
+NODE_OUT="$(run_node_probe)"
+HOSTILE=$((HOSTILE+1))
+expect_eq "hostile: malformed-trailing-content Layer-2 JSON (bash==expected)" "$EXPECTED" "$BASH_OUT"
+expect_eq "hostile: malformed-trailing-content Layer-2 JSON (node==expected)" "$EXPECTED" "$NODE_OUT"
+
+# --- Probe 4: lone-surrogate JSON (Layer-2) — FIXED, bash==node==expected ---
+# A JSON string containing an unpaired UTF-16 high surrogate escape
+# ("clu\ud800ster"). jq's parser rejects the escape and fails to parse the
+# WHOLE document (verified: jq-1.7.1 exits 5, "Invalid \uXXXX\uXXXX
+# surrogate pair escape"), so the bash resolver treats the file as @ABSENT
+# and falls through. The JS resolver is deliberately NARROWED to match:
+# readDeploymentModeField treats a mode string carrying an unpaired
+# surrogate as layer-malformed (undefined) — BOTH sides fall through to the
+# valid Layer-1 "cloud". (Valid surrogate PAIRS parse in both languages and
+# are simply non-members — not this case.)
+#
+# The escape is built via a variable-expansion split (a lone backslash in
+# its own variable, concatenated next to a literal "ud800ster") rather than
+# a literal \ud800 escape typed directly in this file's source, for the same
+# authoring-toolchain reason documented at Probe 1.
+rm -f "$L2_PATH" "$L1_PATH"
+# shellcheck disable=SC1003 # genuinely a literal single backslash, not an escape attempt
+BACKSLASH='\'
+printf '%s' "{\"catalyst\":{\"deployment\":{\"mode\":\"clu${BACKSLASH}ud800ster\"}}}" > "$L2_PATH"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cloud"}}}' > "$L1_PATH"
+EXPECTED="cloud|layer1|true|false"
+BASH_OUT="$(run_bash_probe)"
+NODE_OUT="$(run_node_probe)"
+HOSTILE=$((HOSTILE+1))
+expect_eq "hostile: lone-surrogate Layer-2 JSON (bash==expected, falls through)" "$EXPECTED" "$BASH_OUT"
+expect_eq "hostile: lone-surrogate Layer-2 JSON (node==expected, falls through — JS narrowed to match jq)" "$EXPECTED" "$NODE_OUT"
+
+echo "Hostile probes run: $HOSTILE (NUL-escape / NBSP-padded-env / malformed-trailing-content / lone-surrogate; 2 assertions/probe)"
+echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES, Skipped: $SKIPPED"
 exit "$FAILURES"

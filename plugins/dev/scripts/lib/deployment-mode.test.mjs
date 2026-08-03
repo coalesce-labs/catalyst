@@ -1,5 +1,5 @@
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { DEPLOYMENT_MODES, resolveDeploymentMode, getDeploymentMode } from "./deployment-mode.mjs";
@@ -248,6 +248,93 @@ describe("resolveDeploymentMode — never throws", () => {
     const r = resolveDeploymentMode({ env: {}, layer1ConfigPath: dir, layer2ConfigPath: dir });
     expect(r.source).toBe("default");
     expect(r.mode).toBe("single-host");
+  });
+});
+
+describe("resolveLayer2Path — injected HOME (Codex remediation, CTL-1617)", () => {
+  test("reads Layer-2 from env.HOME, not the real process homedir, when no explicit path/override is given", () => {
+    // Reproduces the bug exactly: NO layer2ConfigPath and NO
+    // CATALYST_LAYER2_CONFIG_FILE override — the only two things that used
+    // to matter — so resolution falls all the way to the homedir()
+    // fallback, which previously ignored the injected env entirely.
+    const fixtureHome = fixtureDir();
+    mkdirSync(resolve(fixtureHome, ".config", "catalyst"), { recursive: true });
+    writeFileSync(
+      resolve(fixtureHome, ".config", "catalyst", "config.json"),
+      JSON.stringify({ catalyst: { deployment: { mode: "cloud" } } }),
+    );
+
+    const r = resolveDeploymentMode({
+      env: { HOME: fixtureHome },
+      layer1ConfigPath: missingPath(fixtureDir(), "layer1.json"),
+      // layer2ConfigPath deliberately omitted — must fall through to
+      // env.HOME, not the real user's home.
+    });
+
+    expect(r).toEqual({
+      mode: "cloud",
+      source: "layer2",
+      inferred: false,
+      recognized: true,
+      raw: "cloud",
+    });
+  });
+
+  test("does not read the REAL process homedir's config when an isolated env.HOME is injected", () => {
+    // Guards against a false-positive fixture: if the real developer machine
+    // happens to also have ~/.config/catalyst/config.json with a deployment
+    // mode set, a bug that reads the real homedir() instead of the injected
+    // one could still coincidentally settle at layer2 with SOME value. This
+    // asserts the isolated fixture home — which has no Layer-1 file and an
+    // ABSENT Layer-2 file — resolves to the constant default, proving
+    // neither layer leaked in from the real homedir().
+    const fixtureHome = fixtureDir();
+    // No .config/catalyst/config.json written under fixtureHome at all.
+    const r = resolveDeploymentMode({
+      env: { HOME: fixtureHome },
+      layer1ConfigPath: missingPath(fixtureHome, "layer1.json"),
+    });
+    expect(r.source).toBe("default");
+    expect(r.mode).toBe("single-host");
+  });
+
+  test("an explicit layer2ConfigPath still wins over env.HOME (no regression)", () => {
+    const dir = fixtureDir();
+    const fixtureHome = fixtureDir();
+    const l2 = writeConfig(dir, "layer2.json", "cluster");
+    const r = resolveDeploymentMode({
+      env: { HOME: fixtureHome },
+      layer1ConfigPath: missingPath(dir, "layer1.json"),
+      layer2ConfigPath: l2,
+    });
+    expect(r.mode).toBe("cluster");
+    expect(r.source).toBe("layer2");
+  });
+
+  test("CATALYST_LAYER2_CONFIG_FILE override still wins over env.HOME (no regression)", () => {
+    const dir = fixtureDir();
+    const fixtureHome = fixtureDir();
+    const l2 = writeConfig(dir, "layer2.json", "cluster");
+    const r = resolveDeploymentMode({
+      env: { HOME: fixtureHome, CATALYST_LAYER2_CONFIG_FILE: l2 },
+      layer1ConfigPath: missingPath(dir, "layer1.json"),
+    });
+    expect(r.mode).toBe("cluster");
+    expect(r.source).toBe("layer2");
+  });
+
+  test("real process homedir() is still the fallback when env.HOME itself is absent (production default)", () => {
+    // No env override at all — resolveLayer2Path must still fall back to
+    // node:os homedir() exactly as before this fix, not throw or resolve to
+    // some empty/undefined path.
+    const r = resolveDeploymentMode({
+      env: {},
+      layer1ConfigPath: missingPath(fixtureDir(), "layer1.json"),
+    });
+    // Whatever the real machine's Layer-2/Layer-1 file says (or doesn't),
+    // this must not throw, and must resolve to a valid enum member (the
+    // resolver's own contract — it never fails the caller).
+    expect(DEPLOYMENT_MODES).toContain(r.mode);
   });
 });
 

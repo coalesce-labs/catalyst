@@ -512,6 +512,67 @@ name — never the value).
 { "catalyst": { "linearReplica": { "mode": "on" } } }
 ```
 
+## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
+
+`catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from
+side effects — whether a webhook tunnel happens to be configured, whether a cluster roster happens to
+resolve to more than one host. It is resolved **identically** by two independently maintained
+implementations — `lib/deployment-mode.mjs` (Node/ESM) and `lib/catalyst-deployment-mode.sh` (the
+Bash mirror, since Bash cannot import a JS leaf) — kept honest by a fixture-matrix cross-stack parity
+test (`__tests__/deployment-mode-parity.test.sh`).
+
+| Value                  | Meaning                                                                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `single-host` (default) | A lone node — no cluster substrate expected.                                                                                  |
+| `cluster`               | A coordinated multi-host fleet; roster/HRW/liveness are graded by `catalyst doctor`.                                          |
+| `cloud`                 | A managed-container node; the smee webhook tunnel must NOT be live and secrets are platform-delivered.                       |
+
+A 4th `both` value was deliberately rejected (CTL-1617 design §2) — the provider's own
+`webhook.delivery.id` already makes concurrent smee+cloud ingestion dedup-safe without one.
+
+Deployment mode is genuinely **fleet-scoped**, so — unlike `catalyst.node.class` — it lives primarily
+in **Layer-1** (committed, shared by the whole repo checkout), with a **Layer-2 override** as the
+exception hatch (e.g. a laptop dev-clone of a cluster-declared repo overriding to `single-host`):
+
+```json
+// .catalyst/config.json (Layer-1, fleet-wide default)
+{ "catalyst": { "deployment": { "mode": "cluster" } } }
+```
+
+```json
+// ~/.config/catalyst/config.json (Layer-2, per-host override)
+{ "catalyst": { "deployment": { "mode": "single-host" } } }
+```
+
+**Resolution** (`resolveDeploymentMode()` / `catalyst_resolve_deployment_mode`):
+
+| Precedence | Source                                                |
+| ---------- | ------------------------------------------------------ |
+| 1          | `CATALYST_DEPLOYMENT_MODE` env var                     |
+| 2          | `catalyst.deployment.mode` in the Layer-2 config       |
+| 3          | `catalyst.deployment.mode` in the Layer-1 config       |
+| 4          | constant default `single-host`                         |
+
+- **Absent everywhere ⇒ `single-host`** — zero-config, zero-behavior-change. A WARN notes the value
+  was inferred.
+- **An explicit but unrecognized value** (a typo) never silently activates cluster/cloud behavior —
+  it degrades to `single-host` (the safest direction) at the layer it was found, and `catalyst doctor`
+  **FAILs** until corrected.
+- A missing/malformed config file, or a present-but-non-string value (`true`, `123`, `[]`), both
+  settle rather than throw — see `lib/deployment-mode.mjs`'s `classifyCandidate` for the full validity
+  ladder.
+- **ENV-vs-FILE asymmetry**: `CATALYST_DEPLOYMENT_MODE` is captured into a long-lived daemon's
+  environment once, at launch. Layer-1/Layer-2 file edits are picked up **live**, on every call. A
+  daemon needs restarting for an env change to take effect.
+- **jq-absent degradation (Bash resolver only)**: when `jq` is unavailable, a Layer-1/Layer-2 file
+  that could otherwise decide the mode is treated as absent (falls through) instead of failing the
+  caller; the resolver exports `CATALYST_DEPLOYMENT_MODE_JQ_MISSING=1` as a loud breadcrumb so
+  `catalyst doctor` can grade a host silently degrading on this axis.
+
+PR1 (this file) ships the resolver in isolation — nothing outside its own tests imports it yet; wiring
+into webhook ingestion gating, secret-provider selection, and `catalyst doctor`'s roster-consistency
+checks lands in later PRs of the CTL-1617 migration plan.
+
 ## GitHub merge rules live in GitHub
 
 Catalyst can open PRs, fix CI, answer review bots, and merge. But GitHub decides what must pass

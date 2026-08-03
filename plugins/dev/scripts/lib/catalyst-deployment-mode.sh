@@ -42,14 +42,27 @@ _CATALYST_DEPLOYMENT_MODE_SH_LOADED=1
 
 # The closed enum. Mirrors DEPLOYMENT_MODES in lib/deployment-mode.mjs — a
 # value added to one side without the other fails the parity test.
-_CATALYST_DEPLOYMENT_MODES="single-host cluster cloud"
+#
+# PARITY DECISION — IFS-INDEPENDENT ENUM (array, not a space-joined string):
+# a bare `for _m in $_CATALYST_DEPLOYMENT_MODES` word-splits on the CALLER's
+# IFS, not a fixed space. A sourcing script that sets the common strict-shell
+# IFS=$'\n\t' (no space in it) would stop splitting this string into three
+# words at all — every candidate, including valid ones, would then compare
+# against ONE giant "single-host cluster cloud" token and always report
+# unrecognized. An array's elements are already delimited at assignment time
+# and iterating "${arr[@]}" never re-splits them, so membership no longer
+# depends on unrelated caller shell state. `${_CATALYST_DEPLOYMENT_MODES[*]}`
+# (join on the FIRST character of IFS) is still available wherever the old
+# space-joined string is needed (e.g. WARN text), but that too is only used
+# from this file's own functions, which never run with a non-default IFS.
+_CATALYST_DEPLOYMENT_MODES=(single-host cluster cloud)
 CATALYST_DEPLOYMENT_MODE_DEFAULT="single-host"
 
 # _catalyst_deployment_mode_is_member VALUE — true iff VALUE (already
 # trimmed + lowercased) names one of the enum members.
 _catalyst_deployment_mode_is_member() {
   local _v="$1" _m
-  for _m in $_CATALYST_DEPLOYMENT_MODES; do
+  for _m in "${_CATALYST_DEPLOYMENT_MODES[@]}"; do
     [[ "$_v" == "$_m" ]] && return 0
   done
   return 1
@@ -64,37 +77,100 @@ _catalyst_deployment_mode_is_member() {
 # (jq: `false // empty` is empty, because `//` treats `false` as falsy) —
 # {"mode": false} would fall through here while JS correctly SETTLES at this
 # layer with recognized:false. Tags:
-#   @ABSENT   — key not present (or file unreadable/malformed/jq missing)
+#   @ABSENT          — key not present (or file unreadable/malformed)
+#   @ABSENT_JQMISSING — key can't be determined because jq itself is missing
+#                       (a distinct reason so the CALLER — not this function,
+#                       see the SUBSHELL-EXPORT DIVERGENCE note on
+#                       catalyst_resolve_deployment_mode below — can export
+#                       the CATALYST_DEPLOYMENT_MODE_JQ_MISSING breadcrumb)
 #   @NULL     — value is JSON null
 #   @STR:xxx  — value is the string "xxx" (may itself be empty)
-#   @NONSTR   — value is present and NOT a string (bool/number/array/object)
-# @ABSENT and @NULL both mean "fall through" to classify, exactly like
-# classifyCandidate's `raw === undefined || raw === null` rung. @NONSTR means
-# "settle here, degraded" — never falls through. Never fails the caller.
+#   @NONSTR   — value is present and NOT a string (bool/number/array/object),
+#               OR is a string that embeds a NUL byte (see NUL-BYTE
+#               CANDIDATE below) — both settle here, degraded, same as a
+#               non-member string would.
+# @ABSENT and @ABSENT_JQMISSING and @NULL all mean "fall through" to
+# classify, exactly like classifyCandidate's `raw === undefined || raw ===
+# null` rung. @NONSTR means "settle here, degraded" — never falls through.
+# Never fails the caller.
+#
+# LONE-SURROGATE PARITY (both sides fall through): a JSON string containing
+# an unpaired UTF-16 surrogate escape (e.g. "clu\ud800ster") is rejected by
+# jq at PARSE time for the WHOLE document (verified: jq-1.7.1 exits 5 —
+# there is no jq invocation that can read ANY field out of such a file), so
+# this function reports @ABSENT and the layer falls through. JSON.parse
+# WOULD accept the string, so the JS resolver deliberately narrows to match:
+# readDeploymentModeField (deployment-mode.mjs) treats a mode string
+# carrying an unpaired surrogate as layer-malformed and returns undefined —
+# both languages fall through to the deeper layer. Valid surrogate PAIRS
+# (astral characters) parse fine in both and are simply non-members.
 _catalyst_deployment_mode_from_file() {
-  local _f="$1"
+  local _f="$1" _jq_out _jq_rc
   if [[ ! -r "$_f" ]]; then
     printf '@ABSENT'
     return 0
   fi
   if ! command -v jq >/dev/null 2>&1; then
     # File exists but we have no way to parse it — see the JQ-ABSENT
-    # DIVERGENCE note atop this file. Loud breadcrumb, not a stderr print.
-    export CATALYST_DEPLOYMENT_MODE_JQ_MISSING=1
-    printf '@ABSENT'
+    # DIVERGENCE note atop this file. The breadcrumb itself is exported by
+    # the CALLER, not here (see the SUBSHELL-EXPORT DIVERGENCE note on
+    # catalyst_resolve_deployment_mode) — this function always runs inside a
+    # $(...) command-substitution subshell, so an `export` performed HERE
+    # would silently vanish the instant $() returns and never reach the
+    # caller's environment. Signal it through the tagged return value
+    # instead, which $() DOES propagate.
+    printf '@ABSENT_JQMISSING'
     return 0
   fi
-  jq -r '
+  # MALFORMED-TRAILING-CONTENT fix: jq streams top-level JSON values and can
+  # print a fully-formed tag for the FIRST one, THEN hit trailing garbage
+  # and exit non-zero (verified: a leading `{"catalyst":{"deployment":
+  # {"mode":"cloud"}}}` followed by stray text prints "@STR:cloud" to stdout
+  # before erroring). Command substitution captures stdout regardless of
+  # exit status, so the pre-fix `jq ... || printf '@ABSENT'` APPENDED
+  # "@ABSENT" onto the already-printed tag ("@STR:cloud\n@ABSENT") instead
+  # of replacing it -- _catalyst_deployment_mode_classify's `"@STR:"*` glob
+  # then matched that whole multi-line blob, so a malformed file with a
+  # syntactically valid PREFIX settled as an unrecognized string instead of
+  # falling through like JSON.parse (which rejects the entire malformed
+  # document and yields undefined). Fix: capture stdout and exit status
+  # SEPARATELY, and only trust the captured output when jq exited 0 -- any
+  # non-zero exit discards whatever partial text was printed and settles on
+  # a clean, single-tag @ABSENT.
+  _jq_out="$(jq -r '
     (.catalyst.deployment // {})
     | if has("mode") then
         (.mode
          | if . == null then "@NULL"
-           elif type == "string" then "@STR:" + .
+           elif type == "string" then
+             # NUL-BYTE CANDIDATE fix: a bash command substitution silently
+             # TRUNCATES an embedded NUL byte -- bash variables cannot
+             # represent one -- so a raw value with an embedded NUL between
+             # "c" and "loud" would otherwise arrive at the caller already
+             # collapsed to the recognized member "cloud" (a false
+             # positive: JS classifies that as a genuine, non-matching
+             # string and degrades it). jq itself still holds the full
+             # Unicode string (including the embedded NUL codepoint) at
+             # this point, so detect and settle it HERE, inside jq, exactly
+             # like any other non-member value -- never let a
+             # NUL-containing candidate reach the $()-boundary as a bare
+             # @STR: tag. The NUL character itself is built via
+             # `[0] | implode` (a one-character string whose sole codepoint
+             # is 0) rather than a literal escape, since jq string
+             # literals inside this single-quoted bash program text cannot
+             # spell a literal escape sequence without breaking bash quoting.
+             (if contains([0] | implode) then "@NONSTR" else "@STR:" + . end)
            else "@NONSTR"
            end)
       else "@ABSENT"
       end
-  ' "$_f" 2>/dev/null || printf '@ABSENT'
+  ' "$_f" 2>/dev/null)"
+  _jq_rc=$?
+  if [[ $_jq_rc -ne 0 ]]; then
+    printf '@ABSENT'
+    return 0
+  fi
+  printf '%s' "$_jq_out"
 }
 
 # _catalyst_deployment_mode_env_tag — tag CATALYST_DEPLOYMENT_MODE the same
@@ -110,6 +186,27 @@ _catalyst_deployment_mode_env_tag() {
   fi
 }
 
+# _catalyst_deployment_mode_trim VALUE — strip ASCII whitespace
+# (space/tab/LF/VT/FF/CR) from both ends. Pure parameter expansion: quote
+# and backslash characters in the value stay DATA, never re-parsed.
+#
+# PARITY DECISION — ASCII-ONLY BY DESIGN: the JS resolver
+# (deployment-mode.mjs classifyCandidate) deliberately narrows its trim to
+# the six ASCII whitespace characters rather than String.prototype.trim() —
+# cross-language parity beats Unicode hospitality. The character set here is
+# spelled out explicitly instead of [[:space:]] because that class is LOCALE
+# DATA: under a UTF-8 locale some platforms (macOS) classify NBSP as space
+# while a C-locale Linux runner does not — the exact same input would then
+# trim differently per host. An NBSP-padded "cluster" keeps its padding on
+# BOTH sides in EVERY locale, fails enum membership on both sides, and
+# degrades identically to single-host/recognized:false at its source layer.
+_catalyst_deployment_mode_trim() {
+  local _t="$1" _ws=$' \t\n\v\f\r'
+  _t="${_t#"${_t%%[!"$_ws"]*}"}"
+  _t="${_t%"${_t##*[!"$_ws"]}"}"
+  printf '%s' "$_t"
+}
+
 # _catalyst_deployment_mode_classify TAGGED SOURCE
 #   Sets the shared _cdm_mode/_cdm_source/_cdm_recognized output vars and
 #   returns 0 when TAGGED settles the question at this layer (a non-member
@@ -121,14 +218,13 @@ _catalyst_deployment_mode_env_tag() {
 #   lib/deployment-mode.mjs's classifyCandidate applies to a trimmed-empty
 #   string).
 #
-#   Trim is pure parameter expansion (bash 3.2-safe, no external process, no
-#   quote/backslash reinterpretation of the value — quote characters in the
-#   raw value are DATA, never re-parsed as shell syntax). Lowercase via
-#   `tr '[:upper:]' '[:lower:]'` (also bash-3.2-safe; ${var,,} is bash 4+).
-#   [:space:] covers space/tab/\n/\v/\f/\r, so a CRLF-suffixed value trims
-#   cleanly — the previous xargs-based trimmer mis-happened, erroring on
-#   unmatched quotes (masked by `|| true`) and re-interpreting quote/
-#   backslash characters as shell syntax instead of leaving them as data.
+#   Trim delegates to _catalyst_deployment_mode_trim (ASCII-only, see
+#   above) rather than pure parameter expansion, so quote/backslash
+#   characters in the raw value still stay DATA — never re-parsed as shell
+#   syntax — since jq consumes the value only as `-R` raw text input, not as
+#   a shell string. Lowercase via `tr '[:upper:]' '[:lower:]'` (bash
+#   3.2-safe; ${var,,} is bash 4+; the enum members are all plain ASCII, so
+#   an ASCII-only lowercase pass matches the ASCII-only trim above).
 _catalyst_deployment_mode_classify() {
   local _tagged="$1" _source="$2" _raw _norm
   case "$_tagged" in
@@ -151,9 +247,7 @@ _catalyst_deployment_mode_classify() {
       ;;
   esac
 
-  _norm="$_raw"
-  _norm="${_norm#"${_norm%%[![:space:]]*}"}"
-  _norm="${_norm%"${_norm##*[![:space:]]}"}"
+  _norm="$(_catalyst_deployment_mode_trim "$_raw")"
   _norm="$(printf '%s' "$_norm" | tr '[:upper:]' '[:lower:]')"
 
   [[ -n "$_norm" ]] || return 1
@@ -184,14 +278,42 @@ _catalyst_deployment_mode_classify() {
 # Layer-2 catalyst.deployment.mode (${CATALYST_LAYER2_CONFIG_FILE:-~/.config/catalyst/config.json})
 # → Layer-1 catalyst.deployment.mode (${CATALYST_CONFIG_FILE:-./.catalyst/config.json})
 # → constant single-host. Never fails (always returns 0).
+#
+# PARITY DECISION — SUBSHELL-EXPORT FIX: _catalyst_deployment_mode_from_file
+# sets its jq-missing breadcrumb by returning the @ABSENT_JQMISSING tag
+# (never by exporting internally — see that function's own header) precisely
+# because every call to it here is wrapped in a $(...) command substitution,
+# which bash always runs in a SUBSHELL: a variable exported from inside that
+# subshell is local to it and is discarded the instant $() returns, so the
+# breadcrumb would silently vanish before `catalyst doctor` (or any other
+# caller) could ever observe it. The fix is to capture each file lookup's
+# TAGGED STDOUT into a plain local variable first — $()'s stdout capture DOES
+# cross the subshell boundary — and only then, back in THIS function's own
+# (non-subshelled) scope, translate the @ABSENT_JQMISSING sentinel into the
+# real export plus a plain @ABSENT before handing it to classify. This also
+# preserves the original laziness: the breadcrumb is only ever exported for
+# a layer this call actually needed to consult (env settling the whole
+# question still means neither file, nor jq's absence, is ever examined).
 catalyst_resolve_deployment_mode() {
   local _cdm_mode="" _cdm_source="" _cdm_recognized="" _cdm_inferred="false"
 
   if ! _catalyst_deployment_mode_classify "$(_catalyst_deployment_mode_env_tag)" "env"; then
     local _l2="${CATALYST_LAYER2_CONFIG_FILE:-${HOME:-}/.config/catalyst/config.json}"
-    if ! _catalyst_deployment_mode_classify "$(_catalyst_deployment_mode_from_file "$_l2")" "layer2"; then
+    local _l2_tagged
+    _l2_tagged="$(_catalyst_deployment_mode_from_file "$_l2")"
+    if [[ "$_l2_tagged" == "@ABSENT_JQMISSING" ]]; then
+      export CATALYST_DEPLOYMENT_MODE_JQ_MISSING=1
+      _l2_tagged="@ABSENT"
+    fi
+    if ! _catalyst_deployment_mode_classify "$_l2_tagged" "layer2"; then
       local _l1="${CATALYST_CONFIG_FILE:-$(pwd)/.catalyst/config.json}"
-      if ! _catalyst_deployment_mode_classify "$(_catalyst_deployment_mode_from_file "$_l1")" "layer1"; then
+      local _l1_tagged
+      _l1_tagged="$(_catalyst_deployment_mode_from_file "$_l1")"
+      if [[ "$_l1_tagged" == "@ABSENT_JQMISSING" ]]; then
+        export CATALYST_DEPLOYMENT_MODE_JQ_MISSING=1
+        _l1_tagged="@ABSENT"
+      fi
+      if ! _catalyst_deployment_mode_classify "$_l1_tagged" "layer1"; then
         _cdm_mode="$CATALYST_DEPLOYMENT_MODE_DEFAULT"
         _cdm_source="default"
         _cdm_recognized="true"
