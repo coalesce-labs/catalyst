@@ -36,6 +36,17 @@ import {
   appendRecoveryDoneOpenPrEvent,
   appendRecoveryDoneAppliedEvent,
 } from "./recovery-done-open-pr-event.mjs";
+// CTL-1616 PR3: the shared secret-contract engine, imported DIRECTLY from the
+// zero-import lib leaf (node:fs/os/path only) — same import shape as
+// cluster-sync.mjs/doctor.mjs (`../lib/secret-contract.mjs`). Folds this
+// file's own hand-rolled LINEAR_API_TOKEN/LINEAR_API_KEY ladder (below) onto
+// the shared registry so the alias fallback lives at the primitive instead of
+// per-call-site — closing CTL-1619 (the alias-drop regression this exact file
+// once carried) PERMANENTLY, and normalizing the one outlier implementation
+// (this file's own trimmed-blank hardening, design §1's "drops the alias"
+// divergence row) onto the SAME resolution every other of the 12 sites now
+// shares.
+import { resolveSecret } from "../lib/secret-contract.mjs";
 export { defaultCheckOpenPrs, defaultDeriveBranchName };
 
 const TICKET_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
@@ -206,12 +217,19 @@ export async function buildReadState(args) {
     return async (t) => map[t] ?? null;
   }
   if (args.graphql) {
-    // Nonblank fallback (NOT `??`): a launch env that exports an empty or
-    // whitespace-only LINEAR_API_TOKEN would defeat `??` (a non-nullish "" /
-    // "  " is selected), stranding the LINEAR_API_KEY fallback and sending a
-    // blank Authorization header. Trim each source and treat blank as absent.
-    const token =
-      (process.env.LINEAR_API_TOKEN || "").trim() || (process.env.LINEAR_API_KEY || "").trim();
+    // CTL-1616 PR3: folded onto the shared secret-contract engine instead of
+    // this file's own hand-rolled LINEAR_API_TOKEN/LINEAR_API_KEY ladder —
+    // closes CTL-1619 (the alias-drop regression) at the primitive,
+    // permanently. NOTE (documented behavior normalizations, not bugs): the
+    // engine's env-alias resolver treats presence as "non-empty string" only
+    // (no trim). That differs from BOTH prior shapes: the other former-`??`
+    // sites treated an EMPTY-STRING LINEAR_API_TOKEN as set (producing a
+    // blank Authorization header — a guaranteed 401), where the engine now
+    // falls through to LINEAR_API_KEY; and this file additionally treated a
+    // WHITESPACE-ONLY token as blank (its own outlier). Both are normalized
+    // to the engine's one rule so all 12 sites resolve identically
+    // (design §8 PR3 table; both changes flagged in the PR body).
+    const token = resolveSecret("linear-api-token").value ?? "";
     return async (t) => graphqlReadState(t, token);
   }
   // cache (filter-state.db). broker-state.mjs imports bun:sqlite → under plain
