@@ -131,8 +131,13 @@ via Layer-2.
   node suppresses tunnel start; the replacement cloud-SDK event connection is **future work** — the
   smee→cloud cutover, ADR-0008 lineage — so `cloud` today means "no smee ingestion", not "cloud
   ingestion wired"). **Consumer**: the CTL-1616 secret contract's provider-of-record dispatch
-  (below) receives the full resolution object and never activates a cloud provider on
-  `inferred:true`.
+  (below) can receive the full resolution object and never activates a cloud provider on
+  `inferred:true` — but only `catalyst doctor` actually threads `deploymentMode` into its
+  `resolveSecret` calls today. The folded Linear/OAuth call sites (`linear-query.mjs`,
+  `cluster-claim.mjs`, etc.) call `resolveSecret(id)`/`resolveSecret(id, { env })` with no
+  `deploymentMode` argument at all, so the cloud guard never engages for them regardless of the
+  node's declared mode — deployment-mode dispatch for those consumers stays **planned**, not
+  shipped (see the Secret Contract section below).
 - **Orthogonal axes, never merged**: deployment mode (fleet topology) × `catalyst.node.class`
   (per-machine role) × `orchestration.dispatchMode` (process substrate within a node).
 - Design + migration plan: `thoughts/shared/research/2026-08-02-ctl-1617-deployment-mode-design.md`.
@@ -158,7 +163,7 @@ flowchart LR
   REG -.mirrored.-> SH[catalyst-secret-contract.sh<br/>bash engine]
   JS <-. three-way parity .-> SH
   JS --> DOCTOR[catalyst doctor<br/>shadow + 1 live cutover]
-  JS --> LINEAR[9-file Linear-token read<br/>PR3]
+  JS --> LINEAR[10-file Linear-token read<br/>PR3]
   JS --> MINT[Linear OAuth-mint trio<br/>PR4]
   JS --> CLOUD[cloud-token name<br/>PR5]
   SH --> HEALTH[health-responder.sh<br/>bash fallback, PR5]
@@ -183,17 +188,25 @@ daemon cluster-sync tick in `execution-core/daemon.mjs`, not yet through this co
 never throws and reports `{ armed, rotated, restartRequired }` — `restartRequired: true` is the
 literal mechanism the 2026-08-02 outage lacked: a `boot-only` row (or a `re-armable` row with no
 hook registered yet — the two degrade identically, by design, so a consumer that never wires the
-arm path can't look safer than one that structurally can't) reports it the moment its resolved
-value changes underneath a still-running daemon.
+arm path can't look safer than one that structurally can't) reports it when a caller invokes
+`armSecret` and the resolved value has changed since that caller's last observation — a
+caller-invoked report, not an automatic one fired the moment the value changes. No production call
+site invokes `armSecret` today (a repo-wide search outside tests finds only the definition and a
+comment reference in `linear-remint.mjs`), so this reporting is not yet wired to any running
+daemon.
 
-**Consumers folded onto the contract so far**: the 9-file/12-site Linear-token read (`linear-query.mjs`,
-`cluster-heartbeat.mjs`, `cluster-claim.mjs`, `linear-estimation-method.mjs`,
-`linear-reconcile-cli.mjs`, three `orch-monitor/lib/linear-*` fallback readers, and
-`score-tickets.ts`); the Linear OAuth-mint trio (`linear-app-actor.sh`'s bash mint,
-`linear-remint.mjs`'s orchestrator-actor reminter — registered as the row's live rearm hook — and
-`linear-comment-post.sh`'s worker-actor chain, legacy tiers preserved verbatim); the cloud-token
-env-var **name** resolver (`config.mjs`'s `resolveNodeCloudTokenEnv` and `health-responder.sh`'s
-bash fallback both now delegate to the one `resolveCloudTokenName` implementation); and
+**Consumers folded onto the contract so far**: the 10-file/12-site Linear-token read
+(`linear-query.mjs` — 3 sites, `cluster-heartbeat.mjs`, `cluster-claim.mjs`,
+`linear-estimation-method.mjs`, `linear-reconcile-cli.mjs`, three `orch-monitor/lib/linear-*`
+fallback readers, `score-tickets.ts`, and the bash `catalyst_resolve_secret linear-api-token`
+snippet in `plugins/dev/skills/phase-triage/SKILL.md`); the Linear OAuth-mint trio
+(`linear-app-actor.sh`'s bash mint, `linear-remint.mjs`'s orchestrator-actor reminter — registered
+as the row's live rearm hook — and `linear-comment-post.sh`'s worker-actor chain, legacy tiers
+preserved verbatim); the cloud-token env-var **name** resolver (`config.mjs`'s
+`resolveNodeCloudTokenEnv` now delegates directly to `resolveCloudTokenName`; `health-responder.sh`'s
+bun-less fallback path instead calls the independently-maintained bash mirror
+`catalyst_secret_cloud_token_name` — kept byte-for-byte with the JS resolver by the parity suite,
+not a shared function call); and
 `catalyst doctor` itself, which consults the contract through `resolveSecret` directly rather
 than a parallel presence check — as a **shadow**
 comparison (INFO-only, never changes a grade) for most checks, with `checkPeerUniqueness` /
