@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://catalyst.coalesce-labs.com/schemas/machine-config.schema.json",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/machine-config.schema.json",
   "title": "Catalyst Machine Config",
   "description": "Schema for ~/.config/catalyst/config.json — the Layer-2 machine-local config. Contains host-specific secrets, concurrency overrides, and webhook registration data. NEVER commit this file to version control.",
   "type": "object",
