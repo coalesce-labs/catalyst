@@ -75,6 +75,43 @@ describe("SECRET_REGISTRY — shape", () => {
     expect(SECRET_REGISTRY.length).toBe(11);
   });
 
+  test("DEEP-FREEZE (Codex finding fix): every row's NESTED envNames array is also frozen, not just the outer row object", () => {
+    for (const row of SECRET_REGISTRY) {
+      expect(Object.isFrozen(row.envNames)).toBe(true);
+      expect(() => {
+        row.envNames.push("EVIL_ALIAS");
+      }).toThrow();
+    }
+  });
+
+  test("DEEP-FREEZE: every row's NESTED rotation object is also frozen — mutating it cannot permanently alter later resolution/hook/arm behavior", () => {
+    const row = getSecretRow("github-token");
+    expect(Object.isFrozen(row.rotation)).toBe(true);
+    expect(() => {
+      row.rotation.class = "boot-only";
+    }).toThrow();
+    // The registry itself is unaffected regardless — re-reading the row shows the original.
+    expect(getSecretRow("github-token").rotation.class).toBe("re-armable");
+  });
+
+  test("DEEP-FREEZE: age-key's nested defaultLocalPath array is frozen", () => {
+    const row = getSecretRow("age-key");
+    expect(Object.isFrozen(row.defaultLocalPath)).toBe(true);
+    expect(() => {
+      row.defaultLocalPath.push("evil");
+    }).toThrow();
+  });
+
+  test("DEEP-FREEZE: resolveSecret never returns a mutable live rotation reference — the caller cannot corrupt later resolutions for the same id", () => {
+    const r1 = resolveSecret("github-token", { env: {} });
+    expect(Object.isFrozen(r1.rotation)).toBe(true);
+    expect(() => {
+      r1.rotation.class = "hacked";
+    }).toThrow();
+    const r2 = resolveSecret("github-token", { env: {} });
+    expect(r2.rotation.class).toBe("re-armable");
+  });
+
   test("every row's delivery is a member of SECRET_DELIVERY", () => {
     for (const row of SECRET_REGISTRY) expect(SECRET_DELIVERY).toContain(row.delivery);
   });
@@ -223,6 +260,20 @@ describe("resolveSecret — bare-file delivery (github-token)", () => {
     const r = resolveSecret("github-token", { env: { CATALYST_CONFIG_DIR: dir, GH_TOKEN: "fallback" } });
     expect(r).toMatchObject({ value: "fallback", source: "inherited" });
   });
+  test("NON-UTF-8 BYTES (Codex finding fix): a file whose bytes are not valid UTF-8 is REJECTED consistently — never silently served as a U+FFFD-mutated credential — falls through to env alias", () => {
+    const dir = fixtureDir();
+    // 0xFF 0xFE is not a valid UTF-8 byte sequence anywhere; readFileSync(...,"utf8") would
+    // silently replace it with U+FFFD U+FFFD without this guard.
+    writeFile(dir, "github-token", Buffer.from([0xff, 0xfe, 0x68, 0x69]));
+    const r = resolveSecret("github-token", { env: { CATALYST_CONFIG_DIR: dir, GH_TOKEN: "fallback-after-bad-utf8" } });
+    expect(r).toMatchObject({ value: "fallback-after-bad-utf8", source: "inherited" });
+  });
+  test("valid multi-byte UTF-8 (e.g. an emoji/check-mark in a token) is preserved, not rejected", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "github-token", Buffer.from("tok-✓-value\n", "utf8"));
+    const r = resolveSecret("github-token", { env: { CATALYST_CONFIG_DIR: dir } });
+    expect(r).toMatchObject({ value: "tok-✓-value", source: "shared-file" });
+  });
 });
 
 describe("resolveSecret — unknown id", () => {
@@ -276,15 +327,44 @@ describe("resolveSecret — env-alias delivery (linear-api-token)", () => {
 });
 
 describe("resolveSecret — config-json delivery (linear-orchestrator-actor, groq-api-key)", () => {
-  test("reads the dotted path from the Layer-2 file", () => {
+  test("ACTOR ROW SHAPE (Codex finding fix): the AUTHORITATIVE Layer-2 schema stores catalyst.linear.bot.orchestrator as an OBJECT ({clientId, clientSecret, ...}), never a string — the pre-fix test here fixtured a string CONTAINING json text, masking that resolveConfigJson only accepted strings and every real production config resolved to none", () => {
     const dir = fixtureDir();
     const l2 = writeFile(
       dir,
       "config.json",
-      JSON.stringify({ catalyst: { linear: { bot: { orchestrator: '{"apiKey":"x"}' } } } }),
+      JSON.stringify({
+        catalyst: { linear: { bot: { orchestrator: { clientSecret: "s3cr3t", clientId: "abc123" } } } },
+      }),
     );
     const r = resolveSecret("linear-orchestrator-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
-    expect(r).toMatchObject({ value: '{"apiKey":"x"}', source: "config-json" });
+    expect(r.source).toBe("config-json");
+    // Canonicalized (sorted-key) so both languages produce the identical byte string
+    // regardless of source field order.
+    expect(r.value).toBe('{"clientId":"abc123","clientSecret":"s3cr3t"}');
+    // The row's value semantics must let a future consumer extract clientId/clientSecret.
+    expect(JSON.parse(r.value)).toEqual({ clientId: "abc123", clientSecret: "s3cr3t" });
+  });
+  test("reads the dotted path from the Layer-2 file (string-shaped config-json value, e.g. groq-api-key)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      JSON.stringify({ groq: { apiKey: "plain-string-value" } }),
+    );
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: "plain-string-value", source: "config-json" });
+  });
+  test("an EMPTY object at the path resolves to the canonical empty-object string, not silently coerced to none", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { linear: { bot: { orchestrator: {} } } } }));
+    const r = resolveSecret("linear-orchestrator-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: "{}", source: "config-json" });
+  });
+  test("an ARRAY at the path is rejected (not a valid credential shape) — settles as none", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { linear: { bot: { orchestrator: ["nope"] } } } }));
+    const r = resolveSecret("linear-orchestrator-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: null, source: "none" });
   });
   test("groq-api-key prefers the env alias over the config path (matches resolveApiKey's env-first precedence)", () => {
     const dir = fixtureDir();
@@ -311,6 +391,101 @@ describe("resolveSecret — config-json delivery (linear-orchestrator-actor, gro
     const l2 = writeFile(dir, "config.json", JSON.stringify({}));
     const r = resolveSecret("linear-worker-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
     expect(r).toMatchObject({ value: null, source: "none" });
+  });
+  test("JSON ACCEPTANCE NORMALIZATION (Codex finding fix): an unpaired-surrogate escape ANYWHERE in the document — even outside the field being read — settles the whole layer as malformed (matches jq's whole-document rejection, exit 5)", () => {
+    const dir = fixtureDir();
+    // The lone \ud800 escape lives in an UNRELATED field; the real value at groq.apiKey is
+    // otherwise perfectly valid. jq rejects the ENTIRE document (verified: exit 5) so the
+    // bash mirror can never see ANY value out of this file — JS must degrade identically.
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      '{"groq":{"apiKey":"from-config"},"unrelated":"clu\\ud800ster"}',
+    );
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: null, source: "none" });
+  });
+});
+
+// hasLiveLoneHighSurrogateEscape is an unexported module-internal helper (same convention as
+// every other readJsonField primitive in this file — containsNul, stripEol, etc. are never
+// exported either); these tests exercise its documented semantics through the one public
+// boundary that observes it, resolveSecret's config-json path, exactly like the "JSON
+// ACCEPTANCE NORMALIZATION" test right above. Verified against real jq 1.7.1 throughout (see
+// the scanner's own doc comment in lib/secret-contract.mjs for the exact jq invocations).
+describe("hasLiveLoneHighSurrogateEscape scanner — E4/E6 jq parity", () => {
+  test("odd backslash run (length 1) before a HIGH surrogate escape is LIVE; unpaired ⇒ rejects the whole document (E4/control)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      '{"groq":{"apiKey":"good"},"unrelated":"clu\\ud800ster"}',
+    );
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: null, source: "none" });
+  });
+
+  test("odd backslash run (length 1) before a LOW surrogate escape is LIVE; lone LOW is ACCEPTED (jq exit 0), not rejected (E4a)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      '{"groq":{"apiKey":"good"},"unrelated":"clu\\udc00ster"}',
+    );
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: "good", source: "config-json" });
+  });
+
+  test("even backslash run (length 2) before 'u' is NOT live — it is an escaped literal backslash followed by ordinary text; the document is not rejected (E6)", () => {
+    const dir = fixtureDir();
+    // Raw file text carries the LITERAL 7-character sequence \\ud800 (escaped backslash +
+    // the 5 literal characters "ud800") — valid JSON, and not an escape at all.
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      '{"groq":{"apiKey":"good"},"unrelated":"literal \\\\ud800 text"}',
+    );
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: "good", source: "config-json" });
+    // The literal backslash+text itself round-trips untouched when it IS the read field.
+    const l2b = writeFile(
+      dir,
+      "config2.json",
+      '{"groq":{"apiKey":"literal \\\\ud800 text"}}',
+    );
+    const r2 = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2b } });
+    expect(r2).toMatchObject({ value: "literal \\ud800 text", source: "config-json" });
+  });
+
+  test("a live HIGH surrogate escape immediately (textually adjacent) followed by a live LOW surrogate escape is a paired astral character — accepted, not rejected", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", '{"groq":{"apiKey":"x\\ud800\\udc00y"}}');
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: "x\u{10000}y", source: "config-json" });
+  });
+
+  test("a live HIGH surrogate escape NOT textually adjacent to a following LOW escape remains unpaired — rejects the document", () => {
+    const dir = fixtureDir();
+    // A literal "Y" sits between the two escapes, breaking adjacency.
+    const l2 = writeFile(dir, "config.json", '{"groq":{"apiKey":"x\\ud800Y\\udc00y"}}');
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: null, source: "none" });
+  });
+
+  test("a live HIGH surrogate escape immediately followed by a NON-live (even-backslash-run) low-looking escape remains unpaired — rejects the document", () => {
+    const dir = fixtureDir();
+    // "\ud800" (live, HIGH) directly followed by "\\udc00" (even run — literal text, not an
+    // escape) — the pairing candidate must itself be LIVE to count, so this does not pair.
+    const l2 = writeFile(dir, "config.json", '{"groq":{"apiKey":"x\\ud800\\\\udc00y"}}');
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: null, source: "none" });
+  });
+
+  test("a live lone LOW surrogate escape INSIDE the resolved value itself is normalized to U+FFFD at the value-extraction boundary, mirroring jq's own replacement (E4b)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", '{"groq":{"apiKey":"x\\udc00y"}}');
+    const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r).toMatchObject({ value: "x�y", source: "config-json" });
   });
 });
 
@@ -421,6 +596,29 @@ describe("resolveSecret — cloud guard (design §4)", () => {
     expect(r.source).toBe("none"); // resolves normally (absent), not short-circuited to null/null-provider
     expect(r.provider).toBe("platform-env");
   });
+  test("CLOUD-TOKEN NAME OVERRIDE (Codex finding fix): genuine cloud mode honors CATALYST_CLOUD_TOKEN_ENV, not only the hardcoded default name — a direct resolveSecret('cloud-token', {deploymentMode}) call previously bypassed resolveCloudTokenName entirely", () => {
+    const r = resolveSecret("cloud-token", {
+      env: { CATALYST_CLOUD_TOKEN_ENV: "MY_PLATFORM_TOKEN", MY_PLATFORM_TOKEN: "the-real-token" },
+      deploymentMode: { mode: "cloud", inferred: false },
+    });
+    expect(r).toMatchObject({ value: "the-real-token", source: "platform-env", envVar: "MY_PLATFORM_TOKEN", envVarSource: "env" });
+  });
+  test("CLOUD-TOKEN NAME OVERRIDE: genuine cloud mode honors the Layer-2 catalyst.cloud.tokenEnv override too", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(dir, "config.json", JSON.stringify({ catalyst: { cloud: { tokenEnv: "OTHER_TOKEN_VAR" } } }));
+    const r = resolveSecret("cloud-token", {
+      env: { CATALYST_LAYER2_CONFIG_FILE: l2, OTHER_TOKEN_VAR: "v2" },
+      deploymentMode: { mode: "cloud", inferred: false },
+    });
+    expect(r).toMatchObject({ value: "v2", source: "platform-env", envVar: "OTHER_TOKEN_VAR", envVarSource: "layer2" });
+  });
+  test("CLOUD-TOKEN NAME OVERRIDE: an overridden name with only the DEFAULT var set (not the override) still resolves none — the override name is genuinely the one consulted, not silently ignored in favor of the default", () => {
+    const r = resolveSecret("cloud-token", {
+      env: { CATALYST_CLOUD_TOKEN_ENV: "MY_PLATFORM_TOKEN", CATALYST_CLOUD_TOKEN: "should-not-be-used" },
+      deploymentMode: { mode: "cloud", inferred: false },
+    });
+    expect(r).toMatchObject({ value: null, source: "none", envVar: "MY_PLATFORM_TOKEN" });
+  });
 });
 
 // ─── Registry validation (design §6) ─────────────────────────────────────────────────────
@@ -504,6 +702,64 @@ describe("armSecret — n/a rows and unknown ids", () => {
   });
   test("unknown id never throws", () => {
     expect(armSecret("does-not-exist", { env: {} })).toEqual({ armed: false, rotated: false, restartRequired: false });
+  });
+});
+
+describe("armSecret — deployment-mode threading (Codex finding fix, design §8)", () => {
+  test("cloud mode with an injected env token AND a stale local file: arm's baseline matches DIRECT resolution (the env value), not the file — a file-only edit must not report a false restartRequired, and the real env rotation MUST be detected", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "github-token", "stale-file-value-v1");
+    const deploymentMode = { mode: "cloud", inferred: false };
+    const env1 = { CATALYST_CONFIG_DIR: dir, GH_TOKEN: "cloud-injected-v1", CATALYST_CLOUD_TOKEN: "boot" };
+
+    // Direct resolution (the ground truth armSecret's baseline must match) resolves via the
+    // env alias, never the file, in genuine cloud mode.
+    const direct = resolveSecret("github-token", { env: env1, deploymentMode });
+    expect(direct).toMatchObject({ value: "cloud-injected-v1", source: "inherited" });
+
+    // First arm call establishes the baseline.
+    expect(armSecret("github-token", { env: env1, deploymentMode })).toEqual({
+      armed: false,
+      rotated: false,
+      restartRequired: false,
+    });
+
+    // Rewriting the STALE FILE ONLY must NOT be observed as a rotation — the arm baseline is
+    // the env-derived value, exactly like direct resolution, never the file's contents.
+    writeFileSync(resolve(dir, "github-token"), "stale-file-value-v2-changed");
+    expect(armSecret("github-token", { env: env1, deploymentMode })).toEqual({
+      armed: false,
+      rotated: false,
+      restartRequired: false,
+    });
+
+    // Rotating the ACTUAL cloud-injected env value MUST be detected.
+    const env2 = { ...env1, GH_TOKEN: "cloud-injected-v2-rotated" };
+    expect(armSecret("github-token", { env: env2, deploymentMode })).toEqual({
+      armed: false,
+      rotated: true,
+      restartRequired: true,
+    });
+  });
+
+  test("omitting deploymentMode entirely preserves today's non-cloud behavior exactly (default parity with resolveSecret's own default)", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "github-token", "file-v1");
+    const env = { CATALYST_CONFIG_DIR: dir };
+    expect(armSecret("github-token", { env })).toEqual({ armed: false, rotated: false, restartRequired: false });
+    writeFileSync(resolve(dir, "github-token"), "file-v2");
+    expect(armSecret("github-token", { env })).toEqual({ armed: false, rotated: true, restartRequired: true });
+  });
+
+  test("hook path also receives deploymentMode in its context object", () => {
+    let received;
+    registerRearmHook("github-token", (ctx) => {
+      received = ctx;
+      return { rearmed: true };
+    });
+    const deploymentMode = { mode: "cluster", inferred: false };
+    armSecret("github-token", { env: {}, deploymentMode });
+    expect(received.deploymentMode).toEqual(deploymentMode);
   });
 });
 

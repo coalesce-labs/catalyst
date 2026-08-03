@@ -176,42 +176,105 @@ catalyst_secret_resolve_layer2_path() {
   printf '%s' "${_xdg}/catalyst/config.json"
 }
 
-# _csc_read_json_string FILE DOTTED_PATH — tagged jq read of a STRING field, mirroring the
+# _csc_b64_decode B64 — decode a base64 string to raw bytes on stdout. macOS/BSD base64 and
+# GNU coreutils base64 both accept -d; -D is BSD's long-standing alias, tried as a fallback
+# for any base64 build that only recognizes the BSD spelling. Never fails the caller (a
+# malformed/empty input decodes to empty output either way).
+_csc_b64_decode() {
+  local _in="$1"
+  if printf '%s' "$_in" | base64 -d 2>/dev/null; then
+    return 0
+  fi
+  printf '%s' "$_in" | base64 -D 2>/dev/null
+}
+
+# _csc_b64_decode_var VARNAME B64 — decodes B64 into VARNAME. Deliberately NOT
+# `VARNAME="$(_csc_b64_decode "$B64")"` — that bare $() capture would strip ANY trailing
+# newline byte off the DECODED value itself (the value is the ENTIRE output of that specific
+# command substitution), reintroducing the exact TRAILING-NEWLINE bug this base64 encoding
+# exists to fix, one boundary later. `read -d ''` over a process substitution captures every
+# byte up to an explicit NUL terminator WITHOUT the trailing-newline-stripping $() performs —
+# safe here because jq already rejects any NUL-containing value before base64-encoding it
+# (see _csc_read_json_string), so the decoded bytes are guaranteed NUL-free, the one byte
+# `read -d ''` cannot represent.
+_csc_b64_decode_var() {
+  local _varname="$1" _b64="$2"
+  IFS= read -r -d '' "$_varname" < <(_csc_b64_decode "$_b64"; printf '\0')
+}
+
+# _csc_read_json_string FILE DOTTED_PATH — tagged jq read of a field, mirroring the
 # type-aware tagged extraction in lib/catalyst-deployment-mode.sh's
 # _catalyst_deployment_mode_from_file (the "a bare `// empty` swallows JSON `false`" lesson —
-# a config-json row whose value is `false`/123/an object must settle as ABSENT-to-this-caller,
+# a config-json row whose value is `false`/123/an array must settle as ABSENT-to-this-caller,
 # never silently coerced to a string). Tags:
-#   @ABSENT  — path missing, file unreadable/malformed, jq unavailable, or value is JSON null
-#   @STR:xxx — value is the string "xxx". NOTE (B2 fix, verifier A1): xxx MAY be empty —
-#              there is no `select` here filtering the empty string out (the previous
-#              version of this comment's "never empty" claim was stale/aspirational; no
-#              such select exists). Callers that need "present AND non-empty" (every
-#              current caller does) must check for that explicitly — see the "@STR:"?*
-#              patterns in _csc_resolve_config_json / _csc_resolve_cloud_token_name, which
-#              require at least one character after the tag, mirroring
-#              lib/secret-contract.mjs's own `raw.length > 0` / `l2Name.length > 0` checks
-#              at the equivalent call sites (an empty JSON string classifies as
-#              absent/fall-through in BOTH languages).
-#   @NONSTR  — value is present but NOT a string, OR a string with an embedded NUL (see the
-#              NUL-BYTE note below) — both settle here, never treated as a usable secret
+#   @ABSENT    — path missing, file unreadable/malformed, jq unavailable, value is JSON null,
+#                a BOM-prefixed file, or a multi-document file (see BOM/MULTI-DOC below)
+#   @STR64:xxx — value is a JSON STRING, base64-encoded as xxx (see TRAILING-NEWLINE FIX
+#                below for why base64, not the value verbatim). xxx MAY decode to the empty
+#                string — no `select` filters that out; callers needing "present AND
+#                non-empty" check the DECODED length explicitly (see _csc_resolve_config_json
+#                / _csc_resolve_cloud_token_name), mirroring lib/secret-contract.mjs's own
+#                `raw.length > 0` checks at the equivalent call sites.
+#   @OBJ64:xxx — value is a JSON OBJECT, canonicalized (recursively sorted-key, matching
+#                lib/secret-contract.mjs's canonicalJsonStringify byte-for-byte) and
+#                base64-encoded as xxx (design §2 finding fix: catalyst.linear.bot.
+#                orchestrator/.worker store OBJECTS, not strings — see
+#                _csc_resolve_config_json, the ONLY caller that accepts this tag;
+#                _csc_resolve_cloud_token_name deliberately does NOT, since a NAME override
+#                can only ever be a plain string).
+#   @NONSTR    — value is present but is an array/boolean/number, OR a string/object whose
+#                canonical form carries an embedded NUL (see the NUL-BYTE note below) — never
+#                treated as a usable secret.
 # Never fails the caller (always echoes a tag, even "@ABSENT" on any error).
+#
+# TRAILING-NEWLINE FIX (Codex finding fix): the OLD implementation returned the tagged value
+# VERBATIM ("@STR:" + $v) through `_jq_out="$(jq ...)"` — and $() strips ALL trailing
+# newlines from its OWN captured output. A value like "abc\n" is the LAST thing printed (tag
+# then value), so its trailing byte WAS the captured string's trailing byte, and $() silently
+# truncated it to "abc" — while lib/secret-contract.mjs's JSON.parse preserves every byte.
+# Base64-encoding the value inside jq means the captured string's own trailing byte is
+# alphanumeric/+//= — NEVER a newline — so nothing is stripped; decoding afterward recovers
+# the exact original bytes, including any trailing newline.
+#
+# BOM SNIFF (parity, mirrors lib/catalyst-deployment-mode.sh's identical fix verbatim): this
+# jq build tolerates a UTF-8 BOM at the start of input; JSON.parse rejects one. A
+# BOM-prefixed Layer-2 file must settle @ABSENT (layer-malformed) on BOTH sides.
+#
+# --slurp / MULTI-DOCUMENT (parity, mirrors catalyst-deployment-mode.sh): jq without -s
+# processes each top-level JSON value in a file independently — a file holding TWO valid
+# documents exits 0 and emits two tags (garbage once collapsed through the $() boundary
+# below), while JSON.parse rejects the whole file (trailing-content SyntaxError). Slurping
+# collapses that to one array whose length exposes the multi-document case (length != 1 →
+# @ABSENT) — a single document is unaffected (length == 1, .[0] is that one document).
 _csc_read_json_string() {
   local _f="$1" _path="$2" _jq_out _jq_rc
   [[ -r "$_f" ]] || { printf '@ABSENT'; return 0; }
   command -v jq >/dev/null 2>&1 || { printf '@ABSENT'; return 0; }
+  local _first3
+  _first3="$(head -c 3 "$_f" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  if [[ "$_first3" == "efbbbf" ]]; then
+    printf '@ABSENT'
+    return 0
+  fi
   # ERREXIT SAFETY: the assignment runs in an `if` condition so a nonzero jq exit cannot
   # abort a caller running under `set -e`/inherit_errexit.
   # NUL-BYTE CANDIDATE: a bash command substitution silently TRUNCATES an embedded NUL byte,
   # so a raw value with an embedded NUL between "c" and "loud" would otherwise arrive at the
   # caller already collapsed to a DIFFERENT (truncated) string than what jq/JS actually saw.
   # Detect it INSIDE jq (mirrors lib/catalyst-deployment-mode.sh's identical fix) and settle
-  # it as @NONSTR before it ever crosses the $() boundary.
-  if _jq_out="$(jq -r --arg p "$_path" '
+  # it as @NONSTR before it ever crosses the $() boundary. Applied identically to the
+  # canonicalized OBJECT form (see @OBJ64 above) via the same $canon-carrying branch.
+  if _jq_out="$(jq -rs --arg p "$_path" '
+    if length != 1 then "@ABSENT" else .[0] |
     (getpath($p | split("."))) as $v |
     if $v == null then "@ABSENT"
     elif ($v | type) == "string" then
-      (if ($v | contains([0] | implode)) then "@NONSTR" else "@STR:" + $v end)
+      (if ($v | contains([0] | implode)) then "@NONSTR" else "@STR64:" + ($v | @base64) end)
+    elif ($v | type) == "object" then
+      ($v | walk(if type == "object" then to_entries | sort_by(.key) | from_entries else . end) | tojson) as $canon |
+      (if ($canon | contains([0] | implode)) then "@NONSTR" else "@OBJ64:" + ($canon | @base64) end)
     else "@NONSTR"
+    end
     end
   ' "$_f" 2>/dev/null)"; then
     _jq_rc=0
@@ -315,6 +378,27 @@ _csc_contains_nul() {
   [[ "$_orig" -ne "$_stripped" ]]
 }
 
+# _csc_is_valid_utf8 FILE — true iff every byte in FILE forms valid UTF-8. PARITY GUARD
+# (Codex finding fix, generalizes the NUL-byte lesson above to the FULL byte-validity
+# question): Node's readFileSync(file, "utf8") REPLACES any invalid UTF-8 byte sequence with
+# U+FFFD rather than failing, so lib/secret-contract.mjs's JS side would silently decode a
+# bare-file secret containing a stray non-UTF-8 byte (e.g. a leading 0xFF 0xFE) into a
+# MUTATED credential, while this file's `cat` preserves the original bytes exactly — two
+# different "resolved" values for the same file. Neither behavior is safe to prefer: a
+# credential that cannot round-trip UTF-8 identically cannot be represented identically in
+# both engines, so BOTH sides REJECT the candidate (falls through to the next candidate,
+# same degrade shape as the NUL-byte guard) rather than one silently serving a mutated view.
+# `iconv -f UTF-8 -t UTF-8` is a standard, portable (GNU + BSD/macOS) round-trip validity
+# check: it exits non-zero the instant it hits a byte sequence that cannot be interpreted as
+# UTF-8, without ever needing to hold the (possibly credential-bearing) decoded text in a
+# shell variable.
+_csc_is_valid_utf8() {
+  local _f="$1"
+  [[ -r "$_f" ]] || return 1
+  command -v iconv >/dev/null 2>&1 || return 0
+  iconv -f UTF-8 -t UTF-8 "$_f" >/dev/null 2>&1
+}
+
 # catalyst_secret_read_first_nonblank_file — tries each of "$@" in order; on the first
 # readable, non-NUL, non-blank (after EOL-strip) candidate, prints the value and returns 0.
 # Prints nothing and returns 1 if no candidate qualifies. (Deliberately does NOT report which
@@ -327,6 +411,7 @@ catalyst_secret_read_first_nonblank_file() {
   for _f in "$@"; do
     [[ -r "$_f" ]] || continue
     _csc_contains_nul "$_f" && continue
+    _csc_is_valid_utf8 "$_f" || continue
     _raw="$(cat "$_f" 2>/dev/null)" || continue
     _val="$(_csc_strip_eol "$_raw")"
     if ! _csc_is_blank "$_val"; then
@@ -426,16 +511,25 @@ _csc_resolve_config_json() {
   _path="$(catalyst_secret_config_json_path "$_id")"
   _l2="$(catalyst_secret_resolve_layer2_path)"
   _tagged="$(_csc_read_json_string "$_l2" "$_path")"
+  # ACTOR ROW SHAPE FIX (Codex finding fix): accepts BOTH the "@STR64:" tag (a JSON string —
+  # the pre-existing groq-api-key/generic shape) AND the "@OBJ64:" tag (a JSON OBJECT — the
+  # catalyst.linear.bot.orchestrator/.worker shape, canonicalized+base64'd by
+  # _csc_read_json_string), mirroring lib/secret-contract.mjs's canonicalizeConfigJsonValue
+  # exactly: string-or-plain-object both resolve; array/boolean/number (@NONSTR) stay
+  # rejected. B2 FIX (empty-value guard, generalized): require the DECODED value to be
+  # non-empty — an empty string decodes to an empty string (falls through to "none", matching
+  # lib/secret-contract.mjs's `raw.length > 0`); an empty object decodes to the 2-byte
+  # canonical string "{}" (non-empty — DOES resolve, matching
+  # canonicalizeConfigJsonValue's "empty object still resolves" behavior).
   case "$_tagged" in
-    "@STR:"?*)
-      # B2 FIX: require at least one character after the tag — an empty extracted string
-      # ("@STR:" alone) falls through to the `*` branch below and classifies as absent.
-      # This mirrors lib/secret-contract.mjs's resolveConfigJson, which only accepts
-      # `raw.length > 0` (an empty config-json string is treated as "none", not a resolved
-      # empty-string secret). WITHOUT this guard, an empty JSON string value diverged from
-      # JS: this file reported source=config-json (with an empty value) while JS fell
-      # through to source=none.
-      _csc_set_result "${_tagged#@STR:}" "config-json" "$_delivery"
+    "@STR64:"*|"@OBJ64:"*)
+      local _decoded
+      _csc_b64_decode_var _decoded "${_tagged#@*:}"
+      if [[ -n "$_decoded" ]]; then
+        _csc_set_result "$_decoded" "config-json" "$_delivery"
+      else
+        _csc_set_result "" "none" "$_delivery"
+      fi
       ;;
     *)
       _csc_set_result "" "none" "$_delivery"
@@ -455,18 +549,44 @@ _csc_resolve_cloud_token_name() {
   else
     _l2="$(catalyst_secret_resolve_layer2_path)"
     _tagged="$(_csc_read_json_string "$_l2" "$_path")"
-    # B2 FIX: same "@STR:"?* non-empty guard as _csc_resolve_config_json — an empty
-    # Layer-2 NAME override must fall through to the default env-var name, matching
-    # lib/secret-contract.mjs's resolveCloudTokenName `l2Name.length > 0` check. Without
-    # this guard an empty tag left `_env_var` empty, and `_val="${!_env_var-}"` below would
-    # attempt an indirect expansion on an EMPTY variable name — a second "invalid variable
-    # name" fatal-abort class, the same failure shape as B1.
+    # B2 FIX: same non-empty guard as _csc_resolve_config_json — an empty Layer-2 NAME
+    # override must fall through to the default env-var name, matching
+    # lib/secret-contract.mjs's resolveCloudTokenName `l2Name.length > 0` check. STRICT
+    # STRING-ONLY BY DESIGN (unlike _csc_resolve_config_json): only the "@STR64:" tag is
+    # accepted here — an "@OBJ64:" (object-shaped) override is deliberately NOT
+    # canonicalized-and-used-as-a-name, mirroring lib/secret-contract.mjs's
+    # resolveCloudTokenName, which reads catalyst.cloud.tokenEnv via the SAME readJsonField
+    # call but applies its OWN `typeof l2Name === "string"` check (never routes through
+    # canonicalizeConfigJsonValue) — a NAME override can only ever be a plain
+    # env-var-name string, so an object there falls back to the default name on both sides.
     case "$_tagged" in
-      "@STR:"?*) _env_var="${_tagged#@STR:}" ;;
+      "@STR64:"*)
+        local _decoded
+        _csc_b64_decode_var _decoded "${_tagged#@STR64:}"
+        if [[ -n "$_decoded" ]]; then
+          _env_var="$_decoded"
+        else
+          _env_var="$(catalyst_secret_env_names "$_id" | head -n1)"
+        fi
+        ;;
       *) _env_var="$(catalyst_secret_env_names "$_id" | head -n1)" ;;
     esac
   fi
-  _val="${!_env_var-}"
+  # INVALID ENV NAME FIX (Codex finding fix): CATALYST_CLOUD_TOKEN_ENV / the Layer-2
+  # tokenEnv override is OPERATOR-CONTROLLED text, not registry data — a value like
+  # "BAD-NAME" (or anything else outside [A-Za-z_][A-Za-z0-9_]*) fed straight into
+  # `${!_env_var-}` FATALLY ABORTS the whole process with "invalid variable name" (verified;
+  # same failure CLASS as the B1/B3 fixes elsewhere in this file, at a call site those fixes
+  # didn't cover). lib/secret-contract.mjs's `env?.[envVar]` never crashes on any string —
+  # an invalid identifier there is simply a lookup that finds nothing. Validating BEFORE the
+  # indirect expansion makes an invalid override degrade to the documented unresolved result
+  # (source=none) identically on both sides, never an abort. The `[[ =~ ]]` test itself
+  # cannot trip errexit (a failed conditional in an `if`/`[[` context never does).
+  if [[ "$_env_var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    _val="${!_env_var-}"
+  else
+    _val=""
+  fi
   if [[ -n "$_val" ]]; then
     _csc_set_result "$_val" "platform-env" "$_delivery"
   else
@@ -556,7 +676,22 @@ catalyst_resolve_secret() {
         fi
       fi
     fi
-    _csc_resolve_env_alias_only "$_id"
+    # PLATFORM-ENV NAME OVERRIDE FIX (Codex finding fix): a bare _csc_resolve_env_alias_only
+    # here only ever checks the row's static env-name list — for cloud-token that is JUST
+    # the hardcoded default "CATALYST_CLOUD_TOKEN" — so an operator-configured
+    # CATALYST_CLOUD_TOKEN_ENV or Layer-2 catalyst.cloud.tokenEnv override was silently
+    # ignored the moment genuine cloud mode activated, even though that SAME override IS
+    # honored one level up (the bootstrap check above recurses via `catalyst_resolve_secret
+    # "$_bid"` with NO deployment-mode args, which falls through to the normal case
+    # dispatch below → _csc_resolve_cloud_token_name). Dispatching platform-env rows through
+    # _csc_resolve_cloud_token_name here too — the SAME function, not a second copy — closes
+    # that gap identically to the JS-side fix (lib/secret-contract.mjs resolveSecret's cloud
+    # branch). Every other cloud-mode row still collapses to its plain env-alias chain.
+    if [[ "$_delivery" == "platform-env" ]]; then
+      _csc_resolve_cloud_token_name "$_id"
+    else
+      _csc_resolve_env_alias_only "$_id"
+    fi
     return 0
   fi
 
@@ -616,9 +751,13 @@ catalyst_secret_reset_arm_state() {
   fi
 }
 
-# catalyst_arm_secret ID — echoes "armed|rotated|restartRequired" (each true|false) AND
-# exports the same three fields as CATALYST_SECRET_ARM_ARMED / _ROTATED / _RESTART_REQUIRED,
-# mirroring armSecret's { armed, rotated, restartRequired } shape.
+# catalyst_arm_secret ID [DEPLOYMENT_MODE] [INFERRED(true|false)] — echoes
+# "armed|rotated|restartRequired" (each true|false) AND exports the same three fields as
+# CATALYST_SECRET_ARM_ARMED / _ROTATED / _RESTART_REQUIRED, mirroring armSecret's { armed,
+# rotated, restartRequired } shape. DEPLOYMENT_MODE/INFERRED are the SAME optional
+# positional args catalyst_resolve_secret takes, threaded straight through (Codex finding
+# fix, design §8) — see the DEPLOYMENT-MODE THREADING FIX comment below for the concrete
+# bug this closes; a caller that never passes them gets EXACTLY today's non-cloud behavior.
 #
 # MUST BE CALLED DIRECTLY, NEVER WRAPPED IN $(...), by any caller that needs the persistent
 # baseline to survive across repeated calls in the same shell — this is the SAME
@@ -631,7 +770,7 @@ catalyst_secret_reset_arm_state() {
 # read the exported vars, or capture stdout via `out="$(catalyst_arm_secret id)"` ONLY when
 # the caller genuinely wants a one-shot, state-discarding check.
 catalyst_arm_secret() {
-  local _id="$1" _rotation_class=""
+  local _id="$1" _dep_mode="${2:-}" _dep_inferred="${3:-true}" _rotation_class=""
   # B4 FIX (errexit safety): the assignment runs in an `if` condition — mirrors the
   # ERREXIT SAFETY pattern on _csc_read_json_string above. catalyst_secret_rotation_class
   # returns rc=1 (printing nothing) for an unknown id; a bare
@@ -656,8 +795,16 @@ catalyst_arm_secret() {
   # contract exists to report). Call resolve directly (no $() — resolve never
   # touches the arm arrays, so there is no subshell-state hazard) and read the
   # CATALYST_SECRET_LAST_VALUE breadcrumb it exports in-shell.
+  #
+  # DEPLOYMENT-MODE THREADING FIX (Codex finding fix, design §8): _dep_mode/_dep_inferred
+  # MUST be forwarded here — omitting them used to make the arm baseline resolve through the
+  # non-cloud file/config chain even when the CALLER is genuinely in cloud mode, while a
+  # sibling direct `catalyst_resolve_secret id cloud false` call correctly resolved via the
+  # cloud-only env-alias chain. In a cloud process with an injected token AND a stale local
+  # file, that mismatch made a stale-file edit falsely report restartRequired while a REAL
+  # token rotation went unnoticed — mirrors lib/secret-contract.mjs's armSecret fix exactly.
   local _current _idx
-  catalyst_resolve_secret "$_id" >/dev/null
+  catalyst_resolve_secret "$_id" "$_dep_mode" "$_dep_inferred" >/dev/null
   _current="${CATALYST_SECRET_LAST_VALUE-}"
   if _idx="$(_csc_arm_index_of "$_id")"; then
     local _previous="${_CSC_ARM_VALUES[$_idx]}"

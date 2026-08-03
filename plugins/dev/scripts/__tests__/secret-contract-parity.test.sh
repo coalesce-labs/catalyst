@@ -223,6 +223,26 @@ _cell "hostile: NUL-byte in bare-file candidate — rejected on both sides" \
   "fallback-after-nul|inherited|bare-file" \
   CSC_PROBE_ID=github-token "CATALYST_CONFIG_DIR=${NUL_DIR}" "GH_TOKEN=fallback-after-nul"
 
+# Hostile probe (Codex finding fix): NON-UTF-8 BYTES in a bare-file candidate. Node's
+# readFileSync(file,"utf8") REPLACES an invalid byte sequence with U+FFFD rather than
+# failing — a bare-file secret containing a stray non-UTF-8 byte would silently decode to a
+# MUTATED credential in JS while bash's `cat` preserves the original bytes exactly. Both
+# sides MUST reject the candidate identically (fall through), same degrade shape as the
+# NUL-byte guard above.
+BADUTF8_DIR="${TMP_DIR}/badutf8-cfg"
+mkdir -p "$BADUTF8_DIR"
+printf '\xff\xfehi' > "${BADUTF8_DIR}/github-token"
+_cell "hostile: non-UTF-8 bytes in bare-file candidate — rejected on both sides" \
+  "fallback-after-bad-utf8|inherited|bare-file" \
+  CSC_PROBE_ID=github-token "CATALYST_CONFIG_DIR=${BADUTF8_DIR}" "GH_TOKEN=fallback-after-bad-utf8"
+
+GOODUTF8_DIR="${TMP_DIR}/goodutf8-cfg"
+mkdir -p "$GOODUTF8_DIR"
+printf 'tok-\xe2\x9c\x93-value\n' > "${GOODUTF8_DIR}/github-token"
+_cell "valid multi-byte UTF-8 in a bare-file candidate is preserved, not rejected" \
+  $'tok-\xe2\x9c\x93-value|shared-file|bare-file' \
+  CSC_PROBE_ID=github-token "CATALYST_CONFIG_DIR=${GOODUTF8_DIR}"
+
 # ─── unknown id ────────────────────────────────────────────────────────────────────────────
 _cell "unknown id: empty triple, never fails the caller" "||" CSC_PROBE_ID=does-not-exist-xyz
 
@@ -293,8 +313,29 @@ _cell "hostile: bare JSON false settles as none (BLOCKING-1 class), never coerce
   "|none|config-json" CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
 
 printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":"{\"apiKey\":\"x\"}"}}}}' > "$L2_FILE"
-_cell "config-json: reads the dotted path (linear-orchestrator-actor)" \
+_cell "config-json: reads the dotted path (linear-orchestrator-actor, string-shaped value)" \
   '{"apiKey":"x"}|config-json|config-json' \
+  CSC_PROBE_ID=linear-orchestrator-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# ACTOR ROW SHAPE (Codex finding fix): the AUTHORITATIVE Layer-2 schema stores
+# catalyst.linear.bot.orchestrator/.worker as OBJECTS ({clientId, clientSecret, ...}), never
+# a string — this fixture uses a REAL object (source key order deliberately
+# clientSecret-before-clientId, to prove the canonicalization is genuinely sorting, not just
+# echoing source order) and asserts both sides produce the IDENTICAL canonical (sorted-key)
+# JSON string.
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":{"clientSecret":"s3cr3t","clientId":"abc123"}}}}}' > "$L2_FILE"
+_cell "config-json: ACTOR ROW SHAPE — OBJECT-shaped value canonicalizes with sorted keys identically on both sides" \
+  '{"clientId":"abc123","clientSecret":"s3cr3t"}|config-json|config-json' \
+  CSC_PROBE_ID=linear-orchestrator-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":{}}}}}' > "$L2_FILE"
+_cell "config-json: ACTOR ROW SHAPE — an EMPTY object still resolves (canonical '{}'), not silently coerced to none" \
+  '{}|config-json|config-json' \
+  CSC_PROBE_ID=linear-orchestrator-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":["nope"]}}}}' > "$L2_FILE"
+_cell "config-json: ACTOR ROW SHAPE — an ARRAY is rejected on both sides (not a valid credential shape)" \
+  "|none|config-json" \
   CSC_PROBE_ID=linear-orchestrator-actor "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
 
 # B5: previously-uncovered row — linear-worker-actor (config-json, distinct configJsonPath
@@ -331,6 +372,116 @@ printf '%s' '{"catalyst":{"cloud":{"tokenEnv":""}}}' > "$L2_FILE"
 _cell "hostile (B2): empty Layer-2 cloud.tokenEnv override falls back to the default env-var name" \
   "cloud-val|platform-env|platform-env" \
   CSC_PROBE_ID=cloud-token "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}" "CATALYST_CLOUD_TOKEN=cloud-val"
+
+# TRAILING NEWLINES IN JSON VALUES (Codex finding fix): a config-json STRING value ending in
+# "\n" must resolve BYTE-FOR-BYTE identically on both sides — the bash side previously lost
+# the trailing newline at the `_jq_out="$(jq ...)"` boundary (a bare command substitution
+# strips ALL trailing newlines from its own captured output).
+printf '%s' '{"groq":{"apiKey":"abc\n"}}' > "$L2_FILE"
+_cell "hostile: trailing newline in a config-json STRING value is preserved byte-for-byte" \
+  $'abc\n|config-json|config-json' \
+  CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# Byte-digest cross-check (independent of shell string-comparison quirks): compare a SHA-256
+# digest of the raw resolved VALUE bytes on both sides — not just the pipe-joined field
+# string, which can hide a byte-level truncation bug behind an apparently-matching test if
+# the harness's OWN capture happened to mask it too.
+JS_TRAILING_NL_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}" CSC_PROBE_ID=groq-api-key node "$PROBE_RESOLVE_JS" 2>&1)"
+BASH_TRAILING_NL_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}" bash -c "source '$LIB'; catalyst_resolve_secret groq-api-key")"
+JS_TRAILING_NL_VAL="${JS_TRAILING_NL_OUT%%|*}"
+BASH_TRAILING_NL_VAL="${BASH_TRAILING_NL_OUT%%|*}"
+JS_DIGEST="$(printf '%s' "$JS_TRAILING_NL_VAL" | shasum -a 256 | awk '{print $1}')"
+BASH_DIGEST="$(printf '%s' "$BASH_TRAILING_NL_VAL" | shasum -a 256 | awk '{print $1}')"
+expect_eq "byte-digest parity: trailing-newline config-json value SHA-256 matches" "$JS_DIGEST" "$BASH_DIGEST"
+
+# INVALID ENV NAME (Codex finding fix): CATALYST_CLOUD_TOKEN_ENV / the Layer-2 tokenEnv
+# override is operator-controlled text, not registry data — an invalid shell identifier
+# (e.g. "BAD-NAME") must degrade to the documented unresolved result on BOTH sides, never a
+# bash "invalid variable name" fatal abort (JS's `env?.[envVar]` never crashes on any string).
+_cell "hostile: invalid env-name override (CATALYST_CLOUD_TOKEN_ENV) resolves none, never aborts" \
+  "|none|platform-env" \
+  CSC_PROBE_ID=cloud-token "CATALYST_CLOUD_TOKEN_ENV=BAD-NAME"
+
+printf '%s' '{"catalyst":{"cloud":{"tokenEnv":"BAD-NAME-FROM-LAYER2"}}}' > "$L2_FILE"
+_cell "hostile: invalid env-name Layer-2 override resolves none, never aborts" \
+  "|none|platform-env" \
+  CSC_PROBE_ID=cloud-token "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# JSON ACCEPTANCE NORMALIZATION (Codex finding fix): BOM-prefixed / multi-document / a
+# lone-surrogate escape anywhere in the document must all settle @ABSENT-equivalent (none) on
+# BOTH sides, matching JSON.parse's rejection of all three (jq natively tolerates a BOM and
+# processes multiple top-level documents independently unless slurped).
+BOM_L2_FILE="${L2_DIR}/bom-config.json"
+printf '\xEF\xBB\xBF{"groq":{"apiKey":"should-not-resolve"}}' > "$BOM_L2_FILE"
+_cell "hostile: BOM-prefixed Layer-2 file settles as none on both sides" \
+  "|none|config-json" \
+  CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${BOM_L2_FILE}"
+
+MULTIDOC_L2_FILE="${L2_DIR}/multidoc-config.json"
+printf '{"groq":{"apiKey":"first-doc"}}{"groq":{"apiKey":"second-doc"}}' > "$MULTIDOC_L2_FILE"
+_cell "hostile: multi-document Layer-2 file settles as none on both sides" \
+  "|none|config-json" \
+  CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${MULTIDOC_L2_FILE}"
+
+# The lone \ud800 escape lives in an UNRELATED field; groq.apiKey's own value is otherwise
+# perfectly valid — jq rejects the ENTIRE document (verified: exit 5), so JS must degrade
+# identically via its raw-text whole-document scan, not merely check the extracted field.
+printf '%s' '{"groq":{"apiKey":"from-config"},"unrelated":"clu\ud800ster"}' > "$L2_FILE"
+_cell "hostile: unpaired-surrogate escape ANYWHERE in the document settles as none on both sides" \
+  "|none|config-json" \
+  CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# ─── E4/E6: jq 1.7.1 lone-LOW-surrogate + backslash-run-aware escape scanning parity ───────
+# Verified against real jq 1.7.1 (jq-1.7.1-apple): jq ACCEPTS a lone LOW surrogate escape
+# (\udc00), substituting U+FFFD and exiting 0 — it only REJECTS lone HIGH escapes (exit 5,
+# the control case directly above). The escape text is authored via the BACKSLASH
+# variable-expansion split (not a literal \uXXXX typed in this file's own source), matching
+# this suite's and deployment-mode-parity.test.sh's existing hostile-cell convention — some
+# authoring toolchains normalize a literal backslash-u sequence in a script's own source.
+# shellcheck disable=SC1003 # genuinely a literal single backslash, not an escape attempt
+BACKSLASH='\'
+
+# E4a: a lone LOW surrogate escape in an UNRELATED field must NOT reject the document — the
+# real value at groq.apiKey resolves normally on both sides.
+printf '%s' "{\"groq\":{\"apiKey\":\"good\"},\"unrelated\":\"clu${BACKSLASH}udc00ster\"}" > "$L2_FILE"
+_cell "E4a: lone LOW surrogate escape in an unrelated field — value resolves normally on both sides" \
+  "good|config-json|config-json" \
+  CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# E4b: a lone LOW surrogate escape INSIDE the resolved secret value itself — both engines
+# must produce the SAME bytes (jq's U+FFFD replacement), verified two ways: the pipe-joined
+# field string AND an independent SHA-256 byte-digest cross-check (mirrors the
+# trailing-newline byte-digest check above — a shell string-comparison quirk could otherwise
+# mask a byte-level divergence that the digest cannot).
+printf '%s' "{\"groq\":{\"apiKey\":\"x${BACKSLASH}udc00y\"}}" > "$L2_FILE"
+_cell "E4b: lone LOW surrogate escape inside the secret value — U+FFFD-replaced, resolved (not rejected)" \
+  $'x\xef\xbf\xbdy|config-json|config-json' \
+  CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+JS_E4B_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}" CSC_PROBE_ID=groq-api-key node "$PROBE_RESOLVE_JS" 2>&1)"
+BASH_E4B_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}" bash -c "source '$LIB'; catalyst_resolve_secret groq-api-key")"
+JS_E4B_VAL="${JS_E4B_OUT%%|*}"
+BASH_E4B_VAL="${BASH_E4B_OUT%%|*}"
+JS_E4B_DIGEST="$(printf '%s' "$JS_E4B_VAL" | shasum -a 256 | awk '{print $1}')"
+BASH_E4B_DIGEST="$(printf '%s' "$BASH_E4B_VAL" | shasum -a 256 | awk '{print $1}')"
+expect_eq "E4b byte-digest parity: lone-LOW-surrogate U+FFFD replacement SHA-256 matches" "$JS_E4B_DIGEST" "$BASH_E4B_DIGEST"
+
+# E6: a field holding the LITERAL 7-character text \\ud800 (an escaped backslash followed by
+# the 5 literal characters "ud800") — valid JSON both parsers accept, and NOT a live escape
+# at all (the backslash run before "u" is length 2, EVEN — both backslashes pair off as one
+# escaped literal backslash, leaving "ud800" as ordinary text). A backslash-run-BLIND scanner
+# false-positives on the bare "\ud800" substring inside that literal text and rejects the
+# WHOLE document even though jq parses it fine and groq.apiKey resolves normally.
+printf '%s' "{\"groq\":{\"apiKey\":\"good\"},\"unrelated\":\"literal ${BACKSLASH}${BACKSLASH}ud800 text\"}" > "$L2_FILE"
+_cell "E6: literal escaped-backslash+text (not a live escape) in an unrelated field does not reject the document" \
+  "good|config-json|config-json" \
+  CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+# Control: a valid astral surrogate PAIR (𐀀, forming U+10000) is accepted and
+# resolved, byte-for-byte, on both sides — the scanner's adjacent-live-pair acceptance path.
+printf '%s' "{\"groq\":{\"apiKey\":\"x${BACKSLASH}ud800${BACKSLASH}udc00y\"}}" > "$L2_FILE"
+_cell "control: valid astral surrogate pair resolves (accepted, not rejected) on both sides" \
+  $'x\xf0\x90\x80\x80y|config-json|config-json' \
+  CSC_PROBE_ID=groq-api-key "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
 
 # ─── platform-env: cloud-token (two-step name-then-value resolution) ──────────────────────
 _cell "platform-env: default name" "cloud-val|platform-env|platform-env" \
@@ -400,6 +551,26 @@ _cell "hostile (B3): cloud-token value beginning with '|' must not falsely trigg
   "cloud-injected|inherited|bare-file" \
   CSC_PROBE_ID=github-token "CATALYST_CONFIG_DIR=${CLOUDGUARD_DIR}" "GH_TOKEN=cloud-injected" \
   "CATALYST_CLOUD_TOKEN=|leading-pipe-value" CSC_PROBE_DEP_MODE=cloud CSC_PROBE_DEP_INFERRED=false
+
+# CLOUD-TOKEN NAME OVERRIDE (Codex finding fix): genuine cloud mode must resolve cloud-token
+# THROUGH the full name-override ladder (env override → Layer-2 override → default), not
+# only the hardcoded default env-var name — a direct resolveSecret("cloud-token",
+# {deploymentMode}) call previously bypassed that ladder entirely on both sides.
+_cell "cloud-token: genuine cloud mode honors CATALYST_CLOUD_TOKEN_ENV override" \
+  "the-real-token|platform-env|platform-env" \
+  CSC_PROBE_ID=cloud-token "CATALYST_CLOUD_TOKEN_ENV=MY_PLATFORM_TOKEN" "MY_PLATFORM_TOKEN=the-real-token" \
+  CSC_PROBE_DEP_MODE=cloud CSC_PROBE_DEP_INFERRED=false
+
+printf '%s' '{"catalyst":{"cloud":{"tokenEnv":"OTHER_TOKEN_VAR"}}}' > "$L2_FILE"
+_cell "cloud-token: genuine cloud mode honors the Layer-2 catalyst.cloud.tokenEnv override too" \
+  "v2|platform-env|platform-env" \
+  CSC_PROBE_ID=cloud-token "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}" "OTHER_TOKEN_VAR=v2" \
+  CSC_PROBE_DEP_MODE=cloud CSC_PROBE_DEP_INFERRED=false
+
+_cell "cloud-token: override name genuinely consulted in cloud mode — the default var being set does NOT resolve it" \
+  "|none|platform-env" \
+  CSC_PROBE_ID=cloud-token "CATALYST_CLOUD_TOKEN_ENV=MY_PLATFORM_TOKEN" "CATALYST_CLOUD_TOKEN=should-not-be-used" \
+  CSC_PROBE_DEP_MODE=cloud CSC_PROBE_DEP_INFERRED=false
 
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES, Skipped: $SKIPPED"

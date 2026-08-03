@@ -215,8 +215,30 @@ export const SECRET_REGISTRY = Object.freeze(
       rotation: { class: "n/a" },
       bootstrapFor: "cluster",
     },
-  ].map((row) => Object.freeze(row)),
+  ].map((row) => deepFreeze(row)),
 );
+
+// deepFreeze — Object.freeze only makes the OUTER object immutable; a row's nested
+// envNames/defaultLocalPath arrays and rotation object were previously left mutable, so
+// `getSecretRow("linear-api-token").envNames.push("EVIL")` or
+// `resolveSecret(id).rotation.class = "boot-only"` would silently corrupt shared registry
+// state for the rest of the process (every later resolution, hook registration, and arm
+// call reads the SAME frozen-row object) — exactly the "frozen registry" contract this
+// module's own header promises but didn't fully deliver. Recursively freezes every
+// object/array reachable from a row so a mutation attempt THROWS (strict-mode ESM) instead
+// of silently succeeding, for every accessor that returns a piece of registry data by
+// reference (getSecretRow, resolveSecret's `rotation` field, etc.) — "frozen" satisfies the
+// design's "return frozen or cloned structures" requirement without needing a clone on
+// every call.
+function deepFreeze(value) {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const key of Object.getOwnPropertyNames(value)) {
+      deepFreeze(value[key]);
+    }
+  }
+  return value;
+}
 
 // getSecretRow — the id → row lookup every engine function starts from. Returns undefined
 // for an unknown id (never throws).
@@ -281,20 +303,152 @@ export function resolveLayer2Path(env = process.env) {
 // value already does. Reuses the same containsNul() helper readFirstNonBlankFile uses
 // below (function declarations hoist, so the later definition is available here) rather
 // than a second copy.
+// hasLiveLoneHighSurrogateEscape — CTL-1617 JSON-acceptance-normalization lesson, mirroring
+// jq 1.7.1's OWN acceptance rule exactly rather than the earlier (over-rejecting) regex
+// guard this replaces. Verified against real jq 1.7.1 (`jq --version` ⇒ jq-1.7.1-apple):
+//   - a lone HIGH surrogate escape (\uD800-\uDBFF, unpaired) ⇒ jq exits 5, rejects the WHOLE
+//     document.
+//   - a lone LOW surrogate escape (\uDC00-\uDFFF, unpaired) ⇒ jq exits 0 and substitutes
+//     U+FFFD for it — ACCEPTED, not rejected.
+//   - a valid HIGH+LOW pair ⇒ accepted, forms the intended astral character.
+// So only a live, unpaired HIGH escape must reject the document; a live lone LOW is fine
+// (handled at the value-extraction boundary below, via toWellFormed()).
+//
+// "Live" is the key subtlety the old regex guard got wrong (E6): a backslash run of ODD
+// length immediately before a `u` means the LAST backslash actually escapes that `u` (every
+// preceding pair of backslashes is itself one escaped literal backslash) — a genuine
+// \uXXXX escape. An EVEN-length run means every backslash pairs off as a literal backslash
+// and the following "uXXXX" is ordinary LITERAL TEXT, not an escape at all — e.g. the JSON
+// string source `"literal \\ud800 text"` (an escaped backslash followed by the 5 literal
+// characters "ud800") parses to the harmless string `literal \ud800 text` and must NOT
+// reject the document, even though the old regex — which only looked for a bare `\uXXXX`
+// substring, blind to what preceded the backslash — matched it and killed the whole read.
+//
+// Scans the RAW file text (before JSON.parse), matching jq's whole-document rejection
+// semantics: a live unpaired HIGH escape ANYWHERE in the document — even outside the field
+// being read — is what makes jq unable to produce ANY value from the file at all.
+function hasLiveLoneHighSurrogateEscape(text) {
+  const re = /(\\+)u([0-9a-fA-F]{4})/g;
+  const liveMatches = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const isLive = m[1].length % 2 === 1;
+    if (!isLive) continue;
+    liveMatches.push({ index: m.index, end: m.index + m[0].length, code: parseInt(m[2], 16) });
+  }
+  for (let i = 0; i < liveMatches.length; i++) {
+    const cur = liveMatches[i];
+    if (cur.code < 0xd800 || cur.code > 0xdbff) continue; // not a HIGH surrogate
+    const next = liveMatches[i + 1];
+    const isPaired = next != null && next.index === cur.end && next.code >= 0xdc00 && next.code <= 0xdfff;
+    if (!isPaired) return true;
+  }
+  return false;
+}
+
+// toWellFormedString — normalizes a JS string so any lone (unpaired) surrogate code unit is
+// replaced with U+FFFD, mirroring what jq 1.7.1 already did AT PARSE TIME for a live lone LOW
+// surrogate escape (verified above). JSON.parse itself performs no such normalization — a
+// parsed JS string can carry a raw lone-low code unit straight through — so this is applied
+// explicitly at the value-extraction boundary (readJsonField's string-typed return), not
+// inside JSON.parse itself, so every OTHER caller of a parsed document (e.g. object/array
+// traversal above) still sees the untouched string. Uses the native
+// String.prototype.toWellFormed() where available (Node/bun both support it); falls back to
+// a manual code-unit walk on a runtime that lacks it.
+function toWellFormedString(str) {
+  if (typeof str.toWellFormed === "function") return str.toWellFormed();
+  let out = "";
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = str.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += str[i] + str[i + 1];
+        i++;
+      } else {
+        out += "�";
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      out += "�";
+    } else {
+      out += str[i];
+    }
+  }
+  return out;
+}
+
 function readJsonField(filePath, dottedPath) {
   if (!dottedPath) return undefined;
   try {
-    const doc = JSON.parse(readFileSync(filePath, "utf8"));
+    const text = readFileSync(filePath, "utf8");
+    // NOTE: a leading UTF-8 BOM and multi-document content are NOT special-cased here —
+    // JSON.parse already rejects both natively (verified: a leading U+FEFF and any
+    // non-whitespace trailing a complete top-level value both throw SyntaxError), matching
+    // jq's own BOM-tolerant-but-multi-doc-tolerant behavior once the bash mirror's
+    // BOM-sniff + --slurp length check (design §5) settle those two cases to @ABSENT. Only
+    // the unpaired-HIGH-surrogate-escape direction needs an explicit JS-side guard (above) —
+    // a lone LOW escape is accepted by both engines (see hasLiveLoneHighSurrogateEscape).
+    if (hasLiveLoneHighSurrogateEscape(text)) return undefined;
+    const doc = JSON.parse(text);
     let cur = doc;
     for (const part of dottedPath.split(".")) {
       if (cur == null || typeof cur !== "object") return undefined;
       cur = cur[part];
     }
-    if (typeof cur === "string" && containsNul(cur)) return undefined;
+    if (typeof cur === "string") {
+      if (containsNul(cur)) return undefined;
+      // WELL-FORMED NORMALIZATION (mirrors jq's own lone-LOW-surrogate replacement, done at
+      // parse time on the bash side) — applied ONLY here, at the value-extraction boundary,
+      // per-value, not to the whole parsed document.
+      return toWellFormedString(cur);
+    }
     return cur;
   } catch {
     return undefined;
   }
+}
+
+// canonicalJsonStringify — deterministic (sorted-key, recursive) JSON serialization, used
+// ONLY to canonicalize an object-shaped config-json value (see canonicalizeConfigJsonValue
+// below). Sorting keys makes the output independent of source-file field order AND of any
+// difference between JS's/jq's default object-iteration order, so the bash mirror's
+// `walk(if type == "object" then to_entries | sort_by(.key) | from_entries else . end) |
+// tojson` produces the BYTE-IDENTICAL string for the same input (verified at authoring
+// time: `{"clientSecret":"s3cr3t","clientId":"abc123"}` canonicalizes to
+// `{"clientId":"abc123","clientSecret":"s3cr3t"}` on both sides).
+function canonicalJsonStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJsonStringify).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJsonStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+// canonicalizeConfigJsonValue — the config-json engine's value-acceptance rule (design §2
+// finding fix: the AUTHORITATIVE Layer-2 schema stores catalyst.linear.bot.orchestrator/
+// .worker as OBJECTS — {clientId, clientSecret, ...} — not strings; a resolver that only
+// accepted strings made both actor rows permanently resolve to "none" for every valid
+// production config, which the pre-fix test suite masked by fixturing a
+// JSON-STRING-CONTAINING-JSON instead of a real object). Accepts a non-empty, NUL-free
+// STRING as-is (the pre-existing groq-api-key/generic shape), or a plain OBJECT (not an
+// array), canonicalized via canonicalJsonStringify so a future consumer can
+// JSON.parse(resolved.value) and pull out clientId/clientSecret — the row's value
+// semantics this finding asks for. Arrays/booleans/numbers stay rejected (unchanged
+// BLOCKING-1 "never silently coerced" contract: a bare `false` at a config-json path is
+// "none", not truthy). NOTE: this generic object-acceptance is scoped to config-json ROW
+// resolution only — resolveCloudTokenName (below) deliberately keeps its OWN strict
+// string-only check on the SAME underlying readJsonField call, since a NAME override can
+// only ever be a plain env-var-name string.
+function canonicalizeConfigJsonValue(raw) {
+  if (typeof raw === "string") {
+    return raw.length > 0 ? raw : null;
+  }
+  if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+    const canon = canonicalJsonStringify(raw);
+    return containsNul(canon) ? null : canon;
+  }
+  return null;
 }
 
 // ─── Bare-file candidate search — generalizes githubTokenFileCandidates ─────
@@ -352,14 +506,33 @@ function containsNul(value) {
   return value.includes("\u0000");
 }
 
+// isValidUtf8RoundTrip — PARITY GUARD (generalizes the NUL-byte/JSON-acceptance lessons
+// above to raw file bytes): Node's readFileSync(file, "utf8") REPLACES any invalid UTF-8
+// byte sequence with U+FFFD (the Unicode replacement character) rather than failing — a
+// bare-file secret containing a stray non-UTF-8 byte (e.g. a leading 0xFF 0xFE) would
+// silently decode to a MUTATED credential in JS, while the bash mirror's `cat` preserves
+// the original bytes exactly. Neither behavior is safe to prefer over the other: a
+// credential that cannot round-trip UTF-8 identically cannot be represented identically in
+// both engines, so this file REJECTS the candidate on both sides (falls through to the
+// next candidate, matching the NUL-byte candidate's degrade shape) rather than silently
+// serving whichever language's mutated/unmutated view happens to run first. Detected via a
+// byte round-trip: decode as UTF-8, re-encode, and compare against the original bytes —
+// any invalid sequence fails to round-trip byte-for-byte.
+function isValidUtf8RoundTrip(buf, decoded) {
+  const reencoded = Buffer.from(decoded, "utf8");
+  return reencoded.length === buf.length && reencoded.equals(buf);
+}
+
 function readFirstNonBlankFile(candidates) {
   for (const file of candidates) {
-    let raw;
+    let buf;
     try {
-      raw = readFileSync(file, "utf8");
+      buf = readFileSync(file);
     } catch {
       continue;
     }
+    const raw = buf.toString("utf8");
+    if (!isValidUtf8RoundTrip(buf, raw)) continue;
     if (containsNul(raw)) continue;
     const val = stripEol(raw);
     if (!isBlank(val)) return { value: val, filePath: file };
@@ -423,8 +596,9 @@ function resolveConfigJson(row, env) {
   }
   const path = resolveLayer2Path(env);
   const raw = readJsonField(path, row.configJsonPath);
-  if (typeof raw === "string" && raw.length > 0) {
-    return { value: raw, source: "config-json", provider: row.delivery, rotation: row.rotation, filePath: path };
+  const resolved = canonicalizeConfigJsonValue(raw);
+  if (resolved != null) {
+    return { value: resolved, source: "config-json", provider: row.delivery, rotation: row.rotation, filePath: path };
   }
   return { value: null, source: "none", provider: row.delivery, rotation: row.rotation };
 }
@@ -520,7 +694,20 @@ export function resolveSecret(id, { env = process.env, deploymentMode } = {}) {
         }
       }
     }
-    return resolveEnvAliasOnly(row, env);
+    // PLATFORM-ENV NAME OVERRIDE FIX: a bare resolveEnvAliasOnly(row, env) here only ever
+    // checks row.envNames literally — for cloud-token that is JUST the hardcoded default
+    // "CATALYST_CLOUD_TOKEN", so an operator-configured CATALYST_CLOUD_TOKEN_ENV or Layer-2
+    // catalyst.cloud.tokenEnv override was silently ignored the moment genuine cloud mode
+    // activated, even though that exact override IS honored one level up (the bootstrap
+    // check above calls resolveSecret(bootstrapRow.id, { env }) WITHOUT deploymentMode,
+    // which routes through the normal switch below to resolveCloudTokenName). Dispatching
+    // platform-env rows through resolveCloudTokenName here — the SAME function, not a
+    // second copy — closes that gap: cloud-token resolves its configured NAME identically
+    // whether reached directly (this branch) or indirectly (the bootstrap check). Every
+    // other cloud-mode row (bare-file/env-alias/config-json rows collapsing to their
+    // envNames-only aliases) is unaffected — this is a targeted fix for the one
+    // platform-env row, not a broadening of what "genuinely cloud" resolves.
+    return row.delivery === "platform-env" ? resolveCloudTokenName(row, env) : resolveEnvAliasOnly(row, env);
   }
 
   switch (row.delivery) {
@@ -595,7 +782,12 @@ export function resetArmState(id) {
   _lastArmedValue.delete(id);
 }
 
-// armSecret(id, { env }) — never throws. Returns { armed, rotated, restartRequired }.
+// armSecret(id, { env, deploymentMode }) — never throws. Returns { armed, rotated,
+// restartRequired }. deploymentMode is the SAME optional CTL-1617 resolution object
+// resolveSecret accepts, threaded straight through (design §8 finding fix) so a cloud-mode
+// caller's arm baseline consults the identical provider chain its own direct resolveSecret
+// calls use — see the DEPLOYMENT-MODE THREADING FIX comment on the hookless-degrade path
+// below for the concrete failure this closes.
 //
 // TWO PATHS, per design §6:
 //
@@ -620,7 +812,7 @@ export function resetArmState(id) {
 //    every SEED re-armable row currently has NO hook registered (self-documenting: this list
 //    must shrink as later PRs call registerRearmHook, and the test will need updating then —
 //    that is by design, not an oversight).
-export function armSecret(id, { env = process.env } = {}) {
+export function armSecret(id, { env = process.env, deploymentMode } = {}) {
   const row = getSecretRow(id);
   if (!row) return { armed: false, rotated: false, restartRequired: false };
 
@@ -632,7 +824,10 @@ export function armSecret(id, { env = process.env } = {}) {
   if (row.rotation?.class === "re-armable" && typeof hook === "function") {
     let result;
     try {
-      result = hook({ env });
+      // Hooks receive the SAME context resolveSecret does (design §8 finding fix) — a
+      // future file-rearm hook must be able to see genuine-cloud mode too, so it never
+      // clobbers an injected platform token with a stale local file's contents.
+      result = hook({ env, deploymentMode });
     } catch {
       return { armed: false, rotated: false, restartRequired: false };
     }
@@ -641,7 +836,18 @@ export function armSecret(id, { env = process.env } = {}) {
   }
 
   // Hookless degrade path (covers boot-only rows AND hookless re-armable rows identically).
-  const resolved = resolveSecret(id, { env });
+  // DEPLOYMENT-MODE THREADING FIX (design §8 finding fix): this MUST pass the same
+  // deploymentMode a caller threads through to direct resolveSecret() calls — omitting it
+  // used to make the arm baseline resolve through the non-cloud file/config chain even in
+  // genuine cloud mode, while a sibling direct resolveSecret(id, { env, deploymentMode })
+  // call correctly resolved via the cloud-only env-alias chain. In a cloud process with an
+  // injected token AND a stale local file, that mismatch made a stale-file edit falsely
+  // report restartRequired while a REAL token rotation went unnoticed — the literal
+  // "arm baselines the wrong provider chain" bug this fix closes. Passing deploymentMode
+  // straight through (default: undefined, identical to resolveSecret's own default) means a
+  // caller that never passes it gets EXACTLY today's non-cloud behavior — this only changes
+  // behavior for a caller that already threads deploymentMode into armSecret.
+  const resolved = resolveSecret(id, { env, deploymentMode });
   const current = resolved.value ?? null;
   const hadBaseline = _lastArmedValue.has(id);
   const previous = _lastArmedValue.get(id) ?? null;

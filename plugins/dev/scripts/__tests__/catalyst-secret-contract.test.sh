@@ -196,6 +196,18 @@ printf 'c\x00loud' > "${TMP_DIR}/nul-cfg/github-token"
 OUT="$(_run "CATALYST_CONFIG_DIR=${TMP_DIR}/nul-cfg" "GH_TOKEN=fallback-after-nul" 'catalyst_resolve_secret github-token')"
 expect_eq "resolve github-token: NUL-containing file rejected, falls through" "fallback-after-nul|inherited|bare-file" "$OUT"
 
+# NON-UTF-8 BYTES (Codex finding fix): a file whose bytes are not valid UTF-8 must be
+# REJECTED consistently on both sides — never silently served as a mutated credential.
+mkdir -p "${TMP_DIR}/badutf8-cfg"
+printf '\xff\xfehi' > "${TMP_DIR}/badutf8-cfg/github-token"
+OUT="$(_run "CATALYST_CONFIG_DIR=${TMP_DIR}/badutf8-cfg" "GH_TOKEN=fallback-after-bad-utf8" 'catalyst_resolve_secret github-token')"
+expect_eq "resolve github-token: non-UTF-8 file rejected, falls through" "fallback-after-bad-utf8|inherited|bare-file" "$OUT"
+
+mkdir -p "${TMP_DIR}/goodutf8-cfg"
+printf 'tok-\xe2\x9c\x93-value\n' > "${TMP_DIR}/goodutf8-cfg/github-token"
+OUT="$(_run "CATALYST_CONFIG_DIR=${TMP_DIR}/goodutf8-cfg" 'catalyst_resolve_secret github-token')"
+expect_eq "resolve github-token: valid multi-byte UTF-8 is preserved, not rejected" $'tok-\xe2\x9c\x93-value|shared-file|bare-file' "$OUT"
+
 # --- resolveSecret: unknown id ----------------------------------------------
 OUT="$(_run 'catalyst_resolve_secret does-not-exist-xyz')"
 expect_eq "resolve unknown id: empty triple, never fails the caller" "||" "$OUT"
@@ -238,7 +250,46 @@ expect_eq "groq-api-key: bare JSON false settles as none (BLOCKING-1 class), nev
 
 printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":"{\"apiKey\":\"x\"}"}}}}' > "${TMP_DIR}/l2cfg/config.json"
 OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" 'catalyst_resolve_secret linear-orchestrator-actor')"
-expect_eq "linear-orchestrator-actor: reads the dotted config path" '{"apiKey":"x"}|config-json|config-json' "$OUT"
+expect_eq "linear-orchestrator-actor: reads the dotted config path (string-shaped value)" '{"apiKey":"x"}|config-json|config-json' "$OUT"
+
+# --- ACTOR ROW SHAPE (Codex finding fix): the AUTHORITATIVE Layer-2 schema stores
+# catalyst.linear.bot.orchestrator/.worker as OBJECTS ({clientId, clientSecret, ...}), never
+# a string — this fixture uses a REAL object (not a string containing JSON text, which
+# masked the pre-fix bug) and asserts the canonicalized (sorted-key) output.
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":{"clientSecret":"s3cr3t","clientId":"abc123"}}}}}' > "${TMP_DIR}/l2cfg/config.json"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" 'catalyst_resolve_secret linear-orchestrator-actor')"
+expect_eq "linear-orchestrator-actor: OBJECT-shaped value canonicalizes with sorted keys" \
+  '{"clientId":"abc123","clientSecret":"s3cr3t"}|config-json|config-json' "$OUT"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":{}}}}}' > "${TMP_DIR}/l2cfg/config.json"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" 'catalyst_resolve_secret linear-orchestrator-actor')"
+expect_eq "linear-orchestrator-actor: an EMPTY object still resolves (canonical '{}')" \
+  '{}|config-json|config-json' "$OUT"
+
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":["nope"]}}}}' > "${TMP_DIR}/l2cfg/config.json"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" 'catalyst_resolve_secret linear-orchestrator-actor')"
+expect_eq "linear-orchestrator-actor: an ARRAY is rejected (not a valid credential shape)" "|none|config-json" "$OUT"
+
+# --- TRAILING NEWLINES IN JSON VALUES (Codex finding fix) -------------------
+printf '%s' '{"groq":{"apiKey":"abc\n"}}' > "${TMP_DIR}/l2cfg/config.json"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" 'catalyst_resolve_secret groq-api-key')"
+expect_eq "groq-api-key: a trailing newline in the JSON string value is preserved byte-for-byte" \
+  $'abc\n|config-json|config-json' "$OUT"
+
+# --- JSON ACCEPTANCE NORMALIZATION (Codex finding fix) ----------------------
+# BOM-prefixed Layer-2 file: jq tolerates it, JSON.parse rejects it — must settle @ABSENT
+# (falls through to none) on the bash side too.
+BOM_CFG="${TMP_DIR}/l2cfg/bom-config.json"
+printf '\xEF\xBB\xBF{"groq":{"apiKey":"should-not-resolve"}}' > "$BOM_CFG"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${BOM_CFG}" 'catalyst_resolve_secret groq-api-key')"
+expect_eq "hostile: BOM-prefixed Layer-2 file settles as none (malformed, matches JSON.parse)" "|none|config-json" "$OUT"
+
+# Multi-document Layer-2 file: jq without -s processes each document independently (emits
+# multiple tags); JSON.parse rejects the whole file. Must settle @ABSENT (none) here too.
+MULTIDOC_CFG="${TMP_DIR}/l2cfg/multidoc-config.json"
+printf '{"groq":{"apiKey":"first-doc"}}{"groq":{"apiKey":"second-doc"}}' > "$MULTIDOC_CFG"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${MULTIDOC_CFG}" 'catalyst_resolve_secret groq-api-key')"
+expect_eq "hostile: multi-document Layer-2 file settles as none (malformed, matches JSON.parse)" "|none|config-json" "$OUT"
 
 # --- resolveSecret: platform-env (cloud-token) ------------------------------
 OUT="$(_run "CATALYST_CLOUD_TOKEN=cloud-val" 'catalyst_resolve_secret cloud-token')"
@@ -250,6 +301,31 @@ OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" "OTHER_VA
 expect_eq "cloud-token: Layer-2 NAME override" "v2|platform-env|platform-env" "$OUT"
 OUT="$(_run 'catalyst_resolve_secret cloud-token')"
 expect_eq "cloud-token: name resolves, value unset ⇒ none" "|none|platform-env" "$OUT"
+
+# --- INVALID ENV NAME (Codex finding fix): CATALYST_CLOUD_TOKEN_ENV / the Layer-2 override
+# is operator-controlled text — an invalid shell-identifier value must degrade to the
+# documented unresolved result (source=none), never a fatal "invalid variable name" abort.
+OUT="$(_run "CATALYST_CLOUD_TOKEN_ENV=BAD-NAME" 'catalyst_resolve_secret cloud-token')"
+RC=$?
+expect_eq "cloud-token: invalid env-name override does not abort the caller (rc=0)" "0" "$RC"
+expect_eq "cloud-token: invalid env-name override resolves none (JS parity), never a crash" "|none|platform-env" "$OUT"
+
+printf '%s' '{"catalyst":{"cloud":{"tokenEnv":"BAD-NAME-FROM-LAYER2"}}}' > "${TMP_DIR}/l2cfg/config.json"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" 'catalyst_resolve_secret cloud-token')"
+RC=$?
+expect_eq "cloud-token: invalid Layer-2 tokenEnv override does not abort the caller (rc=0)" "0" "$RC"
+expect_eq "cloud-token: invalid Layer-2 tokenEnv override resolves none" "|none|platform-env" "$OUT"
+
+# Errexit-safety regression: run the SAME invalid-name probe under `set -e` in a fresh
+# process — before the fix, `${!_env_var-}` on an invalid identifier fatally aborted the
+# WHOLE process, not just the lookup. (CATALYST_CLOUD_TOKEN_ENV is passed as a leading
+# assignment arg to _run, not embedded in the snippet text — _run's own `[[ "$1" == *=* ]]`
+# assignment-parsing loop would otherwise misparse a snippet body containing a literal "=".)
+ERREXIT_ENV_OUT="$(_run "CATALYST_CLOUD_TOKEN_ENV=BAD-NAME" 'set -e
+catalyst_resolve_secret cloud-token')"
+ERREXIT_ENV_RC=$?
+expect_eq "invalid env name under set -e: caller process exits 0 (no abort)" "0" "$ERREXIT_ENV_RC"
+expect_eq "invalid env name under set -e: still resolves none" "|none|platform-env" "$ERREXIT_ENV_OUT"
 
 # --- resolveSecret: local-only (age-key), never fetched ---------------------
 mkdir -p "${TMP_DIR}/agehome/.config/catalyst"
@@ -280,6 +356,21 @@ OUT="$(_run "GH_TOKEN=should-not-be-returned" 'catalyst_resolve_secret github-to
 expect_eq "bootstrap short-circuit: cloud-token absent ⇒ every other row's cloud resolution is empty/empty" "||bare-file" "$OUT"
 OUT="$(_run 'catalyst_resolve_secret cloud-token cloud false')"
 expect_eq "bootstrap short-circuit does not apply to cloud-token itself (resolves normally, absent here)" "|none|platform-env" "$OUT"
+
+# --- CLOUD-TOKEN NAME OVERRIDE (Codex finding fix): genuine cloud mode must honor
+# CATALYST_CLOUD_TOKEN_ENV / the Layer-2 override, not only the hardcoded default name ------
+OUT="$(_run "CATALYST_CLOUD_TOKEN_ENV=MY_PLATFORM_TOKEN" "MY_PLATFORM_TOKEN=the-real-token" 'catalyst_resolve_secret cloud-token cloud false')"
+expect_eq "cloud-token: genuine cloud mode honors CATALYST_CLOUD_TOKEN_ENV override" \
+  "the-real-token|platform-env|platform-env" "$OUT"
+
+printf '%s' '{"catalyst":{"cloud":{"tokenEnv":"OTHER_TOKEN_VAR"}}}' > "${TMP_DIR}/l2cfg/config.json"
+OUT="$(_run "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/l2cfg/config.json" "OTHER_TOKEN_VAR=v2" 'catalyst_resolve_secret cloud-token cloud false')"
+expect_eq "cloud-token: genuine cloud mode honors the Layer-2 catalyst.cloud.tokenEnv override too" \
+  "v2|platform-env|platform-env" "$OUT"
+
+OUT="$(_run "CATALYST_CLOUD_TOKEN_ENV=MY_PLATFORM_TOKEN" "CATALYST_CLOUD_TOKEN=should-not-be-used" 'catalyst_resolve_secret cloud-token cloud false')"
+expect_eq "cloud-token: override name genuinely consulted — the default var being set does NOT resolve it" \
+  "|none|platform-env" "$OUT"
 
 # --- arm state: MUST be called directly (not via $()) for state to persist -
 catalyst_secret_reset_arm_state
@@ -337,6 +428,43 @@ expect_eq "arm: rotation differing only AFTER the pipe is detected (restartRequi
   "false|true|true" \
   "${CATALYST_SECRET_ARM_ARMED}|${CATALYST_SECRET_ARM_ROTATED}|${CATALYST_SECRET_ARM_RESTART_REQUIRED}"
 unset CATALYST_CONFIG_DIR
+
+# --- ARM DEPLOYMENT MODE (Codex finding fix, design §8): catalyst_arm_secret must thread
+# the SAME deployment-mode args catalyst_resolve_secret takes, so a cloud-mode arm baseline
+# consults the identical provider chain direct resolution uses. Scenario: cloud mode with an
+# injected env token AND a stale local file — a file-only edit must NOT report a false
+# restartRequired, and rotating the REAL (env) token MUST be detected. ---------------------
+ARM_CLOUD_TMP="${TMP_DIR}/arm-cloud-cfg"
+mkdir -p "$ARM_CLOUD_TMP"
+export CATALYST_CONFIG_DIR="$ARM_CLOUD_TMP"
+export GH_TOKEN="cloud-injected-v1"
+export CATALYST_CLOUD_TOKEN="boot"
+catalyst_secret_reset_arm_state
+printf 'stale-file-value-v1' > "${ARM_CLOUD_TMP}/github-token"
+
+# Direct resolution (the ground truth arm's baseline must match) resolves via env, not file.
+DIRECT_OUT="$(catalyst_resolve_secret github-token cloud false)"
+expect_eq "arm-deployment-mode: direct resolution in cloud mode uses the env value, not the stale file" \
+  "cloud-injected-v1|inherited|bare-file" "$DIRECT_OUT"
+
+catalyst_arm_secret github-token cloud false >/dev/null
+expect_eq "arm-deployment-mode: first observation establishes baseline" "false|false|false" \
+  "${CATALYST_SECRET_ARM_ARMED}|${CATALYST_SECRET_ARM_ROTATED}|${CATALYST_SECRET_ARM_RESTART_REQUIRED}"
+
+# Rewriting the STALE FILE ONLY must NOT be observed as a rotation.
+printf 'stale-file-value-v2-changed' > "${ARM_CLOUD_TMP}/github-token"
+catalyst_arm_secret github-token cloud false >/dev/null
+expect_eq "arm-deployment-mode: a file-only change is IGNORED — baseline tracks the env-derived value like direct resolution does" \
+  "false|false|false" \
+  "${CATALYST_SECRET_ARM_ARMED}|${CATALYST_SECRET_ARM_ROTATED}|${CATALYST_SECRET_ARM_RESTART_REQUIRED}"
+
+# Rotating the ACTUAL cloud-injected env value MUST be detected.
+export GH_TOKEN="cloud-injected-v2-rotated"
+catalyst_arm_secret github-token cloud false >/dev/null
+expect_eq "arm-deployment-mode: rotating the REAL cloud-injected value IS detected (restartRequired fires)" \
+  "false|true|true" \
+  "${CATALYST_SECRET_ARM_ARMED}|${CATALYST_SECRET_ARM_ROTATED}|${CATALYST_SECRET_ARM_RESTART_REQUIRED}"
+unset CATALYST_CONFIG_DIR GH_TOKEN CATALYST_CLOUD_TOKEN
 
 # --- B4 regression: catalyst_arm_secret(unknown id) must not abort a `set -e` caller ------
 # Same-shell direct call (no `set -e` in THIS process) — asserts the quiet {armed:false}
