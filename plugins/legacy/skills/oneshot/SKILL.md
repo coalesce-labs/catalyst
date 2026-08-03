@@ -24,7 +24,7 @@ provides persistent handoff documents between phases.
 > `catalyst.orchestration.dispatchMode` to `"phase-agents"` in `.catalyst/config.json`, which runs
 > nine short-lived `claude --bg` skills (`phase-triage` … `phase-monitor-deploy`) instead of one
 > long `claude -p` `oneshot` worker. See
-> [Phase agents](https://catalyst.coalesce-labs.com/reference/orchestration/phase-agents/) for the
+> [Phase agents](https://catalyst.coalescelabs.ai/reference/orchestration/phase-agents/) for the
 > pipeline, model assignment, and cost economics.
 
 ## Prerequisites
