@@ -76,7 +76,6 @@ import {
   applyLabel, // CTL-1441: needs-human at the triage re-dispatch cap
   removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
-import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1441
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
