@@ -925,9 +925,14 @@ function defaultSecretFileNonEmpty(dir, name) {
 // Reads the configurable GitHub webhook-secret env-var NAME from Layer-1
 // (.catalyst/config.json → catalyst.monitor.github.webhookSecretEnv), matching
 // webhook-config.ts:412. Defaults to CATALYST_WEBHOOK_SECRET. CTL-1618.
+// Resolve the Layer-1 path via resolveDoctorLayer1Path() (not layer1Path()) so
+// this reader honors the CATALYST_CONFIG_FILE / CATALYST_CONFIG_PATH pointers the
+// daemon/deploy sets and falls back to ${cwd}/.catalyst/config.json — the SAME
+// Layer-1 the running monitor resolves, so the env name matches at runtime
+// (Codex P1: a plugin-repo read diverges from the active project config).
 function defaultGithubSecretEnvName() {
   try {
-    const obj = JSON.parse(readFileSync(layer1Path(), "utf8"));
+    const obj = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
     const name = obj?.catalyst?.monitor?.github?.webhookSecretEnv;
     return typeof name === "string" && name.length > 0 ? name : "CATALYST_WEBHOOK_SECRET";
   } catch {
@@ -938,9 +943,11 @@ function defaultGithubSecretEnvName() {
 // Reads the configurable Linear webhook-secret env-var NAME from Layer-1
 // (.catalyst/config.json → catalyst.monitor.linear.webhookSecretEnv), matching
 // webhook-config.ts:264-269. Null when unset (no per-key env override). CTL-1618.
+// Uses resolveDoctorLayer1Path() (not layer1Path()) for the same monitor-parity
+// reason as defaultGithubSecretEnvName above (Codex P1).
 function defaultLinearSecretEnvName() {
   try {
-    const obj = JSON.parse(readFileSync(layer1Path(), "utf8"));
+    const obj = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
     const name = obj?.catalyst?.monitor?.linear?.webhookSecretEnv;
     return typeof name === "string" && name.length > 0 ? name : null;
   } catch {
