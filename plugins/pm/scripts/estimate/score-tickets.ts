@@ -60,20 +60,31 @@ type ResolveSecretFn = (
 
 async function loadResolveSecret(): Promise<ResolveSecretFn> {
   const glob = (await import("node:fs")).globSync ?? null;
-  const candidates: string[] = [
-    // 1. source-checkout sibling of this plugin
+  const candidates: string[] = [];
+  // 0. explicit override — require-catalyst-dev.sh's own highest-priority
+  //    source (#2921 post-merge P2): honor a configured CATALYST_DEV_SCRIPTS.
+  const devScripts = process.env.CATALYST_DEV_SCRIPTS;
+  if (devScripts) candidates.push(resolve(devScripts, "lib/secret-contract.mjs"));
+  // 1. source-checkout sibling of this plugin; 2. repo-root cwd
+  candidates.push(
     resolve(import.meta.dir, "../../../dev/scripts/lib/secret-contract.mjs"),
-    // 2. repo-root cwd
     resolve(process.cwd(), "plugins/dev/scripts/lib/secret-contract.mjs"),
-  ];
+  );
   if (glob) {
     // 3. installed marketplace clone(s); 4. versioned cache — newest last, so
-    // reverse for newest-first.
+    // reverse for newest-first. Each glob is individually guarded: on Bun
+    // 1.2.x globSync THROWS ENOENT when the pattern's root dir is absent
+    // (#2921 post-merge P1) — a missing optional layout must not abort the
+    // search before valid candidates are tried.
     for (const pat of [
       `${homedir()}/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/secret-contract.mjs`,
       `${homedir()}/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/secret-contract.mjs`,
     ]) {
-      candidates.push(...glob(pat).sort().reverse());
+      try {
+        candidates.push(...glob(pat).sort().reverse());
+      } catch {
+        /* absent optional layout root — skip */
+      }
     }
   }
   for (const p of candidates) {
