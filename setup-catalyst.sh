@@ -124,11 +124,15 @@ prompt_value() {
 	local reply=""
 	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
 		echo "$prompt [${default}] → ${default} (non-interactive)" >&2
-		echo "$default"
+		# printf, not echo: a value of exactly -n/-e/-E is an echo option and would
+		# emit nothing, silently blanking that field (e.g. an explicit invalid
+		# deployment mode would round-trip to "" and read as unset instead of the
+		# recognized:false error). printf '%s' treats the value as data, never a flag.
+		printf '%s\n' "$default"
 		return 0
 	fi
 	read -p "$prompt " -r reply || reply=""
-	echo "${reply:-$default}"
+	printf '%s\n' "${reply:-$default}"
 }
 
 # Merge a patch object into .catalyst.<section> of a config JSON string (CTL-843).
@@ -1340,6 +1344,46 @@ setup_project_config() {
 		[[ -n "$_existing_prof" ]] && thoughts_profile="$_existing_prof"
 	fi
 
+	# Deployment mode (CTL-1622): default single-host, but PRESERVE an existing
+	# committed value (mirrors the thoughts preservation above) so a config
+	# regeneration never clobbers a fleet's declared cluster/cloud back to
+	# single-host. Validation is deferred to the resolver + `catalyst doctor`
+	# (same as ticket prefix), so accept any value here.
+	local deployment_mode="single-host"
+	if [[ -f "$config_file" ]]; then
+		local _existing_mode
+		# Preserve the value whenever the key is PRESENT and NON-NULL — including an
+		# explicit `false`/number/garbage — rather than `// empty` (which jq treats
+		# `false` as absent, silently resetting a misconfig to single-host and masking
+		# the resolver's recognized:false / `catalyst doctor` failure). JSON `null` is
+		# excluded on purpose: the resolver treats null as the "unset" sentinel
+		# (fallthrough → inferred:true, recognized:true, doctor passes), so it must be
+		# handled like an absent key here — `tostring` would coerce it to the string
+		# "null", an unrecognized value that flips doctor to FAIL after regeneration.
+		# Deferred validation (resolver + doctor) is what surfaces a genuinely bad value.
+		_existing_mode=$(jq -r 'if (.catalyst.deployment | objects | has("mode")) and (.catalyst.deployment.mode != null) then (.catalyst.deployment.mode | tostring) else empty end' "$config_file" 2>/dev/null)
+		[[ -n "$_existing_mode" ]] && deployment_mode="$_existing_mode"
+	fi
+
+	echo ""
+	echo "Deployment Mode Configuration:"
+	echo "  Declares this project's fleet topology (CTL-1617):"
+	echo "    single-host  one machine runs everything (default; dev clones)"
+	echo "    cluster      multiple machines share ticket ownership"
+	echo "    cloud        hosted control plane (no local smee tunnel)"
+	echo "  Written to .catalyst/config.json as the fleet default; override"
+	echo "  per-host via ~/.config/catalyst/config.json (Layer-2)."
+	echo ""
+	deployment_mode=$(prompt_value "Enter deployment mode (single-host|cluster|cloud) [${deployment_mode}]:" "${deployment_mode}")
+
+	# JSON-encode the (deliberately-unvalidated) deployment value before it lands
+	# in the heredoc below, so a pasted quote/backslash/newline can't produce a
+	# malformed .catalyst/config.json that the next jq consumer aborts on — after
+	# the file has already been overwritten. jq -Rn emits the value WITH its
+	# surrounding quotes, so the heredoc interpolates it bare (no wrapping "").
+	local deployment_mode_json
+	deployment_mode_json=$(jq -Rn --arg v "$deployment_mode" '$v')
+
 	# Create/update config
 	cat >"$config_file" <<EOF
 {
@@ -1352,6 +1396,9 @@ setup_project_config() {
     "project": {
       "ticketPrefix": "${ticket_prefix}",
       "name": "${project_name}"
+    },
+    "deployment": {
+      "mode": ${deployment_mode_json}
     },
     "linear": {
       "teamKey": "${ticket_prefix}",
@@ -1382,6 +1429,7 @@ EOF
 	echo "✓ ticketPrefix: ${ticket_prefix}"
 	echo "✓ linear.teamKey: ${ticket_prefix}"
 	echo "✓ linear.stateMap: defaults (will be updated with actual Linear states after API setup)"
+	echo "✓ deployment.mode: ${deployment_mode}"
 	echo ""
 }
 
