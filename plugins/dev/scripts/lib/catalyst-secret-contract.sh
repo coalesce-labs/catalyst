@@ -493,6 +493,11 @@ _csc_set_result() {
   # catalyst-execution-core launch their runtimes from the resolving shell),
   # putting the credential in each child's environment. The non-secret
   # SOURCE/PROVIDER breadcrumbs stay exported for logging convenience.
+  # Bash's export attribute is STICKY across reassignment (#2925 post-merge
+  # Codex P2): a shell that inherited the variable already-exported (rolling
+  # upgrade from the pre-fix lib, or any caller's own export) would keep
+  # leaking the NEW value — so the attribute is cleared explicitly each time.
+  export -n CATALYST_SECRET_LAST_VALUE 2>/dev/null || true
   export CATALYST_SECRET_LAST_SOURCE CATALYST_SECRET_LAST_PROVIDER
   printf '%s|%s|%s' "$1" "$2" "$3"
 }
