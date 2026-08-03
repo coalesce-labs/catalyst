@@ -176,6 +176,59 @@ OUT="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_DEPLOYMENT_MODE="cluster" \
   bash -c "IFS=\$'\n\t'; source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s|%s|%s' \"\$CATALYST_DEPLOYMENT_MODE_RESOLVED\" \"\$CATALYST_DEPLOYMENT_MODE_SOURCE\" \"\$CATALYST_DEPLOYMENT_MODE_RECOGNIZED\"")"
 expect_eq "IFS=\$'\\n\\t' in the sourcing shell cannot break enum membership" "cluster|env|true" "$OUT"
 
+# --- Codex round 2: errexit-inheritance safety ------------------------------
+# Under `bash --posix` (or shopt -s inherit_errexit) a nonzero jq inside $()
+# aborts the whole shell unless the capture runs in a condition context. A
+# readable-but-malformed Layer-2 with a valid Layer-1 must fall through and
+# exit 0 even under set -e + POSIX mode.
+R2_L2="${TMP_DIR}/r2-malformed-l2.json"
+R2_L1="${TMP_DIR}/r2-valid-l1.json"
+printf '%s' '{"catalyst":{"deployment":{"mode":' > "$R2_L2"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$R2_L1"
+OUT="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_LAYER2_CONFIG_FILE="$R2_L2" CATALYST_CONFIG_FILE="$R2_L1" \
+  bash --posix -e -c "source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s|%s|rc0' \"\$CATALYST_DEPLOYMENT_MODE_RESOLVED\" \"\$CATALYST_DEPLOYMENT_MODE_SOURCE\"")"
+expect_eq "set -e + POSIX mode: malformed Layer-2 falls through, never aborts" "cluster|layer1|rc0" "$OUT"
+
+# --- Codex round 2: multi-document JSON rejected like JSON.parse ------------
+# Two valid top-level documents: bare jq streams both (exit 0, two tags);
+# JSON.parse rejects the file. --slurp collapses it to length!=1 → @ABSENT.
+R2_MULTI="${TMP_DIR}/r2-multidoc-l2.json"
+printf '%s\n%s\n' '{"catalyst":{"deployment":{"mode":"cloud"}}}' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$R2_MULTI"
+OUT="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_LAYER2_CONFIG_FILE="$R2_MULTI" CATALYST_CONFIG_FILE="$R2_L1" \
+  bash -c "source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s|%s' \"\$CATALYST_DEPLOYMENT_MODE_RESOLVED\" \"\$CATALYST_DEPLOYMENT_MODE_SOURCE\"")"
+expect_eq "multi-document Layer-2 is layer-malformed → falls through" "cluster|layer1" "$OUT"
+
+# --- Codex round 2: BOM-prefixed JSON rejected like JSON.parse --------------
+R2_BOM="${TMP_DIR}/r2-bom-l2.json"
+printf '\xef\xbb\xbf%s' '{"catalyst":{"deployment":{"mode":"cloud"}}}' > "$R2_BOM"
+OUT="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_LAYER2_CONFIG_FILE="$R2_BOM" CATALYST_CONFIG_FILE="$R2_L1" \
+  bash -c "source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s|%s' \"\$CATALYST_DEPLOYMENT_MODE_RESOLVED\" \"\$CATALYST_DEPLOYMENT_MODE_SOURCE\"")"
+expect_eq "BOM-prefixed Layer-2 is layer-malformed → falls through" "cluster|layer1" "$OUT"
+
+# --- Codex round 2: HOME-unset resolution never probes /.config -------------
+# With HOME unset the resolver must still complete (tilde expansion falls back
+# to the passwd home, mirroring os.homedir()) and settle a valid Layer-1.
+OUT="$(env -i PATH="$PATH" CATALYST_CONFIG_FILE="$R2_L1" \
+  bash -c "unset HOME; source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s|%s' \"\$CATALYST_DEPLOYMENT_MODE_RESOLVED\" \"\$CATALYST_DEPLOYMENT_MODE_SOURCE\"")"
+expect_eq "HOME unset: resolver completes via passwd-home fallback" "cluster|layer1" "$OUT"
+
+# --- Codex round 2: jq-missing breadcrumb resets per resolution -------------
+# First resolution with jq hidden and a readable file → breadcrumb=1; a second
+# resolution in the same shell with jq restored must CLEAR it (no stale latch).
+R2_STUB="${TMP_DIR}/r2-no-jq-bin"
+mkdir -p "$R2_STUB"
+for t in bash printf head od tr cat env; do
+  p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$R2_STUB/$t"
+done
+OUT="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_LAYER2_CONFIG_FILE="$R2_L1" CATALYST_CONFIG_FILE="$MISSING" \
+  bash -c "source '$LIB'
+    PATH='$R2_STUB' catalyst_resolve_deployment_mode >/dev/null
+    first=\${CATALYST_DEPLOYMENT_MODE_JQ_MISSING:-unset}
+    catalyst_resolve_deployment_mode >/dev/null
+    second=\${CATALYST_DEPLOYMENT_MODE_JQ_MISSING:-unset}
+    printf '%s|%s' \"\$first\" \"\$second\"")"
+expect_eq "jq-missing breadcrumb is per-resolution, not a latch" "1|unset" "$OUT"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"

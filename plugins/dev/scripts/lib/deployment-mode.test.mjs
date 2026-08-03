@@ -377,4 +377,32 @@ describe("getDeploymentMode", () => {
     expect(new Set(calls).size).toBe(calls.length);
     expect(calls.length).toBe(1);
   });
+
+  // Codex round 2: a valid JSON misconfiguration like {"mode": {"toString":
+  // null}} resolves safely (single-host, recognized:false) but a template
+  // literal `${raw}` in the WARN threw TypeError (shadowed toString) —
+  // breaking the never-throws contract on exactly the degraded path the WARN
+  // exists to report.
+  test("a toString-shadowing raw value warns without throwing", () => {
+    const dir = fixtureDir();
+    const l2 = resolve(dir, "layer2-tostring.json");
+    writeFileSync(l2, '{"catalyst":{"deployment":{"mode":{"toString":null}}}}');
+    const opts = {
+      env: {},
+      layer1ConfigPath: missingPath(dir, "layer1.json"),
+      layer2ConfigPath: l2,
+    };
+    const original = console.warn;
+    const calls = [];
+    console.warn = (...args) => calls.push(args.join(" "));
+    let mode;
+    try {
+      mode = getDeploymentMode(opts);
+    } finally {
+      console.warn = original;
+    }
+    expect(mode).toBe("single-host");
+    expect(calls.length).toBe(1);
+    expect(calls[0]).toContain('{"toString":null}');
+  });
 });

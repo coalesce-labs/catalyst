@@ -137,8 +137,31 @@ _catalyst_deployment_mode_from_file() {
   # SEPARATELY, and only trust the captured output when jq exited 0 -- any
   # non-zero exit discards whatever partial text was printed and settles on
   # a clean, single-tag @ABSENT.
-  _jq_out="$(jq -r '
-    (.catalyst.deployment // {})
+  # BOM SNIFF (parity): this jq build tolerates a UTF-8 BOM at the start of
+  # input, but JSON.parse rejects one — a BOM-prefixed config must read as
+  # layer-malformed (@ABSENT, fall through) on BOTH sides.
+  local _first3
+  _first3="$(head -c 3 "$_f" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  if [[ "$_first3" == "efbbbf" ]]; then
+    printf '@ABSENT'
+    return 0
+  fi
+  # --slurp (parity): jq without -s processes each top-level JSON value in the
+  # file independently — a file holding TWO valid documents exits 0 and emits
+  # two tags, bypassing the exit-status check below, while JSON.parse rejects
+  # the whole file. Slurping collapses that to one array whose length exposes
+  # the multi-document case inside the filter (length != 1 → @ABSENT). A
+  # single document whose mode STRING merely contains an embedded newline is
+  # unaffected: it still emits one (multi-line) @STR: tag, which classify
+  # edge-trims and degrades as a non-member — same as JSON.parse's view.
+  #
+  # ERREXIT SAFETY: the assignment runs in an `if` condition so a nonzero jq
+  # exit cannot abort a caller running under `set -e` (POSIX mode /
+  # inherit_errexit propagate errexit INTO command substitutions — the
+  # documented never-fails contract must survive that).
+  if _jq_out="$(jq -rs '
+    if length != 1 then "@ABSENT" else .[0] |
+    ((.catalyst.deployment // {})
     | if has("mode") then
         (.mode
          | if . == null then "@NULL"
@@ -163,9 +186,13 @@ _catalyst_deployment_mode_from_file() {
            else "@NONSTR"
            end)
       else "@ABSENT"
-      end
-  ' "$_f" 2>/dev/null)"
-  _jq_rc=$?
+      end)
+    end
+  ' "$_f" 2>/dev/null)"; then
+    _jq_rc=0
+  else
+    _jq_rc=$?
+  fi
   if [[ $_jq_rc -ne 0 ]]; then
     printf '@ABSENT'
     return 0
@@ -296,9 +323,21 @@ _catalyst_deployment_mode_classify() {
 # question still means neither file, nor jq's absence, is ever examined).
 catalyst_resolve_deployment_mode() {
   local _cdm_mode="" _cdm_source="" _cdm_recognized="" _cdm_inferred="false"
+  # The jq-missing breadcrumb reflects THIS resolution only — clear any value
+  # latched by an earlier call (or inherited from a parent shell) so a later
+  # call where jq is back, or where env settles without consulting files,
+  # cannot report a stale active degradation to doctor.
+  unset CATALYST_DEPLOYMENT_MODE_JQ_MISSING 2>/dev/null || true
 
   if ! _catalyst_deployment_mode_classify "$(_catalyst_deployment_mode_env_tag)" "env"; then
-    local _l2="${CATALYST_LAYER2_CONFIG_FILE:-${HOME:-}/.config/catalyst/config.json}"
+    # HOME fallback (parity): os.homedir() consults the passwd database when
+    # HOME is unset; bash tilde expansion does the same ("If HOME is unset,
+    # the home directory of the user executing the shell is substituted").
+    # A bare "${HOME:-}" would silently probe /.config/catalyst/config.json
+    # and skip a real Layer-2 override on HOME-less service environments.
+    local _home="${HOME-}"
+    [[ -z "$_home" ]] && _home=~
+    local _l2="${CATALYST_LAYER2_CONFIG_FILE:-${_home}/.config/catalyst/config.json}"
     local _l2_tagged
     _l2_tagged="$(_catalyst_deployment_mode_from_file "$_l2")"
     if [[ "$_l2_tagged" == "@ABSENT_JQMISSING" ]]; then

@@ -534,13 +534,15 @@ Deployment mode is genuinely **fleet-scoped**, so — unlike `catalyst.node.clas
 in **Layer-1** (committed, shared by the whole repo checkout), with a **Layer-2 override** as the
 exception hatch (e.g. a laptop dev-clone of a cluster-declared repo overriding to `single-host`):
 
+In `.catalyst/config.json` (Layer-1, fleet-wide default):
+
 ```json
-// .catalyst/config.json (Layer-1, fleet-wide default)
 { "catalyst": { "deployment": { "mode": "cluster" } } }
 ```
 
+In `~/.config/catalyst/config.json` (Layer-2, per-host override):
+
 ```json
-// ~/.config/catalyst/config.json (Layer-2, per-host override)
 { "catalyst": { "deployment": { "mode": "single-host" } } }
 ```
 
@@ -553,11 +555,13 @@ exception hatch (e.g. a laptop dev-clone of a cluster-declared repo overriding t
 | 3          | `catalyst.deployment.mode` in the Layer-1 config       |
 | 4          | constant default `single-host`                         |
 
-- **Absent everywhere ⇒ `single-host`** — zero-config, zero-behavior-change. A WARN notes the value
-  was inferred.
+- **Absent everywhere ⇒ `single-host`** — zero-config, zero-behavior-change. (Once wired: a WARN
+  will note the value was inferred — the resolver itself is deliberately log-free; the WARN lives in
+  the `getDeploymentMode()` convenience wrapper, and doctor wiring lands in PR2 of the CTL-1617
+  migration plan.)
 - **An explicit but unrecognized value** (a typo) never silently activates cluster/cloud behavior —
-  it degrades to `single-host` (the safest direction) at the layer it was found, and `catalyst doctor`
-  **FAILs** until corrected.
+  it degrades to `single-host` (the safest direction) at the layer it was found. (Future behavior,
+  PR2: `catalyst doctor` will FAIL until the value is corrected.)
 - A missing/malformed config file, or a present-but-non-string value (`true`, `123`, `[]`), both
   settle rather than throw — see `lib/deployment-mode.mjs`'s `classifyCandidate` for the full validity
   ladder.
@@ -566,8 +570,9 @@ exception hatch (e.g. a laptop dev-clone of a cluster-declared repo overriding t
   daemon needs restarting for an env change to take effect.
 - **jq-absent degradation (Bash resolver only)**: when `jq` is unavailable, a Layer-1/Layer-2 file
   that could otherwise decide the mode is treated as absent (falls through) instead of failing the
-  caller; the resolver exports `CATALYST_DEPLOYMENT_MODE_JQ_MISSING=1` as a loud breadcrumb so
-  `catalyst doctor` can grade a host silently degrading on this axis.
+  caller; the resolver exports `CATALYST_DEPLOYMENT_MODE_JQ_MISSING=1` as a breadcrumb (reset at the
+  start of every resolution, so it always reflects the latest call). Grading that breadcrumb is
+  future doctor work (PR2) — nothing consumes it yet.
 
 PR1 (this file) ships the resolver in isolation — nothing outside its own tests imports it yet; wiring
 into webhook ingestion gating, secret-provider selection, and `catalyst doctor`'s roster-consistency

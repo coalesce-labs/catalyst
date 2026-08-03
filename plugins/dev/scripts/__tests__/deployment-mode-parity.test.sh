@@ -316,7 +316,35 @@ HOSTILE=$((HOSTILE+1))
 expect_eq "hostile: lone-surrogate Layer-2 JSON (bash==expected, falls through)" "$EXPECTED" "$BASH_OUT"
 expect_eq "hostile: lone-surrogate Layer-2 JSON (node==expected, falls through — JS narrowed to match jq)" "$EXPECTED" "$NODE_OUT"
 
-echo "Hostile probes run: $HOSTILE (NUL-escape / NBSP-padded-env / malformed-trailing-content / lone-surrogate; 2 assertions/probe)"
+# --- Probe 5: multi-document Layer-2 JSON — FIXED, bash==node==expected ---
+# Two valid top-level documents. Bare jq streams both (exit 0, two tags,
+# bypassing the exit-status guard); JSON.parse rejects the file. The bash
+# reader slurps (-s) so length!=1 classifies as layer-malformed — BOTH sides
+# fall through to the valid Layer-1.
+rm -f "$L2_PATH" "$L1_PATH"
+printf '%s\n%s\n' '{"catalyst":{"deployment":{"mode":"cloud"}}}' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$L2_PATH"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$L1_PATH"
+EXPECTED="cluster|layer1|true|false"
+BASH_OUT="$(run_bash_probe)"
+NODE_OUT="$(run_node_probe)"
+HOSTILE=$((HOSTILE+1))
+expect_eq "hostile: multi-document Layer-2 JSON (bash==expected, falls through)" "$EXPECTED" "$BASH_OUT"
+expect_eq "hostile: multi-document Layer-2 JSON (node==expected, falls through)" "$EXPECTED" "$NODE_OUT"
+
+# --- Probe 6: BOM-prefixed Layer-2 JSON — FIXED, bash==node==expected ---
+# This jq build tolerates a UTF-8 BOM; JSON.parse throws on one. The bash
+# reader byte-sniffs EF BB BF and reports @ABSENT — BOTH sides fall through.
+rm -f "$L2_PATH" "$L1_PATH"
+printf '\xef\xbb\xbf%s' '{"catalyst":{"deployment":{"mode":"cloud"}}}' > "$L2_PATH"
+printf '%s' '{"catalyst":{"deployment":{"mode":"cluster"}}}' > "$L1_PATH"
+EXPECTED="cluster|layer1|true|false"
+BASH_OUT="$(run_bash_probe)"
+NODE_OUT="$(run_node_probe)"
+HOSTILE=$((HOSTILE+1))
+expect_eq "hostile: BOM-prefixed Layer-2 JSON (bash==expected, falls through)" "$EXPECTED" "$BASH_OUT"
+expect_eq "hostile: BOM-prefixed Layer-2 JSON (node==expected, falls through)" "$EXPECTED" "$NODE_OUT"
+
+echo "Hostile probes run: $HOSTILE (NUL-escape / NBSP-padded-env / malformed-trailing-content / lone-surrogate / multi-document / BOM; 2 assertions/probe)"
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES, Skipped: $SKIPPED"
 exit "$FAILURES"

@@ -218,6 +218,20 @@ export function resolveDeploymentMode({ env = process.env, layer1ConfigPath, lay
 // may not be in a warn-worthy state). Every production call site still calls
 // getDeploymentMode() with no args, which resolves against process.env / the
 // real config files exactly as before.
+// printableRaw — render the offending raw value for the WARN without ever
+// throwing: a template-literal `${raw}` coerces via toString, and a valid
+// JSON misconfiguration like {"mode": {"toString": null}} shadows it and
+// throws TypeError — which would break getDeploymentMode's never-throws
+// contract on exactly the degraded path it exists to report.
+function printableRaw(raw) {
+  if (typeof raw === "string") return raw;
+  try {
+    return JSON.stringify(raw) ?? String(raw);
+  } catch {
+    return "[unprintable value]";
+  }
+}
+
 const _warnedDeploymentMode = new Set();
 export function getDeploymentMode(opts = {}) {
   const r = resolveDeploymentMode(opts);
@@ -228,7 +242,7 @@ export function getDeploymentMode(opts = {}) {
       `(set CATALYST_DEPLOYMENT_MODE, or catalyst.deployment.mode in Layer-1/Layer-2 config, to make it explicit)`;
   } else if (!r.recognized) {
     msg =
-      `deployment mode "${r.raw}" is not one of [${DEPLOYMENT_MODES.join(", ")}] — ` +
+      `deployment mode "${printableRaw(r.raw)}" is not one of [${DEPLOYMENT_MODES.join(", ")}] — ` +
       `treating this node as "${r.mode}" (safest); catalyst doctor will FAIL until the value is corrected`;
   }
   if (msg && !_warnedDeploymentMode.has(msg)) {
