@@ -114,6 +114,14 @@ import {
   getReconcileHealth,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
+// CTL-1628: direct import (not routed through reconcile-health.mjs) — the
+// eligible-set persist-failure event has no consecutive-failure/alert-latch
+// state to track, so it skips recordReconcileFailure and appends straight
+// through the same appendHealthEvent seam used above.
+import {
+  appendReconcileHealthEvent,
+  ELIGIBLE_PERSIST_FAILURE_ACTION,
+} from "./reconcile-health-event.mjs";
 import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
@@ -320,7 +328,9 @@ const knownProjects = new Set();
 // after N consecutive failures the health tracker escalates a canonical
 // `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
 // orch-monitor dashboard surfaces the silently-starving team, and a recovering
-// poll clears the alert. `appendHealthEvent` is an injectable test seam.
+// poll clears the alert. `appendHealthEvent` is an injectable test seam — it
+// also gates the CTL-1628 `monitor.reconcile.eligible_persist_failure.<TEAM>`
+// event fired below when the eligible-set disk projection write fails.
 export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, replica, onSource } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
@@ -373,6 +383,17 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
       { team, err: err.message },
       "eligible-set projection write failed — daemon continues, retry next reconcile"
     );
+    // CTL-1628: the log line above was invisible to the dashboard —
+    // "monitoring green, scheduler stale". Escalate onto the unified event
+    // log too, via the same appendHealthEvent test seam used for the CTL-867
+    // reconcile-poll escalation above. Unlike that escalation this fires on
+    // every failed persist (no threshold/latch — a stale-on-disk projection
+    // is worth surfacing immediately, not after N consecutive misses).
+    (appendHealthEvent ?? appendReconcileHealthEvent)({
+      team,
+      action: ELIGIBLE_PERSIST_FAILURE_ACTION,
+      reason: err.message,
+    });
   }
 }
 

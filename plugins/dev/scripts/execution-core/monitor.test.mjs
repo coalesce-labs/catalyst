@@ -201,7 +201,7 @@ describe("reconcileProject", () => {
     expect(exec.calls).toBe(0);
   });
 
-  test("does not crash the daemon when the projection write fails", () => {
+  test("does not crash the daemon when the projection write fails, and surfaces a health event (CTL-1628)", () => {
     enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1")] });
     // Make the projection path a non-empty directory so renameSync fails,
@@ -211,8 +211,16 @@ describe("reconcileProject", () => {
     const projDir = join(catalystDir, "execution-core", "eligible", "ENG.json");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, "sentinel"), "x");
-    expect(() => reconcileProject("ENG", { exec })).not.toThrow();
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+    expect(() => reconcileProject("ENG", { exec, appendHealthEvent })).not.toThrow();
     rmSync(projDir, { recursive: true, force: true });
+    // CTL-1628: the persist-write failure — previously only a buried
+    // log.error ("monitoring green, scheduler stale") — must now also be
+    // visible on the unified event log via the health-event mechanism.
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ team: "ENG", action: "eligible_persist_failure" });
+    expect(events[0].reason).toBeTruthy();
   });
 });
 

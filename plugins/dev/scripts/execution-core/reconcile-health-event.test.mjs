@@ -7,6 +7,7 @@ import {
   appendReconcileHealthEvent,
   RECONCILE_FAILING_ACTION,
   RECONCILE_RECOVERED_ACTION,
+  ELIGIBLE_PERSIST_FAILURE_ACTION,
 } from "./reconcile-health-event.mjs";
 
 describe("buildReconcileHealthEvent", () => {
@@ -51,6 +52,30 @@ describe("buildReconcileHealthEvent", () => {
     expect(ev.attributes["event.action"]).toBe("reconcile.recovered");
     expect(ev.severityText).toBe("INFO");
     expect(ev.severityNumber).toBe(9);
+  });
+
+  // CTL-1628: the eligible-set disk-projection write failure — a sibling
+  // failure mode of the reconcile-poll failure above, but with no
+  // consecutive-failure/alert-latch tracking (monitor.mjs fires this every
+  // time, not after N consecutive misses) — reuses this same envelope
+  // builder/action-naming scheme.
+  test("eligible_persist_failure envelope — WARN, team-keyed name, carries the persist error", () => {
+    const ev = JSON.parse(
+      buildReconcileHealthEvent({
+        team: "CTL",
+        action: ELIGIBLE_PERSIST_FAILURE_ACTION,
+        reason: "ENOSPC: no space left on device",
+      }),
+    );
+    expect(ev.attributes["event.name"]).toBe("monitor.reconcile.eligible_persist_failure.CTL");
+    expect(ev.attributes["event.action"]).toBe("reconcile.eligible_persist_failure");
+    expect(ev.severityText).toBe("WARN");
+    expect(ev.severityNumber).toBe(13);
+    expect(ev.body.payload).toMatchObject({
+      team: "CTL",
+      action: "eligible_persist_failure",
+      reason: "ENOSPC: no space left on device",
+    });
   });
 
   test("optional payload fields default to null when omitted", () => {
