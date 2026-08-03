@@ -16,7 +16,13 @@
 // Shared GraphQL constants (RESOLVE_ISSUE_QUERY, READ_ATTACHMENTS_QUERY,
 // WRITE_ATTACHMENT_MUTATION, defaultPost, authHeader, resolveIssueId) are
 // copied verbatim from cluster-claim.mjs per the plan's no-cross-module-import
-// rule: each lib stays pure and PR-order-independent.
+// rule: each lib stays pure and PR-order-independent. That rule is about
+// execution-core siblings never depending on each other's release order — it
+// does not cover the shared zero-import lib/ leaf: CTL-1616 PR3 imports
+// resolveSecret from lib/secret-contract.mjs directly, the same precedent
+// cluster-sync.mjs and doctor.mjs already set, to fold this file's own
+// LINEAR_API_TOKEN/LINEAR_API_KEY ladder onto the shared contract.
+import { resolveSecret } from "../lib/secret-contract.mjs";
 
 const HEARTBEAT_URL_PREFIX = "catalyst://heartbeat/";
 const HEARTBEAT_ATTACHMENT_TITLE = "catalyst-liveness";
@@ -47,7 +53,7 @@ export function isRateClassLinearError(text) {
 // defaultPost — the production GraphQL POST. Injectable via `post` option on every
 // public function so tests never touch the network.
 async function defaultPost(query, variables) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   const res = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
     method: "POST",
     headers: {

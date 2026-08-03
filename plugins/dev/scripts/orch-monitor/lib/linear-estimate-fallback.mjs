@@ -36,6 +36,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+// CTL-1616 PR3: fold this file's inline LINEAR_API_TOKEN/LINEAR_API_KEY ladder
+// onto the shared secret-contract engine (design §8 PR3 table).
+import { resolveSecret } from "../../lib/secret-contract.mjs";
 
 const HOME = homedir();
 
@@ -114,7 +117,7 @@ const TEAM_METHOD_QUERY = `query GetTeamEstimation($key: String!) {
 }`;
 
 function linearAuthHeader() {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   if (!token) return null;
   return /^lin_oauth/i.test(token) ? `Bearer ${token}` : token;
 }

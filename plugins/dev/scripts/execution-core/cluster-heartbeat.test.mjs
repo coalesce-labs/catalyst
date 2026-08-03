@@ -392,4 +392,31 @@ describe("defaultPost — !res.ok body handling (CTL-1420)", () => {
       restore();
     }
   });
+
+  // CTL-1616 PR3: defaultPost's token resolution folds onto the shared
+  // secret-contract engine (resolveSecret) — this is the synthetic
+  // LINEAR_API_KEY-only fixture the design mandates, proven here by asserting
+  // the Authorization header defaultPost actually sends.
+  test("LINEAR_API_KEY-only fixture: defaultPost sends it as the Authorization header when LINEAR_API_TOKEN is absent", async () => {
+    const savedToken = process.env.LINEAR_API_TOKEN;
+    const savedKey = process.env.LINEAR_API_KEY;
+    let seenAuth = null;
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return { ok: true, json: async () => ({ data: { issue: { id: "issue-1" } } }) };
+    };
+    try {
+      delete process.env.LINEAR_API_TOKEN;
+      process.env.LINEAR_API_KEY = "lin_api_fromkey";
+      const issueId = await resolveIssueId("CTL-9");
+      expect(issueId).toBe("issue-1");
+      expect(seenAuth).toBe("lin_api_fromkey");
+    } finally {
+      restore();
+      if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+      else process.env.LINEAR_API_TOKEN = savedToken;
+      if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = savedKey;
+    }
+  });
 });

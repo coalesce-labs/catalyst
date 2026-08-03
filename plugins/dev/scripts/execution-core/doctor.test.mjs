@@ -212,12 +212,15 @@ describe("checkHrwPartition", () => {
 
 // ─── Phase 3: checkPeerUniqueness ────────────────────────────────────────────
 
-// CTL-1616 PR2: resolveSecretContract is a shadow-only dependency (design §7).
-// These fixtures pin it to AGREE with whatever `hasLinearToken` the test sets,
-// so the pre-existing (pre-shadow) behavioral assertions below stay exact —
-// the real registry resolver would make agreement depend on whatever
+// CTL-1616 PR3: resolveSecretContract is the LIVE answer now (hasLinearToken's
+// default routes through it — see resolveLinearTokenLive in doctor.mjs). Every
+// test below still injects an explicit `hasLinearToken` too, which simply
+// overrides that default outright, so `resolveSecretContract` below is inert
+// where both are present — kept only so these fixtures read the same whether
+// or not a future edit drops the `hasLinearToken` override. Full DI throughout
+// means none of these behavioral assertions depend on whatever
 // LINEAR_API_TOKEN/LINEAR_API_KEY happen to be set in the runner's ambient
-// environment, which these tests were written (via full DI) to never depend on.
+// environment.
 const agreeingSecretContract = (present) => () =>
   present
     ? { value: "contract-token", source: "inherited", provider: "env-alias" }
@@ -363,9 +366,10 @@ const fakeFetch = (body, ok = true) => async (url, opts) => ({
   json: async () => body,
 });
 
-// CTL-1616 PR2 (A2): resolveSecretContract is a shadow-only dependency
-// (design §7). Every test below injects a fixture that AGREES with whatever
-// `linearToken` it sets, so these pre-existing (pre-shadow) assertions never
+// CTL-1616 PR3: resolveSecretContract is the LIVE answer now (linearToken's
+// default routes through it — see resolveLinearTokenLive in doctor.mjs).
+// Every test below still injects an explicit `linearToken` too, which simply
+// overrides that default outright, so these pre-existing assertions never
 // depend on the real registry resolver — which would read the runner's
 // actual LINEAR_API_TOKEN/LINEAR_API_KEY/~/.config/catalyst and make this
 // describe's behavior environment-dependent.
@@ -2240,12 +2244,15 @@ describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)"
     }
   });
 
-  it("shadowed comparison checks (buildContractShadowCheck path) also receive a deploymentMode", async () => {
+  it("CTL-1616 PR3 cutover: checkPeerUniqueness's LIVE resolveSecretContract call also receives a deploymentMode", async () => {
+    // No hasLinearToken override here (unlike the rest of this file's fixtures)
+    // — it must be absent so the default (which calls resolveSecretContract
+    // via resolveLinearTokenLive) actually runs and this assertion exercises
+    // something real.
     const seen = [];
     await checkPeerUniqueness({
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-1",
-      hasLinearToken: () => false,
       readPeerHeartbeats: async () => ({}),
       resolveSecretContract: (id, opts) => {
         seen.push(opts?.deploymentMode);
@@ -2373,13 +2380,17 @@ describe("checksForClass — checkSecretContract registration (CTL-1616 PR2)", (
   });
 });
 
-// ─── CTL-1616 PR2: secret-contract shadow — zero grade change ──────────────
+// ─── CTL-1616 PR2/PR3: secret-contract shadow — zero grade change ──────────
 //
-// The shadow discipline (design §7/§9): the contract is CONSULTED AND COMPARED
-// at 5 hand-rolled call sites (checkPeerUniqueness, checkBotCredentials,
-// checkWorkerLabels, checkWebhookIngestion, checkCloudTokenEnv) but decides
+// The shadow discipline (design §7/§9) still covers the 2 call sites PR3 left
+// alone — checkWebhookIngestion (webhook-secret) and checkCloudTokenEnv
+// (cloud-token) — where the contract is CONSULTED AND COMPARED but decides
 // NOTHING — every disagreement surfaces as an extra INFO row; every agreement
-// surfaces nothing extra. These tests prove both halves plus the invariant
+// surfaces nothing extra. checkPeerUniqueness/checkBotCredentials/
+// checkWorkerLabels were cut over to the contract as their LIVE answer in
+// PR3 (see the "secret-contract cutover" describe above and
+// doctor-worker-labels.test.mjs) — they no longer have an "agree/disagree"
+// axis at all. These tests prove both remaining-shadow halves plus the invariant
 // that grades/exit-code are IDENTICAL either way.
 describe("checkWebhookIngestion — deployment-mode alignment (CTL-1617, #2913 Codex P1)", () => {
   // Hermeticity: the linear/github env legs read process.env directly — an
@@ -2473,7 +2484,13 @@ describe("checkWebhookIngestion — deployment-mode alignment (CTL-1617, #2913 C
   });
 });
 
-describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
+describe("secret-contract cutover — checkPeerUniqueness/checkBotCredentials (CTL-1616 PR3)", () => {
+  // PR3 (design §9) flips these two call sites from PR2's shadow-comparison to
+  // the contract as their LIVE answer — hasLinearToken/linearToken now DEFAULT
+  // to resolveSecretContract's own resolution, and the PR2 shadow-disagreement
+  // row these sites used to emit is retired (there is no second, independently
+  // hand-rolled answer left to disagree with). These tests replace the CTL-1616
+  // PR2 "shadow — zero grade change" describe for these two functions.
   describe("checkPeerUniqueness", () => {
     const base = {
       getHostName: () => "mini",
@@ -2481,59 +2498,97 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
       readPeerHeartbeats: async () => ({}),
     };
 
-    it("agree (both absent) → no shadow row, primary grade unchanged", async () => {
+    it("resolveSecretContract resolving absent → hasLinearToken() false, no-token WARN, never a shadow row", async () => {
       const checks = await checkPeerUniqueness({
         ...base,
-        hasLinearToken: () => false,
         resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
       });
       expect(checks).toHaveLength(1);
+      expect(checks[0].name).toBe("peer-uniqueness");
+      expect(checks[0].status).toBe(STATUS.WARN);
+      expect(checks[0].detail).toContain("no LINEAR_API_TOKEN");
       expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
     });
 
-    it("disagree (hand-rolled says present, contract says absent) → loud INFO row, primary grade unchanged", async () => {
+    it("resolveSecretContract resolving present → hasLinearToken() true, proceeds past the token gate", async () => {
       const checks = await checkPeerUniqueness({
         ...base,
-        hasLinearToken: () => true,
-        resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+        resolveSecretContract: () => ({ value: "contract-token", source: "inherited", provider: "env-alias" }),
       });
-      // Primary "peer-uniqueness" row is untouched (still WARN — empty heartbeats).
-      const primary = checks.find((c) => c.name === "peer-uniqueness");
-      expect(primary.status).toBe(STATUS.WARN);
-      const shadow = checks.find((c) => c.name === "peer-uniqueness-secret-contract-shadow");
-      expect(shadow).toBeDefined();
-      expect(shadow.status).toBe(STATUS.INFO);
-      expect(shadow.detail).toContain('secret="linear-api-token"');
-      expect(shadow.detail).toContain("hand-rolled=present");
-      expect(shadow.detail).toContain("contract={value:absent");
+      expect(checks).toHaveLength(1);
+      expect(checks[0].name).toBe("peer-uniqueness");
+      expect(checks[0].status).toBe(STATUS.WARN); // the EMPTY-heartbeats WARN, not the no-token WARN
+      expect(checks[0].detail).toContain("empty");
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    // CTL-1616 PR3 success criterion (design §9): a LINEAR_API_KEY-only
+    // environment (no LINEAR_API_TOKEN) must resolve identically through the
+    // live cutover. Exercises the REAL resolveSecret default end-to-end — no
+    // hasLinearToken/resolveSecretContract override at all.
+    it("LINEAR_API_KEY-only fixture (real resolveSecret default): honors the alias, proceeds past the token gate", async () => {
+      const savedToken = process.env.LINEAR_API_TOKEN;
+      const savedKey = process.env.LINEAR_API_KEY;
+      try {
+        delete process.env.LINEAR_API_TOKEN;
+        process.env.LINEAR_API_KEY = "lin_api_fromkey";
+        const checks = await checkPeerUniqueness(base);
+        expect(checks).toHaveLength(1);
+        expect(checks[0].detail).toContain("empty"); // past the token gate
+      } finally {
+        if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+        else process.env.LINEAR_API_TOKEN = savedToken;
+        if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+        else process.env.LINEAR_API_KEY = savedKey;
+      }
     });
   });
 
   describe("checkBotCredentials", () => {
-    it("agree (both present) → no shadow row", async () => {
+    it("resolveSecretContract resolving present → linearToken() returns it, proceeds to the connectivity probe", async () => {
       const checks = await checkBotCredentials({
         readLinearBotUserIds: () => new Set(["bot-user-123"]),
-        linearToken: () => "lin_api_abc",
         fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
-        resolveSecretContract: () => ({ value: "lin_api_abc", source: "inherited", provider: "env-alias" }),
+        resolveSecretContract: () => ({ value: "contract-token", source: "inherited", provider: "env-alias" }),
       });
+      const connectivity = checks.find((c) => c.name === "linear-connectivity");
+      expect(connectivity.status).toBe(STATUS.PASS);
       expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
     });
 
-    it("disagree (hand-rolled absent, contract present) → loud INFO row, grade unchanged", async () => {
+    it("resolveSecretContract resolving absent → linearToken() empty, the no-token WARN path, never a shadow row", async () => {
       const checks = await checkBotCredentials({
         readLinearBotUserIds: () => new Set(["bot-user-123"]),
-        linearToken: () => "",
         fetch: fakeFetch({}),
-        resolveSecretContract: () => ({ value: "some-token", source: "inherited", provider: "env-alias" }),
+        resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
       });
       const connectivity = checks.find((c) => c.name === "linear-connectivity");
-      expect(connectivity.status).toBe(STATUS.WARN); // unchanged from the no-shadow behavior
-      const shadow = checks.find((c) => c.name === "bot-credentials-secret-contract-shadow");
-      expect(shadow).toBeDefined();
-      expect(shadow.status).toBe(STATUS.INFO);
-      expect(shadow.detail).toContain("hand-rolled=absent");
-      expect(shadow.detail).toContain("contract={value:present");
+      expect(connectivity.status).toBe(STATUS.WARN);
+      expect(connectivity.detail).toContain("no LINEAR_API_TOKEN");
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    // CTL-1616 PR3 success criterion (design §9): a LINEAR_API_KEY-only
+    // environment resolves identically through the live cutover — real
+    // resolveSecret default, no override at all.
+    it("LINEAR_API_KEY-only fixture (real resolveSecret default): honors the alias, reaches the connectivity probe", async () => {
+      const savedToken = process.env.LINEAR_API_TOKEN;
+      const savedKey = process.env.LINEAR_API_KEY;
+      try {
+        delete process.env.LINEAR_API_TOKEN;
+        process.env.LINEAR_API_KEY = "lin_api_fromkey";
+        const checks = await checkBotCredentials({
+          readLinearBotUserIds: () => new Set(["bot-user-123"]),
+          fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
+        });
+        const connectivity = checks.find((c) => c.name === "linear-connectivity");
+        expect(connectivity.status).toBe(STATUS.PASS);
+      } finally {
+        if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+        else process.env.LINEAR_API_TOKEN = savedToken;
+        if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+        else process.env.LINEAR_API_KEY = savedKey;
+      }
     });
   });
 
@@ -2722,20 +2777,10 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
   describe("grades and exit code are IDENTICAL with the shadow present, agree or disagree", () => {
     // summarize() only counts PASS/WARN/FAIL — INFO rows (agree = none, disagree =
     // one extra) never move pass/warn/fail counts or `ok` (design §7/§9's own
-    // exit-code invariant, doctor.mjs:1728-1736).
-    it("checkPeerUniqueness: summarize() is identical across an agree and a disagree fixture", async () => {
-      const base = {
-        getHostName: () => "mini",
-        getLivenessAnchorIssue: () => "CTL-9999",
-        hasLinearToken: () => true,
-        readPeerHeartbeats: async () => ({}),
-      };
-      const agree = await checkPeerUniqueness({ ...base, resolveSecretContract: () => ({ value: "x", source: "inherited", provider: "env-alias" }) });
-      const disagree = await checkPeerUniqueness({ ...base, resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }) });
-      expect(disagree.length).toBe(agree.length + 1); // exactly one extra INFO row
-      expect(summarize(agree)).toEqual(summarize(disagree));
-      expect(summarize(agree).fail).toBe(0);
-    });
+    // exit-code invariant, doctor.mjs:1728-1736). checkPeerUniqueness no longer
+    // has an "agree vs disagree" axis post-PR3-cutover (there is only ONE
+    // answer now — the contract's own) — see the "secret-contract cutover"
+    // describe above for its replacement coverage.
 
     it("checkWebhookIngestion: summarize() is identical across an agree and a disagree fixture", () => {
       const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
@@ -2768,47 +2813,38 @@ const THROWING_RESOLVER = () => {
   throw new Error("boom: registry lookup exploded");
 };
 
-describe("secret-contract shadow — resolver throw-safety (CTL-1616 PR2 B1)", () => {
-  it("checkPeerUniqueness: a throwing resolver still returns the normal graded row plus a throw-row", async () => {
+describe("secret-contract shadow — resolver throw-safety (CTL-1616 PR2/PR3)", () => {
+  // CTL-1616 PR3 cutover: checkPeerUniqueness/checkBotCredentials no longer
+  // run a shadow comparison — resolveLinearTokenLive (doctor.mjs) wraps the
+  // injected resolveSecretContract in the same safeResolveSecretContract B1
+  // discipline, but a throw now degrades directly to "no token" (the ordinary
+  // WARN path), never an extra INFO row (there is no shadow row left to emit).
+  it("checkPeerUniqueness: a throwing resolveSecretContract degrades to the no-token WARN, never crashes, no shadow row", async () => {
     const checks = await checkPeerUniqueness({
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
-      hasLinearToken: () => true,
       readPeerHeartbeats: async () => ({}),
       resolveSecretContract: THROWING_RESOLVER,
     });
-    const primary = checks.find((c) => c.name === "peer-uniqueness");
-    expect(primary).toBeDefined();
-    expect(primary.status).toBe(STATUS.WARN); // unchanged (empty heartbeats) — throw did not touch grade
-    const throwRow = checks.find((c) => c.name === "peer-uniqueness-secret-contract-shadow");
-    expect(throwRow).toBeDefined();
-    expect(throwRow.status).toBe(STATUS.INFO);
-    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
-    expect(throwRow.detail).toContain('secret="linear-api-token"');
-    expect(throwRow.detail).toContain("boom: registry lookup exploded");
-    expect(throwRow.detail).toContain("grade unaffected");
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("peer-uniqueness");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("no LINEAR_API_TOKEN");
+    expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
     expect(summarize(checks).fail).toBe(0);
   });
 
-  it("checkBotCredentials: a throwing resolver still returns the normal graded rows, throw-row APPENDED (not checks[0] — A1)", async () => {
+  it("checkBotCredentials: a throwing resolveSecretContract degrades to the no-token WARN path, never crashes, no shadow row", async () => {
     const checks = await checkBotCredentials({
       readLinearBotUserIds: () => new Set(["bot-user-123"]),
-      linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
       expectedBotUserId: null,
       resolveSecretContract: THROWING_RESOLVER,
     });
-    // A1: the shadow/throw row is never checks[0] — the primary connectivity
-    // row leads, exactly as it does with no shadow dependency at all.
-    expect(checks[0].name).toBe("linear-connectivity");
-    expect(checks[0].status).toBe(STATUS.PASS);
-    const identity = checks.find((c) => c.name === "bot-identity");
-    expect(identity.status).toBe(STATUS.PASS);
-    const throwRow = checks.find((c) => c.name === "bot-credentials-secret-contract-shadow");
-    expect(throwRow).toBeDefined();
-    expect(throwRow.status).toBe(STATUS.INFO);
-    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
-    expect(checks[checks.length - 1]).toBe(throwRow); // appended last
+    const connectivity = checks.find((c) => c.name === "linear-connectivity");
+    expect(connectivity.status).toBe(STATUS.WARN);
+    expect(connectivity.detail).toContain("no LINEAR_API_TOKEN");
+    expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
     expect(summarize(checks).fail).toBe(0);
   });
 
@@ -2877,16 +2913,19 @@ describe("secret-contract shadow — resolver throw-safety (CTL-1616 PR2 B1)", (
     expect(summarize(checks)).toEqual({ pass: 0, warn: 0, fail: 0, ok: true });
   });
 
-  it("runDoctor: a throwing shadow resolver does not crash the run — exit code and check count match the non-throwing control", async () => {
+  // CTL-1616 PR3 cutover: checkPeerUniqueness's resolveSecretContract is now
+  // the LIVE answer, not a shadow — a throwing resolver degrades to "no
+  // token" (the ordinary WARN doctor already has for a genuinely absent
+  // token), not an extra INFO row. runDoctor must still never crash.
+  it("runDoctor: a throwing resolveSecretContract does not crash the run — degrades to the same WARN shape as a genuinely absent token", async () => {
     const controlChecks = [
       () => [mkCheck("always-pass", STATUS.PASS, "ok")],
       async () =>
         checkPeerUniqueness({
           getHostName: () => "mini",
           getLivenessAnchorIssue: () => "CTL-9999",
-          hasLinearToken: () => true,
           readPeerHeartbeats: async () => ({}),
-          resolveSecretContract: () => ({ value: "x", source: "inherited", provider: "env-alias" }),
+          resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
         }),
     ];
     const throwingChecks = [
@@ -2895,7 +2934,6 @@ describe("secret-contract shadow — resolver throw-safety (CTL-1616 PR2 B1)", (
         checkPeerUniqueness({
           getHostName: () => "mini",
           getLivenessAnchorIssue: () => "CTL-9999",
-          hasLinearToken: () => true,
           readPeerHeartbeats: async () => ({}),
           resolveSecretContract: THROWING_RESOLVER,
         }),
@@ -2908,8 +2946,11 @@ describe("secret-contract shadow — resolver throw-safety (CTL-1616 PR2 B1)", (
     expect(logs.throwing).not.toBeNull(); // doctor produced report output — did not crash
     const throwingReport = JSON.parse(logs.throwing);
     const controlReport = JSON.parse(logs.control);
-    expect(throwingReport.checks.length).toBe(controlReport.checks.length + 1); // one extra INFO throw-row
-    expect(throwingReport.checks.some((c) => c.name === "peer-uniqueness-secret-contract-shadow")).toBe(true);
+    expect(throwingReport.checks.length).toBe(controlReport.checks.length); // no extra row — no shadow left to emit
+    expect(throwingReport.checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    const peerRow = throwingReport.checks.find((c) => c.name === "peer-uniqueness");
+    expect(peerRow.status).toBe("warn");
+    expect(peerRow.detail).toContain("no LINEAR_API_TOKEN");
   });
 });
 

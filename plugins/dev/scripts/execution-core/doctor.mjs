@@ -127,11 +127,15 @@ export const STATUS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" }
 
 export const mkCheck = (name, status, detail) => ({ name, status, detail });
 
-// ─── CTL-1616 PR2: secret-contract shadow observability (zero grade change) ──
+// ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
-// safeResolveSecretContract — B1: every one of the 6 shadow call sites below
-// routes its call into the injected resolveSecretContract/resolveSecretFn
-// dependency through here instead of calling it directly. runDoctor's
+// safeResolveSecretContract — B1: every remaining shadow call site below
+// (checkWebhookIngestion's webhook-secret leg, checkCloudTokenEnv's cloud-token
+// name comparisons, checkSecretContract's own observations) plus the 3 sites
+// PR3 cut over to a LIVE answer (checkPeerUniqueness/checkBotCredentials/
+// checkWorkerLabels via resolveLinearTokenLive) routes its call into the
+// injected resolveSecretContract/resolveSecretFn dependency through here
+// instead of calling it directly. runDoctor's
 // `Promise.all(fns.map(...))` has no per-check isolation (out of scope to add
 // one here — see doctor.test.mjs's B1 tests), so an uncaught throw from ANY
 // check fn crashes the whole suite with zero report output. This wrapper
@@ -226,6 +230,32 @@ function buildContractShadowCheck({ checkName, secretId, handRolled, resolveSecr
       `contract={value:${contractPresent ? "present" : "absent"}, source:${contractResolved?.source ?? "none"}, ` +
       `provider:${contractResolved?.provider ?? "none"}} — never changes this check's grade or exit code`,
   );
+}
+
+// resolveLinearTokenLive — CTL-1616 PR3 cutover (design §7/§9): the shared
+// accessor checkPeerUniqueness/checkBotCredentials/checkWorkerLabels now use
+// to get the LIVE linear-api-token answer from the contract engine — these 3
+// sites no longer hand-roll their own `LINEAR_API_TOKEN ?? LINEAR_API_KEY`
+// env ladder (that read is GONE), and the PR2 shadow-comparison each of them
+// carried (buildContractShadowCheck against secretId "linear-api-token") is
+// retired with it: there is no longer a second, independently-computed
+// hand-rolled answer to compare the contract against, so the disagreement
+// row these sites used to emit cannot exist anymore. resolveSecret's own
+// contract promises "never throws", but this wraps via
+// safeResolveSecretContract anyway — matching this file's existing
+// defensive convention for every other secret-contract call site — so an
+// injected test double (or a future registry bug) that DOES throw degrades
+// to "no token" (the same WARN/INFO path a genuinely absent token already
+// takes) rather than crashing the whole doctor run. Threads the shared
+// resolveDeploymentModeForShadow() default so the cloud guard activates on a
+// declared-cloud node exactly like every other secret-contract call site in
+// this file (checkCloudTokenEnv, checkSecretContract).
+function resolveLinearTokenLive(resolveSecretContract, deploymentMode = resolveDeploymentModeForShadow()) {
+  const r = safeResolveSecretContract(resolveSecretContract, "linear-api-token", {
+    env: process.env,
+    deploymentMode,
+  });
+  return r.ok ? (r.value?.value ?? null) : null;
 }
 
 // ─── Internal path helpers ───────────────────────────────────────────────────
@@ -439,15 +469,12 @@ export async function checkPeerUniqueness(deps = {}) {
   const {
     getHostName: _getHostName = getHostName,
     getLivenessAnchorIssue: _getLivenessAnchorIssue = getLivenessAnchorIssue,
-    hasLinearToken = () =>
-      Boolean(
-        process.env.LINEAR_API_TOKEN?.length || process.env.LINEAR_API_KEY?.length,
-      ),
-    readPeerHeartbeats: _readPeerHeartbeats = readPeerHeartbeats,
-    // CTL-1616 PR2: shadow-only contract resolver for the "third value-read
-    // site" family (design §7) — consulted and COMPARED against hasLinearToken()
-    // below, never used to decide this check's grade.
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
     resolveSecretContract = resolveSecret,
+    hasLinearToken = () => resolveLinearTokenLive(resolveSecretContract) != null,
+    readPeerHeartbeats: _readPeerHeartbeats = readPeerHeartbeats,
   } = deps;
 
   const anchorIssue = _getLivenessAnchorIssue();
@@ -462,23 +489,13 @@ export async function checkPeerUniqueness(deps = {}) {
     ];
   }
 
-  const handRolledHasToken = hasLinearToken();
-  const shadowCheck = buildContractShadowCheck({
-    checkName: "peer-uniqueness",
-    secretId: "linear-api-token",
-    handRolled: handRolledHasToken,
-    resolveSecretContract,
-  });
-  const shadow = shadowCheck ? [shadowCheck] : [];
-
-  if (!handRolledHasToken) {
+  if (!hasLinearToken()) {
     return [
       mkCheck(
         "peer-uniqueness",
         STATUS.WARN,
         `no LINEAR_API_TOKEN / LINEAR_API_KEY — cannot read live peer heartbeats`,
       ),
-      ...shadow,
     ];
   }
 
@@ -493,7 +510,6 @@ export async function checkPeerUniqueness(deps = {}) {
         STATUS.WARN,
         `failed to read peer heartbeats: ${err?.message ?? err}`,
       ),
-      ...shadow,
     ];
   }
 
@@ -507,7 +523,6 @@ export async function checkPeerUniqueness(deps = {}) {
         STATUS.WARN,
         `peer heartbeats returned empty — cluster may be freshly initialized or anchor is stale`,
       ),
-      ...shadow,
     ];
   }
 
@@ -519,7 +534,6 @@ export async function checkPeerUniqueness(deps = {}) {
         `a live peer is already using host name "${self}" — two nodes with the same ` +
           `identity will cause HRW split-brain; set a unique catalyst.host.name`,
       ),
-      ...shadow,
     ];
   }
 
@@ -529,7 +543,6 @@ export async function checkPeerUniqueness(deps = {}) {
       STATUS.PASS,
       `no live peer is using host name "${self}" (${peerKeys.length} peer(s) seen)`,
     ),
-    ...shadow,
   ];
 }
 
@@ -542,28 +555,17 @@ const LINEAR_GQL = "https://api.linear.app/graphql";
 export async function checkBotCredentials(deps = {}) {
   const {
     readLinearBotUserIds: _readLinearBotUserIds = readLinearBotUserIds,
-    linearToken = () =>
-      process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "",
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
+    resolveSecretContract = resolveSecret,
+    linearToken = () => resolveLinearTokenLive(resolveSecretContract) ?? "",
     fetch: _fetch = globalThis.fetch,
     expectedBotUserId = null,
-    // CTL-1616 PR2: shadow-only contract resolver — consulted and COMPARED
-    // against linearToken() below, never used to decide this check's grade.
-    resolveSecretContract = resolveSecret,
   } = deps;
 
   const token = linearToken();
   const checks = [];
-
-  // CTL-1616 PR2 (A1): computed once here, but APPENDED after the primary
-  // rows at every return point below — matching the append-after convention
-  // every other shadow call site follows (a disagreement row must never
-  // become checks[0]).
-  const shadowCheck = buildContractShadowCheck({
-    checkName: "bot-credentials",
-    secretId: "linear-api-token",
-    handRolled: Boolean(token),
-    resolveSecretContract,
-  });
 
   // linear-connectivity
   if (!token) {
@@ -594,7 +596,6 @@ export async function checkBotCredentials(deps = {}) {
         mkCheck("bot-parity", STATUS.INFO, `no --expected-bot-user-id provided`),
       );
     }
-    if (shadowCheck) checks.push(shadowCheck);
     return checks;
   }
 
@@ -650,7 +651,6 @@ export async function checkBotCredentials(deps = {}) {
         `cannot verify bot parity — Linear unreachable`,
       ),
     );
-    if (shadowCheck) checks.push(shadowCheck);
     return checks;
   }
 
@@ -726,7 +726,6 @@ export async function checkBotCredentials(deps = {}) {
     );
   }
 
-  if (shadowCheck) checks.push(shadowCheck);
   return checks;
 }
 
@@ -3042,12 +3041,12 @@ async function defaultLinearGraphQLPost(query, token) {
 export async function checkWorkerLabels(deps = {}) {
   const {
     getRoster = getClusterHosts,
-    linearToken = () => process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "",
-    post = defaultLinearGraphQLPost,
-    // CTL-1616 PR2: shadow-only contract resolver for the "third value-read
-    // site" (design §7) — consulted and COMPARED against linearToken() below,
-    // never used to decide this check's grade.
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
     resolveSecretContract = resolveSecret,
+    linearToken = () => resolveLinearTokenLive(resolveSecretContract) ?? "",
+    post = defaultLinearGraphQLPost,
   } = deps;
 
   const REMEDIATION = "run plugins/dev/scripts/setup-execution-core-states.sh";
@@ -3059,18 +3058,10 @@ export async function checkWorkerLabels(deps = {}) {
   }
 
   const token = linearToken();
-  const shadowCheck = buildContractShadowCheck({
-    checkName: "worker-labels",
-    secretId: "linear-api-token",
-    handRolled: Boolean(token),
-    resolveSecretContract,
-  });
-  const shadow = shadowCheck ? [shadowCheck] : [];
 
   if (!token) {
     return [
       mkCheck("worker-labels", STATUS.INFO, "no LINEAR_API_TOKEN / LINEAR_API_KEY — skipping worker-label check"),
-      ...shadow,
     ];
   }
 
@@ -3081,14 +3072,14 @@ export async function checkWorkerLabels(deps = {}) {
   try {
     const json = await post(QUERY, token);
     if (json?.errors?.length) {
-      return [mkCheck("worker-labels", STATUS.WARN, `Linear GraphQL error: ${JSON.stringify(json.errors)}`), ...shadow];
+      return [mkCheck("worker-labels", STATUS.WARN, `Linear GraphQL error: ${JSON.stringify(json.errors)}`)];
     }
     nodes = json?.data?.issueLabels?.nodes;
     if (!Array.isArray(nodes)) {
-      return [mkCheck("worker-labels", STATUS.WARN, "unexpected issueLabels response shape from Linear"), ...shadow];
+      return [mkCheck("worker-labels", STATUS.WARN, "unexpected issueLabels response shape from Linear")];
     }
   } catch (err) {
-    return [mkCheck("worker-labels", STATUS.WARN, `Linear unreachable: ${err?.message ?? err}`), ...shadow];
+    return [mkCheck("worker-labels", STATUS.WARN, `Linear unreachable: ${err?.message ?? err}`)];
   }
 
   // #2631-safe match: the exclusive-group marker is parent==null + the group
@@ -3101,7 +3092,6 @@ export async function checkWorkerLabels(deps = {}) {
         STATUS.WARN,
         `workspace label group "${WORKER_LABEL_GROUP}" not found — ${REMEDIATION}`,
       ),
-      ...shadow,
     ];
   }
 
@@ -3115,7 +3105,7 @@ export async function checkWorkerLabels(deps = {}) {
         : mkCheck(`worker-label:${host}`, STATUS.WARN, `label "${childName}" missing — ${REMEDIATION}`),
     );
   }
-  return [...checks, ...shadow];
+  return checks;
 }
 
 // ─── CTL-1375: repo-icon token-scope advisory ────────────────────────────────
@@ -3604,33 +3594,36 @@ export async function checkDeploymentModeConsistency(deps = {}) {
   return checks;
 }
 
-// ─── CTL-1616 PR2: secret-contract shadow pass ───────────────────────────────
+// ─── CTL-1616 PR2/PR3: secret-contract observability ─────────────────────────
 //
-// checkSecretContract — SHADOW ONLY (design §7/§9). Resolves a handful of
-// SECRET_REGISTRY rows through the shared lib/secret-contract.mjs engine and
-// reports them as INFO-level OBSERVATIONS: presence for `linear-api-token` and
-// `groq-api-key` — NEW coverage design §7 asks for ("plus new Linear/Groq
-// presence checks"), since no existing doctor check resolves either through
-// the contract today (checkPeerUniqueness/checkBotCredentials/checkWorkerLabels
-// hand-roll their OWN linear-api-token read, shadow-compared at their own call
-// sites above; groq-api-key has no doctor check at all pre-CTL-1616).
+// checkSecretContract — INFO-ONLY OBSERVATION (design §7/§9), UNCHANGED by the
+// PR3 cutover below. Resolves a handful of SECRET_REGISTRY rows through the
+// shared lib/secret-contract.mjs engine and reports them as INFO-level
+// observations: presence for `linear-api-token` and `groq-api-key` — NEW
+// coverage design §7 asked for ("plus new Linear/Groq presence checks"), since
+// no existing doctor check resolved either through the contract pre-CTL-1616.
+//
+// PR3 (design §9) cuts checkPeerUniqueness/checkBotCredentials/checkWorkerLabels
+// over to the contract as their LIVE answer for linear-api-token — see
+// resolveLinearTokenLive above — which retires the PR2 shadow-comparison those
+// 3 call sites used to run against their own hand-rolled reads (there is no
+// hand-rolled answer left there to compare against). checkSecretContract
+// itself stays exactly what it was in PR2: an INFO-only observation, not a
+// graded check — grading `source` against the active deployment mode's
+// expected provider (PASS/WARN/FAIL) is explicitly NOT part of this cutover
+// and remains open work for a later PR. checkWebhookIngestion's
+// webhook-secret shadow and checkCloudTokenEnv's cloud-token shadow are also
+// UNCHANGED — those secrets cut over in their own later migration PRs (design
+// §8/§9 PR4-PR6), not this one.
 //
 // Every emitted check is STATUS.INFO — summarize() never counts INFO toward
 // pass/warn/fail (doctor.mjs:1728-1736 — see summarize()), so this check
 // cannot move doctor's exit code (the FAIL count) or its pass/warn/fail
-// summary line, satisfying the "zero grade change" discipline for the whole
-// shadow pass, not just the injected-dependency call sites above.
+// summary line.
 //
 // Fleet-topology-independent (does not consult resolveRoster) — wired into
 // checksForClass's shared prelude for EVERY class, exactly like
 // checkDeploymentModeConsistency (CTL-1617) just above it.
-//
-// PR3 (design §9) flips this from advisory OBSERVATION to a GRADED check:
-// PASS when `source` matches the active deployment mode's expected provider,
-// WARN on unexpected-provider resolution, FAIL when the active mode's
-// `bootstrapFor` row fails to resolve. None of that grading exists yet here —
-// this PR only proves the contract can be consulted safely, side by side with
-// every hand-rolled reader, without changing a single grade.
 export function checkSecretContract(deps = {}) {
   const { env = process.env, deploymentMode = resolveDeploymentModeForShadow(env), resolveSecretFn = resolveSecret } = deps;
   const checks = [];
