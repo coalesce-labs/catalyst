@@ -36,8 +36,12 @@ import * as linearWriteDefault from "./linear-write.mjs";
 export const defaultLinearWrite = linearWriteDefault;
 
 const ORCHESTRATE_REBASE_BIN = fileURLToPath(new URL("../orchestrate-rebase", import.meta.url));
+// Templates live at plugins/dev/templates/ (orchestrate-rebase resolves them as
+// PLUGIN_ROOT/templates), which from execution-core/ is TWO levels up. `../templates/`
+// pointed at scripts/templates/ — a directory that has never existed — so every rescue
+// dispatch died in awk. Masked by the CTL-1612 401 outage until 2026-08-02 (CTL-1620).
 const RESCUE_PROMPT_TEMPLATE = fileURLToPath(
-  new URL("../templates/rescue-rebase-prompt.md", import.meta.url)
+  new URL("../../templates/rescue-rebase-prompt.md", import.meta.url)
 );
 
 // readStalePrRescueConfig — read catalyst.orchestration.stalePrRescue.*
