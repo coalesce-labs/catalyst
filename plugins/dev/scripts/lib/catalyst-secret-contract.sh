@@ -743,15 +743,24 @@ _csc_resolve_config_json() {
   _csc_set_result "" "none" "$_delivery"
 }
 
-# _csc_resolve_cloud_token_name — cloud-token's two-step resolution: NAME (env override →
-# Layer-2 catalyst.cloud.tokenEnv → default CATALYST_CLOUD_TOKEN), then that variable's
-# VALUE. Mode-independent — always platform-env, never touches a file.
-_csc_resolve_cloud_token_name() {
-  local _id="$1" _delivery _path _l2 _tagged _env_var _val
-  _delivery="$(catalyst_secret_delivery "$_id")"
+# catalyst_secret_cloud_token_name ID — CTL-1616 PR5. NAME-ONLY resolution of the cloud-token
+# row's env-var NAME: env override (CATALYST_CLOUD_TOKEN_ENV) → Layer-2
+# catalyst.cloud.tokenEnv → default. NEVER reads the value of the resolved variable — mirrors
+# lib/secret-contract.mjs's EXPORTED resolveCloudTokenName(env) byte-for-byte (same
+# env-override / Layer-2 / default precedence, same STRICT string-only Layer-2 acceptance —
+# see the STRICT STRING-ONLY note below). PUBLIC (catalyst_ prefix, not _csc_) so
+# health-responder.sh's bash-fallback ladder can call this directly instead of hand-rolling its
+# own jq-based ladder (design §9 PR5: "both cloud-token readers agree byte-for-byte on the
+# resolved env-var name"). Echoes "envVar|source" and sets
+# CATALYST_SECRET_TOKEN_NAME/_SOURCE (mirrors _csc_set_result's exported-breadcrumb
+# convention) so a caller that only needs the NAME (not a resolve-and-check-presence round
+# trip) can skip re-parsing the pipe-joined echo.
+catalyst_secret_cloud_token_name() {
+  local _id="${1:-cloud-token}" _path _l2 _tagged _env_var _source
   _path="$(catalyst_secret_config_json_path "$_id")"
   if [[ -n "${CATALYST_CLOUD_TOKEN_ENV:-}" ]]; then
     _env_var="$CATALYST_CLOUD_TOKEN_ENV"
+    _source="env"
   else
     _l2="$(catalyst_secret_resolve_layer2_path)"
     _tagged="$(_csc_read_json_string "$_l2" "$_path")"
@@ -771,13 +780,33 @@ _csc_resolve_cloud_token_name() {
         _csc_b64_decode_var _decoded "${_tagged#@STR64:}"
         if [[ -n "$_decoded" ]]; then
           _env_var="$_decoded"
+          _source="layer2"
         else
           _env_var="$(catalyst_secret_env_names "$_id" | head -n1)"
+          _source="default"
         fi
         ;;
-      *) _env_var="$(catalyst_secret_env_names "$_id" | head -n1)" ;;
+      *)
+        _env_var="$(catalyst_secret_env_names "$_id" | head -n1)"
+        _source="default"
+        ;;
     esac
   fi
+  CATALYST_SECRET_TOKEN_NAME="$_env_var"
+  # shellcheck disable=SC2034
+  CATALYST_SECRET_TOKEN_NAME_SOURCE="$_source"
+  export CATALYST_SECRET_TOKEN_NAME CATALYST_SECRET_TOKEN_NAME_SOURCE
+  printf '%s|%s' "$_env_var" "$_source"
+}
+
+# _csc_resolve_cloud_token_name — cloud-token's two-step resolution: NAME (via
+# catalyst_secret_cloud_token_name above — single implementation, not a second copy), then
+# that variable's VALUE. Mode-independent — always platform-env, never touches a file.
+_csc_resolve_cloud_token_name() {
+  local _id="$1" _delivery _env_var _val
+  _delivery="$(catalyst_secret_delivery "$_id")"
+  catalyst_secret_cloud_token_name "$_id" >/dev/null
+  _env_var="$CATALYST_SECRET_TOKEN_NAME"
   # INVALID ENV NAME FIX (Codex finding fix): CATALYST_CLOUD_TOKEN_ENV / the Layer-2
   # tokenEnv override is OPERATOR-CONTROLLED text, not registry data — a value like
   # "BAD-NAME" (or anything else outside [A-Za-z_][A-Za-z0-9_]*) fed straight into
