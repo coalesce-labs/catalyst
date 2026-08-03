@@ -345,6 +345,9 @@ _token_provisioned() {
     if [[ -z "$name" ]]; then
       catalyst_secret_cloud_token_name cloud-token >/dev/null
       name="$CATALYST_SECRET_TOKEN_NAME"
+      echo "[health-responder] token-env resolved via bash-fallback: ${name}" >&2
+    else
+      echo "[health-responder] token-env resolved via bun: ${name}" >&2
     fi
     [[ -n "${!name:-}" ]] && printf yes || printf no
   )"

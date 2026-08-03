@@ -1104,13 +1104,13 @@ export MOCK_LAST_EXIT=0
 mkdir -p "${HOME}/.config/catalyst"
 printf 'export CATALYST_CLOUD_TOKEN_ENV=MY_CUSTOM_TOKEN\nexport MY_CUSTOM_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
 run "T75: bun AVAILABLE + env-override token name resolves via the bun path (fixture-matrix cell)" \
-  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}' && printf '%s' \"\$out\" | grep -q 'token-env resolved via bun: MY_CUSTOM_TOKEN'"
 rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG"
 
 printf 'export ANOTHER_CUSTOM_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
 printf '{"catalyst":{"cloud":{"tokenEnv":"ANOTHER_CUSTOM_TOKEN"}}}' > "${SCRATCH}/layer2-config.json"
 run "T76: bun AVAILABLE + Layer-2 tokenEnv override resolves via the bun path (fixture-matrix cell)" \
-  bash -c "out=\$(CATALYST_LAYER2_CONFIG_FILE='${SCRATCH}/layer2-config.json' RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+  bash -c "out=\$(CATALYST_LAYER2_CONFIG_FILE='${SCRATCH}/layer2-config.json' RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}' && printf '%s' \"\$out\" | grep -q 'token-env resolved via bun: ANOTHER_CUSTOM_TOKEN'"
 rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG" "${SCRATCH}/layer2-config.json"
 unset MOCK_LAST_EXIT
 
