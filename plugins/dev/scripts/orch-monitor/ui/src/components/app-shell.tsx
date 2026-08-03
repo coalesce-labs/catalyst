@@ -79,6 +79,7 @@ import {
 import {
   SidebarInset,
   SidebarProvider,
+  SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppFooter } from "@/components/app-footer";
@@ -399,11 +400,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <SidebarInset className="min-h-0 overflow-hidden">
           {/* ── Thin top strip: the SINGLE header — breadcrumb + page actions ──
               CTL-1003 §A1: the sidebar collapse icon and the search button are
-              gone (`[` / Cmd-B still toggle, ⌘K / `/` still open the palette —
-              only the visible buttons are removed). The breadcrumb is the sole
-              left affordance; a detail page portals its prev/next chevrons into
-              the right-aligned HeaderActionsSlot. */}
+              gone on DESKTOP (`[` / Cmd-B still toggle, ⌘K / `/` still open the
+              palette — only the visible buttons are removed there). Below the
+              `md` breakpoint, though, the sidebar renders as an off-canvas Sheet
+              (components/ui/sidebar.tsx) with no keyboard available (iOS Safari)
+              and no other tap target to open it (the edge SidebarRail drag-handle
+              is itself `sm:flex`-gated, i.e. also desktop-only) — so the trigger
+              button is restored here, but ONLY for narrow viewports (`md:hidden`),
+              leaving the deliberate keyboard-only desktop chrome unchanged. */}
           <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
+            <SidebarTrigger className="text-muted-foreground md:hidden" />
             <Breadcrumb>
               <BreadcrumbList>
                 {crumbs.map((crumb, i) => {
