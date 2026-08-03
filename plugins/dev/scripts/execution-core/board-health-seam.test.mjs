@@ -425,3 +425,27 @@ describe("holisticBoardHealthAct — one real dispatch per scan, skip non-dispat
     expect(r.ticket).toBe("CTL-anchor");
   });
 });
+
+// ─── CTL-1608 — scheduler threads getStalledPrState into boardHealthPassFn ───
+describe("schedulerTick — CTL-1608 getStalledPrState seam", () => {
+  test("boardHealthPassFn receives getStalledPrState that returns a Map", () => {
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: () => {},
+      reclaimDeadWork: () => "noop",
+      concurrency: { maxParallel: 4 },
+      liveBackgroundCount: () => 4,
+      boardHealth: { mode: "shadow" },
+      boardHealthPassFn: (opts) => {
+        calls.push(opts);
+        return { ran: true, ranAtMs: 1 };
+      },
+    });
+    expect(calls.length).toBe(1);
+    const o = calls[0];
+    expect(typeof o.getStalledPrState).toBe("function");
+    expect(o.getStalledPrState()).toBeInstanceOf(Map);
+  });
+});

@@ -370,6 +370,7 @@ import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
+import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
 import {
   getAllTicketDescriptors,
   getAllPrStatuses,
@@ -5482,6 +5483,10 @@ export function schedulerTick(
           // below; a bare tick passes none → empty-Map default keeps the new invariant
           // observable:false (shadow-first, ADR-023).
           getStrandedEvidence: _boardHealth.getStrandedEvidence,
+          // CTL-1608: inject the stalled-PR stamp map (from workers/*/stalled-pr.json).
+          // The daemon binds this to read from the real orchDir; a bare tick passes
+          // nothing → assembleBoardState defaults to () => new Map() (observable:false).
+          getStalledPrState: _boardHealth.getStalledPrState ?? (() => readStalledPrState(orchDir)),
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the

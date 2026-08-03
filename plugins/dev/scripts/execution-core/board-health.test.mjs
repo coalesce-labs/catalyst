@@ -71,6 +71,8 @@ function mkBoard(o = {}) {
     // phantom/orphaned-PR cohorts stay observable:false, exactly like an unwired
     // board. `mkPrStatusMap` below builds the nested shape from flat rows.
     prStatusMap: o.prStatusMap ?? new Map(),
+    // CTL-1608: pre-fetched stalled-PR state map (timer-stamped durations).
+    stalledPrMap: o.stalledPrMap ?? new Map(),
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -254,7 +256,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
 
 // ─── CTL-1157 off-gate: off = truly dark (no cohort code, no PR SELECT) ──────
 describe("CTL-1157 off-gate — cohort invariants + PR SELECT are dark in off", () => {
-  const COHORT_KEYS = ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile"];
+  const COHORT_KEYS = ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile", "stalledPr"];
 
   test("evaluateInvariants(mode:off) omits ALL four cohort invariants (legacy set only)", () => {
     const r = evaluateInvariants(mkBoard(), { mode: "off" });
@@ -883,7 +885,7 @@ describe("buildBoardContext", () => {
     const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-OLD"]) };
     const ctx = buildBoardContext(board, invs);
 
-    expect(ctx.schema).toBe("recovery-board-context/v2");
+    expect(ctx.schema).toBe("recovery-board-context/v3");
     expect(ctx.slots).toEqual({ capacity: 4, inUse: 2, free: 2 });
     expect(ctx.eligibleQueue.depth).toBe(2);
     expect(ctx.eligibleQueue.topTickets).toEqual(["CTL-1", "CTL-2"]);
@@ -1052,7 +1054,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     // falls back to the top eligible ticket.
     expect(acted[0].anchor).toBe("CTL-1");
     // the delegate gets the WHOLE-board context, not a per-item brief.
-    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v2");
+    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v3");
     expect(acted[0].decision.gate.decision).toBe("proceed");
     // the act result is threaded back into the pass result (observability).
     expect(r.act).toEqual({ dispatched: true, attempts: 1 });
@@ -2229,5 +2231,130 @@ describe("CTL-1644 off-gate — getStrandedEvidence never invoked in off mode", 
       now: () => NOW,
     });
     expect(called).toBe(1);
+  });
+});
+
+// ─── CTL-1608 checkStalledPr — review-latency / CI-health / no-push ──────────
+function mkStalledPrMap(rows = []) {
+  const map = new Map();
+  for (const r of rows) map.set(r.ticket, { state: "OPEN", ...r });
+  return map;
+}
+
+describe("CTL-1608 checkStalledPr — review/CI/no-push staleness, liveness-independent", () => {
+  const DAY = 24 * HOUR;
+  const openPrTicket = (id) => new Map([[id, { identifier: id, linear_state: "In Review", pr_number: 1 }]]);
+
+  test("empty map → observable:false (shadow-first seam)", () => {
+    const r = evaluateInvariants(mkBoard({ stalledPrMap: new Map() }), { mode: "shadow" });
+    expect(r.stalledPr.observable).toBe(false);
+    expect(r.stalledPr.ok).toBe(true);
+  });
+
+  test("CI failing past threshold → flagged", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-CI"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).toContain("CTL-CI");
+    expect(r.stalledPr.ok).toBe(false);
+  });
+
+  test("review requested past threshold → flagged", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-RV"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-RV", prNumber: 1, reviewRequestedAt: new Date(NOW - 5 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).toContain("CTL-RV");
+  });
+
+  test("no push past threshold → flagged", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-NP"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-NP", prNumber: 1, lastPushAt: new Date(NOW - 8 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).toContain("CTL-NP");
+  });
+
+  test("flags EVEN WITH a live worker (independent of worker liveness — the ticket's whole point)", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-LIVE"),
+      signals: [{ ticket: "CTL-LIVE", phase: "monitor-merge", status: "running" }],
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-LIVE", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).toContain("CTL-LIVE"); // orphanedOpenPr would EXCLUDE this
+  });
+
+  test("fresh stall (under threshold) → not flagged", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-FRESH"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-FRESH", prNumber: 1, ciFirstFailedAt: new Date(NOW - 1 * HOUR).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).not.toContain("CTL-FRESH");
+    expect(r.stalledPr.ok).toBe(true);
+  });
+
+  test("null stamps → not flagged (CI green / review arrived / recently pushed)", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-OK"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-OK", prNumber: 1, ciFirstFailedAt: null, reviewRequestedAt: null, lastPushAt: null },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).not.toContain("CTL-OK");
+  });
+
+  test("terminal Linear state → skipped (no recovery anchor on finished work)", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: new Map([["CTL-DONE", { identifier: "CTL-DONE", linear_state: "Done", pr_number: 1 }]]),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-DONE", prNumber: 1, ciFirstFailedAt: new Date(NOW - 9 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).not.toContain("CTL-DONE");
+  });
+
+  test("proposeMoves → tier1 nudge-stalled-pr for a flagged ticket", () => {
+    const invs = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-CI"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    const moves = proposeMoves(invs, mkBoard());
+    expect(moves.tier1.find((m) => m.ticket === "CTL-CI" && m.move === "nudge-stalled-pr")).toBeTruthy();
+  });
+
+  test("sanctioned latch suppresses the stalled-pr move (stays visible in the invariant)", () => {
+    const invs = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-CI"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    const moves = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-CI"] }));
+    expect(moves.tier1.find((m) => m.ticket === "CTL-CI")).toBeFalsy();
+    expect(invs.stalledPr.flagged).toContain("CTL-CI"); // suppression is in proposeMoves ONLY
+  });
+
+  test("buildBoardContext surfaces stalledPrs additively", () => {
+    const invs = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-CI"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    const ctx = buildBoardContext(mkBoard(), invs);
+    expect(ctx.stalledPrs).toContain("CTL-CI");
   });
 });
