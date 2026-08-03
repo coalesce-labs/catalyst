@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNodeCloudTokenEnv } from "../config.mjs";
+import { resolveCloudTokenName } from "../../lib/secret-contract.mjs";
 
 const ENV_KEYS = ["CATALYST_CLOUD_TOKEN_ENV", "CATALYST_CLOUD_TOKEN", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_HOST_NAME"];
 let saved;
@@ -79,6 +80,31 @@ describe("resolveNodeCloudTokenEnv — overrides (per-host config, not code)", (
     writeFileSync(p, "{ not json");
     process.env.CATALYST_LAYER2_CONFIG_FILE = p;
     expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" });
+  });
+});
+
+describe("resolveNodeCloudTokenEnv — CTL-1616 PR5: byte-for-byte parity with the registry's resolveCloudTokenName", () => {
+  // resolveNodeCloudTokenEnv is now a thin delegate over lib/secret-contract.mjs's
+  // resolveCloudTokenName (design §8/§9 PR5) — this suite pins that delegation directly
+  // rather than only re-exercising resolveNodeCloudTokenEnv's own ladder, so a future
+  // refactor that reintroduces a SECOND hand-rolled copy fails loudly here. Fixture matrix
+  // per design §9 PR5 success criteria: {env-override, layer2, default} — the other half of
+  // the matrix ({bun-path, bash-fallback}) is exercised cross-language by
+  // __tests__/health-responder.test.sh (T57-T59 bash-fallback, T75-T76 bun-path).
+  test("no overrides → both resolvers agree: default/CATALYST_CLOUD_TOKEN", () => {
+    expect(resolveNodeCloudTokenEnv()).toEqual(resolveCloudTokenName(process.env));
+  });
+
+  test("env override → both resolvers agree", () => {
+    process.env.CATALYST_CLOUD_TOKEN_ENV = "MY_CUSTOM_TOKEN";
+    expect(resolveNodeCloudTokenEnv()).toEqual(resolveCloudTokenName(process.env));
+    expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "MY_CUSTOM_TOKEN", source: "env" });
+  });
+
+  test("Layer-2 catalyst.cloud.tokenEnv override → both resolvers agree", () => {
+    writeLayer2({ catalyst: { cloud: { tokenEnv: "L2_TOKEN" } } });
+    expect(resolveNodeCloudTokenEnv()).toEqual(resolveCloudTokenName(process.env));
+    expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "L2_TOKEN", source: "layer2" });
   });
 });
 

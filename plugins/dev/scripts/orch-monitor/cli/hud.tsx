@@ -25,12 +25,22 @@ import {
   compile,
   groqTranslate,
   rewriteNode,
-  readGroqApiKeyFromConfig,
   DslError,
   GroqHttpError,
   GroqResponseError,
 } from "../../lib/dsl-compile.mjs";
 import { buildSystemPrompt } from "../../lib/dsl-prompt.mjs";
+// CTL-1616 PR5 fold (design §8/§9, risk 8 — DOCUMENTED BEHAVIOR CHANGE, not a no-op): this
+// site used to be `process.env["GROQ_API_KEY"] || readGroqApiKeyFromConfig()` — a local
+// 2-tier ladder independent of every other Groq call site. It now calls the SAME shared
+// resolver broker/config.mjs already adopted (lib/api-key-health.mjs resolveApiKey), with the
+// identical {envName, configKeyPath} that site uses — joining broker/config.mjs onto ONE
+// Groq-key ladder (design table: "GROQ_API_KEY — 2 ladders; resolveApiKey adopted by 1 of 3
+// sites; tier count differs"). FLAGGED: resolveApiKey enforces `typeof value === "string"` at
+// its config tier (the old readGroqApiKeyFromConfig did not) and is capable of an additional
+// project-config tier via an optional projectConfigPath (not wired here, matching
+// broker/config.mjs's own call shape) — see this PR's report for the full writeup.
+import { resolveApiKey } from "../../lib/api-key-health.mjs";
 import type { CanonicalEvent } from "../lib/canonical-event.ts";
 import { readPluginVersion, formatVersionBlock } from "./lib/version.ts";
 import { loadHudConfig } from "../lib/monitor-config.ts";
@@ -390,7 +400,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     }
 
     try {
-      const apiKey = process.env["GROQ_API_KEY"] || readGroqApiKeyFromConfig();
+      const apiKey = resolveApiKey({ envName: "GROQ_API_KEY", configKeyPath: "groq.apiKey" }).value;
       // CTL-365: inject current time per-request so "last 24 hours" etc. resolve
       // against the wall clock rather than silently degrading to UTC midnight.
       const systemPrompt = buildSystemPrompt({ now: new Date() });

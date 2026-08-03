@@ -15,6 +15,13 @@ import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync } from "no
 // risk the pino try/catch below guards against.
 import { schemaCompat } from "./config-schema.mjs";
 
+// CTL-1616 PR5: the canonical cloud-token NAME resolver is a zero-import leaf
+// (../lib/secret-contract.mjs) shared verbatim by execution-core (this module,
+// via resolveNodeCloudTokenEnv below) and health-responder.sh's bash fallback
+// (via lib/catalyst-secret-contract.sh's catalyst_secret_cloud_token_name) —
+// same precedent as CTL-1617's deployment-mode re-export just below.
+import { resolveCloudTokenName } from "../lib/secret-contract.mjs";
+
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
 // `bun install` cannot resolve it — and any module graph that includes
@@ -1935,33 +1942,37 @@ export function getCloudSyncSelfHealPath() {
 // lets a host point at a differently-named var. NAME-ONLY: this never reads or returns the
 // secret VALUE (the writer reads process.env[name]; doctor checks presence by name), so the
 // result is safe to log.
-const DEFAULT_CLOUD_TOKEN_ENV = "CATALYST_CLOUD_TOKEN";
-
-// readLayer2CloudTokenEnv — the raw catalyst.cloud.tokenEnv string from the Layer-2
-// file, or undefined (absent/malformed/non-string). Never throws (parity with
-// readLayer2NodeClass). The per-host escape hatch — name your token var without a code change.
-function readLayer2CloudTokenEnv() {
-  try {
-    const v = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cloud?.tokenEnv;
-    return typeof v === "string" && v.length > 0 ? v : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-// resolveNodeCloudTokenEnv — resolve the env-var NAME that holds this host's cloud token:
-// env override → Layer-2 override → the standard `CATALYST_CLOUD_TOKEN`. Returns
-// { envVar, source } where source ∈ "env" | "layer2" | "default". Pure + NAME-only: it never
-// reads process.env[envVar] (the secret value), so it is safe to log the result. No host
-// names are hardcoded — the resolver is host-agnostic by design.
+//
+// CTL-1616 PR5 FOLD: this used to be a hand-rolled 3-tier ladder (env override → Layer-2
+// override read via the OLD non-injectable getLayer2ConfigPath() → the hardcoded default)
+// duplicated against health-responder.sh's bash fallback (design table: "CATALYST_CLOUD_TOKEN
+// name resolution — 2 copies, hand-duplicated precedence ladder"). It is now a THIN DELEGATE
+// onto the secret contract's single NAME resolver (lib/secret-contract.mjs
+// resolveCloudTokenName) — the SAME implementation health-responder.sh's bash fallback mirrors
+// via lib/catalyst-secret-contract.sh's catalyst_secret_cloud_token_name (§9 PR5 fixture
+// matrix: both readers must agree byte-for-byte on the resolved NAME for
+// {env-override,layer2,default} × {bun-path,bash-fallback}). RETURN SHAPE is byte-compatible
+// with every existing caller (doctor.mjs's checkCloudSync `tokenEnv = resolveNodeCloudTokenEnv()`
+// and checkCloudTokenEnv's shadow-diff, cloud-sync.mjs, health-responder.sh's bun probe): still
+// { envVar, source } with source ∈ "env" | "layer2" | "default".
+//
+// ONE INCIDENTAL BEHAVIOR NOTE (not a named design risk, flagged here for honesty): the OLD
+// readLayer2CloudTokenEnv() read the Layer-2 file via getLayer2ConfigPath() — homedir-only,
+// ignoring CATALYST_MACHINE_CONFIG / XDG_CONFIG_HOME — and, separately, ALWAYS consulted real
+// process.env for that file path regardless of the `env` param a caller passed in (a latent
+// injection gap; every existing test mutates process.env directly rather than passing a custom
+// `env`, so this was never observed). resolveCloudTokenName delegates to the registry's
+// resolveLayer2Path, which IS the canonical CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG
+// > XDG_CONFIG_HOME > ~/.config/catalyst chain (design §2) and DOES honor the injected `env`
+// param. On a host that sets CATALYST_MACHINE_CONFIG or XDG_CONFIG_HOME but not
+// CATALYST_LAYER2_CONFIG_FILE, the Layer-2 file this resolver now reads for the
+// catalyst.cloud.tokenEnv override can differ from before PR5 — every existing test only sets
+// CATALYST_LAYER2_CONFIG_FILE directly (the tier both chains check first), so no test's
+// behavior changes, but this is a REAL, if narrow, behavior change worth flagging alongside the
+// Groq fold below rather than letting the general Layer-2-path unification (design §9 PR6)
+// quietly absorb it here first.
 export function resolveNodeCloudTokenEnv({ env = process.env } = {}) {
-  const override = env.CATALYST_CLOUD_TOKEN_ENV;
-  if (typeof override === "string" && override.length > 0) {
-    return { envVar: override, source: "env" };
-  }
-  const l2 = readLayer2CloudTokenEnv();
-  if (l2) return { envVar: l2, source: "layer2" };
-  return { envVar: DEFAULT_CLOUD_TOKEN_ENV, source: "default" };
+  return resolveCloudTokenName(env);
 }
 
 export function readDelegateRunnerConfig(env = process.env) {

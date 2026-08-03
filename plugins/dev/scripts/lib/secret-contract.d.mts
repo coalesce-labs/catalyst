@@ -94,6 +94,15 @@ export interface ResolvedSecret {
 
 export function resolveSecret(id: string, opts?: ResolveSecretOptions): ResolvedSecret;
 
+/** CTL-1616 PR5: NAME-ONLY resolution of the cloud-token row's env-var NAME (env override →
+ *  Layer-2 catalyst.cloud.tokenEnv → default). Never reads the secret VALUE — safe to log.
+ *  execution-core/config.mjs's resolveNodeCloudTokenEnv delegates to this. */
+export interface ResolvedCloudTokenName {
+  envVar: string;
+  source: "env" | "layer2" | "default";
+}
+export function resolveCloudTokenName(env?: Record<string, string | undefined>): ResolvedCloudTokenName;
+
 export interface RearmHookResult {
   rearmed: boolean;
   reason?: string;

@@ -16,13 +16,25 @@ import {
   compile,
   groqTranslate,
   parseGroqResponse,
-  readGroqApiKeyFromConfig,
   rewriteNode,
   DslError,
   GroqHttpError,
   GroqResponseError,
 } from "./dsl-compile.mjs";
 import { SYSTEM_PROMPT } from "./dsl-prompt.mjs";
+// CTL-1616 PR5 fold (design §8/§9, risk 8 — DOCUMENTED BEHAVIOR CHANGE, not a no-op): this
+// site used to be `process.env.GROQ_API_KEY || readGroqApiKeyFromConfig()` — a local 2-tier
+// ladder (env, then dsl-compile.mjs's own config-only reader) independent of every other
+// Groq call site. It now calls the SAME shared resolver broker/config.mjs already adopted
+// (lib/api-key-health.mjs resolveApiKey), with the identical {envName, configKeyPath} this
+// codebase's one other adopted site uses — joining broker/config.mjs onto ONE Groq-key
+// ladder instead of three independently-hand-rolled ones (design table: "GROQ_API_KEY — 2
+// ladders; resolveApiKey adopted by 1 of 3 sites; tier count differs"). FLAGGED: resolveApiKey
+// enforces `typeof value === "string"` at its config tier (the old readGroqApiKeyFromConfig
+// did not) and is capable of an additional project-config tier via an optional
+// projectConfigPath (not wired here, matching broker/config.mjs's own call shape) — see this
+// PR's report for the full behavior-change writeup.
+import { resolveApiKey } from "./api-key-health.mjs";
 
 function parseArgs(argv) {
   const out = { query: null, dsl: null, explain: false, limit: null, since: null };
@@ -94,7 +106,7 @@ async function main() {
     if (args.dsl != null) {
       dsl = parseGroqResponse(args.dsl);
     } else {
-      const apiKey = process.env.GROQ_API_KEY || readGroqApiKeyFromConfig();
+      const apiKey = resolveApiKey({ envName: "GROQ_API_KEY", configKeyPath: "groq.apiKey" }).value;
       dsl = await groqTranslate(args.query, { apiKey, systemPrompt: SYSTEM_PROMPT });
     }
   } catch (err) {

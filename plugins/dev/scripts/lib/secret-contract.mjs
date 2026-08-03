@@ -784,28 +784,38 @@ function resolveConfigJson(row, env, cwd) {
   return { value: null, source: "none", provider: row.delivery, rotation: row.rotation };
 }
 
-// resolveCloudTokenName — cloud-token's two-step resolution: first the env-var NAME (env
-// override → Layer-2 catalyst.cloud.tokenEnv → default CATALYST_CLOUD_TOKEN, mirroring
-// resolveNodeCloudTokenEnv, execution-core/config.mjs:1949-1957), THEN that variable's
-// VALUE. Mode-independent: cloud-token is always platform-env delivery regardless of
-// deployment mode, so this never touches a file.
-function resolveCloudTokenName(row, env) {
+// resolveCloudTokenName(env) — CTL-1616 PR5. NAME-ONLY resolution of the cloud-token row's
+// env-var NAME: env override (CATALYST_CLOUD_TOKEN_ENV) → Layer-2 catalyst.cloud.tokenEnv →
+// default CATALYST_CLOUD_TOKEN. NEVER reads process.env[envVar] (the secret VALUE) — safe to
+// log the result. EXPORTED so execution-core/config.mjs's resolveNodeCloudTokenEnv can become
+// a thin delegate onto this single implementation instead of hand-duplicating the ladder
+// (design §8/§9 PR5) — this is now THE canonical NAME resolver both engines' "cloud-token
+// reader" callers (config.mjs's bun path, health-responder.sh's bash-fallback ladder via
+// lib/catalyst-secret-contract.sh's catalyst_secret_cloud_token_name) delegate to/mirror.
+// Returns { envVar, source } where source ∈ "env" | "layer2" | "default" — the EXACT shape
+// resolveNodeCloudTokenEnv has always returned (byte-compatible for its existing callers,
+// including doctor.mjs's checkCloudSync `tokenEnv = resolveNodeCloudTokenEnv()` and
+// checkCloudTokenEnv's shadow-diff).
+export function resolveCloudTokenName(env = process.env) {
+  const row = getSecretRow("cloud-token");
   const nameOverride = env?.CATALYST_CLOUD_TOKEN_ENV;
-  let envVar, envVarSource;
   if (typeof nameOverride === "string" && nameOverride.length > 0) {
-    envVar = nameOverride;
-    envVarSource = "env";
-  } else {
-    const l2Path = resolveLayer2Path(env);
-    const l2Name = readJsonField(l2Path, row.configJsonPath);
-    if (typeof l2Name === "string" && l2Name.length > 0) {
-      envVar = l2Name;
-      envVarSource = "layer2";
-    } else {
-      envVar = row.envNames[0];
-      envVarSource = "default";
-    }
+    return { envVar: nameOverride, source: "env" };
   }
+  const l2Path = resolveLayer2Path(env);
+  const l2Name = readJsonField(l2Path, row?.configJsonPath);
+  if (typeof l2Name === "string" && l2Name.length > 0) {
+    return { envVar: l2Name, source: "layer2" };
+  }
+  return { envVar: row?.envNames?.[0] ?? "CATALYST_CLOUD_TOKEN", source: "default" };
+}
+
+// resolveCloudTokenValue(row, env) — cloud-token's two-step resolution used by the engine's
+// resolveSecret: the NAME (via resolveCloudTokenName above — single implementation, not a
+// second copy) THEN that variable's VALUE. Mode-independent: cloud-token is always
+// platform-env delivery regardless of deployment mode, so this never touches a file.
+function resolveCloudTokenValue(row, env) {
+  const { envVar, source: envVarSource } = resolveCloudTokenName(env);
   const value = env?.[envVar];
   if (typeof value === "string" && value.length > 0) {
     return { value, source: "platform-env", provider: row.delivery, rotation: row.rotation, envVar, envVarSource };
@@ -856,7 +866,7 @@ function resolveLocalOnlyPresence(row, env) {
 // bootstrap-class row (cloud-token, bootstrapFor: "cloud") fails to resolve, every OTHER
 // cloud-mode resolution returns { value: null, source: null } without probing further — a
 // half-provisioned managed container fails loudly and coherently. The bootstrap row itself
-// is exempt (it must resolve on its own terms) and resolveCloudTokenName never triggers this
+// is exempt (it must resolve on its own terms) and resolveCloudTokenValue never triggers this
 // check (recursion terminates in one level: cloud-token's own resolution never consults
 // `deploymentMode`).
 export function resolveSecret(id, { env = process.env, deploymentMode, cwd = process.cwd() } = {}) {
@@ -881,14 +891,14 @@ export function resolveSecret(id, { env = process.env, deploymentMode, cwd = pro
     // catalyst.cloud.tokenEnv override was silently ignored the moment genuine cloud mode
     // activated, even though that exact override IS honored one level up (the bootstrap
     // check above calls resolveSecret(bootstrapRow.id, { env }) WITHOUT deploymentMode,
-    // which routes through the normal switch below to resolveCloudTokenName). Dispatching
-    // platform-env rows through resolveCloudTokenName here — the SAME function, not a
+    // which routes through the normal switch below to resolveCloudTokenValue). Dispatching
+    // platform-env rows through resolveCloudTokenValue here — the SAME function, not a
     // second copy — closes that gap: cloud-token resolves its configured NAME identically
     // whether reached directly (this branch) or indirectly (the bootstrap check). Every
     // other cloud-mode row (bare-file/env-alias/config-json rows collapsing to their
     // envNames-only aliases) is unaffected — this is a targeted fix for the one
     // platform-env row, not a broadening of what "genuinely cloud" resolves.
-    return row.delivery === "platform-env" ? resolveCloudTokenName(row, env) : resolveEnvAliasOnly(row, env);
+    return row.delivery === "platform-env" ? resolveCloudTokenValue(row, env) : resolveEnvAliasOnly(row, env);
   }
 
   switch (row.delivery) {
@@ -903,7 +913,7 @@ export function resolveSecret(id, { env = process.env, deploymentMode, cwd = pro
     case "config-json":
       return resolveConfigJson(row, env, cwd);
     case "platform-env":
-      return resolveCloudTokenName(row, env);
+      return resolveCloudTokenValue(row, env);
     case "local-only":
       return resolveLocalOnlyPresence(row, env);
     default:

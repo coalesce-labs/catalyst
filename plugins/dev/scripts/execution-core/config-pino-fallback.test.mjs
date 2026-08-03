@@ -53,6 +53,11 @@ function stageScratch() {
   cpSync(resolve(__dirname, "config-schema.mjs"), join(scratch, "config-schema.mjs"));
   // CTL-1617: the zero-import deployment-mode leaf config.mjs re-exports.
   cpSync(resolve(__dirname, "../lib/deployment-mode.mjs"), join(libDir, "deployment-mode.mjs"));
+  // CTL-1616 PR5: config.mjs's resolveNodeCloudTokenEnv now delegates to the zero-import
+  // secret-contract leaf's resolveCloudTokenName — copy it too so this scratch fixture's
+  // module graph resolves identically to production (same rationale as deployment-mode.mjs
+  // above).
+  cpSync(resolve(__dirname, "../lib/secret-contract.mjs"), join(libDir, "secret-contract.mjs"));
   // type:module + no deps -> pino unresolvable from this directory tree.
   writeFileSync(
     join(scratch, "package.json"),
