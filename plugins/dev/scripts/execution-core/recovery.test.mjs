@@ -4382,7 +4382,7 @@ describe("detectSessionRateLimitHit", () => {
 
   test("resolveSession returns null (no resolvable session) → false", () => {
     expect(
-      detectSessionRateLimitHit("job-x", { resolveSession: () => null, findTranscript: () => "/should-not-be-used" }),
+      detectSessionRateLimitHit("job-x", { resolveSession: () => null, findTranscriptFn: () => "/should-not-be-used" }),
     ).toBe(false);
   });
 
@@ -4390,8 +4390,8 @@ describe("detectSessionRateLimitHit", () => {
     expect(
       detectSessionRateLimitHit("job-x", {
         resolveSession: () => "uuid-1",
-        findTranscript: () => null,
-        readFileSync: () => { throw new Error("must not read — no transcript path"); },
+        findTranscriptFn: () => null,
+        readTranscriptFn: () => { throw new Error("must not read — no transcript path"); },
       }),
     ).toBe(false);
   });
@@ -4403,8 +4403,8 @@ describe("detectSessionRateLimitHit", () => {
     ].join("\n");
     const result = detectSessionRateLimitHit("job-x", {
       resolveSession: () => "uuid-1",
-      findTranscript: () => "/fake/transcript.jsonl",
-      readFileSync: () => lines,
+      findTranscriptFn: () => "/fake/transcript.jsonl",
+      readTranscriptFn: () => lines,
     });
     expect(result).toBe(true);
   });
@@ -4414,8 +4414,8 @@ describe("detectSessionRateLimitHit", () => {
     expect(
       detectSessionRateLimitHit("job-x", {
         resolveSession: () => "uuid-1",
-        findTranscript: () => "/fake/transcript.jsonl",
-        readFileSync: () => lines,
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
       }),
     ).toBe(true);
   });
@@ -4428,8 +4428,8 @@ describe("detectSessionRateLimitHit", () => {
     expect(
       detectSessionRateLimitHit("job-x", {
         resolveSession: () => "uuid-1",
-        findTranscript: () => "/fake/transcript.jsonl",
-        readFileSync: () => lines,
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
       }),
     ).toBe(false);
   });
@@ -4441,8 +4441,8 @@ describe("detectSessionRateLimitHit", () => {
     expect(
       detectSessionRateLimitHit("job-x", {
         resolveSession: () => "uuid-1",
-        findTranscript: () => "/fake/transcript.jsonl",
-        readFileSync: () => lines,
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
         tailLines: 5,
       }),
     ).toBe(false);
@@ -4457,8 +4457,8 @@ describe("detectSessionRateLimitHit", () => {
     expect(
       detectSessionRateLimitHit("job-x", {
         resolveSession: () => "uuid-1",
-        findTranscript: () => "/fake/transcript.jsonl",
-        readFileSync: () => lines,
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
       }),
     ).toBe(true);
   });
@@ -4473,7 +4473,7 @@ describe("detectSessionRateLimitHit", () => {
     expect(
       detectSessionRateLimitHit("job-x", {
         resolveSession: () => "uuid-1",
-        findTranscript: () => { throw new Error("boom"); },
+        findTranscriptFn: () => { throw new Error("boom"); },
       }),
     ).toBe(false);
   });
@@ -4482,8 +4482,8 @@ describe("detectSessionRateLimitHit", () => {
     expect(
       detectSessionRateLimitHit("job-x", {
         resolveSession: () => "uuid-1",
-        findTranscript: () => "/fake/transcript.jsonl",
-        readFileSync: () => { throw new Error("EACCES"); },
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => { throw new Error("EACCES"); },
       }),
     ).toBe(false);
   });
@@ -4495,8 +4495,8 @@ describe("detectSessionRateLimitHit", () => {
     expect(
       detectSessionRateLimitHit("job-x", {
         resolveSession: () => "uuid-1",
-        findTranscript: () => "/fake/transcript.jsonl",
-        readFileSync: () => lines,
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
       }),
     ).toBe(false);
   });
