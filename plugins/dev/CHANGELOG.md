@@ -1,5 +1,29 @@
 # Changelog
 
+## [12.43.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.42.0...catalyst-dev-v12.43.0) (2026-08-03)
+
+
+### Features
+
+* **dev:** CTL-1603 — fix board showing zero tickets for cluster-only teams ([#2868](https://github.com/coalesce-labs/catalyst/issues/2868)) ([47a8c78](https://github.com/coalesce-labs/catalyst/commit/47a8c781f09ccf611388dc62dac085727f5a4599))
+* **dev:** CTL-1610 — fix escalated-intent permanent latch and actuation-liveness blind spot ([#2882](https://github.com/coalesce-labs/catalyst/issues/2882)) ([69dd8ad](https://github.com/coalesce-labs/catalyst/commit/69dd8ad4b4f473a84d856f997339ea1564dd123a))
+* **dev:** CTL-1616 secret-contract registry pair + cluster-sync derivation (PR1) ([#2902](https://github.com/coalesce-labs/catalyst/issues/2902)) ([1275440](https://github.com/coalesce-labs/catalyst/commit/127544096dcca03d0c0e1002c576b6b6f65307e9))
+* **dev:** CTL-1617 deployment-mode resolver in isolation (PR1 of 7) ([#2895](https://github.com/coalesce-labs/catalyst/issues/2895)) ([581ad4f](https://github.com/coalesce-labs/catalyst/commit/581ad4fcfe44d5978a5697621f5f8d8393097a96))
+* **dev:** CTL-1617 doctor deployment-mode tunnel-consistency check (PR6 of 7) ([#2906](https://github.com/coalesce-labs/catalyst/issues/2906)) ([4ac3bea](https://github.com/coalesce-labs/catalyst/commit/4ac3bea29c7823d57fe67305351277d359ae1ed5))
+* **dev:** CTL-1617 execution-core wiring + advisory deployment-mode doctor checks (PR2 of 7) ([#2899](https://github.com/coalesce-labs/catalyst/issues/2899)) ([374c1b3](https://github.com/coalesce-labs/catalyst/commit/374c1b3ff9b8e630ceca80b12994d602699c61fd))
+* **dev:** CTL-1617 gate catalyst-join webhook wiring on declared deployment mode (PR5 of 7) ([#2913](https://github.com/coalesce-labs/catalyst/issues/2913)) ([1b983f3](https://github.com/coalesce-labs/catalyst/commit/1b983f3254718ed83a6904e198f57196802f3b7b))
+* **dev:** CTL-1617 gate orch-monitor smee tunnels on deployment mode (PR3 of 7) ([#2900](https://github.com/coalesce-labs/catalyst/issues/2900)) ([a73ce21](https://github.com/coalesce-labs/catalyst/commit/a73ce21e5abb5c92f28e1dc48caa96f23b98ea56))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1605 — route worker-status labels through a terminal-aware chokepoint ([#2872](https://github.com/coalesce-labs/catalyst/issues/2872)) ([8855c10](https://github.com/coalesce-labs/catalyst/commit/8855c108b5878bfc76cc59e2f706af0ce139a1a4))
+* **dev:** CTL-1612 arm daemon credentials from the shared secret files at boot ([#2884](https://github.com/coalesce-labs/catalyst/issues/2884)) ([ea5d031](https://github.com/coalesce-labs/catalyst/commit/ea5d031218eaab012dcbcc8760728cb75a6ec28a))
+* **dev:** CTL-1617 jq-exact lone-surrogate acceptance in the deployment-mode reader ([#2907](https://github.com/coalesce-labs/catalyst/issues/2907)) ([84e7682](https://github.com/coalesce-labs/catalyst/commit/84e7682ffb3c527adca5281a05b0b342424027f4))
+* **dev:** CTL-1617 whole-document lone-surrogate parity + architecture-doc precision ([#2904](https://github.com/coalesce-labs/catalyst/issues/2904)) ([6b1cfd8](https://github.com/coalesce-labs/catalyst/commit/6b1cfd8e118df55d69b56b13b9ea8554da5cc06e))
+* **dev:** CTL-1619 adopt LINEAR_API_KEY fallback in linear-reconcile-cli --graphql ([#2893](https://github.com/coalesce-labs/catalyst/issues/2893)) ([bb0fff5](https://github.com/coalesce-labs/catalyst/commit/bb0fff52bd0f3e5d482af3e52276292ccf902a75))
+* **dev:** CTL-1620 resolve the rescue prompt template from plugins/dev/templates ([#2892](https://github.com/coalesce-labs/catalyst/issues/2892)) ([cf13213](https://github.com/coalesce-labs/catalyst/commit/cf13213751b1a8dca489d98bfc007d6ba4b2aacf))
+
 ## [12.42.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.41.0...catalyst-dev-v12.42.0)
 
 Aug 02, 2026
