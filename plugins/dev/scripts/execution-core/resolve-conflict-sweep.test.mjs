@@ -164,6 +164,44 @@ describe("defaultCollectResolveConflictCandidates", () => {
   test("a missing workers dir returns []", () => {
     expect(defaultCollectResolveConflictCandidates({ orchDir: "/nope", readdirSync: () => { throw new Error("ENOENT"); } })).toEqual([]);
   });
+
+  test("skips a workers/ entry that is not a valid ticket key (isTicketKey filter)", () => {
+    const orchDir = "/orch";
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["not-a-ticket", "CTL-5"] },
+      files: {
+        "/orch/workers/CTL-5": ["phase-implement.json"],
+        "/orch/workers/CTL-5/phase-implement.json": JSON.stringify({
+          status: "stalled",
+          failureReason: "source_conflict_ctl708_unavailable",
+        }),
+      },
+    });
+    const out = defaultCollectResolveConflictCandidates({ orchDir, ...fs });
+    expect(out).toHaveLength(1);
+    expect(out[0].ticket).toBe("CTL-5");
+  });
+
+  test("a throwing resolveWorktreePath degrades to worktreePath:null (fail-closed), candidate still collected", () => {
+    const orchDir = "/orch";
+    const fs = fakeFs({
+      workerDirs: { "/orch/workers": ["CTL-6"] },
+      files: {
+        "/orch/workers/CTL-6": ["phase-implement.json"],
+        "/orch/workers/CTL-6/phase-implement.json": JSON.stringify({
+          status: "stalled",
+          failureReason: "source_conflict_ctl708_unavailable",
+        }),
+      },
+    });
+    const out = defaultCollectResolveConflictCandidates({
+      orchDir,
+      ...fs,
+      resolveWorktreePath: () => { throw new Error("resolver exploded"); },
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0].worktreePath).toBeNull();
+  });
 });
 
 // #1461 Fix 5 (final-review finding, human-approved design): classifyLiveConflict
@@ -622,14 +660,31 @@ describe("defaultEscalateCapExhausted", () => {
       renameSync: () => {},
       postComment: (ticket, body) => { posted.push([ticket, body]); return true; },
     };
-    const ok = defaultEscalateCapExhausted({ ticket: "CTL-1", phase: "implement", workerDir: "/w", cycleCount: 3 }, deps);
+    const ok = defaultEscalateCapExhausted({ ticket: "CTL-1", phase: "implement", workerDir: "/w", cycleCount: 5 }, deps);
     expect(ok).toBe(true);
     const written = JSON.parse(writes[0][1]);
     expect(written.failureReason).toBe("resolve-conflict-cycle-cap-exhausted");
     expect(posted).toHaveLength(1);
     expect(posted[0][0]).toBe("CTL-1");
     expect(posted[0][1]).toMatch(/^🔼 \*\*phase-resolve-conflict\*\* escalated/);
-    expect(posted[0][1]).toMatch(/cycle cap \(3\)/);
+    expect(posted[0][1]).toMatch(/cycle cap \(3\)/);       // RESOLVE_CONFLICT_CYCLE_CAP (module constant)
+    expect(posted[0][1]).toMatch(/after 5 attempt\(s\)/);  // cycleCount (call argument) — now provably distinct
+  });
+
+  test("marks the signal cap-exhausted via stalledReason when that field is present instead of failureReason", () => {
+    const reads = { "/w/phase-implement.json": JSON.stringify({ status: "stalled", stalledReason: "source_conflict_resolvable" }) };
+    const writes = [];
+    const deps = {
+      readFileSync: (p) => reads[p],
+      writeFileSync: (p, body) => writes.push([p, body]),
+      renameSync: () => {},
+      postComment: () => true,
+    };
+    const ok = defaultEscalateCapExhausted({ ticket: "CTL-1", phase: "implement", workerDir: "/w", cycleCount: 3 }, deps);
+    expect(ok).toBe(true);
+    const written = JSON.parse(writes[0][1]);
+    expect(written.stalledReason).toBe("resolve-conflict-cycle-cap-exhausted");
+    expect(written.failureReason).toBeUndefined();
   });
 });
 
@@ -953,6 +1008,31 @@ describe("defaultRevertStallAndResetCycle (#1461 escalation-gap fix)", () => {
     expect(`${workerDir}/phase-resolve-conflict.json` in files).toBe(true);
   });
 
+  // M2 (review follow-up, see the source comment in defaultRevertStallAndResetCycle):
+  // the concurrent-write re-check. No existing fixture in this describe block
+  // exercised the REJECTION path — every one above seeds RESOLVED_MARKER_REASON
+  // and lets the revert proceed. Here the reason has already been changed away
+  // from RESOLVED_MARKER_REASON (to CAP_EXHAUSTED_REASON, simulating a
+  // concurrent cap-exhaustion escalate) by the time this function reads it —
+  // it must back off rather than clobber whatever owns the ticket's stall now.
+  test("M2 rejection: does NOT clobber the reason when a concurrent writer already changed it away from RESOLVED_MARKER_REASON", () => {
+    const { files, deps } = inMemoryFs({
+      [`${workerDir}/phase-implement.json`]: JSON.stringify({ status: "stalled", failureReason: CAP_EXHAUSTED_REASON, bg_job_id: "abc" }),
+    });
+    let readdirCalls = 0;
+    const spiedDeps = { ...deps, readdirSync: (...args) => { readdirCalls++; return deps.readdirSync(...args); } };
+    const ok = defaultRevertStallAndResetCycle(orchDir, ticket, "implement", spiedDeps);
+    expect(ok).toBe(false);
+    // never wrote anything — the concurrent CAP_EXHAUSTED_REASON write stands
+    expect(Object.keys(files)).toEqual([`${workerDir}/phase-implement.json`]);
+    // maybeResetForResolveConflictCycle (step 2) never invoked — step 1's
+    // rejection short-circuits before the reset is ever attempted.
+    expect(readdirCalls).toBe(0);
+    const untouched = JSON.parse(files[`${workerDir}/phase-implement.json`]);
+    expect(untouched.failureReason).toBe(CAP_EXHAUSTED_REASON);
+    expect(untouched.bg_job_id).toBe("abc"); // never rewritten
+  });
+
   // Safety-critical (c): even if this function were ever reached for a
   // genuinely in-flight resolve-conflict run (it shouldn't be — the failures
   // collector's status:"failed" filter is the real guarantee), the cycle-reset
@@ -1107,6 +1187,69 @@ describe("#1461 escalation-gap fix: real end-to-end chain over a real filesystem
   });
 });
 
+// I2 (#12 follow-up): I1 above only exercises the FAILURE→revert→re-candidate
+// chain. This is the sibling for the SUCCESSFUL-redispatch case: a real
+// runResolveConflictSweepPass → real defaultCollectResolveConflictCandidates →
+// real defaultMarkAndDispatch chain over a REAL filesystem, proving a fresh
+// stall behind a STALE terminal phase-resolve-conflict.json genuinely
+// re-dispatches (the stale-signal reset in defaultMarkAndDispatch actually
+// runs) rather than being silently swallowed by phase-agent-dispatch's own
+// idempotency guard as a no-op.
+describe("#1461 cycle-reset fix: real end-to-end successful-redispatch chain over a real filesystem (I2)", () => {
+  let dir;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "resolve-conflict-redispatch-real-fs-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  test("a fresh stall behind a STALE done phase-resolve-conflict.json still gets a REAL dispatch, not a swallowed idempotent no-op", async () => {
+    const orchDir = dir;
+    const ticket = "CTL-9201";
+    const workerDir = join(orchDir, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+
+    // Stale terminal signal left over from a completed FIRST cycle.
+    writeFileSync(join(workerDir, "phase-resolve-conflict.json"), JSON.stringify({ status: "done", generation: 1 }));
+    writeFileSync(join(workerDir, "resolve-conflict-brief.json"), JSON.stringify({ stalledPhase: "implement", attempt: 1 }));
+    writeFileSync(join(workerDir, "resolve-conflict.claim.1"), "{}");
+    // A genuinely NEW stall on the same original phase.
+    writeFileSync(join(workerDir, "phase-implement.json"), JSON.stringify({ status: "stalled", failureReason: RESOLVE_CONFLICT_STALL_REASON }));
+
+    // fakeDispatchLikeRealPhaseAgentDispatch mirrors phase-agent-dispatch's own
+    // idempotency guard exactly (see the cycle-reset integration describe block
+    // above) — reused here unmodified against a REAL fs via readFileSync/writeFileSync.
+    let calls = 0;
+    const dispatch = (_orchDir, _tk, phase) => {
+      calls++;
+      const sigPath = join(workerDir, `phase-${phase}.json`);
+      let existingStatus = null;
+      try { existingStatus = JSON.parse(readFileSync(sigPath, "utf8")).status; } catch { existingStatus = null; }
+      if (["dispatched", "running", "done"].includes(existingStatus)) {
+        return { code: 0, signal: { idempotent: true } };
+      }
+      writeFileSync(sigPath, JSON.stringify({ status: "dispatched", generation: calls + 1 }));
+      return { code: 0, signal: { bg_job_id: `job-${calls}` } };
+    };
+
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      collectCandidates: () => defaultCollectResolveConflictCandidates({ orchDir }),
+      collectCompletions: () => [],
+      collectFailures: () => [],
+      cycleCountOf: () => 1,
+      classifyLive: async () => ({ resolvable: true, conflictFiles: ["a.ts"], conflictTypes: ["content"] }),
+      markAndDispatch: (c) => defaultMarkAndDispatch({ ...c, orchDir }, { isThenable: () => false, dispatch }),
+      emit: async () => true,
+    });
+
+    expect(report.marked).toEqual([{ ticket, phase: "implement" }]);
+    expect(calls).toBe(1);
+    // The dispatch genuinely fired (not idempotent) — proven by the REAL
+    // phase-resolve-conflict.json now reading "dispatched", not the stale "done".
+    const finalSignal = JSON.parse(readFileSync(join(workerDir, "phase-resolve-conflict.json"), "utf8"));
+    expect(finalSignal.status).toBe("dispatched");
+    expect(existsSync(join(workerDir, "resolve-conflict.claim.1"))).toBe(false);
+  });
+});
+
 describe("runResolveConflictSweepPass", () => {
   test("mode 'off' skips everything, no census called", () => {
     const collectCandidates = () => { throw new Error("must not be called"); };
@@ -1244,6 +1387,46 @@ describe("runResolveConflictSweepPass", () => {
     });
     expect(report.marked).toEqual([]);
     expect(report.failed).toEqual([]);
+  });
+
+  test("a per-candidate throw (one ticket's cycleCountOf explodes) does not abort a sibling candidate in the same batch", async () => {
+    const marked = [];
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [
+        { ticket: "CTL-BAD", phase: "implement", workerDir: "/w1", raw: { failureReason: "source_conflict_ctl708_unavailable" }, worktreePath: "/wt1", base: "main" },
+        { ticket: "CTL-GOOD", phase: "implement", workerDir: "/w2", raw: { failureReason: "source_conflict_ctl708_unavailable" }, worktreePath: "/wt2", base: "main" },
+      ],
+      collectCompletions: () => [],
+      cycleCountOf: (ticket) => { if (ticket === "CTL-BAD") throw new Error("boom"); return 0; },
+      classifyLive: async () => ({ resolvable: true, conflictFiles: [], conflictTypes: [] }),
+      markAndDispatch: (c) => { marked.push(c.ticket); return { success: true, dispatched: true }; },
+      emit: async () => true,
+    });
+    expect(report.failed).toEqual([{ ticket: "CTL-BAD", phase: "implement", reason: "boom" }]);
+    expect(report.marked).toEqual([{ ticket: "CTL-GOOD", phase: "implement" }]);
+    expect(marked).toEqual(["CTL-GOOD"]);
+  });
+
+  test("a per-completion throw (one ticket's clearStall explodes) does not abort a sibling completion in the same batch", async () => {
+    const cleared = [];
+    const report = await runResolveConflictSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [],
+      collectCompletions: () => [
+        { ticket: "CTL-BAD", stalledPhase: "implement" },
+        { ticket: "CTL-GOOD", stalledPhase: "verify" },
+      ],
+      clearStall: (c) => {
+        if (c.ticket === "CTL-BAD") throw new Error("clear boom");
+        cleared.push(c.ticket);
+        return true;
+      },
+      emit: async () => true,
+    });
+    expect(report.failed).toEqual([{ ticket: "CTL-BAD", phase: "implement", reason: "clear boom" }]);
+    expect(report.cleared).toEqual([{ ticket: "CTL-GOOD", phase: "verify" }]);
+    expect(cleared).toEqual(["CTL-GOOD"]);
   });
 
   // #1461 escalation-gap fix: the failures sub-pass. A status:"failed"
