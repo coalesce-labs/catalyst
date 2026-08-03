@@ -40,6 +40,11 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+// CTL-1616 PR3: fold this file's inline LINEAR_API_TOKEN/LINEAR_API_KEY ladder
+// onto the shared secret-contract engine (design §8 PR3 table). Direct .mjs
+// import (typed via the co-located secret-contract.d.mts) — same pattern
+// orch-monitor/server.ts already uses for lib/deployment-mode.mjs.
+import { resolveSecret } from "../../../dev/scripts/lib/secret-contract.mjs";
 
 // -- Types -------------------------------------------------------------------
 
@@ -880,8 +885,7 @@ async function main(): Promise<void> {
 
   let skipSet = new Set<string>();
   if (opts.checkLabels) {
-    const token =
-      process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+    const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
     if (!token) {
       console.warn(
         "[score] --check-labels: LINEAR_API_TOKEN not set; skipping label filter",
