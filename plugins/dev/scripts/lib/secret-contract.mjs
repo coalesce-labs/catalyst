@@ -852,8 +852,20 @@ function resolveLocalOnlyPresence(row, env) {
 // } for a known row, or { value: null, source: null, provider: null, rotation: null } for an
 // unknown id.
 //
-// CLOUD GUARD (design §4): the cloud branch activates ONLY when
-// deploymentMode.mode === "cloud" AND deploymentMode.inferred === false — never on a guess.
+// CLOUD GUARD (design §4, belt-and-suspenders extension per design §12 Q3's operator-
+// recommended answer): the cloud branch activates ONLY when deploymentMode.mode === "cloud"
+// AND deploymentMode.inferred === false AND deploymentMode.recognized !== false — never on a
+// guess. CTL-1617 §8 literally mandates only the `inferred === false` half; §12 Q3 asked
+// whether to also refuse on `recognized === false` (an unrecognized EXPLICIT value) and
+// recommended blocking on both, since "an unrecognized explicit value degrades to
+// single-host anyway per the resolver" makes this a defense-in-depth belt-and-suspenders
+// check, not a behavior change for any deploymentMode object produced by the real
+// resolveDeploymentMode (which can never return mode:"cloud" with recognized:false — see
+// classifyCandidate in lib/deployment-mode.mjs). It DOES matter for a hand-constructed or
+// future-degraded deploymentMode object, which is exactly the scenario worth guarding.
+// `!== false` (not `=== true`) is deliberate: every pre-existing caller/test that omits
+// `recognized` entirely (undefined) must keep activating cloud exactly as before — this is
+// an ADDITIVE guard against the one explicit negative signal, not a new required field.
 // Because the guard lives HERE in the shared engine, every row gets it for free; no
 // per-secret guard to forget (mirrors the CTL-1617 §8 mandate this registry consumes). When
 // genuinely cloud, resolution short-circuits to a pure env-alias read of envNames — NO FILE
@@ -873,7 +885,8 @@ export function resolveSecret(id, { env = process.env, deploymentMode, cwd = pro
   const row = getSecretRow(id);
   if (!row) return { value: null, source: null, provider: null, rotation: null };
 
-  const useCloud = deploymentMode?.mode === "cloud" && deploymentMode?.inferred === false;
+  const useCloud =
+    deploymentMode?.mode === "cloud" && deploymentMode?.inferred === false && deploymentMode?.recognized !== false;
 
   if (useCloud) {
     if (row.bootstrapFor !== "cloud") {

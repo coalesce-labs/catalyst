@@ -863,18 +863,23 @@ _csc_cloud_bootstrap_id() {
   return 1
 }
 
-# catalyst_resolve_secret ID [DEPLOYMENT_MODE] [INFERRED(true|false)] — mirrors
-# resolveSecret(id, {env, deploymentMode}). Echoes "value|source|provider" and sets
+# catalyst_resolve_secret ID [DEPLOYMENT_MODE] [INFERRED(true|false)] [RECOGNIZED(true|false)]
+# — mirrors resolveSecret(id, {env, deploymentMode}). Echoes "value|source|provider" and sets
 # CATALYST_SECRET_LAST_VALUE/_SOURCE/_PROVIDER. Never fails the caller (always echoes a
 # 3-field pipe-joined string, empty fields on miss/unresolved).
 #
-# CLOUD GUARD: activates ONLY when DEPLOYMENT_MODE == "cloud" AND INFERRED == "false" —
-# mirrors the JS engine's `deploymentMode.mode === "cloud" && deploymentMode.inferred ===
-# false` guard exactly. Any other combination (including DEPLOYMENT_MODE unset, "single-host",
-# "cluster", or "cloud" with INFERRED != "false") runs the normal per-delivery-type file/config
-# chain — the "never skips the file chain for single-host/cluster" invariant.
+# CLOUD GUARD: activates ONLY when DEPLOYMENT_MODE == "cloud" AND INFERRED == "false" AND
+# RECOGNIZED != "false" — mirrors the JS engine's `deploymentMode.mode === "cloud" &&
+# deploymentMode.inferred === false && deploymentMode.recognized !== false` guard exactly
+# (design §12 Q3 belt-and-suspenders extension — see lib/secret-contract.mjs's resolveSecret
+# docstring for the full rationale). RECOGNIZED defaults to "true" so every existing 2/3-arg
+# call site keeps today's behavior unchanged — this is an ADDITIVE 4th positional arg, never a
+# breaking one. Any other combination (including DEPLOYMENT_MODE unset, "single-host",
+# "cluster", "cloud" with INFERRED != "false", or "cloud"/inferred=false with RECOGNIZED ==
+# "false") runs the normal per-delivery-type file/config chain — the "never skips the file
+# chain for single-host/cluster" invariant.
 catalyst_resolve_secret() {
-  local _id="$1" _dep_mode="${2:-}" _dep_inferred="${3:-true}"
+  local _id="$1" _dep_mode="${2:-}" _dep_inferred="${3:-true}" _dep_recognized="${4:-true}"
   local _idx _delivery
   if ! _idx="$(_csc_index_of "$_id")"; then
     _csc_set_result "" "" ""
@@ -882,7 +887,7 @@ catalyst_resolve_secret() {
   fi
   _delivery="${_CSC_DELIVERY[$_idx]}"
 
-  if [[ "$_dep_mode" == "cloud" && "$_dep_inferred" == "false" ]]; then
+  if [[ "$_dep_mode" == "cloud" && "$_dep_inferred" == "false" && "$_dep_recognized" != "false" ]]; then
     local _bootstrap_for="${_CSC_BOOTSTRAP_FOR[$_idx]}"
     if [[ "$_bootstrap_for" != "cloud" ]]; then
       local _bid
@@ -986,13 +991,14 @@ catalyst_secret_reset_arm_state() {
   fi
 }
 
-# catalyst_arm_secret ID [DEPLOYMENT_MODE] [INFERRED(true|false)] — echoes
-# "armed|rotated|restartRequired" (each true|false) AND exports the same three fields as
-# CATALYST_SECRET_ARM_ARMED / _ROTATED / _RESTART_REQUIRED, mirroring armSecret's { armed,
-# rotated, restartRequired } shape. DEPLOYMENT_MODE/INFERRED are the SAME optional
+# catalyst_arm_secret ID [DEPLOYMENT_MODE] [INFERRED(true|false)] [RECOGNIZED(true|false)] —
+# echoes "armed|rotated|restartRequired" (each true|false) AND exports the same three fields
+# as CATALYST_SECRET_ARM_ARMED / _ROTATED / _RESTART_REQUIRED, mirroring armSecret's { armed,
+# rotated, restartRequired } shape. DEPLOYMENT_MODE/INFERRED/RECOGNIZED are the SAME optional
 # positional args catalyst_resolve_secret takes, threaded straight through (Codex finding
-# fix, design §8) — see the DEPLOYMENT-MODE THREADING FIX comment below for the concrete
-# bug this closes; a caller that never passes them gets EXACTLY today's non-cloud behavior.
+# fix, design §8; RECOGNIZED added in CTL-1616 PR6 alongside the cloud-guard extension) — see
+# the DEPLOYMENT-MODE THREADING FIX comment below for the concrete bug this closes; a caller
+# that never passes them gets EXACTLY today's non-cloud behavior.
 #
 # MUST BE CALLED DIRECTLY, NEVER WRAPPED IN $(...), by any caller that needs the persistent
 # baseline to survive across repeated calls in the same shell — this is the SAME
@@ -1005,7 +1011,7 @@ catalyst_secret_reset_arm_state() {
 # read the exported vars, or capture stdout via `out="$(catalyst_arm_secret id)"` ONLY when
 # the caller genuinely wants a one-shot, state-discarding check.
 catalyst_arm_secret() {
-  local _id="$1" _dep_mode="${2:-}" _dep_inferred="${3:-true}" _rotation_class=""
+  local _id="$1" _dep_mode="${2:-}" _dep_inferred="${3:-true}" _dep_recognized="${4:-true}" _rotation_class=""
   # B4 FIX (errexit safety): the assignment runs in an `if` condition — mirrors the
   # ERREXIT SAFETY pattern on _csc_read_json_string above. catalyst_secret_rotation_class
   # returns rc=1 (printing nothing) for an unknown id; a bare
@@ -1039,7 +1045,7 @@ catalyst_arm_secret() {
   # file, that mismatch made a stale-file edit falsely report restartRequired while a REAL
   # token rotation went unnoticed — mirrors lib/secret-contract.mjs's armSecret fix exactly.
   local _current _idx
-  catalyst_resolve_secret "$_id" "$_dep_mode" "$_dep_inferred" >/dev/null
+  catalyst_resolve_secret "$_id" "$_dep_mode" "$_dep_inferred" "$_dep_recognized" >/dev/null
   _current="${CATALYST_SECRET_LAST_VALUE-}"
   if _idx="$(_csc_arm_index_of "$_id")"; then
     local _previous="${_CSC_ARM_VALUES[$_idx]}"

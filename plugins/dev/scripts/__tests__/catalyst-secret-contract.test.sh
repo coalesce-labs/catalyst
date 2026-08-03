@@ -479,6 +479,16 @@ expect_eq "bootstrap short-circuit: cloud-token absent ⇒ every other row's clo
 OUT="$(_run 'catalyst_resolve_secret cloud-token cloud false')"
 expect_eq "bootstrap short-circuit does not apply to cloud-token itself (resolves normally, absent here)" "|none|platform-env" "$OUT"
 
+# --- cloud guard RECOGNIZED extension (CTL-1616 PR6, design §12 Q3 belt-and-suspenders) -----
+# Mirrors lib/secret-contract.mjs's `deploymentMode.recognized !== false` addition: a 4th
+# positional RECOGNIZED arg, defaulting to "true" so every 2/3-arg call above is unaffected.
+OUT="$(_run "CATALYST_CONFIG_DIR=${TMP_DIR}/cloudguard-cfg" "GH_TOKEN=env-value-should-not-win" 'catalyst_resolve_secret github-token cloud false false')"
+expect_eq "cloud guard: recognized=false does NOT activate cloud even with mode=cloud inferred=false — file chain still runs" \
+  "file-value|shared-file|bare-file" "$OUT"
+OUT="$(_run "GH_TOKEN=should-not-be-returned" 'catalyst_resolve_secret github-token cloud false true')"
+expect_eq "cloud guard: recognized=true (explicit) activates cloud exactly like recognized omitted" \
+  "||bare-file" "$OUT"
+
 # --- CLOUD-TOKEN NAME OVERRIDE (Codex finding fix): genuine cloud mode must honor
 # CATALYST_CLOUD_TOKEN_ENV / the Layer-2 override, not only the hardcoded default name ------
 OUT="$(_run "CATALYST_CLOUD_TOKEN_ENV=MY_PLATFORM_TOKEN" "MY_PLATFORM_TOKEN=the-real-token" 'catalyst_resolve_secret cloud-token cloud false')"

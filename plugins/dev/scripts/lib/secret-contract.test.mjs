@@ -926,6 +926,38 @@ describe("resolveSecret — cloud guard (design §4)", () => {
     });
     expect(r).toMatchObject({ value: null, source: "none", envVar: "MY_PLATFORM_TOKEN" });
   });
+
+  // CTL-1616 PR6 (design §12 Q3 belt-and-suspenders extension): mode==="cloud" &&
+  // inferred===false && recognized===false cannot actually be produced by the real
+  // resolveDeploymentMode (classifyCandidate degrades an unrecognized explicit value's
+  // MODE to single-host before this ever sees "cloud") — so this exercises a
+  // hand-constructed deploymentMode object, proving the engine's OWN defense-in-depth
+  // guard, independent of whether any real caller can currently reach it.
+  test("recognized:false does NOT activate the cloud branch even with mode:cloud and inferred:false — the file chain still runs", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "github-token", "file-value");
+    const r = resolveSecret("github-token", {
+      env: { CATALYST_CONFIG_DIR: dir, GH_TOKEN: "env-value-should-not-win" },
+      deploymentMode: { mode: "cloud", inferred: false, recognized: false },
+    });
+    expect(r).toMatchObject({ value: "file-value", source: "shared-file" });
+  });
+  test("recognized:undefined (omitted) still activates cloud — the guard is ADDITIVE, not a new required field (backward compat with every pre-existing caller)", () => {
+    const r = resolveSecret("github-token", {
+      env: { GH_TOKEN: "should-not-be-returned" },
+      deploymentMode: { mode: "cloud", inferred: false },
+    });
+    // Same bootstrap short-circuit result as the "recognized omitted" tests above —
+    // proves cloud activated (no cloud-token bootstrap ⇒ short-circuit to null/null).
+    expect(r).toEqual({ value: null, source: null, provider: "bare-file", rotation: expect.any(Object) });
+  });
+  test("recognized:true (explicit) activates cloud exactly like recognized omitted", () => {
+    const r = resolveSecret("github-token", {
+      env: { GH_TOKEN: "cloud-injected", CATALYST_CLOUD_TOKEN: "boot" },
+      deploymentMode: { mode: "cloud", inferred: false, recognized: true },
+    });
+    expect(r).toMatchObject({ value: "cloud-injected", provider: "bare-file" });
+  });
 });
 
 // ─── Registry validation (design §6) ─────────────────────────────────────────────────────
