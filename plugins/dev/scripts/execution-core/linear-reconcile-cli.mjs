@@ -167,7 +167,7 @@ Options:
                     while a PR is still open.
   --branch <name>   no-op (retained for back-compat): the open-PR ENUMERATOR derives
                     the branchName from the local replica/cache itself.
-  --graphql         read current state via Linear GraphQL ($LINEAR_API_TOKEN)
+  --graphql         read current state via Linear GraphQL ($LINEAR_API_TOKEN / $LINEAR_API_KEY)
                     for tickets absent from the local cache (unenrolled repos)
   --json            machine-readable output
   -h, --help        show this help`;
@@ -185,7 +185,7 @@ function loadConfig(configPath) {
 async function graphqlReadState(ticket, token) {
   const m = /^([A-Za-z][A-Za-z0-9_]*)-(\d+)$/.exec(ticket);
   if (!m) return null;
-  if (!token) throw new Error("LINEAR_API_TOKEN not set (required for --graphql)");
+  if (!token) throw new Error("LINEAR_API_TOKEN / LINEAR_API_KEY not set (required for --graphql)");
   const [, key, number] = m;
   const query = `query($n: Float!){ issues(filter:{ team:{ key:{ eq:"${key}" } }, number:{ eq:$n } }){ nodes{ state{ name } } } }`;
   const r = await fetch("https://api.linear.app/graphql", {
@@ -200,13 +200,13 @@ async function graphqlReadState(ticket, token) {
   return j?.data?.issues?.nodes?.[0]?.state?.name ?? null;
 }
 
-async function buildReadState(args) {
+export async function buildReadState(args) {
   if (args.statesFile) {
     const map = JSON.parse(readFileSync(args.statesFile, "utf8"));
     return async (t) => map[t] ?? null;
   }
   if (args.graphql) {
-    const token = process.env.LINEAR_API_TOKEN;
+    const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
     return async (t) => graphqlReadState(t, token);
   }
   // cache (filter-state.db). broker-state.mjs imports bun:sqlite → under plain

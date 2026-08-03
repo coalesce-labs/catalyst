@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs, main, defaultCheckOpenPrs } from "./linear-reconcile-cli.mjs";
+import { parseArgs, main, defaultCheckOpenPrs, buildReadState } from "./linear-reconcile-cli.mjs";
 import { defaultDeriveAttachmentPrs } from "./open-pr-gate.mjs";
 import { readDeclaration, listDeclarations } from "./linear-reconcile-store.mjs";
 
@@ -796,4 +796,49 @@ test("ENUMERATOR (CTL-1157): an UNDERIVABLE repo is UNVERIFIABLE (never runs gh 
   expect(r.ok).toBe(false);
   expect(r.unverifiable).toBe(true);
   expect(r.reason).toBe("repo-underivable");
+});
+
+// CTL-1619: --graphql token fallback
+test("--graphql: buildReadState uses LINEAR_API_KEY when LINEAR_API_TOKEN is absent", async () => {
+  const savedToken = process.env.LINEAR_API_TOKEN;
+  const savedKey = process.env.LINEAR_API_KEY;
+  const savedFetch = globalThis.fetch;
+  let seenAuth = null;
+  try {
+    delete process.env.LINEAR_API_TOKEN;
+    process.env.LINEAR_API_KEY = "lin_api_fromkey";
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return {
+        ok: true,
+        json: async () => ({ data: { issues: { nodes: [{ state: { name: "Done" } }] } } }),
+      };
+    };
+    const readState = await buildReadState({ graphql: true });
+    const state = await readState("CTL-1");
+    expect(state).toBe("Done");
+    expect(seenAuth).toBe("lin_api_fromkey");
+  } finally {
+    if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+    else process.env.LINEAR_API_TOKEN = savedToken;
+    if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedKey;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test("--graphql: buildReadState with neither var set throws naming both variables", async () => {
+  const savedToken = process.env.LINEAR_API_TOKEN;
+  const savedKey = process.env.LINEAR_API_KEY;
+  try {
+    delete process.env.LINEAR_API_TOKEN;
+    delete process.env.LINEAR_API_KEY;
+    const readState = await buildReadState({ graphql: true });
+    await expect(readState("CTL-1")).rejects.toThrow(/LINEAR_API_TOKEN \/ LINEAR_API_KEY not set/);
+  } finally {
+    if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+    else process.env.LINEAR_API_TOKEN = savedToken;
+    if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedKey;
+  }
 });
