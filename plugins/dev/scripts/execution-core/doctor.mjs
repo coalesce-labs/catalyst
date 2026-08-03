@@ -922,12 +922,47 @@ function defaultSecretFileNonEmpty(dir, name) {
   }
 }
 
+// Reads the configurable GitHub webhook-secret env-var NAME from Layer-1
+// (.catalyst/config.json → catalyst.monitor.github.webhookSecretEnv), matching
+// webhook-config.ts:412. Defaults to CATALYST_WEBHOOK_SECRET. CTL-1618.
+// Resolve the Layer-1 path via resolveDoctorLayer1Path() (not layer1Path()) so
+// this reader honors the CATALYST_CONFIG_FILE / CATALYST_CONFIG_PATH pointers the
+// daemon/deploy sets and falls back to ${cwd}/.catalyst/config.json — the SAME
+// Layer-1 the running monitor resolves, so the env name matches at runtime
+// (Codex P1: a plugin-repo read diverges from the active project config).
+function defaultGithubSecretEnvName() {
+  try {
+    const obj = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const name = obj?.catalyst?.monitor?.github?.webhookSecretEnv;
+    return typeof name === "string" && name.length > 0 ? name : "CATALYST_WEBHOOK_SECRET";
+  } catch {
+    return "CATALYST_WEBHOOK_SECRET";
+  }
+}
+
+// Reads the configurable Linear webhook-secret env-var NAME from Layer-1
+// (.catalyst/config.json → catalyst.monitor.linear.webhookSecretEnv), matching
+// webhook-config.ts:264-269. Null when unset (no per-key env override). CTL-1618.
+// Uses resolveDoctorLayer1Path() (not layer1Path()) for the same monitor-parity
+// reason as defaultGithubSecretEnvName above (Codex P1).
+function defaultLinearSecretEnvName() {
+  try {
+    const obj = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const name = obj?.catalyst?.monitor?.linear?.webhookSecretEnv;
+    return typeof name === "string" && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 export function checkWebhookIngestion(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
     monitor = defaultReadMonitor(),
     configDir = defaultWebhookConfigDir(),
     secretFileNonEmpty = defaultSecretFileNonEmpty,
+    githubSecretEnvName = defaultGithubSecretEnvName(), // CTL-1618
+    linearSecretEnvName = defaultLinearSecretEnvName(), // CTL-1618
   } = deps;
 
   const roster = resolveRoster();
@@ -943,11 +978,25 @@ export function checkWebhookIngestion(deps = {}) {
 
   const m = monitor ?? {};
 
-  // GitHub route: smee channel + a github HMAC secret (file or env).
+  // GitHub route: smee channel + a github HMAC secret resolved the way the
+  // running monitor reads it (webhook-config.ts:412,429). The env-var NAME is
+  // configurable (Layer-1 webhookSecretEnv, default CATALYST_WEBHOOK_SECRET);
+  // the CTL-1612 projection lifts the on-disk `webhook-secret` file into the
+  // DEFAULT name only, so the file is a valid proxy solely for the default. CTL-1618.
   const ghSmee = typeof m.github?.smeeChannel === "string" ? m.github.smeeChannel : "";
-  const ghSecret =
-    secretFileNonEmpty(configDir, "webhook-secret") ||
-    (process.env.CATALYST_WEBHOOK_SECRET ?? "").length > 0;
+  // Resolve the env secret with the SAME `??` chain as the runtime
+  // (webhook-config.ts:429): `process.env[name] ?? CATALYST_SMEE_SECRET ?? ""`.
+  // `??` (not `||`) matters — an env var explicitly set to "" is NOT nullish, so
+  // it short-circuits and the legacy CATALYST_SMEE_SECRET fallback is NOT reached,
+  // exactly as the monitor computes it. A prior `||`-of-length chain would let an
+  // empty primary fall through to a set SMEE secret and falsely report the route
+  // wired when the runtime disables it (secret.length === 0). CTL-1618.
+  const ghEnvSecret =
+    (process.env[githubSecretEnvName] ?? process.env.CATALYST_SMEE_SECRET ?? "").length > 0;
+  const ghFileSecret =
+    githubSecretEnvName === "CATALYST_WEBHOOK_SECRET" &&
+    secretFileNonEmpty(configDir, "webhook-secret");
+  const ghSecret = ghEnvSecret || ghFileSecret;
   const githubWired = ghSmee.length > 0 && ghSecret;
 
   // Linear route: smee channel + ≥1 keyed webhookId whose HMAC secret resolves.
@@ -961,11 +1010,21 @@ export function checkWebhookIngestion(deps = {}) {
       typeof e.webhookId === "string" && e.webhookId.length > 0
     );
   });
+  // Linear per-key secret resolved as webhook-config.ts:157-171 does: file →
+  // per-key env (linearWebhookSecretEnv) → global CATALYST_LINEAR_WEBHOOK_SECRET.
+  // The env leg uses the runtime's exact `??` chain, so an empty-string per-key
+  // env var short-circuits (does NOT fall through to the global) — matching
+  // resolveSecret, which returns "" and drops the key. CTL-1618.
   const keySecretWired = (k) =>
     secretFileNonEmpty(
       configDir,
       k === "workspace" ? "linear-webhook-secret" : `linear-webhook-secret-${k}`,
-    ) || (process.env.CATALYST_LINEAR_WEBHOOK_SECRET ?? "").length > 0;
+    ) ||
+    (
+      (linearSecretEnvName !== null ? process.env[linearSecretEnvName] : undefined) ??
+      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
+      ""
+    ).length > 0;
   const wiredKeys = webhookKeys.filter(keySecretWired);
   const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
   const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
