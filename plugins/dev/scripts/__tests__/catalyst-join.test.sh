@@ -117,6 +117,7 @@ run_join() {
     HOME="$scratch_home" \
     CATALYST_DIR="${SCRATCH}/catalyst_$$" \
     PATH="${stub_dir}:${PATH}" \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT="${stub_dir}/stub-setup-catalyst.sh" \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT="${stub_dir}/stub-install-cli.sh" \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT="${stub_dir}/stub-setup-plugin-source.sh" \
@@ -234,6 +235,7 @@ BEOF
 run "T1.7 well-formed token passes format validation" bash -c "
   env -i HOME='${SCRATCH}/h17' CATALYST_DIR='${SCRATCH}/c17' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
@@ -248,6 +250,7 @@ run "T1.7 well-formed token passes format validation" bash -c "
 run "T1.8 --bundle mode does not require CATALYST_SEED" bash -c "
   env -i HOME='${SCRATCH}/h18' CATALYST_DIR='${SCRATCH}/c18' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
@@ -269,6 +272,7 @@ chmod +x "$STUBS_NOREACH/stub-reach-probe.sh"
 run "T1.9 reachability failure exits non-zero" bash -c "
   env -i HOME='${SCRATCH}/h19' CATALYST_DIR='${SCRATCH}/c19' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_SEED='mini:7400' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS_NOREACH}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS_NOREACH}/stub-install-cli.sh' \
@@ -283,6 +287,7 @@ run "T1.9 reachability failure exits non-zero" bash -c "
 run "T1.10 --bundle skips reachability probe" bash -c "
   env -i HOME='${SCRATCH}/h110' CATALYST_DIR='${SCRATCH}/c110' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS_NOREACH}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS_NOREACH}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS_NOREACH}/stub-setup-plugin-source.sh' \
@@ -297,6 +302,7 @@ run "T1.11 progress marker created after successful run" bash -c "
   catdir='${SCRATCH}/c111'
   env -i HOME='${SCRATCH}/h111' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
@@ -340,6 +346,7 @@ if command -v nc >/dev/null 2>&1; then
     out=\$(env -i HOME='${SCRATCH}/h112' CATALYST_DIR='${SCRATCH}/c112' \
       PATH='$T112_PATH' \
       CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+      CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
       CATALYST_SEED='127.0.0.1:$T112_PORT' \
       CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
       CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
@@ -364,6 +371,7 @@ if command -v nc >/dev/null 2>&1; then
     out=\$(env -i HOME='${SCRATCH}/h112b' CATALYST_DIR='${SCRATCH}/c112b' \
       PATH='$T112_PATH' \
       CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+      CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
       CATALYST_SEED='127.0.0.1:$T112_CLOSED_PORT' \
       CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
       CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
@@ -391,6 +399,7 @@ run "T2.1 --bundle valid fixture succeeds" bash -c "
   catdir='${SCRATCH}/c21'
   env -i HOME='${SCRATCH}/h21' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -408,6 +417,7 @@ echo '{"layer1Identity": {"projectKey": "CTL"}}' > "$MALFORMED_BUNDLE"
 run "T2.2 --bundle malformed bundle rejected" bash -c "
   env -i HOME='${SCRATCH}/h22' CATALYST_DIR='${SCRATCH}/c22' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -429,6 +439,7 @@ run "T2.3 seed fetch via mock succeeds" bash -c "
   catdir='${SCRATCH}/c23'
   env -i HOME='${SCRATCH}/h23' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_SEED='mini:7400' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
@@ -452,6 +463,7 @@ chmod +x "$CONSUMED_STUB"
 run "T2.4 consumed token prints re-mint command" bash -c "
   env -i HOME='${SCRATCH}/h24' CATALYST_DIR='${SCRATCH}/c24' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_SEED='mini:7400' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
@@ -477,6 +489,7 @@ run "T2.5 --bundle mode does not call fetch stub" bash -c "
   rm -f '$FETCH_TRACK_LOG'
   env -i HOME='${SCRATCH}/h25' CATALYST_DIR='${SCRATCH}/c25' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -506,6 +519,7 @@ run "T2.6 seed-fetch bundle_url ends in /join-bundle and matches JOIN_ROUTE" bas
   rm -f '$URL_CAPTURE'
   env -i HOME='${SCRATCH}/h26' CATALYST_DIR='${SCRATCH}/c26' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_SEED='mini:7400' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
@@ -541,6 +555,7 @@ BEOF
 run "T2.7 null-valued required key (livenessAnchorIssue=null) is accepted" bash -c "
   env -i HOME='${SCRATCH}/h27' CATALYST_DIR='${SCRATCH}/c27' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -566,6 +581,7 @@ BEOF
 run "T2.7b structurally-missing required key still rejected" bash -c "
   env -i HOME='${SCRATCH}/h27b' CATALYST_DIR='${SCRATCH}/c27b' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -594,6 +610,7 @@ BEOF
 run "T2.7c null IDENTITY keys (projectKey/teamKey/stateMap=null) rejected (no fail-open)" bash -c "
   env -i HOME='${SCRATCH}/h27c' CATALYST_DIR='${SCRATCH}/c27c' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -639,10 +656,21 @@ cat > "$SINGLEHOST_WH_BUNDLE" <<'BEOF'
 }
 BEOF
 
-run "T2.8 multiHost roster provisions catalyst.monitor webhook block (CTL-1284)" bash -c "
+# T2.8 (fixture updated for CTL-1617 PR5 — see below): the sandbox has no
+# plugin-source checkout, so catalyst_resolve_deployment_mode's Layer-1/
+# Layer-2 candidates are both @ABSENT and it settles on the constant
+# default (single-host, inferred=true). Post-flip, an inferred mode means
+# the gate explicitly FALLS BACK to the roster_len heuristic (design's
+# mandatory fallback — a join predating this migration must never silently
+# lose webhook wiring) — this now exercises that fallback path, not the
+# unconditional roster_len check it used to be. MULTIHOST_WH_BUNDLE's
+# roster>1 + monitorWebhooks present makes the heuristic (and hence the
+# decision) "wire".
+run "T2.8 multiHost roster + inferred mode FALLS BACK to heuristic and wires (CTL-1284 / CTL-1617 PR5)" bash -c "
   h='${SCRATCH}/h28'
-  env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28' \
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -650,15 +678,24 @@ run "T2.8 multiHost roster provisions catalyst.monitor webhook block (CTL-1284)"
     CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
-    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' >/dev/null 2>&1
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
   cfg=\"\$h/.config/catalyst/config.json\"
+  echo \"\$out\" | grep -qF 'decision=wire' && \
+  echo \"\$out\" | grep -qF 'rule=heuristic-fallback' && \
+  echo \"\$out\" | grep -qF 'inferred=true' && \
+  echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
   jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$cfg\" >/dev/null &&
   jq -e '.catalyst.monitor.linear.ctl.webhookId == \"wh-ctl\"' \"\$cfg\" >/dev/null"
 
-run "T2.9 single-host roster OMITS webhook block — double-dispatch guard (CTL-1284)" bash -c "
+# T2.9 (fixture updated for CTL-1617 PR5 — see T2.8's note): same inferred-mode
+# fallback, but SINGLEHOST_WH_BUNDLE's roster=1 makes the heuristic (and hence
+# the decision) "skip" — the double-dispatch guard, now reached via the
+# fallback rule instead of unconditionally.
+run "T2.9 single-host roster + inferred mode FALLS BACK to heuristic and skips — double-dispatch guard (CTL-1284 / CTL-1617 PR5)" bash -c "
   h='${SCRATCH}/h29'
-  env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c29' \
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c29' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -666,10 +703,138 @@ run "T2.9 single-host roster OMITS webhook block — double-dispatch guard (CTL-
     CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
-    bash '$JOIN' --bundle '$SINGLEHOST_WH_BUNDLE' >/dev/null 2>&1
+    bash '$JOIN' --bundle '$SINGLEHOST_WH_BUNDLE' 2>&1)
   cfg=\"\$h/.config/catalyst/config.json\"
+  echo \"\$out\" | grep -qF 'decision=skip' && \
+  echo \"\$out\" | grep -qF 'rule=heuristic-fallback' && \
+  echo \"\$out\" | grep -qF 'inferred=true' && \
+  echo \"\$out\" | grep -qF 'heuristic_would=skip' && \
   # monitor block must be absent (or at least carry no smeeChannel)
   ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$cfg\" >/dev/null"
+
+# T2.8b / T2.9b / T2.9c: (CTL-1617 PR5 — FLIPPED) merge_shared_config's webhook-wiring
+# gate now decides on the declared deployment mode when one is present (recognized,
+# not inferred), falling back to the roster_len heuristic only when the mode key is
+# absent everywhere (covered by T2.8/T2.9 above). These three pin the flip's actual
+# behavior change: a declared mode overrides roster length in BOTH directions, and a
+# declared non-cluster mode other than single-host (cloud) skips too.
+
+# T2.8b: mode=cluster declared WIRES regardless of roster. SINGLEHOST_WH_BUNDLE
+# (roster=1 — the heuristic alone would SKIP here, per T2.9) paired with a
+# plugin-source checkout config declaring catalyst.deployment.mode=cluster (the
+# CTL-1617 PR4 declaration this repo's Layer-1 actually carries) → mode=cluster,
+# source=layer1, inferred=false → rule=mode-declared, decision=wire. Proves the
+# mode-declared rule overrides the heuristic, not just agrees with it.
+run "T2.8b mode=cluster declared WIRES despite roster=1 (CTL-1617 PR5 flip)" bash -c "
+  h='${SCRATCH}/h28b'
+  catdir='${SCRATCH}/c28b'
+  mkdir -p \"\$catdir/plugin-source/.catalyst\"
+  printf '{\"catalyst\":{\"deployment\":{\"mode\":\"cluster\"}}}' > \"\$catdir/plugin-source/.catalyst/config.json\"
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$SINGLEHOST_WH_BUNDLE' 2>&1)
+  echo \"\$out\" | grep -qF 'decision=wire' && \
+  echo \"\$out\" | grep -qF 'rule=mode-declared' && \
+  echo \"\$out\" | grep -qF 'mode=cluster' && \
+  echo \"\$out\" | grep -qF 'source=layer1' && \
+  echo \"\$out\" | grep -qF 'inferred=false' && \
+  echo \"\$out\" | grep -qF 'heuristic_would=skip' && \
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
+
+# T2.9b: mode=single-host declared SKIPS despite roster>1 — the new behavior the
+# flip introduces (previously roster>1 alone was sufficient to wire). MULTIHOST_WH_BUNDLE
+# (roster=2 — the heuristic alone would WIRE, per T2.8) paired with
+# CATALYST_DEPLOYMENT_MODE=single-host forced via env (highest precedence — beats even
+# a declared Layer-1 'cluster', not that one is seeded here) → rule=mode-declared,
+# decision=skip.
+run "T2.9b mode=single-host declared SKIPS despite roster>1 (CTL-1617 PR5 flip)" bash -c "
+  h='${SCRATCH}/h29b'
+  catdir='${SCRATCH}/c29b'
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_DEPLOYMENT_MODE='single-host' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
+  echo \"\$out\" | grep -qF 'decision=skip' && \
+  echo \"\$out\" | grep -qF 'rule=mode-declared' && \
+  echo \"\$out\" | grep -qF 'mode=single-host' && \
+  echo \"\$out\" | grep -qF 'source=env' && \
+  echo \"\$out\" | grep -qF 'inferred=false' && \
+  echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
+  ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$h/.config/catalyst/config.json\" >/dev/null"
+
+# T2.9c: mode=cloud declared SKIPS too — the mode-declared rule is "wire iff
+# cluster", not "skip iff single-host"; any other recognized, non-inferred value
+# (cloud here) skips exactly like single-host does in T2.9b. roster>1 again, so
+# the heuristic alone would still wire.
+run "T2.9c mode=cloud declared SKIPS despite roster>1 (CTL-1617 PR5 flip)" bash -c "
+  h='${SCRATCH}/h29c'
+  catdir='${SCRATCH}/c29c'
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_DEPLOYMENT_MODE='cloud' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
+  echo \"\$out\" | grep -qF 'decision=skip' && \
+  echo \"\$out\" | grep -qF 'rule=mode-declared' && \
+  echo \"\$out\" | grep -qF 'mode=cloud' && \
+  echo \"\$out\" | grep -qF 'source=env' && \
+  echo \"\$out\" | grep -qF 'inferred=false' && \
+  echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
+  ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$h/.config/catalyst/config.json\" >/dev/null"
+
+# T2.9d: a declared-but-UNRECOGNIZED mode (typo) also lands on the mode-declared
+# rule and SKIPS despite roster>1. The resolver degrades an unrecognized string
+# to single-host with recognized=false but inferred=false — it is still an
+# explicit answer, NOT the absent-key case, so the heuristic fallback must NOT
+# fire. A cluster fleet with a Layer-1 typo therefore loses webhook wiring at
+# join (safe-degradation direction, design §4) until doctor's recognized=false
+# FAIL flags the typo — this test pins that the degradation routes through
+# mode-declared/skip rather than silently falling back to the heuristic.
+run "T2.9d unrecognized mode (typo) degrades to mode-declared SKIP despite roster>1 (CTL-1617 PR5 flip)" bash -c "
+  h='${SCRATCH}/h29d'
+  catdir='${SCRATCH}/c29d'
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_DEPLOYMENT_MODE='clutser' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
+  echo \"\$out\" | grep -qF 'decision=skip' && \
+  echo \"\$out\" | grep -qF 'rule=mode-declared' && \
+  echo \"\$out\" | grep -qF 'mode=single-host' && \
+  echo \"\$out\" | grep -qF 'source=env' && \
+  echo \"\$out\" | grep -qF 'inferred=false' && \
+  echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
+  ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$h/.config/catalyst/config.json\" >/dev/null"
 
 # T2.10 / T2.11: (CTL-1293) provision-thoughts that CLONES OK but fails push-auth
 # is FATAL on a multiHost member (roster>1 owns work → must sync thoughts to
@@ -689,6 +854,7 @@ chmod +x "$PT_CLONE_PUSHFAIL_STUB"
 run "T2.10 multiHost member: clone-OK + push-fail is FATAL (CTL-1293)" bash -c "
   env -i HOME='${SCRATCH}/h210' CATALYST_DIR='${SCRATCH}/c210' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -701,6 +867,7 @@ run "T2.10 multiHost member: clone-OK + push-fail is FATAL (CTL-1293)" bash -c "
 run "T2.11 single-host node: clone-OK + push-fail warns and proceeds (CTL-1293)" bash -c "
   env -i HOME='${SCRATCH}/h211' CATALYST_DIR='${SCRATCH}/c211' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -731,6 +898,7 @@ run "T2.12 provisions settings.json w/ per-host OTEL attrs + daemon OTLP endpoin
   h='${SCRATCH}/h212'
   env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c212' CATALYST_HOST_NAME='test-node' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
@@ -763,6 +931,7 @@ run "T3.1 provisioners run in correct order" bash -c "
   rm -f '$INVLOG3'
   env -i HOME='${SCRATCH}/h31' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3}/stub-setup-plugin-source.sh' \
@@ -785,6 +954,7 @@ run "T3.2 setup-catalyst invoked with CATALYST_AUTONOMOUS=1" bash -c "
   rm -f '$INVLOG3'
   env -i HOME='${SCRATCH}/h32' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3}/stub-setup-plugin-source.sh' \
@@ -805,6 +975,7 @@ run "T3.3 resume skips already-completed stages" bash -c "
     > \"\$catdir/cluster/join-progress.json\"
   env -i HOME='${SCRATCH}/h33' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3}/stub-setup-plugin-source.sh' \
@@ -832,6 +1003,7 @@ run "T3.4 provisioner failure records failedStage and exits non-zero" bash -c "
   rm -f '$INVLOG3F'
   env -i HOME='${SCRATCH}/h34' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3F}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3F}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3F}/stub-setup-plugin-source.sh' \
@@ -858,6 +1030,7 @@ run "T3.5 re-run after failure resumes from failed stage" bash -c "
     > \"\$catdir/cluster/join-progress.json\"
   env -i HOME='${SCRATCH}/h35' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3R}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3R}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3R}/stub-setup-plugin-source.sh' \
@@ -882,6 +1055,7 @@ run "T3.6 provision-thoughts invoked and runs before setup-catalyst" bash -c "
   rm -f '$INVLOG36'
   env -i HOME='${SCRATCH}/h36' CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS36}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS36}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS36}/stub-setup-plugin-source.sh' \
@@ -915,6 +1089,7 @@ run "T4.1 merge-preserve: node-local keys survive" bash -c "
     > \"\$home41/.config/catalyst/config.json\"
   env -i HOME=\"\$home41\" CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4}/stub-setup-plugin-source.sh' \
@@ -935,6 +1110,7 @@ run "T4.2 host.name written to Layer-2 config" bash -c "
   printf '{}' > \"\$home42/.config/catalyst/config.json\"
   env -i HOME=\"\$home42\" CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_HOST_NAME='mynode' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4}/stub-install-cli.sh' \
@@ -958,6 +1134,7 @@ run "T4.3 local hosts.json written; committed roster untouched" bash -c "
   orig_sum=\$(md5 -q \"\$roster\" 2>/dev/null || md5sum \"\$roster\" | cut -d' ' -f1)
   env -i HOME=\"\$home43\" CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_HOST_NAME='newnode' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4}/stub-install-cli.sh' \
@@ -996,6 +1173,7 @@ run "T4.4 doctor gate failure exits non-zero before stack install" bash -c "
   rm -f '$INVLOG4D'
   env -i HOME=\"\$home44\" CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4D}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4D}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4D}/stub-setup-plugin-source.sh' \
@@ -1019,6 +1197,7 @@ run "T4.5 catalyst-stack install-services runs last" bash -c "
   rm -f '$INVLOG4O'
   env -i HOME=\"\$home45\" CATALYST_DIR=\"\$catdir\" \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4O}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4O}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4O}/stub-setup-plugin-source.sh' \
