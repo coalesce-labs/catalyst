@@ -122,8 +122,12 @@ export function localActiveTickets(hostName, { orchDir } = {}) {
 // ({ stop() }) so the daemon can tear it down symmetrically with _heartbeat.
 //
 // Single-host install (roster.length <= 1) → exact no-op: inert handle returned
-// immediately. Missing anchor → multi-host but no anchor configured: logs a
-// one-time warning and returns an inert handle.
+// immediately, regardless of anchor/read-source. Missing anchor → the anchor
+// is a "linear" read-source concept only (CTL-1628): multi-host + "linear" mode
+// + no anchor configured logs a one-time warning and returns an inert handle,
+// exactly as before. Multi-host + "loki" mode arms the publisher even with no
+// anchor configured — the Linear anchor publish is already retired in that mode
+// (see tick() below), but the Linear-free CTL-863 fence re-emit must still run.
 //
 // All collaborators are injectable for unit tests.
 export function startLivenessPublisher({
@@ -159,8 +163,18 @@ export function startLivenessPublisher({
     return { stop() {} };
   }
 
-  // Multi-host but no anchor configured: warn once, return inert handle.
-  if (!anchorIssue) {
+  // CTL-1628: resolve the active read source BEFORE gating on the anchor. The
+  // anchor is a "linear" read-source concept only — retiring the Linear anchor
+  // publish (readSource === "loki") must not also retire the Linear-free
+  // CTL-863 fence re-emit below, so an anchor-less "loki" host must still arm
+  // the publisher. Only "linear" mode needs the anchor to do anything.
+  const effectiveSource = readSource();
+
+  // Multi-host + "linear" mode + no anchor configured: warn once, return inert
+  // handle (unchanged from pre-CTL-1628 behavior). "loki" mode falls through
+  // even with no anchor — tick() below already skips the Linear publish itself
+  // once readSource() !== "linear".
+  if (effectiveSource === "linear" && !anchorIssue) {
     logger.warn(
       { roster },
       "cluster-heartbeat-publisher: CATALYST_LIVENESS_ANCHOR_ISSUE not configured — " +
