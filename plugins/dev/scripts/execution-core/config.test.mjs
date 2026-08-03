@@ -10,6 +10,16 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
+
+// Mirrors getHostName()'s fallback: strip everything after the FIRST dot, not
+// just a trailing ".local". A naive `.replace(/\.local$/, "")` only agrees with
+// this on a bare-label or *.local hostname — it diverges on any real multi-label
+// FQDN that isn't ".local" (e.g. this machine's "aldebaran.hagale.net"), which is
+// exactly the shape a live, non-mDNS Catalyst fleet host has.
+function firstDnsLabel(raw) {
+  const dot = raw.indexOf(".");
+  return dot === -1 ? raw : raw.slice(0, dot);
+}
 import {
   readWaitWatcherConfig,
   EVENT_DEBOUNCE_MS,
@@ -277,7 +287,7 @@ describe("getHostName (CTL-859)", () => {
   test("defaults to os.hostname() with trailing .local stripped", () => {
     // Point Layer-2 at a non-existent file so the hostname default is exercised.
     process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
-    const expected = hostname().replace(/\.local$/, "");
+    const expected = firstDnsLabel(hostname());
     expect(getHostName()).toBe(expected);
   });
 
@@ -300,7 +310,7 @@ describe("getHostName (CTL-859)", () => {
     const cfg = join(tmp, "config.json");
     writeFileSync(cfg, "{ this is not json");
     process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
-    const expected = hostname().replace(/\.local$/, "");
+    const expected = firstDnsLabel(hostname());
     expect(getHostName()).toBe(expected);
   });
 });
@@ -324,6 +334,12 @@ describe("getClusterHosts cluster-repo source (CTL-859 / CTL-1211 / CTL-1274)", 
     process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
     process.env.CATALYST_CLUSTER_DIR = cluster;
     process.env.CATALYST_HOST_NAME = "solo-host";
+    // Point at a controlled, guaranteed-absent path rather than deleting the env
+    // var: an unset CATALYST_LAYER2_CONFIG_FILE falls back to the real
+    // ~/.config/catalyst/config.json, which on a live, configured Catalyst host
+    // (any actual fleet node) has a genuine catalyst.cluster.staticRoster —
+    // leaking the real fleet roster into this "degrades to single-host" case.
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(cluster, "absent-layer2.json");
   });
 
   afterEach(() => {

@@ -40,6 +40,23 @@ const hermeticDir = mkdtempSync(join(tmpdir(), "catalyst-hermetic-"));
 process.env.CATALYST_DIR = hermeticDir;
 process.env.CATALYST_HERMETIC_DIR = hermeticDir;
 
+// Pin CATALYST_LAYER2_CONFIG_FILE the same way, and for the same reason: unset,
+// getLayer2ConfigPath() falls back to the REAL ~/.config/catalyst/config.json —
+// which, on any actual fleet host (a developer's live Catalyst install, not a
+// clean CI runner), is a genuine machine-local config with a real multi-host
+// catalyst.cluster.staticRoster. A test that never overrides this env var then
+// silently becomes "multi-host" and picks up real HRW ownership filtering in
+// schedulerTick's ready.filter() — e.g. a ticket id that doesn't happen to hash
+// to this host gets dropped from `ready` and a "dispatches new work" assertion
+// fails, on this host only, for a reason that has nothing to do with the code
+// under test. Point at a guaranteed-absent path so getLayer2ConfigPath() always
+// resolves the "missing Layer-2 file" branch by default. Tests that want their
+// own Layer-2 fixture still set CATALYST_LAYER2_CONFIG_FILE themselves; the
+// existing save/restore pattern (save current value, delete/set for the test,
+// restore in afterEach) already handles a pinned non-undefined default the same
+// way it handles CATALYST_DIR's hermetic pin.
+process.env.CATALYST_LAYER2_CONFIG_FILE = join(hermeticDir, "layer2-config-absent.json");
+
 // Belt: a real linearis reached despite the shim writes nothing without creds.
 delete process.env.LINEAR_API_TOKEN;
 delete process.env.LINEAR_API_KEY;
