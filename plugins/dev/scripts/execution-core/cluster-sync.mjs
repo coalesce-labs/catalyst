@@ -53,6 +53,7 @@ import {
 import { writeSecretConfig } from "./write-secret-config.mjs";
 import { schemaCompat } from "./config-schema.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
+import { SECRET_REGISTRY } from "../lib/secret-contract.mjs";
 
 // Default age key location on every node (the private half; mode 0o600).
 function defaultAgeKeyFile() {
@@ -625,13 +626,37 @@ export function emitClusterSecretEvent(opts = {}, io = {}) {
 // Leaving these out is what let the 2026-08-02 outage look "applied": cluster-sync
 // rewrote github-token, recorded it in `written`, and emitted plain `refreshed` while
 // every running daemon kept 401ing on the revoked value it had captured at boot.
-const ENV_BACKED_SECRET_EXACT = new Set([
-  "claude-accounts.env",
-  "execution-core.env",
-  "github-token",
-  "webhook-secret",
-  "linear-webhook-secret",
-]);
+// CTL-1616 (A2, same-commit derivation, design §2's "same-commit derivation constraint" —
+// judge-unanimous): this Set and the prefix below are now DERIVED from SECRET_REGISTRY
+// (lib/secret-contract.mjs) rather than hand-maintained in parallel with it — the exact
+// divergence-between-two-hand-authored-lists class this ticket exists to close, which would
+// otherwise be recreated one level up (the registry AND this file's own literal Set drifting
+// apart the same way the pre-CTL-1612 secret chains did). The registry's zero-consumer
+// invariant (its own header: "nothing outside this file's own tests imports it yet") is
+// DELIBERATELY RELAXED to exactly this one consumer, in the SAME commit that introduces the
+// registry — the design's explicit exception, not a violation of it.
+//
+// The boot-captured membership rule (both provenance paragraphs above: "sourced into the
+// daemon's boot env" OR "read ONCE from disk at server boot") maps exactly onto three
+// SECRET_DELIVERY types: "bare-file" (github-token, webhook-secret — read once at boot,
+// never re-read per request), "bare-file-family" (linear-webhook-secret — same read-once
+// shape, open-ended filenames), and "env-file" (claude-accounts.env, execution-core.env —
+// `source`d into the boot env). Every OTHER delivery type is explicitly excluded: "env-alias"
+// (linear-api-token) and "config-json" (the Linear actor rows, groq-api-key) are read FRESH
+// on each resolveSecret call, not captured once; "platform-env" (cloud-token) and
+// "local-only" (age-key) are not files this predicate is about at all. Filtering on
+// `delivery` (not `rotation.class`) is deliberate: github-token's rotation.class is
+// "re-armable" (the CTL-1612 timer-rearm mechanism), yet it MUST stay in this exact set —
+// rearm is an in-process live update, orthogonal to "was this file captured once at
+// process/daemon start", which is what determines whether cluster-sync needs to emit a
+// restart-required signal on a change.
+const _BOOT_CAPTURED_DELIVERIES = new Set(["bare-file", "bare-file-family", "env-file"]);
+
+const ENV_BACKED_SECRET_EXACT = new Set(
+  SECRET_REGISTRY.filter((row) => _BOOT_CAPTURED_DELIVERIES.has(row.delivery)).map(
+    (row) => row.id,
+  ),
+);
 
 // The per-team Linear webhook secrets are a FAMILY, not fixed names: webhook-config.ts
 // builds `linear-webhook-secret-${key}` from the Layer-2 config's team keys, so the set of
@@ -640,7 +665,12 @@ const ENV_BACKED_SECRET_EXACT = new Set([
 // "CTL" — exactly the miss this predicate exists to prevent. Match case-insensitively on
 // the prefix, requiring at least one character after the dash so the bare prefix
 // "linear-webhook-secret-" and a run-on like "linear-webhook-secretXXX" both stay OUT.
-const LINEAR_WEBHOOK_SECRET_PREFIX = "linear-webhook-secret-";
+// Derived from the linear-webhook-secret row's own familyPrefix (falls back to the
+// historical literal only if that row is ever removed from the registry, which the parity
+// test's row-id-set-equality assertion would already have failed loudly on).
+const LINEAR_WEBHOOK_SECRET_PREFIX =
+  SECRET_REGISTRY.find((row) => row.delivery === "bare-file-family")?.familyPrefix ??
+  "linear-webhook-secret-";
 
 // isEnvBackedSecretFile — the boot-captured predicate. Prefer this over direct Set
 // membership; ENV_BACKED_SECRET_FILES stays exported for back-compat with callers/tests
