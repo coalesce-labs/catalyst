@@ -306,17 +306,69 @@ function resolveDevPluginRoot(pluginDirs) {
   return pluginDirs.find((p) => typeof p === "string" && p.length > 0);
 }
 
-// resolveThoughtsRoot — the REAL path the worktree's `thoughts/` symlink points
-// to (it points OUTSIDE the workspace — see the protocol doc). Added to the
-// writable roots so codex can write research/plan artifacts under thoughts/.
-// null when there is no thoughts symlink (best-effort — never throws).
-function resolveThoughtsRoot(worktreePath) {
-  if (!worktreePath) return null;
+// resolveThoughtsRoots — the REAL path(s) any symlink under the worktree's
+// `thoughts/` points to (they point OUTSIDE the workspace — see the protocol
+// doc). Added to the writable roots so codex can write research/plan artifacts
+// under thoughts/. Best-effort throughout: a missing thoughts/ dir, an
+// unreadable directory, or a broken/dangling symlink is skipped rather than
+// thrown — never lets a sandbox-roots computation crash a dispatch.
+//
+// 2026-08-03 fix: the ACTUAL on-disk convention (lib/provision-thoughts.sh) is
+// NOT "thoughts is a symlink" — it's "thoughts is a REAL directory whose
+// immediate entries (`global`, `shared`) are themselves symlinks pointing
+// outside the worktree." The prior version only ever `realpathSync`'d the
+// `thoughts` directory itself; since `thoughts` isn't a symlink in that shape,
+// that just returned the unchanged worktree-local path and never added the
+// actual external target at all. Confirmed live: this silently broke every
+// research/plan artifact write for codex-exec-routed phases (4+ real tickets,
+// each failing with a "thoughts/shared symlink target outside writable roots"
+// sandbox denial) — the bug had existed since codex-exec's original CTL-1457
+// build (2026-07-14) with zero test coverage on this function, only surfacing
+// once research/plan started getting routed through codex-exec.
+//
+// Handles BOTH shapes: `thoughts` itself being a symlink (the legacy/simple
+// case this function originally assumed), and `thoughts` being a real
+// directory whose entries are symlinks (the actual, far more common shape).
+function resolveThoughtsRoots(worktreePath) {
+  if (!worktreePath) return [];
+  const thoughtsPath = join(worktreePath, "thoughts");
+  let stat;
   try {
-    return realpathSync(join(worktreePath, "thoughts"));
+    stat = lstatSync(thoughtsPath);
   } catch {
-    return null;
+    return [];
   }
+  // Legacy/simple shape: `thoughts` itself is a symlink straight to the target.
+  if (stat.isSymbolicLink()) {
+    try {
+      return [realpathSync(thoughtsPath)];
+    } catch {
+      return [];
+    }
+  }
+  if (!stat.isDirectory()) return [];
+  // Real-directory shape: resolve each immediate entry that is ITSELF a
+  // symlink (e.g. thoughts/global, thoughts/shared) to its real target. A
+  // real (non-symlink) entry, e.g. thoughts/searchable, is left alone — it's
+  // already inside the worktree and needs no additional writable root.
+  const out = [];
+  let entries;
+  try {
+    entries = readdirSync(thoughtsPath);
+  } catch {
+    return [];
+  }
+  for (const entry of entries) {
+    const entryPath = join(thoughtsPath, entry);
+    try {
+      if (!lstatSync(entryPath).isSymbolicLink()) continue;
+      out.push(realpathSync(entryPath));
+    } catch {
+      // Broken symlink / permission error on this one entry — skip it, keep
+      // going; never let one bad entry drop the rest of the census.
+    }
+  }
+  return out;
 }
 
 // resolveWorktreeGitDirs — the REAL git metadata paths for a linked worktree.
@@ -350,7 +402,7 @@ function resolveWorktreeGitDirs(worktreePath) {
 
 // resolveWritableRoots — the de-duplicated, absolute writable-root set for the
 // `-c sandbox_workspace_write.writable_roots=[…]` override: the configured roots
-// ∪ {orchDir} ∪ {the resolved thoughts real-root of the worktree if present}
+// ∪ {orchDir} ∪ {every resolved thoughts real-root of the worktree}
 // ∪ {the worktree's real git-dir and git-common-dir, for linked worktrees}.
 // Order-preserving; drops non-absolute / empty / duplicate entries.
 function resolveWritableRoots(cfg, { orchDir, worktreePath } = {}) {
@@ -364,7 +416,7 @@ function resolveWritableRoots(cfg, { orchDir, worktreePath } = {}) {
   };
   for (const r of cfg?.writableRoots ?? []) add(r);
   add(orchDir);
-  add(resolveThoughtsRoot(worktreePath));
+  for (const r of resolveThoughtsRoots(worktreePath)) add(r);
   const { gitDir, commonDir } = resolveWorktreeGitDirs(worktreePath);
   add(gitDir);
   add(commonDir);
