@@ -2348,6 +2348,21 @@ export function reclaimDeadWorkIfPossible(
     // as capSpent, since markEscalationCapTerminal is purely a local
     // tmp+rename write with no Linear/event I/O of its own.
     const mustTerminalizeLocally = capSpent || reason === "no-probe-for-phase";
+    // 2026-08-03 fix (confirmed live across 11 real tickets): for "no-progress",
+    // the caller passes the CTL-736 progress QUANTITY (commits-ahead / doc-size)
+    // as `finalAttemptCount` — not an attempt count. Since the escalate-vs-
+    // continue decision is made by the caller BEFORE this call, keyed on that
+    // quantity being <= the prior value, it is almost always 0 — so every
+    // no-progress escalation's human-facing text read "escalated after 0
+    // attempt(s)" regardless of how many real ask/retry cycles actually ran.
+    // The `attempts` array below is correctly built from the REAL ask history
+    // (priorAsks, +1 for the current ask) — use that same real count for every
+    // display/audit field too, but ONLY for this reason: the other three
+    // reasons (busy-ceiling-exceeded, no-probe-for-phase,
+    // wedged-never-started-exhausted) escalate on a single call rather than
+    // cycling through the ask-cap, so their caller-supplied finalAttemptCount
+    // already carries real, correct meaning and must not be overridden.
+    const effectiveAttemptCount = capApplies ? priorAsks + 1 : finalAttemptCount;
     const reassertTerminalIfLost = () => {
       let already = null;
       try {
@@ -2386,13 +2401,13 @@ export function reclaimDeadWorkIfPossible(
     // produce a fresh brief lazily without duplicating the CTL-1130 logic.
     function buildEscExplanation() {
     const escType = reasonToType(reason);
-    const whyField = reasonToWhyField(reason, finalAttemptCount);
+    const whyField = reasonToWhyField(reason, effectiveAttemptCount);
     let explanation;
     const explanationFields =
       escType === "manual"
         ? {
             escalation_type: "manual",
-            problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+            problem: `${phase} escalated after ${effectiveAttemptCount} attempt(s): ${reason}`,
             call_to_action:
               extras?.call_to_action ??
               `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
@@ -2401,20 +2416,20 @@ export function reclaimDeadWorkIfPossible(
             instructions: extras?.instructions ?? ["check CATALYST_WORKFLOW_GITHUB_TOKEN"],
             remediation_then_retry: `re-run ${ticket} ${phase} after granting the capability`,
             why_not_auto: whyField.value,
-            observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+            observed: { final_attempt_count: effectiveAttemptCount, ...(extras?.observed ?? {}) },
             attempts: extras?.attempts ?? [],
           }
         : {
             escalation_type: "authorization",
-            problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+            problem: `${phase} escalated after ${effectiveAttemptCount} attempt(s): ${reason}`,
             call_to_action:
               extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
             recommendation: `retry ${ticket} ${phase} after investigating ${reason}`,
-            risk: `continued retries risk wasting budget; ${finalAttemptCount} attempt(s) already made`,
+            risk: `continued retries risk wasting budget; ${effectiveAttemptCount} attempt(s) already made`,
             why_asking: whyField.value,
             could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
             authorize_label: `retry ${ticket} ${phase}`,
-            observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+            observed: { final_attempt_count: effectiveAttemptCount, ...(extras?.observed ?? {}) },
             // CTL-1442: truthful ask history — this call site historically passed
             // no extras, so the payload showed attempts:[] forever while asking
             // "authorize retry?" every window (audit RC4). Scoped to the SAME
@@ -2472,7 +2487,7 @@ export function reclaimDeadWorkIfPossible(
         ticket,
         orchId,
         reason,
-        final_attempt_count: finalAttemptCount,
+        final_attempt_count: effectiveAttemptCount,
         extras: enrichedExtras,
       });
     }
