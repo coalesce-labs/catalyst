@@ -48,20 +48,20 @@ describe("node-class.mjs getLayer2ConfigPath — CTL-1616 PR6 dual-read shadow-d
     expect(warnCalls.length).toBe(0);
   });
 
-  test("differ case: CATALYST_MACHINE_CONFIG set (legacy ignores it) — warns once, the NEW (canonical) path wins", () => {
+  test("differ case: CATALYST_MACHINE_CONFIG set (legacy ignores it) — warns once, the LEGACY path wins (observe-only until the reader sweep)", () => {
     process.env.CATALYST_MACHINE_CONFIG = "/machine/nc-pr6-machine-config-test/config.json";
     const result = getLayer2ConfigPath();
-    expect(result).toBe("/machine/nc-pr6-machine-config-test/config.json");
+    expect(result).toBe(resolve(homedir(), ".config", "catalyst", "config.json"));
     expect(warnCalls.length).toBe(1);
     const msg = warnCalls[0][0];
     expect(msg).toContain(resolve(homedir(), ".config", "catalyst", "config.json"));
     expect(msg).toContain("/machine/nc-pr6-machine-config-test/config.json");
   });
 
-  test("differ case: XDG_CONFIG_HOME set (legacy ignores it) — warns once, the NEW (canonical) path wins", () => {
+  test("differ case: XDG_CONFIG_HOME set (legacy ignores it) — warns once, the LEGACY path wins (observe-only until the reader sweep)", () => {
     process.env.XDG_CONFIG_HOME = "/xdg/nc-pr6-xdg-test";
     const result = getLayer2ConfigPath();
-    expect(result).toBe(join("/xdg/nc-pr6-xdg-test", "catalyst", "config.json"));
+    expect(result).toBe(resolve(homedir(), ".config", "catalyst", "config.json"));
     expect(warnCalls.length).toBe(1);
   });
 

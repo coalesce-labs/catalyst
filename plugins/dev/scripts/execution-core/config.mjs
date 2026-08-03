@@ -238,15 +238,22 @@ export function getLayer2ConfigPath() {
   if (legacyPath !== canonicalPath) {
     const msg =
       `layer2 config path shadow-diff (CTL-1616 PR6): legacy chain resolved "${legacyPath}" ` +
-      `but the canonical chain resolved "${canonicalPath}" — using "${canonicalPath}" (legacy ` +
-      `ignores CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME; set CATALYST_LAYER2_CONFIG_FILE to pin ` +
-      `explicitly if this is unexpected)`;
+      `but the canonical chain resolved "${canonicalPath}" — KEEPING the legacy path (this ` +
+      `function feeds WRITE destinations — cluster-sync secret materialization, cluster tune — ` +
+      `while catalyst-secret-env.sh and the scheduler's per-tick reload still read the legacy ` +
+      `chain; switching writes before the reader sweep would strand rotations on ` +
+      `MACHINE_CONFIG/XDG hosts. Set CATALYST_LAYER2_CONFIG_FILE to pin explicitly; the ` +
+      `canonical cutover lands with the full reader/writer sweep)`;
     if (!_warnedLayer2PathDrift.has(msg)) {
       _warnedLayer2PathDrift.add(msg);
       log.warn(msg);
     }
   }
-  return canonicalPath;
+  // #2929 post-merge Codex P1: LEGACY wins until every reader/writer of this
+  // path is swept onto the canonical chain in one PR — a split (canonical
+  // writes, legacy reads) makes a rotation write fresh credentials where the
+  // next daemon launch never looks, exporting the stale/revoked value forever.
+  return legacyPath;
 }
 
 // The repo root that owns the committed cluster roster (.catalyst/hosts.json).
