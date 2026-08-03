@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jobLifecycle } from "./recovery.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
+import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
 import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
@@ -323,14 +324,18 @@ export function defaultEscalate(
     // human escalation. A genuine supersession (readable generation, fresh
     // foreign owner / authoritative read says not-current) still suppresses.
     if (fenceGuard({ ticket, orchDir, multiHost, gateway, self }, { proceedOnMissingGeneration: true })) {
-      labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, linearWrite, {
-        env,
+      routeStuckTicketToDelegate(orchDir, ticket, {
         site: "stale-pr-rescue",
+        reason: detail?.reason ?? "unresolvable-conflict",
+        boardContext: { prNumber: detail?.prNumber },
+        applyLabel: linearWrite,
+        env,
         log,
         explanation: {
           problem: `stale PR for ${ticket} could not be rescued: ${detail?.reason ?? "unresolvable conflict"}`,
           call_to_action: `resolve the PR conflict for ${ticket} or close the PR`,
         },
+        deps: { orchDir },
       });
     } else {
       log.warn(

@@ -77,6 +77,7 @@ import {
   removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1441
+import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import {
@@ -779,12 +780,16 @@ function dispatchTriage(
     // CTL-1441: needs-human application at the re-dispatch cap. Injectable so
     // tests never spawn a real linearis write; default = the label-guard path.
     labelNeedsHuman = (dir, t) =>
-      labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, {
+      routeStuckTicketToDelegate(dir, t, {
         site: "triage-redispatch-cap",
+        reason: "triage-redispatch-cap",
+        boardContext: { cap: TRIAGE_DISPATCH_CAP },
+        applyLabel: { applyLabel },
         explanation: {
           problem: `${t} hit the triage re-dispatch cap (${TRIAGE_DISPATCH_CAP})`,
           call_to_action: `triage ${t} manually or re-scope it`,
         },
+        deps: { orchDir: dir },
       }),
     // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
     // ticket's LIVE state must still equal this workflow-state name at launch.
