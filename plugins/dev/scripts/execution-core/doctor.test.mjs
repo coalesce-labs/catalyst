@@ -2534,7 +2534,7 @@ describe("checkLayer2PathDivergence (#2930 round-2)", () => {
     expect(checks).toHaveLength(1);
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("RELATIVE");
-    expect(checks[0].detail).toContain("ABSOLUTE");
+    expect(checks[0].detail).toContain("ABSOLUTE CATALYST_LAYER2_CONFIG_FILE");
   });
 
   it("remedy names the every-supervised-service pin requirement without a committed ticket prefix", () => {
@@ -2542,7 +2542,9 @@ describe("checkLayer2PathDivergence (#2930 round-2)", () => {
       env: { CATALYST_MACHINE_CONFIG: "/machine/split-test/config.json" },
     });
     expect(checks[0].detail).toContain("EVERY supervised service");
-    expect(checks[0].detail).not.toMatch(/CTL-\d+/);
+    // Prefix-agnostic ticket matcher — the assertion itself must not commit a
+    // repo-specific prefix (the very rule it enforces).
+    expect(checks[0].detail).not.toMatch(/\b[A-Z]{2,}-\d+\b/);
   });
 
   it("fails OPEN (zero rows) when a resolver throws", () => {

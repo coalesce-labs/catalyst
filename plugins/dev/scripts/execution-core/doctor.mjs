@@ -3548,8 +3548,9 @@ export function checkLayer2PathDivergence(deps = {}) {
         STATUS.FAIL,
         `Layer-2 config path is RELATIVE ("${!isAbsolute(legacyRaw) ? legacyRaw : canonicalRaw}") — ` +
           `each consumer resolves it against its own working directory, so different services read ` +
-          `different files; configure an ABSOLUTE path (CATALYST_LAYER2_CONFIG_FILE / ` +
-          `CATALYST_MACHINE_CONFIG must be absolute)`,
+          `different files; set an ABSOLUTE CATALYST_LAYER2_CONFIG_FILE (tier 1 of BOTH chains — ` +
+          `an absolute CATALYST_MACHINE_CONFIG alone still diverges from the legacy chain and ` +
+          `fails the split-brain gate)`,
       ),
     ];
   }
