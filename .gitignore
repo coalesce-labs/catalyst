@@ -81,6 +81,10 @@ mockups/**/*.png
 # Ad hoc root-level package install (e.g. `npm install linearis` for local CLI use)
 /node_modules/
 
+# turbo (CTL-1628): per-task run logs/cache, written under each workspace member
+# and at the repo root whenever `turbo run <task>` executes.
+.turbo/
+
 # Worktree-safety machine-local noise marker (see MACHINE_LOCAL_NOISE in
 # plugins/dev/scripts/execution-core/worktree-safety.mjs)
 .orphaned_at
