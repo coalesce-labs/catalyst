@@ -32,6 +32,7 @@ import {
   defaultConfiguredRepos,
   checkNodeClass,
   checkDeploymentModeConsistency,
+  checkSecretContract,
   checkReadReplicaReachable,
   checkMonitorProductionBuild,
   checkWontOwnWork,
@@ -48,6 +49,7 @@ import {
   parseArgs,
   runDoctor,
 } from "./doctor.mjs";
+import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";
 // CTL-1369 PR4: parity source for doctor's inlined defaultPluginPullOwner.
 import { resolvePluginPullOwner } from "../broker/plugin-refresh.mjs";
@@ -210,6 +212,17 @@ describe("checkHrwPartition", () => {
 
 // ─── Phase 3: checkPeerUniqueness ────────────────────────────────────────────
 
+// CTL-1616 PR2: resolveSecretContract is a shadow-only dependency (design §7).
+// These fixtures pin it to AGREE with whatever `hasLinearToken` the test sets,
+// so the pre-existing (pre-shadow) behavioral assertions below stay exact —
+// the real registry resolver would make agreement depend on whatever
+// LINEAR_API_TOKEN/LINEAR_API_KEY happen to be set in the runner's ambient
+// environment, which these tests were written (via full DI) to never depend on.
+const agreeingSecretContract = (present) => () =>
+  present
+    ? { value: "contract-token", source: "inherited", provider: "env-alias" }
+    : { value: null, source: "none", provider: "env-alias" };
+
 describe("checkPeerUniqueness", () => {
   it("INFO-skips when no liveness anchor issue is configured", async () => {
     const checks = await checkPeerUniqueness({
@@ -229,6 +242,7 @@ describe("checkPeerUniqueness", () => {
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
       hasLinearToken: () => false,
+      resolveSecretContract: agreeingSecretContract(false),
       readPeerHeartbeats: async () => ({}),
     });
     expect(checks).toHaveLength(1);
@@ -295,6 +309,7 @@ describe("checkPeerUniqueness", () => {
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
       hasLinearToken: () => true,
+      resolveSecretContract: agreeingSecretContract(true),
       readPeerHeartbeats: async () => ({
         "mac-studio": { host: "mac-studio", last_seen: "2026-06-15T00:00:00Z", in_flight_tickets: [] },
         "mini": { host: "mini", last_seen: "2026-06-15T00:00:00Z", in_flight_tickets: [] },
@@ -314,6 +329,7 @@ describe("checkPeerUniqueness", () => {
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
       hasLinearToken: () => true,
+      resolveSecretContract: agreeingSecretContract(true),
       readPeerHeartbeats: async () => ({
         "mac-studio": { host: "mac-studio", last_seen: "2026-06-15T00:00:00Z", in_flight_tickets: [] },
         "laptop": { host: "laptop", last_seen: "2026-06-15T00:00:00Z", in_flight_tickets: [] },
@@ -330,6 +346,7 @@ describe("checkPeerUniqueness", () => {
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
       hasLinearToken: () => true,
+      resolveSecretContract: agreeingSecretContract(true),
       readPeerHeartbeats: async () => ({}),
     });
     expect(checks).toHaveLength(1);
@@ -346,6 +363,12 @@ const fakeFetch = (body, ok = true) => async (url, opts) => ({
   json: async () => body,
 });
 
+// CTL-1616 PR2 (A2): resolveSecretContract is a shadow-only dependency
+// (design §7). Every test below injects a fixture that AGREES with whatever
+// `linearToken` it sets, so these pre-existing (pre-shadow) assertions never
+// depend on the real registry resolver — which would read the runner's
+// actual LINEAR_API_TOKEN/LINEAR_API_KEY/~/.config/catalyst and make this
+// describe's behavior environment-dependent.
 describe("checkBotCredentials", () => {
   it("passes when the Linear viewer id is in the local bot-id set", async () => {
     const checks = await checkBotCredentials({
@@ -353,6 +376,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const identity = checks.find((c) => c.name === "bot-identity");
     expect(identity).toBeDefined();
@@ -369,6 +393,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "wrong-user-999", name: "Wrong", email: "wrong@example.com" } } }),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const identity = checks.find((c) => c.name === "bot-identity");
     expect(identity).toBeDefined();
@@ -383,6 +408,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ errors: [{ message: "Authentication failed" }] }),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const connectivity = checks.find((c) => c.name === "linear-connectivity");
     expect(connectivity).toBeDefined();
@@ -396,6 +422,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "",
       fetch: fakeFetch({}),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(false),
     });
     const connectivity = checks.find((c) => c.name === "linear-connectivity");
     expect(connectivity).toBeDefined();
@@ -412,6 +439,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
       expectedBotUserId: "different-expected-id",
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const parity = checks.find((c) => c.name === "bot-parity");
     expect(parity).toBeDefined();
@@ -425,6 +453,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const parity = checks.find((c) => c.name === "bot-parity");
     expect(parity).toBeDefined();
@@ -630,6 +659,12 @@ describe("checkWebhookIngestion", () => {
     // linearSecretEnvName environment-dependent (Codex P2). Clear both here.
     "CATALYST_CONFIG_FILE",
     "CATALYST_CONFIG_PATH",
+    // CTL-1616 PR2 (A2): the shadow-only resolveSecretContract dependency
+    // (default resolveSecret) honors CATALYST_CONFIG_DIR via
+    // secretFileCandidates — an inherited value pointing at a real config dir
+    // would make the shadow comparison below environment-dependent even
+    // though every test here also injects an agreeing fixture.
+    "CATALYST_CONFIG_DIR",
   ];
   let savedEnv = {};
   beforeEach(() => {
@@ -663,6 +698,7 @@ describe("checkWebhookIngestion", () => {
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "" }, linear: {} },
       secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(false),
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("NO webhook route");
@@ -673,6 +709,7 @@ describe("checkWebhookIngestion", () => {
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" } },
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
   });
@@ -685,6 +722,7 @@ describe("checkWebhookIngestion", () => {
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "GH_WH_CUSTOM",
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+      resolveSecretContract: agreeingSecretContract(false),
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("NO webhook route");
@@ -697,6 +735,7 @@ describe("checkWebhookIngestion", () => {
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "GH_WH_CUSTOM",
       secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
   });
@@ -708,6 +747,7 @@ describe("checkWebhookIngestion", () => {
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
       secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
   });
@@ -718,6 +758,7 @@ describe("checkWebhookIngestion", () => {
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
   });
@@ -734,6 +775,7 @@ describe("checkWebhookIngestion", () => {
       monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
       githubSecretEnvName: "GH_WH_CUSTOM",
       secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(false),
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("NO webhook route");
@@ -744,6 +786,7 @@ describe("checkWebhookIngestion", () => {
       resolveRoster: multiHost,
       monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
       secretFileNonEmpty: (_dir, name) => name === "linear-webhook-secret-ctl",
+      resolveSecretContract: agreeingSecretContract(false),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain("linear keys=1");
@@ -758,6 +801,7 @@ describe("checkWebhookIngestion", () => {
         linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
       },
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // ctl secret absent
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("half-wired");
@@ -771,6 +815,7 @@ describe("checkWebhookIngestion", () => {
       monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
       linearSecretEnvName: "LIN_WH_CUSTOM",
       secretFileNonEmpty: noSecrets, // no file, no global CATALYST_LINEAR_WEBHOOK_SECRET
+      resolveSecretContract: agreeingSecretContract(false),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain("linear keys=1");
@@ -783,6 +828,7 @@ describe("checkWebhookIngestion", () => {
       monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
       linearSecretEnvName: "LIN_WH_CUSTOM", // set as a name, but the var itself is unset
       secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(false),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
   });
@@ -802,6 +848,7 @@ describe("checkWebhookIngestion", () => {
       githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
       linearSecretEnvName: "LIN_WH_CUSTOM",
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // github ok, ctl absent everywhere
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("half-wired");
@@ -818,6 +865,7 @@ describe("checkWebhookIngestion", () => {
       githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
       linearSecretEnvName: "LIN_WH_CUSTOM",
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // github ok, ctl absent everywhere
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("half-wired");
@@ -832,6 +880,7 @@ describe("checkWebhookIngestion", () => {
         linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" }, adv: { webhookId: "wh-adv" } },
       },
       secretFileNonEmpty: allSecrets,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain("linear keys=2");
@@ -1724,8 +1773,13 @@ describe("checkCloudTokenEnv", () => {
       throw new Error("ENOENT");
     };
 
+  // A2/A3 hermeticity: agree with the hand-rolled hardcoded name so these
+  // pre-existing tests never reach the real resolveSecret (whose answer
+  // depends on CATALYST_CLOUD_TOKEN_ENV / the developer's Layer-2 config).
+  const agreeingCloudTokenContract = () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" });
+
   it("INFO when no token is decrypted (local-only node)", () => {
-    const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile: reader({}) });
+    const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile: reader({}), resolveSecretContract: agreeingCloudTokenContract });
     expect(checks[0].name).toBe("cloud-token");
     expect(checks[0].status).toBe(STATUS.INFO);
   });
@@ -1735,6 +1789,7 @@ describe("checkCloudTokenEnv", () => {
       configDir: CFG,
       zshenvPath: ZSH,
       readFile: reader({ cloud: clusterCloud("tok") }),
+      resolveSecretContract: agreeingCloudTokenContract,
     });
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("NOT projected");
@@ -1745,6 +1800,7 @@ describe("checkCloudTokenEnv", () => {
       configDir: CFG,
       zshenvPath: ZSH,
       readFile: reader({ cloud: clusterCloud("new"), env: exportLine("old") + "\n" }),
+      resolveSecretContract: agreeingCloudTokenContract,
     });
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("STALE");
@@ -1755,6 +1811,7 @@ describe("checkCloudTokenEnv", () => {
       configDir: CFG,
       zshenvPath: ZSH,
       readFile: reader({ cloud: clusterCloud("tok"), env: exportLine("tok") + "\n", zsh: "export OTHER=1\n" }),
+      resolveSecretContract: agreeingCloudTokenContract,
     });
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("source-guard");
@@ -1769,6 +1826,7 @@ describe("checkCloudTokenEnv", () => {
         env: exportLine("tok") + "\n",
         zsh: "# >>> catalyst cloud-token env (CTL-1307) >>>\n. cluster.env\n",
       }),
+      resolveSecretContract: agreeingCloudTokenContract,
     });
     expect(checks[0].status).toBe(STATUS.PASS);
   });
@@ -1781,7 +1839,7 @@ describe("checkCloudTokenEnv", () => {
       reader({ cloud: clusterCloud("new"), env: exportLine("old") + "\n" }),
     ];
     for (const readFile of branches) {
-      const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile });
+      const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile, resolveSecretContract: agreeingCloudTokenContract });
       for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
     }
   });
@@ -2129,6 +2187,616 @@ describe("checksForClass — checkDeploymentModeConsistency registration (CTL-16
     expect(thunk).toBeDefined();
     const out = await thunk();
     expect(out.some((c) => c.name === "deployment-mode")).toBe(true);
+  });
+});
+
+// ─── CTL-1616 PR2: checkSecretContract (secret-contract shadow pass) ────────
+
+describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)", () => {
+  const CLOUD_MODE = { mode: "cloud", source: "env", inferred: false, recognized: true };
+
+  it("checkSecretContract passes an explicitly-injected deploymentMode through to the resolver", () => {
+    const seen = [];
+    checkSecretContract({
+      deploymentMode: CLOUD_MODE,
+      resolveSecretFn: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(2);
+    for (const dm of seen) expect(dm).toEqual(CLOUD_MODE);
+  });
+
+  it("checkSecretContract supplies a deploymentMode by DEFAULT (the resolver is never mode-blind)", () => {
+    const seen = [];
+    checkSecretContract({
+      resolveSecretFn: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(2);
+    // resolveDeploymentMode() never throws and always returns a resolution
+    // object — the shadow must thread it, not undefined.
+    for (const dm of seen) {
+      expect(dm).toBeDefined();
+      expect(typeof dm.mode).toBe("string");
+    }
+  });
+
+  it("shadowed comparison checks (buildContractShadowCheck path) also receive a deploymentMode", async () => {
+    const seen = [];
+    await checkPeerUniqueness({
+      getHostName: () => "mini",
+      getLivenessAnchorIssue: () => "CTL-1",
+      hasLinearToken: () => false,
+      readPeerHeartbeats: async () => ({}),
+      resolveSecretContract: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(1);
+    expect(seen[0]).toBeDefined();
+    expect(typeof seen[0].mode).toBe("string");
+  });
+
+  it("DEFAULT deploymentMode derives from the INJECTED env, not the host process.env (#2916 round-3)", () => {
+    // env declares cloud with no bootstrap token; deploymentMode dep omitted.
+    // Both halves must resolve from the same injected env: the bootstrap
+    // short-circuit must fire even though the HOST's mode is not cloud.
+    const env = { CATALYST_DEPLOYMENT_MODE: "cloud", GROQ_API_KEY: "gk-live", LINEAR_API_TOKEN: "lin-live" };
+    const checks = checkSecretContract({ env, resolveSecretFn: resolveSecretReal });
+    for (const c of checks) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("no resolution");
+    }
+  });
+
+  it("non-Error resolver throws (Symbol, null-proto object, revoked Proxy) stay inside the shadow (#2916 round-3/4 P3)", () => {
+    const { proxy: revokedProxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    for (const thrown of [Symbol("boom"), Object.create(null), revokedProxy]) {
+      const checks = checkSecretContract({
+        resolveSecretFn: () => {
+          throw thrown;
+        },
+      });
+      expect(checks.length).toBe(2);
+      for (const c of checks) {
+        expect(c.status).toBe(STATUS.INFO);
+        expect(c.detail).toContain("SHADOW RESOLVER THREW");
+      }
+    }
+  });
+
+  it("END-TO-END: declared cloud mode activates the engine's bootstrap short-circuit through checkSecretContract", () => {
+    // Real engine, cloud mode declared, NO platform bootstrap token in env:
+    // every non-bootstrap resolution must short-circuit to no-resolution
+    // (design §4 rule 2) — even though GROQ_API_KEY is right there in env
+    // (proof the file/env ladder was NOT consulted).
+    const env = { GROQ_API_KEY: "gk-live", LINEAR_API_TOKEN: "lin-live" };
+    const checks = checkSecretContract({ env, deploymentMode: CLOUD_MODE, resolveSecretFn: resolveSecretReal });
+    for (const c of checks) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("no resolution");
+    }
+    // Control: same env WITHOUT cloud mode — the normal ladder resolves both.
+    const control = checkSecretContract({ env, deploymentMode: { mode: "single-host", source: "default", inferred: true, recognized: false }, resolveSecretFn: resolveSecretReal });
+    for (const c of control) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("resolves");
+    }
+  });
+});
+
+describe("checkSecretContract (CTL-1616 PR2)", () => {
+  it("emits one INFO observation per shadow-covered secret id (linear-api-token, groq-api-key)", () => {
+    const checks = checkSecretContract({
+      resolveSecretFn: (id) => ({ value: `v-${id}`, source: "inherited", provider: "env-alias" }),
+    });
+    const names = checks.map((c) => c.name);
+    expect(names).toContain("secret-contract-linear-api-token");
+    expect(names).toContain("secret-contract-groq-api-key");
+    for (const c of checks) expect(c.status).toBe(STATUS.INFO);
+  });
+
+  it("never emits WARN or FAIL, even when every resolution is absent (zero grade change)", () => {
+    const checks = checkSecretContract({ resolveSecretFn: () => ({ value: null, source: "none", provider: null }) });
+    for (const c of checks) expect(c.status).toBe(STATUS.INFO);
+    expect(summarize(checks)).toEqual({ pass: 0, warn: 0, fail: 0, ok: true });
+  });
+
+  it("uses the injected resolver, not the real registry, when one is provided", () => {
+    let calledWith = [];
+    checkSecretContract({
+      env: { X: "1" },
+      deploymentMode: { mode: "cluster", inferred: false },
+      resolveSecretFn: (id, opts) => {
+        calledWith.push([id, opts]);
+        return { value: null, source: "none", provider: null };
+      },
+    });
+    expect(calledWith.map(([id]) => id)).toEqual(["linear-api-token", "groq-api-key"]);
+    expect(calledWith[0][1]).toEqual({ env: { X: "1" }, deploymentMode: { mode: "cluster", inferred: false } });
+  });
+});
+
+describe("checksForClass — checkSecretContract registration (CTL-1616 PR2)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+
+  it("worker rubric includes checkSecretContract beside checkDeploymentModeConsistency", () => {
+    const s = src(nodeClassOf({ class: "worker", raw: "worker" }));
+    expect(s).toContain("checkDeploymentModeConsistency");
+    expect(s).toContain("checkSecretContract");
+  });
+
+  it("developer rubric includes checkSecretContract — fleet-topology-independent, not worker-only", () => {
+    const s = src(nodeClassOf({ class: "developer", raw: "developer" }));
+    expect(s).toContain("checkSecretContract");
+  });
+
+  it("monitor rubric includes checkSecretContract", () => {
+    const s = src(nodeClassOf({ class: "monitor", raw: "monitor" }));
+    expect(s).toContain("checkSecretContract");
+  });
+
+  it("an unrecognized node class short-circuits to the single node-class FAIL — secret contract not graded", () => {
+    const nc = nodeClassOf({ recognized: false, raw: "developr", class: "monitor" });
+    const suite = checksForClass(nc);
+    expect(suite).toHaveLength(1);
+  });
+
+  it("the secret-contract thunk actually runs checkSecretContract and returns its (INFO-only) checks", async () => {
+    const s = checksForClass(nodeClassOf({ class: "worker", raw: "worker" }));
+    const thunk = s.find((f) => f.toString().includes("checkSecretContract()"));
+    expect(thunk).toBeDefined();
+    const out = await thunk();
+    expect(out.some((c) => c.name === "secret-contract-linear-api-token")).toBe(true);
+    for (const c of out) expect(c.status).toBe(STATUS.INFO);
+  });
+});
+
+// ─── CTL-1616 PR2: secret-contract shadow — zero grade change ──────────────
+//
+// The shadow discipline (design §7/§9): the contract is CONSULTED AND COMPARED
+// at 5 hand-rolled call sites (checkPeerUniqueness, checkBotCredentials,
+// checkWorkerLabels, checkWebhookIngestion, checkCloudTokenEnv) but decides
+// NOTHING — every disagreement surfaces as an extra INFO row; every agreement
+// surfaces nothing extra. These tests prove both halves plus the invariant
+// that grades/exit-code are IDENTICAL either way.
+describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
+  describe("checkPeerUniqueness", () => {
+    const base = {
+      getHostName: () => "mini",
+      getLivenessAnchorIssue: () => "CTL-9999",
+      readPeerHeartbeats: async () => ({}),
+    };
+
+    it("agree (both absent) → no shadow row, primary grade unchanged", async () => {
+      const checks = await checkPeerUniqueness({
+        ...base,
+        hasLinearToken: () => false,
+        resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+      });
+      expect(checks).toHaveLength(1);
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    it("disagree (hand-rolled says present, contract says absent) → loud INFO row, primary grade unchanged", async () => {
+      const checks = await checkPeerUniqueness({
+        ...base,
+        hasLinearToken: () => true,
+        resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+      });
+      // Primary "peer-uniqueness" row is untouched (still WARN — empty heartbeats).
+      const primary = checks.find((c) => c.name === "peer-uniqueness");
+      expect(primary.status).toBe(STATUS.WARN);
+      const shadow = checks.find((c) => c.name === "peer-uniqueness-secret-contract-shadow");
+      expect(shadow).toBeDefined();
+      expect(shadow.status).toBe(STATUS.INFO);
+      expect(shadow.detail).toContain('secret="linear-api-token"');
+      expect(shadow.detail).toContain("hand-rolled=present");
+      expect(shadow.detail).toContain("contract={value:absent");
+    });
+  });
+
+  describe("checkBotCredentials", () => {
+    it("agree (both present) → no shadow row", async () => {
+      const checks = await checkBotCredentials({
+        readLinearBotUserIds: () => new Set(["bot-user-123"]),
+        linearToken: () => "lin_api_abc",
+        fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
+        resolveSecretContract: () => ({ value: "lin_api_abc", source: "inherited", provider: "env-alias" }),
+      });
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    it("disagree (hand-rolled absent, contract present) → loud INFO row, grade unchanged", async () => {
+      const checks = await checkBotCredentials({
+        readLinearBotUserIds: () => new Set(["bot-user-123"]),
+        linearToken: () => "",
+        fetch: fakeFetch({}),
+        resolveSecretContract: () => ({ value: "some-token", source: "inherited", provider: "env-alias" }),
+      });
+      const connectivity = checks.find((c) => c.name === "linear-connectivity");
+      expect(connectivity.status).toBe(STATUS.WARN); // unchanged from the no-shadow behavior
+      const shadow = checks.find((c) => c.name === "bot-credentials-secret-contract-shadow");
+      expect(shadow).toBeDefined();
+      expect(shadow.status).toBe(STATUS.INFO);
+      expect(shadow.detail).toContain("hand-rolled=absent");
+      expect(shadow.detail).toContain("contract={value:present");
+    });
+  });
+
+  describe("checkWebhookIngestion — CATALYST_CONFIG_DIR override the hand-rolled path ignores", () => {
+    // Isolate the same env-var fallbacks the top-level checkWebhookIngestion
+    // describe isolates (this block sits outside that describe's own
+    // beforeEach/afterEach scope) — an ambient CATALYST_WEBHOOK_SECRET /
+    // CATALYST_SMEE_SECRET would otherwise make ghEnvSecret true regardless of
+    // the file-search divergence this block is isolating.
+    const SHADOW_SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_SMEE_SECRET", "CATALYST_CONFIG_DIR", "CATALYST_DEPLOYMENT_MODE", "CATALYST_WEBHOOK_SECRET_FILE"];
+    let savedEnv = {};
+    let tmpDir;
+    beforeEach(() => {
+      for (const k of SHADOW_SECRET_ENVS) { savedEnv[k] = process.env[k]; delete process.env[k]; }
+      tmpDir = mkdtempSync(join(tmpdir(), "ctl1616-webhook-shadow-"));
+      process.env.CATALYST_CONFIG_DIR = tmpDir;
+      // #2916 round-2 (Codex P2): PIN the deployment mode via the env override
+      // (highest resolver precedence) — this block uses the REAL resolveSecret,
+      // and on a host whose machine config declares cloud (without a bootstrap
+      // token) the engine's cloud short-circuit would report webhook-secret
+      // absent despite the temp file, swallowing the expected disagreement row.
+      // Pinning single-host isolates the fixture from the host's declared mode
+      // while keeping real secret-file resolution.
+      process.env.CATALYST_DEPLOYMENT_MODE = "single-host";
+      // A real, non-empty webhook-secret file at the CATALYST_CONFIG_DIR path —
+      // secretFileCandidates (and so resolveSecret) honor this override;
+      // defaultWebhookConfigDir() does NOT (design §7's cited divergence).
+      writeFileSync(join(tmpDir, "webhook-secret"), "hmac-value-from-override\n");
+    });
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true });
+      for (const k of SHADOW_SECRET_ENVS) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
+
+    it("disagree: hand-rolled (hardcoded configDir) finds nothing, contract (honors CATALYST_CONFIG_DIR) finds the file", () => {
+      const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+      const checks = checkWebhookIngestion({
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+        // configDir NOT overridden here → defaults to defaultWebhookConfigDir(),
+        // which hardcodes ~/.config/catalyst and never looks at CATALYST_CONFIG_DIR.
+        secretFileNonEmpty: () => false, // hand-rolled sees nothing at its (wrong) dir
+        // resolveSecretContract left at its real default (resolveSecret) — it DOES
+        // honor CATALYST_CONFIG_DIR via secretFileCandidates and finds the file above.
+      });
+      const primary = checks.find((c) => c.name === "webhook-ingestion");
+      expect(primary.status).toBe(STATUS.FAIL); // unchanged: hand-rolled still sees no secret
+      const shadow = checks.find((c) => c.name === "webhook-ingestion-secret-contract-shadow");
+      expect(shadow).toBeDefined();
+      expect(shadow.status).toBe(STATUS.INFO);
+      expect(shadow.detail).toContain('secret="webhook-secret"');
+      expect(shadow.detail).toContain("hand-rolled=absent");
+      expect(shadow.detail).toContain("contract={value:present");
+    });
+
+    it("agree: once the hand-rolled configDir is ALSO pointed at the override, no shadow row", () => {
+      const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+      const checks = checkWebhookIngestion({
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+        configDir: tmpDir,
+        secretFileNonEmpty: (dir, name) => {
+          try {
+            return readFileSync(join(dir, name), "utf8").trim().length > 0;
+          } catch {
+            return false;
+          }
+        },
+      });
+      const primary = checks.find((c) => c.name === "webhook-ingestion");
+      expect(primary.status).toBe(STATUS.PASS);
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+  });
+
+  describe("checkCloudTokenEnv — hardcoded env-var NAME vs the contract's resolved name", () => {
+  it("replica-name divergence: resolveNodeCloudTokenEnv disagrees with the contract → loud INFO row (#2916 round-3)", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: "/cfg",
+      zshenvPath: "/home/.zshenv",
+      readFile: () => {
+        throw new Error("ENOENT");
+      },
+      resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+      resolveReplicaTokenEnv: () => ({ envVar: "OTHER_TOKEN", source: "layer2" }),
+    });
+    const shadow = checks.find(
+      (c) => c.name === "cloud-token-secret-contract-shadow" && c.detail.includes("replica-token resolver"),
+    );
+    expect(shadow).toBeDefined();
+    expect(shadow.status).toBe(STATUS.INFO);
+    expect(shadow.detail).toContain('"OTHER_TOKEN"');
+    // primary grade untouched
+    const primary = checks.find((c) => c.name === "cloud-token");
+    expect(primary.status).toBe(STATUS.INFO);
+  });
+
+  it("replica-name divergence fires against the REAL resolveNodeCloudTokenEnv (production shape, #2916 round-4)", () => {
+    const saved = process.env.CATALYST_CLOUD_TOKEN_ENV;
+    process.env.CATALYST_CLOUD_TOKEN_ENV = "OTHER_TOKEN";
+    try {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => {
+          throw new Error("ENOENT");
+        },
+        resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+        // resolveReplicaTokenEnv left at its REAL default — returns { envVar, source }
+      });
+      const shadow = checks.find(
+        (c) => c.name === "cloud-token-secret-contract-shadow" && c.detail.includes("replica-token resolver"),
+      );
+      expect(shadow).toBeDefined();
+      expect(shadow.detail).toContain('"OTHER_TOKEN"');
+    } finally {
+      if (saved === undefined) delete process.env.CATALYST_CLOUD_TOKEN_ENV;
+      else process.env.CATALYST_CLOUD_TOKEN_ENV = saved;
+    }
+  });
+
+  it("replica-name agreement: no replica-divergence row", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: "/cfg",
+      zshenvPath: "/home/.zshenv",
+      readFile: () => {
+        throw new Error("ENOENT");
+      },
+      resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+      resolveReplicaTokenEnv: () => ({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" }),
+    });
+    expect(checks.some((c) => (c.detail ?? "").includes("replica-token resolver"))).toBe(false);
+  });
+
+    it("agree: contract resolves the same default name → no shadow row", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => { throw new Error("ENOENT"); },
+        resolveSecretContract: () => ({ value: null, source: "none", envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+      });
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    it("disagree: contract resolves a CUSTOM env-var name (Layer-2 catalyst.cloud.tokenEnv) the hand-rolled check never looks at", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => { throw new Error("ENOENT"); },
+        resolveSecretContract: () => ({
+          value: "tok",
+          source: "platform-env",
+          envVar: "MY_CUSTOM_CLOUD_TOKEN",
+          envVarSource: "layer2",
+        }),
+      });
+      const primary = checks.find((c) => c.name === "cloud-token");
+      expect(primary.status).toBe(STATUS.INFO); // unchanged (no cluster-cloud.json → local-only)
+      const shadow = checks.find((c) => c.name === "cloud-token-secret-contract-shadow");
+      expect(shadow).toBeDefined();
+      expect(shadow.status).toBe(STATUS.INFO);
+      expect(shadow.detail).toContain('hardcodes env-var name "CATALYST_CLOUD_TOKEN"');
+      expect(shadow.detail).toContain('resolves "MY_CUSTOM_CLOUD_TOKEN"');
+    });
+
+    it("never returns a FAIL status even with a shadow disagreement present (the token stays optional)", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => { throw new Error("ENOENT"); },
+        resolveSecretContract: () => ({ value: "tok", source: "platform-env", envVar: "OTHER_NAME", envVarSource: "env" }),
+      });
+      for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
+    });
+  });
+
+  describe("grades and exit code are IDENTICAL with the shadow present, agree or disagree", () => {
+    // summarize() only counts PASS/WARN/FAIL — INFO rows (agree = none, disagree =
+    // one extra) never move pass/warn/fail counts or `ok` (design §7/§9's own
+    // exit-code invariant, doctor.mjs:1728-1736).
+    it("checkPeerUniqueness: summarize() is identical across an agree and a disagree fixture", async () => {
+      const base = {
+        getHostName: () => "mini",
+        getLivenessAnchorIssue: () => "CTL-9999",
+        hasLinearToken: () => true,
+        readPeerHeartbeats: async () => ({}),
+      };
+      const agree = await checkPeerUniqueness({ ...base, resolveSecretContract: () => ({ value: "x", source: "inherited", provider: "env-alias" }) });
+      const disagree = await checkPeerUniqueness({ ...base, resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }) });
+      expect(disagree.length).toBe(agree.length + 1); // exactly one extra INFO row
+      expect(summarize(agree)).toEqual(summarize(disagree));
+      expect(summarize(agree).fail).toBe(0);
+    });
+
+    it("checkWebhookIngestion: summarize() is identical across an agree and a disagree fixture", () => {
+      const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+      const fixture = (resolveSecretContract) =>
+        checkWebhookIngestion({
+          resolveRoster: multiHost,
+          monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+          secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+          resolveSecretContract,
+        });
+      const agree = fixture(() => ({ value: "x", source: "shared-file", provider: "bare-file" }));
+      const disagree = fixture(() => ({ value: null, source: "none", provider: "bare-file" }));
+      expect(disagree.length).toBe(agree.length + 1);
+      expect(summarize(agree)).toEqual(summarize(disagree));
+    });
+  });
+});
+
+// ─── CTL-1616 PR2 (B1): shadow resolver must be throw-safe ──────────────────
+//
+// None of the 6 shadow call sites may let a throwing resolveSecretContract/
+// resolveSecretFn dependency propagate: runDoctor's `Promise.all(fns.map(fn
+// => Promise.resolve().then(fn)))` has no per-check isolation, so an uncaught
+// throw from ANY check fn rejects the whole Promise.all and crashes doctor
+// with zero report output (proven — see the "runDoctor" describe below). Each
+// test here injects a resolver that throws and asserts: (a) the check still
+// returns its normal graded rows, unchanged, (b) a LOUD INFO throw-row
+// appears, (c) no FAIL/WARN is introduced by the throw itself.
+const THROWING_RESOLVER = () => {
+  throw new Error("boom: registry lookup exploded");
+};
+
+describe("secret-contract shadow — resolver throw-safety (CTL-1616 PR2 B1)", () => {
+  it("checkPeerUniqueness: a throwing resolver still returns the normal graded row plus a throw-row", async () => {
+    const checks = await checkPeerUniqueness({
+      getHostName: () => "mini",
+      getLivenessAnchorIssue: () => "CTL-9999",
+      hasLinearToken: () => true,
+      readPeerHeartbeats: async () => ({}),
+      resolveSecretContract: THROWING_RESOLVER,
+    });
+    const primary = checks.find((c) => c.name === "peer-uniqueness");
+    expect(primary).toBeDefined();
+    expect(primary.status).toBe(STATUS.WARN); // unchanged (empty heartbeats) — throw did not touch grade
+    const throwRow = checks.find((c) => c.name === "peer-uniqueness-secret-contract-shadow");
+    expect(throwRow).toBeDefined();
+    expect(throwRow.status).toBe(STATUS.INFO);
+    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(throwRow.detail).toContain('secret="linear-api-token"');
+    expect(throwRow.detail).toContain("boom: registry lookup exploded");
+    expect(throwRow.detail).toContain("grade unaffected");
+    expect(summarize(checks).fail).toBe(0);
+  });
+
+  it("checkBotCredentials: a throwing resolver still returns the normal graded rows, throw-row APPENDED (not checks[0] — A1)", async () => {
+    const checks = await checkBotCredentials({
+      readLinearBotUserIds: () => new Set(["bot-user-123"]),
+      linearToken: () => "lin_api_abc",
+      fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
+      expectedBotUserId: null,
+      resolveSecretContract: THROWING_RESOLVER,
+    });
+    // A1: the shadow/throw row is never checks[0] — the primary connectivity
+    // row leads, exactly as it does with no shadow dependency at all.
+    expect(checks[0].name).toBe("linear-connectivity");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    const identity = checks.find((c) => c.name === "bot-identity");
+    expect(identity.status).toBe(STATUS.PASS);
+    const throwRow = checks.find((c) => c.name === "bot-credentials-secret-contract-shadow");
+    expect(throwRow).toBeDefined();
+    expect(throwRow.status).toBe(STATUS.INFO);
+    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(checks[checks.length - 1]).toBe(throwRow); // appended last
+    expect(summarize(checks).fail).toBe(0);
+  });
+
+  it("checkWebhookIngestion: a throwing resolver still returns the normal graded row plus a throw-row", () => {
+    const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+      resolveSecretContract: THROWING_RESOLVER,
+    });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.PASS); // unchanged
+    const throwRow = checks.find((c) => c.name === "webhook-ingestion-secret-contract-shadow");
+    expect(throwRow).toBeDefined();
+    expect(throwRow.status).toBe(STATUS.INFO);
+    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(throwRow.detail).toContain('secret="webhook-secret"');
+    expect(summarize(checks).fail).toBe(0);
+  });
+
+  it("checkCloudTokenEnv: a throwing resolver still returns the normal graded row plus a throw-row", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: "/cfg",
+      zshenvPath: "/home/.zshenv",
+      readFile: () => { throw new Error("ENOENT"); },
+      resolveSecretContract: THROWING_RESOLVER,
+    });
+    const primary = checks.find((c) => c.name === "cloud-token");
+    expect(primary).toBeDefined();
+    expect(primary.status).toBe(STATUS.INFO); // unchanged (local-only, no cluster-cloud.json)
+    const throwRow = checks.find((c) => c.name === "cloud-token-secret-contract-shadow");
+    expect(throwRow).toBeDefined();
+    expect(throwRow.status).toBe(STATUS.INFO);
+    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(throwRow.detail).toContain('secret="cloud-token"');
+    for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
+  });
+
+  it("checkSecretContract: a resolver that throws for one id still resolves the other id normally", () => {
+    const checks = checkSecretContract({
+      resolveSecretFn: (id) => {
+        if (id === "groq-api-key") throw new Error("groq lookup exploded");
+        return { value: `v-${id}`, source: "inherited", provider: "env-alias" };
+      },
+    });
+    const linear = checks.find((c) => c.name === "secret-contract-linear-api-token");
+    expect(linear).toBeDefined();
+    expect(linear.status).toBe(STATUS.INFO);
+    expect(linear.detail).toContain("secret contract resolves");
+    const groqThrow = checks.find((c) => c.name === "secret-contract-groq-api-key-secret-contract-shadow");
+    expect(groqThrow).toBeDefined();
+    expect(groqThrow.status).toBe(STATUS.INFO);
+    expect(groqThrow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(groqThrow.detail).toContain("groq lookup exploded");
+    expect(summarize(checks)).toEqual({ pass: 0, warn: 0, fail: 0, ok: true });
+  });
+
+  it("checkSecretContract: a resolver that always throws never produces a FAIL/WARN or an empty result", () => {
+    const checks = checkSecretContract({ resolveSecretFn: THROWING_RESOLVER });
+    expect(checks.length).toBe(2); // one throw-row per shadow-covered id
+    for (const c of checks) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("SHADOW RESOLVER THREW");
+    }
+    expect(summarize(checks)).toEqual({ pass: 0, warn: 0, fail: 0, ok: true });
+  });
+
+  it("runDoctor: a throwing shadow resolver does not crash the run — exit code and check count match the non-throwing control", async () => {
+    const controlChecks = [
+      () => [mkCheck("always-pass", STATUS.PASS, "ok")],
+      async () =>
+        checkPeerUniqueness({
+          getHostName: () => "mini",
+          getLivenessAnchorIssue: () => "CTL-9999",
+          hasLinearToken: () => true,
+          readPeerHeartbeats: async () => ({}),
+          resolveSecretContract: () => ({ value: "x", source: "inherited", provider: "env-alias" }),
+        }),
+    ];
+    const throwingChecks = [
+      () => [mkCheck("always-pass", STATUS.PASS, "ok")],
+      async () =>
+        checkPeerUniqueness({
+          getHostName: () => "mini",
+          getLivenessAnchorIssue: () => "CTL-9999",
+          hasLinearToken: () => true,
+          readPeerHeartbeats: async () => ({}),
+          resolveSecretContract: THROWING_RESOLVER,
+        }),
+    ];
+    let controlExit, throwingExit;
+    const logs = { control: null, throwing: null };
+    controlExit = await runDoctor({ checks: controlChecks, json: true, log: (s) => { logs.control = s; } });
+    throwingExit = await runDoctor({ checks: throwingChecks, json: true, log: (s) => { logs.throwing = s; } });
+    expect(throwingExit).toBe(controlExit); // exit code (FAIL count) unaffected
+    expect(logs.throwing).not.toBeNull(); // doctor produced report output — did not crash
+    const throwingReport = JSON.parse(logs.throwing);
+    const controlReport = JSON.parse(logs.control);
+    expect(throwingReport.checks.length).toBe(controlReport.checks.length + 1); // one extra INFO throw-row
+    expect(throwingReport.checks.some((c) => c.name === "peer-uniqueness-secret-contract-shadow")).toBe(true);
   });
 });
 

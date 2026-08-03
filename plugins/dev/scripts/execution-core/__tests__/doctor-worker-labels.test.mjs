@@ -15,10 +15,21 @@ function healthyNodes() {
 }
 
 // "healthy" defaults; override per test.
+//
+// CTL-1616 PR2: resolveSecretContract is a shadow-only dependency (design §7) —
+// it must AGREE with `linearToken` here so these pre-existing behavioral tests
+// (which predate the shadow pass) don't spuriously grow an extra
+// worker-labels-secret-contract-shadow entry. Fixed values, never the real
+// registry resolver — the real resolver would make these tests' output depend
+// on whatever LINEAR_API_TOKEN/LINEAR_API_KEY happen to be set in the runner's
+// ambient environment (present on a dev shell, absent under `bun test`'s
+// isolated env), which is exactly the flakiness class this file's existing
+// tests were written to avoid via full dependency injection.
 function deps(over = {}) {
   return {
     getRoster: () => ROSTER,
     linearToken: () => "lin_api_test_token",
+    resolveSecretContract: () => ({ value: "contract_test_token", source: "inherited", provider: "env-alias" }),
     post: async () => ({ data: { issueLabels: { nodes: healthyNodes() } } }),
     ...over,
   };
@@ -53,7 +64,9 @@ describe("checkWorkerLabels", () => {
   });
 
   test("no token → single INFO (skip, not warn)", async () => {
-    const recs = await checkWorkerLabels(deps({ linearToken: () => "" }));
+    const recs = await checkWorkerLabels(
+      deps({ linearToken: () => "", resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }) }),
+    );
     expect(recs).toHaveLength(1);
     expect(recs[0].name).toBe("worker-labels");
     expect(recs[0].status).toBe("info");
@@ -138,6 +151,56 @@ describe("checkWorkerLabels", () => {
           const recs = await checkWorkerLabels(deps({ getRoster, linearToken, post }));
           expect(noFail(recs)).toBe(true);
         }
+  });
+});
+
+// ─── CTL-1616 PR2: secret-contract shadow (the "third value-read site") ────
+describe("checkWorkerLabels — secret-contract shadow (CTL-1616 PR2)", () => {
+  test("agree (both present) → no shadow row", async () => {
+    const recs = await checkWorkerLabels(deps());
+    expect(recs.some((r) => r.name.includes("secret-contract-shadow"))).toBe(false);
+  });
+
+  test("disagree (hand-rolled present, contract absent) → loud INFO row, primary grade unchanged", async () => {
+    const recs = await checkWorkerLabels(
+      deps({ resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }) }),
+    );
+    const shadow = recs.find((r) => r.name === "worker-labels-secret-contract-shadow");
+    expect(shadow).toBeDefined();
+    expect(shadow.status).toBe("info");
+    expect(shadow.detail).toContain('secret="linear-api-token"');
+    expect(shadow.detail).toContain("hand-rolled=present");
+    expect(shadow.detail).toContain("contract={value:absent");
+    // Primary rows (group + per-host children) are untouched by the shadow.
+    expect(recs.filter((r) => r.name !== "worker-labels-secret-contract-shadow")).toHaveLength(ROSTER.length);
+  });
+
+  test("a shadow disagreement never yields a FAIL record either", async () => {
+    const recs = await checkWorkerLabels(
+      deps({ resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }) }),
+    );
+    expect(noFail(recs)).toBe(true);
+  });
+
+  // CTL-1616 PR2 (B1): a throwing resolver must never crash this check —
+  // runDoctor's Promise.all has no per-check isolation, so an uncaught throw
+  // here would take down the whole doctor run.
+  test("resolver throws → normal graded rows still returned, plus a loud INFO throw-row, no FAIL", async () => {
+    const recs = await checkWorkerLabels(
+      deps({
+        resolveSecretContract: () => {
+          throw new Error("boom: registry lookup exploded");
+        },
+      }),
+    );
+    // Primary rows (group + per-host children) are untouched by the throw.
+    expect(recs.filter((r) => r.name !== "worker-labels-secret-contract-shadow")).toHaveLength(ROSTER.length);
+    const throwRow = recs.find((r) => r.name === "worker-labels-secret-contract-shadow");
+    expect(throwRow).toBeDefined();
+    expect(throwRow.status).toBe("info");
+    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(throwRow.detail).toContain("boom: registry lookup exploded");
+    expect(noFail(recs)).toBe(true);
   });
 });
 
