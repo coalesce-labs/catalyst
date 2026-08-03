@@ -178,7 +178,13 @@ function shadowErrString(err) {
     if (typeof m === "string" && m) return m;
     return String(err);
   } catch {
-    return Object.prototype.toString.call(err);
+    // Even the fallback can throw (a revoked Proxy throws on ANY operation,
+    // including Object.prototype.toString.call) — end at a literal.
+    try {
+      return Object.prototype.toString.call(err);
+    } catch {
+      return "[unrenderable thrown value]";
+    }
   }
 }
 
@@ -2540,9 +2546,13 @@ export function checkCloudTokenEnv(deps = {}) {
     }
     // Second comparison (#2916 round-3): contract name vs checkCloudSync's
     // replica-token name path. Throw-safe like every shadow call.
+    // resolveNodeCloudTokenEnv returns { envVar, source } (config.mjs) — read
+    // .envVar, never treat the result as a bare string (#2916 round-4: the
+    // string-typed guard made this comparison unreachable in production).
     let replicaName = null;
     try {
-      replicaName = resolveReplicaTokenEnv();
+      const replicaResolved = resolveReplicaTokenEnv();
+      replicaName = typeof replicaResolved?.envVar === "string" ? replicaResolved.envVar : null;
     } catch (err) {
       cloudShadowChecks.push(shadowThrowCheck("cloud-token-replica-name", "cloud-token", err));
     }

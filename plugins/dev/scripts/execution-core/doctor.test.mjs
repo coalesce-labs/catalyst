@@ -2254,8 +2254,10 @@ describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)"
     }
   });
 
-  it("non-Error resolver throws (Symbol, null-proto object) stay inside the shadow (#2916 round-3 P3)", () => {
-    for (const thrown of [Symbol("boom"), Object.create(null)]) {
+  it("non-Error resolver throws (Symbol, null-proto object, revoked Proxy) stay inside the shadow (#2916 round-3/4 P3)", () => {
+    const { proxy: revokedProxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    for (const thrown of [Symbol("boom"), Object.create(null), revokedProxy]) {
       const checks = checkSecretContract({
         resolveSecretFn: () => {
           throw thrown;
@@ -2512,7 +2514,7 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
         throw new Error("ENOENT");
       },
       resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
-      resolveReplicaTokenEnv: () => "OTHER_TOKEN",
+      resolveReplicaTokenEnv: () => ({ envVar: "OTHER_TOKEN", source: "layer2" }),
     });
     const shadow = checks.find(
       (c) => c.name === "cloud-token-secret-contract-shadow" && c.detail.includes("replica-token resolver"),
@@ -2525,6 +2527,30 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
     expect(primary.status).toBe(STATUS.INFO);
   });
 
+  it("replica-name divergence fires against the REAL resolveNodeCloudTokenEnv (production shape, #2916 round-4)", () => {
+    const saved = process.env.CATALYST_CLOUD_TOKEN_ENV;
+    process.env.CATALYST_CLOUD_TOKEN_ENV = "OTHER_TOKEN";
+    try {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => {
+          throw new Error("ENOENT");
+        },
+        resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+        // resolveReplicaTokenEnv left at its REAL default — returns { envVar, source }
+      });
+      const shadow = checks.find(
+        (c) => c.name === "cloud-token-secret-contract-shadow" && c.detail.includes("replica-token resolver"),
+      );
+      expect(shadow).toBeDefined();
+      expect(shadow.detail).toContain('"OTHER_TOKEN"');
+    } finally {
+      if (saved === undefined) delete process.env.CATALYST_CLOUD_TOKEN_ENV;
+      else process.env.CATALYST_CLOUD_TOKEN_ENV = saved;
+    }
+  });
+
   it("replica-name agreement: no replica-divergence row", () => {
     const checks = checkCloudTokenEnv({
       configDir: "/cfg",
@@ -2533,7 +2559,7 @@ describe("secret-contract shadow — zero grade change (CTL-1616 PR2)", () => {
         throw new Error("ENOENT");
       },
       resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
-      resolveReplicaTokenEnv: () => "CATALYST_CLOUD_TOKEN",
+      resolveReplicaTokenEnv: () => ({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" }),
     });
     expect(checks.some((c) => (c.detail ?? "").includes("replica-token resolver"))).toBe(false);
   });
