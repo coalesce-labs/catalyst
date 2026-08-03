@@ -145,6 +145,88 @@ import { resolvePhaseSessionId } from "./session-resolve.mjs";
 export { resolvePhaseSessionId };
 import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
+// detectSessionRateLimitHit — best-effort: did the dead worker's OWN session
+// immediately hit a Claude account usage/session limit, rather than genuinely
+// failing to make progress on the ticket's actual work?
+//
+// Confirmed live 2026-08-03: 11 tickets across 2 hosts all escalated as
+// generic "no-progress" after 3 real retry cycles, each ~10 min apart — but
+// every one of their dead sessions' transcripts consisted of nothing but the
+// harness's own canned reply ("You've hit your session limit · resets
+// <time>") with ZERO tool use, for EVERY attempt. The CTL-736 progress gate
+// correctly measured zero forward progress (nothing was ever attempted), and
+// the 3-strikes ask-cap correctly escalated — the STOP/escalate MACHINERY was
+// never wrong. What was wrong is the human-facing explanation: "no forward
+// progress" reads as "the WORK is stuck," when the true story is "the
+// ACCOUNT was rate-limited," which took real session-transcript archaeology
+// to uncover and cost real operator time. This function lets the no-progress
+// escalation's `extras` carry that distinction so the NEXT occurrence is
+// immediately diagnosable from the Linear comment alone.
+//
+// Deliberately does NOT change the STOP/escalate/ask-cap decision or timing —
+// only enriches the explanation once that decision has already been made
+// (see the no-progress call site). Best-effort throughout: a missing
+// bg_job_id, an unresolvable session, a missing/unreadable transcript, or a
+// malformed line never throws — it just means "we couldn't tell," not "it
+// didn't happen."
+export function detectSessionRateLimitHit(
+  bgJobId,
+  {
+    resolveSession = resolvePhaseSessionId,
+    findTranscript: findT = findTranscript,
+    projectsDir = defaultProjectsDir(),
+    readFileSync: readFile = readFileSync,
+    // Only the tail of the transcript is inspected — a genuine rate-limit hit
+    // ends the session immediately, so the tell-tale text is at or near the
+    // end even for a longer-lived worker that hit the limit mid-run.
+    tailLines = 20,
+  } = {},
+) {
+  if (!bgJobId) return false;
+  let sessionId;
+  try {
+    sessionId = resolveSession(bgJobId);
+  } catch {
+    return false;
+  }
+  if (!sessionId) return false;
+  let transcriptPath;
+  try {
+    transcriptPath = findT(sessionId, projectsDir);
+  } catch {
+    return false;
+  }
+  if (!transcriptPath) return false;
+  let lines;
+  try {
+    lines = readFile(transcriptPath, "utf8").split("\n").filter((l) => l.trim() !== "");
+  } catch {
+    return false;
+  }
+  const start = Math.max(0, lines.length - tailLines);
+  for (let i = lines.length - 1; i >= start; i--) {
+    let entry;
+    try {
+      entry = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    if (entry?.type !== "assistant") continue;
+    const content = entry?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const c of content) {
+      if (
+        c?.type === "text" &&
+        typeof c.text === "string" &&
+        /hit your (session|usage) limit/i.test(c.text)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime,
 // parsed .state, and .firstTerminalAt. Injectable so tests never touch real
@@ -1941,6 +2023,12 @@ export function reclaimDeadWorkIfPossible(
     appendEvent = defaultAppendReclaimEvent,
     appendReviveEvent = defaultAppendReviveEvent,
     appendEscalatedEvent = defaultAppendEscalatedEvent,
+    // 2026-08-03: best-effort session-transcript check so a no-progress
+    // escalation caused by the WORKER hitting a Claude account rate limit is
+    // labeled accurately rather than as a generic "no forward progress" —
+    // see detectSessionRateLimitHit's own header for the full rationale.
+    // Never changes the STOP/escalate decision itself, only its explanation.
+    detectRateLimit = detectSessionRateLimitHit,
     appendReviveSuppressedEvent = defaultAppendReviveSuppressedEvent,
     reviveDispatch = defaultReviveDispatch,
     applyStalledLabel = defaultApplyStalledLabel,
@@ -3075,14 +3163,37 @@ export function reclaimDeadWorkIfPossible(
       }).catch(() => {});
       intentAwareKill({ bgJobId: prevBgJobId });
     }
+    // 2026-08-03: best-effort check on the DEAD worker's own transcript —
+    // never changes this STOP/escalate decision, only enriches the human-
+    // facing explanation when the true cause was an account rate limit
+    // rather than the work itself stalling. See detectSessionRateLimitHit.
+    let rateLimited = false;
+    try {
+      rateLimited = detectRateLimit(prevBgJobId);
+    } catch {
+      rateLimited = false;
+    }
     log.warn(
-      { ticket, phase, prevBgJobId, currentProgress, lastProgress },
+      { ticket, phase, prevBgJobId, currentProgress, lastProgress, rateLimited },
       "ctl-736: no forward progress since last attempt — stopping, not respawning"
     );
     // needs-human (cool-down + breaker guarded). When the Linear breaker is open
     // the escalation defers — surface that so the scheduler does not record a
     // clean stop (the worker is killed, but the label retries next tick).
-    const esc = escalateOnce("no-progress", currentProgress);
+    const esc = escalateOnce(
+      "no-progress",
+      currentProgress,
+      rateLimited
+        ? {
+            call_to_action:
+              `${ticket} ${phase} looks like it hit a Claude account usage/rate limit on every ` +
+              "attempt (its dead session transcript shows the harness's own rate-limit reply, " +
+              "not real work) — wait for the usage window to reset and reply to retry, or reroute " +
+              "this phase to a different executor?",
+            observed: { likely_cause: "account-rate-limited" },
+          }
+        : undefined,
+    );
     return esc === "rate-limited-deferred" ? "rate-limited-deferred" : "no-progress-stopped";
   }
   // Forward progress was made → record the new high-water mark and revive below.
