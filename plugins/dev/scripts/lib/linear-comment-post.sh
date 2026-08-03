@@ -42,6 +42,8 @@ if [[ -n "$CATALYST_SECRET_LAST_VALUE" ]]; then
   CLIENT_ID=$(printf '%s' "$CATALYST_SECRET_LAST_VALUE" | jq -r '.clientId // empty' 2>/dev/null)
   CLIENT_SECRET=$(printf '%s' "$CATALYST_SECRET_LAST_VALUE" | jq -r '.clientSecret // empty' 2>/dev/null)
 fi
+# Secret hygiene (#2924 post-merge Codex P2): drop the breadcrumb once copied.
+unset CATALYST_SECRET_LAST_VALUE
 
 # CTL-1111 back-compat: the pre-fold script ran the per-team directory walk-up (and its "no
 # projectKey found" loud warning) UNCONDITIONALLY whenever the env-credential-pair was absent

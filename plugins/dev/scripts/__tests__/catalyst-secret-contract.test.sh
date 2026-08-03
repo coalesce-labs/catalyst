@@ -609,6 +609,19 @@ expect_eq "B4: catalyst_arm_secret(unknown id) under set -e exits 0 (does not ab
 expect_eq "B4: catalyst_arm_secret(unknown id) under set -e still returns the quiet triple" \
   "false|false|false" "$ERREXIT_OUT"
 
+# ─── SECRET-ENV HYGIENE (#2924 post-merge Codex P2): the resolved VALUE must be
+# readable in the resolving shell but NEVER exported (a long-lived daemon shell
+# launches its runtime as a child; an exported credential lands in every
+# descendant's environment). Exportedness asserted via declare -p (-x flag).
+# NOTE: _run treats a leading *=* arg as an env assignment, so the snippet
+# below is written =-free and the token rides the assigns slot.
+HYGIENE_OUT="$(_run LINEAR_API_TOKEN=tok-hygiene 'catalyst_resolve_secret linear-api-token >/dev/null
+printf "%s|" "${CATALYST_SECRET_LAST_VALUE:-ABSENT}"
+case "$(declare -p CATALYST_SECRET_LAST_VALUE 2>/dev/null)" in "declare -x"*) printf "exported|" ;; *) printf "notexported|" ;; esac
+case "$(declare -p CATALYST_SECRET_LAST_SOURCE 2>/dev/null)" in "declare -x"*) printf "exported" ;; *) printf "notexported" ;; esac')"
+expect_eq "hygiene: VALUE readable same-shell, NOT exported; SOURCE breadcrumb exported" \
+  "tok-hygiene|notexported|exported" "$HYGIENE_OUT"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES, Skipped: 0"
 exit "$FAILURES"
