@@ -31,6 +31,7 @@ import {
   checkRepoIconTokenScope,
   defaultConfiguredRepos,
   checkNodeClass,
+  checkDeploymentModeConsistency,
   checkReadReplicaReachable,
   checkMonitorProductionBuild,
   checkWontOwnWork,
@@ -2091,6 +2092,46 @@ describe("checksForClass — checkSdkDaemonEnv registration (CTL-1396)", () => {
   });
 });
 
+describe("checksForClass — checkDeploymentModeConsistency registration (CTL-1617)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+
+  it("worker rubric includes checkDeploymentModeConsistency beside checkNodeClass", () => {
+    const s = src(nodeClassOf({ class: "worker", raw: "worker" }));
+    expect(s).toContain("checkNodeClass");
+    expect(s).toContain("checkDeploymentModeConsistency");
+  });
+
+  it("developer rubric includes checkDeploymentModeConsistency — a fleet-topology fact, not worker-only", () => {
+    const s = src(nodeClassOf({ class: "developer", raw: "developer" }));
+    expect(s).toContain("checkDeploymentModeConsistency");
+  });
+
+  it("monitor rubric includes checkDeploymentModeConsistency", () => {
+    const s = src(nodeClassOf({ class: "monitor", raw: "monitor" }));
+    expect(s).toContain("checkDeploymentModeConsistency");
+  });
+
+  it("an inferred (unset) node class still grades against the worker suite, deployment mode included", () => {
+    const inferred = nodeClassOf({ class: "worker", source: "default", inferred: true, recognized: true, raw: null });
+    const s = src(inferred);
+    expect(s).toContain("checkDeploymentModeConsistency");
+  });
+
+  it("unrecognized node class short-circuits to the single node-class FAIL — deployment mode not graded", () => {
+    const nc = nodeClassOf({ recognized: false, raw: "developr", class: "monitor" });
+    const suite = checksForClass(nc);
+    expect(suite).toHaveLength(1);
+  });
+
+  it("the deployment-mode thunk actually runs checkDeploymentModeConsistency and returns its checks", async () => {
+    const s = checksForClass(nodeClassOf({ class: "worker", raw: "worker" }));
+    const thunk = s.find((f) => f.toString().includes("checkDeploymentModeConsistency"));
+    expect(thunk).toBeDefined();
+    const out = await thunk();
+    expect(out.some((c) => c.name === "deployment-mode")).toBe(true);
+  });
+});
+
 // ─── checkConfigScopeLeak (CTL-1214) ─────────────────────────────────────────
 
 // A kitchen-sink Layer-1 config carrying every relocated stanza (the historical
@@ -2277,6 +2318,385 @@ describe("checkNodeClass (CTL-1355)", () => {
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("developr");
     expect(checks[0].detail).toContain("not one of");
+  });
+});
+
+// ─── CTL-1617: deployment-mode consistency grading ───────────────────────────
+
+const deploymentModeOf = (over = {}) => ({
+  mode: "single-host",
+  source: "layer1",
+  inferred: false,
+  recognized: true,
+  raw: "single-host",
+  ...over,
+});
+
+const rosterOf = (over = {}) => ({
+  hosts: ["mini"],
+  source: "single-host",
+  multiHost: false,
+  ...over,
+});
+
+describe("checkDeploymentModeConsistency (CTL-1617)", () => {
+  describe("check 1: deployment-mode", () => {
+    it("PASSes an explicit, recognized deployment mode showing value + source", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm.status).toBe(STATUS.PASS);
+      expect(dm.detail).toContain("cluster");
+      expect(dm.detail).toContain("layer1");
+    });
+
+    it("WARNs (not FAILs) an inferred deployment mode by default, naming the declare-it fix", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        resolveRoster: () => rosterOf(),
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm.status).toBe(STATUS.WARN);
+      expect(dm.detail).toContain("deployment mode");
+      expect(dm.detail).toContain("not declared");
+      expect(dm.detail).toContain("catalyst.deployment.mode");
+      expect(dm.detail).toContain("CATALYST_DEPLOYMENT_MODE");
+    });
+
+    it("escalates an inferred deployment mode to FAIL under strict:true (install-verification profile)", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        resolveRoster: () => rosterOf(),
+        strict: true,
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm.status).toBe(STATUS.FAIL);
+    });
+
+    it("does not FAIL on an inferred deployment mode when strict is false (default)", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        resolveRoster: () => rosterOf(),
+        strict: false,
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm.status).not.toBe(STATUS.FAIL);
+    });
+
+    it("deployment-mode is always emitted even for an unrecognized explicit value", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host", // resolver already degraded the typo to single-host
+          source: "env",
+          inferred: false,
+          recognized: false,
+          raw: "clustre",
+        }),
+        resolveRoster: () => rosterOf(),
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm).toBeDefined();
+      expect(dm.status).not.toBe(STATUS.FAIL); // check 2 owns the FAIL for this case
+    });
+  });
+
+  describe("check 2: deployment-mode-recognized", () => {
+    it("FAILs an explicit UNRECOGNIZED deployment mode, naming the raw value and the enum", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "env",
+          inferred: false,
+          recognized: false,
+          raw: "clustre",
+        }),
+        resolveRoster: () => rosterOf(),
+      });
+      const rec = checks.find((c) => c.name === "deployment-mode-recognized");
+      expect(rec).toBeDefined();
+      expect(rec.status).toBe(STATUS.FAIL);
+      expect(rec.detail).toContain("clustre");
+      expect(rec.detail).toContain("not one of");
+      expect(rec.detail).toContain("deployment mode");
+    });
+
+    it("is absent entirely when the deployment mode is recognized", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "single-host", recognized: true }),
+        resolveRoster: () => rosterOf(),
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-recognized")).toBeUndefined();
+    });
+  });
+
+  describe("check 3: deployment-mode-roster-consistency", () => {
+    it("is GATED on inferred:false — absent entirely for an inferred deployment mode", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        // A multi-host roster would trip the WARN below if this check ran —
+        // proving the gate, not just an absence-of-signal false negative.
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-roster-consistency")).toBeUndefined();
+    });
+
+    it('WARNs when declared "single-host" but a multi-host roster resolved', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "single-host", source: "layer2" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.WARN);
+      expect(rc.detail).toContain("single-host");
+      expect(rc.detail).toContain("multi-host roster");
+    });
+
+    it('WARNs when declared "cluster" but no authoritative roster resolved (source=single-host)', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini"], source: "single-host", multiHost: false }),
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.WARN);
+      expect(rc.detail).toContain("cluster");
+      expect(rc.detail).toContain("no authoritative roster");
+    });
+
+    it('WARNs when declared "cloud" but no authoritative roster resolved (source=single-host)', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini"], source: "single-host", multiHost: false }),
+        // check 4 also fires for mode==="cloud" — pin an unreachable fetch so it
+        // resolves deterministically (INFO) and doesn't touch this test's assertions.
+        fetch: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.WARN);
+      expect(rc.detail).toContain("cloud");
+    });
+
+    it('PASSes when declared "single-host" and the roster is single-host', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "single-host", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini"], source: "single-host", multiHost: false }),
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.PASS);
+    });
+
+    it('PASSes when declared "cluster" and an authoritative multi-host roster resolved', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.PASS);
+    });
+
+    it("never FAILs — roster inconsistency is always advisory (WARN), even on garbage roster shapes", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => ({}), // malformed/empty resolver result
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).not.toBe(STATUS.FAIL);
+    });
+  });
+
+  describe("check 4: deployment-mode-tunnel-consistency", () => {
+    it('is absent entirely when declared deployment mode is "single-host"', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "single-host", source: "layer1" }),
+        resolveRoster: () => rosterOf(),
+        fetch: async () => {
+          throw new Error("should never be called for a non-cloud deployment mode");
+        },
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-tunnel-consistency")).toBeUndefined();
+    });
+
+    it('is absent entirely when declared deployment mode is "cluster"', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+        fetch: async () => {
+          throw new Error("should never be called for a non-cloud deployment mode");
+        },
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-tunnel-consistency")).toBeUndefined();
+    });
+
+    it('is absent entirely when the deployment mode is inferred (never "cloud" by construction)', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        resolveRoster: () => rosterOf(),
+        fetch: async () => {
+          throw new Error("should never be called for a non-cloud deployment mode");
+        },
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-tunnel-consistency")).toBeUndefined();
+    });
+
+    it('WARNs when a live smee tunnel is observed on a declared "cloud" node', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf(),
+        webhookTunnelBaseUrl: "http://localhost:7400",
+        fetch: async () => ({ ok: true, status: 200, json: async () => ({ connected: true }) }),
+      });
+      const tc = checks.find((c) => c.name === "deployment-mode-tunnel-consistency");
+      expect(tc).toBeDefined();
+      expect(tc.status).toBe(STATUS.WARN);
+      expect(tc.detail).toContain("deployment mode");
+      expect(tc.detail.toLowerCase()).toContain("cloud");
+      expect(tc.detail.toLowerCase()).toContain("smee");
+    });
+
+    it('PASSes when no smee tunnel is observed on a declared "cloud" node', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf(),
+        webhookTunnelBaseUrl: "http://localhost:7400",
+        fetch: async () => ({ ok: true, status: 200, json: async () => ({ connected: false }) }),
+      });
+      const tc = checks.find((c) => c.name === "deployment-mode-tunnel-consistency");
+      expect(tc.status).toBe(STATUS.PASS);
+    });
+
+    it("INFOs (never FAILs) when the local monitor is unreachable", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf(),
+        webhookTunnelBaseUrl: "http://localhost:7400",
+        fetch: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+      });
+      const tc = checks.find((c) => c.name === "deployment-mode-tunnel-consistency");
+      expect(tc.status).toBe(STATUS.INFO);
+      expect(tc.status).not.toBe(STATUS.FAIL);
+      expect(tc.detail).toContain("could not verify");
+    });
+
+    it("INFOs (never FAILs) when the local monitor responds with a non-2xx status", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf(),
+        webhookTunnelBaseUrl: "http://localhost:7400",
+        fetch: async () => ({ ok: false, status: 502 }),
+      });
+      const tc = checks.find((c) => c.name === "deployment-mode-tunnel-consistency");
+      expect(tc.status).toBe(STATUS.INFO);
+      expect(tc.status).not.toBe(STATUS.FAIL);
+    });
+
+    it("defaults webhookTunnelBaseUrl to http://localhost:${MONITOR_PORT||7400} (port-resolution spike)", async () => {
+      const priorPort = process.env.MONITOR_PORT;
+      delete process.env.MONITOR_PORT;
+      try {
+        let requestedUrl = null;
+        await checkDeploymentModeConsistency({
+          deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+          resolveRoster: () => rosterOf(),
+          fetch: async (url) => {
+            requestedUrl = url;
+            return { ok: true, status: 200, json: async () => ({ connected: false }) };
+          },
+        });
+        expect(requestedUrl).toBe("http://localhost:7400/api/status/webhook-tunnel");
+      } finally {
+        if (priorPort === undefined) delete process.env.MONITOR_PORT;
+        else process.env.MONITOR_PORT = priorPort;
+      }
+    });
+  });
+
+  describe("every message says \"deployment mode\" fully qualified", () => {
+    it("across PASS/WARN/FAIL branches, never bare \"mode\"", async () => {
+      const scenarios = (
+        await Promise.all([
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+            resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+          }),
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({
+              mode: "single-host",
+              source: "default",
+              inferred: true,
+              recognized: true,
+              raw: null,
+            }),
+            resolveRoster: () => rosterOf(),
+          }),
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({
+              mode: "single-host",
+              source: "env",
+              inferred: false,
+              recognized: false,
+              raw: "clustre",
+            }),
+            resolveRoster: () => rosterOf(),
+          }),
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({ mode: "single-host", source: "layer2" }),
+            resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+          }),
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+            resolveRoster: () => rosterOf(),
+            webhookTunnelBaseUrl: "http://localhost:7400",
+            fetch: async () => ({ ok: true, status: 200, json: async () => ({ connected: true }) }),
+          }),
+        ])
+      ).flat();
+      for (const c of scenarios) {
+        expect(c.detail.toLowerCase()).toContain("deployment mode");
+      }
+    });
+  });
+
+  it("defaults resolveRoster to the real resolveClusterHosts when uninjected (no throw)", async () => {
+    // Smoke test only — proves the default seam wires without throwing; does
+    // not assert on the (environment-dependent) resulting status.
+    await expect(
+      checkDeploymentModeConsistency({ deploymentMode: deploymentModeOf({ mode: "single-host" }) }),
+    ).resolves.toBeDefined();
   });
 });
 

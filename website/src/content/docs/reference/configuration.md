@@ -546,6 +546,11 @@ In `~/.config/catalyst/config.json` (Layer-2, per-host override):
 { "catalyst": { "deployment": { "mode": "single-host" } } }
 ```
 
+**This repository declares `cluster`** (CTL-1617 PR4 — the working installation is a 2-host fleet).
+A dev-clone on a machine that runs no Catalyst stack should set the Layer-2 `single-host` override
+above; without it, `catalyst doctor` on that machine reports a declared-cluster-but-no-roster
+deployment-mode WARN (advisory only — nothing else changes).
+
 **Resolution** (`resolveDeploymentMode()` / `catalyst_resolve_deployment_mode`):
 
 | Precedence | Source                                                |

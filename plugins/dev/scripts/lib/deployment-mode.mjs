@@ -117,16 +117,33 @@ function resolveLayer1Path(env, layer1ConfigPath) {
 // UNPAIRED_SURROGATE — a UTF-16 code unit in the surrogate range that is not
 // part of a valid high+low pair. JSON.parse accepts lone-surrogate escapes
 // (`"clu\ud800ster"`) but jq rejects the WHOLE document (exit 5), so the bash
-// mirror can never see such a value. Parity rule: a mode string carrying an
-// unpaired surrogate makes the LAYER malformed in BOTH languages — fall
-// through, exactly as bash does after jq's rejection. Valid surrogate PAIRS
-// (astral characters) parse fine in both and are simply non-members.
+// mirror can never see ANY value out of such a file. Parity rule: an unpaired
+// surrogate escape ANYWHERE in the document makes the LAYER malformed in BOTH
+// languages — fall through, exactly as bash does after jq's whole-document
+// rejection. (Codex on #2903 proved checking only the extracted mode string
+// diverges: {"mode":"cloud","other":"\ud800"} fell through in bash but
+// resolved cloud in JS.) Valid surrogate PAIRS (astral characters) parse fine
+// in both and are simply non-members.
+//
+// The RAW-TEXT scan matches escape SEQUENCES (`\uD800` as six source chars,
+// case-insensitive, not preceded by a pair-forming high escape / not followed
+// by a low escape). Literal surrogate BYTES cannot occur: they are not valid
+// UTF-8, so a file containing them fails both parsers anyway. An even number
+// of preceding backslashes means the escape is live; this scan deliberately
+// over-rejects the pathological `\\ud800` (escaped-backslash-then-text) case —
+// a config whose text spells a surrogate escape at all is treated as malformed
+// at that layer, which only ever degrades toward fall-through, never toward
+// activating a mode.
 const UNPAIRED_SURROGATE =
   /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/;
+const UNPAIRED_SURROGATE_ESCAPE =
+  /(?:\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?:(?<!\\u[dD][89abAB][0-9a-fA-F]{2})\\u[dD][c-fC-F][0-9a-fA-F]{2})/;
 
 function readDeploymentModeField(filePath) {
   try {
-    const mode = JSON.parse(readFileSync(filePath, "utf8"))?.catalyst?.deployment?.mode;
+    const text = readFileSync(filePath, "utf8");
+    if (UNPAIRED_SURROGATE_ESCAPE.test(text)) return undefined;
+    const mode = JSON.parse(text)?.catalyst?.deployment?.mode;
     if (typeof mode === "string" && UNPAIRED_SURROGATE.test(mode)) return undefined;
     return mode;
   } catch {

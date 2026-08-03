@@ -61,6 +61,16 @@ import {
 // CTL-1100: FSM descriptor endpoint. Confirmed bun:sqlite-free (no computed
 // specifier needed — plain static import is safe for Vite/esbuild graph).
 import { buildFsmDescriptor } from "../lib/fsm-descriptor.mjs";
+// CTL-1617: the canonical deployment-mode resolver — a zero-import leaf
+// (node:fs/node:os/node:path only). Imported directly cross-directory rather
+// than via execution-core/config.mjs's re-export: config.mjs's own import
+// chain reaches bun:sqlite through linear-query.mjs, which doctor.mjs's
+// bare-Node runtime rejects — a constraint that doesn't apply to this file
+// (bun), but the leaf is the single source of truth either way, so importing
+// it directly here avoids adding a needless indirection. Precedent for this
+// exact direct cross-directory `.mjs` import shape: the fsm-descriptor.mjs
+// import immediately above, and ui/src/board/process-surface.test.ts:5.
+import { getDeploymentMode } from "../lib/deployment-mode.mjs";
 // CTL-1100: belief store query functions (pure, db-injected). belief-store-queries.mjs
 // has no static bun:sqlite import — plain static import is safe for Vite/esbuild graph.
 import {
@@ -525,6 +535,10 @@ export interface CreateServerOptions {
      * teams that appear here so the HUD's REPO column populates for Linear
      * events. Empty / absent = no enrichment (pre-CTL-362 behaviour). */
     linearTeams?: Array<{ key: string; vcsRepo: string }>;
+    /** Test override for the smee-client constructor used by the Linear
+     * webhook tunnel — mirrors `webhookConfig.tunnelFactory` above. Omitted
+     * in production (the real smee-client is used). CTL-1617. */
+    tunnelFactory?: SmeeClientFactory;
   } | null;
   /** App-actor user ids for agent classification on READ surfaces (the
    *  discussion timeline). Independent of webhook ingestion — configured bot
@@ -538,6 +552,15 @@ export interface CreateServerOptions {
   pushSubscriptionsDbPath?: string;
   /** Override for vapid-keys.json path. Defaults to ${catalystDir}/vapid-keys.json. */
   vapidKeysPath?: string;
+  /**
+   * CTL-1617: override for the deployment-mode reader that gates smee webhook
+   * tunnel startup (a node declared "cloud" must not open a smee tunnel — its
+   * event source is the cloud SDK connection instead). Production defaults to
+   * `getDeploymentMode` (env → Layer-2 → Layer-1 → "single-host"). Tests
+   * inject a deterministic reader so the gate can be exercised for every mode
+   * without touching process.env or real config files.
+   */
+  deploymentModeReader?: (() => string) | null;
 }
 
 const DEFAULT_PORT = 7400;
@@ -867,6 +890,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     pushBridge: pushBridgeOpt = true,
     pushSubscriptionsDbPath,
     vapidKeysPath,
+    deploymentModeReader: deploymentModeReaderOpt,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -5160,74 +5184,107 @@ export function createServer(opts: CreateServerOptions): BunServer {
     );
   }
 
+  // CTL-1617: deployment-mode gate for BOTH smee tunnels below (GitHub +
+  // Linear). A node declared "cloud" expects the cloud SDK event connection
+  // (future work — PR #2755 lineage) as its event source, not the smee
+  // tunnel; a live tunnel on a declared-cloud node is contrary-to-mode
+  // (design §2/§6). Resolved ONCE here (not per-tunnel) so both gates agree
+  // within a single startup. Every other deployment mode — including the
+  // inferred "single-host" default every host resolves today, since nothing
+  // in the live fleet declares a deployment mode yet — leaves this branch
+  // false, so tunnel startup is byte-for-byte unchanged (design §9 PR3
+  // success criterion: provable no-op on the live fleet).
+  const resolveDeploymentModeForTunnelGate =
+    deploymentModeReaderOpt ?? getDeploymentMode;
+  const deploymentModeForTunnelGate = resolveDeploymentModeForTunnelGate();
+  const cloudModeSuppressesTunnels = deploymentModeForTunnelGate === "cloud";
+
   if (webhookConfig && webhookHandler) {
-    const tunnelTarget =
-      webhookConfig.target ?? `http://localhost:${server.port}/api/webhook`;
-    webhookTunnel = createWebhookTunnel({
-      source: webhookConfig.smeeChannel,
-      target: tunnelTarget,
-      logger: {
-        info: (m) => console.info(m),
-        error: (m) => console.error(m),
-      },
-      factory: webhookConfig.tunnelFactory,
-    });
-    void webhookTunnel.start().catch((err: unknown) => {
-      console.error(
-        `[server] webhook tunnel start failed:`,
-        err instanceof Error ? err.message : String(err),
+    if (cloudModeSuppressesTunnels) {
+      // Loud on purpose: a declared-cloud node silently not opening the
+      // GitHub webhook tunnel would be undiagnosable otherwise (a channel is
+      // configured, so the OLD gate at `webhookConfig && webhookHandler`
+      // alone would have started it).
+      console.info(
+        `[server] suppressing GitHub webhook smee tunnel start: deployment mode is "cloud" (event ingestion is the cloud SDK connection, not the smee tunnel)`,
       );
-    });
-    if (webhookReplay && webhookSubscriber) {
-      const replay = webhookReplay;
-      const subscriber = webhookSubscriber;
-      // CTL-216: subscribe to configured watchRepos before replay so they're
-      // present in subscriber.listSubscribed() when replay runs. Errors per
-      // repo are tolerated by ensureSubscribed (logged + continue).
-      const watchRepos = webhookConfig.watchRepos ?? [];
-      const watchSubscriptions =
-        watchRepos.length > 0
-          ? Promise.allSettled(
-              watchRepos.map((repo) => subscriber.ensureSubscribed(repo)),
-            )
-          : Promise.resolve();
-      // 1-hour replay window — wide enough to cover most outages, narrow enough
-      // to keep startup latency under a few seconds.
-      const since = new Date(Date.now() - 60 * 60_000);
-      void watchSubscriptions
-        .then(() => replay.replaySince(subscriber.listSubscribed(), since))
-        .then((count) => {
-          if (count > 0) {
-            console.info(
-              `[server] replayed ${count} webhook deliveries from the last hour`,
+    } else {
+      const tunnelTarget =
+        webhookConfig.target ?? `http://localhost:${server.port}/api/webhook`;
+      webhookTunnel = createWebhookTunnel({
+        source: webhookConfig.smeeChannel,
+        target: tunnelTarget,
+        logger: {
+          info: (m) => console.info(m),
+          error: (m) => console.error(m),
+        },
+        factory: webhookConfig.tunnelFactory,
+      });
+      void webhookTunnel.start().catch((err: unknown) => {
+        console.error(
+          `[server] webhook tunnel start failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+      if (webhookReplay && webhookSubscriber) {
+        const replay = webhookReplay;
+        const subscriber = webhookSubscriber;
+        // CTL-216: subscribe to configured watchRepos before replay so they're
+        // present in subscriber.listSubscribed() when replay runs. Errors per
+        // repo are tolerated by ensureSubscribed (logged + continue).
+        const watchRepos = webhookConfig.watchRepos ?? [];
+        const watchSubscriptions =
+          watchRepos.length > 0
+            ? Promise.allSettled(
+                watchRepos.map((repo) => subscriber.ensureSubscribed(repo)),
+              )
+            : Promise.resolve();
+        // 1-hour replay window — wide enough to cover most outages, narrow enough
+        // to keep startup latency under a few seconds.
+        const since = new Date(Date.now() - 60 * 60_000);
+        void watchSubscriptions
+          .then(() => replay.replaySince(subscriber.listSubscribed(), since))
+          .then((count) => {
+            if (count > 0) {
+              console.info(
+                `[server] replayed ${count} webhook deliveries from the last hour`,
+              );
+            }
+          })
+          .catch((err: unknown) => {
+            console.error(
+              `[server] webhook replay failed:`,
+              err instanceof Error ? err.message : String(err),
             );
-          }
-        })
-        .catch((err: unknown) => {
-          console.error(
-            `[server] webhook replay failed:`,
-            err instanceof Error ? err.message : String(err),
-          );
-        });
+          });
+      }
     }
   }
 
   const linearSmeeChannel = opts.linearWebhookConfig?.smeeChannel ?? "";
   if (linearSmeeChannel.length > 0) {
-    linearWebhookTunnel = createWebhookTunnel({
-      source: linearSmeeChannel,
-      target: `http://localhost:${server.port}/api/webhook/linear`,
-      logger: {
-        info: (m) => console.info(`[linear-tunnel] ${m}`),
-        error: (m) => console.error(`[linear-tunnel] ${m}`),
-      },
-    });
-    void linearWebhookTunnel.start().catch((err: unknown) => {
-      console.error(
-        `[server] linear webhook tunnel start failed:`,
-        err instanceof Error ? err.message : String(err),
+    if (cloudModeSuppressesTunnels) {
+      // Same rationale as the GitHub branch above — loud on purpose.
+      console.info(
+        `[server] suppressing Linear webhook smee tunnel start: deployment mode is "cloud" (event ingestion is the cloud SDK connection, not the smee tunnel)`,
       );
-    });
+    } else {
+      linearWebhookTunnel = createWebhookTunnel({
+        source: linearSmeeChannel,
+        target: `http://localhost:${server.port}/api/webhook/linear`,
+        logger: {
+          info: (m) => console.info(`[linear-tunnel] ${m}`),
+          error: (m) => console.error(`[linear-tunnel] ${m}`),
+        },
+        factory: opts.linearWebhookConfig?.tunnelFactory,
+      });
+      void linearWebhookTunnel.start().catch((err: unknown) => {
+        console.error(
+          `[server] linear webhook tunnel start failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    }
   }
 
   if (pidFile) {

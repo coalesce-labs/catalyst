@@ -57,6 +57,11 @@ import {
   // change-detection marker the daemon's auto-refresh writes.
   getClusterRepoDir,
   getClusterSyncStatePath,
+  // CTL-1617: the one declared deployment-mode answer (single-host/cluster/
+  // cloud), re-exported from the zero-import lib leaf so doctor never grows
+  // a second copy of the resolution ladder.
+  DEPLOYMENT_MODES,
+  resolveDeploymentMode,
 } from "./config.mjs";
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownedBy } from "./hrw.mjs";
@@ -3089,6 +3094,222 @@ export function checkNodeClass(deps = {}) {
   ];
 }
 
+// ─── CTL-1617: deployment-mode consistency grading ───────────────────────────
+
+// checkDeploymentModeConsistency — grade catalyst.deployment.mode (CTL-1617
+// design §7, all four sub-checks). Every
+// message says "deployment mode" fully qualified: this codebase already has
+// three unrelated "mode" concepts (catalyst.orchestration.dispatchMode, the
+// executor-derived dispatch-mode telemetry, readLinearReplica().mode), so
+// bare "mode" in a doctor line is ambiguous.
+//
+//   1. deployment-mode — always emitted. Explicit+recognized → PASS (value +
+//      source). Explicit+UNRECOGNIZED (the resolver already degraded it to
+//      "single-host") → INFO deferring to deployment-mode-recognized below,
+//      which owns that FAIL — this check's own branches are declared-vs-
+//      inferred, not valid-vs-invalid, so it never duplicates check 2's FAIL.
+//      Inferred (unset everywhere) → WARN with the declare-it message
+//      (mirrors the host-name-source WARN-when-implicit pattern verbatim,
+//      ~line 184 above); escalates to FAIL when `strict:true` (the install-
+//      verification profile — an installer that was supposed to persist the
+//      value and didn't is the CTL-1355 install-correctness pattern, same as
+//      checkNodeClass's strict branch above). NOT wired into any strict
+//      profile by this PR — see the checksForClass wiring note below.
+//   2. deployment-mode-recognized — FAIL when `recognized: false` (explicit
+//      typo, already degraded to single-host by the resolver). Same severity
+//      class as checkNodeClass's typo path.
+//   3. deployment-mode-roster-consistency — GATED on `inferred: false` (a
+//      day-one inferred default on a live multi-host cluster must produce
+//      only check 1's declare-it WARN, not a second warning here). Reuses
+//      the same resolveClusterHosts() resolver checkHostIdentity already
+//      calls (no new probe — a cheap, pure, file-backed read, not a network
+//      call). Declared single-host + a multi-host roster resolved, OR
+//      declared cluster/cloud + no authoritative roster (source=single-host)
+//      → WARN. WARN, never FAIL: a transient cluster-repo git-fetch hiccup,
+//      or the declare-then-join migration window, must not flip a healthy
+//      node's doctor red.
+//   4. deployment-mode-tunnel-consistency — GATED on `dm.mode === "cloud"`.
+//      Structurally provably inert for single-host/cluster/inferred: the
+//      resolver's constant default is always "single-host" (§4 of the
+//      design — nothing ever infers "cloud"), so `mode === "cloud"` can only
+//      be true via an EXPLICIT, RECOGNIZED value — this one gate covers both
+//      "only fires in cloud mode" and "only fires when explicit" from the
+//      design in one condition, with no separate `inferred`/`recognized`
+//      check needed. Probes the LOCAL monitor's
+//      `GET /api/status/webhook-tunnel` (port-resolution spike, CTL-1617 §11
+//      Q2: `MONITOR_PORT` env or 7400 — the exact pattern already live in
+//      checkMonitorProductionBuild (defined later in this file); deliberately NOT
+//      checkReadReplicaReachable's baseUrl, which targets a REMOTE
+//      read-replica by design and FAILs on localhost on purpose).
+//      `connected: true` → WARN: a live smee tunnel on a declared-cloud node
+//      is contrary-to-mode (the cloud SDK connection is the expected event
+//      source). Unreachable monitor / any probe failure → INFO "could not
+//      verify" — NEVER FAIL; a down local monitor must not contaminate this
+//      check (same advisory posture as checkMonitorProductionBuild's
+//      INFO-skip).
+//
+// Injected deps (all have real defaults):
+//   deploymentMode      — the resolveDeploymentMode() result object
+//                          ({mode,source,inferred,recognized,raw})
+//   resolveRoster       — () => { hosts, source, multiHost }
+//   strict              — bool, default false (see check 1 above)
+//   webhookTunnelBaseUrl — check 4 only: local monitor base URL, default
+//                          `http://localhost:${MONITOR_PORT || 7400}`
+//   fetch               — check 4 only: default globalThis.fetch
+export async function checkDeploymentModeConsistency(deps = {}) {
+  const {
+    deploymentMode: dm = resolveDeploymentMode(),
+    resolveRoster = resolveClusterHosts,
+    strict = false,
+    webhookTunnelBaseUrl = `http://localhost:${process.env.MONITOR_PORT || 7400}`,
+    fetch: _fetch = globalThis.fetch,
+  } = deps;
+
+  const checks = [];
+
+  // 1. deployment-mode — always emitted.
+  if (!dm.recognized) {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        STATUS.INFO,
+        `deployment mode "${dm.raw}" is not recognized — see deployment-mode-recognized below`,
+      ),
+    );
+  } else if (dm.inferred) {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        strict ? STATUS.FAIL : STATUS.WARN,
+        `deployment mode not declared — treating this node as "${dm.mode}"; set ` +
+          `catalyst.deployment.mode (Layer-1 for the fleet default, Layer-2 for this ` +
+          `host) or CATALYST_DEPLOYMENT_MODE`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        STATUS.PASS,
+        `deployment mode="${dm.mode}" (explicit, source=${dm.source})`,
+      ),
+    );
+  }
+
+  // 2. deployment-mode-recognized — FAIL on an explicit typo.
+  if (!dm.recognized) {
+    checks.push(
+      mkCheck(
+        "deployment-mode-recognized",
+        STATUS.FAIL,
+        `deployment mode "${dm.raw}" is not one of [${DEPLOYMENT_MODES.join(", ")}] — ` +
+          `treating this node as "${dm.mode}" (safest); correct or unset the value ` +
+          `(source=${dm.source})`,
+      ),
+    );
+  }
+
+  // 3. deployment-mode-roster-consistency — gated on inferred:false.
+  if (!dm.inferred) {
+    const roster = resolveRoster() ?? {};
+    const rosterSource = roster.source ?? "unknown";
+    // "declared" vs "resolved": when the explicit value was a typo the resolver
+    // DEGRADED it to single-host — the operator declared the typo, not the mode
+    // this check is grading. Say "resolved (degraded from an unrecognized
+    // value)" in that case so this WARN cannot contradict check 2's FAIL.
+    const declaredPhrase = dm.recognized
+      ? "declared deployment mode"
+      : "resolved deployment mode (degraded from an unrecognized value)";
+    if (dm.mode === "single-host" && roster.multiHost) {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.WARN,
+          `${declaredPhrase} "single-host" but a multi-host roster resolved ` +
+            `(source=${rosterSource}) — HRW dispatch/recovery gates still partition across it`,
+        ),
+      );
+    } else if ((dm.mode === "cluster" || dm.mode === "cloud") && rosterSource === "single-host") {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.WARN,
+          `${declaredPhrase} "${dm.mode}" but no authoritative roster resolved ` +
+            `(source=single-host) — this node effectively runs single-host`,
+        ),
+      );
+    } else {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.PASS,
+          `${declaredPhrase} "${dm.mode}" is consistent with the resolved roster ` +
+            `(source=${rosterSource}, multiHost=${Boolean(roster.multiHost)})`,
+        ),
+      );
+    }
+  }
+
+  // 4. deployment-mode-tunnel-consistency — gated on mode==="cloud" only (see
+  // the doc comment above: structurally provably inert otherwise, since the
+  // resolver never infers "cloud").
+  if (dm.mode === "cloud") {
+    const base = (typeof webhookTunnelBaseUrl === "string" ? webhookTunnelBaseUrl : "").replace(
+      /\/+$/,
+      "",
+    );
+    try {
+      const res = await _fetch(base + "/api/status/webhook-tunnel", {
+        method: "GET",
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!(res?.ok ?? false)) {
+        checks.push(
+          mkCheck(
+            "deployment-mode-tunnel-consistency",
+            STATUS.INFO,
+            `could not verify webhook-tunnel state for deployment mode "cloud" — ` +
+              `${base}/api/status/webhook-tunnel returned HTTP ${res?.status ?? "?"}`,
+          ),
+        );
+      } else {
+        const body = await res.json();
+        if (body?.connected === true) {
+          checks.push(
+            mkCheck(
+              "deployment-mode-tunnel-consistency",
+              STATUS.WARN,
+              `smee webhook tunnel is live on a node with declared deployment mode ` +
+                `"cloud" — expected event ingestion is the cloud SDK connection, not the ` +
+                `smee tunnel`,
+            ),
+          );
+        } else {
+          checks.push(
+            mkCheck(
+              "deployment-mode-tunnel-consistency",
+              STATUS.PASS,
+              `no smee webhook tunnel is live on this declared-cloud node — consistent ` +
+                `with deployment mode "cloud"`,
+            ),
+          );
+        }
+      }
+    } catch (err) {
+      checks.push(
+        mkCheck(
+          "deployment-mode-tunnel-consistency",
+          STATUS.INFO,
+          `could not verify webhook-tunnel state for deployment mode "cloud" — local ` +
+            `monitor at ${base} could not be verified (unreachable or malformed response: ${err?.message ?? err})`,
+        ),
+      );
+    }
+  }
+
+  return checks;
+}
+
 // ─── Developer/monitor: read-replica REACHABILITY (CTL-1346 + CTL-1355) ───────
 
 // defaultReadReplicaBaseUrl — mirror catalyst-stack _vn_read_replica_base /
@@ -3731,6 +3952,13 @@ export function checksForClass(nc, opts = {}) {
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
+  // CTL-1617: deployment-mode consistency — a fleet-topology fact independent
+  // of node class, so it runs for every class (unlike nodeClassCheck it is
+  // never the class-selection short-circuit below). strict:false always here
+  // — this PR wires only the non-strict activation rubric (land-dormant,
+  // CTL-1523 convention); the strict install-profile escalation branch exists
+  // in checkDeploymentModeConsistency but is not wired into any profile yet.
+  const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
 
   // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
   if (!nc.recognized) {
@@ -3787,6 +4015,7 @@ export function checksForClass(nc, opts = {}) {
     // worker-member Claude settings that don't apply to it.
     return [
       nodeClassCheck,
+      deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
@@ -3818,6 +4047,7 @@ export function checksForClass(nc, opts = {}) {
     // the FAIL is removed when the monitor rubric lands (CTL-1355 F3).
     return [
       nodeClassCheck,
+      deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -3841,6 +4071,7 @@ export function checksForClass(nc, opts = {}) {
   // unchanged, with the node-class check prepended (INFO/PASS — never FAILs here).
   return [
     nodeClassCheck,
+    deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),

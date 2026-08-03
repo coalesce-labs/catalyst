@@ -105,6 +105,38 @@ shadow `<TICKET>.json.projected`. Phase 1: broker handler + emit helper + dual-w
 `orchestrate-auto-rebase` (`orchestrate-shadow-diff` verifies byte-for-byte parity). Phase 2: remove
 direct writes (broker sole writer). Phase 3: mirror to SQLite per ADR-011. See ADR-018.
 
+## Deployment Mode (CTL-1617)
+
+One declared answer — **`catalyst.deployment.mode` ∈ `single-host` | `cluster` | `cloud`** — replaces
+the per-host hand-wiring of mode-dependent choices. Resolved by a zero-import bash+JS pair
+(`plugins/dev/scripts/lib/deployment-mode.mjs` + `lib/catalyst-deployment-mode.sh`), kept honest by
+an exhaustive cross-stack parity fixture matrix (`__tests__/deployment-mode-parity.test.sh`). The
+schema itself (precedence ladder, examples, defaulting, every caveat) lives in its canonical
+reference, `website/src/content/docs/reference/configuration.md` — this section covers only the
+architectural role. **This repo's Layer-1 declares `cluster`**; dev-clones override to `single-host`
+via Layer-2.
+
+- **Degradation is the safety direction**: invalid values settle at their layer as
+  `single-host, recognized:false` (asserting the fewest cross-host guarantees); malformed files are
+  layer-absent in BOTH languages. Two supported, deliberate asymmetry bounds: on a **jq-less host**
+  the bash resolver treats config files as absent (env-else-default, with a
+  `CATALYST_DEPLOYMENT_MODE_JQ_MISSING` breadcrumb for doctor) while the JS resolver still reads
+  them; and file-acceptance parity is defined by jq's parser (multi-document, BOM, and
+  lone-surrogate-escape documents are whole-document-malformed on both sides — the JS reader scans
+  raw text to match).
+- **Consumers today**: `catalyst doctor` (`checkDeploymentModeConsistency`, advisory:
+  declared/inferred, typo FAIL, roster-consistency WARN — every message says "deployment mode",
+  never bare "mode", since `dispatchMode`, executor dispatch-mode telemetry, and the replica
+  reader's `mode` are unrelated concepts) and the orch-monitor smee tunnel gate (a declared-`cloud`
+  node suppresses tunnel start; the replacement cloud-SDK event connection is **future work** — the
+  smee→cloud cutover, ADR-0008 lineage — so `cloud` today means "no smee ingestion", not "cloud
+  ingestion wired"). **Planned consumer**: the CTL-1616 secret contract's provider-of-record
+  dispatch receives the full resolution object and never activates a cloud provider on
+  `inferred:true`.
+- **Orthogonal axes, never merged**: deployment mode (fleet topology) × `catalyst.node.class`
+  (per-machine role) × `orchestration.dispatchMode` (process substrate within a node).
+- Design + migration plan: `thoughts/shared/research/2026-08-02-ctl-1617-deployment-mode-design.md`.
+
 ## Agent Teams vs Subagents
 
 | Scenario                                        | Subagents       | Agent Teams |

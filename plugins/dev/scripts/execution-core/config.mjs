@@ -62,6 +62,14 @@ try {
 }
 export { log };
 
+// CTL-1617: the canonical deployment-mode resolver is a zero-import leaf
+// (../lib/deployment-mode.mjs) shared verbatim by execution-core (this
+// re-export) and orch-monitor (direct cross-directory import) — never
+// reimplemented here. See lib/deployment-mode.mjs's file header for the
+// naming rule ("deployment mode", never bare "mode") and the env-vs-file
+// asymmetry caveat.
+export { DEPLOYMENT_MODES, resolveDeploymentMode, getDeploymentMode } from "../lib/deployment-mode.mjs";
+
 // --- Paths ---
 // Re-resolved per call so tests can redirect by setting CATALYST_DIR;
 // production launches pin a stable value.
