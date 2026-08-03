@@ -1408,11 +1408,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
     readStickyIdentity: (args: { dir: string }) => string | null;
     getCatalystRepoDir: () => string;
     deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
-    // CTL-1612 (finding #2): cooldown-gated proactive re-mint of the monitor's
-    // scoped app-actor token (CATALYST_MONITOR_APP_ACTOR_TOKEN). Returns true iff
-    // a fresh token was minted and applied; a no-op within the cooldown window or
-    // with no orchestrator creds configured returns false (fail-open).
-    remintAppActorToken: () => boolean;
+    // CTL-1612 (finding #2, round 2 non-blocking follow-up): cooldown-gated
+    // proactive re-mint of the monitor's scoped app-actor token
+    // (CATALYST_MONITOR_APP_ACTOR_TOKEN). ASYNC — the mint is a
+    // non-blocking child_process.spawn (linear-remint.mjs defaultMintAsync),
+    // so calling this never stalls Bun's single event loop. Resolves true iff
+    // a fresh token was minted and applied; resolves false (never rejects) on
+    // a cooldown no-op, missing creds, or a failed mint.
+    remintAppActorToken: () => Promise<boolean>;
   } | null> | null = null;
   const loadDaemonDeps = () => {
     if (!daemonDepsPromise) {
@@ -1456,15 +1459,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
               }>,
               import("./lib/nav-signal.mjs"),
               import(linearRemintMod) as Promise<{
-                createReminter: (opts?: {
+                createAsyncReminter: (opts?: {
                   readCreds?: () => { clientId: string; clientSecret: string } | null;
                   applyToken?: (token: string) => void;
                   cooldownMs?: number;
+                  failureCooldownMs?: number;
                   logger?: {
                     warn: (obj: unknown, msg: string) => void;
                     info: (obj: unknown, msg: string) => void;
                   };
-                }) => { attempt: (now?: number) => boolean };
+                }) => { attempt: (now?: number) => Promise<boolean> };
                 readOrchestratorCreds: () => { clientId: string; clientSecret: string } | null;
               }>,
             ]);
@@ -1477,16 +1481,33 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // (execution-core/cluster-heartbeat.mjs readPeerHeartbeats, called from
           // runCli's "read" case) catches EVERY post() failure — including an
           // expired-token 401 — and still writes `{}` + exits 0, so there is no
-          // stderr/exit-code signal this call site could react to. A cooldown
-          // (default 45min, comfortably inside Linear's OAuth token lifetime) keeps
-          // the real mint call cheap even though it is checked on every poll tick.
-          const monitorAppActorReminter = linearRemint.createReminter({
+          // stderr/exit-code signal this call site could react to.
+          //
+          // CTL-1612 round 2 (Codex P2 follow-up): createAsyncReminter, NOT
+          // createReminter — the sync reminter's default mint is
+          // spawnSync("curl", ... --max-time 30), which would freeze Bun's
+          // single event loop (every other in-flight HTTP/SSE/webhook handler)
+          // for up to 30s on the initial poll and every 45-min refresh. The
+          // async twin's mint is a non-blocking child_process.spawn
+          // (defaultMintAsync); the call site below (readAnchor) fires it and
+          // does NOT await it, so this poll proceeds immediately with whatever
+          // token is already set and a successful mint lands in time for the
+          // NEXT tick.
+          //
+          // failureCooldownMs is intentionally SHORTER than cooldownMs: a
+          // failed mint (network hiccup, Linear outage) should retry soon
+          // rather than riding out the full 45min success-cooldown while every
+          // poll in between sends an expired token and peers look offline.
+          // A SUCCESSFUL mint still only re-attempts after the full cooldownMs.
+          const monitorAppActorReminter = linearRemint.createAsyncReminter({
             readCreds: linearRemint.readOrchestratorCreds,
             applyToken: (token: string) => {
               process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN = token;
             },
             cooldownMs:
               Number(process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS) || 45 * 60_000,
+            failureCooldownMs:
+              Number(process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_FAILURE_COOLDOWN_MS) || 60_000,
             logger: {
               warn: (_obj: unknown, msg: string) => console.warn(`[server] ${msg}`),
               info: (_obj: unknown, msg: string) => console.info(`[server] ${msg}`),
@@ -1504,7 +1525,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
             readStickyIdentity: hostSticky.readStickyIdentity,
             getCatalystRepoDir: config.getCatalystRepoDir,
             deriveDaemonHealth: navSignal.deriveDaemonHealth,
-            remintAppActorToken: () => monitorAppActorReminter.attempt(),
+            // Contract note above: never rejects (defaultMintAsync resolves
+            // null rather than throwing on any spawn/network failure), but the
+            // catch is belt-and-braces since this is called fire-and-forget
+            // (readAnchor below `void`s the return) — an unhandled rejection
+            // here would otherwise crash the process.
+            remintAppActorToken: () => monitorAppActorReminter.attempt().catch(() => false),
           };
         } catch {
           return null; // execution-core unavailable → degrade to offline
@@ -1776,12 +1802,18 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // linear-comment.mjs's operator-token resolution is untouched. Absent a
         // scoped token (mint never succeeded), falls back to plain process.env —
         // i.e. whatever this call would have resolved before CTL-1612.
+        //
+        // CTL-1612 round 2 (Codex P2 follow-up): remintAppActorToken() is
+        // FIRE-AND-FORGET here (deliberately not awaited — readAnchor itself
+        // must stay synchronous, matching readPeerRecords's synchronous
+        // contract). This poll proceeds immediately with whatever scoped
+        // token is already set (possibly none, possibly stale); a mint that
+        // completes later applies to process.env in the background and is
+        // picked up by the NEXT poll tick. The reminter's own implementation
+        // never rejects (see remintAppActorToken's construction above), so no
+        // unhandled-rejection risk from not chaining a .catch() here too.
         readAnchor: (args: { anchorIssue: string }) => {
-          try {
-            execCoreDeps?.remintAppActorToken();
-          } catch {
-            /* fail-open: keep whatever scoped token (if any) is already set */
-          }
+          void execCoreDeps?.remintAppActorToken();
           const scoped = process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN?.trim();
           const anchorEnv = scoped
             ? { ...process.env, LINEAR_API_TOKEN: scoped, LINEAR_API_KEY: scoped }

@@ -567,4 +567,70 @@ describe("createAsyncReminter", () => {
     });
     expect(await r.attempt(1_000)).toBe(false);
   });
+
+  // CTL-1612 round 2: failureCooldownMs defaults to cooldownMs, so an existing
+  // caller (linearAsyncReminter below) that omits it sees NO behavior change —
+  // asserted by the two tests above already passing unmodified.
+  describe("failureCooldownMs (CTL-1612 round 2)", () => {
+    test("a FAILED mint retries after the short failureCooldownMs, not the long cooldownMs", async () => {
+      let mints = 0;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => (mints++ === 0 ? null : "tok-after-retry"),
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        failureCooldownMs: 5_000,
+        logger: silentLogger,
+      });
+      expect(await r.attempt(0)).toBe(false); // fails, mints=1
+      expect(mints).toBe(1);
+      // Still within failureCooldownMs (5s) — no retry yet.
+      expect(await r.attempt(3_000)).toBe(false);
+      expect(mints).toBe(1);
+      // Past failureCooldownMs but well short of the full 60s cooldownMs.
+      expect(await r.attempt(6_000)).toBe(true);
+      expect(mints).toBe(2);
+    });
+
+    test("a SUCCESSFUL mint still waits the full cooldownMs, not failureCooldownMs", async () => {
+      let mints = 0;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return "tok";
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        failureCooldownMs: 5_000,
+        logger: silentLogger,
+      });
+      expect(await r.attempt(0)).toBe(true); // succeeds, mints=1
+      // Past failureCooldownMs (5s) but still within the long cooldownMs (60s) —
+      // a success must NOT fast-track the next attempt via failureCooldownMs.
+      expect(await r.attempt(10_000)).toBe(false);
+      expect(mints).toBe(1);
+      expect(await r.attempt(61_000)).toBe(true);
+      expect(mints).toBe(2);
+    });
+
+    test("omitting failureCooldownMs defaults it to cooldownMs (byte-identical to pre-CTL-1612 behavior)", async () => {
+      let mints = 0;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return null;
+        },
+        cooldownMs: 60_000,
+        logger: silentLogger,
+      });
+      expect(await r.attempt(0)).toBe(false);
+      expect(mints).toBe(1);
+      // No failureCooldownMs override → still gated by the full 60s cooldown,
+      // exactly as before this parameter existed.
+      expect(await r.attempt(10_000)).toBe(false);
+      expect(mints).toBe(1);
+    });
+  });
 });

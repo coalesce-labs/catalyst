@@ -22,6 +22,27 @@ let tmpDir: string;
 let wtDir: string;
 let pidFile: string;
 
+// CTL-1612 round 2 (Codex P2): cmd_start now mints the monitor's scoped
+// app-actor token via linear_app_actor_auth, which resolves
+// catalyst.linear.bot.orchestrator.{clientId,clientSecret} through the shared
+// secret-contract chain — on a host with real orchestrator creds configured
+// (any dev machine running the broker/execution-core) every "start" run in
+// this file is a REAL POST to https://api.linear.app/oauth/token.
+// CATALYST_LAYER2_CONFIG_FILE is checked FIRST in that chain
+// (unconditionally, before CATALYST_MACHINE_CONFIG/XDG/~/.config), so pinning
+// it to an absent sandbox path seals the read with no fallback — same fix as
+// __tests__/catalyst-monitor-dist-redirect.test.sh's run_cmd_start. The other
+// two keys are unset (Bun.spawn treats an `undefined` value as "omit this
+// var") rather than pinned, since a stale inherited value would otherwise
+// survive the `...process.env` spread below.
+function sandboxSecretEnv(dir: string): Record<string, string | undefined> {
+  return {
+    CATALYST_LAYER2_CONFIG_FILE: join(dir, "absent-layer2-config.json"),
+    CATALYST_MACHINE_CONFIG: undefined,
+    CATALYST_MONITOR_APP_ACTOR_TOKEN: undefined,
+  };
+}
+
 function run(
   args: string[],
   env?: Record<string, string>,
@@ -34,6 +55,7 @@ function run(
       MONITOR_SERVER_SCRIPT: SERVER_SCRIPT,
       MONITOR_SKIP_BOOTSTRAP: "1",
       ...env,
+      ...sandboxSecretEnv(tmpDir),
     },
     cwd: tmpDir,
   });
@@ -427,6 +449,7 @@ describe("catalyst-monitor.sh version drift detection", () => {
         MONITOR_SKIP_BOOTSTRAP: "1",
         CATALYST_VERSION_FILE: versionFile,
         CATALYST_PLUGIN_CACHE_ROOT: cacheRoot,
+        ...sandboxSecretEnv(tmpDir),
       },
       cwd: projectDir,
     });

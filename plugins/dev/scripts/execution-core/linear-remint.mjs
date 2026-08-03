@@ -224,27 +224,48 @@ function defaultMintAsync(creds) {
 // fail-open contract; attempt() resolves true iff a new token was minted AND
 // applied). The cooldown stamp is taken BEFORE the await so overlapping callers
 // within one window collapse to a single mint.
+//
+// CTL-1612 round 2 (Codex P2 follow-up): `failureCooldownMs` defaults to
+// `cooldownMs` — so any EXISTING caller that doesn't pass it (the broker's
+// cache-reconcile linearAsyncReminter singleton below) is byte-identical to
+// before this change: the same cooldown gates both outcomes. A caller that
+// DOES pass a shorter `failureCooldownMs` (the monitor's proactive
+// self-mint — a Linear/network hiccup should be retried soon, not ride out
+// the long success cooldown while every poll in between sends an expired
+// token) gets a short retry window after a FAILED attempt (no creds
+// configured, or a mint that returned no token) while a SUCCESSFUL mint still
+// only re-attempts after the full `cooldownMs`.
 export function createAsyncReminter({
   readCreds = readOrchestratorCreds,
   mint = defaultMintAsync,
   applyToken = defaultApplyToken,
   cooldownMs = DEFAULT_COOLDOWN_MS,
+  failureCooldownMs = cooldownMs,
   logger = log,
 } = {}) {
   let lastAttempt = -Infinity;
+  // The cooldown to apply to the CURRENT attempt's gate check — set by the
+  // PREVIOUS attempt's outcome. Starts at cooldownMs (no prior outcome to
+  // shorten it) so the very first call is never fast-tracked by an unset value.
+  let nextCooldownMs = cooldownMs;
   return {
     async attempt(now = Date.now()) {
-      if (now - lastAttempt < cooldownMs) return false;
+      if (now - lastAttempt < nextCooldownMs) return false;
       lastAttempt = now;
       const creds = readCreds();
-      if (!creds) return false;
+      if (!creds) {
+        nextCooldownMs = failureCooldownMs;
+        return false;
+      }
       const token = await mint(creds);
       if (!token) {
         logger.warn({}, "ctl-785: orchestrator token re-mint FAILED — keeping current token");
+        nextCooldownMs = failureCooldownMs;
         return false;
       }
       applyToken(token);
       logger.info({}, "ctl-785: orchestrator token re-minted after auth error");
+      nextCooldownMs = cooldownMs;
       return true;
     },
   };
