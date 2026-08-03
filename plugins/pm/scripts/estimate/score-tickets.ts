@@ -40,6 +40,54 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+
+// CTL-1616 PR3 (#2921 Codex P2): fold this file's inline
+// LINEAR_API_TOKEN/LINEAR_API_KEY ladder onto the shared secret-contract
+// engine — via a LAZY, LAYOUT-AWARE import, not an eager relative one:
+// catalyst-pm can run from the versioned marketplace cache, where
+// catalyst-dev is a SEPARATELY-installed directory and ../../../dev/... does
+// not exist (an eager import would kill EVERY score operation before
+// main()). Search order mirrors plugins/foundry/scripts/require-catalyst-dev.sh:
+// source-checkout sibling → repo-root cwd → marketplace clone → versioned
+// cache. Only the --check-labels branch needs the module, so a miss is an
+// actionable error there and harmless everywhere else.
+type ResolveSecretFn = (
+  id: string,
+  opts?: { env?: Record<string, string | undefined> },
+) => { value: string | null; source: string | null; provider: string | null };
+
+async function loadResolveSecret(): Promise<ResolveSecretFn> {
+  const glob = (await import("node:fs")).globSync ?? null;
+  const candidates: string[] = [
+    // 1. source-checkout sibling of this plugin
+    resolve(import.meta.dir, "../../../dev/scripts/lib/secret-contract.mjs"),
+    // 2. repo-root cwd
+    resolve(process.cwd(), "plugins/dev/scripts/lib/secret-contract.mjs"),
+  ];
+  if (glob) {
+    // 3. installed marketplace clone(s); 4. versioned cache — newest last, so
+    // reverse for newest-first.
+    for (const pat of [
+      `${homedir()}/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/secret-contract.mjs`,
+      `${homedir()}/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/secret-contract.mjs`,
+    ]) {
+      candidates.push(...glob(pat).sort().reverse());
+    }
+  }
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      const mod = await import(p);
+      if (typeof mod.resolveSecret === "function") return mod.resolveSecret as ResolveSecretFn;
+    }
+  }
+  throw new Error(
+    "score-tickets --check-labels requires the catalyst-dev plugin (shared secret contract lib/secret-contract.mjs); " +
+      "it was not found in the source checkout, repo cwd, marketplace clone, or versioned cache. " +
+      "Fix: install/enable catalyst-dev — claude plugin install catalyst-dev@catalyst",
+  );
+}
 
 // -- Types -------------------------------------------------------------------
 
@@ -880,8 +928,8 @@ async function main(): Promise<void> {
 
   let skipSet = new Set<string>();
   if (opts.checkLabels) {
-    const token =
-      process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+    const resolveSecret = await loadResolveSecret(); // CTL-1616 PR3 (lazy, layout-aware)
+    const token = resolveSecret("linear-api-token").value ?? "";
     if (!token) {
       console.warn(
         "[score] --check-labels: LINEAR_API_TOKEN not set; skipping label filter",
