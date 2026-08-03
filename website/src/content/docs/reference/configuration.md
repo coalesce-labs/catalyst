@@ -587,9 +587,14 @@ checks lands in later PRs of the CTL-1617 migration plan.
 
 Every secret Catalyst resolves — the GitHub token, the Linear API token, the OAuth-mint
 credentials, the cloud token, the Groq key, the cluster age-key — is a row in **one frozen
-registry**, `SECRET_REGISTRY` in `plugins/dev/scripts/lib/secret-contract.mjs`. It replaces what
+registry**, `SECRET_REGISTRY` in `plugins/dev/scripts/lib/secret-contract.mjs`. It **models** what
 used to be independently hand-rolled resolution ladders per secret (the 2026-08-02 fleet 401
-outage was four divergent copies of one chain). Bash cannot import a JS leaf, so the registry has a
+outage was four divergent copies of one chain) — the Linear-token read and the Linear OAuth-mint
+trio are live consumers of it, but the `github-token`/`webhook-secret` rows and the `groq-api-key`
+row are modeled in the registry only: the live GitHub-token/webhook-secret paths (CTL-1612's
+`catalyst-secret-env.sh` / `github-auth-preflight.mjs`) and Groq's pre-existing
+`lib/api-key-health.mjs` ladder remain their own, unrepointed implementations (`docs/architecture.md`'s
+Secret Contract section has the full per-row cutover status). Bash cannot import a JS leaf, so the registry has a
 second, independently-maintained encoding — `plugins/dev/scripts/lib/catalyst-secret-contract.sh` —
 kept honest by a cross-stack **three-way parity test**
 (`__tests__/secret-contract-parity.test.sh`): bash and JS must each match a computed-expected
@@ -644,13 +649,23 @@ implementations scales per type, not per row:
 
 | Delivery           | Resolution chain                                                                                                     |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `bare-file`          | explicit `CATALYST_<ID>_FILE` override → `CATALYST_CONFIG_DIR` → the directory holding the resolved Layer-2 file → XDG dir → falls back to an inherited env alias if no file is found |
+| `bare-file`          | explicit `CATALYST_<ID>_FILE` override → `CATALYST_CONFIG_DIR` → the directory holding `CATALYST_LAYER2_CONFIG_FILE` (or its `~/.config/catalyst/config.json` default) → XDG dir → falls back to an inherited env alias if no file is found |
 | `bare-file-family`   | not a resolvable scalar — a membership predicate (`isSecretFamilyMember`) over an open-ended prefix family          |
 | `env-file`           | presence/non-empty check of a whole file at the same bare-file candidate paths (the file is *sourced*, not read for one value) |
 | `env-alias`          | first non-empty `envNames` entry, in order — no file search at all                                                  |
 | `config-json`        | env alias (if any) → the resolved Layer-2 JSON's `configJsonPath`                                                   |
 | `platform-env`       | the row's env-var **name** is itself resolved (env override → Layer-2 name override → default), then that variable's value is read |
 | `local-only`         | `statSync` presence check of a single path only — the value is never read                                           |
+
+**Bare-file candidate directory ≠ `resolveLayer2Path()`.** `secretFileCandidates()`
+(`secret-contract.mjs:607-620`, mirrored in `catalyst-secret-contract.sh:355-380`) builds its
+Layer-2-directory candidate straight from `CATALYST_LAYER2_CONFIG_FILE` (or the hardcoded
+`~/.config/catalyst/config.json` default) — it does **not** call `resolveLayer2Path()`, so a
+`CATALYST_MACHINE_CONFIG`-only override is never consulted here, unlike every `config-json`/
+`platform-env` row (below). An operator who sets only `CATALYST_MACHINE_CONFIG=/custom/config.json`
+and drops a sibling `/custom/github-token` next to it will find that file skipped: both engines
+still search the home/XDG locations. Provision bare-file secrets via `CATALYST_CONFIG_DIR`, the
+XDG directory, or `CATALYST_LAYER2_CONFIG_FILE` itself so both engines look in the same place.
 
 ### Resolution result
 
@@ -659,11 +674,16 @@ never throws. It returns `{ value, source, provider, rotation, ...extras }` for 
 `{ value: null, source: null, provider: null, rotation: null }` for an unknown one. `provider` is
 the row's `delivery` — a logging breadcrumb only; callers never branch on it. `source` is one of
 `shared-file` | `operator-override` | `inherited` | `config-json` | `legacy-config-json` |
-`platform-env` | `present` | `absent` | `none` — with one exception: the one `bare-file-family`
-row (`linear-webhook-secret`) is a known id with no scalar value, so it resolves to
-`{ value: null, source: null, provider: "bare-file-family", rotation: {...} }` — `source: null`,
-not one of the strings above, while `provider`/`rotation` stay populated (unlike the unknown-id
-shape, where every field is `null`). The bash mirror echoes the same three fields
+`platform-env` | `present` | `absent` | `none` — with two exceptions, both of them a *known* id
+whose `source` collapses to `null` while `provider`/`rotation` stay populated (unlike the
+unknown-id shape, where every field is `null`): the one `bare-file-family` row
+(`linear-webhook-secret`) has no scalar value, so it resolves to
+`{ value: null, source: null, provider: "bare-file-family", rotation: {...} }`; and, in genuine
+cloud mode, any row other than the `cloud-token` bootstrap row itself resolves the identical
+`{ value: null, source: null, provider, rotation }` shape (that row's own `provider`/`rotation`)
+when `cloud-token` fails to resolve — the bootstrap short-circuit, § Cloud guard below. Both are
+normal, expected states — not evidence of an unknown id — so callers must not treat a `null`
+`source` as impossible or unknown-id-only. The bash mirror echoes the same three fields
 pipe-joined (`value|source|provider`) and additionally exports non-secret
 `CATALYST_SECRET_LAST_SOURCE`/`_PROVIDER` breadcrumbs for the calling shell — but deliberately
 **never exports the resolved value** (`export -n` is reasserted on every call, since bash's export
@@ -675,9 +695,13 @@ every child process it launches.
 The cloud provider only ever activates when the full CTL-1617 deployment-mode object satisfies
 **all three**: `mode === "cloud"`, `inferred === false`, and `recognized !== false`. Because the
 guard lives once in the shared engine, every row gets it for free. When genuinely cloud, resolution
-short-circuits to a pure env-alias read of `envNames` — no file search, ever. Anything else
-(single-host, cluster, or an inferred/unrecognized cloud guess) runs the row's normal
-delivery-type chain unchanged.
+short-circuits to a pure env-alias read of `envNames` for the secret **value** — no file search for
+the value, ever — with one carve-out: `cloud-token` itself is `platform-env` delivery, and even in
+genuine cloud mode it first resolves its env-var **name** via `resolveCloudTokenName()` (env
+override → the Layer-2 file's `catalyst.cloud.tokenEnv` → default), so a managed container can
+still consult a config file to learn *which* variable to read before reading that variable's
+value. Anything else (single-host, cluster, or an inferred/unrecognized cloud guess) runs the row's
+normal delivery-type chain unchanged.
 
 A second gate — the **bootstrap short-circuit** — applies only in genuine cloud mode: if the active
 mode's `bootstrapFor` row (`cloud-token`) fails to resolve, every *other* cloud-mode secret
@@ -728,16 +752,22 @@ by `execution-core/linear-remint.mjs` against its cooldown-guarded reminter); `g
 
 ### Linear worker-actor's legacy fallback tiers
 
-`linear-worker-actor` is the one row with a multi-tier fallback chain, folded verbatim from
-`lib/linear-comment-post.sh`'s pre-existing four-rung precedence (deprecating the legacy tiers is
-an explicit, separate follow-up — not part of this fold):
+`linear-worker-actor` is the one row with a multi-tier fallback chain, folded from
+`lib/linear-comment-post.sh`'s pre-existing four-rung precedence with every rung's precedence order
+preserved and one deliberate generalization (deprecating the legacy tiers is an explicit, separate
+follow-up — not part of this fold):
 
 1. `credentialEnvPair` — `CATALYST_LINEAR_AGENT_CLIENT_ID`/`CATALYST_LINEAR_AGENT_CLIENT_SECRET`,
    checked first; both must be non-empty.
 2. The primary `configJsonPath` tier (`catalyst.linear.bot.worker`).
 3. `legacyConfigTiers`' `per-team-legacy` tier, tried only once the above both miss: a per-team
    legacy file (walking up from `cwd` for a `.catalyst/config.json` `projectKey`, reading a sibling
-   `config-<key>.json`).
+   `config-<key>.json`) — **the generalization**: that sibling now resolves relative to the
+   canonical `resolveLayer2Path()` directory, not the old script's hardcoded
+   `$HOME/.config/catalyst`, so it moves with `CATALYST_LAYER2_CONFIG_FILE`/`CATALYST_MACHINE_CONFIG`
+   overrides exactly like every other row's Layer-2-relative path. An operator relying on the old
+   hardcoded location under a custom Layer-2 path gets a different (but now-correct-for-the-chain)
+   file here than the pre-fold script read.
 4. `legacyConfigTiers`' `global-legacy` tier, tried only once tier 3 also misses: the global
    `catalyst.linear.agent` path in the canonical Layer-2 file.
 
