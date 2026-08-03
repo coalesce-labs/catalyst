@@ -22,13 +22,39 @@
 #   the broker/execution-core behavior, UNCHANGED.
 #
 #   With <target-env-var>: exports ONLY that variable, leaving
-#   LINEAR_API_TOKEN/LINEAR_API_KEY untouched. CTL-1612: catalyst-monitor uses
-#   this scoped form (target var CATALYST_MONITOR_APP_ACTOR_TOKEN) because the
-#   monitor is two-identity — its inline-reply path (linear-comment.mjs
-#   resolveLinearToken) must keep resolving the OPERATOR's personal token, and a
-#   blanket LINEAR_API_TOKEN export here outranks that resolution (env beats
-#   Layer-2), making every reply 502 bot_identity. Only the monitor's own
-#   self-reads (the peer-heartbeat anchor read) opt into the scoped var.
+#   LINEAR_API_TOKEN/LINEAR_API_KEY untouched — and ACTIVELY CLEARS any
+#   inherited LINEAR_API_TOKEN/LINEAR_API_KEY first (CTL-1612 round 4, see
+#   below). CTL-1612: catalyst-monitor uses this scoped form (target var
+#   CATALYST_MONITOR_APP_ACTOR_TOKEN) because the monitor is two-identity —
+#   its inline-reply path (linear-comment.mjs resolveLinearToken) must keep
+#   resolving the OPERATOR's personal token, and a blanket LINEAR_API_TOKEN
+#   export here outranks that resolution (env beats Layer-2), making every
+#   reply 502 bot_identity. Only the monitor's own self-reads (the
+#   peer-heartbeat anchor read) opt into the scoped var.
+#
+#   CTL-1612 round 4 (Codex P1 follow-up): scoped mode also UNSETS any
+#   LINEAR_API_TOKEN/LINEAR_API_KEY it finds ALREADY set on entry — not just
+#   "never adds" them. catalyst-broker calls this function UNSCOPED at its own
+#   startup (exports the app-actor token under those two names into the
+#   broker's own process env), and broker/stack-reload.mjs's restart spawn
+#   carries no `env` override, so `catalyst-monitor restart` — issued
+#   automatically after a plugin-source stack reload — inherits the broker's
+#   env verbatim. Without the clear, that inherited bot-valued alias survives
+#   into the monitor's env untouched (the scoped branch previously only
+#   promised not to ADD LINEAR_API_TOKEN/LINEAR_API_KEY, never that it would
+#   REMOVE an inherited one), resolveLinearToken picks it before the personal
+#   Layer-2 token (env beats Layer-2), and every inline reply 502s
+#   bot_identity again — the SAME P1 as round 1's original finding,
+#   resurfacing through a different door (inheritance, not this script's own
+#   export). TRADEOFF: this also clears a legitimate interactively-exported
+#   personal LINEAR_API_TOKEN for a human running `catalyst-monitor start`
+#   from a shell with their own lin_api_* set, forcing a fall-through to the
+#   Layer-2 personal-token tier. That fallback is the DOCUMENTED, supported
+#   source for the monitor's personal token already — the launchd/headless
+#   path relies on it exclusively (the committed launchd wrapper exports no
+#   Linear token at all) — so clearing restores "launchd parity" rather than
+#   degrading anything: this scoped shell never had these vars set on a clean
+#   launchd start, and unsetting them here makes every start path agree.
 #
 # Idempotent-source guard — safe to source multiple times.
 [[ -n "${_CATALYST_LINEAR_APP_ACTOR_SH_LOADED:-}" ]] && return 0
@@ -48,6 +74,17 @@ linear_app_actor_auth() {
   local _daemon="${1:?linear_app_actor_auth: daemon name required}"
   local _target_var="${2:-}"
   local _ocid _ocsec _otok _creds
+
+  # CTL-1612 round 4: see the header comment above — scoped mode never trusts
+  # an inherited LINEAR_API_TOKEN/LINEAR_API_KEY, regardless of whether OUR
+  # OWN mint below succeeds, fails, or finds no orchestrator creds at all.
+  if [[ -n "$_target_var" ]]; then
+    if [[ -n "${LINEAR_API_TOKEN:-}" || -n "${LINEAR_API_KEY:-}" ]]; then
+      echo "${_daemon}: clearing inherited LINEAR_API_TOKEN/LINEAR_API_KEY before scoped mint (scoped mode never trusts an inherited alias — see \$${_target_var} instead)" >&2
+    fi
+    unset LINEAR_API_TOKEN LINEAR_API_KEY
+  fi
+
   catalyst_resolve_secret linear-orchestrator-actor >/dev/null
   _creds="$CATALYST_SECRET_LAST_VALUE"
   # Clear the breadcrumb the moment it's copied (#2924 post-merge Codex P2):

@@ -170,6 +170,7 @@ run_cmd_start() {
     -u GITHUB_TOKEN -u GH_TOKEN -u CATALYST_GITHUB_TOKEN_FILE \
     -u CATALYST_GITHUB_TOKEN_SOURCE -u _CATALYST_SECRET_ENV_SH_LOADED \
     -u CATALYST_MACHINE_CONFIG -u CATALYST_MONITOR_APP_ACTOR_TOKEN \
+    -u CATALYST_LIVENESS_READ_SOURCE \
     PATH="$root/bin:$PATH" \
     CATALYST_DIR="$root/catalyst" \
     MONITOR_SERVER_SCRIPT="$root/srv/server.ts" \
@@ -191,6 +192,12 @@ run_cmd_start() {
 # only way to assert on the loki-skip log line (and, via the curl-stub marker
 # helpers below, on whether linear_app_actor_auth's mint code path ran at
 # all). Every default still sits BEFORE "$@" so a case can override one.
+#
+# CTL-1612 round 4 (Codex P2 follow-up): CATALYST_LIVENESS_READ_SOURCE is
+# ALSO unset here (not just the secret-related vars) — a dev/CI shell that
+# happens to export =loki would otherwise leak into the "unset → AUTO"
+# sub-case below and silently flip it onto the loki-skip path, making Test
+# 16c/16d fail for a reason unrelated to what they're actually testing.
 run_cmd_start_capture_stderr() {
   local root="$1"
   shift
@@ -198,6 +205,7 @@ run_cmd_start_capture_stderr() {
     -u GITHUB_TOKEN -u GH_TOKEN -u CATALYST_GITHUB_TOKEN_FILE \
     -u CATALYST_GITHUB_TOKEN_SOURCE -u _CATALYST_SECRET_ENV_SH_LOADED \
     -u CATALYST_MACHINE_CONFIG -u CATALYST_MONITOR_APP_ACTOR_TOKEN \
+    -u CATALYST_LIVENESS_READ_SOURCE \
     PATH="$root/bin:$PATH" \
     CATALYST_DIR="$root/catalyst" \
     MONITOR_SERVER_SCRIPT="$root/srv/server.ts" \

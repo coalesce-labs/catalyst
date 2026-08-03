@@ -1,0 +1,4 @@
+[test]
+# CTL-1612 round 4: hermetic-Linear preload before any *.test.ts loads, mirroring
+# execution-core/bunfig.toml + broker/bunfig.toml — see test-setup.mjs.
+preload = ["./test-setup.mjs"]
