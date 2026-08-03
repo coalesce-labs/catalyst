@@ -129,6 +129,12 @@ _default_otel_from_user_settings() {
 	done
 }
 
+# CTL-1612: the shared-credential projection lives in lib/catalyst-secret-env.sh so the
+# execution-core launcher, the monitor launcher and the in-process re-arm all resolve the
+# SAME file by the SAME chain. The first cut hand-wrote that chain in four places and they
+# immediately diverged (only one honored CATALYST_CONFIG_DIR) — every review finding across
+# three rounds landed in the duplicated logic, not in the design. One copy, sourced.
+
 # CTL-846: is host:port accepting TCP connections? bash /dev/tcp first, nc fallback.
 # Used to gate mitmproxy proxy vars so a down proxy degrades to direct mode instead of
 # breaking every daemon/worker API call with "connection refused".
@@ -157,6 +163,15 @@ cmd_start() {
 	local neutral_otel
 	neutral_otel="$(_neutralize_otel_attrs "${OTEL_RESOURCE_ATTRIBUTES-}")"
 	export OTEL_RESOURCE_ATTRIBUTES="$neutral_otel"
+	# CTL-1612: arm the shared GitHub credential from the SOPS-managed file BEFORE the
+	# machine-local env is sourced, so the precedence is
+	#   ambient inherited  <  shared SOPS file  <  execution-core.env (explicit operator override).
+	# Ordering does the work here: no conditional can distinguish "inherited from a stale parent"
+	# from "deliberately set by the operator", but running first and letting execution-core.env
+	# source afterwards gives both the fix and the escape hatch.
+	# shellcheck disable=SC1090
+	source "$SCRIPT_DIR/lib/catalyst-secret-env.sh"
+	catalyst_project_github_token
 	# Machine-local daemon env: source ~/.config/catalyst/execution-core.env if present
 	# so per-machine settings survive restarts — e.g. routing the daemon's Linear/gh
 	# (Node fetch/undici) traffic through the local mitmproxy audit. Node's native
@@ -165,6 +180,13 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1612 (Codex P2): the operator override just won — re-point the OTHER alias at it,
+	# or `gh` (which reads GH_TOKEN first) would keep using the value we projected and
+	# silently ignore the override. The env file is passed so the reconcile can detect an
+	# ASSIGNMENT rather than a value change: pinning the same value the shared file already
+	# had is still an explicit override, and marking it as one is what stops the in-process
+	# re-arm from later overwriting the operator's machine-local pin.
+	catalyst_reconcile_github_token_aliases "$_daemon_env"
 	# CTL-1404: after the machine-local env wins, fill any unset OTLP telemetry keys from
 	# ~/.claude/settings.json so the SDK-path child `claude` CLI can export claude_code_* metrics
 	# (token/cost/session). No-op when the keys are already set or settings.json/jq are absent.

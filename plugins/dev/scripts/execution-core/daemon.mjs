@@ -132,6 +132,7 @@ import {
   resolvePhaseSessionId,
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
+import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
 import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
@@ -736,6 +737,9 @@ export function startDaemon({
   // CTL-854: injectable for the boot empty-registry health check. Tests inject
   // a deterministic fake; production uses the real registry reader.
   listProjects: listProjectsFn = realListProjects,
+  // CTL-1612: injectable GitHub-credential boot preflight. Tests inject a fake; in
+  // production it probes `gh` for real. Advisory — never throws, never blocks boot.
+  githubAuthPreflight = resolveGithubBootAuth,
   // CTL-862: injectable seams for the ownership boot-log. Tests inject a fixed
   // roster and eligible list; production resolves them from the real modules.
   readAllEligible = readAllEligibleTickets,
@@ -980,6 +984,29 @@ export function startDaemon({
     // CTL-1365b: dispatch === dispatchFn so the crash-recovery re-dispatch honors
     // the executor flag (defaultDispatch under bg — reconcileBootResume's own
     // default — so byte-identical to today).
+    // CTL-1612 (Codex P1, round 2): materialize cluster secrets and arm the GitHub
+    // credential BEFORE anything dispatches. reconcileBoot and processApprovedResumes
+    // below launch workers synchronously, and dispatch.mjs spawns them with
+    // ...process.env — so a node returning after a rotation would hand every resumed
+    // worker the stale credential and they would keep it for their whole lifetime, even
+    // though the daemon's own env gets corrected later. clusterSync() takes no arguments
+    // and is fail-open, so hoisting it here is safe; the periodic refresh timer is still
+    // armed further down, next to the other timers.
+    if (enableClusterSync) {
+      try {
+        const bootSync = clusterSync();
+        log.info({ pull: bootSync?.pull }, "execution-core daemon: cluster-repo synced at boot");
+      } catch (err) {
+        log.warn({ err: err?.message }, "execution-core daemon: boot cluster-sync threw (continuing)");
+      }
+    }
+    // Re-arm ONLY (no probe) before anything dispatches: this is a cheap local file read,
+    // and it is what stops a boot-resumed worker inheriting a credential the sync just
+    // superseded. The probe is deliberately NOT here — it spawns `gh` with a 10s timeout,
+    // and putting a network round-trip ahead of crash recovery would delay re-dispatching
+    // in-flight work for no diagnostic benefit. It runs after the dispatches instead.
+    rearmGithubTokenFromFile({ env: process.env, log });
+
     const bootResume = reconcileBoot({
       orchDir,
       report,
@@ -994,6 +1021,10 @@ export function startDaemon({
     // dispatch entry point and previously defaulted to defaultDispatch, so an
     // approved-resume ticket launched via bg even under executor=sdk (split-brain).
     processApprovedResumes({ orchDir, dispatch: dispatchFn });
+    // CTL-1612: NOW probe the credential — after the dispatches, so a 10s `gh` timeout can
+    // never delay crash recovery. Advisory only: never throws, never blocks boot, and
+    // alerts solely on a definitive 401.
+    githubAuthPreflight({ env: process.env, log });
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
@@ -1228,24 +1259,32 @@ export function startDaemon({
     // NEVER abort daemon boot or wedge a timer tick. Refresh is a no-op ("no-head")
     // when no clone exists, and skips the sops spawn entirely when HEAD is unchanged.
     if (enableClusterSync) {
-      try {
-        const bootSync = clusterSync();
-        log.info({ pull: bootSync?.pull }, "execution-core daemon: cluster-repo synced at boot");
-      } catch (err) {
-        log.warn(
-          { err: err?.message },
-          "execution-core daemon: boot cluster-sync threw (continuing)"
-        );
-      }
+      // CTL-1612: the BOOT sync moved earlier (before the boot-resume dispatches, so
+      // resumed workers never inherit a stale credential). Only the periodic refresh
+      // is armed here, alongside the other timers.
       _clusterSyncTimer = setInterval(() => {
         try {
           refreshClusterSecrets();
         } catch (err) {
           log.warn({ err: err?.message }, "cluster-sync timer: refresh threw (continuing)");
         }
+        // CTL-1612: re-arm from disk on EVERY tick, unconditionally. Without this the
+        // whole fix is boot-only: a credential rotated at 03:00 on a daemon that booted at
+        // 00:00 stays dead until a human restarts it, and we would merely have converted a
+        // silent failure into a loud one that still needs hands. Deliberately NOT gated on
+        // the refresh result — refreshClusterSecretsIfChanged short-circuits on
+        // `head-unchanged` without re-reading the file, and the rotation may also have been
+        // materialized by the OTHER writer (cluster-sync at boot, or an operator). The call
+        // is a cheap local read, no-ops when the value is unchanged, and never throws.
+        try {
+          rearmGithubTokenFromFile({ env: process.env, log });
+        } catch (err) {
+          log.warn({ err: err?.message }, "cluster-sync timer: credential re-arm threw (continuing)");
+        }
       }, clusterSyncIntervalMs);
       _clusterSyncTimer.unref?.();
     }
+
   } catch (err) {
     stopDaemon();
     throw err;

@@ -43,6 +43,17 @@ export const ALERT_BOOT_RESUME_PENDING = "catalyst.alert.boot_resume_pending";
 
 export const ALERT_KIND_BOOT_RESUME_PENDING = "boot_resume_pending";
 
+// CTL-1612: the daemon's GitHub credential is DEFINITIVELY unusable (a 401 from the
+// API, not a timeout or a network blip). Before this alert existed, a daemon that
+// booted holding a revoked credential simply 401'd every sweep forever — 102 failures
+// across two hosts went unreported for 5+ hours on 2026-08-02, visible only as a
+// repeated warning line buried in daemon.log. Emitted ONLY on a proven-unauthorized
+// probe: a transient/unknown failure must stay silent so a DNS blip or a GitHub 5xx
+// cannot page the fleet.
+export const ALERT_GITHUB_AUTH_UNUSABLE = "catalyst.alert.github_auth_unusable";
+
+export const ALERT_KIND_GITHUB_AUTH_UNUSABLE = "github_auth_unusable";
+
 // Per-kind throttle so a per-tick hot path (runEligibleQuery inside the reconcile
 // timer) cannot spam the event log during a sustained storm. The alert is a LOUD
 // "something is wrong"
@@ -166,6 +177,27 @@ export function emitTicketStateLiveFallback({ identifier = null, reason = null, 
       reason ??
       "a terminal-probe ticket-state read missed the replica and its live linearis fallback failed — backed off (breaker-flap mitigation)",
     detail: identifier ? { "linear.ticket": identifier } : {},
+    append,
+    now,
+    throttleMs,
+  });
+}
+
+// emitGithubAuthUnusable — CTL-1612 boot-preflight alert. Call ONLY when the probe
+// proved a 401; transient/unknown outcomes must not reach here.
+//
+// The detail key is NAMESPACED on purpose. buildDispatchAlertEvent writes its own
+// `source: "catalyst.execution-core"` into body.payload and THEN spreads `...detail`,
+// so a bare `source` key here would silently overwrite the service identifier that
+// every existing catalyst.alert.* consumer reads.
+export function emitGithubAuthUnusable({ tokenSource = null, reason = null, append, now, throttleMs } = {}) {
+  return emitThrottled({
+    eventName: ALERT_GITHUB_AUTH_UNUSABLE,
+    kind: ALERT_KIND_GITHUB_AUTH_UNUSABLE,
+    reason:
+      reason ??
+      "the daemon's GitHub credential was rejected (HTTP 401) at boot — every gh API call from this daemon and the workers it dispatches will fail until it is replaced and the daemon restarted",
+    detail: tokenSource ? { "catalyst.github_token_source": tokenSource } : {},
     append,
     now,
     throttleMs,

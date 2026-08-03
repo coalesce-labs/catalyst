@@ -328,6 +328,35 @@ cmd_start() {
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
 
+  # CTL-1612: project the webhook signing secret from the SOPS-managed file, matching
+  # what the launchd wrapper (orch-monitor/dist/catalyst-monitor-launchd.sh) already
+  # does. Without this the two launch paths disagree: webhook-config.ts resolves the
+  # GitHub HMAC key from process.env ONLY (no file fallback — unlike the Linear per-team
+  # secrets), so a stack-launched monitor on a host whose shell never exported it runs
+  # with the GitHub webhook route silently DISABLED. It is also boot-captured (read once
+  # at loadWebhookConfig, then closed over per request), so a rotation needs a restart —
+  # which is why webhook-secret is now enrolled in cluster-sync's boot-captured registry.
+  # FILE-WINS for the same reason as the daemon's GitHub credential: a stale shell export
+  # is exactly what we are correcting. Empty/whitespace/absent = no-op, never export ""
+  # (an empty secret makes webhook-config treat the route as unconfigured).
+  # CTL-1612: arm BOTH cluster-synced credentials this daemon needs, via the one shared
+  # resolution chain (lib/catalyst-secret-env.sh).
+  #
+  # webhook-secret: webhook-config.ts resolves the GitHub HMAC key from process.env ONLY
+  # (no file fallback, unlike the Linear per-team secrets) and captures it once at boot, so
+  # a monitor started without it runs with the GitHub webhook route silently DISABLED.
+  #
+  # github-token: the monitor makes 13 `gh` calls across 5 files (pr-status, preview-status,
+  # webhook-subscriber, webhook-replay, repo-icon-fetcher) and contains ZERO references to
+  # GITHUB_TOKEN/GH_TOKEN — its GitHub auth is purely ambient inheritance, which is exactly
+  # the bug this ticket exists to fix. doctor.mjs checkRepoIconTokenScope already exists to
+  # warn about this inherited token. Projecting here fixes all 13 sites at once, because they
+  # all inherit this launcher's env; none of them need to change.
+  # shellcheck disable=SC1090
+  source "$SCRIPT_DIR/lib/catalyst-secret-env.sh"
+  catalyst_project_webhook_secret
+  catalyst_project_github_token
+
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \
   MONITOR_PUBLIC_DIR="${MONITOR_UI_DIST_DIR}" \
