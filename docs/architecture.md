@@ -130,12 +130,93 @@ via Layer-2.
   reader's `mode` are unrelated concepts) and the orch-monitor smee tunnel gate (a declared-`cloud`
   node suppresses tunnel start; the replacement cloud-SDK event connection is **future work** — the
   smee→cloud cutover, ADR-0008 lineage — so `cloud` today means "no smee ingestion", not "cloud
-  ingestion wired"). **Planned consumer**: the CTL-1616 secret contract's provider-of-record
-  dispatch receives the full resolution object and never activates a cloud provider on
+  ingestion wired"). **Consumer**: the CTL-1616 secret contract's provider-of-record dispatch
+  (below) receives the full resolution object and never activates a cloud provider on
   `inferred:true`.
 - **Orthogonal axes, never merged**: deployment mode (fleet topology) × `catalyst.node.class`
   (per-machine role) × `orchestration.dispatchMode` (process substrate within a node).
 - Design + migration plan: `thoughts/shared/research/2026-08-02-ctl-1617-deployment-mode-design.md`.
+
+## Secret Contract (CTL-1616)
+
+The 2026-08-02 fleet 401 outage was four divergent hand-written copies of one secret-resolution
+chain. CTL-1616 generalizes CTL-1612's proven github-token/webhook-secret pair into **one
+registry, two engines**: `plugins/dev/scripts/lib/secret-contract.mjs` (a zero-import JS leaf —
+`node:fs`/`os`/`path` only, so `catalyst doctor`'s bare-Node runtime can import it without pulling
+in `execution-core/config.mjs`'s `bun:sqlite` graph) and its independently-maintained bash mirror
+`lib/catalyst-secret-contract.sh`, held honest by a cross-stack **three-way parity suite**
+(`__tests__/secret-contract-parity.test.sh`: bash and JS each checked against a
+computed-expected value, never merely against each other, plus row-id-set equality between the
+two registries). The schema — the 11 registered secrets, the 7 delivery types, the resolution
+result shape, the cloud guard, and the Layer-2 path chain — is documented in full in its canonical
+reference, `website/src/content/docs/reference/configuration.md`; this section covers only the
+architectural role.
+
+```mermaid
+flowchart LR
+  REG[SECRET_REGISTRY<br/>one frozen row set] --> JS[secret-contract.mjs<br/>zero-import engine]
+  REG -.mirrored.-> SH[catalyst-secret-contract.sh<br/>bash engine]
+  JS <-. three-way parity .-> SH
+  JS --> DOCTOR[catalyst doctor<br/>shadow + 1 live cutover]
+  JS --> LINEAR[9-file Linear-token read<br/>PR3]
+  JS --> MINT[Linear OAuth-mint trio<br/>PR4]
+  JS --> CLOUD[cloud-token name<br/>PR5]
+  SH --> HEALTH[health-responder.sh<br/>bash fallback, PR5]
+```
+
+**Bootstrap classes, one per deployment mode** — the one credential the contract can never itself
+deliver, since it is what unlocks (or stands in for) everything else the chain resolves:
+
+| Mode          | Bootstrap credential                          | Row              |
+| ------------- | ---------------------------------------------- | ----------------- |
+| `single-host` | none — every secret is operator-placed          | — (no row)         |
+| `cluster`     | the SOPS age private key (`~/.config/catalyst/age.key`, `SOPS_AGE_KEY_FILE`-overridable) | `age-key` (`local-only`, presence-checked, value never read) |
+| `cloud`       | `CATALYST_CLOUD_TOKEN` (name itself resolvable via a 3-tier ladder) | `cloud-token` (`platform-env`) |
+
+**Rotation classes** generalize `cluster-sync.mjs`'s "captured at process start" prose into
+structured per-row data: `boot-only` (a value change needs a restart), `re-armable`/`timer`
+(proactively re-checked on a recurring tick — `github-token`'s declared shape; its actual re-arm
+today still runs through the pre-existing CTL-1612 `rearmGithubTokenFromFile`, called every
+daemon cluster-sync tick in `execution-core/daemon.mjs`, not yet through this contract's own
+`registerRearmHook`/`armSecret` seam), and `re-armable`/`on-401`
+(reactively re-minted on an observed auth failure — the Linear OAuth-mint shape). `armSecret()`
+never throws and reports `{ armed, rotated, restartRequired }` — `restartRequired: true` is the
+literal mechanism the 2026-08-02 outage lacked: a `boot-only` row (or a `re-armable` row with no
+hook registered yet — the two degrade identically, by design, so a consumer that never wires the
+arm path can't look safer than one that structurally can't) reports it the moment its resolved
+value changes underneath a still-running daemon.
+
+**Consumers folded onto the contract so far**: the 9-file/12-site Linear-token read (`linear-query.mjs`,
+`cluster-heartbeat.mjs`, `cluster-claim.mjs`, `linear-estimation-method.mjs`,
+`linear-reconcile-cli.mjs`, three `orch-monitor/lib/linear-*` fallback readers, and
+`score-tickets.ts`); the Linear OAuth-mint trio (`linear-app-actor.sh`'s bash mint,
+`linear-remint.mjs`'s orchestrator-actor reminter — registered as the row's live rearm hook — and
+`linear-comment-post.sh`'s worker-actor chain, legacy tiers preserved verbatim); the cloud-token
+env-var **name** resolver (`config.mjs`'s `resolveNodeCloudTokenEnv` and `health-responder.sh`'s
+bash fallback both now delegate to the one `resolveCloudTokenName` implementation); and
+`catalyst doctor` itself, which consults the contract through `resolveSecret` directly rather
+than a parallel presence check — as a **shadow**
+comparison (INFO-only, never changes a grade) for most checks, with `checkPeerUniqueness` /
+`checkBotCredentials` / `checkWorkerLabels` cut over to the contract as their *live*
+`linear-api-token` answer, and one grade-changing addition: `checkCloudTokenEnv` now FAILs when the
+active deployment mode is declared `cloud` and the `cloud-token` bootstrap row doesn't resolve —
+the one FAIL doctor cannot route around. The GitHub-token/webhook-secret pair that motivated the
+contract (CTL-1612's `catalyst-secret-env.sh` / `github-auth-preflight.mjs`) has **not yet** been
+re-pointed onto the shared engine — both rows exist in the registry today for shadow comparison and
+future consumers, but the live CTL-1612 code path is still its own, pre-existing implementation.
+
+The same PR5 that unified the cloud-token name resolver did adjacent, unrelated cleanup on Groq's
+`GROQ_API_KEY` ladder (`dsl-cli.mjs` and `hud.tsx` joined `broker/config.mjs` on the shared
+`resolveApiKey`) — but that is `lib/api-key-health.mjs`'s pre-existing (CTL-343) resolver, not this
+contract: none of those three call sites import `secret-contract.mjs`, and the registry's own
+`groq-api-key` row has no consumer today besides `checkSecretContract`'s shadow-only observation.
+
+**Secret-env hygiene rule**: the bash engine's `_csc_set_result` exports the non-secret
+`CATALYST_SECRET_LAST_SOURCE`/`_PROVIDER` breadcrumbs for the calling shell's convenience but
+**never** exports the resolved value itself (`CATALYST_SECRET_LAST_VALUE` stays same-shell-only,
+with `export -n` reasserted on every call since bash's export attribute is sticky across
+reassignment) — a long-lived daemon shell must not leak a credential into every child process it
+launches.
 
 ## Agent Teams vs Subagents
 
