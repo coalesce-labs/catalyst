@@ -49,6 +49,12 @@ function defaultAppend(line) {
 // WARN. The team is the event's entity label — there is no Linear issue
 // identifier for a team-wide reconcile failure, so the attributes carry `team`
 // rather than `linear.issue.identifier`.
+// REASON_ATTR_MAX_LEN — bound on the `reconcile.reason` attribute so a long
+// stack-trace-flavored error message (e.g. a wrapped ENOSPC/EACCES fs error)
+// can't blow up the OTLP/Loki attribute payload. body.payload.reason (below)
+// keeps the untruncated string for local/file consumers.
+const REASON_ATTR_MAX_LEN = 200;
+
 export function buildReconcileHealthEvent({
   team,
   action,
@@ -75,6 +81,15 @@ export function buildReconcileHealthEvent({
         "event.action": `reconcile.${action}`,
         "event.label": team,
         "catalyst.team": team,
+        // CTL-1628: otel-forward's OTLP conversion (lib/destinations/otlp.ts
+        // buildOtlpPayload) only ever forwards `attributes` + `body.message` —
+        // `body.payload` (where `reason` lived exclusively before this) is
+        // never read, so the failure reason was silently dropped for every
+        // Loki/Grafana consumer. Mirrored into attributes here, truncated, so
+        // it survives the forward. Omitted (not even empty-string) when there
+        // is no reason, matching the conditional-attribute style used
+        // elsewhere in this envelope (e.g. linear.issue.identifier).
+        ...(reason ? { "reconcile.reason": String(reason).slice(0, REASON_ATTR_MAX_LEN) } : {}),
       },
       body: {
         payload: {

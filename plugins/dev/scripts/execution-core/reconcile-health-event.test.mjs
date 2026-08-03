@@ -33,6 +33,10 @@ describe("buildReconcileHealthEvent", () => {
     expect(ev.resource["service.name"]).toBe("catalyst.execution-core");
     expect(ev.severityText).toBe("WARN");
     expect(ev.severityNumber).toBe(13);
+    // CTL-1628: reason must also land in attributes — otel-forward's OTLP
+    // conversion never reads body.payload, so a reason confined to the body
+    // is invisible to every Loki/Grafana consumer.
+    expect(ev.attributes["reconcile.reason"]).toBe("removed-state: Ready");
     expect(ev.body.payload).toMatchObject({
       team: "CTL",
       action: "failing",
@@ -42,6 +46,22 @@ describe("buildReconcileHealthEvent", () => {
       reason: "removed-state: Ready",
     });
     expect(ev.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
+  test("reason attribute is truncated to 200 chars and omitted entirely when absent", () => {
+    const long = "x".repeat(500);
+    const withReason = JSON.parse(
+      buildReconcileHealthEvent({ team: "CTL", action: RECONCILE_FAILING_ACTION, reason: long }),
+    );
+    expect(withReason.attributes["reconcile.reason"]).toHaveLength(200);
+    expect(withReason.attributes["reconcile.reason"]).toBe(long.slice(0, 200));
+    // full untruncated reason still survives for local/file consumers via the body
+    expect(withReason.body.payload.reason).toBe(long);
+
+    const withoutReason = JSON.parse(
+      buildReconcileHealthEvent({ team: "CTL", action: RECONCILE_FAILING_ACTION }),
+    );
+    expect(withoutReason.attributes["reconcile.reason"]).toBeUndefined();
   });
 
   test("recovered envelope — INFO severity", () => {
@@ -71,6 +91,7 @@ describe("buildReconcileHealthEvent", () => {
     expect(ev.attributes["event.action"]).toBe("reconcile.eligible_persist_failure");
     expect(ev.severityText).toBe("WARN");
     expect(ev.severityNumber).toBe(13);
+    expect(ev.attributes["reconcile.reason"]).toBe("ENOSPC: no space left on device");
     expect(ev.body.payload).toMatchObject({
       team: "CTL",
       action: "eligible_persist_failure",

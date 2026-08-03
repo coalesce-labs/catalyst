@@ -222,6 +222,72 @@ describe("reconcileProject", () => {
     expect(events[0]).toMatchObject({ team: "ENG", action: "eligible_persist_failure" });
     expect(events[0].reason).toBeTruthy();
   });
+
+  // CTL-1628 (design-gap fix): before this fix, recordReconcileSuccess ran
+  // BEFORE the persist try/catch, so a *persistent* persist fault (unlike a
+  // one-off) kept reconcile-health permanently green — checkFleetFreeze would
+  // never see it. Persist failures now also drive the same N-consecutive
+  // escalation/alert-latch tracker as poll failures.
+  test("N consecutive persist failures escalate monitor.reconcile.failing, exactly once (CTL-1628)", () => {
+    enroll("ENG", { status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    // Same disk-fault simulation as the single-failure test above: block the
+    // projection path so every setProjectEligible call throws.
+    const projDir = join(catalystDir, "execution-core", "eligible", "ENG.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    // Two persist failures under the default threshold (3): both surface the
+    // unconditional eligible_persist_failure event, neither crosses the
+    // escalation threshold yet.
+    expect(events.filter((e) => e.action === "eligible_persist_failure")).toHaveLength(2);
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(0);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(2);
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+
+    // Third consecutive persist failure crosses the threshold → exactly one
+    // "failing" escalation, in addition to the unconditional persist event.
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    expect(events.filter((e) => e.action === "eligible_persist_failure")).toHaveLength(3);
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(1);
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(3);
+
+    // A subsequent successful persist recovers — the alert clears and a
+    // "recovered" event fires, same as a recovering poll.
+    rmSync(projDir, { recursive: true, force: true });
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    expect(events.filter((e) => e.action === "recovered")).toHaveLength(1);
+    const health = getReconcileHealth("ENG");
+    expect(health.alerting).toBe(false);
+    expect(health.consecutiveFailures).toBe(0);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
+  });
+
+  test("a single transient persist failure under the threshold does not alert or affect checkFleetFreeze inputs (CTL-1628)", () => {
+    enroll("ENG", { status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    const projDir = join(catalystDir, "execution-core", "eligible", "ENG.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    rmSync(projDir, { recursive: true, force: true });
+    reconcileProject("ENG", { exec, appendHealthEvent });
+
+    // Recovered before crossing the alert threshold — no "failing"/"recovered"
+    // pair, mirroring the equivalent poll-failure test above.
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(0);
+    expect(events.filter((e) => e.action === "recovered")).toHaveLength(0);
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(0);
+  });
 });
 
 // --- CTL-1397: replica-backed board-list discovery --------------------------

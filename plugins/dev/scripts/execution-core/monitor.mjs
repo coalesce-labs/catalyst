@@ -365,13 +365,20 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     );
     return;
   }
-  // CTL-867: the poll succeeded — reset the failure streak, refresh the
-  // last-successful-refresh marker, and clear any standing alert. Recorded
-  // BEFORE the projection write so a successful poll counts as a recovery even
-  // if the (rare) projection write below fails.
-  recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   try {
     setProjectEligible(team, tickets, { source: "reconcile", query });
+    // CTL-867/CTL-1628: reset the failure streak, refresh the
+    // last-successful-refresh marker, and clear any standing alert only once
+    // the projection has actually landed on disk. This used to run BEFORE the
+    // persist try/catch (recorded as soon as the poll succeeded), which meant
+    // a *persistent* persist fault (e.g. EACCES on the eligible dir) kept
+    // reconcile-health — and by extension checkFleetFreeze, which reads
+    // getReconcileHealth(team)?.alerting — permanently green while the
+    // scheduler read a stale-forever projection (the CTL-1628 design gap:
+    // "persist failures invisible to reconcile health state"). Moved here so
+    // a persist failure now falls into the catch below instead of being
+    // masked as success.
+    recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   } catch (err) {
     // A projection write/rename failure (disk full, permissions) must NOT
     // crash the daemon: reconcileProject runs inside reconcileAll, itself
@@ -394,6 +401,19 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
       action: ELIGIBLE_PERSIST_FAILURE_ACTION,
       reason: err.message,
     });
+    // CTL-1628: ALSO feed this into the same N-consecutive escalation/
+    // alert-latch tracker recordReconcileFailure already drives for poll
+    // failures, so a *persistent* persist fault escalates monitor.reconcile.
+    // failing and holds checkFleetFreeze's alerting flag true — exactly like
+    // a persistent poll fault does — instead of the marker staying frozen
+    // "healthy" forever. The `eligible-persist-failed:` prefix distinguishes
+    // a persist-origin streak from a poll-origin streak in the health marker
+    // / dashboard without adding a second tracked dimension.
+    recordReconcileFailure(
+      team,
+      `eligible-persist-failed: ${err.message}`,
+      appendHealthEvent ? { appendEvent: appendHealthEvent } : {}
+    );
   }
 }
 
