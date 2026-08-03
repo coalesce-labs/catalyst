@@ -98,12 +98,16 @@ outage (heartbeat read throws / everyone looks dead) degrades to the **full rost
 only its own HRW slice — never double-acts). The Linear-CAS claim (`cluster-claim.mjs` soft-CAS on
 `catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains the transition-race serializer.
 
-**Worker signal projection (in migration, ADR-018, CTL-483).** Per-worker `workers/<TICKET>.json`
-files are currently written by ~7 scripts with no inter-process locking. CTL-483 moves these
-mutations to a `worker.state_changed` command event consumed by the broker, which projects to a
-shadow `<TICKET>.json.projected`. Phase 1: broker handler + emit helper + dual-write for
-`orchestrate-auto-rebase` (`orchestrate-shadow-diff` verifies byte-for-byte parity). Phase 2: remove
-direct writes (broker sole writer). Phase 3: mirror to SQLite per ADR-011. See ADR-018.
+**Worker signal projection (CTL-532; ADR-018 Phase 1 retired, CTL-1628).** Per-worker
+`workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process locking; ADR-018
+originally proposed closing that gap via a `worker.state_changed` command event and a JSON shadow
+file with a three-phase dual-write cutover. That JSON shadow-write mechanism stalled at 1 of 7
+writers migrated and was retired as dead weight (zero readers) rather than completed. The live
+successor is **CTL-532**: the broker folds every event on the log (not just a dedicated command
+event) into a pure `reduceWorkerStateEvent` reducer via `projectWorkerStateEvent`, and
+order-independently upserts the result into a SQLite `worker_state` table
+(`broker/broker-state.mjs`) — one row per `(orchestrator, ticket)` with phase, status, PR number,
+and revive count. See ADR-018 for the full history.
 
 ## Deployment Mode (CTL-1617)
 
@@ -427,9 +431,12 @@ are written at their own scheduler sites around the same transition (not fanned 
 chokepoint): (1) Linear Status via the `applyPhaseStatus` chokepoint (Axis 1), (2) the
 `worker-status` label via the admission converger (`convergeHeldLabel`) / `labelOnce` (Axis 2), and
 (5) the optional broker `ticket_state_transitions` table (CTL-764 Phase 10). The standalone
-`recordWorkerTransition` module (`record-worker-transition.mjs`) is the extracted, unit-tested
-reference implementation of this same five-sink fan-out contract; the scheduler's live path uses the
-inline `recordTransition` today.
+`recordWorkerTransition` module (`record-worker-transition.mjs`) — once an extracted, unit-tested
+reference implementation of this same five-sink fan-out contract — was retired as consumer-free
+(CTL-1628): the scheduler's live path has only ever used the inline `recordTransition` chokepoint
+described above. The analogous worker-state projection need (phase/status/PR/revive-count, not
+disposition) is served live by the separate CTL-532 SQLite projection — see "Worker signal
+projection" above.
 
 ### Unified data-flow
 
