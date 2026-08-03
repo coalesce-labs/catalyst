@@ -31,3 +31,26 @@ describe("AppShell provides ServiceHealthContext (5th provider, CTL-945)", () =>
     expect(SRC).toContain("</ServiceHealthContext.Provider>");
   });
 });
+
+// CTL-1003 removed the header's SidebarTrigger for desktop (keyboard-only:
+// `[` / Cmd-B). Below the `md` breakpoint the sidebar is an off-canvas Sheet
+// with no keyboard available (iOS Safari) and no other tap target — the
+// SidebarRail drag-handle is itself desktop-only (`sm:flex`). This restores a
+// trigger, but ONLY on narrow viewports, so the deliberate desktop chrome is
+// unaffected.
+describe("AppShell restores a mobile-only sidebar trigger (narrow-viewport nav fix)", () => {
+  it("imports SidebarTrigger", () => {
+    expect(SRC).toMatch(/import \{[^}]*\bSidebarTrigger\b[^}]*\} from "@\/components\/ui\/sidebar"/s);
+  });
+  it("renders <SidebarTrigger> as the header's first child, before the breadcrumb", () => {
+    const headerIdx = SRC.indexOf("<header");
+    const triggerIdx = SRC.indexOf("<SidebarTrigger");
+    const breadcrumbIdx = SRC.indexOf("<Breadcrumb>");
+    expect(headerIdx).toBeGreaterThan(-1);
+    expect(triggerIdx).toBeGreaterThan(headerIdx);
+    expect(breadcrumbIdx).toBeGreaterThan(triggerIdx);
+  });
+  it("gates the trigger to narrow viewports only (md:hidden), leaving desktop keyboard-only", () => {
+    expect(SRC).toMatch(/<SidebarTrigger className="[^"]*\bmd:hidden\b[^"]*"/);
+  });
+});

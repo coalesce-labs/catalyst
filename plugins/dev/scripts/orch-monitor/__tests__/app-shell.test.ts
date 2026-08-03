@@ -214,9 +214,13 @@ describe("one header: no search box, no SidebarTrigger collapse icon (CTL-1003)"
     expect(shellSrc).toContain("CommandDialog");
   });
 
-  it("the SidebarTrigger collapse icon + its Separator are removed from the header", () => {
-    // `[` / Cmd-B still toggle via shouldToggleSidebar — only the visible icon goes.
-    expect(shellSrc).not.toContain("SidebarTrigger");
+  it("the SidebarTrigger collapse icon's Separator stays removed; the icon itself is DESKTOP-hidden, not gone (mobile-nav fix)", () => {
+    // `[` / Cmd-B still toggle via shouldToggleSidebar on desktop. CTL-1003 removed
+    // the always-visible SidebarTrigger; the mobile-nav follow-up restored it, but
+    // ONLY behind `md:hidden` — below `md` the off-canvas Sheet has no keyboard
+    // (iOS Safari) and no other tap target, so a narrow-viewport icon is required.
+    // The Separator (a purely cosmetic divider) was NOT restored.
+    expect(shellSrc).toMatch(/<SidebarTrigger className="[^"]*\bmd:hidden\b[^"]*"/);
     expect(shellSrc).not.toMatch(/from "@\/components\/ui\/separator"/);
     expect(shellSrc).toContain("shouldToggleSidebar");
   });
