@@ -390,8 +390,24 @@ cmd_start() {
   # (readPeerHeartbeatsSync, wired in server.ts) consumes it. Personal-token paths
   # (linear-comment.mjs, inbox-conversation*.mjs, estimate/title fallbacks) are
   # untouched — they never look at this variable.
-  source "$SCRIPT_DIR/lib/linear-app-actor.sh"
-  linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
+  #
+  # CTL-1612 round 3 (Codex P2 follow-up): the scoped token's ONLY consumer is
+  # the anchor peer-heartbeat read (server.ts pollAnchorHeartbeats → readAnchor
+  # → readPeerHeartbeatsSync). orch-monitor/lib/peer-liveness.mjs readPeerRecords
+  # NEVER calls readAnchor when CATALYST_LIVENESS_READ_SOURCE is exactly "loki"
+  # (case-insensitive) — that is the one mode with a hard early-return before
+  # the anchor tier. Every other value — unset, "auto", "linear", or anything
+  # else — either uses the anchor exclusively ("linear") or as the AUTO
+  # fallback when Loki has no URL/reader or returns empty, so minting stays the
+  # default there. Skip the (real network) mint in loki-only mode: it would
+  # authenticate a credential that structurally can never be read.
+  _liveness_source="$(printf '%s' "${CATALYST_LIVENESS_READ_SOURCE:-}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || true)"
+  if [[ "$_liveness_source" == "loki" ]]; then
+    echo "catalyst-monitor: CATALYST_LIVENESS_READ_SOURCE=loki — skipping app-actor mint (peer-heartbeat anchor read is unused in loki-only mode)" >&2
+  else
+    source "$SCRIPT_DIR/lib/linear-app-actor.sh"
+    linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
+  fi
 
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \

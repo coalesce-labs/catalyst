@@ -1812,6 +1812,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // picked up by the NEXT poll tick. The reminter's own implementation
         // never rejects (see remintAppActorToken's construction above), so no
         // unhandled-rejection risk from not chaining a .catch() here too.
+        //
+        // CTL-1612 round 3 (Codex P2 follow-up): NO explicit
+        // CATALYST_LIVENESS_READ_SOURCE=loki check is needed here. This whole
+        // closure is `readPeerRecords`'s `readAnchor` argument (peer-liveness.mjs)
+        // — readPeerRecords early-returns BEFORE ever calling readAnchor
+        // whenever its resolved source is "loki" (both the loki-has-peers and
+        // loki-empty-fallback branches return before reaching the
+        // `readAnchor(...)` call at the bottom of that function), so this
+        // closure — and the remintAppActorToken() call inside it — is already
+        // structurally unreachable in loki-only mode. Covered by
+        // __tests__/peer-liveness.test.ts "explicit loki: trusts an empty
+        // result — never reads the retired anchor" (asserts a readAnchor call
+        // counter stays 0). catalyst-monitor.sh cmd_start carries the actual
+        // gate (skips the mint entirely under CATALYST_LIVENESS_READ_SOURCE=loki)
+        // since that is where the real network call would otherwise happen.
         readAnchor: (args: { anchorIssue: string }) => {
           void execCoreDeps?.remintAppActorToken();
           const scoped = process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN?.trim();

@@ -633,4 +633,66 @@ describe("createAsyncReminter", () => {
       expect(mints).toBe(1);
     });
   });
+
+  // CTL-1612 round 3 (Codex P2 follow-up): the cooldown gate is TIME-only —
+  // deferred-promise mints prove the IN-FLIGHT LATCH is doing independent
+  // work, not just the timing gate (each test below calls attempt() a second
+  // time with a `now` far past any cooldown window, which the time gate ALONE
+  // would happily let through).
+  describe("in-flight latch (CTL-1612 round 3)", () => {
+    test("a second attempt returns false while the first is still pending, even past the cooldown window", async () => {
+      let mints = 0;
+      let resolveMint;
+      const pending = new Promise((res) => {
+        resolveMint = res;
+      });
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return pending; // stays unresolved until resolveMint() is called
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        logger: silentLogger,
+      });
+
+      const firstAttempt = r.attempt(0); // synchronously reaches the await and latches inFlight
+      // `now` here is WAY past cooldownMs (60s) from lastAttempt(0) — the pure
+      // time gate would pass this. Only the in-flight latch can still block it.
+      expect(await r.attempt(999_999)).toBe(false);
+      expect(mints).toBe(1); // the second call never invoked mint at all
+
+      resolveMint("tok-first");
+      expect(await firstAttempt).toBe(true);
+    });
+
+    test("a later attempt succeeds once the first has resolved", async () => {
+      let mints = 0;
+      let resolveMint;
+      const pending = new Promise((res) => {
+        resolveMint = res;
+      });
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return pending;
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        logger: silentLogger,
+      });
+
+      const firstAttempt = r.attempt(0);
+      resolveMint("tok-first");
+      expect(await firstAttempt).toBe(true);
+      expect(mints).toBe(1);
+
+      // Past cooldownMs AND the first attempt has fully resolved (inFlight
+      // cleared in the finally) — this one must proceed and mint again.
+      expect(await r.attempt(61_000)).toBe(true);
+      expect(mints).toBe(2);
+    });
+  });
 });
