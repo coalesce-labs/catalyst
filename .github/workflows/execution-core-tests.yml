@@ -257,6 +257,35 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/migrate-dual-harness.test.sh
 
+      - name: deployment-mode resolver unit tests (bun, CTL-1617)
+        # Codex remediation: neither of the three deployment-mode suites was
+        # named anywhere in this workflow (nor any other), so required CI
+        # stayed green without ever exercising lib/deployment-mode.mjs, its
+        # Bash mirror, or their cross-stack agreement. This is the JS-side
+        # unit suite (resolveDeploymentMode/getDeploymentMode's validity
+        # ladder, the injected-env isolation contract). Its own step because
+        # lib/deployment-mode.mjs is a deliberately ZERO-IMPORT leaf outside
+        # the execution-core/ tree the "Run stable unit tests" step below is
+        # scoped to.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test deployment-mode.test.mjs
+
+      - name: deployment-mode Bash resolver unit test (CTL-1617)
+        # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
+        # see the bun step above for why this suite was previously ungated.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-deployment-mode.test.sh
+
+      - name: deployment-mode cross-stack parity test (CTL-1617)
+        # The fixture-matrix parity test asserting bash == node == the
+        # design-spec-computed expected value at every cell (168 fixture
+        # cells x 2 assertions, plus the dedicated divergence-pinning probes
+        # for the NUL-byte, NBSP-padding, malformed-trailing-content, and
+        # lone-surrogate hostile inputs). Needs jq, preinstalled on
+        # ubuntu-latest runners.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/deployment-mode-parity.test.sh
+
       - name: Broker worker-state projection test (CTL-1529)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
         # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),

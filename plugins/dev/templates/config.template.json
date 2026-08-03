@@ -55,6 +55,9 @@
         "botUserId": null
       }
     },
+    "deployment": {
+      "mode": "single-host"
+    },
     "orchestration": {
       "_comment": "Worker dispatch mode. 'phase-agents' (default) dispatches the 9-phase pipeline on claude --bg; 'oneshot-legacy' keeps the pre-CTL-452 single-shot oneshot worker on claude -p.",
       "dispatchMode": "phase-agents",
