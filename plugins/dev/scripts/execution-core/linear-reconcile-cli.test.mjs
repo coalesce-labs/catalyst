@@ -827,15 +827,20 @@ test("--graphql: buildReadState uses LINEAR_API_KEY when LINEAR_API_TOKEN is abs
   }
 });
 
-test("--graphql: buildReadState falls back to LINEAR_API_KEY when LINEAR_API_TOKEN is empty", async () => {
-  // CTL-1619 / Codex P2: an exported-but-empty LINEAR_API_TOKEN='' must not
-  // defeat the LINEAR_API_KEY fallback (the `??`→`||` fix).
+test.each([
+  ["empty", ""],
+  ["whitespace-only", "   "],
+])(
+  "--graphql: buildReadState falls back to LINEAR_API_KEY when LINEAR_API_TOKEN is %s",
+  async (_label, blankToken) => {
+  // CTL-1619 / Codex: a blank (empty OR whitespace-only) LINEAR_API_TOKEN must
+  // not defeat the LINEAR_API_KEY fallback (the `??`→trimmed-`||` fix).
   const savedToken = process.env.LINEAR_API_TOKEN;
   const savedKey = process.env.LINEAR_API_KEY;
   const savedFetch = globalThis.fetch;
   let seenAuth = null;
   try {
-    process.env.LINEAR_API_TOKEN = "";
+    process.env.LINEAR_API_TOKEN = blankToken;
     process.env.LINEAR_API_KEY = "lin_api_fromkey";
     globalThis.fetch = async (_url, opts) => {
       seenAuth = opts.headers.Authorization;

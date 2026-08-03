@@ -206,10 +206,12 @@ export async function buildReadState(args) {
     return async (t) => map[t] ?? null;
   }
   if (args.graphql) {
-    // Nonempty-string fallback (NOT `??`): a launch env that exports
-    // LINEAR_API_TOKEN='' would defeat `??` (empty string is not nullish),
-    // stranding the LINEAR_API_KEY fallback. `||` treats "" as absent.
-    const token = process.env.LINEAR_API_TOKEN || process.env.LINEAR_API_KEY || "";
+    // Nonblank fallback (NOT `??`): a launch env that exports an empty or
+    // whitespace-only LINEAR_API_TOKEN would defeat `??` (a non-nullish "" /
+    // "  " is selected), stranding the LINEAR_API_KEY fallback and sending a
+    // blank Authorization header. Trim each source and treat blank as absent.
+    const token =
+      (process.env.LINEAR_API_TOKEN || "").trim() || (process.env.LINEAR_API_KEY || "").trim();
     return async (t) => graphqlReadState(t, token);
   }
   // cache (filter-state.db). broker-state.mjs imports bun:sqlite → under plain
