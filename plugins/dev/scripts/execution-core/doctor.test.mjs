@@ -2421,9 +2421,29 @@ describe("checkWebhookIngestion — deployment-mode alignment (CTL-1617, #2913 C
     expect(primary.detail).toContain("intentionally not wired");
   });
 
-  it("declared cloud: same aligned PASS (wire iff cluster, not skip iff single-host)", () => {
+  it("declared cloud: WARN, not PASS — cloud replacement ingestion does not exist yet (#2918 follow-up)", () => {
     const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("cloud") });
-    expect(checks.find((c) => c.name === "webhook-ingestion").status).toBe(STATUS.PASS);
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.WARN);
+    expect(primary.detail).toContain("no event ingestion at all");
+  });
+
+  it("declared non-cluster with a DANGLING Linear key: half-wired FAIL fires before the aligned grant (#2918 follow-up ordering)", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      // no github route at all + linear webhookId without its secret →
+      // both wired flags false → the old code granted the aligned PASS
+      // before ever reaching the dangling check.
+      monitor: { github: {}, linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
+      secretFileNonEmpty: () => false,
+      linearSecretEnvName: null,
+      resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+      resolveDeploymentModeFn: () => mode("single-host"),
+    });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.FAIL);
+    expect(primary.detail).toContain("half-wired");
+    expect(primary.detail).toContain("does not excuse config residue");
   });
 
   it("declared CLUSTER keeps the FAIL — the missed-activation-step-2b signal must survive", () => {

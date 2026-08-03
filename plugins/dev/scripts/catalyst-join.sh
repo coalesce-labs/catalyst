@@ -970,7 +970,14 @@ do_doctor_gate() {
   # Gate strictly on [$? -eq 0] per the doctor contract. This replaces the old
   # default of check-setup.sh, a cwd-relative full-workstation check that exits
   # nonzero on a fresh node (the reason mini-2's join needed a manual marker poke).
-  if bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
+  # #2918 follow-up (Codex P1): thread the SAME Layer-1 the webhook-wiring
+  # gate consulted (provisioner-parity plugin-source checkout) into the doctor
+  # run — the deployment-mode resolver's own Layer-1 default is CWD-relative
+  # (the operator's invocation directory), so without this the doctor gate
+  # resolves an inferred default and keeps the webhook-ingestion FAIL on a
+  # declared non-cluster join that the wiring gate intentionally skipped.
+  local _doctor_l1="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/.catalyst/config.json"
+  if CATALYST_CONFIG_FILE="$_doctor_l1" bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
     info "Doctor gate passed (catalyst-doctor: 0 FAIL checks)."
     return 0
   else

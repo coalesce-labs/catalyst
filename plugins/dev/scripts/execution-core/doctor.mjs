@@ -1226,6 +1226,36 @@ export function checkWebhookIngestion(deps = {}) {
       declaredMode.recognized === true &&
       declaredMode.mode !== "cluster"
     ) {
+      // #2918 follow-up (Codex P2 x2):
+      // (a) The aligned grant applies only to a FULLY-ABSENT route — a
+      //     dangling Linear webhookId without its HMAC secret is config
+      //     residue and must keep the half-wired FAIL even here (this
+      //     branch previously returned before the dangling check below).
+      if (danglingKeys.length > 0) {
+        return [
+          mkCheck(
+            "webhook-ingestion",
+            STATUS.FAIL,
+            `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>) — declared mode "${declaredMode.mode}" does not excuse config residue`,
+          ),
+          ...webhookShadow,
+        ];
+      }
+      // (b) Declared CLOUD is a WARN, not a PASS: cloud suppresses the smee
+      //     tunnels but its replacement ingestion (the cloud SDK event
+      //     connection) does not exist yet — an otherwise-green doctor must
+      //     not certify a node with zero event ingestion. Flips to PASS only
+      //     when a real cloud ingestion check exists to stand in its place.
+      if (declaredMode.mode === "cloud") {
+        return [
+          mkCheck(
+            "webhook-ingestion",
+            STATUS.WARN,
+            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired, but cloud replacement ingestion is NOT yet implemented: this node currently has no event ingestion at all`,
+          ),
+          ...webhookShadow,
+        ];
+      }
       return [
         mkCheck(
           "webhook-ingestion",

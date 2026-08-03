@@ -1352,6 +1352,38 @@ run "T4.4 doctor gate failure exits non-zero before stack install" bash -c "
     bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1; [[ \$? -ne 0 ]] && \
   ! grep -q 'catalyst-stack install-services' '$INVLOG4D'"
 
+# T4.4b: (#2918 follow-up P1) the doctor gate must run with CATALYST_CONFIG_FILE
+# pointed at the provisioner-parity plugin-source Layer-1 — the deployment-mode
+# resolver's own Layer-1 default is CWD-relative (the operator's invocation
+# dir), so without the override the gate resolves an inferred default and
+# keeps a webhook-ingestion FAIL the wiring gate intentionally aligned away.
+STUBS4B="${SCRATCH}/stubs4b"
+make_stubs "$STUBS4B"
+run "T4.4b doctor gate receives the plugin-source CATALYST_CONFIG_FILE (#2918 P1)" bash -c "
+  catdir='${SCRATCH}/c44b'
+  home44b='${SCRATCH}/h44b'
+  mkdir -p \"\$home44b/.config/catalyst\"
+  printf '{}' > \"\$home44b/.config/catalyst/config.json\"
+  envlog='${SCRATCH}/c44b-doctor-env.log'
+  cat > '${STUBS4B}/stub-doctor-envlog.sh' <<'STUB'
+#!/usr/bin/env bash
+echo \"CATALYST_CONFIG_FILE=\${CATALYST_CONFIG_FILE:-UNSET}\" >> '${SCRATCH}/c44b-doctor-env.log'
+exit 0
+STUB
+  chmod +x '${STUBS4B}/stub-doctor-envlog.sh'
+  env -i HOME=\"\$home44b\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS4B}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4B}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4B}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS4B}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS4B}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4B}/stub-doctor-envlog.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS4B}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
+  grep -qF \"CATALYST_CONFIG_FILE=\$home44b/catalyst/plugin-source/.catalyst/config.json\" \"\$envlog\""
+
 # T4.5: catalyst-stack install-services runs AFTER config merge
 STUBS4O="${SCRATCH}/stubs4o"
 make_stubs "$STUBS4O"
