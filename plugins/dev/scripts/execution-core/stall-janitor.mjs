@@ -506,24 +506,37 @@ export const defaultNoEvict = () => false;
 // the STEP A terminal short-circuit (resolveAndApplyWorkerStatusLabel). Mirrors the
 // J4 census fences (classifyTerminalSignalGc + the agentsFresh bail): never remove
 // a dir whose worktree hosts a live session, and never evict when the liveness
-// snapshot is not fresh (defer to a trustworthy tick). Best-effort rmSync — never
-// throws. A no-op default (defaultNoEvict) protects any un-wired caller.
+// snapshot is not fresh (defer to a trustworthy tick). Also consults the SDK
+// worker registry (in-process, then the cross-process disk projection) BEFORE the
+// agents-roster fence — an in-process SDK/codex-exec worker has bg_job_id null and
+// is invisible to `claude agents`/the roster check (see sdk-worker-registry.mjs
+// header), so without this a live in-process worker's signal dir is deletable the
+// moment Linear goes terminal. Best-effort rmSync — never throws. A no-op default
+// (defaultNoEvict) protects any un-wired caller.
 export function makeEvictWorkerDir({
   orchDir,
   agents = [],
   agentsFresh = true,
   resolveWorktreePath = () => null,
+  isSdkWorkerLive = () => false,
+  isSdkWorkerLiveOnDisk = () => false,
 }) {
   return (ticket) => {
     if (!agentsFresh) return false; // never evict blind (CTL-1315 discipline)
+    if (isSdkWorkerLive(ticket) || isSdkWorkerLiveOnDisk(ticket)) return false; // live in-process/cross-process SDK worker owns this dir
     let worktreePath = null;
     try {
       worktreePath = resolveWorktreePath(ticket);
     } catch {
       /* conservative — treat as unresolved */
     }
+    // CTL-1605 finding: an unresolved worktree path (missing/pre-CTL-615 signal,
+    // or a resolver throw above) must DEFER, not fail open — the live-session
+    // probe below can only clear a ticket it can actually evaluate. The J4 census
+    // stays the slow backstop for a dir that never resolves a worktree.
+    if (!worktreePath) return false;
     const liveSession =
-      !!worktreePath && Array.isArray(agents) && agents.some((a) => cwdUnder(a?.cwd, worktreePath));
+      Array.isArray(agents) && agents.some((a) => cwdUnder(a?.cwd, worktreePath));
     if (liveSession) return false; // a live worker owns this dir
     try {
       rmSync(join(orchDir, "workers", ticket), { recursive: true, force: true });

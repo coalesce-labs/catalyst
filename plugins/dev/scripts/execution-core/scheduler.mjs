@@ -81,7 +81,7 @@ import {
   fetchTicketAssignee,
   isAssigneeClaimable,
   isClaimable,
-  readTicketLabels,
+  readTicketLabels as defaultReadTicketLabels,
   GATEWAY_EXISTS_FRESH_MS,
 } from "./linear-query.mjs";
 import { gatewayLabelsHit, descriptorAgeMs } from "./gateway-read.mjs"; // CTL-1079 / CTL-1570
@@ -98,7 +98,12 @@ import {
 } from "./signal-reader.mjs";
 // CTL-1410 Phase B: the in-process SDK worker registry — the liveness fact for
 // workers with no bg job (leaf module; a Map read, never a shell-out).
-import { isSdkWorkerLive as registrySdkWorkerLive } from "./sdk-worker-registry.mjs";
+// CTL-1605: isSdkWorkerLiveOnDisk is the cross-process disk-projection fence
+// (delegate-runner / codex-exec children) the fast-path evictor also consults.
+import {
+  isSdkWorkerLive as registrySdkWorkerLive,
+  isSdkWorkerLiveOnDisk,
+} from "./sdk-worker-registry.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 // CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
@@ -340,7 +345,9 @@ import {
   clearStalledLabel,
   labelNeedsHumanUnlessBeliefOwner,
   resolveAndApplyWorkerStatusLabel,
+  WORKER_STATUS_LABELS,
 } from "./label-guard.mjs";
+import { DISPOSITIONS } from "./worker-disposition.mjs"; // CTL-1605: precedence order for the onTerminalCleared aggregate-arg → pre-clear `from` resolution
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
 import {
@@ -3598,6 +3605,11 @@ export function schedulerTick(
     // both hydrateOutOfSetBlockers calls. Defaults to the real batch helper;
     // tests inject a stub `(ids) => Map<id, descriptor>` so a tick never shells out.
     fetchBatch = fetchTicketsBatch,
+    // CTL-1605: single-ticket live label read seam — consulted by the STEP A
+    // terminal-stale branch (the batch-cached labels can trail the fresh-overlaid
+    // state; see the A.3.5 comment below) and by the retraction sweep's
+    // readLabels fallback. Injectable so tests never shell out to `linearis`.
+    readTicketLabels = defaultReadTicketLabels,
     // CTL-1605: guarded fast-path worker-dir eviction seam. STEP A routes a
     // Linear-terminal triaged-waiting ticket through resolveAndApplyWorkerStatusLabel,
     // which clears any stale worker-status label and calls this to evict the stale
@@ -5500,18 +5512,79 @@ export function schedulerTick(
       const liveTriagedWaiting = [];
       for (const ticket of triagedWaiting) {
         const rel = relByTicket.get(ticket) ?? null;
+        const staleTerminal = isLinearTerminal(rel?.state);
+        let currentLabels = rel?.labels ?? [];
+        let terminalConfirmed = staleTerminal;
+        if (staleTerminal) {
+          // CTL-1605 finding: rel.labels is the batch-cached (≤TTL-stale) label
+          // set — getRelations (linear-cache.mjs) overlays a FRESH state onto the
+          // cached descriptor but leaves labels untouched, and no label-apply site
+          // invalidates the relations cache entry (only the durable blocked_by
+          // edge write does, see the cache?.invalidate?.(candidate) below). A tick
+          // that cached labels:[] before this run's own A.7 stamped blocked/queued,
+          // immediately followed by Linear going terminal, would otherwise see
+          // present=∅ here and silently evict without ever clearing the
+          // just-applied label (the same retry-loss class as the eviction-gating
+          // fix above). Refresh live before computing the present set — one read
+          // per terminal-stale ticket, rare and self-extinguishing (the ticket is
+          // evicted once cleared). A failed live read DEFERS entirely — this
+          // ticket is treated as NOT-terminal for this tick (same fail-safe
+          // discipline as an isTerminal() throw) rather than risk a false
+          // clear/evict off possibly-stale labels.
+          const live = readTicketLabels(ticket);
+          if (live.ok) {
+            currentLabels = live.labels;
+          } else {
+            terminalConfirmed = false;
+          }
+        }
         const res = resolveAndApplyWorkerStatusLabel(orchDir, ticket, {
           desired: null, // STEP A never APPLIES here; it only refuses + clears when terminal
-          currentLabels: rel?.labels ?? [],
+          currentLabels,
           isTerminal: () => ({
-            terminal: isLinearTerminal(rel?.state),
+            terminal: terminalConfirmed,
             reason: "linear-terminal",
             state: rel?.state,
           }),
           writeStatus,
           evictWorkerDir,
-          onTerminalCleared: (label) => {
-            const from = label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label;
+          // CTL-1605 (Codex thread, scheduler.mjs:5518): resolveAndApplyWorkerStatusLabel
+          // fires this callback ONCE per call with the AGGREGATE outcome across every
+          // present worker-status label, not once per label — the old per-label firing
+          // let a single confirmed removal (e.g. "blocked") record a worker.transition
+          // {to:null} on a multi-label ticket even when a sibling removal (e.g. the
+          // sticky "needs-human") was backoff-skipped or resolved removed:false, so the
+          // event stream falsely claimed the ticket was disposition-clear while a
+          // worker-status label was still live on Linear.
+          //
+          // `survivor === null` → every present label confirmed removed: Linear is
+          // genuinely disposition-clear, so record the {to:null} transition.
+          // `fromDisposition` is the highest-precedence label that WAS present before
+          // this clear (DISPOSITIONS order; legacy "waiting" normalized to "queued"
+          // first) — preserving the old per-label call's intent of naming what got
+          // cleared, now computed over the whole pre-clear set instead of one label.
+          //
+          // `survivor` non-null → at least one present label (typically the sticky
+          // needs-human CTL-1078 backoff-skip) did NOT confirm removal: the disposition
+          // is NOT actually clear. Recording {to:null} here would be exactly the false
+          // "disposition-clear" event this fix exists to stop, so it's skipped. A
+          // {to:<survivor>} transition is skipped too — nothing transitioned TO
+          // survivor, it was already the ticket's live disposition and is untouched by
+          // this call, so emitting it would only be a same-value re-announcement that
+          // recordTransition's lastDispositionEmit only-on-change guard would dedup
+          // away in the steady state anyway. Not calling recordTransition is simpler
+          // and can't accidentally seed that guard's state with a misleading
+          // fromDisposition for a transition that never happened.
+          onTerminalCleared: (survivor) => {
+            if (survivor !== null) return;
+            const rank = (label) => {
+              const idx = DISPOSITIONS.indexOf(label);
+              return idx === -1 ? DISPOSITIONS.length : idx;
+            };
+            const from = currentLabels
+              .filter((label) => WORKER_STATUS_LABELS.includes(label))
+              .map((label) => (label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label))
+              .reduce((best, label) => (best === null || rank(label) < rank(best) ? label : best), null);
             recordTransition({
               ticket,
               fromDisposition: from,
@@ -5603,6 +5676,13 @@ export function schedulerTick(
                   toDisposition: "needs-human",
                   source: "dependency-cycle",
                 });
+                // CTL-1605 finding: this write just changed `member`'s live label
+                // set; the relations cache entry hydrated earlier this tick (A.3)
+                // still carries the PRE-write labels. Drop it so the next tick's
+                // getRelations (including a future terminal-stale live-label read
+                // above) never serves the stale set — mirrors the durable
+                // blocked_by edge-write invalidation below.
+                cache?.invalidate?.(member);
               }
             } else {
               log.warn(
@@ -5648,10 +5728,14 @@ export function schedulerTick(
           // Cycle member → owned by needs-human (labelOnce above). Clear any
           // stale held label so it doesn't double-signal, and drop its held
           // emit-state so a future non-cycle hold re-emits.
-          convergeHeldLabel(ticket, labelsByTicket.get(ticket), null, writeStatus, {
+          const cycleClearWrites = convergeHeldLabel(ticket, labelsByTicket.get(ticket), null, writeStatus, {
             orchDir,
             now,
           });
+          // CTL-1605 finding: invalidate on a genuine write only — mirrors the
+          // durable blocked_by edge-write invalidation below and avoids evicting
+          // the relations cache on every steady-state (zero-write) tick.
+          if (cycleClearWrites > 0) cache?.invalidate?.(ticket);
           lastHeldEmitState.delete(ticket);
           // CTL-764 Phase 5: cycle member superseded by needs-human → clear disposition.
           recordTransition({ ticket, toDisposition: null, source: "cycle-member-clear" });
@@ -5700,7 +5784,7 @@ export function schedulerTick(
         // double-callback (a ticket wearing two stale held labels). Legacy "waiting"
         // normalizes to the canonical "queued" (finding 2) so the stream never carries
         // a fifth disposition value.
-        convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, {
+        const admissionHeldWrites = convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, {
           orchDir,
           now,
           onRemoveResult: (label, removed) => {
@@ -5714,6 +5798,13 @@ export function schedulerTick(
             });
           },
         });
+        // CTL-1605 finding: a genuine held-label apply/remove just changed this
+        // ticket's live label set — drop the relations cache entry so the next
+        // tick's getRelations (and any terminal-stale live-label read above)
+        // never serves the pre-write labels. Mirrors the durable blocked_by
+        // edge-write invalidation below; conditioned on writes>0 so a
+        // steady-state (zero-write) tick stays a true no-op.
+        if (admissionHeldWrites > 0) cache?.invalidate?.(ticket);
 
         if (desired) {
           // Only-on-state-change emission: skip if the same held class already
@@ -7597,26 +7688,39 @@ function runTick() {
       // CTL-1605: arm the guarded fast-path eviction seam for the STEP A terminal
       // short-circuit. Reuses the SAME warm agents snapshot + freshness + worktree
       // resolver the J4 census uses (never removes a dir whose worktree hosts a live
-      // session; defers when the snapshot is not fresh). Tests inject their own by
-      // calling schedulerTick({ evictWorkerDir }) directly (see the CTL-1605 STEP A
-      // tests); the `runningOpts.evictWorkerDir` read is a forward-compat hook (not
-      // wired through startScheduler today). A bare unit tick gets defaultNoEvict.
+      // session; defers when the snapshot is not fresh), plus the SDK worker
+      // registry fences (in-process, then cross-process disk projection) so a live
+      // bg_job_id-less worker is never evicted out from under itself. Tests inject
+      // their own by calling schedulerTick({ evictWorkerDir }) directly (see the
+      // CTL-1605 STEP A tests); the `runningOpts.evictWorkerDir` read is a
+      // forward-compat hook (not wired through startScheduler today). A bare unit
+      // tick gets defaultNoEvict.
+      //
+      // CTL-1605 finding: this is a per-call closure — NOT an IIFE evaluated once
+      // at options-assembly time — so getAgentsCached() is re-read at the MOMENT
+      // each ticket is evicted, not captured before the (synchronous, potentially
+      // long-running) tick's earlier passes run. A snapshot that goes stale between
+      // options-assembly and STEP A would otherwise be evicted against blind
+      // (violating the CTL-1315 "never evict blind" discipline the frozen
+      // `agentsFresh` value exists to enforce).
       evictWorkerDir:
         runningOpts.evictWorkerDir ??
-        (() => {
+        ((ticket) => {
           const agentsSnap = getAgentsCached();
           return makeEvictWorkerDir({
             orchDir: runningOpts.orchDir,
             agents: agentsSnap.agents,
             agentsFresh: agentsSnap.isFresh,
-            resolveWorktreePath: (ticket) => {
+            resolveWorktreePath: (t) => {
               for (const sig of readWorkerSignals(runningOpts.orchDir)) {
-                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+                if (sig.ticket === t && sig.worktreePath) return sig.worktreePath;
               }
               return null;
             },
-          });
-        })(),
+            isSdkWorkerLive: registrySdkWorkerLive,
+            isSdkWorkerLiveOnDisk: (t) => isSdkWorkerLiveOnDisk(runningOpts.orchDir, t),
+          })(ticket);
+        }),
       // CTL-764 Phase 5: the LIVE worker.transition emitter (Sink-3, feeding OTLP
       // Sink-4 via otel-forward). schedulerTick defaults this to null, so a bare
       // unit tick stays silent; production MUST thread the real emitter here or
