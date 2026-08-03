@@ -452,12 +452,12 @@ describe("defaultCollectUnstuckCandidates — shared census builder (CTL-1064)",
   });
 
   test("finds source_conflict_ctl708_unavailable via failureReason (the real producer field), not just stalledReason", () => {
-    const readdirSync = (p, opts) => {
-      if (p.endsWith("/workers")) return [{ name: "CTL-1", isDirectory: () => true }];
-      return [{ name: "phase-implement.json", isDirectory: () => false }];
-    };
-    const readFileSync = () => JSON.stringify({ status: "stalled", failureReason: "source_conflict_ctl708_unavailable" });
-    const out = defaultCollectUnstuckCandidates({ orchDir: "/orch", readdirSync, readFileSync });
+    makeWorker("CTL-2010", {
+      status: "stalled",
+      failureReason: "source_conflict_ctl708_unavailable",
+      stalledReason: undefined,
+    });
+    const out = defaultCollectUnstuckCandidates({ orchDir });
     expect(out).toHaveLength(1);
     expect(out[0].evidence.reason).toBe("source_conflict_ctl708_unavailable");
   });

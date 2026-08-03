@@ -47,6 +47,11 @@ export function classifyResolveConflictCandidate(ctx = {}) {
     return { action: "skip", reason: "not-our-stall" };
   }
   if (cycleCount >= RESOLVE_CONFLICT_CYCLE_CAP) {
+    // NOTE: this "cycle-cap-exhausted" string is this classifier's own decision-
+    // object vocabulary (report.wouldEscalate/escalated reasons), a SEPARATE
+    // namespace from the exported CAP_EXHAUSTED_REASON constant below (which is
+    // the value written into the SIGNAL's failureReason/stalledReason field by
+    // defaultEscalateCapExhausted). Do not conflate the two when grepping.
     return { action: "cap-exhausted", reason: "cycle-cap-exhausted" };
   }
   if (alreadyResolving) {
@@ -235,6 +240,35 @@ const RESOLVE_CONFLICT_DISPATCH_PHASE = "resolve-conflict";
 // defaultCollectResolveConflictFailures (below) reuses to recognize a FAILED
 // resolve-conflict cycle in any of its real shapes, not just the in-skill
 // `status:"failed"` hard-error path.
+//
+// Interaction with orchestrate-revive's legacy phase-mode retry sweep (#1461
+// follow-up, verified 2026-08-02): orchestrate-revive globs every
+// workers/<T>/phase-*.json, including phase-resolve-conflict.json, and its
+// CTL-607 current-phase guard computes CURRENT_PHASE via
+// lib/phase-sequence.sh's latest_phase_in_dir(), which only walks the 10
+// canonical PHASES entries (triage..teardown) — "resolve-conflict" is not one
+// of them. So P_PHASE="resolve-conflict" can NEVER equal CURRENT_PHASE, and
+// phase-resolve-conflict.json is unconditionally skipped by that guard on
+// every pass, regardless of its status. orchestrate-revive can never
+// re-dispatch or escalate this file directly.
+//
+// The ORIGINAL stalled phase's own signal (e.g. phase-implement.json) IS
+// reachable, though: while resolve-conflict-sweep is mid-cycle its
+// failureReason/stalledReason reads RESOLVED_MARKER_REASON (a non-empty
+// string), and orchestrate-revive's phase_is_truly_failed() only checks for a
+// non-empty .failureReason — it does not know this marker value is a
+// resolve-conflict-owned in-flight state, not a real failure. If
+// orchestrate-revive's phase-mode loop scans this ticket's worker dir while
+// the marker is set, it raises a spurious phase-failed-unrecoverable
+// attention item instead of a silent no-op. See
+// __tests__/orchestrate-revive-phase.test.sh Test I for both properties
+// proven directly against the real script.
+//
+// Blast radius is narrow: orchestrate-revive is invoked ONLY by the legacy
+// catalyst-legacy:orchestrate wave loop (grep confirms no execution-core
+// scheduler/daemon path calls it) — a team running dispatchMode:
+// execution-core exclusively never has this loop running against the same
+// worker dir, so the overlap only exists under a mixed/legacy deployment.
 const RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES = new Set(["done", "failed", "stalled", "turn-cap-exhausted"]);
 
 // maybeResetForResolveConflictCycle — final-whole-branch-re-review follow-up
@@ -767,9 +801,10 @@ export function defaultRevertStallAndResetCycle(
 // injected; mirrors runUnstuckSweepPass's off/shadow/enforce shape + report.
 // Three independent sub-passes per tick: (1) candidates → classify → mark-and-
 // dispatch or cap-exhausted-escalate; (2) completions (status:"done") →
-// clearStall; (3) failures (status:"failed", #1461 escalation-gap fix) →
-// cap-exhausted-escalate or revert-and-reset-cycle. Order is
-// completions-then-failures-then-candidates so a just-completed or
+// clearStall; (3) failures (any RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES shape
+// minus "done" — failed/stalled/turn-cap-exhausted, #1461 escalation-gap fix
+// widened at classify time) → cap-exhausted-escalate or revert-and-reset-cycle.
+// Order is completions-then-failures-then-candidates so a just-completed or
 // just-failed ticket's stall is cleared/reverted before that same tick's
 // candidate scan would otherwise re-see it (defensive; either order is safe
 // since an acted-on ticket no longer carries the marker the candidate census
@@ -934,15 +969,16 @@ export function runResolveConflictSweepPass({
           continue;
         }
 
-        // mark-and-dispatch
+        if (decision.action !== "mark-and-dispatch") {
+          // Defensive — classifyResolveConflictCandidate's closed return set never
+          // produces anything else today; a future new action value must not
+          // silently fall into mark-and-dispatch.
+          report.failed.push({ ticket: c.ticket, phase: c.phase, reason: `unknown classifier action: ${decision.action}` });
+          continue;
+        }
+
         if (!enforce) {
           fire("resolve-conflict.would.mark", { ticket: c.ticket, phase: c.phase });
-          // #1461 Fix 4: the enforce path fires TWO distinct events for this
-          // action (marked.resolvable, then dispatched once markAndDispatch
-          // actually dispatches) — resolve-conflict.would.dispatch was in the
-          // closed vocabulary but never fired on the shadow twin, leaving it
-          // dead on both ends. Fire it alongside would.mark so shadow mode has
-          // full observability parity with what enforce would actually do.
           fire("resolve-conflict.would.dispatch", { ticket: c.ticket, phase: c.phase });
           report.wouldMark.push({ ticket: c.ticket, phase: c.phase });
           continue;

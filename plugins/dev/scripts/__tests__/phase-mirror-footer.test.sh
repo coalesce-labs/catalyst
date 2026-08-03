@@ -144,7 +144,7 @@ assert_grep 'session uuid `feedface-1111-2222-3333-444455556666`' "$OUT4" "uuid 
 echo ""
 echo "Test 5: all 9 phase mirror skills reference phase-mirror-footer.sh"
 SKILLS_DIR="${REPO_ROOT}/plugins/dev/skills"
-for phase in research plan implement verify remediate review triage pr monitor-merge; do
+for phase in research plan implement verify remediate review triage pr monitor-merge resolve-conflict; do
   skill="${SKILLS_DIR}/phase-${phase}/SKILL.md"
   if [[ -f "$skill" ]] && grep -q 'phase-mirror-footer\.sh' "$skill"; then
     pass "phase-${phase} wires the footer helper"
