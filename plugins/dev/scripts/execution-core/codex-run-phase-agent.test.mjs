@@ -16,7 +16,9 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -406,6 +408,130 @@ describe("buildCodexArgs", () => {
     const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath: "/no" });
     expect(args.slice(0, 2)).toEqual(["exec", "--json"]);
     expect(args).not.toContain("resume");
+  });
+});
+
+// ── buildCodexArgs: thoughts/ symlink resolution into writable_roots ─────────
+//
+// The REAL on-disk convention (lib/provision-thoughts.sh) is NOT "thoughts is a
+// symlink" — it's "thoughts is a real directory whose immediate entries (global,
+// shared) are themselves symlinks pointing OUTSIDE the worktree." A prior version
+// of resolveThoughtsRoot only ever `realpathSync`'d the `thoughts` directory
+// itself, which — since `thoughts` isn't a symlink in this shape — just returned
+// the unchanged worktree-local path and never added the actual external target
+// at all. Confirmed live 2026-08-03: this silently broke every research/plan
+// artifact write for codex-exec-routed phases across 4+ real tickets
+// (COP-3/COP-5/CQD-5/CQD-7), each failing with a "thoughts/shared symlink target
+// outside writable roots" sandbox denial.
+describe("buildCodexArgs — thoughts/ symlink resolution into writable_roots", () => {
+  function extractWritableRoots(args) {
+    const idx = args.indexOf("-c");
+    for (let i = idx; i < args.length; i += 2) {
+      const flag = args[i + 1];
+      if (typeof flag === "string" && flag.startsWith("sandbox_workspace_write.writable_roots=")) {
+        return JSON.parse(flag.slice("sandbox_workspace_write.writable_roots=".length));
+      }
+    }
+    throw new Error("writable_roots flag not found in args");
+  }
+
+  function makeWorktreeWithThoughts(build) {
+    // realpathSync the temp root immediately: macOS's /tmp (and /var) are
+    // themselves symlinks into /private/..., so anything resolveThoughtsRoots
+    // resolves via realpathSync comes back CANONICALIZED — comparing against
+    // an un-canonicalized `root` would spuriously fail on macOS specifically.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "codex-thoughts-")));
+    const worktreePath = join(root, "wt", "CTL-100");
+    mkdirSync(worktreePath, { recursive: true });
+    const external = join(root, "external-thoughts-repo");
+    mkdirSync(external, { recursive: true });
+    build({ root, worktreePath, external });
+    return { root, worktreePath, external };
+  }
+
+  test("REAL on-disk shape: thoughts/ is a real dir; its shared + global entries are symlinks — both real targets land in writable_roots", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ root, worktreePath, external }) => {
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      const sharedTarget = join(external, "repos", "coppa", "shared");
+      const globalTarget = join(external, "global");
+      mkdirSync(sharedTarget, { recursive: true });
+      mkdirSync(globalTarget, { recursive: true });
+      symlinkSync(sharedTarget, join(thoughtsDir, "shared"));
+      symlinkSync(globalTarget, join(thoughtsDir, "global"));
+      // A REAL (non-symlink) subdirectory alongside the symlinks — must be ignored.
+      mkdirSync(join(thoughtsDir, "searchable"), { recursive: true });
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo", "repos", "coppa", "shared"));
+      expect(roots).toContain(join(root, "external-thoughts-repo", "global"));
+      // The worktree-local thoughts/ path itself is not a useful ADDITIONAL root
+      // (it's already inside the worktree) and must not be added redundantly.
+      expect(roots).not.toContain(join(worktreePath, "thoughts"));
+      expect(roots).not.toContain(join(worktreePath, "thoughts", "searchable"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("LEGACY shape preserved: thoughts itself IS a direct symlink — still resolves to its target", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      symlinkSync(external, join(worktreePath, "thoughts"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("thoughts/ has no symlinked entries at all (real subdirs only) — adds nothing, does not throw", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      mkdirSync(join(worktreePath, "thoughts", "searchable"), { recursive: true });
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("no thoughts/ directory at all under the worktree — adds nothing, does not throw", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(() => {});
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a BROKEN symlink inside thoughts/ (dangling target) is skipped, not thrown", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      symlinkSync(join(external, "does-not-exist"), join(thoughtsDir, "shared"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      // Must not throw despite the dangling symlink.
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
