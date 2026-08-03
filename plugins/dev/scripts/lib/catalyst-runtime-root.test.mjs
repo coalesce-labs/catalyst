@@ -8,7 +8,7 @@
 // so this suite never touches the real ~/.claude or the runner's own cwd.
 
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { catalystDevScripts, catalystPluginRoot, catalystRuntimeLayout } from "./catalyst-runtime-root.mjs";
@@ -89,6 +89,64 @@ describe("catalystDevScripts", () => {
     expect(() => catalystDevScripts(undefined, { env: { HOME: home }, cwd: scratch() })).not.toThrow();
   });
 
+  test("marketplace: skips a partial newest install, falls back to the newest VALID candidate", () => {
+    // CTL-1628 A2 post-merge fix: the newest candidate (catalyst-v2, no
+    // sentinel — a partial/broken install) must not sink the whole rung;
+    // resolution should fall back to the next-newest valid candidate.
+    const home = scratch();
+    const valid = join(home, ".claude/plugins/marketplaces/catalyst-v1/plugins/dev/scripts");
+    makeDevScripts(valid);
+    mkdirSync(join(home, ".claude/plugins/marketplaces/catalyst-v2/plugins/dev/scripts"), {
+      recursive: true,
+    }); // no sentinel file — partial install
+    const result = catalystDevScripts(undefined, { env: { HOME: home }, cwd: scratch() });
+    expect(result).toEqual({ path: valid, source: "marketplace" });
+  });
+
+  test("cache: skips a partial newest install (2.0.0), falls back to valid 1.0.0", () => {
+    const home = scratch();
+    const valid = join(home, ".claude/plugins/cache/catalyst/catalyst-dev/1.0.0/scripts");
+    makeDevScripts(valid);
+    mkdirSync(join(home, ".claude/plugins/cache/catalyst/catalyst-dev/2.0.0/scripts"), {
+      recursive: true,
+    }); // no sentinel file — partial install
+    const result = catalystDevScripts(undefined, { env: { HOME: home }, cwd: scratch() });
+    expect(result).toEqual({ path: valid, source: "cache" });
+  });
+
+  test("marketplace: follows a symlinked installation directory (matches `ls -d` glob semantics)", () => {
+    // CTL-1628 A2 post-merge fix: Dirent.isDirectory() is false for a
+    // symlink entry, so a symlinked marketplace clone (e.g. a dev checkout
+    // symlinked into ~/.claude/plugins/marketplaces/) used to be silently
+    // dropped by the wildcard expansion, diverging from the bash twin's
+    // `ls -d ...*/plugins/dev/scripts`, which follows symlinks.
+    const home = scratch();
+    const realTarget = scratch();
+    makeDevScripts(join(realTarget, "plugins", "dev", "scripts"));
+    mkdirSync(join(home, ".claude/plugins/marketplaces"), { recursive: true });
+    symlinkSync(realTarget, join(home, ".claude/plugins/marketplaces", "catalyst-symlinked"), "dir");
+    const result = catalystDevScripts(undefined, { env: { HOME: home }, cwd: scratch() });
+    expect(result.source).toBe("marketplace");
+    expect(result.path).toBe(join(home, ".claude/plugins/marketplaces/catalyst-symlinked/plugins/dev/scripts"));
+  });
+
+  test("cache: follows a symlinked version directory (second wildcard segment)", () => {
+    // The symlink sits at the SECOND `*` in `cache/*/catalyst-dev/*/scripts`
+    // (the version dir) — the wildcard position the Dirent.isDirectory()
+    // bug actually affects, as opposed to a literal path segment which
+    // reaches existsSync() unconditionally and was never at risk.
+    const home = scratch();
+    const realTarget = scratch();
+    makeDevScripts(join(realTarget, "scripts"));
+    mkdirSync(join(home, ".claude/plugins/cache/catalyst/catalyst-dev"), { recursive: true });
+    symlinkSync(realTarget, join(home, ".claude/plugins/cache/catalyst/catalyst-dev", "1.0.0"), "dir");
+    const result = catalystDevScripts(undefined, { env: { HOME: home }, cwd: scratch() });
+    expect(result.source).toBe("cache");
+    expect(result.path).toBe(
+      join(home, ".claude/plugins/cache/catalyst/catalyst-dev/1.0.0/scripts"),
+    );
+  });
+
   test("total miss: returns null path/source and prints a LOUD stderr diagnostic", () => {
     const home = scratch();
     const originalError = console.error;
@@ -128,6 +186,31 @@ describe("catalystPluginRoot", () => {
 
   test("defaults startDir to process.cwd() and never throws on a bogus dir", () => {
     expect(() => catalystPluginRoot("/nonexistent-" + Date.now())).not.toThrow();
+  });
+
+  test("rejects a nonexistent startDir even when nested beneath a valid plugin root", () => {
+    // CTL-1628 A2 post-merge fix: the bash twin's `cd "$dir" 2>/dev/null`
+    // fails outright on a nonexistent startDir (immediate miss, no ancestor
+    // walk). resolvePath() alone never touches the filesystem, so a stale/
+    // mistyped startDir under a real plugin used to walk UP from the
+    // nonexistent path and return the valid ancestor instead of null.
+    const root = scratch();
+    const plugin = join(root, "plugins", "dev");
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(plugin, "version.txt"), "1.0.0\n");
+    writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), "{}");
+    const stale = join(plugin, "scripts", "does-not-exist");
+    expect(catalystPluginRoot(stale)).toBeNull();
+  });
+
+  test("rejects a startDir that resolves to a file, not a directory", () => {
+    const root = scratch();
+    const plugin = join(root, "plugins", "dev");
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(plugin, "version.txt"), "1.0.0\n");
+    writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), "{}");
+    const notADir = join(plugin, "version.txt");
+    expect(catalystPluginRoot(notADir)).toBeNull();
   });
 });
 

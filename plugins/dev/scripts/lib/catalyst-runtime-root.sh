@@ -85,10 +85,34 @@ catalyst_dev_scripts() {
     fi
     __cd_root="$( cd "./plugins/dev/scripts" 2>/dev/null && pwd )"
     __cd_valid "$__cd_root" && { printf '%s\n' "$__cd_root"; return 0; }
-    __cd_mkt="$( ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts 2>/dev/null | sort -V | tail -1 )"
-    __cd_valid "$__cd_mkt" && { printf '%s\n' "$__cd_mkt"; return 0; }
-    __cd_cache="$( ls -d "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts 2>/dev/null | sort -V | tail -1 )"
-    __cd_valid "$__cd_cache" && { printf '%s\n' "$__cd_cache"; return 0; }
+    # CTL-1628 A2 post-merge fix: these two rungs used to pick the SINGLE
+    # newest candidate (`sort -V | tail -1`) and validate only that one — if
+    # the newest install was partial/broken (sentinel missing), the WHOLE
+    # rung failed even when an older, fully-valid install sat right next to
+    # it. Concretely, register-thought.sh delegates here to find
+    # workflow-context.sh: catalyst_dev_scripts validates a DIFFERENT
+    # sentinel (check-project-setup.sh), so a newest cache dir that passes
+    # THIS sentinel but happens to be missing workflow-context.sh specifically
+    # would shadow an older cache dir that has it. Walk candidates
+    # newest-to-oldest (`sort -rV`) and take the first one that validates,
+    # via a heredoc-fed loop (not a pipe) so `return` propagates out of
+    # __cd_resolve rather than exiting an unwanted subshell.
+    __cd_mkt_list="$( ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts 2>/dev/null | sort -rV )"
+    if [ -n "$__cd_mkt_list" ]; then
+      while IFS= read -r __cd_mkt; do
+        __cd_valid "$__cd_mkt" && { printf '%s\n' "$__cd_mkt"; return 0; }
+      done <<__CD_MKT_EOF__
+$__cd_mkt_list
+__CD_MKT_EOF__
+    fi
+    __cd_cache_list="$( ls -d "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts 2>/dev/null | sort -rV )"
+    if [ -n "$__cd_cache_list" ]; then
+      while IFS= read -r __cd_cache; do
+        __cd_valid "$__cd_cache" && { printf '%s\n' "$__cd_cache"; return 0; }
+      done <<__CD_CACHE_EOF__
+$__cd_cache_list
+__CD_CACHE_EOF__
+    fi
     return 1
   }
 
@@ -99,7 +123,7 @@ catalyst_dev_scripts() {
     echo "       Fix: install/enable catalyst-dev —  claude plugin install catalyst-dev@catalyst" >&2
     echo "       (or export CATALYST_DEV_SCRIPTS=/path/to/catalyst-dev/scripts)" >&2
     unset -f __cd_valid __cd_resolve 2>/dev/null
-    unset __cd_requesting_plugin __cd_sentinel __cd_sib __cd_root __cd_mkt __cd_cache 2>/dev/null
+    unset __cd_requesting_plugin __cd_sentinel __cd_sib __cd_root __cd_mkt __cd_cache __cd_mkt_list __cd_cache_list 2>/dev/null
     return 1
   fi
   export CATALYST_DEV_SCRIPTS

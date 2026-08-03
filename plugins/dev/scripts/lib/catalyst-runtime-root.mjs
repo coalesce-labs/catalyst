@@ -94,7 +94,24 @@ function expandStarGlob(pattern) {
           continue; // absent/unreadable optional layout root — skip, don't abort
         }
         for (const e of entries) {
-          if (e.isDirectory()) next.push(join(dir, e.name));
+          const full = join(dir, e.name);
+          if (e.isDirectory()) {
+            next.push(full);
+          } else if (e.isSymbolicLink()) {
+            // CTL-1628 A2 post-merge fix: Dirent.isDirectory() is false for
+            // a symlink (it reports the dirent's OWN type, not its target),
+            // so a symlinked marketplace/cache install used to be silently
+            // dropped here while the bash twin's `ls -d` glob (which follows
+            // symlinks) accepted it — a same-inputs, different-output
+            // divergence between the twins. statSync follows the link;
+            // stat-through a broken symlink throws, so skip it like any
+            // other unreadable entry.
+            try {
+              if (statSync(full).isDirectory()) next.push(full);
+            } catch {
+              continue; // broken symlink — skip, don't abort
+            }
+          }
         }
       } else {
         next.push(join(dir, seg));
@@ -105,20 +122,27 @@ function expandStarGlob(pattern) {
   return current.filter((p) => existsSync(p));
 }
 
-// newestDevScriptsDir — CTL-1628 A2 verify-round-2 parity fix: mirrors the
-// bash twin's rung semantics exactly. lib/catalyst-runtime-root.sh's
-// catalyst_dev_scripts picks the newest path FIRST (`sort -V | tail -1`)
-// and only THEN sentinel-validates it — if that single newest entry is
-// broken, the whole rung fails (falls through to the next rung) rather than
-// trying the next-newest candidate. This used to filter to valid paths
-// first and pick the newest of those, which silently accepted a
-// second-newest-but-valid dir where the bash lib returns nothing for the
-// rung — a same-inputs, different-output divergence between the twins.
+// newestDevScriptsDir — CTL-1628 A2 post-merge fix: mirrors the bash twin's
+// rung semantics exactly. lib/catalyst-runtime-root.sh's catalyst_dev_scripts
+// walks candidates newest-to-oldest (`sort -rV`) and returns the first one
+// that sentinel-validates, rather than validating ONLY the single newest
+// candidate. A partial/broken newest install (sentinel missing) used to fail
+// the WHOLE rung even when an older, fully-valid install sat right next to
+// it — register-thought.sh's workflow-context.sh lookup hit exactly this: it
+// validates a DIFFERENT file than catalyst_dev_scripts' own sentinel, so a
+// newest cache dir that passes THIS sentinel but happens to be missing
+// workflow-context.sh specifically shadowed an older cache dir that had it.
+// (An earlier "verify-round-2" pass here intentionally matched a STRICTER
+// newest-then-validate-only bash behavior; this pass changes BOTH twins
+// together to the more robust validate-then-accept walk, so the twins stay
+// in parity either way.)
 function newestDevScriptsDir(paths) {
   if (paths.length === 0) return null;
-  const sorted = [...paths].sort(versionCompare);
-  const newest = sorted[sorted.length - 1];
-  return isValidDevScriptsDir(newest) ? newest : null;
+  const sorted = [...paths].sort(versionCompare).reverse();
+  for (const candidate of sorted) {
+    if (isValidDevScriptsDir(candidate)) return candidate;
+  }
+  return null;
 }
 
 // catalystDevScripts([requestingPlugin], [opts]) — Q1. Resolves the shared
@@ -191,6 +215,18 @@ export function catalystPluginRoot(startDir = process.cwd()) {
   let dir;
   try {
     dir = resolvePath(startDir);
+  } catch {
+    return null;
+  }
+  // CTL-1628 A2 post-merge fix: the bash twin's `cd "$__cpr_dir" 2>/dev/null`
+  // fails outright on a nonexistent/non-directory startDir, producing an
+  // immediate miss with no ancestor walk at all. resolvePath() only performs
+  // lexical path resolution — it never touches the filesystem — so a
+  // stale/mistyped startDir beneath a valid plugin used to walk UP from that
+  // nonexistent path and return the valid ancestor's root, diverging from
+  // the bash twin. Validate existence up front to match.
+  try {
+    if (!statSync(dir).isDirectory()) return null;
   } catch {
     return null;
   }
