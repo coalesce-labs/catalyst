@@ -11,6 +11,9 @@ import { withBreaker, linearBreaker, isRateLimitError } from "./linear-breaker.m
 import { withAuthRemint, linearReminter, isBatchAuthError } from "./linear-remint.mjs";
 import { emitEligibleSourceUnavailable, emitTicketStateLiveFallback } from "./dispatch-alert.mjs";
 import { emitLinearReadEvent } from "./linear-read-event.mjs";
+// CTL-1616 PR3: fold this file's 3 inline LINEAR_API_TOKEN/LINEAR_API_KEY
+// ladders onto the shared secret-contract engine (design §8 PR3 table).
+import { resolveSecret } from "../lib/secret-contract.mjs";
 
 // linearis caps a single page; 200 comfortably covers a project's pickable
 // set without pagination (the reconcile poll runs every 10 min anyway).
@@ -578,7 +581,7 @@ export function buildBatchCurlArgs(ids, { token = "", ca } = {}) {
 // Returns { nodes, auth, ratelimit, curlFailed }. Never throws. Internal to
 // defaultBatchExec; extracted so the auth-retry path can call it a second time.
 function runBatchOnce(ids) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   const { args, payload } = buildBatchCurlArgs(ids, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
   const res = spawnSync("curl", args, { input: payload, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   if (res.status !== 0) {
@@ -975,7 +978,7 @@ export function buildDelegateCurlArgs(identifier, { token = "", ca } = {}) {
 }
 
 function runDelegateOnce(identifier) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   const { args, payload } = buildDelegateCurlArgs(identifier, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
   const res = spawnSync("curl", args, { input: payload, encoding: "utf8" });
   if (res.status !== 0) return { nodes: null };
@@ -1040,7 +1043,7 @@ export function buildDelegateBatchCurlArgs(team, identifiers, { token = "", ca }
 }
 
 function runDelegateBatchOnce(team, identifiers) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   const { args, payload } = buildDelegateBatchCurlArgs(team, identifiers, {
     token,
     ca: process.env.NODE_EXTRA_CA_CERTS,

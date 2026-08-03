@@ -16,10 +16,10 @@ function healthyNodes() {
 
 // "healthy" defaults; override per test.
 //
-// CTL-1616 PR2: resolveSecretContract is a shadow-only dependency (design §7) —
-// it must AGREE with `linearToken` here so these pre-existing behavioral tests
-// (which predate the shadow pass) don't spuriously grow an extra
-// worker-labels-secret-contract-shadow entry. Fixed values, never the real
+// CTL-1616 PR3: linearToken's default now routes through the injected
+// resolveSecretContract (the LIVE answer — see resolveLinearTokenLive in
+// doctor.mjs), and every test below still injects an explicit `linearToken`
+// too, which overrides that default outright. Fixed values, never the real
 // registry resolver — the real resolver would make these tests' output depend
 // on whatever LINEAR_API_TOKEN/LINEAR_API_KEY happen to be set in the runner's
 // ambient environment (present on a dev shell, absent under `bun test`'s
@@ -154,52 +154,67 @@ describe("checkWorkerLabels", () => {
   });
 });
 
-// ─── CTL-1616 PR2: secret-contract shadow (the "third value-read site") ────
-describe("checkWorkerLabels — secret-contract shadow (CTL-1616 PR2)", () => {
-  test("agree (both present) → no shadow row", async () => {
-    const recs = await checkWorkerLabels(deps());
+// ─── CTL-1616 PR3: secret-contract cutover (the "third value-read site") ───
+// PR3 (design §9) flips checkWorkerLabels from PR2's shadow-comparison to the
+// contract as its LIVE answer for linear-api-token — linearToken's default
+// now routes through resolveSecretContract, and the PR2 shadow-disagreement
+// row this check used to emit is retired (there is no hand-rolled answer left
+// to disagree with).
+describe("checkWorkerLabels — secret-contract cutover (CTL-1616 PR3)", () => {
+  test("resolveSecretContract resolving absent → linearToken() empty, the no-token INFO path, never a shadow row", async () => {
+    const recs = await checkWorkerLabels(
+      deps({ linearToken: undefined, resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }) }),
+    );
+    expect(recs).toHaveLength(1);
+    expect(recs[0].name).toBe("worker-labels");
+    expect(recs[0].status).toBe("info");
+    expect(recs[0].detail).toMatch(/token/i);
     expect(recs.some((r) => r.name.includes("secret-contract-shadow"))).toBe(false);
   });
 
-  test("disagree (hand-rolled present, contract absent) → loud INFO row, primary grade unchanged", async () => {
-    const recs = await checkWorkerLabels(
-      deps({ resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }) }),
-    );
-    const shadow = recs.find((r) => r.name === "worker-labels-secret-contract-shadow");
-    expect(shadow).toBeDefined();
-    expect(shadow.status).toBe("info");
-    expect(shadow.detail).toContain('secret="linear-api-token"');
-    expect(shadow.detail).toContain("hand-rolled=present");
-    expect(shadow.detail).toContain("contract={value:absent");
-    // Primary rows (group + per-host children) are untouched by the shadow.
-    expect(recs.filter((r) => r.name !== "worker-labels-secret-contract-shadow")).toHaveLength(ROSTER.length);
+  test("resolveSecretContract resolving present → linearToken() returns it, proceeds to query Linear", async () => {
+    const recs = await checkWorkerLabels(deps({ linearToken: undefined }));
+    expect(recs).toHaveLength(ROSTER.length);
+    expect(recs.some((r) => r.name.includes("secret-contract-shadow"))).toBe(false);
   });
 
-  test("a shadow disagreement never yields a FAIL record either", async () => {
-    const recs = await checkWorkerLabels(
-      deps({ resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }) }),
-    );
-    expect(noFail(recs)).toBe(true);
+  // CTL-1616 PR3 success criterion (design §9): a LINEAR_API_KEY-only
+  // environment resolves identically through the live cutover. Exercises the
+  // REAL resolveSecret default end-to-end — no linearToken/
+  // resolveSecretContract override at all.
+  test("LINEAR_API_KEY-only fixture (real resolveSecret default): honors the alias, proceeds to query Linear", async () => {
+    const savedToken = process.env.LINEAR_API_TOKEN;
+    const savedKey = process.env.LINEAR_API_KEY;
+    try {
+      delete process.env.LINEAR_API_TOKEN;
+      process.env.LINEAR_API_KEY = "lin_api_fromkey";
+      const recs = await checkWorkerLabels({
+        getRoster: () => ROSTER,
+        post: async () => ({ data: { issueLabels: { nodes: healthyNodes() } } }),
+      });
+      expect(recs).toHaveLength(ROSTER.length);
+      for (const host of ROSTER) expect(byName(recs)[`worker-label:${host}`].status).toBe("pass");
+    } finally {
+      if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+      else process.env.LINEAR_API_TOKEN = savedToken;
+      if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = savedKey;
+    }
   });
 
-  // CTL-1616 PR2 (B1): a throwing resolver must never crash this check —
-  // runDoctor's Promise.all has no per-check isolation, so an uncaught throw
-  // here would take down the whole doctor run.
-  test("resolver throws → normal graded rows still returned, plus a loud INFO throw-row, no FAIL", async () => {
+  test("a throwing resolveSecretContract degrades to the no-token INFO path, never crashes, no FAIL, no shadow row", async () => {
     const recs = await checkWorkerLabels(
       deps({
+        linearToken: undefined,
         resolveSecretContract: () => {
           throw new Error("boom: registry lookup exploded");
         },
       }),
     );
-    // Primary rows (group + per-host children) are untouched by the throw.
-    expect(recs.filter((r) => r.name !== "worker-labels-secret-contract-shadow")).toHaveLength(ROSTER.length);
-    const throwRow = recs.find((r) => r.name === "worker-labels-secret-contract-shadow");
-    expect(throwRow).toBeDefined();
-    expect(throwRow.status).toBe("info");
-    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
-    expect(throwRow.detail).toContain("boom: registry lookup exploded");
+    expect(recs).toHaveLength(1);
+    expect(recs[0].name).toBe("worker-labels");
+    expect(recs[0].status).toBe("info");
+    expect(recs.some((r) => r.name.includes("secret-contract-shadow"))).toBe(false);
     expect(noFail(recs)).toBe(true);
   });
 });
