@@ -137,6 +137,22 @@ export const mkCheck = (name, status, detail) => ({ name, status, detail });
 // check fn crashes the whole suite with zero report output. This wrapper
 // itself never throws: `{ ok: true, value }` on success, `{ ok: false, error }`
 // on throw.
+// resolveDeploymentModeForShadow — the deployment-mode answer threaded into
+// every shadow resolver call (#2916 Codex P2): without it, resolveSecret's
+// cloud guard (deploymentMode.mode === "cloud" && inferred === false) can
+// never activate, so a declared-cloud node's shadow would follow the
+// non-cloud file/config ladder and mask exactly the provider divergence the
+// shadow exists to detect. Throw-safe by the same B1 discipline: a throwing
+// mode resolver degrades to undefined (= the engine's non-cloud path), never
+// a crash.
+function resolveDeploymentModeForShadow() {
+  try {
+    return resolveDeploymentMode();
+  } catch {
+    return undefined;
+  }
+}
+
 function safeResolveSecretContract(resolveFn, secretId, opts) {
   try {
     return { ok: true, value: resolveFn(secretId, opts) };
@@ -174,8 +190,8 @@ function shadowThrowCheck(checkName, secretId, err) {
 // resolver call itself is isolated via safeResolveSecretContract (B1) — a
 // throwing resolver surfaces as a shadowThrowCheck INFO row instead of
 // propagating up through the caller.
-function buildContractShadowCheck({ checkName, secretId, handRolled, resolveSecretContract, env = process.env }) {
-  const resolution = safeResolveSecretContract(resolveSecretContract, secretId, { env });
+function buildContractShadowCheck({ checkName, secretId, handRolled, resolveSecretContract, env = process.env, deploymentMode = resolveDeploymentModeForShadow() }) {
+  const resolution = safeResolveSecretContract(resolveSecretContract, secretId, { env, deploymentMode });
   if (!resolution.ok) return shadowThrowCheck(checkName, secretId, resolution.error);
   const contractResolved = resolution.value;
   const contractPresent = contractResolved?.value != null;
@@ -2481,6 +2497,7 @@ export function checkCloudTokenEnv(deps = {}) {
   let cloudShadowCheck = null;
   const contractResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
     env: process.env,
+    deploymentMode: resolveDeploymentModeForShadow(),
   });
   if (!contractResolution.ok) {
     cloudShadowCheck = shadowThrowCheck("cloud-token", "cloud-token", contractResolution.error);
@@ -3520,7 +3537,7 @@ export async function checkDeploymentModeConsistency(deps = {}) {
 // this PR only proves the contract can be consulted safely, side by side with
 // every hand-rolled reader, without changing a single grade.
 export function checkSecretContract(deps = {}) {
-  const { env = process.env, deploymentMode, resolveSecretFn = resolveSecret } = deps;
+  const { env = process.env, deploymentMode = resolveDeploymentModeForShadow(), resolveSecretFn = resolveSecret } = deps;
   const checks = [];
   for (const id of ["linear-api-token", "groq-api-key"]) {
     // CTL-1616 PR2 (B1): isolated via safeResolveSecretContract — a throwing

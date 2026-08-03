@@ -49,6 +49,7 @@ import {
   parseArgs,
   runDoctor,
 } from "./doctor.mjs";
+import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";
 // CTL-1369 PR4: parity source for doctor's inlined defaultPluginPullOwner.
 import { resolvePluginPullOwner } from "../broker/plugin-refresh.mjs";
@@ -2190,6 +2191,76 @@ describe("checksForClass — checkDeploymentModeConsistency registration (CTL-16
 });
 
 // ─── CTL-1616 PR2: checkSecretContract (secret-contract shadow pass) ────────
+
+describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)", () => {
+  const CLOUD_MODE = { mode: "cloud", source: "env", inferred: false, recognized: true };
+
+  it("checkSecretContract passes an explicitly-injected deploymentMode through to the resolver", () => {
+    const seen = [];
+    checkSecretContract({
+      deploymentMode: CLOUD_MODE,
+      resolveSecretFn: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(2);
+    for (const dm of seen) expect(dm).toEqual(CLOUD_MODE);
+  });
+
+  it("checkSecretContract supplies a deploymentMode by DEFAULT (the resolver is never mode-blind)", () => {
+    const seen = [];
+    checkSecretContract({
+      resolveSecretFn: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(2);
+    // resolveDeploymentMode() never throws and always returns a resolution
+    // object — the shadow must thread it, not undefined.
+    for (const dm of seen) {
+      expect(dm).toBeDefined();
+      expect(typeof dm.mode).toBe("string");
+    }
+  });
+
+  it("shadowed comparison checks (buildContractShadowCheck path) also receive a deploymentMode", async () => {
+    const seen = [];
+    await checkPeerUniqueness({
+      getHostName: () => "mini",
+      getLivenessAnchorIssue: () => "CTL-1",
+      hasLinearToken: () => false,
+      readPeerHeartbeats: async () => ({}),
+      resolveSecretContract: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(1);
+    expect(seen[0]).toBeDefined();
+    expect(typeof seen[0].mode).toBe("string");
+  });
+
+  it("END-TO-END: declared cloud mode activates the engine's bootstrap short-circuit through checkSecretContract", () => {
+    // Real engine, cloud mode declared, NO platform bootstrap token in env:
+    // every non-bootstrap resolution must short-circuit to no-resolution
+    // (design §4 rule 2) — even though GROQ_API_KEY is right there in env
+    // (proof the file/env ladder was NOT consulted).
+    const env = { GROQ_API_KEY: "gk-live", LINEAR_API_TOKEN: "lin-live" };
+    const checks = checkSecretContract({ env, deploymentMode: CLOUD_MODE, resolveSecretFn: resolveSecretReal });
+    for (const c of checks) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("no resolution");
+    }
+    // Control: same env WITHOUT cloud mode — the normal ladder resolves both.
+    const control = checkSecretContract({ env, deploymentMode: { mode: "single-host", source: "default", inferred: true, recognized: false }, resolveSecretFn: resolveSecretReal });
+    for (const c of control) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("resolves");
+    }
+  });
+});
 
 describe("checkSecretContract (CTL-1616 PR2)", () => {
   it("emits one INFO observation per shadow-covered secret id (linear-api-token, groq-api-key)", () => {
