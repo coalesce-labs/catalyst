@@ -206,11 +206,26 @@ OUT="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_LAYER2_CONFIG_FILE="$R2_BOM" CA
 expect_eq "BOM-prefixed Layer-2 is layer-malformed → falls through" "cluster|layer1" "$OUT"
 
 # --- Codex round 2: HOME-unset resolution never probes /.config -------------
-# With HOME unset the resolver must still complete (tilde expansion falls back
-# to the passwd home, mirroring os.homedir()) and settle a valid Layer-1.
-OUT="$(env -i PATH="$PATH" CATALYST_CONFIG_FILE="$R2_L1" \
+# HERMETICITY BOUND: with HOME unset, tilde expansion falls back to the REAL
+# passwd home (mirroring os.homedir()) — which this sandbox cannot fake, so an
+# end-to-end assertion through the default Layer-2 path reads the developer's
+# actual ~/.config/catalyst/config.json and breaks the moment that file
+# declares a deployment mode (observed live 2026-08-03 when this machine
+# gained its Layer-2 override). Assert the two halves separately instead:
+# (1) the tilde fallback derives a real absolute home (never "" → /.config);
+# shellcheck disable=SC2016 # single quotes deliberate — the INNER shell must expand
+HOME_FALLBACK="$(env -i PATH="$PATH" bash -c 'unset HOME; h=~; printf "%s" "$h"')"
+if [[ "$HOME_FALLBACK" == /* && "$HOME_FALLBACK" != "/" ]]; then
+  ok "HOME unset: tilde fallback derives an absolute passwd home (never /.config)"
+else
+  fail "HOME unset: tilde fallback derives an absolute passwd home (never /.config)" \
+    "got '$HOME_FALLBACK'"
+fi
+# (2) the resolver completes under unset HOME with the Layer-2 path pinned
+# hermetically (no crash, no set -u abort, Layer-1 settles).
+OUT="$(env -i PATH="$PATH" CATALYST_LAYER2_CONFIG_FILE="$MISSING" CATALYST_CONFIG_FILE="$R2_L1" \
   bash -c "unset HOME; source '$LIB'; catalyst_resolve_deployment_mode >/dev/null; printf '%s|%s' \"\$CATALYST_DEPLOYMENT_MODE_RESOLVED\" \"\$CATALYST_DEPLOYMENT_MODE_SOURCE\"")"
-expect_eq "HOME unset: resolver completes via passwd-home fallback" "cluster|layer1" "$OUT"
+expect_eq "HOME unset: resolver completes without crashing (hermetic Layer-2)" "cluster|layer1" "$OUT"
 
 # --- Codex round 2: jq-missing breadcrumb resets per resolution -------------
 # First resolution with jq hidden and a readable file → breadcrumb=1; a second

@@ -23,68 +23,55 @@ LINEAR_API="https://api.linear.app"
 # execution-core/linear-remint.mjs (MINT_SCOPE) and catalyst-execution-core.
 MINT_SCOPE="read,write,comments:create,app:assignable,app:mentionable"
 
-# _find_layer2_config — resolve the OLD per-team Layer-2 file
-# (~/.config/catalyst/config-<key>.json) by walking up for .catalyst/config.json
-# and reading the project key. The key lives at `.catalyst.projectKey` (nested);
-# a bare top-level `.projectKey` is also honored for any legacy layout. Falls
-# back to the GLOBAL ~/.config/catalyst/config.json when no key is found.
-_find_layer2_config() {
-  local dir="$PWD"
-  while [[ "$dir" != "/" ]]; do
-    local cfg="$dir/.catalyst/config.json"
-    if [[ -f "$cfg" ]]; then
-      local key
-      key=$(jq -r '.catalyst.projectKey // .projectKey // empty' "$cfg" 2>/dev/null) || true
-      if [[ -n "$key" ]]; then
-        echo "$HOME/.config/catalyst/config-${key}.json"
-        return 0
-      fi
-    fi
-    dir="$(dirname "$dir")"
-  done
-  # CTL-1111: no projectKey found anywhere in the ancestry. Make the drift LOUD
-  # instead of silently aliasing to the global config — name what's missing so an
-  # operator can see why the per-team config-<key>.json was not consulted. Still
-  # return the global path so branch 1 (global bot.worker) back-compat keeps
-  # working. Warning goes to stderr; stdout remains the resolved path.
-  echo "linear-comment-post: no projectKey in any .catalyst/config.json from $PWD upward — per-team config-<key>.json NOT resolved; falling back to global config.json" >&2
-  echo "$HOME/.config/catalyst/config.json"
-}
+# CTL-1616 PR4: the credential-env-pair check + the THREE config-json tiers below (NEW global
+# bot.worker → OLD per-team agent → OLD global agent) are folded onto the shared secret
+# contract's linear-worker-actor row (catalyst_resolve_secret linear-worker-actor) — ALL THREE
+# TIERS PRESERVED VERBATIM (deprecating them is an explicit follow-up ticket, design §12 Q6;
+# collapsing live credential paths on a recovering fleet is exactly what this fold defers).
+# The directory walk-up + its CTL-1111 loud stderr warning now live in
+# lib/catalyst-secret-contract.sh's _csc_resolve_legacy_per_team_path (same wording, same
+# stderr channel — __tests__/linear-comment-post.test.sh's warning assertions are unaffected).
+_LCP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${_LCP_LIB_DIR}/catalyst-secret-contract.sh"
 
-CLIENT_ID="${CATALYST_LINEAR_AGENT_CLIENT_ID:-}"
-CLIENT_SECRET="${CATALYST_LINEAR_AGENT_CLIENT_SECRET:-}"
+CLIENT_ID=""
+CLIENT_SECRET=""
+catalyst_resolve_secret linear-worker-actor >/dev/null
+if [[ -n "$CATALYST_SECRET_LAST_VALUE" ]]; then
+  CLIENT_ID=$(printf '%s' "$CATALYST_SECRET_LAST_VALUE" | jq -r '.clientId // empty' 2>/dev/null)
+  CLIENT_SECRET=$(printf '%s' "$CATALYST_SECRET_LAST_VALUE" | jq -r '.clientSecret // empty' 2>/dev/null)
+fi
+# Secret hygiene (#2924 post-merge Codex P2): drop the breadcrumb once copied.
+unset CATALYST_SECRET_LAST_VALUE
+
+# CTL-1111 back-compat: the pre-fold script ran the per-team directory walk-up (and its "no
+# projectKey found" loud warning) UNCONDITIONALLY whenever the env-credential-pair was absent
+# — even when the global bot.worker tier already won — because a misconfigured worktree
+# (missing .catalyst/config.json ancestry) is worth flagging regardless of which tier
+# ultimately supplied the credential. catalyst_resolve_secret's chain only consults the
+# per-team tier LAZILY (once every earlier tier misses), so this call preserves that
+# diagnostic side effect explicitly; its return value is discarded — the credential itself
+# always comes solely from the canonical resolution above.
+#
+# A2 FIX (CTL-1616 PR4 remediation, duplicate-warning regression): fires ONLY when the
+# PRIMARY tier itself won (source "config-json" — unique to that tier for this row, since it
+# is the only tier that resolves without ever touching a legacy tier). That is the ONE case
+# where catalyst_resolve_secret's own chain returns EARLY without ever invoking the per-team
+# walk-up at all, so calling it here is genuinely the FIRST and ONLY invocation. Every OTHER
+# outcome ("inherited" — the env pair won; "legacy-config-json"/"none" — the primary tier
+# missed) means the chain's own legacyConfigTiers loop ALREADY tried the per-team-legacy tier
+# as its first rung (and already fired the loud warning if no projectKey was found) —
+# calling this again here would print the SAME warning a second time, which is exactly the
+# regression this fix closes (the old unconditional-except-"inherited" guard fired here in
+# BOTH the "already handled internally" cases above, not just the one that needed it).
+if [[ "$CATALYST_SECRET_LAST_SOURCE" == "config-json" ]]; then
+  _csc_resolve_legacy_per_team_path >/dev/null
+fi
 
 if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
-  GLOBAL_CONFIG="$HOME/.config/catalyst/config.json"
-  LAYER2_CONFIG="$(_find_layer2_config)"
-
-  # 1. NEW global path (~/.config/catalyst/config.json):
-  #    catalyst.linear.bot.worker.{clientId,clientSecret}
-  if [[ -f "$GLOBAL_CONFIG" ]]; then
-    CLIENT_ID=$(jq -r '.catalyst.linear.bot.worker.clientId // empty' "$GLOBAL_CONFIG" 2>/dev/null)
-    CLIENT_SECRET=$(jq -r '.catalyst.linear.bot.worker.clientSecret // empty' "$GLOBAL_CONFIG" 2>/dev/null)
-  fi
-
-  # 2. OLD per-team path fallback (config-<key>.json, resolved above):
-  #    catalyst.linear.agent.{clientId,clientSecret}. During the transition the
-  #    worker creds may still live in the per-team file under the legacy key.
-  if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]] && [[ -f "$LAYER2_CONFIG" ]]; then
-    CLIENT_ID=$(jq -r '.catalyst.linear.agent.clientId // empty' "$LAYER2_CONFIG" 2>/dev/null)
-    CLIENT_SECRET=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$LAYER2_CONFIG" 2>/dev/null)
-  fi
-
-  # 3. OLD global path fallback: legacy catalyst.linear.agent.* in the global
-  #    config.json (covers a global-only legacy layout when no per-team file
-  #    exists or the resolver already pointed at config.json).
-  if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]] && [[ -f "$GLOBAL_CONFIG" ]]; then
-    CLIENT_ID=$(jq -r '.catalyst.linear.agent.clientId // empty' "$GLOBAL_CONFIG" 2>/dev/null)
-    CLIENT_SECRET=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$GLOBAL_CONFIG" 2>/dev/null)
-  fi
-
-  if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
-    echo "linear-comment-post: catalyst.linear.bot.worker.{clientId,clientSecret} (global) or legacy catalyst.linear.agent.* (per-team $LAYER2_CONFIG / global $GLOBAL_CONFIG) not found" >&2
-    exit 1
-  fi
+  echo "linear-comment-post: catalyst.linear.bot.worker.{clientId,clientSecret} (global) or legacy catalyst.linear.agent.* (per-team / global) not found" >&2
+  exit 1
 fi
 
 # 1. Mint app-actor token via client_credentials grant.

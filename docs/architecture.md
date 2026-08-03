@@ -105,6 +105,134 @@ shadow `<TICKET>.json.projected`. Phase 1: broker handler + emit helper + dual-w
 `orchestrate-auto-rebase` (`orchestrate-shadow-diff` verifies byte-for-byte parity). Phase 2: remove
 direct writes (broker sole writer). Phase 3: mirror to SQLite per ADR-011. See ADR-018.
 
+## Deployment Mode (CTL-1617)
+
+One declared answer — **`catalyst.deployment.mode` ∈ `single-host` | `cluster` | `cloud`** — replaces
+the per-host hand-wiring of mode-dependent choices. Resolved by a zero-import bash+JS pair
+(`plugins/dev/scripts/lib/deployment-mode.mjs` + `lib/catalyst-deployment-mode.sh`), kept honest by
+an exhaustive cross-stack parity fixture matrix (`__tests__/deployment-mode-parity.test.sh`). The
+schema itself (precedence ladder, examples, defaulting, every caveat) lives in its canonical
+reference, `website/src/content/docs/reference/configuration.md` — this section covers only the
+architectural role. **This repo's Layer-1 declares `cluster`**; dev-clones override to `single-host`
+via Layer-2.
+
+- **Degradation is the safety direction**: invalid values settle at their layer as
+  `single-host, recognized:false` (asserting the fewest cross-host guarantees); malformed files are
+  layer-absent in BOTH languages. Two supported, deliberate asymmetry bounds: on a **jq-less host**
+  the bash resolver treats config files as absent (env-else-default, with a
+  `CATALYST_DEPLOYMENT_MODE_JQ_MISSING` breadcrumb for doctor) while the JS resolver still reads
+  them; and file-acceptance parity is defined by jq's parser (multi-document, BOM, and
+  lone-surrogate-escape documents are whole-document-malformed on both sides — the JS reader scans
+  raw text to match).
+- **Consumers today**: `catalyst doctor` (`checkDeploymentModeConsistency`, advisory:
+  declared/inferred, typo FAIL, roster-consistency WARN — every message says "deployment mode",
+  never bare "mode", since `dispatchMode`, executor dispatch-mode telemetry, and the replica
+  reader's `mode` are unrelated concepts) and the orch-monitor smee tunnel gate (a declared-`cloud`
+  node suppresses tunnel start; the replacement cloud-SDK event connection is **future work** — the
+  smee→cloud cutover, ADR-0008 lineage — so `cloud` today means "no smee ingestion", not "cloud
+  ingestion wired"). **Consumer**: the CTL-1616 secret contract's provider-of-record dispatch
+  (below) can receive the full resolution object and never activates a cloud provider on
+  `inferred:true` — but only `catalyst doctor` actually threads `deploymentMode` into its
+  `resolveSecret` calls today. The folded Linear/OAuth call sites (`linear-query.mjs`,
+  `cluster-claim.mjs`, etc.) call `resolveSecret(id)`/`resolveSecret(id, { env })` with no
+  `deploymentMode` argument at all, so the cloud guard never engages for them regardless of the
+  node's declared mode — deployment-mode dispatch for those consumers stays **planned**, not
+  shipped (see the Secret Contract section below).
+- **Orthogonal axes, never merged**: deployment mode (fleet topology) × `catalyst.node.class`
+  (per-machine role) × `orchestration.dispatchMode` (process substrate within a node).
+- Design + migration plan: `thoughts/shared/research/2026-08-02-ctl-1617-deployment-mode-design.md`.
+
+## Secret Contract (CTL-1616)
+
+The 2026-08-02 fleet 401 outage was four divergent hand-written copies of one secret-resolution
+chain. CTL-1616 generalizes CTL-1612's proven github-token/webhook-secret pair into **one
+registry, two engines**: `plugins/dev/scripts/lib/secret-contract.mjs` (a zero-import JS leaf —
+`node:fs`/`os`/`path` only, so `catalyst doctor`'s bare-Node runtime can import it without pulling
+in `execution-core/config.mjs`'s `bun:sqlite` graph) and its independently-maintained bash mirror
+`lib/catalyst-secret-contract.sh`, held honest by a cross-stack **three-way parity suite**
+(`__tests__/secret-contract-parity.test.sh`: bash and JS each checked against a
+computed-expected value, never merely against each other, plus row-id-set equality between the
+two registries). The schema — the 11 registered secrets, the 7 delivery types, the resolution
+result shape, the cloud guard, and the Layer-2 path chain — is documented in full in its canonical
+reference, `website/src/content/docs/reference/configuration.md`; this section covers only the
+architectural role.
+
+```mermaid
+flowchart LR
+  REG[SECRET_REGISTRY<br/>one frozen row set] --> JS[secret-contract.mjs<br/>zero-import engine]
+  REG -.mirrored.-> SH[catalyst-secret-contract.sh<br/>bash engine]
+  JS <-. three-way parity .-> SH
+  JS --> DOCTOR[catalyst doctor<br/>shadow + 1 live cutover]
+  JS --> LINEAR[10-file Linear-token read<br/>PR3]
+  JS --> MINT[Linear OAuth-mint trio<br/>PR4]
+  JS --> CLOUD[cloud-token name<br/>PR5]
+  SH --> HEALTH[health-responder.sh<br/>bash fallback, PR5]
+```
+
+**Bootstrap classes, one per deployment mode** — the one credential the contract can never itself
+deliver, since it is what unlocks (or stands in for) everything else the chain resolves:
+
+| Mode          | Bootstrap credential                          | Row              |
+| ------------- | ---------------------------------------------- | ----------------- |
+| `single-host` | none — every secret is operator-placed          | — (no row)         |
+| `cluster`     | the SOPS age private key (`~/.config/catalyst/age.key`, `SOPS_AGE_KEY_FILE`-overridable) | `age-key` (`local-only`, presence-checked, value never read) |
+| `cloud`       | `CATALYST_CLOUD_TOKEN` (name itself resolvable via a 3-tier ladder) | `cloud-token` (`platform-env`) |
+
+**Rotation classes** generalize `cluster-sync.mjs`'s "captured at process start" prose into
+structured per-row data: `boot-only` (a value change needs a restart), `re-armable`/`timer`
+(proactively re-checked on a recurring tick — `github-token`'s declared shape; its actual re-arm
+today still runs through the pre-existing CTL-1612 `rearmGithubTokenFromFile`, called every
+daemon cluster-sync tick in `execution-core/daemon.mjs`, not yet through this contract's own
+`registerRearmHook`/`armSecret` seam), and `re-armable`/`on-401`
+(reactively re-minted on an observed auth failure — the Linear OAuth-mint shape). `armSecret()`
+never throws and reports `{ armed, rotated, restartRequired }` — `restartRequired: true` is the
+literal mechanism the 2026-08-02 outage lacked: a `boot-only` row (or a `re-armable` row with no
+hook registered yet — the two degrade identically, by design, so a consumer that never wires the
+arm path can't look safer than one that structurally can't) reports it when a caller invokes
+`armSecret` and the resolved value has changed since the PROCESS's last `armSecret` observation
+for that id (`_lastArmedValue` is module-level, one baseline per secret id shared by every caller
+in the process — caller B observing a rotation resets what caller A sees) — a caller-invoked
+report, not an automatic one fired the moment the value changes. No production call
+site invokes `armSecret` today (a repo-wide search outside tests finds only the definition and a
+comment reference in `linear-remint.mjs`), so this reporting is not yet wired to any running
+daemon.
+
+**Consumers folded onto the contract so far**: the 10-file/12-site Linear-token read
+(`linear-query.mjs` — 3 sites, `cluster-heartbeat.mjs`, `cluster-claim.mjs`,
+`linear-estimation-method.mjs`, `linear-reconcile-cli.mjs`, three `orch-monitor/lib/linear-*`
+fallback readers, `score-tickets.ts`, and the bash `catalyst_resolve_secret linear-api-token`
+snippet in `plugins/dev/skills/phase-triage/SKILL.md`); the Linear OAuth-mint trio
+(`linear-app-actor.sh`'s bash mint, `linear-remint.mjs`'s orchestrator-actor reminter — registered
+as the row's live rearm hook — and `linear-comment-post.sh`'s worker-actor chain, legacy tiers
+preserved verbatim); the cloud-token env-var **name** resolver (`config.mjs`'s
+`resolveNodeCloudTokenEnv` now delegates directly to `resolveCloudTokenName`; `health-responder.sh`'s
+bun-less fallback path instead calls the independently-maintained bash mirror
+`catalyst_secret_cloud_token_name` — kept byte-for-byte with the JS resolver by the parity suite,
+not a shared function call); and
+`catalyst doctor` itself, which consults the contract through `resolveSecret` directly rather
+than a parallel presence check — as a **shadow**
+comparison (INFO-only, never changes a grade) for most checks, with `checkPeerUniqueness` /
+`checkBotCredentials` / `checkWorkerLabels` cut over to the contract as their *live*
+`linear-api-token` answer, and one grade-changing addition: `checkCloudTokenEnv` now FAILs when the
+active deployment mode is declared `cloud` and the `cloud-token` bootstrap row doesn't resolve —
+the one FAIL doctor cannot route around. The GitHub-token/webhook-secret pair that motivated the
+contract (CTL-1612's `catalyst-secret-env.sh` / `github-auth-preflight.mjs`) has **not yet** been
+re-pointed onto the shared engine — both rows exist in the registry today for shadow comparison and
+future consumers, but the live CTL-1612 code path is still its own, pre-existing implementation.
+
+The same PR5 that unified the cloud-token name resolver did adjacent, unrelated cleanup on Groq's
+`GROQ_API_KEY` ladder (`dsl-cli.mjs` and `hud.tsx` joined `broker/config.mjs` on the shared
+`resolveApiKey`) — but that is `lib/api-key-health.mjs`'s pre-existing (CTL-343) resolver, not this
+contract: none of those three call sites import `secret-contract.mjs`, and the registry's own
+`groq-api-key` row has no consumer today besides `checkSecretContract`'s shadow-only observation.
+
+**Secret-env hygiene rule**: the bash engine's `_csc_set_result` exports the non-secret
+`CATALYST_SECRET_LAST_SOURCE`/`_PROVIDER` breadcrumbs for the calling shell's convenience but
+**never** exports the resolved value itself (`CATALYST_SECRET_LAST_VALUE` stays same-shell-only,
+with `export -n` reasserted on every call since bash's export attribute is sticky across
+reassignment) — a long-lived daemon shell must not leak a credential into every child process it
+launches.
+
 ## Agent Teams vs Subagents
 
 | Scenario                                        | Subagents       | Agent Teams |

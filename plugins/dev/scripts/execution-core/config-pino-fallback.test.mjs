@@ -11,7 +11,7 @@
 
 import { describe, test, expect } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,13 +35,29 @@ function pickProbeCommand() {
 }
 
 function stageScratch() {
-  const scratch = mkdtempSync(join(tmpdir(), "ctl-578-pino-"));
+  const root = mkdtempSync(join(tmpdir(), "ctl-578-pino-"));
+  // Mirror the real plugins/dev/scripts/ layout one level deep: config.mjs
+  // lives in execution-core/, its sibling config-schema.mjs alongside it, and
+  // (CTL-1617) the deployment-mode resolver one directory UP in lib/ — so
+  // config.mjs's relative import "../lib/deployment-mode.mjs" resolves
+  // exactly as it does in production instead of escaping the fixture root.
+  const scratch = join(root, "execution-core");
+  const libDir = join(root, "lib");
+  mkdirSync(scratch, { recursive: true });
+  mkdirSync(libDir, { recursive: true });
   cpSync(CONFIG_MJS, join(scratch, "config.mjs"));
   // CTL-1211: config.mjs imports the dep-free sibling config-schema.mjs — copy it
   // too so the scratch fixture can resolve config.mjs's local (non-pino) imports.
   // (The point of the fixture is that PINO is unresolvable; local siblings must
-  // still resolve, so any new sibling import config.mjs gains belongs here.)
+  // still resolve, so any new sibling/relative import config.mjs gains belongs here.)
   cpSync(resolve(__dirname, "config-schema.mjs"), join(scratch, "config-schema.mjs"));
+  // CTL-1617: the zero-import deployment-mode leaf config.mjs re-exports.
+  cpSync(resolve(__dirname, "../lib/deployment-mode.mjs"), join(libDir, "deployment-mode.mjs"));
+  // CTL-1616 PR5: config.mjs's resolveNodeCloudTokenEnv now delegates to the zero-import
+  // secret-contract leaf's resolveCloudTokenName — copy it too so this scratch fixture's
+  // module graph resolves identically to production (same rationale as deployment-mode.mjs
+  // above).
+  cpSync(resolve(__dirname, "../lib/secret-contract.mjs"), join(libDir, "secret-contract.mjs"));
   // type:module + no deps -> pino unresolvable from this directory tree.
   writeFileSync(
     join(scratch, "package.json"),
