@@ -46,10 +46,39 @@ for candidate in \
   "$HOME/.catalyst/bin/workflow-context" \
   "$HOME/.catalyst/bin/workflow-context.sh" \
   "${CLAUDE_PLUGIN_ROOT:-__missing__}/scripts/workflow-context.sh" \
-  "$(find "$HOME/.claude/plugins" -name "workflow-context.sh" -maxdepth 8 2>/dev/null | head -1)" \
 ; do
   [[ -x "$candidate" ]] && WC_SCRIPT="$candidate" && break
 done
+
+# CTL-1628 Phase A2 bug fix: the final fallback used to be
+# `find "$HOME/.claude/plugins" -name workflow-context.sh -maxdepth 8 | head -1`
+# — UNORDERED, so with more than one cached/marketplace copy installed it
+# could silently pick an arbitrary (possibly stale) one. Resolve via
+# lib/catalyst-runtime-root.sh's catalyst_dev_scripts instead — the same
+# ordered probe (env override -> source-checkout sibling -> repo-root cwd ->
+# newest marketplace clone -> newest versioned cache) every other
+# catalyst-dev consumer uses. This script is itself always a sibling of
+# lib/catalyst-runtime-root.sh (both live in plugins/dev/scripts/), so its
+# own real (symlink-resolved) location — it is installed to
+# ~/.catalyst/bin/register-thought as a symlink — reliably bootstraps
+# sourcing the lib with no ambiguity.
+if [[ -z "$WC_SCRIPT" ]]; then
+  _RT_SRC="${BASH_SOURCE[0]}"
+  while [[ -L "$_RT_SRC" ]]; do
+    _RT_D="$(cd -P "$(dirname "$_RT_SRC")" && pwd)" && _RT_SRC="$(readlink "$_RT_SRC")"
+    [[ "$_RT_SRC" != /* ]] && _RT_SRC="$_RT_D/$_RT_SRC"
+  done
+  _RT_DIR="$(cd -P "$(dirname "$_RT_SRC")" && pwd)"
+  if [[ -f "${_RT_DIR}/lib/catalyst-runtime-root.sh" ]]; then
+    # shellcheck disable=SC1091
+    . "${_RT_DIR}/lib/catalyst-runtime-root.sh"
+    catalyst_dev_scripts >/dev/null 2>&1 || true
+    if [[ -n "${CATALYST_DEV_SCRIPTS:-}" && -x "${CATALYST_DEV_SCRIPTS}/workflow-context.sh" ]]; then
+      WC_SCRIPT="${CATALYST_DEV_SCRIPTS}/workflow-context.sh"
+    fi
+  fi
+  unset _RT_SRC _RT_D _RT_DIR
+fi
 
 [[ -z "$WC_SCRIPT" ]] && exit 0
 
