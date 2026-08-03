@@ -827,6 +827,36 @@ test("--graphql: buildReadState uses LINEAR_API_KEY when LINEAR_API_TOKEN is abs
   }
 });
 
+test("--graphql: buildReadState falls back to LINEAR_API_KEY when LINEAR_API_TOKEN is empty", async () => {
+  // CTL-1619 / Codex P2: an exported-but-empty LINEAR_API_TOKEN='' must not
+  // defeat the LINEAR_API_KEY fallback (the `??`→`||` fix).
+  const savedToken = process.env.LINEAR_API_TOKEN;
+  const savedKey = process.env.LINEAR_API_KEY;
+  const savedFetch = globalThis.fetch;
+  let seenAuth = null;
+  try {
+    process.env.LINEAR_API_TOKEN = "";
+    process.env.LINEAR_API_KEY = "lin_api_fromkey";
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return {
+        ok: true,
+        json: async () => ({ data: { issues: { nodes: [{ state: { name: "Done" } }] } } }),
+      };
+    };
+    const readState = await buildReadState({ graphql: true });
+    const state = await readState("CTL-1");
+    expect(state).toBe("Done");
+    expect(seenAuth).toBe("lin_api_fromkey");
+  } finally {
+    if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+    else process.env.LINEAR_API_TOKEN = savedToken;
+    if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedKey;
+    globalThis.fetch = savedFetch;
+  }
+});
+
 test("--graphql: buildReadState with neither var set throws naming both variables", async () => {
   const savedToken = process.env.LINEAR_API_TOKEN;
   const savedKey = process.env.LINEAR_API_KEY;
