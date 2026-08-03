@@ -1862,6 +1862,162 @@ describe("checkCloudTokenEnv", () => {
       for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
     }
   });
+
+  // ─── CTL-1616 PR6 §7 FAIL escalation (design §5) ───────────────────────────
+  describe("cloud-token-bootstrap FAIL escalation (CTL-1616 PR6)", () => {
+    const DECLARED_CLOUD = { mode: "cloud", source: "env", inferred: false, recognized: true };
+    // Every mode this escalation must be INERT for — the "zero grade change on
+    // every live host" success criterion (design §9 PR6): both minis are
+    // cluster, the laptop is single-host, and an inferred default must never
+    // fire this either.
+    const NON_DECLARED_CLOUD_MODES = [
+      { mode: "single-host", source: "default", inferred: true, recognized: true },
+      { mode: "single-host", source: "layer2", inferred: false, recognized: true },
+      { mode: "cluster", source: "layer1", inferred: false, recognized: true },
+      // Belt-and-suspenders (design §12 Q3): a hand-constructed cloud+inferred:false
+      // object with recognized:false must also stay inert.
+      { mode: "cloud", source: "env", inferred: false, recognized: false },
+    ];
+
+    it("FAILs cloud-token-bootstrap, naming the resolved env-var name and the §4 short-circuit consequence, when declared cloud mode's bootstrap credential does not resolve", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: DECLARED_CLOUD,
+        resolveSecretContract: () => ({
+          value: null,
+          source: "none",
+          provider: "platform-env",
+          envVar: "CATALYST_CLOUD_TOKEN",
+          envVarSource: "default",
+        }),
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(boot).toBeDefined();
+      expect(boot.status).toBe(STATUS.FAIL);
+      expect(boot.detail).toContain("CATALYST_CLOUD_TOKEN");
+      expect(boot.detail.toLowerCase()).toContain("cloud");
+      expect(boot.detail.toLowerCase()).toContain("short-circuit");
+    });
+
+    it("names a CUSTOM resolved env-var name in the FAIL detail — never hardcodes CATALYST_CLOUD_TOKEN", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: DECLARED_CLOUD,
+        resolveSecretContract: () => ({
+          value: null,
+          source: "none",
+          provider: "platform-env",
+          envVar: "MY_CUSTOM_CLOUD_TOKEN",
+          envVarSource: "layer2",
+        }),
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(boot.status).toBe(STATUS.FAIL);
+      expect(boot.detail).toContain("MY_CUSTOM_CLOUD_TOKEN");
+    });
+
+    it("PASSes cloud-token-bootstrap when declared cloud mode's bootstrap credential DOES resolve", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: DECLARED_CLOUD,
+        resolveSecretContract: () => ({
+          value: "the-real-token",
+          source: "platform-env",
+          provider: "platform-env",
+          envVar: "CATALYST_CLOUD_TOKEN",
+          envVarSource: "default",
+        }),
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(boot).toBeDefined();
+      expect(boot.status).toBe(STATUS.PASS);
+    });
+
+    it("a throwing resolver in declared cloud mode degrades to a shadow-throw INFO row, never a crash", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: DECLARED_CLOUD,
+        resolveSecretContract: () => {
+          throw new Error("boom");
+        },
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap-secret-contract-shadow");
+      expect(boot).toBeDefined();
+      expect(boot.status).toBe(STATUS.INFO);
+      expect(checks.some((c) => c.status === STATUS.FAIL)).toBe(false);
+    });
+
+    it("is structurally INERT (contributes zero checks — not even INFO) for every non-declared-cloud deployment mode: zero grade change on every live host", () => {
+      for (const deploymentMode of NON_DECLARED_CLOUD_MODES) {
+        const checks = checkCloudTokenEnv({
+          configDir: CFG,
+          zshenvPath: ZSH,
+          readFile: reader({}),
+          deploymentMode,
+          // A resolver that WOULD FAIL if consulted — proves the gate short-circuits
+          // before ever calling it, not merely that its result happens to be non-FAIL.
+          resolveSecretContract: () => {
+            throw new Error("must never be called for this deployment mode");
+          },
+        });
+        expect(checks.find((c) => c.name === "cloud-token-bootstrap")).toBeUndefined();
+        expect(checks.find((c) => c.name === "cloud-token-bootstrap-secret-contract-shadow")).toBeUndefined();
+      }
+    });
+
+    it("fails OPEN to today's INFO-only behavior when the injected deploymentMode itself is undefined/throws (never crashes checkCloudTokenEnv)", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: undefined,
+        resolveSecretContract: agreeingCloudTokenContract,
+      });
+      expect(checks.find((c) => c.name === "cloud-token-bootstrap")).toBeUndefined();
+      expect(checks[0].status).toBe(STATUS.INFO);
+    });
+
+    // ─── §9 PR6 invariant (design §9 success criterion) ──────────────────────
+    it("END-TO-END with the REAL engine: a synthetic declared-cloud run with no platform token produces the FAIL and PROVABLY never touches the file-search path", () => {
+      // A real cluster-cloud.json/cluster.env/zshenv trio IS present (so the
+      // hand-rolled branches above would otherwise PASS) — the point of this
+      // test is that the NEW escalation fires independently, via the real
+      // resolveSecret engine, and that engine's cloud guard short-circuits
+      // before ever touching the file the CATALYST_CONFIG_DIR fixture below
+      // would otherwise satisfy.
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({
+          cloud: clusterCloud("tok"),
+          env: exportLine("tok") + "\n",
+          zsh: "# >>> catalyst cloud-token env (CTL-1307) >>>\n. cluster.env\n",
+        }),
+        deploymentMode: DECLARED_CLOUD,
+        // env has NO CATALYST_CLOUD_TOKEN — the real engine's cloud branch is a
+        // pure env-alias read (no file search at all), so this is genuinely
+        // absent regardless of the cluster-cloud.json/cluster.env fixtures above.
+        resolveSecretContract: (id, opts) => resolveSecretReal(id, { ...opts, env: {} }),
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(boot).toBeDefined();
+      expect(boot.status).toBe(STATUS.FAIL);
+      expect(boot.detail).toContain("CATALYST_CLOUD_TOKEN");
+      // The original hand-rolled cluster-cloud.json/cluster.env/zshenv check
+      // still PASSes on its own terms (proving the two questions are genuinely
+      // orthogonal, not that one silently overrides the other).
+      expect(checks[0].name).toBe("cloud-token");
+      expect(checks[0].status).toBe(STATUS.PASS);
+    });
+  });
 });
 
 describe("checkSdkExecutorAuth (CTL-1367 item 9)", () => {

@@ -167,7 +167,12 @@ import { resolveSecret } from "${JS_LIB}";
 const id = process.env.CSC_PROBE_ID;
 const depMode = process.env.CSC_PROBE_DEP_MODE;
 const depInferred = process.env.CSC_PROBE_DEP_INFERRED;
-const deploymentMode = depMode ? { mode: depMode, inferred: depInferred === "true" } : undefined;
+// CTL-1616 PR6: RECOGNIZED defaults to true when unset — mirrors bash's \${4:-true} default,
+// so every pre-PR6 cell (which never sets CSC_PROBE_DEP_RECOGNIZED) exercises the identical
+// semantic input on both sides it always did.
+const depRecognizedRaw = process.env.CSC_PROBE_DEP_RECOGNIZED;
+const depRecognized = depRecognizedRaw === undefined ? true : depRecognizedRaw === "true";
+const deploymentMode = depMode ? { mode: depMode, inferred: depInferred === "true", recognized: depRecognized } : undefined;
 // CTL-1616 PR4: linear-worker-actor's per-team-legacy tier walks cwd upward — CSC_PROBE_CWD
 // threads the same working directory the bash side is cd'd into (see _cell_in_dir) so both
 // sides walk from the IDENTICAL starting point.
@@ -186,7 +191,7 @@ _cell() {
   local BASH_OUT NODE_OUT
   BASH_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" bash -c "
     source '$LIB'
-    catalyst_resolve_secret \"\$CSC_PROBE_ID\" \"\${CSC_PROBE_DEP_MODE:-}\" \"\${CSC_PROBE_DEP_INFERRED:-true}\"
+    catalyst_resolve_secret \"\$CSC_PROBE_ID\" \"\${CSC_PROBE_DEP_MODE:-}\" \"\${CSC_PROBE_DEP_INFERRED:-true}\" \"\${CSC_PROBE_DEP_RECOGNIZED:-true}\"
   ")"
   NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" node "$PROBE_RESOLVE_JS" 2>&1)"
   expect_eq "$_name (bash==expected)" "$_expected" "$BASH_OUT"
@@ -203,7 +208,7 @@ _cell_in_dir() {
   local BASH_OUT NODE_OUT
   BASH_OUT="$(cd "$_dir" && env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" bash -c "
     source '$LIB'
-    catalyst_resolve_secret \"\$CSC_PROBE_ID\" \"\${CSC_PROBE_DEP_MODE:-}\" \"\${CSC_PROBE_DEP_INFERRED:-true}\"
+    catalyst_resolve_secret \"\$CSC_PROBE_ID\" \"\${CSC_PROBE_DEP_MODE:-}\" \"\${CSC_PROBE_DEP_INFERRED:-true}\" \"\${CSC_PROBE_DEP_RECOGNIZED:-true}\"
   ")"
   NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" CSC_PROBE_CWD="$_dir" "$@" node "$PROBE_RESOLVE_JS" 2>&1)"
   expect_eq "$_name (bash==expected)" "$_expected" "$BASH_OUT"
@@ -703,6 +708,18 @@ _cell "bootstrap short-circuit: cloud-token absent ⇒ every other row's cloud r
   CSC_PROBE_DEP_MODE=cloud CSC_PROBE_DEP_INFERRED=false
 _cell "bootstrap short-circuit does not apply to cloud-token itself" "|none|platform-env" \
   CSC_PROBE_ID=cloud-token CSC_PROBE_DEP_MODE=cloud CSC_PROBE_DEP_INFERRED=false
+
+# ─── cloud guard RECOGNIZED extension (CTL-1616 PR6, design §12 Q3 belt-and-suspenders) ────
+# `recognized !== false` is ADDITIVE to the inferred check — a hand-constructed deploymentMode
+# with recognized:false must NOT activate cloud even when mode=cloud/inferred=false; omitting
+# or explicitly setting recognized:true must activate cloud exactly as before this PR.
+_cell "cloud guard: recognized=false does NOT activate cloud (even with mode=cloud, inferred=false)" \
+  "file-value|shared-file|bare-file" \
+  CSC_PROBE_ID=github-token "CATALYST_CONFIG_DIR=${CLOUDGUARD_DIR}" "GH_TOKEN=env-value-should-not-win" \
+  CSC_PROBE_DEP_MODE=cloud CSC_PROBE_DEP_INFERRED=false CSC_PROBE_DEP_RECOGNIZED=false
+_cell "cloud guard: recognized=true (explicit) activates cloud exactly like recognized omitted" \
+  "||bare-file" CSC_PROBE_ID=github-token "GH_TOKEN=should-not-be-returned" \
+  CSC_PROBE_DEP_MODE=cloud CSC_PROBE_DEP_INFERRED=false CSC_PROBE_DEP_RECOGNIZED=true
 
 # Hostile probe (B3): the bootstrap-class secret's VALUE itself begins with "|". The
 # previous bash implementation captured the recursive resolve call's pipe-joined

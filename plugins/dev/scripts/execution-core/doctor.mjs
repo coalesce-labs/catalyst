@@ -2552,12 +2552,21 @@ export function checkAgentBrowser(deps = {}) {
   return checks;
 }
 
-// checkCloudTokenEnv — CTL-1307. ADVISORY ONLY (never FAIL): the cluster-shared
-// CATALYST_CLOUD_TOKEN is an OPTIONAL extension — a node stays fully local-only
-// without it, so its absence must NEVER block activation. WARN only on DRIFT: the
-// token has been decrypted from the catalyst-cluster repo (cluster-cloud.json)
-// but is not yet projected into the machine-level env (cluster.env + ~/.zshenv
-// guard). All reads are injectable + fail-open.
+// checkCloudTokenEnv — CTL-1307. ADVISORY for the cluster-shared-token distribution
+// checks below (the `cloud-token` row's original CTL-1307 scope): CATALYST_CLOUD_TOKEN
+// is an OPTIONAL extension for a cluster node — a node stays fully local-only without
+// it, so its absence must NEVER block activation there. WARN only on DRIFT: the token
+// has been decrypted from the catalyst-cluster repo (cluster-cloud.json) but is not yet
+// projected into the machine-level env (cluster.env + ~/.zshenv guard).
+//
+// CTL-1616 PR6 (design §5/§7) ADDS ONE FAIL: when the ACTIVE deployment mode is
+// DECLARED cloud (not cluster's optional extension — the actual managed-platform mode),
+// a missing/unresolvable bootstrap credential IS the one FAIL doctor cannot route
+// around — see the `cloud-token-bootstrap` check below. That escalation is gated
+// entirely on deployment mode and contributes ZERO checks for every other mode, so this
+// function's original ADVISORY/never-FAIL contract is UNCHANGED for single-host,
+// cluster, and inferred nodes — i.e. every live host today. All reads are injectable +
+// fail-open.
 export function checkCloudTokenEnv(deps = {}) {
   const {
     configDir = process.env.CATALYST_CONFIG_DIR || resolve(homedir(), ".config", "catalyst"),
@@ -2578,8 +2587,78 @@ export function checkCloudTokenEnv(deps = {}) {
     // here alongside the literal-name comparison so a clean shadow cycle
     // cannot mask that divergence.
     resolveReplicaTokenEnv = resolveNodeCloudTokenEnv,
+    // CTL-1616 PR6 (design §5/§7): the §7 FAIL escalation's deployment-mode
+    // input — injectable, same convention as every other secret-contract call
+    // site in this file. Default is throw-safe (resolveDeploymentModeForShadow
+    // catches internally and degrades to undefined), so an unset/throwing
+    // resolver fails OPEN to today's INFO-only behavior (the escalation below
+    // is gated on this being genuinely {mode:"cloud", inferred:false, ...} —
+    // undefined never satisfies that gate).
+    deploymentMode = resolveDeploymentModeForShadow(),
   } = deps;
   const checks = [];
+
+  // CTL-1616 PR6 §7 FAIL ESCALATION (design §5): "the one FAIL doctor cannot
+  // route around." Computed ONCE here (same convention as cloudShadowChecks
+  // just below) and appended at EVERY return point so it fires regardless of
+  // which cluster-cloud.json/cluster.env/zshenv branch this check's existing
+  // hand-rolled logic lands in — those branches answer "is CATALYST_CLOUD_TOKEN
+  // projected from the cluster-sync distribution path", an ORTHOGONAL question
+  // to "is this node's deployment mode declared cloud and did the bootstrap
+  // credential resolve" (design §4's bootstrapFor:"cloud" row IS this same
+  // secret, just consulted through the shared engine rather than the
+  // cluster-sync file trio).
+  //
+  // GATE: fires ONLY when the ACTIVE deployment mode is DECLARED cloud —
+  // recognized (not a typo'd/degraded value) AND not inferred (an operator
+  // explicitly set it, matching checkDeploymentModeConsistency's tunnel-
+  // consistency gate at ~line 3445 and the engine's own cloud guard in
+  // lib/secret-contract.mjs's resolveSecret). Structurally inert (contributes
+  // ZERO checks, hence zero grade change) for every other deployment mode —
+  // single-host, cluster, inferred, or an unrecognized explicit value — so
+  // this is provably a no-op on both live minis (cluster) and the laptop
+  // (single-host). `recognized !== false` mirrors the engine's own
+  // belt-and-suspenders extension (design §12 Q3) rather than requiring
+  // recognized===true, so a deploymentMode object that omits the field
+  // (legacy callers, most fixtures elsewhere in this file) still gates
+  // correctly on inferred alone.
+  const cloudBootstrapEscalationChecks = [];
+  const dm = deploymentMode;
+  if (dm && dm.mode === "cloud" && dm.inferred === false && dm.recognized !== false) {
+    const bootstrapResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
+      env: process.env,
+      deploymentMode: dm,
+    });
+    if (!bootstrapResolution.ok) {
+      cloudBootstrapEscalationChecks.push(
+        shadowThrowCheck("cloud-token-bootstrap", "cloud-token", bootstrapResolution.error),
+      );
+    } else {
+      const bootstrapResolved = bootstrapResolution.value;
+      const envVar = typeof bootstrapResolved?.envVar === "string" ? bootstrapResolved.envVar : "CATALYST_CLOUD_TOKEN";
+      if (bootstrapResolved?.value == null) {
+        cloudBootstrapEscalationChecks.push(
+          mkCheck(
+            "cloud-token-bootstrap",
+            STATUS.FAIL,
+            `deployment mode is declared "cloud" but the bootstrap credential (env var ` +
+              `"${envVar}") did not resolve — per the §4 cloud guard's bootstrap short-circuit, ` +
+              `EVERY other cloud-mode secret resolution returns null until this is set (a ` +
+              `half-provisioned managed container); set ${envVar} in the platform environment`,
+          ),
+        );
+      } else {
+        cloudBootstrapEscalationChecks.push(
+          mkCheck(
+            "cloud-token-bootstrap",
+            STATUS.PASS,
+            `deployment mode is declared "cloud" and the bootstrap credential resolved ` +
+              `(env var "${envVar}", source=${bootstrapResolved.envVarSource ?? bootstrapResolved.source})`,
+          ),
+        );
+      }
+    }
+  }
 
   // CTL-1616 PR2 (B1): computed ONCE here, but pushed at each return point
   // below so the shadow row is always APPENDED AFTER the primary rows (the
@@ -2655,7 +2734,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
       ),
     );
-    checks.push(...cloudShadowChecks);
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2675,7 +2754,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cloud token decrypted but NOT projected to ~/.config/catalyst/cluster.env — run 'catalyst-stack sync-cloud-env'",
       ),
     );
-    checks.push(...cloudShadowChecks);
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
   if (!clusterEnv.includes(expected)) {
@@ -2686,7 +2765,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cluster.env CATALYST_CLOUD_TOKEN is STALE vs cluster-cloud.json — run 'catalyst-stack sync-cloud-env' and restart cloud daemons",
       ),
     );
-    checks.push(...cloudShadowChecks);
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2704,7 +2783,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cluster.env present but ~/.zshenv lacks the source-guard — shells (and shell-launched cloud daemons) won't inherit CATALYST_CLOUD_TOKEN",
       ),
     );
-    checks.push(...cloudShadowChecks);
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2715,7 +2794,7 @@ export function checkCloudTokenEnv(deps = {}) {
       "cluster cloud token projected to machine-level env (cluster.env + ~/.zshenv guard)",
     ),
   );
-  checks.push(...cloudShadowChecks);
+  checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
   return checks;
 }
 

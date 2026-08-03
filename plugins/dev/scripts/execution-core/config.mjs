@@ -20,7 +20,10 @@ import { schemaCompat } from "./config-schema.mjs";
 // via resolveNodeCloudTokenEnv below) and health-responder.sh's bash fallback
 // (via lib/catalyst-secret-contract.sh's catalyst_secret_cloud_token_name) —
 // same precedent as CTL-1617's deployment-mode re-export just below.
-import { resolveCloudTokenName } from "../lib/secret-contract.mjs";
+// CTL-1616 PR6: resolveLayer2Path is the registry's canonical Layer-2 path chain
+// (CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME > ~/.config),
+// consulted by getLayer2ConfigPath's dual-read shadow-diff below (design §8 PR6).
+import { resolveCloudTokenName, resolveLayer2Path } from "../lib/secret-contract.mjs";
 
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
@@ -209,14 +212,41 @@ export function getEventLogPath() {
 // Linear-CAS claim, takeover/healing) have one source of truth. Nothing in the
 // dispatch/claim/eligible-query path consults these yet.
 
-// Layer-2 (machine-local) config path. Mirrors daemon.mjs main()'s resolution:
-// CATALYST_LAYER2_CONFIG_FILE || ~/.config/catalyst/config.json. Each host's
-// Layer-2 file differs, so this is the right home for a per-host name.
+// Layer-2 (machine-local) config path. Historically CATALYST_LAYER2_CONFIG_FILE ||
+// ~/.config/catalyst/config.json (daemon.mjs main()'s resolution) — homedir-only, ignoring
+// CATALYST_MACHINE_CONFIG and XDG_CONFIG_HOME. Each host's Layer-2 file differs, so this is
+// the right home for a per-host name.
+//
+// CTL-1616 PR6 (design §8/§9): DUAL-READ shadow-diff for one release before this delegates
+// fully to the registry's canonical resolveLayer2Path (lib/secret-contract.mjs) chain —
+// CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME > ~/.config/catalyst.
+// The two chains AGREE whenever CATALYST_LAYER2_CONFIG_FILE is set (checked first by both) or
+// neither CATALYST_MACHINE_CONFIG nor XDG_CONFIG_HOME is set (both fall to the same homedir
+// default) — the common case on every host today, hence silent. They DISAGREE on a host that
+// sets CATALYST_MACHINE_CONFIG or XDG_CONFIG_HOME without also setting
+// CATALYST_LAYER2_CONFIG_FILE — a DOCUMENTED BEHAVIOR CHANGE (design risk 8), logged loudly
+// (once per unique divergence message, mirroring getNodeClass's _warnedNodeClass dedup below)
+// so the operator sees it before the next PR removes the legacy chain entirely. The NEW
+// (canonical) path is always what this function returns on a disagreement — matching the
+// operator-attention-flag direction #2927 already established for this class of shadow-diff.
+const _warnedLayer2PathDrift = new Set();
 export function getLayer2ConfigPath() {
-  return (
+  const legacyPath =
     process.env.CATALYST_LAYER2_CONFIG_FILE ||
-    resolve(homedir(), ".config", "catalyst", "config.json")
-  );
+    resolve(homedir(), ".config", "catalyst", "config.json");
+  const canonicalPath = resolveLayer2Path(process.env);
+  if (legacyPath !== canonicalPath) {
+    const msg =
+      `layer2 config path shadow-diff (CTL-1616 PR6): legacy chain resolved "${legacyPath}" ` +
+      `but the canonical chain resolved "${canonicalPath}" — using "${canonicalPath}" (legacy ` +
+      `ignores CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME; set CATALYST_LAYER2_CONFIG_FILE to pin ` +
+      `explicitly if this is unexpected)`;
+    if (!_warnedLayer2PathDrift.has(msg)) {
+      _warnedLayer2PathDrift.add(msg);
+      log.warn(msg);
+    }
+  }
+  return canonicalPath;
 }
 
 // The repo root that owns the committed cluster roster (.catalyst/hosts.json).
