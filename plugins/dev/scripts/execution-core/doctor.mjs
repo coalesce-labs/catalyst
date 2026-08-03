@@ -935,6 +935,19 @@ function defaultGithubSecretEnvName() {
   }
 }
 
+// Reads the configurable Linear webhook-secret env-var NAME from Layer-1
+// (.catalyst/config.json → catalyst.monitor.linear.webhookSecretEnv), matching
+// webhook-config.ts:264-269. Null when unset (no per-key env override). CTL-1618.
+function defaultLinearSecretEnvName() {
+  try {
+    const obj = JSON.parse(readFileSync(layer1Path(), "utf8"));
+    const name = obj?.catalyst?.monitor?.linear?.webhookSecretEnv;
+    return typeof name === "string" && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 export function checkWebhookIngestion(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
@@ -942,6 +955,7 @@ export function checkWebhookIngestion(deps = {}) {
     configDir = defaultWebhookConfigDir(),
     secretFileNonEmpty = defaultSecretFileNonEmpty,
     githubSecretEnvName = defaultGithubSecretEnvName(), // CTL-1618
+    linearSecretEnvName = defaultLinearSecretEnvName(), // CTL-1618
   } = deps;
 
   const roster = resolveRoster();
@@ -983,11 +997,15 @@ export function checkWebhookIngestion(deps = {}) {
       typeof e.webhookId === "string" && e.webhookId.length > 0
     );
   });
+  // Linear per-key secret resolved as webhook-config.ts:157-171 does:
+  // file → per-key env (linearWebhookSecretEnv) → global CATALYST_LINEAR_WEBHOOK_SECRET. CTL-1618.
   const keySecretWired = (k) =>
     secretFileNonEmpty(
       configDir,
       k === "workspace" ? "linear-webhook-secret" : `linear-webhook-secret-${k}`,
-    ) || (process.env.CATALYST_LINEAR_WEBHOOK_SECRET ?? "").length > 0;
+    ) ||
+    (linearSecretEnvName !== null && (process.env[linearSecretEnvName] ?? "").length > 0) ||
+    (process.env.CATALYST_LINEAR_WEBHOOK_SECRET ?? "").length > 0;
   const wiredKeys = webhookKeys.filter(keySecretWired);
   const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
   const linearWired = linSmee.length > 0 && wiredKeys.length > 0;

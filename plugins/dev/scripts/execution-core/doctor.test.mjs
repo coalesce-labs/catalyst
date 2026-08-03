@@ -739,6 +739,45 @@ describe("checkWebhookIngestion", () => {
     expect(checks[0].detail).toContain("ctl");
   });
 
+  it("Linear: keyed webhook wired purely via per-key linearWebhookSecretEnv env var → PASS", () => {
+    process.env.LIN_WH_CUSTOM = "lin-hmac";
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
+      linearSecretEnvName: "LIN_WH_CUSTOM",
+      secretFileNonEmpty: noSecrets, // no file, no global CATALYST_LINEAR_WEBHOOK_SECRET
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("linear keys=1");
+  });
+
+  it("Linear: per-key env name configured but empty, global CATALYST_LINEAR_WEBHOOK_SECRET set → PASS", () => {
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "global-hmac";
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
+      linearSecretEnvName: "LIN_WH_CUSTOM", // set as a name, but the var itself is unset
+      secretFileNonEmpty: noSecrets,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("Linear: no file, per-key env name configured but unset, no global → FAIL half-wired", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" }, // github wired so failure is the dangling key
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
+      },
+      githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
+      linearSecretEnvName: "LIN_WH_CUSTOM",
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // github ok, ctl absent everywhere
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("half-wired");
+    expect(checks[0].detail).toContain("ctl");
+  });
+
   it("PASSes when all routes and keyed secrets resolve", () => {
     const checks = checkWebhookIngestion({
       resolveRoster: multiHost,
