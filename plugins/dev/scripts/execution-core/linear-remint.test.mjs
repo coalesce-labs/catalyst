@@ -8,13 +8,17 @@ import {
   isAuthError,
   isBatchAuthError,
   readOrchestratorCreds,
+  defaultLayer2Path,
   buildMintCurlArgs,
   parseMintResponse,
   createReminter,
   createAsyncReminter,
+  createOrchestratorActorRearmHook,
+  linearReminter,
   withAuthRemint,
 } from "./linear-remint.mjs";
 import { createLinearBreaker, withBreaker } from "./linear-breaker.mjs";
+import { resolveLayer2Path, armSecret, registerRearmHook, resetArmState } from "../lib/secret-contract.mjs";
 
 const silentLogger = { warn() {}, info() {}, error() {} };
 
@@ -130,6 +134,70 @@ describe("readOrchestratorCreds", () => {
   test("null when orchestrator key is entirely absent", () => {
     const p = writeCfg({ catalyst: { linear: { bot: {} } } });
     expect(readOrchestratorCreds(p)).toBeNull();
+  });
+});
+
+// ── defaultLayer2Path (CTL-1616 PR4 fold) ─────────────────────────────────────
+// defaultLayer2Path/readOrchestratorCreds are folded onto the shared secret contract
+// (resolveLayer2Path / resolveSecret("linear-orchestrator-actor")) so the Layer-2 chain +
+// config-path read are defined ONCE. This asserts the delegation, not a re-implementation.
+describe("defaultLayer2Path (CTL-1616 PR4 fold)", () => {
+  test("delegates to the shared secret contract's resolveLayer2Path — no second chain", () => {
+    expect(defaultLayer2Path()).toBe(resolveLayer2Path());
+  });
+});
+
+// ── createOrchestratorActorRearmHook (CTL-1616 PR4) ───────────────────────────
+// Pure adapter, unit-tested against a FAKE reminter only — never linearReminter (the real
+// process-wide singleton), which would attempt a genuine network mint against api.linear.app
+// using whatever real Layer-2 credentials the host running this test happens to have.
+describe("createOrchestratorActorRearmHook (CTL-1616 PR4)", () => {
+  test("adapts a reminter whose attempt() returns true into {rearmed:true}", () => {
+    expect(createOrchestratorActorRearmHook({ attempt: () => true })({ env: {} })).toEqual({ rearmed: true });
+  });
+  test("adapts a reminter whose attempt() returns false into {rearmed:false}", () => {
+    expect(createOrchestratorActorRearmHook({ attempt: () => false })({ env: {} })).toEqual({ rearmed: false });
+  });
+  test("end-to-end against a fully injected createReminter — mint/readCreds/applyToken never touch the real network", () => {
+    let mintCalls = 0;
+    const fakeReminter = createReminter({
+      readCreds: () => ({ clientId: "c", clientSecret: "s" }),
+      mint: () => {
+        mintCalls += 1;
+        return "tok";
+      },
+      applyToken: () => {},
+      logger: silentLogger,
+    });
+    expect(createOrchestratorActorRearmHook(fakeReminter)({ env: {} })).toEqual({ rearmed: true });
+    expect(mintCalls).toBe(1);
+  });
+});
+
+// ── linear-orchestrator-actor rearm-hook wiring (CTL-1616 PR4) ────────────────
+// Exercises the ACTUAL registerRearmHook/armSecret seam this row is wired through in
+// production (design §8/§9: "the cooldown reminters register as the row's on-401 rearm
+// hook") — with an INJECTED fake reminter, never the real linearReminter singleton.
+describe("linear-orchestrator-actor rearm-hook wiring (CTL-1616 PR4)", () => {
+  afterEach(() => {
+    // Restore production wiring exactly as the module registers it at import time, so this
+    // describe block leaves no cross-test contamination for anything that runs after it in
+    // the same process.
+    registerRearmHook("linear-orchestrator-actor", createOrchestratorActorRearmHook(linearReminter));
+    resetArmState("linear-orchestrator-actor");
+  });
+
+  test("armSecret routes through the registered hook (armed path), not the hookless-degrade path", () => {
+    let attempts = 0;
+    const fakeReminter = { attempt: () => { attempts += 1; return true; } };
+    registerRearmHook("linear-orchestrator-actor", createOrchestratorActorRearmHook(fakeReminter));
+    expect(armSecret("linear-orchestrator-actor", { env: {} })).toEqual({ armed: true, rotated: true, restartRequired: false });
+    expect(attempts).toBe(1);
+  });
+
+  test("a false attempt() (cooldown active / no creds / mint failed) reports no rotation", () => {
+    registerRearmHook("linear-orchestrator-actor", createOrchestratorActorRearmHook({ attempt: () => false }));
+    expect(armSecret("linear-orchestrator-actor", { env: {} })).toEqual({ armed: false, rotated: false, restartRequired: false });
   });
 });
 

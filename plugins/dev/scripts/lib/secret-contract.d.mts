@@ -21,6 +21,12 @@ export interface SecretRotation {
   trigger?: RotationTrigger;
 }
 
+/** CTL-1616 PR4: a single legacy config-json fallback tier (linear-worker-actor only). */
+export interface LegacyConfigTier {
+  scope: "per-team-legacy" | "global-legacy";
+  configJsonPath: string;
+}
+
 export interface SecretRow {
   id: string;
   envNames: readonly string[];
@@ -33,6 +39,17 @@ export interface SecretRow {
   familyPrefix?: string;
   /** present only on the age-key local-only row, relative to HOME */
   defaultLocalPath?: readonly string[];
+  /**
+   * CTL-1616 PR4 (linear-worker-actor only): an env-var pair checked BEFORE configJsonPath —
+   * folds linear-comment-post.sh's CATALYST_LINEAR_AGENT_CLIENT_ID/_SECRET precedence tier.
+   */
+  credentialEnvPair?: { clientId: string; clientSecret: string };
+  /**
+   * CTL-1616 PR4 (linear-worker-actor only): additional config-json tiers tried, in order,
+   * only once configJsonPath itself misses — folds linear-comment-post.sh's two legacy
+   * catalyst.linear.agent tiers verbatim.
+   */
+  legacyConfigTiers?: readonly LegacyConfigTier[];
 }
 
 export const SECRET_DELIVERY: readonly SecretDelivery[];
@@ -45,6 +62,12 @@ export function isSecretFamilyMember(filename: string): boolean;
 export function resolveLayer2Path(env?: Record<string, string | undefined>): string;
 export function explicitFileOverrideEnvName(id: string): string;
 export function secretFileCandidates(id: string, env?: Record<string, string | undefined>): string[];
+/** CTL-1616 PR4: linear-worker-actor's per-team-legacy tier path (mirrors
+ *  linear-comment-post.sh's _find_layer2_config directory walk-up). */
+export function resolveLegacyPerTeamConfigPath(
+  env?: Record<string, string | undefined>,
+  cwd?: string,
+): string;
 
 /** The subset of CTL-1617's resolveDeploymentMode() output this engine consumes. */
 export interface DeploymentModeInput {
@@ -57,6 +80,8 @@ export interface DeploymentModeInput {
 export interface ResolveSecretOptions {
   env?: Record<string, string | undefined>;
   deploymentMode?: DeploymentModeInput;
+  /** CTL-1616 PR4: cwd the per-team-legacy tier's directory walk starts from (linear-worker-actor only). Defaults to process.cwd(). */
+  cwd?: string;
 }
 
 export interface ResolvedSecret {
