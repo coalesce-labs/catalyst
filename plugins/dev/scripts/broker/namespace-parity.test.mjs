@@ -59,6 +59,10 @@ const INLINE_EVENT_NAMES = [
   "agent.resumed",                    // wait-event.mjs:buildWaitEnvelope
   "fence.claimed.CTL-1",              // CTL-863 fence-event.mjs (exec-core-owned, projected-not-re-emitted)
   "fence.released.CTL-1",             // CTL-863 fence-event.mjs
+  "escalation.explanation-absent",    // CTL-1609 label-guard.mjs (warn when explanation omitted)
+  "delegate.would-route",             // CTL-1609 delegate-first.mjs (shadow mode — would enqueue)
+  "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
+  "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
 ];
 
 // Build the flat list of all static exec-core event names.
