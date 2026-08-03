@@ -160,6 +160,21 @@ const ALLOWLIST = [
       "it), so a fixed tail would intermittently report 'no question raised' — the exact false " +
       "negative the inbox exists to catch. Bounding needs a backwards CHUNKED scan, not a byte cap.",
   },
+  {
+    file: "execution-core/recovery.mjs",
+    count: 2,
+    symbol: "readExecCoreBootEpoch + readBootEpoch",
+    ticket: "CTL-1442",
+    reason:
+      "NEITHER site reads anything resembling a JSONL log. readExecCoreBootEpoch reads " +
+      "daemon-boot.json (a single small JSON object: `{bootedAt}`) and readBootEpoch's linux branch " +
+      "reads `/proc/stat` (a kernel pseudo-file). Both pre-date this ticket; they were never flagged " +
+      "before (0 violations in this file) and only started matching once detectSessionRateLimitHit " +
+      "was added elsewhere in this same (large, module-global-taint-scanned) file — a false-positive " +
+      "side effect of the detector's over-approximation, exactly the tradeoff its own header accepts " +
+      "('prefer allowlistable false positives over silent false negatives'). Nothing to bound: neither " +
+      "file is JSONL, let alone append-only or growing.",
+  },
 ];
 
 // ─── the scanner ────────────────────────────────────────────────────────────
