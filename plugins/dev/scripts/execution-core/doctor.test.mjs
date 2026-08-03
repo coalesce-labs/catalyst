@@ -616,7 +616,13 @@ describe("checkDaemonToolPath", () => {
 describe("checkWebhookIngestion", () => {
   // Isolate the env-var secret fallbacks the check honors (matching
   // webhook-config.ts) so a dev shell with these set can't mask a dangling key.
-  const SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_LINEAR_WEBHOOK_SECRET"];
+  const SECRET_ENVS = [
+    "CATALYST_WEBHOOK_SECRET",
+    "CATALYST_LINEAR_WEBHOOK_SECRET",
+    "CATALYST_SMEE_SECRET",
+    "GH_WH_CUSTOM", // custom github env name used in tests below
+    "LIN_WH_CUSTOM", // custom linear env name used in Phase 2 tests
+  ];
   let savedEnv = {};
   beforeEach(() => {
     for (const k of SECRET_ENVS) { savedEnv[k] = process.env[k]; delete process.env[k]; }
@@ -658,6 +664,51 @@ describe("checkWebhookIngestion", () => {
     const checks = checkWebhookIngestion({
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" } },
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("GitHub: custom webhookSecretEnv with ONLY the on-disk file present → FAIL (file not projected into a custom name)", () => {
+    // Runtime reads process.env['GH_WH_CUSTOM']; the projection only exports the
+    // default CATALYST_WEBHOOK_SECRET, so the file is NOT a valid proxy here.
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "GH_WH_CUSTOM",
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("NO webhook route");
+  });
+
+  it("GitHub: custom webhookSecretEnv whose env var IS set → PASS (doctor reads the configured name)", () => {
+    process.env.GH_WH_CUSTOM = "hmac-value";
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "GH_WH_CUSTOM",
+      secretFileNonEmpty: noSecrets,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("GitHub: CATALYST_SMEE_SECRET legacy fallback set (no file, default name unset) → PASS", () => {
+    process.env.CATALYST_SMEE_SECRET = "legacy-hmac";
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
+      secretFileNonEmpty: noSecrets,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("GitHub: default name + on-disk file present → PASS (regression guard — projection wires the default)", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
     });
     expect(checks[0].status).toBe(STATUS.PASS);

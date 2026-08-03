@@ -922,12 +922,26 @@ function defaultSecretFileNonEmpty(dir, name) {
   }
 }
 
+// Reads the configurable GitHub webhook-secret env-var NAME from Layer-1
+// (.catalyst/config.json → catalyst.monitor.github.webhookSecretEnv), matching
+// webhook-config.ts:412. Defaults to CATALYST_WEBHOOK_SECRET. CTL-1618.
+function defaultGithubSecretEnvName() {
+  try {
+    const obj = JSON.parse(readFileSync(layer1Path(), "utf8"));
+    const name = obj?.catalyst?.monitor?.github?.webhookSecretEnv;
+    return typeof name === "string" && name.length > 0 ? name : "CATALYST_WEBHOOK_SECRET";
+  } catch {
+    return "CATALYST_WEBHOOK_SECRET";
+  }
+}
+
 export function checkWebhookIngestion(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
     monitor = defaultReadMonitor(),
     configDir = defaultWebhookConfigDir(),
     secretFileNonEmpty = defaultSecretFileNonEmpty,
+    githubSecretEnvName = defaultGithubSecretEnvName(), // CTL-1618
   } = deps;
 
   const roster = resolveRoster();
@@ -943,11 +957,19 @@ export function checkWebhookIngestion(deps = {}) {
 
   const m = monitor ?? {};
 
-  // GitHub route: smee channel + a github HMAC secret (file or env).
+  // GitHub route: smee channel + a github HMAC secret resolved the way the
+  // running monitor reads it (webhook-config.ts:412,429). The env-var NAME is
+  // configurable (Layer-1 webhookSecretEnv, default CATALYST_WEBHOOK_SECRET);
+  // the CTL-1612 projection lifts the on-disk `webhook-secret` file into the
+  // DEFAULT name only, so the file is a valid proxy solely for the default. CTL-1618.
   const ghSmee = typeof m.github?.smeeChannel === "string" ? m.github.smeeChannel : "";
-  const ghSecret =
-    secretFileNonEmpty(configDir, "webhook-secret") ||
-    (process.env.CATALYST_WEBHOOK_SECRET ?? "").length > 0;
+  const ghEnvSecret =
+    (process.env[githubSecretEnvName] ?? "").length > 0 ||
+    (process.env.CATALYST_SMEE_SECRET ?? "").length > 0;
+  const ghFileSecret =
+    githubSecretEnvName === "CATALYST_WEBHOOK_SECRET" &&
+    secretFileNonEmpty(configDir, "webhook-secret");
+  const ghSecret = ghEnvSecret || ghFileSecret;
   const githubWired = ghSmee.length > 0 && ghSecret;
 
   // Linear route: smee channel + ≥1 keyed webhookId whose HMAC secret resolves.
