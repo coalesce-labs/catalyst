@@ -779,7 +779,13 @@ function dispatchTriage(
     // CTL-1441: needs-human application at the re-dispatch cap. Injectable so
     // tests never spawn a real linearis write; default = the label-guard path.
     labelNeedsHuman = (dir, t) =>
-      labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, { site: "triage-redispatch-cap" }),
+      labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, {
+        site: "triage-redispatch-cap",
+        explanation: {
+          problem: `${t} hit the triage re-dispatch cap (${TRIAGE_DISPATCH_CAP})`,
+          call_to_action: `triage ${t} manually or re-scope it`,
+        },
+      }),
     // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
     // ticket's LIVE state must still equal this workflow-state name at launch.
     // null/undefined (the webhook path, eligible-half candidates) skips the check.

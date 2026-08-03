@@ -3,7 +3,7 @@
 //   cd plugins/dev/scripts/execution-core && bun test label-guard.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,6 +22,7 @@ import {
   resolveAndApplyWorkerStatusLabel,
   WORKER_STATUS_LABELS,
 } from "./label-guard.mjs";
+import { validateExplanation } from "./escalation-explanation.mjs";
 
 let orchDir;
 
@@ -1205,5 +1206,143 @@ describe("resolveAndApplyWorkerStatusLabel", () => {
     // A backoff-skip is not a confirmed removal → evict must stay withheld.
     expect(res.evicted).toBe(false);
     expect(evicted).toEqual([]);
+  });
+});
+
+// ─── CTL-1609: explanation-required label chokepoint (Phase 1, Gap 2) ────────
+
+describe("labelNeedsHumanUnlessBeliefOwner — explanation threading (CTL-1609)", () => {
+  const RECOVERY_PASS_SIG = (orchDir, ticket) =>
+    join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+
+  function makeAppliedWS() {
+    return { applyLabel: () => ({ applied: true }) };
+  }
+  function makeRateLimitedWS() {
+    return { applyLabel: () => ({ applied: false, reason: "rate-limited" }) };
+  }
+
+  test("explanation coerced and written on confirmed apply", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E1");
+    mkdirSync(workerDir, { recursive: true });
+    const warns = [];
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E1", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "dispatch-failures",
+      log: { info: () => {}, warn: (obj) => warns.push(obj) },
+      explanation: {
+        problem: "dispatch failed 8×",
+        call_to_action: "authorize retry of CTL-E1 or cancel",
+      },
+    });
+    expect(wrote).toBe(true);
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E1"), "utf8"));
+    expect(sig.status).toBe("needs-human");
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(sig.explanation.call_to_action).toBe("authorize retry of CTL-E1 or cancel");
+    // No absent-warn because explanation was supplied
+    expect(warns.some((w) => w.event === "escalation.explanation-absent")).toBe(false);
+  });
+
+  test("no explanation supplied → degraded coerce + WARN logged, signal still written", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E2");
+    mkdirSync(workerDir, { recursive: true });
+    const warns = [];
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E2", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "terminal-sweep",
+      log: { info: () => {}, warn: (obj) => warns.push(obj) },
+      // no explanation
+    });
+    expect(wrote).toBe(true);
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E2"), "utf8"));
+    expect(sig.status).toBe("needs-human");
+    expect(sig.explanation).toBeTruthy();
+    expect(sig.explanation.degraded).toBe(true);
+    // call_to_action must pass the tautology gate
+    const { valid } = validateExplanation(sig.explanation);
+    expect(valid).toBe(true);
+    // WARN with event:"escalation.explanation-absent" and the site
+    const absentWarn = warns.find((w) => w.event === "escalation.explanation-absent");
+    expect(absentWarn).toBeTruthy();
+    expect(absentWarn.site).toBe("terminal-sweep");
+  });
+
+  test("label NOT applied (rate-limited) → no explanation signal written", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E3");
+    mkdirSync(workerDir, { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E3", makeRateLimitedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "dispatch-failures",
+      log: { info: () => {}, warn: () => {} },
+      explanation: { problem: "failed", call_to_action: "retry CTL-E3 or cancel" },
+    });
+    expect(wrote).toBe(false);
+    expect(existsSync(RECOVERY_PASS_SIG(orchDir, "CTL-E3"))).toBe(false);
+  });
+
+  test("belief-owner deferral (CATALYST_INTENTS_ENFORCE=1) writes nothing", () => {
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E4", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+      site: "terminal-sweep",
+      log: { info: () => {}, warn: () => {} },
+      explanation: { problem: "stuck", call_to_action: "retry CTL-E4 or close it" },
+    });
+    expect(wrote).toBe(false);
+    expect(existsSync(RECOVERY_PASS_SIG(orchDir, "CTL-E4"))).toBe(false);
+  });
+
+  test("invalid/garbage explanation never throws — coerced object still written", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E5");
+    mkdirSync(workerDir, { recursive: true });
+    expect(() =>
+      labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E5", makeAppliedWS(), {
+        env: { CATALYST_INTENTS_ENFORCE: "0" },
+        site: "dispatch-failures",
+        log: { info: () => {}, warn: () => {} },
+        explanation: { problem: 123 }, // garbage type
+      })
+    ).not.toThrow();
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E5"), "utf8"));
+    expect(sig.status).toBe("needs-human");
+    expect(sig.explanation).toBeTruthy();
+  });
+
+  test("no-overwrite guard: richer pre-existing explanation is preserved", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E6");
+    mkdirSync(workerDir, { recursive: true });
+    // Write a rich (non-degraded) explanation already on disk
+    const richSig = {
+      ticket: "CTL-E6",
+      status: "needs-human",
+      needsHumanSince: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      phase: "recovery-pass",
+      explanation: {
+        escalation_type: "authorization",
+        problem: "recovery attempts exhausted (rich signal)",
+        call_to_action: "authorize another recovery cycle for CTL-E6",
+        recommendation: "inspect the last recovery-pass session",
+        risk: "ticket rots silently without action",
+        why_asking: "risk-authority gate",
+        could_higher_tier_resolve: false,
+        authorize_label: "retry CTL-E6",
+      },
+    };
+    writeFileSync(
+      RECOVERY_PASS_SIG(orchDir, "CTL-E6"),
+      JSON.stringify(richSig)
+    );
+    // Now call the chokepoint with a thin explanation — should not overwrite
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E6", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "attempts-exhausted",
+      log: { info: () => {}, warn: () => {} },
+      explanation: { human_question: "see recovery-pass escalation brief" },
+    });
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E6"), "utf8"));
+    // Rich explanation preserved — call_to_action unchanged
+    expect(sig.explanation.call_to_action).toBe("authorize another recovery cycle for CTL-E6");
+    expect(sig.explanation.degraded).toBeUndefined();
   });
 });

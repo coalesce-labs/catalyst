@@ -327,6 +327,10 @@ export function defaultEscalate(
         env,
         site: "stale-pr-rescue",
         log,
+        explanation: {
+          problem: `stale PR for ${ticket} could not be rescued: ${detail?.reason ?? "unresolvable conflict"}`,
+          call_to_action: `resolve the PR conflict for ${ticket} or close the PR`,
+        },
       });
     } else {
       log.warn(

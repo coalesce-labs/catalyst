@@ -2397,6 +2397,16 @@ export function maybeEscalateDispatchFailures(
     env,
     site: "dispatch-failures",
     log,
+    explanation: {
+      escalation_type: "authorization",
+      problem: `dispatch failed ${marker.consecutiveFailures}× on ${marker.phase} (${marker.code})`,
+      call_to_action: `authorize retry of ${marker.ticket} or cancel`,
+      recommendation: "retry dispatch",
+      risk: `${marker.code} — ${marker.consecutiveFailures} consecutive failures on the ${marker.phase} phase`,
+      why_asking: "circuit breaker tripped; repeated dispatch failures require operator review",
+      could_higher_tier_resolve: false,
+      authorize_label: `retry ${marker.ticket}`,
+    },
   });
   appendEvent({
     ticket: marker.ticket,
@@ -5003,6 +5013,10 @@ export function schedulerTick(
               labelNeedsHuman: (dir, t) =>
                 labelNeedsHumanUnlessBeliefOwner(dir, t, writeStatus, {
                   site: "attempts-exhausted",
+                  // The curated explanation is already on disk from escalateExhaustedIntents's
+                  // prior writeSignal call. Pass a thin hint so the absent-warn is suppressed;
+                  // writeExplanationSignal's no-overwrite guard keeps the richer signal intact.
+                  explanation: { human_question: "see recovery-pass escalation brief" },
                 }),
               // Codex R1: a finished ticket's stale ledger is forgotten by the
               // terminal cleanup LATER in the tick — never page a human for it.
@@ -5731,6 +5745,16 @@ export function schedulerTick(
                 env,
                 site: "dependency-cycle",
                 log,
+                explanation: {
+                  escalation_type: "decision",
+                  problem: `${member} is in a dependency cycle: ${anomaly.members.join(" → ")}`,
+                  call_to_action: `break the cycle for ${member}: reprioritize a member or drop a dependency`,
+                  options: [
+                    { label: "reprioritize", tradeoff: "changes queue order for all cycle members" },
+                    { label: "drop dependency", tradeoff: "may leave a blocker unaddressed" },
+                  ],
+                  why_you: "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
+                },
               });
               // CTL-764 finding 8: emit only on an actual label write (a persisted
               // marker after restart / belief-owner deferral is not a fresh escalation).
@@ -6538,6 +6562,16 @@ export function schedulerTick(
               env,
               site: "ctl-925-cycle",
               log,
+              explanation: {
+                escalation_type: "decision",
+                problem: `${member} is in a dependency cycle among eligible tickets: ${anomaly.members.join(" → ")}`,
+                call_to_action: `break the cycle for ${member}: reprioritize a member or drop a dependency`,
+                options: [
+                  { label: "reprioritize", tradeoff: "changes queue order for all cycle members" },
+                  { label: "drop dependency", tradeoff: "may leave a blocker unaddressed" },
+                ],
+                why_you: "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
+              },
             });
             // CTL-764 finding 8: emit only on an actual label write (a persisted
             // marker after restart / belief-owner deferral is not a fresh escalation).
@@ -7145,10 +7179,15 @@ export function schedulerTick(
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
           if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+            const stalledSig = signalByTicket.get(ticket);
             const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
               env,
               site: "terminal-sweep",
               log,
+              explanation: {
+                problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${stalledSig?.stalledReason ?? "no reason"}) and is not terminal`,
+                call_to_action: `decide whether to retry ${ticket} or close it`,
+              },
             });
             // CTL-764 finding 8: emit worker.transition ONLY when the label write
             // actually occurred. A persisted .linear-label-needs-human marker after a

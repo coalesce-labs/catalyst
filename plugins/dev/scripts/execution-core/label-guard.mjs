@@ -16,9 +16,10 @@
 //     dispatch cool-down rationale in scheduler.mjs::dispatchCooldownPath and
 //     memory project_scheduler_marker_under_workers_excludes_ticket).
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { log } from "./config.mjs";
+import { coerceExplanation } from "./escalation-explanation.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs";
 
 // ─── labelOnce — moved from scheduler.mjs (CTL-585, then CTL-638 re-home) ───
@@ -372,6 +373,64 @@ export function inEscalationCooldown(orchDir, ticket, phase, now) {
   return now - escalatedAt < ESCALATION_COOLDOWN_MS;
 }
 
+// ─── CTL-1609: explanation signal writer ─────────────────────────────────────
+//
+// Writes a board-readable `phase-recovery-pass.json` carrying `.explanation` so
+// the operator inbox renders a "What's needed now" card instead of a bare
+// "escalated — needs human". Shape mirrors writeEscalationSignal in
+// recovery-reasoning.mjs (the proven write pattern). Colocated here (not
+// imported from recovery-reasoning) to avoid pulling scheduler-adjacent
+// internals into this leaf module.
+//
+// No-overwrite guard: if the existing signal already carries a non-degraded
+// `.explanation` (e.g., from escalateExhaustedIntents's prior writeSignal call
+// on the `attempts-exhausted` site), the coerced thin explanation must NOT
+// clobber it. `degraded:true` means the earlier writer also fell back → the
+// new coerce may be equivalent or richer, so we overwrite; absent `degraded`
+// (a proper typed-union object) means a human-readable curated signal → keep.
+function writeExplanationSignal(orchDir, ticket, explanation, { log: logArg = null } = {}) {
+  if (!orchDir || !ticket || !explanation) return;
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+    let prior = {};
+    try {
+      prior = JSON.parse(readFileSync(p, "utf8")) ?? {};
+    } catch {
+      prior = {};
+    }
+    // No-overwrite guard for the `attempts-exhausted` site (and any future site
+    // that pre-writes a rich curated explanation before the label apply).
+    if (prior.explanation && prior.explanation.degraded !== true) return;
+    const nowIso = new Date().toISOString();
+    const signal = {
+      ...prior,
+      ticket,
+      status: "needs-human",
+      needsHumanSince:
+        typeof prior.needsHumanSince === "string" && prior.needsHumanSince !== ""
+          ? prior.needsHumanSince
+          : nowIso,
+      updatedAt: nowIso,
+      phase: "recovery-pass",
+      explanation,
+    };
+    mkdirSync(dirname(p), { recursive: true });
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(signal, null, 2));
+    renameSync(tmp, p);
+  } catch (err) {
+    try {
+      const logger = logArg ?? log;
+      logger.warn(
+        { ticket, err: err?.message },
+        "label-guard: explanation signal write failed — continuing"
+      );
+    } catch {
+      /* logging must never block the label path */
+    }
+  }
+}
+
 // ─── CTL-1241: belief-ownership deferral guard ────────────────────────────────
 //
 // When CATALYST_INTENTS_ENFORCE=1, the belief engine's executeEscalations
@@ -401,9 +460,11 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 //   ticket      — ticket identifier
 //   writeStatus — { applyLabel } as passed to labelOnce
 //   opts        — {
-//     env   : Record<string,string>  (process.env in production)
-//     site  : string                 (short site-id for the deferral log)
-//     log   : { info }              (the module's log instance)
+//     env         : Record<string,string>  (process.env in production)
+//     site        : string                 (short site-id for the deferral log)
+//     log         : { info, warn }        (the module's log instance)
+//     explanation : object | undefined    (CTL-1609 Gap 2 — structured escalation
+//                   explanation; coerced via coerceExplanation if partial/absent)
 //   }
 //
 // CTL-764 finding 8 + finding C: returns whether the needs-human label was CONFIRMED
@@ -417,7 +478,7 @@ export function labelNeedsHumanUnlessBeliefOwner(
   orchDir,
   ticket,
   writeStatus,
-  { env = process.env, site = "unknown", log: logArg = null } = {}
+  { env = process.env, site = "unknown", log: logArg = null, explanation = undefined } = {}
 ) {
   if (beliefOwnsNeedsHuman(env)) {
     // Defer to executeEscalations — R12 belief owner. Record, do not page.
@@ -436,6 +497,24 @@ export function labelNeedsHumanUnlessBeliefOwner(
       applied = r.applied === true;
     },
   });
+  // CTL-1609 Gap 2: on a confirmed apply, coerce the explanation and persist it to
+  // the board-readable phase-recovery-pass.json so the operator inbox renders a real
+  // "What's needed now" card. Gated on `applied` (CTL-764 finding C) so a failed or
+  // marker-guarded no-op never manufactures a spurious explanation signal.
+  if (applied) {
+    // Use the injected log's warn if available; fall back to the module-level log
+    // so existing callers that only inject { info } don't break (warn is new).
+    const warnFn =
+      typeof logArg?.warn === "function" ? logArg.warn.bind(logArg) : log.warn.bind(log);
+    if (explanation === undefined || explanation === null) {
+      warnFn(
+        { ticket, site, event: "escalation.explanation-absent" },
+        "label-guard: needs-human applied without an explanation — coercing (CTL-1609)"
+      );
+    }
+    const coerced = coerceExplanation(explanation ?? {}, { ticket, canExecute: false });
+    writeExplanationSignal(orchDir, ticket, coerced, { log: logArg });
+  }
   return applied;
 }
 
