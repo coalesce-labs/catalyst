@@ -1,0 +1,18 @@
+{
+  "name": "catalyst",
+  "private": true,
+  "packageManager": "bun@1.3.5",
+  "workspaces": [
+    "plugins/dev/scripts/broker",
+    "plugins/dev/scripts/coordination-publish",
+    "plugins/dev/scripts/execution-core",
+    "plugins/dev/scripts/otel-audit",
+    "plugins/dev/scripts/otel-forward",
+    "plugins/dev/scripts/orch-monitor",
+    "plugins/dev/scripts/orch-monitor/desktop",
+    "plugins/dev/scripts/orch-monitor/ui"
+  ],
+  "devDependencies": {
+    "turbo": "2.10.8"
+  }
+}
