@@ -269,6 +269,32 @@ _removal_guard_ok() {
 	fi
 	assert_worktree_removal_safe "$_wt"
 }
+
+# _worktree_install_rollback — CTL-1628 post-merge: the guarded
+# presweep+remove sequence a failed dependency install rolls back through,
+# shared by every auto-detected install step (`make setup`, `bun install`,
+# `npm install`) so a failure anywhere in step 1 cleans up the half-built
+# worktree instead of `set -e` aborting the script and leaving it on disk.
+_worktree_install_rollback() {
+	echo -e "${RED}❌ Setup failed. Cleaning up worktree...${NC}"
+	cd - >/dev/null
+	# CTL-649: defensive presweep — in a failure-before-dispatch rollback
+	# no bg session should exist yet, but the helper is a cheap no-op
+	# in that case and prevents any future race that lands a session
+	# between create-worktree and rollback from leaking.
+	[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
+		"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
+	# CTL-1417: skip the force-remove if the tree is in use / is our cwd
+	# OR the guard is unavailable (fail-closed), leaving it for the reaper
+	# rather than deleting an in-use worktree.
+	if _removal_guard_ok "$WORKTREE_PATH"; then
+		git worktree remove --force "$WORKTREE_PATH"
+		git branch -D "$WORKTREE_NAME" 2>/dev/null || true
+	else
+		echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
+	fi
+	exit 1
+}
 if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 	# Remove stale workflow-context.json if copied from main repo
 	rm -f "${WORKTREE_PATH}/.catalyst/.workflow-context.json"
@@ -399,28 +425,16 @@ else
 	# 1. Install dependencies
 	if [ -f "Makefile" ] && grep -q "^setup:" Makefile; then
 		echo "  Running: make setup"
-		if ! make setup; then
-			echo -e "${RED}❌ Setup failed. Cleaning up worktree...${NC}"
-			cd - >/dev/null
-			# CTL-649: defensive presweep — in a failure-before-dispatch rollback
-			# no bg session should exist yet, but the helper is a cheap no-op
-			# in that case and prevents any future race that lands a session
-			# between create-worktree and rollback from leaking.
-			SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-			[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
-				"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-			# CTL-1417: skip the force-remove if the tree is in use / is our cwd
-			# OR the guard is unavailable (fail-closed), leaving it for the reaper
-			# rather than deleting an in-use worktree.
-			if _removal_guard_ok "$WORKTREE_PATH"; then
-				git worktree remove --force "$WORKTREE_PATH"
-				git branch -D "$WORKTREE_NAME" 2>/dev/null || true
-			else
-				echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
-			fi
-			exit 1
-		fi
+		make setup || _worktree_install_rollback
 	elif [ -f "package.json" ]; then
+		# CTL-1628 post-merge: a bun workspace root (this repo's own
+		# package.json, or any other) declares "workspaces" — npm ignores
+		# bun.lock and would write package-lock.json debris into a
+		# bun-managed tree, so that combination is bun-only. A plain,
+		# non-workspace package.json (the pre-CTL-1628 common case across
+		# other Catalyst-managed repos) keeps the npm fallback.
+		IS_BUN_WORKSPACE=false
+		jq -e '.workspaces' package.json >/dev/null 2>&1 && IS_BUN_WORKSPACE=true
 		if command -v bun >/dev/null 2>&1; then
 			# CTL-1628: root package.json (the bun workspace, Phase A1) arms this
 			# branch on every worktree creation. Use --frozen-lockfile so the
@@ -429,10 +443,17 @@ else
 			# before the worker's first commit (which could otherwise ride
 			# unrelated lockfile drift into the ticket's diff).
 			echo "  Running: bun install --frozen-lockfile"
-			bun install --frozen-lockfile
+			bun install --frozen-lockfile || _worktree_install_rollback
+		elif [ "$IS_BUN_WORKSPACE" = true ]; then
+			echo -e "${YELLOW}⚠️  bun not found on PATH — this is a bun workspace root${NC}"
+			echo "  (package.json declares \"workspaces\"). Skipping auto-install rather"
+			echo "  than falling back to npm, which ignores bun.lock and writes"
+			echo "  package-lock.json debris into a bun-managed workspace tree."
+			echo "  Install bun (https://bun.sh) and run 'bun install --frozen-lockfile'"
+			echo "  in the worktree manually."
 		else
 			echo "  Running: npm install"
-			npm install
+			npm install || _worktree_install_rollback
 		fi
 	fi
 
