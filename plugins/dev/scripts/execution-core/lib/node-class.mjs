@@ -32,12 +32,12 @@ const NODE_CLASS_MOST_RESTRICTIVE = "monitor";
 // ~/.config/catalyst/config.json, duplicated here to keep this a leaf (same pattern
 // host-identity.mjs uses for layer2HostName) and mirroring config.mjs's OWN legacy chain.
 //
-// CTL-1616 PR6 (design §8/§9): DUAL-READ shadow-diff for one release, delegating the
-// RETURNED path to the registry's canonical resolveLayer2Path chain (CATALYST_LAYER2_CONFIG_FILE
-// > CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME > ~/.config/catalyst) — same dual-read shape as
-// execution-core/config.mjs's getLayer2ConfigPath, which this file mirrors. Exported (unlike
-// before) so tests can exercise the shadow-diff directly. No `log` import here (zero-import
-// leaf) — uses console.warn, same as lib/deployment-mode.mjs's getDeploymentMode dedup.
+// CTL-1616 PR6 (+#2929/#2930): OBSERVE-ONLY dual-read — RETURNS THE LEGACY chain and only
+// WARNS when the registry's canonical resolveLayer2Path chain would disagree, staying
+// path-consistent with config.mjs's getLayer2ConfigPath and every un-swept legacy reader
+// (see that function's header for the reader/writer-split rationale; the canonical cutover
+// lands as ONE sweep). Exported so tests can exercise the shadow-diff directly. No `log`
+// import here (zero-import leaf) — uses console.warn, same as lib/deployment-mode.mjs.
 const _warnedLayer2PathDrift = new Set();
 export function getLayer2ConfigPath() {
   const legacyPath = process.env.CATALYST_LAYER2_CONFIG_FILE || resolve(homedir(), ".config", "catalyst", "config.json");
@@ -45,15 +45,17 @@ export function getLayer2ConfigPath() {
   if (legacyPath !== canonicalPath) {
     const msg =
       `layer2 config path shadow-diff (CTL-1616 PR6): legacy chain resolved "${legacyPath}" ` +
-      `but the canonical chain resolved "${canonicalPath}" — using "${canonicalPath}" (legacy ` +
-      `ignores CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME; set CATALYST_LAYER2_CONFIG_FILE to pin ` +
-      `explicitly if this is unexpected)`;
+      `but the canonical chain resolved "${canonicalPath}" — KEEPING the legacy path until the ` +
+      `full reader/writer sweep (set CATALYST_LAYER2_CONFIG_FILE to pin explicitly)`;
     if (!_warnedLayer2PathDrift.has(msg)) {
       _warnedLayer2PathDrift.add(msg);
       console.warn(`[node-class] ${msg}`);
     }
   }
-  return canonicalPath;
+  // #2929 post-merge Codex P1: legacy wins (observe-only shadow) — this must
+  // stay path-consistent with config.mjs getLayer2ConfigPath and every
+  // un-swept legacy reader; the canonical cutover lands as one sweep.
+  return legacyPath;
 }
 
 // readLayer2NodeClass — the raw catalyst.node.class value from the Layer-2 file EXACTLY as

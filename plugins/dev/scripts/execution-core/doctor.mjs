@@ -72,7 +72,7 @@ import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
 // config.mjs, so doctor stays safe under bare Node. SHADOW ONLY in this PR: the
 // contract is consulted and compared, never used to decide a grade (see
 // checkSecretContract + buildContractShadowCheck below).
-import { resolveSecret } from "../lib/secret-contract.mjs";
+import { resolveSecret, resolveLayer2Path } from "../lib/secret-contract.mjs";
 // CTL-1481: the canonical worker-ownership label names — imported (not
 // re-hardcoded) so the doctor can never drift from what the stamper writes.
 // From the zero-import names leaf, NOT worker-label.mjs: doctor runs under
@@ -2567,6 +2567,12 @@ export function checkAgentBrowser(deps = {}) {
 // function's original ADVISORY/never-FAIL contract is UNCHANGED for single-host,
 // cluster, and inferred nodes — i.e. every live host today. All reads are injectable +
 // fail-open.
+// _isDeclaredCloud — the one gate PR6's escalation and the local-only wording
+// share: a genuinely DECLARED cloud mode (recognized, not inferred).
+function _isDeclaredCloud(dm) {
+  return Boolean(dm && dm.mode === "cloud" && dm.inferred === false && dm.recognized !== false);
+}
+
 export function checkCloudTokenEnv(deps = {}) {
   const {
     configDir = process.env.CATALYST_CONFIG_DIR || resolve(homedir(), ".config", "catalyst"),
@@ -2594,8 +2600,15 @@ export function checkCloudTokenEnv(deps = {}) {
     // resolver fails OPEN to today's INFO-only behavior (the escalation below
     // is gated on this being genuinely {mode:"cloud", inferred:false, ...} —
     // undefined never satisfies that gate).
-    deploymentMode = resolveDeploymentModeForShadow(),
+    // NOTE (#2929 post-merge Codex P2): the default must apply only when the
+    // caller OMITTED the key — a destructure default also fires on an
+    // explicitly-supplied `deploymentMode: undefined`, silently re-resolving
+    // the HOST's mode and making injected-state tests host-dependent. Hence
+    // the `in`-guarded assignment below instead of a destructure default.
+    deploymentMode: _deploymentModeDep,
   } = deps;
+  const deploymentMode =
+    "deploymentMode" in deps ? _deploymentModeDep : resolveDeploymentModeForShadow();
   const checks = [];
 
   // CTL-1616 PR6 §7 FAIL ESCALATION (design §5): "the one FAIL doctor cannot
@@ -2624,7 +2637,7 @@ export function checkCloudTokenEnv(deps = {}) {
   // correctly on inferred alone.
   const cloudBootstrapEscalationChecks = [];
   const dm = deploymentMode;
-  if (dm && dm.mode === "cloud" && dm.inferred === false && dm.recognized !== false) {
+  if (_isDeclaredCloud(dm)) {
     const bootstrapResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
       env: process.env,
       deploymentMode: dm,
@@ -2671,7 +2684,11 @@ export function checkCloudTokenEnv(deps = {}) {
   const cloudShadowChecks = [];
   const contractResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
     env: process.env,
-    deploymentMode: resolveDeploymentModeForShadow(),
+    // #2930 round-2 (Codex P2): reuse the SAME resolved deploymentMode the
+    // bootstrap gate and the local-only wording use — an independent
+    // re-resolve here made an explicitly-injected mode (incl. undefined)
+    // evaluate the shadow under the HOST's mode.
+    deploymentMode,
   });
   if (!contractResolution.ok) {
     cloudShadowChecks.push(shadowThrowCheck("cloud-token", "cloud-token", contractResolution.error));
@@ -2731,7 +2748,9 @@ export function checkCloudTokenEnv(deps = {}) {
       mkCheck(
         "cloud-token",
         STATUS.INFO,
-        "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
+        _isDeclaredCloud(deploymentMode)
+          ? "no cluster-sync cloud token file — expected on a declared-cloud node (the platform environment is the token source; see cloud-token-bootstrap)"
+          : "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
       ),
     );
     checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
@@ -3488,6 +3507,50 @@ export function checkNodeClass(deps = {}) {
 }
 
 // ─── CTL-1617: deployment-mode consistency grading ───────────────────────────
+
+// checkLayer2PathDivergence — CTL-1616 PR6 follow-up (#2930 round-2 Codex P1).
+// On a host that sets CATALYST_MACHINE_CONFIG or XDG_CONFIG_HOME without
+// CATALYST_LAYER2_CONFIG_FILE, the fleet's Layer-2 readers/writers are SPLIT:
+// legacy readers (catalyst-secret-env.sh, the scheduler's per-tick reload) and
+// the write destinations fed by getLayer2ConfigPath use the legacy home chain,
+// while the registry-based consumers folded in PR3-PR5 (the OAuth mint chain,
+// cloud-token name) use the canonical resolveLayer2Path chain. A credential
+// rotation on such a host writes fresh material where half the readers never
+// look — so the configuration is UNSUPPORTED until the canonical cutover sweep,
+// and this check FAILs it loudly with the real remedy:
+// CATALYST_LAYER2_CONFIG_FILE is tier 1 of BOTH chains, pinning every reader
+// and writer to one file. On every non-divergent host (all live fleet hosts)
+// this check is a silent PASS-less no-op (zero rows).
+export function checkLayer2PathDivergence(deps = {}) {
+  const {
+    env = process.env,
+    legacyPathFn = () =>
+      env.CATALYST_LAYER2_CONFIG_FILE || resolve(homedir(), ".config", "catalyst", "config.json"),
+    canonicalPathFn = () => resolveLayer2Path(env),
+  } = deps;
+  let legacyPath;
+  let canonicalPath;
+  try {
+    legacyPath = legacyPathFn();
+    canonicalPath = canonicalPathFn();
+  } catch {
+    return []; // fail-open: a throwing resolver must not invent a divergence
+  }
+  if (legacyPath === canonicalPath) return [];
+  return [
+    mkCheck(
+      "layer2-path-divergence",
+      STATUS.FAIL,
+      `Layer-2 config path is SPLIT-BRAIN on this host: legacy chain resolves "${legacyPath}" ` +
+        `(read by catalyst-secret-env.sh + the scheduler reload; fed by cluster-sync writes) but ` +
+        `the registry's canonical chain resolves "${canonicalPath}" (read by the OAuth mint chain ` +
+        `and cloud-token name resolution) — a credential rotation would land where half the ` +
+        `readers never look. This CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME-divergent layout is ` +
+        `unsupported until the canonical reader/writer sweep; set CATALYST_LAYER2_CONFIG_FILE ` +
+        `(tier 1 of BOTH chains) to pin every reader and writer to one file`,
+    ),
+  ];
+}
 
 // checkDeploymentModeConsistency — grade catalyst.deployment.mode (CTL-1617
 // design §7, all four sub-checks). Every
@@ -4409,6 +4472,9 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1523 convention); the strict install-profile escalation branch exists
   // in checkDeploymentModeConsistency but is not wired into any profile yet.
   const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
+  // #2930 round-2: split-brain Layer-2 path layout is unsupported until the
+  // canonical sweep — zero rows on every non-divergent host.
+  const layer2PathDivergenceCheck = () => checkLayer2PathDivergence();
   // CTL-1616 PR2: secret-contract shadow pass — like deploymentModeCheck, a
   // fleet-topology-independent fact (does not consult resolveRoster), so it
   // runs for every class. SHADOW ONLY: every check it (and the injected
@@ -4473,6 +4539,7 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
@@ -4506,6 +4573,7 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
@@ -4531,6 +4599,7 @@ export function checksForClass(nc, opts = {}) {
   return [
     nodeClassCheck,
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
     () => checkHostIdentity(),
     () => checkHrwPartition(),
