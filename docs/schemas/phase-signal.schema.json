@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://catalyst.coalesce-labs.com/schemas/phase-signal.schema.json",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/phase-signal.schema.json",
   "title": "Phase Signal File",
   "description": "Schema for ~/catalyst/execution-core/workers/{TICKET}/phase-{name}.json — the per-phase coordination file written by the execution-core daemon and updated by phase-agent workers. The daemon dispatches work by writing this file; the phase-agent worker updates it (status, bg_job_id) as it runs; the daemon reads it to determine when to advance to the next phase.",
   "type": "object",

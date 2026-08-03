@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://catalyst.coalesce-labs.com/schemas/catalyst-config.schema.json",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/catalyst-config.schema.json",
   "title": "Catalyst Project Config",
   "description": "Schema for .catalyst/config.json — the Layer-1 project config committed to the repository. Contains team-wide settings safe to share. Secrets and host-specific overrides belong in the Layer-2 machine config (~/.config/catalyst/config.json).",
   "type": "object",
