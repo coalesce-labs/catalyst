@@ -189,8 +189,10 @@ never throws and reports `{ armed, rotated, restartRequired }` — `restartRequi
 literal mechanism the 2026-08-02 outage lacked: a `boot-only` row (or a `re-armable` row with no
 hook registered yet — the two degrade identically, by design, so a consumer that never wires the
 arm path can't look safer than one that structurally can't) reports it when a caller invokes
-`armSecret` and the resolved value has changed since that caller's last observation — a
-caller-invoked report, not an automatic one fired the moment the value changes. No production call
+`armSecret` and the resolved value has changed since the PROCESS's last `armSecret` observation
+for that id (`_lastArmedValue` is module-level, one baseline per secret id shared by every caller
+in the process — caller B observing a rotation resets what caller A sees) — a caller-invoked
+report, not an automatic one fired the moment the value changes. No production call
 site invokes `armSecret` today (a repo-wide search outside tests finds only the definition and a
 comment reference in `linear-remint.mjs`), so this reporting is not yet wired to any running
 daemon.
