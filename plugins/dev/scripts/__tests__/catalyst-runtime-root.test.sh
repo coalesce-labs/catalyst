@@ -128,6 +128,27 @@ OUT=$(run_lib "$SCRATCH/empty-cwd" "$CACHE_HOME" "")
 assert_eq "${OUT%%|*}" "0" "cache glob: return 0"
 assert_eq "${OUT#*|}" "$NEWEST_CACHE" "cache glob: sort -V picks 1.10.0 over 1.2.0 (numeric, not lexical)"
 
+# ─── catalyst_dev_scripts: marketplace glob skips a partial newest install ──
+# CTL-1628 A2 post-merge fix: the newest candidate (catalyst-v2, no sentinel
+# — a partial/broken install) must NOT sink the whole rung; the resolver
+# should fall back to the next-newest VALID candidate (catalyst-v1).
+MKT_PARTIAL_HOME="$SCRATCH/mkt-partial-home"
+VALID_MKT="$MKT_PARTIAL_HOME/.claude/plugins/marketplaces/catalyst-v1/plugins/dev/scripts"
+make_dev_scripts_dir "$VALID_MKT"
+mkdir -p "$MKT_PARTIAL_HOME/.claude/plugins/marketplaces/catalyst-v2/plugins/dev/scripts"  # no sentinel file
+OUT=$(run_lib "$SCRATCH/empty-cwd" "$MKT_PARTIAL_HOME" "")
+assert_eq "${OUT%%|*}" "0" "marketplace glob: partial newest — return 0"
+assert_eq "${OUT#*|}" "$VALID_MKT" "marketplace glob: partial newest (v2) skipped, falls back to valid v1"
+
+# ─── catalyst_dev_scripts: cache glob skips a partial newest install ────────
+CACHE_PARTIAL_HOME="$SCRATCH/cache-partial-home"
+VALID_CACHE="$CACHE_PARTIAL_HOME/.claude/plugins/cache/catalyst/catalyst-dev/1.0.0/scripts"
+make_dev_scripts_dir "$VALID_CACHE"
+mkdir -p "$CACHE_PARTIAL_HOME/.claude/plugins/cache/catalyst/catalyst-dev/2.0.0/scripts"  # no sentinel file
+OUT=$(run_lib "$SCRATCH/empty-cwd" "$CACHE_PARTIAL_HOME" "")
+assert_eq "${OUT%%|*}" "0" "cache glob: partial newest — return 0"
+assert_eq "${OUT#*|}" "$VALID_CACHE" "cache glob: partial newest (2.0.0) skipped, falls back to valid 1.0.0"
+
 # ─── catalyst_dev_scripts: total miss is LOUD (stderr) and returns 1 ────────
 OUT=$(cd "$SCRATCH/empty-cwd" && env -i HOME="$SCRATCH/empty-home" PATH="$PATH" LIB="$LIB" bash -c '
   unset CATALYST_DEV_SCRIPTS CLAUDE_PLUGIN_ROOT
