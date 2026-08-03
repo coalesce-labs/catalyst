@@ -51,6 +51,7 @@ import {
   runDoctor,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
+import { TICKET_KEY_RE } from "./ticket-key.mjs";
 import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";
 // CTL-1369 PR4: parity source for doctor's inlined defaultPluginPullOwner.
 import { resolvePluginPullOwner } from "../broker/plugin-refresh.mjs";
@@ -2542,11 +2543,13 @@ describe("checkLayer2PathDivergence (#2930 round-2)", () => {
       env: { CATALYST_MACHINE_CONFIG: "/machine/split-test/config.json" },
     });
     expect(checks[0].detail).toContain("EVERY supervised service");
-    // Prefix-agnostic ticket matcher mirroring the repo's canonical ticket
-    // grammar (ticket-key.mjs TICKET_KEY_RE: one-letter keys, digits and
-    // underscores allowed) — the assertion itself must not commit a
-    // repo-specific prefix (the very rule it enforces).
-    expect(checks[0].detail).not.toMatch(/\b[A-Z][A-Z0-9_]*-\d+\b/);
+    // Prefix-agnostic ticket scan DERIVED from the canonical grammar
+    // (ticket-key.mjs TICKET_KEY_RE, anchors stripped for substring scanning)
+    // so a future grammar extension cannot silently stale this assertion —
+    // and the assertion itself commits no repo-specific prefix (the very
+    // rule it enforces).
+    const ticketScanRe = new RegExp(`\\b${TICKET_KEY_RE.source.replace(/^\^|\$$/g, "")}\\b`);
+    expect(checks[0].detail).not.toMatch(ticketScanRe);
   });
 
   it("fails OPEN (zero rows) when a resolver throws", () => {
