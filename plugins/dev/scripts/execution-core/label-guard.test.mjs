@@ -1345,4 +1345,35 @@ describe("labelNeedsHumanUnlessBeliefOwner — explanation threading (CTL-1609)"
     expect(sig.explanation.call_to_action).toBe("authorize another recovery cycle for CTL-E6");
     expect(sig.explanation.degraded).toBeUndefined();
   });
+
+  test("no-overwrite guard: degraded prior IS overwritten by richer explanation", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E7");
+    mkdirSync(workerDir, { recursive: true });
+    // Write a degraded signal (the prior call had no explanation)
+    const degradedSig = {
+      ticket: "CTL-E7",
+      status: "needs-human",
+      needsHumanSince: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      phase: "recovery-pass",
+      explanation: { escalation_type: "authorization", degraded: true },
+    };
+    writeFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E7"), JSON.stringify(degradedSig));
+    // Call chokepoint with a richer, non-degraded explanation — SHOULD overwrite
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E7", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "dispatch-failures",
+      log: { info: () => {}, warn: () => {} },
+      explanation: {
+        problem: "richer replacement for CTL-E7",
+        call_to_action: "resolve the dispatch failure for CTL-E7",
+      },
+    });
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E7"), "utf8"));
+    // Guard allowed the overwrite — new problem/call_to_action from the second call are present.
+    // coerceExplanation always sets degraded:true, so the written signal is still degraded,
+    // but the content is the richer one (proving the guard did NOT block the write).
+    expect(sig.explanation.problem).toBe("richer replacement for CTL-E7");
+    expect(sig.explanation.call_to_action).toBe("resolve the dispatch failure for CTL-E7");
+  });
 });
