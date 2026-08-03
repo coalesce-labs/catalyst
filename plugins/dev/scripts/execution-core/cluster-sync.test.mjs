@@ -1738,6 +1738,37 @@ describe("cluster-secret event severity + env-backed set (Codex re-review)", () 
     expect(ENV_BACKED_SECRET_FILES.has("claude-accounts.env")).toBe(true);
     expect(ENV_BACKED_SECRET_FILES.has("execution-core.env")).toBe(true);
   });
+
+  // CTL-1616 (A2): ENV_BACKED_SECRET_EXACT is now DERIVED from SECRET_REGISTRY
+  // (lib/secret-contract.mjs) instead of hand-maintained in parallel with it (see the
+  // derivation's own header comment above its definition). This test is the
+  // before/after PARITY ASSERTION the design's "same-commit derivation constraint"
+  // (§2) mandates for a load-bearing marker-advance gate: the derived set must equal
+  // the EXACT historical literal set this file hand-maintained before the derivation,
+  // byte-for-byte — a silent membership change here would (via isEnvBackedSecretFile →
+  // assessMaterialization) either mask a real rotation's restart-required signal or
+  // spuriously nag on a rotation that was never boot-captured.
+  test("ENV_BACKED_SECRET_EXACT (derived from SECRET_REGISTRY) equals the historical hand-maintained literal set", () => {
+    const historicalLiteralSet = new Set([
+      "claude-accounts.env",
+      "execution-core.env",
+      "github-token",
+      "webhook-secret",
+      "linear-webhook-secret",
+    ]);
+    expect(new Set(ENV_BACKED_SECRET_FILES)).toEqual(historicalLiteralSet);
+  });
+
+  test("LINEAR_WEBHOOK_SECRET_PREFIX (derived from the registry's family row) still matches every historical family fixture", () => {
+    // Cross-check via the PUBLIC predicate rather than reaching for the private prefix
+    // constant directly — this is exactly the behavior isEnvBackedSecretFile's own
+    // describe block below re-verifies in full; this test only pins the derivation
+    // didn't silently change the prefix STRING itself.
+    expect(isEnvBackedSecretFile("linear-webhook-secret-ctl")).toBe(true);
+    expect(isEnvBackedSecretFile("linear-webhook-secret-CTL")).toBe(true);
+    expect(isEnvBackedSecretFile("linear-webhook-secret-")).toBe(false);
+    expect(isEnvBackedSecretFile("linear-webhook-secretXXX")).toBe(false);
+  });
 });
 
 // CTL-1612. The predicate that decides which rotated files get a `restart-required`
