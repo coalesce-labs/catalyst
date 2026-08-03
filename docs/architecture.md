@@ -105,6 +105,32 @@ shadow `<TICKET>.json.projected`. Phase 1: broker handler + emit helper + dual-w
 `orchestrate-auto-rebase` (`orchestrate-shadow-diff` verifies byte-for-byte parity). Phase 2: remove
 direct writes (broker sole writer). Phase 3: mirror to SQLite per ADR-011. See ADR-018.
 
+## Deployment Mode (CTL-1617)
+
+One declared answer — **`catalyst.deployment.mode` ∈ `single-host` | `cluster` | `cloud`** — replaces
+the per-host hand-wiring of mode-dependent choices (event source, secret provider of record, cluster
+expectations). Resolved identically in bash and JS by a zero-import pair
+(`plugins/dev/scripts/lib/deployment-mode.mjs` + `lib/catalyst-deployment-mode.sh`), kept honest by
+an exhaustive cross-stack parity fixture matrix (`__tests__/deployment-mode-parity.test.sh`).
+
+- **Precedence**: `CATALYST_DEPLOYMENT_MODE` env → Layer-2 `catalyst.deployment.mode` (per-host
+  override, wins when present) → Layer-1 (committed fleet default; **this repo declares `cluster`**)
+  → constant `single-host`. The default is a constant, never roster-inferred — a derived default
+  silently flips with roster state and forces the two languages onto divergent inference signals.
+- **Degradation is the safety direction**: non-string / typo values settle at their layer as
+  `single-host, recognized:false` (asserting the fewest cross-host guarantees); malformed files
+  (bad JSON, multi-document, BOM, lone-surrogate strings) are layer-absent in BOTH languages.
+- **Consumers**: `catalyst doctor` (`checkDeploymentModeConsistency`, advisory: declared/inferred,
+  typo FAIL, roster-consistency WARN — every message says "deployment mode", never bare "mode",
+  since `dispatchMode`, executor dispatch-mode telemetry, and the replica reader's `mode` are
+  unrelated concepts); the orch-monitor smee tunnel gate (tunnels start only when the mode is not
+  `cloud`); and the CTL-1616 secret contract's provider-of-record dispatch, which receives the FULL
+  resolution object and never activates a cloud provider on `inferred:true`.
+- **Orthogonal axes, never merged**: deployment mode (fleet topology) × `catalyst.node.class`
+  (per-machine role) × `orchestration.dispatchMode` (process substrate within a node).
+- Full reference (schema, examples, caveats): `website/src/content/docs/reference/configuration.md`;
+  design + migration plan: `thoughts/shared/research/2026-08-02-ctl-1617-deployment-mode-design.md`.
+
 ## Agent Teams vs Subagents
 
 | Scenario                                        | Subagents       | Agent Teams |
