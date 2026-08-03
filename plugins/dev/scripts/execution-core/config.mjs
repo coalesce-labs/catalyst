@@ -217,18 +217,19 @@ export function getEventLogPath() {
 // CATALYST_MACHINE_CONFIG and XDG_CONFIG_HOME. Each host's Layer-2 file differs, so this is
 // the right home for a per-host name.
 //
-// CTL-1616 PR6 (design §8/§9): DUAL-READ shadow-diff for one release before this delegates
-// fully to the registry's canonical resolveLayer2Path (lib/secret-contract.mjs) chain —
-// CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME > ~/.config/catalyst.
-// The two chains AGREE whenever CATALYST_LAYER2_CONFIG_FILE is set (checked first by both) or
-// neither CATALYST_MACHINE_CONFIG nor XDG_CONFIG_HOME is set (both fall to the same homedir
-// default) — the common case on every host today, hence silent. They DISAGREE on a host that
-// sets CATALYST_MACHINE_CONFIG or XDG_CONFIG_HOME without also setting
-// CATALYST_LAYER2_CONFIG_FILE — a DOCUMENTED BEHAVIOR CHANGE (design risk 8), logged loudly
-// (once per unique divergence message, mirroring getNodeClass's _warnedNodeClass dedup below)
-// so the operator sees it before the next PR removes the legacy chain entirely. The NEW
-// (canonical) path is always what this function returns on a disagreement — matching the
-// operator-attention-flag direction #2927 already established for this class of shadow-diff.
+// CTL-1616 PR6 (+#2929/#2930 follow-ups): OBSERVE-ONLY dual-read. This function RETURNS THE
+// LEGACY chain (CATALYST_LAYER2_CONFIG_FILE || homedir default) and only WARNS when the
+// registry's canonical resolveLayer2Path chain (… > CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME
+// > homedir) would disagree. It must NOT return the canonical path yet: this resolver feeds
+// WRITE destinations (cluster-sync secret materialization, cluster tune) whose READERS are
+// split across BOTH chains — catalyst-secret-env.sh and the scheduler's per-tick reload read
+// legacy, while the registry-based consumers folded in PR3-PR5 (the mint chain, cloud-token
+// name) read canonical. On a divergent (MACHINE_CONFIG/XDG-only) host there is NO consistent
+// half-migrated answer — doctor's layer2-path-divergence check FAILs that configuration as
+// unsupported-until-the-sweep, and CATALYST_LAYER2_CONFIG_FILE (tier 1 of BOTH chains) is the
+// operator pin that restores one file for everyone. The canonical cutover must land as ONE
+// sweep of every reader and writer — do not sequence it from an assumption that reads already
+// use the canonical path (they are split; see #2930's review).
 const _warnedLayer2PathDrift = new Set();
 export function getLayer2ConfigPath() {
   const legacyPath =

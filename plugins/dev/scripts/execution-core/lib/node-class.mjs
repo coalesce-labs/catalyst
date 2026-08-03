@@ -32,12 +32,12 @@ const NODE_CLASS_MOST_RESTRICTIVE = "monitor";
 // ~/.config/catalyst/config.json, duplicated here to keep this a leaf (same pattern
 // host-identity.mjs uses for layer2HostName) and mirroring config.mjs's OWN legacy chain.
 //
-// CTL-1616 PR6 (design §8/§9): DUAL-READ shadow-diff for one release, delegating the
-// RETURNED path to the registry's canonical resolveLayer2Path chain (CATALYST_LAYER2_CONFIG_FILE
-// > CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME > ~/.config/catalyst) — same dual-read shape as
-// execution-core/config.mjs's getLayer2ConfigPath, which this file mirrors. Exported (unlike
-// before) so tests can exercise the shadow-diff directly. No `log` import here (zero-import
-// leaf) — uses console.warn, same as lib/deployment-mode.mjs's getDeploymentMode dedup.
+// CTL-1616 PR6 (+#2929/#2930): OBSERVE-ONLY dual-read — RETURNS THE LEGACY chain and only
+// WARNS when the registry's canonical resolveLayer2Path chain would disagree, staying
+// path-consistent with config.mjs's getLayer2ConfigPath and every un-swept legacy reader
+// (see that function's header for the reader/writer-split rationale; the canonical cutover
+// lands as ONE sweep). Exported so tests can exercise the shadow-diff directly. No `log`
+// import here (zero-import leaf) — uses console.warn, same as lib/deployment-mode.mjs.
 const _warnedLayer2PathDrift = new Set();
 export function getLayer2ConfigPath() {
   const legacyPath = process.env.CATALYST_LAYER2_CONFIG_FILE || resolve(homedir(), ".config", "catalyst", "config.json");
