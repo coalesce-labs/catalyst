@@ -67,8 +67,6 @@ import {
 import {
   saveInterests,
   persistBrokerState,
-  getProjectedWorkerStatePath,
-  writeProjectedWorkerState,
   projectWorkerStateEvent,
 } from "./projection.mjs";
 import {
@@ -2775,12 +2773,19 @@ export function processEvent(event) {
     return;
   }
 
-  // CTL-483 Phase 1: project worker state mutations to a shadow file so the
-  // verification cycle can confirm byte-for-byte agreement with direct writes.
-  if (name === "worker.state_changed") {
-    handleWorkerStateChanged(event);
-    return;
-  }
+  // CTL-1628: legacy-emitter compat consume. The ADR-018 Phase 1 JSON-shadow
+  // scaffolding was retired (dispatch branch + handleWorkerStateChanged +
+  // getProjectedWorkerStatePath/writeProjectedWorkerState removed), but an
+  // un-upgraded orchestrate-auto-rebase can still emit worker.state_changed
+  // during a mixed-version rollout. The CTL-532 fold (projectWorkerStateEvent,
+  // above) already consumed the event unconditionally; this branch only
+  // prevents the now-orphaned event from falling through shouldSkipEvent /
+  // interests routing into queueEvent's Groq prose classifier, which it never
+  // reached before. This guards ROLLING-UPGRADE SKEW (an un-upgraded host's
+  // orchestrate-auto-rebase copy still emitting), not legacy-mode usage —
+  // remove once the fleet is uniformly past the release that dropped the
+  // emitter, and at the latest with the CTL-1635 legacy sunset.
+  if (name === "worker.state_changed") return;
 
   if (shouldSkipEvent(event)) return;
 
@@ -2900,36 +2905,6 @@ export function processEvent(event) {
   if (getEventName(event) === "comms.message.posted") return;
 
   queueEvent(event);
-}
-
-// --- worker.state_changed handler (CTL-483 / CTL-529) ---
-// Stays with the other event handlers; getProjectedWorkerStatePath +
-// writeProjectedWorkerState come from projection.mjs via the existing
-// router -> projection import edge.
-export function handleWorkerStateChanged(event) {
-  const payload = getEventPayload(event);
-  const orchestrator = getEventOrchestrator(event);
-  const ticket = event.attributes?.["catalyst.worker.ticket"] ?? payload.ticket;
-  if (!orchestrator || !ticket) {
-    log.warn(
-      { orchestrator, ticket },
-      "worker.state_changed missing orchestrator/ticket — dropping"
-    );
-    return;
-  }
-  const state = payload.state;
-  if (!state || typeof state !== "object") {
-    log.warn(
-      { orchestrator, ticket },
-      "worker.state_changed missing body.payload.state — dropping"
-    );
-    return;
-  }
-  const target = getProjectedWorkerStatePath(orchestrator, ticket);
-  writeProjectedWorkerState(target, state, {
-    writer: event.attributes?.["catalyst.writer"] ?? payload.writer ?? "unknown",
-    ts: event.ts ?? event.observedTs ?? new Date().toISOString(),
-  });
 }
 
 // CTL-529: stop the debounce timers without flushing the pending batch. Used

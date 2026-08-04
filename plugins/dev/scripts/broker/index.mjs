@@ -136,8 +136,6 @@ export {
   getBrokerStateFilePath,
   buildBrokerState,
   writeBrokerStateFile,
-  getProjectedWorkerStatePath,
-  writeProjectedWorkerState,
   reduceWorkerStateEvent,
   projectWorkerStateEvent,
   replayWorkerStateProjection,
@@ -173,7 +171,6 @@ export {
   runWatchdogTick,
   startDriftCheckWatcher,
   processEvent,
-  handleWorkerStateChanged,
   seedLastSeenByService, // CTL-1122
 } from "./router.mjs";
 export { loadExistingRegistrations, getLastByteOffset } from "./tailer.mjs";
