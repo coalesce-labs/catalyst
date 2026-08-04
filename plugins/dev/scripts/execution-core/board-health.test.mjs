@@ -791,6 +791,26 @@ describe("buildBoardScanEvent", () => {
     expect(ev.details.flagged).toContain("CTL-1");
     expect(Array.isArray(ev.details.tier1Moves)).toBe(true);
   });
+
+  // CTL-1607: per-host slot census threaded onto the board-scan event.
+  test("threads board.capacity into details.slot* scalars", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 3, freeSlots: 1 } });
+    const decision = decideBoardHealth(invs, board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision, board });
+    expect(ev.details.slotCapacity).toBe(4);
+    expect(ev.details.slotInUse).toBe(3);
+    expect(ev.details.slotFree).toBe(1);
+  });
+
+  test("no board arg → slot* scalars default to null (back-compat)", () => {
+    const invs = allGreen();
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision });
+    expect(ev.details.slotCapacity).toBeNull();
+    expect(ev.details.slotInUse).toBeNull();
+    expect(ev.details.slotFree).toBeNull();
+  });
 });
 
 // ─── buildBoardContext — the whole-board brief the delegate gets injected ────

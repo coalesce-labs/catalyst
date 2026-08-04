@@ -1337,7 +1337,7 @@ export function buildBoardContext(boardState, invariants) {
 // ── (6) buildBoardScanEvent — PURE. The flat event reused through the CTL-1287
 // emit envelope. Scalars at the top of details (CTL-1291 promotes them to
 // chartable attributes); rosters/move arrays stay in details → body.payload.
-export function buildBoardScanEvent({ mode, invariants, decision, act = null }) {
+export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
   // proposedMoves but never whether anything was dispatched — the blind spot behind
@@ -1373,6 +1373,13 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null }) 
       // CTL-1435 (C1): 0/1 so Grafana can chart the dispatch RATE alongside the
       // proposal counts (proposed-vs-dispatched is the actuation-liveness signal).
       actDispatched: actOutcome.dispatched ? 1 : 0,
+      // CTL-1607: per-host slot census so fleet capacity is visible off-host. Null
+      // when no board was threaded (back-compat). NOTE: slotFree is occupancy-derived
+      // (>= slotCapacity - slotInUse when queued/SDK workers exist), so a fleet
+      // consumer must SUM recovery.slot.free directly, never capacity - in_use.
+      slotCapacity: board?.capacity?.maxParallel ?? null,
+      slotInUse: board?.capacity?.liveCount ?? null,
+      slotFree: board?.capacity?.freeSlots ?? null,
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
       ),
@@ -1505,7 +1512,7 @@ export function boardHealthPass({
 
   // CTL-1435 (C1): emit AFTER actuation so the scan event carries the act outcome.
   try {
-    emit(buildBoardScanEvent({ mode, invariants, decision: dec, act: actOutcome })); // shadow AND enforce
+    emit(buildBoardScanEvent({ mode, invariants, decision: dec, act: actOutcome, board })); // shadow AND enforce
   } catch (err) {
     log({ err: err.message }, "board-health: emit failed (continuing)");
   }
