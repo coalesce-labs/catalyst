@@ -44,7 +44,7 @@ beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "ws-proj-"));
   openBrokerStateDb(join(tmpDir, "t.db"));
   // Snapshot CATALYST_DIR so replay tests that redirect it cannot leak into
-  // sibling test files (worker-state.test.mjs also reads this env var).
+  // sibling test files.
   savedCatalystDir = process.env.CATALYST_DIR;
 });
 
