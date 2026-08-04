@@ -73,13 +73,17 @@ if echo "$OUT" | grep -q "clearing inherited LINEAR_API_TOKEN/LINEAR_API_KEY"; t
 else
 	fail "did not log the clear; output: $OUT"
 fi
-# No orchestrator creds configured (absent Layer-2 file) → mint no-ops →
-# SCOPED_TARGET stays unset. This proves the clear happens EVEN WHEN the
-# mint itself never runs — the two are independent.
-if echo "$OUT" | grep -qxF "SCOPED_TARGET=[]"; then
-	pass "SCOPED_TARGET stays unset when no orchestrator creds are configured (clear is independent of mint outcome)"
+# No orchestrator creds configured (absent Layer-2 file) → mint no-ops. Since
+# CTL-1612 round 6, SCOPED_TARGET is now seeded from the captured inherited
+# bot-shaped token in this exact case (a usable credential is reused rather
+# than discarded — see the dedicated "inherited-token fallback" section
+# below for the full behavior matrix). This still proves the ALIAS CLEAR
+# happens independent of mint outcome (asserted above) — only the target-var
+# SEEDING behavior changed in round 6.
+if echo "$OUT" | grep -qxF "SCOPED_TARGET=[lin_oauth_fake_inherited_bot_token]"; then
+	pass "SCOPED_TARGET is seeded from the inherited token when no orchestrator creds are configured (CTL-1612 round 6 fallback)"
 else
-	fail "SCOPED_TARGET unexpectedly set; output: $OUT"
+	fail "SCOPED_TARGET not seeded from the inherited fallback; output: $OUT"
 fi
 
 echo ""
@@ -123,6 +127,27 @@ if echo "$OUT_UPPER" | grep -qxF "LINEAR_API_TOKEN=[LIN_API_FAKE_UPPERCASE_KEY]"
 	pass "uppercase LIN_API_* is recognized as personal (case-insensitive) and survives"
 else
 	fail "uppercase LIN_API_* was cleared; output: $OUT_UPPER"
+fi
+
+echo ""
+echo "scoped mode: a PADDED personal lin_api_* key (surrounding whitespace) still survives (CTL-1612 round 6)"
+OUT_PADDED="$(env -i HOME="$HOME" PATH="$PATH" CATALYST_LAYER2_CONFIG_FILE="$ABSENT_LAYER2" \
+	LINEAR_API_TOKEN="  lin_api_fake_padded_key  " \
+	bash -c '
+		set -uo pipefail
+		source "'"$LIB"'"
+		linear_app_actor_auth "test-daemon" SCOPED_TARGET
+		echo "LINEAR_API_TOKEN=[${LINEAR_API_TOKEN:-}]"
+	' 2>&1)"
+if echo "$OUT_PADDED" | grep -qxF "LINEAR_API_TOKEN=[  lin_api_fake_padded_key  ]"; then
+	pass "padded personal lin_api_* key survives untouched (including its original padding — only the CLASSIFICATION trims, never the stored value)"
+else
+	fail "padded personal LINEAR_API_TOKEN was cleared or mutated; output: $OUT_PADDED"
+fi
+if echo "$OUT_PADDED" | grep -q "clearing inherited"; then
+	fail "logged a clear line for a padded personal key; output: $OUT_PADDED"
+else
+	pass "no clear log line for a padded personal key"
 fi
 
 echo ""
@@ -208,6 +233,105 @@ if echo "$OUT4" | grep -qxF "LINEAR_API_KEY=[lin_api_standalone_personal_key]"; 
 else
 	fail "standalone clear touched the personal key; output: $OUT4"
 fi
+
+# ─── Inherited-token fallback (CTL-1612 round 6, Codex P2 resilience follow-up) ─
+# A usable inherited app-actor token must not be discarded when the monitor's
+# OWN mint then fails — it should seed the scoped target var instead, so
+# self-reads keep working until the next successful mint. A SUCCESSFUL mint
+# still always wins. These fixtures need REAL (fake) orchestrator creds — a
+# stubbed curl on PATH stands in for the network so the mint can genuinely
+# succeed or fail without ever reaching api.linear.app.
+echo ""
+echo "inherited-token fallback: mint FAILS + inherited bot token present → scoped var seeded from inherited (CTL-1612 round 6)"
+
+FAKE_L2="${SCRATCH}/fake-layer2-with-creds.json"
+cat > "$FAKE_L2" <<'EOF'
+{"catalyst":{"linear":{"bot":{"orchestrator":{"clientId":"fake-r6-client-id","clientSecret":"fake-r6-client-secret"}}}}}
+EOF
+
+STUB_BIN="${SCRATCH}/bin"
+mkdir -p "$STUB_BIN"
+
+# Stub curl that ALWAYS fails the mint (no access_token in the response) —
+# never reaches the real network.
+cat > "${STUB_BIN}/curl-fail" <<'CURLSTUB'
+#!/usr/bin/env bash
+echo '{"error":"invalid_client"}'
+CURLSTUB
+chmod +x "${STUB_BIN}/curl-fail"
+
+# Stub curl that ALWAYS succeeds with a fixed fake access_token.
+cat > "${STUB_BIN}/curl-success" <<'CURLSTUB'
+#!/usr/bin/env bash
+echo '{"access_token":"fake-r6-fresh-mint-token"}'
+CURLSTUB
+chmod +x "${STUB_BIN}/curl-success"
+
+ln -sf "${STUB_BIN}/curl-fail" "${STUB_BIN}/curl"
+OUT_FAIL_FALLBACK="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
+	LINEAR_API_TOKEN="lin_oauth_fake_inherited_for_fallback" \
+	bash -c '
+		set -uo pipefail
+		source "'"$LIB"'"
+		linear_app_actor_auth "test-daemon" SCOPED_TARGET
+		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+	' 2>&1)"
+if echo "$OUT_FAIL_FALLBACK" | grep -qxF "SCOPED_TARGET=[lin_oauth_fake_inherited_for_fallback]"; then
+	pass "mint-fails + inherited-bot-token: SCOPED_TARGET seeded from the inherited token"
+else
+	fail "mint-fails + inherited-bot-token: SCOPED_TARGET not seeded; output: $OUT_FAIL_FALLBACK"
+fi
+if echo "$OUT_FAIL_FALLBACK" | grep -q "reusing the inherited app-actor token"; then
+	pass "mint-fails + inherited-bot-token: logs the reuse"
+else
+	fail "mint-fails + inherited-bot-token: did not log the reuse; output: $OUT_FAIL_FALLBACK"
+fi
+rm -f "${STUB_BIN}/curl"
+
+echo ""
+echo "inherited-token fallback: mint SUCCEEDS + inherited bot token present → fresh token wins"
+ln -sf "${STUB_BIN}/curl-success" "${STUB_BIN}/curl"
+OUT_SUCCESS_WINS="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
+	LINEAR_API_TOKEN="lin_oauth_fake_inherited_should_be_replaced" \
+	bash -c '
+		set -uo pipefail
+		source "'"$LIB"'"
+		linear_app_actor_auth "test-daemon" SCOPED_TARGET
+		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+	' 2>&1)"
+if echo "$OUT_SUCCESS_WINS" | grep -qxF "SCOPED_TARGET=[fake-r6-fresh-mint-token]"; then
+	pass "mint-succeeds: fresh token wins over the inherited fallback"
+else
+	fail "mint-succeeds: fresh token did not win; output: $OUT_SUCCESS_WINS"
+fi
+if echo "$OUT_SUCCESS_WINS" | grep -q "reusing the inherited app-actor token"; then
+	fail "mint-succeeds: incorrectly logged a fallback reuse; output: $OUT_SUCCESS_WINS"
+else
+	pass "mint-succeeds: no fallback-reuse log line"
+fi
+rm -f "${STUB_BIN}/curl"
+
+echo ""
+echo "inherited-token fallback: mint FAILS + NO inherited token → scoped var stays unset"
+ln -sf "${STUB_BIN}/curl-fail" "${STUB_BIN}/curl"
+OUT_FAIL_NOFALLBACK="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
+	bash -c '
+		set -uo pipefail
+		source "'"$LIB"'"
+		linear_app_actor_auth "test-daemon" SCOPED_TARGET
+		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+	' 2>&1)"
+if echo "$OUT_FAIL_NOFALLBACK" | grep -qxF "SCOPED_TARGET=[]"; then
+	pass "mint-fails + no-inherited-token: SCOPED_TARGET stays unset"
+else
+	fail "mint-fails + no-inherited-token: SCOPED_TARGET unexpectedly set; output: $OUT_FAIL_NOFALLBACK"
+fi
+if echo "$OUT_FAIL_NOFALLBACK" | grep -q "WARNING orchestrator token mint failed"; then
+	pass "mint-fails + no-inherited-token: logs the existing WARNING (unchanged)"
+else
+	fail "mint-fails + no-inherited-token: did not log the WARNING; output: $OUT_FAIL_NOFALLBACK"
+fi
+rm -f "${STUB_BIN}/curl"
 
 echo ""
 echo "────────────────────────────────────────"

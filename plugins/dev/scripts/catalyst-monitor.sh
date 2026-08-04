@@ -144,6 +144,20 @@ json_quote_or_null() {
 #   1. CATALYST_LIVENESS_ANCHOR_ISSUE env (test/override)
 #   2. catalyst.cluster.livenessAnchorIssue in the Layer-2 config
 #   3. empty — caller treats as "no anchor configured"
+#
+# CTL-1612 round 6 (Codex P2 follow-up): this duplication (rather than a
+# runtime call into the canonical JS getter) is a deliberate single-source-
+# risk tradeoff, not an oversight — see the round-6 report for why a bounded
+# `bun -e "import(...)…"` one-shot at every monitor start was rejected (adds
+# a runtime dependency + startup cost to the launch path, defeating round 3's
+# whole point of skipping the mint cheaply). __tests__/liveness-anchor-parity.test.sh
+# is what makes a future divergence between this function and
+# getLivenessAnchorIssue() TEST-DETECTABLE instead of a silent landmine — it
+# extracts this exact function's source and runs it against the same fixtures
+# as the JS getter, three-way-asserting both against a computed-expected
+# literal (the __tests__/secret-contract-parity.test.sh pattern). Edit this
+# function's resolution order/default path ONLY in lockstep with that test
+# and getLivenessAnchorIssue() itself.
 resolve_liveness_anchor_issue() {
   if [[ -n "${CATALYST_LIVENESS_ANCHOR_ISSUE:-}" ]]; then
     printf '%s' "$CATALYST_LIVENESS_ANCHOR_ISSUE"
@@ -151,7 +165,13 @@ resolve_liveness_anchor_issue() {
   fi
   local _l2_path="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"
   if [[ -f "$_l2_path" ]] && command -v jq &>/dev/null; then
-    jq -r '.catalyst.cluster.livenessAnchorIssue // empty' "$_l2_path" 2>/dev/null
+    # CTL-1612 round 6 (Codex P2 follow-up, liveness-anchor-parity.test.sh):
+    # `select(type=="string")` rejects a non-string field (e.g. a stray
+    # number) the same way getLivenessAnchorIssue's `typeof a === "string"`
+    # guard does. Without it, `jq -r 'FIELD // empty'` on a NUMBER prints the
+    # number as text instead of treating it as absent — bash would resolve an
+    # anchor the JS side never would, diverging on a hostile/malformed config.
+    jq -r '(.catalyst.cluster.livenessAnchorIssue | select(type=="string")) // empty' "$_l2_path" 2>/dev/null
   fi
 }
 

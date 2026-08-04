@@ -86,6 +86,15 @@ source "${_LAA_LIB_DIR}/catalyst-secret-contract.sh"
 #   raw Authorization header), a REAL, functionally load-bearing split, not
 #   just a naming convention. Logs ONLY when something was actually cleared.
 #
+#   CTL-1612 round 6 (Codex P2 follow-up): each value is TRIMMED of
+#   surrounding whitespace before the prefix check — matching
+#   orch-monitor/lib/linear-comment.mjs's resolveLinearToken, the definitive
+#   consumer, which does `.trim()` on its resolved env value before ever
+#   comparing/using it. Without the trim, a padded personal credential
+#   (`LINEAR_API_TOKEN="  lin_api_…"`) would classify as non-personal here and
+#   get cleared, even though the token that reaches resolveLinearToken (which
+#   sees the SAME padded value and trims it there) would have worked fine.
+#
 #   Factored out of linear_app_actor_auth's scoped branch so a caller that
 #   needs to skip the MINT ENTIRELY (no orchestrator work to do at all — e.g.
 #   catalyst-monitor.sh's loki-only or no-liveness-anchor skip paths,
@@ -93,20 +102,42 @@ source "${_LAA_LIB_DIR}/catalyst-secret-contract.sh"
 #   attempting a network call. linear_app_actor_auth's own scoped branch
 #   calls this too, so every scoped entry point gets the same guarantee
 #   regardless of whether it goes on to mint.
+#
+#   CTL-1612 round 6 (Codex P2 follow-up, resilience refinement): before
+#   clearing, the FIRST bot/oauth-shaped value found (LINEAR_API_TOKEN
+#   preferred over LINEAR_API_KEY, matching linear-comment.mjs
+#   resolveLinearToken's own precedence) is captured into the breadcrumb
+#   LAA_LAST_CLEARED_TOKEN — reset at the top of every call, so a caller
+#   always reads either THIS call's capture or empty, never a stale one from
+#   a previous invocation. This is what lets linear_app_actor_auth's scoped
+#   branch reuse a USABLE inherited app-actor token as a fallback if its own
+#   mint then fails, instead of discarding a working credential and leaving
+#   the scoped target var empty (self-reads would otherwise go dark until
+#   the NEXT successful mint, even though the inherited token could have
+#   served them in the meantime). The aliases are unset in EVERY case
+#   regardless of what gets captured — the round-4/5 P1 contract (never let
+#   a non-personal alias survive into resolveLinearToken's env-first
+#   resolution) holds unconditionally.
+LAA_LAST_CLEARED_TOKEN=""
 linear_app_actor_clear_inherited() {
   local _daemon="${1:?linear_app_actor_clear_inherited: daemon name required}"
   local _cleared=0
-  local _lc
+  local _trimmed _lc
+  LAA_LAST_CLEARED_TOKEN=""
   if [[ -n "${LINEAR_API_TOKEN:-}" ]]; then
-    _lc="$(printf '%s' "$LINEAR_API_TOKEN" | tr '[:upper:]' '[:lower:]')"
+    _trimmed="$(printf '%s' "$LINEAR_API_TOKEN" | xargs 2>/dev/null || true)"
+    _lc="$(printf '%s' "$_trimmed" | tr '[:upper:]' '[:lower:]')"
     if [[ "$_lc" != lin_api_* ]]; then
+      LAA_LAST_CLEARED_TOKEN="$LINEAR_API_TOKEN"
       unset LINEAR_API_TOKEN
       _cleared=1
     fi
   fi
   if [[ -n "${LINEAR_API_KEY:-}" ]]; then
-    _lc="$(printf '%s' "$LINEAR_API_KEY" | tr '[:upper:]' '[:lower:]')"
+    _trimmed="$(printf '%s' "$LINEAR_API_KEY" | xargs 2>/dev/null || true)"
+    _lc="$(printf '%s' "$_trimmed" | tr '[:upper:]' '[:lower:]')"
     if [[ "$_lc" != lin_api_* ]]; then
+      [[ -z "$LAA_LAST_CLEARED_TOKEN" ]] && LAA_LAST_CLEARED_TOKEN="$LINEAR_API_KEY"
       unset LINEAR_API_KEY
       _cleared=1
     fi
@@ -120,12 +151,22 @@ linear_app_actor_auth() {
   local _daemon="${1:?linear_app_actor_auth: daemon name required}"
   local _target_var="${2:-}"
   local _ocid _ocsec _otok _creds
+  local _inherited_fallback=""
 
   # CTL-1612 rounds 4/5: see the header comment above — scoped mode never
   # trusts an inherited non-personal LINEAR_API_TOKEN/LINEAR_API_KEY,
   # regardless of whether OUR OWN mint below succeeds, fails, or finds no
   # orchestrator creds at all.
-  [[ -n "$_target_var" ]] && linear_app_actor_clear_inherited "$_daemon"
+  #
+  # CTL-1612 round 6: _inherited_fallback captures whatever
+  # linear_app_actor_clear_inherited just cleared (empty if nothing was
+  # cleared, or the clear never ran in unscoped mode) — read IMMEDIATELY, into
+  # a local, before anything else in this function can touch the shared
+  # LAA_LAST_CLEARED_TOKEN breadcrumb.
+  if [[ -n "$_target_var" ]]; then
+    linear_app_actor_clear_inherited "$_daemon"
+    _inherited_fallback="$LAA_LAST_CLEARED_TOKEN"
+  fi
 
   catalyst_resolve_secret linear-orchestrator-actor >/dev/null
   _creds="$CATALYST_SECRET_LAST_VALUE"
@@ -155,6 +196,9 @@ linear_app_actor_auth() {
         https://api.linear.app/oauth/token --data @- 2>/dev/null |
       jq -r '.access_token // empty' 2>/dev/null)
     if [[ -n "$_otok" ]]; then
+      # A SUCCESSFUL mint always wins — even over a usable inherited fallback
+      # (CTL-1612 round 6): a fresh token is preferred to a possibly-aging
+      # inherited one whenever we actually have the choice.
       if [[ -n "$_target_var" ]]; then
         # Scoped mint: export ONLY the named var — LINEAR_API_TOKEN/LINEAR_API_KEY
         # are deliberately left untouched (see the header comment above).
@@ -165,11 +209,32 @@ linear_app_actor_auth() {
         echo "${_daemon}: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2
       fi
     else
+      # CTL-1612 round 6: creds WERE configured but the mint POST itself
+      # failed (network/OAuth-endpoint issue) — the same class of failure
+      # the round-2 async re-minter's failureCooldownMs exists to retry soon
+      # for the server.ts side. Here at start time there is no retry loop, so
+      # reuse a captured inherited app-actor token if one survived the clear
+      # above — it is still USABLE (Linear doesn't invalidate a token just
+      # because ITS OWN re-mint elsewhere failed) and strictly better than
+      # leaving the scoped var empty until the next successful mint.
       if [[ -n "$_target_var" ]]; then
-        echo "${_daemon}: WARNING orchestrator token mint failed — \$${_target_var} not set (self-reads fall back to existing resolution)" >&2
+        if [[ -n "$_inherited_fallback" ]]; then
+          export "${_target_var}=${_inherited_fallback}"
+          echo "${_daemon}: orchestrator token mint failed — reusing the inherited app-actor token for \$${_target_var} (still usable until it expires; a future successful mint will replace it)" >&2
+        else
+          echo "${_daemon}: WARNING orchestrator token mint failed — \$${_target_var} not set (self-reads fall back to existing resolution)" >&2
+        fi
       else
         echo "${_daemon}: WARNING orchestrator token mint failed — daemon using existing LINEAR_API_TOKEN" >&2
       fi
     fi
+  elif [[ -n "$_target_var" && -n "$_inherited_fallback" ]]; then
+    # CTL-1612 round 6: no orchestrator app configured at all (the documented
+    # silent no-op — UNCHANGED for unscoped mode and for scoped mode with
+    # nothing to fall back to). Scoped mode with a captured inherited token
+    # is the one case that gets LOUDER than before: silence here would throw
+    # away a usable credential for no reason, so seed the target var from it.
+    export "${_target_var}=${_inherited_fallback}"
+    echo "${_daemon}: no orchestrator app configured — reusing the inherited app-actor token for \$${_target_var} (still usable until it expires)" >&2
   fi
 }
