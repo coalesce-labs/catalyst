@@ -38,6 +38,7 @@ import {
   getReconcileHealth,
   readReconcileHealthMarkers,
   recordReconcileFailure,
+  recordReconcileSuccess,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
 import {
@@ -45,6 +46,9 @@ import {
   ALERT_RAISED,
   ALERT_CLEARED,
   ALERT_KIND_FLEET_FROZEN_ADMISSION,
+  FLEET_FREEZE_CAUSE_ALL_POLL,
+  FLEET_FREEZE_CAUSE_ALL_PERSIST,
+  FLEET_FREEZE_CAUSE_MIXED,
 } from "./fleet-freeze-alert.mjs"; // CTL-1420
 
 let catalystDir;
@@ -587,6 +591,43 @@ describe("reconcileProject — CTL-867 reconcile-health escalation", () => {
     expect(inMem.lastSuccessTs).toBe(staleSuccessTs);
     expect(inMem.alerting).toBe(true);
   });
+
+  // CTL-1628 r3 (Codex #2960 round 3): the round-2 fix stamped
+  // lastFailureOrigin only in memory, so a daemon restart mid persist-origin
+  // streak lost it — the recovery event would fall back to "poll" even though
+  // the poll never failed. lastFailureOrigin is now ALSO in the persisted
+  // marker (writeHealthMarker) and rehydrated (hydrateEntry), so a restart
+  // mid-streak still attributes the eventual recovery correctly.
+  test("a daemon restart mid persist-origin streak still recovers with the persist-origin reason (CTL-1628 r3)", () => {
+    enroll("ENG", { status: "Ready" });
+    const appendHealthEvent = () => {};
+
+    // Drive an alerting persist-origin streak, then simulate a restart —
+    // exactly like the poll-origin restart test above, but for "persist".
+    for (let i = 0; i < 3; i++) {
+      recordReconcileFailure("ENG", `eligible-persist-failed: EACCES`, {
+        appendEvent: appendHealthEvent,
+        origin: "persist",
+      });
+    }
+    const beforeRestart = readReconcileHealthMarkers().ENG;
+    expect(beforeRestart.alerting).toBe(true);
+    expect(beforeRestart.lastFailureOrigin).toBe("persist");
+
+    // Simulate a daemon RESTART: in-memory map cleared, disk marker survives.
+    __resetReconcileHealthForTests();
+    expect(getReconcileHealth("ENG")).toBeNull();
+
+    // The very next tick recovers — no recordReconcileFailure call happens
+    // first, so recordReconcileSuccess must derive the origin from the
+    // rehydrated marker, not an empty in-memory default.
+    const events = [];
+    recordReconcileSuccess("ENG", { appendEvent: (e) => events.push(e) });
+
+    const recovered = events.filter((e) => e.action === "recovered");
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].reason).toBe("eligible-persist-succeeded");
+  });
 });
 
 describe("handleStateChangedEvent", () => {
@@ -1059,6 +1100,11 @@ describe("lifecycle", () => {
     expect(alerts[0].attributes["event.name"]).toBe(ALERT_RAISED);
     expect(alerts[0].attributes["event.label"]).toBe(ALERT_KIND_FLEET_FROZEN_ADMISSION);
     expect(alerts[0].body.payload.teams.sort()).toEqual(["ENG", "PLAT"]);
+    // CTL-1628 r3: every team's failure here originated at the eligibleQuery
+    // poll (throwingExec throws before any persist is attempted) — the
+    // documented replica+linearis double-outage story, so cause is all-poll.
+    expect(alerts[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+    expect(alerts[0].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
 
     // A further all-failing pass does NOT re-fire (latched).
     reconcileAll({ exec: throwingExec, fleetFreezeAppend });
@@ -1074,6 +1120,61 @@ describe("lifecycle", () => {
     expect(getReconcileHealth("ENG").alerting).toBe(false);
     expect(alerts).toHaveLength(2);
     expect(alerts[1].attributes["event.name"]).toBe(ALERT_CLEARED);
+  });
+
+  // CTL-1628 r3 (Codex #2960 round 3): before this fix, a fleet freeze caused
+  // entirely by a local eligible-set disk fault (every poll succeeds, every
+  // persist throws — e.g. EACCES on the shared eligible dir) was reported
+  // with the SAME hard-coded "replica or linearis" reason as a genuine
+  // double outage, sending an operator to chase the wrong subsystem.
+  test("reconcileAll attributes an all-persist-origin freeze to the disk fault, not the replica/linearis story", () => {
+    __resetFleetFreezeLatch();
+    enroll("ENG", { status: "Todo" });
+    enroll("PLAT", { status: "Todo" });
+    const goodExec = execReturning({ ENG: [node("ENG-1")], PLAT: [node("PLAT-1")] });
+    // Block BOTH teams' projection paths so every persist throws while the
+    // poll always succeeds.
+    for (const team of ["ENG", "PLAT"]) {
+      const projDir = join(catalystDir, "execution-core", "eligible", `${team}.json`);
+      mkdirSync(projDir, { recursive: true });
+      writeFileSync(join(projDir, "sentinel"), "x");
+    }
+    const alerts = [];
+    const fleetFreezeAppend = (line) => alerts.push(JSON.parse(line));
+
+    for (let i = 0; i < 3; i++) reconcileAll({ exec: goodExec, fleetFreezeAppend });
+
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(getReconcileHealth("PLAT").alerting).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    expect(alerts[0].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    expect(alerts[0].body.payload.reason).toMatch(/local filesystem fault/);
+    expect(alerts[0].body.payload.reason).not.toMatch(/replica or linearis/);
+  });
+
+  test("reconcileAll attributes a MIXED-origin freeze (one team poll-failing, one persist-failing) as mixed", () => {
+    __resetFleetFreezeLatch();
+    enroll("ENG", { status: "Ready" }); // will poll-fail
+    enroll("PLAT", { status: "Todo" }); // will persist-fail
+    const projDir = join(catalystDir, "execution-core", "eligible", "PLAT.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    const mixedExec = (_cmd, args) => {
+      const team = args[args.indexOf("--team") + 1];
+      if (team === "PLAT") return { code: 0, stdout: JSON.stringify({ nodes: [node("PLAT-1")] }), stderr: "" };
+      return { code: 1, stdout: "", stderr: "removed-state: Ready" };
+    };
+    const alerts = [];
+    const fleetFreezeAppend = (line) => alerts.push(JSON.parse(line));
+
+    for (let i = 0; i < 3; i++) reconcileAll({ exec: mixedExec, fleetFreezeAppend });
+
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(getReconcileHealth("PLAT").alerting).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_MIXED);
+    expect(alerts[0].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_MIXED);
   });
 
   test("stopMonitor clears pending debounce timers (a queued reconcile never fires)", async () => {

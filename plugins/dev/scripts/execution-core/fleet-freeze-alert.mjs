@@ -32,6 +32,42 @@ export const ALERT_RAISED = "catalyst.alert.raised";
 export const ALERT_CLEARED = "catalyst.alert.cleared";
 export const ALERT_KIND_FLEET_FROZEN_ADMISSION = "fleet_frozen_admission";
 
+// CTL-1628 r3: cause classification for a raised freeze. The header comment's
+// "residual DOUBLE outage" story (replica AND linearis both down) is true only
+// when every frozen team's reconcile-health streak originated at the
+// eligibleQuery POLL. Since CTL-1628 taught reconcile-health to also latch
+// `alerting` for a persistent eligible-set DISK PERSIST fault (EACCES/ENOSPC on
+// the local eligible dir — a single-host filesystem problem, not a
+// replica/linearis outage), an all-teams freeze can now ALSO happen with every
+// poll succeeding and every persist failing. Without distinguishing the two, an
+// operator paged for "fleet frozen" would chase a replica/linearis outage that
+// doesn't exist. MIXED covers a freeze where different teams hit different
+// origins (e.g. one team's Linear state config broke while another's disk
+// filled) — still worth a human look, but neither documented story alone.
+export const FLEET_FREEZE_CAUSE_ALL_POLL = "all-poll-failing";
+export const FLEET_FREEZE_CAUSE_ALL_PERSIST = "all-persist-failing";
+export const FLEET_FREEZE_CAUSE_MIXED = "mixed";
+
+const FREEZE_REASON_BY_CAUSE = {
+  [FLEET_FREEZE_CAUSE_ALL_POLL]:
+    "every registered team's reconcile POLL is failing — the eligible projection cannot refresh from the replica or linearis (fleet admission is frozen)",
+  [FLEET_FREEZE_CAUSE_ALL_PERSIST]:
+    "every registered team's eligible-set disk PERSIST is failing (poll succeeds) — likely a local filesystem fault (disk full/permissions), NOT a replica/linearis outage (fleet admission is frozen)",
+  [FLEET_FREEZE_CAUSE_MIXED]:
+    "every registered team's reconcile is failing, but from a MIX of poll and persist origins across teams — check each team's reconcile-health marker (fleet admission is frozen)",
+};
+
+// classifyFreezeCause — origins is a non-empty array of "poll" | "persist"
+// (one per frozen team). Exported for tests; callers normally go through
+// checkFleetFreeze.
+export function classifyFreezeCause(origins) {
+  const allPoll = origins.every((o) => o === "poll");
+  if (allPoll) return FLEET_FREEZE_CAUSE_ALL_POLL;
+  const allPersist = origins.every((o) => o === "persist");
+  if (allPersist) return FLEET_FREEZE_CAUSE_ALL_PERSIST;
+  return FLEET_FREEZE_CAUSE_MIXED;
+}
+
 // Module-scoped latch so the alert fires exactly once per raised→cleared
 // transition (mirrors reconcile-health's per-team `alerting` latch, fleet-wide).
 // PERSISTED to disk + hydrated on first use so a daemon RESTART mid-freeze does
@@ -98,7 +134,13 @@ function defaultAppend(line) {
 
 // buildFleetFreezeAlertEvent — canonical JSONL line (string + "\n") for the
 // fleet-frozen-admission alert. `action` is "raised" (WARN) or "cleared" (INFO).
-export function buildFleetFreezeAlertEvent({ action, teams = [], reason = null } = {}) {
+// `cause` (CTL-1628 r3: FLEET_FREEZE_CAUSE_*, "raised" only) is mirrored into
+// BOTH attributes and body.payload — attributes because otel-forward's OTLP
+// conversion never reads body.payload (confirmed in the CTL-1628 r1 fix to
+// reconcile-health-event.mjs), so a cause confined to the body would be
+// silently dropped for every Loki/Grafana consumer, defeating the entire
+// point of distinguishing the two outage stories where operators actually look.
+export function buildFleetFreezeAlertEvent({ action, teams = [], reason = null, cause = null } = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const raised = action === "raised";
   return (
@@ -116,11 +158,13 @@ export function buildFleetFreezeAlertEvent({ action, teams = [], reason = null }
         "event.entity": "alert",
         "event.action": action,
         "event.label": ALERT_KIND_FLEET_FROZEN_ADMISSION,
+        ...(cause ? { "alert.cause": cause } : {}),
       },
       body: {
         payload: {
           kind: ALERT_KIND_FLEET_FROZEN_ADMISSION,
           reason,
+          cause,
           source: "catalyst.execution-core",
           count: teams.length,
           teams,
@@ -138,10 +182,23 @@ export function buildFleetFreezeAlertEvent({ action, teams = [], reason = null }
 //
 //   teams        — every registered team (e.g. listProjects().map(p => p.team))
 //   isTeamFrozen  — (team) => boolean; true when that team can't refresh eligible
+//   getTeamOrigin — CTL-1628 r3: (team) => "poll" | "persist"; which stage was
+//                   failing for that team (see reconcile-health.mjs's
+//                   lastFailureOrigin). Defaults to always "poll" — the pre-r3
+//                   behavior — so a caller that hasn't wired origin tracking
+//                   still gets the original all-poll double-outage message.
+//                   Only consulted for teams isTeamFrozen already said are
+//                   frozen; a non-"poll"/"persist" return is treated as "poll".
 //   append        — injectable JSONL sink (defaults to the canonical event log)
 //
-// Returns { frozen, emitted } where emitted ∈ {"raised","cleared",null}.
-export function checkFleetFreeze({ teams = [], isTeamFrozen = () => false, append = defaultAppend } = {}) {
+// Returns { frozen, emitted, cause } where emitted ∈ {"raised","cleared",null}
+// and cause (raised transitions only) ∈ FLEET_FREEZE_CAUSE_*.
+export function checkFleetFreeze({
+  teams = [],
+  isTeamFrozen = () => false,
+  getTeamOrigin = () => "poll",
+  append = defaultAppend,
+} = {}) {
   hydrate();
   // An EMPTY team list is NOT evidence of recovery — it means "no teams to
   // evaluate", which also happens on a transient unreadable/malformed registry
@@ -149,12 +206,20 @@ export function checkFleetFreeze({ teams = [], isTeamFrozen = () => false, appen
   // would flap a genuinely-raised latch to `cleared` and re-raise next tick. So an
   // empty team set is a NO-TRANSITION: preserve the current latch, emit nothing.
   if (teams.length === 0) {
-    return { frozen: _fleetFrozenRaised, emitted: null };
+    return { frozen: _fleetFrozenRaised, emitted: null, cause: null };
   }
   const frozen = teams.every((t) => isTeamFrozen(t));
   let emitted = null;
+  let cause = null;
   try {
     if (frozen && !_fleetFrozenRaised) {
+      // Every team in `teams` is frozen (that's what `frozen` means here), so
+      // every team's origin is meaningful — classify the whole freeze by them.
+      const origins = teams.map((t) => {
+        const o = getTeamOrigin(t);
+        return o === "persist" ? "persist" : "poll";
+      });
+      cause = classifyFreezeCause(origins);
       // Append FIRST; flip + persist the latch only on a successful write, so a
       // transient append failure (disk full) retries next tick instead of silently
       // latching "raised" with no event ever emitted.
@@ -162,14 +227,17 @@ export function checkFleetFreeze({ teams = [], isTeamFrozen = () => false, appen
         buildFleetFreezeAlertEvent({
           action: "raised",
           teams,
-          reason:
-            "every registered team's reconcile is failing — the eligible projection cannot refresh from the replica or linearis (fleet admission is frozen)",
+          cause,
+          reason: FREEZE_REASON_BY_CAUSE[cause],
         })
       );
       _fleetFrozenRaised = true;
       persist();
       emitted = "raised";
-      log.error({ teams }, "CTL-1420: fleet FROZEN for admission — all teams' reconcile failing");
+      log.error(
+        { teams, cause },
+        "CTL-1420: fleet FROZEN for admission — all teams' reconcile failing",
+      );
     } else if (!frozen && _fleetFrozenRaised) {
       append(buildFleetFreezeAlertEvent({ action: "cleared", teams }));
       _fleetFrozenRaised = false;
@@ -181,5 +249,5 @@ export function checkFleetFreeze({ teams = [], isTeamFrozen = () => false, appen
     // Never throw out of the reconcile timer.
     log.error?.({ err: err.message }, "CTL-1420: fleet-freeze alert emit failed (continuing)");
   }
-  return { frozen, emitted };
+  return { frozen, emitted, cause };
 }

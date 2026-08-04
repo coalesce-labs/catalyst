@@ -441,9 +441,16 @@ export function reconcileAll({ exec, delegateExec, appendHealthEvent, fleetFreez
   // neither the replica nor linearis — new work is frozen fleet-wide, which used
   // to be silent (reconcileProject just preserves the empty prior set). Latched +
   // best-effort inside checkFleetFreeze; a team's recovery clears it.
+  //
+  // CTL-1628 r3: getTeamOrigin threads each team's failure origin ("poll" |
+  // "persist", from reconcile-health.mjs's lastFailureOrigin) so checkFleetFreeze
+  // can tell the documented replica+linearis double outage (all-poll) apart
+  // from an all-teams local disk fault (all-persist) — same alert name, an
+  // accurate cause instead of an operator chasing the wrong subsystem.
   checkFleetFreeze({
     teams: [...seen],
     isTeamFrozen: (t) => getReconcileHealth(t)?.alerting === true,
+    getTeamOrigin: (t) => getReconcileHealth(t)?.lastFailureOrigin ?? "poll",
     ...(fleetFreezeAppend ? { append: fleetFreezeAppend } : {}),
   });
 }

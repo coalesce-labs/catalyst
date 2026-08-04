@@ -8,11 +8,15 @@ import { join } from "node:path";
 import {
   buildFleetFreezeAlertEvent,
   checkFleetFreeze,
+  classifyFreezeCause,
   isFleetFrozenRaised,
   __resetFleetFreezeLatch,
   ALERT_RAISED,
   ALERT_CLEARED,
   ALERT_KIND_FLEET_FROZEN_ADMISSION,
+  FLEET_FREEZE_CAUSE_ALL_POLL,
+  FLEET_FREEZE_CAUSE_ALL_PERSIST,
+  FLEET_FREEZE_CAUSE_MIXED,
 } from "./fleet-freeze-alert.mjs";
 
 // The latch persists under getReconcileHealthDir() (CATALYST_DIR-scoped), so give
@@ -59,6 +63,45 @@ describe("buildFleetFreezeAlertEvent", () => {
     expect(ev.severityText).toBe("INFO");
     expect(ev.severityNumber).toBe(9);
   });
+
+  // CTL-1628 r3: `cause` must land in BOTH attributes and body.payload —
+  // otel-forward's OTLP conversion never reads body.payload (the same gap the
+  // CTL-1628 r1 fix closed for reconcile-health-event.mjs's `reason`), so a
+  // cause confined to the body would be silently dropped for every
+  // Loki/Grafana consumer, defeating the point of distinguishing outage causes.
+  test("raised with a cause: mirrored into attributes.\"alert.cause\" and body.payload.cause", () => {
+    const ev = JSON.parse(
+      buildFleetFreezeAlertEvent({
+        action: "raised",
+        teams: ["CTL"],
+        reason: "disk fault",
+        cause: FLEET_FREEZE_CAUSE_ALL_PERSIST,
+      }),
+    );
+    expect(ev.attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    expect(ev.body.payload.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+  });
+
+  test("no cause given: attributes omit \"alert.cause\" entirely (not even empty-string)", () => {
+    const ev = JSON.parse(buildFleetFreezeAlertEvent({ action: "cleared", teams: ["CTL"] }));
+    expect(ev.attributes["alert.cause"]).toBeUndefined();
+    expect(ev.body.payload.cause).toBeNull();
+  });
+});
+
+describe("classifyFreezeCause", () => {
+  test("every team poll-origin → all-poll-failing (the documented replica+linearis double outage)", () => {
+    expect(classifyFreezeCause(["poll", "poll", "poll"])).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+  });
+
+  test("every team persist-origin → all-persist-failing (a local filesystem fault)", () => {
+    expect(classifyFreezeCause(["persist", "persist"])).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+  });
+
+  test("a mix of poll and persist origins across teams → mixed", () => {
+    expect(classifyFreezeCause(["poll", "persist"])).toBe(FLEET_FREEZE_CAUSE_MIXED);
+    expect(classifyFreezeCause(["persist", "poll", "persist"])).toBe(FLEET_FREEZE_CAUSE_MIXED);
+  });
 });
 
 describe("checkFleetFreeze", () => {
@@ -70,7 +113,9 @@ describe("checkFleetFreeze", () => {
     const opts = { teams: ["CTL", "ADV", "OTL"], isTeamFrozen: () => true, append };
 
     const r1 = checkFleetFreeze(opts);
-    expect(r1).toEqual({ frozen: true, emitted: "raised" });
+    // CTL-1628 r3: no getTeamOrigin passed → defaults to "poll" for every
+    // team → cause classifies as the documented all-poll double-outage story.
+    expect(r1).toEqual({ frozen: true, emitted: "raised", cause: FLEET_FREEZE_CAUSE_ALL_POLL });
     expect(isFleetFrozenRaised()).toBe(true);
     expect(lines).toHaveLength(1);
     expect(lines[0].attributes["event.name"]).toBe(ALERT_RAISED);
@@ -78,7 +123,7 @@ describe("checkFleetFreeze", () => {
 
     // Still frozen next pass → no duplicate emit.
     const r2 = checkFleetFreeze(opts);
-    expect(r2).toEqual({ frozen: true, emitted: null });
+    expect(r2).toEqual({ frozen: true, emitted: null, cause: null });
     expect(lines).toHaveLength(1);
   });
 
@@ -91,7 +136,7 @@ describe("checkFleetFreeze", () => {
     // ADV recovers → not all frozen → cleared.
     const frozenSet = new Set(["CTL"]);
     const r = checkFleetFreeze({ teams: ["CTL", "ADV"], isTeamFrozen: (t) => frozenSet.has(t), append });
-    expect(r).toEqual({ frozen: false, emitted: "cleared" });
+    expect(r).toEqual({ frozen: false, emitted: "cleared", cause: null });
     expect(lines).toHaveLength(2);
     expect(lines[1].attributes["event.name"]).toBe(ALERT_CLEARED);
     expect(isFleetFrozenRaised()).toBe(false);
@@ -110,14 +155,14 @@ describe("checkFleetFreeze", () => {
       isTeamFrozen: (t) => frozenSet.has(t),
       append: (l) => lines.push(l),
     });
-    expect(r).toEqual({ frozen: false, emitted: null });
+    expect(r).toEqual({ frozen: false, emitted: null, cause: null });
     expect(lines).toHaveLength(0);
   });
 
   test("empty registry from a CLOSED latch never raises (no teams to evaluate)", () => {
     const lines = [];
     const r = checkFleetFreeze({ teams: [], isTeamFrozen: () => true, append: (l) => lines.push(l) });
-    expect(r).toEqual({ frozen: false, emitted: null });
+    expect(r).toEqual({ frozen: false, emitted: null, cause: null });
     expect(lines).toHaveLength(0);
   });
 
@@ -134,7 +179,7 @@ describe("checkFleetFreeze", () => {
 
     // Registry momentarily unreadable → teams=[] → must NOT emit `cleared`.
     const r = checkFleetFreeze({ teams: [], isTeamFrozen: () => true, append });
-    expect(r).toEqual({ frozen: true, emitted: null }); // latch preserved
+    expect(r).toEqual({ frozen: true, emitted: null, cause: null }); // latch preserved
     expect(lines).toHaveLength(1); // no spurious cleared
     expect(isFleetFrozenRaised()).toBe(true);
 
@@ -161,7 +206,7 @@ describe("checkFleetFreeze", () => {
     // First post-restart check, still frozen: hydrate reads the marker → already
     // raised → NO second `raised` emitted.
     const r = checkFleetFreeze({ teams, isTeamFrozen: () => true, append });
-    expect(r).toEqual({ frozen: true, emitted: null });
+    expect(r).toEqual({ frozen: true, emitted: null, cause: null });
     expect(lines).toHaveLength(1); // still exactly one raised, no duplicate
     expect(isFleetFrozenRaised()).toBe(true); // hydrated from disk
 
@@ -185,5 +230,73 @@ describe("checkFleetFreeze", () => {
     const r = checkFleetFreeze({ teams: ["CTL"], isTeamFrozen: () => true, append: (l) => lines.push(l) });
     expect(r.emitted).toBe("raised");
     expect(lines).toHaveLength(1);
+  });
+
+  // CTL-1628 r3 (Codex #2960 round 3): before this fix, checkFleetFreeze had
+  // no way to distinguish WHY every team was frozen — the raised event always
+  // used the same "replica or linearis" reason, even when the true cause was
+  // a local eligible-set disk fault affecting every team. getTeamOrigin lets
+  // the caller (monitor.mjs's reconcileAll) thread each team's actual origin.
+  test("getTeamOrigin all \"poll\" → cause all-poll-failing, reason names replica/linearis", () => {
+    const lines = [];
+    const append = (l) => lines.push(JSON.parse(l));
+    const r = checkFleetFreeze({
+      teams: ["CTL", "ADV"],
+      isTeamFrozen: () => true,
+      getTeamOrigin: () => "poll",
+      append,
+    });
+    expect(r.cause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+    expect(lines[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+    expect(lines[0].body.payload.reason).toMatch(/replica or linearis/);
+    expect(lines[0].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+  });
+
+  test("getTeamOrigin all \"persist\" → cause all-persist-failing, reason names a local filesystem fault, not replica/linearis", () => {
+    const lines = [];
+    const append = (l) => lines.push(JSON.parse(l));
+    const r = checkFleetFreeze({
+      teams: ["CTL", "ADV"],
+      isTeamFrozen: () => true,
+      getTeamOrigin: () => "persist",
+      append,
+    });
+    expect(r.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    expect(lines[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    expect(lines[0].body.payload.reason).toMatch(/local filesystem fault/);
+    expect(lines[0].body.payload.reason).not.toMatch(/replica or linearis/);
+    expect(lines[0].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+  });
+
+  test("getTeamOrigin mixed across teams → cause mixed", () => {
+    const lines = [];
+    const append = (l) => lines.push(JSON.parse(l));
+    const originByTeam = { CTL: "poll", ADV: "persist" };
+    const r = checkFleetFreeze({
+      teams: ["CTL", "ADV"],
+      isTeamFrozen: () => true,
+      getTeamOrigin: (t) => originByTeam[t],
+      append,
+    });
+    expect(r.cause).toBe(FLEET_FREEZE_CAUSE_MIXED);
+    expect(lines[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_MIXED);
+  });
+
+  test("no getTeamOrigin provided → defaults every team to \"poll\" (pre-r3 behavior preserved)", () => {
+    const lines = [];
+    const append = (l) => lines.push(JSON.parse(l));
+    const r = checkFleetFreeze({ teams: ["CTL"], isTeamFrozen: () => true, append });
+    expect(r.cause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+  });
+
+  test("cleared transitions never carry a cause (cause is a raised-only classification)", () => {
+    const lines = [];
+    const append = (l) => lines.push(JSON.parse(l));
+    checkFleetFreeze({ teams: ["CTL"], isTeamFrozen: () => true, getTeamOrigin: () => "persist", append });
+    const r = checkFleetFreeze({ teams: ["CTL"], isTeamFrozen: () => false, append });
+    expect(r.emitted).toBe("cleared");
+    expect(r.cause).toBeNull();
+    expect(lines[1].body.payload.cause).toBeNull();
+    expect(lines[1].attributes["alert.cause"]).toBeUndefined();
   });
 });
