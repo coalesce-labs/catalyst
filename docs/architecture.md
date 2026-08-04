@@ -98,19 +98,23 @@ outage (heartbeat read throws / everyone looks dead) degrades to the **full rost
 only its own HRW slice — never double-acts). The Linear-CAS claim (`cluster-claim.mjs` soft-CAS on
 `catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains the transition-race serializer.
 
-**Worker signal projection (CTL-532; ADR-018 Phase 1 retired, CTL-1628).** Per-worker
-`workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process locking; ADR-018
-originally proposed closing that gap via a `worker.state_changed` command event and a JSON shadow
-file with a three-phase dual-write cutover. That JSON shadow-write mechanism stalled at 1 of 7
-writers migrated and was retired as dead weight (zero readers) rather than completed. **CTL-532**
-built a separate, live *observational* projection: the broker folds every event on the log (not
-just a dedicated command event) into a pure `reduceWorkerStateEvent` reducer via
-`projectWorkerStateEvent`, and upserts the result into a SQLite `worker_state` table
-(`broker/broker-state.mjs`) — one row per `(orchestrator, ticket)` with phase, status, PR number,
-and revive count. The upsert is order-independent for distinct timestamps; an exact `eventTs` tie
-is last-write-wins by processing order, not by occurrence order. It only inserts into that side
-table; it never reads or writes the canonical `workers/<TICKET>.json`, so the original 7-writer
-race is still open — tracked as CTL-1631. See ADR-018 for the full history.
+**Worker signal projection (CTL-532 = ADR-018 Phase 3, shipped; Phase 1 retired, CTL-1628).**
+Per-worker `workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process
+locking; ADR-018 originally proposed closing that gap via a `worker.state_changed` command event and
+a JSON shadow file with a three-phase dual-write cutover. Phase 1 (the JSON shadow-write mechanism)
+stalled at 1 of 7 writers migrated and was retired as dead weight — its only reader was the manual
+`orchestrate-shadow-diff` verification CLI, removed with it; nothing operational ever consumed the
+shadow files. Phase 2 (the direct-write cutover) never happened and is now moot. Phase 3 — as
+originally scoped, a `(orch_id,ticket)` SQLite mirror — **did ship**, as **CTL-532**: the broker
+folds every event on the log (not just a dedicated command event) into a pure
+`reduceWorkerStateEvent` reducer via `projectWorkerStateEvent`, and upserts the result into a SQLite
+`worker_state` table (`broker/broker-state.mjs`) — one row per `(orchestrator, ticket)` with phase,
+status, PR number, and revive count. Only `phase`/`status` (and the `last_event_id`/`last_event_ts`
+watermark itself) are gated on that watermark — order-independent for distinct timestamps,
+last-write-wins by processing order on an exact tie; `pr_number` (COALESCE) and `revive_count` (MAX)
+apply unconditionally on every upsert regardless of event order. The table is purely observational:
+it never reads or writes the canonical `workers/<TICKET>.json`, so the original 7-writer race is
+still open — tracked as CTL-1631. See ADR-018 for the full history.
 
 ## Deployment Mode (CTL-1617)
 
