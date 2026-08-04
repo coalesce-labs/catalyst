@@ -59,6 +59,9 @@ import {
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
   holisticBoardHealthAct,
+  clearDispositionEmit, // Codex #2970 post-merge round 4: expected-disposition-guarded dedup reset
+  __seedDispositionEmitForTest,
+  __readDispositionEmitForTest,
   __resetForTests,
   __getRunningOpts,
   // CTL-705: Phase 2 helpers
@@ -12300,6 +12303,37 @@ describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () 
       (e) => e.toDisposition === "needs-human" && e.ticket === "CTL-764"
     );
     expect(needsHuman).toBeDefined();
+  });
+
+  // Codex #2970 post-merge round 4: clearDispositionEmit(ticket, expectedDisposition)
+  // must only clear the live entry when it MATCHES what the caller believes it just
+  // cleared — an unconditional clear would corrupt an UNRELATED disposition (e.g. the
+  // daemon calling it for "needs-human" on a ticket whose live entry is actually
+  // "blocked" or "queued"). Seeds lastDispositionEmit directly (via the test-only
+  // helpers) rather than driving a full schedulerTick escalation, which needs
+  // stall-threshold setup shared across this describe block and is not reliably
+  // reproducible standalone.
+  test("clearDispositionEmit only resets a MATCHING dedup entry, never an unrelated one", () => {
+    __seedDispositionEmitForTest("CTL-1", "needs-human");
+
+    // Wrong expected disposition — must be a no-op against the live "needs-human" entry.
+    clearDispositionEmit("CTL-1", "blocked");
+    expect(__readDispositionEmitForTest("CTL-1")).toBe("needs-human");
+
+    // Correct expected disposition — clears it.
+    clearDispositionEmit("CTL-1", "needs-human");
+    expect(__readDispositionEmitForTest("CTL-1")).toBeNull();
+  });
+
+  test("clearDispositionEmit never touches an UNRELATED ticket's entry", () => {
+    __seedDispositionEmitForTest("CTL-1", "needs-human");
+    __seedDispositionEmitForTest("CTL-2", "blocked");
+
+    clearDispositionEmit("CTL-1", "needs-human");
+
+    expect(__readDispositionEmitForTest("CTL-1")).toBeNull();
+    // CTL-2's unrelated "blocked" entry must survive untouched.
+    expect(__readDispositionEmitForTest("CTL-2")).toBe("blocked");
   });
 
   test("clear needs-human on terminal Done emits worker.transition(toDisposition=null)", () => {

@@ -561,7 +561,12 @@ export async function handleCommentWake(
     // deleted that marker, so they'd never even attempt the clear).
     if (clearedNeedsHuman) {
       try {
-        clearDispositionEmit(ticket);
+        // Codex #2970 post-merge round 4: clearedNeedsHuman is true on the
+        // idempotent already-absent case too — a managed ticket whose CURRENT
+        // disposition is "blocked"/"queued" (needs-human never applied) still
+        // reaches here. Pass "needs-human" so clearDispositionEmit only resets
+        // when the map's live entry actually matches, never an unrelated one.
+        clearDispositionEmit(ticket, "needs-human");
       } catch {
         /* observability only */
       }
@@ -680,6 +685,12 @@ export async function handleCommentWake(
     } catch {
       /* fail-open */
     }
+    // Codex #2970 post-merge round 3: needsInputWroteEarly is declared once, BEFORE
+    // this loop — with multiple phase-*.json signals in needs-input, it would OR
+    // into every iteration's needsInputRemoved unchanged, turning one Linear write
+    // into one emission per matching signal. Consume the credit here, on the
+    // iteration that used it, so it can fund at most one emission across the loop.
+    needsInputWroteEarly = false;
     // CTL-764 finding 11: record the needs-input→cleared resolution in the canonical
     // worker.transition stream. scheduler.mjs owns the park/apply emission; the clear
     // is emitted here (the daemon removes the durable label out-of-band and redispatches
@@ -703,7 +714,9 @@ export async function handleCommentWake(
     // not write-only, so a cross-host clear resets this process's dedup entry too.
     if (needsInputConfirmed) {
       try {
-        clearDispositionEmit(ticket);
+        // Codex #2970 post-merge round 4: same expected-disposition guard as the
+        // needs-human site above.
+        clearDispositionEmit(ticket, "needs-input");
       } catch {
         /* observability only */
       }
