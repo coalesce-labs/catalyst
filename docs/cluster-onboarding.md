@@ -131,6 +131,13 @@ Check the onboard script's verification output:
 
 To activate mini-2 and begin accepting work:
 
+**Prerequisite:** the steps below assume a local clone of the private `catalyst-cluster` repo
+already exists on the machine you're editing from, at the default `CATALYST_CLUSTER_DIR` location
+(`~/catalyst/catalyst-cluster`) — see the [config-mirror contract](../website/src/content/docs/reference/cluster-config-mirror.md).
+Like the age key, `catalyst-join` does **not** clone this repo (see the Scope note in
+"Provisioning the shared cloud token" below); it is a pre-existing prerequisite provisioned once,
+separately, on each node that needs write access to the roster.
+
 1. **Add to committed roster:** in the private `catalyst-cluster` repo, add the node's name to
    `cluster.json` `roster[]` and push:
    ```bash
