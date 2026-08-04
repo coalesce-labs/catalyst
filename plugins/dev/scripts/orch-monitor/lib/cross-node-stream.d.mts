@@ -12,8 +12,10 @@ export type TailRoute =
   | { mode: "unroutable"; host: string };
 
 /**
- * The committed cluster roster from <repoRoot>/.catalyst/hosts.json. An absent /
- * malformed / empty roster collapses to [] (the single-host default). Never throws.
+ * The cluster roster from the catalyst-cluster control-plane repo's
+ * cluster.json.roster (CTL-1274/CTL-1628 — the retired per-repo
+ * .catalyst/hosts.json is never read). An absent / malformed / too-new /
+ * empty roster collapses to [] (the single-host default). Never throws.
  */
 export function readClusterRoster(deps?: {
   env?: NodeJS.ProcessEnv;

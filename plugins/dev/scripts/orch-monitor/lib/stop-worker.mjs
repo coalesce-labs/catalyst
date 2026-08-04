@@ -17,9 +17,10 @@
 //      <ticket> <generation>, exit FENCE_STALE_EXIT=10 ⇒ stale). A stop request
 //      that originates from a partitioned / stale-generation node is REJECTED so a
 //      zombie node can't kill a worker the cluster has already taken over.
-//      SINGLE-HOST (hosts.json absent / length ≤ 1) ⇒ the fence-check is an
-//      identity NO-OP pass: there is no other node, so the stop proceeds normally
-//      with ZERO added latency and no subprocess (the single-node MVP path).
+//      SINGLE-HOST (the catalyst-cluster repo's cluster.json roster absent /
+//      length ≤ 1) ⇒ the fence-check is an identity NO-OP pass: there is no
+//      other node, so the stop proceeds normally with ZERO added latency and no
+//      subprocess (the single-node MVP path).
 //   3. The actual kill wraps `claude stop <shortId>` where shortId is the 8-char
 //      form derived from the run signal's bg_job_id (the daemon's existing
 //      termination primitive — claude-agents.mjs::claudeStop; `claude stop`
@@ -43,8 +44,10 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { shortIdFromSessionId } from "../../execution-core/claude-ids.mjs";
+import { schemaCompat } from "../../execution-core/config-schema.mjs";
 import { readPhaseSignalVerbatim } from "./ticket-runs.mjs";
 
 // Mirror cluster-claim.mjs's exit contract: the fence CLI exits 10 when the
@@ -64,29 +67,43 @@ const CLUSTER_CLAIM_CLI = fileURLToPath(
 const FENCE_TIMEOUT_MS = Number(process.env.EXECUTION_CORE_CLAIM_TIMEOUT_MS) || 15_000;
 
 // ── single-host detection (the identity no-op gate) ──────────────────────────
-// readClusterHostCount — how many hosts are in the committed cluster roster
-// (<repoRoot>/.catalyst/hosts.json, a JSON array of host names). Mirrors
-// execution-core/config.mjs::getClusterHosts's tolerance: an absent / unreadable
-// / malformed / non-array / empty-array roster collapses to the SINGLE-HOST
-// default of 1. Kept LOCAL (not imported from config.mjs) so the orch-monitor
-// package stays self-contained and PR-order-independent; the externalities are
-// the env var + the file read, both injectable. Never throws.
+// readClusterHostCount — how many hosts are in the cluster roster, read from
+// the catalyst-cluster control-plane repo's cluster.json (`<clusterRepoDir>/
+// cluster.json`.roster, a JSON array of host names). CTL-1274 retired the
+// per-repo `.catalyst/hosts.json` roster file — this reader MUST NEVER touch
+// it. Mirrors execution-core/config.mjs's `readClusterRepoRoster` exactly:
+// same CATALYST_CLUSTER_DIR / CATALYST_DIR env resolution (CATALYST_CLUSTER_DIR
+// overrides; default `<CATALYST_DIR or ~/catalyst>/catalyst-cluster`), same
+// schemaCompat gate (a cluster.json whose schemaVersion is newer than this
+// stack supports is ignored — imported from the dep-free
+// execution-core/config-schema.mjs sibling leaf so the policy can't drift
+// between the two readers), same blank-filtering, collapsing to the
+// SINGLE-HOST default of 1 on absent / unreadable / malformed / non-array /
+// empty-array / too-new. Kept LOCAL (not importing execution-core/config.mjs
+// itself, which pulls in the pino logger and other daemon deps) so the
+// orch-monitor package stays self-contained and PR-order-independent; the
+// externalities are the env vars + the file read, both injectable. Never
+// throws.
 export function readClusterHostCount({
   env = process.env,
   read = readFileSync,
 } = {}) {
-  const cfgFile = env.CATALYST_CONFIG_FILE;
-  // <repoRoot>/.catalyst/config.json → <repoRoot>/.catalyst (else cwd/.catalyst)
-  const catalystDir = cfgFile ? resolve(cfgFile, "..") : resolve(process.cwd(), ".catalyst");
+  const catalystDir = env.CATALYST_DIR ?? resolve(homedir(), "catalyst");
+  const clusterDir = env.CATALYST_CLUSTER_DIR || resolve(catalystDir, "catalyst-cluster");
   try {
-    const raw = read(resolve(catalystDir, "hosts.json"), "utf8");
+    const raw = read(resolve(clusterDir, "cluster.json"), "utf8");
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      const hosts = parsed.filter((h) => typeof h === "string" && h.length > 0);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      schemaCompat(parsed.schemaVersion) !== "too-new" &&
+      Array.isArray(parsed.roster)
+    ) {
+      const hosts = parsed.roster.filter((h) => typeof h === "string" && h.length > 0);
       if (hosts.length > 0) return hosts.length;
     }
   } catch {
-    /* absent/malformed roster → single-host default */
+    /* absent/malformed/unreadable cluster repo → single-host default */
   }
   return 1;
 }
