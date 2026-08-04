@@ -7464,8 +7464,33 @@ const lastDispositionEmit = new Map();
 // ticket reaches terminal Done. This export lets the daemon reset the entry
 // immediately after ITS OWN confirmed clear, closing the window without waiting on
 // Done or a process restart.
-export function clearDispositionEmit(ticket) {
+//
+// Codex #2970 post-merge round 4: `expectedDisposition` is REQUIRED, not optional.
+// The daemon calls this whenever ITS OWN removeLabel(ticket, "needs-human") comes
+// back confirmed — including the idempotent case where needs-human was never
+// applied to this ticket at all (e.g. its current disposition is "blocked" or
+// "queued"). An unconditional `.set(ticket, null)` would overwrite that UNRELATED
+// entry with null, corrupting the tick-converged dedup for a disposition this call
+// never touched. Only clear when the map's CURRENT value for the ticket matches
+// what this caller believes it just cleared — a mismatch (including "never seen
+// this ticket") is a no-op, never a write.
+export function clearDispositionEmit(ticket, expectedDisposition) {
+  if (lastDispositionEmit.get(ticket) !== expectedDisposition) return;
   lastDispositionEmit.set(ticket, null);
+}
+
+// __seedDispositionEmitForTest / __readDispositionEmitForTest — Codex #2970
+// post-merge round 4: a direct, isolated way to unit-test
+// clearDispositionEmit's expected-disposition guard without driving a full
+// schedulerTick escalation (which needs stall-threshold/marker setup shared
+// across the describe block and is not reliably reproducible standalone —
+// verified: the existing terminal-sweep escalation test fails when run in
+// isolation too). Test-only; not part of the public contract.
+export function __seedDispositionEmitForTest(ticket, value) {
+  lastDispositionEmit.set(ticket, value);
+}
+export function __readDispositionEmitForTest(ticket) {
+  return lastDispositionEmit.get(ticket);
 }
 
 // CTL-1064: Pass 0u throttle — epoch-ms of the last unstuck-sweep run.

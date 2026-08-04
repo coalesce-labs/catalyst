@@ -1739,6 +1739,48 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(needsInputClears).toHaveLength(1);
   });
 
+  // Codex #2970 post-merge round 3: needsInputWroteEarly was declared once,
+  // BEFORE the per-signal loop, and never reset — with multiple needs-input
+  // signals for the same ticket, that one early Linear write funded a SEPARATE
+  // emission per signal instead of exactly one.
+  test("emits exactly ONE needs-input clear when the ticket has multiple needs-input signals and the early removal earned the write", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-MULTI", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    writeSignal(orch, "PROJ-MULTI", "verify", {
+      status: "needs-input",
+      parkedFrom: "verify",
+    });
+    const transitions = [];
+    let needsInputCalls = 0;
+    await handleCommentWake(
+      { ticket: "PROJ-MULTI", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) => {
+          if (label === "needs-human") return { removed: true, wrote: false };
+          // The FIRST needs-input call (the earlier needs-human-block cleanup)
+          // performs the real write; every subsequent call — one per signal
+          // file the per-signal loop visits — finds it already gone.
+          needsInputCalls += 1;
+          return needsInputCalls === 1
+            ? { removed: true, wrote: true }
+            : { removed: true, wrote: false };
+        },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const needsInputClears = transitions.filter(
+      (e) => e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(needsInputClears).toHaveLength(1);
+  });
+
   // Codex #2970 post-merge round 2, extended to needs-input for consistency with
   // the needs-human fix: when NEITHER of this invocation's two removeLabel calls
   // performed the write (a third host already cleared it before either ran), the
