@@ -446,43 +446,54 @@ else
 		echo "  Running: make setup"
 		make setup || _worktree_install_rollback
 	elif [ -f "package.json" ]; then
-		# CTL-1628 post-merge (Codex #2948): a bun workspace root (this repo's
-		# own package.json, or any other) declares "workspaces" AND shows
-		# actual bun evidence — npm ignores bun.lock and would write
-		# package-lock.json debris into a bun-managed tree, so THAT
-		# combination is bun-only. "workspaces" alone is package-manager
-		# neutral (an npm/yarn/pnpm monorepo declares it too) — a
-		# package-lock.json-based npm workspace, with no bun.lock and no
-		# "packageManager": "bun@..." field, keeps the npm fallback below.
-		IS_BUN_WORKSPACE=false
-		if jq -e '.workspaces' package.json >/dev/null 2>&1; then
-			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null)
-			if [ -f "bun.lock" ] || [ -f "bun.lockb" ] || [[ "$PACKAGE_MANAGER_FIELD" == bun@* ]]; then
-				IS_BUN_WORKSPACE=true
-			fi
+		# CTL-1628 post-merge (Codex #2948 round 4): BUN EVIDENCE alone (a
+		# bun.lock/bun.lockb, or "packageManager" naming bun) selects the bun
+		# path — independent of whether package.json also declares
+		# "workspaces". Round 3 required "workspaces" AND bun evidence, which
+		# meant a single-package bun project (bun.lock, no "workspaces" key —
+		# most bun apps aren't monorepos) fell through to npm and wrote
+		# package-lock.json debris into a bun-managed tree. "workspaces" is
+		# package-manager-neutral either way (an npm/yarn/pnpm monorepo
+		# declares it too), so it was never the right signal to gate on; only
+		# bun evidence is. The bun-absent warn+skip below applies identically
+		# to a workspace root and a single-package project — no need to
+		# distinguish the two once bun evidence itself is the sole gate.
+		HAS_BUN_LOCK=false
+		[ -f "bun.lock" ] || [ -f "bun.lockb" ] && HAS_BUN_LOCK=true
+		PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null)
+		HAS_BUN_EVIDENCE=false
+		if [ "$HAS_BUN_LOCK" = true ] || [[ "$PACKAGE_MANAGER_FIELD" == bun@* ]]; then
+			HAS_BUN_EVIDENCE=true
 		fi
-		# CTL-1628 post-merge (Codex #2948 round 3): gate the bun-install branch
-		# on IS_BUN_WORKSPACE too, not just "bun happens to be on PATH" — an
-		# npm/yarn project on a host that ALSO has bun installed used to enter
-		# this branch and hard-fail on `--frozen-lockfile` (nothing to freeze
-		# against, no bun.lock in an npm-managed tree), rolling the worktree
-		# back where the old plain install would have succeeded via npm.
-		if [ "$IS_BUN_WORKSPACE" = true ]; then
+		if [ "$HAS_BUN_EVIDENCE" = true ]; then
 			if command -v bun >/dev/null 2>&1; then
-				# CTL-1628: root package.json (the bun workspace, Phase A1) arms this
-				# branch on every worktree creation. Use --frozen-lockfile so the
-				# fresh worktree installs exactly what's committed in bun.lock
-				# rather than silently re-resolving and rewriting the lockfile
-				# before the worker's first commit (which could otherwise ride
-				# unrelated lockfile drift into the ticket's diff).
-				echo "  Running: bun install --frozen-lockfile"
-				bun install --frozen-lockfile || _worktree_install_rollback
+				if [ "$HAS_BUN_LOCK" = true ]; then
+					# CTL-1628: use --frozen-lockfile so the fresh worktree installs
+					# exactly what's committed in bun.lock rather than silently
+					# re-resolving and rewriting the lockfile before the worker's
+					# first commit (which could otherwise ride unrelated lockfile
+					# drift into the ticket's diff).
+					echo "  Running: bun install --frozen-lockfile"
+					bun install --frozen-lockfile || _worktree_install_rollback
+				else
+					# No lock committed yet (bun evidence is only the
+					# "packageManager" field) — nothing to freeze against, so a
+					# plain install is correct here rather than a guaranteed
+					# --frozen-lockfile failure.
+					echo "  Running: bun install"
+					bun install || _worktree_install_rollback
+				fi
 			else
-				echo -e "${YELLOW}⚠️  bun not found on PATH — this is a bun workspace root${NC}"
-				echo "  (package.json declares \"workspaces\"). Skipping auto-install rather"
-				echo "  than falling back to npm, which ignores bun.lock and writes"
-				echo "  package-lock.json debris into a bun-managed workspace tree."
-				echo "  Install bun (https://bun.sh) and run 'bun install --frozen-lockfile'"
+				echo -e "${YELLOW}⚠️  bun not found on PATH — this is a bun-managed project${NC}"
+				echo "  (bun.lock/bun.lockb present, or \"packageManager\" names bun)."
+				echo "  Skipping auto-install rather than falling back to npm, which"
+				echo "  ignores bun.lock and writes package-lock.json debris into a"
+				echo "  bun-managed tree."
+				if [ "$HAS_BUN_LOCK" = true ]; then
+					echo "  Install bun (https://bun.sh) and run 'bun install --frozen-lockfile'"
+				else
+					echo "  Install bun (https://bun.sh) and run 'bun install'"
+				fi
 				echo "  in the worktree manually."
 			fi
 		else
