@@ -585,10 +585,13 @@ emitting it during a mixed-version fleet rollout.
 }
 ```
 
-`reduceWorkerStateEvent` reads `attributes."catalyst.orchestrator.id"` (falls back to
-`body.payload.orchestrator`), `attributes."catalyst.worker.ticket"` (falls back to
-`body.payload.ticket`), and `body.payload.state` (status/phase/PR-number/revive-count extracted
-from it) — see `broker/broker-state.mjs` for the resulting `worker_state` row shape.
+`reduceWorkerStateEvent` reads the orchestrator via `localOrchestrator`: the legacy top-level
+`orchestrator` field, falling back to `attributes."catalyst.orchestrator.id"` — **not**
+`body.payload.orchestrator`; a payload-only orchestrator is silently dropped. Ticket comes from
+`localTicket`: `attributes."catalyst.worker.ticket"`, falling back to
+`attributes."linear.issue.identifier"`, then `body.payload.ticket`, then `body.payload.worker`.
+`body.payload.state` supplies status/phase/PR-number/revive-count (extracted from it) — see
+`broker/broker-state.mjs` for the resulting `worker_state` row shape.
 
 ---
 
