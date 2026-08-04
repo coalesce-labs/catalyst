@@ -455,6 +455,11 @@ export function assembleBoardState({
       maxParallel: capacity?.maxParallel ?? 0,
       liveCount: capacity?.liveCount ?? 0,
       freeSlots: capacity?.freeSlots ?? 0,
+      // CTL-1607: the scheduler's new-work admission gate outcome for THIS tick
+      // (!livenessFresh || draining). Carried so buildBoardScanEvent can collapse
+      // the PUBLISHED slotFree to 0 on a node that will not admit — the emitted
+      // census is observational only; invariants read the un-gated freeSlots above.
+      admissionGated: !!capacity?.admissionGated,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
     // CTL-1432 (B2/B3): deferred board-health anchor candidates + the sanctioned
@@ -1349,6 +1354,30 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
     skippedReason: act?.skippedReason ?? (act?.dispatched === true ? null : "shadow"),
     skippedReasonNoClock: act?.skippedReasonNoClock === true, // CTL-1610
   };
+  // CTL-1607 (Codex #2985 P2 ×3): per-host slot census, corrected so a fleet
+  // consumer can SUM these across hosts without under/over-counting. Null when no
+  // board was threaded (back-compat). Three corrections vs the raw capacity snap:
+  //  · in_use is derived from FREE (capacity − rawFree), so it reflects the FULL
+  //    occupancy basis the scheduler admits against — liveCount + queued board-
+  //    health delegates + in-process SDK workers — not just live bg jobs. (Raw
+  //    board.capacity.freeSlots is already computeFreeSlots(maxParallel,
+  //    occupiedCount), so capacity − rawFree == occupiedCount.)
+  //  · a board-health delegate dispatched THIS scan reserves a slot the scheduler
+  //    charges immediately after this pass returns (scheduler.mjs: occupiedCount++
+  //    on act.dispatched), so free is debited (and in_use credited) by it here.
+  //  · a draining or stale-liveness node admits no new work — the scheduler's
+  //    admission gate collapses its free slots to 0 (`livenessFresh && !draining`)
+  //    — so its PUBLISHED free collapses to 0 too (admissionGated, threaded on
+  //    board.capacity by the scheduler).
+  const _slotCap = board?.capacity?.maxParallel ?? null;
+  const _rawFree = board?.capacity?.freeSlots ?? null;
+  const _slotGated = board?.capacity?.admissionGated === true;
+  const _slotReserved = actOutcome.dispatched ? 1 : 0;
+  const slotFree = _rawFree == null ? null : _slotGated ? 0 : Math.max(0, _rawFree - _slotReserved);
+  const slotInUse =
+    _slotCap == null || _rawFree == null
+      ? null
+      : Math.min(_slotCap, Math.max(0, _slotCap - _rawFree) + _slotReserved);
   return {
     type: "recovery.board-scan",
     ticket: null, // board/fleet-scoped → event.label:null; the board reader ignores it (correct)
@@ -1373,13 +1402,14 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       // CTL-1435 (C1): 0/1 so Grafana can chart the dispatch RATE alongside the
       // proposal counts (proposed-vs-dispatched is the actuation-liveness signal).
       actDispatched: actOutcome.dispatched ? 1 : 0,
-      // CTL-1607: per-host slot census so fleet capacity is visible off-host. Null
-      // when no board was threaded (back-compat). NOTE: slotFree is occupancy-derived
-      // (>= slotCapacity - slotInUse when queued/SDK workers exist), so a fleet
-      // consumer must SUM recovery.slot.free directly, never capacity - in_use.
-      slotCapacity: board?.capacity?.maxParallel ?? null,
-      slotInUse: board?.capacity?.liveCount ?? null,
-      slotFree: board?.capacity?.freeSlots ?? null,
+      // CTL-1607: per-host slot census so fleet capacity is visible off-host
+      // (computed above; occupancy-derived in_use, delegate-debited + gate-collapsed
+      // free). A fleet consumer SUMs slotFree directly — never capacity − in_use:
+      // on a draining/stale node free is gate-collapsed to 0 while in_use still
+      // reports actual occupancy, so capacity − in_use overstates admittable free.
+      slotCapacity: _slotCap,
+      slotInUse,
+      slotFree,
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
       ),
