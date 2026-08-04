@@ -661,7 +661,12 @@ emitting it during a mixed-version fleet rollout.
 
 #### worker.transition fields (CTL-764)
 
-Emitted by `recordTransition` in `scheduler.mjs` (sync chokepoint). Dims are **attributes** (not
+Emitted by two producers: `recordTransition` in `scheduler.mjs` (the sync chokepoint for
+scheduler-owned transitions), and the daemon's `handleCommentWake` (CTL-768,
+`execution-core/daemon.mjs`), which calls `appendWorkerTransitionEvent` directly at two sites — the
+`needs-human`→cleared resolution on a human reply, and the `needs-input`→cleared resolution after a
+comment-driven wake — bypassing `recordTransition` because the scheduler never observes those edges
+(the daemon removes the durable label out-of-band and redispatches). Dims are **attributes** (not
 `body.payload`) because `otel-forward` strips `body.payload` before forwarding off-machine.
 
 | attribute                          | type    | values / notes                                                              |

@@ -453,6 +453,14 @@ comment says why: "scheduler.mjs owns the park/apply emission; the clear is emit
 removes the durable label out-of-band and redispatches — the scheduler never observes this edge)."
 This is a deliberate, self-documented second producer, not a gap in the chokepoint design.
 
+**A separate escalation path emits no `worker.transition` at all.** Pass 0w's hung-worker
+escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
+progress-watchdog pass) applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner`
+(`label-guard.mjs`) but never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other
+event emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record.
+Unlike the daemon's comment-wake sites above, this is a genuine coverage gap, not an alternate
+producer.
+
 The standalone `recordWorkerTransition` module (`record-worker-transition.mjs`) — an extracted,
 unit-tested scaffold for sinks 1–3 only (Linear status, disposition label, event log) whose own doc
 comment flagged sinks 4–5 and full call-site wiring as unfinished ("Phase 5 will wire the production

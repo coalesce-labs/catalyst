@@ -514,9 +514,10 @@ resolvable stalls consuming attention); leave re-engagement to the inference eng
 
 ## ADR-026: Two-Axis Worker State Model + worker-status Label Group (CTL-764)
 
-**Decision** — all **scheduler-owned** worker state transitions are consolidated behind a single
-chokepoint and a workspace-scoped, single-valued `worker-status` Linear label group carrying worker
-_disposition_ independently of _pipeline stage_. The live chokepoint is the **inline
+**Decision** — worker state transitions **that the scheduler records** are consolidated behind a
+single chokepoint and a workspace-scoped, single-valued `worker-status` Linear label group carrying
+worker _disposition_ independently of _pipeline stage_ (known gaps in that coverage are listed
+below). The live chokepoint is the **inline
 `recordTransition`** function inside `scheduler.mjs`'s `schedulerTick` — not the standalone
 `recordWorkerTransition` module (`record-worker-transition.mjs`) named in this ADR's original
 design: that module's own doc comment declared only three of the eventual five sinks (Sink 1 Linear
@@ -535,8 +536,15 @@ clearing a stale `needs-human` marker on human reply, and clearing `needs-input`
 comment-driven wake — bypassing `recordTransition` entirely; its own code comment explains why:
 "scheduler.mjs owns the park/apply emission; the clear is emitted here (the daemon removes the
 durable label out-of-band and redispatches — the scheduler never observes this edge)." This is a
-deliberate, self-documented second producer. See "Two-axis worker state & the recordWorkerTransition
-chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
+deliberate, self-documented second producer.
+
+**A separate escalation path emits no `worker.transition` at all.** Pass 0w's hung-worker escalation
+(`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s progress-watchdog pass)
+applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) but never
+calls `recordTransition`, `appendWorkerTransitionEvent`, or any other event emitter anywhere in that
+path — a real Axis-2 transition with no `worker.transition` record. Unlike the daemon's comment-wake
+sites above, this is a genuine coverage gap, not an alternate producer. See "Two-axis worker state &
+the recordWorkerTransition chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
 
 **Two orthogonal axes (never blurred):**
 
@@ -569,10 +577,12 @@ merged axes into a single status enum (rejected: pipeline stage and disposition 
 both need independent observability); async `recordWorkerTransition` only (rejected: `schedulerTick`
 is sync; async would require a separate flush loop with new failure modes).
 
-**Consequences** — every transition fans out to five sinks (Linear Status, label, event log, OTLP
-via otel-forward, optional broker table); all fail-open. The HUD capacity header gains
-per-disposition buckets and triage is carved out of `maxParallel` counting. AGENTS.md /
-architecture.md carry the two-axis model as first-class concepts.
+**Consequences** — every scheduler-owned transition fans out to four **live** sinks (Linear Status,
+label, event log, OTLP via otel-forward); all fail-open. A fifth sink (an optional broker
+`ticket_state_transitions` table, CTL-764 Phase 10) was designed but never implemented — no schema,
+writer, or broker consumer exist for it. The HUD capacity header gains per-disposition buckets and
+triage is carved out of `maxParallel` counting. AGENTS.md / architecture.md carry the two-axis model
+as first-class concepts.
 
 ## ADR-027: Browser automation stays local — cloud browser backends rejected (2026-07-25)
 
