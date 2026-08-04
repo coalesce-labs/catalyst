@@ -569,11 +569,16 @@ is always readable regardless of which team's ticket is in flight. Exclusive gro
 single-value; the daemon removes stale members before applying a new one.
 
 **Precedence** — `needs-human > needs-input > blocked > queued > none`. `needs-human` is sticky
-(applied by `labelOnce`, NOT tick-converged) and cleared only at explicit resolution (Done or
-terminal-sweep). `queued`/`blocked`/`needs-input` are tick-converged (re-derived on diff each tick).
+(applied by `labelOnce`, NOT tick-converged) and cleared only at explicit resolution.
+`queued`/`blocked`/`needs-input` are tick-converged (re-derived on diff each tick).
 
-**Resolution-gated clearing** — `clearStalledLabel`'s `onRemoved` callback fires only on confirmed
-Linear label removal, preventing false-positive "cleared" events on API failures.
+**Resolution-gated clearing — TWO removal paths (Codex #2970 round 5).** `needs-human` is removed
+only by an explicit, confirmed-removal signal, and there are two: (1) `clearStalledLabel`'s
+`onRemoved` callback, fired only on confirmed Linear label removal at scheduler-side resolution
+points (Done / terminal-sweep / no-stall-clear), preventing false-positive "cleared" events on API
+failures; and (2) the daemon's `handleCommentWake` needs-human clear on a managed ticket's confirmed
+human reply — a write-gated, emission-carrying removal via `removeLabel` directly (not
+`clearStalledLabel`), documented in the producer-split paragraph above.
 
 **`waiting` → `queued` rename** — the prior `waiting` label was renamed to `queued` to align with
 the disposition vocabulary. Back-compat: legacy `waiting` labels map to `queued` in the HUD and

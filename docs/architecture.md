@@ -419,15 +419,26 @@ Every worker ticket has **two orthogonal axes** — never blurred:
   | `queued`      | converger (admission gate, tick-converged)          | pickup / Done                     |
   | `blocked`     | converger (dependency not terminal, tick-converged) | dep becomes terminal / Done       |
   | `needs-input` | daemon `handleCommentWake` (worker paused, CTL-768) | human reply                       |
-  | `needs-human` | `labelOnce` (sticky — NOT tick-converged)           | `clearStalledLabel` on resolution |
+  | `needs-human` | `labelOnce` (sticky — NOT tick-converged)           | two paths — see below             |
 
 **Precedence** (only one label at a time): `needs-human > needs-input > blocked > queued > none`.
 `needs-human` is **sticky** — it is never included in `TICK_CONVERGED_DISPOSITIONS` and only cleared
-at explicit resolution (Done or terminal-sweep-clear), not on steady-state ticks.
+at explicit resolution, not on steady-state ticks.
 
-**Resolution-gated clearing** — tick-converged labels (`queued`/`blocked`/`needs-input`) are
-re-derived on every tick and applied/removed on diff; `needs-human` is removed only by
-`clearStalledLabel`'s `onRemoved` callback which fires only on confirmed Linear label removal.
+**Resolution-gated clearing — TWO removal paths for `needs-human` (Codex #2970 round 5).**
+Tick-converged labels (`queued`/`blocked`/`needs-input`) are re-derived on every tick and
+applied/removed on diff. `needs-human` is different: it is removed only by an explicit,
+confirmed-removal signal, and there are two of those, not one:
+1. **`clearStalledLabel`'s `onRemoved` callback**, fired only on a confirmed Linear label removal at
+   scheduler-side resolution points (terminal-done-clear, terminal-sweep-clear, no-stall-clear).
+2. **The daemon's `handleCommentWake` needs-human clear** (CTL-1612/#2970) — a *write-gated*,
+   *emission-carrying* removal on a managed ticket's confirmed human reply. It calls `removeLabel`
+   directly (not `clearStalledLabel`), only treats the removal as genuine when the call performed a
+   real write (not a no-op re-check), emits the `worker.transition` clear itself
+   (`appendWorkerTransitionEvent`, bypassing `recordTransition`), and resets the scheduler's
+   in-process `lastDispositionEmit` dedup entry (`clearDispositionEmit`) so the shared chokepoint's
+   only-on-change guard doesn't swallow a later genuine re-escalation. See the producer-split
+   paragraph below for why this path exists separately from `clearStalledLabel`.
 
 Worker transitions **originating from the scheduler** are recorded at its transition sites,
 coordinated around a single **inline `recordTransition` chokepoint** inside `schedulerTick`. That
