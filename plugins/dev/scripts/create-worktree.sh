@@ -542,31 +542,133 @@ else
 		# by us) directory an attacker cannot have pre-planted a config
 		# into. Trap-cleaned on EXIT so an interrupted sniff doesn't leak
 		# the scratch dir; the trap is cleared right after we clean up
-		# normally so it doesn't linger for the rest of the script. If
-		# mktemp itself fails (disk full, permissions), skip the bun -e
-		# attempt entirely rather than falling back to an untrusted cwd —
-		# PACKAGE_MANAGER_FIELD stays empty, same graceful-degrade posture
-		# as every other tier here.
+		# normally so it doesn't linger for the rest of the script.
+		#
+		# CTL-1628 post-merge (Codex #2967 post-merge, round 10): two
+		# follow-ups on round 9's mktemp:
+		#   1. A bare `mktemp -d` resolves under $TMPDIR (/tmp on
+		#      macOS/most Linux) — a shared, multi-user directory. Threat
+		#      model: without the sticky bit (not guaranteed by mktemp
+		#      itself, only that the CREATED dir is 0700), another local
+		#      user could race a rename-and-replace against it. Prefer a
+		#      scratch dir under $HOME instead — single-user by
+		#      construction — falling back to the previous /tmp-based
+		#      mktemp only if $HOME/.cache can't be created/used.
+		#   2. mktemp failure used to give up on the sniff entirely rather
+		#      than trying the remaining tiers. Restructured the whole
+		#      jq/bun/node/grep chain from an if/elif (mutually exclusive by
+		#      construction) into a cascade gated on SNIFF_DONE, so "bun is
+		#      on PATH but mktemp failed" now falls through to node (if
+		#      present) and then the text sniff, instead of a dead end.
 		PM_SNIFF='console.log(JSON.parse(require("fs").readFileSync(process.env.CW_PACKAGE_JSON,"utf8")).packageManager??"")'
 		PACKAGE_JSON_ABS="$(pwd)/package.json"
+		PACKAGE_MANAGER_FIELD=""
+		SNIFF_DONE=false
 		if command -v jq >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
-		elif command -v bun >/dev/null 2>&1; then
-			BUN_SNIFF_CWD=$(mktemp -d 2>/dev/null) || BUN_SNIFF_CWD=""
+			SNIFF_DONE=true
+		fi
+		# CTL-1628 post-merge (Codex #2967 post-merge, round 11): three more
+		# follow-ups, verified directly on this host (macOS/BSD userland):
+		#   1. `mktemp -d -p <dir>` (no explicit template) DID work correctly
+		#      here (BSD mktemp's synopsis on this machine documents -p), but
+		#      -p support isn't guaranteed across every mktemp this script
+		#      might run under fleet-wide (older BSD variants, minimal
+		#      containers). The explicit-template form `mktemp -d
+		#      "<dir>/prefix.XXXXXXXX"` is unambiguously portable across both
+		#      GNU and BSD mktemp — verified working identically to -p on
+		#      this host — so use it everywhere instead of relying on -p.
+		#   2. The `mkdir -p "$CATALYST_SNIFF_CACHE"` was a bare statement
+		#      under this script's top-level `set -e` — confirmed directly
+		#      that a failing `mkdir -p` (read-only/unwritable parent) trips
+		#      set -e and aborts the WHOLE worktree creation. A
+		#      sniff-infrastructure failure must never do that; `|| true`
+		#      makes the failure a no-op that the writability check below
+		#      catches instead.
+		#   3. The $HOME/.cache preference (round 10) only checked
+		#      existence+writability, which a group-writable or symlinked
+		#      ~/.cache would still pass. Threat model: this is a dev tool,
+		#      not a setuid binary, so a full TOCTOU-proof design is
+		#      overkill — but a cheap, few-line check (not a symlink, owned
+		#      by us, no group/other write bit) rejects the specific
+		#      "attacker-controlled ~/.cache" shape the finding describes,
+		#      falling back to the TMPDIR-based mktemp (same portable
+		#      template form) if any check fails.
+		if [ "$SNIFF_DONE" = false ] && command -v bun >/dev/null 2>&1; then
+			CATALYST_SNIFF_CACHE="$HOME/.cache"
+			mkdir -p "$CATALYST_SNIFF_CACHE" 2>/dev/null || true
+			CACHE_SAFE=false
+			if [ -d "$CATALYST_SNIFF_CACHE" ] && [ ! -L "$CATALYST_SNIFF_CACHE" ] && [ -w "$CATALYST_SNIFF_CACHE" ]; then
+				# CTL-1628 post-merge (Codex #2972 post-merge, round 12): the
+				# prior `stat -f ... || stat -c ...` was a SINGLE command
+				# substitution wrapping both probes, so on GNU stat (where -f
+				# means "show FILESYSTEM status", a completely different flag
+				# than BSD's -f FORMAT) the first probe's own stdout — a
+				# multi-line filesystem-status report, not a clean UID —
+				# stayed captured even when its nonzero exit triggered the ||
+				# fallback, and the second probe's output landed appended
+				# after it. _stat_probe validates the CAPTURED value itself
+				# (must be a pure digit string / octal digit string) — the
+				# validation gate is what makes probe order irrelevant and
+				# neutralizes either variant's noise, not exit-code-based ||
+				# chaining alone. Its own `stat` call is guarded with
+				# `|| out=""` so a probe's nonzero exit (expected and normal
+				# for the "wrong" stat dialect) can never trip this script's
+				# top-level set -e on its own, the same class of bug this
+				# whole isolation effort has repeatedly had to fix elsewhere.
+				_stat_probe() {
+					local flag="$1" fmt="$2" target="$3" pattern="$4" out
+					out=$(stat "$flag" "$fmt" "$target" 2>/dev/null) || out=""
+					if [[ "$out" =~ $pattern ]]; then
+						echo "$out"
+						return 0
+					fi
+					return 1
+				}
+				CACHE_OWNER=$(_stat_probe -f '%u' "$CATALYST_SNIFF_CACHE" '^[0-9]+$') ||
+					CACHE_OWNER=$(_stat_probe -c '%u' "$CATALYST_SNIFF_CACHE" '^[0-9]+$') || CACHE_OWNER=""
+				CACHE_PERM=$(_stat_probe -f '%Lp' "$CATALYST_SNIFF_CACHE" '^[0-7]+$') ||
+					CACHE_PERM=$(_stat_probe -c '%a' "$CATALYST_SNIFF_CACHE" '^[0-7]+$') || CACHE_PERM=""
+				if [ -n "$CACHE_OWNER" ] && [ "$CACHE_OWNER" = "$(id -u)" ] && [ -n "$CACHE_PERM" ]; then
+					CACHE_PERM_OCT=$((8#$CACHE_PERM))
+					if [ $(( (CACHE_PERM_OCT / 8) % 8 & 2 )) -eq 0 ] && [ $(( CACHE_PERM_OCT % 8 & 2 )) -eq 0 ]; then
+						CACHE_SAFE=true
+					fi
+				fi
+			fi
+			if [ "$CACHE_SAFE" = true ]; then
+				BUN_SNIFF_CWD=$(mktemp -d "${CATALYST_SNIFF_CACHE}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CWD=""
+			else
+				BUN_SNIFF_CWD=$(mktemp -d "${TMPDIR:-/tmp}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CWD=""
+			fi
 			if [ -n "$BUN_SNIFF_CWD" ]; then
 				trap 'rm -rf "$BUN_SNIFF_CWD"' EXIT
 				PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" bun --cwd "$BUN_SNIFF_CWD" -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 				rm -rf "$BUN_SNIFF_CWD"
 				trap - EXIT
-			else
-				PACKAGE_MANAGER_FIELD=""
+				SNIFF_DONE=true
 			fi
-		elif command -v node >/dev/null 2>&1; then
+			# CTL-1628 post-merge (Codex #2967 post-merge, round 11, #4): if
+			# BOTH scratch-dir attempts fail (an extremely rare double
+			# failure — $HOME/.cache and $TMPDIR are practically never both
+			# unwritable on the same host), SNIFF_DONE stays false and this
+			# falls through to node / the text sniff below rather than
+			# giving up. Considered running bun --cwd against the WORKTREE
+			# itself as a still-isolated alternative — rejected: by this
+			# point in the script `git worktree add` has already checked
+			# out the full project tree (including any committed
+			# bunfig.toml) into $WORKTREE_PATH, so that cwd is NOT provably
+			# bunfig-free — it is exactly the round-8 vulnerability this
+			# whole isolation effort exists to avoid. The imprecise text
+			# sniff is the correct, designed last resort here, not a gap.
+		fi
+		if [ "$SNIFF_DONE" = false ] && command -v node >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" node -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
-		elif tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
+			SNIFF_DONE=true
+		fi
+		if [ "$SNIFF_DONE" = false ] && tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
 			PACKAGE_MANAGER_FIELD="bun@detected"
-		else
-			PACKAGE_MANAGER_FIELD=""
+			SNIFF_DONE=true
 		fi
 		HAS_BUN_EVIDENCE=false
 		if [ "$HAS_BUN_LOCK" = true ] || [[ "$PACKAGE_MANAGER_FIELD" == bun@* ]]; then
