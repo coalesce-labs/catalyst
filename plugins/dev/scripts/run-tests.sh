@@ -71,6 +71,26 @@ LIB_SHELL_TEST_DIR="${LIB_SHELL_TEST_DIR:-${SCRIPT_DIR}/lib/__tests__}"
 # every real wrapper's exact shape (`exec bash ".../lib/__tests__/<name>"`)
 # and excluding comments (start with `#`) and fixture-building `echo`/
 # `printf` lines (start with `echo`/`printf`, not `bash`/`exec`).
+#
+# CTL-1612 post-merge #2978 (Codex P2 follow-up): the round-15 shape-anchor
+# alone still matches UNREACHABLE invocation-shaped lines — dead code after a
+# top-level `exit` — codified, concretely, by round 15's OWN smoke fixtures
+# (FIX7/FIX10 in run-tests.test.sh appended their `exec bash "..."` line
+# AFTER the fixture's `exit 0`). A wrapper file shaped that way never
+# actually runs the lib suite, yet got counted as if it had, silently
+# skipping a real (and here, hypothetically failing) lib suite with
+# `RESULT: PASS`. This is heuristic territory, not a place for a real bash
+# parser (control flow, subshells, `case`, sourced files, etc. are all still
+# unaccounted for and deliberately out of scope) — the cheap, high-value
+# improvement is to stop scanning a file's text past its first TOP-LEVEL
+# `exit` line (column 0, i.e. not indented — real wrapper files are a single
+# unindented top-level statement, so this never affects them). Residual
+# imprecision is accepted: an exec line reachable only through a real branch
+# (`if`/`case`) still counts as "wrapped" even on a path that's never
+# actually taken, and one truly dead only behind further control flow before
+# ever reaching a top-level `exit` also still counts. Both are strictly
+# rarer/subtler than the reproduced "dead code after exit" shape and are
+# left for a real static analyzer, not this glob-time heuristic.
 LIB_WRAPPED_BASENAMES=""
 if [[ -d $SHELL_TEST_DIR ]]; then
 	for _wrapper_file in "$SHELL_TEST_DIR"/*.test.sh; do
@@ -78,7 +98,8 @@ if [[ -d $SHELL_TEST_DIR ]]; then
 		while IFS= read -r _wrapped_basename; do
 			[[ -n $_wrapped_basename ]] || continue
 			LIB_WRAPPED_BASENAMES="${LIB_WRAPPED_BASENAMES}${_wrapped_basename}"$'\n'
-		done < <(grep -nE '^[[:space:]]*(exec[[:space:]]+)?bash[[:space:]].*lib/__tests__/[A-Za-z0-9._-]+\.test\.sh"' "$_wrapper_file" 2>/dev/null |
+		done < <(awk '/^exit([[:space:]]|$)/{exit} {print}' "$_wrapper_file" 2>/dev/null |
+			grep -nE '^[[:space:]]*(exec[[:space:]]+)?bash[[:space:]].*lib/__tests__/[A-Za-z0-9._-]+\.test\.sh"' |
 			grep -oE 'lib/__tests__/[A-Za-z0-9._-]+\.test\.sh"' |
 			sed -E 's#^lib/__tests__/(.+)"$#\1#')
 	done
