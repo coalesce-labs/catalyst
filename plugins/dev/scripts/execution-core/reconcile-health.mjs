@@ -110,10 +110,30 @@ function hydrateEntry(team) {
   }
 }
 
+// RECOVERY_REASON_BY_ORIGIN — CTL-1628 r2: the recovery event previously
+// hard-coded reason:"reconcile-poll-succeeded" regardless of which stage had
+// actually been failing. Since CTL-1628 added a second failure origin (the
+// eligible-set disk persist, not just the eligibleQuery poll), a persist-origin
+// streak recovering would misattribute itself to the poll stage in Loki. Keyed
+// by the `origin` recordReconcileFailure was called with for the streak.
+const RECOVERY_REASON_BY_ORIGIN = {
+  poll: "reconcile-poll-succeeded",
+  persist: "eligible-persist-succeeded",
+};
+
 // recordReconcileSuccess — a reconcile poll succeeded for `team`. Resets the
 // consecutive-failure counter, stamps lastSuccessTs, and — if the team was
 // alerting — emits a recovery event and clears the alert. Best-effort throughout;
 // the `appendEvent`/`now` seams are injectable for tests.
+//
+// CTL-1628 r2: the recovery reason names the stage that actually recovered
+// (`entry.lastFailureOrigin`, set by the most recent recordReconcileFailure
+// call for this streak — "poll" or "persist") instead of always claiming the
+// poll stage. `lastFailureOrigin` is in-memory only (not written to the disk
+// marker — the marker's wire shape is unchanged); a daemon restart mid-streak
+// falls back to "poll" until the next recordReconcileFailure call re-stamps
+// the origin, which is an acceptable gap since a fresh failure precedes any
+// possible recovery.
 export function recordReconcileSuccess(
   team,
   { appendEvent = defaultAppendEvent, now = () => new Date().toISOString() } = {},
@@ -121,12 +141,14 @@ export function recordReconcileSuccess(
   const entry = ensureEntry(team);
   const wasAlerting = entry.alerting;
   const priorFailures = entry.consecutiveFailures;
+  const recoveredOrigin = entry.lastFailureOrigin ?? "poll";
   entry.consecutiveFailures = 0;
   entry.lastSuccessTs = now();
   entry.alerting = false;
+  entry.lastFailureOrigin = null;
   if (wasAlerting) {
     log.info(
-      { team, priorFailures },
+      { team, priorFailures, recoveredOrigin },
       "reconcile-health: team recovered — eligible set refreshing again (CTL-867)",
     );
     appendEvent({
@@ -134,29 +156,35 @@ export function recordReconcileSuccess(
       action: RECONCILE_RECOVERED_ACTION,
       consecutiveFailures: 0,
       lastSuccessTs: entry.lastSuccessTs,
-      reason: "reconcile-poll-succeeded",
+      reason: RECOVERY_REASON_BY_ORIGIN[recoveredOrigin] ?? RECOVERY_REASON_BY_ORIGIN.poll,
     });
   }
   writeHealthMarker(team, entry);
 }
 
-// recordReconcileFailure — a reconcile poll threw for `team`. Increments the
-// consecutive-failure counter; once it crosses RECONCILE_FAILURE_ALERT_THRESHOLD
-// (and the team is not already alerting), escalates a single
-// monitor.reconcile.failing.<TEAM> event so the failure surfaces on the
-// dashboard instead of staying buried in a log.error. The alert is emitted ONCE
-// per failing streak (the `alerting` latch) — a recovery clears it. Best-effort;
-// `appendEvent`/`threshold` seams are injectable for tests.
+// recordReconcileFailure — a reconcile poll threw for `team` (or, via the
+// CTL-1628 `origin: "persist"` call site in monitor.mjs, the eligible-set disk
+// persist threw after a successful poll). Increments the consecutive-failure
+// counter; once it crosses RECONCILE_FAILURE_ALERT_THRESHOLD (and the team is
+// not already alerting), escalates a single monitor.reconcile.failing.<TEAM>
+// event so the failure surfaces on the dashboard instead of staying buried in
+// a log.error. The alert is emitted ONCE per failing streak (the `alerting`
+// latch) — a recovery clears it. Best-effort; `appendEvent`/`threshold` seams
+// are injectable for tests. `origin` ("poll" | "persist", default "poll") is
+// stamped onto the entry so a later recordReconcileSuccess can name the stage
+// that actually recovered (CTL-1628 r2) instead of assuming poll.
 export function recordReconcileFailure(
   team,
   reason,
   {
     appendEvent = defaultAppendEvent,
     threshold = RECONCILE_FAILURE_ALERT_THRESHOLD,
+    origin = "poll",
   } = {},
 ) {
   const entry = ensureEntry(team);
   entry.consecutiveFailures += 1;
+  entry.lastFailureOrigin = origin;
   const staleMs = entry.lastSuccessTs
     ? Date.now() - Date.parse(entry.lastSuccessTs)
     : null;

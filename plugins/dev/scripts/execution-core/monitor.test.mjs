@@ -261,11 +261,53 @@ describe("reconcileProject", () => {
     // "recovered" event fires, same as a recovering poll.
     rmSync(projDir, { recursive: true, force: true });
     reconcileProject("ENG", { exec, appendHealthEvent });
-    expect(events.filter((e) => e.action === "recovered")).toHaveLength(1);
+    const recovered = events.filter((e) => e.action === "recovered");
+    expect(recovered).toHaveLength(1);
+    // CTL-1628 r2: the streak that just cleared was persist-origin (every
+    // failure in it was the disk write throwing, never the poll) — the
+    // recovery event must name that stage, not hard-code the poll.
+    expect(recovered[0].reason).toBe("eligible-persist-succeeded");
     const health = getReconcileHealth("ENG");
     expect(health.alerting).toBe(false);
     expect(health.consecutiveFailures).toBe(0);
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
+  });
+
+  // CTL-1628 r2 (Codex #2960 follow-up): recordReconcileSuccess used to
+  // hard-code reason:"reconcile-poll-succeeded" on every recovery event,
+  // regardless of which stage (poll vs persist) had actually been failing —
+  // a persist-origin streak recovering would misattribute itself to the poll
+  // stage in Loki. Both streak origins are exercised here side by side.
+  test("recovery event names the stage that actually recovered — persist-origin vs poll-origin (CTL-1628 r2)", () => {
+    enroll("ENG", { status: "Todo" });
+    const goodExec = execReturning({ ENG: [node("ENG-1")] });
+    const throwingExec = () => ({ code: 1, stdout: "", stderr: "removed-state: Ready" });
+
+    // Poll-origin streak: the eligibleQuery itself throws — never the persist.
+    const pollEvents = [];
+    const pollAppend = (e) => pollEvents.push(e);
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent: pollAppend });
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    reconcileProject("ENG", { exec: goodExec, appendHealthEvent: pollAppend });
+    const pollRecovered = pollEvents.filter((e) => e.action === "recovered");
+    expect(pollRecovered).toHaveLength(1);
+    expect(pollRecovered[0].reason).toBe("reconcile-poll-succeeded");
+
+    // Persist-origin streak on a fresh team: the poll always succeeds, only
+    // the disk write throws.
+    enroll("PLAT", { status: "Todo" });
+    const persistEvents = [];
+    const persistAppend = (e) => persistEvents.push(e);
+    const projDir = join(catalystDir, "execution-core", "eligible", "PLAT.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    for (let i = 0; i < 3; i++) reconcileProject("PLAT", { exec: goodExec, appendHealthEvent: persistAppend });
+    expect(getReconcileHealth("PLAT").alerting).toBe(true);
+    rmSync(projDir, { recursive: true, force: true });
+    reconcileProject("PLAT", { exec: goodExec, appendHealthEvent: persistAppend });
+    const persistRecovered = persistEvents.filter((e) => e.action === "recovered");
+    expect(persistRecovered).toHaveLength(1);
+    expect(persistRecovered[0].reason).toBe("eligible-persist-succeeded");
   });
 
   test("a single transient persist failure under the threshold does not alert or affect checkFleetFreeze inputs (CTL-1628)", () => {
@@ -442,7 +484,12 @@ describe("reconcileProject — CTL-867 reconcile-health escalation", () => {
     expect(health.alerting).toBe(false);
     expect(health.lastSuccessTs).toBeTruthy();
     expect(events).toHaveLength(2);
-    expect(events[1]).toMatchObject({ team: "ENG", action: "recovered" });
+    // CTL-1628 r2: a poll-origin streak's recovery reason is unchanged.
+    expect(events[1]).toMatchObject({
+      team: "ENG",
+      action: "recovered",
+      reason: "reconcile-poll-succeeded",
+    });
     // The successful poll also rebuilt the eligible set (no longer frozen stale).
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
   });

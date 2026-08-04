@@ -408,11 +408,14 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     // a persistent poll fault does — instead of the marker staying frozen
     // "healthy" forever. The `eligible-persist-failed:` prefix distinguishes
     // a persist-origin streak from a poll-origin streak in the health marker
-    // / dashboard without adding a second tracked dimension.
+    // / dashboard without adding a second tracked dimension. `origin: "persist"`
+    // (CTL-1628 r2) additionally lets recordReconcileSuccess's eventual
+    // recovery event name the stage that actually recovered, rather than
+    // hard-coding "reconcile-poll-succeeded" for a streak the poll never failed.
     recordReconcileFailure(
       team,
       `eligible-persist-failed: ${err.message}`,
-      appendHealthEvent ? { appendEvent: appendHealthEvent } : {}
+      { origin: "persist", ...(appendHealthEvent ? { appendEvent: appendHealthEvent } : {}) }
     );
   }
 }
