@@ -1781,6 +1781,77 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(needsInputClears).toHaveLength(1);
   });
 
+  // Codex #2970 post-merge round 5: the credit-consume line used to run
+  // unconditionally after the try/catch, so a THROWING first per-signal
+  // removeLabel call burned the credit without funding an emission — leaving a
+  // second, successful signal unable to claim it. Consuming it INSIDE the try
+  // (only on success) means a throw preserves the credit for the next iteration.
+  test("credit survives a throwing per-signal removeLabel call, funding a LATER successful signal's emission", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-THROW", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    writeSignal(orch, "PROJ-THROW", "verify", {
+      status: "needs-input",
+      parkedFrom: "verify",
+    });
+    const transitions = [];
+    let needsInputCalls = 0;
+    await handleCommentWake(
+      { ticket: "PROJ-THROW", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) => {
+          if (label === "needs-human") return { removed: true, wrote: false };
+          needsInputCalls += 1;
+          // Call 1: the earlier needs-human-block cleanup earns the real write.
+          if (needsInputCalls === 1) return { removed: true, wrote: true };
+          // Call 2: the FIRST per-signal loop iteration — throws (transient error).
+          if (needsInputCalls === 2) throw new Error("transient Linear 5xx");
+          // Call 3: the SECOND per-signal loop iteration — succeeds, finds it
+          // already gone (the early write already cleared it).
+          return { removed: true, wrote: false };
+        },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const needsInputClears = transitions.filter(
+      (e) => e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(needsInputClears).toHaveLength(1);
+  });
+
+  // Codex #2970 post-merge round 5: the EARLY needs-input removal (inside the
+  // needs-human block) can be a real, confirmed clear on its own — but a ticket
+  // with no local worker dir hits the readdirSync early-return before ever
+  // reaching the per-signal loop's own clearDispositionEmit(ticket, "needs-input")
+  // call. Without resetting it right where the confirmation is known, a live
+  // needs-input dedup entry would survive indefinitely for such a ticket.
+  test("resets the needs-input dedup entry from the EARLY removal when the ticket has no local worker dir", async () => {
+    const orch = tmpOrcDir(); // deliberately no workers/<TICKET>/ at all
+    const resetCalls = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NODIR2", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) =>
+          label === "needs-human"
+            ? { removed: true, wrote: false }
+            : { removed: true, wrote: true },
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket, expected) => resetCalls.push({ ticket, expected }),
+      }
+    );
+    expect(resetCalls).toContainEqual({ ticket: "PROJ-NODIR2", expected: "needs-input" });
+  });
+
   // Codex #2970 post-merge round 2, extended to needs-input for consistency with
   // the needs-human fix: when NEITHER of this invocation's two removeLabel calls
   // performed the write (a third host already cleared it before either ran), the
