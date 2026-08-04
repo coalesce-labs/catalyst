@@ -54,6 +54,36 @@ delete process.env.LINEAR_API_TOKEN;
 delete process.env.LINEAR_API_KEY;
 delete process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN;
 
+// CTL-1612 round 11 (Codex P2 follow-up): the CATALYST_LAYER2_CONFIG_FILE pin
+// above seals the mint's own credential read, but getLivenessAnchorIssue()
+// (execution-core/config.mjs) checks CATALYST_LIVENESS_ANCHOR_ISSUE env
+// FIRST, unconditionally, before ever consulting Layer-2 — an ambient export
+// of that var (a real dev/CI shell running the broker/execution-core, same
+// class of machine already confirmed to have real orchestrator creds during
+// this round's remediation) makes a direct createServer() suite resolve a
+// REAL anchor issue regardless of the Layer-2 pin, and the immediate poll's
+// readAnchor closure then reaches the real heartbeat CLI — a genuine POST to
+// Linear's GraphQL endpoint, even with an empty/no token (it just fails
+// there instead of never being attempted). Clearing it here makes
+// getLivenessAnchorIssue() return null unconditionally (Layer-2 already
+// sealed, env now absent too), which makes readAnchor structurally
+// unreachable regardless of source (peer-liveness.mjs's `!anchorIssue`
+// early return, CTL-1612 round 3) — the anchor tier can never fire, no
+// matter what CATALYST_LIVENESS_READ_SOURCE resolves to.
+//
+// Also cleared for the SAME hermeticity reason, audited alongside it:
+// CATALYST_LIVENESS_READ_SOURCE (an ambient "linear" would force anchor-only
+// mode — moot once the anchor issue itself is cleared above, but a test
+// suite's resolved liveness TRANSPORT should never depend on the runner's
+// ambient shell state either) and CATALYST_LOKI_QUERY_URL (the analogous
+// exposure for the OTHER poll transport — an ambient real Loki endpoint
+// would make the same background poll reach a live Loki server instead of
+// Linear; same class of "ambient env makes a hermetic test non-hermetic"
+// risk, a different backend).
+delete process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
+delete process.env.CATALYST_LIVENESS_READ_SOURCE;
+delete process.env.CATALYST_LOKI_QUERY_URL;
+
 // Tripwire flag, mirroring execution-core/broker's own test-setup.mjs — clear
 // attribution for any in-JS guard or assertion that wants to check it ran.
 process.env.CATALYST_TEST = "1";
