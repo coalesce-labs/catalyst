@@ -529,12 +529,18 @@ that previously matched `.event == "filter.wake.${id}"` now match:
 
 ---
 
-### `worker.state_changed` — catalyst.orchestrator (CTL-483)
+### `worker.state_changed` — catalyst.orchestrator (CTL-483; retired producer, CTL-1628)
 
-Emitted by scripts that mutate `workers/<TICKET>.json` as part of the Phase 1 dual-write rollout
-(ADR-018). Carries the full new state in `body.payload.state` so the broker can project to
-`<orchDir>/workers/<TICKET>.json.projected` byte-for-byte. The `_projected` audit field added by the
-broker is NOT part of the event — it's metadata stamped at write time.
+**Retired producer — retained as replay/compat input.** The dedicated emitter
+(`lib/emit-worker-state-changed.sh`) and the broker's shadow-file consumer
+(`handleWorkerStateChanged`) were removed in CTL-1628 along with the rest of the ADR-018 Phase 1
+JSON-shadow scaffolding — see ADR-018. The event name and wire shape below are **not** dead,
+though: `reduceWorkerStateEvent` (`broker/projection.mjs`, CTL-532) still folds any
+`worker.state_changed` record it sees, because (a) `replayWorkerStateProjection` refolds the entire
+current-month event log on every broker restart, so historical records already on disk stay live
+replay input, and (b) the broker router has a defensive compat-consume
+(`if (name === "worker.state_changed") return;`) for an un-upgraded `orchestrate-auto-rebase` still
+emitting it during a mixed-version fleet rollout.
 
 ```json
 {
@@ -579,17 +585,13 @@ broker is NOT part of the event — it's metadata stamped at write time.
 }
 ```
 
-Required broker-handler fields:
-
-| Field                                   | Purpose                                                            |
-| --------------------------------------- | ------------------------------------------------------------------ |
-| `attributes."catalyst.orchestrator.id"` | path component — falls back to `body.payload.orchestrator`         |
-| `attributes."catalyst.worker.ticket"`   | path component — falls back to `body.payload.ticket`               |
-| `attributes."catalyst.writer"`          | audit trail — falls back to `body.payload.writer` then `"unknown"` |
-| `body.payload.state`                    | full new file contents (must be a JSON object)                     |
-
-Missing any of `orchestrator`, `ticket`, or `state` causes the broker to drop the event with a
-`warn` log line and write no file.
+`reduceWorkerStateEvent` reads the orchestrator via `localOrchestrator`: the legacy top-level
+`orchestrator` field, falling back to `attributes."catalyst.orchestrator.id"` — **not**
+`body.payload.orchestrator`; a payload-only orchestrator is silently dropped. Ticket comes from
+`localTicket`: `attributes."catalyst.worker.ticket"`, falling back to
+`attributes."linear.issue.identifier"`, then `body.payload.ticket`, then `body.payload.worker`.
+`body.payload.state` supplies status/phase/PR-number/revive-count (extracted from it) — see
+`broker/broker-state.mjs` for the resulting `worker_state` row shape.
 
 ---
 
@@ -653,7 +655,7 @@ Missing any of `orchestrator`, `ticket`, or `state` causes the broker to drop th
 | `orchestrator.worker.phase_advanced`  | `worker`       | `phase_advanced`  | INFO     | `body.payload` = `{windowSec, changes}`                                                                                                                                                                                             |
 | `orchestrator.attention.raised`       | `attention`    | `raised`          | WARN     | `body.payload` = `{attentionType, reason}`                                                                                                                                                                                          |
 | `orchestrator.attention.resolved`     | `attention`    | `resolved`        | INFO     |                                                                                                                                                                                                                                     |
-| `worker.state_changed`                | `worker`       | `state_changed`   | INFO     | `body.payload` = `{ticket, orchestrator, writer, state}`; consumed by broker projection (ADR-018)                                                                                                                                   |
+| `worker.state_changed`                | `worker`       | `state_changed`   | INFO     | **Retired producer (CTL-1628)** — retained as replay/compat input; `reduceWorkerStateEvent` still folds it. `body.payload` = `{ticket, orchestrator, writer, state}`.                                                              |
 | `linear.state.write.<TICKET>`         | `worker`       | `state_written`   | INFO     | CTL-757 audit: `{ticket, phase, source, applied, from_state, to_state}`; `source` = `scheduler-advance` or `preemption-resume`                                                                                                      |
 | `worker.transition.<TICKET>`          | `worker`       | `transition`      | INFO     | CTL-764 unified two-axis event; supersedes `linear.state.write.*` as the canonical transition record. `attributes` carry disposition/stage dims (see CTL-764 fields below). `body.payload` is stripped off-machine by otel-forward. |
 

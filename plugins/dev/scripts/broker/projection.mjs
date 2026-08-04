@@ -288,53 +288,6 @@ export function persistBrokerState({ probe } = {}) {
   writeBrokerStateFile(buildBrokerState({ probe }));
 }
 
-// CTL-483: worker state projection (Phase 1 — shadow path).
-//
-// During the dual-write migration period, scripts that mutate
-// `workers/<TICKET>.json` ALSO emit a `worker.state_changed` event carrying
-// the full new state. The broker projects that state to
-// `<canonical>.projected` so the direct write is never racing with the
-// projection. A separate verification CLI (orchestrate-shadow-diff) compares
-// canonical vs projected to confirm byte-for-byte agreement before Phase 2
-// cuts over to broker-as-sole-writer at the canonical path.
-//
-// CTL-529: the worker.state_changed event handler (handleWorkerStateChanged)
-// lives in router.mjs with the other event handlers; it calls the path +
-// writer helpers below through the existing router → projection import edge.
-
-export function getProjectedWorkerStatePath(orchestratorId, ticket) {
-  const runsDir =
-    process.env.CATALYST_RUNS_DIR ?? `${process.env.CATALYST_DIR ?? `${homedir()}/catalyst`}/runs`;
-  return resolve(runsDir, orchestratorId, "workers", `${ticket}.json.projected`);
-}
-
-export function writeProjectedWorkerState(target, state, meta = {}) {
-  try {
-    mkdirSync(dirname(target), { recursive: true });
-    const tmp = `${target}.tmp`;
-    const payload = {
-      ...state,
-      _projected: {
-        writer: meta.writer ?? "unknown",
-        ts: meta.ts ?? new Date().toISOString(),
-      },
-    };
-    try {
-      writeFileSync(tmp, JSON.stringify(payload, null, 2));
-      renameSync(tmp, target);
-    } catch (err) {
-      try {
-        unlinkSync(tmp);
-      } catch {
-        /* tmp already gone */
-      }
-      throw err;
-    }
-  } catch (err) {
-    log.warn({ err: err.message, path: target }, "failed to write projected worker state");
-  }
-}
-
 // ─── CTL-532: event-sourced worker-state projection (ADR-018 Phase 3) ─────────
 //
 // reduceWorkerStateEvent folds the `phase.*`, `worker.state_changed`, and
