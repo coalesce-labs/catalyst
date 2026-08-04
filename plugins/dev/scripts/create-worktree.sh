@@ -636,9 +636,24 @@ else
 					fi
 				fi
 			fi
+			# CTL-1628 post-merge (Codex #2972 post-merge, round 13): the
+			# safe-cache and TMPDIR attempts used to be mutually exclusive
+			# (if/else) — when $HOME/.cache passed the safety check but the
+			# mktemp call THERE specifically failed (e.g. that filesystem is
+			# full or over quota, independent of $TMPDIR), the sniff gave up
+			# rather than trying TMPDIR as a second attempt. Try the safe
+			# cache first (still preferred — single-user by construction),
+			# and only on ITS mktemp failing (not merely CACHE_SAFE being
+			# false) fall through to the TMPDIR-based mktemp, which is safe
+			# on its own terms — mktemp's own atomic O_EXCL creation already
+			# guarantees whatever it creates is 0700 owned by us, the same
+			# baseline guarantee round 9's original /tmp-based fix relied on
+			# before $HOME/.cache was even added as a preference.
+			BUN_SNIFF_CWD=""
 			if [ "$CACHE_SAFE" = true ]; then
 				BUN_SNIFF_CWD=$(mktemp -d "${CATALYST_SNIFF_CACHE}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CWD=""
-			else
+			fi
+			if [ -z "$BUN_SNIFF_CWD" ]; then
 				BUN_SNIFF_CWD=$(mktemp -d "${TMPDIR:-/tmp}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CWD=""
 			fi
 			if [ -n "$BUN_SNIFF_CWD" ]; then
