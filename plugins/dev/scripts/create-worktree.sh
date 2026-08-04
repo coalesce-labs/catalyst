@@ -461,22 +461,30 @@ else
 				IS_BUN_WORKSPACE=true
 			fi
 		fi
-		if command -v bun >/dev/null 2>&1; then
-			# CTL-1628: root package.json (the bun workspace, Phase A1) arms this
-			# branch on every worktree creation. Use --frozen-lockfile so the
-			# fresh worktree installs exactly what's committed in bun.lock
-			# rather than silently re-resolving and rewriting the lockfile
-			# before the worker's first commit (which could otherwise ride
-			# unrelated lockfile drift into the ticket's diff).
-			echo "  Running: bun install --frozen-lockfile"
-			bun install --frozen-lockfile || _worktree_install_rollback
-		elif [ "$IS_BUN_WORKSPACE" = true ]; then
-			echo -e "${YELLOW}⚠️  bun not found on PATH — this is a bun workspace root${NC}"
-			echo "  (package.json declares \"workspaces\"). Skipping auto-install rather"
-			echo "  than falling back to npm, which ignores bun.lock and writes"
-			echo "  package-lock.json debris into a bun-managed workspace tree."
-			echo "  Install bun (https://bun.sh) and run 'bun install --frozen-lockfile'"
-			echo "  in the worktree manually."
+		# CTL-1628 post-merge (Codex #2948 round 3): gate the bun-install branch
+		# on IS_BUN_WORKSPACE too, not just "bun happens to be on PATH" — an
+		# npm/yarn project on a host that ALSO has bun installed used to enter
+		# this branch and hard-fail on `--frozen-lockfile` (nothing to freeze
+		# against, no bun.lock in an npm-managed tree), rolling the worktree
+		# back where the old plain install would have succeeded via npm.
+		if [ "$IS_BUN_WORKSPACE" = true ]; then
+			if command -v bun >/dev/null 2>&1; then
+				# CTL-1628: root package.json (the bun workspace, Phase A1) arms this
+				# branch on every worktree creation. Use --frozen-lockfile so the
+				# fresh worktree installs exactly what's committed in bun.lock
+				# rather than silently re-resolving and rewriting the lockfile
+				# before the worker's first commit (which could otherwise ride
+				# unrelated lockfile drift into the ticket's diff).
+				echo "  Running: bun install --frozen-lockfile"
+				bun install --frozen-lockfile || _worktree_install_rollback
+			else
+				echo -e "${YELLOW}⚠️  bun not found on PATH — this is a bun workspace root${NC}"
+				echo "  (package.json declares \"workspaces\"). Skipping auto-install rather"
+				echo "  than falling back to npm, which ignores bun.lock and writes"
+				echo "  package-lock.json debris into a bun-managed workspace tree."
+				echo "  Install bun (https://bun.sh) and run 'bun install --frozen-lockfile'"
+				echo "  in the worktree manually."
+			fi
 		else
 			echo "  Running: npm install"
 			npm install || _worktree_install_rollback
