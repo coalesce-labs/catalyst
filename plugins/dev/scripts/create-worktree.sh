@@ -511,13 +511,36 @@ else
 		# `set -e` — confirmed empirically that `node -e` (unlike `bun -e`)
 		# DOES exit non-zero on malformed JSON, which would otherwise abort
 		# the whole script exactly like the round-5 bare-jq bug.
-		PM_SNIFF='console.log(JSON.parse(require("fs").readFileSync("package.json","utf8")).packageManager??"")'
+		#
+		# CTL-1628 post-merge (Codex #2966, round 8): `bun -e` was run with
+		# the PROJECT itself as cwd, so bun loaded the project's own
+		# bunfig.toml (default config path is $cwd/bunfig.toml — confirmed
+		# via `bun --help`) BEFORE evaluating the one-liner, including any
+		# `preload` array — arbitrary project-controlled code would run
+		# during worktree CREATION, before any trust decision. Confirmed
+		# empirically: a bunfig.toml `preload` script wrote a marker file
+		# under a plain `bun -e` run; `bun --config <path>` did NOT suppress
+		# it (bun's `-e` preload discovery ignores an explicit --config
+		# override); `bun --cwd <dir outside the project> -e` DID suppress
+		# it, and bun does not walk up the directory tree from --cwd looking
+		# for a config file, so any directory outside the project's own tree
+		# is sufficient isolation. Point --cwd at /tmp (always present, never
+		# part of a worktree's own path) and read package.json via an
+		# ABSOLUTE path passed through an env var — not interpolated into
+		# the JS source string, so no shell-to-JS quoting/escaping is needed
+		# for paths with unusual characters. node has no equivalent
+		# project-scoped auto-preload mechanism (no bunfig.toml analogue,
+		# and `node -e`'s cwd doesn't influence what code node executes), so
+		# it needs no cwd isolation — only switched to the same env-var-based
+		# absolute path for a single shared PM_SNIFF template.
+		PM_SNIFF='console.log(JSON.parse(require("fs").readFileSync(process.env.CW_PACKAGE_JSON,"utf8")).packageManager??"")'
+		PACKAGE_JSON_ABS="$(pwd)/package.json"
 		if command -v jq >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 		elif command -v bun >/dev/null 2>&1; then
-			PACKAGE_MANAGER_FIELD=$(bun -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+			PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" bun --cwd /tmp -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 		elif command -v node >/dev/null 2>&1; then
-			PACKAGE_MANAGER_FIELD=$(node -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+			PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" node -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 		elif tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
 			PACKAGE_MANAGER_FIELD="bun@detected"
 		else
