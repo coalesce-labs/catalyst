@@ -103,6 +103,30 @@ export function defaultGithubTokenFile(env = process.env) {
   return githubTokenFileCandidates(env)[0];
 }
 
+// containsNul / isValidUtf8RoundTrip — CTL-1623 post-merge fix (Codex round 1). Mirrors
+// lib/secret-contract.mjs's identically-named PRIVATE (unexported) helpers byte-for-byte —
+// duplicated here rather than exported from the engine, per this ticket's "don't touch the
+// shared engine unless a genuine parity bug forces it" discipline; these two functions are
+// ~4 lines each and stable, so the duplication cost is low next to the risk of widening the
+// engine's public surface. WHY THIS MATTERS HERE SPECIFICALLY: the bug Codex reproduced was
+// that rearmGithubTokenFromFile's default `readFile` used `readFileSync(p, "utf8")`, which
+// silently REPLACES any invalid UTF-8 byte with U+FFFD at decode time — so when the
+// catalyst-secret-env.sh launcher correctly fails closed on a malformed synced file (keeps
+// a good inherited GH_TOKEN, per lib/catalyst-secret-contract.sh's own containsNul/
+// isValidUtf8 guards), this hook then ran a SECOND, less careful read of the SAME file and
+// installed the U+FFFD-mangled bytes over the good inherited value at boot and on every
+// timer tick — defeating the fold's fail-closed hygiene one layer up. These two functions
+// let the candidate loop below apply the IDENTICAL validity gates the engine already
+// applies, so a candidate this hook cannot represent byte-for-byte falls through to the
+// next one (or to "absent") instead of installing a mutated credential.
+function containsNul(value) {
+  return value.includes("\u0000");
+}
+function isValidUtf8RoundTrip(buf, decoded) {
+  const reencoded = Buffer.from(decoded, "utf8");
+  return reencoded.length === buf.length && reencoded.equals(buf);
+}
+
 // rearmGithubTokenFromFile — CTL-1612 (Codex P1). Re-read the shared credential from
 // disk and update this process's env if it has changed.
 //
@@ -116,9 +140,18 @@ export function defaultGithubTokenFile(env = process.env) {
 //
 // Call AFTER clusterSync. Respects an explicit operator override (the launcher marks it
 // CATALYST_GITHUB_TOKEN_SOURCE=operator-override) and never throws.
+//
+// `readFile` READS RAW BYTES (a Buffer, matching plain `readFileSync(p)` with no encoding
+// argument) — CTL-1623 post-merge fix: the previous default decoded to "utf8" up front,
+// which is exactly what silently mangled an invalid-UTF-8 file (see the containsNul/
+// isValidUtf8RoundTrip comment above). The candidate loop below decodes+validates itself so
+// it can reject a candidate it cannot represent identically. Existing/injected test seams
+// that return a plain STRING (not a Buffer) still work unchanged — a string return is
+// treated as already-decoded text and wrapped in a Buffer for the round-trip check, which
+// trivially passes for any ordinary fixture literal.
 export function rearmGithubTokenFromFile({
   env = process.env,
-  readFile = (p) => readFileSync(p, "utf8"),
+  readFile = (p) => readFileSync(p),
   log = defaultLog,
 } = {}) {
   try {
@@ -134,6 +167,15 @@ export function rearmGithubTokenFromFile({
       } catch {
         continue; // not on this host — try the next candidate
       }
+      // PARITY GUARDS (CTL-1623 post-merge fix): reject a candidate this hook cannot
+      // represent identically to the engine's own bare-file read — an invalid-UTF-8 byte
+      // sequence or an embedded NUL — instead of silently installing a mutated value.
+      // Order matches lib/secret-contract.mjs's readFirstNonBlankFile: UTF-8 round-trip
+      // first, then NUL, both on the RAW bytes/decoded text, before the EOL strip.
+      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw ?? ""), "utf8");
+      const decoded = buf.toString("utf8");
+      if (!isValidUtf8RoundTrip(buf, decoded)) continue; // not on this host, effectively — try the next candidate
+      if (containsNul(decoded)) continue;
       found = true;
       // Strip ONLY trailing line terminators; preserve every other byte.
       // `.replace(/\s+/g,"")` corrupted internal whitespace, and a full `.trim()` corrupts
@@ -143,7 +185,7 @@ export function rearmGithubTokenFromFile({
       // file ending in `\n\n` must re-arm to the same bare token the launcher installed.
       // Mirrors _catalyst_strip_eol in lib/catalyst-secret-env.sh so the bash and JS
       // readers cannot disagree.
-      const candidate = String(raw ?? "").replace(/[\r\n]+$/, "");
+      const candidate = decoded.replace(/[\r\n]+$/, "");
       // Blank-check, not truthiness: a whitespace-only file must keep falling through to
       // the next candidate (a truthy "   " would break here and mask a valid fallback).
       if (candidate.trim()) {
