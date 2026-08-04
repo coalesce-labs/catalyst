@@ -5662,7 +5662,12 @@ export function schedulerTick(
         for (const member of anomaly.members) {
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
-            if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
+            if (
+              fenceGuard(
+                { ticket: member, orchDir, multiHost, gateway, self },
+                { proceedOnMissingGeneration: true }
+              )
+            ) {
               const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
                 env,
                 site: "dependency-cycle",
@@ -6469,7 +6474,12 @@ export function schedulerTick(
           );
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
-          if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
+          if (
+            fenceGuard(
+              { ticket: member, orchDir, multiHost, gateway, self },
+              { proceedOnMissingGeneration: true }
+            )
+          ) {
             const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
               env,
               site: "ctl-925-cycle",
@@ -7080,7 +7090,21 @@ export function schedulerTick(
         } else {
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
-          if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+          if (
+            fenceGuard(
+              { ticket, orchDir, multiHost, gateway, self },
+              {
+                proceedOnMissingGeneration: true,
+                // CTL-1329: a missing generation stays missing next tick regardless
+                // of whether THIS tick's escalation write succeeded, so arm the same
+                // cooldown the fail-closed suppression branch below arms — otherwise
+                // proceeding here (instead of suppressing) reintroduces the unbounded
+                // per-tick terminal-probe burn CTL-1329 fixed, just on the write path
+                // instead of the read path.
+                onMissingGeneration: () => stampFenceSuppress(orchDir, ticket, now()),
+              }
+            )
+          ) {
             const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
               env,
               site: "terminal-sweep",
