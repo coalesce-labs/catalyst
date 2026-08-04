@@ -595,6 +595,59 @@ else
 		#      falling back to the TMPDIR-based mktemp (same portable
 		#      template form) if any check fails.
 		if [ "$SNIFF_DONE" = false ] && command -v bun >/dev/null 2>&1; then
+			# Defined here (not inside a parent-check block) so it's available
+			# regardless of which path — or neither — actually runs below.
+			_stat_probe() {
+				local flag="$1" fmt="$2" target="$3" pattern="$4" out
+				out=$(stat "$flag" "$fmt" "$target" 2>/dev/null) || out=""
+				if [[ "$out" =~ $pattern ]]; then
+					echo "$out"
+					return 0
+				fi
+				return 1
+			}
+			_stat_owner() { _stat_probe -f '%u' "$1" '^[0-9]+$' || _stat_probe -c '%u' "$1" '^[0-9]+$'; }
+			# _stat_perm_oct <target> — echoes the permission+special bits
+			# (setuid/setgid/sticky + rwx) as a DECIMAL number ready for
+			# arithmetic. BSD's %Lp ("logical permissions") turned out to
+			# silently STRIP the sticky bit entirely (confirmed directly:
+			# chmod 1777 a dir, %Lp reports "777" — no leading digit at
+			# all), which would have made _perm_has_sticky always false on
+			# macOS/BSD and defeated the TMPDIR safety check below on the
+			# most common secure /tmp configuration. %p (full raw mode,
+			# includes file-type bits) does carry it; masking with & 07777
+			# strips the file-type bits uniformly for both dialects (GNU's
+			# %a has none to begin with, so the mask is a safe no-op there).
+			_stat_perm_oct() {
+				local raw
+				raw=$(_stat_probe -f '%p' "$1" '^[0-9]+$') || raw=$(_stat_probe -c '%a' "$1" '^[0-7]+$') || return 1
+				echo $(( (8#$raw) & 4095 ))
+			}
+			_perm_no_group_other_write() {
+				local oct="$1"
+				[ $(( (oct / 8) % 8 & 2 )) -eq 0 ] && [ $(( oct % 8 & 2 )) -eq 0 ]
+			}
+			# Sticky bit is bit 9 (0-indexed) of the masked mode — e.g. 1777
+			# octal = 1023 decimal, (1023/512)&1 = 1; 0700 octal = 448
+			# decimal, (448/512)&1 = 0.
+			_perm_has_sticky() {
+				local oct="$1"
+				[ $(( (oct / 512) & 1 )) -eq 1 ]
+			}
+			# CTL-1628 post-merge (Codex #2975 post-merge, round 14): a
+			# post-creation check applied to whatever mktemp actually
+			# returned (owned by us, exactly 0700) — a TOCTOU-narrowing
+			# backstop independent of the parent check below, so even a
+			# parent that passed its pre-check but got raced doesn't get
+			# trusted blindly. A candidate that fails this is removed and
+			# DISCARDED — the caller falls through to the next tier.
+			_scratch_dir_verified() {
+				local dir="$1" owner perm_oct
+				owner=$(_stat_owner "$dir") || return 1
+				[ "$owner" = "$(id -u)" ] || return 1
+				perm_oct=$(_stat_perm_oct "$dir") || return 1
+				[ "$perm_oct" -eq 448 ]
+			}
 			CATALYST_SNIFF_CACHE="$HOME/.cache"
 			mkdir -p "$CATALYST_SNIFF_CACHE" 2>/dev/null || true
 			CACHE_SAFE=false
@@ -616,24 +669,34 @@ else
 				# for the "wrong" stat dialect) can never trip this script's
 				# top-level set -e on its own, the same class of bug this
 				# whole isolation effort has repeatedly had to fix elsewhere.
-				_stat_probe() {
-					local flag="$1" fmt="$2" target="$3" pattern="$4" out
-					out=$(stat "$flag" "$fmt" "$target" 2>/dev/null) || out=""
-					if [[ "$out" =~ $pattern ]]; then
-						echo "$out"
-						return 0
-					fi
-					return 1
-				}
-				CACHE_OWNER=$(_stat_probe -f '%u' "$CATALYST_SNIFF_CACHE" '^[0-9]+$') ||
-					CACHE_OWNER=$(_stat_probe -c '%u' "$CATALYST_SNIFF_CACHE" '^[0-9]+$') || CACHE_OWNER=""
-				CACHE_PERM=$(_stat_probe -f '%Lp' "$CATALYST_SNIFF_CACHE" '^[0-7]+$') ||
-					CACHE_PERM=$(_stat_probe -c '%a' "$CATALYST_SNIFF_CACHE" '^[0-7]+$') || CACHE_PERM=""
-				if [ -n "$CACHE_OWNER" ] && [ "$CACHE_OWNER" = "$(id -u)" ] && [ -n "$CACHE_PERM" ]; then
-					CACHE_PERM_OCT=$((8#$CACHE_PERM))
-					if [ $(( (CACHE_PERM_OCT / 8) % 8 & 2 )) -eq 0 ] && [ $(( CACHE_PERM_OCT % 8 & 2 )) -eq 0 ]; then
-						CACHE_SAFE=true
-					fi
+				# (_stat_probe / _stat_owner / _stat_perm_oct now defined
+				# once, above, and reused by the TMPDIR-parent check and the
+				# post-creation verification below rather than duplicated.)
+				CACHE_OWNER=$(_stat_owner "$CATALYST_SNIFF_CACHE") || CACHE_OWNER=""
+				CACHE_PERM_OCT=$(_stat_perm_oct "$CATALYST_SNIFF_CACHE") || CACHE_PERM_OCT=""
+				if [ -n "$CACHE_OWNER" ] && [ "$CACHE_OWNER" = "$(id -u)" ] && [ -n "$CACHE_PERM_OCT" ] &&
+					_perm_no_group_other_write "$CACHE_PERM_OCT"; then
+					CACHE_SAFE=true
+				fi
+			fi
+			# CTL-1628 post-merge (Codex #2975 post-merge, round 14): the
+			# round-13 TMPDIR retry attempted mktemp there with NO parent
+			# safety check at all (unlike the cache path above) — reopening
+			# the group-writable/symlinked-parent class of attack round 12
+			# closed for $HOME/.cache, just against $TMPDIR instead. $TMPDIR
+			# is typically the shared, sticky-bit 1777 /tmp — requiring the
+			# SAME strict "no group/other write" the cache parent needs would
+			# reject the normal, secure default everywhere, so TMPDIR only
+			# needs EITHER the sticky bit (rename/delete restricted to the
+			# owning user, the standard protection) OR the same strict
+			# cache-style permissions.
+			TMPDIR_TARGET="${TMPDIR:-/tmp}"
+			TMPDIR_SAFE=false
+			if [ -d "$TMPDIR_TARGET" ] && [ ! -L "$TMPDIR_TARGET" ]; then
+				TMPDIR_PERM_OCT=$(_stat_perm_oct "$TMPDIR_TARGET") || TMPDIR_PERM_OCT=""
+				if [ -n "$TMPDIR_PERM_OCT" ] &&
+					{ _perm_has_sticky "$TMPDIR_PERM_OCT" || _perm_no_group_other_write "$TMPDIR_PERM_OCT"; }; then
+					TMPDIR_SAFE=true
 				fi
 			fi
 			# CTL-1628 post-merge (Codex #2972 post-merge, round 13): the
@@ -648,13 +711,33 @@ else
 			# on its own terms — mktemp's own atomic O_EXCL creation already
 			# guarantees whatever it creates is 0700 owned by us, the same
 			# baseline guarantee round 9's original /tmp-based fix relied on
-			# before $HOME/.cache was even added as a preference.
+			# before $HOME/.cache was even added as a preference. Round 14
+			# adds post-creation verification (_scratch_dir_verified) to
+			# EACH attempt: if validation fails, the candidate is discarded
+			# and the caller falls through to the next tier rather than
+			# proceeding with an unverified cwd. The TMPDIR attempt is also
+			# now gated on TMPDIR_SAFE — it is skipped entirely (not just
+			# unverified after the fact) when the parent itself looks unsafe.
 			BUN_SNIFF_CWD=""
 			if [ "$CACHE_SAFE" = true ]; then
-				BUN_SNIFF_CWD=$(mktemp -d "${CATALYST_SNIFF_CACHE}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CWD=""
+				BUN_SNIFF_CANDIDATE=$(mktemp -d "${CATALYST_SNIFF_CACHE}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CANDIDATE=""
+				if [ -n "$BUN_SNIFF_CANDIDATE" ]; then
+					if _scratch_dir_verified "$BUN_SNIFF_CANDIDATE"; then
+						BUN_SNIFF_CWD="$BUN_SNIFF_CANDIDATE"
+					else
+						rm -rf "$BUN_SNIFF_CANDIDATE"
+					fi
+				fi
 			fi
-			if [ -z "$BUN_SNIFF_CWD" ]; then
-				BUN_SNIFF_CWD=$(mktemp -d "${TMPDIR:-/tmp}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CWD=""
+			if [ -z "$BUN_SNIFF_CWD" ] && [ "$TMPDIR_SAFE" = true ]; then
+				BUN_SNIFF_CANDIDATE=$(mktemp -d "${TMPDIR_TARGET}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CANDIDATE=""
+				if [ -n "$BUN_SNIFF_CANDIDATE" ]; then
+					if _scratch_dir_verified "$BUN_SNIFF_CANDIDATE"; then
+						BUN_SNIFF_CWD="$BUN_SNIFF_CANDIDATE"
+					else
+						rm -rf "$BUN_SNIFF_CANDIDATE"
+					fi
+				fi
 			fi
 			if [ -n "$BUN_SNIFF_CWD" ]; then
 				trap 'rm -rf "$BUN_SNIFF_CWD"' EXIT
