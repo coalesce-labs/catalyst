@@ -107,19 +107,16 @@ if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 	pass "LIB_SHELL_TEST_DIR fixture is discovered and run"
 else fail "LIB_SHELL_TEST_DIR override was not wired into the shell suite" "$OUT"; fi
 
-# Test 8 (CTL-1612 round 9, Codex P2 follow-up): a suite matching one of
-# run-tests.sh's hardcoded LIB_SHELL_TEST_WRAPPED basenames must be counted
-# EXACTLY ONCE even when a file with that same basename exists in BOTH
-# SHELL_TEST_DIR and LIB_SHELL_TEST_DIR — the real-world shape of
+# Test 8 (CTL-1612 round 9, Codex P2 follow-up): a real wrapped basename must
+# be counted EXACTLY ONCE even when a file with that same basename exists in
+# BOTH SHELL_TEST_DIR and LIB_SHELL_TEST_DIR — the real-world shape of
 # __tests__/secrets-hygiene.test.sh (a wrapper) coexisting with
 # lib/__tests__/secrets-hygiene.test.sh (the wrapped suite). Uses the REAL
 # wrapped basename "secrets-hygiene.test.sh" (not an arbitrary fixture name)
-# so this test breaks LOUDLY — not silently — if run-tests.sh's hardcoded
-# LIB_SHELL_TEST_WRAPPED list ever drifts out of sync with the real wrapper
-# set (a 7th wrapper added without updating that list would show up here as
-# a double-count, per that list's own header comment). Counts occurrences of
-# the suite's own PASS marker line directly in the runner's combined output —
-# the property this test exists to pin.
+# so this test breaks LOUDLY — not silently — if the derived wrapped set
+# (CTL-1612 round 13) ever stops recognizing a real wrapper shape. Counts
+# occurrences of the suite's own PASS marker line directly in the runner's
+# combined output — the property this test exists to pin.
 FIX7="$(make_fixture "secrets-hygiene:0")"
 # CTL-1612 round 12 (Codex P2 follow-up): the wrapped-exclusion is now gated
 # on the wrapper file actually being discovered under the active
@@ -142,20 +139,40 @@ if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 else fail "aggregate summary miscounted the wrapped-basename fixture" "$OUT"; fi
 
 # Test 9 (CTL-1612 round 12, Codex P2 follow-up): a targeted run whose
-# SHELL_TEST_DIR override has NO wrapper for a LIB_SHELL_TEST_WRAPPED
-# basename must still execute that lib suite directly — the pre-fix
-# static-list-only skip dropped it silently (0 tests run, reported PASS)
-# whenever no wrapper was actually present this run. Uses the real wrapped
-# basename "secrets-hygiene.test.sh" so this is exactly the scenario the
-# finding described: a targeted/fixture run pointing LIB_SHELL_TEST_DIR at
-# one wrapped suite in isolation, with an empty/overridden SHELL_TEST_DIR.
+# SHELL_TEST_DIR override has NO wrapper for a real wrapped basename must
+# still execute that lib suite directly — the pre-fix skip dropped it
+# silently (0 tests run, reported PASS) whenever no wrapper was actually
+# present this run. Uses the real wrapped basename "secrets-hygiene.test.sh"
+# so this is exactly the scenario the finding described: a targeted/fixture
+# run pointing LIB_SHELL_TEST_DIR at one wrapped suite in isolation, with an
+# empty/overridden SHELL_TEST_DIR.
 FIX9_SHELL="$(mktemp -d)"
 FIX9_LIB="$(make_fixture "secrets-hygiene:0")"
-trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$FIX6" "$FIX7" "$FIX7_LIB" "$FIX9_SHELL" "$FIX9_LIB" "$EMPTY_LIB_DIR"' EXIT
+trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$FIX6" "$FIX7" "$FIX7_LIB" "$FIX9_SHELL" "$FIX9_LIB" "$FIX10_SHELL" "$FIX10_LIB" "$EMPTY_LIB_DIR"' EXIT
 OUT="$(SHELL_TEST_DIR="$FIX9_SHELL" LIB_SHELL_TEST_DIR="$FIX9_LIB" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 	pass "wrapped-basename lib suite runs directly when no wrapper is present under the active SHELL_TEST_DIR"
 else fail "wrapped-basename lib suite was wrongly skipped with no active wrapper (0 tests, silent PASS)" "$OUT"; fi
+
+# Test 10 (CTL-1612 round 13, Codex P1 follow-up): the wrapped set is now
+# DERIVED from wrapper files rather than a hardcoded table, so it must
+# correctly dedupe an ARBITRARY basename that was never a member of any
+# prior hardcoded list — this is the exact self-registration property the
+# finding asked for ("a new wrapper is self-registering"). Uses a basename
+# ("brand-new-lib-suite.test.sh") that has never appeared in any round's
+# static list; a pre-round-13 implementation (hardcoded table, however
+# up to date) would double-run this fixture since it isn't a recognized
+# member, while the derived-set implementation recognizes it purely from the
+# wrapper file's own exec-target reference.
+FIX10_SHELL="$(make_fixture "brand-new-lib-suite:0")"
+echo '# exec bash ".../lib/__tests__/brand-new-lib-suite.test.sh"' >>"${FIX10_SHELL}/brand-new-lib-suite.test.sh"
+FIX10_LIB="$(mktemp -d)"
+cp "${FIX10_SHELL}/brand-new-lib-suite.test.sh" "${FIX10_LIB}/brand-new-lib-suite.test.sh"
+OUT="$(SHELL_TEST_DIR="$FIX10_SHELL" LIB_SHELL_TEST_DIR="$FIX10_LIB" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+MARKER_COUNT="$(grep -c 'PASS .*brand-new-lib-suite\.test\.sh' <<<"$OUT")"
+if [[ "$MARKER_COUNT" -eq 1 ]]; then
+	pass "a brand-new wrapper/basename never in any hardcoded list is self-registering and dedupes correctly"
+else fail "brand-new wrapper/basename ran $MARKER_COUNT time(s), expected exactly 1 (derivation is not self-registering)" "$OUT"; fi
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"

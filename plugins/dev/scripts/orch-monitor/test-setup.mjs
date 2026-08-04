@@ -80,9 +80,22 @@ delete process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN;
 // would make the same background poll reach a live Loki server instead of
 // Linear; same class of "ambient env makes a hermetic test non-hermetic"
 // risk, a different backend).
+//
+// CTL-1612 round 13 (Codex P2 follow-up): CATALYST_LOKI_QUERY_URL is only
+// getLokiQueryUrl()'s EXPLICIT tier (execution-core/config.mjs) — clearing it
+// alone doesn't seal the getter. Its fallback tier derives a Loki URL from
+// OTEL_EXPORTER_OTLP_ENDPOINT (port swapped to 3100), and that env var is
+// exactly as ambient on a real dev/CI host running the OTel collector as the
+// other vars cleared above. Left uncleared, a direct createServer() suite on
+// such a host still resolves a live Loki URL via that fallback and the
+// AUTO-mode poll's synchronous reader either contacts the real backend or
+// eats its ~8s timeout per suite — un-cached, so it repeats every run.
+// Audited getLokiQueryUrl() itself for any other derivation input: it reads
+// only these two env vars (no third tier), so this closes the getter fully.
 delete process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
 delete process.env.CATALYST_LIVENESS_READ_SOURCE;
 delete process.env.CATALYST_LOKI_QUERY_URL;
+delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 
 // Tripwire flag, mirroring execution-core/broker's own test-setup.mjs — clear
 // attribution for any in-JS guard or assertion that wants to check it ran.

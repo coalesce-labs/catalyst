@@ -30,50 +30,46 @@ LIB_SHELL_TEST_DIR="${LIB_SHELL_TEST_DIR:-${SCRIPT_DIR}/lib/__tests__}"
 # __tests__/secrets-hygiene.test.sh). Discovering them AGAIN via the
 # LIB_SHELL_TEST_DIR glob below double-runs them: inflated pass/fail counts,
 # and the relatively expensive Git/worktree fixture setup some of them do
-# pays twice. Verified exhaustively via
-# `grep -rl "lib/__tests__" __tests__/*.test.sh` — exactly these 6 wrapper
-# files (plus __tests__/run-tests.test.sh itself, which tests the GLOB
-# MECHANISM, not a suite wrapper, so it's not in this list). A static list
-# (not a grep-derived one) was chosen deliberately: simpler, and
-# __tests__/run-tests.test.sh's own "each wrapped suite appears exactly
-# once" pinning test (added this same round) self-detects any future drift
-# — a 7th wrapper added later without updating this list would show up as a
-# double-count there, not silently ship.
-LIB_SHELL_TEST_WRAPPED=(
-	"cluster-fence-guard.test.sh"   # __tests__/cluster-fence-guard-lib.test.sh
-	"draft-pr.test.sh"              # __tests__/draft-pr-lib.test.sh
-	"worktree-rebase.test.sh"       # __tests__/worktree-rebase-lib.test.sh
-	"worktree-remove-guard.test.sh" # __tests__/worktree-remove-guard-lib.test.sh
-	"secret-hygiene-check.test.sh"  # __tests__/secret-hygiene-check.test.sh
-	"secrets-hygiene.test.sh"       # __tests__/secrets-hygiene.test.sh
-)
-_lib_suite_is_wrapped() {
-	local _basename="$1" _w
-	for _w in "${LIB_SHELL_TEST_WRAPPED[@]}"; do
-		[[ "$_basename" == "$_w" ]] && return 0
+# pays twice.
+#
+# CTL-1612 round 12 (Codex P2 follow-up): a hardcoded LIB_SHELL_TEST_WRAPPED
+# table (rounds 9-11) said "this basename normally has a wrapper", not "a
+# wrapper actually ran this invocation" — a targeted/fixture run overriding
+# SHELL_TEST_DIR to a dir with no wrapper files silently dropped the lib
+# suite (0 tests run, reported PASS).
+#
+# CTL-1612 round 13 (Codex P1 follow-up): that same hardcoded table was ALSO
+# a second source of truth for the wrapper SET itself, independent of the
+# round-12 presence bug — add a 7th wrapper later and this list drifts: the
+# shell loop below runs the new wrapper fine, but the lib loop doesn't
+# recognize its target and double-runs the underlying suite, and
+# run-tests.test.sh's smoke coverage only ever pinned the ONE static-list
+# entry it happened to exercise, so this drift class could ship unnoticed.
+# Fix: derive the wrapped set from the wrapper files THEMSELVES, once, up
+# front — scan every file actually present under the active SHELL_TEST_DIR
+# for the literal exec-target reference every real wrapper contains
+# (".../lib/__tests__/<basename>.test.sh", see e.g.
+# __tests__/cluster-fence-guard-lib.test.sh) and collect the referenced
+# basenames into LIB_WRAPPED_BASENAMES. A new wrapper is therefore
+# self-registering — adding the wrapper file is the only step, no second
+# list to remember or drift out of sync with — and this keeps round 12's
+# "only skip when a wrapper is actually present under the ACTIVE
+# SHELL_TEST_DIR this run" semantics for free, since the set is derived from
+# that same active directory.
+LIB_WRAPPED_BASENAMES=""
+if [[ -d $SHELL_TEST_DIR ]]; then
+	for _wrapper_file in "$SHELL_TEST_DIR"/*.test.sh; do
+		[[ -f $_wrapper_file ]] || continue
+		while IFS= read -r _wrapped_basename; do
+			[[ -n $_wrapped_basename ]] || continue
+			LIB_WRAPPED_BASENAMES="${LIB_WRAPPED_BASENAMES}${_wrapped_basename}"$'\n'
+		done < <(grep -oE 'lib/__tests__/[A-Za-z0-9._-]+\.test\.sh"' "$_wrapper_file" 2>/dev/null |
+			sed -E 's#^lib/__tests__/(.+)"$#\1#')
 	done
-	return 1
-}
-# CTL-1612 round 12 (Codex P2 follow-up): _lib_suite_is_wrapped above is a
-# STATIC list — it says "this basename normally has a wrapper", not "a
-# wrapper actually ran this invocation". A targeted/fixture run that
-# overrides SHELL_TEST_DIR (e.g. the smoke test in __tests__/run-tests.test.sh,
-# or a developer pointing LIB_SHELL_TEST_DIR at one wrapped suite in
-# isolation) has no wrapper files under the active SHELL_TEST_DIR at all, so
-# the static-list skip silently drops the lib suite with zero tests run and
-# the aggregate still reports PASS. Each wrapper execs
-# ".../lib/__tests__/<basename>.test.sh" (see e.g.
-# __tests__/cluster-fence-guard-lib.test.sh), so grep the files ACTUALLY
-# present under the active SHELL_TEST_DIR for that reference before trusting
-# the static list's skip.
+fi
 _lib_suite_wrapper_present() {
-	local _basename="$1" _f
-	[[ -d $SHELL_TEST_DIR ]] || return 1
-	for _f in "$SHELL_TEST_DIR"/*.test.sh; do
-		[[ -f $_f ]] || continue
-		grep -Fq "lib/__tests__/${_basename}\"" "$_f" 2>/dev/null && return 0
-	done
-	return 1
+	local _basename="$1"
+	grep -qxF "$_basename" <<<"$LIB_WRAPPED_BASENAMES"
 }
 # +x test: distinguishes "unset" (use default) from "set to empty" (smoke test).
 if [[ -z ${EXTRA_SHELL_TESTS+x} ]]; then
@@ -143,13 +139,13 @@ done
 # override var above (which the smoke test also repoints, deliberately kept
 # single-purpose).
 # CTL-1612 round 9: skip a lib suite that already ran via its SHELL_TEST_DIR
-# wrapper in the loop above (LIB_SHELL_TEST_WRAPPED, see its comment) —
-# without this, the aggregate summary double-counts 6 of the 13 suites.
-# CTL-1612 round 12: ...but only when that wrapper is actually present under
-# the ACTIVE SHELL_TEST_DIR this run — see _lib_suite_wrapper_present above.
+# wrapper in the loop above — without this, the aggregate summary
+# double-counts suites that have one. CTL-1612 round 13: the wrapped set
+# (LIB_WRAPPED_BASENAMES) is derived from the wrapper files themselves, see
+# its comment above _lib_suite_wrapper_present.
 for f in "$LIB_SHELL_TEST_DIR"/*.test.sh; do
 	_f_basename="$(basename "$f")"
-	if _lib_suite_is_wrapped "$_f_basename" && _lib_suite_wrapper_present "$_f_basename"; then
+	if _lib_suite_wrapper_present "$_f_basename"; then
 		continue
 	fi
 	run_shell_test "$f"

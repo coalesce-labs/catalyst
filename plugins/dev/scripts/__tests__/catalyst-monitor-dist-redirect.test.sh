@@ -477,17 +477,18 @@ printenv > "$ENV_CAPTURE"
 STUB_BUN
 chmod +x "$ROOT/bin/bun"
 
-# Run cmd_start in a subshell; it will background the stub bun. Give it a moment.
-PATH="$ROOT/bin:$PATH" \
-CATALYST_DIR="$ROOT/catalyst" \
-MONITOR_SERVER_SCRIPT="$ROOT/srv/server.ts" \
-MONITOR_UI_DIST_DIR="$ROOT/dist" \
-MONITOR_SKIP_BOOTSTRAP=1 \
-bash -c '
-  source "'"$MONITOR_SH"'" url >/dev/null 2>&1
-  cmd_start >/dev/null 2>&1 || true
-' 2>/dev/null || true
-sleep 0.2
+# CTL-1612 round 13 (Codex P2 follow-up): this used to invoke cmd_start via a
+# standalone bash -c block instead of the shared run_cmd_start sandbox helper
+# (see that helper's header comment) — on a host with real orchestrator
+# creds configured (any dev machine running the broker/execution-core),
+# cmd_start's app-actor mint resolves them and POSTs a REAL client_credentials
+# request to https://api.linear.app/oauth/token before the stub bun below
+# ever runs. run_cmd_start pins CATALYST_LAYER2_CONFIG_FILE (and the other
+# secret-file/liveness vars) to absent sandbox paths, sealing that read —
+# same defaults this test already relied on (PATH/CATALYST_DIR/
+# MONITOR_SERVER_SCRIPT/MONITOR_UI_DIST_DIR/MONITOR_SKIP_BOOTSTRAP), so no
+# extra override args are needed.
+run_cmd_start "$ROOT"
 
 if [[ -f "$ENV_CAPTURE" ]]; then
   if grep -q "MONITOR_PUBLIC_DIR=$ROOT/dist" "$ENV_CAPTURE" 2>/dev/null; then

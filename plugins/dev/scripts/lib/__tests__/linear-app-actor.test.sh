@@ -31,6 +31,26 @@
 
 set -uo pipefail
 
+# CTL-1612 round 13 (Codex P1 follow-up): lib/linear-app-actor.sh's own mint
+# chain has a documented, tested fallback for a jq-less host (round 9: jq →
+# bun -e → node -e, loud warning + fail-open when all three are absent). This
+# SUITE never got the matching guard, so on a truly bash-and-git-only
+# checkout (no jq/bun/node) the fake-credential mint cases below fail to
+# parse their fixtures and the suite itself hard-fails — Codex reproduced
+# exit 1 with 18 pass / 12 fail via the aggregate runner. "SKIP:" (column 0)
+# is the marker run-tests.sh's `grep -q '^SKIP:'` recognizes as a clean skip,
+# matching the round-12 precedent (rebase-telemetry.test.sh,
+# emit-reap-intent.test.sh) — the suite should skip, not fail, when its
+# subject's own documented no-parser case is the actual host state.
+if
+	! command -v jq >/dev/null 2>&1 &&
+		! command -v bun >/dev/null 2>&1 &&
+		! command -v node >/dev/null 2>&1
+then
+	echo "SKIP: linear-app-actor tests require a JSON parser (jq, bun, or node — none on PATH)"
+	exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="${SCRIPT_DIR}/../linear-app-actor.sh"
 SCRATCH="$(mktemp -d -t linear-app-actor-test-XXXXXX)"
