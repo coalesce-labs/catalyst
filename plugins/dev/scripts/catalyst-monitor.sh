@@ -164,7 +164,8 @@ resolve_liveness_anchor_issue() {
     return 0
   fi
   local _l2_path="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"
-  if [[ -f "$_l2_path" ]] && command -v jq &>/dev/null; then
+  [[ -f "$_l2_path" ]] || return 0
+  if command -v jq &>/dev/null; then
     # CTL-1612 round 6 (Codex P2 follow-up, liveness-anchor-parity.test.sh):
     # `select(type=="string")` rejects a non-string field (e.g. a stray
     # number) the same way getLivenessAnchorIssue's `typeof a === "string"`
@@ -172,6 +173,27 @@ resolve_liveness_anchor_issue() {
     # number as text instead of treating it as absent — bash would resolve an
     # anchor the JS side never would, diverging on a hostile/malformed config.
     jq -r '(.catalyst.cluster.livenessAnchorIssue | select(type=="string")) // empty' "$_l2_path" 2>/dev/null
+  else
+    # CTL-1612 round 7 (Codex P2 follow-up): jq is neither a required nor
+    # optional repo dependency and bootstrap does not enforce it (a
+    # documented-minimal host can genuinely lack it) — a bare `jq` call above
+    # would silently resolve "no anchor configured" here while the runtime's
+    # node/bun getLivenessAnchorIssue() parses the SAME file and finds one,
+    # taking the no-anchor skip branch and clearing the inherited app-actor
+    # aliases without ever transferring a usable token to
+    # CATALYST_MONITOR_APP_ACTOR_TOKEN. Same jq-absent-degrade shape as
+    # create-worktree.sh's #2948 round-5 precedent: fall back to a plain
+    # grep/sed sniff of the first "livenessAnchorIssue":"..." QUOTED-STRING
+    # occurrence anywhere in the file. Imprecise — it doesn't confirm JSON
+    # structure/nesting under catalyst.cluster, and a value spanning multiple
+    # lines won't match — but adequate for this boolean-ish "is an anchor
+    # configured" check, and the quoted-value requirement naturally rejects a
+    # non-string field the same way the jq `select(type=="string")` branch
+    # does above. __tests__/liveness-anchor-parity.test.sh exercises this
+    # exact path with jq hidden from PATH.
+    grep -oE '"livenessAnchorIssue"[[:space:]]*:[[:space:]]*"[^"]*"' "$_l2_path" 2>/dev/null \
+      | head -1 \
+      | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/'
   fi
 }
 

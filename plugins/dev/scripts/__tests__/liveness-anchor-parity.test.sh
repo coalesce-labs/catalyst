@@ -104,6 +104,46 @@ L2_DIR="${TMP_DIR}/l2cfg"
 mkdir -p "$L2_DIR"
 L2_FILE="${L2_DIR}/config.json"
 
+# CTL-1612 round 7 (Codex P2 follow-up): a minimal jq-less PATH — grep/head/sed
+# (the grep-fallback rung's own dependencies) plus bash itself (env -i's `bash`
+# argument is looked up via the NEW restricted PATH being set, not the caller's
+# — verified empirically), resolved dynamically here via a PLAIN non-interactive
+# `command -v` (portable across the macOS/Linux paths a CI runner may use;
+# hardcoding /usr/bin/grep etc. would NOT be portable). jq is deliberately
+# absent from this directory and nowhere else is added to PATH, so
+# `command -v jq` genuinely fails inside it — proves the grep-fallback rung
+# itself, not just that jq happens to still be reachable.
+NOJQ_BIN="${TMP_DIR}/nojq-bin"
+mkdir -p "$NOJQ_BIN"
+for _nojq_tool in grep head sed bash; do
+  _nojq_real="$(command -v "$_nojq_tool" 2>/dev/null || true)"
+  if [[ -n "$_nojq_real" ]]; then
+    ln -sf "$_nojq_real" "${NOJQ_BIN}/${_nojq_tool}"
+  else
+    echo "FATAL: liveness-anchor-parity jq-less fixture — '$_nojq_tool' not found on PATH" >&2
+    exit 1
+  fi
+done
+
+# _cell_nojq NAME EXPECTED [ENV_VAR=VAL ...] — like _cell, but the BASH side
+# runs under NOJQ_BIN (jq unreachable, forcing the grep-fallback rung); the
+# NODE side runs under the NORMAL PATH (JSON.parse never needed jq at all, so
+# there is nothing to restrict there — this cell is specifically proving the
+# BASH fallback agrees with the UNCHANGED canonical getter, not testing node).
+_cell_nojq() {
+  local _name="$1" _expected="$2"
+  shift 2
+  local BASH_OUT NODE_OUT
+  BASH_OUT="$(env -i PATH="$NOJQ_BIN" HOME="$SANDBOX_HOME" "$@" bash -c "
+    command -v jq >/dev/null 2>&1 && echo 'FATAL: jq unexpectedly reachable in the jq-less fixture' >&2 && exit 1
+    source '$BASH_FN_PROBE'
+    resolve_liveness_anchor_issue
+  ")"
+  NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" node "$PROBE_JS" 2>&1)"
+  expect_eq "$_name (bash-without-jq==expected)" "$_expected" "$BASH_OUT"
+  expect_eq "$_name (node==expected)" "$_expected" "$NODE_OUT"
+}
+
 # ─── env wins over Layer-2 ────────────────────────────────────────────────
 printf '%s' '{"catalyst":{"cluster":{"livenessAnchorIssue":"CTL-FROM-L2"}}}' > "$L2_FILE"
 _cell "env wins over Layer-2 when both are set" "CTL-FROM-ENV" \
@@ -151,6 +191,27 @@ printf '%s' '{"catalyst":{"cluster":{"livenessAnchorIssue":"CTL-FROM-HOME-DEFAUL
   > "${SANDBOX_HOME}/.config/catalyst/config.json"
 _cell "default path (no CATALYST_LAYER2_CONFIG_FILE) resolves via \$HOME/.config/catalyst/config.json on both sides" \
   "CTL-FROM-HOME-DEFAULT"
+
+# ─── jq-less host (CTL-1612 round 7): the grep-fallback rung ──────────────
+printf '%s' '{"catalyst":{"cluster":{"livenessAnchorIssue":"CTL-FROM-L2-NOJQ"}}}' > "$L2_FILE"
+_cell_nojq "jq-less: Layer-2 catalyst.cluster.livenessAnchorIssue resolves via the grep fallback" \
+  "CTL-FROM-L2-NOJQ" "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+printf '%s' '{}' > "$L2_FILE"
+_cell_nojq "jq-less: Layer-2 present but missing the field ⇒ empty" "" \
+  "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+_cell_nojq "jq-less: Layer-2 file absent ⇒ empty (never throws)" "" \
+  "CATALYST_LAYER2_CONFIG_FILE=${TMP_DIR}/does-not-exist-config-nojq.json"
+
+printf '%s' '{"catalyst":{"cluster":{"livenessAnchorIssue":12345}}}' > "$L2_FILE"
+_cell_nojq "jq-less: Layer-2 field is a non-string (number) ⇒ empty (the grep fallback's quoted-value requirement rejects it, matching the jq select(type==\"string\") branch)" \
+  "" "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+printf '%s' '{"catalyst":{"cluster":{"livenessAnchorIssue":"CTL-FROM-L2-NOJQ"}}}' > "$L2_FILE"
+_cell_nojq "jq-less: env still wins over Layer-2 (the fallback rung is never even reached)" \
+  "CTL-FROM-ENV-NOJQ" \
+  "CATALYST_LIVENESS_ANCHOR_ISSUE=CTL-FROM-ENV-NOJQ" "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
 
 echo ""
 echo "────────────────────────────────────────"

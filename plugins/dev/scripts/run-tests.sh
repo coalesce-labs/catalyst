@@ -14,6 +14,15 @@ BROKER_DIR="${REPO_ROOT}/plugins/dev/scripts/broker"
 EXECUTION_CORE_DIR="${REPO_ROOT}/plugins/dev/scripts/execution-core"
 
 SHELL_TEST_DIR="${SHELL_TEST_DIR:-${SCRIPT_DIR}/__tests__}"
+# CTL-1612 round 7 (Codex P2 follow-up): lib/__tests__/*.test.sh was never
+# discovered by this runner (only the flat SHELL_TEST_DIR glob above ran), so
+# lib/__tests__/linear-app-actor.test.sh — the only direct regression coverage
+# for the monitor's scoped app-actor credential handling (alias clearing,
+# personal-key preservation, inherited-token fallback) — never ran
+# automatically. All 13 lib/__tests__/*.test.sh suites were verified passing
+# before wiring this in (one, escalate-emitters.test.sh, was fixed alongside —
+# pre-existing shellcheck debt in orphan-sweep.sh unrelated to CTL-1612).
+LIB_SHELL_TEST_DIR="${LIB_SHELL_TEST_DIR:-${SCRIPT_DIR}/lib/__tests__}"
 # +x test: distinguishes "unset" (use default) from "set to empty" (smoke test).
 if [[ -z ${EXTRA_SHELL_TESTS+x} ]]; then
 	EXTRA_SHELL_TESTS="${SCRIPT_DIR}/test-workflow-context.sh"
@@ -75,6 +84,13 @@ ensure_execution_core_deps
 echo "=== Shell suite ==="
 shopt -s nullglob
 for f in "$SHELL_TEST_DIR"/*.test.sh; do
+	run_shell_test "$f"
+done
+# CTL-1612 round 7: lib/__tests__ is a SEPARATE directory from SHELL_TEST_DIR
+# (scripts/__tests__), so it needs its own glob rather than folding into the
+# override var above (which the smoke test also repoints, deliberately kept
+# single-purpose).
+for f in "$LIB_SHELL_TEST_DIR"/*.test.sh; do
 	run_shell_test "$f"
 done
 for f in $EXTRA_SHELL_TESTS; do

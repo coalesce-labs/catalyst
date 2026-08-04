@@ -402,6 +402,27 @@ export function isAppRoute(pathname: string): boolean {
   return isDetailDeepLinkPath(pathname);
 }
 
+// shouldSeedFreshMintCooldown — CTL-1612 round 7 (Codex P2 follow-up). Pure
+// decision extracted from the monitorAppActorReminter construction (see the
+// CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE comment at that call site) so it is
+// unit-testable without instantiating a whole server. A token being PRESENT
+// is not enough to seed the reminter's long success cooldown — since round 6,
+// linear_app_actor_auth's scoped mode can populate the token via an INHERITED
+// fallback (a broker-inherited token reused because the shell's own mint
+// failed or found no creds) rather than a genuinely fresh mint, and that
+// fallback token could already be near its own expiry. Only "minted" — the
+// companion provenance marker linear_app_actor_auth exports alongside the
+// token — proves a fresh mint just happened and it is safe to suppress the
+// reminter's first poll for the full cooldown window; "inherited", any other
+// value, or an absent/blank token all fall through to false (the untouched
+// -Infinity default — first poll's attempt fires as it always has).
+export function shouldSeedFreshMintCooldown(
+  token: string | undefined,
+  source: string | undefined,
+): boolean {
+  return Boolean(token?.trim()) && source === "minted";
+}
+
 export interface CreateServerOptions {
   port?: number;
   hostname?: string;
@@ -1514,6 +1535,20 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // loki-only/no-anchor skip — CTL-1612 rounds 3/5) is unaffected: the
           // token is absent, so this falls through to the untouched default
           // (-Infinity — first poll's attempt fires as it always has).
+          //
+          // CTL-1612 round 7 (Codex P2 follow-up): presence alone is no longer
+          // sufficient — since round 6, CATALYST_MONITOR_APP_ACTOR_TOKEN can be
+          // populated by the shell's INHERITED-TOKEN FALLBACK (a broker-inherited
+          // token reused because the shell's own mint failed or found no creds),
+          // not just a genuinely fresh mint. Seeding the full 45min success
+          // cooldown for a fallback token that could already be near expiry
+          // would suppress the reminter's retry for the whole window instead of
+          // the shorter failureCooldownMs — exactly the double-mint bug this
+          // seeding was added to fix, just for the opposite reason (too LONG a
+          // suppression instead of too SHORT). shouldSeedFreshMintCooldown
+          // (module-level, unit-tested) checks the companion
+          // CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE marker linear_app_actor_auth
+          // now also exports alongside the token.
           const monitorAppActorReminter = linearRemint.createAsyncReminter({
             readCreds: linearRemint.readOrchestratorCreds,
             applyToken: (token: string) => {
@@ -1527,7 +1562,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
               warn: (_obj: unknown, msg: string) => console.warn(`[server] ${msg}`),
               info: (_obj: unknown, msg: string) => console.info(`[server] ${msg}`),
             },
-            initialLastAttempt: process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN?.trim()
+            initialLastAttempt: shouldSeedFreshMintCooldown(
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN,
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE,
+            )
               ? Date.now()
               : undefined,
           });

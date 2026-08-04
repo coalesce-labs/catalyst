@@ -57,6 +57,7 @@ OUT="$(env -i HOME="$HOME" PATH="$PATH" CATALYST_LAYER2_CONFIG_FILE="$ABSENT_LAY
 		echo "LINEAR_API_TOKEN=[${LINEAR_API_TOKEN:-}]"
 		echo "LINEAR_API_KEY=[${LINEAR_API_KEY:-}]"
 		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+		echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
 	' 2>&1)"
 if echo "$OUT" | grep -qxF "LINEAR_API_TOKEN=[]"; then
 	pass "LINEAR_API_TOKEN cleared"
@@ -84,6 +85,11 @@ if echo "$OUT" | grep -qxF "SCOPED_TARGET=[lin_oauth_fake_inherited_bot_token]";
 	pass "SCOPED_TARGET is seeded from the inherited token when no orchestrator creds are configured (CTL-1612 round 6 fallback)"
 else
 	fail "SCOPED_TARGET not seeded from the inherited fallback; output: $OUT"
+fi
+if echo "$OUT" | grep -qxF "SCOPED_TARGET_SOURCE=[inherited]"; then
+	pass "SCOPED_TARGET_SOURCE=inherited (CTL-1612 round 7 provenance marker)"
+else
+	fail "SCOPED_TARGET_SOURCE not marked inherited; output: $OUT"
 fi
 
 echo ""
@@ -275,6 +281,7 @@ OUT_FAIL_FALLBACK="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAY
 		source "'"$LIB"'"
 		linear_app_actor_auth "test-daemon" SCOPED_TARGET
 		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+		echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
 	' 2>&1)"
 if echo "$OUT_FAIL_FALLBACK" | grep -qxF "SCOPED_TARGET=[lin_oauth_fake_inherited_for_fallback]"; then
 	pass "mint-fails + inherited-bot-token: SCOPED_TARGET seeded from the inherited token"
@@ -285,6 +292,11 @@ if echo "$OUT_FAIL_FALLBACK" | grep -q "reusing the inherited app-actor token"; 
 	pass "mint-fails + inherited-bot-token: logs the reuse"
 else
 	fail "mint-fails + inherited-bot-token: did not log the reuse; output: $OUT_FAIL_FALLBACK"
+fi
+if echo "$OUT_FAIL_FALLBACK" | grep -qxF "SCOPED_TARGET_SOURCE=[inherited]"; then
+	pass "mint-fails + inherited-bot-token: SCOPED_TARGET_SOURCE=inherited (CTL-1612 round 7)"
+else
+	fail "mint-fails + inherited-bot-token: SCOPED_TARGET_SOURCE not marked inherited; output: $OUT_FAIL_FALLBACK"
 fi
 rm -f "${STUB_BIN}/curl"
 
@@ -298,6 +310,7 @@ OUT_SUCCESS_WINS="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYE
 		source "'"$LIB"'"
 		linear_app_actor_auth "test-daemon" SCOPED_TARGET
 		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+		echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
 	' 2>&1)"
 if echo "$OUT_SUCCESS_WINS" | grep -qxF "SCOPED_TARGET=[fake-r6-fresh-mint-token]"; then
 	pass "mint-succeeds: fresh token wins over the inherited fallback"
@@ -308,6 +321,11 @@ if echo "$OUT_SUCCESS_WINS" | grep -q "reusing the inherited app-actor token"; t
 	fail "mint-succeeds: incorrectly logged a fallback reuse; output: $OUT_SUCCESS_WINS"
 else
 	pass "mint-succeeds: no fallback-reuse log line"
+fi
+if echo "$OUT_SUCCESS_WINS" | grep -qxF "SCOPED_TARGET_SOURCE=[minted]"; then
+	pass "mint-succeeds: SCOPED_TARGET_SOURCE=minted (CTL-1612 round 7) — not left at 'inherited' from the pre-set env value"
+else
+	fail "mint-succeeds: SCOPED_TARGET_SOURCE not marked minted; output: $OUT_SUCCESS_WINS"
 fi
 rm -f "${STUB_BIN}/curl"
 
@@ -320,6 +338,7 @@ OUT_FAIL_NOFALLBACK="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_L
 		source "'"$LIB"'"
 		linear_app_actor_auth "test-daemon" SCOPED_TARGET
 		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+		echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
 	' 2>&1)"
 if echo "$OUT_FAIL_NOFALLBACK" | grep -qxF "SCOPED_TARGET=[]"; then
 	pass "mint-fails + no-inherited-token: SCOPED_TARGET stays unset"
@@ -330,6 +349,11 @@ if echo "$OUT_FAIL_NOFALLBACK" | grep -q "WARNING orchestrator token mint failed
 	pass "mint-fails + no-inherited-token: logs the existing WARNING (unchanged)"
 else
 	fail "mint-fails + no-inherited-token: did not log the WARNING; output: $OUT_FAIL_NOFALLBACK"
+fi
+if echo "$OUT_FAIL_NOFALLBACK" | grep -qxF "SCOPED_TARGET_SOURCE=[]"; then
+	pass "mint-fails + no-inherited-token: SCOPED_TARGET_SOURCE stays unset too (CTL-1612 round 7 — no token, no provenance to report)"
+else
+	fail "mint-fails + no-inherited-token: SCOPED_TARGET_SOURCE unexpectedly set; output: $OUT_FAIL_NOFALLBACK"
 fi
 rm -f "${STUB_BIN}/curl"
 

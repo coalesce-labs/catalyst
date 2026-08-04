@@ -32,6 +32,14 @@
 #   reply 502 bot_identity. Only the monitor's own self-reads (the
 #   peer-heartbeat anchor read) opt into the scoped var.
 #
+#   CTL-1612 round 7 (Codex P2 follow-up): whenever <target-env-var> is set,
+#   a companion "<target-env-var>_SOURCE" var is ALSO exported —
+#   "minted" for a genuinely fresh mint, "inherited" for a round-6 fallback
+#   reuse. A caller (server.ts) that wants to know "is this token fresh
+#   enough to skip an immediate re-mint" must check this marker, not just
+#   whether the target var is merely present — an inherited fallback can be
+#   near its own expiry.
+#
 #   CTL-1612 round 4 (Codex P1 follow-up): scoped mode also CLEARS a
 #   non-personal LINEAR_API_TOKEN/LINEAR_API_KEY it finds ALREADY set on
 #   entry — not just "never adds" them. catalyst-broker calls this function
@@ -202,7 +210,19 @@ linear_app_actor_auth() {
       if [[ -n "$_target_var" ]]; then
         # Scoped mint: export ONLY the named var — LINEAR_API_TOKEN/LINEAR_API_KEY
         # are deliberately left untouched (see the header comment above).
+        #
+        # CTL-1612 round 7 (Codex P2 follow-up): also export
+        # "${_target_var}_SOURCE=minted" — a companion PROVENANCE marker a
+        # caller can use to tell "this is a genuinely fresh token" apart from
+        # "this is a reused inherited token" (see the two round-6 fallback
+        # branches below, which export "...=inherited" instead). server.ts
+        # reads this to decide whether it's safe to seed the async
+        # reminter's cooldown as if ITS OWN mint just succeeded — an inherited
+        # fallback token could be near expiry, and treating it as fresh would
+        # suppress the reminter's retry for the full success cooldown instead
+        # of the shorter failure-retry window.
         export "${_target_var}=${_otok}"
+        export "${_target_var}_SOURCE=minted"
         echo "${_daemon}: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket, scoped to \$${_target_var})" >&2
       else
         export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
@@ -220,6 +240,9 @@ linear_app_actor_auth() {
       if [[ -n "$_target_var" ]]; then
         if [[ -n "$_inherited_fallback" ]]; then
           export "${_target_var}=${_inherited_fallback}"
+          # CTL-1612 round 7: "inherited", not "minted" — see the provenance
+          # comment above.
+          export "${_target_var}_SOURCE=inherited"
           echo "${_daemon}: orchestrator token mint failed — reusing the inherited app-actor token for \$${_target_var} (still usable until it expires; a future successful mint will replace it)" >&2
         else
           echo "${_daemon}: WARNING orchestrator token mint failed — \$${_target_var} not set (self-reads fall back to existing resolution)" >&2
@@ -235,6 +258,9 @@ linear_app_actor_auth() {
     # is the one case that gets LOUDER than before: silence here would throw
     # away a usable credential for no reason, so seed the target var from it.
     export "${_target_var}=${_inherited_fallback}"
+    # CTL-1612 round 7: "inherited", not "minted" — see the provenance
+    # comment above.
+    export "${_target_var}_SOURCE=inherited"
     echo "${_daemon}: no orchestrator app configured — reusing the inherited app-actor token for \$${_target_var} (still usable until it expires)" >&2
   fi
 }

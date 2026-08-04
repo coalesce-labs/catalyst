@@ -254,6 +254,29 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-monitor-dist-redirect.test.sh
 
+      - name: liveness-anchor cross-stack parity test (CTL-1612 round 6/7)
+        # Pins catalyst-monitor.sh's resolve_liveness_anchor_issue() (a bash mirror of
+        # execution-core/config.mjs's getLivenessAnchorIssue(), duplicated deliberately —
+        # see the round-6/7 report for the runtime-dependency tradeoff) against the
+        # canonical getter via the __tests__/secret-contract-parity.test.sh three-way-
+        # assertion pattern, PLUS a jq-less fixture (round 7) exercising the grep/sed
+        # fallback rung a jq-absent host takes. Needs jq AND node, both preinstalled on
+        # ubuntu-latest runners (mirrors the deployment-mode-parity step above).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/liveness-anchor-parity.test.sh
+
+      - name: linear-app-actor scoped-credential unit tests (CTL-1612 rounds 4-6)
+        # The only direct regression coverage for lib/linear-app-actor.sh's scoped
+        # mode: inherited-alias clearing (round 4), personal lin_api_* key preservation
+        # incl. whitespace-trimmed classification (rounds 5/6), and the inherited-token
+        # fallback when the monitor's own mint fails or finds no creds (round 6). Lives
+        # under lib/__tests__/ rather than __tests__/, so — unlike every other suite in
+        # this allowlist — it also needed a dedicated step (round 7): the local
+        # run-tests.sh aggregate runner didn't glob that directory either until this
+        # same round wired both in together.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/linear-app-actor.test.sh
+
       - name: daemon shared-GitHub-credential projection test (CTL-1612)
         # Covers _project_shared_github_token: the shared SOPS file WINS over a stale
         # inherited GITHUB_TOKEN/GH_TOKEN (the 2026-08-02 fleet outage), an
