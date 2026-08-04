@@ -105,11 +105,12 @@ file with a three-phase dual-write cutover. That JSON shadow-write mechanism sta
 writers migrated and was retired as dead weight (zero readers) rather than completed. **CTL-532**
 built a separate, live *observational* projection: the broker folds every event on the log (not
 just a dedicated command event) into a pure `reduceWorkerStateEvent` reducer via
-`projectWorkerStateEvent`, and order-independently upserts the result into a SQLite `worker_state`
-table (`broker/broker-state.mjs`) — one row per `(orchestrator, ticket)` with phase, status, PR
-number, and revive count. It only inserts into that side table; it never reads or writes the
-canonical `workers/<TICKET>.json`, so the original 7-writer race is still open — tracked as
-CTL-1631. See ADR-018 for the full history.
+`projectWorkerStateEvent`, and upserts the result into a SQLite `worker_state` table
+(`broker/broker-state.mjs`) — one row per `(orchestrator, ticket)` with phase, status, PR number,
+and revive count. The upsert is order-independent for distinct timestamps; an exact `eventTs` tie
+is last-write-wins by processing order, not by occurrence order. It only inserts into that side
+table; it never reads or writes the canonical `workers/<TICKET>.json`, so the original 7-writer
+race is still open — tracked as CTL-1631. See ADR-018 for the full history.
 
 ## Deployment Mode (CTL-1617)
 
