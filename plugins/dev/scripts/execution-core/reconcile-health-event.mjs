@@ -1,5 +1,5 @@
-// reconcile-health-event.mjs — canonical monitor.reconcile.{failing,recovered}
-// events (CTL-867).
+// reconcile-health-event.mjs — canonical monitor.reconcile.{failing,recovered,
+// eligible_persist_failure} events (CTL-867, CTL-1628).
 //
 // When a team's eligibleQuery errors every reconcile poll (e.g. its status
 // references a removed Linear state → `linearis issues list --team X --status
@@ -13,6 +13,16 @@
 //   monitor.reconcile.failing.<TEAM>    — WARN, after N consecutive failures
 //   monitor.reconcile.recovered.<TEAM>  — INFO, when a poll succeeds after an alert
 //
+// CTL-1628 adds a third, sibling action for a DIFFERENT failure mode in the
+// same reconcileProject flow: the eligibleQuery poll succeeds, but the
+// resulting eligible-set disk projection write/rename then fails (disk full,
+// permissions). That was previously only a buried log.error — "monitoring
+// green, scheduler stale" — with no event-log signal at all. Unlike
+// failing/recovered, this action is emitted every time the persist write
+// fails (no consecutive-failure threshold or alert latch — see
+// monitor.mjs's reconcileProject catch block):
+//   monitor.reconcile.eligible_persist_failure.<TEAM> — WARN, every failed persist
+//
 // Shape mirrors triage-transition-event.mjs / memory-event.mjs (OTel envelope,
 // appendFileSync, never throws) so the dashboard/HUD parsers treat these events
 // identically to every other canonical execution-core emission.
@@ -24,6 +34,7 @@ import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 export const RECONCILE_FAILING_ACTION = "failing";
 export const RECONCILE_RECOVERED_ACTION = "recovered";
+export const ELIGIBLE_PERSIST_FAILURE_ACTION = "eligible_persist_failure"; // CTL-1628
 
 // defaultAppend — writes a JSONL line to the canonical event log.
 function defaultAppend(line) {
@@ -33,10 +44,17 @@ function defaultAppend(line) {
 }
 
 // buildReconcileHealthEvent — returns a canonical JSONL line (string + "\n") for
-// the monitor.reconcile.<action>.<TEAM> event. `action` is "failing" (WARN) or
-// "recovered" (INFO). The team is the event's entity label — there is no Linear
-// issue identifier for a team-wide reconcile failure, so the attributes carry
-// `team` rather than `linear.issue.identifier`.
+// the monitor.reconcile.<action>.<TEAM> event. `action` is "recovered" (INFO);
+// every other action — "failing" or "eligible_persist_failure" (CTL-1628) — is
+// WARN. The team is the event's entity label — there is no Linear issue
+// identifier for a team-wide reconcile failure, so the attributes carry `team`
+// rather than `linear.issue.identifier`.
+// REASON_ATTR_MAX_LEN — bound on the `reconcile.reason` attribute so a long
+// stack-trace-flavored error message (e.g. a wrapped ENOSPC/EACCES fs error)
+// can't blow up the OTLP/Loki attribute payload. body.payload.reason (below)
+// keeps the untruncated string for local/file consumers.
+const REASON_ATTR_MAX_LEN = 200;
+
 export function buildReconcileHealthEvent({
   team,
   action,
@@ -46,7 +64,7 @@ export function buildReconcileHealthEvent({
   reason = null,
 } = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-  const failing = action === RECONCILE_FAILING_ACTION;
+  const failing = action !== RECONCILE_RECOVERED_ACTION;
   return (
     JSON.stringify({
       ts,
@@ -63,6 +81,15 @@ export function buildReconcileHealthEvent({
         "event.action": `reconcile.${action}`,
         "event.label": team,
         "catalyst.team": team,
+        // CTL-1628: otel-forward's OTLP conversion (lib/destinations/otlp.ts
+        // buildOtlpPayload) only ever forwards `attributes` + `body.message` —
+        // `body.payload` (where `reason` lived exclusively before this) is
+        // never read, so the failure reason was silently dropped for every
+        // Loki/Grafana consumer. Mirrored into attributes here, truncated, so
+        // it survives the forward. Omitted (not even empty-string) when there
+        // is no reason, matching the conditional-attribute style used
+        // elsewhere in this envelope (e.g. linear.issue.identifier).
+        ...(reason ? { "reconcile.reason": String(reason).slice(0, REASON_ATTR_MAX_LEN) } : {}),
       },
       body: {
         payload: {

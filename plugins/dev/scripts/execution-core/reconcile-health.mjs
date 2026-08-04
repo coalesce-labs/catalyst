@@ -48,6 +48,15 @@ function writeHealthMarker(team, state) {
       lastSuccessTs: state.lastSuccessTs,
       consecutiveFailures: state.consecutiveFailures,
       alerting: state.alerting,
+      // CTL-1628 r3: persist the failure origin ("poll" | "persist") so a
+      // daemon restart mid-streak still attributes the eventual recovery
+      // event to the correct stage (the r2 fix) instead of falling back to
+      // "poll" just because the in-memory-only field didn't survive restart.
+      // Additive field — every existing marker reader either ignores unknown
+      // JSON fields (JSON.parse) or explicitly allowlists fields it reads
+      // (orch-monitor's reconcile-health-reader.ts, board-health.mjs), so
+      // this is wire-compatible with markers written by pre-r3 code.
+      lastFailureOrigin: state.lastFailureOrigin ?? null,
       updatedAt: new Date().toISOString(),
     },
     null,
@@ -104,16 +113,40 @@ function hydrateEntry(team) {
         typeof marker.consecutiveFailures === "number" ? marker.consecutiveFailures : 0,
       lastSuccessTs: marker.lastSuccessTs ?? null,
       alerting: marker.alerting === true,
+      // CTL-1628 r3: readReconcileHealthMarkers already coerces this to
+      // "poll" | "persist" (absent on pre-r3 markers → "poll"), so just pass
+      // it through.
+      lastFailureOrigin: marker.lastFailureOrigin,
     };
   } catch {
     return null; // best-effort: any read/parse fault → fresh defaults
   }
 }
 
+// RECOVERY_REASON_BY_ORIGIN — CTL-1628 r2: the recovery event previously
+// hard-coded reason:"reconcile-poll-succeeded" regardless of which stage had
+// actually been failing. Since CTL-1628 added a second failure origin (the
+// eligible-set disk persist, not just the eligibleQuery poll), a persist-origin
+// streak recovering would misattribute itself to the poll stage in Loki. Keyed
+// by the `origin` recordReconcileFailure was called with for the streak.
+const RECOVERY_REASON_BY_ORIGIN = {
+  poll: "reconcile-poll-succeeded",
+  persist: "eligible-persist-succeeded",
+};
+
 // recordReconcileSuccess — a reconcile poll succeeded for `team`. Resets the
 // consecutive-failure counter, stamps lastSuccessTs, and — if the team was
 // alerting — emits a recovery event and clears the alert. Best-effort throughout;
 // the `appendEvent`/`now` seams are injectable for tests.
+//
+// CTL-1628 r2: the recovery reason names the stage that actually recovered
+// (`entry.lastFailureOrigin`, set by the most recent recordReconcileFailure
+// call for this streak — "poll" or "persist") instead of always claiming the
+// poll stage. CTL-1628 r3: `lastFailureOrigin` is now ALSO persisted to (and
+// hydrated from) the disk marker — see writeHealthMarker/hydrateEntry — so a
+// daemon restart mid-streak still attributes the eventual recovery correctly
+// instead of falling back to "poll" just because the field didn't survive
+// restart (the original r2 gap this closes).
 export function recordReconcileSuccess(
   team,
   { appendEvent = defaultAppendEvent, now = () => new Date().toISOString() } = {},
@@ -121,12 +154,14 @@ export function recordReconcileSuccess(
   const entry = ensureEntry(team);
   const wasAlerting = entry.alerting;
   const priorFailures = entry.consecutiveFailures;
+  const recoveredOrigin = entry.lastFailureOrigin ?? "poll";
   entry.consecutiveFailures = 0;
   entry.lastSuccessTs = now();
   entry.alerting = false;
+  entry.lastFailureOrigin = null;
   if (wasAlerting) {
     log.info(
-      { team, priorFailures },
+      { team, priorFailures, recoveredOrigin },
       "reconcile-health: team recovered — eligible set refreshing again (CTL-867)",
     );
     appendEvent({
@@ -134,29 +169,35 @@ export function recordReconcileSuccess(
       action: RECONCILE_RECOVERED_ACTION,
       consecutiveFailures: 0,
       lastSuccessTs: entry.lastSuccessTs,
-      reason: "reconcile-poll-succeeded",
+      reason: RECOVERY_REASON_BY_ORIGIN[recoveredOrigin] ?? RECOVERY_REASON_BY_ORIGIN.poll,
     });
   }
   writeHealthMarker(team, entry);
 }
 
-// recordReconcileFailure — a reconcile poll threw for `team`. Increments the
-// consecutive-failure counter; once it crosses RECONCILE_FAILURE_ALERT_THRESHOLD
-// (and the team is not already alerting), escalates a single
-// monitor.reconcile.failing.<TEAM> event so the failure surfaces on the
-// dashboard instead of staying buried in a log.error. The alert is emitted ONCE
-// per failing streak (the `alerting` latch) — a recovery clears it. Best-effort;
-// `appendEvent`/`threshold` seams are injectable for tests.
+// recordReconcileFailure — a reconcile poll threw for `team` (or, via the
+// CTL-1628 `origin: "persist"` call site in monitor.mjs, the eligible-set disk
+// persist threw after a successful poll). Increments the consecutive-failure
+// counter; once it crosses RECONCILE_FAILURE_ALERT_THRESHOLD (and the team is
+// not already alerting), escalates a single monitor.reconcile.failing.<TEAM>
+// event so the failure surfaces on the dashboard instead of staying buried in
+// a log.error. The alert is emitted ONCE per failing streak (the `alerting`
+// latch) — a recovery clears it. Best-effort; `appendEvent`/`threshold` seams
+// are injectable for tests. `origin` ("poll" | "persist", default "poll") is
+// stamped onto the entry so a later recordReconcileSuccess can name the stage
+// that actually recovered (CTL-1628 r2) instead of assuming poll.
 export function recordReconcileFailure(
   team,
   reason,
   {
     appendEvent = defaultAppendEvent,
     threshold = RECONCILE_FAILURE_ALERT_THRESHOLD,
+    origin = "poll",
   } = {},
 ) {
   const entry = ensureEntry(team);
   entry.consecutiveFailures += 1;
+  entry.lastFailureOrigin = origin;
   const staleMs = entry.lastSuccessTs
     ? Date.now() - Date.parse(entry.lastSuccessTs)
     : null;
@@ -210,6 +251,9 @@ export function readReconcileHealthMarkers({ dir = getReconcileHealthDir() } = {
           typeof parsed.consecutiveFailures === "number" ? parsed.consecutiveFailures : 0,
         alerting: parsed.alerting === true,
         updatedAt: parsed.updatedAt ?? null,
+        // CTL-1628 r3: additive field, absent on markers written by pre-r3
+        // code — coerce to "poll", the pre-r3 default/fallback.
+        lastFailureOrigin: parsed.lastFailureOrigin === "persist" ? "persist" : "poll",
       };
     } catch {
       // unreadable / malformed marker — skip this team, keep the rest
