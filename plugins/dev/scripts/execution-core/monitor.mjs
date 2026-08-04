@@ -114,6 +114,14 @@ import {
   getReconcileHealth,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
+// CTL-1628: direct import (not routed through reconcile-health.mjs) — the
+// eligible-set persist-failure event has no consecutive-failure/alert-latch
+// state to track, so it skips recordReconcileFailure and appends straight
+// through the same appendHealthEvent seam used above.
+import {
+  appendReconcileHealthEvent,
+  ELIGIBLE_PERSIST_FAILURE_ACTION,
+} from "./reconcile-health-event.mjs";
 import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
@@ -320,7 +328,9 @@ const knownProjects = new Set();
 // after N consecutive failures the health tracker escalates a canonical
 // `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
 // orch-monitor dashboard surfaces the silently-starving team, and a recovering
-// poll clears the alert. `appendHealthEvent` is an injectable test seam.
+// poll clears the alert. `appendHealthEvent` is an injectable test seam — it
+// also gates the CTL-1628 `monitor.reconcile.eligible_persist_failure.<TEAM>`
+// event fired below when the eligible-set disk projection write fails.
 export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, replica, onSource } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
@@ -355,13 +365,20 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     );
     return;
   }
-  // CTL-867: the poll succeeded — reset the failure streak, refresh the
-  // last-successful-refresh marker, and clear any standing alert. Recorded
-  // BEFORE the projection write so a successful poll counts as a recovery even
-  // if the (rare) projection write below fails.
-  recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   try {
     setProjectEligible(team, tickets, { source: "reconcile", query });
+    // CTL-867/CTL-1628: reset the failure streak, refresh the
+    // last-successful-refresh marker, and clear any standing alert only once
+    // the projection has actually landed on disk. This used to run BEFORE the
+    // persist try/catch (recorded as soon as the poll succeeded), which meant
+    // a *persistent* persist fault (e.g. EACCES on the eligible dir) kept
+    // reconcile-health — and by extension checkFleetFreeze, which reads
+    // getReconcileHealth(team)?.alerting — permanently green while the
+    // scheduler read a stale-forever projection (the CTL-1628 design gap:
+    // "persist failures invisible to reconcile health state"). Moved here so
+    // a persist failure now falls into the catch below instead of being
+    // masked as success.
+    recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   } catch (err) {
     // A projection write/rename failure (disk full, permissions) must NOT
     // crash the daemon: reconcileProject runs inside reconcileAll, itself
@@ -372,6 +389,33 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     log.error(
       { team, err: err.message },
       "eligible-set projection write failed — daemon continues, retry next reconcile"
+    );
+    // CTL-1628: the log line above was invisible to the dashboard —
+    // "monitoring green, scheduler stale". Escalate onto the unified event
+    // log too, via the same appendHealthEvent test seam used for the CTL-867
+    // reconcile-poll escalation above. Unlike that escalation this fires on
+    // every failed persist (no threshold/latch — a stale-on-disk projection
+    // is worth surfacing immediately, not after N consecutive misses).
+    (appendHealthEvent ?? appendReconcileHealthEvent)({
+      team,
+      action: ELIGIBLE_PERSIST_FAILURE_ACTION,
+      reason: err.message,
+    });
+    // CTL-1628: ALSO feed this into the same N-consecutive escalation/
+    // alert-latch tracker recordReconcileFailure already drives for poll
+    // failures, so a *persistent* persist fault escalates monitor.reconcile.
+    // failing and holds checkFleetFreeze's alerting flag true — exactly like
+    // a persistent poll fault does — instead of the marker staying frozen
+    // "healthy" forever. The `eligible-persist-failed:` prefix distinguishes
+    // a persist-origin streak from a poll-origin streak in the health marker
+    // / dashboard without adding a second tracked dimension. `origin: "persist"`
+    // (CTL-1628 r2) additionally lets recordReconcileSuccess's eventual
+    // recovery event name the stage that actually recovered, rather than
+    // hard-coding "reconcile-poll-succeeded" for a streak the poll never failed.
+    recordReconcileFailure(
+      team,
+      `eligible-persist-failed: ${err.message}`,
+      { origin: "persist", ...(appendHealthEvent ? { appendEvent: appendHealthEvent } : {}) }
     );
   }
 }
@@ -397,9 +441,16 @@ export function reconcileAll({ exec, delegateExec, appendHealthEvent, fleetFreez
   // neither the replica nor linearis — new work is frozen fleet-wide, which used
   // to be silent (reconcileProject just preserves the empty prior set). Latched +
   // best-effort inside checkFleetFreeze; a team's recovery clears it.
+  //
+  // CTL-1628 r3: getTeamOrigin threads each team's failure origin ("poll" |
+  // "persist", from reconcile-health.mjs's lastFailureOrigin) so checkFleetFreeze
+  // can tell the documented replica+linearis double outage (all-poll) apart
+  // from an all-teams local disk fault (all-persist) — same alert name, an
+  // accurate cause instead of an operator chasing the wrong subsystem.
   checkFleetFreeze({
     teams: [...seen],
     isTeamFrozen: (t) => getReconcileHealth(t)?.alerting === true,
+    getTeamOrigin: (t) => getReconcileHealth(t)?.lastFailureOrigin ?? "poll",
     ...(fleetFreezeAppend ? { append: fleetFreezeAppend } : {}),
   });
 }
