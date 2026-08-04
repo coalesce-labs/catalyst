@@ -496,6 +496,22 @@ export async function handleCommentWake(
     try {
       const earlyRes = await removeLabel(ticket, "needs-input");
       needsInputWroteEarly = earlyRes?.wrote === true;
+      // Codex #2970 post-merge round 5: this call can ALSO be a real, confirmed
+      // clear of the needs-input label — but if the ticket has no local worker
+      // dir, the readdirSync below returns before ever reaching the per-signal
+      // loop's own clearDispositionEmit(ticket, "needs-input") call. Without this,
+      // a live "needs-input" dedup entry would survive indefinitely (there's no
+      // later point in this invocation, or any self-heal path, that would reset
+      // it for a ticket with no local signal to match against). Reset it here,
+      // right where the confirmation is known, independent of whether a worker
+      // dir exists.
+      if (earlyRes === undefined || earlyRes?.removed !== false) {
+        try {
+          clearDispositionEmit(ticket, "needs-input");
+        } catch {
+          /* observability only */
+        }
+      }
     } catch {
       /* fail-open — same reasoning as above */
     }
@@ -682,15 +698,18 @@ export async function handleCommentWake(
       const res = await removeLabel(ticket, "needs-input"); // CTL-764 Phase 4: durable needs-input cleared on genuine resolution
       needsInputRemoved = res === undefined || res?.wrote === true || needsInputWroteEarly;
       needsInputConfirmed = res === undefined || res?.removed !== false;
+      // Codex #2970 post-merge round 3 / round 5: needsInputWroteEarly is declared
+      // once, BEFORE this loop — with multiple phase-*.json signals in needs-input,
+      // it would OR into every iteration's needsInputRemoved unchanged, turning one
+      // Linear write into one emission per matching signal. Consume the credit here,
+      // INSIDE the try, only once removeLabel has actually SUCCEEDED and this
+      // iteration has used it — not unconditionally after the try/catch. If this
+      // call throws, the catch below skips this line entirely, so a throwing FIRST
+      // signal doesn't burn the credit a later, successful signal could still use.
+      needsInputWroteEarly = false;
     } catch {
       /* fail-open */
     }
-    // Codex #2970 post-merge round 3: needsInputWroteEarly is declared once, BEFORE
-    // this loop — with multiple phase-*.json signals in needs-input, it would OR
-    // into every iteration's needsInputRemoved unchanged, turning one Linear write
-    // into one emission per matching signal. Consume the credit here, on the
-    // iteration that used it, so it can fund at most one emission across the loop.
-    needsInputWroteEarly = false;
     // CTL-764 finding 11: record the needs-input→cleared resolution in the canonical
     // worker.transition stream. scheduler.mjs owns the park/apply emission; the clear
     // is emitted here (the daemon removes the durable label out-of-band and redispatches
