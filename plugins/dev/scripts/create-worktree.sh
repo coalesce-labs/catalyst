@@ -177,11 +177,19 @@ if [ -d "$WORKTREE_PATH" ]; then
 fi
 
 # Create worktree
+# CREATED_BRANCH (Codex #2948): tracks whether THIS run created
+# WORKTREE_NAME as a new branch, vs. checking out one the user already
+# owned. The rollback helpers below only `git branch -D` when this is
+# true — force-deleting a pre-existing branch on a failed setup could
+# silently lose the user's unpushed commits. Default false (fail-safe:
+# never delete unless we're sure we created it).
+CREATED_BRANCH=false
 if git show-ref --verify --quiet "refs/heads/${WORKTREE_NAME}"; then
 	echo "📋 Using existing branch: ${WORKTREE_NAME}"
 	git worktree add "$WORKTREE_PATH" "$WORKTREE_NAME"
 else
 	echo "🆕 Creating new branch: ${WORKTREE_NAME}"
+	CREATED_BRANCH=true
 	START_POINT="$BASE_BRANCH"
 	if [ "$SKIP_FETCH" = false ]; then
 		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
@@ -268,6 +276,43 @@ _removal_guard_ok() {
 		return 1
 	fi
 	assert_worktree_removal_safe "$_wt"
+}
+
+# _worktree_rollback_remove — CTL-1628 post-merge (Codex #2948): the guarded
+# presweep+remove sequence shared by every rollback site (failed install,
+# missing thoughts/shared). Deletes the branch only when THIS run created it
+# (CREATED_BRANCH) — a pre-existing branch the user already owned must
+# survive a failed setup rather than being force-deleted, which could lose
+# unpushed commits. The worktree itself is always removed either way.
+_worktree_rollback_remove() {
+	cd - >/dev/null
+	# CTL-649: defensive presweep — in a failure-before-dispatch rollback
+	# no bg session should exist yet, but the helper is a cheap no-op
+	# in that case and prevents any future race that lands a session
+	# between create-worktree and rollback from leaking.
+	[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
+		"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
+	# CTL-1417: skip the force-remove if the tree is in use / is our cwd
+	# OR the guard is unavailable (fail-closed), leaving it for the reaper
+	# rather than deleting an in-use worktree.
+	if _removal_guard_ok "$WORKTREE_PATH"; then
+		git worktree remove --force "$WORKTREE_PATH"
+		if [ "$CREATED_BRANCH" = true ]; then
+			git branch -D "$WORKTREE_NAME" 2>/dev/null || true
+		fi
+	else
+		echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
+	fi
+}
+
+# _worktree_install_rollback — the guarded rollback a failed dependency
+# install (`make setup`, `bun install`, `npm install`) runs through, so a
+# failure anywhere in step 1 cleans up the half-built worktree instead of
+# `set -e` aborting the script and leaving it on disk.
+_worktree_install_rollback() {
+	echo -e "${RED}❌ Setup failed. Cleaning up worktree...${NC}"
+	_worktree_rollback_remove
+	exit 1
 }
 if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 	# Remove stale workflow-context.json if copied from main repo
@@ -399,40 +444,79 @@ else
 	# 1. Install dependencies
 	if [ -f "Makefile" ] && grep -q "^setup:" Makefile; then
 		echo "  Running: make setup"
-		if ! make setup; then
-			echo -e "${RED}❌ Setup failed. Cleaning up worktree...${NC}"
-			cd - >/dev/null
-			# CTL-649: defensive presweep — in a failure-before-dispatch rollback
-			# no bg session should exist yet, but the helper is a cheap no-op
-			# in that case and prevents any future race that lands a session
-			# between create-worktree and rollback from leaking.
-			SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-			[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
-				"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-			# CTL-1417: skip the force-remove if the tree is in use / is our cwd
-			# OR the guard is unavailable (fail-closed), leaving it for the reaper
-			# rather than deleting an in-use worktree.
-			if _removal_guard_ok "$WORKTREE_PATH"; then
-				git worktree remove --force "$WORKTREE_PATH"
-				git branch -D "$WORKTREE_NAME" 2>/dev/null || true
-			else
-				echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
-			fi
-			exit 1
-		fi
+		make setup || _worktree_install_rollback
 	elif [ -f "package.json" ]; then
-		if command -v bun >/dev/null 2>&1; then
-			# CTL-1628: root package.json (the bun workspace, Phase A1) arms this
-			# branch on every worktree creation. Use --frozen-lockfile so the
-			# fresh worktree installs exactly what's committed in bun.lock
-			# rather than silently re-resolving and rewriting the lockfile
-			# before the worker's first commit (which could otherwise ride
-			# unrelated lockfile drift into the ticket's diff).
-			echo "  Running: bun install --frozen-lockfile"
-			bun install --frozen-lockfile
+		# CTL-1628 post-merge (Codex #2948 round 4): BUN EVIDENCE alone (a
+		# bun.lock/bun.lockb, or "packageManager" naming bun) selects the bun
+		# path — independent of whether package.json also declares
+		# "workspaces". Round 3 required "workspaces" AND bun evidence, which
+		# meant a single-package bun project (bun.lock, no "workspaces" key —
+		# most bun apps aren't monorepos) fell through to npm and wrote
+		# package-lock.json debris into a bun-managed tree. "workspaces" is
+		# package-manager-neutral either way (an npm/yarn/pnpm monorepo
+		# declares it too), so it was never the right signal to gate on; only
+		# bun evidence is. The bun-absent warn+skip below applies identically
+		# to a workspace root and a single-package project — no need to
+		# distinguish the two once bun evidence itself is the sole gate.
+		HAS_BUN_LOCK=false
+		[ -f "bun.lock" ] || [ -f "bun.lockb" ] && HAS_BUN_LOCK=true
+		# CTL-1628 post-merge (Codex #2948 round 5): jq is not guaranteed present
+		# on every host this script runs on (a documented-minimal host can lack
+		# it) — a bare `jq -r ...` command substitution under this script's
+		# top-level `set -e` would exit 127 right here, AFTER `git worktree add`
+		# already created the worktree/branch but BEFORE any rollback is armed,
+		# stranding both with no error message and no attempt at npm. Guard on
+		# `command -v jq` first; without it, fall back to a plain grep sniff of
+		# the "packageManager" field — imprecise (matches inside any string
+		# value, ignores JSON structure) but adequate for the boolean bun@
+		# prefix check this needs, and it degrades to the same lock-file-only
+		# detection (HAS_BUN_LOCK, no jq involved) in the worst case rather than
+		# ever crashing the script.
+		if command -v jq >/dev/null 2>&1; then
+			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null)
+		elif grep -qE '"packageManager"[[:space:]]*:[[:space:]]*"bun@' package.json 2>/dev/null; then
+			PACKAGE_MANAGER_FIELD="bun@detected"
+		else
+			PACKAGE_MANAGER_FIELD=""
+		fi
+		HAS_BUN_EVIDENCE=false
+		if [ "$HAS_BUN_LOCK" = true ] || [[ "$PACKAGE_MANAGER_FIELD" == bun@* ]]; then
+			HAS_BUN_EVIDENCE=true
+		fi
+		if [ "$HAS_BUN_EVIDENCE" = true ]; then
+			if command -v bun >/dev/null 2>&1; then
+				if [ "$HAS_BUN_LOCK" = true ]; then
+					# CTL-1628: use --frozen-lockfile so the fresh worktree installs
+					# exactly what's committed in bun.lock rather than silently
+					# re-resolving and rewriting the lockfile before the worker's
+					# first commit (which could otherwise ride unrelated lockfile
+					# drift into the ticket's diff).
+					echo "  Running: bun install --frozen-lockfile"
+					bun install --frozen-lockfile || _worktree_install_rollback
+				else
+					# No lock committed yet (bun evidence is only the
+					# "packageManager" field) — nothing to freeze against, so a
+					# plain install is correct here rather than a guaranteed
+					# --frozen-lockfile failure.
+					echo "  Running: bun install"
+					bun install || _worktree_install_rollback
+				fi
+			else
+				echo -e "${YELLOW}⚠️  bun not found on PATH — this is a bun-managed project${NC}"
+				echo "  (bun.lock/bun.lockb present, or \"packageManager\" names bun)."
+				echo "  Skipping auto-install rather than falling back to npm, which"
+				echo "  ignores bun.lock and writes package-lock.json debris into a"
+				echo "  bun-managed tree."
+				if [ "$HAS_BUN_LOCK" = true ]; then
+					echo "  Install bun (https://bun.sh) and run 'bun install --frozen-lockfile'"
+				else
+					echo "  Install bun (https://bun.sh) and run 'bun install'"
+				fi
+				echo "  in the worktree manually."
+			fi
 		else
 			echo "  Running: npm install"
-			npm install
+			npm install || _worktree_install_rollback
 		fi
 	fi
 
@@ -489,20 +573,7 @@ if [ "$THOUGHTS_INIT_EXPECTED" = true ] && { [ ! -L "thoughts/shared" ] || [ ! -
 	echo "  ~/.config/humanlayer/humanlayer.json (concurrent 'thoughts init'"
 	echo "  write race) dropped init into an interactive prompt that failed."
 	echo -e "${RED}  Cleaning up worktree...${NC}"
-	cd - >/dev/null
-	# CTL-649: defensive presweep before removal.
-	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-	[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
-		"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-	# CTL-1417: skip the force-remove if the tree is in use / is our cwd OR the
-	# guard is unavailable (fail-closed), leaving it for the reaper rather than
-	# deleting an in-use worktree.
-	if _removal_guard_ok "$WORKTREE_PATH"; then
-		git worktree remove --force "$WORKTREE_PATH"
-		git branch -D "$WORKTREE_NAME" 2>/dev/null || true
-	else
-		echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
-	fi
+	_worktree_rollback_remove
 	exit 1
 fi
 
