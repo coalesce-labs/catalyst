@@ -2,9 +2,10 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test fleet-freeze-alert.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getReconcileHealthDir } from "./config.mjs";
 import {
   buildFleetFreezeAlertEvent,
   checkFleetFreeze,
@@ -18,6 +19,13 @@ import {
   FLEET_FREEZE_CAUSE_ALL_PERSIST,
   FLEET_FREEZE_CAUSE_MIXED,
 } from "./fleet-freeze-alert.mjs";
+
+// markerPath — mirrors the module-private helper so tests can write/inspect
+// the on-disk marker directly (legacy-shape simulation, persist-failure
+// simulation) without going through checkFleetFreeze.
+function markerPath() {
+  return join(getReconcileHealthDir(), "fleet-freeze.json");
+}
 
 // The latch persists under getReconcileHealthDir() (CATALYST_DIR-scoped), so give
 // each test an isolated CATALYST_DIR — no cross-test marker leakage, no writes to
@@ -105,15 +113,22 @@ describe("buildFleetFreezeAlertEvent", () => {
     expect(ev.attributes["event.name"]).toBe(ALERT_RAISED); // same topic as a fresh raise
     expect(ev.attributes["alert.cause_changed"]).toBe(true);
     expect(ev.attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    // CTL-1628 r4 post-merge: previousCause must ALSO land in attributes —
+    // otel-forward's OTLP conversion never reads body.payload, so a
+    // previousCause confined to the body would be silently dropped for every
+    // Loki/Grafana consumer, leaving a cause-drift alert with no record of
+    // what it changed FROM (same gap the r1/r3 fixes closed for reason/cause).
+    expect(ev.attributes["alert.previous_cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
     expect(ev.body.payload.causeChanged).toBe(true);
     expect(ev.body.payload.previousCause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
   });
 
-  test("causeChanged omitted (default false): no cause_changed attribute, payload carries false/null", () => {
+  test("causeChanged omitted (default false): no cause_changed/previous_cause attributes, payload carries false/null", () => {
     const ev = JSON.parse(
       buildFleetFreezeAlertEvent({ action: "raised", teams: ["CTL"], cause: FLEET_FREEZE_CAUSE_ALL_POLL }),
     );
     expect(ev.attributes["alert.cause_changed"]).toBeUndefined();
+    expect(ev.attributes["alert.previous_cause"]).toBeUndefined();
     expect(ev.body.payload.causeChanged).toBe(false);
     expect(ev.body.payload.previousCause).toBeNull();
   });
@@ -364,6 +379,9 @@ describe("checkFleetFreeze", () => {
       expect(lines[1].attributes["event.name"]).toBe(ALERT_RAISED); // same topic, not a new alert kind
       expect(lines[1].attributes["alert.cause_changed"]).toBe(true);
       expect(lines[1].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+      // CTL-1628 r4 post-merge: previousCause must survive otel-forward's OTLP
+      // conversion (attributes-only), not just live in the body.
+      expect(lines[1].attributes["alert.previous_cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
       expect(lines[1].body.payload.previousCause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
       expect(lines[1].body.payload.reason).toMatch(/local filesystem fault/);
 
@@ -434,6 +452,142 @@ describe("checkFleetFreeze", () => {
       const r2 = checkFleetFreeze(opts);
       expect(r2.emitted).toBe("cause_changed");
       expect(r2.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+      expect(lines).toHaveLength(2);
+    });
+  });
+
+  // CTL-1628 r4 post-merge (Codex #2960 post-merge finding 2): a marker
+  // written before the r3 cause field existed has raised:true with no
+  // `cause` at all — hydrating that as null would make the FIRST post-
+  // upgrade tick misreport a real cause as "changed" even though nothing
+  // about the freeze itself moved; it's just that the field is new.
+  describe("legacy marker hydration (no cause field) defaults to all-poll (CTL-1628 r4 post-merge)", () => {
+    test("a still-raised legacy marker ({raised:true}, no cause) + unchanged all-poll origins emits nothing on the first post-upgrade tick", () => {
+      mkdirSync(getReconcileHealthDir(), { recursive: true });
+      writeFileSync(markerPath(), JSON.stringify({ raised: true }));
+
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      const r = checkFleetFreeze({
+        teams: ["CTL"],
+        isTeamFrozen: () => true,
+        getTeamOrigin: () => "poll",
+        append,
+      });
+      expect(r).toEqual({ frozen: true, emitted: null, cause: null });
+      expect(lines).toHaveLength(0);
+    });
+
+    test("a still-raised legacy marker + a REAL drift to all-persist still emits exactly one cause_changed", () => {
+      mkdirSync(getReconcileHealthDir(), { recursive: true });
+      writeFileSync(markerPath(), JSON.stringify({ raised: true }));
+
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      const r = checkFleetFreeze({
+        teams: ["CTL"],
+        isTeamFrozen: () => true,
+        getTeamOrigin: () => "persist",
+        append,
+      });
+      expect(r.emitted).toBe("cause_changed");
+      expect(r.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+      expect(lines).toHaveLength(1);
+      expect(lines[0].body.payload.previousCause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+    });
+
+    test("a legacy marker that is NOT raised ({raised:false}) hydrates cause as null, not all-poll", () => {
+      mkdirSync(getReconcileHealthDir(), { recursive: true });
+      writeFileSync(markerPath(), JSON.stringify({ raised: false }));
+
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      // Not frozen → no transition, no emission either way; this just
+      // confirms hydrate() doesn't fabricate a cause for a closed latch.
+      const r = checkFleetFreeze({ teams: ["CTL"], isTeamFrozen: () => false, append });
+      expect(r).toEqual({ frozen: false, emitted: null, cause: null });
+      expect(lines).toHaveLength(0);
+    });
+  });
+
+  // CTL-1628 r4 post-merge (Codex #2960 post-merge finding 3): persist()
+  // previously swallowed a transient marker-write failure with no retry —
+  // _lastEmittedCause (and _fleetFrozenRaised) had already advanced in
+  // memory, so the stale on-disk marker would sit there forever unless
+  // ANOTHER transition happened to trigger a fresh persist() call.
+  describe("persist retry after a transient marker-write failure (CTL-1628 r4 post-merge)", () => {
+    // Block the marker path so writeFileSync/renameSync inside persist()
+    // throws (same disk-fault simulation used in monitor.test.mjs). Removes
+    // any existing marker FILE first — a prior successful persist() may have
+    // already created one, and mkdirSync would EEXIST on top of a file.
+    function blockMarkerPath() {
+      rmSync(markerPath(), { recursive: true, force: true });
+      mkdirSync(markerPath(), { recursive: true });
+      writeFileSync(join(markerPath(), "sentinel"), "x");
+    }
+    function unblockMarkerPath() {
+      rmSync(markerPath(), { recursive: true, force: true });
+    }
+
+    test("a transient persist failure on the raise does NOT re-emit on retry — only the marker catches up", () => {
+      blockMarkerPath();
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      const opts = { teams: ["CTL"], isTeamFrozen: () => true, getTeamOrigin: () => "poll", append };
+
+      // The raise event still fires (append happens before persist), but the
+      // marker write fails — event count is 1 despite the persist fault.
+      const r1 = checkFleetFreeze(opts);
+      expect(r1.emitted).toBe("raised");
+      expect(lines).toHaveLength(1);
+
+      // Still blocked: a further check must NOT re-emit "raised" again (the
+      // in-memory latch already advanced) and must not spuriously detect a
+      // cause drift either (origins are unchanged).
+      const r2 = checkFleetFreeze(opts);
+      expect(r2).toEqual({ frozen: true, emitted: null, cause: null });
+      expect(lines).toHaveLength(1);
+
+      // Unblock: the NEXT check retries the persist (no new transition, so
+      // still no event emitted) and the marker catches up.
+      unblockMarkerPath();
+      const r3 = checkFleetFreeze(opts);
+      expect(r3).toEqual({ frozen: true, emitted: null, cause: null });
+      expect(lines).toHaveLength(1); // still exactly one — the retry emitted nothing
+
+      // Prove the marker actually caught up: a simulated restart now
+      // rehydrates the correct raised+cause state from disk.
+      __resetFleetFreezeLatch();
+      const r4 = checkFleetFreeze(opts); // no drift → silent, proving hydrate saw raised:true + cause:all-poll
+      expect(r4).toEqual({ frozen: true, emitted: null, cause: null });
+      expect(lines).toHaveLength(1);
+    });
+
+    test("a transient persist failure on a cause_changed drift retries without duplicating the alert", () => {
+      let origin = "poll";
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      const opts = { teams: ["CTL"], isTeamFrozen: () => true, getTeamOrigin: () => origin, append };
+
+      checkFleetFreeze(opts); // raise: all-poll (persist succeeds, unblocked)
+      expect(lines).toHaveLength(1);
+
+      // Drift to persist, but block the marker write for this transition.
+      origin = "persist";
+      blockMarkerPath();
+      const r1 = checkFleetFreeze(opts);
+      expect(r1.emitted).toBe("cause_changed");
+      expect(lines).toHaveLength(2); // the drift event still fires
+
+      // Still blocked, no further drift: no duplicate cause_changed.
+      const r2 = checkFleetFreeze(opts);
+      expect(r2).toEqual({ frozen: true, emitted: null, cause: null });
+      expect(lines).toHaveLength(2);
+
+      // Unblock: the retry succeeds silently (no third emission).
+      unblockMarkerPath();
+      const r3 = checkFleetFreeze(opts);
+      expect(r3).toEqual({ frozen: true, emitted: null, cause: null });
       expect(lines).toHaveLength(2);
     });
   });
