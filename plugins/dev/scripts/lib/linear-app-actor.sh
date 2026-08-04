@@ -155,11 +155,104 @@ linear_app_actor_clear_inherited() {
   fi
 }
 
+# CTL-1612 round 9 (Codex P2 follow-up): tiered JSON parsing for the mint
+# chain — jq → bun -e → node -e — mirroring the create-worktree.sh #2966
+# packageManager-sniff precedent (same reasoning: prefer a REAL JSON parser
+# whenever one happens to be on PATH; jq is neither a required nor optional
+# repo dependency and bootstrap does not enforce it). Without this, a
+# supported host without jq — anchor configured, orchestrator creds
+# configured — could never populate CATALYST_MONITOR_APP_ACTOR_TOKEN even
+# though bun (which every monitor host already has, since it's what RUNS the
+# monitor) or node could parse the exact same JSON.
+#
+# SECURITY (unchanged from the jq-only version): the JSON document parsed
+# here — the orchestrator client credentials, and the OAuth token response —
+# is credential material. It travels via STDIN in every tier, never as an
+# argv string or embedded in the one-shot script text (the field NAME, e.g.
+# "clientId", is the only argv arg, and that is never secret). `bun -e`/
+# `node -e` read stdin the identical way a script file would.
+#
+# SCOPE NOTE: this closes the gap ONLY for linear-app-actor.sh's OWN
+# field-parsing (the clientId/clientSecret/access_token extraction and the
+# two @uri encodes below). It does NOT touch catalyst_resolve_secret's own,
+# SEPARATE jq dependency (lib/catalyst-secret-contract.sh's
+# _csc_read_json_string — the Layer-2 config-json READ that populates
+# CATALYST_SECRET_LAST_VALUE / `$_creds` below) — that function has its OWN
+# jq gate (`command -v jq || { printf '@ABSENT'; return 0; }`) and is core,
+# heavily-hardened, hostile-input-tested shared infrastructure used by every
+# config-json registry row (worker-actor, cloud-token, groq-api-key, …), not
+# something scoped to "the monitor's mint chain". A truly jq-less host today
+# still can't RESOLVE the orchestrator creds in the first place (a separate,
+# pre-existing, deliberately-scoped limitation) — this fix makes what
+# linear-app-actor.sh itself does with a JSON string, once it HAS one,
+# jq-independent. See the round-9 report for why extending
+# _csc_read_json_string itself was judged out of proportion for this finding.
+LAA_JSON_FIELD_SNIFF='let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const v=JSON.parse(d)[process.argv[1]];process.stdout.write(v==null?"":String(v))}catch{process.stdout.write("")}})'
+LAA_URI_ENCODE_SNIFF='let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(encodeURIComponent(d))})'
+
+# _laa_json_field <tier> <field-name>
+#   Extracts a top-level field from a JSON document on STDIN, using the
+#   given TIER ("jq"/"bun"/"node" — resolved ONCE by the caller via
+#   _laa_resolve_json_tier, not re-probed per field). Prints the field's
+#   value or empty on any parse failure/missing field (same fail-open shape
+#   as jq's `// empty`) — never throws, `set -e` safe (`|| true` on the
+#   bun/node tiers: empirically, unlike jq, a bun/node one-shot CAN exit
+#   non-zero on malformed input, which would otherwise abort the caller
+#   exactly like the round-5 bare-jq stranding bug this pattern already
+#   fixed once, in create-worktree.sh).
+_laa_json_field() {
+  local _tier="$1" _field="$2"
+  case "$_tier" in
+    jq) jq -r --arg f "$_field" '.[$f] // empty' 2>/dev/null ;;
+    bun) bun -e "$LAA_JSON_FIELD_SNIFF" "$_field" 2>/dev/null || true ;;
+    node) node -e "$LAA_JSON_FIELD_SNIFF" "$_field" 2>/dev/null || true ;;
+    *) printf '' ;;
+  esac
+}
+
+# _laa_uri_encode <tier> — URL-encodes a raw string on STDIN. bun/node's
+# native encodeURIComponent is RFC-3986-compatible parity with jq's @uri for
+# the character classes an OAuth client_id/client_secret realistically
+# contains (verified: identical output for a mixed alphanumeric+space+&+=
+# fixture).
+_laa_uri_encode() {
+  local _tier="$1"
+  case "$_tier" in
+    jq) jq -sRr '@uri' 2>/dev/null ;;
+    bun) bun -e "$LAA_URI_ENCODE_SNIFF" 2>/dev/null || true ;;
+    node) node -e "$LAA_URI_ENCODE_SNIFF" 2>/dev/null || true ;;
+    *) printf '' ;;
+  esac
+}
+
+# _laa_resolve_json_tier <daemon-name>
+#   Probes ONCE for jq → bun → node (in that preference order — jq stays
+#   authoritative/unchanged when present) and prints the chosen tier name,
+#   or empty. Probing once (not per field) is what lets the caller warn
+#   EXACTLY once, loudly, when none are available — several silent
+#   empty-string field extractions would look identical to "field genuinely
+#   absent" or "creds not configured", exactly the silent-failure shape
+#   Codex flagged.
+_laa_resolve_json_tier() {
+  local _daemon="${1:?_laa_resolve_json_tier: daemon name required}"
+  if command -v jq >/dev/null 2>&1; then
+    printf 'jq'
+  elif command -v bun >/dev/null 2>&1; then
+    printf 'bun'
+  elif command -v node >/dev/null 2>&1; then
+    printf 'node'
+  else
+    echo "${_daemon}: WARNING no JSON parser available (jq/bun/node all absent) — cannot parse orchestrator credentials or mint the app-actor token; self-reads fall back to existing resolution" >&2
+  fi
+}
+
 linear_app_actor_auth() {
   local _daemon="${1:?linear_app_actor_auth: daemon name required}"
   local _target_var="${2:-}"
-  local _ocid _ocsec _otok _creds
+  local _ocid _ocsec _otok _creds _json_tier
   local _inherited_fallback=""
+
+  _json_tier="$(_laa_resolve_json_tier "$_daemon")"
 
   # CTL-1612 rounds 4/5: see the header comment above — scoped mode never
   # trusts an inherited non-personal LINEAR_API_TOKEN/LINEAR_API_KEY,
@@ -183,26 +276,28 @@ linear_app_actor_auth() {
   # credential variable in the daemon shell serves nobody. (The lib no longer
   # exports the VALUE at all; this unset is belt-and-braces for THIS shell.)
   unset CATALYST_SECRET_LAST_VALUE
-  if [[ -n "$_creds" ]]; then
-    _ocid=$(printf '%s' "$_creds" | jq -r '.clientId // empty' 2>/dev/null)
-    _ocsec=$(printf '%s' "$_creds" | jq -r '.clientSecret // empty' 2>/dev/null)
+  if [[ -n "$_creds" && -n "$_json_tier" ]]; then
+    _ocid=$(printf '%s' "$_creds" | _laa_json_field "$_json_tier" clientId)
+    _ocsec=$(printf '%s' "$_creds" | _laa_json_field "$_json_tier" clientSecret)
   fi
   if [[ -n "${_ocid:-}" && -n "${_ocsec:-}" ]]; then
     # Secret travels via --data @- on stdin, never argv (process-table hygiene —
     # house style: linear-remint.mjs buildMintCurlArgs), values URL-encoded via
-    # jq @uri (parity with the re-minter's URLSearchParams — a form-reserved
-    # char in a credential must not silently corrupt the body). Connection +
-    # transfer bounded so a hung OAuth endpoint cannot wedge daemon start.
-    # Encoder input rides stdin too (jq -sRr) — `--arg` would put the secret
-    # right back into a process-table argv, the exposure this block avoids.
-    local _eid _esec
-    _eid=$(printf '%s' "$_ocid" | jq -sRr '@uri' 2>/dev/null)
-    _esec=$(printf '%s' "$_ocsec" | jq -sRr '@uri' 2>/dev/null)
-    _otok=$(printf 'grant_type=client_credentials&client_id=%s&client_secret=%s&scope=read,write,comments:create,app:assignable,app:mentionable&actor=app' \
+    # _laa_uri_encode/@uri (parity with the re-minter's URLSearchParams — a
+    # form-reserved char in a credential must not silently corrupt the
+    # body). Connection + transfer bounded so a hung OAuth endpoint cannot
+    # wedge daemon start. Encoder input rides stdin too — an argv-based
+    # encode would put the secret right back into a process-table argv, the
+    # exposure this block avoids (CTL-1612 round 9: the tiered bun/node
+    # one-shots preserve this — see _laa_uri_encode's own comment).
+    local _eid _esec _curl_out
+    _eid=$(printf '%s' "$_ocid" | _laa_uri_encode "$_json_tier")
+    _esec=$(printf '%s' "$_ocsec" | _laa_uri_encode "$_json_tier")
+    _curl_out=$(printf 'grant_type=client_credentials&client_id=%s&client_secret=%s&scope=read,write,comments:create,app:assignable,app:mentionable&actor=app' \
       "$_eid" "$_esec" |
       curl -s --connect-timeout 5 --max-time 30 --noproxy '*' -X POST \
-        https://api.linear.app/oauth/token --data @- 2>/dev/null |
-      jq -r '.access_token // empty' 2>/dev/null)
+        https://api.linear.app/oauth/token --data @- 2>/dev/null)
+    _otok=$(printf '%s' "$_curl_out" | _laa_json_field "$_json_tier" access_token)
     if [[ -n "$_otok" ]]; then
       # A SUCCESSFUL mint always wins — even over a usable inherited fallback
       # (CTL-1612 round 6): a fresh token is preferred to a possibly-aging

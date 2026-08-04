@@ -23,6 +23,37 @@ SHELL_TEST_DIR="${SHELL_TEST_DIR:-${SCRIPT_DIR}/__tests__}"
 # before wiring this in (one, escalate-emitters.test.sh, was fixed alongside —
 # pre-existing shellcheck debt in orphan-sweep.sh unrelated to CTL-1612).
 LIB_SHELL_TEST_DIR="${LIB_SHELL_TEST_DIR:-${SCRIPT_DIR}/lib/__tests__}"
+# CTL-1612 round 9 (Codex P2 follow-up): 6 of the 13 lib/__tests__ suites
+# ALREADY run via a one-line SHELL_TEST_DIR wrapper
+# (`exec bash ".../lib/__tests__/<name>.test.sh"`, predating the round-7
+# glob above — e.g. __tests__/cluster-fence-guard-lib.test.sh,
+# __tests__/secrets-hygiene.test.sh). Discovering them AGAIN via the
+# LIB_SHELL_TEST_DIR glob below double-runs them: inflated pass/fail counts,
+# and the relatively expensive Git/worktree fixture setup some of them do
+# pays twice. Verified exhaustively via
+# `grep -rl "lib/__tests__" __tests__/*.test.sh` — exactly these 6 wrapper
+# files (plus __tests__/run-tests.test.sh itself, which tests the GLOB
+# MECHANISM, not a suite wrapper, so it's not in this list). A static list
+# (not a grep-derived one) was chosen deliberately: simpler, and
+# __tests__/run-tests.test.sh's own "each wrapped suite appears exactly
+# once" pinning test (added this same round) self-detects any future drift
+# — a 7th wrapper added later without updating this list would show up as a
+# double-count there, not silently ship.
+LIB_SHELL_TEST_WRAPPED=(
+	"cluster-fence-guard.test.sh"   # __tests__/cluster-fence-guard-lib.test.sh
+	"draft-pr.test.sh"              # __tests__/draft-pr-lib.test.sh
+	"worktree-rebase.test.sh"       # __tests__/worktree-rebase-lib.test.sh
+	"worktree-remove-guard.test.sh" # __tests__/worktree-remove-guard-lib.test.sh
+	"secret-hygiene-check.test.sh"  # __tests__/secret-hygiene-check.test.sh
+	"secrets-hygiene.test.sh"       # __tests__/secrets-hygiene.test.sh
+)
+_lib_suite_is_wrapped() {
+	local _basename="$1" _w
+	for _w in "${LIB_SHELL_TEST_WRAPPED[@]}"; do
+		[[ "$_basename" == "$_w" ]] && return 0
+	done
+	return 1
+}
 # +x test: distinguishes "unset" (use default) from "set to empty" (smoke test).
 if [[ -z ${EXTRA_SHELL_TESTS+x} ]]; then
 	EXTRA_SHELL_TESTS="${SCRIPT_DIR}/test-workflow-context.sh"
@@ -90,7 +121,13 @@ done
 # (scripts/__tests__), so it needs its own glob rather than folding into the
 # override var above (which the smoke test also repoints, deliberately kept
 # single-purpose).
+# CTL-1612 round 9: skip a lib suite that already ran via its SHELL_TEST_DIR
+# wrapper in the loop above (LIB_SHELL_TEST_WRAPPED, see its comment) —
+# without this, the aggregate summary double-counts 6 of the 13 suites.
 for f in "$LIB_SHELL_TEST_DIR"/*.test.sh; do
+	if _lib_suite_is_wrapped "$(basename "$f")"; then
+		continue
+	fi
 	run_shell_test "$f"
 done
 for f in $EXTRA_SHELL_TESTS; do

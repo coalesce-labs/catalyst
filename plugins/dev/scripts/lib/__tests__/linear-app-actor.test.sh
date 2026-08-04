@@ -357,6 +357,92 @@ else
 fi
 rm -f "${STUB_BIN}/curl"
 
+# ─── Tiered jq-less JSON parsing in the mint chain (CTL-1612 round 9) ──────
+# linear-app-actor.sh's OWN field-parsing (clientId/clientSecret/access_token
+# extraction, @uri encoding) now falls back jq → bun -e → node -e, mirroring
+# create-worktree.sh's #2966 packageManager-sniff precedent. NOTE:
+# catalyst_resolve_secret (lib/catalyst-secret-contract.sh) has its OWN,
+# SEPARATE jq dependency that this round deliberately does not touch (core,
+# heavily-hardened shared infrastructure used by every config-json registry
+# row — see the header comment above linear_app_actor_auth and the round-9
+# report for why extending it was judged out of proportion for this
+# finding). Both cases below therefore STUB catalyst_resolve_secret (a plain
+# bash function redefinition after sourcing $LIB — later definition wins) so
+# they can isolate and prove linear-app-actor.sh's OWN tier, independent of
+# that separate, still-jq-dependent concern.
+echo ""
+echo "jq-less-but-bun-present: mint SUCCEEDS via the bun tier (CTL-1612 round 9)"
+NOJQ_BIN="${SCRATCH}/nojq-bin"
+mkdir -p "$NOJQ_BIN"
+_r9_missing=""
+for _r9_tool in bash bun; do
+	_r9_real="$(command -v "$_r9_tool" 2>/dev/null || true)"
+	if [[ -n "$_r9_real" ]]; then
+		ln -sf "$_r9_real" "${NOJQ_BIN}/${_r9_tool}"
+	else
+		_r9_missing="$_r9_tool"
+	fi
+done
+ln -sf "${STUB_BIN}/curl-success" "${NOJQ_BIN}/curl"
+
+if [[ -n "$_r9_missing" ]]; then
+	echo "  SKIP: jq-less-but-bun-present mint test ('$_r9_missing' not found on this host)"
+else
+	OUT_NOJQ_BUN="$(env -i HOME="$HOME" PATH="$NOJQ_BIN" \
+		bash -c '
+			set -uo pipefail
+			command -v jq >/dev/null 2>&1 && echo "FATAL: jq unexpectedly reachable in the jq-less fixture" >&2 && exit 1
+			source "'"$LIB"'"
+			catalyst_resolve_secret() {
+				CATALYST_SECRET_LAST_VALUE="{\"clientId\":\"fake-r9-client-id\",\"clientSecret\":\"fake-r9-client-secret\"}"
+			}
+			linear_app_actor_auth "test-daemon" SCOPED_TARGET
+			echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+			echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
+		' 2>&1)"
+	if echo "$OUT_NOJQ_BUN" | grep -qxF "SCOPED_TARGET=[fake-r6-fresh-mint-token]"; then
+		pass "jq-less-but-bun-present: mint succeeds, SCOPED_TARGET set from the bun-parsed access_token"
+	else
+		fail "jq-less-but-bun-present: mint did not succeed via bun; output: $OUT_NOJQ_BUN"
+	fi
+	if echo "$OUT_NOJQ_BUN" | grep -qxF "SCOPED_TARGET_SOURCE=[minted]"; then
+		pass "jq-less-but-bun-present: SCOPED_TARGET_SOURCE=minted"
+	else
+		fail "jq-less-but-bun-present: SCOPED_TARGET_SOURCE not marked minted; output: $OUT_NOJQ_BUN"
+	fi
+fi
+
+echo ""
+echo "no JSON parser available (jq/bun/node all absent): loud warning, mint stays impossible (CTL-1612 round 9)"
+NONE_BIN="${SCRATCH}/none-bin"
+mkdir -p "$NONE_BIN"
+_r9b_bash="$(command -v bash 2>/dev/null || true)"
+if [[ -z "$_r9b_bash" ]]; then
+	fail "no-parser test: could not resolve bash itself for the restricted PATH fixture"
+else
+	ln -sf "$_r9b_bash" "${NONE_BIN}/bash"
+	OUT_NONE="$(env -i HOME="$HOME" PATH="$NONE_BIN" \
+		bash -c '
+			set -uo pipefail
+			source "'"$LIB"'"
+			catalyst_resolve_secret() {
+				CATALYST_SECRET_LAST_VALUE="{\"clientId\":\"fake-r9-client-id\",\"clientSecret\":\"fake-r9-client-secret\"}"
+			}
+			linear_app_actor_auth "test-daemon" SCOPED_TARGET
+			echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+		' 2>&1)"
+	if echo "$OUT_NONE" | grep -q "WARNING no JSON parser available"; then
+		pass "no-parser: logs the loud warning (jq/bun/node all absent)"
+	else
+		fail "no-parser: did not log the loud warning; output: $OUT_NONE"
+	fi
+	if echo "$OUT_NONE" | grep -qxF "SCOPED_TARGET=[]"; then
+		pass "no-parser: SCOPED_TARGET stays unset (mint impossible without a JSON parser)"
+	else
+		fail "no-parser: SCOPED_TARGET unexpectedly set; output: $OUT_NONE"
+	fi
+fi
+
 echo ""
 echo "────────────────────────────────────────"
 echo "Results: ${PASSES} passed, ${FAILURES} failed"

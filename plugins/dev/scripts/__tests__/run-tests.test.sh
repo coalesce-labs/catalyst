@@ -101,11 +101,36 @@ else fail "non-column-0 'SKIP:' wrongly classified" "$OUT"; fi
 # harmlessly ignored — a fixture placed there is discovered and run, proving
 # it is not a dead override.
 FIX6="$(make_fixture "libok:0")"
-trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$FIX6" "$EMPTY_LIB_DIR"' EXIT
+trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$FIX6" "$FIX7" "$FIX7_LIB" "$EMPTY_LIB_DIR"' EXIT
 OUT="$(SHELL_TEST_DIR="$EMPTY_LIB_DIR" LIB_SHELL_TEST_DIR="$FIX6" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 	pass "LIB_SHELL_TEST_DIR fixture is discovered and run"
 else fail "LIB_SHELL_TEST_DIR override was not wired into the shell suite" "$OUT"; fi
+
+# Test 8 (CTL-1612 round 9, Codex P2 follow-up): a suite matching one of
+# run-tests.sh's hardcoded LIB_SHELL_TEST_WRAPPED basenames must be counted
+# EXACTLY ONCE even when a file with that same basename exists in BOTH
+# SHELL_TEST_DIR and LIB_SHELL_TEST_DIR — the real-world shape of
+# __tests__/secrets-hygiene.test.sh (a wrapper) coexisting with
+# lib/__tests__/secrets-hygiene.test.sh (the wrapped suite). Uses the REAL
+# wrapped basename "secrets-hygiene.test.sh" (not an arbitrary fixture name)
+# so this test breaks LOUDLY — not silently — if run-tests.sh's hardcoded
+# LIB_SHELL_TEST_WRAPPED list ever drifts out of sync with the real wrapper
+# set (a 7th wrapper added without updating that list would show up here as
+# a double-count, per that list's own header comment). Counts occurrences of
+# the suite's own PASS marker line directly in the runner's combined output —
+# the property this test exists to pin.
+FIX7="$(make_fixture "secrets-hygiene:0")"
+FIX7_LIB="$(mktemp -d)"
+cp "${FIX7}/secrets-hygiene.test.sh" "${FIX7_LIB}/secrets-hygiene.test.sh"
+OUT="$(SHELL_TEST_DIR="$FIX7" LIB_SHELL_TEST_DIR="$FIX7_LIB" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+MARKER_COUNT="$(grep -c 'PASS .*secrets-hygiene\.test\.sh' <<<"$OUT")"
+if [[ "$MARKER_COUNT" -eq 1 ]]; then
+	pass "wrapped basename (secrets-hygiene.test.sh) runs exactly once, present under both SHELL_TEST_DIR and LIB_SHELL_TEST_DIR"
+else fail "wrapped basename ran $MARKER_COUNT time(s), expected exactly 1" "$OUT"; fi
+if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
+	pass "aggregate summary counts exactly 1 (not 2) for the wrapped-basename fixture"
+else fail "aggregate summary miscounted the wrapped-basename fixture" "$OUT"; fi
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"
