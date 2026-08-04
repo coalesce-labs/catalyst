@@ -542,31 +542,58 @@ else
 		# by us) directory an attacker cannot have pre-planted a config
 		# into. Trap-cleaned on EXIT so an interrupted sniff doesn't leak
 		# the scratch dir; the trap is cleared right after we clean up
-		# normally so it doesn't linger for the rest of the script. If
-		# mktemp itself fails (disk full, permissions), skip the bun -e
-		# attempt entirely rather than falling back to an untrusted cwd —
-		# PACKAGE_MANAGER_FIELD stays empty, same graceful-degrade posture
-		# as every other tier here.
+		# normally so it doesn't linger for the rest of the script.
+		#
+		# CTL-1628 post-merge (Codex #2967 post-merge, round 10): two
+		# follow-ups on round 9's mktemp:
+		#   1. A bare `mktemp -d` resolves under $TMPDIR (/tmp on
+		#      macOS/most Linux) — a shared, multi-user directory. Threat
+		#      model: without the sticky bit (not guaranteed by mktemp
+		#      itself, only that the CREATED dir is 0700), another local
+		#      user could race a rename-and-replace against it. Prefer a
+		#      scratch dir under $HOME instead — single-user by
+		#      construction — falling back to the previous /tmp-based
+		#      mktemp only if $HOME/.cache can't be created/used.
+		#   2. mktemp failure used to give up on the sniff entirely rather
+		#      than trying the remaining tiers. Restructured the whole
+		#      jq/bun/node/grep chain from an if/elif (mutually exclusive by
+		#      construction) into a cascade gated on SNIFF_DONE, so "bun is
+		#      on PATH but mktemp failed" now falls through to node (if
+		#      present) and then the text sniff, instead of a dead end.
 		PM_SNIFF='console.log(JSON.parse(require("fs").readFileSync(process.env.CW_PACKAGE_JSON,"utf8")).packageManager??"")'
 		PACKAGE_JSON_ABS="$(pwd)/package.json"
+		PACKAGE_MANAGER_FIELD=""
+		SNIFF_DONE=false
 		if command -v jq >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
-		elif command -v bun >/dev/null 2>&1; then
-			BUN_SNIFF_CWD=$(mktemp -d 2>/dev/null) || BUN_SNIFF_CWD=""
+			SNIFF_DONE=true
+		fi
+		if [ "$SNIFF_DONE" = false ] && command -v bun >/dev/null 2>&1; then
+			CATALYST_SNIFF_CACHE="$HOME/.cache"
+			mkdir -p "$CATALYST_SNIFF_CACHE" 2>/dev/null
+			if [ -d "$CATALYST_SNIFF_CACHE" ] && [ -w "$CATALYST_SNIFF_CACHE" ]; then
+				BUN_SNIFF_CWD=$(mktemp -d -p "$CATALYST_SNIFF_CACHE" 2>/dev/null) || BUN_SNIFF_CWD=""
+			else
+				BUN_SNIFF_CWD=$(mktemp -d 2>/dev/null) || BUN_SNIFF_CWD=""
+			fi
 			if [ -n "$BUN_SNIFF_CWD" ]; then
 				trap 'rm -rf "$BUN_SNIFF_CWD"' EXIT
 				PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" bun --cwd "$BUN_SNIFF_CWD" -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 				rm -rf "$BUN_SNIFF_CWD"
 				trap - EXIT
-			else
-				PACKAGE_MANAGER_FIELD=""
+				SNIFF_DONE=true
 			fi
-		elif command -v node >/dev/null 2>&1; then
+			# mktemp failed on both attempts: SNIFF_DONE stays false and
+			# falls through to node / the text sniff below, rather than
+			# giving up on the whole detection.
+		fi
+		if [ "$SNIFF_DONE" = false ] && command -v node >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" node -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
-		elif tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
+			SNIFF_DONE=true
+		fi
+		if [ "$SNIFF_DONE" = false ] && tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
 			PACKAGE_MANAGER_FIELD="bun@detected"
-		else
-			PACKAGE_MANAGER_FIELD=""
+			SNIFF_DONE=true
 		fi
 		HAS_BUN_EVIDENCE=false
 		if [ "$HAS_BUN_LOCK" = true ] || [[ "$PACKAGE_MANAGER_FIELD" == bun@* ]]; then
