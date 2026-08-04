@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 
 import { log as defaultLog } from "./config.mjs";
 import { emitGithubAuthUnusable } from "./dispatch-alert.mjs";
-import { secretFileCandidates } from "../lib/secret-contract.mjs"; // CTL-1623: the github-token row's candidate chain, single-sourced from the registry
+import { secretFileCandidates, containsNul, isValidUtf8RoundTrip } from "../lib/secret-contract.mjs"; // CTL-1623: the github-token row's candidate chain, single-sourced from the registry
 
 // Bounded so a hung/unreachable api.github.com can never wedge daemon boot.
 export const GITHUB_PROBE_TIMEOUT_MS = 10_000;
@@ -103,29 +103,14 @@ export function defaultGithubTokenFile(env = process.env) {
   return githubTokenFileCandidates(env)[0];
 }
 
-// containsNul / isValidUtf8RoundTrip — CTL-1623 post-merge fix (Codex round 1). Mirrors
-// lib/secret-contract.mjs's identically-named PRIVATE (unexported) helpers byte-for-byte —
-// duplicated here rather than exported from the engine, per this ticket's "don't touch the
-// shared engine unless a genuine parity bug forces it" discipline; these two functions are
-// ~4 lines each and stable, so the duplication cost is low next to the risk of widening the
-// engine's public surface. WHY THIS MATTERS HERE SPECIFICALLY: the bug Codex reproduced was
-// that rearmGithubTokenFromFile's default `readFile` used `readFileSync(p, "utf8")`, which
-// silently REPLACES any invalid UTF-8 byte with U+FFFD at decode time — so when the
-// catalyst-secret-env.sh launcher correctly fails closed on a malformed synced file (keeps
-// a good inherited GH_TOKEN, per lib/catalyst-secret-contract.sh's own containsNul/
-// isValidUtf8 guards), this hook then ran a SECOND, less careful read of the SAME file and
-// installed the U+FFFD-mangled bytes over the good inherited value at boot and on every
-// timer tick — defeating the fold's fail-closed hygiene one layer up. These two functions
-// let the candidate loop below apply the IDENTICAL validity gates the engine already
-// applies, so a candidate this hook cannot represent byte-for-byte falls through to the
-// next one (or to "absent") instead of installing a mutated credential.
-function containsNul(value) {
-  return value.includes("\u0000");
-}
-function isValidUtf8RoundTrip(buf, decoded) {
-  const reencoded = Buffer.from(decoded, "utf8");
-  return reencoded.length === buf.length && reencoded.equals(buf);
-}
+// containsNul / isValidUtf8RoundTrip are imported from lib/secret-contract.mjs (CTL-1623
+// Codex round 2) — the CANONICAL malformed-file validators the engine's own bare-file read
+// applies. Sharing one implementation (instead of the round-1 verbatim copies) means the
+// resolver and this hook can never drift on what counts as a representable credential
+// file: the bug Codex reproduced in round 1 was exactly a resolver-rejects/hook-installs
+// split, where readFileSync(p, "utf8") silently replaced invalid UTF-8 bytes with U+FFFD
+// and this hook installed the mangled token over a good inherited one at boot and on every
+// timer tick. See the candidate loop below for where the gates apply.
 
 // rearmGithubTokenFromFile — CTL-1612 (Codex P1). Re-read the shared credential from
 // disk and update this process's env if it has changed.
