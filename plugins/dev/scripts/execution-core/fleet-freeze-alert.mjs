@@ -140,7 +140,17 @@ function persist() {
   try {
     const dir = getReconcileHealthDir();
     mkdirSync(dir, { recursive: true });
-    const tmp = join(dir, `.fleet-freeze.${randomBytes(4).toString("hex")}.tmp`);
+    // CTL-1628 post-merge: a DETERMINISTIC tmp name (not a randomBytes-suffixed
+    // one) — matches the idiom every other atomic-write helper in this
+    // directory uses (reconcile-health.mjs's writeHealthMarker, eligible-
+    // set.mjs, registry.mjs: `${file}.tmp`). With the r4-post-merge retry
+    // loop calling persist() again on every subsequent tick while dirty, a
+    // randomized name would leave a NEW orphaned .tmp file behind on every
+    // failed attempt (writeFileSync succeeds; only the rename fails) — an
+    // unbounded accumulation for as long as the underlying fault persists.
+    // A deterministic name means each retry's writeFileSync overwrites the
+    // SAME file in place, bounding the leftover to at most one.
+    const tmp = `${markerPath()}.tmp`;
     writeFileSync(
       tmp,
       JSON.stringify({ raised: _fleetFrozenRaised, cause: _lastEmittedCause, ts: Date.now() }),

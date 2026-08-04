@@ -2,7 +2,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test fleet-freeze-alert.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getReconcileHealthDir } from "./config.mjs";
@@ -589,6 +589,32 @@ describe("checkFleetFreeze", () => {
       const r3 = checkFleetFreeze(opts);
       expect(r3).toEqual({ frozen: true, emitted: null, cause: null });
       expect(lines).toHaveLength(2);
+    });
+
+    // CTL-1628 post-merge (Codex #2968 follow-up): persist() previously used
+    // a randomBytes-suffixed tmp filename, so writeFileSync succeeding but
+    // renameSync failing left a NEW orphaned .tmp file on EVERY failed
+    // attempt — and the r4-post-merge retry loop calls persist() again on
+    // every subsequent tick while the fault persists, so tmp files
+    // accumulated without bound for as long as the underlying disk fault
+    // lasted. persist() now uses a deterministic tmp name (`${markerPath()}.tmp`,
+    // matching every other atomic-write helper in this directory), so a
+    // repeated failure overwrites the SAME tmp file in place.
+    test("repeated failed persists leave at most one .tmp file, not one per attempt", () => {
+      blockMarkerPath();
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      const opts = { teams: ["CTL"], isTeamFrozen: () => true, getTeamOrigin: () => "poll", append };
+
+      checkFleetFreeze(opts); // raise → persist fails, tmp written
+      checkFleetFreeze(opts); // retry #1 → persist fails again
+      checkFleetFreeze(opts); // retry #2 → persist fails again
+
+      const tmpFiles = readdirSync(getReconcileHealthDir()).filter(
+        (f) => f.includes("fleet-freeze") && f.endsWith(".tmp"),
+      );
+      expect(tmpFiles).toHaveLength(1);
+      expect(tmpFiles[0]).toBe("fleet-freeze.json.tmp");
     });
   });
 });
