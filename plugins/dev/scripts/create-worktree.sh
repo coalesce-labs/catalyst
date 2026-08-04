@@ -599,8 +599,36 @@ else
 			mkdir -p "$CATALYST_SNIFF_CACHE" 2>/dev/null || true
 			CACHE_SAFE=false
 			if [ -d "$CATALYST_SNIFF_CACHE" ] && [ ! -L "$CATALYST_SNIFF_CACHE" ] && [ -w "$CATALYST_SNIFF_CACHE" ]; then
-				CACHE_OWNER=$(stat -f '%u' "$CATALYST_SNIFF_CACHE" 2>/dev/null || stat -c '%u' "$CATALYST_SNIFF_CACHE" 2>/dev/null)
-				CACHE_PERM=$(stat -f '%Lp' "$CATALYST_SNIFF_CACHE" 2>/dev/null || stat -c '%a' "$CATALYST_SNIFF_CACHE" 2>/dev/null)
+				# CTL-1628 post-merge (Codex #2972 post-merge, round 12): the
+				# prior `stat -f ... || stat -c ...` was a SINGLE command
+				# substitution wrapping both probes, so on GNU stat (where -f
+				# means "show FILESYSTEM status", a completely different flag
+				# than BSD's -f FORMAT) the first probe's own stdout — a
+				# multi-line filesystem-status report, not a clean UID —
+				# stayed captured even when its nonzero exit triggered the ||
+				# fallback, and the second probe's output landed appended
+				# after it. _stat_probe validates the CAPTURED value itself
+				# (must be a pure digit string / octal digit string) — the
+				# validation gate is what makes probe order irrelevant and
+				# neutralizes either variant's noise, not exit-code-based ||
+				# chaining alone. Its own `stat` call is guarded with
+				# `|| out=""` so a probe's nonzero exit (expected and normal
+				# for the "wrong" stat dialect) can never trip this script's
+				# top-level set -e on its own, the same class of bug this
+				# whole isolation effort has repeatedly had to fix elsewhere.
+				_stat_probe() {
+					local flag="$1" fmt="$2" target="$3" pattern="$4" out
+					out=$(stat "$flag" "$fmt" "$target" 2>/dev/null) || out=""
+					if [[ "$out" =~ $pattern ]]; then
+						echo "$out"
+						return 0
+					fi
+					return 1
+				}
+				CACHE_OWNER=$(_stat_probe -f '%u' "$CATALYST_SNIFF_CACHE" '^[0-9]+$') ||
+					CACHE_OWNER=$(_stat_probe -c '%u' "$CATALYST_SNIFF_CACHE" '^[0-9]+$') || CACHE_OWNER=""
+				CACHE_PERM=$(_stat_probe -f '%Lp' "$CATALYST_SNIFF_CACHE" '^[0-7]+$') ||
+					CACHE_PERM=$(_stat_probe -c '%a' "$CATALYST_SNIFF_CACHE" '^[0-7]+$') || CACHE_PERM=""
 				if [ -n "$CACHE_OWNER" ] && [ "$CACHE_OWNER" = "$(id -u)" ] && [ -n "$CACHE_PERM" ]; then
 					CACHE_PERM_OCT=$((8#$CACHE_PERM))
 					if [ $(( (CACHE_PERM_OCT / 8) % 8 & 2 )) -eq 0 ] && [ $(( CACHE_PERM_OCT % 8 & 2 )) -eq 0 ]; then
