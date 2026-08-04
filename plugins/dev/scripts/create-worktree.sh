@@ -568,13 +568,50 @@ else
 			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 			SNIFF_DONE=true
 		fi
+		# CTL-1628 post-merge (Codex #2967 post-merge, round 11): three more
+		# follow-ups, verified directly on this host (macOS/BSD userland):
+		#   1. `mktemp -d -p <dir>` (no explicit template) DID work correctly
+		#      here (BSD mktemp's synopsis on this machine documents -p), but
+		#      -p support isn't guaranteed across every mktemp this script
+		#      might run under fleet-wide (older BSD variants, minimal
+		#      containers). The explicit-template form `mktemp -d
+		#      "<dir>/prefix.XXXXXXXX"` is unambiguously portable across both
+		#      GNU and BSD mktemp — verified working identically to -p on
+		#      this host — so use it everywhere instead of relying on -p.
+		#   2. The `mkdir -p "$CATALYST_SNIFF_CACHE"` was a bare statement
+		#      under this script's top-level `set -e` — confirmed directly
+		#      that a failing `mkdir -p` (read-only/unwritable parent) trips
+		#      set -e and aborts the WHOLE worktree creation. A
+		#      sniff-infrastructure failure must never do that; `|| true`
+		#      makes the failure a no-op that the writability check below
+		#      catches instead.
+		#   3. The $HOME/.cache preference (round 10) only checked
+		#      existence+writability, which a group-writable or symlinked
+		#      ~/.cache would still pass. Threat model: this is a dev tool,
+		#      not a setuid binary, so a full TOCTOU-proof design is
+		#      overkill — but a cheap, few-line check (not a symlink, owned
+		#      by us, no group/other write bit) rejects the specific
+		#      "attacker-controlled ~/.cache" shape the finding describes,
+		#      falling back to the TMPDIR-based mktemp (same portable
+		#      template form) if any check fails.
 		if [ "$SNIFF_DONE" = false ] && command -v bun >/dev/null 2>&1; then
 			CATALYST_SNIFF_CACHE="$HOME/.cache"
-			mkdir -p "$CATALYST_SNIFF_CACHE" 2>/dev/null
-			if [ -d "$CATALYST_SNIFF_CACHE" ] && [ -w "$CATALYST_SNIFF_CACHE" ]; then
-				BUN_SNIFF_CWD=$(mktemp -d -p "$CATALYST_SNIFF_CACHE" 2>/dev/null) || BUN_SNIFF_CWD=""
+			mkdir -p "$CATALYST_SNIFF_CACHE" 2>/dev/null || true
+			CACHE_SAFE=false
+			if [ -d "$CATALYST_SNIFF_CACHE" ] && [ ! -L "$CATALYST_SNIFF_CACHE" ] && [ -w "$CATALYST_SNIFF_CACHE" ]; then
+				CACHE_OWNER=$(stat -f '%u' "$CATALYST_SNIFF_CACHE" 2>/dev/null || stat -c '%u' "$CATALYST_SNIFF_CACHE" 2>/dev/null)
+				CACHE_PERM=$(stat -f '%Lp' "$CATALYST_SNIFF_CACHE" 2>/dev/null || stat -c '%a' "$CATALYST_SNIFF_CACHE" 2>/dev/null)
+				if [ -n "$CACHE_OWNER" ] && [ "$CACHE_OWNER" = "$(id -u)" ] && [ -n "$CACHE_PERM" ]; then
+					CACHE_PERM_OCT=$((8#$CACHE_PERM))
+					if [ $(( (CACHE_PERM_OCT / 8) % 8 & 2 )) -eq 0 ] && [ $(( CACHE_PERM_OCT % 8 & 2 )) -eq 0 ]; then
+						CACHE_SAFE=true
+					fi
+				fi
+			fi
+			if [ "$CACHE_SAFE" = true ]; then
+				BUN_SNIFF_CWD=$(mktemp -d "${CATALYST_SNIFF_CACHE}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CWD=""
 			else
-				BUN_SNIFF_CWD=$(mktemp -d 2>/dev/null) || BUN_SNIFF_CWD=""
+				BUN_SNIFF_CWD=$(mktemp -d "${TMPDIR:-/tmp}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CWD=""
 			fi
 			if [ -n "$BUN_SNIFF_CWD" ]; then
 				trap 'rm -rf "$BUN_SNIFF_CWD"' EXIT
@@ -583,9 +620,19 @@ else
 				trap - EXIT
 				SNIFF_DONE=true
 			fi
-			# mktemp failed on both attempts: SNIFF_DONE stays false and
-			# falls through to node / the text sniff below, rather than
-			# giving up on the whole detection.
+			# CTL-1628 post-merge (Codex #2967 post-merge, round 11, #4): if
+			# BOTH scratch-dir attempts fail (an extremely rare double
+			# failure — $HOME/.cache and $TMPDIR are practically never both
+			# unwritable on the same host), SNIFF_DONE stays false and this
+			# falls through to node / the text sniff below rather than
+			# giving up. Considered running bun --cwd against the WORKTREE
+			# itself as a still-isolated alternative — rejected: by this
+			# point in the script `git worktree add` has already checked
+			# out the full project tree (including any committed
+			# bunfig.toml) into $WORKTREE_PATH, so that cwd is NOT provably
+			# bunfig-free — it is exactly the round-8 vulnerability this
+			# whole isolation effort exists to avoid. The imprecise text
+			# sniff is the correct, designed last resort here, not a gap.
 		fi
 		if [ "$SNIFF_DONE" = false ] && command -v node >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" node -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
