@@ -235,6 +235,17 @@ function defaultMintAsync(creds) {
 // token) gets a short retry window after a FAILED attempt (no creds
 // configured, or a mint that returned no token) while a SUCCESSFUL mint still
 // only re-attempts after the full `cooldownMs`.
+// CTL-1612 round 5 (Codex P2 follow-up): `initialLastAttempt` seeds the
+// cooldown gate's starting point. Default -Infinity is UNCHANGED from before
+// this param existed — every existing caller (the broker's linearAsyncReminter
+// singleton below) that omits it still fires on its very first attempt(),
+// byte-identical to today. A caller that already has a KNOWN-FRESH token in
+// hand at construction time — the monitor's server.ts, when the shell startup
+// mint (catalyst-monitor.sh cmd_start → linear_app_actor_auth) already
+// succeeded before this process even started — passes Date.now() so the
+// FIRST attempt() call correctly honors the full cooldownMs instead of
+// re-minting seconds after the shell already did (a redundant OAuth POST on
+// every monitor start/restart, doubling production mint traffic).
 export function createAsyncReminter({
   readCreds = readOrchestratorCreds,
   mint = defaultMintAsync,
@@ -242,8 +253,9 @@ export function createAsyncReminter({
   cooldownMs = DEFAULT_COOLDOWN_MS,
   failureCooldownMs = cooldownMs,
   logger = log,
+  initialLastAttempt = -Infinity,
 } = {}) {
-  let lastAttempt = -Infinity;
+  let lastAttempt = initialLastAttempt;
   // The cooldown to apply to the CURRENT attempt's gate check — set by the
   // PREVIOUS attempt's outcome. Starts at cooldownMs (no prior outcome to
   // shorten it) so the very first call is never fast-tracked by an unset value.

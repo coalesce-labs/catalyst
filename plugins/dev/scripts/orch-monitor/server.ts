@@ -1468,6 +1468,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
                     warn: (obj: unknown, msg: string) => void;
                     info: (obj: unknown, msg: string) => void;
                   };
+                  initialLastAttempt?: number;
                 }) => { attempt: (now?: number) => Promise<boolean> };
                 readOrchestratorCreds: () => { clientId: string; clientSecret: string } | null;
               }>,
@@ -1499,6 +1500,20 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // rather than riding out the full 45min success-cooldown while every
           // poll in between sends an expired token and peers look offline.
           // A SUCCESSFUL mint still only re-attempts after the full cooldownMs.
+          //
+          // CTL-1612 round 5 (Codex P2 follow-up): initialLastAttempt seeds the
+          // cooldown gate with Date.now() WHEN CATALYST_MONITOR_APP_ACTOR_TOKEN is
+          // already present at this construction point — i.e. the shell startup
+          // mint (catalyst-monitor.sh cmd_start → linear_app_actor_auth) already
+          // succeeded before this bun process even started. Without this, the
+          // reminter's lastAttempt starts at -Infinity regardless, so the FIRST
+          // anchor poll's proactive remintAppActorToken() call fires immediately
+          // and re-mints seconds after the shell already did — doubling
+          // production OAuth traffic on every monitor start/restart. A monitor
+          // that never got a shell-level mint (creds absent there, or the
+          // loki-only/no-anchor skip — CTL-1612 rounds 3/5) is unaffected: the
+          // token is absent, so this falls through to the untouched default
+          // (-Infinity — first poll's attempt fires as it always has).
           const monitorAppActorReminter = linearRemint.createAsyncReminter({
             readCreds: linearRemint.readOrchestratorCreds,
             applyToken: (token: string) => {
@@ -1512,6 +1527,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
               warn: (_obj: unknown, msg: string) => console.warn(`[server] ${msg}`),
               info: (_obj: unknown, msg: string) => console.info(`[server] ${msg}`),
             },
+            initialLastAttempt: process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN?.trim()
+              ? Date.now()
+              : undefined,
           });
           return {
             readClusterHeartbeats: recovery.readClusterHeartbeats,

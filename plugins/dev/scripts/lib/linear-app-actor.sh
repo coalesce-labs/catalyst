@@ -32,29 +32,33 @@
 #   reply 502 bot_identity. Only the monitor's own self-reads (the
 #   peer-heartbeat anchor read) opt into the scoped var.
 #
-#   CTL-1612 round 4 (Codex P1 follow-up): scoped mode also UNSETS any
-#   LINEAR_API_TOKEN/LINEAR_API_KEY it finds ALREADY set on entry — not just
-#   "never adds" them. catalyst-broker calls this function UNSCOPED at its own
-#   startup (exports the app-actor token under those two names into the
-#   broker's own process env), and broker/stack-reload.mjs's restart spawn
-#   carries no `env` override, so `catalyst-monitor restart` — issued
-#   automatically after a plugin-source stack reload — inherits the broker's
-#   env verbatim. Without the clear, that inherited bot-valued alias survives
-#   into the monitor's env untouched (the scoped branch previously only
-#   promised not to ADD LINEAR_API_TOKEN/LINEAR_API_KEY, never that it would
-#   REMOVE an inherited one), resolveLinearToken picks it before the personal
-#   Layer-2 token (env beats Layer-2), and every inline reply 502s
+#   CTL-1612 round 4 (Codex P1 follow-up): scoped mode also CLEARS a
+#   non-personal LINEAR_API_TOKEN/LINEAR_API_KEY it finds ALREADY set on
+#   entry — not just "never adds" them. catalyst-broker calls this function
+#   UNSCOPED at its own startup (exports the app-actor token under those two
+#   names into the broker's own process env), and broker/stack-reload.mjs's
+#   restart spawn carries no `env` override, so `catalyst-monitor restart` —
+#   issued automatically after a plugin-source stack reload — inherits the
+#   broker's env verbatim. Without the clear, that inherited bot-valued alias
+#   survives into the monitor's env untouched (the scoped branch previously
+#   only promised not to ADD LINEAR_API_TOKEN/LINEAR_API_KEY, never that it
+#   would REMOVE an inherited one), resolveLinearToken picks it before the
+#   personal Layer-2 token (env beats Layer-2), and every inline reply 502s
 #   bot_identity again — the SAME P1 as round 1's original finding,
 #   resurfacing through a different door (inheritance, not this script's own
-#   export). TRADEOFF: this also clears a legitimate interactively-exported
-#   personal LINEAR_API_TOKEN for a human running `catalyst-monitor start`
-#   from a shell with their own lin_api_* set, forcing a fall-through to the
-#   Layer-2 personal-token tier. That fallback is the DOCUMENTED, supported
-#   source for the monitor's personal token already — the launchd/headless
-#   path relies on it exclusively (the committed launchd wrapper exports no
-#   Linear token at all) — so clearing restores "launchd parity" rather than
-#   degrading anything: this scoped shell never had these vars set on a clean
-#   launchd start, and unsetting them here makes every start path agree.
+#   export).
+#
+#   CTL-1612 round 5 (Codex P2 follow-up): the clear is PRECISE, not
+#   unconditional — see linear_app_actor_clear_inherited below. A genuinely
+#   personal `lin_api_*` key survives; anything else (bot/oauth-shaped, or
+#   unrecognized) is cleared. A round-4 unconditional clear also deleted a
+#   LEGITIMATE personal credential for an operator who runs the monitor from
+#   a shell with their own `lin_api_*` exported and no Layer-2 personal token
+#   configured — the estimate/title fallbacks
+#   (linear-estimate-fallback.mjs/linear-title-description-fallback.mjs)
+#   resolve ONLY LINEAR_API_TOKEN/LINEAR_API_KEY, with no Layer-2 tier at
+#   all, so that launch configuration lost board enrichment entirely and
+#   inline replies returned `no_token`.
 #
 # Idempotent-source guard — safe to source multiple times.
 [[ -n "${_CATALYST_LINEAR_APP_ACTOR_SH_LOADED:-}" ]] && return 0
@@ -70,20 +74,58 @@ _LAA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${_LAA_LIB_DIR}/catalyst-secret-contract.sh"
 
+# linear_app_actor_clear_inherited <daemon-name>
+#   CTL-1612 rounds 4/5: clears any INHERITED LINEAR_API_TOKEN/LINEAR_API_KEY
+#   that is NOT a personal `lin_api_*` key — i.e. bot/oauth-shaped or
+#   unrecognized-shaped values only. A genuinely personal key survives
+#   untouched (see the round-5 header comment above for why). Matching is
+#   case-insensitive (lowercased before the prefix check) for parity with the
+#   codebase's other credential-shape check (cluster-heartbeat.mjs/
+#   cluster-claim.mjs authHeader: `/^lin_oauth/i`) — Linear's own API
+#   distinguishes the two credential kinds by this exact prefix (Bearer vs.
+#   raw Authorization header), a REAL, functionally load-bearing split, not
+#   just a naming convention. Logs ONLY when something was actually cleared.
+#
+#   Factored out of linear_app_actor_auth's scoped branch so a caller that
+#   needs to skip the MINT ENTIRELY (no orchestrator work to do at all — e.g.
+#   catalyst-monitor.sh's loki-only or no-liveness-anchor skip paths,
+#   CTL-1612 round 5) can still close the inherited-bot-alias gap without
+#   attempting a network call. linear_app_actor_auth's own scoped branch
+#   calls this too, so every scoped entry point gets the same guarantee
+#   regardless of whether it goes on to mint.
+linear_app_actor_clear_inherited() {
+  local _daemon="${1:?linear_app_actor_clear_inherited: daemon name required}"
+  local _cleared=0
+  local _lc
+  if [[ -n "${LINEAR_API_TOKEN:-}" ]]; then
+    _lc="$(printf '%s' "$LINEAR_API_TOKEN" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$_lc" != lin_api_* ]]; then
+      unset LINEAR_API_TOKEN
+      _cleared=1
+    fi
+  fi
+  if [[ -n "${LINEAR_API_KEY:-}" ]]; then
+    _lc="$(printf '%s' "$LINEAR_API_KEY" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$_lc" != lin_api_* ]]; then
+      unset LINEAR_API_KEY
+      _cleared=1
+    fi
+  fi
+  if [[ "$_cleared" == "1" ]]; then
+    echo "${_daemon}: clearing inherited LINEAR_API_TOKEN/LINEAR_API_KEY (non-personal shape — scoped mode never trusts an inherited bot/oauth alias; a personal lin_api_* key would have survived)" >&2
+  fi
+}
+
 linear_app_actor_auth() {
   local _daemon="${1:?linear_app_actor_auth: daemon name required}"
   local _target_var="${2:-}"
   local _ocid _ocsec _otok _creds
 
-  # CTL-1612 round 4: see the header comment above — scoped mode never trusts
-  # an inherited LINEAR_API_TOKEN/LINEAR_API_KEY, regardless of whether OUR
-  # OWN mint below succeeds, fails, or finds no orchestrator creds at all.
-  if [[ -n "$_target_var" ]]; then
-    if [[ -n "${LINEAR_API_TOKEN:-}" || -n "${LINEAR_API_KEY:-}" ]]; then
-      echo "${_daemon}: clearing inherited LINEAR_API_TOKEN/LINEAR_API_KEY before scoped mint (scoped mode never trusts an inherited alias — see \$${_target_var} instead)" >&2
-    fi
-    unset LINEAR_API_TOKEN LINEAR_API_KEY
-  fi
+  # CTL-1612 rounds 4/5: see the header comment above — scoped mode never
+  # trusts an inherited non-personal LINEAR_API_TOKEN/LINEAR_API_KEY,
+  # regardless of whether OUR OWN mint below succeeds, fails, or finds no
+  # orchestrator creds at all.
+  [[ -n "$_target_var" ]] && linear_app_actor_clear_inherited "$_daemon"
 
   catalyst_resolve_secret linear-orchestrator-actor >/dev/null
   _creds="$CATALYST_SECRET_LAST_VALUE"

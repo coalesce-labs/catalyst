@@ -132,6 +132,29 @@ json_quote_or_null() {
   fi
 }
 
+# CTL-1612 round 5 (Codex P2 follow-up): bash mirror of
+# execution-core/config.mjs's getLivenessAnchorIssue() resolution order — used
+# ONLY to decide whether cmd_start's app-actor mint has anything to serve
+# (the scoped token's sole consumer, the anchor peer-heartbeat read, can never
+# fire with no anchor configured — readPeerRecords's `!anchorIssue` early
+# return, orch-monitor/lib/peer-liveness.mjs). Deliberately narrower than the
+# full secret-contract chain (matches getLayer2ConfigPath's own "legacy path"
+# comment: CATALYST_LAYER2_CONFIG_FILE, else ~/.config/catalyst/config.json —
+# no CATALYST_MACHINE_CONFIG/XDG tier for this specific reader):
+#   1. CATALYST_LIVENESS_ANCHOR_ISSUE env (test/override)
+#   2. catalyst.cluster.livenessAnchorIssue in the Layer-2 config
+#   3. empty — caller treats as "no anchor configured"
+resolve_liveness_anchor_issue() {
+  if [[ -n "${CATALYST_LIVENESS_ANCHOR_ISSUE:-}" ]]; then
+    printf '%s' "$CATALYST_LIVENESS_ANCHOR_ISSUE"
+    return 0
+  fi
+  local _l2_path="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"
+  if [[ -f "$_l2_path" ]] && command -v jq &>/dev/null; then
+    jq -r '.catalyst.cluster.livenessAnchorIssue // empty' "$_l2_path" 2>/dev/null
+  fi
+}
+
 is_alive() {
   local pid="$1"
   kill -0 "$pid" 2>/dev/null
@@ -401,11 +424,32 @@ cmd_start() {
   # fallback when Loki has no URL/reader or returns empty, so minting stays the
   # default there. Skip the (real network) mint in loki-only mode: it would
   # authenticate a credential that structurally can never be read.
+  #
+  # CTL-1612 round 5 (Codex P2 follow-up): readAnchor ALSO can never fire when
+  # NO liveness anchor is configured at all — readPeerRecords's `!anchorIssue`
+  # early return — regardless of source (AUTO or explicit "linear" included).
+  # A fleet running single-host, or one that hasn't set up cross-host liveness
+  # yet, would otherwise mint on every start and wait out curl's 30s ceiling
+  # for a credential nothing can ever read. Skip that case too.
+  #
+  # CTL-1612 round 5 (Codex P1 follow-up): BOTH skip branches below now call
+  # linear_app_actor_clear_inherited — the round-4 inherited-alias clear lived
+  # entirely inside linear_app_actor_auth, so a skip branch that never calls
+  # that function never ran it either. A broker stack-reload's `catalyst-monitor
+  # restart` in loki-only (or no-anchor) mode would otherwise still carry the
+  # broker's bot-valued LINEAR_API_TOKEN/LINEAR_API_KEY straight through to
+  # linear-comment.mjs — the same P1 as round 4's fix, just reachable via a
+  # path that used to return before ever sourcing the lib.
+  source "$SCRIPT_DIR/lib/linear-app-actor.sh"
   _liveness_source="$(printf '%s' "${CATALYST_LIVENESS_READ_SOURCE:-}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || true)"
+  _liveness_anchor_issue="$(resolve_liveness_anchor_issue)"
   if [[ "$_liveness_source" == "loki" ]]; then
     echo "catalyst-monitor: CATALYST_LIVENESS_READ_SOURCE=loki — skipping app-actor mint (peer-heartbeat anchor read is unused in loki-only mode)" >&2
+    linear_app_actor_clear_inherited "catalyst-monitor"
+  elif [[ -z "$_liveness_anchor_issue" ]]; then
+    echo "catalyst-monitor: no liveness anchor configured (CATALYST_LIVENESS_ANCHOR_ISSUE / catalyst.cluster.livenessAnchorIssue) — skipping app-actor mint (peer-heartbeat anchor read has nothing to attach to)" >&2
+    linear_app_actor_clear_inherited "catalyst-monitor"
   else
-    source "$SCRIPT_DIR/lib/linear-app-actor.sh"
     linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
   fi
 

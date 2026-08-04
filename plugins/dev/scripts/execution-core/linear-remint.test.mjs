@@ -695,4 +695,65 @@ describe("createAsyncReminter", () => {
       expect(mints).toBe(2);
     });
   });
+
+  // CTL-1612 round 5 (Codex P2 follow-up): initialLastAttempt lets a caller
+  // that already has a fresh token in hand at construction (the monitor's
+  // shell startup mint) seed the cooldown gate so the FIRST attempt() call
+  // doesn't immediately re-mint.
+  describe("initialLastAttempt (CTL-1612 round 5)", () => {
+    test("omitting it defaults to -Infinity — first attempt() always fires (unchanged pre-existing behavior)", async () => {
+      let mints = 0;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return "tok";
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        logger: silentLogger,
+      });
+      // now=0 would fail a real cooldown gate if lastAttempt were seeded to
+      // anything greater than -Infinity — proves the default is untouched.
+      expect(await r.attempt(0)).toBe(true);
+      expect(mints).toBe(1);
+    });
+
+    test("seeding it to a recent timestamp blocks the first attempt() until cooldownMs has elapsed from that seed", async () => {
+      let mints = 0;
+      const seedNow = 1_000_000;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return "tok";
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        logger: silentLogger,
+        initialLastAttempt: seedNow,
+      });
+      // Just past the seed, still well within cooldownMs — blocked.
+      expect(await r.attempt(seedNow + 5_000)).toBe(false);
+      expect(mints).toBe(0);
+      // Past cooldownMs from the SEED (not from -Infinity) — proceeds.
+      expect(await r.attempt(seedNow + 61_000)).toBe(true);
+      expect(mints).toBe(1);
+    });
+
+    test("applyToken is never called by seeding alone — a seed with no real mint yet still requires an actual successful attempt() before any token is applied", async () => {
+      let applied = null;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => "tok",
+        applyToken: (t) => {
+          applied = t;
+        },
+        cooldownMs: 60_000,
+        logger: silentLogger,
+        initialLastAttempt: Date.now(),
+      });
+      expect(applied).toBeNull();
+    });
+  });
 });
