@@ -531,20 +531,31 @@ implemented** anywhere, live path or otherwise — no schema, no writer, no brok
 the codebase. CTL-1628 removed the retired module as consumer-free.
 
 **The chokepoint is not the only `worker.transition` emitter.** The daemon's `handleCommentWake`
-(CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent` directly at two sites —
-clearing a stale `needs-human` marker on human reply, and clearing `needs-input` after a
-comment-driven wake — bypassing `recordTransition` entirely; its own code comment explains why:
-"scheduler.mjs owns the park/apply emission; the clear is emitted here (the daemon removes the
-durable label out-of-band and redispatches — the scheduler never observes this edge)." This is a
-deliberate, self-documented second producer.
+(CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent` directly at two
+structurally distinct sites, both bypassing `recordTransition` but for different reasons:
+- The **`needs-input` clear** (a per-signal branch gated on `status === "needs-input"`) removes the
+  label, emits the clear, and redispatches the parked worker in the same block. Its own code comment
+  explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted here (the
+  daemon removes the durable label out-of-band and redispatches — the scheduler never observes this
+  edge)."
+- The **`needs-human` clear** runs once per comment-wake call, gated on positive human provenance
+  and a managed ticket, with **no redispatch** in that block. It bypasses `recordTransition` because
+  the scheduler's own needs-human handling is STICKY-by-design (never clears it itself on a
+  steady-state admission pass, per the `recordTransition` suppression logic above) — the
+  "redispatches" half of the quoted rationale does not apply to this site.
 
-**A separate escalation path emits no `worker.transition` at all.** Pass 0w's hung-worker escalation
-(`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s progress-watchdog pass)
-applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) but never
-calls `recordTransition`, `appendWorkerTransitionEvent`, or any other event emitter anywhere in that
-path — a real Axis-2 transition with no `worker.transition` record. Unlike the daemon's comment-wake
-sites above, this is a genuine coverage gap, not an alternate producer. See "Two-axis worker state &
-the recordWorkerTransition chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
+Both are deliberate, self-documented second-producer sites.
+
+**A separate escalation path emits no `worker.transition` for its disposition change.** Pass 0w's
+hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
+progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
+`bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
+it applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) and
+never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
+emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
+the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
+specifically, not an alternate producer. See "Two-axis worker state & the recordWorkerTransition
+chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
 
 **Two orthogonal axes (never blurred):**
 
@@ -577,8 +588,16 @@ merged axes into a single status enum (rejected: pipeline stage and disposition 
 both need independent observability); async `recordWorkerTransition` only (rejected: `schedulerTick`
 is sync; async would require a separate flush loop with new failure modes).
 
-**Consequences** — every scheduler-owned transition fans out to four **live** sinks (Linear Status,
-label, event log, OTLP via otel-forward); all fail-open. A fifth sink (an optional broker
+**Consequences** — four sinks are **live** (Linear Status, label, event log, OTLP via otel-forward);
+all fail-open. No single transition reaches all four — each recordTransition call is either
+stage-only or disposition-only (`toDisposition === undefined` means "no disposition guard, always
+emit" for a pure stage move; omitting `toStage`/`fromStage` means no Linear-Status write for a pure
+disposition move), so a transition reaches at most three: a stage move touches Linear Status + event
+log + OTLP (skips the label sink); a disposition move touches the label + event log + OTLP (skips
+Linear Status) — e.g. the dependency-cycle escalation (`scheduler.mjs` ~5666-5678) calls
+`labelNeedsHumanUnlessBeliefOwner` (label) and `recordTransition({ toDisposition: "needs-human" })`
+(event log + OTLP) with no stage touched at all. Only a call that sets both `toStage` and
+`toDisposition` together would reach all four. A fifth sink (an optional broker
 `ticket_state_transitions` table, CTL-764 Phase 10) was designed but never implemented — no schema,
 writer, or broker consumer exist for it. The HUD capacity header gains per-disposition buckets and
 triage is carved out of `maxParallel` counting. AGENTS.md / architecture.md carry the two-axis model

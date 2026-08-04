@@ -447,19 +447,31 @@ transition (not fanned out from inside the chokepoint): (1) Linear Status via th
 
 **The scheduler chokepoint is not the only `worker.transition` emitter.** The daemon's
 `handleCommentWake` (CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent`
-directly at two sites — clearing a stale `needs-human` marker on human reply, and clearing
-`needs-input` after a comment-driven wake — bypassing `recordTransition` entirely. Its own code
-comment says why: "scheduler.mjs owns the park/apply emission; the clear is emitted here (the daemon
-removes the durable label out-of-band and redispatches — the scheduler never observes this edge)."
-This is a deliberate, self-documented second producer, not a gap in the chokepoint design.
+directly at two structurally distinct sites, both bypassing `recordTransition` — but for different
+reasons, not one shared rationale:
+- The **`needs-input` clear** (a per-signal branch gated on `status === "needs-input"`) removes the
+  label, emits the clear, and then redispatches the parked worker in the same block. Its own code
+  comment explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted
+  here (the daemon removes the durable label out-of-band and redispatches — the scheduler never
+  observes this edge)."
+- The **`needs-human` clear** runs once per comment-wake call, gated on positive human provenance
+  and a managed ticket — before any per-signal / worker-dir lookup, and with **no redispatch** in
+  that block at all. It bypasses `recordTransition` for the same underlying reason (the scheduler's
+  own STICKY needs-human handling explicitly defers clearing to an external confirmed-removal
+  signal, never clearing it itself on a steady-state admission pass), but the "redispatches" half of
+  the quoted rationale above does not apply to this site.
 
-**A separate escalation path emits no `worker.transition` at all.** Pass 0w's hung-worker
-escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
-progress-watchdog pass) applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner`
-(`label-guard.mjs`) but never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other
-event emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record.
-Unlike the daemon's comment-wake sites above, this is a genuine coverage gap, not an alternate
-producer.
+Both are deliberate, self-documented second-producer sites, not a gap in the chokepoint design.
+
+**A separate escalation path emits no `worker.transition` for its disposition change.** Pass 0w's
+hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
+progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
+`bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
+it applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) and
+never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
+emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
+the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
+specifically, not an alternate producer.
 
 The standalone `recordWorkerTransition` module (`record-worker-transition.mjs`) — an extracted,
 unit-tested scaffold for sinks 1–3 only (Linear status, disposition label, event log) whose own doc
