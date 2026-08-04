@@ -460,7 +460,25 @@ else
 		# distinguish the two once bun evidence itself is the sole gate.
 		HAS_BUN_LOCK=false
 		[ -f "bun.lock" ] || [ -f "bun.lockb" ] && HAS_BUN_LOCK=true
-		PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null)
+		# CTL-1628 post-merge (Codex #2948 round 5): jq is not guaranteed present
+		# on every host this script runs on (a documented-minimal host can lack
+		# it) — a bare `jq -r ...` command substitution under this script's
+		# top-level `set -e` would exit 127 right here, AFTER `git worktree add`
+		# already created the worktree/branch but BEFORE any rollback is armed,
+		# stranding both with no error message and no attempt at npm. Guard on
+		# `command -v jq` first; without it, fall back to a plain grep sniff of
+		# the "packageManager" field — imprecise (matches inside any string
+		# value, ignores JSON structure) but adequate for the boolean bun@
+		# prefix check this needs, and it degrades to the same lock-file-only
+		# detection (HAS_BUN_LOCK, no jq involved) in the worst case rather than
+		# ever crashing the script.
+		if command -v jq >/dev/null 2>&1; then
+			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null)
+		elif grep -qE '"packageManager"[[:space:]]*:[[:space:]]*"bun@' package.json 2>/dev/null; then
+			PACKAGE_MANAGER_FIELD="bun@detected"
+		else
+			PACKAGE_MANAGER_FIELD=""
+		fi
 		HAS_BUN_EVIDENCE=false
 		if [ "$HAS_BUN_LOCK" = true ] || [[ "$PACKAGE_MANAGER_FIELD" == bun@* ]]; then
 			HAS_BUN_EVIDENCE=true
