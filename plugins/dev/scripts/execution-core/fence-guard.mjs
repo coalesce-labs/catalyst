@@ -193,6 +193,17 @@ export function fenceGuard(
     // default (false = fail-closed): suppressing a mutating write on "can't tell"
     // is the safe side; dropping a needs-human escalation is NOT.
     proceedOnMissingGeneration = false,
+    // CTL-1329 interlock: fired whenever a generation could not be determined
+    // (regardless of proceedOnMissingGeneration), BEFORE the proceed/fail-closed
+    // branch. A call site sitting inside the terminal-sweep's fence-suppress
+    // cooldown (stampFenceSuppress/isFenceSuppressFresh) uses this to arm the
+    // cooldown even when it opted into proceedOnMissingGeneration — a missing
+    // generation stays missing next tick regardless of whether this tick wrote,
+    // so re-probing every tick is the same unbounded burn CTL-1329 fixed
+    // (2026-06-23 OAuth-drain incident), just relocated from the write path to
+    // the terminal-probe path. Optional; default no-op so existing callers are
+    // unaffected.
+    onMissingGeneration = null,
   } = {},
 ) {
   // N=1 single-host gate: provably no peer → trust local unconditionally.
@@ -253,6 +264,16 @@ export function fenceGuard(
       }
     }
     if (!Number.isFinite(generation)) {
+      if (typeof onMissingGeneration === "function") {
+        try {
+          onMissingGeneration({ ticket });
+        } catch (err) {
+          logger?.debug?.(
+            { ticket, err: err?.message },
+            "fenceGuard: onMissingGeneration hook threw — continuing",
+          );
+        }
+      }
       if (proceedOnMissingGeneration) {
         // Loud fail-open: never silently drop an escalation on "can't tell".
         logger?.warn?.(
