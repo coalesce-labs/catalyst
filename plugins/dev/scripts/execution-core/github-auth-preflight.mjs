@@ -19,11 +19,10 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test github-auth-preflight.test.mjs
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
 
 import { log as defaultLog } from "./config.mjs";
 import { emitGithubAuthUnusable } from "./dispatch-alert.mjs";
+import { secretFileCandidates } from "../lib/secret-contract.mjs"; // CTL-1623: the github-token row's candidate chain, single-sourced from the registry
 
 // Bounded so a hung/unreachable api.github.com can never wedge daemon boot.
 export const GITHUB_PROBE_TIMEOUT_MS = 10_000;
@@ -72,30 +71,31 @@ export function defaultProbeGithubAuth(env = process.env) {
   }
 }
 
-// githubTokenFileCandidates — the resolution CHAIN, in priority order. Mirrors the
-// launcher's _project_shared_github_token exactly.
+// githubTokenFileCandidates — the resolution CHAIN, in priority order. CTL-1623: delegates
+// to the shared secret contract (lib/secret-contract.mjs's secretFileCandidates) instead of
+// hand-rolling a second copy of the chain — this function and
+// lib/catalyst-secret-env.sh's catalyst_project_github_token were the last CTL-1612 pair
+// still reading it by hand; the engine is now the single source for both.
 //
 // The writers disagree (Codex P1, round 2): cluster-sync materializes bare secrets into
 // dirname(getLayer2ConfigPath()), whose default is HARDCODED ~/.config/catalyst and is
 // NOT XDG-aware, while other tooling (setup-webhooks.sh:23, lib/linear-app-actor.sh:30)
 // IS. Reading only the XDG path would miss every rotation on an XDG host — strictly worse
 // than the hardcoded read. So prefer cluster-sync's own destination, then fall back to
-// the XDG location, and take the first readable non-empty file.
+// the XDG location, and take the first readable non-empty file. See
+// secretFileCandidates/explicitFileOverrideEnvName in lib/secret-contract.mjs for the exact
+// chain (explicit CATALYST_GITHUB_TOKEN_FILE override → CATALYST_CONFIG_DIR →
+// cluster-sync's own destination dir → XDG dir).
+//
+// ONE FLAGGED BEHAVIOR CHANGE (CTL-1623, HOME=""): the pre-fold chain used
+// `env?.HOME ?? homedir()`, which only substitutes on HOME being null/undefined — an
+// explicit empty-string HOME was used as-is (dirname("" + "/.config/...") stays relative to
+// "."). The engine's chain length-checks HOME (`typeof env?.HOME === "string" &&
+// env.HOME.length > 0`) and falls back to homedir() for an empty string too — the saner
+// behavior for a degenerate, presumably-unintentional HOME="". See
+// github-auth-preflight.test.mjs's "HOME=''" cell for the pinned before/after.
 export function githubTokenFileCandidates(env = process.env) {
-  if (env?.CATALYST_GITHUB_TOKEN_FILE) return [env.CATALYST_GITHUB_TOKEN_FILE];
-  // CTL-1612: honor CATALYST_CONFIG_DIR exactly as the launcher's
-  // catalyst_read_secret_file does. Without this the two disagree — the launcher arms from
-  // the configured directory and labels it "shared-file", then this re-arm (boot AND every
-  // timer tick) replaces both aliases from the DEFAULT directory. If that copy is stale the
-  // daemon silently reverts to 401s, which is the exact divergence the shared library was
-  // introduced to eliminate, recreated across the bash/JS boundary.
-  if (env?.CATALYST_CONFIG_DIR) return [join(env.CATALYST_CONFIG_DIR, "github-token")];
-  const home = env?.HOME ?? homedir();
-  const layer2 = env?.CATALYST_LAYER2_CONFIG_FILE ?? join(home, ".config", "catalyst", "config.json");
-  const out = [join(dirname(layer2), "github-token")];
-  const xdg = join(env?.XDG_CONFIG_HOME || join(home, ".config"), "catalyst", "github-token");
-  if (!out.includes(xdg)) out.push(xdg);
-  return out;
+  return secretFileCandidates("github-token", env);
 }
 
 // defaultGithubTokenFile — the highest-priority candidate (cluster-sync's destination).

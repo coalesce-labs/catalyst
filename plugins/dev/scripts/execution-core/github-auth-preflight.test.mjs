@@ -987,7 +987,8 @@ describe("resolveGithubBootAuth re-arms before probing", () => {
   });
 });
 
-// ── daemon boot ORDERING (CTL-1612, Codex P1 round 2) ─────────────────────────
+// ── daemon boot ORDERING (CTL-1612, Codex P1 round 2; CTL-1623: call sites now route
+// through armSecret) ────────────────────────────────────────────────────────────────────
 //
 // The preflight's placement in daemon.mjs is load-bearing, and both directions have
 // already been wrong once:
@@ -998,10 +999,18 @@ describe("resolveGithubBootAuth re-arms before probing", () => {
 //     ...process.env, so every resumed worker inherited the stale credential for life.
 // The only correct window is: clusterSync → preflight → any dispatch. A structural
 // assertion is the honest way to pin that; a unit test cannot observe boot ordering.
+//
+// CTL-1623: both call sites were re-pointed from a direct rearmGithubTokenFromFile() call
+// to armSecret("github-token", { env: process.env }) — routing through the registry's arm
+// path so the registerRearmHook-registered hook (== rearmGithubTokenFromFile itself, wired
+// at module load, see the "rearm hook registration" describe block below) actually fires.
+// The needle strings below track that rename; the ordering invariants themselves are
+// unchanged.
 describe("daemon boot ordering", () => {
   const daemonSrc = readFileSync(new URL("./daemon.mjs", import.meta.url), "utf8").split("\n");
   const lineOf = (needle) => daemonSrc.findIndex((l) => l.includes(needle));
   const countOf = (needle) => daemonSrc.filter((l) => l.includes(needle)).length;
+  const REARM_CALL = 'armSecret("github-token", { env: process.env });';
 
   // The boot sequence must be: clusterSync -> RE-ARM -> dispatch -> PROBE.
   // Both halves are load-bearing and both have been wrong once:
@@ -1012,14 +1021,14 @@ describe("daemon boot ordering", () => {
   //     for no diagnostic benefit.
   test("the boot cluster-sync runs BEFORE the credential re-arm", () => {
     const sync = lineOf("const bootSync = clusterSync()");
-    const rearm = lineOf("rearmGithubTokenFromFile({ env: process.env, log })");
+    const rearm = lineOf(REARM_CALL);
     expect(sync).toBeGreaterThan(-1);
     expect(rearm).toBeGreaterThan(-1);
     expect(sync).toBeLessThan(rearm);
   });
 
   test("the credential RE-ARM runs BEFORE anything dispatches a worker", () => {
-    const rearm = lineOf("rearmGithubTokenFromFile({ env: process.env, log })");
+    const rearm = lineOf(REARM_CALL);
     const bootResume = lineOf("const bootResume = reconcileBoot(");
     const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn })");
     expect(bootResume).toBeGreaterThan(-1);
@@ -1045,10 +1054,29 @@ describe("daemon boot ordering", () => {
   test("the re-arm is ALSO wired into the periodic cluster-sync timer", () => {
     const timer = lineOf("_clusterSyncTimer = setInterval(");
     expect(timer).toBeGreaterThan(-1);
-    const rearmCalls = daemonSrc
-      .map((l, i) => (l.includes("rearmGithubTokenFromFile({ env: process.env, log })") ? i : -1))
-      .filter((i) => i >= 0);
+    const rearmCalls = daemonSrc.map((l, i) => (l.includes(REARM_CALL) ? i : -1)).filter((i) => i >= 0);
     expect(rearmCalls.length).toBe(2); // once at boot, once per timer tick
     expect(rearmCalls.some((i) => i > timer)).toBe(true);
+  });
+
+  // CTL-1623: the registry's "re-armable/timer" label was aspiration until this PR — no
+  // caller had ever registered a hook, so armSecret("github-token") always took the
+  // hookless-degrade path (secret-contract.mjs's armSecret docstring). This pins that the
+  // hook registration is wired at module scope (before either call site above can fire,
+  // since both live inside startDaemon()) and that the registered hook IS
+  // rearmGithubTokenFromFile — not a second, parallel implementation.
+  describe("rearm hook registration (CTL-1623)", () => {
+    test("registerRearmHook(\"github-token\", ...) is called at module scope, not inside startDaemon", () => {
+      const regLine = lineOf('registerRearmHook("github-token"');
+      const startDaemonLine = lineOf("export function startDaemon({");
+      expect(regLine).toBeGreaterThan(-1);
+      expect(startDaemonLine).toBeGreaterThan(-1);
+      expect(regLine).toBeLessThan(startDaemonLine); // registered before startDaemon is even defined
+    });
+
+    test("the registered hook closure calls rearmGithubTokenFromFile (not a duplicate implementation)", () => {
+      const regLine = lineOf('registerRearmHook("github-token"');
+      expect(daemonSrc[regLine]).toContain("rearmGithubTokenFromFile");
+    });
   });
 });
