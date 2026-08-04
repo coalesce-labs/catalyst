@@ -1,7 +1,7 @@
 // cluster-heartbeat-publisher.test.mjs — periodic cross-host liveness publisher
 // (CTL-1090, Phase 4). Injects fakes for publish, ownedTickets, roster, etc.
 // so no network, fs, or subprocess is touched.
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { startLivenessPublisher } from "./cluster-heartbeat-publisher.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 
@@ -10,7 +10,25 @@ describe("startLivenessPublisher (CTL-1090)", () => {
   // singleton (default). Reset it to CLOSED before each test so the existing
   // "publishes …" assertions are deterministic regardless of test order; the
   // new breaker-behavior tests inject an explicit fake breaker.
-  beforeEach(() => linearBreaker.recordSuccess());
+  //
+  // CTL-1628 (Codex #2958 P2): every test below relies on the DEFAULT
+  // `readSource` (none is injected), which resolves from
+  // process.env.CATALYST_LIVENESS_READ_SOURCE via getLivenessReadSource().
+  // Since CTL-1628 the anchor guard AND the Linear-publish skip are both
+  // gated on that source, so this whole block's "publishes to Linear"
+  // assumptions are only valid in "linear" mode — a host that exports
+  // CATALYST_LIVENESS_READ_SOURCE=loki would otherwise silently skip every
+  // Linear publish in here and fail these assertions. Pin it explicitly for
+  // the duration of this block and restore the ambient value after.
+  const savedReadSourceEnv = process.env.CATALYST_LIVENESS_READ_SOURCE;
+  beforeEach(() => {
+    linearBreaker.recordSuccess();
+    process.env.CATALYST_LIVENESS_READ_SOURCE = "linear";
+  });
+  afterEach(() => {
+    if (savedReadSourceEnv === undefined) delete process.env.CATALYST_LIVENESS_READ_SOURCE;
+    else process.env.CATALYST_LIVENESS_READ_SOURCE = savedReadSourceEnv;
+  });
   test("single-host roster: returns an inert handle, publisher fn NEVER called", () => {
     const publish = () => { throw new Error("must not publish single-host"); };
     const h = startLivenessPublisher({

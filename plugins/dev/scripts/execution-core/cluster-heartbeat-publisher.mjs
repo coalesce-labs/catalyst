@@ -3,9 +3,19 @@
 //
 // startLivenessPublisher mirrors startHeartbeat() in heartbeat-event.mjs:
 // immediate tick + setInterval + unref + { stop } handle. The difference:
-//   • single-host (roster<=1) or missing anchor → inert { stop(){} } handle (no-op)
-//   • each tick publishes { anchorIssue, host: self, inFlightTickets: ownedTickets() }
-//     via publishHeartbeatSync (fail-open — a publish error is swallowed)
+//   • single-host (roster<=1) → inert { stop(){} } handle (no-op), unconditionally.
+//   • multi-host: the anchor requirement and the Linear publish are both gated
+//     on the ACTIVE read source (CTL-1420 #17 / CTL-1628), not on anchor
+//     presence alone:
+//       - readSource "linear" + no anchor configured → inert { stop(){} }
+//         handle (the legacy no-op path).
+//       - readSource "linear" + anchor configured → armed; each tick publishes
+//         { anchorIssue, host: self, inFlightTickets: ownedTickets() } via
+//         publishHeartbeatSync (fail-open — a publish error is swallowed),
+//         AFTER the Linear-free fence re-emit below.
+//       - readSource "loki" (anchor configured or not) → armed, but the Linear
+//         anchor publish is skipped every tick (retired in this mode); only
+//         the Linear-free CTL-863 fence re-emit runs.
 //
 // The `ownedTickets` default reads in-flight tickets for `self` from the LOCAL
 // signal directory (same predicate defaultOwnedTicketsForHost uses for the
