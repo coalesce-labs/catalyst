@@ -567,4 +567,193 @@ describe("createAsyncReminter", () => {
     });
     expect(await r.attempt(1_000)).toBe(false);
   });
+
+  // CTL-1612 round 2: failureCooldownMs defaults to cooldownMs, so an existing
+  // caller (linearAsyncReminter below) that omits it sees NO behavior change —
+  // asserted by the two tests above already passing unmodified.
+  describe("failureCooldownMs (CTL-1612 round 2)", () => {
+    test("a FAILED mint retries after the short failureCooldownMs, not the long cooldownMs", async () => {
+      let mints = 0;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => (mints++ === 0 ? null : "tok-after-retry"),
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        failureCooldownMs: 5_000,
+        logger: silentLogger,
+      });
+      expect(await r.attempt(0)).toBe(false); // fails, mints=1
+      expect(mints).toBe(1);
+      // Still within failureCooldownMs (5s) — no retry yet.
+      expect(await r.attempt(3_000)).toBe(false);
+      expect(mints).toBe(1);
+      // Past failureCooldownMs but well short of the full 60s cooldownMs.
+      expect(await r.attempt(6_000)).toBe(true);
+      expect(mints).toBe(2);
+    });
+
+    test("a SUCCESSFUL mint still waits the full cooldownMs, not failureCooldownMs", async () => {
+      let mints = 0;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return "tok";
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        failureCooldownMs: 5_000,
+        logger: silentLogger,
+      });
+      expect(await r.attempt(0)).toBe(true); // succeeds, mints=1
+      // Past failureCooldownMs (5s) but still within the long cooldownMs (60s) —
+      // a success must NOT fast-track the next attempt via failureCooldownMs.
+      expect(await r.attempt(10_000)).toBe(false);
+      expect(mints).toBe(1);
+      expect(await r.attempt(61_000)).toBe(true);
+      expect(mints).toBe(2);
+    });
+
+    test("omitting failureCooldownMs defaults it to cooldownMs (byte-identical to pre-CTL-1612 behavior)", async () => {
+      let mints = 0;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return null;
+        },
+        cooldownMs: 60_000,
+        logger: silentLogger,
+      });
+      expect(await r.attempt(0)).toBe(false);
+      expect(mints).toBe(1);
+      // No failureCooldownMs override → still gated by the full 60s cooldown,
+      // exactly as before this parameter existed.
+      expect(await r.attempt(10_000)).toBe(false);
+      expect(mints).toBe(1);
+    });
+  });
+
+  // CTL-1612 round 3 (Codex P2 follow-up): the cooldown gate is TIME-only —
+  // deferred-promise mints prove the IN-FLIGHT LATCH is doing independent
+  // work, not just the timing gate (each test below calls attempt() a second
+  // time with a `now` far past any cooldown window, which the time gate ALONE
+  // would happily let through).
+  describe("in-flight latch (CTL-1612 round 3)", () => {
+    test("a second attempt returns false while the first is still pending, even past the cooldown window", async () => {
+      let mints = 0;
+      let resolveMint;
+      const pending = new Promise((res) => {
+        resolveMint = res;
+      });
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return pending; // stays unresolved until resolveMint() is called
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        logger: silentLogger,
+      });
+
+      const firstAttempt = r.attempt(0); // synchronously reaches the await and latches inFlight
+      // `now` here is WAY past cooldownMs (60s) from lastAttempt(0) — the pure
+      // time gate would pass this. Only the in-flight latch can still block it.
+      expect(await r.attempt(999_999)).toBe(false);
+      expect(mints).toBe(1); // the second call never invoked mint at all
+
+      resolveMint("tok-first");
+      expect(await firstAttempt).toBe(true);
+    });
+
+    test("a later attempt succeeds once the first has resolved", async () => {
+      let mints = 0;
+      let resolveMint;
+      const pending = new Promise((res) => {
+        resolveMint = res;
+      });
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return pending;
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        logger: silentLogger,
+      });
+
+      const firstAttempt = r.attempt(0);
+      resolveMint("tok-first");
+      expect(await firstAttempt).toBe(true);
+      expect(mints).toBe(1);
+
+      // Past cooldownMs AND the first attempt has fully resolved (inFlight
+      // cleared in the finally) — this one must proceed and mint again.
+      expect(await r.attempt(61_000)).toBe(true);
+      expect(mints).toBe(2);
+    });
+  });
+
+  // CTL-1612 round 5 (Codex P2 follow-up): initialLastAttempt lets a caller
+  // that already has a fresh token in hand at construction (the monitor's
+  // shell startup mint) seed the cooldown gate so the FIRST attempt() call
+  // doesn't immediately re-mint.
+  describe("initialLastAttempt (CTL-1612 round 5)", () => {
+    test("omitting it defaults to -Infinity — first attempt() always fires (unchanged pre-existing behavior)", async () => {
+      let mints = 0;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return "tok";
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        logger: silentLogger,
+      });
+      // now=0 would fail a real cooldown gate if lastAttempt were seeded to
+      // anything greater than -Infinity — proves the default is untouched.
+      expect(await r.attempt(0)).toBe(true);
+      expect(mints).toBe(1);
+    });
+
+    test("seeding it to a recent timestamp blocks the first attempt() until cooldownMs has elapsed from that seed", async () => {
+      let mints = 0;
+      const seedNow = 1_000_000;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => {
+          mints++;
+          return "tok";
+        },
+        applyToken: () => {},
+        cooldownMs: 60_000,
+        logger: silentLogger,
+        initialLastAttempt: seedNow,
+      });
+      // Just past the seed, still well within cooldownMs — blocked.
+      expect(await r.attempt(seedNow + 5_000)).toBe(false);
+      expect(mints).toBe(0);
+      // Past cooldownMs from the SEED (not from -Infinity) — proceeds.
+      expect(await r.attempt(seedNow + 61_000)).toBe(true);
+      expect(mints).toBe(1);
+    });
+
+    test("applyToken is never called by seeding alone — a seed with no real mint yet still requires an actual successful attempt() before any token is applied", async () => {
+      let applied = null;
+      const r = createAsyncReminter({
+        readCreds: () => ({ clientId: "id", clientSecret: "sec" }),
+        mint: async () => "tok",
+        applyToken: (t) => {
+          applied = t;
+        },
+        cooldownMs: 60_000,
+        logger: silentLogger,
+        initialLastAttempt: Date.now(),
+      });
+      expect(applied).toBeNull();
+    });
+  });
 });

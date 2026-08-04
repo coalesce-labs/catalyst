@@ -148,12 +148,29 @@ STUB_BUN
 # _CATALYST_SECRET_ENV_SH_LOADED is scrubbed too: it is the shared lib's
 # idempotent-source guard, and an exported one would make cmd_start's `source` a no-op,
 # leaving every projection silently unperformed.
+#
+# CTL-1612 (Codex P2 follow-up): cmd_start now ALSO mints the monitor's scoped
+# app-actor token (linear_app_actor_auth "catalyst-monitor"
+# CATALYST_MONITOR_APP_ACTOR_TOKEN), which resolves
+# catalyst.linear.bot.orchestrator.{clientId,clientSecret} through the shared
+# secret-contract chain and — if creds resolve — POSTs a REAL client_credentials
+# request to https://api.linear.app/oauth/token. Tests 13/14 invoke cmd_start 11
+# times; on a host with real orchestrator creds configured (any dev machine that
+# runs the broker/execution-core) that is 11 live network calls per test run.
+# CATALYST_LAYER2_CONFIG_FILE is checked FIRST in that chain (unconditionally,
+# before CATALYST_MACHINE_CONFIG/XDG/~/.config — catalyst-secret-contract.sh
+# catalyst_secret_resolve_layer2_path), so pinning it to an absent sandbox path
+# seals the read: catalyst_resolve_secret finds no creds, and
+# linear_app_actor_auth's mint block silently no-ops (documented fail-open) —
+# no curl, no export, byte-identical to "orchestrator app not configured".
 run_cmd_start() {
   local root="$1"
   shift
   env -u CATALYST_WEBHOOK_SECRET -u CATALYST_WEBHOOK_SECRET_FILE -u CATALYST_CONFIG_DIR \
     -u GITHUB_TOKEN -u GH_TOKEN -u CATALYST_GITHUB_TOKEN_FILE \
     -u CATALYST_GITHUB_TOKEN_SOURCE -u _CATALYST_SECRET_ENV_SH_LOADED \
+    -u CATALYST_MACHINE_CONFIG -u CATALYST_MONITOR_APP_ACTOR_TOKEN \
+    -u CATALYST_LIVENESS_READ_SOURCE -u CATALYST_LIVENESS_ANCHOR_ISSUE \
     PATH="$root/bin:$PATH" \
     CATALYST_DIR="$root/catalyst" \
     MONITOR_SERVER_SCRIPT="$root/srv/server.ts" \
@@ -161,12 +178,83 @@ run_cmd_start() {
     MONITOR_SKIP_BOOTSTRAP=1 \
     CATALYST_WEBHOOK_SECRET_FILE="$root/absent-webhook-secret" \
     CATALYST_GITHUB_TOKEN_FILE="$root/absent-github-token" \
+    CATALYST_LAYER2_CONFIG_FILE="$root/absent-layer2-config.json" \
     "$@" \
     bash -c '
       source "'"$MONITOR_SH"'" url >/dev/null 2>&1
       cmd_start >/dev/null 2>&1 || true
     ' 2>/dev/null || true
   sleep 0.2
+}
+
+# CTL-1612 round 3: identical sandboxing to run_cmd_start, but preserves
+# cmd_start's stderr into $root/stderr-captured instead of discarding it — the
+# only way to assert on the loki-skip log line (and, via the curl-stub marker
+# helpers below, on whether linear_app_actor_auth's mint code path ran at
+# all). Every default still sits BEFORE "$@" so a case can override one.
+#
+# CTL-1612 round 4 (Codex P2 follow-up): CATALYST_LIVENESS_READ_SOURCE is
+# ALSO unset here (not just the secret-related vars) — a dev/CI shell that
+# happens to export =loki would otherwise leak into the "unset → AUTO"
+# sub-case below and silently flip it onto the loki-skip path, making Test
+# 16c/16d fail for a reason unrelated to what they're actually testing.
+run_cmd_start_capture_stderr() {
+  local root="$1"
+  shift
+  env -u CATALYST_WEBHOOK_SECRET -u CATALYST_WEBHOOK_SECRET_FILE -u CATALYST_CONFIG_DIR \
+    -u GITHUB_TOKEN -u GH_TOKEN -u CATALYST_GITHUB_TOKEN_FILE \
+    -u CATALYST_GITHUB_TOKEN_SOURCE -u _CATALYST_SECRET_ENV_SH_LOADED \
+    -u CATALYST_MACHINE_CONFIG -u CATALYST_MONITOR_APP_ACTOR_TOKEN \
+    -u CATALYST_LIVENESS_READ_SOURCE -u CATALYST_LIVENESS_ANCHOR_ISSUE \
+    PATH="$root/bin:$PATH" \
+    CATALYST_DIR="$root/catalyst" \
+    MONITOR_SERVER_SCRIPT="$root/srv/server.ts" \
+    MONITOR_UI_DIST_DIR="$root/dist" \
+    MONITOR_SKIP_BOOTSTRAP=1 \
+    CATALYST_WEBHOOK_SECRET_FILE="$root/absent-webhook-secret" \
+    CATALYST_GITHUB_TOKEN_FILE="$root/absent-github-token" \
+    CATALYST_LAYER2_CONFIG_FILE="$root/absent-layer2-config.json" \
+    "$@" \
+    bash -c '
+      source "'"$MONITOR_SH"'" url >/dev/null 2>&1
+      cmd_start >/dev/null 2>"'"$root"'/stderr-captured" || true
+    ' || true
+  sleep 0.2
+}
+
+# CTL-1612 round 3: installs a FAKE (obviously non-real) orchestrator
+# clientId/clientSecret into a Layer-2-shaped config file, plus a stub `curl`
+# that marks a file when invoked and returns a canned auth-failure body
+# instead of ever reaching the network. This lets the loki-skip tests below
+# distinguish "the mint code path never ran" (curl-invoked marker absent)
+# from "it ran and failed for an unrelated sandbox reason" (creds absent) —
+# without ever making a real request, fake creds or not.
+#
+# CTL-1612 round 5: optional 2nd arg — a fake catalyst.cluster.livenessAnchorIssue
+# value to embed in the config (default: a fixed fake ticket id, so every EXISTING
+# caller of this helper — round 3's Test 16 — continues to have an anchor
+# configured and the mint proceeds exactly as those tests already expect, now
+# that cmd_start ALSO gates on anchor presence). Pass an EMPTY STRING explicitly
+# to build a config with NO anchor field at all (round 5's no-anchor-configured
+# skip tests, Test 17).
+install_fake_orchestrator_creds_and_curl_stub() {
+  local root="$1"
+  local anchor="${2-CTL-9999-fake-anchor}"
+  if [[ -n "$anchor" ]]; then
+    cat > "$root/fake-layer2-config.json" <<EOF
+{"catalyst":{"linear":{"bot":{"orchestrator":{"clientId":"fake-ctl1612-r3-client-id","clientSecret":"fake-ctl1612-r3-client-secret"}}},"cluster":{"livenessAnchorIssue":"$anchor"}}}
+EOF
+  else
+    cat > "$root/fake-layer2-config.json" <<'EOF'
+{"catalyst":{"linear":{"bot":{"orchestrator":{"clientId":"fake-ctl1612-r3-client-id","clientSecret":"fake-ctl1612-r3-client-secret"}}}}}
+EOF
+  fi
+  cat > "$root/bin/curl" <<CURLSTUB
+#!/usr/bin/env bash
+touch "$root/curl-invoked"
+echo '{"error":"invalid_client"}'
+CURLSTUB
+  chmod +x "$root/bin/curl"
 }
 
 # CTL-1612 assertions over the captured child env. Secret VALUES are never echoed —
@@ -389,17 +477,18 @@ printenv > "$ENV_CAPTURE"
 STUB_BUN
 chmod +x "$ROOT/bin/bun"
 
-# Run cmd_start in a subshell; it will background the stub bun. Give it a moment.
-PATH="$ROOT/bin:$PATH" \
-CATALYST_DIR="$ROOT/catalyst" \
-MONITOR_SERVER_SCRIPT="$ROOT/srv/server.ts" \
-MONITOR_UI_DIST_DIR="$ROOT/dist" \
-MONITOR_SKIP_BOOTSTRAP=1 \
-bash -c '
-  source "'"$MONITOR_SH"'" url >/dev/null 2>&1
-  cmd_start >/dev/null 2>&1 || true
-' 2>/dev/null || true
-sleep 0.2
+# CTL-1612 round 13 (Codex P2 follow-up): this used to invoke cmd_start via a
+# standalone bash -c block instead of the shared run_cmd_start sandbox helper
+# (see that helper's header comment) — on a host with real orchestrator
+# creds configured (any dev machine running the broker/execution-core),
+# cmd_start's app-actor mint resolves them and POSTs a REAL client_credentials
+# request to https://api.linear.app/oauth/token before the stub bun below
+# ever runs. run_cmd_start pins CATALYST_LAYER2_CONFIG_FILE (and the other
+# secret-file/liveness vars) to absent sandbox paths, sealing that read —
+# same defaults this test already relied on (PATH/CATALYST_DIR/
+# MONITOR_SERVER_SCRIPT/MONITOR_UI_DIST_DIR/MONITOR_SKIP_BOOTSTRAP), so no
+# extra override args are needed.
+run_cmd_start "$ROOT"
 
 if [[ -f "$ENV_CAPTURE" ]]; then
   if grep -q "MONITOR_PUBLIC_DIR=$ROOT/dist" "$ENV_CAPTURE" 2>/dev/null; then
@@ -791,6 +880,169 @@ else
       && echo "    source=$SRC_COUNT webhook=$WH_COUNT github=$GT_COUNT"
   fi
 fi
+
+# ─── Test 16: CATALYST_LIVENESS_READ_SOURCE=loki skips the app-actor mint ────
+# CTL-1612 round 3 (Codex P2 follow-up): the scoped token's ONLY consumer
+# (server.ts pollAnchorHeartbeats → readAnchor → readPeerHeartbeatsSync) is
+# structurally unreachable when CATALYST_LIVENESS_READ_SOURCE=loki
+# (orch-monitor/lib/peer-liveness.mjs readPeerRecords early-returns before
+# ever calling readAnchor — see orch-monitor/__tests__/peer-liveness.test.ts
+# "explicit loki: trusts an empty result — never reads the retired anchor").
+# cmd_start should skip the real mint entirely in that mode (no curl, no
+# network), and must NOT skip it for any other value — unset/AUTO or the
+# explicit anchor-only "linear" mode — where the anchor can still be read.
+#
+# Each sub-case installs FAKE (obviously non-real) orchestrator creds plus a
+# stub curl that marks a file instead of ever reaching the network, so "was
+# the mint code path reached" is asserted via the marker file's presence —
+# never via a real request, fake creds or not.
+echo ""
+echo "Test 16: cmd_start skips the app-actor mint under CATALYST_LIVENESS_READ_SOURCE=loki (CTL-1612 round 3)"
+
+ROOT="$(make_sandbox)"
+install_fake_orchestrator_creds_and_curl_stub "$ROOT"
+run_cmd_start_capture_stderr "$ROOT" \
+  CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json" \
+  CATALYST_LIVENESS_READ_SOURCE=loki
+STDERR_LOKI="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
+if echo "$STDERR_LOKI" | grep -q "skipping app-actor mint"; then
+  pass "16a: loki-only mode logs the skip"
+else
+  fail "16a: loki-only mode did not log the skip; stderr: $STDERR_LOKI"
+fi
+if [[ -f "$ROOT/curl-invoked" ]]; then
+  fail "16b: loki-only mode still invoked curl (mint attempted despite the skip)"
+else
+  pass "16b: loki-only mode never invoked curl — mint code path never ran"
+fi
+rm -rf "$ROOT"
+
+ROOT="$(make_sandbox)"
+install_fake_orchestrator_creds_and_curl_stub "$ROOT"
+run_cmd_start_capture_stderr "$ROOT" \
+  CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json"
+  # CATALYST_LIVENESS_READ_SOURCE left unset → AUTO
+STDERR_AUTO="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
+if echo "$STDERR_AUTO" | grep -q "skipping app-actor mint"; then
+  fail "16c: unset (AUTO) mode incorrectly skipped the mint; stderr: $STDERR_AUTO"
+else
+  pass "16c: unset (AUTO) mode does not skip the mint"
+fi
+if [[ -f "$ROOT/curl-invoked" ]]; then
+  pass "16d: unset (AUTO) mode invoked curl — mint code path ran"
+else
+  fail "16d: unset (AUTO) mode never invoked curl; stderr: $STDERR_AUTO"
+fi
+rm -rf "$ROOT"
+
+ROOT="$(make_sandbox)"
+install_fake_orchestrator_creds_and_curl_stub "$ROOT"
+run_cmd_start_capture_stderr "$ROOT" \
+  CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json" \
+  CATALYST_LIVENESS_READ_SOURCE=linear
+STDERR_LINEAR="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
+if echo "$STDERR_LINEAR" | grep -q "skipping app-actor mint"; then
+  fail "16e: linear (anchor-only) mode incorrectly skipped the mint; stderr: $STDERR_LINEAR"
+else
+  pass "16e: linear (anchor-only) mode does not skip the mint"
+fi
+if [[ -f "$ROOT/curl-invoked" ]]; then
+  pass "16f: linear (anchor-only) mode invoked curl — mint code path ran"
+else
+  fail "16f: linear (anchor-only) mode never invoked curl; stderr: $STDERR_LINEAR"
+fi
+rm -rf "$ROOT"
+
+ROOT="$(make_sandbox)"
+install_fake_orchestrator_creds_and_curl_stub "$ROOT"
+run_cmd_start_capture_stderr "$ROOT" \
+  CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json" \
+  CATALYST_LIVENESS_READ_SOURCE=" LOKI "
+STDERR_UPPER="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
+if echo "$STDERR_UPPER" | grep -q "skipping app-actor mint"; then
+  pass "16g: whitespace + uppercase LOKI is matched case-insensitively (trimmed)"
+else
+  fail "16g: whitespace/uppercase LOKI was not recognized as loki-only; stderr: $STDERR_UPPER"
+fi
+if [[ -f "$ROOT/curl-invoked" ]]; then
+  fail "16h: whitespace/uppercase LOKI still invoked curl"
+else
+  pass "16h: whitespace/uppercase LOKI never invoked curl"
+fi
+rm -rf "$ROOT"
+
+# ─── Test 17: no liveness anchor configured skips the app-actor mint ────────
+# CTL-1612 round 5 (Codex P2 follow-up): readAnchor's other precondition —
+# alongside "not loki-only" (Test 16) — is a resolvable liveness anchor issue
+# (execution-core/config.mjs getLivenessAnchorIssue: CATALYST_LIVENESS_ANCHOR_ISSUE
+# env, else catalyst.cluster.livenessAnchorIssue in Layer-2, else null; when
+# null, orch-monitor/lib/peer-liveness.mjs readPeerRecords's `!anchorIssue`
+# branch means readAnchor is NEVER called, regardless of source). cmd_start
+# should skip the mint when NO anchor resolves at all (AUTO or explicit
+# "linear"), and must NOT skip when an anchor resolves via EITHER the env
+# override or the Layer-2 config key.
+echo ""
+echo "Test 17: cmd_start skips the app-actor mint when no liveness anchor is configured (CTL-1612 round 5)"
+
+# 17a: orchestrator creds present, but NO anchor anywhere (env unset, Layer-2
+# has no cluster.livenessAnchorIssue field at all — the empty-string 2nd arg).
+ROOT="$(make_sandbox)"
+install_fake_orchestrator_creds_and_curl_stub "$ROOT" ""
+run_cmd_start_capture_stderr "$ROOT" \
+  CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json"
+STDERR_NOANCHOR="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
+if echo "$STDERR_NOANCHOR" | grep -q "no liveness anchor configured"; then
+  pass "17a: no-anchor-configured mode logs the skip"
+else
+  fail "17a: no-anchor-configured mode did not log the skip; stderr: $STDERR_NOANCHOR"
+fi
+if [[ -f "$ROOT/curl-invoked" ]]; then
+  fail "17b: no-anchor-configured mode still invoked curl (mint attempted despite the skip)"
+else
+  pass "17b: no-anchor-configured mode never invoked curl — mint code path never ran"
+fi
+rm -rf "$ROOT"
+
+# 17c: anchor resolved via CATALYST_LIVENESS_ANCHOR_ISSUE env (Layer-2 has no
+# anchor field — proves the env leg alone is sufficient to unblock the mint).
+ROOT="$(make_sandbox)"
+install_fake_orchestrator_creds_and_curl_stub "$ROOT" ""
+run_cmd_start_capture_stderr "$ROOT" \
+  CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json" \
+  CATALYST_LIVENESS_ANCHOR_ISSUE="CTL-1234-env-anchor"
+STDERR_ENVANCHOR="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
+if echo "$STDERR_ENVANCHOR" | grep -q "no liveness anchor configured"; then
+  fail "17d: env-provided anchor incorrectly skipped the mint; stderr: $STDERR_ENVANCHOR"
+else
+  pass "17d: env-provided anchor (CATALYST_LIVENESS_ANCHOR_ISSUE) does not skip the mint"
+fi
+if [[ -f "$ROOT/curl-invoked" ]]; then
+  pass "17e: env-provided anchor invoked curl — mint code path ran"
+else
+  fail "17e: env-provided anchor never invoked curl; stderr: $STDERR_ENVANCHOR"
+fi
+rm -rf "$ROOT"
+
+# 17f: anchor resolved via Layer-2 catalyst.cluster.livenessAnchorIssue (env
+# unset — proves the Layer-2 leg alone is sufficient to unblock the mint).
+# install_fake_orchestrator_creds_and_curl_stub's default 2nd-arg behavior
+# already embeds a fake Layer-2 anchor, so this is the plain default call.
+ROOT="$(make_sandbox)"
+install_fake_orchestrator_creds_and_curl_stub "$ROOT"
+run_cmd_start_capture_stderr "$ROOT" \
+  CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json"
+STDERR_L2ANCHOR="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
+if echo "$STDERR_L2ANCHOR" | grep -q "no liveness anchor configured"; then
+  fail "17g: Layer-2-provided anchor incorrectly skipped the mint; stderr: $STDERR_L2ANCHOR"
+else
+  pass "17g: Layer-2-provided anchor (catalyst.cluster.livenessAnchorIssue) does not skip the mint"
+fi
+if [[ -f "$ROOT/curl-invoked" ]]; then
+  pass "17h: Layer-2-provided anchor invoked curl — mint code path ran"
+else
+  fail "17h: Layer-2-provided anchor never invoked curl; stderr: $STDERR_L2ANCHOR"
+fi
+rm -rf "$ROOT"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""

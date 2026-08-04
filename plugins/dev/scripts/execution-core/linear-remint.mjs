@@ -224,28 +224,82 @@ function defaultMintAsync(creds) {
 // fail-open contract; attempt() resolves true iff a new token was minted AND
 // applied). The cooldown stamp is taken BEFORE the await so overlapping callers
 // within one window collapse to a single mint.
+//
+// CTL-1612 round 2 (Codex P2 follow-up): `failureCooldownMs` defaults to
+// `cooldownMs` — so any EXISTING caller that doesn't pass it (the broker's
+// cache-reconcile linearAsyncReminter singleton below) is byte-identical to
+// before this change: the same cooldown gates both outcomes. A caller that
+// DOES pass a shorter `failureCooldownMs` (the monitor's proactive
+// self-mint — a Linear/network hiccup should be retried soon, not ride out
+// the long success cooldown while every poll in between sends an expired
+// token) gets a short retry window after a FAILED attempt (no creds
+// configured, or a mint that returned no token) while a SUCCESSFUL mint still
+// only re-attempts after the full `cooldownMs`.
+// CTL-1612 round 5 (Codex P2 follow-up): `initialLastAttempt` seeds the
+// cooldown gate's starting point. Default -Infinity is UNCHANGED from before
+// this param existed — every existing caller (the broker's linearAsyncReminter
+// singleton below) that omits it still fires on its very first attempt(),
+// byte-identical to today. A caller that already has a KNOWN-FRESH token in
+// hand at construction time — the monitor's server.ts, when the shell startup
+// mint (catalyst-monitor.sh cmd_start → linear_app_actor_auth) already
+// succeeded before this process even started — passes Date.now() so the
+// FIRST attempt() call correctly honors the full cooldownMs instead of
+// re-minting seconds after the shell already did (a redundant OAuth POST on
+// every monitor start/restart, doubling production mint traffic).
 export function createAsyncReminter({
   readCreds = readOrchestratorCreds,
   mint = defaultMintAsync,
   applyToken = defaultApplyToken,
   cooldownMs = DEFAULT_COOLDOWN_MS,
+  failureCooldownMs = cooldownMs,
   logger = log,
+  initialLastAttempt = -Infinity,
 } = {}) {
-  let lastAttempt = -Infinity;
+  let lastAttempt = initialLastAttempt;
+  // The cooldown to apply to the CURRENT attempt's gate check — set by the
+  // PREVIOUS attempt's outcome. Starts at cooldownMs (no prior outcome to
+  // shorten it) so the very first call is never fast-tracked by an unset value.
+  let nextCooldownMs = cooldownMs;
+  // CTL-1612 round 3 (Codex P2 follow-up): the cooldown gate above is TIME-only
+  // — it does not, by itself, stop a SECOND attempt() from starting while a
+  // FIRST is still awaiting its mint. In practice the active cooldown is
+  // always >= the mint's own worst-case duration (curl --max-time 30 inside
+  // buildMintCurlArgs), so this never fires for a well-behaved caller — but a
+  // caller-supplied failureCooldownMs/poll cadence shorter than that ceiling,
+  // or a curl call that somehow outlives its own --max-time, would let two
+  // mints race: duplicate network calls, and an out-of-order applyToken() if
+  // the SECOND (later-started) call happens to resolve before the first.
+  // inFlight is a simple latch, independent of the time gate, that closes
+  // that gap unconditionally. Non-overlapping callers (the broker's
+  // linearAsyncReminter singleton, which always awaits one attempt() before
+  // issuing the next) never observe inFlight as true on entry, so this is
+  // purely additive for them.
+  let inFlight = false;
   return {
     async attempt(now = Date.now()) {
-      if (now - lastAttempt < cooldownMs) return false;
+      if (inFlight) return false;
+      if (now - lastAttempt < nextCooldownMs) return false;
       lastAttempt = now;
-      const creds = readCreds();
-      if (!creds) return false;
-      const token = await mint(creds);
-      if (!token) {
-        logger.warn({}, "ctl-785: orchestrator token re-mint FAILED — keeping current token");
-        return false;
+      inFlight = true;
+      try {
+        const creds = readCreds();
+        if (!creds) {
+          nextCooldownMs = failureCooldownMs;
+          return false;
+        }
+        const token = await mint(creds);
+        if (!token) {
+          logger.warn({}, "ctl-785: orchestrator token re-mint FAILED — keeping current token");
+          nextCooldownMs = failureCooldownMs;
+          return false;
+        }
+        applyToken(token);
+        logger.info({}, "ctl-785: orchestrator token re-minted after auth error");
+        nextCooldownMs = cooldownMs;
+        return true;
+      } finally {
+        inFlight = false;
       }
-      applyToken(token);
-      logger.info({}, "ctl-785: orchestrator token re-minted after auth error");
-      return true;
     },
   };
 }

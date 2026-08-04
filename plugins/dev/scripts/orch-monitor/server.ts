@@ -402,6 +402,42 @@ export function isAppRoute(pathname: string): boolean {
   return isDetailDeepLinkPath(pathname);
 }
 
+// shouldSeedFreshMintCooldown — CTL-1612 round 7 (Codex P2 follow-up). Pure
+// decision extracted from the monitorAppActorReminter construction (see the
+// CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE comment at that call site) so it is
+// unit-testable without instantiating a whole server. A token being PRESENT
+// is not enough to seed the reminter's long success cooldown — since round 6,
+// linear_app_actor_auth's scoped mode can populate the token via an INHERITED
+// fallback (a broker-inherited token reused because the shell's own mint
+// failed or found no creds) rather than a genuinely fresh mint, and that
+// fallback token could already be near its own expiry. Only "minted" — the
+// companion provenance marker linear_app_actor_auth exports alongside the
+// token — proves a fresh mint just happened and it is safe to suppress the
+// reminter's first poll for the full cooldown window; "inherited", any other
+// value, or an absent/blank token all fall through to false (the untouched
+// -Infinity default — first poll's attempt fires as it always has).
+export function shouldSeedFreshMintCooldown(
+  token: string | undefined,
+  source: string | undefined,
+): boolean {
+  return Boolean(token?.trim()) && source === "minted";
+}
+
+// parsePositiveFiniteDurationMs — CTL-1612 round 12 (Codex P2 follow-up).
+// `Number(value) || fallbackMs` (the prior form at the two call sites below)
+// accepts any negative number as an override, since only 0/NaN are falsy in
+// JS — CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS=-1 makes the cooldown
+// gate pass on every anchor poll, re-minting a production OAuth token on
+// every tick. It also accepts Infinity (no finiteness check), which
+// permanently suppresses re-mint and eventually leaves the monitor running
+// on an expired token. This validates the parsed value is finite AND
+// strictly positive before accepting it; anything else (unset, empty,
+// non-numeric, zero, negative, ±Infinity) falls back to `fallbackMs`.
+export function parsePositiveFiniteDurationMs(raw: string | undefined, fallbackMs: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallbackMs;
+}
+
 export interface CreateServerOptions {
   port?: number;
   hostname?: string;
@@ -1395,13 +1431,27 @@ export function createServer(opts: CreateServerOptions): BunServer {
     getClusterHosts: () => string[];
     getLivenessAnchorIssue: () => string | null;
     getLokiQueryUrl: () => string | null;
-    readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
+    // CTL-1612: opts.env lets the monitor's own call site (below) hand this
+    // spawnSync a scoped app-actor env WITHOUT mutating process.env globally —
+    // see the readAnchor wrapper in pollAnchorHeartbeats for why.
+    readPeerHeartbeatsSync: (
+      args: { anchorIssue: string },
+      opts?: { env?: NodeJS.ProcessEnv },
+    ) => Record<string, AnchorPeerRec>;
     readClusterLivenessFromLokiSyncCached: (args: {
       lokiUrl: string;
     }) => Record<string, AnchorPeerRec>;
     readStickyIdentity: (args: { dir: string }) => string | null;
     getCatalystRepoDir: () => string;
     deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
+    // CTL-1612 (finding #2, round 2 non-blocking follow-up): cooldown-gated
+    // proactive re-mint of the monitor's scoped app-actor token
+    // (CATALYST_MONITOR_APP_ACTOR_TOKEN). ASYNC — the mint is a
+    // non-blocking child_process.spawn (linear-remint.mjs defaultMintAsync),
+    // so calling this never stalls Bun's single event loop. Resolves true iff
+    // a fresh token was minted and applied; resolves false (never rejects) on
+    // a cooldown no-op, missing creds, or a failed mint.
+    remintAppActorToken: () => Promise<boolean>;
   } | null> | null = null;
   const loadDaemonDeps = () => {
     if (!daemonDepsPromise) {
@@ -1412,31 +1462,132 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const heartbeatSyncMod = ["..", "execution-core", "cluster-heartbeat-sync.mjs"].join("/");
           const lokiSyncMod = ["..", "execution-core", "loki-liveness-sync.mjs"].join("/");
           const hostStickyMod = ["..", "execution-core", "host-sticky.mjs"].join("/");
-          const [recovery, config, heartbeatSync, lokiSync, hostSticky, navSignal] = await Promise.all([
-            import(recoveryMod) as Promise<{
-              readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
-              readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
-            }>,
-            import(configMod) as Promise<{
-              getHostName: () => string;
-              getClusterHosts: () => string[];
-              getLivenessAnchorIssue: () => string | null;
-              getLokiQueryUrl: () => string | null;
-              getCatalystRepoDir: () => string;
-            }>,
-            import(heartbeatSyncMod) as Promise<{
-              readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
-            }>,
-            import(lokiSyncMod) as Promise<{
-              readClusterLivenessFromLokiSyncCached: (args: {
-                lokiUrl: string;
-              }) => Record<string, AnchorPeerRec>;
-            }>,
-            import(hostStickyMod) as Promise<{
-              readStickyIdentity: (args: { dir: string }) => string | null;
-            }>,
-            import("./lib/nav-signal.mjs"),
-          ]);
+          // CTL-1612 (finding #2): the same re-mint machinery execution-core/broker
+          // already use for a mid-run 401 (linear-remint.mjs), loaded lazily
+          // alongside the other execution-core deps (VITE-GRAPH GUARD).
+          const linearRemintMod = ["..", "execution-core", "linear-remint.mjs"].join("/");
+          const [recovery, config, heartbeatSync, lokiSync, hostSticky, navSignal, linearRemint] =
+            await Promise.all([
+              import(recoveryMod) as Promise<{
+                readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
+                readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
+              }>,
+              import(configMod) as Promise<{
+                getHostName: () => string;
+                getClusterHosts: () => string[];
+                getLivenessAnchorIssue: () => string | null;
+                getLokiQueryUrl: () => string | null;
+                getCatalystRepoDir: () => string;
+              }>,
+              import(heartbeatSyncMod) as Promise<{
+                readPeerHeartbeatsSync: (
+                  args: { anchorIssue: string },
+                  opts?: { env?: NodeJS.ProcessEnv },
+                ) => Record<string, AnchorPeerRec>;
+              }>,
+              import(lokiSyncMod) as Promise<{
+                readClusterLivenessFromLokiSyncCached: (args: {
+                  lokiUrl: string;
+                }) => Record<string, AnchorPeerRec>;
+              }>,
+              import(hostStickyMod) as Promise<{
+                readStickyIdentity: (args: { dir: string }) => string | null;
+              }>,
+              import("./lib/nav-signal.mjs"),
+              import(linearRemintMod) as Promise<{
+                createAsyncReminter: (opts?: {
+                  readCreds?: () => { clientId: string; clientSecret: string } | null;
+                  applyToken?: (token: string) => void;
+                  cooldownMs?: number;
+                  failureCooldownMs?: number;
+                  logger?: {
+                    warn: (obj: unknown, msg: string) => void;
+                    info: (obj: unknown, msg: string) => void;
+                  };
+                  initialLastAttempt?: number;
+                }) => { attempt: (now?: number) => Promise<boolean> };
+                readOrchestratorCreds: () => { clientId: string; clientSecret: string } | null;
+              }>,
+            ]);
+          // CTL-1612 (finding #2): proactive, cooldown-gated re-mint of the
+          // monitor's SCOPED app-actor token (never LINEAR_API_TOKEN/LINEAR_API_KEY
+          // — see the CATALYST_MONITOR_APP_ACTOR_TOKEN comment in catalyst-monitor.sh
+          // cmd_start). This substitutes for a REACTIVE on-401 re-mint (the pattern
+          // broker/cache-reconcile.mjs uses via isAuthError(...)) because it is not
+          // available here: the anchor "read" subcommand
+          // (execution-core/cluster-heartbeat.mjs readPeerHeartbeats, called from
+          // runCli's "read" case) catches EVERY post() failure — including an
+          // expired-token 401 — and still writes `{}` + exits 0, so there is no
+          // stderr/exit-code signal this call site could react to.
+          //
+          // CTL-1612 round 2 (Codex P2 follow-up): createAsyncReminter, NOT
+          // createReminter — the sync reminter's default mint is
+          // spawnSync("curl", ... --max-time 30), which would freeze Bun's
+          // single event loop (every other in-flight HTTP/SSE/webhook handler)
+          // for up to 30s on the initial poll and every 45-min refresh. The
+          // async twin's mint is a non-blocking child_process.spawn
+          // (defaultMintAsync); the call site below (readAnchor) fires it and
+          // does NOT await it, so this poll proceeds immediately with whatever
+          // token is already set and a successful mint lands in time for the
+          // NEXT tick.
+          //
+          // failureCooldownMs is intentionally SHORTER than cooldownMs: a
+          // failed mint (network hiccup, Linear outage) should retry soon
+          // rather than riding out the full 45min success-cooldown while every
+          // poll in between sends an expired token and peers look offline.
+          // A SUCCESSFUL mint still only re-attempts after the full cooldownMs.
+          //
+          // CTL-1612 round 5 (Codex P2 follow-up): initialLastAttempt seeds the
+          // cooldown gate with Date.now() WHEN CATALYST_MONITOR_APP_ACTOR_TOKEN is
+          // already present at this construction point — i.e. the shell startup
+          // mint (catalyst-monitor.sh cmd_start → linear_app_actor_auth) already
+          // succeeded before this bun process even started. Without this, the
+          // reminter's lastAttempt starts at -Infinity regardless, so the FIRST
+          // anchor poll's proactive remintAppActorToken() call fires immediately
+          // and re-mints seconds after the shell already did — doubling
+          // production OAuth traffic on every monitor start/restart. A monitor
+          // that never got a shell-level mint (creds absent there, or the
+          // loki-only/no-anchor skip — CTL-1612 rounds 3/5) is unaffected: the
+          // token is absent, so this falls through to the untouched default
+          // (-Infinity — first poll's attempt fires as it always has).
+          //
+          // CTL-1612 round 7 (Codex P2 follow-up): presence alone is no longer
+          // sufficient — since round 6, CATALYST_MONITOR_APP_ACTOR_TOKEN can be
+          // populated by the shell's INHERITED-TOKEN FALLBACK (a broker-inherited
+          // token reused because the shell's own mint failed or found no creds),
+          // not just a genuinely fresh mint. Seeding the full 45min success
+          // cooldown for a fallback token that could already be near expiry
+          // would suppress the reminter's retry for the whole window instead of
+          // the shorter failureCooldownMs — exactly the double-mint bug this
+          // seeding was added to fix, just for the opposite reason (too LONG a
+          // suppression instead of too SHORT). shouldSeedFreshMintCooldown
+          // (module-level, unit-tested) checks the companion
+          // CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE marker linear_app_actor_auth
+          // now also exports alongside the token.
+          const monitorAppActorReminter = linearRemint.createAsyncReminter({
+            readCreds: linearRemint.readOrchestratorCreds,
+            applyToken: (token: string) => {
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN = token;
+            },
+            cooldownMs: parsePositiveFiniteDurationMs(
+              process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS,
+              45 * 60_000,
+            ),
+            failureCooldownMs: parsePositiveFiniteDurationMs(
+              process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_FAILURE_COOLDOWN_MS,
+              60_000,
+            ),
+            logger: {
+              warn: (_obj: unknown, msg: string) => console.warn(`[server] ${msg}`),
+              info: (_obj: unknown, msg: string) => console.info(`[server] ${msg}`),
+            },
+            initialLastAttempt: shouldSeedFreshMintCooldown(
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN,
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE,
+            )
+              ? Date.now()
+              : undefined,
+          });
           return {
             readClusterHeartbeats: recovery.readClusterHeartbeats,
             readClusterAdmission: recovery.readClusterAdmission,
@@ -1449,6 +1600,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
             readStickyIdentity: hostSticky.readStickyIdentity,
             getCatalystRepoDir: config.getCatalystRepoDir,
             deriveDaemonHealth: navSignal.deriveDaemonHealth,
+            // Contract note above: never rejects (defaultMintAsync resolves
+            // null rather than throwing on any spawn/network failure), but the
+            // catch is belt-and-braces since this is called fire-and-forget
+            // (readAnchor below `void`s the return) — an unhandled rejection
+            // here would otherwise crash the process.
+            remintAppActorToken: () => monitorAppActorReminter.attempt().catch(() => false),
           };
         } catch {
           return null; // execution-core unavailable → degrade to offline
@@ -1712,7 +1869,47 @@ export function createServer(opts: CreateServerOptions): BunServer {
         lokiUrl: explicitLokiUrl ?? lokiUrl ?? cfgLokiUrl ?? null,
         anchorIssue: execCoreDeps.getLivenessAnchorIssue(),
         readLoki: execCoreDeps.readClusterLivenessFromLokiSyncCached,
-        readAnchor: execCoreDeps.readPeerHeartbeatsSync,
+        // CTL-1612: re-mint (cooldown-gated, cheap no-op most ticks — see the
+        // comment on remintAppActorToken above) before every anchor read, then
+        // layer the scoped app-actor token (CATALYST_MONITOR_APP_ACTOR_TOKEN)
+        // onto a COPY of process.env for just this subprocess call. This never
+        // touches the real process.env.LINEAR_API_TOKEN/LINEAR_API_KEY, so
+        // linear-comment.mjs's operator-token resolution is untouched. Absent a
+        // scoped token (mint never succeeded), falls back to plain process.env —
+        // i.e. whatever this call would have resolved before CTL-1612.
+        //
+        // CTL-1612 round 2 (Codex P2 follow-up): remintAppActorToken() is
+        // FIRE-AND-FORGET here (deliberately not awaited — readAnchor itself
+        // must stay synchronous, matching readPeerRecords's synchronous
+        // contract). This poll proceeds immediately with whatever scoped
+        // token is already set (possibly none, possibly stale); a mint that
+        // completes later applies to process.env in the background and is
+        // picked up by the NEXT poll tick. The reminter's own implementation
+        // never rejects (see remintAppActorToken's construction above), so no
+        // unhandled-rejection risk from not chaining a .catch() here too.
+        //
+        // CTL-1612 round 3 (Codex P2 follow-up): NO explicit
+        // CATALYST_LIVENESS_READ_SOURCE=loki check is needed here. This whole
+        // closure is `readPeerRecords`'s `readAnchor` argument (peer-liveness.mjs)
+        // — readPeerRecords early-returns BEFORE ever calling readAnchor
+        // whenever its resolved source is "loki" (both the loki-has-peers and
+        // loki-empty-fallback branches return before reaching the
+        // `readAnchor(...)` call at the bottom of that function), so this
+        // closure — and the remintAppActorToken() call inside it — is already
+        // structurally unreachable in loki-only mode. Covered by
+        // __tests__/peer-liveness.test.ts "explicit loki: trusts an empty
+        // result — never reads the retired anchor" (asserts a readAnchor call
+        // counter stays 0). catalyst-monitor.sh cmd_start carries the actual
+        // gate (skips the mint entirely under CATALYST_LIVENESS_READ_SOURCE=loki)
+        // since that is where the real network call would otherwise happen.
+        readAnchor: (args: { anchorIssue: string }) => {
+          void execCoreDeps?.remintAppActorToken();
+          const scoped = process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN?.trim();
+          const anchorEnv = scoped
+            ? { ...process.env, LINEAR_API_TOKEN: scoped, LINEAR_API_KEY: scoped }
+            : process.env;
+          return execCoreDeps?.readPeerHeartbeatsSync(args, { env: anchorEnv }) ?? {};
+        },
       }) as { peers: Record<string, AnchorPeerRec> | null; source: string };
       // CTL-1551: remember which transport ACTUALLY served this poll — the
       // liveness window resolver budgets by real transport, not by env intent

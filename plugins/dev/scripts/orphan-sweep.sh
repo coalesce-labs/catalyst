@@ -84,6 +84,7 @@ export PATH="${PATH}:${SCRIPT_DIR}"
 # foreign holders and bash-3.2 (where presweep's mapfile fail-closes without
 # ever reaching the removal). No side effects on source.
 # shellcheck source=lib/worktree-remove-guard.sh
+# shellcheck disable=SC1091
 [ -r "${SCRIPT_DIR}/lib/worktree-remove-guard.sh" ] && source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 
 # _removal_guard_ok <path> — the SINGLE fail-closed predicate every `git worktree
@@ -145,7 +146,14 @@ _resolve_sweep_config_path() {
 }
 
 _cfg_str() {
-  [[ -f "${SWEEP_CONFIG_PATH:-}" ]] && command -v jq >/dev/null 2>&1 || { printf ''; return 0; }
+  # CTL-1612 round 7 post-merge hygiene: explicit if/else instead of
+  # `A && B || C` — shellcheck SC2015 flags that idiom because C also runs
+  # when A is true but B fails, which is not the if-then-else it visually
+  # reads as. Same short-circuit semantics, unambiguous now.
+  if [[ ! -f "${SWEEP_CONFIG_PATH:-}" ]] || ! command -v jq >/dev/null 2>&1; then
+    printf ''
+    return 0
+  fi
   jq -r "$1 // empty" "$SWEEP_CONFIG_PATH" 2>/dev/null || printf ''
 }
 
@@ -840,6 +848,10 @@ _proc_alive_state() {
 
 # _proc_alive <pid> — back-compat boolean wrapper. 0 = NOT confirmed gone (alive
 # OR unprobeable), 1 = confirmed gone. Never used to claim an exit on its own.
+# shellcheck disable=SC2329 # not called anywhere in this file today — kept
+# as the documented back-compat boolean-wrapper API surface per its own
+# comment above, for a caller that sources this file and wants the simple
+# true/false shape instead of _proc_alive_state's three-way result.
 _proc_alive() {
   _proc_alive_state "$1"
   [[ "$_SWEEP_PROC_ALIVE_STATE" != "gone" ]]
