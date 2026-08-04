@@ -617,6 +617,9 @@ describe("removeLabel (CTL-549)", () => {
     const fetchLabels = () => ["blocked", "orchestrator"];
     const result = await removeLabel("CTL-1", "blocked", { exec, fetchLabels });
     expect(result.removed).toBe(true);
+    // Codex #2970 round 3: a real write happened — distinguishable from the
+    // idempotent no-op case below via the additive `wrote` field.
+    expect(result.wrote).toBe(true);
     const args = cmds.find((c) => c.args[1] === "update").args;
     expect(args.slice(0, 3)).toEqual(["issues", "update", "CTL-1"]);
     expect(args).toContain("--labels");
@@ -638,12 +641,16 @@ describe("removeLabel (CTL-549)", () => {
     expect(args[args.indexOf("--label-mode") + 1]).toBe("overwrite");
   });
 
-  test("idempotent — label already absent: returns removed:true with NO write", async () => {
+  test("idempotent — label already absent: returns removed:true, wrote:false, NO write", async () => {
     const cmds = [];
     const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
     const fetchLabels = () => ["orchestrator", "bug"]; // target 'blocked' not present
     const result = await removeLabel("CTL-1", "blocked", { exec, fetchLabels });
     expect(result.removed).toBe(true);
+    // Codex #2970 round 3: `removed:true` alone can't tell a no-op apart from a
+    // real write (e.g. a duplicate webhook / second host re-checking after the
+    // label is already gone). `wrote:false` is the additive signal for that.
+    expect(result.wrote).toBe(false);
     expect(cmds).toHaveLength(0); // no overwrite issued
   });
 
@@ -653,6 +660,7 @@ describe("removeLabel (CTL-549)", () => {
     const fetchLabels = () => ["needs-human/question"]; // the only label is the one removed
     const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
     expect(result.removed).toBe(true);
+    expect(result.wrote).toBe(true);
     expect(cmds).toHaveLength(1);
     expect(cmds[0].args).toEqual(["issues", "update", "CTL-1", "--clear-labels"]);
     expect(cmds[0].args).not.toContain("--labels");

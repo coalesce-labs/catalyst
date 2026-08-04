@@ -7448,6 +7448,26 @@ const lastHeldEmitState = new Map();
 // (null = no label / cleared). Cleared on daemon restart (via __resetForTests).
 const lastDispositionEmit = new Map();
 
+// clearDispositionEmit — Codex #2970 round 3: the daemon runs the scheduler
+// in-process (daemon.mjs imports startScheduler from this module directly), so
+// lastDispositionEmit is the SAME live Map both share. handleCommentWake's
+// needs-human clear bypasses recordTransition entirely (CTL-764 finding: "the
+// scheduler never observes this edge"), so it never touches this map — leaving a
+// stale "needs-human" entry that would swallow a genuine LATER re-escalation to
+// needs-human via the only-on-change guard. The needs-input analog self-heals on
+// the next scheduler tick (the `else if (lastDispositionEmit.get(ticket) ===
+// HELD_LABEL_NEEDS_INPUT)` branch below); needs-human has no equivalent
+// unconditional check — its self-heal paths (clearStalledLabel's onRemoved →
+// recordTransition, at the terminal-done-clear / terminal-sweep-clear / no-stall-clear
+// sites) are marker-gated, and the daemon's clearNeedsHumanMarkers already deletes
+// that same marker, so those paths never even attempt the clear until (if ever) the
+// ticket reaches terminal Done. This export lets the daemon reset the entry
+// immediately after ITS OWN confirmed clear, closing the window without waiting on
+// Done or a process restart.
+export function clearDispositionEmit(ticket) {
+  lastDispositionEmit.set(ticket, null);
+}
+
 // CTL-1064: Pass 0u throttle — epoch-ms of the last unstuck-sweep run.
 // Module-level so the 15-min gate persists across ticks without a db write.
 // Reset to 0 on daemon restart (module reload) or via __resetForTests.

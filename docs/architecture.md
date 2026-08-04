@@ -419,35 +419,77 @@ Every worker ticket has **two orthogonal axes** — never blurred:
   | `queued`      | converger (admission gate, tick-converged)          | pickup / Done                     |
   | `blocked`     | converger (dependency not terminal, tick-converged) | dep becomes terminal / Done       |
   | `needs-input` | daemon `handleCommentWake` (worker paused, CTL-768) | human reply                       |
-  | `needs-human` | `labelOnce` (sticky — NOT tick-converged)           | `clearStalledLabel` on resolution |
+  | `needs-human` | `labelOnce` (sticky — NOT tick-converged)           | two paths — see below             |
 
 **Precedence** (only one label at a time): `needs-human > needs-input > blocked > queued > none`.
 `needs-human` is **sticky** — it is never included in `TICK_CONVERGED_DISPOSITIONS` and only cleared
-at explicit resolution (Done or terminal-sweep-clear), not on steady-state ticks.
+at explicit resolution, not on steady-state ticks.
 
-**Resolution-gated clearing** — tick-converged labels (`queued`/`blocked`/`needs-input`) are
-re-derived on every tick and applied/removed on diff; `needs-human` is removed only by
-`clearStalledLabel`'s `onRemoved` callback which fires only on confirmed Linear label removal.
+**Resolution-gated clearing — TWO removal paths for `needs-human` (Codex #2970 round 5).**
+Tick-converged labels (`queued`/`blocked`/`needs-input`) are re-derived on every tick and
+applied/removed on diff. `needs-human` is different: it is removed only by an explicit,
+confirmed-removal signal, and there are two of those, not one:
+1. **`clearStalledLabel`'s `onRemoved` callback**, fired only on a confirmed Linear label removal at
+   scheduler-side resolution points (terminal-done-clear, terminal-sweep-clear, no-stall-clear).
+2. **The daemon's `handleCommentWake` needs-human clear** (CTL-1612/#2970) — a *write-gated*,
+   *emission-carrying* removal on a managed ticket's confirmed human reply. It calls `removeLabel`
+   directly (not `clearStalledLabel`), only treats the removal as genuine when the call performed a
+   real write (not a no-op re-check), emits the `worker.transition` clear itself
+   (`appendWorkerTransitionEvent`, bypassing `recordTransition`), and resets the scheduler's
+   in-process `lastDispositionEmit` dedup entry (`clearDispositionEmit`) so the shared chokepoint's
+   only-on-change guard doesn't swallow a later genuine re-escalation. See the producer-split
+   paragraph below for why this path exists separately from `clearStalledLabel`.
 
-Worker transitions are recorded at the scheduler's transition sites, coordinated around a single
-**inline `recordTransition` chokepoint** inside `schedulerTick`. That chokepoint owns sink (3): it
-emits exactly one canonical `worker.transition.<TICKET>` event per genuine change to the unified
-event log, and the only-on-change guard (`lastDispositionEmit`) prevents double-emit on steady-state
-ticks. Its emitter defaults to `null` so a bare unit tick stays silent; **production threads the
-real emitter (`defaultAppendWorkerTransitionEvent`) via `runTick`** — without that wiring every
-`recordTransition` early-returns and the event stream is dark. That event feeds sink (4), OTLP via
-`otel-forward` (dims as attributes — `body.payload` is stripped off-machine). The remaining sinks
-are written at their own scheduler sites around the same transition (not fanned out from inside the
-chokepoint): (1) Linear Status via the `applyPhaseStatus` chokepoint (Axis 1), (2) the
-`worker-status` label via the admission converger (`convergeHeldLabel`) / `labelOnce` (Axis 2), and
-(5) the optional broker `ticket_state_transitions` table (CTL-764 Phase 10). The standalone
-`recordWorkerTransition` module (`record-worker-transition.mjs`) — an extracted, unit-tested scaffold
-for sinks 1–3 only (Linear status, disposition label, event log) whose own doc comment flagged sinks
-4–5 and full call-site wiring as unfinished ("Phase 5 will wire the production defaults... and route
-all call sites here") — never reached that Phase 5 and was retired as consumer-free (CTL-1628): the
-scheduler's live path has only ever used the inline `recordTransition` chokepoint described above,
-and sinks 4 (OTLP) and 5 (the broker table) were added directly to that live path, never retrofitted
-into the retired module. The analogous worker-state projection need (phase/status/PR/revive-count,
+Worker transitions **originating from the scheduler** are recorded at its transition sites,
+coordinated around a single **inline `recordTransition` chokepoint** inside `schedulerTick`. That
+chokepoint owns sink (3): it emits exactly one canonical `worker.transition.<TICKET>` event per
+genuine change to the unified event log, and the only-on-change guard (`lastDispositionEmit`)
+prevents double-emit on steady-state ticks. Its emitter defaults to `null` so a bare unit tick stays
+silent; **production threads the real emitter (`defaultAppendWorkerTransitionEvent`) via
+`runTick`** — without that wiring every `recordTransition` early-returns and the event stream is
+dark. That event feeds sink (4), OTLP via `otel-forward` (dims as attributes — `body.payload` is
+stripped off-machine) — the only other sink that's actually live. Sink (5), an optional broker
+`ticket_state_transitions` table (CTL-764 Phase 10), was **never implemented** — no schema, no
+writer, no broker consumer exist anywhere in the codebase; it remains a planned item, not a shipped
+one. The remaining scheduler-side sinks are written at their own scheduler sites around the same
+transition (not fanned out from inside the chokepoint): (1) Linear Status via the
+`applyPhaseStatus` chokepoint (Axis 1), (2) the `worker-status` label via the admission converger
+(`convergeHeldLabel`) / `labelOnce` (Axis 2).
+
+**The scheduler chokepoint is not the only `worker.transition` emitter.** The daemon's
+`handleCommentWake` (CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent`
+directly at two structurally distinct sites, both bypassing `recordTransition` — but for different
+reasons, not one shared rationale:
+- The **`needs-input` clear** (a per-signal branch gated on `status === "needs-input"`) removes the
+  label, emits the clear, and then redispatches the parked worker in the same block. Its own code
+  comment explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted
+  here (the daemon removes the durable label out-of-band and redispatches — the scheduler never
+  observes this edge)."
+- The **`needs-human` clear** runs once per comment-wake call, gated on positive human provenance
+  and a managed ticket — before any per-signal / worker-dir lookup, and with **no redispatch** in
+  that block at all. It bypasses `recordTransition` for the same underlying reason (the scheduler's
+  own STICKY needs-human handling explicitly defers clearing to an external confirmed-removal
+  signal, never clearing it itself on a steady-state admission pass), but the "redispatches" half of
+  the quoted rationale above does not apply to this site.
+
+Both are deliberate, self-documented second-producer sites, not a gap in the chokepoint design.
+
+**A separate escalation path emits no `worker.transition` for its disposition change.** Pass 0w's
+hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
+progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
+`bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
+it applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) and
+never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
+emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
+the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
+specifically, not an alternate producer.
+
+The standalone `recordWorkerTransition` module (`record-worker-transition.mjs`) — an extracted,
+unit-tested scaffold for sinks 1–3 only (Linear status, disposition label, event log) whose own doc
+comment flagged sinks 4–5 and full call-site wiring as unfinished ("Phase 5 will wire the production
+defaults... and route all call sites here") — never reached that Phase 5 and was retired as
+consumer-free (CTL-1628): the scheduler's live path has only ever used the inline `recordTransition`
+chokepoint described above. The analogous worker-state projection need (phase/status/PR/revive-count,
 not disposition) is served live by the separate CTL-532 SQLite projection — see "Worker signal
 projection" above.
 
