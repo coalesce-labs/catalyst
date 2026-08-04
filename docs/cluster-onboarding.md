@@ -131,12 +131,18 @@ Check the onboard script's verification output:
 
 To activate mini-2 and begin accepting work:
 
-**Prerequisite:** the steps below assume a local clone of the private `catalyst-cluster` repo
-already exists on the machine you're editing from, at the default `CATALYST_CLUSTER_DIR` location
-(`~/catalyst/catalyst-cluster`) — see the [config-mirror contract](../website/src/content/docs/reference/cluster-config-mirror.md).
-Like the age key, `catalyst-join` does **not** clone this repo (see the Scope note in
-"Provisioning the shared cloud token" below); it is a pre-existing prerequisite provisioned once,
-separately, on each node that needs write access to the roster.
+**Prerequisite:** **every** activated node — not just the machine performing this edit — needs its
+own local clone of the private `catalyst-cluster` repo at the default `CATALYST_CLUSTER_DIR`
+location (`~/catalyst/catalyst-cluster`). `cluster-sync` only pulls an *existing* clone (it never
+clones fresh), and `resolveClusterHosts()` reads `cluster.json.roster` from that same local clone to
+resolve the fleet roster; without it, a node fails open to the `static`/`single-host` roster source
+(it silently treats itself as the only host in the fleet), which risks HRW double-ownership against
+nodes that do see the shared roster. A read-only clone is sufficient for that; only the machine used
+to perform the roster edit below additionally needs *write* access (push rights) to the repo. Like
+the age key, `catalyst-join` does **not** clone this repo (see the Scope note in "Provisioning the
+shared cloud token" below) — the clone is a pre-existing prerequisite provisioned once, separately,
+on each node. See the [config-mirror contract](../website/src/content/docs/reference/cluster-config-mirror.md)
+for the full SHARED/PER-NODE classification.
 
 1. **Add to committed roster:** in the private `catalyst-cluster` repo, add the node's name to
    `cluster.json` `roster[]` and push:
