@@ -1,7 +1,7 @@
 // cluster-heartbeat-publisher.test.mjs — periodic cross-host liveness publisher
 // (CTL-1090, Phase 4). Injects fakes for publish, ownedTickets, roster, etc.
 // so no network, fs, or subprocess is touched.
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { startLivenessPublisher } from "./cluster-heartbeat-publisher.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 
@@ -10,7 +10,25 @@ describe("startLivenessPublisher (CTL-1090)", () => {
   // singleton (default). Reset it to CLOSED before each test so the existing
   // "publishes …" assertions are deterministic regardless of test order; the
   // new breaker-behavior tests inject an explicit fake breaker.
-  beforeEach(() => linearBreaker.recordSuccess());
+  //
+  // CTL-1628 (Codex #2958 P2): every test below relies on the DEFAULT
+  // `readSource` (none is injected), which resolves from
+  // process.env.CATALYST_LIVENESS_READ_SOURCE via getLivenessReadSource().
+  // Since CTL-1628 the anchor guard AND the Linear-publish skip are both
+  // gated on that source, so this whole block's "publishes to Linear"
+  // assumptions are only valid in "linear" mode — a host that exports
+  // CATALYST_LIVENESS_READ_SOURCE=loki would otherwise silently skip every
+  // Linear publish in here and fail these assertions. Pin it explicitly for
+  // the duration of this block and restore the ambient value after.
+  const savedReadSourceEnv = process.env.CATALYST_LIVENESS_READ_SOURCE;
+  beforeEach(() => {
+    linearBreaker.recordSuccess();
+    process.env.CATALYST_LIVENESS_READ_SOURCE = "linear";
+  });
+  afterEach(() => {
+    if (savedReadSourceEnv === undefined) delete process.env.CATALYST_LIVENESS_READ_SOURCE;
+    else process.env.CATALYST_LIVENESS_READ_SOURCE = savedReadSourceEnv;
+  });
   test("single-host roster: returns an inert handle, publisher fn NEVER called", () => {
     const publish = () => { throw new Error("must not publish single-host"); };
     const h = startLivenessPublisher({
@@ -25,7 +43,7 @@ describe("startLivenessPublisher (CTL-1090)", () => {
     h.stop(); // must not throw
   });
 
-  test("missing anchor (multi-host): returns inert handle, no publish", () => {
+  test("missing anchor (multi-host, linear mode — default readSource): returns inert handle, no publish", () => {
     const publish = () => { throw new Error("must not publish without anchor"); };
     const h = startLivenessPublisher({
       roster: ["mini", "laptop"],
@@ -367,6 +385,85 @@ describe("startLivenessPublisher — loki-mode retires the Linear publish (CTL-1
     const h = startLivenessPublisher({
       roster: ["mini", "mini-2"],
       anchorIssue: "CTL-9",
+      self: "mini",
+      ownedTickets: () => ["CTL-1"],
+      publish: (args) => publishCalls.push(args),
+      readSource: () => "linear",
+      intervalMs: 60_000,
+    });
+    h.stop();
+    expect(publishCalls.length).toBeGreaterThanOrEqual(1);
+    expect(publishCalls[0]).toMatchObject({ host: "mini", inFlightTickets: ["CTL-1"] });
+  });
+
+  // CTL-1628: correctness seam #3 — the anchor guard used to fire BEFORE the
+  // read-source was known, so an anchor-less "loki" host was wrongly returned
+  // an inert handle and never ran the Linear-free CTL-863 fence re-emit either.
+  // Currently dormant (the fleet still has an anchor configured) but a landmine
+  // for the planned anchor retirement.
+  test("readSource=loki + NO anchor configured: publisher still arms — fence re-emit fires, no Linear publish", () => {
+    const publishCalls = [];
+    const fenceCalls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "mini-2"],
+      anchorIssue: null, // no anchor configured
+      self: "mini",
+      ownedTickets: () => ["CTL-1"],
+      readGeneration: () => 7, // finite → fence re-emit fires
+      emitFence: (args) => fenceCalls.push(args),
+      publish: () => { throw new Error("must NOT publish to Linear in loki mode"); },
+      readSource: () => "loki",
+      intervalMs: 60_000,
+    });
+    h.stop();
+    expect(publishCalls.length).toBe(0);
+    expect(fenceCalls).toEqual([{ ticket: "CTL-1", owner_host: "mini", generation: 7 }]);
+  });
+
+  test("readSource=linear + NO anchor configured: early return preserved (inert handle, no fence re-emit either)", () => {
+    const publishCalls = [];
+    const fenceCalls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "mini-2"],
+      anchorIssue: null, // no anchor configured
+      self: "mini",
+      ownedTickets: () => { throw new Error("must not be called — publisher must be inert"); },
+      readGeneration: () => 7,
+      emitFence: (args) => fenceCalls.push(args),
+      publish: (args) => publishCalls.push(args),
+      readSource: () => "linear",
+      intervalMs: 60_000,
+    });
+    expect(typeof h.stop).toBe("function");
+    h.stop();
+    expect(publishCalls.length).toBe(0);
+    expect(fenceCalls.length).toBe(0);
+  });
+
+  test("readSource=loki + anchor CONFIGURED: unchanged — fence re-emit fires, no Linear publish", () => {
+    const publishCalls = [];
+    const fenceCalls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "mini-2"],
+      anchorIssue: "CTL-9", // anchor present
+      self: "mini",
+      ownedTickets: () => ["CTL-1"],
+      readGeneration: () => 7,
+      emitFence: (args) => fenceCalls.push(args),
+      publish: (args) => publishCalls.push(args),
+      readSource: () => "loki",
+      intervalMs: 60_000,
+    });
+    h.stop();
+    expect(publishCalls.length).toBe(0);
+    expect(fenceCalls).toEqual([{ ticket: "CTL-1", owner_host: "mini", generation: 7 }]);
+  });
+
+  test("readSource=linear + anchor CONFIGURED: unchanged — publishes as before", () => {
+    const publishCalls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "mini-2"],
+      anchorIssue: "CTL-9", // anchor present
       self: "mini",
       ownedTickets: () => ["CTL-1"],
       publish: (args) => publishCalls.push(args),
