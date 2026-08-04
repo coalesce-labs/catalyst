@@ -134,6 +134,7 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
+import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
 import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
@@ -147,6 +148,14 @@ import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
+
+// CTL-1623: register the github-token row's rearm hook at module load — BEFORE either
+// call site below (both live inside startDaemon(), invoked only later) can fire. Makes
+// the registry's "re-armable/timer" label live wiring instead of aspiration: previously
+// nothing had called registerRearmHook, so armSecret("github-token") would have taken the
+// hookless-degrade path (design §6). registerRearmHook is idempotent (Map.set), so a
+// module re-evaluation (a test re-importing this file) never double-registers.
+registerRearmHook("github-token", ({ env }) => rearmGithubTokenFromFile({ env, log }));
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -1114,7 +1123,10 @@ export function startDaemon({
     // superseded. The probe is deliberately NOT here — it spawns `gh` with a 10s timeout,
     // and putting a network round-trip ahead of crash recovery would delay re-dispatching
     // in-flight work for no diagnostic benefit. It runs after the dispatches instead.
-    rearmGithubTokenFromFile({ env: process.env, log });
+    // CTL-1623: routed through armSecret so the registered rearm hook fires (registerRearmHook
+    // above) instead of calling rearmGithubTokenFromFile directly — same effect (the hook
+    // closure IS rearmGithubTokenFromFile), but through the registry's arm path.
+    armSecret("github-token", { env: process.env });
 
     const bootResume = reconcileBoot({
       orchDir,
@@ -1385,11 +1397,15 @@ export function startDaemon({
         // `head-unchanged` without re-reading the file, and the rotation may also have been
         // materialized by the OTHER writer (cluster-sync at boot, or an operator). The call
         // is a cheap local read, no-ops when the value is unchanged, and never throws.
-        try {
-          rearmGithubTokenFromFile({ env: process.env, log });
-        } catch (err) {
-          log.warn({ err: err?.message }, "cluster-sync timer: credential re-arm threw (continuing)");
-        }
+        // CTL-1623: routed through armSecret (same hook, registered above) — see the
+        // boot-time call site's comment for why this isn't a second rearmGithubTokenFromFile
+        // call. No surrounding try/catch: armSecret itself never throws (it wraps the
+        // registered hook call in its own try/catch and returns the quiet
+        // {armed:false,...} triple on failure — see secret-contract.mjs's armSecret), and
+        // the hook closure (rearmGithubTokenFromFile) already logs+swallows its own errors
+        // via `log`. A wrapping try/catch here would only ever imply protection the callee
+        // already provides.
+        armSecret("github-token", { env: process.env });
       }, clusterSyncIntervalMs);
       _clusterSyncTimer.unref?.();
     }
