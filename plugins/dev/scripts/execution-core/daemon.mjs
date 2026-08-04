@@ -121,6 +121,7 @@ import {
   clearHoldStopCooldown, // CTL-768
   defaultClearStall, // CTL-1067: J3 stall-clear seam
   readMaxParallel, // CTL-1551: the SCHEDULER-ENFORCED slot ceiling for the heartbeat
+  clearDispositionEmit as defaultClearDispositionEmit, // Codex #2970 round 3: reset the in-process worker.transition dedup after an out-of-band clear
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { labelMarkerBase } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth)
@@ -399,6 +400,11 @@ export async function handleCommentWake(
     // CTL-764 finding 11: canonical worker.transition emitter for the needs-input→
     // cleared resolution. Injectable for tests; defaults to the real appender.
     appendWorkerTransitionEvent = defaultAppendWorkerTransitionEvent,
+    // Codex #2970 round 3: resets the scheduler's in-process worker.transition
+    // dedup map (lastDispositionEmit) after this function's own out-of-band clear,
+    // so a later genuine re-escalation isn't swallowed by a stale entry. Injectable
+    // for tests; defaults to the real scheduler export.
+    clearDispositionEmit = defaultClearDispositionEmit,
     // CTL-1567 (Codex P1): is this ticket managed by THIS Catalyst installation?
     // The daemon receives EVERY workspace `linear.comment.created`, so without this
     // gate the no-worker-dir clear below would strip a same-named `needs-human`
@@ -459,10 +465,18 @@ export async function handleCommentWake(
   //      tickets this installation actually manages.
   const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
   let clearedNeedsHuman = false;
+  // Codex #2970 round 3: distinct from clearedNeedsHuman (which also covers the
+  // idempotent already-absent case and gates the marker reconcile below — that
+  // must run either way to keep labelOnce in step). This one is true ONLY when
+  // removeLabel performed a real write, so a duplicate webhook / second host
+  // re-checking an already-cleared label doesn't emit a second worker.transition
+  // "cleared" record for a state change that didn't happen on this call.
+  let clearedNeedsHumanWrote = false;
   if (humanProvenance && isManagedTicket(ticket, orchDir)) {
     try {
       const res = await removeLabel(ticket, "needs-human");
       clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
+      clearedNeedsHumanWrote = res?.wrote === true;
     } catch {
       /* fail-open on the WRITE — a Linear 5xx must not block the wake path */
     }
@@ -508,16 +522,33 @@ export async function handleCommentWake(
         "handleCommentWake: needs-human marker reconcile failed — label already cleared"
       );
     }
-    try {
-      appendWorkerTransitionEvent({
-        ticket,
-        orchId: ticket,
-        fromDisposition: "needs-human",
-        toDisposition: null,
-        reason: "human-responded",
-      });
-    } catch {
-      /* observability only */
+    // Codex #2970 round 3: gate on a CONFIRMED write, not merely a confirmed-absent
+    // read — otherwise a duplicate webhook / second host that finds the label
+    // already gone would still record a fresh "cleared" transition for a change
+    // that happened on a prior call, mislabeling the timeline.
+    if (clearedNeedsHumanWrote) {
+      try {
+        appendWorkerTransitionEvent({
+          ticket,
+          orchId: ticket,
+          fromDisposition: "needs-human",
+          toDisposition: null,
+          reason: "human-responded",
+        });
+      } catch {
+        /* observability only */
+      }
+      // Codex #2970 round 3: the daemon and scheduler share lastDispositionEmit
+      // in-process — this out-of-band clear never went through recordTransition,
+      // so the map still thinks this ticket is "needs-human". Reset it now rather
+      // than waiting on the ticket reaching terminal Done (needs-human's self-heal
+      // paths are marker-gated and clearNeedsHumanMarkers above already deleted
+      // that marker, so they'd never even attempt the clear).
+      try {
+        clearDispositionEmit(ticket);
+      } catch {
+        /* observability only */
+      }
     }
   }
 
@@ -606,13 +637,18 @@ export async function handleCommentWake(
     // CTL-764 finding E: gate the needs-input→cleared emission on a CONFIRMED removal.
     // removeLabel reports a failed read/write as {removed:false} WITHOUT throwing, so the
     // try/catch alone never suppresses the event — a bare emit would record a clear the
-    // durable label never got. removed:true covers both a real removal AND the idempotent
-    // already-absent case (linear-write.mjs:289-291); an undefined return from a test stub
-    // is treated as success to keep the wake path testable.
+    // durable label never got. An undefined return from a test stub is treated as success
+    // to keep the wake path testable.
+    // Codex #2970 round 3: removed:true alone still covers both a real removal AND the
+    // idempotent already-absent case (linear-write.mjs) — gate the emission on the
+    // additive `wrote` field instead, so a duplicate webhook / second host re-checking an
+    // already-cleared label doesn't record a second "cleared" transition for a change
+    // that happened on a prior call. `wrote` is undefined on a test-stub `undefined`
+    // return, so the `res === undefined` success path stays gated on that alone.
     let needsInputRemoved = false;
     try {
       const res = await removeLabel(ticket, "needs-input"); // CTL-764 Phase 4: durable needs-input cleared on genuine resolution
-      needsInputRemoved = res === undefined || res?.removed === true;
+      needsInputRemoved = res === undefined || res?.wrote === true;
     } catch {
       /* fail-open */
     }
@@ -631,6 +667,16 @@ export async function handleCommentWake(
         reason: "comment-wake",
         source: "comment-wake-clear",
       });
+      // Codex #2970 round 3: scheduler.mjs already self-heals this specific stale
+      // entry on its next relevant tick (the `lastDispositionEmit.get(ticket) ===
+      // HELD_LABEL_NEEDS_INPUT` branch), but resetting it here too closes the
+      // window immediately rather than waiting a tick, and mirrors the needs-human
+      // site above for consistency.
+      try {
+        clearDispositionEmit(ticket);
+      } catch {
+        /* observability only */
+      }
     }
 
     dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
