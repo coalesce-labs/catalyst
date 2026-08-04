@@ -472,9 +472,21 @@ else
 		# prefix check this needs, and it degrades to the same lock-file-only
 		# detection (HAS_BUN_LOCK, no jq involved) in the worst case rather than
 		# ever crashing the script.
+		#
+		# CTL-1628 post-merge (Codex #2948, round 6): the fallback grep was
+		# line-oriented, so valid JSON that splits "packageManager", the colon,
+		# or "bun@..." across lines (pretty-printed with one token per line,
+		# multi-line formatting from some generators, etc.) missed a genuine
+		# bun-only project and fell through to npm. `tr -d '[:space:]'` collapses
+		# all whitespace — including newlines — before the substring match, so
+		# formatting no longer matters. Stripping whitespace can corrupt string
+		# *values* elsewhere in the file, but this fallback never reads those
+		# values back — it only tests whether this one substring exists —
+		# so that's harmless here. Still dependency-free (tr is as universal
+		# as grep).
 		if command -v jq >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null)
-		elif grep -qE '"packageManager"[[:space:]]*:[[:space:]]*"bun@' package.json 2>/dev/null; then
+		elif tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
 			PACKAGE_MANAGER_FIELD="bun@detected"
 		else
 			PACKAGE_MANAGER_FIELD=""
