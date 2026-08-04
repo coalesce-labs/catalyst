@@ -5,6 +5,10 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "public/assets/**", "public/index.html"]
     },
+    "orch-monitor-ui#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "../public/assets/**", "../public/index.html"]
+    },
     "build:ui": {
       "dependsOn": ["^build"],
       "outputs": ["public/assets/**", "public/index.html"]
