@@ -76,6 +76,14 @@ export function classifyFreezeCause(origins) {
 // when restarts (deploy/crash/recovery loop) are most likely. This matches
 // reconcile-health, which was made restart-durable for the same reason.
 let _fleetFrozenRaised = false;
+// _lastEmittedCause — CTL-1628 r4: the cause classification of the most recent
+// raised/cause_changed emission. Compared against a fresh classification on
+// every check while still frozen so an origin DRIFT mid-freeze (e.g. the
+// replica recovers but a team's local disk then fills — all-poll →
+// all-persist, or either → mixed) gets its own emission instead of the one
+// standing alert silently going stale with the ORIGINAL, now-wrong cause.
+// PERSISTED alongside the raised latch for the same restart-durability reason.
+let _lastEmittedCause = null;
 let _hydrated = false;
 
 // markerPath — the persisted latch marker, alongside the per-team reconcile-health
@@ -92,9 +100,15 @@ function hydrate() {
   _hydrated = true;
   try {
     const raw = readFileSync(markerPath(), "utf8");
-    _fleetFrozenRaised = JSON.parse(raw)?.raised === true;
+    const parsed = JSON.parse(raw);
+    _fleetFrozenRaised = parsed?.raised === true;
+    // CTL-1628 r4: additive field — absent on markers written before this fix,
+    // which just means "no cause on record yet" (the next frozen tick treats
+    // any classification as a fresh one to report, not a drift).
+    _lastEmittedCause = typeof parsed?.cause === "string" ? parsed.cause : null;
   } catch {
     _fleetFrozenRaised = false; // absent/malformed → closed
+    _lastEmittedCause = null;
   }
 }
 
@@ -104,7 +118,10 @@ function persist() {
     const dir = getReconcileHealthDir();
     mkdirSync(dir, { recursive: true });
     const tmp = join(dir, `.fleet-freeze.${randomBytes(4).toString("hex")}.tmp`);
-    writeFileSync(tmp, JSON.stringify({ raised: _fleetFrozenRaised, ts: Date.now() }));
+    writeFileSync(
+      tmp,
+      JSON.stringify({ raised: _fleetFrozenRaised, cause: _lastEmittedCause, ts: Date.now() }),
+    );
     renameSync(tmp, markerPath());
   } catch (err) {
     log.error?.({ err: err.message }, "CTL-1420: fleet-freeze latch persist failed (continuing)");
@@ -112,10 +129,11 @@ function persist() {
 }
 
 // __resetFleetFreezeLatch — test seam so latch state never leaks across tests.
-// Clears both the in-memory latch and the hydration flag so the next check
-// re-reads the (CATALYST_DIR-scoped) marker.
+// Clears the in-memory latch, last-emitted cause, and the hydration flag so
+// the next check re-reads the (CATALYST_DIR-scoped) marker.
 export function __resetFleetFreezeLatch() {
   _fleetFrozenRaised = false;
+  _lastEmittedCause = null;
   _hydrated = false;
 }
 
@@ -140,7 +158,22 @@ function defaultAppend(line) {
 // reconcile-health-event.mjs), so a cause confined to the body would be
 // silently dropped for every Loki/Grafana consumer, defeating the entire
 // point of distinguishing the two outage stories where operators actually look.
-export function buildFleetFreezeAlertEvent({ action, teams = [], reason = null, cause = null } = {}) {
+//
+// `causeChanged`/`previousCause` (CTL-1628 r4, "raised" only): set when this
+// emission is a mid-freeze cause RECLASSIFICATION (origins drifted, e.g.
+// all-poll → all-persist) rather than the initial raise — same event name/
+// topic as a fresh raise (the fleet IS still frozen), distinguished by the
+// `alert.cause_changed` attribute so a consumer can special-case "the cause
+// changed under an already-open alert" without misreading it as a second,
+// unrelated freeze.
+export function buildFleetFreezeAlertEvent({
+  action,
+  teams = [],
+  reason = null,
+  cause = null,
+  causeChanged = false,
+  previousCause = null,
+} = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const raised = action === "raised";
   return (
@@ -159,12 +192,15 @@ export function buildFleetFreezeAlertEvent({ action, teams = [], reason = null, 
         "event.action": action,
         "event.label": ALERT_KIND_FLEET_FROZEN_ADMISSION,
         ...(cause ? { "alert.cause": cause } : {}),
+        ...(causeChanged ? { "alert.cause_changed": true } : {}),
       },
       body: {
         payload: {
           kind: ALERT_KIND_FLEET_FROZEN_ADMISSION,
           reason,
           cause,
+          causeChanged,
+          previousCause,
           source: "catalyst.execution-core",
           count: teams.length,
           teams,
@@ -174,11 +210,11 @@ export function buildFleetFreezeAlertEvent({ action, teams = [], reason = null, 
   );
 }
 
-// checkFleetFreeze — evaluate the fleet-frozen-for-admission condition and emit a
-// raised/cleared alert ON A STATE TRANSITION only (latched; idempotent within a
-// state). The fleet is frozen when there is ≥1 registered team AND EVERY team's
-// reconcile is in a persistent-failure state (isTeamFrozen). Best-effort: any
-// emit error is swallowed so a failed alert never crashes the reconcile timer.
+// checkFleetFreeze — evaluate the fleet-frozen-for-admission condition and emit
+// an alert ON A STATE TRANSITION (latched; idempotent within a steady state) —
+// PLUS, CTL-1628 r4, on a mid-freeze CAUSE reclassification (see below).
+// Best-effort: any emit error is swallowed so a failed alert never crashes the
+// reconcile timer.
 //
 //   teams        — every registered team (e.g. listProjects().map(p => p.team))
 //   isTeamFrozen  — (team) => boolean; true when that team can't refresh eligible
@@ -191,8 +227,21 @@ export function buildFleetFreezeAlertEvent({ action, teams = [], reason = null, 
 //                   frozen; a non-"poll"/"persist" return is treated as "poll".
 //   append        — injectable JSONL sink (defaults to the canonical event log)
 //
-// Returns { frozen, emitted, cause } where emitted ∈ {"raised","cleared",null}
-// and cause (raised transitions only) ∈ FLEET_FREEZE_CAUSE_*.
+// CTL-1628 r4: while the fleet stays frozen across ticks, origins can DRIFT —
+// e.g. the replica/linearis outage that raised an all-poll freeze recovers,
+// but a team's local disk fills in the meantime, so the SAME standing freeze
+// is now all-persist (or mixed). Before this fix, cause classification only
+// ran on the initial raise — the one emitted alert would keep reporting the
+// ORIGINAL, now-wrong cause for the freeze's entire duration. The cause is now
+// re-classified on every check while frozen (not only the initial raise); when
+// it differs from the last-emitted cause, a `cause_changed` update is emitted
+// (same event name/topic as `raised` — the fleet IS still frozen — with an
+// updated reason and the `alert.cause_changed` marker) — never on unchanged
+// classifications, so a steady-state freeze stays exactly as silent as before.
+//
+// Returns { frozen, emitted, cause } where emitted ∈
+// {"raised","cause_changed","cleared",null} and cause (non-null only on
+// "raised"/"cause_changed") ∈ FLEET_FREEZE_CAUSE_*.
 export function checkFleetFreeze({
   teams = [],
   isTeamFrozen = () => false,
@@ -210,37 +259,65 @@ export function checkFleetFreeze({
   }
   const frozen = teams.every((t) => isTeamFrozen(t));
   let emitted = null;
-  let cause = null;
+  let returnedCause = null;
   try {
-    if (frozen && !_fleetFrozenRaised) {
+    if (frozen) {
       // Every team in `teams` is frozen (that's what `frozen` means here), so
       // every team's origin is meaningful — classify the whole freeze by them.
-      const origins = teams.map((t) => {
-        const o = getTeamOrigin(t);
-        return o === "persist" ? "persist" : "poll";
-      });
-      cause = classifyFreezeCause(origins);
-      // Append FIRST; flip + persist the latch only on a successful write, so a
-      // transient append failure (disk full) retries next tick instead of silently
-      // latching "raised" with no event ever emitted.
-      append(
-        buildFleetFreezeAlertEvent({
-          action: "raised",
-          teams,
-          cause,
-          reason: FREEZE_REASON_BY_CAUSE[cause],
-        })
-      );
-      _fleetFrozenRaised = true;
-      persist();
-      emitted = "raised";
-      log.error(
-        { teams, cause },
-        "CTL-1420: fleet FROZEN for admission — all teams' reconcile failing",
-      );
-    } else if (!frozen && _fleetFrozenRaised) {
+      // Computed on EVERY frozen tick (not gated on the raise transition) so a
+      // mid-freeze drift is caught, not just the moment of the initial raise.
+      const origins = teams.map((t) => (getTeamOrigin(t) === "persist" ? "persist" : "poll"));
+      const currentCause = classifyFreezeCause(origins);
+
+      if (!_fleetFrozenRaised) {
+        // Append FIRST; flip + persist the latch only on a successful write, so
+        // a transient append failure (disk full) retries next tick instead of
+        // silently latching "raised" with no event ever emitted.
+        append(
+          buildFleetFreezeAlertEvent({
+            action: "raised",
+            teams,
+            cause: currentCause,
+            reason: FREEZE_REASON_BY_CAUSE[currentCause],
+          })
+        );
+        _fleetFrozenRaised = true;
+        _lastEmittedCause = currentCause;
+        persist();
+        emitted = "raised";
+        returnedCause = currentCause;
+        log.error(
+          { teams, cause: currentCause },
+          "CTL-1420: fleet FROZEN for admission — all teams' reconcile failing",
+        );
+      } else if (currentCause !== _lastEmittedCause) {
+        // Already latched, but the classification drifted since the raise (or
+        // the last cause-update) — avoid spamming: only this actual transition
+        // emits, an unchanged classification on every other tick stays silent.
+        const previousCause = _lastEmittedCause;
+        append(
+          buildFleetFreezeAlertEvent({
+            action: "raised",
+            teams,
+            cause: currentCause,
+            reason: FREEZE_REASON_BY_CAUSE[currentCause],
+            causeChanged: true,
+            previousCause,
+          })
+        );
+        _lastEmittedCause = currentCause;
+        persist();
+        emitted = "cause_changed";
+        returnedCause = currentCause;
+        log.error(
+          { teams, cause: currentCause, previousCause },
+          "CTL-1420: fleet-frozen cause reclassified — origins drifted while still frozen",
+        );
+      }
+    } else if (_fleetFrozenRaised) {
       append(buildFleetFreezeAlertEvent({ action: "cleared", teams }));
       _fleetFrozenRaised = false;
+      _lastEmittedCause = null;
       persist();
       emitted = "cleared";
       log.info({ teams }, "CTL-1420: fleet admission UNFROZEN — a team's reconcile recovered");
@@ -249,5 +326,5 @@ export function checkFleetFreeze({
     // Never throw out of the reconcile timer.
     log.error?.({ err: err.message }, "CTL-1420: fleet-freeze alert emit failed (continuing)");
   }
-  return { frozen, emitted, cause };
+  return { frozen, emitted, cause: returnedCause };
 }

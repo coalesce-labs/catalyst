@@ -87,6 +87,36 @@ describe("buildFleetFreezeAlertEvent", () => {
     expect(ev.attributes["alert.cause"]).toBeUndefined();
     expect(ev.body.payload.cause).toBeNull();
   });
+
+  // CTL-1628 r4: a cause-drift reclassification reuses the SAME "raised" event
+  // name/topic (the fleet IS still frozen) but is marked distinctly so a
+  // consumer can tell it apart from the initial raise.
+  test("causeChanged:true sets attributes.\"alert.cause_changed\" and carries previousCause in the body", () => {
+    const ev = JSON.parse(
+      buildFleetFreezeAlertEvent({
+        action: "raised",
+        teams: ["CTL"],
+        cause: FLEET_FREEZE_CAUSE_ALL_PERSIST,
+        reason: "disk fault",
+        causeChanged: true,
+        previousCause: FLEET_FREEZE_CAUSE_ALL_POLL,
+      }),
+    );
+    expect(ev.attributes["event.name"]).toBe(ALERT_RAISED); // same topic as a fresh raise
+    expect(ev.attributes["alert.cause_changed"]).toBe(true);
+    expect(ev.attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    expect(ev.body.payload.causeChanged).toBe(true);
+    expect(ev.body.payload.previousCause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+  });
+
+  test("causeChanged omitted (default false): no cause_changed attribute, payload carries false/null", () => {
+    const ev = JSON.parse(
+      buildFleetFreezeAlertEvent({ action: "raised", teams: ["CTL"], cause: FLEET_FREEZE_CAUSE_ALL_POLL }),
+    );
+    expect(ev.attributes["alert.cause_changed"]).toBeUndefined();
+    expect(ev.body.payload.causeChanged).toBe(false);
+    expect(ev.body.payload.previousCause).toBeNull();
+  });
 });
 
 describe("classifyFreezeCause", () => {
@@ -298,5 +328,113 @@ describe("checkFleetFreeze", () => {
     expect(r.cause).toBeNull();
     expect(lines[1].body.payload.cause).toBeNull();
     expect(lines[1].attributes["alert.cause"]).toBeUndefined();
+  });
+
+  // CTL-1628 r4 (Codex #2960 round 4): before this fix, cause classification
+  // only ran on the initial raise — the one standing alert would keep
+  // reporting the ORIGINAL cause for the freeze's entire duration even if the
+  // origins driving it changed underneath it.
+  describe("cause reclassification on origin drift (CTL-1628 r4)", () => {
+    test("origins drift all-poll → all-persist mid-freeze: exactly one cause_changed emission with the persist reason", () => {
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      let origin = "poll";
+      const opts = {
+        teams: ["CTL", "ADV"],
+        isTeamFrozen: () => true,
+        getTeamOrigin: () => origin,
+        append,
+      };
+
+      const raise = checkFleetFreeze(opts);
+      expect(raise).toEqual({ frozen: true, emitted: "raised", cause: FLEET_FREEZE_CAUSE_ALL_POLL });
+      expect(lines).toHaveLength(1);
+
+      // Still frozen, no drift yet → silent, exactly like a steady-state check.
+      const steady = checkFleetFreeze(opts);
+      expect(steady).toEqual({ frozen: true, emitted: null, cause: null });
+      expect(lines).toHaveLength(1);
+
+      // Origins drift: the poll/linearis outage recovered, but now every
+      // team's local disk persist is failing instead.
+      origin = "persist";
+      const drift = checkFleetFreeze(opts);
+      expect(drift).toEqual({ frozen: true, emitted: "cause_changed", cause: FLEET_FREEZE_CAUSE_ALL_PERSIST });
+      expect(lines).toHaveLength(2);
+      expect(lines[1].attributes["event.name"]).toBe(ALERT_RAISED); // same topic, not a new alert kind
+      expect(lines[1].attributes["alert.cause_changed"]).toBe(true);
+      expect(lines[1].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+      expect(lines[1].body.payload.previousCause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+      expect(lines[1].body.payload.reason).toMatch(/local filesystem fault/);
+
+      // No further drift → no duplicate cause_changed emission.
+      const steady2 = checkFleetFreeze(opts);
+      expect(steady2).toEqual({ frozen: true, emitted: null, cause: null });
+      expect(lines).toHaveLength(2);
+    });
+
+    test("origins drift into mixed, then back out: two cause_changed emissions total, none while unchanged", () => {
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      const originByTeam = { CTL: "poll", ADV: "poll" };
+      const opts = {
+        teams: ["CTL", "ADV"],
+        isTeamFrozen: () => true,
+        getTeamOrigin: (t) => originByTeam[t],
+        append,
+      };
+
+      checkFleetFreeze(opts); // raise: all-poll
+      expect(lines).toHaveLength(1);
+      expect(lines[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+
+      // One team's origin flips to persist → mixed.
+      originByTeam.ADV = "persist";
+      const r1 = checkFleetFreeze(opts);
+      expect(r1.emitted).toBe("cause_changed");
+      expect(r1.cause).toBe(FLEET_FREEZE_CAUSE_MIXED);
+      expect(lines).toHaveLength(2);
+
+      // Repeating the same mixed state does NOT re-emit (avoid spamming).
+      checkFleetFreeze(opts);
+      checkFleetFreeze(opts);
+      expect(lines).toHaveLength(2);
+
+      // Both teams now persist → all-persist (still a drift from mixed).
+      originByTeam.CTL = "persist";
+      const r2 = checkFleetFreeze(opts);
+      expect(r2.emitted).toBe("cause_changed");
+      expect(r2.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+      expect(lines).toHaveLength(3);
+      expect(lines[2].body.payload.previousCause).toBe(FLEET_FREEZE_CAUSE_MIXED);
+    });
+
+    test("a daemon restart mid-freeze rehydrates the last-emitted cause, so drift detection survives the restart", () => {
+      const lines = [];
+      const append = (l) => lines.push(JSON.parse(l));
+      let origin = "poll";
+      const opts = { teams: ["CTL"], isTeamFrozen: () => true, getTeamOrigin: () => origin, append };
+
+      checkFleetFreeze(opts); // raise: all-poll, persisted to the marker
+      expect(lines).toHaveLength(1);
+
+      // Simulate a RESTART: in-memory state cleared, disk marker survives.
+      __resetFleetFreezeLatch();
+      expect(isFleetFrozenRaised()).toBe(false);
+
+      // First post-restart check, no drift yet: hydrate restores BOTH the
+      // raised latch and the last-emitted cause → still silent.
+      const r1 = checkFleetFreeze(opts);
+      expect(r1).toEqual({ frozen: true, emitted: null, cause: null });
+      expect(lines).toHaveLength(1);
+
+      // NOW origins drift post-restart — the rehydrated cause is what drift
+      // is measured against, so this still correctly detects the change.
+      origin = "persist";
+      const r2 = checkFleetFreeze(opts);
+      expect(r2.emitted).toBe("cause_changed");
+      expect(r2.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+      expect(lines).toHaveLength(2);
+    });
   });
 });
