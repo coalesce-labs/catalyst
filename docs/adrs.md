@@ -514,19 +514,48 @@ resolvable stalls consuming attention); leave re-engagement to the inference eng
 
 ## ADR-026: Two-Axis Worker State Model + worker-status Label Group (CTL-764)
 
-**Decision** — all worker state transitions are consolidated behind a single chokepoint and a
-workspace-scoped, single-valued `worker-status` Linear label group carrying worker _disposition_
-independently of _pipeline stage_. The live chokepoint is the **inline `recordTransition`** function
-inside `scheduler.mjs`'s `schedulerTick` — not the standalone `recordWorkerTransition` module
-(`record-worker-transition.mjs`) named in this ADR's original design: that module's own doc comment
-declared only three of the eventual five sinks (Sink 1 Linear workflow status via `applyPhaseStatus`,
-Sink 2 the disposition label via `convergeLabel`, Sink 3 the unified event log via
-`appendWorkerTransitionEvent`) and flagged itself as unfinished — "Phase 5 will wire the production
-defaults... and route all call sites here." That Phase 5 wiring never happened; the scheduler's live
-path never called the module, and OTLP forwarding (sink 4) and the broker `ticket_state_transitions`
-table (sink 5) were added directly to the live inline path, never retrofitted into it. CTL-1628
-removed it as consumer-free. See "Two-axis worker state & the recordWorkerTransition chokepoint
-(CTL-764)" in `docs/architecture.md` for the live mechanism.
+**Decision** — worker state transitions **that the scheduler records** are consolidated behind a
+single chokepoint and a workspace-scoped, single-valued `worker-status` Linear label group carrying
+worker _disposition_ independently of _pipeline stage_ (known gaps in that coverage are listed
+below). The live chokepoint is the **inline
+`recordTransition`** function inside `scheduler.mjs`'s `schedulerTick` — not the standalone
+`recordWorkerTransition` module (`record-worker-transition.mjs`) named in this ADR's original
+design: that module's own doc comment declared only three of the eventual five sinks (Sink 1 Linear
+workflow status via `applyPhaseStatus`, Sink 2 the disposition label via `convergeLabel`, Sink 3 the
+unified event log via `appendWorkerTransitionEvent`) and flagged itself as unfinished — "Phase 5 will
+wire the production defaults... and route all call sites here." That Phase 5 wiring never happened;
+the scheduler's live path never called the module. Of the two sinks the module never reached, only
+sink 4 (OTLP via `otel-forward`) is actually live — it rides automatically on sink 3's event-log
+write. Sink 5 (a broker `ticket_state_transitions` table, CTL-764 Phase 10) was **never
+implemented** anywhere, live path or otherwise — no schema, no writer, no broker consumer exist in
+the codebase. CTL-1628 removed the retired module as consumer-free.
+
+**The chokepoint is not the only `worker.transition` emitter.** The daemon's `handleCommentWake`
+(CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent` directly at two
+structurally distinct sites, both bypassing `recordTransition` but for different reasons:
+- The **`needs-input` clear** (a per-signal branch gated on `status === "needs-input"`) removes the
+  label, emits the clear, and redispatches the parked worker in the same block. Its own code comment
+  explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted here (the
+  daemon removes the durable label out-of-band and redispatches — the scheduler never observes this
+  edge)."
+- The **`needs-human` clear** runs once per comment-wake call, gated on positive human provenance
+  and a managed ticket, with **no redispatch** in that block. It bypasses `recordTransition` because
+  the scheduler's own needs-human handling is STICKY-by-design (never clears it itself on a
+  steady-state admission pass, per the `recordTransition` suppression logic above) — the
+  "redispatches" half of the quoted rationale does not apply to this site.
+
+Both are deliberate, self-documented second-producer sites.
+
+**A separate escalation path emits no `worker.transition` for its disposition change.** Pass 0w's
+hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
+progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
+`bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
+it applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) and
+never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
+emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
+the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
+specifically, not an alternate producer. See "Two-axis worker state & the recordWorkerTransition
+chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
 
 **Two orthogonal axes (never blurred):**
 
@@ -540,11 +569,16 @@ is always readable regardless of which team's ticket is in flight. Exclusive gro
 single-value; the daemon removes stale members before applying a new one.
 
 **Precedence** — `needs-human > needs-input > blocked > queued > none`. `needs-human` is sticky
-(applied by `labelOnce`, NOT tick-converged) and cleared only at explicit resolution (Done or
-terminal-sweep). `queued`/`blocked`/`needs-input` are tick-converged (re-derived on diff each tick).
+(applied by `labelOnce`, NOT tick-converged) and cleared only at explicit resolution.
+`queued`/`blocked`/`needs-input` are tick-converged (re-derived on diff each tick).
 
-**Resolution-gated clearing** — `clearStalledLabel`'s `onRemoved` callback fires only on confirmed
-Linear label removal, preventing false-positive "cleared" events on API failures.
+**Resolution-gated clearing — TWO removal paths (Codex #2970 round 5).** `needs-human` is removed
+only by an explicit, confirmed-removal signal, and there are two: (1) `clearStalledLabel`'s
+`onRemoved` callback, fired only on confirmed Linear label removal at scheduler-side resolution
+points (Done / terminal-sweep / no-stall-clear), preventing false-positive "cleared" events on API
+failures; and (2) the daemon's `handleCommentWake` needs-human clear on a managed ticket's confirmed
+human reply — a write-gated, emission-carrying removal via `removeLabel` directly (not
+`clearStalledLabel`), documented in the producer-split paragraph above.
 
 **`waiting` → `queued` rename** — the prior `waiting` label was renamed to `queued` to align with
 the disposition vocabulary. Back-compat: legacy `waiting` labels map to `queued` in the HUD and
@@ -559,10 +593,20 @@ merged axes into a single status enum (rejected: pipeline stage and disposition 
 both need independent observability); async `recordWorkerTransition` only (rejected: `schedulerTick`
 is sync; async would require a separate flush loop with new failure modes).
 
-**Consequences** — every transition fans out to five sinks (Linear Status, label, event log, OTLP
-via otel-forward, optional broker table); all fail-open. The HUD capacity header gains
-per-disposition buckets and triage is carved out of `maxParallel` counting. AGENTS.md /
-architecture.md carry the two-axis model as first-class concepts.
+**Consequences** — four sinks are **live** (Linear Status, label, event log, OTLP via otel-forward);
+all fail-open. No single transition reaches all four — each recordTransition call is either
+stage-only or disposition-only (`toDisposition === undefined` means "no disposition guard, always
+emit" for a pure stage move; omitting `toStage`/`fromStage` means no Linear-Status write for a pure
+disposition move), so a transition reaches at most three: a stage move touches Linear Status + event
+log + OTLP (skips the label sink); a disposition move touches the label + event log + OTLP (skips
+Linear Status) — e.g. the dependency-cycle escalation (`scheduler.mjs` ~5666-5678) calls
+`labelNeedsHumanUnlessBeliefOwner` (label) and `recordTransition({ toDisposition: "needs-human" })`
+(event log + OTLP) with no stage touched at all. Only a call that sets both `toStage` and
+`toDisposition` together would reach all four. A fifth sink (an optional broker
+`ticket_state_transitions` table, CTL-764 Phase 10) was designed but never implemented — no schema,
+writer, or broker consumer exist for it. The HUD capacity header gains per-disposition buckets and
+triage is carved out of `maxParallel` counting. AGENTS.md / architecture.md carry the two-axis model
+as first-class concepts.
 
 ## ADR-027: Browser automation stays local — cloud browser backends rejected (2026-07-25)
 
