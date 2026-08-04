@@ -514,19 +514,29 @@ resolvable stalls consuming attention); leave re-engagement to the inference eng
 
 ## ADR-026: Two-Axis Worker State Model + worker-status Label Group (CTL-764)
 
-**Decision** — all worker state transitions are consolidated behind a single chokepoint and a
-workspace-scoped, single-valued `worker-status` Linear label group carrying worker _disposition_
-independently of _pipeline stage_. The live chokepoint is the **inline `recordTransition`** function
-inside `scheduler.mjs`'s `schedulerTick` — not the standalone `recordWorkerTransition` module
-(`record-worker-transition.mjs`) named in this ADR's original design: that module's own doc comment
-declared only three of the eventual five sinks (Sink 1 Linear workflow status via `applyPhaseStatus`,
-Sink 2 the disposition label via `convergeLabel`, Sink 3 the unified event log via
-`appendWorkerTransitionEvent`) and flagged itself as unfinished — "Phase 5 will wire the production
-defaults... and route all call sites here." That Phase 5 wiring never happened; the scheduler's live
-path never called the module, and OTLP forwarding (sink 4) and the broker `ticket_state_transitions`
-table (sink 5) were added directly to the live inline path, never retrofitted into it. CTL-1628
-removed it as consumer-free. See "Two-axis worker state & the recordWorkerTransition chokepoint
-(CTL-764)" in `docs/architecture.md` for the live mechanism.
+**Decision** — all **scheduler-owned** worker state transitions are consolidated behind a single
+chokepoint and a workspace-scoped, single-valued `worker-status` Linear label group carrying worker
+_disposition_ independently of _pipeline stage_. The live chokepoint is the **inline
+`recordTransition`** function inside `scheduler.mjs`'s `schedulerTick` — not the standalone
+`recordWorkerTransition` module (`record-worker-transition.mjs`) named in this ADR's original
+design: that module's own doc comment declared only three of the eventual five sinks (Sink 1 Linear
+workflow status via `applyPhaseStatus`, Sink 2 the disposition label via `convergeLabel`, Sink 3 the
+unified event log via `appendWorkerTransitionEvent`) and flagged itself as unfinished — "Phase 5 will
+wire the production defaults... and route all call sites here." That Phase 5 wiring never happened;
+the scheduler's live path never called the module. Of the two sinks the module never reached, only
+sink 4 (OTLP via `otel-forward`) is actually live — it rides automatically on sink 3's event-log
+write. Sink 5 (a broker `ticket_state_transitions` table, CTL-764 Phase 10) was **never
+implemented** anywhere, live path or otherwise — no schema, no writer, no broker consumer exist in
+the codebase. CTL-1628 removed the retired module as consumer-free.
+
+**The chokepoint is not the only `worker.transition` emitter.** The daemon's `handleCommentWake`
+(CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent` directly at two sites —
+clearing a stale `needs-human` marker on human reply, and clearing `needs-input` after a
+comment-driven wake — bypassing `recordTransition` entirely; its own code comment explains why:
+"scheduler.mjs owns the park/apply emission; the clear is emitted here (the daemon removes the
+durable label out-of-band and redispatches — the scheduler never observes this edge)." This is a
+deliberate, self-documented second producer. See "Two-axis worker state & the recordWorkerTransition
+chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
 
 **Two orthogonal axes (never blurred):**
 

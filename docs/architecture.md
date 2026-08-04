@@ -429,25 +429,36 @@ at explicit resolution (Done or terminal-sweep-clear), not on steady-state ticks
 re-derived on every tick and applied/removed on diff; `needs-human` is removed only by
 `clearStalledLabel`'s `onRemoved` callback which fires only on confirmed Linear label removal.
 
-Worker transitions are recorded at the scheduler's transition sites, coordinated around a single
-**inline `recordTransition` chokepoint** inside `schedulerTick`. That chokepoint owns sink (3): it
-emits exactly one canonical `worker.transition.<TICKET>` event per genuine change to the unified
-event log, and the only-on-change guard (`lastDispositionEmit`) prevents double-emit on steady-state
-ticks. Its emitter defaults to `null` so a bare unit tick stays silent; **production threads the
-real emitter (`defaultAppendWorkerTransitionEvent`) via `runTick`** — without that wiring every
-`recordTransition` early-returns and the event stream is dark. That event feeds sink (4), OTLP via
-`otel-forward` (dims as attributes — `body.payload` is stripped off-machine). The remaining sinks
-are written at their own scheduler sites around the same transition (not fanned out from inside the
-chokepoint): (1) Linear Status via the `applyPhaseStatus` chokepoint (Axis 1), (2) the
-`worker-status` label via the admission converger (`convergeHeldLabel`) / `labelOnce` (Axis 2), and
-(5) the optional broker `ticket_state_transitions` table (CTL-764 Phase 10). The standalone
-`recordWorkerTransition` module (`record-worker-transition.mjs`) — an extracted, unit-tested scaffold
-for sinks 1–3 only (Linear status, disposition label, event log) whose own doc comment flagged sinks
-4–5 and full call-site wiring as unfinished ("Phase 5 will wire the production defaults... and route
-all call sites here") — never reached that Phase 5 and was retired as consumer-free (CTL-1628): the
-scheduler's live path has only ever used the inline `recordTransition` chokepoint described above,
-and sinks 4 (OTLP) and 5 (the broker table) were added directly to that live path, never retrofitted
-into the retired module. The analogous worker-state projection need (phase/status/PR/revive-count,
+Worker transitions **originating from the scheduler** are recorded at its transition sites,
+coordinated around a single **inline `recordTransition` chokepoint** inside `schedulerTick`. That
+chokepoint owns sink (3): it emits exactly one canonical `worker.transition.<TICKET>` event per
+genuine change to the unified event log, and the only-on-change guard (`lastDispositionEmit`)
+prevents double-emit on steady-state ticks. Its emitter defaults to `null` so a bare unit tick stays
+silent; **production threads the real emitter (`defaultAppendWorkerTransitionEvent`) via
+`runTick`** — without that wiring every `recordTransition` early-returns and the event stream is
+dark. That event feeds sink (4), OTLP via `otel-forward` (dims as attributes — `body.payload` is
+stripped off-machine) — the only other sink that's actually live. Sink (5), an optional broker
+`ticket_state_transitions` table (CTL-764 Phase 10), was **never implemented** — no schema, no
+writer, no broker consumer exist anywhere in the codebase; it remains a planned item, not a shipped
+one. The remaining scheduler-side sinks are written at their own scheduler sites around the same
+transition (not fanned out from inside the chokepoint): (1) Linear Status via the
+`applyPhaseStatus` chokepoint (Axis 1), (2) the `worker-status` label via the admission converger
+(`convergeHeldLabel`) / `labelOnce` (Axis 2).
+
+**The scheduler chokepoint is not the only `worker.transition` emitter.** The daemon's
+`handleCommentWake` (CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent`
+directly at two sites — clearing a stale `needs-human` marker on human reply, and clearing
+`needs-input` after a comment-driven wake — bypassing `recordTransition` entirely. Its own code
+comment says why: "scheduler.mjs owns the park/apply emission; the clear is emitted here (the daemon
+removes the durable label out-of-band and redispatches — the scheduler never observes this edge)."
+This is a deliberate, self-documented second producer, not a gap in the chokepoint design.
+
+The standalone `recordWorkerTransition` module (`record-worker-transition.mjs`) — an extracted,
+unit-tested scaffold for sinks 1–3 only (Linear status, disposition label, event log) whose own doc
+comment flagged sinks 4–5 and full call-site wiring as unfinished ("Phase 5 will wire the production
+defaults... and route all call sites here") — never reached that Phase 5 and was retired as
+consumer-free (CTL-1628): the scheduler's live path has only ever used the inline `recordTransition`
+chokepoint described above. The analogous worker-state projection need (phase/status/PR/revive-count,
 not disposition) is served live by the separate CTL-532 SQLite projection — see "Worker signal
 projection" above.
 
