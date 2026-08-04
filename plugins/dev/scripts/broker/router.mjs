@@ -2773,6 +2773,20 @@ export function processEvent(event) {
     return;
   }
 
+  // CTL-1628: legacy-emitter compat consume. The ADR-018 Phase 1 JSON-shadow
+  // scaffolding was retired (dispatch branch + handleWorkerStateChanged +
+  // getProjectedWorkerStatePath/writeProjectedWorkerState removed), but an
+  // un-upgraded orchestrate-auto-rebase can still emit worker.state_changed
+  // during a mixed-version rollout. The CTL-532 fold (projectWorkerStateEvent,
+  // above) already consumed the event unconditionally; this branch only
+  // prevents the now-orphaned event from falling through shouldSkipEvent /
+  // interests routing into queueEvent's Groq prose classifier, which it never
+  // reached before. This guards ROLLING-UPGRADE SKEW (an un-upgraded host's
+  // orchestrate-auto-rebase copy still emitting), not legacy-mode usage —
+  // remove once the fleet is uniformly past the release that dropped the
+  // emitter, and at the latest with the CTL-1635 legacy sunset.
+  if (name === "worker.state_changed") return;
+
   if (shouldSkipEvent(event)) return;
 
   // CTL-822: durable descriptor write-through. MUST run for every

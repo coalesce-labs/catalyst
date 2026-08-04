@@ -243,12 +243,20 @@ Dual-write in three phases (mirrors ADR-008):
 
 **What actually shipped**: only `orchestrate-auto-rebase` ever migrated to Phase 1 (1 of 7 writers);
 the migration stalled there from 2026-05-17 and the `.json.projected` shadow files it produced
-never gained a reader. CTL-1628 removed the Phase 1 shadow-write scaffolding as dead weight (broker
-`handleWorkerStateChanged`/`getProjectedWorkerStatePath`/`writeProjectedWorkerState`, the
-`worker.state_changed` event and its `lib/emit-worker-state-changed.sh` emitter, and the
-`orchestrate-shadow-diff` verification CLI) — Phase 2 (direct-write cutover) and Phase 3 (as
-originally scoped, a `(orch_id,ticket)` mirror fed by that same event) never happened on this path
-and are now moot.
+never gained a reader. CTL-1628 removed the Phase 1 shadow-write **scaffolding** as dead weight —
+the broker's `handleWorkerStateChanged`/`getProjectedWorkerStatePath`/`writeProjectedWorkerState`,
+the dedicated `lib/emit-worker-state-changed.sh` emitter, and the `orchestrate-shadow-diff`
+verification CLI. Phase 2 (direct-write cutover) and Phase 3 (as originally scoped, a
+`(orch_id,ticket)` mirror fed by that same event) never happened on this path and are now moot.
+
+The `worker.state_changed` **event name and wire schema are not gone**, only the dedicated producer
+and shadow-file consumer: `reduceWorkerStateEvent` (below) still treats it as valid input, both (a)
+on every broker restart within the same calendar month — `replayWorkerStateProjection` folds the
+*entire* current-month event log, so any `worker.state_changed` record already on disk from before
+this change remains live replay input — and (b) as a defensive compat-consume in the broker router
+(`if (name === "worker.state_changed") return;`, CTL-1628) for an un-upgraded `orchestrate-auto-rebase`
+still emitting it during a mixed-version fleet rollout. The wire schema stays documented in
+`references/event-schema.md`, marked as a retired producer retained for replay/compat.
 
 The **projection need this ADR set out to solve was served a different way**: **CTL-532** built a
 live, event-sourced worker-state projection directly against the durable event log — independent of
@@ -260,7 +268,12 @@ above all routing gates; the pure `reduceWorkerStateEvent` reducer normalizes `p
 broker SQLite `worker_state` table — one row per `(orchestrator, ticket)` holding
 phase/status/PR-number/revive-count — plus `worker_revive_events` (idempotency ledger) and
 `projection_meta` (single-row watermark), all defined in `broker/broker-state.mjs:194-232` and
-shipped in #936. This was previously undocumented against this ADR; it is the live successor.
+shipped in #936. This was previously undocumented against this ADR.
+
+**CTL-532 is observational, not a fix for this ADR's original problem.** `upsertWorkerState` only
+inserts/updates the SQLite `worker_state` row; it never reads or writes the canonical
+`workers/<TICKET>.json` file. The seven-script single-writer race this ADR set out to close is
+therefore **still open** — tracked separately as CTL-1631.
 
 **Supersedes** ADR-006's `workers/<TICKET>.json` design only; global state + event log stay in
 force.

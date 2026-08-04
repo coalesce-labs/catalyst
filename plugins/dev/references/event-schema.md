@@ -529,6 +529,64 @@ that previously matched `.event == "filter.wake.${id}"` now match:
 
 ---
 
+### `worker.state_changed` — catalyst.orchestrator (CTL-483; retired producer, CTL-1628)
+
+**Retired producer — retained as replay/compat input.** The dedicated emitter
+(`lib/emit-worker-state-changed.sh`) and the broker's shadow-file consumer
+(`handleWorkerStateChanged`) were removed in CTL-1628 along with the rest of the ADR-018 Phase 1
+JSON-shadow scaffolding — see ADR-018. The event name and wire shape below are **not** dead,
+though: `reduceWorkerStateEvent` (`broker/projection.mjs`, CTL-532) still folds any
+`worker.state_changed` record it sees, because (a) `replayWorkerStateProjection` refolds the entire
+current-month event log on every broker restart, so historical records already on disk stay live
+replay input, and (b) the broker router has a defensive compat-consume
+(`if (name === "worker.state_changed") return;`) for an un-upgraded `orchestrate-auto-rebase` still
+emitting it during a mixed-version fleet rollout.
+
+```json
+{
+  "ts": "2026-05-17T18:00:00.000Z",
+  "id": "33333333-4444-4555-8666-777777777777",
+  "observedTs": "2026-05-17T18:00:00.001Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "resource": {
+    "service.name": "catalyst.orchestrator",
+    "service.namespace": "catalyst",
+    "catalyst.node.class": "worker"
+  },
+  "attributes": {
+    "event.name": "worker.state_changed",
+    "event.entity": "worker",
+    "event.action": "state_changed",
+    "catalyst.orchestrator.id": "o-ctl-483",
+    "catalyst.worker.ticket": "CTL-483",
+    "catalyst.writer": "orchestrate-auto-rebase"
+  },
+  "body": {
+    "message": "worker CTL-483 state changed by orchestrate-auto-rebase",
+    "payload": {
+      "ticket": "CTL-483",
+      "orchestrator": "o-ctl-483",
+      "writer": "orchestrate-auto-rebase",
+      "state": {
+        "ticket": "CTL-483",
+        "status": "pr-created",
+        "phase": 5,
+        "dirtySince": null,
+        "...": "full contents of workers/<TICKET>.json"
+      }
+    }
+  }
+}
+```
+
+`reduceWorkerStateEvent` reads `attributes."catalyst.orchestrator.id"` (falls back to
+`body.payload.orchestrator`), `attributes."catalyst.worker.ticket"` (falls back to
+`body.payload.ticket`), and `body.payload.state` (status/phase/PR-number/revive-count extracted
+from it) — see `broker/broker-state.mjs` for the resulting `worker_state` row shape.
+
+---
+
 ## All event names by producer
 
 ### catalyst.github
@@ -589,6 +647,7 @@ that previously matched `.event == "filter.wake.${id}"` now match:
 | `orchestrator.worker.phase_advanced`  | `worker`       | `phase_advanced`  | INFO     | `body.payload` = `{windowSec, changes}`                                                                                                                                                                                             |
 | `orchestrator.attention.raised`       | `attention`    | `raised`          | WARN     | `body.payload` = `{attentionType, reason}`                                                                                                                                                                                          |
 | `orchestrator.attention.resolved`     | `attention`    | `resolved`        | INFO     |                                                                                                                                                                                                                                     |
+| `worker.state_changed`                | `worker`       | `state_changed`   | INFO     | **Retired producer (CTL-1628)** — retained as replay/compat input; `reduceWorkerStateEvent` still folds it. `body.payload` = `{ticket, orchestrator, writer, state}`.                                                              |
 | `linear.state.write.<TICKET>`         | `worker`       | `state_written`   | INFO     | CTL-757 audit: `{ticket, phase, source, applied, from_state, to_state}`; `source` = `scheduler-advance` or `preemption-resume`                                                                                                      |
 | `worker.transition.<TICKET>`          | `worker`       | `transition`      | INFO     | CTL-764 unified two-axis event; supersedes `linear.state.write.*` as the canonical transition record. `attributes` carry disposition/stage dims (see CTL-764 fields below). `body.payload` is stripped off-machine by otel-forward. |
 
