@@ -54,6 +54,27 @@ _lib_suite_is_wrapped() {
 	done
 	return 1
 }
+# CTL-1612 round 12 (Codex P2 follow-up): _lib_suite_is_wrapped above is a
+# STATIC list — it says "this basename normally has a wrapper", not "a
+# wrapper actually ran this invocation". A targeted/fixture run that
+# overrides SHELL_TEST_DIR (e.g. the smoke test in __tests__/run-tests.test.sh,
+# or a developer pointing LIB_SHELL_TEST_DIR at one wrapped suite in
+# isolation) has no wrapper files under the active SHELL_TEST_DIR at all, so
+# the static-list skip silently drops the lib suite with zero tests run and
+# the aggregate still reports PASS. Each wrapper execs
+# ".../lib/__tests__/<basename>.test.sh" (see e.g.
+# __tests__/cluster-fence-guard-lib.test.sh), so grep the files ACTUALLY
+# present under the active SHELL_TEST_DIR for that reference before trusting
+# the static list's skip.
+_lib_suite_wrapper_present() {
+	local _basename="$1" _f
+	[[ -d $SHELL_TEST_DIR ]] || return 1
+	for _f in "$SHELL_TEST_DIR"/*.test.sh; do
+		[[ -f $_f ]] || continue
+		grep -Fq "lib/__tests__/${_basename}\"" "$_f" 2>/dev/null && return 0
+	done
+	return 1
+}
 # +x test: distinguishes "unset" (use default) from "set to empty" (smoke test).
 if [[ -z ${EXTRA_SHELL_TESTS+x} ]]; then
 	EXTRA_SHELL_TESTS="${SCRIPT_DIR}/test-workflow-context.sh"
@@ -124,8 +145,11 @@ done
 # CTL-1612 round 9: skip a lib suite that already ran via its SHELL_TEST_DIR
 # wrapper in the loop above (LIB_SHELL_TEST_WRAPPED, see its comment) —
 # without this, the aggregate summary double-counts 6 of the 13 suites.
+# CTL-1612 round 12: ...but only when that wrapper is actually present under
+# the ACTIVE SHELL_TEST_DIR this run — see _lib_suite_wrapper_present above.
 for f in "$LIB_SHELL_TEST_DIR"/*.test.sh; do
-	if _lib_suite_is_wrapped "$(basename "$f")"; then
+	_f_basename="$(basename "$f")"
+	if _lib_suite_is_wrapped "$_f_basename" && _lib_suite_wrapper_present "$_f_basename"; then
 		continue
 	fi
 	run_shell_test "$f"

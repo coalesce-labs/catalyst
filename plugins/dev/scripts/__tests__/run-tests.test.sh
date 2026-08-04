@@ -121,6 +121,15 @@ else fail "LIB_SHELL_TEST_DIR override was not wired into the shell suite" "$OUT
 # the suite's own PASS marker line directly in the runner's combined output —
 # the property this test exists to pin.
 FIX7="$(make_fixture "secrets-hygiene:0")"
+# CTL-1612 round 12 (Codex P2 follow-up): the wrapped-exclusion is now gated
+# on the wrapper file actually being discovered under the active
+# SHELL_TEST_DIR (_lib_suite_wrapper_present), which greps each file there
+# for the literal exec-target reference every real wrapper contains (see
+# __tests__/secrets-hygiene.test.sh). This fixture's SHELL_TEST_DIR entry
+# must carry that same reference or it stops being recognized as a genuine
+# wrapper and this test's "runs exactly once" assertion would break for the
+# wrong reason (double-run, not a fixed detection gap).
+echo '# exec bash ".../lib/__tests__/secrets-hygiene.test.sh"' >>"${FIX7}/secrets-hygiene.test.sh"
 FIX7_LIB="$(mktemp -d)"
 cp "${FIX7}/secrets-hygiene.test.sh" "${FIX7_LIB}/secrets-hygiene.test.sh"
 OUT="$(SHELL_TEST_DIR="$FIX7" LIB_SHELL_TEST_DIR="$FIX7_LIB" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
@@ -131,6 +140,22 @@ else fail "wrapped basename ran $MARKER_COUNT time(s), expected exactly 1" "$OUT
 if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 	pass "aggregate summary counts exactly 1 (not 2) for the wrapped-basename fixture"
 else fail "aggregate summary miscounted the wrapped-basename fixture" "$OUT"; fi
+
+# Test 9 (CTL-1612 round 12, Codex P2 follow-up): a targeted run whose
+# SHELL_TEST_DIR override has NO wrapper for a LIB_SHELL_TEST_WRAPPED
+# basename must still execute that lib suite directly — the pre-fix
+# static-list-only skip dropped it silently (0 tests run, reported PASS)
+# whenever no wrapper was actually present this run. Uses the real wrapped
+# basename "secrets-hygiene.test.sh" so this is exactly the scenario the
+# finding described: a targeted/fixture run pointing LIB_SHELL_TEST_DIR at
+# one wrapped suite in isolation, with an empty/overridden SHELL_TEST_DIR.
+FIX9_SHELL="$(mktemp -d)"
+FIX9_LIB="$(make_fixture "secrets-hygiene:0")"
+trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$FIX6" "$FIX7" "$FIX7_LIB" "$FIX9_SHELL" "$FIX9_LIB" "$EMPTY_LIB_DIR"' EXIT
+OUT="$(SHELL_TEST_DIR="$FIX9_SHELL" LIB_SHELL_TEST_DIR="$FIX9_LIB" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
+	pass "wrapped-basename lib suite runs directly when no wrapper is present under the active SHELL_TEST_DIR"
+else fail "wrapped-basename lib suite was wrongly skipped with no active wrapper (0 tests, silent PASS)" "$OUT"; fi
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"

@@ -423,6 +423,21 @@ export function shouldSeedFreshMintCooldown(
   return Boolean(token?.trim()) && source === "minted";
 }
 
+// parsePositiveFiniteDurationMs — CTL-1612 round 12 (Codex P2 follow-up).
+// `Number(value) || fallbackMs` (the prior form at the two call sites below)
+// accepts any negative number as an override, since only 0/NaN are falsy in
+// JS — CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS=-1 makes the cooldown
+// gate pass on every anchor poll, re-minting a production OAuth token on
+// every tick. It also accepts Infinity (no finiteness check), which
+// permanently suppresses re-mint and eventually leaves the monitor running
+// on an expired token. This validates the parsed value is finite AND
+// strictly positive before accepting it; anything else (unset, empty,
+// non-numeric, zero, negative, ±Infinity) falls back to `fallbackMs`.
+export function parsePositiveFiniteDurationMs(raw: string | undefined, fallbackMs: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallbackMs;
+}
+
 export interface CreateServerOptions {
   port?: number;
   hostname?: string;
@@ -1554,10 +1569,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
             applyToken: (token: string) => {
               process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN = token;
             },
-            cooldownMs:
-              Number(process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS) || 45 * 60_000,
-            failureCooldownMs:
-              Number(process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_FAILURE_COOLDOWN_MS) || 60_000,
+            cooldownMs: parsePositiveFiniteDurationMs(
+              process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS,
+              45 * 60_000,
+            ),
+            failureCooldownMs: parsePositiveFiniteDurationMs(
+              process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_FAILURE_COOLDOWN_MS,
+              60_000,
+            ),
             logger: {
               warn: (_obj: unknown, msg: string) => console.warn(`[server] ${msg}`),
               info: (_obj: unknown, msg: string) => console.info(`[server] ${msg}`),
