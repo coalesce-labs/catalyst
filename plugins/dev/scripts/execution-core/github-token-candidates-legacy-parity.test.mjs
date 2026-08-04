@@ -16,7 +16,7 @@
 import { describe, test, expect } from "bun:test";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { githubTokenFileCandidates } from "./github-auth-preflight.mjs";
+import { githubTokenFileCandidates, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs";
 
 // ─── FROZEN LEGACY REFERENCE (verbatim copy of the pre-CTL-1623 githubTokenFileCandidates) ─
 function legacyGithubTokenFileCandidates(env = process.env) {
@@ -155,5 +155,72 @@ describe("FLAGGED BEHAVIOR CHANGE: CATALYST_LAYER2_CONFIG_FILE=\"\" (CTL-1623, s
   test("legacy and delegate DIVERGE for CATALYST_LAYER2_CONFIG_FILE=\"\" — pinned explicitly", () => {
     const env = { HOME: "/home/x", CATALYST_LAYER2_CONFIG_FILE: "" };
     expect(githubTokenFileCandidates(env)).not.toEqual(legacyGithubTokenFileCandidates(env));
+  });
+});
+
+// ─── THIRD FLAGGED DIVERGENCE (post-merge Codex round 1): malformed-file READ behavior ──
+//
+// Not a candidates-list divergence (githubTokenFileCandidates/secretFileCandidates never
+// disagree here — this is about what rearmGithubTokenFromFile does with the BYTES it reads
+// off a resolved candidate). Kept in this A/B parity file rather than a separate one since
+// this file is CTL-1623's designated "JS A/B parity suite" and the divergence is the exact
+// counterpart to catalyst-secret-env-legacy-parity.test.sh's (a)/(b) bash cells — the same
+// underlying bug, on the JS side of the CTL-1612 pair.
+//
+// LEGACY (pre-fix) rearmGithubTokenFromFile read every candidate via
+// `readFileSync(p, "utf8")` — decoding straight to a string, which silently REPLACES any
+// invalid UTF-8 byte with U+FFFD and does NOT reject an embedded NUL (NUL is itself valid
+// UTF-8, so it would have survived the strip/blank checks and been installed verbatim). The
+// FIXED rearmGithubTokenFromFile reads raw bytes and applies the same containsNul /
+// isValidUtf8RoundTrip parity guards lib/secret-contract.mjs's engine uses, so a malformed
+// candidate now falls through (effectively "absent") instead of installing a mutated value.
+describe("FLAGGED DIVERGENCE (post-merge fix): rearmGithubTokenFromFile — invalid-UTF-8 / NUL-containing candidates", () => {
+  // FROZEN LEGACY REFERENCE — the pre-fix read+strip+blank-check pipeline, verbatim (minus
+  // the surrounding candidate-loop/env-mutation plumbing, which is unchanged and not what
+  // diverges here). Operates on a raw Buffer so it can be exercised against the SAME
+  // fixture bytes the fixed implementation sees, mirroring how the bash suite freezes a
+  // reference rather than re-deriving legacy behavior from prose.
+  function legacyReadCandidate(buf) {
+    const decoded = buf.toString("utf8"); // the bug: decodes FIRST, mangling invalid bytes
+    const candidate = decoded.replace(/[\r\n]+$/, "");
+    return candidate.trim() ? candidate : null; // null == "blank, falls through" (unchanged today)
+  }
+
+  test("DOCUMENTED: the legacy read pipeline would have installed the U+FFFD-mangled value for an invalid-UTF-8 file", () => {
+    const buf = Buffer.from([0xff, 0xfe, 0x68, 0x69]);
+    const legacyResult = legacyReadCandidate(buf);
+    expect(legacyResult).not.toBeNull();
+    expect(legacyResult).toContain("�");
+  });
+
+  test("FLAGGED DIVERGENCE: the fixed rearmGithubTokenFromFile fails closed instead — installs nothing, no U+FFFD", () => {
+    const env = { CATALYST_GITHUB_TOKEN_FILE: "/fake/path", GITHUB_TOKEN: "good-inherited", GH_TOKEN: "good-inherited" };
+    const out = rearmGithubTokenFromFile({
+      env,
+      readFile: () => Buffer.from([0xff, 0xfe, 0x68, 0x69]),
+      log: null,
+    });
+    expect(out).toEqual({ rearmed: false, reason: "absent" });
+    expect(env.GITHUB_TOKEN).toBe("good-inherited");
+    expect(env.GITHUB_TOKEN).not.toContain("�");
+  });
+
+  test("DOCUMENTED: the legacy read pipeline would have installed the NUL-stripped mutated value for a NUL-containing file", () => {
+    const buf = Buffer.from("c\0loud");
+    const legacyResult = legacyReadCandidate(buf);
+    // NUL survives readFileSync(...,"utf8") decoding (it is valid UTF-8) and .trim() does
+    // not strip it — the legacy pipeline installs it verbatim, embedded NUL and all.
+    expect(legacyResult).toBe("c\0loud");
+  });
+
+  test("FLAGGED DIVERGENCE: the fixed rearmGithubTokenFromFile rejects the NUL-containing candidate", () => {
+    const env = { CATALYST_GITHUB_TOKEN_FILE: "/fake/path", GITHUB_TOKEN: "good-inherited", GH_TOKEN: "good-inherited" };
+    const out = rearmGithubTokenFromFile({
+      env,
+      readFile: () => Buffer.from("c\0loud"),
+      log: null,
+    });
+    expect(out).toEqual({ rearmed: false, reason: "absent" });
+    expect(env.GITHUB_TOKEN).toBe("good-inherited");
   });
 });
