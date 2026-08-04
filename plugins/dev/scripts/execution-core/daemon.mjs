@@ -472,6 +472,14 @@ export async function handleCommentWake(
   // re-checking an already-cleared label doesn't emit a second worker.transition
   // "cleared" record for a state change that didn't happen on this call.
   let clearedNeedsHumanWrote = false;
+  // Codex #2970 post-merge round 1: this EARLIER needs-input removal (below) can
+  // itself be the call that performs the real write — the per-signal loop's own
+  // removeLabel(ticket, "needs-input") call then finds the label already absent
+  // ({wrote:false}) and would wrongly skip the emission that THIS call earned.
+  // Capture it here and OR it into the per-signal loop's write determination so a
+  // genuine write, wherever it happens in this invocation, produces exactly one
+  // emission instead of zero.
+  let needsInputWroteEarly = false;
   if (humanProvenance && isManagedTicket(ticket, orchDir)) {
     try {
       const res = await removeLabel(ticket, "needs-human");
@@ -486,7 +494,8 @@ export async function handleCommentWake(
     // inbox after the human answered — while this path claimed to be the complete
     // response. Both labels are the same fact from the operator's side.
     try {
-      await removeLabel(ticket, "needs-input");
+      const earlyRes = await removeLabel(ticket, "needs-input");
+      needsInputWroteEarly = earlyRes?.wrote === true;
     } catch {
       /* fail-open — same reasoning as above */
     }
@@ -522,10 +531,11 @@ export async function handleCommentWake(
         "handleCommentWake: needs-human marker reconcile failed — label already cleared"
       );
     }
-    // Codex #2970 round 3: gate on a CONFIRMED write, not merely a confirmed-absent
-    // read — otherwise a duplicate webhook / second host that finds the label
-    // already gone would still record a fresh "cleared" transition for a change
-    // that happened on a prior call, mislabeling the timeline.
+    // Codex #2970 round 3: gate the EMISSION on a CONFIRMED write, not merely a
+    // confirmed-absent read — otherwise a duplicate webhook / second host that
+    // finds the label already gone would still record a fresh "cleared"
+    // transition for a change that happened on a prior call, mislabeling the
+    // timeline. Only the writer host should ever emit.
     if (clearedNeedsHumanWrote) {
       try {
         appendWorkerTransitionEvent({
@@ -538,12 +548,18 @@ export async function handleCommentWake(
       } catch {
         /* observability only */
       }
-      // Codex #2970 round 3: the daemon and scheduler share lastDispositionEmit
-      // in-process — this out-of-band clear never went through recordTransition,
-      // so the map still thinks this ticket is "needs-human". Reset it now rather
-      // than waiting on the ticket reaching terminal Done (needs-human's self-heal
-      // paths are marker-gated and clearNeedsHumanMarkers above already deleted
-      // that marker, so they'd never even attempt the clear).
+    }
+    // Codex #2970 post-merge round 2: the daemon and scheduler share
+    // lastDispositionEmit in-process — this out-of-band clear never went through
+    // recordTransition, so the map still thinks this ticket is "needs-human".
+    // Reset it on any CONFIRMED clear (clearedNeedsHuman), not only a write by
+    // THIS process (clearedNeedsHumanWrote) — a cross-host clear (another host
+    // did the write; this host observes {removed:true, wrote:false}) is just as
+    // confirmed, and this process's dedup entry is just as stale either way. Do
+    // this rather than waiting on the ticket reaching terminal Done (needs-human's
+    // self-heal paths are marker-gated and clearNeedsHumanMarkers above already
+    // deleted that marker, so they'd never even attempt the clear).
+    if (clearedNeedsHuman) {
       try {
         clearDispositionEmit(ticket);
       } catch {
@@ -640,15 +656,27 @@ export async function handleCommentWake(
     // durable label never got. An undefined return from a test stub is treated as success
     // to keep the wake path testable.
     // Codex #2970 round 3: removed:true alone still covers both a real removal AND the
-    // idempotent already-absent case (linear-write.mjs) — gate the emission on the
+    // idempotent already-absent case (linear-write.mjs) — gate the EMISSION on the
     // additive `wrote` field instead, so a duplicate webhook / second host re-checking an
     // already-cleared label doesn't record a second "cleared" transition for a change
     // that happened on a prior call. `wrote` is undefined on a test-stub `undefined`
     // return, so the `res === undefined` success path stays gated on that alone.
+    // Codex #2970 post-merge round 1: `needsInputWroteEarly` folds in the EARLIER
+    // needs-input removal (in the needs-human block above) — that call can itself be
+    // the one that performed the real write, leaving THIS call observing
+    // {wrote:false} for a change it didn't make. OR'ing it in means a genuine write,
+    // wherever in this invocation it happened, still earns exactly one emission.
     let needsInputRemoved = false;
+    // Codex #2970 post-merge round 2: CONFIRMED removal (regardless of who wrote),
+    // separate from needsInputRemoved's write-only signal — gates clearDispositionEmit
+    // below, not the emission. A cross-host clear (another host wrote; this host
+    // observes {removed:true, wrote:false}) is just as confirmed and this process's
+    // dedup entry is just as stale either way.
+    let needsInputConfirmed = false;
     try {
       const res = await removeLabel(ticket, "needs-input"); // CTL-764 Phase 4: durable needs-input cleared on genuine resolution
-      needsInputRemoved = res === undefined || res?.wrote === true;
+      needsInputRemoved = res === undefined || res?.wrote === true || needsInputWroteEarly;
+      needsInputConfirmed = res === undefined || res?.removed !== false;
     } catch {
       /* fail-open */
     }
@@ -657,7 +685,7 @@ export async function handleCommentWake(
     // is emitted here (the daemon removes the durable label out-of-band and redispatches
     // — the scheduler never observes this edge). toDisposition:null is encoded as the
     // "cleared" sentinel in the event builder (finding 12). Fail-open — never blocks the
-    // wake. finding E: only emitted on a confirmed removal.
+    // wake. finding E: only emitted on a confirmed WRITE (only the writer host emits).
     if (needsInputRemoved) {
       appendWorkerTransitionEvent({
         ticket,
@@ -667,11 +695,13 @@ export async function handleCommentWake(
         reason: "comment-wake",
         source: "comment-wake-clear",
       });
-      // Codex #2970 round 3: scheduler.mjs already self-heals this specific stale
-      // entry on its next relevant tick (the `lastDispositionEmit.get(ticket) ===
-      // HELD_LABEL_NEEDS_INPUT` branch), but resetting it here too closes the
-      // window immediately rather than waiting a tick, and mirrors the needs-human
-      // site above for consistency.
+    }
+    // Codex #2970 round 3 / post-merge round 2: scheduler.mjs already self-heals this
+    // specific stale entry on its next relevant tick (the
+    // `lastDispositionEmit.get(ticket) === HELD_LABEL_NEEDS_INPUT` branch), but
+    // resetting it here too closes the window immediately. Gated on CONFIRMED removal,
+    // not write-only, so a cross-host clear resets this process's dedup entry too.
+    if (needsInputConfirmed) {
       try {
         clearDispositionEmit(ticket);
       } catch {
