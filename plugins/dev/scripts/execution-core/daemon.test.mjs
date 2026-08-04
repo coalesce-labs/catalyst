@@ -1550,6 +1550,38 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(cleared).toContainEqual({ ticket: "PROJ-NH", phase: "implement" });
   });
 
+  // Codex #2970: the needs-human clear call site passed {from, to} — keys
+  // buildWorkerTransitionEvent doesn't accept (it wants fromDisposition/
+  // toDisposition) — so the emitted worker.transition envelope carried neither
+  // disposition. This pins the fixed shape, mirroring the finding-11 pattern for
+  // the needs-input clear below.
+  test("emits worker.transition(needs-human→cleared) with fromDisposition/toDisposition set", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH2", "implement", { status: "needs-human" });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH2", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "PROJ-NH2" && e.fromDisposition === "needs-human"
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.toDisposition).toBeNull();
+    expect(cleared.orchId).toBe("PROJ-NH2");
+    expect(cleared.reason).toBe("human-responded");
+    // The old buggy call's {from, to} keys must not resurface.
+    expect(cleared.from).toBeUndefined();
+    expect(cleared.to).toBeUndefined();
+  });
+
   test("the bot's OWN comment still does NOT clear the label (self-echo guard intact)", async () => {
     const orch = tmpOrcDir();
     const removed = [];

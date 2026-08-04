@@ -511,8 +511,9 @@ export async function handleCommentWake(
     try {
       appendWorkerTransitionEvent({
         ticket,
-        from: "needs-human",
-        to: "cleared",
+        orchId: ticket,
+        fromDisposition: "needs-human",
+        toDisposition: null,
         reason: "human-responded",
       });
     } catch {
