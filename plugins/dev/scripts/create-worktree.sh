@@ -524,21 +524,43 @@ else
 		# override); `bun --cwd <dir outside the project> -e` DID suppress
 		# it, and bun does not walk up the directory tree from --cwd looking
 		# for a config file, so any directory outside the project's own tree
-		# is sufficient isolation. Point --cwd at /tmp (always present, never
-		# part of a worktree's own path) and read package.json via an
-		# ABSOLUTE path passed through an env var — not interpolated into
-		# the JS source string, so no shell-to-JS quoting/escaping is needed
-		# for paths with unusual characters. node has no equivalent
-		# project-scoped auto-preload mechanism (no bunfig.toml analogue,
-		# and `node -e`'s cwd doesn't influence what code node executes), so
-		# it needs no cwd isolation — only switched to the same env-var-based
-		# absolute path for a single shared PM_SNIFF template.
+		# is sufficient isolation. Read package.json via an ABSOLUTE path
+		# passed through an env var — not interpolated into the JS source
+		# string, so no shell-to-JS quoting/escaping is needed for paths
+		# with unusual characters. node has no equivalent project-scoped
+		# auto-preload mechanism (no bunfig.toml analogue, and `node -e`'s
+		# cwd doesn't influence what code node executes), so it needs no cwd
+		# isolation — only switched to the same env-var-based absolute path
+		# for a single shared PM_SNIFF template.
+		#
+		# CTL-1628 post-merge (Codex #2967, round 9): round 8 pointed --cwd
+		# at /tmp — but /tmp is world-writable, so an attacker who can plant
+		# /tmp/bunfig.toml poisons the sniff exactly the same way the
+		# project's own bunfig.toml did (confirmed empirically: a
+		# /tmp/bunfig.toml preload DOES get loaded by `bun --cwd /tmp -e`).
+		# Use `mktemp -d` instead — a freshly-created, private (0700, owned
+		# by us) directory an attacker cannot have pre-planted a config
+		# into. Trap-cleaned on EXIT so an interrupted sniff doesn't leak
+		# the scratch dir; the trap is cleared right after we clean up
+		# normally so it doesn't linger for the rest of the script. If
+		# mktemp itself fails (disk full, permissions), skip the bun -e
+		# attempt entirely rather than falling back to an untrusted cwd —
+		# PACKAGE_MANAGER_FIELD stays empty, same graceful-degrade posture
+		# as every other tier here.
 		PM_SNIFF='console.log(JSON.parse(require("fs").readFileSync(process.env.CW_PACKAGE_JSON,"utf8")).packageManager??"")'
 		PACKAGE_JSON_ABS="$(pwd)/package.json"
 		if command -v jq >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 		elif command -v bun >/dev/null 2>&1; then
-			PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" bun --cwd /tmp -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+			BUN_SNIFF_CWD=$(mktemp -d 2>/dev/null) || BUN_SNIFF_CWD=""
+			if [ -n "$BUN_SNIFF_CWD" ]; then
+				trap 'rm -rf "$BUN_SNIFF_CWD"' EXIT
+				PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" bun --cwd "$BUN_SNIFF_CWD" -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+				rm -rf "$BUN_SNIFF_CWD"
+				trap - EXIT
+			else
+				PACKAGE_MANAGER_FIELD=""
+			fi
 		elif command -v node >/dev/null 2>&1; then
 			PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" node -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 		elif tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
