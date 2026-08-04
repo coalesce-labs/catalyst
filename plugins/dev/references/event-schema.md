@@ -661,8 +661,23 @@ emitting it during a mixed-version fleet rollout.
 
 #### worker.transition fields (CTL-764)
 
-Emitted by `recordTransition` in `scheduler.mjs` (sync chokepoint). Dims are **attributes** (not
-`body.payload`) because `otel-forward` strips `body.payload` before forwarding off-machine.
+Emitted by two producers: `recordTransition` in `scheduler.mjs` (the sync chokepoint for
+scheduler-owned transitions), and the daemon's `handleCommentWake` (CTL-768,
+`execution-core/daemon.mjs`), which calls `appendWorkerTransitionEvent` directly at two sites,
+bypassing `recordTransition` because the scheduler never observes these edges:
+- The `needs-human`→cleared resolution on a confirmed human reply to a managed ticket — emitted
+  unconditionally (not gated on a local worker dir/signal existing).
+- The `needs-input`→cleared resolution after a comment-driven wake — **only for signal-backed
+  wakes**: it fires from inside the per-signal loop over local `phase-*.json` files, which requires
+  a local worker dir. When the ticket has **no** local worker dir (e.g. already reaped) but still
+  carries a durable Linear `needs-input` label, the needs-human block's secondary
+  `removeLabel(ticket, "needs-input")` cleanup call still clears that label — but the function
+  returns before ever reaching the per-signal loop, so **no `worker.transition` is emitted for that
+  clear**. This is a real, unrecorded disposition change, not just a documentation gap — the same
+  class of coverage hole as the Pass 0w watchdog-escalation gap in ADR-026 / architecture.md.
+
+Dims are **attributes** (not `body.payload`) because `otel-forward` strips `body.payload` before
+forwarding off-machine.
 
 | attribute                          | type    | values / notes                                                              |
 | ---------------------------------- | ------- | --------------------------------------------------------------------------- |
