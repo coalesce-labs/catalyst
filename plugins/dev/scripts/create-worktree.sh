@@ -479,13 +479,45 @@ else
 		# multi-line formatting from some generators, etc.) missed a genuine
 		# bun-only project and fell through to npm. `tr -d '[:space:]'` collapses
 		# all whitespace — including newlines — before the substring match, so
-		# formatting no longer matters. Stripping whitespace can corrupt string
-		# *values* elsewhere in the file, but this fallback never reads those
-		# values back — it only tests whether this one substring exists —
-		# so that's harmless here. Still dependency-free (tr is as universal
-		# as grep).
+		# formatting no longer matters. Still dependency-free (tr is as
+		# universal as grep). But normalized-text matching has two REMAINING
+		# imprecisions of its own, both fixed by the tiered fallback below
+		# (round 7): it can match a "packageManager":"bun@ substring sitting
+		# inside some unrelated string VALUE (any whitespace-normalized JSON
+		# is just text to grep), and it is not ROOT-scoped — a NESTED
+		# {"toolConfig":{"packageManager":"bun@1.3.5"}} matches even when the
+		# actual root-level project uses npm.
+		#
+		# CTL-1628 post-merge (Codex #2948, round 7): prefer a REAL JSON
+		# parser whenever one happens to be on PATH, so the two imprecisions
+		# above only apply on a truly minimal host with none available:
+		#   1. jq, if present — authoritative, unchanged from round 5.
+		#   2. else bun, if present — bun ships a JSON parser and its
+		#      presence is exactly what this sniff's outcome selects between
+		#      (bun path vs npm path), so using it here is both free and
+		#      trustworthy: if bun can't run this one-liner, it can't run
+		#      the install either. `-e` evaluates the given script directly.
+		#   3. else node, if present — same idea, most commonly-installed
+		#      JS runtime.
+		#   4. else (no jq/bun/node at all) — the round-6 normalized-grep
+		#      last resort, imprecisions documented above and accepted only
+		#      at this tier. Note npm itself is a node script (`#!/usr/bin/env
+		#      node`) and could not run on this host anyway, so a false
+		#      positive here only steers the user toward installing bun
+		#      instead of an npm install that would have failed regardless.
+		# Every tier's command substitution falls back to an explicit empty
+		# string on ANY non-zero exit (`|| PACKAGE_MANAGER_FIELD=""`) rather
+		# than trusting the sub-command to always exit 0 under this script's
+		# `set -e` — confirmed empirically that `node -e` (unlike `bun -e`)
+		# DOES exit non-zero on malformed JSON, which would otherwise abort
+		# the whole script exactly like the round-5 bare-jq bug.
+		PM_SNIFF='console.log(JSON.parse(require("fs").readFileSync("package.json","utf8")).packageManager??"")'
 		if command -v jq >/dev/null 2>&1; then
-			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null)
+			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+		elif command -v bun >/dev/null 2>&1; then
+			PACKAGE_MANAGER_FIELD=$(bun -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+		elif command -v node >/dev/null 2>&1; then
+			PACKAGE_MANAGER_FIELD=$(node -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
 		elif tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
 			PACKAGE_MANAGER_FIELD="bun@detected"
 		else
