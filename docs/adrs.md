@@ -247,11 +247,15 @@ the migration stalled there from 2026-05-17. Phase 1's only reader was the manua
 automated ever consumed the `.json.projected` shadow files. CTL-1628 removed the Phase 1
 shadow-write **scaffolding** as dead weight — the broker's
 `handleWorkerStateChanged`/`getProjectedWorkerStatePath`/`writeProjectedWorkerState`, the dedicated
-`lib/emit-worker-state-changed.sh` emitter, and `orchestrate-shadow-diff` itself. **Phase 2**
-(direct-write cutover) never happened and is now moot — the canonical `workers/<TICKET>.json` files
-are still written exactly as before, by the same seven racing scripts. **Phase 3** — as originally
-scoped, a `(orch_id,ticket)` SQLite mirror — **did ship**, as CTL-532 below; both `projection.mjs:291`
-and `broker-state.mjs:194` label it in-code as `(ADR-018 Phase 3)`.
+`lib/emit-worker-state-changed.sh` emitter, and `orchestrate-shadow-diff` itself. **Phase 2's plan**
+(cut over to broker-sole-writer once Phase 1 reached zero drift) **is dead** — it depended on the
+now-retired Phase 1 drift-check pipeline, so that specific implementation can no longer execute; the
+canonical `workers/<TICKET>.json` files are still written exactly as before, by the same seven
+racing scripts. The *problem* Phase 2 was meant to solve — the seven-script single-writer race — is
+still open, but it is no longer tracked as this ADR's Phase 2: **CTL-1631** now owns it as a
+standalone ticket, replacing the retired Phase-2 plan rather than continuing it. **Phase 3** — as
+originally scoped, a `(orch_id,ticket)` SQLite mirror — **did ship**, as CTL-532 below; both
+`projection.mjs:291` and `broker-state.mjs:194` label it in-code as `(ADR-018 Phase 3)`.
 
 The `worker.state_changed` **event name and wire schema are not gone**, only the dedicated producer
 and shadow-file consumer: `reduceWorkerStateEvent` (below) still treats it as valid input, both (a)
@@ -264,11 +268,15 @@ still emitting it during a mixed-version fleet rollout. The wire schema stays do
 
 **CTL-532 shipped this ADR's Phase 3.** `processEvent` folds every event (not just
 `worker.state_changed`) into `projectWorkerStateEvent` unconditionally, above all routing gates; the
-pure `reduceWorkerStateEvent` reducer normalizes `worker.state_changed`, `orchestrator.worker.*`, and
-`phase.<name>.<status>.<TICKET>` event families into a patch — for the phase family, only
+pure `reduceWorkerStateEvent` reducer normalizes `worker.state_changed`, `phase.<name>.<status>.<TICKET>`,
+and a specific subset of `orchestrator.worker.*` actions into a patch. For the phase family, only
 `status` ∈ `{complete, failed, turn-cap-exhausted}` matches `WORKER_PHASE_EVENT_PATTERN`;
 `phase.<name>.skipped.<TICKET>` (e.g. `phase-monitor-deploy`'s no-deploy-observed outcome) is a real,
-separately-routed event but is **not** in that pattern's alternation, so it is not folded here.
+separately-routed event but is **not** in that pattern's alternation, so it is not folded here. For
+the `orchestrator.worker.*` family it is **not** a wildcard: `revived`, `pr_created`, and
+`status_terminal` are special-cased, and `dispatched`/`done`/`failed`/`launch_failed` map through
+`WORKER_LIFECYCLE_STATUS`; `pr_merged` and `phase_advanced` are real, separately-routed
+`orchestrator.worker.*` events that hit no branch and are silently dropped (`return null`).
 `upsertWorkerState` gates `phase`, `status`, and the `last_event_id`/`last_event_ts` watermark itself
 on an order-independent watermark — an incoming event's `last_event_ts` must be `>=` (not `>`) the
 row's current watermark to apply, so on an exact timestamp tie the later-*processed* event wins, not
@@ -283,10 +291,10 @@ value). The result lands in the broker SQLite `worker_state` table — one row p
 `broker/broker-state.mjs:194-232` and shipped in #936. This was previously undocumented against this
 ADR.
 
-**CTL-532 is observational, not a fix for Phase 2's problem — Phase 2 remains open.**
+**CTL-532 is observational, not a fix for the single-writer-race problem.**
 `upsertWorkerState` only inserts/updates the SQLite `worker_state` row; it never reads or writes the
-canonical `workers/<TICKET>.json` file. The seven-script single-writer race Phase 2 was meant to
-close is therefore **still open** — tracked separately as CTL-1631.
+canonical `workers/<TICKET>.json` file. That problem — originally Phase 2's remit — is CTL-1631's to
+close, not this ADR's.
 
 **No supersession happened.** Phase 2 — the only phase that would have replaced the direct-write
 `workers/<TICKET>.json` design (from ADR-017's signal layout) with a broker-sole-writer path — was
@@ -510,10 +518,15 @@ resolvable stalls consuming attention); leave re-engagement to the inference eng
 workspace-scoped, single-valued `worker-status` Linear label group carrying worker _disposition_
 independently of _pipeline stage_. The live chokepoint is the **inline `recordTransition`** function
 inside `scheduler.mjs`'s `schedulerTick` — not the standalone `recordWorkerTransition` module
-(`record-worker-transition.mjs`) named in this ADR's original design: that module was an extracted,
-unit-tested reference implementation of the same five-sink fan-out contract, but the scheduler's
-live path never called it. CTL-1628 removed it as consumer-free. See "Two-axis worker state & the
-recordWorkerTransition chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
+(`record-worker-transition.mjs`) named in this ADR's original design: that module's own doc comment
+declared only three of the eventual five sinks (Sink 1 Linear workflow status via `applyPhaseStatus`,
+Sink 2 the disposition label via `convergeLabel`, Sink 3 the unified event log via
+`appendWorkerTransitionEvent`) and flagged itself as unfinished — "Phase 5 will wire the production
+defaults... and route all call sites here." That Phase 5 wiring never happened; the scheduler's live
+path never called the module, and OTLP forwarding (sink 4) and the broker `ticket_state_transitions`
+table (sink 5) were added directly to the live inline path, never retrofitted into it. CTL-1628
+removed it as consumer-free. See "Two-axis worker state & the recordWorkerTransition chokepoint
+(CTL-764)" in `docs/architecture.md` for the live mechanism.
 
 **Two orthogonal axes (never blurred):**
 
