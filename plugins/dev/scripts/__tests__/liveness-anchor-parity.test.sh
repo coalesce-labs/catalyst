@@ -52,9 +52,18 @@ expect_eq() {
   fi
 }
 
+# CTL-1612 round 8 (Codex P2 follow-up): the marker MUST start at column 0 —
+# run-tests.sh's aggregate runner recognizes a skipped shell suite via
+# `grep -q '^SKIP:' <<<"$out"` (anchored). A leading-space "  SKIP:" (this
+# suite's own round-6 copy of secret-contract-parity.test.sh/
+# deployment-mode-parity.test.sh's existing pattern — neither is wired into
+# run-tests.sh's SHELL_TEST_DIR discovery today, so neither has hit this yet)
+# never matches that anchor, so the runner would count a skipped run as an
+# unconditional PASS (exit 0, no recognized skip line) — silently reporting
+# coverage that never ran on a node/jq-light checkout.
 if ! command -v node >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 \
    || [[ ! -f "$MONITOR_SH" ]] || [[ ! -f "$JS_CONFIG" ]]; then
-  echo "  SKIP: liveness-anchor-parity (node/jq unavailable or files missing: $MONITOR_SH / $JS_CONFIG)"
+  echo "SKIP: liveness-anchor-parity (node/jq unavailable or files missing: $MONITOR_SH / $JS_CONFIG)"
   echo ""
   echo "Total: 0, Passed: 0, Failed: 0, Skipped: 1"
   exit 0
@@ -85,17 +94,38 @@ import { getLivenessAnchorIssue } from "${JS_CONFIG}";
 process.stdout.write(getLivenessAnchorIssue() ?? "");
 EOF
 
+# _run_node_probe [ENV_VAR=VAL ...] — CTL-1612 round 8 (Codex P2 follow-up).
+# Runs the JS probe with stdout and stderr captured SEPARATELY, printing
+# whatever landed on stderr as a diagnostic (never folded into the compared
+# value) whenever it's non-empty. execution-core/config.mjs's console-shim
+# warning ("pino unavailable ...", printed on import when pino isn't
+# installed — a real, supported, dependency-light checkout state) writes to
+# stderr; a bare `2>&1` on the node invocation used to prepend that warning
+# onto NODE_OUT, so every string-equality assertion failed even though
+# getLivenessAnchorIssue() itself returned the correct value. Sets the
+# caller's NODE_OUT var (by design a plain global here — bash has no clean
+# multi-value return, and every caller is this file's own top-level cells).
+_run_node_probe() {
+  local _err_file
+  _err_file="$(mktemp)"
+  NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" node "$PROBE_JS" 2>"$_err_file")"
+  if [[ -s "$_err_file" ]]; then
+    echo "    node stderr (diagnostic only — NOT part of the compared value): $(cat "$_err_file")"
+  fi
+  rm -f "$_err_file"
+}
+
 # _cell NAME EXPECTED [ENV_VAR=VAL ...] — runs BOTH implementations under
 # identical env -i fixtures and asserts bash==expected AND node==expected.
 _cell() {
   local _name="$1" _expected="$2"
   shift 2
-  local BASH_OUT NODE_OUT
+  local BASH_OUT
   BASH_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" bash -c "
     source '$BASH_FN_PROBE'
     resolve_liveness_anchor_issue
   ")"
-  NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" node "$PROBE_JS" 2>&1)"
+  _run_node_probe "$@"
   expect_eq "$_name (bash==expected)" "$_expected" "$BASH_OUT"
   expect_eq "$_name (node==expected)" "$_expected" "$NODE_OUT"
 }
@@ -133,13 +163,13 @@ done
 _cell_nojq() {
   local _name="$1" _expected="$2"
   shift 2
-  local BASH_OUT NODE_OUT
+  local BASH_OUT
   BASH_OUT="$(env -i PATH="$NOJQ_BIN" HOME="$SANDBOX_HOME" "$@" bash -c "
     command -v jq >/dev/null 2>&1 && echo 'FATAL: jq unexpectedly reachable in the jq-less fixture' >&2 && exit 1
     source '$BASH_FN_PROBE'
     resolve_liveness_anchor_issue
   ")"
-  NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" node "$PROBE_JS" 2>&1)"
+  _run_node_probe "$@"
   expect_eq "$_name (bash-without-jq==expected)" "$_expected" "$BASH_OUT"
   expect_eq "$_name (node==expected)" "$_expected" "$NODE_OUT"
 }
