@@ -293,89 +293,111 @@ echo '{"access_token":"fake-r6-fresh-mint-token"}'
 CURLSTUB
 chmod +x "${STUB_BIN}/curl-success"
 
-ln -sf "${STUB_BIN}/curl-fail" "${STUB_BIN}/curl"
-OUT_FAIL_FALLBACK="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
-	LINEAR_API_TOKEN="lin_oauth_fake_inherited_for_fallback" \
-	bash -c '
-		set -uo pipefail
-		source "'"$LIB"'"
-		linear_app_actor_auth "test-daemon" SCOPED_TARGET
-		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
-		echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
-	' 2>&1)"
-if echo "$OUT_FAIL_FALLBACK" | grep -qxF "SCOPED_TARGET=[lin_oauth_fake_inherited_for_fallback]"; then
-	pass "mint-fails + inherited-bot-token: SCOPED_TARGET seeded from the inherited token"
-else
-	fail "mint-fails + inherited-bot-token: SCOPED_TARGET not seeded; output: $OUT_FAIL_FALLBACK"
-fi
-if echo "$OUT_FAIL_FALLBACK" | grep -q "reusing the inherited app-actor token"; then
-	pass "mint-fails + inherited-bot-token: logs the reuse"
-else
-	fail "mint-fails + inherited-bot-token: did not log the reuse; output: $OUT_FAIL_FALLBACK"
-fi
-if echo "$OUT_FAIL_FALLBACK" | grep -qxF "SCOPED_TARGET_SOURCE=[inherited]"; then
-	pass "mint-fails + inherited-bot-token: SCOPED_TARGET_SOURCE=inherited (CTL-1612 round 7)"
-else
-	fail "mint-fails + inherited-bot-token: SCOPED_TARGET_SOURCE not marked inherited; output: $OUT_FAIL_FALLBACK"
-fi
-rm -f "${STUB_BIN}/curl"
+# CTL-1612 round 15 (Codex P2 follow-up): these three scenarios drive
+# linear_app_actor_auth against the REAL (unstubbed) catalyst_resolve_secret
+# with a REAL $FAKE_L2 file — unlike the "Tiered jq-less JSON parsing"
+# scenarios further below, which deliberately STUB catalyst_resolve_secret to
+# isolate linear-app-actor.sh's OWN round-9 tiered parsing from that
+# function's separate jq dependency (see the header comment above that
+# section). catalyst_resolve_secret's Layer-2 reader (lib/catalyst-secret-
+# contract.sh) requires jq specifically — round 9's mint-chain tiering never
+# touched it (documented out-of-scope boundary) — so on a host with bun or
+# node but no jq, the suite-level guard above passes (a parser exists) yet
+# these three cases still can't resolve $FAKE_L2's clientId/clientSecret.
+# Codex reproduced this concretely: exit 1 with 28 pass / 4 failures — the
+# successful-mint fixture can't resolve creds, and the failed-mint fixture
+# never reaches the warning path it expects. Case-level (not suite-level)
+# SKIP: everything else in this file (the clear-inherited cases above, which
+# never touch catalyst_resolve_secret because $ABSENT_LAYER2 short-circuits
+# it before any parsing, and the tiered-parsing cases below, which stub it
+# out) must keep running even when jq is absent.
+if command -v jq >/dev/null 2>&1; then
+	ln -sf "${STUB_BIN}/curl-fail" "${STUB_BIN}/curl"
+	OUT_FAIL_FALLBACK="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
+		LINEAR_API_TOKEN="lin_oauth_fake_inherited_for_fallback" \
+		bash -c '
+			set -uo pipefail
+			source "'"$LIB"'"
+			linear_app_actor_auth "test-daemon" SCOPED_TARGET
+			echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+			echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
+		' 2>&1)"
+	if echo "$OUT_FAIL_FALLBACK" | grep -qxF "SCOPED_TARGET=[lin_oauth_fake_inherited_for_fallback]"; then
+		pass "mint-fails + inherited-bot-token: SCOPED_TARGET seeded from the inherited token"
+	else
+		fail "mint-fails + inherited-bot-token: SCOPED_TARGET not seeded; output: $OUT_FAIL_FALLBACK"
+	fi
+	if echo "$OUT_FAIL_FALLBACK" | grep -q "reusing the inherited app-actor token"; then
+		pass "mint-fails + inherited-bot-token: logs the reuse"
+	else
+		fail "mint-fails + inherited-bot-token: did not log the reuse; output: $OUT_FAIL_FALLBACK"
+	fi
+	if echo "$OUT_FAIL_FALLBACK" | grep -qxF "SCOPED_TARGET_SOURCE=[inherited]"; then
+		pass "mint-fails + inherited-bot-token: SCOPED_TARGET_SOURCE=inherited (CTL-1612 round 7)"
+	else
+		fail "mint-fails + inherited-bot-token: SCOPED_TARGET_SOURCE not marked inherited; output: $OUT_FAIL_FALLBACK"
+	fi
+	rm -f "${STUB_BIN}/curl"
 
-echo ""
-echo "inherited-token fallback: mint SUCCEEDS + inherited bot token present → fresh token wins"
-ln -sf "${STUB_BIN}/curl-success" "${STUB_BIN}/curl"
-OUT_SUCCESS_WINS="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
-	LINEAR_API_TOKEN="lin_oauth_fake_inherited_should_be_replaced" \
-	bash -c '
-		set -uo pipefail
-		source "'"$LIB"'"
-		linear_app_actor_auth "test-daemon" SCOPED_TARGET
-		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
-		echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
-	' 2>&1)"
-if echo "$OUT_SUCCESS_WINS" | grep -qxF "SCOPED_TARGET=[fake-r6-fresh-mint-token]"; then
-	pass "mint-succeeds: fresh token wins over the inherited fallback"
-else
-	fail "mint-succeeds: fresh token did not win; output: $OUT_SUCCESS_WINS"
-fi
-if echo "$OUT_SUCCESS_WINS" | grep -q "reusing the inherited app-actor token"; then
-	fail "mint-succeeds: incorrectly logged a fallback reuse; output: $OUT_SUCCESS_WINS"
-else
-	pass "mint-succeeds: no fallback-reuse log line"
-fi
-if echo "$OUT_SUCCESS_WINS" | grep -qxF "SCOPED_TARGET_SOURCE=[minted]"; then
-	pass "mint-succeeds: SCOPED_TARGET_SOURCE=minted (CTL-1612 round 7) — not left at 'inherited' from the pre-set env value"
-else
-	fail "mint-succeeds: SCOPED_TARGET_SOURCE not marked minted; output: $OUT_SUCCESS_WINS"
-fi
-rm -f "${STUB_BIN}/curl"
+	echo ""
+	echo "inherited-token fallback: mint SUCCEEDS + inherited bot token present → fresh token wins"
+	ln -sf "${STUB_BIN}/curl-success" "${STUB_BIN}/curl"
+	OUT_SUCCESS_WINS="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
+		LINEAR_API_TOKEN="lin_oauth_fake_inherited_should_be_replaced" \
+		bash -c '
+			set -uo pipefail
+			source "'"$LIB"'"
+			linear_app_actor_auth "test-daemon" SCOPED_TARGET
+			echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+			echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
+		' 2>&1)"
+	if echo "$OUT_SUCCESS_WINS" | grep -qxF "SCOPED_TARGET=[fake-r6-fresh-mint-token]"; then
+		pass "mint-succeeds: fresh token wins over the inherited fallback"
+	else
+		fail "mint-succeeds: fresh token did not win; output: $OUT_SUCCESS_WINS"
+	fi
+	if echo "$OUT_SUCCESS_WINS" | grep -q "reusing the inherited app-actor token"; then
+		fail "mint-succeeds: incorrectly logged a fallback reuse; output: $OUT_SUCCESS_WINS"
+	else
+		pass "mint-succeeds: no fallback-reuse log line"
+	fi
+	if echo "$OUT_SUCCESS_WINS" | grep -qxF "SCOPED_TARGET_SOURCE=[minted]"; then
+		pass "mint-succeeds: SCOPED_TARGET_SOURCE=minted (CTL-1612 round 7) — not left at 'inherited' from the pre-set env value"
+	else
+		fail "mint-succeeds: SCOPED_TARGET_SOURCE not marked minted; output: $OUT_SUCCESS_WINS"
+	fi
+	rm -f "${STUB_BIN}/curl"
 
-echo ""
-echo "inherited-token fallback: mint FAILS + NO inherited token → scoped var stays unset"
-ln -sf "${STUB_BIN}/curl-fail" "${STUB_BIN}/curl"
-OUT_FAIL_NOFALLBACK="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
-	bash -c '
-		set -uo pipefail
-		source "'"$LIB"'"
-		linear_app_actor_auth "test-daemon" SCOPED_TARGET
-		echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
-		echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
-	' 2>&1)"
-if echo "$OUT_FAIL_NOFALLBACK" | grep -qxF "SCOPED_TARGET=[]"; then
-	pass "mint-fails + no-inherited-token: SCOPED_TARGET stays unset"
+	echo ""
+	echo "inherited-token fallback: mint FAILS + NO inherited token → scoped var stays unset"
+	ln -sf "${STUB_BIN}/curl-fail" "${STUB_BIN}/curl"
+	OUT_FAIL_NOFALLBACK="$(env -i HOME="$HOME" PATH="${STUB_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2" \
+		bash -c '
+			set -uo pipefail
+			source "'"$LIB"'"
+			linear_app_actor_auth "test-daemon" SCOPED_TARGET
+			echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+			echo "SCOPED_TARGET_SOURCE=[${SCOPED_TARGET_SOURCE:-}]"
+		' 2>&1)"
+	if echo "$OUT_FAIL_NOFALLBACK" | grep -qxF "SCOPED_TARGET=[]"; then
+		pass "mint-fails + no-inherited-token: SCOPED_TARGET stays unset"
+	else
+		fail "mint-fails + no-inherited-token: SCOPED_TARGET unexpectedly set; output: $OUT_FAIL_NOFALLBACK"
+	fi
+	if echo "$OUT_FAIL_NOFALLBACK" | grep -q "WARNING orchestrator token mint failed"; then
+		pass "mint-fails + no-inherited-token: logs the existing WARNING (unchanged)"
+	else
+		fail "mint-fails + no-inherited-token: did not log the WARNING; output: $OUT_FAIL_NOFALLBACK"
+	fi
+	if echo "$OUT_FAIL_NOFALLBACK" | grep -qxF "SCOPED_TARGET_SOURCE=[]"; then
+		pass "mint-fails + no-inherited-token: SCOPED_TARGET_SOURCE stays unset too (CTL-1612 round 7 — no token, no provenance to report)"
+	else
+		fail "mint-fails + no-inherited-token: SCOPED_TARGET_SOURCE unexpectedly set; output: $OUT_FAIL_NOFALLBACK"
+	fi
+	rm -f "${STUB_BIN}/curl"
 else
-	fail "mint-fails + no-inherited-token: SCOPED_TARGET unexpectedly set; output: $OUT_FAIL_NOFALLBACK"
+	echo "  SKIP: inherited-token fallback mint-path cases (jq required — catalyst_resolve_secret's Layer-2 reader has its own jq dependency, CTL-1612 round 9 documented scope boundary; a JSON parser existing for the suite-level guard above is not enough)"
 fi
-if echo "$OUT_FAIL_NOFALLBACK" | grep -q "WARNING orchestrator token mint failed"; then
-	pass "mint-fails + no-inherited-token: logs the existing WARNING (unchanged)"
-else
-	fail "mint-fails + no-inherited-token: did not log the WARNING; output: $OUT_FAIL_NOFALLBACK"
-fi
-if echo "$OUT_FAIL_NOFALLBACK" | grep -qxF "SCOPED_TARGET_SOURCE=[]"; then
-	pass "mint-fails + no-inherited-token: SCOPED_TARGET_SOURCE stays unset too (CTL-1612 round 7 — no token, no provenance to report)"
-else
-	fail "mint-fails + no-inherited-token: SCOPED_TARGET_SOURCE unexpectedly set; output: $OUT_FAIL_NOFALLBACK"
-fi
-rm -f "${STUB_BIN}/curl"
 
 # ─── Tiered jq-less JSON parsing in the mint chain (CTL-1612 round 9) ──────
 # linear-app-actor.sh's OWN field-parsing (clientId/clientSecret/access_token

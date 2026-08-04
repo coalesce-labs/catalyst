@@ -56,6 +56,21 @@ LIB_SHELL_TEST_DIR="${LIB_SHELL_TEST_DIR:-${SCRIPT_DIR}/lib/__tests__}"
 # "only skip when a wrapper is actually present under the ACTIVE
 # SHELL_TEST_DIR this run" semantics for free, since the set is derived from
 # that same active directory.
+#
+# CTL-1612 round 15 (Codex P2 follow-up): the round-13 grep matched the
+# lib/__tests__ reference ANYWHERE in a file's text — a comment, a doc
+# string, or (concretely reproduced) __tests__/run-tests.test.sh's own
+# fixture-building `echo '... lib/__tests__/brand-new-lib-suite.test.sh"'`
+# line, which merely BUILDS a string for a generated fixture and never
+# executes anything. Any file merely mentioning a basename got treated as a
+# real wrapper for it, so a genuine future lib suite of that basename would
+# be silently skipped forever (0 tests run, reported PASS) even with no
+# wrapper actually executing it. Fix: only count a reference on a line that
+# is itself a real invocation — anchored to a line whose first token
+# (after optional leading whitespace) is `bash` or `exec bash`, matching
+# every real wrapper's exact shape (`exec bash ".../lib/__tests__/<name>"`)
+# and excluding comments (start with `#`) and fixture-building `echo`/
+# `printf` lines (start with `echo`/`printf`, not `bash`/`exec`).
 LIB_WRAPPED_BASENAMES=""
 if [[ -d $SHELL_TEST_DIR ]]; then
 	for _wrapper_file in "$SHELL_TEST_DIR"/*.test.sh; do
@@ -63,7 +78,8 @@ if [[ -d $SHELL_TEST_DIR ]]; then
 		while IFS= read -r _wrapped_basename; do
 			[[ -n $_wrapped_basename ]] || continue
 			LIB_WRAPPED_BASENAMES="${LIB_WRAPPED_BASENAMES}${_wrapped_basename}"$'\n'
-		done < <(grep -oE 'lib/__tests__/[A-Za-z0-9._-]+\.test\.sh"' "$_wrapper_file" 2>/dev/null |
+		done < <(grep -nE '^[[:space:]]*(exec[[:space:]]+)?bash[[:space:]].*lib/__tests__/[A-Za-z0-9._-]+\.test\.sh"' "$_wrapper_file" 2>/dev/null |
+			grep -oE 'lib/__tests__/[A-Za-z0-9._-]+\.test\.sh"' |
 			sed -E 's#^lib/__tests__/(.+)"$#\1#')
 	done
 fi

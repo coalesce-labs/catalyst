@@ -105,14 +105,38 @@ EOF
 # getLivenessAnchorIssue() itself returned the correct value. Sets the
 # caller's NODE_OUT var (by design a plain global here — bash has no clean
 # multi-value return, and every caller is this file's own top-level cells).
+#
+# CTL-1612 round 15 (Codex P2 follow-up): also captures the probe's exit
+# status into the caller's NODE_RC global. Command substitution only
+# captures stdout — a probe that crashes BEFORE writing output (getter
+# throws, import fails) produced an empty NODE_OUT with the shell's `$?`
+# from the substitution silently discarded, so an expected-empty fixture
+# (malformed/missing/non-string/empty-field cases) passed vacuously even
+# though the canonical getter never actually ran to completion. Callers must
+# check NODE_RC before trusting NODE_OUT as a legitimate "resolved empty".
 _run_node_probe() {
   local _err_file
   _err_file="$(mktemp)"
   NODE_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" node "$PROBE_JS" 2>"$_err_file")"
+  NODE_RC=$?
   if [[ -s "$_err_file" ]]; then
     echo "    node stderr (diagnostic only — NOT part of the compared value): $(cat "$_err_file")"
   fi
   rm -f "$_err_file"
+}
+
+# _expect_node_eq NAME EXPECTED — CTL-1612 round 15 (Codex P2 follow-up):
+# shared by _cell and _cell_nojq so the NODE_RC check lives in exactly one
+# place. A nonzero NODE_RC fails the cell outright (crash ≠ legitimately
+# empty) regardless of what NODE_OUT happens to contain; only a clean exit
+# is compared against the expected value.
+_expect_node_eq() {
+  local _name="$1" _expected="$2"
+  if [[ "$NODE_RC" -ne 0 ]]; then
+    fail "$_name (node==expected)" "node probe exited $NODE_RC (crash) instead of 0 — NODE_OUT='$NODE_OUT' cannot be trusted as a legitimate empty result"
+  else
+    expect_eq "$_name (node==expected)" "$_expected" "$NODE_OUT"
+  fi
 }
 
 # _cell NAME EXPECTED [ENV_VAR=VAL ...] — runs BOTH implementations under
@@ -127,7 +151,7 @@ _cell() {
   ")"
   _run_node_probe "$@"
   expect_eq "$_name (bash==expected)" "$_expected" "$BASH_OUT"
-  expect_eq "$_name (node==expected)" "$_expected" "$NODE_OUT"
+  _expect_node_eq "$_name" "$_expected"
 }
 
 L2_DIR="${TMP_DIR}/l2cfg"
@@ -171,7 +195,7 @@ _cell_nojq() {
   ")"
   _run_node_probe "$@"
   expect_eq "$_name (bash-without-jq==expected)" "$_expected" "$BASH_OUT"
-  expect_eq "$_name (node==expected)" "$_expected" "$NODE_OUT"
+  _expect_node_eq "$_name" "$_expected"
 }
 
 # ─── env wins over Layer-2 ────────────────────────────────────────────────
@@ -242,6 +266,42 @@ printf '%s' '{"catalyst":{"cluster":{"livenessAnchorIssue":"CTL-FROM-L2-NOJQ"}}}
 _cell_nojq "jq-less: env still wins over Layer-2 (the fallback rung is never even reached)" \
   "CTL-FROM-ENV-NOJQ" \
   "CATALYST_LIVENESS_ANCHOR_ISSUE=CTL-FROM-ENV-NOJQ" "CATALYST_LAYER2_CONFIG_FILE=${L2_FILE}"
+
+
+# ── Crash-detection self-test (CTL-1612 round 15, Codex P2 follow-up) ──────
+# Proves _expect_node_eq actually fails a cell when the node probe crashes,
+# rather than silently passing the way the pre-fix version did — Codex
+# reproduced a fixture-specific throwing getter still yielding
+# "28 passed, 0 failed" and exit 0, because an expected-empty fixture's ""
+# happened to match the crash's coincidentally-empty NODE_OUT with the
+# nonzero exit status discarded. Points PROBE_JS at a script that throws
+# BEFORE writing any stdout (exactly the "exits nonzero before writing
+# output" scenario the finding describes) and asserts the resulting FAIL is
+# actually recorded. Runs in a saved/restored counter scope so this
+# self-test's INTENTIONAL failure doesn't leak into (or get masked by) the
+# suite's own pass/fail totals below — the self-test's own outcome is what
+# gets folded back in.
+echo ""
+echo "Crash-detection self-test: a throwing node probe must FAIL the cell, not pass vacuously"
+CRASH_PROBE_JS="${TMP_DIR}/probe-anchor-crash.mjs"
+cat > "$CRASH_PROBE_JS" <<'EOF'
+throw new Error("simulated getLivenessAnchorIssue crash — probe never reaches stdout.write");
+EOF
+_SAVED_FAILURES=$FAILURES
+_SAVED_PASSES=$PASSES
+_REAL_PROBE_JS="$PROBE_JS"
+PROBE_JS="$CRASH_PROBE_JS"
+_run_node_probe
+_expect_node_eq "crash-detection self-test" ""
+PROBE_JS="$_REAL_PROBE_JS"
+if [[ "$FAILURES" -eq $((_SAVED_FAILURES + 1)) && "$PASSES" -eq $_SAVED_PASSES ]]; then
+  FAILURES=$_SAVED_FAILURES
+  PASSES=$((_SAVED_PASSES + 1))
+  echo "  PASS: crash-detection self-test (throwing probe correctly counted as a FAIL, not a vacuous pass)"
+else
+  FAILURES=$((_SAVED_FAILURES + 1))
+  echo "  FAIL: crash-detection self-test — expected exactly 1 new failure and 0 new passes from the throwing probe, got +$((FAILURES - _SAVED_FAILURES)) failures / +$((PASSES - _SAVED_PASSES)) passes"
+fi
 
 echo ""
 echo "────────────────────────────────────────"
