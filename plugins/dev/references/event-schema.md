@@ -549,18 +549,23 @@ emitting it during a mixed-version fleet rollout.
   "observedTs": "2026-05-17T18:00:00.001Z",
   "severityText": "INFO",
   "severityNumber": 9,
+  "traceId": "922348e23aa9b22524e048006709a6a1",
+  "spanId": "1a0513b3232a6043",
   "resource": {
     "service.name": "catalyst.orchestrator",
     "service.namespace": "catalyst",
+    "service.version": "9.3.0",
     "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "worker.state_changed",
     "event.entity": "worker",
     "event.action": "state_changed",
+    "event.label": "worker CTL-483 state changed by orchestrate-auto-rebase",
     "catalyst.orchestrator.id": "o-ctl-483",
     "catalyst.worker.ticket": "CTL-483",
-    "catalyst.writer": "orchestrate-auto-rebase"
+    "catalyst.writer": "orchestrate-auto-rebase",
+    "catalyst.session.id": "sess_..."
   },
   "body": {
     "message": "worker CTL-483 state changed by orchestrate-auto-rebase",

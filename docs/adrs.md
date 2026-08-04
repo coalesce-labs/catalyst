@@ -264,11 +264,14 @@ the Phase 1 shadow-write mechanism and not gated on migrating the seven writers.
 folds every event (not just `worker.state_changed`) into `projectWorkerStateEvent` unconditionally,
 above all routing gates; the pure `reduceWorkerStateEvent` reducer normalizes `phase.*`,
 `worker.state_changed`, and `orchestrator.worker.*` event families into a patch, and
-`upsertWorkerState` applies it with an order-independent watermark gate. The result lands in the
-broker SQLite `worker_state` table — one row per `(orchestrator, ticket)` holding
-phase/status/PR-number/revive-count — plus `worker_revive_events` (idempotency ledger) and
-`projection_meta` (single-row watermark), all defined in `broker/broker-state.mjs:194-232` and
-shipped in #936. This was previously undocumented against this ADR.
+`upsertWorkerState` applies it with an order-independent watermark gate — an incoming event's
+`last_event_ts` must be `>=` (not `>`) the row's current watermark to apply, so on an exact
+timestamp tie the later-*processed* event wins, not the later-*occurring* one (pinned by
+`worker-state-projection.test.mjs:1140-1163`). The result lands in the broker SQLite `worker_state`
+table — one row per `(orchestrator, ticket)` holding phase/status/PR-number/revive-count — plus
+`worker_revive_events` (idempotency ledger) and `projection_meta` (single-row watermark), all
+defined in `broker/broker-state.mjs:194-232` and shipped in #936. This was previously undocumented
+against this ADR.
 
 **CTL-532 is observational, not a fix for this ADR's original problem.** `upsertWorkerState` only
 inserts/updates the SQLite `worker_state` row; it never reads or writes the canonical
