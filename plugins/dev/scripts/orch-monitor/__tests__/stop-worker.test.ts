@@ -335,10 +335,10 @@ describe("runFenceCheck — single-host no-op vs multi-host CLI", () => {
   });
 });
 
-describe("readClusterHostCount — single-host default", () => {
-  it("an absent / unreadable hosts.json → single-host default of 1", () => {
+describe("readClusterHostCount — single-host default (reads the cluster-repo cluster.json, never hosts.json)", () => {
+  it("an absent / unreadable cluster.json → single-host default of 1", () => {
     const out = readClusterHostCount({
-      env: {},
+      env: { CATALYST_CLUSTER_DIR: "/no/such/cluster-repo" },
       read: () => {
         throw new Error("ENOENT");
       },
@@ -348,16 +348,16 @@ describe("readClusterHostCount — single-host default", () => {
 
   it("a roster of one → 1", () => {
     const out = readClusterHostCount({
-      env: { CATALYST_CONFIG_FILE: "/repo/.catalyst/config.json" },
-      read: () => JSON.stringify(["mini"]),
+      env: { CATALYST_CLUSTER_DIR: "/cluster" },
+      read: () => JSON.stringify({ schemaVersion: 1, roster: ["mini"] }),
     });
     expect(out).toBe(1);
   });
 
   it("a roster of three → 3", () => {
     const out = readClusterHostCount({
-      env: { CATALYST_CONFIG_FILE: "/repo/.catalyst/config.json" },
-      read: () => JSON.stringify(["mini", "mac-studio", "laptop"]),
+      env: { CATALYST_CLUSTER_DIR: "/cluster" },
+      read: () => JSON.stringify({ schemaVersion: 1, roster: ["mini", "mac-studio", "laptop"] }),
     });
     expect(out).toBe(3);
   });
@@ -367,15 +367,42 @@ describe("readClusterHostCount — single-host default", () => {
       readClusterHostCount({ env: {}, read: () => "not json" }),
     ).toBe(1);
     expect(
-      readClusterHostCount({ env: {}, read: () => JSON.stringify({ not: "an array" }) }),
+      readClusterHostCount({
+        env: {},
+        read: () => JSON.stringify({ schemaVersion: 1, roster: "not-an-array" }),
+      }),
     ).toBe(1);
     expect(
-      readClusterHostCount({ env: {}, read: () => JSON.stringify([]) }),
+      readClusterHostCount({ env: {}, read: () => JSON.stringify({ schemaVersion: 1, roster: [] }) }),
     ).toBe(1);
-    // an array of empties is filtered to zero valid hosts → 1
+    // an array of empties/non-strings is filtered to zero valid hosts → 1
     expect(
-      readClusterHostCount({ env: {}, read: () => JSON.stringify(["", null, 7]) }),
+      readClusterHostCount({
+        env: {},
+        read: () => JSON.stringify({ schemaVersion: 1, roster: ["", null, 7] }),
+      }),
     ).toBe(1);
+  });
+
+  it("a too-new schemaVersion is ignored (fail-safe, not trusted) → single-host default of 1", () => {
+    const out = readClusterHostCount({
+      env: { CATALYST_CLUSTER_DIR: "/cluster" },
+      read: () => JSON.stringify({ schemaVersion: 999, roster: ["mini", "mac-studio"] }),
+    });
+    expect(out).toBe(1);
+  });
+
+  it("cluster-repo roster wins even when a stray hosts.json is present alongside it (CTL-1274/CTL-1628: hosts.json is never read)", () => {
+    const out = readClusterHostCount({
+      env: { CATALYST_CLUSTER_DIR: "/cluster" },
+      read: (path: string) => {
+        if (path.endsWith("hosts.json")) {
+          return JSON.stringify(["legacy-should-never-be-read"]);
+        }
+        return JSON.stringify({ schemaVersion: 1, roster: ["mini", "mac-studio"] });
+      },
+    });
+    expect(out).toBe(2);
   });
 });
 
