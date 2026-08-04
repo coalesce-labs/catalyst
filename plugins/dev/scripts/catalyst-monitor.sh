@@ -173,6 +173,18 @@ resolve_liveness_anchor_issue() {
     # number as text instead of treating it as absent — bash would resolve an
     # anchor the JS side never would, diverging on a hostile/malformed config.
     jq -r '(.catalyst.cluster.livenessAnchorIssue | select(type=="string")) // empty' "$_l2_path" 2>/dev/null
+    # CTL-1612 post-merge #2978 (Codex P2 follow-up): explicit, unconditional
+    # `return 0` — this function's contract everywhere else is "never surface
+    # an internal failure as our own; a resolution miss is always a clean
+    # empty" (see the two `return 0`s above: env-unset, file-absent). jq
+    # itself exits NONZERO on malformed/invalid JSON input, and this branch
+    # used to let that raw jq exit code silently become the FUNCTION's own
+    # exit status — the parity test's canonical JS side never has this gap
+    # (getLivenessAnchorIssue wraps its JSON.parse in try/catch and always
+    # returns cleanly; see execution-core/config.mjs), so a malformed Layer-2
+    # config made bash and node agree on OUTPUT (both empty) while disagreeing
+    # on STATUS (bash nonzero, node 0) — a real robustness gap this closes.
+    return 0
   else
     # CTL-1612 round 7 (Codex P2 follow-up): jq is neither a required nor
     # optional repo dependency and bootstrap does not enforce it (a
@@ -194,6 +206,15 @@ resolve_liveness_anchor_issue() {
     grep -oE '"livenessAnchorIssue"[[:space:]]*:[[:space:]]*"[^"]*"' "$_l2_path" 2>/dev/null \
       | head -1 \
       | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/'
+    # CTL-1612 post-merge #2978 (Codex P2 follow-up): same unconditional
+    # `return 0` as the jq branch above, for a SECOND (broader) reason on
+    # this branch specifically: the script runs under `set -o pipefail`
+    # (line 11), so a NO-MATCH `grep` (the ordinary, legitimate "field not
+    # present" or "no anchor configured" case — not an error) makes the
+    # WHOLE pipeline exit 1, even though `head`/`sed` on that empty input
+    # exit 0. Without this, most jq-less "resolves to empty" cells — not
+    # just malformed input — would report a spurious nonzero status.
+    return 0
   fi
 }
 

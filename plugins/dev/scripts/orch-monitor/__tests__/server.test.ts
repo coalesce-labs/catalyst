@@ -2171,3 +2171,57 @@ describe("publicDir resolution", () => {
     }
   });
 });
+
+// CTL-1612 post-merge #2978 (Codex P2 follow-up): server.stop() sets the
+// `stopped` lifecycle flag (see its comment above daemonDepsPromise in
+// server.ts) SYNCHRONOUSLY, before any other cleanup step — this is what the
+// fire-and-forget remint guard (readAnchor) and the mint-result guard
+// (applyToken) both check before acting, closing the "stop before deps
+// resolve → post-stop OAuth request / process.env mutation" gap Codex
+// reported. This suite creates its own server (no clusterReader — this
+// package's real, un-mocked loadDaemonDeps()/anchor-poll prime path, same as
+// every other describe block above except cluster-signal-endpoints.test.ts)
+// to observe the __stopped debug seam (CTL-1224 convention) directly.
+//
+// Scope note: this asserts the FLAG's lifecycle (unset → true, synchronously,
+// exactly once stop() runs) — the property server.stop() itself owns and
+// this PR adds. It does NOT drive a live remint attempt through
+// readAnchor/applyToken end-to-end: doing so needs a real
+// CATALYST_LIVENESS_ANCHOR_ISSUE, which test-setup.mjs deliberately clears
+// (round 11) specifically so this hermetic suite never reaches readAnchor's
+// downstream readPeerHeartbeatsSync — a real spawn/network call with no
+// built-in test seam to fake safely. The readAnchor/applyToken guards
+// themselves are the two lines added alongside `stopped` in server.ts and
+// are covered by direct code inspection + this flag test, not a live mint.
+describe("server.stop() lifecycle flag (CTL-1612 post-merge #2978)", () => {
+  it("stopped starts false, flips true synchronously on stop(), and stays true", async () => {
+    const stopTmp = mkdtempSync(join(tmpdir(), "orch-monitor-stopflag-"));
+    const stopWt = join(stopTmp, "wt");
+    mkdirSync(stopWt, { recursive: true });
+    const stopServer = createServer({
+      port: 0,
+      wtDir: stopWt,
+      startWatcher: false,
+      annotationsDbPath: join(stopTmp, "annotations.db"),
+    });
+    try {
+      const dbg = stopServer as unknown as { __stopped?: () => boolean };
+      expect(typeof dbg.__stopped).toBe("function");
+      expect(dbg.__stopped!()).toBe(false);
+
+      void stopServer.stop(true);
+      // No await, no setTimeout: stop() sets `stopped = true` as its FIRST
+      // statement (before unsubscribers, watcher/DB teardown, etc.), so this
+      // must already be true on the very next synchronous read — proving the
+      // flag isn't racing any of that other cleanup.
+      expect(dbg.__stopped!()).toBe(true);
+
+      // Idempotent: a second stop() (bun's own server.stop tolerates
+      // double-close) leaves it true, never resets to false.
+      void stopServer.stop(true);
+      expect(dbg.__stopped!()).toBe(true);
+    } finally {
+      rmSync(stopTmp, { recursive: true, force: true });
+    }
+  });
+});

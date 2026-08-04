@@ -1424,6 +1424,26 @@ export function createServer(opts: CreateServerOptions): BunServer {
     effectiveCapacity: number;
     activeWorkers: number;
   };
+  // CTL-1612 post-merge #2978 (Codex P2 follow-up): server.stop() clears
+  // anchorPollTimer (stops FUTURE ticks) but does nothing about work already
+  // in flight when it's called — the `loadDaemonDeps().then(...)` prime
+  // below (which calls pollAnchorHeartbeats() directly, independent of the
+  // timer, once deps resolve) can still fire after stop() if deps hadn't
+  // resolved yet, and an in-flight `monitorAppActorReminter.attempt()` can
+  // still resolve and mutate `process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN`
+  // after the server has shut down — a real OAuth request outliving the
+  // server instance, observable by anything (tests, or an embedding app)
+  // that keeps the Bun process alive after closing this server. `stopped`
+  // is set synchronously at the top of server.stop (see its definition
+  // below) and checked at the two points that matter: before the
+  // fire-and-forget remint is even attempted (readAnchor, in
+  // pollAnchorHeartbeats below) and before a mint RESULT is applied
+  // (applyToken, in loadDaemonDeps below) — an attempt already past that
+  // checkpoint when stop() fires still completes its network round-trip
+  // (this is a lifecycle guard against post-stop SIDE EFFECTS, not
+  // cancellation of in-flight I/O), but its result is discarded rather than
+  // written to process.env or acted on.
+  let stopped = false;
   let daemonDepsPromise: Promise<{
     readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
     readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
@@ -1566,7 +1586,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // now also exports alongside the token.
           const monitorAppActorReminter = linearRemint.createAsyncReminter({
             readCreds: linearRemint.readOrchestratorCreds,
+            // CTL-1612 post-merge #2978 (Codex P2 follow-up): an attempt() in
+            // flight when server.stop() fires still runs to completion (see
+            // the `stopped` comment above daemonDepsPromise) — this guard is
+            // what makes that harmless: a mint that resolves post-stop is
+            // discarded here instead of writing a fresh token into
+            // process.env for a server instance that no longer exists.
             applyToken: (token: string) => {
+              if (stopped) return;
               process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN = token;
             },
             cooldownMs: parsePositiveFiniteDurationMs(
@@ -1903,7 +1930,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // gate (skips the mint entirely under CATALYST_LIVENESS_READ_SOURCE=loki)
         // since that is where the real network call would otherwise happen.
         readAnchor: (args: { anchorIssue: string }) => {
-          void execCoreDeps?.remintAppActorToken();
+          // CTL-1612 post-merge #2978 (Codex P2 follow-up): don't even START
+          // a remint attempt once stopped — see the `stopped` comment above
+          // daemonDepsPromise. This closure can still run post-stop via the
+          // loadDaemonDeps().then(...) prime firing after deps resolve late
+          // (anchorPollTimer being cleared only stops the interval, not that
+          // one already-scheduled continuation).
+          if (!stopped) void execCoreDeps?.remintAppActorToken();
           const scoped = process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN?.trim();
           const anchorEnv = scoped
             ? { ...process.env, LINEAR_API_TOKEN: scoped, LINEAR_API_KEY: scoped }
@@ -5498,6 +5531,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const originalStop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
+    // CTL-1612 post-merge #2978 (Codex P2 follow-up): set FIRST, synchronously,
+    // before any other cleanup — see the `stopped` comment above
+    // daemonDepsPromise for what this guards (the fire-and-forget remint in
+    // readAnchor, and applyToken's process.env write).
+    stopped = true;
     for (const u of unsubscribers) u();
     watcher?.stop();
     boardSnapshot.stop();
@@ -5540,6 +5578,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
     () => eventRing.listenerCount();
   (server as unknown as { __sseClientCount?: () => number }).__sseClientCount =
     () => sseClients.size;
+  // CTL-1612 post-merge #2978 (Codex P2 follow-up): same CTL-1224 debug-seam
+  // convention — exposes the `stopped` lifecycle flag (see its comment above
+  // daemonDepsPromise) so a test can assert it flips synchronously, before
+  // any other stop() cleanup runs. The UI never reads this.
+  (server as unknown as { __stopped?: () => boolean }).__stopped = () => stopped;
 
   return server;
 }

@@ -139,18 +139,46 @@ _expect_node_eq() {
   fi
 }
 
+# _expect_bash_eq NAME EXPECTED — CTL-1612 post-merge #2978 (Codex P2
+# follow-up): the bash-side counterpart to _expect_node_eq above. CONTRACT
+# CHECK FIRST (per the finding's own caution — a resolver whose fail-open
+# path legitimately returns nonzero-with-empty would need per-fixture
+# exit-status PARITY, not a blanket fail): resolve_liveness_anchor_issue()
+# was audited and now explicitly `return 0`s on EVERY resolution path
+# (env-set, Layer-2-absent, jq-parsed, and — this round's production fix in
+# catalyst-monitor.sh — the jq-parse-failure and grep-fallback-no-match
+# paths, both of which used to leak a raw nonzero exit code: jq's own
+# invalid-JSON status on malformed input, and — because catalyst-monitor.sh
+# runs under `set -o pipefail` — grep's own no-match status through the
+# grep|head|sed pipeline on an ordinary "field not found" case). Node's
+# getLivenessAnchorIssue() has ALWAYS exited 0 unconditionally (try/catch
+# around JSON.parse, see execution-core/config.mjs). So post-fix, "exit
+# status parity with the node side" collapses to the same blanket
+# always-0-on-legitimate-resolution check as _expect_node_eq — not because
+# blanket-fail was assumed correct, but because that IS what auditing the
+# contract concluded it should be.
+_expect_bash_eq() {
+  local _name="$1" _expected="$2" _label="${3:-bash==expected}"
+  if [[ "$BASH_RC" -ne 0 ]]; then
+    fail "$_name ($_label)" "bash probe exited $BASH_RC (crash) instead of 0 — BASH_OUT='$BASH_OUT' cannot be trusted as a legitimate empty result"
+  else
+    expect_eq "$_name ($_label)" "$_expected" "$BASH_OUT"
+  fi
+}
+
 # _cell NAME EXPECTED [ENV_VAR=VAL ...] — runs BOTH implementations under
 # identical env -i fixtures and asserts bash==expected AND node==expected.
 _cell() {
   local _name="$1" _expected="$2"
   shift 2
-  local BASH_OUT
+  local BASH_OUT BASH_RC
   BASH_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" "$@" bash -c "
     source '$BASH_FN_PROBE'
     resolve_liveness_anchor_issue
   ")"
+  BASH_RC=$?
   _run_node_probe "$@"
-  expect_eq "$_name (bash==expected)" "$_expected" "$BASH_OUT"
+  _expect_bash_eq "$_name" "$_expected"
   _expect_node_eq "$_name" "$_expected"
 }
 
@@ -187,14 +215,15 @@ done
 _cell_nojq() {
   local _name="$1" _expected="$2"
   shift 2
-  local BASH_OUT
+  local BASH_OUT BASH_RC
   BASH_OUT="$(env -i PATH="$NOJQ_BIN" HOME="$SANDBOX_HOME" "$@" bash -c "
     command -v jq >/dev/null 2>&1 && echo 'FATAL: jq unexpectedly reachable in the jq-less fixture' >&2 && exit 1
     source '$BASH_FN_PROBE'
     resolve_liveness_anchor_issue
   ")"
+  BASH_RC=$?
   _run_node_probe "$@"
-  expect_eq "$_name (bash-without-jq==expected)" "$_expected" "$BASH_OUT"
+  _expect_bash_eq "$_name" "$_expected" "bash-without-jq==expected"
   _expect_node_eq "$_name" "$_expected"
 }
 
@@ -301,6 +330,44 @@ if [[ "$FAILURES" -eq $((_SAVED_FAILURES + 1)) && "$PASSES" -eq $_SAVED_PASSES ]
 else
   FAILURES=$((_SAVED_FAILURES + 1))
   echo "  FAIL: crash-detection self-test — expected exactly 1 new failure and 0 new passes from the throwing probe, got +$((FAILURES - _SAVED_FAILURES)) failures / +$((PASSES - _SAVED_PASSES)) passes"
+fi
+
+# ── Bash-side crash-detection self-test (CTL-1612 post-merge #2978, Codex P2
+# follow-up) ─────────────────────────────────────────────────────────────
+# The bash-side counterpart to the node self-test above — proves
+# _expect_bash_eq actually fails a cell when the BASH probe exits nonzero,
+# not the vacuous pass Codex reported ("the committed malformed-JSON fixture
+# already exercises that shape — the resolver returns an empty value with a
+# nonzero jq status while the suite reports the 'never throws' case as
+# passing"). Uses a throwaway function body (nonzero exit, empty output) in
+# place of the real resolve_liveness_anchor_issue() to simulate that exact
+# shape directly, without depending on jq/malformed-JSON machinery for the
+# self-test itself. Same saved/restored counter scope as the node self-test,
+# for the same reason (the intentional failure this triggers must not leak
+# into the suite's real totals).
+echo ""
+echo "Bash-side crash-detection self-test: a nonzero-exiting bash probe must FAIL the cell, not pass vacuously"
+CRASH_FN_PROBE="${TMP_DIR}/crash-resolve-liveness-anchor-issue.sh"
+cat >"$CRASH_FN_PROBE" <<'EOF'
+resolve_liveness_anchor_issue() {
+  return 7
+}
+EOF
+_SAVED_FAILURES=$FAILURES
+_SAVED_PASSES=$PASSES
+BASH_OUT="$(env -i PATH="$PATH" HOME="$SANDBOX_HOME" bash -c "
+  source '$CRASH_FN_PROBE'
+  resolve_liveness_anchor_issue
+")"
+BASH_RC=$?
+_expect_bash_eq "bash-side crash-detection self-test" ""
+if [[ "$FAILURES" -eq $((_SAVED_FAILURES + 1)) && "$PASSES" -eq $_SAVED_PASSES ]]; then
+  FAILURES=$_SAVED_FAILURES
+  PASSES=$((_SAVED_PASSES + 1))
+  echo "  PASS: bash-side crash-detection self-test (nonzero-exiting probe correctly counted as a FAIL, not a vacuous pass)"
+else
+  FAILURES=$((_SAVED_FAILURES + 1))
+  echo "  FAIL: bash-side crash-detection self-test — expected exactly 1 new failure and 0 new passes from the nonzero-exiting probe, got +$((FAILURES - _SAVED_FAILURES)) failures / +$((PASSES - _SAVED_PASSES)) passes"
 fi
 
 echo ""

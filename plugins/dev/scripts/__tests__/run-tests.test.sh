@@ -117,7 +117,6 @@ else fail "LIB_SHELL_TEST_DIR override was not wired into the shell suite" "$OUT
 # (CTL-1612 round 13) ever stops recognizing a real wrapper shape. Counts
 # occurrences of the suite's own PASS marker line directly in the runner's
 # combined output — the property this test exists to pin.
-FIX7="$(make_fixture "secrets-hygiene:0")"
 # CTL-1612 round 12 (Codex P2 follow-up): the wrapped-exclusion is now gated
 # on the wrapper file actually being discovered under the active
 # SHELL_TEST_DIR (_lib_suite_wrapper_present), which greps each file there
@@ -127,13 +126,26 @@ FIX7="$(make_fixture "secrets-hygiene:0")"
 # wrapper and this test's "runs exactly once" assertion would break for the
 # wrong reason (double-run, not a fixed detection gap).
 #
-# CTL-1612 round 15 (Codex P2 follow-up): the appended line must be shaped
+# CTL-1612 round 15 (Codex P2 follow-up): the reference line must be shaped
 # like a REAL invocation (`bash`/`exec bash` as the line's first token), not
 # a comment — detection is now anchored to that shape (see run-tests.sh), so
-# a `#`-prefixed mention no longer counts. The line is still dead code here
-# (it lands after the fixture's own `exit 0`), it just has to look like a
-# genuine wrapper line for detection purposes.
-echo 'exec bash "${SCRIPT_DIR}/../lib/__tests__/secrets-hygiene.test.sh"' >>"${FIX7}/secrets-hygiene.test.sh"
+# a `#`-prefixed mention no longer counts.
+#
+# CTL-1612 post-merge #2978 (Codex P2 follow-up): the reference line must
+# ALSO be REACHABLE — placed before any top-level `exit` (see run-tests.sh's
+# awk truncation) — or it stops counting as a wrapper too. `if false; then …
+# fi` keeps it syntactically present (and textually before the trailing
+# `exit 0`, so detection still finds it) while never actually executing at
+# runtime — this fixture's whole point is to prove "a real-shaped, reachable
+# reference counts" without this test file genuinely re-invoking anything.
+FIX7="$(mktemp -d)"
+cat >"${FIX7}/secrets-hygiene.test.sh" <<'FIX7EOF'
+#!/usr/bin/env bash
+if false; then
+	exec bash "${SCRIPT_DIR}/../lib/__tests__/secrets-hygiene.test.sh"
+fi
+exit 0
+FIX7EOF
 FIX7_LIB="$(mktemp -d)"
 cp "${FIX7}/secrets-hygiene.test.sh" "${FIX7_LIB}/secrets-hygiene.test.sh"
 OUT="$(SHELL_TEST_DIR="$FIX7" LIB_SHELL_TEST_DIR="$FIX7_LIB" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
@@ -171,10 +183,17 @@ else fail "wrapped-basename lib suite was wrongly skipped with no active wrapper
 # up to date) would double-run this fixture since it isn't a recognized
 # member, while the derived-set implementation recognizes it purely from the
 # wrapper file's own exec-target reference.
-FIX10_SHELL="$(make_fixture "brand-new-lib-suite:0")"
-# CTL-1612 round 15: real-invocation shape, not a comment — see the note on
-# the equivalent FIX7 line above.
-echo 'exec bash "${SCRIPT_DIR}/../lib/__tests__/brand-new-lib-suite.test.sh"' >>"${FIX10_SHELL}/brand-new-lib-suite.test.sh"
+# CTL-1612 round 15 + post-merge #2978: real-invocation shape, reachable
+# before the trailing `exit 0` — see the note on the equivalent FIX7 fixture
+# above.
+FIX10_SHELL="$(mktemp -d)"
+cat >"${FIX10_SHELL}/brand-new-lib-suite.test.sh" <<'FIX10EOF'
+#!/usr/bin/env bash
+if false; then
+	exec bash "${SCRIPT_DIR}/../lib/__tests__/brand-new-lib-suite.test.sh"
+fi
+exit 0
+FIX10EOF
 FIX10_LIB="$(mktemp -d)"
 cp "${FIX10_SHELL}/brand-new-lib-suite.test.sh" "${FIX10_LIB}/brand-new-lib-suite.test.sh"
 OUT="$(SHELL_TEST_DIR="$FIX10_SHELL" LIB_SHELL_TEST_DIR="$FIX10_LIB" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
@@ -212,6 +231,35 @@ else fail "comment-only mention wrongly suppressed the lib suite (0 tests, silen
 if grep -q 'shell 2 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 	pass "both the commenting shell suite and the mentioned lib suite are counted independently (no dedup)"
 else fail "aggregate summary miscounted the comment-only-mention fixture" "$OUT"; fi
+
+# Test 12 (CTL-1612 post-merge #2978, Codex P2 follow-up): an invocation-
+# shaped reference that is UNREACHABLE — dead code after a top-level `exit`
+# — must NOT be treated as a real wrapper either. Codex's concrete
+# reproduction was round 15's OWN FIX7/FIX10 fixtures (fixed above in this
+# same file): `exit 0` followed by an apparent `exec bash
+# ".../lib/__tests__/x.test.sh"` line the runner never actually reaches.
+# This fixture reproduces that exact pre-fix shape on purpose, paired with a
+# LIB_SHELL_TEST_DIR suite that FAILS — if the runner still (wrongly) treats
+# the dead exec line as a genuine wrapper, the failing lib suite gets
+# silently skipped and the aggregate reports a clean PASS despite real,
+# never-executed failing coverage; post-fix it must run directly and surface
+# the failure.
+FIX12_SHELL="$(mktemp -d)"
+trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$FIX6" "$FIX7" "$FIX7_LIB" "$FIX9_SHELL" "$FIX9_LIB" "$FIX10_SHELL" "$FIX10_LIB" "$FIX11_SHELL" "$FIX11_LIB" "$FIX12_SHELL" "$FIX12_LIB" "$EMPTY_LIB_DIR"' EXIT
+cat >"${FIX12_SHELL}/dead-code-wrapper.test.sh" <<'FIX12EOF'
+#!/usr/bin/env bash
+exit 0
+exec bash "${SCRIPT_DIR}/../lib/__tests__/dead-code-wrapper.test.sh"
+FIX12EOF
+FIX12_LIB="$(make_fixture "dead-code-wrapper:1")"
+OUT="$(SHELL_TEST_DIR="$FIX12_SHELL" LIB_SHELL_TEST_DIR="$FIX12_LIB" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+RC=$?
+if grep -q 'FAIL .*dead-code-wrapper\.test\.sh' <<<"$OUT"; then
+	pass "an unreachable (post-exit) invocation-shaped reference does not suppress the real lib suite"
+else fail "unreachable reference wrongly suppressed the failing lib suite (0 tests, silently skipped)" "$OUT"; fi
+if [[ $RC -ne 0 ]]; then
+	pass "the failing lib suite's failure propagates to the aggregate exit code (not masked as PASS)"
+else fail "aggregate exited 0 despite a real, never-suppressed lib-suite failure" "$OUT"; fi
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"
