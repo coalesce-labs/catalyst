@@ -46,7 +46,15 @@ const RUNTIME = existsSync(resolve(homedir(), ".bun/bin/bun")) ? "bun" : "node";
  * JSON record ({generatedAt, accounts:[…]}). When no env file exists, returns an
  * empty record so the surfaces render "unavailable"/quiet rather than erroring.
  */
-export async function defaultAccountsProbeExec({ envFile = ENV_FILE, timeoutMs = 30000 } = {}) {
+export async function defaultAccountsProbeExec({
+  envFile = ENV_FILE,
+  timeoutMs = 30000,
+  // probePath/runtime default to the module consts (production-identical); they are
+  // injectable ONLY so the secrets-hygiene mechanism is unit-testable against a stub
+  // probe with no network call — see accounts-probe.test.mjs.
+  probePath = PROBE,
+  runtime = RUNTIME,
+} = {}) {
   if (!existsSync(envFile)) return { generatedAt: new Date().toISOString(), accounts: [] };
   // `set -a` exports every sourced var to the exec'd child only; the token dies
   // with this bash -c subshell and never reaches the monitor's own env.
@@ -55,7 +63,7 @@ export async function defaultAccountsProbeExec({ envFile = ENV_FILE, timeoutMs =
   // inherited env so the sourced accounts file is the SOLE authority for the
   // active-account selection — a monitor daemon mis-started with the token in its
   // own env can't silently forward it (the design keeps it out of the monitor env).
-  const childEnv = { ...process.env, CATALYST_ACCOUNTS_ENV: envFile, RT: RUNTIME, PROBE };
+  const childEnv = { ...process.env, CATALYST_ACCOUNTS_ENV: envFile, RT: runtime, PROBE: probePath };
   delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
   const { stdout } = await execFileP("bash", ["-c", script], {
     encoding: "utf8",
@@ -188,6 +196,8 @@ export function createAccountsProbe({
 }) {
   let cache = null; // { summary, probedAt }
   let inflight = null; // shared promise while a probe is running (coalescing)
+  let lastProbeStartedAt = null; // probe INITIATION clock, set even when the probe errors
+  let lastResult = null; // most recent returned summary (ok OR error posture)
 
   function serveCache() {
     return { ...cache.summary, probedAt: cache.probedAt, cached: true };
@@ -195,12 +205,14 @@ export function createAccountsProbe({
 
   function runProbe() {
     if (inflight) return inflight; // coalesce concurrent callers onto one probe
+    lastProbeStartedAt = now(); // floor gates INITIATION, so record it before exec()
     inflight = (async () => {
       try {
         const raw = await exec();
         const summary = deriveAccountsSummary(raw, { node });
         cache = { summary, probedAt: now() };
-        return { ...summary, probedAt: cache.probedAt, cached: false };
+        lastResult = { ...summary, probedAt: cache.probedAt, cached: false };
+        return lastResult;
       } catch (err) {
         // Build an error posture over a synthetic error record; return WITHOUT
         // caching so the next call retries rather than serving a stale error.
@@ -220,7 +232,8 @@ export function createAccountsProbe({
           ],
         };
         const summary = deriveAccountsSummary(errRecord, { node });
-        return { ...summary, probedAt: now(), cached: false };
+        lastResult = { ...summary, probedAt: now(), cached: false };
+        return lastResult;
       } finally {
         inflight = null;
       }
@@ -229,12 +242,21 @@ export function createAccountsProbe({
   }
 
   async function get({ refresh = false } = {}) {
-    if (cache) {
-      // Normal reads serve within the full TTL; a forced refresh serves within the
-      // shorter floor. refreshFloorMs < ttlMs, so `refresh` still probes sooner —
-      // it just cannot be looped faster than the floor.
-      const threshold = refresh ? refreshFloorMs : ttlMs;
-      if (now() - cache.probedAt < threshold) return serveCache();
+    // Normal reads serve within the full TTL; a forced refresh serves within the
+    // shorter floor. refreshFloorMs < ttlMs, so `refresh` still probes sooner — it
+    // just cannot be looped faster than the floor.
+    const threshold = refresh ? refreshFloorMs : ttlMs;
+    if (cache && now() - cache.probedAt < threshold) return serveCache();
+    // A probe already running: coalesce onto it regardless of the floor.
+    if (inflight) return inflight;
+    // Gate probe INITIATION on the same cadence, not just cache hits: during a
+    // sustained probe failure (errors are intentionally uncached) or a cold start
+    // there is no cache to gate on, yet re-probing must not spawn a fresh subprocess +
+    // Haiku call faster than `threshold` (the DoS the finding flags for ?refresh=true).
+    // Serve the most recent posture (which may be an error) instead of re-probing;
+    // retry once the window lapses.
+    if (lastProbeStartedAt !== null && now() - lastProbeStartedAt < threshold) {
+      if (lastResult) return { ...lastResult, cached: true };
     }
     return runProbe();
   }

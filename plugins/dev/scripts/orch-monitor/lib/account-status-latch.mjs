@@ -4,8 +4,13 @@
 //
 // Mirrors broker-degraded.mjs: a PURE edge state machine (nextAccountStatusLatch),
 // a durable marker (~/catalyst/account-status-latch.json, atomic tmp+rename), and
-// EMIT-THEN-ADVANCE — the latch advances only on a successful append, so a
-// transient event-log failure re-attempts the same edge next tick.
+// PERSIST-BEFORE-EMIT — the durable marker is the source of truth. The new episode
+// state is written to disk BEFORE the append, so a restart can never re-announce an
+// episode we already emitted (exactly-once across restarts). A failed persist emits
+// nothing (nothing to duplicate) and a failed append rolls the marker back, so in
+// either case the SAME edge is recomputed and retried next tick (never lose a real
+// transition). The in-memory latch only advances once BOTH the marker and the append
+// succeed, so it never diverges from disk in a way that re-announces an open episode.
 //
 // account.* is NOT a broker-protected namespace (account.ratelimit.sampled already
 // lives there), so no namespace-contract change is needed.
@@ -114,8 +119,10 @@ const defaultEmit = (env) => emitEventLog(env);
 
 /**
  * checkAccountStatusTransition — one timer-tick evaluation. Emits exactly one
- * `account.status.changed` event on the active account's ok↔rejected edge, then
- * advances the latch ONLY on a successful emit (emit-then-advance).
+ * `account.status.changed` event on the active account's ok↔rejected edge. The
+ * durable marker is persisted BEFORE the append and the in-memory latch advances
+ * only once BOTH succeed (persist-before-emit), so a restart never re-announces an
+ * already-emitted episode and a failed write re-attempts the same edge next tick.
  *
  * `degraded`, `error`, and `unknown` neither trip nor clear — they HOLD the
  * current latch (only a definitive `rejected`/`ok` moves it).
@@ -153,17 +160,31 @@ export async function checkAccountStatusTransition(summary, opts = {}) {
     payload: { node: summary.node, handle: summary.active?.label, status: edge },
   });
 
+  // PERSIST-BEFORE-EMIT: write the NEW episode state to the durable marker BEFORE
+  // appending, so the marker is the source of truth. If the marker write fails we
+  // emit nothing and leave the in-memory latch untouched — there is nothing to
+  // duplicate and the same edge is recomputed and retried next tick.
+  const prevLatched = latch.prev === true;
+  if (!persist({ latched })) return null;
+
   let ok;
   try {
     ok = emit(env) !== false;
   } catch {
     ok = false;
   }
-  // EMIT-THEN-ADVANCE: a failed append leaves the latch untouched so the next
-  // tick retries this edge (a real transition is never lost to one bad append).
-  if (!ok) return null;
+  if (!ok) {
+    // Append failed after the marker advanced. Roll the marker back to the
+    // pre-edge state and leave the in-memory latch untouched so the next tick
+    // recomputes and retries this edge (a real transition is never lost to one
+    // bad append). The rollback keeps disk consistent with the un-advanced latch.
+    persist({ latched: prevLatched });
+    return null;
+  }
 
+  // Both the durable marker and the append succeeded — advance the in-memory
+  // latch to match disk. In-memory and on-disk never diverge in a way that
+  // re-announces an open episode after a restart.
   latch.prev = latched;
-  persist({ latched });
   return edge;
 }

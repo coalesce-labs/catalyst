@@ -1,5 +1,12 @@
 import { describe, it, expect } from "bun:test";
-import { deriveAccountsSummary, createAccountsProbe } from "../accounts-probe.mjs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  deriveAccountsSummary,
+  createAccountsProbe,
+  defaultAccountsProbeExec,
+} from "../accounts-probe.mjs";
 
 const REJECTED_ACTIVE = {
   generatedAt: "2026-08-05T12:00:00.000Z",
@@ -170,16 +177,95 @@ describe("createAccountsProbe (cache)", () => {
     expect(p.latest()).not.toBeNull();
     expect(calls()).toBe(1);
   });
-  it("a throwing exec yields an error posture, never throws, and is not cached as fresh", async () => {
+  it("a throwing exec yields an error posture, never throws, and retries after the floor", async () => {
     let n = 0;
+    let t = 1000;
     const exec = async () => {
       n += 1;
       throw new Error("spawn EACCES");
     };
-    const p = createAccountsProbe({ exec, ttlMs: 5000, now: () => 1000, node: "n" });
+    const p = createAccountsProbe({ exec, ttlMs: 5000, refreshFloorMs: 2000, now: () => t, node: "n" });
     const r = await p.get();
     expect(r.status).toBe("error");
-    await p.get(); // should retry, not serve a stale error
+    t = 3000; // within ttl but past the refresh floor
+    const throttled = await p.get(); // normal read within ttl cadence → served, not re-probed
+    expect(n).toBe(1);
+    expect(throttled.status).toBe("error");
+    t = 7000; // past the ttl
+    await p.get(); // retries, not a stale error served forever
     expect(n).toBe(2);
+  });
+  it("a forced ?refresh during SUSTAINED failure cannot re-probe faster than the floor (DoS cold-hole)", async () => {
+    // low-severity DoS finding (CTL-1653): errors are uncached, so pre-fix every
+    // serialized refresh=true during a failing probe spawned a fresh subprocess +
+    // Haiku call. The floor now gates probe INITIATION, not just cache hits.
+    let n = 0;
+    let t = 1000;
+    const exec = async () => {
+      n += 1;
+      throw new Error("401 unauthorized");
+    };
+    const p = createAccountsProbe({ exec, ttlMs: 5000, refreshFloorMs: 2000, now: () => t, node: "n" });
+    const first = await p.get({ refresh: true }); // cold start → probes once
+    expect(n).toBe(1);
+    expect(first.status).toBe("error");
+    t = 1500; // within the floor, still no cache (error uncached)
+    const throttled = await p.get({ refresh: true });
+    expect(n).toBe(1); // NOT re-probed — served the recent error posture
+    expect(throttled.status).toBe("error");
+    expect(throttled.cached).toBe(true);
+    t = 3500; // past the floor → one retry allowed
+    await p.get({ refresh: true });
+    expect(n).toBe(2);
+  });
+});
+
+describe("defaultAccountsProbeExec (secrets hygiene)", () => {
+  it("returns an empty {accounts:[]} record when the env file is absent (no probe spawned)", async () => {
+    const missing = join(tmpdir(), "definitely-absent-accounts-env-" + process.pid + ".env");
+    const r = await defaultAccountsProbeExec({ envFile: missing });
+    expect(r.accounts).toEqual([]);
+    expect(typeof r.generatedAt).toBe("string");
+  });
+  it("makes the SOURCED token sole authority in the child, keeps the parent env clean, and returns token-free", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "accounts-exec-"));
+    const stub = join(dir, "stub-probe.mjs");
+    // The stub inspects its OWN (child) env and emits a token-FREE record describing
+    // what it saw — never the token value. It proves: (a) the ambient token was
+    // stripped, (b) the sourced token is the one present (sole authority).
+    writeFileSync(
+      stub,
+      [
+        "const tok = process.env.CLAUDE_CODE_OAUTH_TOKEN || '';",
+        "const rec = {",
+        "  generatedAt: 't',",
+        "  accounts: [{",
+        "    label: 'stub',",
+        "    isActive: true,",
+        "    sawSourced: tok === 'sk-ant-oat-SOURCED',", // sourced file won
+        "    sawAmbient: tok === 'sk-ant-oat-AMBIENT',", // ambient must have been stripped
+        "  }],",
+        "};",
+        "process.stdout.write(JSON.stringify(rec));", // token itself never printed
+      ].join("\n"),
+    );
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(envFile, 'CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-SOURCED"\n');
+
+    // Ambient token in THIS process's env — the strip must remove it from the child so
+    // the sourced file is the sole authority; and it must remain in the parent unchanged.
+    const prior = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-AMBIENT";
+    try {
+      const r = await defaultAccountsProbeExec({ envFile, probePath: stub });
+      expect(JSON.stringify(r)).not.toContain("sk-ant-oat"); // token-free wire output
+      expect(r.accounts[0].sawAmbient).toBe(false); // ambient stripped from child
+      expect(r.accounts[0].sawSourced).toBe(true); // sourced file is sole authority
+      expect(process.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat-AMBIENT"); // parent untouched
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

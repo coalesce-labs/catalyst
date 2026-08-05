@@ -1102,9 +1102,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
             }
           }
           // CTL-1653 Phase 4: edge-triggered account.status.changed emit. Best-
-          // effort — a marker/IO hiccup must never kill the tick.
+          // effort — a marker/IO hiccup must never kill the tick. The fn is async,
+          // so a synchronous try/catch cannot see a rejected promise; attach a
+          // .catch() so a future change that introduces a rejection can never
+          // become an unhandled rejection (the synchronous try/catch is retained
+          // for a throw before the first await).
           try {
-            void checkAccountStatusTransition(s);
+            checkAccountStatusTransition(s).catch((err) => {
+              console.error(`[server] account status transition check rejected:`, err);
+            });
           } catch (err) {
             console.error(`[server] account status transition check failed:`, err);
           }
