@@ -2518,23 +2518,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
           if (refresh) {
             const hasRefreshHeader = req.headers.get(ACCOUNTS_REFRESH_HEADER) !== null;
             const hostHeader = req.headers.get("host");
-            // SCHEME-AWARE Host check (Codex round-5, refining round-4): Host
-            // carries no scheme, but an https://-only MONITOR_TRUSTED_ORIGINS
-            // entry deliberately does NOT trust the plaintext form of the same
-            // host — probing both schemes unconditionally would let a page
-            // served over plain HTTP for the trusted hostname spend the probe.
-            // The request's effective scheme is https ONLY when the co-located
-            // reverse proxy says so: X-Forwarded-Proto is honored solely from a
-            // loopback peer (this server always listens plaintext; TLS
-            // terminates at a proxy on the same host — the heap-snapshot
-            // route's existing localhost gate uses the same assumption). A
-            // remote client spoofing the header stays "http" and an https-only
-            // trusted set correctly rejects it.
+            // SCHEME-AWARE Host check (Codex rounds 4-6): Host carries no
+            // scheme, but an https://-only MONITOR_TRUSTED_ORIGINS entry
+            // deliberately does NOT trust the plaintext form of the same host.
+            // The scheme signal must be OPERATOR-DECLARED, never header-derived
+            // (round-6): X-Forwarded-Proto is client-spoofable from any
+            // loopback browser, and appending proxies put the client's value
+            // FIRST in the list — no peer-address gate fixes that. When
+            // MONITOR_TLS_PROXY_PEERS is set (comma-separated peer addresses of
+            // the TLS-terminating proxy, e.g. "127.0.0.1,::1"), a request
+            // arriving FROM one of those peers is https by declaration —
+            // headers are ignored entirely. Unset (the default, no TLS proxy),
+            // every request is plaintext and an https-only trusted set
+            // correctly rejects its host.
             const peer = server.requestIP(req)?.address ?? "";
-            const peerIsLoopback =
-              peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
-            const fwdProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
-            const effectiveScheme = peerIsLoopback && fwdProto === "https" ? "https" : "http";
+            const tlsProxyPeers = (process.env.MONITOR_TLS_PROXY_PEERS ?? "")
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            const effectiveScheme = tlsProxyPeers.includes(peer) ? "https" : "http";
             const hostTrusted =
               hostHeader !== null && originAllowed(`${effectiveScheme}://${hostHeader}`);
             if (!hasRefreshHeader || !hostTrusted || !originAllowed(req.headers.get("origin"))) {
