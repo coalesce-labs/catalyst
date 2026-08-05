@@ -103,6 +103,7 @@ export interface BoardCurrentPhase {
   model: string | null;
   startedAt?: string;
   updatedAt?: string;
+  failureReason?: string | null;
 }
 
 export interface BoardTicket {

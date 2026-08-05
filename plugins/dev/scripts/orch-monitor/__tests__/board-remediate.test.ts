@@ -243,3 +243,33 @@ describe("ticketColumns — remediate ticket routes to remediate column", () => 
 test("REMEDIATE_PHASE export equals 'remediate'", () => {
   expect(REMEDIATE_PHASE).toBe("remediate");
 });
+
+// CTL-1648: remediate derivation must surface attentionReason when failureReason is absent
+describe("derivePhaseWithRemediate — attentionReason surfacing (CTL-1648)", () => {
+  it("Case 1 (remediate RUNNING): surfaces remediate.attentionReason", () => {
+    const s = sigs();
+    s[idx("verify")] = { status: "done", updatedAt: "2026-08-05T01:00:00Z" };
+    const remediateSig = { status: "running", attentionReason: "ctl-587-revive-reset",
+      startedAt: "2026-08-05T01:05:00Z", updatedAt: "2026-08-05T01:06:00Z" };
+    expect(derivePhaseWithRemediate(s, remediateSig).failureReason)
+      .toBe("ctl-587-revive-reset");
+  });
+
+  it("Case 2 (remediate TERMINAL, wins by updatedAt): surfaces remediate.attentionReason", () => {
+    const s = sigs();
+    s[idx("verify")] = { status: "done", updatedAt: "2026-08-05T01:00:00Z" };
+    const remediateSig = { status: "failed", attentionReason: "sdk-overloaded-exhausted",
+      updatedAt: "2026-08-05T01:10:00Z" };
+    expect(derivePhaseWithRemediate(s, remediateSig).failureReason)
+      .toBe("sdk-overloaded-exhausted");
+  });
+
+  it("precedence: remediate.failureReason still wins over attentionReason", () => {
+    const s = sigs();
+    s[idx("verify")] = { status: "done", updatedAt: "2026-08-05T01:00:00Z" };
+    const remediateSig = { status: "failed", failureReason: "remediate-terminal",
+      attentionReason: "revive-reset", updatedAt: "2026-08-05T01:10:00Z" };
+    expect(derivePhaseWithRemediate(s, remediateSig).failureReason)
+      .toBe("remediate-terminal");
+  });
+});
