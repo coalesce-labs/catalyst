@@ -14,7 +14,7 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { log as defaultLog } from "./config.mjs";
 import { authorEscalationComment } from "./unstuck-sweep-escalation.mjs";
 import { captureDeepDiveEvidence } from "./unstuck-sweep-evidence.mjs";
@@ -33,6 +33,25 @@ function defaultReadSignal(orchDir, ticket, phase) {
   } catch {
     return null;
   }
+}
+
+// escalateCommentMarkerPath — CTL-1641 (Codex #3005 P2): per-(ticket,category,phase)
+// idempotency marker for the authored escalation COMMENT. The needs-human LABEL is
+// already once-guarded (labelOnce's .linear-label-needs-human marker), and the escalate
+// branch deliberately has no intent gate, so without this a candidate that stays stuck
+// (unknown / remediate-cap — cleared only by a human) would receive a fresh Linear
+// comment on EVERY sweep interval. Mirrors the sibling act-path marker in
+// unstuck-sweep.mjs:defaultPostUnstuckComment (.unstuck-comment-<cat>-<phase>.applied);
+// a distinct prefix keeps the two paths' markers from colliding. Returns null when the
+// path can't be formed (fail-open → post unconditionally, as before).
+function escalateCommentMarkerPath(orchDir, ticket, category, phase) {
+  if (!orchDir || !ticket || !phase) return null;
+  return join(
+    orchDir,
+    "workers",
+    ticket,
+    `.unstuck-escalate-comment-${category ?? "unknown"}-${phase}.applied`
+  );
 }
 
 // makeDefaultCommitsAhead — computes commits ahead of origin/main for a worktree.
@@ -93,10 +112,31 @@ export function buildUnstuckEscalateSeam(deps = {}) {
 
   const _commitsAhead = commitsAhead ?? makeDefaultCommitsAhead(runGit);
 
-  const _applyLabel = applyNeedsHuman ?? ((ticket) =>
+  // CTL-1641 (Codex #3005 P2): the DEFAULT label binding returns a structured
+  // { applied, error? } so escalate() can surface a GENUINE non-confirming write
+  // (applyLabel ran but did not land — rate-limited / verify-failed / missing-label)
+  // as a `label` side-effect error, while leaving benign belief-owner deferral and
+  // an already-applied marker no-op error-free. onOutcome carries the distinction
+  // that labelNeedsHumanUnlessBeliefOwner's boolean return erases. An INJECTED
+  // applyNeedsHuman still returns a bare boolean (a stub can't distinguish, so its
+  // `false` stays benign — see the belief-owner test) and escalate() handles both.
+  const _applyLabel = applyNeedsHuman ?? ((ticket) => {
+    let outcome = { deferred: false, applied: false, ran: false, reason: null };
     labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
       env, site: "unstuck-escalate", log,
-    }));
+      onOutcome: (o) => { outcome = o; },
+    });
+    if (outcome.applied) return { applied: true };
+    // Attempted (applyLabel ran) but did not confirm, and not a belief-owner deferral →
+    // a real failed escalation surface. A marker no-op (ran:false) or deferral is benign.
+    if (!outcome.deferred && outcome.ran) {
+      return {
+        applied: false,
+        error: `needs-human label write did not confirm (reason: ${outcome.reason ?? "unknown"})`,
+      };
+    }
+    return { applied: false };
+  });
 
   const commentHelper = env.CATALYST_COMMENT_POST_HELPER ?? COMMENT_HELPER_DEFAULT;
   const _post = postComment ?? ((ticket, body) => {
@@ -107,6 +147,7 @@ export function buildUnstuckEscalateSeam(deps = {}) {
   return function escalate(candidate, decision) {
     const ticket = candidate?.ticket;
     const phase = candidate?.phase;
+    const category = decision?.category ?? candidate?.evidence?.reason ?? "unknown";
     const reason = candidate?.evidence?.reason ?? decision?.category;
     const errors = [];
 
@@ -125,20 +166,57 @@ export function buildUnstuckEscalateSeam(deps = {}) {
     const body = authorEscalationComment(evidence);
 
     // 2. Label FIRST — the operator's needs-attention surface. Independent of the comment.
+    //    The label seam may return either a bare boolean (injected stub) or a structured
+    //    { applied, error? } (the default binding). CTL-1641 (Codex #3005 P2): a genuine
+    //    non-confirming write surfaces via `error` so the sweep's escalateFailures counts
+    //    it, while benign deferral / already-applied no-ops stay error-free.
     let labelApplied = false;
     try {
-      labelApplied = Boolean(_applyLabel(ticket));
+      const lr = _applyLabel(ticket);
+      if (lr && typeof lr === "object") {
+        labelApplied = lr.applied === true;
+        if (lr.error) errors.push({ sideEffect: "label", err: lr.error });
+      } else {
+        labelApplied = Boolean(lr);
+      }
     } catch (err) {
       errors.push({ sideEffect: "label", err: err?.message ?? String(err) });
     }
 
-    // 3. Comment SECOND — independent; a failure never unwinds the label.
+    // 3. Comment SECOND — independent; a failure never unwinds the label. CTL-1641
+    //    (Codex #3005 P2): idempotent per (ticket, category, phase). Once a comment has
+    //    posted for this stall, a later sweep on the still-stuck candidate must NOT
+    //    re-post (the label is already once-guarded; the escalate branch has no intent
+    //    gate). A pre-existing marker means "already delivered" → satisfied, not a re-post
+    //    and not an error. The marker is written only after a CONFIRMED post; the worker
+    //    dir must already exist (a real candidate's always does — fail-open otherwise).
+    const commentMarker = escalateCommentMarkerPath(orchDir, ticket, category, phase);
+    const workerDir = orchDir && ticket ? join(orchDir, "workers", ticket) : null;
+    const markerGuardActive = Boolean(commentMarker && workerDir && existsSync(workerDir));
+
     let commentPosted = false;
-    try {
-      commentPosted = Boolean(_post(ticket, body));
-      if (!commentPosted) errors.push({ sideEffect: "comment", err: "post returned falsy" });
-    } catch (err) {
-      errors.push({ sideEffect: "comment", err: err?.message ?? String(err) });
+    if (markerGuardActive && existsSync(commentMarker)) {
+      commentPosted = true; // already delivered this lifetime — no duplicate, no error
+    } else {
+      try {
+        commentPosted = Boolean(_post(ticket, body));
+        if (commentPosted) {
+          if (markerGuardActive) {
+            try {
+              writeFileSync(commentMarker, "");
+            } catch (err) {
+              log.warn(
+                { ticket, err: err?.message },
+                "unstuck-escalate: comment idempotency marker write failed — continuing (CTL-1641)"
+              );
+            }
+          }
+        } else {
+          errors.push({ sideEffect: "comment", err: "post returned falsy" });
+        }
+      } catch (err) {
+        errors.push({ sideEffect: "comment", err: err?.message ?? String(err) });
+      }
     }
 
     return { ticket, phase, labelApplied, commentPosted, errors };

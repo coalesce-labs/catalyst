@@ -2,7 +2,7 @@
 // escalate seam factory. All IO is stubbed via deps injection; no real git/fs/Linear.
 
 import { describe, test, expect } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -124,6 +124,98 @@ describe("buildUnstuckEscalateSeam — CTL-1641", () => {
     });
     const r = seam(candidate("unknown", "CTL-42", "verify"), decision("unknown"));
     expect(r).toMatchObject({ ticket: "CTL-42", phase: "verify", labelApplied: true, commentPosted: true, errors: [] });
+  });
+});
+
+// CTL-1641 Codex #3005 P2 remediation — the two masking cases the injected-stub tests
+// above cannot reach: (1) a genuine non-confirming LABEL write must surface a `label`
+// error (not be swallowed as benign like a belief-owner deferral), and (2) the escalation
+// COMMENT must be idempotent per (ticket,category,phase) so a still-stuck candidate is not
+// re-commented on every sweep. Both exercise the DEFAULT bindings against a real temp
+// orchDir so the marker files and the labelOnce/onOutcome path actually run.
+describe("buildUnstuckEscalateSeam — CTL-1641 Codex #3005 P2 remediation", () => {
+  test("a genuine non-confirming label write (applyLabel ran, applied:false) surfaces a 'label' error", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1641-labelfail-"));
+    mkdirSync(join(dir, "workers", "CTL-1"), { recursive: true });
+    const seam = buildUnstuckEscalateSeam({
+      orchDir: dir,
+      env: {},                                                     // not belief-owner → real labelOnce path
+      writeStatus: { applyLabel: () => ({ applied: false, reason: "rate-limited" }) },
+      // applyNeedsHuman intentionally NOT injected — exercise the default structured binding.
+      postComment: () => true,
+      captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
+      commitsAhead: () => 2,
+    });
+    const r = seam(candidate("unknown", "CTL-1", "verify"), decision("unknown"));
+    expect(r.labelApplied).toBe(false);
+    expect(r.errors.some((e) => e.sideEffect === "label")).toBe(true);
+    expect(r.commentPosted).toBe(true);                            // independence: the comment still posts
+  });
+
+  test("an already-applied needs-human marker (labelOnce no-op) is NOT a label error", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1641-labelnoop-"));
+    const wdir = join(dir, "workers", "CTL-2");
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(join(wdir, ".linear-label-needs-human.applied"), "");  // a prior lifetime already landed it
+    const seam = buildUnstuckEscalateSeam({
+      orchDir: dir,
+      env: {},
+      writeStatus: { applyLabel: () => { throw new Error("applyLabel must not run on a marker no-op"); } },
+      postComment: () => true,
+      captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
+      commitsAhead: () => 1,
+    });
+    const r = seam(candidate("unknown", "CTL-2", "verify"), decision("unknown"));
+    expect(r.labelApplied).toBe(false);
+    expect(r.errors.some((e) => e.sideEffect === "label")).toBe(false);  // benign no-op — not a failure
+  });
+
+  test("the escalation comment posts once per (ticket,category,phase); a second sweep is suppressed by the marker", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1641-commentonce-"));
+    mkdirSync(join(dir, "workers", "CTL-3"), { recursive: true });
+    let posts = 0;
+    const seam = buildUnstuckEscalateSeam({
+      orchDir: dir,
+      env: {},
+      applyNeedsHuman: () => true,
+      postComment: () => { posts++; return true; },
+      captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
+      commitsAhead: () => 2,
+    });
+    const c = candidate("unknown", "CTL-3", "verify");
+    const d = decision("unknown");
+    const r1 = seam(c, d);
+    const r2 = seam(c, d);                                          // same still-stuck candidate, next sweep
+    expect(posts).toBe(1);                                          // comment posted exactly once
+    expect(r1.commentPosted).toBe(true);
+    expect(r2.commentPosted).toBe(true);                           // second call satisfied by the marker
+    expect(r2.errors).toEqual([]);
+    expect(existsSync(join(dir, "workers", "CTL-3", ".unstuck-escalate-comment-unknown-verify.applied"))).toBe(true);
+  });
+
+  test("a failed comment post does NOT write the idempotency marker — the next sweep retries", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1641-commentretry-"));
+    mkdirSync(join(dir, "workers", "CTL-4"), { recursive: true });
+    let posts = 0;
+    const seam = buildUnstuckEscalateSeam({
+      orchDir: dir,
+      env: {},
+      applyNeedsHuman: () => true,
+      postComment: () => { posts++; return posts >= 2; },          // fail the first post, succeed the second
+      captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
+      commitsAhead: () => 2,
+    });
+    const c = candidate("unknown", "CTL-4", "verify");
+    const d = decision("unknown");
+    const marker = join(dir, "workers", "CTL-4", ".unstuck-escalate-comment-unknown-verify.applied");
+    const r1 = seam(c, d);
+    expect(r1.commentPosted).toBe(false);
+    expect(r1.errors.some((e) => e.sideEffect === "comment")).toBe(true);
+    expect(existsSync(marker)).toBe(false);                        // no marker on failure
+    const r2 = seam(c, d);                                          // retry on the next sweep
+    expect(r2.commentPosted).toBe(true);
+    expect(posts).toBe(2);
+    expect(existsSync(marker)).toBe(true);                         // marker written after the confirmed post
   });
 });
 
