@@ -76,3 +76,16 @@ export declare function createAccountsProbe(opts: {
   now?: () => number;
   node?: string;
 }): AccountsProbe;
+
+/**
+ * resolveRuntime — the CHILD runtime path used to run the probe (CTL-1653
+ * round-2). Always an absolute path when bun is chosen; "node" (bare) as the
+ * last resort. All inputs injectable — see accounts-probe.mjs's doc comment.
+ */
+export declare function resolveRuntime(opts?: {
+  isBun?: boolean;
+  execPath?: string;
+  resolveOnPath?: (bin: string) => string | null;
+  bunHomeDefault?: string;
+  bunHomeExists?: boolean;
+}): string;

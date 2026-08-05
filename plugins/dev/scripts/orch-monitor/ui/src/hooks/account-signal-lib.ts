@@ -72,6 +72,40 @@ export function decodeAccountSignalFrame(data: string): AccountSignal | null {
   }
 }
 
+/**
+ * Structural guard: the documented `{available:false}` unavailable contract
+ * (disabled probe / no-env-file — see lib/accounts-probe.mjs deriveAccountsSummary
+ * and server.ts's /api/accounts). Distinct from `isAccountSignal`'s garbage check —
+ * this is a well-formed, DOCUMENTED response shape, not noise.
+ */
+export function isAccountUnavailable(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  return (value as Record<string, unknown>).available === false;
+}
+
+/**
+ * What a consumer should do with a raw `/api/accounts` body or SSE `account`
+ * frame payload (already JSON-parsed): apply a valid signal, clear to the
+ * unavailable state, or ignore malformed/garbage input untouched.
+ *
+ * CTL-1653 Codex finding (stale-strip): before this existed, a decode that
+ * returned null for BOTH garbage AND the well-formed `{available:false}` frame
+ * meant callers treated a genuine "probe went unavailable" transition as a
+ * no-op — the footer/banner kept rendering a stale rejected/ok posture forever
+ * once the env file was removed or the probe was disabled. `clear` is the fix:
+ * it is a real state transition, not noise, and must reach the UI.
+ */
+export type AccountFrameAction =
+  | { type: "apply"; signal: AccountSignal }
+  | { type: "clear" }
+  | { type: "ignore" };
+
+export function accountFrameAction(value: unknown): AccountFrameAction {
+  if (isAccountSignal(value)) return { type: "apply", signal: value };
+  if (isAccountUnavailable(value)) return { type: "clear" };
+  return { type: "ignore" };
+}
+
 /** The tone vocabulary shared by the footer indicator + HUD strip. */
 export type AccountTone = "quiet" | "warn" | "loud" | "muted";
 

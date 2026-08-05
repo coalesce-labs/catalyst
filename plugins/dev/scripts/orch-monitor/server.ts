@@ -622,6 +622,13 @@ export interface CreateServerOptions {
 }
 
 const DEFAULT_PORT = 7400;
+/**
+ * CTL-1653 (Codex round-2): the header GET /api/accounts?refresh=true requires,
+ * on top of the trusted-origin allowlist — see that route's CROSS-ORIGIN +
+ * SIMPLE-REQUEST GUARD comment for why a header (not just Origin) is needed.
+ * Exported so tests and docs reference the one canonical name.
+ */
+export const ACCOUNTS_REFRESH_HEADER = "x-catalyst-refresh";
 
 function resolveVersion(): string {
   const candidates = [
@@ -2475,18 +2482,34 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/accounts") {
           if (!accountsProbe) return Response.json({ available: false, node: hostName() });
           const refresh = url.searchParams.get("refresh") === "true";
-          // CROSS-ORIGIN GUARD on the state-changing path only. The monitor binds
-          // 0.0.0.0 with no auth, and `refresh=true` is the one per-request probe
-          // trigger — spending a real Haiku call per account (bounded by the
-          // refresh floor, but not to zero). Without this, any page the operator
-          // visits could drive it repeatedly. Same allowlist as the reply route
-          // (lib/trusted-origin.mjs); an absent Origin (non-browser callers) is
-          // allowed — see isOriginAllowed's doc comment.
-          if (refresh && !originAllowed(req.headers.get("origin"))) {
-            return Response.json(
-              { status: "forbidden", error: "cross-origin refresh rejected" },
-              { status: 403 },
-            );
+          // CROSS-ORIGIN + SIMPLE-REQUEST GUARD on the state-changing path only.
+          // The monitor binds 0.0.0.0 with no auth, and `refresh=true` is the one
+          // per-request probe trigger — spending a real Haiku call per account
+          // (bounded by the refresh floor, but not to zero).
+          //
+          // The origin allowlist alone (originAllowed, same as the Linear-reply
+          // route) does NOT close this: this route is a GET, and browsers omit
+          // `Origin` on a SIMPLE cross-site request — a bare `<img
+          // src="...?refresh=true">`, a top-level navigation, or a plain <form>
+          // GET carries no Origin at all, and originAllowed(null) is (correctly,
+          // for the POST-route contract that guard was designed for) permissive
+          // (CTL-1653 Codex round-2 finding). Requiring this NON-STANDARD header
+          // closes that class of vector structurally rather than by allowlist:
+          // none of those simple-request mechanisms can ever attach a custom
+          // header, and a cross-origin fetch()/XHR that tried to would trigger a
+          // CORS preflight this server does not answer for arbitrary origins, so
+          // the browser never sends the real request. curl/non-browser callers
+          // stay usable by passing the header explicitly (documented in
+          // orch-monitor-api.md) — Origin remains permissively absent for them,
+          // same as before.
+          if (refresh) {
+            const hasRefreshHeader = req.headers.get(ACCOUNTS_REFRESH_HEADER) !== null;
+            if (!hasRefreshHeader || !originAllowed(req.headers.get("origin"))) {
+              return Response.json(
+                { status: "forbidden", error: "cross-origin refresh rejected" },
+                { status: 403 },
+              );
+            }
           }
           const summary = await accountsProbe.get({ refresh });
           return Response.json({ available: true, ...summary });

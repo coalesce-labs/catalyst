@@ -19,7 +19,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,34 +37,127 @@ const ENV_FILE =
   process.env.CLAUDE_ACCOUNTS_ENV ?? resolve(homedir(), ".config/catalyst/claude-accounts.env");
 
 // resolveOnPath — mirrors catalyst-stack's `_ca_node_runtime` (`command -v bun`):
-// scan $PATH for the binary rather than assuming one fixed install location.
+// scan $PATH for the binary and return its ABSOLUTE path (not a bare command
+// name) — see resolveRuntime's doc comment for why the bare name is unsafe.
 function resolveOnPath(bin) {
   for (const dir of (process.env.PATH ?? "").split(":")) {
-    if (dir && existsSync(resolve(dir, bin))) return true;
+    if (!dir) continue;
+    const candidate = resolve(dir, bin);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+const BUN_HOME_DEFAULT = resolve(homedir(), ".bun/bin/bun");
+
+/**
+ * resolveRuntime — the CHILD runtime that runs the probe. ALWAYS an absolute
+ * path when bun is the choice, never the bare `bun` command name: the bash -c
+ * subshell this spawns into (defaultAccountsProbeExec, below) inherits this
+ * process's PATH, but a launchd/mise-managed monitor can be launched via an
+ * ABSOLUTE Bun path on a restricted PATH that omits bun's own directory — the
+ * bare command name then exits command-not-found in the child and every real
+ * probe degrades to a spawn/error posture (CTL-1653 Codex round-2 finding: the
+ * round-1 fix detected bun's PRESENCE correctly but still returned the literal
+ * string "bun" instead of a usable path).
+ *
+ * Preference order, each one proven independently of the others:
+ *   (1) this process's OWN Bun executable (`process.execPath`) — when the
+ *       monitor itself is running under bun, this is proven valid regardless
+ *       of PATH;
+ *   (2) `bun` resolved from PATH, as an absolute path (mirrors catalyst-stack's
+ *       `_ca_node_runtime` / `command -v bun` — catches a Homebrew/managed
+ *       install this process happens not to be running under);
+ *   (3) the historical `~/.bun/bin/bun` default-install path, kept for
+ *       back-compat;
+ *   (4) `node` (bare command name; last resort — mirrors catalyst-stack's own
+ *       node fallback, which is also a bare name).
+ *
+ * All five inputs are injectable so every branch is independently testable
+ * without depending on whether THIS test process happens to be running under
+ * bun (it always is, under `bun test`) or what the test host's PATH contains.
+ *
+ * @param {object} [o]
+ * @param {boolean}  [o.isBun]         default: typeof Bun !== "undefined"
+ * @param {string}   [o.execPath]      default: process.execPath
+ * @param {Function} [o.resolveOnPath] default: the module's own PATH scanner
+ * @param {string}   [o.bunHomeDefault] default: BUN_HOME_DEFAULT
+ * @param {boolean}  [o.bunHomeExists] default: existsSync(BUN_HOME_DEFAULT)
+ * @returns {string}
+ */
+export function resolveRuntime({
+  isBun = typeof Bun !== "undefined",
+  execPath = process.execPath,
+  resolveOnPath: resolveOnPathFn = resolveOnPath,
+  bunHomeDefault = BUN_HOME_DEFAULT,
+  bunHomeExists = existsSync(BUN_HOME_DEFAULT),
+} = {}) {
+  if (isBun) return execPath;
+  const onPath = resolveOnPathFn("bun");
+  if (onPath) return onPath;
+  if (bunHomeExists) return bunHomeDefault;
+  return "node";
+}
+
+const RUNTIME = resolveRuntime();
+
+// The token-assignment line shape the env-file contract defines (mirrors
+// claude-accounts-usage.mjs's parseAccountsEnv regex byte-for-byte — see that
+// file's SECRETS HYGIENE header comment for the full contract).
+const CLAUDE_TOKEN_LINE_RE = /^(?:export\s+)?CLAUDE_TOKEN_[A-Za-z0-9_]+=(.*)$/;
+const PASTE_TOKEN_PLACEHOLDER = "PASTE_TOKEN_HERE";
+
+/**
+ * hasUsableAccountsEnv — cheap parse: does this env file define at least one
+ * non-empty, non-placeholder `CLAUDE_TOKEN_<label>=…` entry? The env-file
+ * contract (claude-accounts-usage.mjs's parseAccountsEnv, and its own exit-1
+ * "No CLAUDE_TOKEN_* tokens found" message) treats a file that exists but has
+ * no USABLE entry the same as an absent file — this mirrors that regex + the
+ * same placeholder skip so this check agrees with what the probe itself would
+ * find (CTL-1653 Codex round-2 finding: existence alone let an empty or
+ * placeholder-only file still spawn the probe, which then exits nonzero with
+ * no JSON and surfaced as available:true/status:"error" instead of the
+ * documented available:false contract).
+ *
+ * SECRETS HYGIENE: a candidate token value is held in a local var only long
+ * enough to test truthiness/placeholder-equality (identical discipline to
+ * parseAccountsEnv itself) — it is never logged, stored beyond this function,
+ * or returned.
+ */
+function hasUsableAccountsEnv(envFile) {
+  let raw;
+  try {
+    raw = readFileSync(envFile, "utf8");
+  } catch {
+    return false; // unreadable — existsSync already gated the ENOENT case above
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const m = trimmed.match(CLAUDE_TOKEN_LINE_RE);
+    if (!m) continue;
+    const rhs = m[1].trimStart();
+    const q = rhs[0];
+    const token =
+      q === "'" || q === '"'
+        ? (() => {
+            const end = rhs.indexOf(q, 1);
+            return end === -1 ? rhs.slice(1) : rhs.slice(1, end);
+          })()
+        : (rhs.match(/^(\S+)/)?.[1] ?? "");
+    if (token && token !== PASTE_TOKEN_PLACEHOLDER) return true;
   }
   return false;
 }
-// The CHILD runtime that runs the probe: bun else node — mirrors catalyst-stack's
-// _ca_node_runtime choice. The probe is pure node:* + fetch, so either runs it.
-// Preference order: (1) this process's OWN runtime — when the monitor itself is
-// running under bun, bun is proven present regardless of where it is installed;
-// (2) `bun` resolved from PATH (the _ca_node_runtime parity check, catches a
-// Homebrew/managed install this process happens not to be running under); (3)
-// the historical `~/.bun/bin/bun` default-install check, kept for back-compat;
-// (4) node.
-const RUNTIME =
-  typeof Bun !== "undefined" ||
-  resolveOnPath("bun") ||
-  existsSync(resolve(homedir(), ".bun/bin/bun"))
-    ? "bun"
-    : "node";
 
 /**
  * defaultAccountsProbeExec — run the CTL-1650 probe in a subshell that sources the
  * accounts env so CLAUDE_CODE_OAUTH_TOKEN is visible for active-account detection
  * and never enters this (long-lived monitor) process's env. Returns the token-free
- * JSON record ({generatedAt, accounts:[…]}). When no env file exists, returns an
- * empty `available:false` record so the surfaces render "unavailable"/quiet rather
+ * JSON record ({generatedAt, accounts:[…]}). When no env file exists — OR one
+ * exists but defines no usable CLAUDE_TOKEN_* entry (empty file, comments-only,
+ * every entry still the PASTE_TOKEN_HERE placeholder) — returns an empty
+ * `available:false` record so the surfaces render "unavailable"/quiet rather
  * than erroring (deriveAccountsSummary propagates the flag; see below). When the
  * probe exits nonzero (e.g. every configured account is invalid/auth-failing), the
  * token-free JSON it already wrote to stdout is recovered from the rejected exec's
@@ -80,7 +173,7 @@ export async function defaultAccountsProbeExec({
   probePath = PROBE,
   runtime = RUNTIME,
 } = {}) {
-  if (!existsSync(envFile)) {
+  if (!existsSync(envFile) || !hasUsableAccountsEnv(envFile)) {
     return { generatedAt: new Date().toISOString(), accounts: [], available: false };
   }
   // `set -a` exports every sourced var to the exec'd child only; the token dies
