@@ -9,7 +9,7 @@
 // hook is built from, adjacent to the source so drift is obvious in review.
 
 import { describe, test, expect } from "bun:test";
-import { shouldReconnectOnIdle } from "./useAccountModel";
+import { shouldReconnectOnIdle, accountFrameAction } from "./useAccountModel";
 import { createNodeEventSource } from "../lib/node-event-source";
 
 describe("shouldReconnectOnIdle (CTL-1653 Codex round-2: clean-EOF reconnect)", () => {
@@ -41,6 +41,26 @@ function fetchStreamingThenCloseCleanly(chunks: string[]): typeof fetch {
     return Promise.resolve(new Response(stream, { status: 200 }));
   }) as unknown as typeof fetch;
 }
+
+describe("accountFrameAction (CTL-1653 Codex round-3: HUD clears on unavailable, mirrors the web fix)", () => {
+  test("apply for a valid posture frame", () => {
+    const action = accountFrameAction({ status: "rejected", active: { label: "acctA" } });
+    expect(action.type).toBe("apply");
+    expect(action.type === "apply" && action.signal.status).toBe("rejected");
+  });
+  test("clear for {available:false} — a REAL transition the strip must react to, not noise", () => {
+    // Before this fix, the HUD's decode returned null for this shape (same as
+    // garbage) and the caller only called setSignal on a non-null value, so an
+    // already-open HUD kept showing the PREVIOUS posture forever after the
+    // node's env file was emptied/reset-to-placeholders.
+    expect(accountFrameAction({ available: false, node: "mini-2" })).toEqual({ type: "clear" });
+  });
+  test("ignore for garbage/truncated input", () => {
+    expect(accountFrameAction({ garbage: true })).toEqual({ type: "ignore" });
+    expect(accountFrameAction(null)).toEqual({ type: "ignore" });
+    expect(accountFrameAction("a string")).toEqual({ type: "ignore" });
+  });
+});
 
 describe("createNodeEventSource: the gap shouldReconnectOnIdle exists to close", () => {
   test("a clean end-of-stream resolves whenIdle() WITHOUT ever invoking onerror", async () => {
