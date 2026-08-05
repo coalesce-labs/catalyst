@@ -153,7 +153,9 @@ via Layer-2.
   node's declared mode — deployment-mode dispatch for those consumers stays **planned**, not
   shipped (see the Secret Contract section below).
 - **Orthogonal axes, never merged**: deployment mode (fleet topology) × `catalyst.node.class`
-  (per-machine role) × `orchestration.dispatchMode` (process substrate within a node).
+  (per-machine role: `worker` runs the full execution layer; `monitor`/`developer` run observation
+  substrate only — broker + monitor + event-mirror, no heartbeat/dispatch/recovery) ×
+  `orchestration.dispatchMode` (process substrate within a node).
 - Design + migration plan: `thoughts/shared/research/2026-08-02-ctl-1617-deployment-mode-design.md`.
 
 ## Secret Contract (CTL-1616)
@@ -512,6 +514,10 @@ flowchart LR
     OM[orch-monitor<br/>web dashboard]
     CE[catalyst-events tail<br/>raw stream]
   end
+  subgraph ObservationNodes["Observation nodes (monitor/developer)"]
+    EM[event-mirror daemon<br/>ssh-tail fan-in] -- "ssh tail -c +N<br/>per-host byte cursor" --> REMOTE_EL[worker host<br/>events/YYYY-MM.jsonl]
+    EM --> EL
+  end
   SJ --> HUD
   PSF -.not yet scanned.-> HUD
   BI --> HUD
@@ -528,6 +534,15 @@ Writers (phase-agent workers, `phase-agent-dispatch`, broker daemon, webhook rec
 `fs.watch` byte-cursor driving `claude stop`/`git worktree remove`/`git branch -D`], `catalyst-hud`,
 orch-monitor) consume that log plus per-run state and broker registry without coordinating. The
 broker and the reaper are each both reader and writer of the same file.
+
+**Event-mirror (CTL-1654) — observation-node fleet feed.** On `monitor`/`developer` nodes,
+`catalyst-stack start` launches the event-mirror daemon (`event-mirror/index.ts` supervised by
+launchd KeepAlive). It fans each worker host's `~/catalyst/events/YYYY-MM.jsonl` into the local
+copy via `ssh tail -c +N`, advancing a per-host byte cursor and deduplicating by event id (in-memory
+ring, scoped to the current month's file). The append is idempotent: events already in the local
+file are never double-written. `catalyst-events tail`/`wait-for` on the observation node then
+resolve fleet events locally with no polling loop. The fan-in is transport-abstracted (injectable
+`fetchFn`) so a future cloud-changefeed transport drops in without touching the dedup core.
 
 ### Linear app-actor self-echo guard (`botUserId`)
 
