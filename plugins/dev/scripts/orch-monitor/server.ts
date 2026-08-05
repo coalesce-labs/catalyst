@@ -136,6 +136,7 @@ import { buildTrustedOrigins, isOriginAllowed } from "./lib/trusted-origin.mjs";
 // the async TTL cache serves /api/accounts + the /api/accounts/stream SSE.
 import { createAccountsProbe, defaultAccountsProbeExec } from "./lib/accounts-probe.mjs";
 import { createAccountsTimer } from "./lib/accounts-timer.mjs";
+import { checkAccountStatusTransition } from "./lib/account-status-latch.mjs";
 import type { CachedAccountsSummary } from "./lib/accounts-probe";
 /** CTL-1653: the injectable child-process seam for the Claude-account probe.
  *  Production is defaultAccountsProbeExec; tests inject a scripted fake record. */
@@ -1027,6 +1028,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
             } catch {
               /* a dead subscriber is pruned on its own stream cancel */
             }
+          }
+          // CTL-1653 Phase 4: edge-triggered account.status.changed emit. Best-
+          // effort — a marker/IO hiccup must never kill the tick.
+          try {
+            void checkAccountStatusTransition(s);
+          } catch (err) {
+            console.error(`[server] account status transition check failed:`, err);
           }
         },
       })
