@@ -2518,13 +2518,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
           if (refresh) {
             const hasRefreshHeader = req.headers.get(ACCOUNTS_REFRESH_HEADER) !== null;
             const hostHeader = req.headers.get("host");
-            // Check BOTH schemes (Codex round-4): Host carries no scheme, and a
-            // reverse-proxied deployment configures its MONITOR_TRUSTED_ORIGINS
-            // entry as the https:// origin — an http://-only probe would 403
-            // every legitimate proxied refresh.
+            // SCHEME-AWARE Host check (Codex round-5, refining round-4): Host
+            // carries no scheme, but an https://-only MONITOR_TRUSTED_ORIGINS
+            // entry deliberately does NOT trust the plaintext form of the same
+            // host — probing both schemes unconditionally would let a page
+            // served over plain HTTP for the trusted hostname spend the probe.
+            // The request's effective scheme is https ONLY when the co-located
+            // reverse proxy says so: X-Forwarded-Proto is honored solely from a
+            // loopback peer (this server always listens plaintext; TLS
+            // terminates at a proxy on the same host — the heap-snapshot
+            // route's existing localhost gate uses the same assumption). A
+            // remote client spoofing the header stays "http" and an https-only
+            // trusted set correctly rejects it.
+            const peer = server.requestIP(req)?.address ?? "";
+            const peerIsLoopback =
+              peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
+            const fwdProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+            const effectiveScheme = peerIsLoopback && fwdProto === "https" ? "https" : "http";
             const hostTrusted =
-              hostHeader !== null &&
-              (originAllowed(`http://${hostHeader}`) || originAllowed(`https://${hostHeader}`));
+              hostHeader !== null && originAllowed(`${effectiveScheme}://${hostHeader}`);
             if (!hasRefreshHeader || !hostTrusted || !originAllowed(req.headers.get("origin"))) {
               return Response.json(
                 { status: "forbidden", error: "cross-origin refresh rejected" },

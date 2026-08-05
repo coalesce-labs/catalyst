@@ -260,17 +260,31 @@ describe("/api/accounts refresh behind an HTTPS reverse proxy", () => {
       /* ignore */
     }
   });
-  it("a refresh whose Host matches an https-configured trusted origin is admitted", async () => {
+  it("a proxied refresh (X-Forwarded-Proto https from loopback) whose Host matches the https trusted origin is admitted", async () => {
     const before = calls;
     const r = await fetch(`${base}/api/accounts?refresh=true`, {
       headers: {
         [ACCOUNTS_REFRESH_HEADER]: "1",
         Host: "catalyst.internal.example",
         Origin: "https://catalyst.internal.example",
+        "X-Forwarded-Proto": "https",
       },
     });
     expect(r.status).toBe(200);
     expect(calls).toBe(before + 1);
+  });
+  it("the SAME request WITHOUT X-Forwarded-Proto is rejected — an https-only trusted host is never treated as plaintext", async () => {
+    // CTL-1653 Codex round-5: a page served over plain HTTP for the trusted
+    // hostname (originless same-origin GET) must not be able to spend the
+    // probe when the config trusts only the https:// origin. Without the
+    // proxy's X-Forwarded-Proto the effective scheme is http, and
+    // http://catalyst.internal.example is deliberately NOT in the trusted set.
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Host: "catalyst.internal.example" },
+    });
+    expect(r.status).toBe(403);
+    expect(calls).toBe(before);
   });
   it("an untrusted Host is still rejected even with the https set configured", async () => {
     const before = calls;
