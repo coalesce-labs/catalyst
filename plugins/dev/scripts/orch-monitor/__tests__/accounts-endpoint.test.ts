@@ -221,3 +221,63 @@ describe("/api/accounts disabled (accountsProbeExec:null)", () => {
     }
   });
 });
+
+describe("/api/accounts refresh behind an HTTPS reverse proxy", () => {
+  // CTL-1653 Codex round-4: MONITOR_TRUSTED_ORIGINS' documented reverse-proxy
+  // form is a FULL https:// origin, but Host carries no scheme — an
+  // http://-only probe of the trusted set would 403 every legitimate proxied
+  // refresh. The guard must accept a Host that matches a trusted origin under
+  // EITHER scheme.
+  let server: ReturnType<typeof createServer>;
+  let tmpDir = "";
+  let base = "";
+  let calls = 0;
+  let prevTrusted: string | undefined;
+  beforeAll(() => {
+    prevTrusted = process.env.MONITOR_TRUSTED_ORIGINS;
+    process.env.MONITOR_TRUSTED_ORIGINS = "https://catalyst.internal.example";
+    const dirs = mkWtDir("accounts-endpoint-https-");
+    tmpDir = dirs.tmpDir;
+    server = createServer({
+      port: 0,
+      wtDir: dirs.wtDir,
+      startWatcher: false,
+      accountsRefreshFloorMs: 0,
+      accountsProbeExec: () => {
+        calls += 1;
+        return Promise.resolve(FAKE);
+      },
+    });
+    base = `http://localhost:${server.port}`;
+  });
+  afterAll(() => {
+    if (prevTrusted === undefined) delete process.env.MONITOR_TRUSTED_ORIGINS;
+    else process.env.MONITOR_TRUSTED_ORIGINS = prevTrusted;
+    void server.stop(true);
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+  it("a refresh whose Host matches an https-configured trusted origin is admitted", async () => {
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: {
+        [ACCOUNTS_REFRESH_HEADER]: "1",
+        Host: "catalyst.internal.example",
+        Origin: "https://catalyst.internal.example",
+      },
+    });
+    expect(r.status).toBe(200);
+    expect(calls).toBe(before + 1);
+  });
+  it("an untrusted Host is still rejected even with the https set configured", async () => {
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Host: "evil.example" },
+    });
+    expect(r.status).toBe(403);
+    expect(calls).toBe(before);
+  });
+});
