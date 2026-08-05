@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1",
+  "vcsRepo": "coalesce-labs/catalyst",
+  "projectKey": "CTL",
+  "team": { "intent": "existing", "key": "CTL" },
+  "deploymentMode": "cluster",
+  "controller": { "id": "laptop", "nodeClass": "developer" },
+  "targetPolicy": {
+    "targets": [{ "id": "mini-1", "nodeClass": "worker", "online": true }],
+    "includeController": false,
+    "executionNodeClasses": ["worker"]
+  },
+  "observations": {
+    "provider.github_access": { "status": "satisfied", "evidence": { "repo": "coalesce-labs/catalyst" } },
+    "target.mini-1.checkout": { "status": "satisfied", "evidence": { "revision": "abc123" } },
+    "target.mini-1.execution_registry": { "status": "pending", "reason": { "code": "missing_registry_entry" } }
+  }
+}
