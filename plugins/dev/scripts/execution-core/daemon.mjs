@@ -148,6 +148,7 @@ import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
+import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
 
 // CTL-1623: register the github-token row's rearm hook at module load — BEFORE either
 // call site below (both live inside startDaemon(), invoked only later) can fire. Makes
@@ -817,6 +818,9 @@ export function startDaemon({
   // CTL-1090: cross-host liveness publisher. Injectable for tests. Single-host
   // installs get an inert no-op handle from startLivenessPublisher itself.
   startLivenessPublisher = realStartLivenessPublisher,
+  // CTL-1654: node-class guard seam. Injectable for tests (production uses the
+  // zero-import lib/node-class.mjs resolver). Defaults to the real resolver.
+  nodeClassResolver = _resolveNodeClass,
   // CTL-1274 + CTL-1393: cluster-repo auto-refresh. clusterSync runs once at boot
   // (pull + decrypt secrets + seed the change-detection marker); refreshClusterSecrets
   // runs on a cadence — it pulls AND, when the clone's HEAD moved with a secrets/
@@ -1331,12 +1335,32 @@ export function startDaemon({
       _ratelimitPoller = startRatelimitPoller();
     }
 
+    // CTL-1654: resolve node class once at boot. A monitor/developer node must NOT
+    // emit node.heartbeat (the only dispatch-roster signal) — a node that never
+    // heartbeats is shed from computeDispatchSurvivingRoster automatically. This
+    // explicit guard is defense-in-depth: even if a monitor node is mis-listed in
+    // cluster.json, the daemon stays in an observe-only mode (no heartbeat, no
+    // dispatch, no recovery). The daemon remains up so a mis-launched daemon is
+    // visibly refusing (WARN in logs + verify-node catches exec-core-stopped) rather
+    // than crash-looping under launchd — matching NODE_CLASS_MOST_RESTRICTIVE semantics.
+    const { class: _nodeClass } = nodeClassResolver();
+    const _isWorkerNode = _nodeClass === "worker";
+    if (!_isWorkerNode) {
+      log.warn(
+        { nodeClass: _nodeClass },
+        `execution-core launched on node.class=${_nodeClass} — refusing to actuate ` +
+        `(no heartbeat, no dispatch, no recovery). This node is observe-only (CTL-1654).`
+      );
+    }
+
     // CTL-859: start the node-heartbeat emitter. Appends a node.heartbeat event
     // to the unified event log every HEARTBEAT_INTERVAL_MS so a future liveness
     // reader (readClusterHeartbeats) can detect a dead node by heartbeat
     // silence. ADDITIVE/dormant — pure observability, no behavior consumes it
     // yet. Inside the same try/catch so a throw triggers PID-file cleanup.
-    if (enableHeartbeat) {
+    // CTL-1654: gated on _isWorkerNode — a monitor/developer node must never
+    // heartbeat (the heartbeat IS the dispatch-roster membership signal).
+    if (enableHeartbeat && _isWorkerNode) {
       // CTL-1322: supply the live admission-state closure so each heartbeat carries
       // { accepting, holdReason, effectiveCapacity, activeWorkers } — computed from
       // the same gate source fns the scheduler enforces (orchDir + concurrency are
