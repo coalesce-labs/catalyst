@@ -4,13 +4,19 @@
 //
 // Mirrors broker-degraded.mjs: a PURE edge state machine (nextAccountStatusLatch),
 // a durable marker (~/catalyst/account-status-latch.json, atomic tmp+rename), and
-// PERSIST-BEFORE-EMIT — the durable marker is the source of truth. The new episode
-// state is written to disk BEFORE the append, so a restart can never re-announce an
-// episode we already emitted (exactly-once across restarts). A failed persist emits
-// nothing (nothing to duplicate) and a failed append rolls the marker back, so in
-// either case the SAME edge is recomputed and retried next tick (never lose a real
-// transition). The in-memory latch only advances once BOTH the marker and the append
-// succeed, so it never diverges from disk in a way that re-announces an open episode.
+// EMIT-THEN-ADVANCE — the in-memory latch is authoritative and the marker follows it.
+// The append happens FIRST; the latch advances ONLY on a successful append, so a
+// transient log failure re-attempts the SAME edge next tick instead of swallowing a
+// real transition (never-lose). The durable marker is persisted AFTER the append, and
+// if that write fails a module-level `_persistPending` flag retries it on the next
+// tick — in-memory stays authoritative meanwhile, so the retry never changes what is
+// emitted; it only makes the on-disk copy catch up. This is exactly the reconcile
+// broker-degraded.mjs uses (Codex #2740) and it satisfies BOTH guarantees at once:
+// never re-announce an already-emitted episode after a restart (exactly-once) AND
+// never lose a real transition to one bad write. NOT persist-before-emit — writing the
+// advanced marker ahead of the append means a crash in that window hydrates an
+// episode we never emitted on restart, permanently suppressing the edge (the defect
+// this file previously regressed into).
 //
 // account.* is NOT a broker-protected namespace (account.ratelimit.sampled already
 // lives there), so no namespace-contract change is needed.
@@ -46,6 +52,13 @@ export function nextAccountStatusLatch(prev, { trip, clear } = {}) {
 // hydrated on the first tick so a monitor RESTART mid-episode does not re-emit.
 const _moduleLatch = { prev: false };
 let _hydrated = false;
+// Codex #2740 reconcile (ported from broker-degraded.mjs): the marker write can fail
+// AFTER the event append already succeeded and `_moduleLatch.prev` advanced. Swallowing
+// that would leave memory and disk disagreeing with nothing to reconcile them, so a
+// later restart could hydrate an absent/stale marker and re-emit a duplicate edge for
+// the same episode. When the post-emit write fails we remember it and retry on every
+// subsequent module-path tick until it lands; in-memory stays authoritative meanwhile.
+let _persistPending = false;
 
 // Resolved per call (not a load-time const) so tests can redirect via CATALYST_DIR.
 // Prefer process.env.HOME over homedir() for parity with getEventLogPath (macOS's
@@ -113,16 +126,19 @@ function persistLatchToDisk({ latched }) {
 export function __resetAccountStatusLatchForTest() {
   _moduleLatch.prev = false;
   _hydrated = false;
+  _persistPending = false;
 }
 
 const defaultEmit = (env) => emitEventLog(env);
 
 /**
  * checkAccountStatusTransition — one timer-tick evaluation. Emits exactly one
- * `account.status.changed` event on the active account's ok↔rejected edge. The
- * durable marker is persisted BEFORE the append and the in-memory latch advances
- * only once BOTH succeed (persist-before-emit), so a restart never re-announces an
- * already-emitted episode and a failed write re-attempts the same edge next tick.
+ * `account.status.changed` event on the active account's ok↔rejected edge. Uses
+ * EMIT-THEN-ADVANCE (mirrors broker-degraded.mjs): the append happens first, the
+ * in-memory latch advances only on a successful append (so a failed append retries
+ * the same edge next tick — never-lose), and the durable marker is persisted AFTER,
+ * with a `_persistPending` retry if that write fails, so a restart never re-announces
+ * an already-emitted episode (exactly-once) without ever losing a real transition.
  *
  * `degraded`, `error`, and `unknown` neither trip nor clear — they HOLD the
  * current latch (only a definitive `rejected`/`ok` moves it).
@@ -140,6 +156,15 @@ export async function checkAccountStatusTransition(summary, opts = {}) {
   if (usingModule) hydrateLatch();
   const latch = usingModule ? _moduleLatch : state;
   const persist = opts.persist ?? (usingModule ? persistLatchToDisk : () => true);
+
+  // Reconcile a previously-failed marker write before evaluating this tick (ported
+  // from broker-degraded.mjs). Runs AFTER hydrateLatch so it never clobbers the
+  // on-disk episode with un-hydrated defaults; in-memory state is authoritative, so
+  // this only makes the on-disk copy catch up. Module-path only — an injected-state
+  // test drives `persist` itself and never sets `_persistPending`.
+  if (usingModule && _persistPending) {
+    _persistPending = !persist({ latched: latch.prev === true });
+  }
 
   const trip = summary?.status === "rejected";
   const clear = summary?.status === "ok";
@@ -160,31 +185,28 @@ export async function checkAccountStatusTransition(summary, opts = {}) {
     payload: { node: summary.node, handle: summary.active?.label, status: edge },
   });
 
-  // PERSIST-BEFORE-EMIT: write the NEW episode state to the durable marker BEFORE
-  // appending, so the marker is the source of truth. If the marker write fails we
-  // emit nothing and leave the in-memory latch untouched — there is nothing to
-  // duplicate and the same edge is recomputed and retried next tick.
-  const prevLatched = latch.prev === true;
-  if (!persist({ latched })) return null;
-
+  // EMIT-THEN-ADVANCE: append the event FIRST. The in-memory latch advances ONLY on
+  // a successful append, so a transient log failure re-attempts the SAME edge next
+  // tick rather than silently dropping a real transition (never-lose). The durable
+  // marker is written AFTER — never before — because a marker advanced ahead of the
+  // append would, on a crash in that window, hydrate an already-advanced episode on
+  // restart and suppress an edge that was never emitted.
   let ok;
   try {
     ok = emit(env) !== false;
   } catch {
     ok = false;
   }
-  if (!ok) {
-    // Append failed after the marker advanced. Roll the marker back to the
-    // pre-edge state and leave the in-memory latch untouched so the next tick
-    // recomputes and retries this edge (a real transition is never lost to one
-    // bad append). The rollback keeps disk consistent with the un-advanced latch.
-    persist({ latched: prevLatched });
-    return null;
-  }
+  if (!ok) return null;
 
-  // Both the durable marker and the append succeeded — advance the in-memory
-  // latch to match disk. In-memory and on-disk never diverge in a way that
-  // re-announces an open episode after a restart.
+  // Append landed: the in-memory episode is now authoritative. Advance it, then
+  // pin hydration closed (module path) so a later successful read of a stale/absent
+  // marker — e.g. after a failed persist below — can never clobber what we just
+  // committed to the event log. Persist the marker AFTER; if that write fails,
+  // `_persistPending` retries it next tick (broker-degraded.mjs's reconcile).
   latch.prev = latched;
+  if (usingModule) _hydrated = true;
+  const persisted = persist({ latched });
+  if (usingModule) _persistPending = !persisted;
   return edge;
 }

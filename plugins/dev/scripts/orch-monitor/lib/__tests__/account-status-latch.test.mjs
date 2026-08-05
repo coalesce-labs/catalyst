@@ -26,7 +26,7 @@ describe("nextAccountStatusLatch (pure edge)", () => {
   });
 });
 
-describe("checkAccountStatusTransition (persist-before-emit)", () => {
+describe("checkAccountStatusTransition (emit-then-advance)", () => {
   const summary = (status) => ({
     node: "mini-2",
     status,
@@ -79,35 +79,36 @@ describe("checkAccountStatusTransition (persist-before-emit)", () => {
     });
     expect(events.length).toBe(0);
   });
-  it("persist() failing emits NOTHING and leaves the latch un-advanced (retries next tick)", async () => {
-    // HIGH finding (CTL-1653): the durable marker is the source of truth. If it
-    // cannot be written we must not emit — a restart would otherwise re-announce
-    // an episode whose marker never landed. The edge is preserved for retry.
+  it("emit-then-advance: a failed marker write still emits + advances (in-memory authoritative)", async () => {
+    // CTL-1653 (2nd verify): the never-lose fix. The append is the source of truth,
+    // NOT the marker. A transient marker-write failure must NOT swallow a real
+    // transition — the event is emitted and the in-memory latch advances; only the
+    // durable copy lags (the module path retries it via _persistPending next tick).
     const state = { prev: false };
-    let persistOk = false;
     const emitted = [];
     const emit = (e) => (emitted.push(e), true);
-    await checkAccountStatusTransition(summary("rejected"), {
-      emit,
-      state,
-      persist: () => persistOk,
-    });
-    expect(emitted.length).toBe(0); // persist-before-emit: no marker → no event
-    expect(state.prev).toBe(false); // latch un-advanced → same edge next tick
-
-    persistOk = true; // marker write recovers
     const edge = await checkAccountStatusTransition(summary("rejected"), {
       emit,
       state,
-      persist: () => persistOk,
+      persist: () => false, // marker write fails
     });
-    expect(edge).toBe("rejected");
-    expect(emitted.length).toBe(1); // exactly one emit once the marker persists
-    expect(state.prev).toBe(true);
+    expect(edge).toBe("rejected"); // emitted despite the failed marker write
+    expect(emitted.length).toBe(1);
+    expect(state.prev).toBe(true); // in-memory advanced (authoritative)
+
+    // Still rejected: already latched → no re-emit even after the write recovers.
+    const noEdge = await checkAccountStatusTransition(summary("rejected"), {
+      emit,
+      state,
+      persist: () => true,
+    });
+    expect(noEdge).toBeNull();
+    expect(emitted.length).toBe(1);
   });
-  it("rolls the marker back and retries when the append fails AFTER a good persist", async () => {
-    // never-lose: a failed append must not leave the marker advanced (which would
-    // make a restart suppress the edge). The marker is rolled back to pre-edge.
+  it("append failing does NOT touch the marker and retries the SAME edge next tick", async () => {
+    // never-lose: the marker is written only AFTER a successful append, so a failed
+    // append leaves both the latch un-advanced AND the marker untouched (no bogus
+    // rollback dance) — the identical edge is recomputed and retried next tick.
     const state = { prev: false };
     const persistCalls = [];
     const persist = ({ latched }) => (persistCalls.push(latched), true);
@@ -118,8 +119,7 @@ describe("checkAccountStatusTransition (persist-before-emit)", () => {
       persist,
     });
     expect(state.prev).toBe(false); // un-advanced
-    // marker advanced true then rolled back to false (pre-edge)
-    expect(persistCalls).toEqual([true, false]);
+    expect(persistCalls).toEqual([]); // marker never touched on a failed append
 
     emitOk = true;
     const emitted = [];
@@ -131,6 +131,7 @@ describe("checkAccountStatusTransition (persist-before-emit)", () => {
     expect(edge).toBe("rejected");
     expect(emitted.length).toBe(1);
     expect(state.prev).toBe(true);
+    expect(persistCalls).toEqual([true]); // persisted once, AFTER the good append
   });
 });
 
@@ -172,5 +173,40 @@ describe("checkAccountStatusTransition durable marker + restart (real disk)", ()
     expect(emitted.length).toBe(1);
     expect(emitted[0].attributes["account.status"]).toBe("ok");
     expect(JSON.parse(readFileSync(getAccountStatusLatchPath(), "utf8")).latched).toBe(false);
+  });
+  it("_persistPending: a failed post-emit marker write is retried next tick without re-emitting", async () => {
+    // CTL-1653 (2nd verify): ports broker-degraded.mjs's Codex #2740 reconcile. A
+    // post-emit marker write that fails must NOT be swallowed (memory would outrun
+    // disk and a restart could re-emit a duplicate edge) — it is retried on the next
+    // module-path tick, and that retry NEVER re-emits (in-memory stays authoritative).
+    dir = mkdtempSync(join(tmpdir(), "acct-latch-"));
+    process.env.CATALYST_DIR = dir;
+    __resetAccountStatusLatchForTest();
+
+    const emitted = [];
+    const emit = (e) => (emitted.push(e), true);
+    // A fake persist we can fail then heal (module path → _persistPending is tracked).
+    let persistOk = false;
+    const persistCalls = [];
+    const persist = ({ latched }) => (persistCalls.push({ latched, ok: persistOk }), persistOk);
+
+    // Tick 1: ok→rejected. Append succeeds; the marker write FAILS → edge still emits,
+    // in-memory latch advances, _persistPending is armed.
+    const edge1 = await checkAccountStatusTransition(summary("rejected"), { emit, persist });
+    expect(edge1).toBe("rejected");
+    expect(emitted.length).toBe(1);
+    expect(persistCalls).toEqual([{ latched: true, ok: false }]);
+
+    // Tick 2: still rejected (no new edge). The reconcile retries the marker write —
+    // now succeeding — and emits NOTHING (already latched).
+    persistOk = true;
+    const edge2 = await checkAccountStatusTransition(summary("rejected"), { emit, persist });
+    expect(edge2).toBeNull();
+    expect(emitted.length).toBe(1); // no duplicate
+    // The reconcile fired with the authoritative latched=true, and it landed.
+    expect(persistCalls).toEqual([
+      { latched: true, ok: false },
+      { latched: true, ok: true },
+    ]);
   });
 });
