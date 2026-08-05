@@ -4004,6 +4004,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // an allowlist the attacker cannot influence — see lib/trusted-origin.mjs
           // for the rebinding walkthrough and the inertness trade-off.
           if (!originAllowed(req.headers.get("origin"))) {
+            // TEMPORARY diagnostic for a live 2026-08-05 incident (CAT-18 tracks
+            // making this permanent/proper) — logs the exact received Origin and
+            // the live trusted set (self hostnames/addresses only, not sensitive)
+            // so a real mismatch is visible instead of guessed at.
+            console.error(
+              `[reply] cross-origin rejected: origin=${JSON.stringify(req.headers.get("origin"))} trusted=${JSON.stringify([...(trustedOriginsCache ?? [])])}`,
+            );
             return Response.json(
               { status: "forbidden", error: "cross-origin reply rejected" },
               { status: 403 },
