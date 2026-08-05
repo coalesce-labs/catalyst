@@ -76,6 +76,20 @@ function appendCoordination(obj) {
   appendFileSync(coordinationPath(), JSON.stringify(obj) + "\n");
 }
 
+// Append to the LOCAL event log that readNewEvents() drains (catalystDir/events/
+// <YYYY-MM>.jsonl — see config.mjs getEventLogPath). Used to exercise the local
+// tail alongside the coordination tail for the shared cross-source dedup.
+function eventLogPath() {
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  return join(catalystDir, "events", `${ym}.jsonl`);
+}
+
+function appendEventLog(obj) {
+  mkdirSync(join(catalystDir, "events"), { recursive: true });
+  appendFileSync(eventLogPath(), JSON.stringify(obj) + "\n");
+}
+
 function commentEvent({ ticket = "CTL-1", commentId = "cmt-1", authorId = "u-1" } = {}) {
   return {
     id: `env-${commentId}`,
@@ -259,6 +273,29 @@ describe("readNewCoordinationComments (CTL-1655 Phase 2)", () => {
     expect(onComment).not.toHaveBeenCalled();
   });
 
+  test("constraint 2 (reverse): coordination tail then local tail fires onComment exactly once — the local tail HONORS the shared dedup", () => {
+    // phase-review remediation (CTL-1655, Codex P2): the local event-log tail
+    // (readNewEvents) must SKIP a linear.comment.created the coordination-mirror
+    // tail already dispatched — plan §Phase 2 "whichever tail sees a given
+    // comment first wins and the other skips". Before the fix the local tail
+    // inserted into the dedup but ignored the result, so it re-dispatched (a
+    // second Phase B worker for one Linear comment — the CTL-1653 pathology).
+    setMultiHost();
+    const onComment = mock(() => {});
+    enroll("CTL", { status: "Todo" });
+    startMonitor({ exec: execReturning({}), reconcileIntervalMs: 60_000, onComment });
+    const ev = commentEvent({ ticket: "CTL-2b", commentId: "cmt-dedup-2" });
+    // Coordination-mirror tail wins the race and dispatches first (marks dedup).
+    appendCoordination(ev);
+    readNewCoordinationComments();
+    expect(onComment).toHaveBeenCalledTimes(1);
+    // The SAME comment also lands on the local event log (the originating host
+    // has it in both places). The local tail must skip — not re-dispatch.
+    appendEventLog(ev);
+    readNewEvents();
+    expect(onComment).toHaveBeenCalledTimes(1);
+  });
+
   test("constraint 2: two different commentIds each dispatch exactly once", () => {
     setMultiHost();
     const onComment = mock(() => {});
@@ -386,6 +423,30 @@ describe("startMonitor — coordination boot-drain (CTL-1655 Phase 3)", () => {
     await new Promise((r) => setTimeout(r, 40));
     expect(onComment).toHaveBeenCalledTimes(1);
     expect(onComment.mock.calls[0][0]).toMatchObject({ ticket: "CTL-11" });
+  });
+
+  // phase-review remediation (CTL-1655, Codex P2): the startTailing fs.watch gate
+  // is startup-only, so a daemon that BOOTS single-host and later gains a peer must
+  // still drain the mirror without a restart. The coordination poll timer is the
+  // only re-arming path, so it must be armed unconditionally (the reader self-no-ops
+  // while single-host). Before the fix the poll timer was gated on the boot-time
+  // host count, so a live roster expansion silently dropped every cross-host wake.
+  test("poll re-arms after a live single-host → multi-host roster expansion (no restart)", async () => {
+    // Boot SINGLE-host (no setMultiHost yet).
+    const onComment = mock(() => {});
+    enroll("CTL", { status: "Todo" });
+    startMonitor({
+      exec: execReturning({}),
+      reconcileIntervalMs: 60_000,
+      tailerPollMs: 10,
+      onComment,
+    });
+    // A second host joins the roster AFTER boot; then a cross-host comment lands.
+    setMultiHost();
+    appendCoordination(commentEvent({ ticket: "CTL-13", commentId: "cmt-expand" }));
+    await new Promise((r) => setTimeout(r, 40));
+    expect(onComment).toHaveBeenCalledTimes(1);
+    expect(onComment.mock.calls[0][0]).toMatchObject({ ticket: "CTL-13" });
   });
 });
 

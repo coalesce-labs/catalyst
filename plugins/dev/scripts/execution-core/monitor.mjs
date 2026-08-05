@@ -1602,13 +1602,19 @@ export function readNewEvents({ foldOnly = false } = {}) {
         event,
         foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts
       ); // CTL-681 + CTL-749
-      // CTL-1655: insert into the shared cross-source dedup before routing so
-      // the coordination tail skips a comment this tail already processed.
+      // CTL-1655: consult the shared cross-source dedup before routing so the
+      // two tails don't double-dispatch the same comment. Per plan §Phase 2
+      // ("whichever tail sees a given comment first wins and the other skips"),
+      // HONOR the result here: if the coordination-mirror tail already processed
+      // this comment (it won the race on the originating host, where the comment
+      // lands in BOTH the local event log and the hub-echoed coordination.jsonl),
+      // skip the redundant handleCommentCreatedEvent — otherwise Phase B
+      // dispatch fires twice for one Linear comment (the CTL-1653 pathology).
       // foldOnly drains do NOT insert — replayed events must not permanently
       // poison the dedup set and block their own future live delivery.
       const eventName681 = event?.attributes?.["event.name"] ?? event?.event;
       if (eventName681 === "linear.comment.created" && !foldOnly) {
-        markAndCheckCommentSeen(commentKeyOf(event));
+        if (markAndCheckCommentSeen(commentKeyOf(event))) continue;
       }
       handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
     }
@@ -1844,16 +1850,17 @@ export function startMonitor({
     tailerPollTimer = setInterval(() => readNewEvents(), tailerPollMs);
     // CTL-1655: poll the coordination mirror on the same cadence so a missed
     // fs.watch (the common case for cross-process appends on macOS) does not
-    // silently drop cross-host comment wakes. readNewCoordinationComments is a
-    // single-host no-op, but gate on multi-host here too so the timer is never
-    // armed when it could only ever no-op — matching the watcher gate in
-    // startTailing. The poll is cheap (reads only bytes past coordinationCursor).
-    if (getClusterHosts().length > 1) {
-      coordinationPollTimer = setInterval(
-        () => readNewCoordinationComments(),
-        tailerPollMs
-      );
-    }
+    // silently drop cross-host comment wakes. The poll is cheap (reads only
+    // bytes past coordinationCursor) and readNewCoordinationComments re-reads
+    // the roster per call, self-no-op'ing while single-host. Arm it
+    // UNCONDITIONALLY (not gated on the boot-time host count): a daemon that
+    // boots single-host and later has a peer added must still start draining the
+    // mirror without a restart — the startTailing watcher gate is startup-only,
+    // so this poll is the sole path that re-arms on a live roster expansion.
+    coordinationPollTimer = setInterval(
+      () => readNewCoordinationComments(),
+      tailerPollMs
+    );
   }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
