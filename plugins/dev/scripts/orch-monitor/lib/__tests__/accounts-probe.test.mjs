@@ -107,12 +107,60 @@ describe("createAccountsProbe (cache)", () => {
     await p.get();
     expect(calls()).toBe(2);
   });
-  it("refresh:true bypasses a fresh cache", async () => {
+  it("refresh:true bypasses a fresh cache (refreshFloorMs:0)", async () => {
     const { exec, calls } = mkExec();
-    const p = createAccountsProbe({ exec, ttlMs: 5000, now: () => 1000, node: "n" });
+    const p = createAccountsProbe({
+      exec,
+      ttlMs: 5000,
+      refreshFloorMs: 0,
+      now: () => 1000,
+      node: "n",
+    });
     await p.get();
     await p.get({ refresh: true });
     expect(calls()).toBe(2);
+  });
+  it("refresh WITHIN the floor serves cache (no probe) — DoS guard", async () => {
+    const { exec, calls } = mkExec();
+    let t = 1000;
+    const p = createAccountsProbe({
+      exec,
+      ttlMs: 5000,
+      refreshFloorMs: 2000,
+      now: () => t,
+      node: "n",
+    });
+    await p.get(); // probes, cache at t=1000
+    t = 2500; // within the 2000ms floor
+    const b = await p.get({ refresh: true });
+    expect(calls()).toBe(1); // refresh throttled by the floor
+    expect(b.cached).toBe(true);
+  });
+  it("refresh AFTER the floor re-probes", async () => {
+    const { exec, calls } = mkExec();
+    let t = 1000;
+    const p = createAccountsProbe({
+      exec,
+      ttlMs: 5000,
+      refreshFloorMs: 2000,
+      now: () => t,
+      node: "n",
+    });
+    await p.get();
+    t = 3500; // past the 2000ms floor
+    await p.get({ refresh: true });
+    expect(calls()).toBe(2);
+  });
+  it("coalesces concurrent get() calls into a single probe (DoS guard)", async () => {
+    let n = 0;
+    const exec = async () => {
+      n += 1;
+      await Promise.resolve(); // yield so all three callers overlap
+      return REJECTED_ACTIVE;
+    };
+    const p = createAccountsProbe({ exec, ttlMs: 5000, now: () => 1000, node: "n" });
+    await Promise.all([p.get(), p.get(), p.get()]);
+    expect(n).toBe(1);
   });
   it("latest() returns the last posture without probing; null before first probe", async () => {
     const { exec, calls } = mkExec();

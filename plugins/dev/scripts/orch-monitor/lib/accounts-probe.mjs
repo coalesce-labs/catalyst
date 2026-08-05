@@ -21,14 +21,22 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const execFileP = promisify(execFile);
-const PROBE = resolve(import.meta.dir, "..", "..", "claude-accounts-usage.mjs");
+// fileURLToPath(import.meta.url) resolves under BOTH bun and node (import.meta.dir
+// is a bun-only extension), so this module loads regardless of the parent runtime.
+const PROBE = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "claude-accounts-usage.mjs",
+);
 const ENV_FILE =
   process.env.CLAUDE_ACCOUNTS_ENV ?? resolve(homedir(), ".config/catalyst/claude-accounts.env");
-// bun else node — mirrors catalyst-stack's _ca_node_runtime choice. The probe is
-// pure node:* + fetch, so either runtime runs it.
+// The CHILD runtime that runs the probe: bun else node — mirrors catalyst-stack's
+// _ca_node_runtime choice. The probe is pure node:* + fetch, so either runs it.
 const RUNTIME = existsSync(resolve(homedir(), ".bun/bin/bun")) ? "bun" : "node";
 
 /**
@@ -43,11 +51,17 @@ export async function defaultAccountsProbeExec({ envFile = ENV_FILE, timeoutMs =
   // `set -a` exports every sourced var to the exec'd child only; the token dies
   // with this bash -c subshell and never reaches the monitor's own env.
   const script = `set -a; . "$CATALYST_ACCOUNTS_ENV"; set +a; exec "$RT" "$PROBE" --json`;
+  // Defense-in-depth: strip any ambient CLAUDE_CODE_OAUTH_TOKEN from the child's
+  // inherited env so the sourced accounts file is the SOLE authority for the
+  // active-account selection — a monitor daemon mis-started with the token in its
+  // own env can't silently forward it (the design keeps it out of the monitor env).
+  const childEnv = { ...process.env, CATALYST_ACCOUNTS_ENV: envFile, RT: RUNTIME, PROBE };
+  delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
   const { stdout } = await execFileP("bash", ["-c", script], {
     encoding: "utf8",
     timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, CATALYST_ACCOUNTS_ENV: envFile, RT: RUNTIME, PROBE },
+    env: childEnv,
   });
   return JSON.parse(stdout);
 }
@@ -74,6 +88,15 @@ function bindingWindowStatus(active) {
   return active.overallStatus ?? null;
 }
 
+// Whitelist-map ONE rate-limit window to a token-free view. RECURSIVE field pick
+// so the "a leaked field can't ride along" guarantee holds at EVERY level, not
+// just the top — a future upstream change that attached anything under a window
+// object can never flow through to the API/SSE.
+function pickWindow(w) {
+  if (!w || typeof w !== "object") return null;
+  return { pct: w.pct ?? null, resetsAt: w.resetsAt ?? null, status: w.status ?? null };
+}
+
 // Whitelist-map ONE raw account to a token-free view. Explicit field pick — never
 // spread the raw record, so a leaked `token` (or any other unexpected field) can't
 // ride along into the summary.
@@ -84,8 +107,8 @@ function pickAccount(a) {
     email: a?.email ?? null,
     overallStatus: a?.overallStatus ?? null,
     representativeClaim: a?.representativeClaim ?? null,
-    fiveHour: a?.fiveHour ?? null,
-    sevenDay: a?.sevenDay ?? null,
+    fiveHour: pickWindow(a?.fiveHour),
+    sevenDay: pickWindow(a?.sevenDay),
     error: a?.error ?? null,
   };
 }
@@ -141,47 +164,79 @@ export function deriveAccountsSummary(raw, { node } = {}) {
  * A throwing exec yields an error posture that is NOT cached (so a transient failure
  * retries next call). `latest()` returns the last posture without probing.
  *
+ * Two DoS guards (each real probe spends one Haiku call PER account):
+ *  - **In-flight coalescing** — concurrent `get()` calls share ONE probe, so a
+ *    burst of parallel requests can never fan out into N subprocesses.
+ *  - **Refresh floor** — a forced `refresh` still serves the cache when it is
+ *    younger than `refreshFloorMs` (< `ttlMs`), so a client cannot loop
+ *    `?refresh=true` to spend unbounded inference / self-exhaust the accounts.
+ *
  * @param {object} o
- * @param {Function} o.exec         async () => raw probe record
- * @param {number}   [o.ttlMs]      cache TTL (default 5 min)
- * @param {Function} [o.now]        injectable clock (default Date.now)
- * @param {string}   o.node         this node's identity
+ * @param {Function} o.exec           async () => raw probe record
+ * @param {number}   [o.ttlMs]        cache TTL for normal reads (default 5 min)
+ * @param {number}   [o.refreshFloorMs] min age before a forced refresh re-probes (default 30 s)
+ * @param {Function} [o.now]          injectable clock (default Date.now)
+ * @param {string}   o.node           this node's identity
  * @returns {{get, latest}}
  */
-export function createAccountsProbe({ exec, ttlMs = 5 * 60 * 1000, now = () => Date.now(), node }) {
+export function createAccountsProbe({
+  exec,
+  ttlMs = 5 * 60 * 1000,
+  refreshFloorMs = 30 * 1000,
+  now = () => Date.now(),
+  node,
+}) {
   let cache = null; // { summary, probedAt }
+  let inflight = null; // shared promise while a probe is running (coalescing)
+
+  function serveCache() {
+    return { ...cache.summary, probedAt: cache.probedAt, cached: true };
+  }
+
+  function runProbe() {
+    if (inflight) return inflight; // coalesce concurrent callers onto one probe
+    inflight = (async () => {
+      try {
+        const raw = await exec();
+        const summary = deriveAccountsSummary(raw, { node });
+        cache = { summary, probedAt: now() };
+        return { ...summary, probedAt: cache.probedAt, cached: false };
+      } catch (err) {
+        // Build an error posture over a synthetic error record; return WITHOUT
+        // caching so the next call retries rather than serving a stale error.
+        const errRecord = {
+          generatedAt: new Date(now()).toISOString(),
+          accounts: [
+            {
+              label: null,
+              isActive: true,
+              email: null,
+              overallStatus: null,
+              representativeClaim: null,
+              fiveHour: null,
+              sevenDay: null,
+              error: err?.message ?? String(err),
+            },
+          ],
+        };
+        const summary = deriveAccountsSummary(errRecord, { node });
+        return { ...summary, probedAt: now(), cached: false };
+      } finally {
+        inflight = null;
+      }
+    })();
+    return inflight;
+  }
 
   async function get({ refresh = false } = {}) {
-    if (!refresh && cache && now() - cache.probedAt < ttlMs) {
-      return { ...cache.summary, probedAt: cache.probedAt, cached: true };
+    if (cache) {
+      // Normal reads serve within the full TTL; a forced refresh serves within the
+      // shorter floor. refreshFloorMs < ttlMs, so `refresh` still probes sooner —
+      // it just cannot be looped faster than the floor.
+      const threshold = refresh ? refreshFloorMs : ttlMs;
+      if (now() - cache.probedAt < threshold) return serveCache();
     }
-    let raw;
-    try {
-      raw = await exec();
-    } catch (err) {
-      // Build an error posture over a synthetic error record; return WITHOUT
-      // caching so the next call retries rather than serving a stale error.
-      const errRecord = {
-        generatedAt: new Date(now()).toISOString(),
-        accounts: [
-          {
-            label: null,
-            isActive: true,
-            email: null,
-            overallStatus: null,
-            representativeClaim: null,
-            fiveHour: null,
-            sevenDay: null,
-            error: err?.message ?? String(err),
-          },
-        ],
-      };
-      const summary = deriveAccountsSummary(errRecord, { node });
-      return { ...summary, probedAt: now(), cached: false };
-    }
-    const summary = deriveAccountsSummary(raw, { node });
-    cache = { summary, probedAt: now() };
-    return { ...summary, probedAt: cache.probedAt, cached: false };
+    return runProbe();
   }
 
   function latest() {

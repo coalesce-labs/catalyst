@@ -5,12 +5,18 @@
 // (CATALYST_MONITOR_URL, else http://127.0.0.1:<MONITOR_PORT|7400>).
 //
 // Uses the HUD's dependency-free createNodeEventSource (no browser EventSource in
-// bun). Never throws: any connection error just leaves the last posture (or null).
+// bun). createNodeEventSource is a ONE-SHOT reader (reconnect policy is the hook's
+// job), so this hook owns capped-backoff reconnect + a snapshot reconcile — without
+// it the strip would freeze on its last value forever the first time the local
+// monitor restarts or the stream drops. Never throws.
 
 import { useEffect, useState } from "react";
-import { createNodeEventSource } from "../lib/node-event-source";
+import { createNodeEventSource, type NodeEventSource } from "../lib/node-event-source";
 import { DEFAULT_MONITOR_PORT } from "../lib/read-model-url";
 import type { AccountStripSignal } from "../components/account-strip";
+
+const INITIAL_BACKOFF_MS = 500;
+const MAX_BACKOFF_MS = 15_000;
 
 /** Resolve the LOCAL monitor base URL (no path). */
 function localMonitorBase(env: Record<string, string | undefined>): string {
@@ -45,10 +51,13 @@ export function useAccountModel(): AccountStripSignal | null {
   useEffect(() => {
     let alive = true;
     const base = localMonitorBase(process.env);
+    let es: NodeEventSource | null = null;
+    let backoff = INITIAL_BACKOFF_MS;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-    // Snapshot on mount so the strip populates immediately, not only on the next
-    // stream frame. Best-effort — a failure just waits for the stream.
-    void (async () => {
+    // Snapshot from /api/accounts so the strip populates immediately (and re-seeds
+    // after a drop), not only on the next stream frame. Best-effort.
+    const reconcile = async () => {
       try {
         const r = await fetch(`${base}/api/accounts`);
         if (r.ok && alive) {
@@ -59,20 +68,56 @@ export function useAccountModel(): AccountStripSignal | null {
       } catch {
         /* offline — the stream (or a later snapshot) will populate it */
       }
-    })();
-
-    const es = createNodeEventSource(`${base}/api/accounts/stream`);
-    es.addEventListener("account", (ev) => {
-      const next = decodeAccountFrame(ev.data);
-      if (next && alive) setSignal(next);
-    });
-    es.onerror = () => {
-      /* read-model/monitor unavailable — keep the last posture, no crash */
     };
+
+    const scheduleReconnect = () => {
+      if (!alive) return;
+      const delay = backoff;
+      backoff = Math.min(MAX_BACKOFF_MS, backoff * 2);
+      reconnectTimer = setTimeout(connect, delay);
+      void reconcile();
+    };
+
+    function connect() {
+      if (!alive) return;
+      let src: NodeEventSource;
+      try {
+        src = createNodeEventSource(`${base}/api/accounts/stream`);
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      es = src;
+      src.addEventListener("account", (ev) => {
+        backoff = INITIAL_BACKOFF_MS; // reset on a real frame
+        const next = decodeAccountFrame(ev.data);
+        if (next && alive) setSignal(next);
+      });
+      src.onerror = () => {
+        // One-shot reader errored (monitor restart / stream drop) — close and
+        // reconnect with capped backoff so the strip resumes updating.
+        try {
+          src.close();
+        } catch {
+          /* noop */
+        }
+        if (es === src) es = null;
+        scheduleReconnect();
+      };
+    }
+
+    void reconcile();
+    connect();
 
     return () => {
       alive = false;
-      es.close();
+      clearTimeout(reconnectTimer);
+      try {
+        es?.close();
+      } catch {
+        /* noop */
+      }
+      es = null;
     };
   }, []);
 

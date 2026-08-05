@@ -616,6 +616,9 @@ export interface CreateServerOptions {
   accountsProbeExec?: AccountsProbeExec | null;
   /** CTL-1653: accounts cache TTL (default 5 min). Also the periodic timer interval. */
   accountsTtlMs?: number;
+  /** CTL-1653: min age before a forced `?refresh=true` re-probes (default 30 s) —
+   *  the DoS floor that stops a client looping refresh to spend unbounded inference. */
+  accountsRefreshFloorMs?: number;
 }
 
 const DEFAULT_PORT = 7400;
@@ -948,6 +951,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     deploymentModeReader: deploymentModeReaderOpt,
     accountsProbeExec: accountsProbeExecOpt,
     accountsTtlMs = 5 * 60 * 1000,
+    accountsRefreshFloorMs = 30 * 1000,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -1077,6 +1081,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       : createAccountsProbe({
           exec: accountsProbeExecOpt ?? defaultAccountsProbeExec,
           ttlMs: accountsTtlMs,
+          refreshFloorMs: accountsRefreshFloorMs,
           node: hostName(),
         });
 

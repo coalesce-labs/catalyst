@@ -54,6 +54,9 @@ describe("/api/accounts", () => {
       port: 0,
       wtDir: dirs.wtDir,
       startWatcher: false,
+      // Disable the refresh floor so the ?refresh assertion exercises the route,
+      // not the DoS throttle (the floor has its own unit tests in accounts-probe).
+      accountsRefreshFloorMs: 0,
       accountsProbeExec: () => {
         calls += 1;
         return Promise.resolve(FAKE);

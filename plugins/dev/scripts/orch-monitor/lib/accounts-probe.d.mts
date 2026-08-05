@@ -59,6 +59,7 @@ export interface AccountsProbe {
 export declare function createAccountsProbe(opts: {
   exec: () => Promise<unknown>;
   ttlMs?: number;
+  refreshFloorMs?: number;
   now?: () => number;
   node?: string;
 }): AccountsProbe;
