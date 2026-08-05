@@ -2518,7 +2518,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
           if (refresh) {
             const hasRefreshHeader = req.headers.get(ACCOUNTS_REFRESH_HEADER) !== null;
             const hostHeader = req.headers.get("host");
-            const hostTrusted = hostHeader !== null && originAllowed(`http://${hostHeader}`);
+            // Check BOTH schemes (Codex round-4): Host carries no scheme, and a
+            // reverse-proxied deployment configures its MONITOR_TRUSTED_ORIGINS
+            // entry as the https:// origin — an http://-only probe would 403
+            // every legitimate proxied refresh.
+            const hostTrusted =
+              hostHeader !== null &&
+              (originAllowed(`http://${hostHeader}`) || originAllowed(`https://${hostHeader}`));
             if (!hasRefreshHeader || !hostTrusted || !originAllowed(req.headers.get("origin"))) {
               return Response.json(
                 { status: "forbidden", error: "cross-origin refresh rejected" },
