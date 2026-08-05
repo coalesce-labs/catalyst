@@ -2,6 +2,10 @@
 // escalate seam factory. All IO is stubbed via deps injection; no real git/fs/Linear.
 
 import { describe, test, expect } from "bun:test";
+import { existsSync, mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildUnstuckEscalateSeam } from "./unstuck-escalate-seam.mjs";
 
 function candidate(reason = "unknown", ticket = "CTL-1", phase = "implement") {
@@ -120,5 +124,53 @@ describe("buildUnstuckEscalateSeam — CTL-1641", () => {
     });
     const r = seam(candidate("unknown", "CTL-42", "verify"), decision("unknown"));
     expect(r).toMatchObject({ ticket: "CTL-42", phase: "verify", labelApplied: true, commentPosted: true, errors: [] });
+  });
+});
+
+// CTL-1641 verify LOW: every test above injects postComment, so the production
+// DEFAULT _post binding (helper-path resolution + spawn) is 0% exercised — the
+// exact path where the verify HIGH bug lived (PLUGIN_ROOT/cwd-relative resolution
+// that silently missed for the daemon). These guard the default binding directly.
+describe("buildUnstuckEscalateSeam default _post binding — CTL-1641 verify LOW", () => {
+  test("the module's sibling-relative helper path resolves to a real file (guards the URL fallback the HIGH bug missed)", () => {
+    // The source module resolves `new URL('../lib/linear-comment-post.sh', import.meta.url)`.
+    // This test file sits in the same directory (execution-core/), so `../lib/...` from here
+    // resolves identically — it must point at a file that actually exists (cwd/env-independent),
+    // which the old `process.env.PLUGIN_ROOT ?? process.cwd()` + 'scripts/lib/...' did not.
+    const expected = fileURLToPath(new URL("../lib/linear-comment-post.sh", import.meta.url));
+    expect(existsSync(expected)).toBe(true);
+    expect(expected.endsWith("plugins/dev/scripts/lib/linear-comment-post.sh")).toBe(true);
+  });
+
+  test("default _post (no postComment injection) spawns the resolved helper with [ticket, body] and reports its exit status", () => {
+    // Bind a hermetic stub as the helper via the CATALYST_COMMENT_POST_HELPER seam — the same
+    // env override the sibling daemon modules honor — and exercise the REAL default _post path
+    // (spawnSync of COMMENT_HELPER), which no other test covers.
+    const dir = mkdtempSync(join(tmpdir(), "ctl1641-escalate-"));
+    const argvOut = join(dir, "argv.txt");
+    const stub = join(dir, "stub-comment-post.sh");
+    writeFileSync(stub, `#!/usr/bin/env bash\nprintf '%s\\n' "$1" "$2" > "${argvOut}"\nexit 0\n`);
+    chmodSync(stub, 0o755);
+
+    const prev = process.env.CATALYST_COMMENT_POST_HELPER;
+    process.env.CATALYST_COMMENT_POST_HELPER = stub;
+    try {
+      const seam = buildUnstuckEscalateSeam({
+        orchDir: dir,
+        applyNeedsHuman: () => true,           // label still injected (not under test here)
+        captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
+        commitsAhead: () => 2,
+        // postComment intentionally NOT injected — exercise the production default.
+      });
+      const r = seam(candidate("unknown", "CTL-77", "verify"), decision("unknown"));
+      expect(r.commentPosted).toBe(true);
+      expect(r.errors).toEqual([]);
+      const [ticketArg, bodyArg] = readFileSync(argvOut, "utf8").split("\n");
+      expect(ticketArg).toBe("CTL-77");
+      expect(bodyArg).toContain("CTL-77");   // the authored escalation body reached the helper
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_COMMENT_POST_HELPER;
+      else process.env.CATALYST_COMMENT_POST_HELPER = prev;
+    }
   });
 });

@@ -13,6 +13,7 @@
 
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { log as defaultLog } from "./config.mjs";
 import { authorEscalationComment } from "./unstuck-sweep-escalation.mjs";
@@ -45,6 +46,21 @@ function makeDefaultCommitsAhead(runGit) {
     return Number.isFinite(n) ? n : null;
   };
 }
+
+// COMMENT_HELPER_DEFAULT — the app-actor Linear comment helper, resolved
+// location-independently the way the sibling daemon modules do
+// (recovery-emit.mjs:101-103, recovery-reasoning.mjs:61, recovery.mjs:665). The
+// execution-core daemon that runs this seam never exports PLUGIN_ROOT and its
+// cwd is the repo root (daemon.mjs), so the old `process.env.PLUGIN_ROOT ??
+// process.cwd()` + "scripts/lib/..." resolution silently missed and the
+// authored escalation comment never posted (CTL-1641 verify HIGH). From
+// execution-core/ this URL resolves to plugins/dev/scripts/lib/linear-comment-post.sh
+// regardless of cwd/env. The static URL resolution is import-time; the
+// CATALYST_COMMENT_POST_HELPER override is read per-build from the factory's
+// `env` (below) so it can't be frozen to the wrong value at import.
+const COMMENT_HELPER_DEFAULT = fileURLToPath(
+  new URL("../lib/linear-comment-post.sh", import.meta.url)
+);
 
 export function buildUnstuckEscalateSeam(deps = {}) {
   const {
@@ -82,12 +98,9 @@ export function buildUnstuckEscalateSeam(deps = {}) {
       env, site: "unstuck-escalate", log,
     }));
 
+  const commentHelper = env.CATALYST_COMMENT_POST_HELPER ?? COMMENT_HELPER_DEFAULT;
   const _post = postComment ?? ((ticket, body) => {
-    const helperPath = join(
-      process.env.PLUGIN_ROOT ?? process.cwd(),
-      "scripts/lib/linear-comment-post.sh"
-    );
-    const r = spawnSync(helperPath, [ticket, body], { encoding: "utf8", timeout: 10_000 });
+    const r = spawnSync(commentHelper, [ticket, body], { encoding: "utf8", timeout: 10_000 });
     return Boolean(r && r.status === 0);
   });
 
