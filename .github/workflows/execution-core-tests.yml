@@ -277,6 +277,18 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/linear-app-actor.test.sh
 
+      - name: worktree-salvage primitive + telemetry unit tests (CTL-1639)
+        # lib/worktree-salvage.sh snapshots a worktree's unpushed commits +
+        # uncommitted changes to ~/catalyst/salvage/ BEFORE any destructive
+        # removal. It is the single-source-of-truth primitive four destructive
+        # sites (dispatcher L3, orphan-sweep, phase-teardown, JS reaper) call, so
+        # a regression here silently re-opens the data-loss hole the ticket
+        # closed. Lives under lib/__tests__/ (like linear-app-actor above), so it
+        # needs its own explicit step — the CI job's enumerated allowlist does not
+        # glob that directory.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/worktree-salvage.test.sh
+
       - name: daemon shared-GitHub-credential projection test (CTL-1612)
         # Covers _project_shared_github_token: the shared SOPS file WINS over a stale
         # inherited GITHUB_TOKEN/GH_TOKEN (the 2026-08-02 fleet outage), an
