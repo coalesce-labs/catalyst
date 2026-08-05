@@ -236,6 +236,74 @@ describe("defaultAccountsProbeExec (secrets hygiene)", () => {
     expect(typeof r.generatedAt).toBe("string");
     expect(r.available).toBe(false);
   });
+  it("treats an EXISTING but empty env file as unavailable, no probe spawned (CTL-1653 Codex round-2)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "accounts-env-empty-"));
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(envFile, "");
+    const stub = join(dir, "should-never-run.mjs");
+    writeFileSync(stub, "process.stdout.write(JSON.stringify({generatedAt:'t',accounts:[]}));");
+    try {
+      const r = await defaultAccountsProbeExec({ envFile, probePath: stub });
+      expect(r.available).toBe(false);
+      expect(r.accounts).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("treats a placeholder-only env file (every CLAUDE_TOKEN_* still PASTE_TOKEN_HERE) as unavailable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "accounts-env-placeholder-"));
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(
+      envFile,
+      [
+        "# Catalyst Claude-account tokens — fill these in.",
+        'CLAUDE_TOKEN_acctA=PASTE_TOKEN_HERE  # acctA@x.io',
+        'export CLAUDE_TOKEN_acctB=PASTE_TOKEN_HERE',
+        "",
+      ].join("\n"),
+    );
+    const stub = join(dir, "should-never-run.mjs");
+    writeFileSync(stub, "process.stdout.write(JSON.stringify({generatedAt:'t',accounts:[]}));");
+    try {
+      const r = await defaultAccountsProbeExec({ envFile, probePath: stub });
+      expect(r.available).toBe(false);
+      expect(r.accounts).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("treats a comments-only env file (no CLAUDE_TOKEN_* line at all) as unavailable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "accounts-env-comments-only-"));
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(envFile, "# nothing configured yet\n\n");
+    try {
+      const r = await defaultAccountsProbeExec({ envFile });
+      expect(r.available).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("a file with at least one USABLE token entry still spawns the probe (positive control)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "accounts-env-usable-"));
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(
+      envFile,
+      [
+        'CLAUDE_TOKEN_acctA=PASTE_TOKEN_HERE  # placeholder, still unusable',
+        'CLAUDE_TOKEN_acctB="sk-ant-oat-REAL"  # acctB@x.io — the one usable entry',
+        "",
+      ].join("\n"),
+    );
+    const stub = join(dir, "stub-probe.mjs");
+    writeFileSync(stub, "process.stdout.write(JSON.stringify({generatedAt:'t',accounts:[{label:'acctB',isActive:true}]}));");
+    try {
+      const r = await defaultAccountsProbeExec({ envFile, probePath: stub });
+      expect(r.available).toBeUndefined(); // real probe output — no available:false short-circuit
+      expect(r.accounts[0].label).toBe("acctB");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("preserves the probe's stdout JSON when it exits nonzero (e.g. all accounts invalid)", async () => {
     // CTL-1653 Codex finding: a nonzero exit still writes the token-free record
     // to stdout first; execFileP rejects on nonzero, so the fix must recover
@@ -255,7 +323,13 @@ describe("defaultAccountsProbeExec (secrets hygiene)", () => {
       ].join("\n"),
     );
     const envFile = join(dir, "claude-accounts.env");
-    writeFileSync(envFile, 'CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-X"\n');
+    // A CLAUDE_TOKEN_* line makes hasUsableAccountsEnv treat the file as
+    // usable (this fixture isn't testing that gate — the stub reads
+    // CLAUDE_CODE_OAUTH_TOKEN directly, unaffected by this extra line).
+    writeFileSync(
+      envFile,
+      'CLAUDE_TOKEN_ACCTA="sk-ant-oat-X"  # a@x.io\nCLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-X"\n',
+    );
     try {
       const r = await defaultAccountsProbeExec({ envFile, probePath: stub });
       expect(r.accounts[0].label).toBe("acctA");
@@ -269,7 +343,10 @@ describe("defaultAccountsProbeExec (secrets hygiene)", () => {
     const stub = join(dir, "stub-probe.mjs");
     writeFileSync(stub, ["process.stderr.write('boom');", "process.exit(1);"].join("\n"));
     const envFile = join(dir, "claude-accounts.env");
-    writeFileSync(envFile, 'CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-X"\n');
+    writeFileSync(
+      envFile,
+      'CLAUDE_TOKEN_ACCTA="sk-ant-oat-X"  # a@x.io\nCLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-X"\n',
+    );
     try {
       await expect(defaultAccountsProbeExec({ envFile, probePath: stub })).rejects.toBeTruthy();
     } finally {
@@ -299,7 +376,13 @@ describe("defaultAccountsProbeExec (secrets hygiene)", () => {
       ].join("\n"),
     );
     const envFile = join(dir, "claude-accounts.env");
-    writeFileSync(envFile, 'CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-SOURCED"\n');
+    // A CLAUDE_TOKEN_* line makes hasUsableAccountsEnv treat the file as
+    // usable; the stub reads CLAUDE_CODE_OAUTH_TOKEN directly (the sourcing
+    // mechanism under test), unaffected by this extra line.
+    writeFileSync(
+      envFile,
+      'CLAUDE_TOKEN_STUB="sk-ant-oat-SOURCED"  # stub@x.io\nCLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-SOURCED"\n',
+    );
 
     // Ambient token in THIS process's env — the strip must remove it from the child so
     // the sourced file is the sole authority; and it must remain in the parent unchanged.

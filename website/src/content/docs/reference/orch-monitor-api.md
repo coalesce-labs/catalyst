@@ -28,8 +28,10 @@ response** (or in the monitor's own environment).
   ```bash
   curl -H "X-Catalyst-Refresh: 1" "http://localhost:7400/api/accounts?refresh=true"
   ```
-- **Disabled** — on a node with no `claude-accounts.env` (or when the probe is disabled), the
-  endpoint returns `{ "available": false, "node": "<host>" }`.
+- **Disabled** — on a node with no `claude-accounts.env` (missing entirely, empty, or defining no
+  usable `CLAUDE_TOKEN_*` entry — every entry still the `PASTE_TOKEN_HERE` placeholder counts as
+  none), or when the probe is disabled, the endpoint returns
+  `{ "available": false, "node": "<host>" }`.
 
 ```json
 {

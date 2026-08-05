@@ -14,7 +14,10 @@
 // bun). createNodeEventSource is a ONE-SHOT reader (reconnect policy is the hook's
 // job), so this hook owns capped-backoff reconnect + a snapshot reconcile — without
 // it the strip would freeze on its last value forever the first time the local
-// monitor restarts or the stream drops. Never throws.
+// monitor restarts or the stream drops. Reconnects on BOTH an errored close
+// (onerror) and a CLEAN end-of-stream (whenIdle() resolving with no prior
+// onerror — a graceful monitor restart / proxy close never fires onerror; see
+// shouldReconnectOnIdle). Never throws.
 
 import { useEffect, useState } from "react";
 import { createNodeEventSource, type NodeEventSource } from "../lib/node-event-source";
@@ -23,6 +26,39 @@ import type { AccountStripSignal } from "../components/account-strip";
 
 const INITIAL_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 15_000;
+
+/**
+ * shouldReconnectOnIdle — pure decision for whether a NodeEventSource's clean
+ * end-of-stream (its `whenIdle()` resolving with NO prior `onerror`) should
+ * trigger a reconnect. A clean EOF happens when the monitor restarts or a
+ * proxy closes the connection gracefully — `createNodeEventSource`'s `pump()`
+ * returns normally on `done` from the reader in that case, never invoking
+ * `onerror`, so a hook that only reconnects from `onerror` freezes the strip
+ * on its last value forever (CTL-1653 Codex round-2 finding). Exported so the
+ * three guards are independently testable without a DOM, timers, or a real
+ * EventSource — bun's test runner has no React-hook renderer (see
+ * useFilter.test.ts for the established pattern this mirrors).
+ *
+ * @param handled   true if `onerror` already handled this connection's end
+ *                  (an errored close reconnects via its own onerror path —
+ *                  reconnecting here too would double-schedule)
+ * @param alive     false once the component has unmounted — never reconnect
+ *                  after teardown
+ * @param isCurrent false when a newer connection has already superseded this
+ *                  one — this stale `whenIdle()` resolving late must not
+ *                  reconnect a second time
+ */
+export function shouldReconnectOnIdle({
+  handled,
+  alive,
+  isCurrent,
+}: {
+  handled: boolean;
+  alive: boolean;
+  isCurrent: boolean;
+}): boolean {
+  return !handled && alive && isCurrent;
+}
 
 /** Resolve the LOCAL monitor base URL (no path). */
 function localMonitorBase(env: Record<string, string | undefined>): string {
@@ -94,12 +130,14 @@ export function useAccountModel(): AccountStripSignal | null {
         return;
       }
       es = src;
+      let handled = false; // true once onerror has already handled this src's end
       src.addEventListener("account", (ev) => {
         backoff = INITIAL_BACKOFF_MS; // reset on a real frame
         const next = decodeAccountFrame(ev.data);
         if (next && alive) setSignal(next);
       });
       src.onerror = () => {
+        handled = true;
         // One-shot reader errored (monitor restart / stream drop) — close and
         // reconnect with capped backoff so the strip resumes updating.
         try {
@@ -110,6 +148,22 @@ export function useAccountModel(): AccountStripSignal | null {
         if (es === src) es = null;
         scheduleReconnect();
       };
+      // A CLEAN end-of-stream never fires onerror (see shouldReconnectOnIdle's
+      // doc comment) — without this, the strip freezes forever the first time
+      // the local monitor restarts gracefully instead of dropping the
+      // connection with an error. onerror (when it fires) always completes
+      // synchronously before whenIdle() resolves, so `handled` is accurate by
+      // the time this runs.
+      void src
+        .whenIdle()
+        .then(() => {
+          if (!shouldReconnectOnIdle({ handled, alive, isCurrent: es === src })) return;
+          es = null;
+          scheduleReconnect();
+        })
+        .catch(() => {
+          /* whenIdle() never rejects in practice; defensive no-op */
+        });
     }
 
     void reconcile();
