@@ -41,13 +41,50 @@ Config lives in `~/.config/catalyst/config-{projectKey}.json` under
           "enabled": true,
           "endpoint": "http://localhost:4318",
           "batchSize": 100,
-          "flushIntervalMs": 5000
+          "flushIntervalMs": 5000,
+          "lokiAcceptWindowMs": 3600000,
+          "maxRetryElapsedMs": 60000
         }
       }
     }
   }
 }
 ```
+
+### Status classification & age-drop (CTL-1506)
+
+The OTLP sender classifies every HTTP response and partitions each outgoing batch by record age
+before any network call:
+
+**HTTP status classification:**
+
+| Status | Class | Action |
+|--------|-------|--------|
+| `2xx` | — | Delivered |
+| `429` | retryable | Exponential backoff up to `maxRetryElapsedMs`, then DLQ |
+| `5xx` | retryable | Same |
+| Network error | retryable | Same |
+| `4xx` (not 429) | **terminal** | Dropped with `forward_dropped` event, **never DLQ'd** |
+
+**Age-partitioning:** Before any send, records older than `lokiAcceptWindowMs` (default 1 h) are
+split out, dropped with a `forward_dropped` event (`drop_reason: "aged"`), and the fresh
+remainder is sent. This prevents aged co-riders from dragging fresh records into the DLQ.
+
+**DLQ drain:** On each successful primary delivery, the bounded drain also age-partitions queued
+batches. A fully-aged DLQ entry is discarded (`drop_reason: "aged"`); a terminal 4xx during drain
+is discarded (`drop_reason: "terminal_4xx"`); a retryable error stops the drain and requeues
+(preserving CTL-1060 backpressure).
+
+**Config knobs:**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `lokiAcceptWindowMs` | `3600000` (1 h) | Age cutoff for Loki records. Tune if your Loki deployment has a different `reject_old_samples_max_age`. |
+| `maxRetryElapsedMs` | `60000` (60 s) | Max elapsed time for HTTP retry backoff before DLQ-ing a retryable failure. |
+
+**`forward_dropped` event:** Emitted as a canonical event (`catalyst.observability.forward_dropped`)
+with attribute `catalyst.observability.drop_reason` (`"aged"` or `"terminal_4xx"`) and
+`body.payload.count`. Loop-guarded by `isSelfBatch` (same as `forward_failed`).
 
 The `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable overrides `endpoint` (port 4317 is
 automatically rewritten to 4318 for HTTP).

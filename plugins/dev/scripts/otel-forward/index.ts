@@ -99,6 +99,9 @@ const senders = {
         endpoint: cfg.otlp.endpoint,
         dlqPath: OTLP_DLQ_PATH,
         eventLogPath: EVENT_LOG_PATH,
+        // CTL-1506: age window + retry window from config
+        lokiAcceptWindowMs: cfg.otlp.lokiAcceptWindowMs,
+        httpRetryPolicy: { maxElapsedMs: cfg.otlp.maxRetryElapsedMs },
         // CTL-1060 Phase 3: advance lastForwardedTs on each confirmed-delivered batch
         onBatchDelivered: (batch) => {
           const batchMaxTs = batch.reduce(

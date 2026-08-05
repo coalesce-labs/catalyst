@@ -1,4 +1,4 @@
-import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
+import type { CanonicalEvent } from "../../orch-monitor/lib/canonical-event.ts";
 
 export interface AgePartition { fresh: CanonicalEvent[]; aged: CanonicalEvent[]; }
 
