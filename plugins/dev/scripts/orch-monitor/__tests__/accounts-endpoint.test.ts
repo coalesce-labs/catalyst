@@ -126,6 +126,32 @@ describe("/api/accounts", () => {
     });
     expect(r.status).toBe(200);
   });
+  it("a DNS-rebinding-shaped request (foreign Host, header present, no Origin) is rejected (403)", async () => {
+    // CTL-1653 Codex round-3: a page loaded as http://evil.example:<port> that
+    // later re-resolves to THIS server's IP is same-origin to the browser once
+    // rebound — its JS can attach the refresh header with no CORS preflight,
+    // and a same-origin fetch isn't guaranteed to carry Origin either (which
+    // originAllowed(null) would otherwise admit). The Host header is what the
+    // browser's own HTTP stack sets from the page's URL — the attacker's
+    // domain, not this server's real name — so it must be checked too. Same
+    // physical connection (127.0.0.1/localhost) as every other test here, but
+    // an untrusted Host is exactly what a rebound browser would send.
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Host: "evil.example:1234" },
+    });
+    expect(r.status).toBe(403);
+    expect(calls).toBe(before); // no probe spawned
+  });
+  it("a request with the REAL Host (localhost:<port>) + the header succeeds (positive control)", async () => {
+    const before = calls;
+    const port = new URL(base).port;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Host: `localhost:${port}` },
+    });
+    expect(r.status).toBe(200);
+    expect(calls).toBe(before + 1);
+  });
 });
 
 describe("/api/accounts when the accounts env file is absent", () => {

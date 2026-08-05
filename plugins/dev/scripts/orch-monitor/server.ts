@@ -2482,10 +2482,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/accounts") {
           if (!accountsProbe) return Response.json({ available: false, node: hostName() });
           const refresh = url.searchParams.get("refresh") === "true";
-          // CROSS-ORIGIN + SIMPLE-REQUEST GUARD on the state-changing path only.
-          // The monitor binds 0.0.0.0 with no auth, and `refresh=true` is the one
-          // per-request probe trigger — spending a real Haiku call per account
-          // (bounded by the refresh floor, but not to zero).
+          // CROSS-ORIGIN + SIMPLE-REQUEST + DNS-REBINDING GUARD on the
+          // state-changing path only. The monitor binds 0.0.0.0 with no auth,
+          // and `refresh=true` is the one per-request probe trigger — spending
+          // a real Haiku call per account (bounded by the refresh floor, but
+          // not to zero).
           //
           // The origin allowlist alone (originAllowed, same as the Linear-reply
           // route) does NOT close this: this route is a GET, and browsers omit
@@ -2494,17 +2495,31 @@ export function createServer(opts: CreateServerOptions): BunServer {
           // GET carries no Origin at all, and originAllowed(null) is (correctly,
           // for the POST-route contract that guard was designed for) permissive
           // (CTL-1653 Codex round-2 finding). Requiring this NON-STANDARD header
-          // closes that class of vector structurally rather than by allowlist:
-          // none of those simple-request mechanisms can ever attach a custom
-          // header, and a cross-origin fetch()/XHR that tried to would trigger a
-          // CORS preflight this server does not answer for arbitrary origins, so
-          // the browser never sends the real request. curl/non-browser callers
-          // stay usable by passing the header explicitly (documented in
-          // orch-monitor-api.md) — Origin remains permissively absent for them,
-          // same as before.
+          // closes THAT class of vector: none of those simple-request mechanisms
+          // can ever attach a custom header, and a cross-origin fetch()/XHR that
+          // tried to would trigger a CORS preflight this server does not answer
+          // for arbitrary origins, so the browser never sends the real request.
+          //
+          // DNS REBINDING defeats the header check alone (CTL-1653 Codex
+          // round-3 finding): a page loaded as `http://evil.example:<port>`
+          // that later re-resolves to THIS server's IP is same-origin to the
+          // browser once rebound, so its JS can attach the header with no
+          // preflight — and a same-origin fetch/XHR is not guaranteed to carry
+          // `Origin` either, which originAllowed(null) then admits. The `Host`
+          // header is the fix: it is NOT rebindable to a name we recognize —
+          // the rebound request still arrives with `Host: evil.example:<port>`
+          // (the browser sends whatever host the page's URL named, never OUR
+          // real name/address), so validating Host against the SAME trusted-
+          // origin set used for Origin (reusing `originAllowed` — Host is just
+          // an origin without a scheme) rejects it regardless of whether
+          // Origin is present. curl/non-browser callers stay usable: curl sets
+          // Host from the URL it was given, and localhost/127.0.0.1/the node's
+          // own address are exactly what's trusted.
           if (refresh) {
             const hasRefreshHeader = req.headers.get(ACCOUNTS_REFRESH_HEADER) !== null;
-            if (!hasRefreshHeader || !originAllowed(req.headers.get("origin"))) {
+            const hostHeader = req.headers.get("host");
+            const hostTrusted = hostHeader !== null && originAllowed(`http://${hostHeader}`);
+            if (!hasRefreshHeader || !hostTrusted || !originAllowed(req.headers.get("origin"))) {
               return Response.json(
                 { status: "forbidden", error: "cross-origin refresh rejected" },
                 { status: 403 },

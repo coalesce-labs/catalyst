@@ -123,13 +123,27 @@ const PASTE_TOKEN_PLACEHOLDER = "PASTE_TOKEN_HERE";
  * enough to test truthiness/placeholder-equality (identical discipline to
  * parseAccountsEnv itself) — it is never logged, stored beyond this function,
  * or returned.
+ *
+ * THROWS on a read failure that is NOT "the file is gone" (permission denied,
+ * ownership, or any other I/O error) — CTL-1653 Codex round-3 finding: an
+ * unreadable-but-present file (broken permissions/ownership on a real secret
+ * deployment) must surface as a probe ERROR, not silently look like the same
+ * "intentionally disabled" state as a genuinely absent/empty file. The throw
+ * propagates out of defaultAccountsProbeExec (below) uncaught, so
+ * createAccountsProbe's existing runProbe() catch synthesizes the SAME
+ * status:"error" posture it already builds for any other exec() failure —
+ * reusing that machinery rather than inventing a second error shape.
  */
 function hasUsableAccountsEnv(envFile) {
   let raw;
   try {
     raw = readFileSync(envFile, "utf8");
-  } catch {
-    return false; // unreadable — existsSync already gated the ENOENT case above
+  } catch (err) {
+    // ENOENT here (vs. the existsSync gate above) is a benign TOCTOU race —
+    // the file vanished between the two checks — and is still "absent".
+    // Anything else (EACCES, EPERM, ownership, …) is a real misconfiguration.
+    if (err?.code === "ENOENT") return false;
+    throw err;
   }
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -159,10 +173,14 @@ function hasUsableAccountsEnv(envFile) {
  * every entry still the PASTE_TOKEN_HERE placeholder) — returns an empty
  * `available:false` record so the surfaces render "unavailable"/quiet rather
  * than erroring (deriveAccountsSummary propagates the flag; see below). When the
- * probe exits nonzero (e.g. every configured account is invalid/auth-failing), the
- * token-free JSON it already wrote to stdout is recovered from the rejected exec's
- * `.stdout` rather than discarded — otherwise a diagnosable per-account auth error
- * collapses into a synthetic unlabeled spawn-error posture.
+ * file EXISTS but is unreadable (permission/ownership — a real misconfiguration,
+ * not an intentional disabled state), THROWS instead — see hasUsableAccountsEnv's
+ * doc comment; the caller's createAccountsProbe.runProbe() catch turns that into
+ * the usual status:"error" posture. When the probe exits nonzero (e.g. every
+ * configured account is invalid/auth-failing), the token-free JSON it already
+ * wrote to stdout is recovered from the rejected exec's `.stdout` rather than
+ * discarded — otherwise a diagnosable per-account auth error collapses into a
+ * synthetic unlabeled spawn-error posture.
  */
 export async function defaultAccountsProbeExec({
   envFile = ENV_FILE,
