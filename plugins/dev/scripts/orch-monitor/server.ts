@@ -2536,7 +2536,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
               .split(",")
               .map((s) => s.trim())
               .filter((s) => s.length > 0);
-            const effectiveScheme = tlsProxyPeers.includes(peer) ? "https" : "http";
+            // Normalize IPv4-mapped spellings (Codex round-7): a dual-stack
+            // bind (MONITOR_HOST=::) reports an IPv4 upstream as
+            // ::ffff:127.0.0.1, which must match a natural "127.0.0.1" entry.
+            const unmap = (a: string) => a.replace(/^::ffff:/i, "");
+            const peerNorm = unmap(peer);
+            const effectiveScheme = tlsProxyPeers.some((p) => unmap(p) === peerNorm)
+              ? "https"
+              : "http";
             const hostTrusted =
               hostHeader !== null && originAllowed(`${effectiveScheme}://${hostHeader}`);
             if (!hasRefreshHeader || !hostTrusted || !originAllowed(req.headers.get("origin"))) {

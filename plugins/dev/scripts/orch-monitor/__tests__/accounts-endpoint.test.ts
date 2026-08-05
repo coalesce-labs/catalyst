@@ -279,6 +279,30 @@ describe("/api/accounts refresh behind an HTTPS reverse proxy", () => {
     expect(r.status).toBe(200);
     expect(calls).toBe(before + 1);
   });
+  it("an IPv4-mapped peer matches a natural IPv4 declaration (dual-stack normalization)", async () => {
+    // CTL-1653 Codex round-7: a dual-stack bind reports 127.0.0.1 upstreams as
+    // ::ffff:127.0.0.1 — a natural MONITOR_TLS_PROXY_PEERS=127.0.0.1 entry must
+    // still classify the proxied refresh as https. The suite's connections may
+    // arrive under either spelling, so declare ONLY the bare IPv4 form and
+    // assert admission still works (the beforeAll declares all spellings; here
+    // we narrow to the un-mapped one).
+    const saved = process.env.MONITOR_TLS_PROXY_PEERS;
+    process.env.MONITOR_TLS_PROXY_PEERS = "127.0.0.1,::1";
+    try {
+      const before = calls;
+      const r = await fetch(`${base}/api/accounts?refresh=true`, {
+        headers: {
+          [ACCOUNTS_REFRESH_HEADER]: "1",
+          Host: "catalyst.internal.example",
+          Origin: "https://catalyst.internal.example",
+        },
+      });
+      expect(r.status).toBe(200);
+      expect(calls).toBe(before + 1);
+    } finally {
+      process.env.MONITOR_TLS_PROXY_PEERS = saved;
+    }
+  });
   it("a spoofed X-Forwarded-Proto from a NON-declared peer cannot upgrade the scheme (403)", async () => {
     // CTL-1653 Codex round-6: the scheme signal is operator-declared config,
     // never header-derived — any loopback browser can send the header, and
