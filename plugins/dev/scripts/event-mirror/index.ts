@@ -83,10 +83,26 @@ function defaultFetchFn(): FetchFn {
        host, `tail -c +${offset} ${remoteFile} 2>/dev/null || true`],
       { stdout: "pipe", stderr: "pipe" }
     );
-    const [stdout] = await Promise.all([
+    const [stdout, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       proc.exited,
     ]);
+    // CTL-1654 (Codex P2): distinguish a healthy-but-empty tail from a failed SSH.
+    // The remote `... 2>/dev/null || true` masks a MISSING/empty remote file (rc 0,
+    // empty stdout = a reachable host with nothing new — legitimately healthy). But
+    // an ssh connect/auth failure exits non-zero (e.g. 255) BEFORE the remote shell
+    // runs, so `|| true` never sees it. Treat any non-zero exit as a fetch failure
+    // and throw: mirrorTick's per-host catch then marks the host UNHEALTHY instead of
+    // silently reporting it healthy-with-zero-lines (which leaves the local event log
+    // blind to that worker while still emitting a healthy tick).
+    if (exitCode !== 0) {
+      const stderr = await new Response(proc.stderr).text().catch(() => "");
+      const firstLine = stderr.trim().split("\n")[0] ?? "";
+      throw new Error(
+        `event-mirror: ssh tail of ${host} failed (exit ${exitCode})` +
+        (firstLine ? `: ${firstLine.slice(0, 200)}` : "")
+      );
+    }
     const raw = stdout;
     const lines = raw.split("\n").filter(l => l.trim());
     return { lines, bytesRead: Buffer.byteLength(raw, "utf8") };
@@ -176,8 +192,16 @@ export function resolveHosts(): string[] {
   if (envHosts) return envHosts.split(",").map(h => h.trim()).filter(Boolean);
   // Fallback: try to read cluster.json roster minus self.
   try {
+    // CTL-1654 (Codex P2): honor the canonical Catalyst-dir chain the SAME way
+    // execution-core/config.mjs getClusterRepoDir() does — CATALYST_CLUSTER_JSON
+    // (an explicit file) ?? CATALYST_CLUSTER_DIR ?? <CATALYST_DIR|~/catalyst>/catalyst-cluster
+    // — so an install with a relocated CATALYST_DIR / CATALYST_CLUSTER_DIR reads its
+    // real roster instead of a stale ~/catalyst default (or resolving to no hosts and
+    // a healthy-looking mirror that never fans in fleet events).
+    const clusterDir = process.env.CATALYST_CLUSTER_DIR ??
+      join(CATALYST_DIR, "catalyst-cluster");
     const clusterPath = process.env.CATALYST_CLUSTER_JSON ??
-      join(homedir(), "catalyst", "catalyst-cluster", "cluster.json");
+      join(clusterDir, "cluster.json");
     if (existsSync(clusterPath)) {
       const cluster = JSON.parse(readFileSync(clusterPath, "utf8")) as { roster?: string[] };
       const selfName = process.env.CATALYST_HOST_NAME ?? hostname();

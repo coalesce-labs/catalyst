@@ -107,6 +107,48 @@ describe("CTL-1654 Phase 3: daemon node-class guard", () => {
     }).not.toThrow();
   });
 
+  // ── CTL-1654 Codex P2 F4: the ACTUATORS (monitor + scheduler), not just the
+  // heartbeat, are gated on node class so a mis-launched exec-core is observe-only. ──
+
+  test("monitor node does NOT arm the monitor/scheduler actuators (observe-only)", () => {
+    process.env.CATALYST_NODE_CLASS = "monitor";
+    const armed = [];
+    startDaemon({
+      ...FAKES,
+      startMonitor: () => { armed.push("monitor"); },
+      startScheduler: () => { armed.push("scheduler"); },
+      enableHeartbeat: false,
+    });
+    expect(armed).not.toContain("monitor");
+    expect(armed).not.toContain("scheduler");
+  });
+
+  test("developer node does NOT arm the monitor/scheduler actuators (observe-only)", () => {
+    process.env.CATALYST_NODE_CLASS = "developer";
+    const armed = [];
+    startDaemon({
+      ...FAKES,
+      startMonitor: () => { armed.push("monitor"); },
+      startScheduler: () => { armed.push("scheduler"); },
+      enableHeartbeat: false,
+    });
+    expect(armed).not.toContain("monitor");
+    expect(armed).not.toContain("scheduler");
+  });
+
+  test("worker node DOES arm the monitor/scheduler actuators (unchanged)", () => {
+    process.env.CATALYST_NODE_CLASS = "worker";
+    const armed = [];
+    startDaemon({
+      ...FAKES,
+      startMonitor: () => { armed.push("monitor"); },
+      startScheduler: () => { armed.push("scheduler"); },
+      enableHeartbeat: false,
+    });
+    expect(armed).toContain("monitor");
+    expect(armed).toContain("scheduler");
+  });
+
   test("monitor node: injectable nodeClassResolver seam (explicit injection wins)", () => {
     // Simulates a test that needs to force a specific class regardless of env.
     delete process.env.CATALYST_NODE_CLASS;

@@ -1174,11 +1174,37 @@ export function startDaemon({
     const linearBotUserIds = readLinearBotUserIds(configPath, layer2Path);
     const linearBotWriteId = readLinearBotWriteId(configPath, layer2Path); // CTL-781
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
+    // CTL-1654 (Codex P2 "gate the daemon before starting actuators"): resolve the
+    // node class BEFORE arming the actuators, and arm the monitor + scheduler ONLY on
+    // a worker node. Previously the node-class guard ran AFTER monitorFn()/schedulerFn()
+    // and only suppressed the heartbeat — so a mis-launched exec-core on a monitor/
+    // developer node (a direct `catalyst-execution-core start`, or an old launcher)
+    // still armed the dispatch + recovery actuators, and suppressing the heartbeat did
+    // not make it observation-only. cmd_start already refuses to start exec-core off a
+    // worker (the primary control); this is the defense-in-depth backstop that makes the
+    // daemon genuinely observe-only when that control is bypassed. The process stays UP
+    // (visibly refusing — WARN in logs + verify-node's exec-core-stopped catches it)
+    // rather than crash-looping under launchd.
+    const { class: _nodeClass } = nodeClassResolver();
+    const _isWorkerNode = _nodeClass === "worker";
+    if (!_isWorkerNode) {
+      log.warn(
+        { nodeClass: _nodeClass },
+        `execution-core launched on node.class=${_nodeClass} — observe-only: the ` +
+        `monitor + scheduler actuators are NOT armed and no heartbeat/liveness is ` +
+        `emitted (dispatch AND recovery are inert). cmd_start should not have started ` +
+        `exec-core here (CTL-1654).`
+      );
+    }
+
     // CTL-1365a/b: executor + dispatchFn + dispatchMode + commentWakeDispatch are
     // resolved ONCE above (before reconcileBoot) and threaded into all four dispatch
     // entry points. The monitor receives dispatchFn for its →Triage one-shot, and
     // the onComment callback routes comment-wakes through commentWakeDispatch (the
     // same executor) — no split-brain.
+    // CTL-1654: the actuator arming below (monitorFn + schedulerFn + auto-tuner) is
+    // gated on _isWorkerNode — see the observe-only backstop comment above.
+    if (_isWorkerNode) {
     monitorFn({
       orchDir,
       cache,
@@ -1261,6 +1287,7 @@ export function startDaemon({
     // before any auto-tune adjustments. configPath + layer2Path are threaded
     // so the tuner can re-read the merged concurrency on every sample.
     _stopAutoTuner = startAutoTunerFn({ configPath, layer2Path });
+    } // CTL-1654: end worker-only actuator gate (monitor + scheduler + auto-tuner)
 
     if (watchRegistry) {
       // Watch the execution-core dir for registry.json changes — the registry is
@@ -1335,32 +1362,14 @@ export function startDaemon({
       _ratelimitPoller = startRatelimitPoller();
     }
 
-    // CTL-1654: resolve node class once at boot. A monitor/developer node must NOT
+    // CTL-1654: _nodeClass / _isWorkerNode were resolved above (before the actuators)
+    // so the same guard that skips arming the monitor + scheduler also gates the
+    // heartbeat + liveness membership signals here. A monitor/developer node must NOT
     // emit node.heartbeat (the only dispatch-roster signal) — a node that never
-    // heartbeats is shed from computeDispatchSurvivingRoster automatically. This
-    // explicit guard directly stops only the two membership signals — the
-    // node.heartbeat emitter and the liveness publisher below. Suppression of
-    // DISPATCH is emergent from that: with no heartbeat this host is shed from the
-    // dispatch surviving roster and so owns/dispatches no new work. RECOVERY is not
-    // directly gated here and uses the fail-open surviving roster (which still
-    // includes the local node), so the scheduler/recovery tick — invoked
-    // unconditionally above — could in principle act on recovery if a monitor daemon
-    // were mis-launched. In practice catalyst-stack cmd_start never starts
-    // execution-core on a non-worker node (the primary control), so the daemon stays
-    // observe-only. The daemon remains up so a mis-launched daemon is visibly refusing
-    // (WARN in logs + verify-node catches exec-core-stopped) rather than crash-looping
-    // under launchd — matching NODE_CLASS_MOST_RESTRICTIVE semantics.
-    const { class: _nodeClass } = nodeClassResolver();
-    const _isWorkerNode = _nodeClass === "worker";
-    if (!_isWorkerNode) {
-      log.warn(
-        { nodeClass: _nodeClass },
-        `execution-core launched on node.class=${_nodeClass} — observe-only: no ` +
-        `heartbeat/liveness (dispatch is then emergently shed from the roster). ` +
-        `cmd_start should not have started exec-core here (CTL-1654).`
-      );
-    }
-
+    // heartbeats is shed from computeDispatchSurvivingRoster automatically, so even if
+    // an actuator were reachable it would own no HRW slice. With CTL-1654's actuator
+    // gate above, dispatch AND recovery are now inert on a non-worker node directly,
+    // not merely emergently.
     // CTL-859: start the node-heartbeat emitter. Appends a node.heartbeat event
     // to the unified event log every HEARTBEAT_INTERVAL_MS so a future liveness
     // reader (readClusterHeartbeats) can detect a dead node by heartbeat

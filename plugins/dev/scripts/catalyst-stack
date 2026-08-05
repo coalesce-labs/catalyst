@@ -742,20 +742,32 @@ cmd_start() {
   fi
 
   # CTL-1654: the imperative start path honors catalyst.node.class the same way the
-  # install lifecycle (install-lifecycle.mjs isWorker) already does — only a WORKER
-  # node runs the execution layer. developer/monitor run observation services only.
+  # install lifecycle (install-lifecycle.mjs isWorker) already does. The service
+  # matrix matches the verify-node profiles EXACTLY:
+  #   worker    → monitor + broker + execution-core + shipper (no event-mirror)
+  #   monitor   → monitor + broker + forward + event-mirror (exec-core/shipper stopped)
+  #   developer → daemonless client: ONLY the event-mirror (broker + exec-core stopped)
+  # The reporting substrate (monitor + broker + otel-forward) runs on worker and
+  # monitor, but NOT on a developer node — a developer is a daemonless client whose
+  # verify-node profile asserts broker-stopped / exec-core-stopped. Starting a broker
+  # here would immediately fail that node's own `verify-node broker-stopped` check
+  # (Codex P2 "keep developer starts daemonless").
   local node_class; node_class="$(_resolve_node_class)"
 
   # CTL-1084: known-good start order is monitor → broker → execution-core
   # (encoded here instead of operator memory; daemon always last).
-  start_monitor
-  start_broker
+  if [[ "$node_class" != "developer" ]]; then
+    start_monitor
+    start_broker
+  fi
   if [[ "$node_class" == "worker" ]]; then
     start_daemon "$use_proxy"
   else
     log "node.class=${node_class}: observation-only — execution-core NOT started"
   fi
-  start_forward
+  if [[ "$node_class" != "developer" ]]; then
+    start_forward
+  fi
   # CTL-1263: the log-shipper comes up LAST — it only tails the daemons' .log
   # files, so it should start after the daemons it observes. start_shipper is
   # idempotent + non-fatal (warns loudly on a missing binary, returns 1).
@@ -1303,6 +1315,30 @@ PLIST
 # kickstarts explicitly after bootstrap so the service is live immediately.
 render_event_mirror_plist() {
   local launcher="$1"
+  # CTL-1654 (Codex P2 "pass mirror host overrides into launchd"): capture the roster
+  # overrides resolveHosts() reads — CATALYST_EVENT_MIRROR_HOSTS (the explicit host
+  # list) and the cluster-dir chain the fallback consults (CATALYST_CLUSTER_DIR /
+  # CATALYST_CLUSTER_JSON) — into the plist's environment. Without this the supervised
+  # daemon starts WITHOUT the override and falls back to <CATALYST_DIR>/catalyst-cluster,
+  # so on a developer/monitor host with no local cluster clone the mirror logs "no hosts
+  # configured" forever even though `catalyst-stack start` was given hosts. Each key is
+  # emitted only when set at install time (a plain conditional, mirroring host_env).
+  local mirror_env=""
+  if [[ -n "${CATALYST_EVENT_MIRROR_HOSTS:-}" ]]; then
+    mirror_env="${mirror_env}
+    <key>CATALYST_EVENT_MIRROR_HOSTS</key>
+    <string>${CATALYST_EVENT_MIRROR_HOSTS}</string>"
+  fi
+  if [[ -n "${CATALYST_CLUSTER_DIR:-}" ]]; then
+    mirror_env="${mirror_env}
+    <key>CATALYST_CLUSTER_DIR</key>
+    <string>${CATALYST_CLUSTER_DIR}</string>"
+  fi
+  if [[ -n "${CATALYST_CLUSTER_JSON:-}" ]]; then
+    mirror_env="${mirror_env}
+    <key>CATALYST_CLUSTER_JSON</key>
+    <string>${CATALYST_CLUSTER_JSON}</string>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -1331,7 +1367,7 @@ render_event_mirror_plist() {
     <key>HOME</key>
     <string>${HOME}</string>
     <key>CATALYST_DIR</key>
-    <string>${CATALYST_DIR:-${HOME}/catalyst}</string>
+    <string>${CATALYST_DIR:-${HOME}/catalyst}</string>${mirror_env}
   </dict>
 
   <key>StandardOutPath</key>
@@ -1552,31 +1588,68 @@ cmd_uninstall_services() {
   fi
 }
 
-# _resolve_node_class — this node's catalyst.node.class, NORMALIZED the same way the
-# runtime resolveNodeClass() does it: env CATALYST_NODE_CLASS, else the Layer-2
-# catalyst.node.class, then trim + lowercase; empty/unset ⇒ "worker" (the fail-safe
-# default). Honors the SAME Layer-2 path env the runtime uses — CATALYST_LAYER2_CONFIG_FILE
-# (config.mjs getLayer2ConfigPath), NOT CATALYST_MACHINE_CONFIG — so a node whose class is
-# `Worker` / ` worker ` / lives in an overridden Layer-2 path resolves identically (Codex P2).
+# _resolve_node_class — this node's catalyst.node.class, resolved IDENTICALLY to the
+# runtime resolveNodeClass(): env CATALYST_NODE_CLASS, else the Layer-2
+# catalyst.node.class, trim + lowercase. Honors the SAME Layer-2 path env the runtime
+# uses — CATALYST_LAYER2_CONFIG_FILE (config.mjs getLayer2ConfigPath).
+#
+# FAIL-CLOSED (Codex P2 "fail closed on invalid node-class config"): the resolution is
+# NOT a plain `// worker` default. Three cases, matching the canonical resolver:
+#   - ABSENT (env unset AND Layer-2 null / key-missing)   ⇒ worker  (CTL-1344 zero-change default)
+#   - a RECOGNIZED member (worker | monitor | developer)  ⇒ honored verbatim
+#   - PRESENT-but-INVALID: a non-string Layer-2 value (false / 0 / [] / {}) OR an
+#     unrecognized string ("developr")                    ⇒ monitor (NODE_CLASS_MOST_RESTRICTIVE)
+# The old code collapsed a present non-string to "" and then to worker, so a
+# misconfigured node started the FULL execution layer instead of failing closed to
+# observation-only. Preferring the canonical resolveNodeClass() (via config.mjs)
+# keeps this byte-for-byte with the daemon + verify-node; a bash fallback covers the
+# no-bun / no-config.mjs case with the same classification.
 _resolve_node_class() {
-  local raw=""
+  local cfgmjs="${SCRIPT_DIR}/execution-core/config.mjs"
+  if command -v bun >/dev/null 2>&1 && [[ -f "$cfgmjs" ]]; then
+    local out
+    if out="$(CFG_MJS="$cfgmjs" bun -e '
+        const m = await import(process.env.CFG_MJS);
+        try { process.stdout.write(String(m.resolveNodeClass().class || "")); }
+        catch { process.stdout.write(""); }
+      ' 2>/dev/null)" && [[ -n "$out" ]]; then
+      printf '%s' "$out"; return 0
+    fi
+    # fall through to the bash fallback on any bun/import failure.
+  fi
+
+  # --- bash fallback: REAL resolution (config.mjs unavailable) -----------------
+  # Distinguish ABSENT (env unset AND Layer-2 null/key-missing ⇒ worker default)
+  # from PRESENT-but-INVALID. The jq prints "" for absent, the string for a string,
+  # and the "__nonstring__" sentinel for a present non-string.
+  local raw="" nonstring="no"
   if [[ -n "${CATALYST_NODE_CLASS:-}" ]]; then
     raw="$CATALYST_NODE_CLASS"
   else
     local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
-    if command -v bun >/dev/null 2>&1; then
-      raw="$(CFG_PATH="$cfg" bun -e '
-        const fs = require("fs");
-        let v = null;
-        try { v = JSON.parse(fs.readFileSync(process.env.CFG_PATH, "utf8"))?.catalyst?.node?.class; } catch {}
-        process.stdout.write(typeof v === "string" ? v : "");
-      ' 2>/dev/null || printf '')"
+    if [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+      local jqout
+      jqout="$(jq -r '
+        if   (.catalyst.node.class == null)            then ""
+        elif (.catalyst.node.class | type) == "string" then .catalyst.node.class
+        else "__nonstring__" end
+      ' "$cfg" 2>/dev/null || true)"
+      if [[ "$jqout" == "__nonstring__" ]]; then nonstring="yes"
+      elif [[ -n "$jqout" ]]; then raw="$jqout"; fi
     fi
+  fi
+  if [[ "$nonstring" == "yes" ]]; then
+    printf 'monitor'; return 0   # present non-string ⇒ most-restrictive (fail-closed)
   fi
   # trim + lowercase (matches resolveNodeClass normalized = raw.trim().toLowerCase()).
   raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | xargs)"
-  [[ -z "$raw" ]] && raw="worker"
-  printf '%s' "$raw"
+  if [[ -z "$raw" ]]; then
+    printf 'worker'             # absent ⇒ worker default (CTL-1344 zero-change)
+  elif [[ "$raw" == "worker" || "$raw" == "monitor" || "$raw" == "developer" ]]; then
+    printf '%s' "$raw"          # recognized ⇒ honor verbatim
+  else
+    printf 'monitor'           # typo / unrecognized ⇒ most-restrictive (fail-closed)
+  fi
 }
 
 # cmd_adopt_updater — the SUPERVISED GATE-3 cutover (CTL-1348). Installs the 5th launchd

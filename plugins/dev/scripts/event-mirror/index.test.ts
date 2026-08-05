@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/event-mirror && bun test
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import { mirrorTick, resolveHosts, type FetchFn } from "./index.ts";
@@ -189,6 +189,7 @@ describe("resolveHosts — roster resolution", () => {
   const ENV_KEYS = [
     "CATALYST_EVENT_MIRROR_HOSTS",
     "CATALYST_CLUSTER_JSON",
+    "CATALYST_CLUSTER_DIR",
     "CATALYST_HOST_NAME",
   ] as const;
   let saved: Record<string, string | undefined>;
@@ -239,6 +240,18 @@ describe("resolveHosts — roster resolution", () => {
     const clusterPath = join(tmp, "cluster-self.json");
     writeFileSync(clusterPath, JSON.stringify({ roster: [self, "peer-a", "peer-b"] }));
     withEnv({ CATALYST_CLUSTER_JSON: clusterPath }, () => {
+      expect(resolveHosts()).toEqual(["peer-a", "peer-b"]);
+    });
+  });
+
+  test("CATALYST_CLUSTER_DIR is honored for the roster fallback (Codex P2 F1)", () => {
+    // Regression guard for the CTL-1654 remediation: the fallback used to hardcode
+    // ~/catalyst/catalyst-cluster/cluster.json, so a relocated CATALYST_CLUSTER_DIR
+    // resolved no hosts. It must now read <CATALYST_CLUSTER_DIR>/cluster.json.
+    const clusterDir = join(tmp, "relocated-cluster");
+    mkdirSync(clusterDir, { recursive: true });
+    writeFileSync(join(clusterDir, "cluster.json"), JSON.stringify({ roster: ["peer-a", "peer-b"] }));
+    withEnv({ CATALYST_CLUSTER_DIR: clusterDir, CATALYST_HOST_NAME: "self-not-in-roster" }, () => {
       expect(resolveHosts()).toEqual(["peer-a", "peer-b"]);
     });
   });

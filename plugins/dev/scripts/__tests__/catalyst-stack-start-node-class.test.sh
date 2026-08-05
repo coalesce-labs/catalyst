@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Tests for CTL-1654: catalyst-stack cmd_start honors catalyst.node.class
-# — only a WORKER node starts execution-core + the log-shipper; monitor/developer
-# nodes start observation services only (monitor, broker, forward) and add
-# the event-mirror.
+# Tests for CTL-1654: catalyst-stack cmd_start honors catalyst.node.class,
+# matching the verify-node profiles:
+#   worker    — full stack: monitor + broker + execution-core + shipper (no event-mirror)
+#   monitor   — observation host: monitor + broker + forward + event-mirror (no exec-core/shipper)
+#   developer — daemonless client: ONLY the event-mirror (no broker/monitor/forward/exec-core)
 # Run: bash plugins/dev/scripts/__tests__/catalyst-stack-start-node-class.test.sh
 
 set -uo pipefail
@@ -129,15 +130,92 @@ check "worker: start_event_mirror NOT called" assert_not_called start_event_mirr
 echo ""
 
 # --- developer class ---
-echo "  # developer class: observation-only (same skip as monitor — regression guard)"
+echo "  # developer class: daemonless client — ONLY event-mirror (Codex P2: no broker)"
 run_cmd_start "developer"
 
-check "developer: start_monitor called" assert_called start_monitor
-check "developer: start_broker called" assert_called start_broker
-check "developer: start_forward called" assert_called start_forward
+check "developer: start_monitor NOT called" assert_not_called start_monitor
+check "developer: start_broker NOT called" assert_not_called start_broker
+check "developer: start_forward NOT called" assert_not_called start_forward
 check "developer: start_daemon NOT called" assert_not_called start_daemon
 check "developer: start_shipper NOT called" assert_not_called start_shipper
 check "developer: start_event_mirror called" assert_called start_event_mirror
+
+echo ""
+echo "=== Phase 2: _resolve_node_class fail-closed on invalid config (Codex P2 F5) ==="
+echo ""
+
+# Resolve the REAL _resolve_node_class (not the stub) against a given env + Layer-2
+# config file. Prints the resolved class to stdout.
+resolve_class() {
+  local env_class="${1:-}" cfg_json="${2:-}"
+  local cfg="${SCRATCH}/layer2-config.json"
+  if [[ -n "$cfg_json" ]]; then printf '%s' "$cfg_json" > "$cfg"; else rm -f "$cfg"; fi
+  CATALYST_NODE_CLASS="$env_class" \
+  CATALYST_LAYER2_CONFIG_FILE="$cfg" \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    [[ -n "${CATALYST_NODE_CLASS}" ]] || unset CATALYST_NODE_CLASS
+    _resolve_node_class
+  '
+}
+
+assert_class() {
+  local name="$1" expected="$2" got="$3"
+  if [[ "$got" == "$expected" ]]; then
+    PASSES=$((PASSES + 1)); echo "  PASS: $name (got '$got')"
+  else
+    FAILURES=$((FAILURES + 1)); echo "  FAIL: $name (expected '$expected', got '$got')"
+  fi
+}
+
+assert_class "absent config ⇒ worker default" \
+  "worker" "$(resolve_class "" '{"catalyst":{}}')"
+assert_class "recognized 'developer' honored" \
+  "developer" "$(resolve_class "" '{"catalyst":{"node":{"class":"developer"}}}')"
+assert_class "recognized 'monitor' honored" \
+  "monitor" "$(resolve_class "" '{"catalyst":{"node":{"class":"monitor"}}}')"
+# The fail-closed cases the old code got wrong: a non-string / typo must NOT become worker.
+assert_class "non-string class ⇒ monitor (fail-closed, was worker)" \
+  "monitor" "$(resolve_class "" '{"catalyst":{"node":{"class":false}}}')"
+assert_class "typo class ⇒ monitor (fail-closed)" \
+  "monitor" "$(resolve_class "" '{"catalyst":{"node":{"class":"developr"}}}')"
+assert_class "env override 'worker' wins" \
+  "worker" "$(resolve_class "worker" '{"catalyst":{"node":{"class":"monitor"}}}')"
+
+echo ""
+echo "=== Phase 3: event-mirror plist carries roster overrides (Codex P2 F6) ==="
+echo ""
+
+# Render the event-mirror plist with a given environment; prints the XML.
+render_mirror_plist() {
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    render_event_mirror_plist /tmp/launch.sh
+  '
+}
+
+PLIST_WITH_HOSTS="$(CATALYST_EVENT_MIRROR_HOSTS='mini,mini-2' render_mirror_plist)"
+if grep -q '<key>CATALYST_EVENT_MIRROR_HOSTS</key>' <<<"$PLIST_WITH_HOSTS" \
+   && grep -q '<string>mini,mini-2</string>' <<<"$PLIST_WITH_HOSTS"; then
+  PASSES=$((PASSES + 1)); echo "  PASS: plist carries CATALYST_EVENT_MIRROR_HOSTS when set"
+else
+  FAILURES=$((FAILURES + 1)); echo "  FAIL: plist missing CATALYST_EVENT_MIRROR_HOSTS override"
+fi
+
+PLIST_WITH_CLUSTER="$(CATALYST_CLUSTER_DIR='/opt/catalyst-cluster' render_mirror_plist)"
+if grep -q '<key>CATALYST_CLUSTER_DIR</key>' <<<"$PLIST_WITH_CLUSTER" \
+   && grep -q '<string>/opt/catalyst-cluster</string>' <<<"$PLIST_WITH_CLUSTER"; then
+  PASSES=$((PASSES + 1)); echo "  PASS: plist carries CATALYST_CLUSTER_DIR when set"
+else
+  FAILURES=$((FAILURES + 1)); echo "  FAIL: plist missing CATALYST_CLUSTER_DIR override"
+fi
+
+PLIST_BARE="$(unset CATALYST_EVENT_MIRROR_HOSTS CATALYST_CLUSTER_DIR CATALYST_CLUSTER_JSON; render_mirror_plist)"
+if grep -q 'CATALYST_EVENT_MIRROR_HOSTS' <<<"$PLIST_BARE"; then
+  FAILURES=$((FAILURES + 1)); echo "  FAIL: plist injected CATALYST_EVENT_MIRROR_HOSTS when unset"
+else
+  PASSES=$((PASSES + 1)); echo "  PASS: plist omits override keys when unset"
+fi
 
 echo ""
 echo "=== Results: ${PASSES} pass, ${FAILURES} fail ==="
