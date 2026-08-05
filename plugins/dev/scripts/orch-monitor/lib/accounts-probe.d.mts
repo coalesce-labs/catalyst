@@ -29,7 +29,8 @@ export interface AccountView {
 export type AccountsNodeStatus = "ok" | "degraded" | "rejected" | "error" | "unknown";
 
 /** The node-scoped summary the API/dashboards consume. Token-free by construction. */
-export interface AccountsSummary {
+export interface AccountsSummaryAvailable {
+  available?: true;
   node: string | null;
   generatedAt: string | null;
   status: AccountsNodeStatus;
@@ -37,6 +38,18 @@ export interface AccountsSummary {
   accounts: AccountView[];
   siblingWithHeadroom: { label: string | null; email: string | null } | null;
 }
+
+/**
+ * The reduced shape deriveAccountsSummary returns for `raw.available === false`
+ * (no `claude-accounts.env` on this node) — the SAME minimal shape the disabled
+ * (`accountsProbeExec:null`) path returns, so a caller can't tell the two apart.
+ */
+export interface AccountsSummaryUnavailable {
+  available: false;
+  node: string | null;
+}
+
+export type AccountsSummary = AccountsSummaryAvailable | AccountsSummaryUnavailable;
 
 /** A summary returned from the cache, stamped with probe time + cache-hit flag. */
 export type CachedAccountsSummary = AccountsSummary & { probedAt: number; cached: boolean };

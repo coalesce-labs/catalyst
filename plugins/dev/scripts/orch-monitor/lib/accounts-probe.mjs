@@ -35,16 +35,41 @@ const PROBE = resolve(
 );
 const ENV_FILE =
   process.env.CLAUDE_ACCOUNTS_ENV ?? resolve(homedir(), ".config/catalyst/claude-accounts.env");
+
+// resolveOnPath — mirrors catalyst-stack's `_ca_node_runtime` (`command -v bun`):
+// scan $PATH for the binary rather than assuming one fixed install location.
+function resolveOnPath(bin) {
+  for (const dir of (process.env.PATH ?? "").split(":")) {
+    if (dir && existsSync(resolve(dir, bin))) return true;
+  }
+  return false;
+}
 // The CHILD runtime that runs the probe: bun else node — mirrors catalyst-stack's
 // _ca_node_runtime choice. The probe is pure node:* + fetch, so either runs it.
-const RUNTIME = existsSync(resolve(homedir(), ".bun/bin/bun")) ? "bun" : "node";
+// Preference order: (1) this process's OWN runtime — when the monitor itself is
+// running under bun, bun is proven present regardless of where it is installed;
+// (2) `bun` resolved from PATH (the _ca_node_runtime parity check, catches a
+// Homebrew/managed install this process happens not to be running under); (3)
+// the historical `~/.bun/bin/bun` default-install check, kept for back-compat;
+// (4) node.
+const RUNTIME =
+  typeof Bun !== "undefined" ||
+  resolveOnPath("bun") ||
+  existsSync(resolve(homedir(), ".bun/bin/bun"))
+    ? "bun"
+    : "node";
 
 /**
  * defaultAccountsProbeExec — run the CTL-1650 probe in a subshell that sources the
  * accounts env so CLAUDE_CODE_OAUTH_TOKEN is visible for active-account detection
  * and never enters this (long-lived monitor) process's env. Returns the token-free
  * JSON record ({generatedAt, accounts:[…]}). When no env file exists, returns an
- * empty record so the surfaces render "unavailable"/quiet rather than erroring.
+ * empty `available:false` record so the surfaces render "unavailable"/quiet rather
+ * than erroring (deriveAccountsSummary propagates the flag; see below). When the
+ * probe exits nonzero (e.g. every configured account is invalid/auth-failing), the
+ * token-free JSON it already wrote to stdout is recovered from the rejected exec's
+ * `.stdout` rather than discarded — otherwise a diagnosable per-account auth error
+ * collapses into a synthetic unlabeled spawn-error posture.
  */
 export async function defaultAccountsProbeExec({
   envFile = ENV_FILE,
@@ -55,7 +80,9 @@ export async function defaultAccountsProbeExec({
   probePath = PROBE,
   runtime = RUNTIME,
 } = {}) {
-  if (!existsSync(envFile)) return { generatedAt: new Date().toISOString(), accounts: [] };
+  if (!existsSync(envFile)) {
+    return { generatedAt: new Date().toISOString(), accounts: [], available: false };
+  }
   // `set -a` exports every sourced var to the exec'd child only; the token dies
   // with this bash -c subshell and never reaches the monitor's own env.
   const script = `set -a; . "$CATALYST_ACCOUNTS_ENV"; set +a; exec "$RT" "$PROBE" --json`;
@@ -65,13 +92,28 @@ export async function defaultAccountsProbeExec({
   // own env can't silently forward it (the design keeps it out of the monitor env).
   const childEnv = { ...process.env, CATALYST_ACCOUNTS_ENV: envFile, RT: runtime, PROBE: probePath };
   delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
-  const { stdout } = await execFileP("bash", ["-c", script], {
-    encoding: "utf8",
-    timeout: timeoutMs,
-    maxBuffer: 8 * 1024 * 1024,
-    env: childEnv,
-  });
-  return JSON.parse(stdout);
+  try {
+    const { stdout } = await execFileP("bash", ["-c", script], {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 8 * 1024 * 1024,
+      env: childEnv,
+    });
+    return JSON.parse(stdout);
+  } catch (err) {
+    // Node's promisified execFile attaches the child's stdout/stderr to the
+    // rejection even on a nonzero exit. Recover and parse it so a diagnosable
+    // per-account error (expired token, auth failure) survives; a parse failure
+    // (truly no usable stdout) falls through to rethrowing the original error.
+    if (typeof err?.stdout === "string" && err.stdout.trim() !== "") {
+      try {
+        return JSON.parse(err.stdout);
+      } catch {
+        /* fall through — rethrow below */
+      }
+    }
+    throw err;
+  }
 }
 
 // ── pure status mapping (the single canonical map Phases 3-6 import) ─────────
@@ -128,11 +170,17 @@ function pickAccount(a) {
  *   - active.error (transport)     → "error" (sensor broken, distinct from rejected)
  *   - else the active binding window's status mapped ok|degraded|rejected|unknown
  *
+ * `raw.available === false` (defaultAccountsProbeExec's no-env-file record) short-
+ * circuits to the SAME minimal shape the disabled (`accountsProbeExec:null`) path
+ * returns — no status/active/accounts — so /api/accounts and the SSE frame can't
+ * be told apart from a genuinely disabled probe by callers.
+ *
  * @param {object} raw   the probe's {generatedAt, accounts:[…]} record
  * @param {object} opts  { node }
  * @returns {{node, generatedAt, status, active, accounts, siblingWithHeadroom}}
  */
 export function deriveAccountsSummary(raw, { node } = {}) {
+  if (raw?.available === false) return { node: node ?? null, available: false };
   const accounts = Array.isArray(raw?.accounts) ? raw.accounts.map(pickAccount) : [];
   const active = accounts.find((a) => a.isActive) ?? null;
 

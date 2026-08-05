@@ -2469,10 +2469,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // (active account + per-window utilization/resets/status +
         // siblingWithHeadroom), token-free, cached ~5 min. `?refresh=true`
         // forces a fresh probe. Disabled (accountsProbeExec:null) → a stable
-        // available:false response, matching the dbPath-gated endpoints.
+        // available:false response, matching the dbPath-gated endpoints. A
+        // no-env-file probe result carries its own available:false (see
+        // deriveAccountsSummary), which overrides the literal below via spread.
         if (url.pathname === "/api/accounts") {
           if (!accountsProbe) return Response.json({ available: false, node: hostName() });
           const refresh = url.searchParams.get("refresh") === "true";
+          // CROSS-ORIGIN GUARD on the state-changing path only. The monitor binds
+          // 0.0.0.0 with no auth, and `refresh=true` is the one per-request probe
+          // trigger — spending a real Haiku call per account (bounded by the
+          // refresh floor, but not to zero). Without this, any page the operator
+          // visits could drive it repeatedly. Same allowlist as the reply route
+          // (lib/trusted-origin.mjs); an absent Origin (non-browser callers) is
+          // allowed — see isOriginAllowed's doc comment.
+          if (refresh && !originAllowed(req.headers.get("origin"))) {
+            return Response.json(
+              { status: "forbidden", error: "cross-origin refresh rejected" },
+              { status: 403 },
+            );
+          }
           const summary = await accountsProbe.get({ refresh });
           return Response.json({ available: true, ...summary });
         }

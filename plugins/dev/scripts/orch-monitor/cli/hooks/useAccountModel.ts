@@ -2,7 +2,13 @@
 // posture over the LOCAL monitor's `/api/accounts/stream` SSE. Unlike the read
 // model (which may point at a remote replica), account posture is inherently
 // per-node/local, so this always targets the local monitor
-// (CATALYST_MONITOR_URL, else http://127.0.0.1:<MONITOR_PORT|7400>).
+// (ACCOUNT_MONITOR_URL, else http://127.0.0.1:<MONITOR_PORT|7400>).
+//
+// Deliberately does NOT read CATALYST_MONITOR_URL: read-model-url.ts documents
+// that override as the first-precedence base for a developer node reading a
+// WORKER's remote monitor for board data. Honoring it here too would stream the
+// REMOTE worker's account posture under this (local) node's strip/banner —
+// account posture is node-scoped, so it needs its own, distinct escape hatch.
 //
 // Uses the HUD's dependency-free createNodeEventSource (no browser EventSource in
 // bun). createNodeEventSource is a ONE-SHOT reader (reconnect policy is the hook's
@@ -20,7 +26,7 @@ const MAX_BACKOFF_MS = 15_000;
 
 /** Resolve the LOCAL monitor base URL (no path). */
 function localMonitorBase(env: Record<string, string | undefined>): string {
-  const explicit = env.CATALYST_MONITOR_URL?.trim().replace(/\/+$/, "");
+  const explicit = env.ACCOUNT_MONITOR_URL?.trim().replace(/\/+$/, "");
   if (explicit) return explicit;
   const parsed = parseInt(env.MONITOR_PORT ?? "", 10);
   const port = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MONITOR_PORT;

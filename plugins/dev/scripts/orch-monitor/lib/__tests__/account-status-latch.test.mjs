@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -208,5 +208,23 @@ describe("checkAccountStatusTransition durable marker + restart (real disk)", ()
       { latched: true, ok: false },
       { latched: true, ok: true },
     ]);
+  });
+  it("a transient (non-ENOENT) hydration failure aborts evaluation instead of using default prev:false", async () => {
+    // Codex finding (CTL-1653): hydrateLatch() leaves `_hydrated` false on a
+    // read error other than ENOENT and touches nothing. Before the fix,
+    // checkAccountStatusTransition evaluated anyway against the default
+    // in-memory prev:false — if the persisted latch was actually still open,
+    // a sustained 'rejected' reading would emit a duplicate edge. Make the
+    // latch PATH itself a directory so readFileSync throws EISDIR, not ENOENT.
+    dir = mkdtempSync(join(tmpdir(), "acct-latch-"));
+    process.env.CATALYST_DIR = dir;
+    mkdirSync(getAccountStatusLatchPath());
+    __resetAccountStatusLatchForTest();
+
+    const emitted = [];
+    const emit = (e) => (emitted.push(e), true);
+    const edge = await checkAccountStatusTransition(summary("rejected"), { emit });
+    expect(edge).toBeNull();
+    expect(emitted.length).toBe(0); // aborted this tick — never evaluated
   });
 });

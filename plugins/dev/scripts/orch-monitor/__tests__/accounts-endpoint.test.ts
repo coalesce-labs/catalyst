@@ -97,6 +97,43 @@ describe("/api/accounts", () => {
     await fetch(`${base}/api/accounts?refresh=true`);
     expect(calls).toBe(before + 1);
   });
+  it("?refresh=true from an untrusted cross-origin caller is rejected (403), no probe spent", async () => {
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { Origin: "http://evil.example:1234" },
+    });
+    expect(r.status).toBe(403);
+    expect(calls).toBe(before); // no probe spawned
+  });
+  it("a plain (non-refresh) read is unaffected by a cross-origin caller", async () => {
+    const r = await fetch(`${base}/api/accounts`, {
+      headers: { Origin: "http://evil.example:1234" },
+    });
+    expect(r.status).toBe(200);
+  });
+});
+
+describe("/api/accounts when the accounts env file is absent", () => {
+  it("returns available:false (same contract as the disabled path), not available:true+status:unknown", async () => {
+    const { tmpDir, wtDir } = mkWtDir("accounts-endpoint-no-env-");
+    const s = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      // Mirrors defaultAccountsProbeExec's own no-env-file record.
+      accountsProbeExec: () =>
+        Promise.resolve({ generatedAt: new Date().toISOString(), accounts: [], available: false }),
+    });
+    const b = (await (await fetch(`http://localhost:${s.port}/api/accounts`)).json()) as AccountsBody;
+    expect(b.available).toBe(false);
+    expect(b.status).toBeUndefined();
+    void s.stop(true);
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
 });
 
 describe("/api/accounts/stream", () => {

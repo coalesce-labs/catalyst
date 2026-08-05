@@ -82,6 +82,13 @@ describe("deriveAccountsSummary", () => {
     expect(JSON.stringify(s)).not.toContain("sk-ant-oat");
     expect(JSON.stringify(s)).not.toContain("token");
   });
+  it("raw.available===false short-circuits to the SAME minimal shape as the disabled path", () => {
+    const s = deriveAccountsSummary(
+      { generatedAt: "t", accounts: [], available: false },
+      { node: "mini-2" },
+    );
+    expect(s).toEqual({ node: "mini-2", available: false });
+  });
 });
 
 describe("createAccountsProbe (cache)", () => {
@@ -221,11 +228,52 @@ describe("createAccountsProbe (cache)", () => {
 });
 
 describe("defaultAccountsProbeExec (secrets hygiene)", () => {
-  it("returns an empty {accounts:[]} record when the env file is absent (no probe spawned)", async () => {
+  it("returns an empty {accounts:[], available:false} record when the env file is absent (no probe spawned)", async () => {
     const missing = join(tmpdir(), "definitely-absent-accounts-env-" + process.pid + ".env");
     const r = await defaultAccountsProbeExec({ envFile: missing });
     expect(r.accounts).toEqual([]);
     expect(typeof r.generatedAt).toBe("string");
+    expect(r.available).toBe(false);
+  });
+  it("preserves the probe's stdout JSON when it exits nonzero (e.g. all accounts invalid)", async () => {
+    // CTL-1653 Codex finding: a nonzero exit still writes the token-free record
+    // to stdout first; execFileP rejects on nonzero, so the fix must recover
+    // stdout from the rejection rather than discard it in favor of a synthetic
+    // unlabeled spawn-error posture.
+    const dir = mkdtempSync(join(tmpdir(), "accounts-exec-nonzero-"));
+    const stub = join(dir, "stub-probe.mjs");
+    writeFileSync(
+      stub,
+      [
+        "const rec = {",
+        "  generatedAt: 't',",
+        "  accounts: [{ label: 'acctA', isActive: true, error: 'token expired' }],",
+        "};",
+        "process.stdout.write(JSON.stringify(rec));",
+        "process.exit(1);",
+      ].join("\n"),
+    );
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(envFile, 'CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-X"\n');
+    try {
+      const r = await defaultAccountsProbeExec({ envFile, probePath: stub });
+      expect(r.accounts[0].label).toBe("acctA");
+      expect(r.accounts[0].error).toBe("token expired");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("rethrows the original error when a nonzero exit produced no usable stdout", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "accounts-exec-nonzero-empty-"));
+    const stub = join(dir, "stub-probe.mjs");
+    writeFileSync(stub, ["process.stderr.write('boom');", "process.exit(1);"].join("\n"));
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(envFile, 'CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-X"\n');
+    try {
+      await expect(defaultAccountsProbeExec({ envFile, probePath: stub })).rejects.toBeTruthy();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
   it("makes the SOURCED token sole authority in the child, keeps the parent env clean, and returns token-free", async () => {
     const dir = mkdtempSync(join(tmpdir(), "accounts-exec-"));

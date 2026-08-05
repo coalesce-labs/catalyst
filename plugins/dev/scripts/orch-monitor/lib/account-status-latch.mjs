@@ -153,7 +153,16 @@ const defaultEmit = (env) => emitEventLog(env);
 export async function checkAccountStatusTransition(summary, opts = {}) {
   const { emit = defaultEmit, state = null } = opts;
   const usingModule = state === null;
-  if (usingModule) hydrateLatch();
+  if (usingModule) {
+    hydrateLatch();
+    // hydrateLatch() leaves `_hydrated` false on a transient (non-ENOENT) read
+    // error and touches nothing else. Evaluating anyway would fall through to
+    // the default in-memory `prev:false` — if the persisted latch is actually
+    // still open, that can emit a duplicate `account.status.changed` on a
+    // sustained `rejected` reading. Abort this tick instead; the next tick
+    // retries hydration before evaluating.
+    if (!_hydrated) return null;
+  }
   const latch = usingModule ? _moduleLatch : state;
   const persist = opts.persist ?? (usingModule ? persistLatchToDisk : () => true);
 
