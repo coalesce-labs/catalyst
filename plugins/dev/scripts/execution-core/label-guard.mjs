@@ -345,6 +345,11 @@ export const ESCALATION_COOLDOWN_MS =
 // site parks the ticket terminally instead of asking again.
 export const ESCALATION_ASK_CAP = Number(process.env.CATALYST_ESCALATION_ASK_CAP) || 3;
 
+// LABEL_CONFIRM_CAP — maximum transient label-write attempts before escalation.label-unconfirmed
+// fires and the cooldown is written unconditionally. Bounds the label-retry storm so a persistent
+// Linear outage eventually produces a loud operator-visible alert instead of silent per-tick retries.
+export const LABEL_CONFIRM_CAP = Number(process.env.CATALYST_LABEL_CONFIRM_CAP) || 5;
+
 export function escalationCooldownPath(orchDir, ticket, phase) {
   return join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`);
 }
