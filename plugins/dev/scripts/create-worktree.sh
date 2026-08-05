@@ -30,6 +30,11 @@ ORCHESTRATION_NAME=""
 REUSE_EXISTING=false
 SKIP_FETCH=false
 EXPECTED_BRANCH=""
+# CTL-1640: resume-from-remote is default-on. When no local branch exists and
+# origin has this ticket branch (pushed draft-PR commits, CTL-783), seed the
+# worktree from that remote tip instead of orphaning it under a fresh branch off
+# base. --no-from-remote opts out; --from-remote affirms the default.
+FROM_REMOTE=true
 
 while [[ $# -gt 0 ]]; do
 	case $1 in
@@ -38,6 +43,8 @@ while [[ $# -gt 0 ]]; do
 		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
 		--reuse-existing) REUSE_EXISTING=true; shift ;;
 		--skip-fetch) SKIP_FETCH=true; shift ;;
+		--from-remote) FROM_REMOTE=true; shift ;;
+		--no-from-remote) FROM_REMOTE=false; shift ;;
 		# CTL-615: when --reuse-existing returns an existing worktree dir,
 		# assert its HEAD is on this branch. Mismatch → exit 64 with a
 		# clear diagnostic. The daemon's revive path passes the ticket name
@@ -52,12 +59,17 @@ done
 # Get worktree name from positional args
 if [ ${#POSITIONAL[@]} -eq 0 ]; then
 	echo -e "${RED}Error: Worktree name is required${NC}"
-	echo "Usage: ./create-worktree.sh <worktree_name> [base_branch] [--worktree-dir <path>] [--hooks-json <json>]"
+	echo "Usage: ./create-worktree.sh <worktree_name> [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--no-from-remote]"
+	echo ""
+	echo "  --from-remote / --no-from-remote  Seed a new branch from origin/<worktree_name>"
+	echo "                                    when it exists (default: --from-remote); opt out"
+	echo "                                    to always root a fresh branch on the base tip."
 	echo ""
 	echo "Examples:"
 	echo "  ./create-worktree.sh ENG-123"
 	echo "  ./create-worktree.sh feature-auth main"
 	echo "  ./create-worktree.sh orch-1-ENG-123 main --worktree-dir ~/catalyst/my-app"
+	echo "  ./create-worktree.sh ENG-123 main --no-from-remote   # ignore origin/ENG-123, root on base"
 	exit 1
 fi
 
@@ -186,12 +198,44 @@ fi
 CREATED_BRANCH=false
 if git show-ref --verify --quiet "refs/heads/${WORKTREE_NAME}"; then
 	echo "📋 Using existing branch: ${WORKTREE_NAME}"
+	# CTL-1640: local branch wins (policy: no auto-merge), but surface a
+	# divergence from origin/<name> so a stale local branch atop pushed work is
+	# visible. Best-effort, gated like the base fetch; never changes behavior.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
+		&& git ls-remote --exit-code --heads origin "$WORKTREE_NAME" >/dev/null 2>&1; then
+		LOCAL_SHA="$(git rev-parse --verify --quiet "refs/heads/${WORKTREE_NAME}" 2>/dev/null || true)"
+		REMOTE_SHA="$(git ls-remote --heads origin "$WORKTREE_NAME" 2>/dev/null | awk '{print $1}')"
+		if [ -n "$REMOTE_SHA" ] && [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+			echo -e "${YELLOW}⚠️  local ${WORKTREE_NAME} (${LOCAL_SHA:0:8}) diverges from origin (${REMOTE_SHA:0:8}); keeping local, not merging (CTL-1640)${NC}" >&2
+		fi
+	fi
 	git worktree add "$WORKTREE_PATH" "$WORKTREE_NAME"
 else
 	echo "🆕 Creating new branch: ${WORKTREE_NAME}"
+	# CREATED_BRANCH=true is correct even when seeded from origin/<name> below:
+	# the local branch head then equals origin/<name>, so the rollback helpers'
+	# `git branch -D` can never lose unpushed work (every commit is on origin).
 	CREATED_BRANCH=true
 	START_POINT="$BASE_BRANCH"
-	if [ "$SKIP_FETCH" = false ]; then
+	SEEDED_FROM_REMOTE=false
+	# CTL-1640: resume-from-remote — if origin already has this ticket branch
+	# (e.g. a pushed draft PR's commits, CTL-783), seed the worktree from that
+	# remote tip instead of orphaning it under a fresh branch off base. The local
+	# branch already took precedence above; --skip-fetch (offline) and
+	# --no-from-remote opt out. This is the missing CTL-783 "resume consumer" —
+	# both normal dispatch and cross-host reclaim funnel through this script, so
+	# they both resume automatically with no .mjs change.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
+		&& git ls-remote --exit-code --heads origin "$WORKTREE_NAME" >/dev/null 2>&1; then
+		if git fetch --quiet origin "$WORKTREE_NAME" 2>/dev/null; then
+			START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+			SEEDED_FROM_REMOTE=true
+			echo "🌱 Resuming from origin/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
+		else
+			echo -e "${YELLOW}⚠️  origin/${WORKTREE_NAME} exists but could not be fetched; falling back to base${NC}" >&2
+		fi
+	fi
+	if [ "$SEEDED_FROM_REMOTE" = false ] && [ "$SKIP_FETCH" = false ]; then
 		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
 			START_POINT="refs/remotes/origin/${BASE_BRANCH}"
 			echo "🔄 Fetched origin/${BASE_BRANCH}; rooting on remote tip"
