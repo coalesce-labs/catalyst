@@ -422,6 +422,49 @@ start_daemon() {
 
 stop_daemon() { catalyst-execution-core stop 2>&1 | sed 's/^/  /'; }
 
+# CTL-1654: event-mirror service — fans fleet event logs into the local event file
+# on observation nodes (monitor/developer) so `catalyst-events tail`/`wait-for`
+# resolve fleet events locally. Managed via a launchd LaunchAgent (KeepAlive).
+start_event_mirror() {
+  [[ "$(uname -s)" == "Darwin" ]] || { warn "event-mirror launchd agent is macOS-only"; return 1; }
+  command -v launchctl >/dev/null 2>&1 || { warn "launchctl not found"; return 1; }
+  if [[ ! -f "$EVENT_MIRROR_LAUNCHER" ]]; then
+    warn "event-mirror launcher not found at $EVENT_MIRROR_LAUNCHER — not starting"
+    return 1
+  fi
+  log "installing event-mirror LaunchAgent ($EVENT_MIRROR_AGENT_LABEL)"
+  mkdir -p "$(dirname "$EVENT_MIRROR_AGENT_PLIST")"
+  render_event_mirror_plist "$EVENT_MIRROR_LAUNCHER" > "$EVENT_MIRROR_AGENT_PLIST"
+  local guid; guid="gui/$(id -u)"
+  # Idempotent (re)load: bootout any existing instance, then bootstrap fresh.
+  launchctl bootout "$guid" "$EVENT_MIRROR_AGENT_PLIST" 2>/dev/null || true
+  if ! launchctl bootstrap "$guid" "$EVENT_MIRROR_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
+    rm -f "$EVENT_MIRROR_AGENT_PLIST"
+    warn "launchctl bootstrap failed for $EVENT_MIRROR_AGENT_PLIST — event-mirror not started"
+    return 1
+  fi
+  # RunAtLoad=false: kick explicitly so the service is live immediately after bootstrap.
+  launchctl kickstart -k "gui/$(id -u)/${EVENT_MIRROR_AGENT_LABEL}" >/dev/null 2>&1 || true
+  log "  → event-mirror LaunchAgent started (log: $EVENT_MIRROR_LOG)"
+}
+stop_event_mirror() {
+  if [[ ! -f "$EVENT_MIRROR_AGENT_PLIST" ]]; then
+    log "event-mirror not installed (no $EVENT_MIRROR_AGENT_PLIST)"
+    return 0
+  fi
+  command -v launchctl >/dev/null 2>&1 || { rm -f "$EVENT_MIRROR_AGENT_PLIST"; return 0; }
+  local guid; guid="gui/$(id -u)"
+  log "stopping event-mirror LaunchAgent ($EVENT_MIRROR_AGENT_LABEL)"
+  launchctl bootout "$guid" "$EVENT_MIRROR_AGENT_PLIST" 2>/dev/null || true
+  rm -f "$EVENT_MIRROR_AGENT_PLIST"
+  log "  → event-mirror stopped and uninstalled"
+}
+# _vn_event_mirror_running — "yes" when a bun process is running event-mirror/index.ts.
+# launch.sh always resolves the canonical path before exec'ing bun, so pgrep-by-path is stable.
+_vn_event_mirror_running() {
+  if pgrep -f "event-mirror/index.ts" >/dev/null 2>&1; then echo yes; else echo no; fi
+}
+
 # ─── Hotpatch (CTL-940: one-checkout nodes) ─────────────────────────────────
 # The daemon, script wrappers, and dispatched workers all run from the
 # pluginDirs checkout, so updating a node is a single ff-only pull of that
@@ -697,11 +740,21 @@ cmd_start() {
     ensure_proxy_deps || fail "proxy preflight failed"
     start_mitmproxy || warn "continuing without mitmproxy (Linear traffic won't be logged)"
   fi
+
+  # CTL-1654: the imperative start path honors catalyst.node.class the same way the
+  # install lifecycle (install-lifecycle.mjs isWorker) already does — only a WORKER
+  # node runs the execution layer. developer/monitor run observation services only.
+  local node_class; node_class="$(_resolve_node_class)"
+
   # CTL-1084: known-good start order is monitor → broker → execution-core
   # (encoded here instead of operator memory; daemon always last).
   start_monitor
   start_broker
-  start_daemon "$use_proxy"
+  if [[ "$node_class" == "worker" ]]; then
+    start_daemon "$use_proxy"
+  else
+    log "node.class=${node_class}: observation-only — execution-core NOT started"
+  fi
   start_forward
   # CTL-1263: the log-shipper comes up LAST — it only tails the daemons' .log
   # files, so it should start after the daemons it observes. start_shipper is
@@ -710,7 +763,16 @@ cmd_start() {
   # start_shipper detects it and defers — launchd's KeepAlive (not this keep-alive)
   # owns shipper resurrection, so it survives stack stop/restart and restarts
   # instantly on death instead of waiting for the next 600s tick.
-  start_shipper || warn "continuing without log-shipper (daemon logs won't be shipped to Loki)"
+  # CTL-1654: monitor/developer nodes have no Alloy log-shipper (docs/health-responder.md).
+  if [[ "$node_class" == "worker" ]]; then
+    start_shipper || warn "continuing without log-shipper (daemon logs won't be shipped to Loki)"
+  fi
+
+  # CTL-1654: bring up the event-mirror on observation nodes (fan fleet events in).
+  # start_event_mirror is a no-op stub until Phase 4 wires the real service.
+  if [[ "$node_class" != "worker" ]]; then
+    start_event_mirror || warn "continuing without event-mirror (local tail/wait-for see only local events)"
+  fi
 
   # CTL-1307: project the cluster-shared cloud token into machine-level env, if
   # one has been decrypted from the catalyst-cluster repo. Quiet + fail-open: a
@@ -725,6 +787,8 @@ cmd_start() {
 cmd_stop() {
   # Reverse of start order: the shipper started last, so stop it first.
   stop_shipper
+  # CTL-1654: stop event-mirror on observation nodes; idempotent no-op on workers.
+  stop_event_mirror
   stop_daemon
   stop_forward
   stop_monitor
@@ -835,6 +899,14 @@ CLOUD_SYNC_AGENT_LABEL="ai.coalesce.catalyst-cloud-sync"
 CLOUD_SYNC_AGENT_PLIST="${HOME}/Library/LaunchAgents/${CLOUD_SYNC_AGENT_LABEL}.plist"
 _cloud_sync_agent_installed() { [[ -f "$CLOUD_SYNC_AGENT_PLIST" ]]; }
 _resolve_cloud_sync_launcher() { printf '%s\n' "$CLOUD_SYNC_LAUNCHER"; }
+
+# CTL-1654: event-mirror LaunchAgent — fans fleet events into the local event file on
+# observation nodes (monitor/developer). Installed/uninstalled by start/stop_event_mirror
+# at each catalyst-stack start/stop (not by install-services — observation-only opt-in).
+EVENT_MIRROR_AGENT_LABEL="ai.coalesce.catalyst-event-mirror"
+EVENT_MIRROR_AGENT_PLIST="${HOME}/Library/LaunchAgents/${EVENT_MIRROR_AGENT_LABEL}.plist"
+EVENT_MIRROR_LOG="${CATALYST_DIR:-$HOME/catalyst}/event-mirror.log"
+EVENT_MIRROR_LAUNCHER="${SCRIPT_DIR}/event-mirror/launch.sh"
 
 # _shipper_agent_installed — true when the dedicated KeepAlive shipper agent owns Alloy.
 _shipper_agent_installed() { [[ -f "$SHIPPER_AGENT_PLIST" ]]; }
@@ -1220,6 +1292,53 @@ render_cloud_sync_plist() {
 
   <key>StandardErrorPath</key>
   <string>${CLOUD_SYNC_LOG}</string>
+</dict>
+</plist>
+PLIST
+}
+
+# render_event_mirror_plist <launcher> — emit the event-mirror LaunchAgent plist XML to stdout
+# (CTL-1654). Pure: no filesystem or launchctl side effects, so it is unit-testable.
+# KeepAlive=true so launchd restarts on crash. RunAtLoad=false: start_event_mirror
+# kickstarts explicitly after bootstrap so the service is live immediately.
+render_event_mirror_plist() {
+  local launcher="$1"
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${EVENT_MIRROR_AGENT_LABEL}</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${launcher}</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$(_stack_agent_path)</string>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>CATALYST_DIR</key>
+    <string>${CATALYST_DIR:-${HOME}/catalyst}</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>${EVENT_MIRROR_LOG}</string>
+
+  <key>StandardErrorPath</key>
+  <string>${EVENT_MIRROR_LOG}</string>
 </dict>
 </plist>
 PLIST
@@ -2680,16 +2799,20 @@ _vn_run_worker() {
   fi
 }
 
-# _vn_run_monitor <source> — reporting-host profile; a STUB (plan §10 enum slot). It
-# grades nothing beyond the node-class, so the verdict must NOT read as a verified-healthy
-# PASS: the profile-stub note is a loud WARN (F5), not a quiet SKIP, so a monitor node that
-# is wrongly running broker+exec-core cannot masquerade as a clean pass. WARN never bumps
-# required-failures, so the exit code stays 0 — a stub is not a failure, just not a gate.
+# _vn_run_monitor <in_roster> <multi_host> <source> <roster_source> — reporting-host
+# profile (CTL-1654). Graded: observation services UP, execution layer DOWN,
+# event-mirror UP (gated — see below), and provably owns no HRW slice.
+# roster_source is threaded to the would-not-own-work check so an unverified roster WARNs.
 _vn_run_monitor() {
-  local source="$1"
-  if [[ "$VN_JSON" != "yes" ]]; then echo "  Tier 1 — monitor profile (reporting host; STUB — NOT a pass gate)"; fi
-  _vn_emit "node-class"   T1 true  "$(_vn_v_node_class monitor monitor false "$source")"
-  _vn_record "profile-stub" T1 false WARN "monitor profile is a STUB — verify-node does NOT yet grade monitor nodes (no monitor host exists); this is NOT a pass gate (full grading lands with catalyst-doctor, CTL-1355)"
+  local in_roster="$1" multi_host="$2" source="$3" roster_src="${4:-}" drained
+  drained="$(_vn_drained)"
+  if [[ "$VN_JSON" != "yes" ]]; then echo "  Tier 1 — monitor profile (observation host; required)"; fi
+  _vn_emit "node-class"          T1 true "$(_vn_v_node_class monitor monitor false "$source")"
+  _vn_emit "broker-running"      T1 true "$(_vn_v_daemon_up broker "$(_vn_broker_running)")"
+  _vn_emit "monitor-running"     T1 true "$(_vn_v_daemon_up monitor "$(_vn_monitor_running)")"
+  _vn_emit "exec-core-stopped"   T1 true "$(_vn_v_daemon_down execution-core "$(_vn_exec_core_running)")"
+  _vn_emit "event-mirror-running" T1 true "$(_vn_v_daemon_up event-mirror "$(_vn_event_mirror_running)")"
+  _vn_emit "would-not-own-work"  T1 true "$(_vn_v_dev_no_work "$in_roster" "$multi_host" "$drained" "$roster_src")"
 }
 
 # _vn_finish <node_class> — summary (JSON or text) + exit code (non-zero iff a
@@ -2802,7 +2925,7 @@ cmd_verify_node() {
 
   case "$class" in
     developer) _vn_run_developer "$in_roster" "$multi_host" "$source" "$roster_src" ;;
-    monitor)   _vn_run_monitor "$source" ;;
+    monitor)   _vn_run_monitor   "$in_roster" "$multi_host" "$source" "$roster_src" ;;
     worker|*)  _vn_run_worker "$inferred" "$source" ;;
   esac
 
