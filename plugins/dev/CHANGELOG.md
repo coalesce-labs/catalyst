@@ -1,15 +1,20 @@
 # Changelog
 
-## [12.45.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.44.0...catalyst-dev-v12.45.0) (2026-08-05)
+## [12.45.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.44.0...catalyst-dev-v12.45.0)
+
+Aug 05, 2026
+
+<!-- ai-enhanced -->
+
+### Claude Account Switching Command
+
+The new `catalyst-stack claude-account` command handles the full Claude SDK account rotation workflow in one step: `status` shows per-account utilization and reset times, `switch <handle>` validates the target, flips the SOPS secret, commits, pushes, and verifies the new account is active and error-free. A `sync` subcommand lets a second node adopt a pushed switch without repeating the full procedure. The release also fixes the orchestration monitor surfacing "unknown reason" for stalled tickets that actually had a specific `attentionReason` like `sdk-overloaded-exhausted`, and patches a broker bug where pre-workspace `node_modules` debris could shadow root installs and leave daemons running stale dependency versions.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1650 catalyst-stack claude-account subcommand + commit the accounts-usage tool ([#3004](https://github.com/coalesce-labs/catalyst/issues/3004)) ([779ef08](https://github.com/coalesce-labs/catalyst/commit/779ef08989caff53a3b9a9d2bb85e0c97e18914b))
-
-
-### Bug Fixes
-
 * **broker:** CTL-1646 — prune pre-workspace member node_modules before a root install ([#2997](https://github.com/coalesce-labs/catalyst/issues/2997)) ([598e3c8](https://github.com/coalesce-labs/catalyst/commit/598e3c8ace0fe63f20f9acae8edbb31bab50d019))
 * **dev:** CTL-1623 export the canonical malformed-file validators instead of duplicating them ([#2984](https://github.com/coalesce-labs/catalyst/issues/2984)) ([c2b070e](https://github.com/coalesce-labs/catalyst/commit/c2b070e8d4afac497382b251aad8f2fb6efa13ab))
 * **dev:** CTL-1623 make the github-token rearm hook reject malformed files + run the bash parity suite in CI ([#2983](https://github.com/coalesce-labs/catalyst/issues/2983)) ([160abbf](https://github.com/coalesce-labs/catalyst/commit/160abbf2805c610ed9229fa906ef80754badcc05))
