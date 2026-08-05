@@ -1442,6 +1442,12 @@ let reconcileTimer = null;
 // CTL triage-entry fix (Phase 0): the poll timer that drains the event log when
 // fs.watch fails to fire (the common case for cross-process appends on macOS).
 let tailerPollTimer = null;
+// CTL-1655: sibling poll timer draining the coordination mirror. The mirror is a
+// cross-process append (written by coordination-publish), so fs.watch alone is
+// unreliable — the same rationale that requires tailerPollTimer above. There is no
+// reconcile backstop for the coordination tail, so without this poll a missed
+// fs.watch event silently drops a cross-host comment wake until restart.
+let coordinationPollTimer = null;
 let tailerOpts = {};
 
 // CTL-1655: bounded commentId-keyed dedup (Phase 1).
@@ -1836,6 +1842,18 @@ export function startMonitor({
   // is cheap (readNewEvents reads only bytes past the durable cursor).
   if (tailerPollMs > 0) {
     tailerPollTimer = setInterval(() => readNewEvents(), tailerPollMs);
+    // CTL-1655: poll the coordination mirror on the same cadence so a missed
+    // fs.watch (the common case for cross-process appends on macOS) does not
+    // silently drop cross-host comment wakes. readNewCoordinationComments is a
+    // single-host no-op, but gate on multi-host here too so the timer is never
+    // armed when it could only ever no-op — matching the watcher gate in
+    // startTailing. The poll is cheap (reads only bytes past coordinationCursor).
+    if (getClusterHosts().length > 1) {
+      coordinationPollTimer = setInterval(
+        () => readNewCoordinationComments(),
+        tailerPollMs
+      );
+    }
   }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
@@ -1869,7 +1887,11 @@ export function stopMonitor() {
   }
   watcher?.close();
   watcher = null;
-  // CTL-1655 Phase 3: close the coordination mirror watcher.
+  // CTL-1655: clear the coordination mirror poll timer and close its watcher.
+  if (coordinationPollTimer) {
+    clearInterval(coordinationPollTimer);
+    coordinationPollTimer = null;
+  }
   coordinationWatcher?.close();
   coordinationWatcher = null;
 }

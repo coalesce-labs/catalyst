@@ -365,6 +365,28 @@ describe("startMonitor — coordination boot-drain (CTL-1655 Phase 3)", () => {
     // Single-host → still no-op regardless of the manual call
     expect(onComment).not.toHaveBeenCalled();
   });
+
+  // phase-review remediation (CTL-1655): the coordination tail must have a poll
+  // fallback like the event-log tailer — fs.watch misses cross-process appends on
+  // macOS, and there is no reconcile backstop for the coordination mirror.
+  test("poll fallback: a comment appended after boot is drained by the coordination poll timer with NO manual call (multi-host)", async () => {
+    setMultiHost();
+    const onComment = mock(() => {});
+    enroll("CTL", { status: "Todo" });
+    // Short poll cadence so the sibling coordination poll timer fires in-test.
+    startMonitor({
+      exec: execReturning({}),
+      reconcileIntervalMs: 60_000,
+      tailerPollMs: 10,
+      onComment,
+    });
+    // Append AFTER the boot-drain and deliberately do NOT call
+    // readNewCoordinationComments — only the poll timer can pick this up.
+    appendCoordination(commentEvent({ ticket: "CTL-11", commentId: "cmt-poll" }));
+    await new Promise((r) => setTimeout(r, 40));
+    expect(onComment).toHaveBeenCalledTimes(1);
+    expect(onComment.mock.calls[0][0]).toMatchObject({ ticket: "CTL-11" });
+  });
 });
 
 // ── Phase 4: cross-host observability breadcrumb ──────────────────────────────
