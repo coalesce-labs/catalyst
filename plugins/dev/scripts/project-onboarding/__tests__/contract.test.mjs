@@ -63,6 +63,20 @@ test("requires explicit confirmation before normalizing a create-team request", 
   });
 });
 
+test("normalizes target IDs in locale-independent code-unit order for every input permutation", () => {
+  const request = fixture("locale-sensitive-targets");
+  const reversed = {
+    ...request,
+    targetPolicy: { ...request.targetPolicy, targets: [...request.targetPolicy.targets].reverse() },
+  };
+
+  const normalized = normalizeOnboardingRequest(request);
+  const reversedNormalized = normalizeOnboardingRequest(reversed);
+
+  assert.deepEqual(normalized.targetPolicy.targets.map(({ id }) => id), ["I", "i", "z", "ä", "İ", "ı"]);
+  assert.equal(JSON.stringify(normalized), JSON.stringify(reversedNormalized));
+});
+
 test("contract remains a pure module with no adapter or host capability imports", () => {
   const source = readFileSync(fileURLToPath(new URL("../contract.mjs", import.meta.url)), "utf8");
 

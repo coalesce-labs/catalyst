@@ -28,19 +28,31 @@ test("creates the hand-defined stable control-plane then local-target step order
   ]);
 });
 
-test("expands cluster targets after control-plane steps and keeps cloud authoritative", () => {
+test("expands cluster targets after control-plane steps", () => {
   const clusterPlan = createOnboardingPlan(fixture("cluster-offline-node"));
-  const cloudPlan = createOnboardingPlan(fixture("cloud-authoritative"));
 
   assert.deepEqual([...new Set(clusterPlan.filter((step) => step.scope === "target").map((step) => step.targetId))], ["mini-1", "mini-2"]);
-  assert.deepEqual(stepRefs(cloudPlan), [
-    { id: "provider.github_access", scope: "control_plane" },
-    { id: "provider.linear_team", scope: "control_plane" },
-    { id: "project.identity_config", scope: "control_plane" },
-    { id: "project.workflow_states", scope: "control_plane" },
-    { id: "project.git_automations", scope: "control_plane" },
-    { id: "project.event_ingestion", scope: "control_plane" },
-  ]);
+});
+
+test("preserves declared cloud targets so control-plane success cannot imply fleet convergence", () => {
+  const observations = Object.fromEntries([
+    "provider.github_access",
+    "provider.linear_team",
+    "project.identity_config",
+    "project.workflow_states",
+    "project.git_automations",
+    "project.event_ingestion",
+  ].map((id) => [id, { status: "satisfied" }]));
+  const plan = createOnboardingPlan(fixture("cloud-authoritative"), observations);
+
+  assert.deepEqual([...new Set(plan.filter((step) => step.scope === "target").map((step) => step.targetId))], ["cloud-worker-1"]);
+  assert.deepEqual(readinessForPlan(plan), {
+    ready: false,
+    requiredSteps: { total: 11, satisfied: 6, pending: 5, blocked: 0 },
+    targets: [
+      { targetId: "cloud-worker-1", ready: false, requiredSteps: { total: 5, satisfied: 0, pending: 5, blocked: 0 } },
+    ],
+  });
 });
 
 test("excludes a developer controller from execution targets until policy and node class both permit it", () => {
@@ -93,6 +105,17 @@ test("treats blocked and pending required steps as not ready while not_applicabl
       { targetId: "mini-1", ready: false, requiredSteps: { total: 2, satisfied: 0, pending: 1, blocked: 1 } },
     ],
   });
+});
+
+test("reports target readiness in locale-independent code-unit order", () => {
+  const readiness = readinessForPlan(["ı", "i", "ä", "I", "İ", "z"].map((targetId) => ({
+    id: "target.checkout",
+    scope: "target",
+    targetId,
+    status: "satisfied",
+  })));
+
+  assert.deepEqual(readiness.targets.map(({ targetId }) => targetId), ["I", "i", "z", "ä", "İ", "ı"]);
 });
 
 test("returns byte-stable JSON and changes rerun statuses only from observations", () => {

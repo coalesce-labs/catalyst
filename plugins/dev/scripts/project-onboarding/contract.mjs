@@ -2,6 +2,10 @@ export const SCHEMA_VERSION = "1";
 export const DEPLOYMENT_MODES = Object.freeze(["single-host", "cluster", "cloud"]);
 export const NODE_CLASSES = Object.freeze(["developer", "worker", "monitor"]);
 
+export function compareCodeUnits(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function requireObject(value, name) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${name} is required`);
@@ -64,7 +68,7 @@ function normalizeTargetPolicy(value, deploymentMode) {
     throw new TypeError("target policy requires explicit execution node classes");
   }
 
-  const targets = policy.targets.map(normalizeTarget).sort((left, right) => left.id.localeCompare(right.id));
+  const targets = policy.targets.map(normalizeTarget).sort((left, right) => compareCodeUnits(left.id, right.id));
   if (new Set(targets.map(({ id }) => id)).size !== targets.length) {
     throw new TypeError("target ids must be unique");
   }

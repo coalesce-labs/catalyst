@@ -1,4 +1,4 @@
-import { normalizeOnboardingRequest } from "./contract.mjs";
+import { compareCodeUnits, normalizeOnboardingRequest } from "./contract.mjs";
 
 export const STEP_STATUS = Object.freeze(["pending", "satisfied", "blocked", "not_applicable"]);
 
@@ -62,7 +62,6 @@ function offlineStep(id, targetId) {
 }
 
 function isExecutionTarget(target, request) {
-  if (request.deploymentMode === "cloud") return false;
   if (!request.targetPolicy.executionNodeClasses.includes(target.nodeClass)) return false;
   if (target.id === request.controller.id && !request.targetPolicy.includeController) return false;
   return true;
@@ -103,7 +102,7 @@ export function readinessForPlan(steps) {
   if (!Array.isArray(steps)) throw new TypeError("plan steps are required");
   const requiredSteps = summarizeRequiredSteps(steps);
   const targetIds = [...new Set(steps.filter((step) => step.scope === "target" && typeof step.targetId === "string").map((step) => step.targetId))]
-    .sort((left, right) => left.localeCompare(right));
+    .sort(compareCodeUnits);
   const targets = targetIds.map((targetId) => {
     const targetRequiredSteps = summarizeRequiredSteps(steps.filter((step) => step.scope === "target" && step.targetId === targetId));
     return { targetId, ready: isReady(targetRequiredSteps), requiredSteps: targetRequiredSteps };

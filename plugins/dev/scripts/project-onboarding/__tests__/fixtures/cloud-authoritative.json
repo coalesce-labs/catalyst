@@ -6,7 +6,7 @@
   "deploymentMode": "cloud",
   "controller": { "id": "cloud-control-plane", "nodeClass": "monitor" },
   "targetPolicy": {
-    "targets": [],
+    "targets": [{ "id": "cloud-worker-1", "nodeClass": "worker", "online": true }],
     "includeController": false,
     "executionNodeClasses": ["worker"]
   }
