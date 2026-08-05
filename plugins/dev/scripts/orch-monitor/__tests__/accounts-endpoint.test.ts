@@ -233,9 +233,14 @@ describe("/api/accounts refresh behind an HTTPS reverse proxy", () => {
   let base = "";
   let calls = 0;
   let prevTrusted: string | undefined;
+  let prevTlsPeers: string | undefined;
   beforeAll(() => {
     prevTrusted = process.env.MONITOR_TRUSTED_ORIGINS;
     process.env.MONITOR_TRUSTED_ORIGINS = "https://catalyst.internal.example";
+    prevTlsPeers = process.env.MONITOR_TLS_PROXY_PEERS;
+    // Declare the test client's loopback address as the TLS-terminating proxy
+    // peer — scheme is operator-declared config, never header-derived (round-6).
+    process.env.MONITOR_TLS_PROXY_PEERS = "127.0.0.1,::1,::ffff:127.0.0.1";
     const dirs = mkWtDir("accounts-endpoint-https-");
     tmpDir = dirs.tmpDir;
     server = createServer({
@@ -253,6 +258,8 @@ describe("/api/accounts refresh behind an HTTPS reverse proxy", () => {
   afterAll(() => {
     if (prevTrusted === undefined) delete process.env.MONITOR_TRUSTED_ORIGINS;
     else process.env.MONITOR_TRUSTED_ORIGINS = prevTrusted;
+    if (prevTlsPeers === undefined) delete process.env.MONITOR_TLS_PROXY_PEERS;
+    else process.env.MONITOR_TLS_PROXY_PEERS = prevTlsPeers;
     void server.stop(true);
     try {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -260,31 +267,41 @@ describe("/api/accounts refresh behind an HTTPS reverse proxy", () => {
       /* ignore */
     }
   });
-  it("a proxied refresh (X-Forwarded-Proto https from loopback) whose Host matches the https trusted origin is admitted", async () => {
+  it("a refresh from the DECLARED TLS-proxy peer whose Host matches the https trusted origin is admitted", async () => {
     const before = calls;
     const r = await fetch(`${base}/api/accounts?refresh=true`, {
       headers: {
         [ACCOUNTS_REFRESH_HEADER]: "1",
         Host: "catalyst.internal.example",
         Origin: "https://catalyst.internal.example",
-        "X-Forwarded-Proto": "https",
       },
     });
     expect(r.status).toBe(200);
     expect(calls).toBe(before + 1);
   });
-  it("the SAME request WITHOUT X-Forwarded-Proto is rejected — an https-only trusted host is never treated as plaintext", async () => {
-    // CTL-1653 Codex round-5: a page served over plain HTTP for the trusted
-    // hostname (originless same-origin GET) must not be able to spend the
-    // probe when the config trusts only the https:// origin. Without the
-    // proxy's X-Forwarded-Proto the effective scheme is http, and
-    // http://catalyst.internal.example is deliberately NOT in the trusted set.
-    const before = calls;
-    const r = await fetch(`${base}/api/accounts?refresh=true`, {
-      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Host: "catalyst.internal.example" },
-    });
-    expect(r.status).toBe(403);
-    expect(calls).toBe(before);
+  it("a spoofed X-Forwarded-Proto from a NON-declared peer cannot upgrade the scheme (403)", async () => {
+    // CTL-1653 Codex round-6: the scheme signal is operator-declared config,
+    // never header-derived — any loopback browser can send the header, and
+    // appending proxies put the client's value first. With the declared-peer
+    // set cleared, the SAME loopback client sending X-Forwarded-Proto: https
+    // stays plaintext, and http://catalyst.internal.example is deliberately
+    // NOT in the https-only trusted set.
+    const saved = process.env.MONITOR_TLS_PROXY_PEERS;
+    delete process.env.MONITOR_TLS_PROXY_PEERS;
+    try {
+      const before = calls;
+      const r = await fetch(`${base}/api/accounts?refresh=true`, {
+        headers: {
+          [ACCOUNTS_REFRESH_HEADER]: "1",
+          Host: "catalyst.internal.example",
+          "X-Forwarded-Proto": "https",
+        },
+      });
+      expect(r.status).toBe(403);
+      expect(calls).toBe(before);
+    } finally {
+      process.env.MONITOR_TLS_PROXY_PEERS = saved;
+    }
   });
   it("an untrusted Host is still rejected even with the https set configured", async () => {
     const before = calls;
