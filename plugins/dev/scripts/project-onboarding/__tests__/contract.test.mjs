@@ -30,7 +30,11 @@ test("normalizes an explicit existing-team local request without mutating its in
       executionNodeClasses: ["worker"],
     },
   });
-  assert.deepEqual(request, { ...original, vcsRepo: " coalesce-labs/catalyst ", projectKey: " CTL " });
+  assert.deepEqual(request, {
+    ...original,
+    vcsRepo: " coalesce-labs/catalyst ",
+    projectKey: " CTL ",
+  });
 });
 
 test("rejects every missing or ambiguous required request field", () => {
@@ -73,12 +77,18 @@ test("normalizes target IDs in locale-independent code-unit order for every inpu
   const normalized = normalizeOnboardingRequest(request);
   const reversedNormalized = normalizeOnboardingRequest(reversed);
 
-  assert.deepEqual(normalized.targetPolicy.targets.map(({ id }) => id), ["I", "i", "z", "ä", "İ", "ı"]);
+  assert.deepEqual(
+    normalized.targetPolicy.targets.map(({ id }) => id),
+    ["I", "i", "z", "ä", "İ", "ı"]
+  );
   assert.equal(JSON.stringify(normalized), JSON.stringify(reversedNormalized));
 });
 
 test("contract remains a pure module with no adapter or host capability imports", () => {
   const source = readFileSync(fileURLToPath(new URL("../contract.mjs", import.meta.url)), "utf8");
 
-  assert.doesNotMatch(source, /from\s+["'](?:node:(?:fs|child_process|http|https)|[^"']*(?:adapter|provider|config|http-client)[^"']*)["']/i);
+  assert.doesNotMatch(
+    source,
+    /from\s+["'](?:node:(?:fs|child_process|http|https)|[^"']*(?:adapter|provider|config|http-client)[^"']*)["']/i
+  );
 });

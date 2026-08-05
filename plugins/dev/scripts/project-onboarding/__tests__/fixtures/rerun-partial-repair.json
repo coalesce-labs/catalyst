@@ -11,8 +11,14 @@
     "executionNodeClasses": ["worker"]
   },
   "observations": {
-    "provider.github_access": { "status": "satisfied", "evidence": { "repo": "coalesce-labs/catalyst" } },
+    "provider.github_access": {
+      "status": "satisfied",
+      "evidence": { "repo": "coalesce-labs/catalyst" }
+    },
     "target.mini-1.checkout": { "status": "satisfied", "evidence": { "revision": "abc123" } },
-    "target.mini-1.execution_registry": { "status": "pending", "reason": { "code": "missing_registry_entry" } }
+    "target.mini-1.execution_registry": {
+      "status": "pending",
+      "reason": { "code": "missing_registry_entry" }
+    }
   }
 }

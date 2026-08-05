@@ -58,7 +58,10 @@ function normalizeTeam(value) {
 
 function normalizeTargetPolicy(value, deploymentMode) {
   const policy = requireObject(value, "target policy");
-  if (!Array.isArray(policy.targets) || (policy.targets.length === 0 && deploymentMode !== "cloud")) {
+  if (
+    !Array.isArray(policy.targets) ||
+    (policy.targets.length === 0 && deploymentMode !== "cloud")
+  ) {
     throw new TypeError("target policy requires explicit targets");
   }
   if (typeof policy.includeController !== "boolean") {
@@ -68,12 +71,19 @@ function normalizeTargetPolicy(value, deploymentMode) {
     throw new TypeError("target policy requires explicit execution node classes");
   }
 
-  const targets = policy.targets.map(normalizeTarget).sort((left, right) => compareCodeUnits(left.id, right.id));
+  const targets = policy.targets
+    .map(normalizeTarget)
+    .sort((left, right) => compareCodeUnits(left.id, right.id));
   if (new Set(targets.map(({ id }) => id)).size !== targets.length) {
     throw new TypeError("target ids must be unique");
   }
-  const executionNodeClasses = [...new Set(policy.executionNodeClasses.map((nodeClass) => normalizeNodeClass(nodeClass, "execution node class")))]
-    .sort((left, right) => NODE_CLASSES.indexOf(left) - NODE_CLASSES.indexOf(right));
+  const executionNodeClasses = [
+    ...new Set(
+      policy.executionNodeClasses.map((nodeClass) =>
+        normalizeNodeClass(nodeClass, "execution node class")
+      )
+    ),
+  ].sort((left, right) => NODE_CLASSES.indexOf(left) - NODE_CLASSES.indexOf(right));
 
   return { targets, includeController: policy.includeController, executionNodeClasses };
 }

@@ -20,17 +20,25 @@ const TARGET_STEP_IDS = Object.freeze([
 ]);
 
 function recordOrEmpty(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? structuredClone(value) : {};
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? structuredClone(value)
+    : {};
 }
 
 function observationKey(step) {
-  return step.scope === "control_plane" ? step.id : `target.${step.targetId}.${step.id.slice("target.".length)}`;
+  return step.scope === "control_plane"
+    ? step.id
+    : `target.${step.targetId}.${step.id.slice("target.".length)}`;
 }
 
 function applyObservation(step, observations) {
   const observation = observations?.[observationKey(step)];
   if (observation === undefined) return step;
-  if (observation === null || typeof observation !== "object" || !STEP_STATUS.includes(observation.status)) {
+  if (
+    observation === null ||
+    typeof observation !== "object" ||
+    !STEP_STATUS.includes(observation.status)
+  ) {
     throw new TypeError(`observation for ${observationKey(step)} has an invalid status`);
   }
   return {
@@ -38,7 +46,8 @@ function applyObservation(step, observations) {
     status: observation.status,
     reason: recordOrEmpty(observation.reason),
     evidence: recordOrEmpty(observation.evidence),
-    repairable: typeof observation.repairable === "boolean" ? observation.repairable : step.repairable,
+    repairable:
+      typeof observation.repairable === "boolean" ? observation.repairable : step.repairable,
   };
 }
 
@@ -69,13 +78,17 @@ function isExecutionTarget(target, request) {
 
 export function createOnboardingPlan(request, observations = {}) {
   const normalized = normalizeOnboardingRequest(request);
-  const controlPlaneSteps = CONTROL_PLANE_STEP_IDS.map((id) => applyObservation(pendingStep(id, "control_plane"), observations));
+  const controlPlaneSteps = CONTROL_PLANE_STEP_IDS.map((id) =>
+    applyObservation(pendingStep(id, "control_plane"), observations)
+  );
   const targetSteps = normalized.targetPolicy.targets
     .filter((target) => isExecutionTarget(target, normalized))
     .flatMap((target) =>
       TARGET_STEP_IDS.map((id) =>
-        target.online ? applyObservation(pendingStep(id, "target", target.id), observations) : offlineStep(id, target.id),
-      ),
+        target.online
+          ? applyObservation(pendingStep(id, "target", target.id), observations)
+          : offlineStep(id, target.id)
+      )
     );
 
   return [...controlPlaneSteps, ...targetSteps];
@@ -101,12 +114,23 @@ function isReady(summary) {
 export function readinessForPlan(steps) {
   if (!Array.isArray(steps)) throw new TypeError("plan steps are required");
   const requiredSteps = summarizeRequiredSteps(steps);
-  const targetIds = [...new Set(steps.filter((step) => step.scope === "target" && typeof step.targetId === "string").map((step) => step.targetId))]
-    .sort(compareCodeUnits);
+  const targetIds = [
+    ...new Set(
+      steps
+        .filter((step) => step.scope === "target" && typeof step.targetId === "string")
+        .map((step) => step.targetId)
+    ),
+  ].sort(compareCodeUnits);
   const targets = targetIds.map((targetId) => {
-    const targetRequiredSteps = summarizeRequiredSteps(steps.filter((step) => step.scope === "target" && step.targetId === targetId));
+    const targetRequiredSteps = summarizeRequiredSteps(
+      steps.filter((step) => step.scope === "target" && step.targetId === targetId)
+    );
     return { targetId, ready: isReady(targetRequiredSteps), requiredSteps: targetRequiredSteps };
   });
 
-  return { ready: isReady(requiredSteps) && targets.every((target) => target.ready), requiredSteps, targets };
+  return {
+    ready: isReady(requiredSteps) && targets.every((target) => target.ready),
+    requiredSteps,
+    targets,
+  };
 }
