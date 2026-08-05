@@ -1338,18 +1338,26 @@ export function startDaemon({
     // CTL-1654: resolve node class once at boot. A monitor/developer node must NOT
     // emit node.heartbeat (the only dispatch-roster signal) — a node that never
     // heartbeats is shed from computeDispatchSurvivingRoster automatically. This
-    // explicit guard is defense-in-depth: even if a monitor node is mis-listed in
-    // cluster.json, the daemon stays in an observe-only mode (no heartbeat, no
-    // dispatch, no recovery). The daemon remains up so a mis-launched daemon is
-    // visibly refusing (WARN in logs + verify-node catches exec-core-stopped) rather
-    // than crash-looping under launchd — matching NODE_CLASS_MOST_RESTRICTIVE semantics.
+    // explicit guard directly stops only the two membership signals — the
+    // node.heartbeat emitter and the liveness publisher below. Suppression of
+    // DISPATCH is emergent from that: with no heartbeat this host is shed from the
+    // dispatch surviving roster and so owns/dispatches no new work. RECOVERY is not
+    // directly gated here and uses the fail-open surviving roster (which still
+    // includes the local node), so the scheduler/recovery tick — invoked
+    // unconditionally above — could in principle act on recovery if a monitor daemon
+    // were mis-launched. In practice catalyst-stack cmd_start never starts
+    // execution-core on a non-worker node (the primary control), so the daemon stays
+    // observe-only. The daemon remains up so a mis-launched daemon is visibly refusing
+    // (WARN in logs + verify-node catches exec-core-stopped) rather than crash-looping
+    // under launchd — matching NODE_CLASS_MOST_RESTRICTIVE semantics.
     const { class: _nodeClass } = nodeClassResolver();
     const _isWorkerNode = _nodeClass === "worker";
     if (!_isWorkerNode) {
       log.warn(
         { nodeClass: _nodeClass },
-        `execution-core launched on node.class=${_nodeClass} — refusing to actuate ` +
-        `(no heartbeat, no dispatch, no recovery). This node is observe-only (CTL-1654).`
+        `execution-core launched on node.class=${_nodeClass} — observe-only: no ` +
+        `heartbeat/liveness (dispatch is then emergently shed from the roster). ` +
+        `cmd_start should not have started exec-core here (CTL-1654).`
       );
     }
 

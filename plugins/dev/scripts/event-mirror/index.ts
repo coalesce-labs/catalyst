@@ -8,7 +8,7 @@
 // cloud changefeed transport lands as an alternate implementation without touching
 // the fan-in / dedup core.
 
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import {
@@ -171,7 +171,7 @@ export async function mirrorTick(opts: MirrorTickOpts): Promise<TickResult> {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-function resolveHosts(): string[] {
+export function resolveHosts(): string[] {
   const envHosts = process.env.CATALYST_EVENT_MIRROR_HOSTS;
   if (envHosts) return envHosts.split(",").map(h => h.trim()).filter(Boolean);
   // Fallback: try to read cluster.json roster minus self.
@@ -180,7 +180,7 @@ function resolveHosts(): string[] {
       join(homedir(), "catalyst", "catalyst-cluster", "cluster.json");
     if (existsSync(clusterPath)) {
       const cluster = JSON.parse(readFileSync(clusterPath, "utf8")) as { roster?: string[] };
-      const selfName = process.env.CATALYST_HOST_NAME ?? Bun.hostname();
+      const selfName = process.env.CATALYST_HOST_NAME ?? hostname();
       return (cluster.roster ?? []).filter(h => h !== selfName);
     }
   } catch { /* fall through */ }

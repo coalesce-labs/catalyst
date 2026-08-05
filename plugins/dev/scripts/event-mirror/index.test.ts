@@ -4,10 +4,10 @@
 // Run: cd plugins/dev/scripts/event-mirror && bun test
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
-import { mirrorTick, type FetchFn } from "./index.ts";
+import { mirrorTick, resolveHosts, type FetchFn } from "./index.ts";
 import { newMirrorState, filterNewLines, extractEventId } from "./lib/state.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -180,5 +180,72 @@ describe("mirrorTick — fan-in from multiple hosts", () => {
     });
     expect(result.appended).toBe(0);
     expect(existsSync(localFile)).toBe(false);
+  });
+});
+
+describe("resolveHosts — roster resolution", () => {
+  // Snapshot + restore the env keys resolveHosts reads, so these tests don't
+  // leak into the rest of the suite.
+  const ENV_KEYS = [
+    "CATALYST_EVENT_MIRROR_HOSTS",
+    "CATALYST_CLUSTER_JSON",
+    "CATALYST_HOST_NAME",
+  ] as const;
+  let saved: Record<string, string | undefined>;
+  let tmp: string;
+
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), "resolvehosts-"));
+  });
+  afterAll(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const withEnv = (env: Record<string, string | undefined>, fn: () => void) => {
+    saved = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]));
+    for (const k of ENV_KEYS) delete process.env[k];
+    for (const [k, v] of Object.entries(env)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try { fn(); }
+    finally {
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k]!;
+      }
+    }
+  };
+
+  test("CATALYST_EVENT_MIRROR_HOSTS wins, trimmed + empties dropped", () => {
+    withEnv({ CATALYST_EVENT_MIRROR_HOSTS: " mini , mini-2 ,, " }, () => {
+      expect(resolveHosts()).toEqual(["mini", "mini-2"]);
+    });
+  });
+
+  test("cluster.json fallback returns roster minus self (CATALYST_HOST_NAME)", () => {
+    const clusterPath = join(tmp, "cluster.json");
+    writeFileSync(clusterPath, JSON.stringify({ roster: ["mini", "mini-2", "studio"] }));
+    withEnv({ CATALYST_CLUSTER_JSON: clusterPath, CATALYST_HOST_NAME: "mini" }, () => {
+      expect(resolveHosts()).toEqual(["mini-2", "studio"]);
+    });
+  });
+
+  test("cluster.json fallback resolves self via os.hostname() when CATALYST_HOST_NAME unset", () => {
+    // Regression guard for the CTL-1654 remediate fix: the fallback used the
+    // non-existent Bun.hostname(), which threw and made resolveHosts() return [].
+    // With os.hostname() the path stays live even without CATALYST_HOST_NAME.
+    const self = hostname();
+    const clusterPath = join(tmp, "cluster-self.json");
+    writeFileSync(clusterPath, JSON.stringify({ roster: [self, "peer-a", "peer-b"] }));
+    withEnv({ CATALYST_CLUSTER_JSON: clusterPath }, () => {
+      expect(resolveHosts()).toEqual(["peer-a", "peer-b"]);
+    });
+  });
+
+  test("no env hosts and no cluster.json → empty", () => {
+    withEnv({ CATALYST_CLUSTER_JSON: join(tmp, "does-not-exist.json") }, () => {
+      expect(resolveHosts()).toEqual([]);
+    });
   });
 });
