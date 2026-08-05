@@ -1,8 +1,8 @@
 {
   "schemaVersion": "1",
   "vcsRepo": "coalesce-labs/catalyst",
-  "projectKey": "CTL",
-  "team": { "intent": "existing", "key": "CTL" },
+  "projectKey": "PROJ",
+  "team": { "intent": "existing", "key": "PROJ" },
   "deploymentMode": "cluster",
   "controller": { "id": "controller", "nodeClass": "developer" },
   "targetPolicy": {

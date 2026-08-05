@@ -12,7 +12,7 @@ test("normalizes an explicit existing-team local request without mutating its in
   const request = fixture("local-existing-team");
   const original = structuredClone(request);
   request.vcsRepo = " coalesce-labs/catalyst ";
-  request.projectKey = " CTL ";
+  request.projectKey = " PROJ ";
 
   const normalized = normalizeOnboardingRequest(request);
 
@@ -20,8 +20,8 @@ test("normalizes an explicit existing-team local request without mutating its in
   assert.deepEqual(normalized, {
     schemaVersion: "1",
     vcsRepo: "coalesce-labs/catalyst",
-    projectKey: "CTL",
-    team: { intent: "existing", key: "CTL" },
+    projectKey: "PROJ",
+    team: { intent: "existing", key: "PROJ" },
     deploymentMode: "single-host",
     controller: { id: "mini-1", nodeClass: "worker" },
     targetPolicy: {
@@ -33,7 +33,7 @@ test("normalizes an explicit existing-team local request without mutating its in
   assert.deepEqual(request, {
     ...original,
     vcsRepo: " coalesce-labs/catalyst ",
-    projectKey: " CTL ",
+    projectKey: " PROJ ",
   });
 });
 
@@ -43,7 +43,7 @@ test("rejects every missing or ambiguous required request field", () => {
     { ...valid, vcsRepo: "" },
     { ...valid, vcsRepo: "coalesce-labs/catalyst/extra" },
     { ...valid, projectKey: "" },
-    { ...valid, team: { intent: "unknown", key: "CTL" } },
+    { ...valid, team: { intent: "unknown", key: "PROJ" } },
     { ...valid, deploymentMode: "hybrid" },
     { ...valid, targetPolicy: undefined },
     { ...valid, targetPolicy: { ...valid.targetPolicy, targets: [] } },

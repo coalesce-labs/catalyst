@@ -1,8 +1,8 @@
 {
   "schemaVersion": "1",
   "vcsRepo": "coalesce-labs/catalyst",
-  "projectKey": "CTL",
-  "team": { "intent": "existing", "key": "CTL" },
+  "projectKey": "PROJ",
+  "team": { "intent": "existing", "key": "PROJ" },
   "deploymentMode": "single-host",
   "controller": { "id": "mini-1", "nodeClass": "worker" },
   "targetPolicy": {

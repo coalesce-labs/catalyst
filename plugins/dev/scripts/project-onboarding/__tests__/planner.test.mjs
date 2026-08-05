@@ -171,7 +171,7 @@ test("returns byte-stable JSON and changes rerun statuses only from observations
   const duplicate = createOnboardingPlan(request, request.observations);
   const repaired = createOnboardingPlan(request, {
     ...request.observations,
-    "target.mini-1.execution_registry": { status: "satisfied", evidence: { entry: "CTL" } },
+    "target.mini-1.execution_registry": { status: "satisfied", evidence: { entry: "PROJ" } },
   });
 
   assert.equal(JSON.stringify(first), JSON.stringify(duplicate));
