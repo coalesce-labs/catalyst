@@ -21,6 +21,13 @@ response** (or in the monitor's own environment).
 - **Cached** (~5 min TTL). Repeated calls within the TTL are served from cache — the same `probedAt`
   is returned and no inference call is spent.
 - **`?refresh=true`** forces a fresh probe (operator-initiated; the only per-request probe path).
+  Requires the `X-Catalyst-Refresh` header (any value) **and** a trusted `Origin` when one is
+  present. The header is what actually stops the vector: this route is a GET, so a browser
+  navigating to (or embedding) the URL directly sends no `Origin` at all, and neither a header-less
+  request nor an untrusted `Origin` is accepted — a plain read (no `refresh`) needs neither.
+  ```bash
+  curl -H "X-Catalyst-Refresh: 1" "http://localhost:7400/api/accounts?refresh=true"
+  ```
 - **Disabled** — on a node with no `claude-accounts.env` (or when the probe is disabled), the
   endpoint returns `{ "available": false, "node": "<host>" }`.
 

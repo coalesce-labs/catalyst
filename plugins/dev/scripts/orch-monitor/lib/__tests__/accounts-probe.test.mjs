@@ -6,6 +6,7 @@ import {
   deriveAccountsSummary,
   createAccountsProbe,
   defaultAccountsProbeExec,
+  resolveRuntime,
 } from "../accounts-probe.mjs";
 
 const REJECTED_ACTIVE = {
@@ -315,5 +316,49 @@ describe("defaultAccountsProbeExec (secrets hygiene)", () => {
       else process.env.CLAUDE_CODE_OAUTH_TOKEN = prior;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("resolveRuntime (CTL-1653 Codex round-2: never the bare 'bun' command name)", () => {
+  it("prefers this process's own Bun executable (process.execPath) when running under bun", () => {
+    // The round-1 fix detected bun's PRESENCE correctly but still returned the
+    // literal string "bun" — a launchd/mise-managed monitor launched via an
+    // absolute Bun path on a restricted PATH has no `bun` command to resolve,
+    // so the bare name exits command-not-found in the probe's bash -c child.
+    expect(
+      resolveRuntime({ isBun: true, execPath: "/opt/homebrew/opt/bun/bin/bun" }),
+    ).toBe("/opt/homebrew/opt/bun/bin/bun");
+  });
+  it("falls back to an ABSOLUTE PATH-resolved bun (not a bare name) when not running under bun", () => {
+    expect(
+      resolveRuntime({
+        isBun: false,
+        resolveOnPath: (bin) => (bin === "bun" ? "/usr/local/bin/bun" : null),
+      }),
+    ).toBe("/usr/local/bin/bun");
+  });
+  it("falls back to the historical ~/.bun/bin/bun default-install path", () => {
+    expect(
+      resolveRuntime({
+        isBun: false,
+        resolveOnPath: () => null,
+        bunHomeExists: true,
+        bunHomeDefault: "/Users/x/.bun/bin/bun",
+      }),
+    ).toBe("/Users/x/.bun/bin/bun");
+  });
+  it("falls back to node (bare name, last resort) when bun is nowhere to be found", () => {
+    expect(
+      resolveRuntime({ isBun: false, resolveOnPath: () => null, bunHomeExists: false }),
+    ).toBe("node");
+  });
+  it("module default resolves to a real string given the actual test host (sanity)", () => {
+    // No overrides: exercises the real typeof Bun / PATH / homedir detection.
+    // Under `bun test` this process IS bun, so it must be process.execPath —
+    // an absolute path, never the bare literal "bun".
+    const rt = resolveRuntime();
+    expect(typeof rt).toBe("string");
+    expect(rt).not.toBe("bun");
+    expect(rt.startsWith("/")).toBe(true);
   });
 });

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createServer } from "../server";
+import { createServer, ACCOUNTS_REFRESH_HEADER } from "../server";
 
 const FAKE = {
   generatedAt: "2026-08-05T12:00:00.000Z",
@@ -92,20 +92,35 @@ describe("/api/accounts", () => {
     const b = (await (await fetch(`${base}/api/accounts`)).json()) as AccountsBody;
     expect(b.cached).toBe(true);
   });
-  it("?refresh=true forces a new probe", async () => {
-    const before = calls;
-    await fetch(`${base}/api/accounts?refresh=true`);
-    expect(calls).toBe(before + 1);
-  });
-  it("?refresh=true from an untrusted cross-origin caller is rejected (403), no probe spent", async () => {
+  it("?refresh=true WITH the required header forces a new probe (admit path)", async () => {
     const before = calls;
     const r = await fetch(`${base}/api/accounts?refresh=true`, {
-      headers: { Origin: "http://evil.example:1234" },
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1" },
+    });
+    expect(r.status).toBe(200);
+    expect(calls).toBe(before + 1);
+  });
+  it("?refresh=true WITHOUT the header is rejected (403), no probe spent (deny path)", async () => {
+    // CTL-1653 Codex round-2: the header is what closes the simple-request /
+    // originless-GET hole — an <img>/top-level-nav/plain-form GET (and a bare
+    // curl call, and this fetch()) can never carry it unless deliberately set.
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`);
+    expect(r.status).toBe(403);
+    expect(calls).toBe(before); // no probe spawned
+  });
+  it("?refresh=true WITH the header but an untrusted cross-origin caller is still rejected (403)", async () => {
+    // The header alone isn't sufficient either — the origin allowlist still
+    // applies on top of it (defense in depth for a same-origin-page-with-
+    // custom-header scenario the header check alone wouldn't catch).
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Origin: "http://evil.example:1234" },
     });
     expect(r.status).toBe(403);
     expect(calls).toBe(before); // no probe spawned
   });
-  it("a plain (non-refresh) read is unaffected by a cross-origin caller", async () => {
+  it("a plain (non-refresh) read needs neither the header nor a trusted origin", async () => {
     const r = await fetch(`${base}/api/accounts`, {
       headers: { Origin: "http://evil.example:1234" },
     });

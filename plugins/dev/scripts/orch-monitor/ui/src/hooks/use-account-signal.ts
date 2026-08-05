@@ -13,11 +13,7 @@
 // AccountSignalContext so the footer + banner share the same value without opening
 // a second EventSource. Consumers inside AppShell use useAccountSignalContext().
 import { createContext, useContext, useEffect, useState } from "react";
-import {
-  decodeAccountSignalFrame,
-  isAccountSignal,
-  type AccountSignal,
-} from "./account-signal-lib";
+import { accountFrameAction, type AccountSignal } from "./account-signal-lib";
 
 // ── Shared context ────────────────────────────────────────────────────────────
 
@@ -51,8 +47,25 @@ export function useAccountSignal(): AccountSignal | null {
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | undefined;
 
-    const apply = (next: AccountSignal) => {
+    const apply = (next: AccountSignal | null) => {
       if (alive) setSignal(next);
+    };
+
+    // Dispatch a raw (already JSON-parsed) frame/body per accountFrameAction:
+    // apply a valid signal, CLEAR to null on the documented {available:false}
+    // transition (CTL-1653 Codex stale-strip finding — this must reach the UI,
+    // not be dropped like garbage), or ignore malformed input untouched.
+    const dispatch = (raw: unknown): boolean => {
+      const action = accountFrameAction(raw);
+      if (action.type === "apply") {
+        apply(action.signal);
+        return true;
+      }
+      if (action.type === "clear") {
+        apply(null);
+        return true;
+      }
+      return false;
     };
 
     const reconcile = async (): Promise<boolean> => {
@@ -63,10 +76,7 @@ export function useAccountSignal(): AccountSignal | null {
         const r = await fetch("/api/accounts", { signal: controller.signal });
         if (r.ok) {
           const body: unknown = await r.json();
-          if (isAccountSignal(body)) {
-            apply(body);
-            return true;
-          }
+          if (dispatch(body)) return true;
         }
       } catch {
         /* offline — the backoff loop retries */
@@ -92,8 +102,13 @@ export function useAccountSignal(): AccountSignal | null {
       }
       es.addEventListener("account", (ev) => {
         backoff = INITIAL_BACKOFF_MS; // reset on a real frame
-        const next = decodeAccountSignalFrame((ev as MessageEvent).data as string);
-        if (next) apply(next);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse((ev as MessageEvent).data as string);
+        } catch {
+          return; // truncated/garbage frame — ignore
+        }
+        dispatch(parsed);
       });
       es.onerror = () => {
         try {

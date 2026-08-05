@@ -37,27 +37,69 @@ const ENV_FILE =
   process.env.CLAUDE_ACCOUNTS_ENV ?? resolve(homedir(), ".config/catalyst/claude-accounts.env");
 
 // resolveOnPath — mirrors catalyst-stack's `_ca_node_runtime` (`command -v bun`):
-// scan $PATH for the binary rather than assuming one fixed install location.
+// scan $PATH for the binary and return its ABSOLUTE path (not a bare command
+// name) — see resolveRuntime's doc comment for why the bare name is unsafe.
 function resolveOnPath(bin) {
   for (const dir of (process.env.PATH ?? "").split(":")) {
-    if (dir && existsSync(resolve(dir, bin))) return true;
+    if (!dir) continue;
+    const candidate = resolve(dir, bin);
+    if (existsSync(candidate)) return candidate;
   }
-  return false;
+  return null;
 }
-// The CHILD runtime that runs the probe: bun else node — mirrors catalyst-stack's
-// _ca_node_runtime choice. The probe is pure node:* + fetch, so either runs it.
-// Preference order: (1) this process's OWN runtime — when the monitor itself is
-// running under bun, bun is proven present regardless of where it is installed;
-// (2) `bun` resolved from PATH (the _ca_node_runtime parity check, catches a
-// Homebrew/managed install this process happens not to be running under); (3)
-// the historical `~/.bun/bin/bun` default-install check, kept for back-compat;
-// (4) node.
-const RUNTIME =
-  typeof Bun !== "undefined" ||
-  resolveOnPath("bun") ||
-  existsSync(resolve(homedir(), ".bun/bin/bun"))
-    ? "bun"
-    : "node";
+
+const BUN_HOME_DEFAULT = resolve(homedir(), ".bun/bin/bun");
+
+/**
+ * resolveRuntime — the CHILD runtime that runs the probe. ALWAYS an absolute
+ * path when bun is the choice, never the bare `bun` command name: the bash -c
+ * subshell this spawns into (defaultAccountsProbeExec, below) inherits this
+ * process's PATH, but a launchd/mise-managed monitor can be launched via an
+ * ABSOLUTE Bun path on a restricted PATH that omits bun's own directory — the
+ * bare command name then exits command-not-found in the child and every real
+ * probe degrades to a spawn/error posture (CTL-1653 Codex round-2 finding: the
+ * round-1 fix detected bun's PRESENCE correctly but still returned the literal
+ * string "bun" instead of a usable path).
+ *
+ * Preference order, each one proven independently of the others:
+ *   (1) this process's OWN Bun executable (`process.execPath`) — when the
+ *       monitor itself is running under bun, this is proven valid regardless
+ *       of PATH;
+ *   (2) `bun` resolved from PATH, as an absolute path (mirrors catalyst-stack's
+ *       `_ca_node_runtime` / `command -v bun` — catches a Homebrew/managed
+ *       install this process happens not to be running under);
+ *   (3) the historical `~/.bun/bin/bun` default-install path, kept for
+ *       back-compat;
+ *   (4) `node` (bare command name; last resort — mirrors catalyst-stack's own
+ *       node fallback, which is also a bare name).
+ *
+ * All five inputs are injectable so every branch is independently testable
+ * without depending on whether THIS test process happens to be running under
+ * bun (it always is, under `bun test`) or what the test host's PATH contains.
+ *
+ * @param {object} [o]
+ * @param {boolean}  [o.isBun]         default: typeof Bun !== "undefined"
+ * @param {string}   [o.execPath]      default: process.execPath
+ * @param {Function} [o.resolveOnPath] default: the module's own PATH scanner
+ * @param {string}   [o.bunHomeDefault] default: BUN_HOME_DEFAULT
+ * @param {boolean}  [o.bunHomeExists] default: existsSync(BUN_HOME_DEFAULT)
+ * @returns {string}
+ */
+export function resolveRuntime({
+  isBun = typeof Bun !== "undefined",
+  execPath = process.execPath,
+  resolveOnPath: resolveOnPathFn = resolveOnPath,
+  bunHomeDefault = BUN_HOME_DEFAULT,
+  bunHomeExists = existsSync(BUN_HOME_DEFAULT),
+} = {}) {
+  if (isBun) return execPath;
+  const onPath = resolveOnPathFn("bun");
+  if (onPath) return onPath;
+  if (bunHomeExists) return bunHomeDefault;
+  return "node";
+}
+
+const RUNTIME = resolveRuntime();
 
 /**
  * defaultAccountsProbeExec — run the CTL-1650 probe in a subshell that sources the

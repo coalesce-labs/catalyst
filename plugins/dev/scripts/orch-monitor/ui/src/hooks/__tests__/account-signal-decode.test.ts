@@ -2,6 +2,8 @@ import { describe, it, expect } from "bun:test";
 import {
   decodeAccountSignalFrame,
   isAccountSignal,
+  isAccountUnavailable,
+  accountFrameAction,
   accountIndicatorLabel,
   bannerModel,
   type AccountSignal,
@@ -27,6 +29,31 @@ describe("decodeAccountSignalFrame / isAccountSignal", () => {
   });
   it("rejects malformed input → null", () =>
     expect(decodeAccountSignalFrame("not json")).toBeNull());
+});
+
+describe("isAccountUnavailable / accountFrameAction (CTL-1653 Codex stale-strip fix)", () => {
+  it("recognizes the documented {available:false} unavailable contract", () => {
+    expect(isAccountUnavailable({ available: false, node: "mini-2" })).toBe(true);
+  });
+  it("does not confuse a valid signal or garbage with the unavailable contract", () => {
+    expect(isAccountUnavailable({ status: "ok" })).toBe(false);
+    expect(isAccountUnavailable("not an object")).toBe(false);
+    expect(isAccountUnavailable(null)).toBe(false);
+    expect(isAccountUnavailable({ available: true })).toBe(false);
+  });
+  it("accountFrameAction: apply for a valid signal", () => {
+    const action = accountFrameAction({ status: "rejected", active: { label: "acctA" } });
+    expect(action.type).toBe("apply");
+    expect(action.type === "apply" && action.signal.status).toBe("rejected");
+  });
+  it("accountFrameAction: clear for {available:false} — a REAL transition, not noise", () => {
+    expect(accountFrameAction({ available: false, node: "mini-2" })).toEqual({ type: "clear" });
+  });
+  it("accountFrameAction: ignore for garbage/truncated input", () => {
+    expect(accountFrameAction({ garbage: true })).toEqual({ type: "ignore" });
+    expect(accountFrameAction(null)).toEqual({ type: "ignore" });
+    expect(accountFrameAction("a string")).toEqual({ type: "ignore" });
+  });
 });
 
 describe("accountIndicatorLabel (quiet while ok)", () => {
