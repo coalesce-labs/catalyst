@@ -135,6 +135,8 @@ import { buildTrustedOrigins, isOriginAllowed } from "./lib/trusted-origin.mjs";
 // claude-accounts-usage.mjs in a token-scoped subshell (defaultAccountsProbeExec);
 // the async TTL cache serves /api/accounts + the /api/accounts/stream SSE.
 import { createAccountsProbe, defaultAccountsProbeExec } from "./lib/accounts-probe.mjs";
+import { createAccountsTimer } from "./lib/accounts-timer.mjs";
+import type { CachedAccountsSummary } from "./lib/accounts-probe";
 /** CTL-1653: the injectable child-process seam for the Claude-account probe.
  *  Production is defaultAccountsProbeExec; tests inject a scripted fake record. */
 type AccountsProbeExec = () => Promise<unknown>;
@@ -1009,6 +1011,32 @@ export function createServer(opts: CreateServerOptions): BunServer {
           ttlMs: accountsTtlMs,
           node: hostName(),
         });
+
+  // CTL-1653: per-connection SSE subscribers fed by the periodic timer. The
+  // timer refreshes the cache every accountsTtlMs and fans each fresh summary
+  // out to all subscribers (Phase 4 also folds the transition latch in here).
+  const accountsSubscribers = new Set<(s: CachedAccountsSummary) => void>();
+  const accountsTimer = accountsProbe
+    ? createAccountsTimer({
+        probe: accountsProbe,
+        intervalMs: accountsTtlMs,
+        onTick: (s) => {
+          for (const send of accountsSubscribers) {
+            try {
+              send(s);
+            } catch {
+              /* a dead subscriber is pruned on its own stream cancel */
+            }
+          }
+        },
+      })
+    : null;
+  // The timer spawns the real Claude-account probe (a Haiku call when
+  // claude-accounts.env exists), so it belongs to the long-running daemon path
+  // only — gate on startWatcher so the hundreds of `startWatcher:false` unit
+  // servers never fork a probe. Tests that exercise the stream inject a fake
+  // exec + leave startWatcher default (true).
+  if (accountsTimer && startWatcher !== false) accountsTimer.start();
 
   // CTL-1050: the service-health registry monitor — ONE severity model shared by
   // the Fleet Ops strip, the outage emitter, the inbox decoration, AND the
@@ -2356,6 +2384,54 @@ export function createServer(opts: CreateServerOptions): BunServer {
             const refresh = url.searchParams.get("refresh") === "true";
             const summary = await accountsProbe.get({ refresh });
             return Response.json({ available: true, ...summary });
+          }
+
+          // CTL-1653: SSE stream of the node's Claude-account posture. Each event:
+          //   event: account\ndata: <summary json>\n\n
+          // On connect, emit the current cached summary immediately (so a fresh
+          // dashboard renders without waiting a whole interval); thereafter the
+          // periodic timer broadcasts each fresh summary to every subscriber.
+          if (url.pathname === "/api/accounts/stream") {
+            const probeRef = accountsProbe;
+            let send: ((s: CachedAccountsSummary) => void) | null = null;
+            const stream = new ReadableStream<Uint8Array>({
+              async start(controller) {
+                const frame = (s: unknown) => {
+                  try {
+                    controller.enqueue(
+                      encoder.encode(`event: account\ndata: ${JSON.stringify(s)}\n\n`),
+                    );
+                  } catch {
+                    if (send) accountsSubscribers.delete(send);
+                    send = null;
+                  }
+                };
+                if (!probeRef) {
+                  // Disabled: emit one unavailable frame, no subscription.
+                  frame({ available: false, node: hostName() });
+                  return;
+                }
+                send = frame;
+                accountsSubscribers.add(send);
+                try {
+                  frame(await probeRef.get());
+                } catch (err) {
+                  console.error(`[server] accounts stream initial frame failed:`, err);
+                }
+              },
+              cancel() {
+                if (send) accountsSubscribers.delete(send);
+                send = null;
+              },
+            });
+            return new Response(stream, {
+              headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                Connection: "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+              },
+            });
           }
 
           // CTL-1152: GET /api/projects — the config-driven project roster. One
@@ -5443,6 +5519,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
     watcher?.stop();
     boardSnapshot.stop();
     serviceHealth.stop();
+    accountsTimer?.stop(); // CTL-1653: stop the periodic Claude-account probe
+    accountsSubscribers.clear();
     prFetcher?.stop();
     previewFetcher?.stop();
     linear?.stop();

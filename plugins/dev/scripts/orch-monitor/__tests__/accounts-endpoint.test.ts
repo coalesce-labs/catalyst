@@ -96,6 +96,34 @@ describe("/api/accounts", () => {
   });
 });
 
+describe("/api/accounts/stream", () => {
+  it("emits an 'account' framed SSE event on connect", async () => {
+    const { tmpDir, wtDir } = mkWtDir("accounts-stream-");
+    const s = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      accountsProbeExec: () => Promise.resolve(FAKE),
+      accountsTtlMs: 10,
+    });
+    const res = await fetch(`http://localhost:${s.port}/api/accounts/stream`, {
+      headers: { Accept: "text/event-stream" },
+    });
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    const text = new TextDecoder().decode(value);
+    expect(text).toContain("event: account");
+    expect(text).toContain('"status"');
+    await reader.cancel();
+    void s.stop(true);
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+});
+
 describe("/api/accounts disabled (accountsProbeExec:null)", () => {
   it("returns available:false, never spawns", async () => {
     const { tmpDir, wtDir } = mkWtDir("accounts-endpoint-disabled-");
