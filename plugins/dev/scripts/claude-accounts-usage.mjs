@@ -284,11 +284,13 @@ async function main() {
   const { accounts, missing } = parseAccountsEnv(envPath);
 
   if (missing) {
-    console.error(`No accounts file at ${envPath} (set CLAUDE_ACCOUNTS_ENV to override).`);
+    // CodeQL clear-text-logging guard: envPath derives from process.env, so it never
+    // reaches a log line — the operator knows which path they configured.
+    console.error("No accounts file found (default ~/.config/catalyst/claude-accounts.env; set CLAUDE_ACCOUNTS_ENV to override).");
     process.exit(1);
   }
   if (accounts.length === 0) {
-    console.error(`No CLAUDE_TOKEN_* tokens found in ${envPath}.`);
+    console.error("No CLAUDE_TOKEN_* tokens found in the accounts env file.");
     process.exit(1);
   }
 
