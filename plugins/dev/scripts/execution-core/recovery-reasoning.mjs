@@ -1251,6 +1251,15 @@ function promoteNumericAttrs(type, details) {
     // dashboards/alerts get a chartable dispatch-rate signal (the act object rides in
     // body.payload, which the OTel/Loki path does not make queryable).
     num("recovery.act_dispatched", details.actDispatched);
+    // CTL-1607: per-host slot census → chartable Loki metadata. Fleet-wide free
+    // capacity is sum(recovery.slot.free) across hosts (host identity via host_name
+    // metadata). Sum FREE directly — never slot.capacity - slot.in_use: on a
+    // draining/stale-liveness node slot.free is gate-collapsed to 0 while
+    // slot.in_use still reports actual occupancy, so capacity − in_use overstates
+    // admittable free (see the emit-site note in board-health.mjs).
+    num("recovery.slot.capacity", details.slotCapacity);
+    num("recovery.slot.in_use", details.slotInUse);
+    num("recovery.slot.free", details.slotFree);
     str("recovery.gate_decision", details.gateDecision);
     str("recovery.gate_reason", details.gateReason);
     str("recovery.mode", details.mode);
