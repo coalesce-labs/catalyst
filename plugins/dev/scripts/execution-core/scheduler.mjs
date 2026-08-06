@@ -367,7 +367,7 @@ import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
-import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
+import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import {
   getAllTicketDescriptors,
   getAllPrStatuses,
@@ -5430,6 +5430,10 @@ export function schedulerTick(
           // → empty-Map / empty-array defaults keep the new invariants
           // observable:false and the holistic failover unreachable (shadow-safe).
           getPrStatusMap: _boardHealth.getPrStatusMap,
+          // CTL-1644: thread the stranded-mid-pipeline evidence seam. Daemon-bound
+          // below; a bare tick passes none → empty-Map default keeps the new invariant
+          // observable:false (shadow-first, ADR-023).
+          getStrandedEvidence: _boardHealth.getStrandedEvidence,
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the
@@ -8082,6 +8086,73 @@ function runTick() {
             /* best-effort — empty PR map on open failure */
           }
           return getAllPrStatuses();
+        },
+        // CTL-1644: build per-ticket actuation + salvageability evidence for
+        // checkStrandedMidPipeline. Called inside assembleBoardState, protected
+        // by the 5-min scan throttle. Uses cheap local sources only:
+        //   - hasWorkerDir: orchDir/workers/<ticket>/ presence (primary actuation signal)
+        //   - hasFreshIntent: active recovery intent within the cooldown window
+        //   - openPr: prStatusMap lookup by the ticket descriptor's prNumber
+        // Phase 3 will add remoteBranchExists / worktreeUnpushed via the
+        // stall-janitor census. hasLiveBg is false for Phase 2 (worker-dir
+        // presence is the primary actuation signal; a worker-dir that exists but
+        // has no live bg job is still "actuated" until the reaper cleans it up).
+        // CTL-1644 (Codex P1): these two salvage fields stay ABSENT (not false)
+        // in Phase 2. classifyRevivalRoute treats absent salvage as UNKNOWN and
+        // returns a non-dispatchable `unknown-salvage` route (held, never
+        // restart-fresh) — so a stranded ticket with a pushed branch is never
+        // discarded before Phase 3 populates the real evidence.
+        getStrandedEvidence: () => {
+          const evidenceMap = new Map();
+          try { openBrokerStateDb(); } catch { /* best-effort */ }
+          let prMap = new Map();
+          let descriptors = [];
+          try { prMap = getAllPrStatuses(); } catch { /* best-effort */ }
+          try { descriptors = getAllTicketDescriptors({ includeRemoved: false }); } catch { /* best-effort */ }
+          for (const d of descriptors) {
+            // CTL-1644: broker rowToTicketDescriptor sets ONLY `.ticket` (e.g.
+            // "CTL-9") — never `.identifier`/`.id` — so key evidence identically
+            // to assembleBoardState's ticketsById (`d.identifier ?? d.ticket ??
+            // d.id`). Without the `.ticket` fallback every descriptor keyed
+            // undefined, the evidence Map came back empty on every real scan, and
+            // checkStrandedMidPipeline short-circuited to observable:false — the
+            // invariant never fired against production data (dark in shadow AND
+            // enforce). The join key must match ticketsById or evidence.get(id) misses.
+            const id = d.identifier ?? d.ticket ?? d.id;
+            if (!id) continue;
+            const hasWorkerDir = existsSync(join(runningOpts.orchDir, "workers", id));
+            let hasFreshIntent = false;
+            try {
+              hasFreshIntent = recoverySkipReason(id, { orchDir: runningOpts.orchDir }) !== null;
+            } catch { /* fail open — no intent treated as not protected */ }
+            let openPr = null;
+            const prNum = d.prNumber ?? d.pr_number ?? null;
+            if (prNum != null) {
+              let repo = null;
+              try {
+                const team = teamOf(id);
+                if (team) repo = ownerRepoFromRepoRoot(getProjectConfig(team)?.repoRoot ?? null);
+              } catch { /* best-effort — number-only fallback */ }
+              // CTL-1644 (Codex P2): reuse board-health's lookupPrStatus so a
+              // known-repo ticket never borrows an UNRELATED repo's #N. The prior
+              // inline `byRepo.values().next().value` fallback picked an arbitrary
+              // repo's row, misrouting a stranded org/y ticket onto org/x#42.
+              // lookupPrStatus returns {ambiguous:true,status:null} on a number-only
+              // collision → status !== "open" → openPr stays null (safe).
+              const entry = lookupPrStatus(prMap, prNum, repo);
+              if (entry && String(entry.status ?? "").toLowerCase() === "open") {
+                openPr = { number: prNum, status: "open" };
+              }
+            }
+            evidenceMap.set(id, {
+              id,
+              hasWorkerDir,
+              hasLiveBg: false, // Phase 3: wire real bg-liveness probe here
+              hasFreshIntent,
+              openPr,
+            });
+          }
+          return evidenceMap;
         },
         // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so
         // the phantom/orphaned-PR cohorts disambiguate a cross-repo #-collision by
