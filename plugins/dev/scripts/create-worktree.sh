@@ -253,6 +253,21 @@ else
 		else
 			echo -e "${YELLOW}⚠️  Could not fetch origin/${BASE_BRANCH}; falling back to local ${BASE_BRANCH} (worker may branch off stale ref)${NC}" >&2
 		fi
+		# CTL-1640 (Codex #3025 P2): re-check origin/<ticket> immediately before creating
+		# the branch. A superseded worker's early-draft push (implement-plan-draft-pr-early,
+		# CTL-783) can land AFTER the negative ticket fetch above but before `git worktree
+		# add -b` — a TOCTOU window that would otherwise root the survivor on base and never
+		# resume the pushed commits (the local-branch-wins path then takes over on every later
+		# provisioning). This last-moment fetch narrows that window to the gap between here and
+		# the add. It does NOT fully close the race — the durable fix is a cluster-fence guard
+		# on the producer's early-draft push — but it converts the common case back to a resume.
+		if [ "$FROM_REMOTE" = true ] \
+			&& git fetch --quiet origin \
+				"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
+			START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+			SEEDED_FROM_REMOTE=true
+			echo "🌱 origin/${WORKTREE_NAME} appeared during provisioning; resuming from its pushed tip (CTL-1640)"
+		fi
 	fi
 	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$START_POINT"
 fi
