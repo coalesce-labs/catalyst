@@ -443,7 +443,8 @@ start_event_mirror() {
     warn "launchctl bootstrap failed for $EVENT_MIRROR_AGENT_PLIST — event-mirror not started"
     return 1
   fi
-  # RunAtLoad=false: kick explicitly so the service is live immediately after bootstrap.
+  # Kick explicitly too so the service is live immediately after bootstrap, without
+  # waiting for RunAtLoad to fire on the next login (CTL-1662).
   launchctl kickstart -k "gui/$(id -u)/${EVENT_MIRROR_AGENT_LABEL}" >/dev/null 2>&1 || true
   log "  → event-mirror LaunchAgent started (log: $EVENT_MIRROR_LOG)"
 }
@@ -1311,8 +1312,13 @@ PLIST
 
 # render_event_mirror_plist <launcher> — emit the event-mirror LaunchAgent plist XML to stdout
 # (CTL-1654). Pure: no filesystem or launchctl side effects, so it is unit-testable.
-# KeepAlive=true so launchd restarts on crash. RunAtLoad=false: start_event_mirror
-# kickstarts explicitly after bootstrap so the service is live immediately.
+# KeepAlive=true so launchd restarts on crash. RunAtLoad=true so it self-starts at
+# every login (CTL-1662) — this node's class may never install the STACK_AGENT
+# (developer/monitor nodes typically only run adopt-updater, not install-services),
+# so the dedicated per-daemon agent must be self-sufficient, matching the
+# updater/cloud-sync/log-shipper agents' own convention. start_event_mirror also
+# kickstarts explicitly right after bootstrap so the service is live immediately
+# on a fresh install without waiting for the next login.
 render_event_mirror_plist() {
   local launcher="$1"
   # CTL-1654 (Codex P2 "pass mirror host overrides into launchd"): capture the roster
@@ -1355,7 +1361,7 @@ render_event_mirror_plist() {
   </array>
 
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 
   <key>KeepAlive</key>
   <true/>
@@ -2855,6 +2861,7 @@ _vn_run_developer() {
   _vn_emit "exec-core-stopped"  T1 true "$(_vn_v_daemon_down execution-core "$(_vn_exec_core_running)")"
   _vn_emit "plugins-fresh"      T1 true "$(_vn_v_updater "$(_vn_updater_ec)")"
   _vn_emit "read-replica"       T1 true "$(_vn_v_read_replica developer "$(_vn_read_replica_base)")"
+  _vn_emit "event-mirror-running" T1 true "$(_vn_v_daemon_up event-mirror "$(_vn_event_mirror_running)")"
   _vn_emit "would-not-own-work" T1 true "$(_vn_v_dev_no_work "$in_roster" "$multi_host" "$drained" "$roster_src")"
 }
 

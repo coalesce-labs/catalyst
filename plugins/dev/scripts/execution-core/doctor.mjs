@@ -4572,7 +4572,12 @@ export function checksForClass(nc, opts = {}) {
       () => checkSecretsHygiene(),
       developerBotCredentials,
       () => checkHrwPartition(), // would-own count (visibility)
-      () => checkDaemonlessLocal({ nodeClass: nc.class, runVerifyNode }), // broker/exec-core down + plugins fresh
+      () =>
+        checkDaemonlessLocal({
+          nodeClass: nc.class,
+          runVerifyNode,
+          rows: ["broker-stopped", "exec-core-stopped", "plugins-fresh", "event-mirror-running"], // CTL-1662: without this row a dead event-mirror is invisible to doctor
+        }), // broker/exec-core down + plugins fresh + event-mirror alive
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (correct class agent set)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater (a developer runs no broker)
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a developer)
