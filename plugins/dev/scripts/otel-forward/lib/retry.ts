@@ -68,7 +68,14 @@ export async function withHttpRetry<T>(
 ): Promise<T> {
   const p = { ...DEFAULT_HTTP_RETRY_POLICY, ...policy };
   const now = clock.now ?? (() => Date.now());
-  const sleep = clock.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
+  // CTL-1506 (Codex P1): the default backoff sleep is abortable — on shutdown the pending
+  // sleep resolves immediately (instead of blocking for a 4/8/16/30s backoff), so the
+  // post-sleep abort check fires right away and the caller DLQs within the launcher grace.
+  const sleep = clock.sleep ?? ((ms) => new Promise<void>((r) => {
+    if (clock.signal?.aborted) return r();
+    const t = setTimeout(r, ms);
+    clock.signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+  }));
   const start = now();
   let attempt = 0;
   for (;;) {

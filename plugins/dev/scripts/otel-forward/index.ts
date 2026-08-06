@@ -25,10 +25,13 @@ import { buildCanonicalEnvelope } from "./lib/canonical.ts";
 const CATALYST_DIR = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const EVENTS_DIR = process.env.CATALYST_EVENTS_DIR ?? join(CATALYST_DIR, "events");
 const CHECKPOINT_PATH = join(CATALYST_DIR, "otel-forward.checkpoint.json");
+const PROJECT_KEY = process.env.CATALYST_PROJECT_KEY ?? "catalyst-workspace";
+// CTL-1506 (Codex P1): derive the Layer-2 path from the project key so a non-default
+// CATALYST_PROJECT_KEY actually reads config-{projectKey}.json (as documented) without
+// requiring a separate CATALYST_CONFIG_PATH override.
 const CONFIG_PATH =
   process.env.CATALYST_CONFIG_PATH ??
-  join(homedir(), ".config/catalyst/config-catalyst-workspace.json");
-const PROJECT_KEY = process.env.CATALYST_PROJECT_KEY ?? "catalyst-workspace";
+  join(homedir(), `.config/catalyst/config-${PROJECT_KEY}.json`);
 
 const cfg = loadForwarderConfig(CONFIG_PATH, PROJECT_KEY);
 const ck = readCheckpoint(CHECKPOINT_PATH);
@@ -199,28 +202,22 @@ type DestKey = "otlp" | "posthog" | "cae";
 // race-free (no two OtlpSender.flush concurrently entering drainDlqBounded against the
 // same file) WITHOUT coupling healthy sinks to a slow one — a tick for PostHog/CFAE
 // still flushes while OTLP is mid-retry, so their events don't sit in memory (which,
-// with the checkpoint advancing, a restart could otherwise skip). Each flush also splices
-// at most batchSize events, honoring the documented cap.
+// with the checkpoint advancing, a restart could otherwise skip).
 const inFlight: Record<DestKey, Promise<void> | null> = { otlp: null, posthog: null, cae: null };
 
 function flushDest(
   key: DestKey,
   sender: { flush: (b: CanonicalEvent[]) => Promise<void> } | null,
-  buffer: CanonicalEvent[],
-  batchSize: number
+  buffer: CanonicalEvent[]
 ): Promise<void> {
   if (!sender || buffer.length === 0) return Promise.resolve();
   if (inFlight[key]) return inFlight[key]!; // coalesce this destination's tick
-  // CTL-1506 (Codex P1/P2): drain the WHOLE buffer this flush (so a batchSize cap can't
-  // leave an ever-growing in-memory remainder the checkpoint advances past), but send it
-  // in ≤ batchSize chunks so no single request exceeds the destination's payload limit.
-  const drained = buffer.splice(0);
-  const size = Math.max(1, batchSize);
-  const p = (async () => {
-    for (let i = 0; i < drained.length; i += size) {
-      await sender.flush(drained.slice(i, i + size));
-    }
-  })().finally(() => {
+  // CTL-1506: drain the whole buffer in a single flush() so the sender's own DLQ drain
+  // runs exactly once per cycle (CTL-1060 per-cycle cap) and no spliced-out remainder can
+  // be lost. batchSize is advisory only — see the config reference. A sender.flush() never
+  // rejects in normal operation (it DLQs its own failures); the timer .catch below is the
+  // backstop for an exceptional storage error.
+  const p = sender.flush(buffer.splice(0)).finally(() => {
     inFlight[key] = null;
   });
   inFlight[key] = p;
@@ -229,9 +226,9 @@ function flushDest(
 
 async function flushAll(): Promise<void> {
   await Promise.allSettled([
-    flushDest("otlp", senders.otlp, buffers.otlp, cfg.otlp.batchSize),
-    flushDest("posthog", senders.posthog, buffers.posthog, cfg.posthog.batchSize),
-    flushDest("cae", senders.cae, buffers.cae, cfg.cloudflareAE.batchSize),
+    flushDest("otlp", senders.otlp, buffers.otlp),
+    flushDest("posthog", senders.posthog, buffers.posthog),
+    flushDest("cae", senders.cae, buffers.cae),
   ]);
 }
 
@@ -261,17 +258,17 @@ if (import.meta.main) {
   const flushTimers: ReturnType<typeof setInterval>[] = [];
   if (senders.otlp) {
     flushTimers.push(setInterval(() => {
-      flushDest("otlp", senders.otlp, buffers.otlp, cfg.otlp.batchSize).catch(onFlushError("otlp"));
+      flushDest("otlp", senders.otlp, buffers.otlp).catch(onFlushError("otlp"));
     }, cfg.otlp.flushIntervalMs));
   }
   if (senders.posthog) {
     flushTimers.push(setInterval(() => {
-      flushDest("posthog", senders.posthog, buffers.posthog, cfg.posthog.batchSize).catch(onFlushError("posthog"));
+      flushDest("posthog", senders.posthog, buffers.posthog).catch(onFlushError("posthog"));
     }, cfg.posthog.flushIntervalMs));
   }
   if (senders.cae) {
     flushTimers.push(setInterval(() => {
-      flushDest("cae", senders.cae, buffers.cae, cfg.cloudflareAE.batchSize).catch(onFlushError("cae"));
+      flushDest("cae", senders.cae, buffers.cae).catch(onFlushError("cae"));
     }, cfg.cloudflareAE.flushIntervalMs));
   }
 

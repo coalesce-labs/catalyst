@@ -42,16 +42,14 @@ function toAttrArray(obj: Record<string, unknown>): OtlpAttr[] {
   );
 }
 
-// CTL-1506 (Codex P2): never put a NaN timeUnixNano on the wire. An unparseable `ts`
+// CTL-1506 (Codex P2): never put a NaN timeUnixNano on the wire. An unparseable timestamp
 // would serialize to JSON `null`, which the collector rejects with a terminal 400 that
-// dead-drops every co-rider in the batch. Fall back to observedTs, then to a safe recent
-// clock, so one malformed-timestamp record can't poison an otherwise-valid batch.
-function toUnixNano(primary: string | undefined, fallback: string | undefined): number {
-  const p = primary ? Date.parse(primary) : NaN;
-  if (!Number.isNaN(p)) return p * 1_000_000;
-  const f = fallback ? Date.parse(fallback) : NaN;
-  if (!Number.isNaN(f)) return f * 1_000_000;
-  return Date.now() * 1_000_000;
+// dead-drops every co-rider in the batch. Fall back to a fresh clock (NOT to a possibly-old
+// observedTs, which could itself be past Loki's window and trigger the same too-old drop) —
+// a record with an unknown time is sent as "now", which is always inside the accept window.
+function toUnixNano(ts: string | undefined): number {
+  const t = ts ? Date.parse(ts) : NaN;
+  return (Number.isNaN(t) ? Date.now() : t) * 1_000_000;
 }
 
 export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
@@ -65,8 +63,8 @@ export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
           scope: { name: "catalyst.otel-forward" },
           logRecords: [
             {
-              timeUnixNano: toUnixNano(ev.ts, ev.observedTs),
-              observedTimeUnixNano: toUnixNano(ev.observedTs ?? ev.ts, ev.ts),
+              timeUnixNano: toUnixNano(ev.ts),
+              observedTimeUnixNano: toUnixNano(ev.observedTs ?? ev.ts),
               severityNumber: ev.severityNumber,
               severityText: ev.severityText,
               ...(ev.traceId ? { traceId: ev.traceId } : {}),

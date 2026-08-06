@@ -75,15 +75,11 @@ batches. A fully-aged DLQ entry is discarded (`drop_reason: "aged"`); a terminal
 is discarded (`drop_reason: "terminal_4xx"`); a retryable error stops the drain and requeues
 (preserving CTL-1060 backpressure).
 
-**Config knobs:** The authoritative schema for every forwarder key — including
-`lokiAcceptWindowMs` and `maxRetryElapsedMs` — lives in the user-facing configuration reference,
-`website/src/content/docs/reference/configuration.md` (§ "Event forwarders"). Summarized here for
-convenience:
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `lokiAcceptWindowMs` | `3600000` (1 h) | Age cutoff for Loki records. Tune if your Loki deployment has a different `reject_old_samples_max_age`. |
-| `maxRetryElapsedMs` | `60000` (60 s) | Max elapsed time for HTTP retry backoff before DLQ-ing a retryable failure. |
+**Config knobs:** the authoritative schema for every forwarder key — including
+`lokiAcceptWindowMs` and `maxRetryElapsedMs`, their defaults, and the effective age cutoff — lives
+in the user-facing configuration reference,
+`website/src/content/docs/reference/configuration.md` (§ "Event forwarders"). It is intentionally
+not duplicated here.
 
 **`forward_dropped` event:** Emitted as a canonical event (`catalyst.observability.forward_dropped`)
 with attribute `catalyst.observability.drop_reason` (`"aged"` or `"terminal_4xx"`) and

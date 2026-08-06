@@ -136,11 +136,18 @@ describe("buildOtlpPayload", () => {
     expect(Number.isFinite(lr.observedTimeUnixNano)).toBe(true);
   });
 
-  test("falls back to observedTs when ts is unparseable (CTL-1506)", () => {
-    const ev = { ...SAMPLE_EVENT, ts: "garbage" } as unknown as CanonicalEvent; // observedTs valid
+  test("an unparseable ts is sent as a fresh 'now', never a possibly-stale observedTs (CTL-1506)", () => {
+    // observedTs here is well outside any Loki window; the fallback must NOT use it (that
+    // would re-trigger the too-old drop the guard prevents) — it uses a fresh clock instead.
+    const before = Date.now() * 1_000_000;
+    const ev = { ...SAMPLE_EVENT, ts: "garbage", observedTs: "2020-01-01T00:00:00Z" } as unknown as CanonicalEvent;
     const payload = buildOtlpPayload([ev]) as any;
+    const after = Date.now() * 1_000_000;
     const lr = payload.resourceLogs[0].scopeLogs[0].logRecords[0];
-    expect(lr.timeUnixNano).toBe(Date.parse(SAMPLE_EVENT.observedTs!) * 1_000_000);
+    expect(lr.timeUnixNano).toBeGreaterThanOrEqual(before);
+    expect(lr.timeUnixNano).toBeLessThanOrEqual(after);
+    // and it is NOT the stale observedTs
+    expect(lr.timeUnixNano).not.toBe(Date.parse("2020-01-01T00:00:00Z") * 1_000_000);
   });
 });
 

@@ -222,4 +222,19 @@ describe("withHttpRetry", () => {
     })).rejects.toBeInstanceOf(HttpError);
     expect(calls).toBe(1); // stopped after the first failure — no retry, caller DLQs
   });
+
+  test("the default backoff sleep is INTERRUPTED by the abort signal, not waited out (CTL-1506)", async () => {
+    const ac = new AbortController();
+    let calls = 0;
+    const start = Date.now();
+    // Real timers, a 5s backoff — abort fires 10ms into the sleep and must cut it short.
+    const p = withHttpRetry(async () => {
+      calls++;
+      if (calls === 1) setTimeout(() => ac.abort(), 10);
+      throw new HttpError(503);
+    }, { baseMs: 5000, maxElapsedMs: 60_000 }, { signal: ac.signal });
+    await expect(p).rejects.toBeInstanceOf(HttpError);
+    expect(calls).toBe(1);                       // no second attempt
+    expect(Date.now() - start).toBeLessThan(2000); // did not block for the full 5s backoff
+  });
 });
