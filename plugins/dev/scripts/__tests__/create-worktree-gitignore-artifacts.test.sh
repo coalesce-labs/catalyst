@@ -74,13 +74,26 @@ echo "Test 1: fresh worktree's local git exclude carries every Catalyst runtime-
 build_scratch
 run_create wt-exclude
 assert_eq "0" "$EXIT" "exits 0"
-EXCLUDE_FILE="$(git -C "$WT_PATH" rev-parse --git-path info/exclude 2>/dev/null)"
-[[ $EXCLUDE_FILE == /* ]] || EXCLUDE_FILE="$WT_PATH/$EXCLUDE_FILE"
+# The exclude file is wired in via worktree-scoped `core.excludesFile`
+# (never the shared `info/exclude`, which is common to every linked worktree).
+EXCLUDE_FILE="$(git -C "$WT_PATH" config --worktree --get core.excludesFile 2>/dev/null)"
 EXCLUDE_CONTENT="$(cat "$EXCLUDE_FILE" 2>/dev/null || true)"
-for pattern in "thoughts/" ".catalyst/.workflow-context.json" ".catalyst/.workflow-context.json.bak" \
-	".catalyst/worktree-provenance.json" ".needs-cleanup" ".orphaned_at" ".trunk"; do
+for pattern in "/thoughts/" "/.catalyst/.workflow-context.json" "/.catalyst/.workflow-context.json.bak" \
+	"/.catalyst/worktree-provenance.json" "/.needs-cleanup" "/.orphaned_at" \
+	"/.trunk/actions" "/.trunk/logs" "/.trunk/notifications" "/.trunk/out" "/.trunk/tools"; do
 	assert_contains "$pattern" "$EXCLUDE_CONTENT" "exclude file contains '$pattern'"
 done
+# Never write to the repo's COMMON info/exclude — that file is shared by
+# every linked worktree, so none of our patterns should land in it (its
+# stock git-init boilerplate comments are fine and untouched either way).
+COMMON_EXCLUDE="$(git -C "$SRC" rev-parse --git-path info/exclude 2>/dev/null)"
+[[ $COMMON_EXCLUDE == /* ]] || COMMON_EXCLUDE="$SRC/$COMMON_EXCLUDE"
+COMMON_CONTENT="$(cat "$COMMON_EXCLUDE" 2>/dev/null || true)"
+if [[ $COMMON_CONTENT == *"thoughts/"* ]]; then
+	fail "the shared info/exclude was NOT written to (found our pattern in it)"
+else
+	pass "the shared info/exclude was not written to"
+fi
 rm -rf "$SCRATCH"
 
 echo ""
@@ -106,10 +119,36 @@ assert_eq "0" "$EXIT" "exits 0"
 # against the same worktree to exercise idempotency in isolation.
 FUNC_SRC="$(sed -n '/^catalyst_git_exclude_worktree_artifacts()/,/^}/p' "$CREATE_WT")"
 bash -c "$FUNC_SRC"$'\n'"catalyst_git_exclude_worktree_artifacts \"\$1\"" -- "$WT_PATH"
-EXCLUDE_FILE="$(git -C "$WT_PATH" rev-parse --git-path info/exclude 2>/dev/null)"
-[[ $EXCLUDE_FILE == /* ]] || EXCLUDE_FILE="$WT_PATH/$EXCLUDE_FILE"
-AFTER_COUNT="$(grep -cxF 'thoughts/' "$EXCLUDE_FILE" 2>/dev/null || echo 0)"
-assert_eq "1" "$AFTER_COUNT" "'thoughts/' still appears exactly once after a second call"
+EXCLUDE_FILE="$(git -C "$WT_PATH" config --worktree --get core.excludesFile 2>/dev/null)"
+AFTER_COUNT="$(grep -cxF '/thoughts/' "$EXCLUDE_FILE" 2>/dev/null || echo 0)"
+assert_eq "1" "$AFTER_COUNT" "'/thoughts/' still appears exactly once after a second call"
+rm -rf "$SCRATCH"
+
+echo ""
+echo "Test 4: appending preserves a line boundary when the exclude file lacks a trailing newline"
+build_scratch
+run_create wt-noeof-newline
+assert_eq "0" "$EXIT" "exits 0"
+EXCLUDE_FILE="$(git -C "$WT_PATH" config --worktree --get core.excludesFile 2>/dev/null)"
+printf 'foo' >"$EXCLUDE_FILE"
+FUNC_SRC="$(sed -n '/^catalyst_git_exclude_worktree_artifacts()/,/^}/p' "$CREATE_WT")"
+bash -c "$FUNC_SRC"$'\n'"catalyst_git_exclude_worktree_artifacts \"\$1\"" -- "$WT_PATH"
+CONTENT="$(cat "$EXCLUDE_FILE")"
+assert_contains $'foo\n' "$CONTENT" "'foo' line was not corrupted by the append"
+assert_contains "/thoughts/" "$CONTENT" "'/thoughts/' was appended on its own line"
+rm -rf "$SCRATCH"
+
+echo ""
+echo "Test 5: reuse path (--reuse-existing) applies the exclusions too"
+build_scratch
+run_create wt-reuse
+assert_eq "0" "$EXIT" "exits 0"
+EXCLUDE_FILE="$(git -C "$WT_PATH" config --worktree --get core.excludesFile 2>/dev/null)"
+rm -f "$EXCLUDE_FILE"
+run_create wt-reuse --reuse-existing
+assert_eq "0" "$EXIT" "reuse exits 0"
+REUSE_CONTENT="$(cat "$EXCLUDE_FILE" 2>/dev/null || true)"
+assert_contains "/thoughts/" "$REUSE_CONTENT" "reuse path re-applied the exclude patterns"
 rm -rf "$SCRATCH"
 
 echo ""

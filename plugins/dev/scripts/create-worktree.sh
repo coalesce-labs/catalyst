@@ -24,11 +24,20 @@ NC='\033[0m'
 
 # catalyst_git_exclude_worktree_artifacts <worktree_path> — keep Catalyst's own
 # worktree-local runtime bookkeeping out of every project's git status, without
-# ever touching that project's TRACKED .gitignore. Mirrors the existing pattern
-# already used for .agents/ (codex-run-phase-agent.mjs's gitExcludeAgents +
-# resolveGitExcludePath): writes to this worktree's LOCAL, uncommitted
-# `git rev-parse --git-path info/exclude`, so it applies only here, never
-# leaks into the project's history, and needs no per-project PR.
+# ever touching that project's TRACKED .gitignore.
+#
+# NOTE this deliberately does NOT write to `git rev-parse --git-path
+# info/exclude` (the pattern used for .agents/ in codex-run-phase-agent.mjs's
+# gitExcludeAgents): `info/exclude` is NOT a per-worktree file — for a linked
+# worktree it resolves to the repo's COMMON `.git/info/exclude`, shared by
+# EVERY worktree of this repo. Writing patterns there would leak this
+# worktree's exclusions into every sibling worktree (and the primary
+# checkout) and would outlive this worktree's own teardown. Instead this uses
+# a genuinely worktree-scoped mechanism: a private exclude file under this
+# worktree's OWN git-dir (`git rev-parse --git-dir` IS per-worktree for a
+# linked worktree — unlike `--git-path info/exclude`), wired in via
+# `core.excludesFile` set at `--worktree` config scope (which requires
+# `extensions.worktreeConfig=true`, enabled here idempotently).
 #
 # Before this, every onboarded project had to carry its own .gitignore entries
 # for these paths — miss one and `git status` shows Catalyst's own noise as
@@ -37,21 +46,45 @@ NC='\033[0m'
 # .catalyst/.workflow-context.json). Idempotent + best-effort: failures here
 # must never abort worktree creation.
 catalyst_git_exclude_worktree_artifacts() {
-	local worktree_path="$1" exclude_path pattern
-	exclude_path=$(git -C "$worktree_path" rev-parse --git-path info/exclude 2>/dev/null) || return 0
-	[[ "$exclude_path" = /* ]] || exclude_path="${worktree_path}/${exclude_path}"
+	local worktree_path="$1" git_dir exclude_path pattern
+	git_dir=$(git -C "$worktree_path" rev-parse --git-dir 2>/dev/null) || return 0
+	[[ "$git_dir" = /* ]] || git_dir="${worktree_path}/${git_dir}"
+	# Enable worktree-scoped config (idempotent; a no-op if already set) so the
+	# core.excludesFile write below lands in THIS worktree's private
+	# config.worktree, never the shared repo config.
+	git -C "$worktree_path" config extensions.worktreeConfig true 2>/dev/null || return 0
+	exclude_path="${git_dir}/catalyst-worktree-exclude"
+	git -C "$worktree_path" config --worktree core.excludesFile "$exclude_path" 2>/dev/null || return 0
 	mkdir -p "$(dirname "$exclude_path")" 2>/dev/null || return 0
 	[ -f "$exclude_path" ] || : >"$exclude_path"
+	# Preserve a line boundary: if the file already has content that doesn't
+	# end in a newline, appending would concatenate onto its last line instead
+	# of starting a fresh one.
+	if [ -s "$exclude_path" ] && [ -n "$(tail -c1 "$exclude_path" 2>/dev/null)" ]; then
+		printf '\n' >>"$exclude_path" 2>/dev/null || return 0
+	fi
+	# Root-anchored (leading "/") so these only match the worktree-root
+	# artifact, never a same-named path nested in legitimate project content
+	# (e.g. docs/thoughts/). The .trunk/* entries mirror exactly the runtime
+	# noise paths dirty-tree-classifier.mjs treats as generated — never a
+	# project's own .trunk/trunk.yaml or plugin configuration.
 	for pattern in \
-		"thoughts/" \
-		".catalyst/.workflow-context.json" \
-		".catalyst/.workflow-context.json.bak" \
-		".catalyst/worktree-provenance.json" \
-		".needs-cleanup" \
-		".orphaned_at" \
-		".trunk"; do
-		grep -qxF "$pattern" "$exclude_path" 2>/dev/null || printf '%s\n' "$pattern" >>"$exclude_path"
+		"/thoughts/" \
+		"/.catalyst/.workflow-context.json" \
+		"/.catalyst/.workflow-context.json.bak" \
+		"/.catalyst/worktree-provenance.json" \
+		"/.needs-cleanup" \
+		"/.orphaned_at" \
+		"/.trunk/actions" \
+		"/.trunk/logs" \
+		"/.trunk/notifications" \
+		"/.trunk/out" \
+		"/.trunk/tools"; do
+		# The write itself is best-effort: an unwritable exclude file (e.g.
+		# read-only filesystem) must never abort worktree creation under `set -e`.
+		grep -qxF "$pattern" "$exclude_path" 2>/dev/null || printf '%s\n' "$pattern" >>"$exclude_path" 2>/dev/null || true
 	done
+	return 0
 }
 
 # Parse flags (collect positional args separately)
@@ -212,6 +245,12 @@ if [ -d "$WORKTREE_PATH" ]; then
 				echo -e "${GREEN}  ✅ thoughts/shared repaired${NC}"
 			fi
 		fi
+		# CTL: the reuse path short-circuits before the setup block below, so a
+		# worktree that predates this exclusion mechanism (or was reused via
+		# --reuse-existing, e.g. worktree.mjs's revive path) never reaches the
+		# call further down. Apply it here too so a reused worktree gets the
+		# same protection as a freshly created one.
+		catalyst_git_exclude_worktree_artifacts "$WORKTREE_PATH"
 		echo -e "${GREEN}♻️  Reusing existing worktree: $WORKTREE_PATH${NC}"
 		echo "WORKTREE_PATH=${WORKTREE_PATH}"
 		exit 0
