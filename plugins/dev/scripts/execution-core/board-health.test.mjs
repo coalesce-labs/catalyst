@@ -1929,6 +1929,14 @@ describe("classifyRevivalRoute (CTL-1644)", () => {
     expect(c.dispatchable).toBe(true);
   });
 
+  test("remote branch exists but local salvage UNCHECKED ⇒ held, NOT resume-from-remote [Codex P2 round 3]", () => {
+    // worktreeUnpushed omitted (local probe failed/skipped): !undefined would have
+    // wrongly picked resume-from-remote and discarded possible unpushed local work.
+    const c = classifyRevivalRoute({ remoteBranchExists: true });
+    expect(c.route).toBe("unknown-salvage");
+    expect(c.dispatchable).toBe(false);
+  });
+
   test("local worktree with unpushed commits ⇒ adopt (stubbed dispatchable:false, CTL-1642)", () => {
     const c = classifyRevivalRoute({ worktreeUnpushed: true });
     expect(c.route).toBe("adopt");

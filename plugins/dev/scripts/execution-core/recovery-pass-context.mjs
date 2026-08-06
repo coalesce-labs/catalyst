@@ -340,19 +340,30 @@ function printDispatchedBrief(ticket, orchDir) {
     if (bc.strandedNodes?.length) {
       console.log(`stranded nodes: ${bc.strandedNodes.map((n) => n.host).join(", ")}`);
     }
-    // CTL-1644 (Codex P1): surface the per-ticket classified revival routes so the
-    // delegate can enumerate this cohort and distinguish pr-not-merged /
-    // resume-from-remote / adopt / restart-fresh / unknown-salvage — instead of
-    // receiving only a generic holistic dispatch. `(hold)` marks a non-dispatchable
-    // route (adopt / unknown-salvage) the worker must NOT auto-actuate.
+    // CTL-1644 (Codex P1 → P2 round 3): surface the per-ticket classified revival
+    // routes so the delegate can enumerate this cohort and distinguish
+    // pr-not-merged / resume-from-remote / restart-fresh. The recovery-pass skill
+    // treats injected board context as AUTHORITATIVE and acts on every surfaced
+    // anomaly — it has no route-aware hold transition — so we must NOT surface a
+    // non-dispatchable route (adopt / unknown-salvage) here even when an UNRELATED
+    // anomaly anchored the dispatch: doing so would let the worker touch a route
+    // the classifier marked unsafe. Held routes are deliberately kept out of the
+    // worker's actionable context; they remain observable via the board-scan event
+    // (strandedRoutes / strandedHeldCount) for the HUD / monitor / event-log.
     const smp = bc.strandedMidPipeline ?? {};
-    const smpEntries = Object.entries(smp);
-    if (smpEntries.length) {
+    const actionable = Object.entries(smp).filter(([, r]) => r?.dispatchable !== false);
+    const heldCount = Object.values(smp).filter((r) => r?.dispatchable === false).length;
+    if (actionable.length) {
       console.log(
-        `stranded mid-pipeline: ${smpEntries
-          .map(([t, r]) => `${t}→${r?.route ?? "?"}${r?.dispatchable === false ? "(hold)" : ""}`)
+        `stranded mid-pipeline (actionable): ${actionable
+          .map(([t, r]) => `${t}→${r?.route ?? "?"}`)
           .join(", ")}`,
       );
+    }
+    if (heldCount) {
+      // Count only — NOT an action directive. Awaiting Phase-3 salvage evidence
+      // or an operator; the worker must not act on these.
+      console.log(`stranded mid-pipeline (held, do NOT act): ${heldCount}`);
     }
   }
   console.log("--- recent log buffer (tail 40) ---");

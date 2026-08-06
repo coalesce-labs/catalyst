@@ -896,9 +896,15 @@ export function classifyRevivalRoute(evidence = {}) {
     return { route: "pr-not-merged", dispatchable: true,
       rationale: "open PR found — route through existing pr-not-merged remediation" };
   }
-  if (evidence.remoteBranchExists && !evidence.worktreeUnpushed) {
+  // CTL-1644 (Codex P2 round 3): require an EXPLICIT negative local-salvage result
+  // (worktreeUnpushed === false), not merely falsy. If the remote probe succeeded
+  // but the local-worktree probe failed/was omitted, worktreeUnpushed is undefined
+  // and `!undefined` would wrongly pick the dispatchable resume-from-remote route,
+  // discarding unpushed local commits that actually need the held `adopt` route.
+  // Absent local evidence falls through to the unknown-salvage guard below (held).
+  if (evidence.remoteBranchExists && evidence.worktreeUnpushed === false) {
     return { route: "resume-from-remote", dispatchable: true,
-      rationale: "remote branch exists — seed a fresh worktree from origin/<ticket> (CTL-1640)" };
+      rationale: "remote branch exists, no unpushed local — seed a fresh worktree from origin/<ticket> (CTL-1640)" };
   }
   if (evidence.worktreeUnpushed) {
     return { route: "adopt", dispatchable: false, blockedBy: "CTL-1642",
@@ -1553,6 +1559,12 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       // CTL-1644: scalar count of stranded mid-pipeline tickets this scan so
       // Grafana can chart the stranded population without parsing the classified map.
       strandedCount: invariants.strandedMidPipeline?.flagged?.length ?? 0,
+      // CTL-1644 (Codex P2 round 3): scalar count of HELD (dispatchable:false)
+      // stranded tickets — the anchor filter keeps these out of tier2Moves and
+      // boardContext, so this is the only chartable signal that the cohort exists
+      // but is being deliberately held (e.g. the whole Phase-2 unknown-salvage set).
+      strandedHeldCount: Object.values(invariants.strandedMidPipeline?.classified ?? {})
+        .filter((c) => c?.dispatchable === false).length,
       // CTL-1607: per-host slot census so fleet capacity is visible off-host
       // (computed above; occupancy-derived in_use, delegate-debited + gate-collapsed
       // free). A fleet consumer SUMs slotFree directly — never capacity − in_use:
@@ -1566,6 +1578,13 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       ),
       // ── rosters/proposals: stay in body.payload, NEVER promoted (cardinality) ──
       flagged: dedupeFlagged(invariants),
+      // CTL-1644 (Codex P2 round 3): the full per-ticket classified route map
+      // ({route, dispatchable, rationale, ...}), emitted on EVERY scan regardless
+      // of whether anything dispatched. For a held-only board the anchor filter
+      // suppresses tier2Moves and boardContext, so this map is the ONLY place the
+      // route + reason for each held ticket survives to the event-log / HUD /
+      // monitor. Ticket-id keyed → high cardinality → body.payload, never promoted.
+      strandedRoutes: invariants.strandedMidPipeline?.classified ?? {},
       tier1Moves: decision.moves.tier1,
       tier2Moves: decision.moves.tier2,
       tier3Moves: decision.moves.tier3,
