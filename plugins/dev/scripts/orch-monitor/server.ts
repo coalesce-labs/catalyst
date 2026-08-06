@@ -148,6 +148,16 @@ import {
 } from "./lib/inbox-conversation.mjs";
 import { replyToTicket } from "./lib/reply-ticket.mjs";
 import { buildTrustedOrigins, isOriginAllowed } from "./lib/trusted-origin.mjs";
+// CTL-1653: node-scoped Claude-account posture surface. The probe runner spawns
+// claude-accounts-usage.mjs in a token-scoped subshell (defaultAccountsProbeExec);
+// the async TTL cache serves /api/accounts + the /api/accounts/stream SSE.
+import { createAccountsProbe, defaultAccountsProbeExec } from "./lib/accounts-probe.mjs";
+import { createAccountsTimer } from "./lib/accounts-timer.mjs";
+import { checkAccountStatusTransition } from "./lib/account-status-latch.mjs";
+import type { CachedAccountsSummary } from "./lib/accounts-probe";
+/** CTL-1653: the injectable child-process seam for the Claude-account probe.
+ *  Production is defaultAccountsProbeExec; tests inject a scripted fake record. */
+type AccountsProbeExec = () => Promise<unknown>;
 /** Canonical ticket key for the conversation routes: a team prefix that may carry
  *  digits/underscores (`OPS_2-17`), then `-<number>`. Anchored, and containing no
  *  path characters, so it cannot express a traversal. */
@@ -597,9 +607,28 @@ export interface CreateServerOptions {
    * without touching process.env or real config files.
    */
   deploymentModeReader?: (() => string) | null;
+  /**
+   * CTL-1653: override for the child-process Claude-account probe runner.
+   * Production spawns claude-accounts-usage.mjs in a token-scoped subshell
+   * (defaultAccountsProbeExec); tests inject a scripted fake; null disables
+   * the endpoint + periodic timer entirely (returns available:false).
+   */
+  accountsProbeExec?: AccountsProbeExec | null;
+  /** CTL-1653: accounts cache TTL (default 5 min). Also the periodic timer interval. */
+  accountsTtlMs?: number;
+  /** CTL-1653: min age before a forced `?refresh=true` re-probes (default 30 s) —
+   *  the DoS floor that stops a client looping refresh to spend unbounded inference. */
+  accountsRefreshFloorMs?: number;
 }
 
 const DEFAULT_PORT = 7400;
+/**
+ * CTL-1653 (Codex round-2): the header GET /api/accounts?refresh=true requires,
+ * on top of the trusted-origin allowlist — see that route's CROSS-ORIGIN +
+ * SIMPLE-REQUEST GUARD comment for why a header (not just Origin) is needed.
+ * Exported so tests and docs reference the one canonical name.
+ */
+export const ACCOUNTS_REFRESH_HEADER = "x-catalyst-refresh";
 
 function resolveVersion(): string {
   const candidates = [
@@ -927,6 +956,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
     pushSubscriptionsDbPath,
     vapidKeysPath,
     deploymentModeReader: deploymentModeReaderOpt,
+    accountsProbeExec: accountsProbeExecOpt,
+    accountsTtlMs = 5 * 60 * 1000,
+    accountsRefreshFloorMs = 30 * 1000,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -1046,6 +1078,57 @@ export function createServer(opts: CreateServerOptions): BunServer {
     lokiFetcherOpt === null
       ? null
       : (lokiFetcherOpt ?? (lokiUrl ? createLokiFetcher({ baseUrl: lokiUrl }) : null));
+
+  // CTL-1653: the node-scoped Claude-account posture probe (cached ~5 min).
+  // null disables /api/accounts + the periodic timer entirely (available:false),
+  // matching the dbPath-gated endpoints; a scripted exec is injected in tests.
+  const accountsProbe =
+    accountsProbeExecOpt === null
+      ? null
+      : createAccountsProbe({
+          exec: accountsProbeExecOpt ?? defaultAccountsProbeExec,
+          ttlMs: accountsTtlMs,
+          refreshFloorMs: accountsRefreshFloorMs,
+          node: hostName(),
+        });
+
+  // Per-connection SSE subscribers fed by the periodic timer. The timer refreshes
+  // the cache every accountsTtlMs and fans each fresh summary out to all
+  // subscribers, then folds in the Phase-4 edge-triggered transition emit.
+  const accountsSubscribers = new Set<(s: CachedAccountsSummary) => void>();
+  const accountsTimer = accountsProbe
+    ? createAccountsTimer({
+        probe: accountsProbe,
+        intervalMs: accountsTtlMs,
+        onTick: (s) => {
+          for (const send of accountsSubscribers) {
+            try {
+              send(s);
+            } catch {
+              /* a dead subscriber is pruned on its own stream cancel */
+            }
+          }
+          // CTL-1653 Phase 4: edge-triggered account.status.changed emit. Best-
+          // effort — a marker/IO hiccup must never kill the tick. The fn is async,
+          // so a synchronous try/catch cannot see a rejected promise; attach a
+          // .catch() so a future change that introduces a rejection can never
+          // become an unhandled rejection (the synchronous try/catch is retained
+          // for a throw before the first await).
+          try {
+            checkAccountStatusTransition(s).catch((err) => {
+              console.error(`[server] account status transition check rejected:`, err);
+            });
+          } catch (err) {
+            console.error(`[server] account status transition check failed:`, err);
+          }
+        },
+      })
+    : null;
+  // The timer spawns the real Claude-account probe (a Haiku call when
+  // claude-accounts.env exists), so it belongs to the long-running daemon path
+  // only — gate on startWatcher so the hundreds of `startWatcher:false` unit
+  // servers never fork a probe. Tests that exercise the stream inject a fake exec.
+  if (accountsTimer && startWatcher !== false) accountsTimer.start();
 
   // CTL-1050: the service-health registry monitor — ONE severity model shared by
   // the Fleet Ops strip, the outage emitter, the inbox decoration, AND the
@@ -2387,6 +2470,137 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/config") {
           const cfg = loadMonitorConfig(monitorConfigPath);
           return Response.json(cfg);
+        }
+
+        // CTL-1653: GET /api/accounts — THIS node's Claude-account posture
+        // (active account + per-window utilization/resets/status +
+        // siblingWithHeadroom), token-free, cached ~5 min. `?refresh=true`
+        // forces a fresh probe. Disabled (accountsProbeExec:null) → a stable
+        // available:false response, matching the dbPath-gated endpoints. A
+        // no-env-file probe result carries its own available:false (see
+        // deriveAccountsSummary), which overrides the literal below via spread.
+        if (url.pathname === "/api/accounts") {
+          if (!accountsProbe) return Response.json({ available: false, node: hostName() });
+          const refresh = url.searchParams.get("refresh") === "true";
+          // CROSS-ORIGIN + SIMPLE-REQUEST + DNS-REBINDING GUARD on the
+          // state-changing path only. The monitor binds 0.0.0.0 with no auth,
+          // and `refresh=true` is the one per-request probe trigger — spending
+          // a real Haiku call per account (bounded by the refresh floor, but
+          // not to zero).
+          //
+          // The origin allowlist alone (originAllowed, same as the Linear-reply
+          // route) does NOT close this: this route is a GET, and browsers omit
+          // `Origin` on a SIMPLE cross-site request — a bare `<img
+          // src="...?refresh=true">`, a top-level navigation, or a plain <form>
+          // GET carries no Origin at all, and originAllowed(null) is (correctly,
+          // for the POST-route contract that guard was designed for) permissive
+          // (CTL-1653 Codex round-2 finding). Requiring this NON-STANDARD header
+          // closes THAT class of vector: none of those simple-request mechanisms
+          // can ever attach a custom header, and a cross-origin fetch()/XHR that
+          // tried to would trigger a CORS preflight this server does not answer
+          // for arbitrary origins, so the browser never sends the real request.
+          //
+          // DNS REBINDING defeats the header check alone (CTL-1653 Codex
+          // round-3 finding): a page loaded as `http://evil.example:<port>`
+          // that later re-resolves to THIS server's IP is same-origin to the
+          // browser once rebound, so its JS can attach the header with no
+          // preflight — and a same-origin fetch/XHR is not guaranteed to carry
+          // `Origin` either, which originAllowed(null) then admits. The `Host`
+          // header is the fix: it is NOT rebindable to a name we recognize —
+          // the rebound request still arrives with `Host: evil.example:<port>`
+          // (the browser sends whatever host the page's URL named, never OUR
+          // real name/address), so validating Host against the SAME trusted-
+          // origin set used for Origin (reusing `originAllowed` — Host is just
+          // an origin without a scheme) rejects it regardless of whether
+          // Origin is present. curl/non-browser callers stay usable: curl sets
+          // Host from the URL it was given, and localhost/127.0.0.1/the node's
+          // own address are exactly what's trusted.
+          if (refresh) {
+            const hasRefreshHeader = req.headers.get(ACCOUNTS_REFRESH_HEADER) !== null;
+            const hostHeader = req.headers.get("host");
+            // SCHEME-AWARE Host check (Codex rounds 4-6): Host carries no
+            // scheme, but an https://-only MONITOR_TRUSTED_ORIGINS entry
+            // deliberately does NOT trust the plaintext form of the same host.
+            // The scheme signal must be OPERATOR-DECLARED, never header-derived
+            // (round-6): X-Forwarded-Proto is client-spoofable from any
+            // loopback browser, and appending proxies put the client's value
+            // FIRST in the list — no peer-address gate fixes that. When
+            // MONITOR_TLS_PROXY_PEERS is set (comma-separated peer addresses of
+            // the TLS-terminating proxy, e.g. "127.0.0.1,::1"), a request
+            // arriving FROM one of those peers is https by declaration —
+            // headers are ignored entirely. Unset (the default, no TLS proxy),
+            // every request is plaintext and an https-only trusted set
+            // correctly rejects its host.
+            const peer = server.requestIP(req)?.address ?? "";
+            const tlsProxyPeers = (process.env.MONITOR_TLS_PROXY_PEERS ?? "")
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            // Normalize IPv4-mapped spellings (Codex round-7): a dual-stack
+            // bind (MONITOR_HOST=::) reports an IPv4 upstream as
+            // ::ffff:127.0.0.1, which must match a natural "127.0.0.1" entry.
+            const unmap = (a: string) => a.replace(/^::ffff:/i, "");
+            const peerNorm = unmap(peer);
+            const effectiveScheme = tlsProxyPeers.some((p) => unmap(p) === peerNorm)
+              ? "https"
+              : "http";
+            const hostTrusted =
+              hostHeader !== null && originAllowed(`${effectiveScheme}://${hostHeader}`);
+            if (!hasRefreshHeader || !hostTrusted || !originAllowed(req.headers.get("origin"))) {
+              return Response.json(
+                { status: "forbidden", error: "cross-origin refresh rejected" },
+                { status: 403 },
+              );
+            }
+          }
+          const summary = await accountsProbe.get({ refresh });
+          return Response.json({ available: true, ...summary });
+        }
+
+        // CTL-1653: SSE stream of the node's Claude-account posture. Each event:
+        //   event: account\ndata: <summary json>\n\n
+        // On connect, emit the current cached summary immediately (so a fresh
+        // dashboard renders without waiting a whole interval); thereafter the
+        // periodic timer broadcasts each fresh summary to every subscriber.
+        if (url.pathname === "/api/accounts/stream") {
+          const probeRef = accountsProbe;
+          let send: ((s: CachedAccountsSummary) => void) | null = null;
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              const frame = (s: unknown) => {
+                try {
+                  controller.enqueue(encoder.encode(`event: account\ndata: ${JSON.stringify(s)}\n\n`));
+                } catch {
+                  if (send) accountsSubscribers.delete(send);
+                  send = null;
+                }
+              };
+              if (!probeRef) {
+                // Disabled: emit one unavailable frame, no subscription.
+                frame({ available: false, node: hostName() });
+                return;
+              }
+              send = frame;
+              accountsSubscribers.add(send);
+              try {
+                frame(await probeRef.get());
+              } catch (err) {
+                console.error(`[server] accounts stream initial frame failed:`, err);
+              }
+            },
+            cancel() {
+              if (send) accountsSubscribers.delete(send);
+              send = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
         }
 
         // CTL-1152: GET /api/projects — the config-driven project roster. One
@@ -5540,6 +5754,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
     watcher?.stop();
     boardSnapshot.stop();
     serviceHealth.stop();
+    accountsTimer?.stop(); // CTL-1653: stop the periodic Claude-account probe
+    accountsSubscribers.clear();
     prFetcher?.stop();
     previewFetcher?.stop();
     linear?.stop();

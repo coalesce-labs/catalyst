@@ -2194,7 +2194,7 @@ describe("publicDir resolution", () => {
 // themselves are the two lines added alongside `stopped` in server.ts and
 // are covered by direct code inspection + this flag test, not a live mint.
 describe("server.stop() lifecycle flag (CTL-1612 post-merge #2978)", () => {
-  it("stopped starts false, flips true synchronously on stop(), and stays true", async () => {
+  it("stopped starts false, flips true synchronously on stop(), and stays true", () => {
     const stopTmp = mkdtempSync(join(tmpdir(), "orch-monitor-stopflag-"));
     const stopWt = join(stopTmp, "wt");
     mkdirSync(stopWt, { recursive: true });

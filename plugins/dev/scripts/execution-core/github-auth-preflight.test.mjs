@@ -17,7 +17,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test github-auth-preflight.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -633,6 +633,112 @@ describe("rearmGithubTokenFromFile", () => {
   });
 });
 
+// ── rearmGithubTokenFromFile: malformed-file PARITY GUARDS (CTL-1623 post-merge fix) ──
+//
+// CODEX'S REPRODUCED BUG: this hook's default `readFile` used to decode straight to
+// "utf8" (`readFileSync(p, "utf8")`), which silently REPLACES any invalid UTF-8 byte
+// with U+FFFD at decode time. So when the bash launcher (lib/catalyst-secret-env.sh,
+// via lib/catalyst-secret-contract.sh's own containsNul/isValidUtf8 guards) correctly
+// failed closed on a malformed synced credential file and kept a good inherited
+// GH_TOKEN, THIS hook then ran a second, less careful read of the SAME file and
+// installed the U+FFFD-mangled bytes over the good inherited value — at boot AND on
+// every timer tick — defeating the fold's fail-closed hygiene one layer up. These
+// tests pin the fix: a candidate this hook cannot represent identically to the engine
+// (lib/secret-contract.mjs's containsNul/isValidUtf8RoundTrip) now falls through
+// exactly like the "absent" case, never installing anything.
+describe("rearmGithubTokenFromFile: malformed-file PARITY GUARDS", () => {
+  test("REGRESSION (Codex): an invalid-UTF-8 file on disk + valid inherited GH_TOKEN/GITHUB_TOKEN in env → re-arm installs nothing, both aliases keep the inherited value, no U+FFFD anywhere", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      CATALYST_GITHUB_TOKEN_SOURCE: "inherited",
+      GITHUB_TOKEN: STALE_TOKEN, // "inherited" here stands in for a GOOD, currently-working credential
+      GH_TOKEN: STALE_TOKEN,
+    };
+    // 0xFF 0xFE is not a valid UTF-8 byte sequence anywhere — the exact byte shape
+    // Codex's report cites (a corrupted/partially-written sync of the shared file).
+    const out = rearmGithubTokenFromFile({
+      env,
+      readFile: () => Buffer.from([0xff, 0xfe, 0x68, 0x69]),
+      log: null,
+    });
+    expect(out).toEqual({ rearmed: false, reason: "absent" });
+    expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN); // unchanged — the good inherited value
+    expect(env.GH_TOKEN).toBe(STALE_TOKEN);
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("inherited"); // breadcrumb NOT rewritten
+    expect(env.GITHUB_TOKEN).not.toContain("�"); // the mutated-bytes regression, pinned negatively
+    expect(env.GH_TOKEN).not.toContain("�");
+  });
+
+  test("REGRESSION: a NUL-containing file installs nothing — falls through exactly like absent", () => {
+    const env = {
+      CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE,
+      CATALYST_GITHUB_TOKEN_SOURCE: "inherited",
+      GITHUB_TOKEN: STALE_TOKEN,
+      GH_TOKEN: STALE_TOKEN,
+    };
+    const out = rearmGithubTokenFromFile({
+      env,
+      readFile: () => Buffer.from("c\0loud"),
+      log: null,
+    });
+    expect(out).toEqual({ rearmed: false, reason: "absent" });
+    expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+    expect(env.GH_TOKEN).toBe(STALE_TOKEN);
+    expect(env.CATALYST_GITHUB_TOKEN_SOURCE).toBe("inherited");
+  });
+
+  test("an invalid-UTF-8 candidate falls through to a LATER, valid candidate — matches the engine's per-candidate fall-through, not a blanket abort", () => {
+    const env = { XDG_CONFIG_HOME: "/xdg-config", HOME: "/home/fake" };
+    const writerPath = join("/home/fake", ".config", "catalyst", "github-token");
+    const xdgPath = join("/xdg-config", "catalyst", "github-token");
+    const out = rearmGithubTokenFromFile({
+      env,
+      readFile: (p) => {
+        if (p === writerPath) return Buffer.from([0xff, 0xfe]); // corrupted primary candidate
+        if (p === xdgPath) return ROTATED_TOKEN; // the valid fallback candidate
+        throw new Error("ENOENT");
+      },
+      log: null,
+    });
+    expect(out).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+    expect(env.GH_TOKEN).toBe(ROTATED_TOKEN);
+  });
+
+  test("REGRESSION GUARD FOR THE FIX ITSELF: a real on-disk invalid-UTF-8 file, read via the PRODUCTION default readFile (no injected readFile) — proves the default now reads raw bytes, not readFileSync(p,\"utf8\")", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gh-preflight-badutf8-"));
+    const file = join(dir, "github-token");
+    try {
+      writeFileSync(file, Buffer.from([0xff, 0xfe, 0x68, 0x69]));
+      const env = {
+        CATALYST_GITHUB_TOKEN_FILE: file,
+        CATALYST_GITHUB_TOKEN_SOURCE: "inherited",
+        GITHUB_TOKEN: STALE_TOKEN,
+        GH_TOKEN: STALE_TOKEN,
+      };
+      // No `readFile` override — exercises the real default.
+      const out = rearmGithubTokenFromFile({ env, log: null });
+      expect(out).toEqual({ rearmed: false, reason: "absent" });
+      expect(env.GITHUB_TOKEN).toBe(STALE_TOKEN);
+      expect(env.GH_TOKEN).toBe(STALE_TOKEN);
+      expect(env.GITHUB_TOKEN).not.toContain("�");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a plain-string readFile return (the existing test-seam shape) is unaffected — round-trips as always-valid", () => {
+    const env = { CATALYST_GITHUB_TOKEN_FILE: TOKEN_FILE, GITHUB_TOKEN: STALE_TOKEN, GH_TOKEN: STALE_TOKEN };
+    const out = rearmGithubTokenFromFile({
+      env,
+      readFile: () => ROTATED_TOKEN, // a plain string, not a Buffer — the pre-existing seam shape
+      log: null,
+    });
+    expect(out).toEqual({ rearmed: true, reason: "rotated" });
+    expect(env.GITHUB_TOKEN).toBe(ROTATED_TOKEN);
+  });
+});
+
 // ── rearmGithubTokenFromFile: whitespace fidelity ─────────────────────────────
 //
 // THE ROUND-3 DATA-CORRUPTION REGRESSION. The reader used to normalize the file with
@@ -987,7 +1093,8 @@ describe("resolveGithubBootAuth re-arms before probing", () => {
   });
 });
 
-// ── daemon boot ORDERING (CTL-1612, Codex P1 round 2) ─────────────────────────
+// ── daemon boot ORDERING (CTL-1612, Codex P1 round 2; CTL-1623: call sites now route
+// through armSecret) ────────────────────────────────────────────────────────────────────
 //
 // The preflight's placement in daemon.mjs is load-bearing, and both directions have
 // already been wrong once:
@@ -998,10 +1105,18 @@ describe("resolveGithubBootAuth re-arms before probing", () => {
 //     ...process.env, so every resumed worker inherited the stale credential for life.
 // The only correct window is: clusterSync → preflight → any dispatch. A structural
 // assertion is the honest way to pin that; a unit test cannot observe boot ordering.
+//
+// CTL-1623: both call sites were re-pointed from a direct rearmGithubTokenFromFile() call
+// to armSecret("github-token", { env: process.env }) — routing through the registry's arm
+// path so the registerRearmHook-registered hook (== rearmGithubTokenFromFile itself, wired
+// at module load, see the "rearm hook registration" describe block below) actually fires.
+// The needle strings below track that rename; the ordering invariants themselves are
+// unchanged.
 describe("daemon boot ordering", () => {
   const daemonSrc = readFileSync(new URL("./daemon.mjs", import.meta.url), "utf8").split("\n");
   const lineOf = (needle) => daemonSrc.findIndex((l) => l.includes(needle));
   const countOf = (needle) => daemonSrc.filter((l) => l.includes(needle)).length;
+  const REARM_CALL = 'armSecret("github-token", { env: process.env });';
 
   // The boot sequence must be: clusterSync -> RE-ARM -> dispatch -> PROBE.
   // Both halves are load-bearing and both have been wrong once:
@@ -1012,14 +1127,14 @@ describe("daemon boot ordering", () => {
   //     for no diagnostic benefit.
   test("the boot cluster-sync runs BEFORE the credential re-arm", () => {
     const sync = lineOf("const bootSync = clusterSync()");
-    const rearm = lineOf("rearmGithubTokenFromFile({ env: process.env, log })");
+    const rearm = lineOf(REARM_CALL);
     expect(sync).toBeGreaterThan(-1);
     expect(rearm).toBeGreaterThan(-1);
     expect(sync).toBeLessThan(rearm);
   });
 
   test("the credential RE-ARM runs BEFORE anything dispatches a worker", () => {
-    const rearm = lineOf("rearmGithubTokenFromFile({ env: process.env, log })");
+    const rearm = lineOf(REARM_CALL);
     const bootResume = lineOf("const bootResume = reconcileBoot(");
     const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn })");
     expect(bootResume).toBeGreaterThan(-1);
@@ -1045,10 +1160,29 @@ describe("daemon boot ordering", () => {
   test("the re-arm is ALSO wired into the periodic cluster-sync timer", () => {
     const timer = lineOf("_clusterSyncTimer = setInterval(");
     expect(timer).toBeGreaterThan(-1);
-    const rearmCalls = daemonSrc
-      .map((l, i) => (l.includes("rearmGithubTokenFromFile({ env: process.env, log })") ? i : -1))
-      .filter((i) => i >= 0);
+    const rearmCalls = daemonSrc.map((l, i) => (l.includes(REARM_CALL) ? i : -1)).filter((i) => i >= 0);
     expect(rearmCalls.length).toBe(2); // once at boot, once per timer tick
     expect(rearmCalls.some((i) => i > timer)).toBe(true);
+  });
+
+  // CTL-1623: the registry's "re-armable/timer" label was aspiration until this PR — no
+  // caller had ever registered a hook, so armSecret("github-token") always took the
+  // hookless-degrade path (secret-contract.mjs's armSecret docstring). This pins that the
+  // hook registration is wired at module scope (before either call site above can fire,
+  // since both live inside startDaemon()) and that the registered hook IS
+  // rearmGithubTokenFromFile — not a second, parallel implementation.
+  describe("rearm hook registration (CTL-1623)", () => {
+    test("registerRearmHook(\"github-token\", ...) is called at module scope, not inside startDaemon", () => {
+      const regLine = lineOf('registerRearmHook("github-token"');
+      const startDaemonLine = lineOf("export function startDaemon({");
+      expect(regLine).toBeGreaterThan(-1);
+      expect(startDaemonLine).toBeGreaterThan(-1);
+      expect(regLine).toBeLessThan(startDaemonLine); // registered before startDaemon is even defined
+    });
+
+    test("the registered hook closure calls rearmGithubTokenFromFile (not a duplicate implementation)", () => {
+      const regLine = lineOf('registerRearmHook("github-token"');
+      expect(daemonSrc[regLine]).toContain("rearmGithubTokenFromFile");
+    });
   });
 });

@@ -642,7 +642,13 @@ function isBlank(value) {
 // on BOTH sides (this file, and the bash mirror's analogous file-candidate loop) so a
 // NUL-containing file falls through to the next candidate identically everywhere, rather
 // than silently disagreeing on the resolved value.
-function containsNul(value) {
+//
+// EXPORTED (with isValidUtf8RoundTrip below) as the CANONICAL malformed-file validators:
+// execution-core's rearmGithubTokenFromFile applies the identical gates to its own
+// re-read of the github-token file, and a private parallel copy there could drift and
+// re-open the exact resolver-rejects/hook-installs split these guards exist to close.
+// Still zero-import: exporting pure helpers adds no dependency to this leaf.
+export function containsNul(value) {
   return value.includes("\u0000");
 }
 
@@ -658,7 +664,9 @@ function containsNul(value) {
 // serving whichever language's mutated/unmutated view happens to run first. Detected via a
 // byte round-trip: decode as UTF-8, re-encode, and compare against the original bytes —
 // any invalid sequence fails to round-trip byte-for-byte.
-function isValidUtf8RoundTrip(buf, decoded) {
+// Exported alongside containsNul above — see that comment for why the two validators are
+// the single canonical implementation shared with the rearm hook.
+export function isValidUtf8RoundTrip(buf, decoded) {
   const reencoded = Buffer.from(decoded, "utf8");
   return reencoded.length === buf.length && reencoded.equals(buf);
 }
