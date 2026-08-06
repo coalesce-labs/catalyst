@@ -2853,7 +2853,16 @@ export function reclaimDeadWorkIfPossible(
     const i = phaseIndex(p);
     return i > max ? i : max;
   }, -1);
-  if (phaseIndex(phase) < latestIdx) {
+  // The signal's OWN phase needs the identical isKnownPhase guard: ancillary
+  // dispatches that reuse this same signal-file machinery outside the FSM
+  // (e.g. "recovery-pass", written by recovery-reasoning.mjs) have no ordinal
+  // position, so phaseIndex() throws PhaseFsmError for them. Previously this
+  // was unguarded — every dead recovery-pass worker hit the throw on every
+  // tick, was swallowed by the CTL-702 per-worker isolation in scheduler.mjs,
+  // and could never actually be reclaimed. A non-FSM phase can't be
+  // "superseded" in the ordinal sense, so skip the comparison and fall
+  // through to the normal reclaim-eligible path below.
+  if (isKnownPhase(phase) && phaseIndex(phase) < latestIdx) {
     // CTL-649: emit a reap-intent so the daemon reaper can stop the lingering
     // bg worker. Fire-and-forget — the periodic orphan reaper picks up anything
     // the reconciler missed.

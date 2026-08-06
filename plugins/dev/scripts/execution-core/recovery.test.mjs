@@ -4125,6 +4125,47 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
       });
     }).not.toThrow();
   });
+
+  test("supersede guard tolerates an unknown phase on the SIGNAL ITSELF, not just in listTicketPhases history (regression)", () => {
+    // Non-FSM dispatches (e.g. recovery-reasoning.mjs's Pass 0r recovery-pass
+    // actuator) reuse this same workers/<ticket>/phase-<name>.json signal-file
+    // machinery with phase:"recovery-pass" — a name with no PHASE_LINEAR_KEY
+    // entry and no ordinal position. Before this fix, `phaseIndex(phase)` ran
+    // UNGUARDED (unlike the `dispatched` reduce four lines above, which already
+    // had the isKnownPhase guard), so every dead recovery-pass worker threw
+    // PhaseFsmError on every tick — caught by scheduler.mjs's CTL-702 per-worker
+    // isolation, but permanently unreclaimable as a result. A non-FSM phase
+    // can't be "superseded" in the ordinal sense, so it must skip the guard and
+    // fall through to the normal reclaim-eligible path — which, since no probe
+    // is registered for a non-pipeline phase, resolves to a clean one-time
+    // 'escalated' (reason: no-probe-for-phase) rather than an uncaught throw.
+    const escalate = recorder(undefined);
+    const applyLabel = recorder(undefined);
+    const recoveryPassSig = {
+      ticket: "CTL-503",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: {
+        ticket: "CTL-503",
+        phase: "recovery-pass",
+        orchestrator: "CTL-503",
+        status: "running",
+        bg_job_id: "job-old",
+      },
+    };
+    let r;
+    expect(() => {
+      r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+        statJob: () => null, // dead bg job
+        listTicketPhases: () => ["triage", "research", "plan", "implement"],
+        appendEscalatedEvent: escalate,
+        applyStalledLabel: applyLabel,
+        writeEscalationCoolDown: () => {},
+      });
+    }).not.toThrow();
+    expect(r).toBe("escalated");
+  });
 });
 
 describe("readBootSince — CTL-655 boot-time window reader", () => {
