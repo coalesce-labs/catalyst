@@ -1305,9 +1305,19 @@ export function proposeMoves(invariants, _b) {
   }
   // CTL-1644: one tier2 route move per stranded ticket — the delegate picks the
   // specific revival arm rather than the generic recover-unowned-in-flight sweep.
+  // CTL-1644 (Codex P2, round 2): ONLY a DISPATCHABLE route becomes an anchorable
+  // move. A non-dispatchable route (adopt / unknown-salvage) is surfaced in
+  // boardContext.strandedMidPipeline for visibility (rendered `(hold)`) but must
+  // NEVER anchor an autonomous recovery-pass dispatch: the recovery-pass skill has
+  // no route-aware hold branch and would auto-actuate a route the classifier marked
+  // unsafe. In Phase 2 the scheduler omits salvage evidence, so every stranded
+  // ticket classifies as `unknown-salvage` (held) — this gate keeps the whole
+  // cohort surfaced-but-held (via the invariant + telemetry) until Phase 3 wires
+  // real evidence or an operator acts, rather than restart-freshing on a hunch.
   for (const t of invariants.strandedMidPipeline?.flagged ?? []) {
     if (!invariants.strandedMidPipeline.ok && !sanction(t)) {
       const cls = strandedClassified[t] ?? {};
+      if (cls.dispatchable === false) continue; // held — surface only, never anchor
       tier2.push({ ticket: t, move: "route-stranded-mid-pipeline",
         route: cls.route, rationale: cls.rationale ?? "stranded mid-pipeline ticket classified for revival" });
     }

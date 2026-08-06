@@ -214,17 +214,39 @@ describe("boardHealthPass — stranded route dispatch (CTL-1644 Phase 3)", () =>
     expect(capturedCtx?.strandedMidPipeline?.["CTL-99"]?.route).toBe("pr-not-merged");
   });
 
-  test("enforce: adopt route (worktreeUnpushed) is classified as dispatchable:false in boardContext", () => {
-    let capturedCtx = null;
-    boardHealthPass(mkOpts("enforce", ({ boardContext }) => {
-      capturedCtx = boardContext;
+  test("enforce: adopt route (worktreeUnpushed, dispatchable:false) is classified but NEVER anchored [Codex P2 round 2]", () => {
+    // A non-dispatchable route must NOT trigger an autonomous recovery-pass
+    // dispatch — the recovery-pass skill has no route-aware hold branch. The
+    // ticket is still CLASSIFIED (visible via the invariant), just never anchored.
+    const actArgs = [];
+    const result = boardHealthPass(mkOpts("enforce", (args) => {
+      actArgs.push(args);
       return { dispatched: true, candidate: "CTL-99" };
     }, {
-      getStrandedEvidence: () => strandedEvidence("CTL-99",
-        { worktreeUnpushed: true }),
+      getStrandedEvidence: () => strandedEvidence("CTL-99", { worktreeUnpushed: true }),
     }));
-    expect(capturedCtx?.strandedMidPipeline?.["CTL-99"]?.route).toBe("adopt");
-    expect(capturedCtx.strandedMidPipeline["CTL-99"].dispatchable).toBe(false);
+    // Classified correctly as a held adopt route...
+    expect(result.invariants?.strandedMidPipeline?.classified?.["CTL-99"]?.route).toBe("adopt");
+    expect(result.invariants.strandedMidPipeline.classified["CTL-99"].dispatchable).toBe(false);
+    // ...but a held route is not an anchorable move → no autonomous dispatch.
+    expect(actArgs.length).toBe(0);
+  });
+
+  test("enforce: unknown-salvage route (Phase-2 unchecked evidence) is classified but NEVER anchored [Codex P2 round 2]", () => {
+    // The production Phase-2 case: evidence omits both salvage fields → unknown-salvage
+    // (dispatchable:false). Must be surfaced-but-held, never auto-actuated.
+    const actArgs = [];
+    const result = boardHealthPass(mkOpts("enforce", (args) => {
+      actArgs.push(args);
+      return { dispatched: true, candidate: "CTL-99" };
+    }, {
+      // Omit both salvage fields to mirror the real scheduler.getStrandedEvidence.
+      getStrandedEvidence: () => new Map([["CTL-99", { id: "CTL-99",
+        hasWorkerDir: false, hasLiveBg: false, hasFreshIntent: false, openPr: null }]]),
+    }));
+    expect(result.invariants?.strandedMidPipeline?.classified?.["CTL-99"]?.route).toBe("unknown-salvage");
+    expect(result.invariants.strandedMidPipeline.classified["CTL-99"].dispatchable).toBe(false);
+    expect(actArgs.length).toBe(0);
   });
 
   test("shadow: stranded ticket detected — invariants flagged — but act NOT called", () => {
