@@ -71,10 +71,21 @@ export async function withHttpRetry<T>(
   // CTL-1506 (Codex P1): the default backoff sleep is abortable — on shutdown the pending
   // sleep resolves immediately (instead of blocking for a 4/8/16/30s backoff), so the
   // post-sleep abort check fires right away and the caller DLQs within the launcher grace.
+  // CTL-1506 (Codex P2): the abort listener is removed on BOTH the timer firing and the
+  // abort — else every completed retry backoff would leak a settled-closure listener on
+  // the long-lived daemon-wide signal (listener warnings + unbounded memory over time).
   const sleep = clock.sleep ?? ((ms) => new Promise<void>((r) => {
-    if (clock.signal?.aborted) return r();
-    const t = setTimeout(r, ms);
-    clock.signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+    const sig = clock.signal;
+    if (sig?.aborted) return r();
+    let onAbort: (() => void) | undefined;
+    const t = setTimeout(() => {
+      if (sig && onAbort) sig.removeEventListener("abort", onAbort);
+      r();
+    }, ms);
+    if (sig) {
+      onAbort = () => { clearTimeout(t); r(); };
+      sig.addEventListener("abort", onAbort, { once: true });
+    }
   }));
   const start = now();
   let attempt = 0;
