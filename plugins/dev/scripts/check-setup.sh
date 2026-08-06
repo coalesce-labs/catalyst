@@ -706,10 +706,26 @@ header "Execution-core Daemon Env / Proxy Audit (optional)"
 # machine — hard to debug. So: surface the file, and when a proxy is configured,
 # verify it actually works.
 DAEMON_ENV_FILE="${CATALYST_EXECUTION_CORE_ENV:-$CATALYST_CONFIG/execution-core.env}"
-DAEMON_ENV_EXAMPLE="plugins/dev/templates/execution-core.env.example"
+# CTL-1628 Phase A2 bug fix: this chain used to assign the relative-cwd
+# candidate UNCONDITIONALLY first (no existence check), then only
+# conditionally override it with CLAUDE_PLUGIN_ROOT — inverted relative to
+# this file's 3 sibling chains (LAUNCHER :596, SHIPPER_CONFIG_PATH :666,
+# _cfg_scripts :870), which all try CLAUDE_PLUGIN_ROOT first and only fall
+# back to the relative path once verified to exist. Net effect when both
+# existed was the same (CLAUDE_PLUGIN_ROOT still won), but when NEITHER
+# existed this chain silently kept an unverified relative path instead of
+# leaving the candidate unset like its siblings do. Align: try
+# CLAUDE_PLUGIN_ROOT first (existence-checked), then the relative path
+# (also existence-checked); if neither verifies, fall back to the relative
+# path purely as display text for the info message below (this section is
+# advisory-only — info, never warn/fail).
+DAEMON_ENV_EXAMPLE=""
 if [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/templates/execution-core.env.example" ]]; then
 	DAEMON_ENV_EXAMPLE="${CLAUDE_PLUGIN_ROOT}/templates/execution-core.env.example"
+elif [[ -f "plugins/dev/templates/execution-core.env.example" ]]; then
+	DAEMON_ENV_EXAMPLE="plugins/dev/templates/execution-core.env.example"
 fi
+[[ -z $DAEMON_ENV_EXAMPLE ]] && DAEMON_ENV_EXAMPLE="plugins/dev/templates/execution-core.env.example"
 
 if [[ ! -f $DAEMON_ENV_FILE ]]; then
 	# Absent file = intended default; not a problem. Surface it for discoverability.

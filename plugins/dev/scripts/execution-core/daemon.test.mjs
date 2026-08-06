@@ -1550,6 +1550,337 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(cleared).toContainEqual({ ticket: "PROJ-NH", phase: "implement" });
   });
 
+  // Codex #2970: the needs-human clear call site passed {from, to} — keys
+  // buildWorkerTransitionEvent doesn't accept (it wants fromDisposition/
+  // toDisposition) — so the emitted worker.transition envelope carried neither
+  // disposition. This pins the fixed shape, mirroring the finding-11 pattern for
+  // the needs-input clear below.
+  test("emits worker.transition(needs-human→cleared) with fromDisposition/toDisposition set", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH2", "implement", { status: "needs-human" });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH2", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "PROJ-NH2" && e.fromDisposition === "needs-human"
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.toDisposition).toBeNull();
+    expect(cleared.orchId).toBe("PROJ-NH2");
+    expect(cleared.reason).toBe("human-responded");
+    // The old buggy call's {from, to} keys must not resurface.
+    expect(cleared.from).toBeUndefined();
+    expect(cleared.to).toBeUndefined();
+  });
+
+  // Codex #2970 round 3: a no-op re-check (e.g. a duplicate webhook / second host
+  // finding the label already gone) must NOT emit a second "cleared" transition —
+  // only a call that performed a real write does. The marker reconcile still runs
+  // either way (clearedNeedsHuman, not clearedNeedsHumanWrote, gates that block).
+  test("does NOT emit worker.transition(needs-human→cleared) on a no-op ({removed:true, wrote:false})", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH3", "implement", { status: "needs-human" });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH3", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: false }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "PROJ-NH3" && e.fromDisposition === "needs-human"
+    );
+    expect(cleared).toBeUndefined();
+  });
+
+  // Codex #2970 round 3: the daemon and scheduler share lastDispositionEmit
+  // in-process (recordTransition's only-on-change guard). A real out-of-band
+  // clear must reset that shared dedup entry so a later GENUINE re-escalation to
+  // needs-human isn't silently swallowed by the guard comparing against a stale
+  // "needs-human" value.
+  test("resets the scheduler's disposition dedup on a real needs-human clear", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH4", "implement", { status: "needs-human" });
+    const resetTickets = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH4", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(resetTickets).toContain("PROJ-NH4");
+  });
+
+  // Codex #2970 post-merge round 2: {removed:true, wrote:false} is a CONFIRMED
+  // clear performed by a DIFFERENT host (cross-host case) — this process's
+  // lastDispositionEmit entry is just as stale as if it had done the write
+  // itself, so the dedup reset must still fire. Only the transition EMISSION
+  // stays write-gated (only the writer host emits).
+  test("resets the scheduler's disposition dedup on a cross-host needs-human clear (confirmed, not written here)", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH5", "implement", { status: "needs-human" });
+    const resetTickets = [];
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH5", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: false }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(resetTickets).toContain("PROJ-NH5");
+    // The clear was confirmed but not written BY THIS HOST — no emission here.
+    expect(transitions.find((e) => e.fromDisposition === "needs-human")).toBeUndefined();
+  });
+
+  test("does NOT reset the scheduler's disposition dedup when the needs-human removal is not confirmed", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH6", "implement", { status: "needs-human" });
+    const resetTickets = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH6", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: false, reason: "transient" }),
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(resetTickets).toEqual([]);
+  });
+
+  test("resets the scheduler's disposition dedup on a real needs-input clear", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const resetTickets = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(resetTickets).toContain("CTL-1");
+  });
+
+  // Codex #2970 post-merge round 1: the EARLIER needs-input removal (inside the
+  // needs-human block, gated on humanProvenance + isManagedTicket) can itself
+  // perform the real write. The per-signal loop's OWN removeLabel(ticket,
+  // "needs-input") call then observes the label already absent ({wrote:false}) —
+  // without threading the earlier call's write, the emission this genuine clear
+  // earned would be silently dropped.
+  test("does not lose the needs-input clear emission when the EARLIER (needs-human-block) removal performed the real write", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-RACE", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    let needsInputCalls = 0;
+    await handleCommentWake(
+      { ticket: "PROJ-RACE", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) => {
+          if (label === "needs-human") return { removed: true, wrote: false }; // never applied on this ticket
+          // needs-input: the FIRST call (the earlier needs-human-block cleanup)
+          // performs the real write; the SECOND call (the per-signal loop) finds
+          // it already gone.
+          needsInputCalls += 1;
+          return needsInputCalls === 1
+            ? { removed: true, wrote: true }
+            : { removed: true, wrote: false };
+        },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const needsInputClears = transitions.filter(
+      (e) => e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    // Exactly one emission for the one genuine write — not zero (lost), not two
+    // (double-counted).
+    expect(needsInputClears).toHaveLength(1);
+  });
+
+  // Codex #2970 post-merge round 3: needsInputWroteEarly was declared once,
+  // BEFORE the per-signal loop, and never reset — with multiple needs-input
+  // signals for the same ticket, that one early Linear write funded a SEPARATE
+  // emission per signal instead of exactly one.
+  test("emits exactly ONE needs-input clear when the ticket has multiple needs-input signals and the early removal earned the write", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-MULTI", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    writeSignal(orch, "PROJ-MULTI", "verify", {
+      status: "needs-input",
+      parkedFrom: "verify",
+    });
+    const transitions = [];
+    let needsInputCalls = 0;
+    await handleCommentWake(
+      { ticket: "PROJ-MULTI", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) => {
+          if (label === "needs-human") return { removed: true, wrote: false };
+          // The FIRST needs-input call (the earlier needs-human-block cleanup)
+          // performs the real write; every subsequent call — one per signal
+          // file the per-signal loop visits — finds it already gone.
+          needsInputCalls += 1;
+          return needsInputCalls === 1
+            ? { removed: true, wrote: true }
+            : { removed: true, wrote: false };
+        },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const needsInputClears = transitions.filter(
+      (e) => e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(needsInputClears).toHaveLength(1);
+  });
+
+  // Codex #2970 post-merge round 5: the credit-consume line used to run
+  // unconditionally after the try/catch, so a THROWING first per-signal
+  // removeLabel call burned the credit without funding an emission — leaving a
+  // second, successful signal unable to claim it. Consuming it INSIDE the try
+  // (only on success) means a throw preserves the credit for the next iteration.
+  test("credit survives a throwing per-signal removeLabel call, funding a LATER successful signal's emission", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-THROW", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    writeSignal(orch, "PROJ-THROW", "verify", {
+      status: "needs-input",
+      parkedFrom: "verify",
+    });
+    const transitions = [];
+    let needsInputCalls = 0;
+    await handleCommentWake(
+      { ticket: "PROJ-THROW", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) => {
+          if (label === "needs-human") return { removed: true, wrote: false };
+          needsInputCalls += 1;
+          // Call 1: the earlier needs-human-block cleanup earns the real write.
+          if (needsInputCalls === 1) return { removed: true, wrote: true };
+          // Call 2: the FIRST per-signal loop iteration — throws (transient error).
+          if (needsInputCalls === 2) throw new Error("transient Linear 5xx");
+          // Call 3: the SECOND per-signal loop iteration — succeeds, finds it
+          // already gone (the early write already cleared it).
+          return { removed: true, wrote: false };
+        },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const needsInputClears = transitions.filter(
+      (e) => e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(needsInputClears).toHaveLength(1);
+  });
+
+  // Codex #2970 post-merge round 5: the EARLY needs-input removal (inside the
+  // needs-human block) can be a real, confirmed clear on its own — but a ticket
+  // with no local worker dir hits the readdirSync early-return before ever
+  // reaching the per-signal loop's own clearDispositionEmit(ticket, "needs-input")
+  // call. Without resetting it right where the confirmation is known, a live
+  // needs-input dedup entry would survive indefinitely for such a ticket.
+  test("resets the needs-input dedup entry from the EARLY removal when the ticket has no local worker dir", async () => {
+    const orch = tmpOrcDir(); // deliberately no workers/<TICKET>/ at all
+    const resetCalls = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NODIR2", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) =>
+          label === "needs-human"
+            ? { removed: true, wrote: false }
+            : { removed: true, wrote: true },
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket, expected) => resetCalls.push({ ticket, expected }),
+      }
+    );
+    expect(resetCalls).toContainEqual({ ticket: "PROJ-NODIR2", expected: "needs-input" });
+  });
+
+  // Codex #2970 post-merge round 2, extended to needs-input for consistency with
+  // the needs-human fix: when NEITHER of this invocation's two removeLabel calls
+  // performed the write (a third host already cleared it before either ran), the
+  // clear is still CONFIRMED — the dedup reset must fire even though no emission
+  // does (only the writer host emits).
+  test("resets the scheduler's disposition dedup on a fully cross-host needs-input clear, with no emission", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-RACE2", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    const resetTickets = [];
+    await handleCommentWake(
+      { ticket: "PROJ-RACE2", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: false }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(
+      transitions.find((e) => e.fromDisposition === "needs-input" && e.toDisposition === null)
+    ).toBeUndefined();
+    expect(resetTickets).toContain("PROJ-RACE2");
+  });
+
   test("the bot's OWN comment still does NOT clear the label (self-echo guard intact)", async () => {
     const orch = tmpOrcDir();
     const removed = [];
@@ -1731,7 +2062,7 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(cleared).toBeUndefined();
   });
 
-  test("finding E — emits the clear on a confirmed {removed:true}", async () => {
+  test("finding E — emits the clear on a confirmed real write ({removed:true, wrote:true})", async () => {
     const orch = tmpOrcDir();
     writeSignal(orch, "CTL-1", "implement", {
       status: "needs-input",
@@ -1743,7 +2074,7 @@ describe("handleCommentWake (CTL-549)", () => {
       {
         orchDir: orch,
         dispatch: () => ({ code: 0 }),
-        removeLabel: async () => ({ removed: true }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
         appendWorkerTransitionEvent: (ev) => transitions.push(ev),
       }
     );
@@ -1752,6 +2083,31 @@ describe("handleCommentWake (CTL-549)", () => {
     );
     expect(cleared).toBeDefined();
     expect(cleared.source).toBe("comment-wake-clear");
+  });
+
+  // Codex #2970 round 3: removed:true alone (a no-op re-check on an already-cleared
+  // label — the second-host/duplicate-webhook case) must NOT emit a second "cleared"
+  // transition. Only wrote:true does.
+  test("finding E round 2 — does NOT emit the clear on a no-op ({removed:true, wrote:false})", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: false }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-1" && e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(cleared).toBeUndefined();
   });
 
   test("no-ops when ticket has no worker dir", async () => {

@@ -132,6 +132,92 @@ json_quote_or_null() {
   fi
 }
 
+# CTL-1612 round 5 (Codex P2 follow-up): bash mirror of
+# execution-core/config.mjs's getLivenessAnchorIssue() resolution order — used
+# ONLY to decide whether cmd_start's app-actor mint has anything to serve
+# (the scoped token's sole consumer, the anchor peer-heartbeat read, can never
+# fire with no anchor configured — readPeerRecords's `!anchorIssue` early
+# return, orch-monitor/lib/peer-liveness.mjs). Deliberately narrower than the
+# full secret-contract chain (matches getLayer2ConfigPath's own "legacy path"
+# comment: CATALYST_LAYER2_CONFIG_FILE, else ~/.config/catalyst/config.json —
+# no CATALYST_MACHINE_CONFIG/XDG tier for this specific reader):
+#   1. CATALYST_LIVENESS_ANCHOR_ISSUE env (test/override)
+#   2. catalyst.cluster.livenessAnchorIssue in the Layer-2 config
+#   3. empty — caller treats as "no anchor configured"
+#
+# CTL-1612 round 6 (Codex P2 follow-up): this duplication (rather than a
+# runtime call into the canonical JS getter) is a deliberate single-source-
+# risk tradeoff, not an oversight — see the round-6 report for why a bounded
+# `bun -e "import(...)…"` one-shot at every monitor start was rejected (adds
+# a runtime dependency + startup cost to the launch path, defeating round 3's
+# whole point of skipping the mint cheaply). __tests__/liveness-anchor-parity.test.sh
+# is what makes a future divergence between this function and
+# getLivenessAnchorIssue() TEST-DETECTABLE instead of a silent landmine — it
+# extracts this exact function's source and runs it against the same fixtures
+# as the JS getter, three-way-asserting both against a computed-expected
+# literal (the __tests__/secret-contract-parity.test.sh pattern). Edit this
+# function's resolution order/default path ONLY in lockstep with that test
+# and getLivenessAnchorIssue() itself.
+resolve_liveness_anchor_issue() {
+  if [[ -n "${CATALYST_LIVENESS_ANCHOR_ISSUE:-}" ]]; then
+    printf '%s' "$CATALYST_LIVENESS_ANCHOR_ISSUE"
+    return 0
+  fi
+  local _l2_path="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"
+  [[ -f "$_l2_path" ]] || return 0
+  if command -v jq &>/dev/null; then
+    # CTL-1612 round 6 (Codex P2 follow-up, liveness-anchor-parity.test.sh):
+    # `select(type=="string")` rejects a non-string field (e.g. a stray
+    # number) the same way getLivenessAnchorIssue's `typeof a === "string"`
+    # guard does. Without it, `jq -r 'FIELD // empty'` on a NUMBER prints the
+    # number as text instead of treating it as absent — bash would resolve an
+    # anchor the JS side never would, diverging on a hostile/malformed config.
+    jq -r '(.catalyst.cluster.livenessAnchorIssue | select(type=="string")) // empty' "$_l2_path" 2>/dev/null
+    # CTL-1612 post-merge #2978 (Codex P2 follow-up): explicit, unconditional
+    # `return 0` — this function's contract everywhere else is "never surface
+    # an internal failure as our own; a resolution miss is always a clean
+    # empty" (see the two `return 0`s above: env-unset, file-absent). jq
+    # itself exits NONZERO on malformed/invalid JSON input, and this branch
+    # used to let that raw jq exit code silently become the FUNCTION's own
+    # exit status — the parity test's canonical JS side never has this gap
+    # (getLivenessAnchorIssue wraps its JSON.parse in try/catch and always
+    # returns cleanly; see execution-core/config.mjs), so a malformed Layer-2
+    # config made bash and node agree on OUTPUT (both empty) while disagreeing
+    # on STATUS (bash nonzero, node 0) — a real robustness gap this closes.
+    return 0
+  else
+    # CTL-1612 round 7 (Codex P2 follow-up): jq is neither a required nor
+    # optional repo dependency and bootstrap does not enforce it (a
+    # documented-minimal host can genuinely lack it) — a bare `jq` call above
+    # would silently resolve "no anchor configured" here while the runtime's
+    # node/bun getLivenessAnchorIssue() parses the SAME file and finds one,
+    # taking the no-anchor skip branch and clearing the inherited app-actor
+    # aliases without ever transferring a usable token to
+    # CATALYST_MONITOR_APP_ACTOR_TOKEN. Same jq-absent-degrade shape as
+    # create-worktree.sh's #2948 round-5 precedent: fall back to a plain
+    # grep/sed sniff of the first "livenessAnchorIssue":"..." QUOTED-STRING
+    # occurrence anywhere in the file. Imprecise — it doesn't confirm JSON
+    # structure/nesting under catalyst.cluster, and a value spanning multiple
+    # lines won't match — but adequate for this boolean-ish "is an anchor
+    # configured" check, and the quoted-value requirement naturally rejects a
+    # non-string field the same way the jq `select(type=="string")` branch
+    # does above. __tests__/liveness-anchor-parity.test.sh exercises this
+    # exact path with jq hidden from PATH.
+    grep -oE '"livenessAnchorIssue"[[:space:]]*:[[:space:]]*"[^"]*"' "$_l2_path" 2>/dev/null \
+      | head -1 \
+      | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/'
+    # CTL-1612 post-merge #2978 (Codex P2 follow-up): same unconditional
+    # `return 0` as the jq branch above, for a SECOND (broader) reason on
+    # this branch specifically: the script runs under `set -o pipefail`
+    # (line 11), so a NO-MATCH `grep` (the ordinary, legitimate "field not
+    # present" or "no anchor configured" case — not an error) makes the
+    # WHOLE pipeline exit 1, even though `head`/`sed` on that empty input
+    # exit 0. Without this, most jq-less "resolves to empty" cells — not
+    # just malformed input — would report a spurious nonzero status.
+    return 0
+  fi
+}
+
 is_alive() {
   local pid="$1"
   kill -0 "$pid" 2>/dev/null
@@ -197,14 +283,31 @@ bootstrap() {
   fi
 
   if [[ -d "$MONITOR_DIR" ]]; then
-    if [[ ! -d "$MONITOR_DIR/node_modules" ]] || [[ "$MONITOR_DIR/bun.lock" -nt "$MONITOR_DIR/node_modules" ]]; then
+    # CTL-1628: since the 8 per-package bun.lock files were consolidated into a
+    # single root workspace lockfile, $MONITOR_DIR/bun.lock (and ui/bun.lock) no
+    # longer exist, so the plain "-nt" checks below are permanently false (a
+    # nonexistent left operand never compares newer). Resolve the actual
+    # workspace-root lockfile via `git rev-parse --show-toplevel` at runtime and
+    # OR its mtime into the gate so a root dep bump still triggers reinstall. The
+    # original per-dir checks are left in place (harmless no-ops once the lock
+    # files are gone) so this stays a superset — it also still fires correctly
+    # in a non-git sandbox that supplies its own per-dir bun.lock (CTL-1223 tests).
+    local monitor_root_lockfile
+    monitor_root_lockfile="$(git -C "$MONITOR_DIR" rev-parse --show-toplevel 2>/dev/null)"
+    [[ -n "$monitor_root_lockfile" ]] && monitor_root_lockfile="$monitor_root_lockfile/bun.lock"
+    if [[ ! -d "$MONITOR_DIR/node_modules" ]] || [[ "$MONITOR_DIR/bun.lock" -nt "$MONITOR_DIR/node_modules" ]] || { [[ -n "$monitor_root_lockfile" ]] && [[ "$monitor_root_lockfile" -nt "$MONITOR_DIR/node_modules" ]]; }; then
       echo "Installing orch-monitor dependencies..."
       (cd "$MONITOR_DIR" && bun install --frozen-lockfile 2>/dev/null || bun install)
     fi
 
-    if [[ -d "$MONITOR_DIR/ui" ]] && { [[ ! -d "$MONITOR_DIR/ui/node_modules" ]] || [[ "$MONITOR_DIR/ui/bun.lock" -nt "$MONITOR_DIR/ui/node_modules" ]]; }; then
-      echo "Installing orch-monitor UI dependencies..."
-      (cd "$MONITOR_DIR/ui" && bun install --frozen-lockfile 2>/dev/null || bun install)
+    if [[ -d "$MONITOR_DIR/ui" ]]; then
+      local ui_root_lockfile
+      ui_root_lockfile="$(git -C "$MONITOR_DIR/ui" rev-parse --show-toplevel 2>/dev/null)"
+      [[ -n "$ui_root_lockfile" ]] && ui_root_lockfile="$ui_root_lockfile/bun.lock"
+      if [[ ! -d "$MONITOR_DIR/ui/node_modules" ]] || [[ "$MONITOR_DIR/ui/bun.lock" -nt "$MONITOR_DIR/ui/node_modules" ]] || { [[ -n "$ui_root_lockfile" ]] && [[ "$ui_root_lockfile" -nt "$MONITOR_DIR/ui/node_modules" ]]; }; then
+        echo "Installing orch-monitor UI dependencies..."
+        (cd "$MONITOR_DIR/ui" && bun install --frozen-lockfile 2>/dev/null || bun install)
+      fi
     fi
 
     if [[ -d "$MONITOR_DIR/ui" ]]; then
@@ -327,6 +430,91 @@ cmd_start() {
 
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
+
+  # CTL-1612: project the webhook signing secret from the SOPS-managed file, matching
+  # what the launchd wrapper (orch-monitor/dist/catalyst-monitor-launchd.sh) already
+  # does. Without this the two launch paths disagree: webhook-config.ts resolves the
+  # GitHub HMAC key from process.env ONLY (no file fallback — unlike the Linear per-team
+  # secrets), so a stack-launched monitor on a host whose shell never exported it runs
+  # with the GitHub webhook route silently DISABLED. It is also boot-captured (read once
+  # at loadWebhookConfig, then closed over per request), so a rotation needs a restart —
+  # which is why webhook-secret is now enrolled in cluster-sync's boot-captured registry.
+  # FILE-WINS for the same reason as the daemon's GitHub credential: a stale shell export
+  # is exactly what we are correcting. Empty/whitespace/absent = no-op, never export ""
+  # (an empty secret makes webhook-config treat the route as unconfigured).
+  # CTL-1612: arm BOTH cluster-synced credentials this daemon needs, via the one shared
+  # resolution chain (lib/catalyst-secret-env.sh).
+  #
+  # webhook-secret: webhook-config.ts resolves the GitHub HMAC key from process.env ONLY
+  # (no file fallback, unlike the Linear per-team secrets) and captures it once at boot, so
+  # a monitor started without it runs with the GitHub webhook route silently DISABLED.
+  #
+  # github-token: the monitor makes 13 `gh` calls across 5 files (pr-status, preview-status,
+  # webhook-subscriber, webhook-replay, repo-icon-fetcher) and contains ZERO references to
+  # GITHUB_TOKEN/GH_TOKEN — its GitHub auth is purely ambient inheritance, which is exactly
+  # the bug this ticket exists to fix. doctor.mjs checkRepoIconTokenScope already exists to
+  # warn about this inherited token. Projecting here fixes all 13 sites at once, because they
+  # all inherit this launcher's env; none of them need to change.
+  # shellcheck disable=SC1090
+  source "$SCRIPT_DIR/lib/catalyst-secret-env.sh"
+  catalyst_project_webhook_secret
+  catalyst_project_github_token
+
+  # Authenticate the monitor's own Linear calls (peer-heartbeat anchor read,
+  # CTL-1090/CTL-1217) as the Catalyst Orchestrator app-actor, same as the
+  # broker/execution-core start paths (CTL-785/CTL-1577) — without this the
+  # monitor process has no app-actor token at all and any direct Linear read
+  # it performs (e.g. readPeerHeartbeatsSync) silently fails closed to {}.
+  #
+  # CTL-1612 (Codex P1 follow-up): the monitor is TWO-IDENTITY, unlike the
+  # broker/execution-core. Its inline-reply path (orch-monitor/lib/linear-comment.mjs
+  # resolveLinearToken) resolves env (LINEAR_API_TOKEN/LINEAR_API_KEY) BEFORE the
+  # operator's Layer-2 personal token, and REFUSES to post as the app-actor
+  # (bot_identity gate) — so exporting the mint under LINEAR_API_TOKEN/LINEAR_API_KEY
+  # here, as the broker/execution-core do, would silently 502 every operator inline
+  # reply. Mint into a SCOPED var instead; only the monitor's own self-read
+  # (readPeerHeartbeatsSync, wired in server.ts) consumes it. Personal-token paths
+  # (linear-comment.mjs, inbox-conversation*.mjs, estimate/title fallbacks) are
+  # untouched — they never look at this variable.
+  #
+  # CTL-1612 round 3 (Codex P2 follow-up): the scoped token's ONLY consumer is
+  # the anchor peer-heartbeat read (server.ts pollAnchorHeartbeats → readAnchor
+  # → readPeerHeartbeatsSync). orch-monitor/lib/peer-liveness.mjs readPeerRecords
+  # NEVER calls readAnchor when CATALYST_LIVENESS_READ_SOURCE is exactly "loki"
+  # (case-insensitive) — that is the one mode with a hard early-return before
+  # the anchor tier. Every other value — unset, "auto", "linear", or anything
+  # else — either uses the anchor exclusively ("linear") or as the AUTO
+  # fallback when Loki has no URL/reader or returns empty, so minting stays the
+  # default there. Skip the (real network) mint in loki-only mode: it would
+  # authenticate a credential that structurally can never be read.
+  #
+  # CTL-1612 round 5 (Codex P2 follow-up): readAnchor ALSO can never fire when
+  # NO liveness anchor is configured at all — readPeerRecords's `!anchorIssue`
+  # early return — regardless of source (AUTO or explicit "linear" included).
+  # A fleet running single-host, or one that hasn't set up cross-host liveness
+  # yet, would otherwise mint on every start and wait out curl's 30s ceiling
+  # for a credential nothing can ever read. Skip that case too.
+  #
+  # CTL-1612 round 5 (Codex P1 follow-up): BOTH skip branches below now call
+  # linear_app_actor_clear_inherited — the round-4 inherited-alias clear lived
+  # entirely inside linear_app_actor_auth, so a skip branch that never calls
+  # that function never ran it either. A broker stack-reload's `catalyst-monitor
+  # restart` in loki-only (or no-anchor) mode would otherwise still carry the
+  # broker's bot-valued LINEAR_API_TOKEN/LINEAR_API_KEY straight through to
+  # linear-comment.mjs — the same P1 as round 4's fix, just reachable via a
+  # path that used to return before ever sourcing the lib.
+  source "$SCRIPT_DIR/lib/linear-app-actor.sh"
+  _liveness_source="$(printf '%s' "${CATALYST_LIVENESS_READ_SOURCE:-}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || true)"
+  _liveness_anchor_issue="$(resolve_liveness_anchor_issue)"
+  if [[ "$_liveness_source" == "loki" ]]; then
+    echo "catalyst-monitor: CATALYST_LIVENESS_READ_SOURCE=loki — skipping app-actor mint (peer-heartbeat anchor read is unused in loki-only mode)" >&2
+    linear_app_actor_clear_inherited "catalyst-monitor"
+  elif [[ -z "$_liveness_anchor_issue" ]]; then
+    echo "catalyst-monitor: no liveness anchor configured (CATALYST_LIVENESS_ANCHOR_ISSUE / catalyst.cluster.livenessAnchorIssue) — skipping app-actor mint (peer-heartbeat anchor read has nothing to attach to)" >&2
+    linear_app_actor_clear_inherited "catalyst-monitor"
+  else
+    linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
+  fi
 
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \

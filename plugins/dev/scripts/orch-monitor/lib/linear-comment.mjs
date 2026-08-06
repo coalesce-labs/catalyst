@@ -44,6 +44,15 @@
 // success payload while silently not applying — the GraphQL path is the one that
 // demonstrably works for mutations. Reads stay on the replica (linear-thread.mjs).
 
+// CTL-1616 PR3: fold the env-alias leg of resolveLinearToken's chain onto the
+// shared secret-contract engine (design §8 PR3 table — this file was the one
+// outlier using `||` where the other 8 hand-rolled copies used `??`). Only the
+// env-alias LEG folds here: the Layer-2 `linear.apiToken` personal-token
+// fallback below is this file's own distinct chain (a different secret from
+// the registry's `linear-api-token` row's config-json shape) and is out of
+// scope for this PR.
+import { resolveSecret } from "../../lib/secret-contract.mjs";
+
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 
 /** Wall-clock budget for a single Linear mutation. The operator is waiting on this
@@ -73,7 +82,15 @@ const REQUEST_TIMEOUT_MS = 15_000;
  * this is the belt to that braces.)
  */
 export function resolveLinearToken(env = process.env, { projectConfig = null } = {}) {
-  const fromEnv = env.LINEAR_API_TOKEN || env.LINEAR_API_KEY || null;
+  // CTL-1616 PR3: was `env.LINEAR_API_TOKEN || env.LINEAR_API_KEY || null` —
+  // folded onto resolveSecret's env-alias resolver (same alias precedence,
+  // same `env` injected here for tests). Precise semantics, unchanged from
+  // the old `||` ladder: an EMPTY-STRING token falls through to
+  // LINEAR_API_KEY (falsy before, non-empty-check now); a WHITESPACE-ONLY
+  // token wins the env leg in BOTH versions (truthy before, non-empty now),
+  // then fails the `.trim()` check below and falls to the Layer-2 personal
+  // token — SKIPPING LINEAR_API_KEY, exactly as it always did.
+  const fromEnv = resolveSecret("linear-api-token", { env }).value;
   if (typeof fromEnv === "string" && fromEnv.trim() !== "") return fromEnv.trim();
   // Layer-2 personal token — the launchd path's only source. BOTH shapes are
   // accepted: `linear.apiToken` is what the reference schema documents

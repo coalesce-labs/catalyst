@@ -1,7 +1,7 @@
 ---
 name: phase-plan
 description: |
-  Phase agent for the plan step of the 9-phase orchestrator pipeline (CTL-450).
+  Phase agent for the plan step of the 10-phase orchestrator pipeline (CTL-450).
   Wraps /catalyst-dev:create-plan and produces
   thoughts/shared/plans/<date>-<ticket>.md, then emits phase.plan.complete.<ticket>.
   Reads the prior research document from thoughts/shared/research/ as its

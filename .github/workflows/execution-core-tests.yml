@@ -77,6 +77,11 @@ on:
       - "plugins/dev/scripts/migrate-dual-harness.sh"
       - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
+      # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
+      # every member package's install (incl. execution-core, broker, otel-forward).
+      - "package.json"
+      - "bun.lock"
+      - "turbo.json"
   push:
     branches: [main]
     paths:
@@ -125,6 +130,10 @@ on:
       - "plugins/dev/scripts/migrate-dual-harness.sh"
       - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
+      # CTL-1628: see the pull_request note above.
+      - "package.json"
+      - "bun.lock"
+      - "turbo.json"
 
 jobs:
   execution-core-unit-tests:
@@ -141,7 +150,11 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install
+        # CTL-1628: a single root bun workspace/lockfile now covers execution-core,
+        # broker, and otel-forward (among others) — install at the repo root so
+        # bun resolves the one root bun.lock instead of a per-package copy.
+        working-directory: .
+        run: bun install --frozen-lockfile
 
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
@@ -234,6 +247,61 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/review-comments-headless.test.sh
 
+      - name: monitor launcher / dist-redirect test (incl. CTL-1612 webhook-secret projection)
+        # Previously ungated in CI (run-tests.sh globs it locally, but the CI job uses an
+        # explicit allowlist). Now covers the cmd_start CATALYST_WEBHOOK_SECRET projection
+        # that brings the stack launch path to parity with the launchd wrapper.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-monitor-dist-redirect.test.sh
+
+      - name: liveness-anchor cross-stack parity test (CTL-1612 round 6/7)
+        # Pins catalyst-monitor.sh's resolve_liveness_anchor_issue() (a bash mirror of
+        # execution-core/config.mjs's getLivenessAnchorIssue(), duplicated deliberately —
+        # see the round-6/7 report for the runtime-dependency tradeoff) against the
+        # canonical getter via the __tests__/secret-contract-parity.test.sh three-way-
+        # assertion pattern, PLUS a jq-less fixture (round 7) exercising the grep/sed
+        # fallback rung a jq-absent host takes. Needs jq AND node, both preinstalled on
+        # ubuntu-latest runners (mirrors the deployment-mode-parity step above).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/liveness-anchor-parity.test.sh
+
+      - name: linear-app-actor scoped-credential unit tests (CTL-1612 rounds 4-6)
+        # The only direct regression coverage for lib/linear-app-actor.sh's scoped
+        # mode: inherited-alias clearing (round 4), personal lin_api_* key preservation
+        # incl. whitespace-trimmed classification (rounds 5/6), and the inherited-token
+        # fallback when the monitor's own mint fails or finds no creds (round 6). Lives
+        # under lib/__tests__/ rather than __tests__/, so — unlike every other suite in
+        # this allowlist — it also needed a dedicated step (round 7): the local
+        # run-tests.sh aggregate runner didn't glob that directory either until this
+        # same round wired both in together.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/linear-app-actor.test.sh
+
+      - name: daemon shared-GitHub-credential projection test (CTL-1612)
+        # Covers _project_shared_github_token: the shared SOPS file WINS over a stale
+        # inherited GITHUB_TOKEN/GH_TOKEN (the 2026-08-02 fleet outage), an
+        # empty/whitespace/absent file is a total no-op that never exports "", and the
+        # GITHUB_TOKEN-only case reconciles GH_TOKEN so a stale one cannot outrank it.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-execution-core-github-token.test.sh
+
+      - name: catalyst-secret-env A/B legacy-vs-folded parity test (CTL-1623)
+        # catalyst_project_github_token/_webhook_secret's FILE-READ tier now delegates to
+        # lib/catalyst-secret-contract.sh's catalyst_resolve_secret (the CTL-1616 registry
+        # engine) instead of hand-rolling its own file search. This suite freezes the
+        # pre-fold implementation as a test-local reference and asserts byte-identical
+        # results across the full fixture space (explicit overrides, CATALYST_CONFIG_DIR,
+        # CATALYST_LAYER2_CONFIG_FILE-derived dir, XDG dedupe, absent/whitespace-only files,
+        # trailing-EOL stripping, pipe-in-value, the full github-token precedence ladder),
+        # plus two FLAGGED, deliberately-divergent fail-closed cells (NUL-containing file,
+        # invalid-UTF-8 file — Codex post-merge round 1) where the folded engine now
+        # rejects a candidate the legacy reader would have silently mutated. Sibling suites
+        # secret-contract-parity.test.sh / catalyst-secret-contract.test.sh remain CI-dark
+        # (pre-existing family-wide gap, tracked separately) — this is the one directly
+        # exercising the CTL-1612 pair's own launcher-facing wrapper functions.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-secret-env-legacy-parity.test.sh
+
       - name: migrate-dual-harness test (CTL-1530)
         # Covers the dual-harness classification (dual-ok / codex-only /
         # claude-only-monolithic / no-harness), the skills-dir state machine
@@ -242,6 +310,51 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/migrate-dual-harness.test.sh
 
+      - name: catalyst-runtime-root Bash resolver unit tests (CTL-1628 Phase A2)
+        # Pins lib/catalyst-runtime-root.sh's catalyst_dev_scripts (probe order,
+        # sentinel, sort -V newest-wins, LOUD miss), catalyst_plugin_root (Q3
+        # ancestor walk), and catalyst_runtime_layout classification. Was
+        # previously unwired (no allowlist entry) so this contract had no CI guard.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-runtime-root.test.sh
+
+      - name: catalyst-runtime-root mjs resolver unit tests (bun, CTL-1628 Phase A2)
+        # The .mjs twin of the suite above. Own step (not the "Run stable unit
+        # tests" allowlist below) because that step's working-directory is
+        # execution-core/ and this lib is a deliberately zero-import leaf
+        # outside that tree (mirrors the deployment-mode step's own rationale).
+        working-directory: plugins/dev/scripts/lib
+        run: bun test catalyst-runtime-root.test.mjs
+
+      - name: deployment-mode resolver unit tests (bun, CTL-1617)
+        # Codex remediation: neither of the three deployment-mode suites was
+        # named anywhere in this workflow (nor any other), so required CI
+        # stayed green without ever exercising lib/deployment-mode.mjs, its
+        # Bash mirror, or their cross-stack agreement. This is the JS-side
+        # unit suite (resolveDeploymentMode/getDeploymentMode's validity
+        # ladder, the injected-env isolation contract). Its own step because
+        # lib/deployment-mode.mjs is a deliberately ZERO-IMPORT leaf outside
+        # the execution-core/ tree the "Run stable unit tests" step below is
+        # scoped to.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test deployment-mode.test.mjs
+
+      - name: deployment-mode Bash resolver unit test (CTL-1617)
+        # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
+        # see the bun step above for why this suite was previously ungated.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-deployment-mode.test.sh
+
+      - name: deployment-mode cross-stack parity test (CTL-1617)
+        # The fixture-matrix parity test asserting bash == node == the
+        # design-spec-computed expected value at every cell (168 fixture
+        # cells x 2 assertions, plus the dedicated divergence-pinning probes
+        # for the NUL-byte, NBSP-padding, malformed-trailing-content, and
+        # lone-surrogate hostile inputs). Needs jq, preinstalled on
+        # ubuntu-latest runners.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/deployment-mode-parity.test.sh
+
       - name: Broker worker-state projection test (CTL-1529)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
         # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),
@@ -249,11 +362,12 @@ jobs:
         # so two of this PR's fixes shipped behind a test CI never ran. It cannot join
         # the `bun test` list below: that job's working-directory is execution-core, and
         # this suite needs the BROKER package's own node_modules (pino) to import
-        # ./index.mjs. Hence its own step with its own install.
+        # ./index.mjs. Hence its own step.
+        # CTL-1628: the root workspace install above already covers broker's deps
+        # (bun resolves the workspace root's node_modules from this cwd), so no
+        # per-package install here anymore.
         working-directory: plugins/dev/scripts/broker
-        run: |
-          bun install --frozen-lockfile
-          bun test worker-state-projection.test.mjs
+        run: bun test worker-state-projection.test.mjs
 
       - name: otel-forward tests (CTL-1529 round 3)
         # otel-forward had NO CI coverage at all before this
@@ -266,10 +380,10 @@ jobs:
         # (An earlier revision of this step was scoped to dlq.test.ts and justified
         # that with "5 failures, pre-existing" in lib/destinations/* — that was
         # false, and it would have told future readers not to widen.)
+        # CTL-1628: the root workspace install above already covers otel-forward's
+        # deps, so no per-package install here anymore.
         working-directory: plugins/dev/scripts/otel-forward
-        run: |
-          bun install --frozen-lockfile
-          bun test
+        run: bun test
 
       - name: orphan-sweep kill-gate test (CTL-1531)
         # orphan-sweep.sh KILLS PROCESSES and removes worktrees, and had ZERO CI
@@ -451,7 +565,6 @@ jobs:
             test-setup.test.mjs \
             transcript-tail.test.mjs \
             triage-transition-event.test.mjs \
-            record-worker-transition.test.mjs \
             worker-disposition.test.mjs \
             worker-transition-event.test.mjs \
             turn-zero-gate.test.mjs \
@@ -481,4 +594,7 @@ jobs:
             linear-read-event.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
-            updater/updater-tracing.test.mjs
+            updater/updater-tracing.test.mjs \
+            github-auth-preflight.test.mjs \
+            github-token-candidates-legacy-parity.test.mjs \
+            cluster-sync.test.mjs

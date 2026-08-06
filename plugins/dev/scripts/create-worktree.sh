@@ -30,6 +30,11 @@ ORCHESTRATION_NAME=""
 REUSE_EXISTING=false
 SKIP_FETCH=false
 EXPECTED_BRANCH=""
+# CTL-1640: resume-from-remote is default-on. When no local branch exists and
+# origin has this ticket branch (pushed draft-PR commits, CTL-783), seed the
+# worktree from that remote tip instead of orphaning it under a fresh branch off
+# base. --no-from-remote opts out; --from-remote affirms the default.
+FROM_REMOTE=true
 
 while [[ $# -gt 0 ]]; do
 	case $1 in
@@ -38,6 +43,8 @@ while [[ $# -gt 0 ]]; do
 		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
 		--reuse-existing) REUSE_EXISTING=true; shift ;;
 		--skip-fetch) SKIP_FETCH=true; shift ;;
+		--from-remote) FROM_REMOTE=true; shift ;;
+		--no-from-remote) FROM_REMOTE=false; shift ;;
 		# CTL-615: when --reuse-existing returns an existing worktree dir,
 		# assert its HEAD is on this branch. Mismatch → exit 64 with a
 		# clear diagnostic. The daemon's revive path passes the ticket name
@@ -52,12 +59,17 @@ done
 # Get worktree name from positional args
 if [ ${#POSITIONAL[@]} -eq 0 ]; then
 	echo -e "${RED}Error: Worktree name is required${NC}"
-	echo "Usage: ./create-worktree.sh <worktree_name> [base_branch] [--worktree-dir <path>] [--hooks-json <json>]"
+	echo "Usage: ./create-worktree.sh <worktree_name> [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--no-from-remote]"
+	echo ""
+	echo "  --from-remote / --no-from-remote  Seed a new branch from origin/<worktree_name>"
+	echo "                                    when it exists (default: --from-remote); opt out"
+	echo "                                    to always root a fresh branch on the base tip."
 	echo ""
 	echo "Examples:"
 	echo "  ./create-worktree.sh ENG-123"
 	echo "  ./create-worktree.sh feature-auth main"
 	echo "  ./create-worktree.sh orch-1-ENG-123 main --worktree-dir ~/catalyst/my-app"
+	echo "  ./create-worktree.sh ENG-123 main --no-from-remote   # ignore origin/ENG-123, root on base"
 	exit 1
 fi
 
@@ -177,18 +189,84 @@ if [ -d "$WORKTREE_PATH" ]; then
 fi
 
 # Create worktree
+# CREATED_BRANCH (Codex #2948): tracks whether THIS run created
+# WORKTREE_NAME as a new branch, vs. checking out one the user already
+# owned. The rollback helpers below only `git branch -D` when this is
+# true — force-deleting a pre-existing branch on a failed setup could
+# silently lose the user's unpushed commits. Default false (fail-safe:
+# never delete unless we're sure we created it).
+CREATED_BRANCH=false
 if git show-ref --verify --quiet "refs/heads/${WORKTREE_NAME}"; then
 	echo "📋 Using existing branch: ${WORKTREE_NAME}"
+	# CTL-1640: local branch wins (policy: no auto-merge), but surface a
+	# divergence from origin/<name> so a stale local branch atop pushed work is
+	# visible. Read the LOCALLY-CACHED remote-tracking ref (git rev-parse, no
+	# network) rather than a synchronous `git ls-remote` (Codex #3025 P2): the
+	# reuse path needs no remote data to add the worktree, and createWorktree()
+	# spawns this script without a timeout, so a live ls-remote against a slow or
+	# unreachable origin would block dispatch/reclaim until the transport times out
+	# — all for a cosmetic warning. Best-effort: if the remote-tracking ref is not
+	# present locally, we simply skip the warning.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ]; then
+		LOCAL_SHA="$(git rev-parse --verify --quiet "refs/heads/${WORKTREE_NAME}" 2>/dev/null || true)"
+		REMOTE_SHA="$(git rev-parse --verify --quiet "refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null || true)"
+		if [ -n "$REMOTE_SHA" ] && [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+			echo -e "${YELLOW}⚠️  local ${WORKTREE_NAME} (${LOCAL_SHA:0:8}) diverges from origin (${REMOTE_SHA:0:8}); keeping local, not merging (CTL-1640)${NC}" >&2
+		fi
+	fi
 	git worktree add "$WORKTREE_PATH" "$WORKTREE_NAME"
 else
 	echo "🆕 Creating new branch: ${WORKTREE_NAME}"
+	# CREATED_BRANCH=true is correct even when seeded from origin/<name> below:
+	# the local branch head then equals origin/<name>, so the rollback helpers'
+	# `git branch -D` can never lose unpushed work (every commit is on origin).
+	CREATED_BRANCH=true
 	START_POINT="$BASE_BRANCH"
-	if [ "$SKIP_FETCH" = false ]; then
+	SEEDED_FROM_REMOTE=false
+	# CTL-1640: resume-from-remote — if origin already has this ticket branch
+	# (e.g. a pushed draft PR's commits, CTL-783), seed the worktree from that
+	# remote tip instead of orphaning it under a fresh branch off base. The local
+	# branch already took precedence above; --skip-fetch (offline) and
+	# --no-from-remote opt out. This is the missing CTL-783 "resume consumer" —
+	# both normal dispatch and cross-host reclaim funnel through this script, so
+	# they both resume automatically with no .mjs change.
+	# CTL-1640 (Codex #3025 P1/P2): fetch with an EXPLICIT destination refspec so the
+	# remote-tracking ref is written even in a restricted-refspec (e.g. single-branch)
+	# clone, where a bare `git fetch origin <ticket>` returns success but lands the tip
+	# only in FETCH_HEAD — leaving START_POINT (refs/remotes/origin/<ticket>) nonexistent
+	# and failing the worktree add. A single fetch also collapses remote discovery and
+	# retrieval into ONE round-trip: no separate `git ls-remote` existence snapshot (which
+	# both added serial remote I/O and opened a split-window race where a concurrent push
+	# between the snapshot and the fetch could be missed), and a missing ticket ref simply
+	# makes the fetch exit non-zero so we fall through to seeding from base.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
+		&& git fetch --quiet origin \
+			"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
+		START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+		SEEDED_FROM_REMOTE=true
+		echo "🌱 Resuming from origin/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
+	fi
+	if [ "$SEEDED_FROM_REMOTE" = false ] && [ "$SKIP_FETCH" = false ]; then
 		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
 			START_POINT="refs/remotes/origin/${BASE_BRANCH}"
 			echo "🔄 Fetched origin/${BASE_BRANCH}; rooting on remote tip"
 		else
 			echo -e "${YELLOW}⚠️  Could not fetch origin/${BASE_BRANCH}; falling back to local ${BASE_BRANCH} (worker may branch off stale ref)${NC}" >&2
+		fi
+		# CTL-1640 (Codex #3025 P2): re-check origin/<ticket> immediately before creating
+		# the branch. A superseded worker's early-draft push (implement-plan-draft-pr-early,
+		# CTL-783) can land AFTER the negative ticket fetch above but before `git worktree
+		# add -b` — a TOCTOU window that would otherwise root the survivor on base and never
+		# resume the pushed commits (the local-branch-wins path then takes over on every later
+		# provisioning). This last-moment fetch narrows that window to the gap between here and
+		# the add. It does NOT fully close the race — the durable fix is a cluster-fence guard
+		# on the producer's early-draft push — but it converts the common case back to a resume.
+		if [ "$FROM_REMOTE" = true ] \
+			&& git fetch --quiet origin \
+				"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
+			START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+			SEEDED_FROM_REMOTE=true
+			echo "🌱 origin/${WORKTREE_NAME} appeared during provisioning; resuming from its pushed tip (CTL-1640)"
 		fi
 	fi
 	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$START_POINT"
@@ -268,6 +346,43 @@ _removal_guard_ok() {
 		return 1
 	fi
 	assert_worktree_removal_safe "$_wt"
+}
+
+# _worktree_rollback_remove — CTL-1628 post-merge (Codex #2948): the guarded
+# presweep+remove sequence shared by every rollback site (failed install,
+# missing thoughts/shared). Deletes the branch only when THIS run created it
+# (CREATED_BRANCH) — a pre-existing branch the user already owned must
+# survive a failed setup rather than being force-deleted, which could lose
+# unpushed commits. The worktree itself is always removed either way.
+_worktree_rollback_remove() {
+	cd - >/dev/null
+	# CTL-649: defensive presweep — in a failure-before-dispatch rollback
+	# no bg session should exist yet, but the helper is a cheap no-op
+	# in that case and prevents any future race that lands a session
+	# between create-worktree and rollback from leaking.
+	[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
+		"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
+	# CTL-1417: skip the force-remove if the tree is in use / is our cwd
+	# OR the guard is unavailable (fail-closed), leaving it for the reaper
+	# rather than deleting an in-use worktree.
+	if _removal_guard_ok "$WORKTREE_PATH"; then
+		git worktree remove --force "$WORKTREE_PATH"
+		if [ "$CREATED_BRANCH" = true ]; then
+			git branch -D "$WORKTREE_NAME" 2>/dev/null || true
+		fi
+	else
+		echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
+	fi
+}
+
+# _worktree_install_rollback — the guarded rollback a failed dependency
+# install (`make setup`, `bun install`, `npm install`) runs through, so a
+# failure anywhere in step 1 cleans up the half-built worktree instead of
+# `set -e` aborting the script and leaving it on disk.
+_worktree_install_rollback() {
+	echo -e "${RED}❌ Setup failed. Cleaning up worktree...${NC}"
+	_worktree_rollback_remove
+	exit 1
 }
 if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 	# Remove stale workflow-context.json if copied from main repo
@@ -399,34 +514,368 @@ else
 	# 1. Install dependencies
 	if [ -f "Makefile" ] && grep -q "^setup:" Makefile; then
 		echo "  Running: make setup"
-		if ! make setup; then
-			echo -e "${RED}❌ Setup failed. Cleaning up worktree...${NC}"
-			cd - >/dev/null
-			# CTL-649: defensive presweep — in a failure-before-dispatch rollback
-			# no bg session should exist yet, but the helper is a cheap no-op
-			# in that case and prevents any future race that lands a session
-			# between create-worktree and rollback from leaking.
-			SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-			[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
-				"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-			# CTL-1417: skip the force-remove if the tree is in use / is our cwd
-			# OR the guard is unavailable (fail-closed), leaving it for the reaper
-			# rather than deleting an in-use worktree.
-			if _removal_guard_ok "$WORKTREE_PATH"; then
-				git worktree remove --force "$WORKTREE_PATH"
-				git branch -D "$WORKTREE_NAME" 2>/dev/null || true
-			else
-				echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
-			fi
-			exit 1
-		fi
+		make setup || _worktree_install_rollback
 	elif [ -f "package.json" ]; then
-		if command -v bun >/dev/null 2>&1; then
-			echo "  Running: bun install"
-			bun install
+		# CTL-1628 post-merge (Codex #2948 round 4): BUN EVIDENCE alone (a
+		# bun.lock/bun.lockb, or "packageManager" naming bun) selects the bun
+		# path — independent of whether package.json also declares
+		# "workspaces". Round 3 required "workspaces" AND bun evidence, which
+		# meant a single-package bun project (bun.lock, no "workspaces" key —
+		# most bun apps aren't monorepos) fell through to npm and wrote
+		# package-lock.json debris into a bun-managed tree. "workspaces" is
+		# package-manager-neutral either way (an npm/yarn/pnpm monorepo
+		# declares it too), so it was never the right signal to gate on; only
+		# bun evidence is. The bun-absent warn+skip below applies identically
+		# to a workspace root and a single-package project — no need to
+		# distinguish the two once bun evidence itself is the sole gate.
+		HAS_BUN_LOCK=false
+		[ -f "bun.lock" ] || [ -f "bun.lockb" ] && HAS_BUN_LOCK=true
+		# CTL-1628 post-merge (Codex #2948 round 5): jq is not guaranteed present
+		# on every host this script runs on (a documented-minimal host can lack
+		# it) — a bare `jq -r ...` command substitution under this script's
+		# top-level `set -e` would exit 127 right here, AFTER `git worktree add`
+		# already created the worktree/branch but BEFORE any rollback is armed,
+		# stranding both with no error message and no attempt at npm. Guard on
+		# `command -v jq` first; without it, fall back to a plain grep sniff of
+		# the "packageManager" field — imprecise (matches inside any string
+		# value, ignores JSON structure) but adequate for the boolean bun@
+		# prefix check this needs, and it degrades to the same lock-file-only
+		# detection (HAS_BUN_LOCK, no jq involved) in the worst case rather than
+		# ever crashing the script.
+		#
+		# CTL-1628 post-merge (Codex #2948, round 6): the fallback grep was
+		# line-oriented, so valid JSON that splits "packageManager", the colon,
+		# or "bun@..." across lines (pretty-printed with one token per line,
+		# multi-line formatting from some generators, etc.) missed a genuine
+		# bun-only project and fell through to npm. `tr -d '[:space:]'` collapses
+		# all whitespace — including newlines — before the substring match, so
+		# formatting no longer matters. Still dependency-free (tr is as
+		# universal as grep). But normalized-text matching has two REMAINING
+		# imprecisions of its own, both fixed by the tiered fallback below
+		# (round 7): it can match a "packageManager":"bun@ substring sitting
+		# inside some unrelated string VALUE (any whitespace-normalized JSON
+		# is just text to grep), and it is not ROOT-scoped — a NESTED
+		# {"toolConfig":{"packageManager":"bun@1.3.5"}} matches even when the
+		# actual root-level project uses npm.
+		#
+		# CTL-1628 post-merge (Codex #2948, round 7): prefer a REAL JSON
+		# parser whenever one happens to be on PATH, so the two imprecisions
+		# above only apply on a truly minimal host with none available:
+		#   1. jq, if present — authoritative, unchanged from round 5.
+		#   2. else bun, if present — bun ships a JSON parser and its
+		#      presence is exactly what this sniff's outcome selects between
+		#      (bun path vs npm path), so using it here is both free and
+		#      trustworthy: if bun can't run this one-liner, it can't run
+		#      the install either. `-e` evaluates the given script directly.
+		#   3. else node, if present — same idea, most commonly-installed
+		#      JS runtime.
+		#   4. else (no jq/bun/node at all) — the round-6 normalized-grep
+		#      last resort, imprecisions documented above and accepted only
+		#      at this tier. Note npm itself is a node script (`#!/usr/bin/env
+		#      node`) and could not run on this host anyway, so a false
+		#      positive here only steers the user toward installing bun
+		#      instead of an npm install that would have failed regardless.
+		# Every tier's command substitution falls back to an explicit empty
+		# string on ANY non-zero exit (`|| PACKAGE_MANAGER_FIELD=""`) rather
+		# than trusting the sub-command to always exit 0 under this script's
+		# `set -e` — confirmed empirically that `node -e` (unlike `bun -e`)
+		# DOES exit non-zero on malformed JSON, which would otherwise abort
+		# the whole script exactly like the round-5 bare-jq bug.
+		#
+		# CTL-1628 post-merge (Codex #2966, round 8): `bun -e` was run with
+		# the PROJECT itself as cwd, so bun loaded the project's own
+		# bunfig.toml (default config path is $cwd/bunfig.toml — confirmed
+		# via `bun --help`) BEFORE evaluating the one-liner, including any
+		# `preload` array — arbitrary project-controlled code would run
+		# during worktree CREATION, before any trust decision. Confirmed
+		# empirically: a bunfig.toml `preload` script wrote a marker file
+		# under a plain `bun -e` run; `bun --config <path>` did NOT suppress
+		# it (bun's `-e` preload discovery ignores an explicit --config
+		# override); `bun --cwd <dir outside the project> -e` DID suppress
+		# it, and bun does not walk up the directory tree from --cwd looking
+		# for a config file, so any directory outside the project's own tree
+		# is sufficient isolation. Read package.json via an ABSOLUTE path
+		# passed through an env var — not interpolated into the JS source
+		# string, so no shell-to-JS quoting/escaping is needed for paths
+		# with unusual characters. node has no equivalent project-scoped
+		# auto-preload mechanism (no bunfig.toml analogue, and `node -e`'s
+		# cwd doesn't influence what code node executes), so it needs no cwd
+		# isolation — only switched to the same env-var-based absolute path
+		# for a single shared PM_SNIFF template.
+		#
+		# CTL-1628 post-merge (Codex #2967, round 9): round 8 pointed --cwd
+		# at /tmp — but /tmp is world-writable, so an attacker who can plant
+		# /tmp/bunfig.toml poisons the sniff exactly the same way the
+		# project's own bunfig.toml did (confirmed empirically: a
+		# /tmp/bunfig.toml preload DOES get loaded by `bun --cwd /tmp -e`).
+		# Use `mktemp -d` instead — a freshly-created, private (0700, owned
+		# by us) directory an attacker cannot have pre-planted a config
+		# into. Trap-cleaned on EXIT so an interrupted sniff doesn't leak
+		# the scratch dir; the trap is cleared right after we clean up
+		# normally so it doesn't linger for the rest of the script.
+		#
+		# CTL-1628 post-merge (Codex #2967 post-merge, round 10): two
+		# follow-ups on round 9's mktemp:
+		#   1. A bare `mktemp -d` resolves under $TMPDIR (/tmp on
+		#      macOS/most Linux) — a shared, multi-user directory. Threat
+		#      model: without the sticky bit (not guaranteed by mktemp
+		#      itself, only that the CREATED dir is 0700), another local
+		#      user could race a rename-and-replace against it. Prefer a
+		#      scratch dir under $HOME instead — single-user by
+		#      construction — falling back to the previous /tmp-based
+		#      mktemp only if $HOME/.cache can't be created/used.
+		#   2. mktemp failure used to give up on the sniff entirely rather
+		#      than trying the remaining tiers. Restructured the whole
+		#      jq/bun/node/grep chain from an if/elif (mutually exclusive by
+		#      construction) into a cascade gated on SNIFF_DONE, so "bun is
+		#      on PATH but mktemp failed" now falls through to node (if
+		#      present) and then the text sniff, instead of a dead end.
+		PM_SNIFF='console.log(JSON.parse(require("fs").readFileSync(process.env.CW_PACKAGE_JSON,"utf8")).packageManager??"")'
+		PACKAGE_JSON_ABS="$(pwd)/package.json"
+		PACKAGE_MANAGER_FIELD=""
+		SNIFF_DONE=false
+		if command -v jq >/dev/null 2>&1; then
+			PACKAGE_MANAGER_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+			SNIFF_DONE=true
+		fi
+		# CTL-1628 post-merge (Codex #2967 post-merge, round 11): three more
+		# follow-ups, verified directly on this host (macOS/BSD userland):
+		#   1. `mktemp -d -p <dir>` (no explicit template) DID work correctly
+		#      here (BSD mktemp's synopsis on this machine documents -p), but
+		#      -p support isn't guaranteed across every mktemp this script
+		#      might run under fleet-wide (older BSD variants, minimal
+		#      containers). The explicit-template form `mktemp -d
+		#      "<dir>/prefix.XXXXXXXX"` is unambiguously portable across both
+		#      GNU and BSD mktemp — verified working identically to -p on
+		#      this host — so use it everywhere instead of relying on -p.
+		#   2. The `mkdir -p "$CATALYST_SNIFF_CACHE"` was a bare statement
+		#      under this script's top-level `set -e` — confirmed directly
+		#      that a failing `mkdir -p` (read-only/unwritable parent) trips
+		#      set -e and aborts the WHOLE worktree creation. A
+		#      sniff-infrastructure failure must never do that; `|| true`
+		#      makes the failure a no-op that the writability check below
+		#      catches instead.
+		#   3. The $HOME/.cache preference (round 10) only checked
+		#      existence+writability, which a group-writable or symlinked
+		#      ~/.cache would still pass. Threat model: this is a dev tool,
+		#      not a setuid binary, so a full TOCTOU-proof design is
+		#      overkill — but a cheap, few-line check (not a symlink, owned
+		#      by us, no group/other write bit) rejects the specific
+		#      "attacker-controlled ~/.cache" shape the finding describes,
+		#      falling back to the TMPDIR-based mktemp (same portable
+		#      template form) if any check fails.
+		if [ "$SNIFF_DONE" = false ] && command -v bun >/dev/null 2>&1; then
+			# Defined here (not inside a parent-check block) so it's available
+			# regardless of which path — or neither — actually runs below.
+			_stat_probe() {
+				local flag="$1" fmt="$2" target="$3" pattern="$4" out
+				out=$(stat "$flag" "$fmt" "$target" 2>/dev/null) || out=""
+				if [[ "$out" =~ $pattern ]]; then
+					echo "$out"
+					return 0
+				fi
+				return 1
+			}
+			_stat_owner() { _stat_probe -f '%u' "$1" '^[0-9]+$' || _stat_probe -c '%u' "$1" '^[0-9]+$'; }
+			# _stat_perm_oct <target> — echoes the permission+special bits
+			# (setuid/setgid/sticky + rwx) as a DECIMAL number ready for
+			# arithmetic. BSD's %Lp ("logical permissions") turned out to
+			# silently STRIP the sticky bit entirely (confirmed directly:
+			# chmod 1777 a dir, %Lp reports "777" — no leading digit at
+			# all), which would have made _perm_has_sticky always false on
+			# macOS/BSD and defeated the TMPDIR safety check below on the
+			# most common secure /tmp configuration. %p (full raw mode,
+			# includes file-type bits) does carry it; masking with & 07777
+			# strips the file-type bits uniformly for both dialects (GNU's
+			# %a has none to begin with, so the mask is a safe no-op there).
+			_stat_perm_oct() {
+				local raw
+				raw=$(_stat_probe -f '%p' "$1" '^[0-9]+$') || raw=$(_stat_probe -c '%a' "$1" '^[0-7]+$') || return 1
+				echo $(( (8#$raw) & 4095 ))
+			}
+			_perm_no_group_other_write() {
+				local oct="$1"
+				[ $(( (oct / 8) % 8 & 2 )) -eq 0 ] && [ $(( oct % 8 & 2 )) -eq 0 ]
+			}
+			# Sticky bit is bit 9 (0-indexed) of the masked mode — e.g. 1777
+			# octal = 1023 decimal, (1023/512)&1 = 1; 0700 octal = 448
+			# decimal, (448/512)&1 = 0.
+			_perm_has_sticky() {
+				local oct="$1"
+				[ $(( (oct / 512) & 1 )) -eq 1 ]
+			}
+			# CTL-1628 post-merge (Codex #2975 post-merge, round 14): a
+			# post-creation check applied to whatever mktemp actually
+			# returned (owned by us, exactly 0700) — a TOCTOU-narrowing
+			# backstop independent of the parent check below, so even a
+			# parent that passed its pre-check but got raced doesn't get
+			# trusted blindly. A candidate that fails this is removed and
+			# DISCARDED — the caller falls through to the next tier.
+			_scratch_dir_verified() {
+				local dir="$1" owner perm_oct
+				owner=$(_stat_owner "$dir") || return 1
+				[ "$owner" = "$(id -u)" ] || return 1
+				perm_oct=$(_stat_perm_oct "$dir") || return 1
+				[ "$perm_oct" -eq 448 ]
+			}
+			CATALYST_SNIFF_CACHE="$HOME/.cache"
+			mkdir -p "$CATALYST_SNIFF_CACHE" 2>/dev/null || true
+			CACHE_SAFE=false
+			if [ -d "$CATALYST_SNIFF_CACHE" ] && [ ! -L "$CATALYST_SNIFF_CACHE" ] && [ -w "$CATALYST_SNIFF_CACHE" ]; then
+				# CTL-1628 post-merge (Codex #2972 post-merge, round 12): the
+				# prior `stat -f ... || stat -c ...` was a SINGLE command
+				# substitution wrapping both probes, so on GNU stat (where -f
+				# means "show FILESYSTEM status", a completely different flag
+				# than BSD's -f FORMAT) the first probe's own stdout — a
+				# multi-line filesystem-status report, not a clean UID —
+				# stayed captured even when its nonzero exit triggered the ||
+				# fallback, and the second probe's output landed appended
+				# after it. _stat_probe validates the CAPTURED value itself
+				# (must be a pure digit string / octal digit string) — the
+				# validation gate is what makes probe order irrelevant and
+				# neutralizes either variant's noise, not exit-code-based ||
+				# chaining alone. Its own `stat` call is guarded with
+				# `|| out=""` so a probe's nonzero exit (expected and normal
+				# for the "wrong" stat dialect) can never trip this script's
+				# top-level set -e on its own, the same class of bug this
+				# whole isolation effort has repeatedly had to fix elsewhere.
+				# (_stat_probe / _stat_owner / _stat_perm_oct now defined
+				# once, above, and reused by the TMPDIR-parent check and the
+				# post-creation verification below rather than duplicated.)
+				CACHE_OWNER=$(_stat_owner "$CATALYST_SNIFF_CACHE") || CACHE_OWNER=""
+				CACHE_PERM_OCT=$(_stat_perm_oct "$CATALYST_SNIFF_CACHE") || CACHE_PERM_OCT=""
+				if [ -n "$CACHE_OWNER" ] && [ "$CACHE_OWNER" = "$(id -u)" ] && [ -n "$CACHE_PERM_OCT" ] &&
+					_perm_no_group_other_write "$CACHE_PERM_OCT"; then
+					CACHE_SAFE=true
+				fi
+			fi
+			# CTL-1628 post-merge (Codex #2975 post-merge, round 14): the
+			# round-13 TMPDIR retry attempted mktemp there with NO parent
+			# safety check at all (unlike the cache path above) — reopening
+			# the group-writable/symlinked-parent class of attack round 12
+			# closed for $HOME/.cache, just against $TMPDIR instead. $TMPDIR
+			# is typically the shared, sticky-bit 1777 /tmp — requiring the
+			# SAME strict "no group/other write" the cache parent needs would
+			# reject the normal, secure default everywhere, so TMPDIR only
+			# needs EITHER the sticky bit (rename/delete restricted to the
+			# owning user, the standard protection) OR the same strict
+			# cache-style permissions.
+			TMPDIR_TARGET="${TMPDIR:-/tmp}"
+			TMPDIR_SAFE=false
+			if [ -d "$TMPDIR_TARGET" ] && [ ! -L "$TMPDIR_TARGET" ]; then
+				TMPDIR_PERM_OCT=$(_stat_perm_oct "$TMPDIR_TARGET") || TMPDIR_PERM_OCT=""
+				if [ -n "$TMPDIR_PERM_OCT" ] &&
+					{ _perm_has_sticky "$TMPDIR_PERM_OCT" || _perm_no_group_other_write "$TMPDIR_PERM_OCT"; }; then
+					TMPDIR_SAFE=true
+				fi
+			fi
+			# CTL-1628 post-merge (Codex #2972 post-merge, round 13): the
+			# safe-cache and TMPDIR attempts used to be mutually exclusive
+			# (if/else) — when $HOME/.cache passed the safety check but the
+			# mktemp call THERE specifically failed (e.g. that filesystem is
+			# full or over quota, independent of $TMPDIR), the sniff gave up
+			# rather than trying TMPDIR as a second attempt. Try the safe
+			# cache first (still preferred — single-user by construction),
+			# and only on ITS mktemp failing (not merely CACHE_SAFE being
+			# false) fall through to the TMPDIR-based mktemp, which is safe
+			# on its own terms — mktemp's own atomic O_EXCL creation already
+			# guarantees whatever it creates is 0700 owned by us, the same
+			# baseline guarantee round 9's original /tmp-based fix relied on
+			# before $HOME/.cache was even added as a preference. Round 14
+			# adds post-creation verification (_scratch_dir_verified) to
+			# EACH attempt: if validation fails, the candidate is discarded
+			# and the caller falls through to the next tier rather than
+			# proceeding with an unverified cwd. The TMPDIR attempt is also
+			# now gated on TMPDIR_SAFE — it is skipped entirely (not just
+			# unverified after the fact) when the parent itself looks unsafe.
+			BUN_SNIFF_CWD=""
+			if [ "$CACHE_SAFE" = true ]; then
+				BUN_SNIFF_CANDIDATE=$(mktemp -d "${CATALYST_SNIFF_CACHE}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CANDIDATE=""
+				if [ -n "$BUN_SNIFF_CANDIDATE" ]; then
+					if _scratch_dir_verified "$BUN_SNIFF_CANDIDATE"; then
+						BUN_SNIFF_CWD="$BUN_SNIFF_CANDIDATE"
+					else
+						rm -rf "$BUN_SNIFF_CANDIDATE"
+					fi
+				fi
+			fi
+			if [ -z "$BUN_SNIFF_CWD" ] && [ "$TMPDIR_SAFE" = true ]; then
+				BUN_SNIFF_CANDIDATE=$(mktemp -d "${TMPDIR_TARGET}/catalyst-sniff.XXXXXXXX" 2>/dev/null) || BUN_SNIFF_CANDIDATE=""
+				if [ -n "$BUN_SNIFF_CANDIDATE" ]; then
+					if _scratch_dir_verified "$BUN_SNIFF_CANDIDATE"; then
+						BUN_SNIFF_CWD="$BUN_SNIFF_CANDIDATE"
+					else
+						rm -rf "$BUN_SNIFF_CANDIDATE"
+					fi
+				fi
+			fi
+			if [ -n "$BUN_SNIFF_CWD" ]; then
+				trap 'rm -rf "$BUN_SNIFF_CWD"' EXIT
+				PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" bun --cwd "$BUN_SNIFF_CWD" -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+				rm -rf "$BUN_SNIFF_CWD"
+				trap - EXIT
+				SNIFF_DONE=true
+			fi
+			# CTL-1628 post-merge (Codex #2967 post-merge, round 11, #4): if
+			# BOTH scratch-dir attempts fail (an extremely rare double
+			# failure — $HOME/.cache and $TMPDIR are practically never both
+			# unwritable on the same host), SNIFF_DONE stays false and this
+			# falls through to node / the text sniff below rather than
+			# giving up. Considered running bun --cwd against the WORKTREE
+			# itself as a still-isolated alternative — rejected: by this
+			# point in the script `git worktree add` has already checked
+			# out the full project tree (including any committed
+			# bunfig.toml) into $WORKTREE_PATH, so that cwd is NOT provably
+			# bunfig-free — it is exactly the round-8 vulnerability this
+			# whole isolation effort exists to avoid. The imprecise text
+			# sniff is the correct, designed last resort here, not a gap.
+		fi
+		if [ "$SNIFF_DONE" = false ] && command -v node >/dev/null 2>&1; then
+			PACKAGE_MANAGER_FIELD=$(CW_PACKAGE_JSON="$PACKAGE_JSON_ABS" node -e "$PM_SNIFF" 2>/dev/null) || PACKAGE_MANAGER_FIELD=""
+			SNIFF_DONE=true
+		fi
+		if [ "$SNIFF_DONE" = false ] && tr -d '[:space:]' <package.json 2>/dev/null | grep -q '"packageManager":"bun@'; then
+			PACKAGE_MANAGER_FIELD="bun@detected"
+			SNIFF_DONE=true
+		fi
+		HAS_BUN_EVIDENCE=false
+		if [ "$HAS_BUN_LOCK" = true ] || [[ "$PACKAGE_MANAGER_FIELD" == bun@* ]]; then
+			HAS_BUN_EVIDENCE=true
+		fi
+		if [ "$HAS_BUN_EVIDENCE" = true ]; then
+			if command -v bun >/dev/null 2>&1; then
+				if [ "$HAS_BUN_LOCK" = true ]; then
+					# CTL-1628: use --frozen-lockfile so the fresh worktree installs
+					# exactly what's committed in bun.lock rather than silently
+					# re-resolving and rewriting the lockfile before the worker's
+					# first commit (which could otherwise ride unrelated lockfile
+					# drift into the ticket's diff).
+					echo "  Running: bun install --frozen-lockfile"
+					bun install --frozen-lockfile || _worktree_install_rollback
+				else
+					# No lock committed yet (bun evidence is only the
+					# "packageManager" field) — nothing to freeze against, so a
+					# plain install is correct here rather than a guaranteed
+					# --frozen-lockfile failure.
+					echo "  Running: bun install"
+					bun install || _worktree_install_rollback
+				fi
+			else
+				echo -e "${YELLOW}⚠️  bun not found on PATH — this is a bun-managed project${NC}"
+				echo "  (bun.lock/bun.lockb present, or \"packageManager\" names bun)."
+				echo "  Skipping auto-install rather than falling back to npm, which"
+				echo "  ignores bun.lock and writes package-lock.json debris into a"
+				echo "  bun-managed tree."
+				if [ "$HAS_BUN_LOCK" = true ]; then
+					echo "  Install bun (https://bun.sh) and run 'bun install --frozen-lockfile'"
+				else
+					echo "  Install bun (https://bun.sh) and run 'bun install'"
+				fi
+				echo "  in the worktree manually."
+			fi
 		else
 			echo "  Running: npm install"
-			npm install
+			npm install || _worktree_install_rollback
 		fi
 	fi
 
@@ -483,20 +932,7 @@ if [ "$THOUGHTS_INIT_EXPECTED" = true ] && { [ ! -L "thoughts/shared" ] || [ ! -
 	echo "  ~/.config/humanlayer/humanlayer.json (concurrent 'thoughts init'"
 	echo "  write race) dropped init into an interactive prompt that failed."
 	echo -e "${RED}  Cleaning up worktree...${NC}"
-	cd - >/dev/null
-	# CTL-649: defensive presweep before removal.
-	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-	[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
-		"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-	# CTL-1417: skip the force-remove if the tree is in use / is our cwd OR the
-	# guard is unavailable (fail-closed), leaving it for the reaper rather than
-	# deleting an in-use worktree.
-	if _removal_guard_ok "$WORKTREE_PATH"; then
-		git worktree remove --force "$WORKTREE_PATH"
-		git branch -D "$WORKTREE_NAME" 2>/dev/null || true
-	else
-		echo "create-worktree: guard refused/unavailable for ${WORKTREE_PATH}; leaving for reaper" >&2
-	fi
+	_worktree_rollback_remove
 	exit 1
 fi
 

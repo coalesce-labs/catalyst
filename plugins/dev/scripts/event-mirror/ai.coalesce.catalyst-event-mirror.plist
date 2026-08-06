@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ai.coalesce.catalyst-event-mirror.plist — CTL-1654
+  launchd agent for the event-mirror daemon (monitor/developer nodes only).
+  Install: launchctl load -w ~/Library/LaunchAgents/ai.coalesce.catalyst-event-mirror.plist
+  Managed by catalyst-stack start/stop on observation nodes.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.coalesce.catalyst-event-mirror</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>LAUNCH_SH_PLACEHOLDER</string>
+  </array>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>CATALYST_DIR_PLACEHOLDER/event-mirror.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>CATALYST_DIR_PLACEHOLDER/event-mirror.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>HOME_PLACEHOLDER</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    <key>CATALYST_DIR</key>
+    <string>CATALYST_DIR_PLACEHOLDER</string>
+  </dict>
+</dict>
+</plist>

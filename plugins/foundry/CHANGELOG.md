@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.3.0...catalyst-foundry-v2.4.0) (2026-08-04)
+
+
+### Features
+
+* **dev:** CTL-1628 catalyst-runtime-root resolver — fold Tier 1 duplicates + 4 latent resolver bugs (Phase A2) ([#2946](https://github.com/coalesce-labs/catalyst/issues/2946)) ([c01ef76](https://github.com/coalesce-labs/catalyst/commit/c01ef76bd7ec44fee32369f732848494187c1b97))
+
 ## [2.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.2.0...catalyst-foundry-v2.3.0)
 
 Jul 27, 2026

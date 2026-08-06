@@ -38,7 +38,10 @@
 //     Linear call on a request path").
 //   - NEVER throws.
 //
-// Dependencies: none beyond node built-ins + Bun's global `fetch`.
+// Dependencies: node built-ins + Bun's global `fetch`, plus (CTL-1616 PR3) the
+// shared secret-contract engine for the LINEAR_API_TOKEN/LINEAR_API_KEY
+// resolution below (design §8 PR3 table).
+import { resolveSecret } from "../../lib/secret-contract.mjs";
 
 // ── In-memory TTL cache ───────────────────────────────────────────────────────
 // Keyed by ticket ID (e.g. "CTL-926"). Value:
@@ -166,7 +169,7 @@ const TITLE_DESC_QUERY_FOR_TEAM = `query FallbackTitleDesc($teamKey: String!, $n
 }`;
 
 function linearAuthHeader() {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   if (!token) return null;
   return /^lin_oauth/i.test(token) ? `Bearer ${token}` : token;
 }

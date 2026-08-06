@@ -787,7 +787,9 @@ export function deriveCurrentPhase(phaseSigs) {
         model: sig.model || null,
         startedAt: sig.startedAt,
         updatedAt: sig.updatedAt,
-        failureReason: sig.failureReason ?? sig.stalledReason ?? null,
+        // attentionReason inserted between failureReason and stalledReason to match
+        // scheduler.mjs:2666 readDispatchFailureReason precedence (CTL-1648).
+        failureReason: sig.failureReason ?? sig.attentionReason ?? sig.stalledReason ?? null,
       };
     }
     lastTerminal = {
@@ -796,7 +798,7 @@ export function deriveCurrentPhase(phaseSigs) {
       model: sig.model || null,
       startedAt: sig.startedAt,
       updatedAt: sig.updatedAt,
-      failureReason: sig.failureReason ?? sig.stalledReason ?? null,
+      failureReason: sig.failureReason ?? sig.attentionReason ?? sig.stalledReason ?? null,
     };
     lastTerminalIndex = i;
   }
@@ -845,7 +847,7 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remediateSig.updatedAt ?? null,
-      failureReason: remediateSig.failureReason ?? remediateSig.stalledReason ?? null,
+      failureReason: remediateSig.failureReason ?? remediateSig.attentionReason ?? remediateSig.stalledReason ?? null,
     };
   }
   // Case 2: remediate is terminal but more recent than what PHASE_ORDER surfaced.
@@ -860,7 +862,7 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remUpdated || null,
-      failureReason: remediateSig.failureReason ?? remediateSig.stalledReason ?? null,
+      failureReason: remediateSig.failureReason ?? remediateSig.attentionReason ?? remediateSig.stalledReason ?? null,
     };
   }
   return cur;

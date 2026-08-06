@@ -1,7 +1,7 @@
 ---
 name: phase-review
 description: |
-  Phase agent for the review step of the 9-phase orchestrator pipeline (CTL-450).
+  Phase agent for the review step of the 10-phase orchestrator pipeline (CTL-450).
   Wraps the /review skill (gstack) — explicitly skips /ultrareview per user decision.
   Reads verify.json from the prior phase, runs /review against the diff, writes
   ${ORCH_DIR}/workers/<TICKET>/review.json, and creates a remediation commit for

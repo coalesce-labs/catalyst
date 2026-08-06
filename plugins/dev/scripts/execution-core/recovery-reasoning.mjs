@@ -173,6 +173,21 @@ export function reasoningRecoveryPass(items, opts = {}) {
       continue;
     }
 
+    // PROJ-1657 Codex P1 (round 8): a probe-less phase already parked terminal
+    // via markEscalationCapTerminal (stalledReason "no-probe-for-phase" — a dead
+    // recovery-pass worker with no retry path) has no typed failure signature,
+    // so defaultClassifyTicket would fall through to its generic
+    // decision:"defer"/fix_class:"board-health" case. readDeferredBoardHealthIntents
+    // later picks that defer up as a holistic board-health candidate, and
+    // holisticBoardHealthAct can dispatch a brand-new recovery-pass generation
+    // for it — silently reversing the terminal hand-off to a human this branch
+    // just declared. Same skip shape as the linearTerminal guard above.
+    if (item.evidence?.signal?.stalledReason === "no-probe-for-phase") {
+      log(`recovery-reasoning: ${item.ticket} skipped (terminal no-probe-for-phase)`);
+      tickStats.terminalSkipped.push(item.ticket);
+      continue;
+    }
+
     // DIAGNOSE: reuse diagnostician evidence. If the caller didn't attach
     // logsOutput, capture it read-only now (claude logs + bg job state). This is
     // a pure collector — no env gate, no side effects (CTL-937 captureEvidence).
@@ -1251,6 +1266,15 @@ function promoteNumericAttrs(type, details) {
     // dashboards/alerts get a chartable dispatch-rate signal (the act object rides in
     // body.payload, which the OTel/Loki path does not make queryable).
     num("recovery.act_dispatched", details.actDispatched);
+    // CTL-1607: per-host slot census → chartable Loki metadata. Fleet-wide free
+    // capacity is sum(recovery.slot.free) across hosts (host identity via host_name
+    // metadata). Sum FREE directly — never slot.capacity - slot.in_use: on a
+    // draining/stale-liveness node slot.free is gate-collapsed to 0 while
+    // slot.in_use still reports actual occupancy, so capacity − in_use overstates
+    // admittable free (see the emit-site note in board-health.mjs).
+    num("recovery.slot.capacity", details.slotCapacity);
+    num("recovery.slot.in_use", details.slotInUse);
+    num("recovery.slot.free", details.slotFree);
     str("recovery.gate_decision", details.gateDecision);
     str("recovery.gate_reason", details.gateReason);
     str("recovery.mode", details.mode);
@@ -2351,6 +2375,11 @@ export function defaultClearIntentCooldown(ticket, opts = {}) {
     return false; // absent / malformed → nothing to clear
   }
   if (!prior || typeof prior !== "object") return false;
+  // CTL-1610: a failed dispatch resets only the retryable COOLDOWN timer. An
+  // escalated entry's ts/lastTs are the TERMINAL human-handoff clock the 7-day
+  // TTL ages off (RECOVERY_TERMINAL_INTENT_TTL_MS) — stripping them here strands
+  // the ticket in a permanent "escalated" latch (defaultSkipReason:2136). Refuse.
+  if (prior.escalated === true) return false;
   delete prior.lastTs;
   delete prior.ts;
   try {
@@ -2359,4 +2388,48 @@ export function defaultClearIntentCooldown(ticket, opts = {}) {
   } catch {
     return false;
   }
+}
+
+// CTL-1610 (Phase 2): true iff the intent is an escalated latch with NO numeric
+// clock — the timestamp-less state that defaultSkipReason:2136 treats as
+// permanently terminal. Read-only; absent/malformed ledger → false.
+export function defaultLatchHasNoClock(ticket, opts = {}) {
+  const orchDir = opts.orchDir ?? resolveOrchDir();
+  if (!orchDir || !ticket) return false;
+  let data;
+  try { data = JSON.parse(readFileSync(recoveryIntentPath(orchDir, ticket), "utf8")); }
+  catch { return false; }
+  if (!data || data.escalated !== true) return false;
+  const last = typeof data.lastTs === "number" ? data.lastTs : data.ts;
+  return typeof last !== "number";
+}
+
+// CTL-1610 (Phase 3): one-time heal for entries stripped before the Phase-1
+// guard shipped. Re-stamps ts/lastTs=now on every escalated+no-clock intent so
+// it becomes TTL-bounded instead of permanently terminal. Returns the tickets
+// changed. dryRun:true lists without writing.
+export function restampNoClockEscalations(opts = {}) {
+  const orchDir = opts.orchDir ?? resolveOrchDir();
+  const now = opts.now ?? (() => Date.now());
+  const dryRun = opts.dryRun === true;
+  const dir = join(orchDir, ".recovery-intents");
+  let files;
+  try { files = readdirSync(dir).filter((f) => f.endsWith(".json")); } catch { return []; }
+  const changed = [];
+  for (const f of files) {
+    const ticket = f.replace(/\.json$/, "");
+    if (!defaultLatchHasNoClock(ticket, { orchDir })) continue;
+    if (dryRun) { changed.push(ticket); continue; }
+    // Per-file try/catch: a single unreadable/unwritable file must not abort
+    // the scan — remaining entries must still be healed (CTL-1610 Codex P2).
+    try {
+      const p = join(dir, f);
+      const data = JSON.parse(readFileSync(p, "utf8"));
+      const ts = now();
+      data.ts = ts; data.lastTs = ts;
+      writeFileSync(p, JSON.stringify(data));
+      changed.push(ticket);
+    } catch { /* best-effort per-file — continue to next */ }
+  }
+  return changed;
 }
