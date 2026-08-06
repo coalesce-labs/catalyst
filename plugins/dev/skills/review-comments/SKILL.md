@@ -46,13 +46,35 @@ gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
 Group comments into threads using `in_reply_to_id` — read the full thread before acting on any
 individual comment, since later replies may refine or resolve earlier ones.
 
+## Step 1.5: Determine the Review Round
+
+Automated reviewers re-review after every remediation push, and each round can surface new,
+smaller findings. Count how many times THIS bot reviewer has submitted a review on this PR — the
+first submission is round 1:
+
+```bash
+BOT_LOGIN=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+  --jq '[.[] | select(.user.type == "Bot")] | last | .user.login // empty')
+REVIEW_ROUND=$( [ -n "$BOT_LOGIN" ] && gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+  --jq "[.[] | select(.user.login == \"${BOT_LOGIN}\")] | length" || echo 1 )
+```
+
+- `REVIEW_ROUND == 1` → fix every actionable finding this pass, regardless of priority (Step 2).
+- `REVIEW_ROUND >= 2` → P0/P1 stays mandatory-fix; P2-and-lower findings may be deferred instead
+  of fixed inline (see "Deferring low-priority findings after round one" under Step 3).
+
+This exists because fine-grained automated reviewers keep surfacing progressively smaller findings
+on every pass — chasing all of them to zero burns disproportionate time and tokens for diminishing
+value.
+
 ## Step 2: Categorize Comments
 
 | Category | Action |
 |----------|--------|
-| **Code change requested** | Implement the fix |
+| **Code change requested** | Implement the fix (round 1: any priority; round 2+: P0/P1 only — see below) |
 | **Question / clarification** | Read context and draft a reply |
 | **Suggestion (optional)** | Evaluate — implement if it improves the code, explain trade-off if not |
+| **Deferred (P2/P3, round 2+)** | File a follow-up ticket capturing the finding; reply linking it; do not implement inline — see "Deferring low-priority findings after round one" |
 | **Approval / praise** | No action needed |
 | **Already resolved** | Skip (check if thread is marked resolved) |
 
@@ -82,6 +104,17 @@ I think this would [concern]. Draft reply:
 Post this reply? [y/N]
 ```
 
+**Deferring low-priority findings after round one:** on `REVIEW_ROUND >= 2`, a P2-or-lower finding
+does not get implemented inline (P0/P1 always gets fixed, every round). Instead:
+1. File a follow-up ticket capturing the finding (file, line, what the reviewer flagged) — same
+   team as the PR's ticket, Backlog status.
+2. Reply on the thread linking the follow-up ticket, then resolve the thread (Step 5).
+
+This is a policy decision, not a judgment call — unlike disagreements above, it does NOT go through
+the `[y/N]` prompt and applies identically in interactive and headless mode. It keeps AGENTS.md's
+"every review thread resolved" rule intact: deferral resolves the thread via that reply, it does
+not leave it open.
+
 ## Non-interactive / headless mode (CTL-1496)
 
 When `CATALYST_PHASE` is set **or** `--headless` is passed as an argument, this skill runs in a
@@ -89,6 +122,9 @@ mode safe for `claude --bg` workers (no stdin available):
 
 - **Addressable findings** (code change requested, clear fix) → address in code + resolve the
   thread via `resolveReviewThread` mutation (same as the interactive path). Unchanged.
+- **Deferred findings** (P2/P3 on `REVIEW_ROUND >= 2`) → same in both modes: file the follow-up
+  ticket, reply, resolve the thread. Not gated on `--headless` — see "Deferring low-priority
+  findings after round one" above; this is a policy decision, not a judgment call.
 - **Disagreement / judgment-call findings** → the `Post this reply? [y/N]` prompt is **SKIPPED** in headless mode.
   Instead, the thread is left unresolved and a structured record is appended to the ticket's
   worker directory under the orchestrator dir:
@@ -132,6 +168,7 @@ workflow. Summary:
 
 - **Code change implemented** → resolve the thread
 - **Reply posted** (disagreement or clarification) → resolve the thread
+- **Deferred to follow-up ticket** (P2/P3, round 2+) → resolve the thread
 - **Approval / praise** → already not blocking, skip
 - **Could not address** → do NOT resolve; leave for human review
 
@@ -163,14 +200,21 @@ workflow. Summary:
    - Analysis: The switch is more readable here and has exhaustiveness checking.
    - Draft reply ready — awaiting your decision.
 
+### Deferred to Follow-up (round 2+, low priority)
+
+5. **@reviewer** on `path/to/file.ts:200`
+   - Comment: "Consider extracting this into a helper"
+   - Filed as: {TICKET-ID} — reply posted, thread resolved
+
 ### No Action Needed
 
-5. **@reviewer**: "LGTM" (approval)
+6. **@reviewer**: "LGTM" (approval)
 
 ### Summary
 - Code changes: {N}
 - Questions answered: {N}
 - Disagreements flagged: {N}
+- Deferred to follow-up: {N}
 - Skipped (resolved/approval): {N}
 - Commit: {short hash} pushed to branch
 ```

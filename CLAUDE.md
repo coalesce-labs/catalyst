@@ -26,8 +26,12 @@ concrete instance of the tool-agnostic "automated code reviewer" in `AGENTS.md` 
 
 - **Triggers:** PR opened for review, draft marked ready, or a `@codex review` comment — **not**
   every push. After a remediation push, request a re-review with `@codex review`.
-- **Findings:** posted as inline **review threads** (P1/P2/P3). Resolve each via GraphQL
-  `addPullRequestReviewThreadReply` + `resolveReviewThread` — never `--admin`.
+- **Findings:** posted as inline **review threads** (P1/P2/P3 — Codex has no P0). Resolve each via
+  GraphQL `addPullRequestReviewThreadReply` + `resolveReviewThread` — never `--admin`. **Round 1**
+  (the review right after the PR opens or is marked ready): fix and resolve every actionable
+  finding regardless of priority. **Round 2+** (any re-review after a remediation push): P1 stays
+  mandatory-fix; P2/P3 may be deferred to a follow-up ticket instead of fixed inline — see
+  `AGENTS.md` → "Pull requests" and `/catalyst-dev:review-comments`.
 - **No findings = a clean pass:** Codex reacts 👍 **or** posts an issue comment "Codex Review:
   Didn't find any major issues 🎉 / Reviewed commit: `<sha>`". This is a resolved review, not a
   missing one. Note the clean-pass result is an **issue comment / reaction**, not a `reviews` API
