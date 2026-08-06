@@ -4297,6 +4297,67 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     expect(escalate.calls.length).toBe(0); // reconciled to done, never escalated
     expect(reapIntent.calls[0][0]).toBe("phase.reclaim.reap-requested");
   });
+
+  test("no-probe-for-phase skips an already-parked needs-human signal instead of re-escalating (regression, Codex #3027 round 4 P2)", () => {
+    // recovery-emit.mjs's `escalated` subcommand already parked this signal
+    // needs-human with a worker-authored decision brief before the worker
+    // died (crashed before its phase-completion event landed). Re-escalating
+    // with a generic no-probe-for-phase brief would discard that curated
+    // explanation — mirrors the pre-existing needs-input guard.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const recoveryPassSig = {
+      ticket: "PROJ-507",
+      phase: "recovery-pass",
+      status: "needs-human",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-507", phase: "recovery-pass", status: "needs-human", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => false,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("noop");
+    expect(escalate.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+  });
+
+  test("no-probe-for-phase returns 'reclaim-failed' when the complete-event-seen emit-complete repair fails (regression, Codex #3027 round 4 P2)", () => {
+    // The other completion-reconciliation branches (CTL-778 alive-probe-reclaim,
+    // and branch (B) of reclaimDeadWork) both return 'reclaim-failed' on a
+    // non-zero emitComplete — this branch must match so scheduler.mjs doesn't
+    // bucket a failed signal repair as a successful reclaim.
+    const emit = recorder({ code: 1, stderr: "boom" });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const reapIntent = recorder(Promise.resolve());
+    const recoveryPassSig = {
+      ticket: "PROJ-508",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-508", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      emitReapIntent: reapIntent,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(emit.calls.length).toBe(1);
+  });
 });
 
 describe("readBootSince — CTL-655 boot-time window reader", () => {

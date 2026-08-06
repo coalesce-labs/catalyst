@@ -272,6 +272,19 @@ describe("isTicketInFlight", () => {
   test("no signals at all → NOT in-flight", () => {
     expect(isTicketInFlight({})).toBe(false);
   });
+  // PROJ-1657 Codex P1 (round 4): a stalled ANCILLARY (non-pipeline) signal
+  // must not by itself flip an otherwise-live ticket to not-in-flight, but a
+  // stalled ancillary signal with NO real pipeline signal at all must still
+  // correctly report not-in-flight (the original CTL-1657 case).
+  test("a stalled recovery-pass signal with no other phase → NOT in-flight (original CTL-1657 case)", () => {
+    expect(isTicketInFlight({ "recovery-pass": "stalled" })).toBe(false);
+  });
+  test("a stalled recovery-pass signal alongside a running pipeline phase → still in-flight", () => {
+    expect(isTicketInFlight({ "recovery-pass": "stalled", implement: "running" })).toBe(true);
+  });
+  test("a stalled recovery-pass signal alongside a stalled pipeline phase → NOT in-flight", () => {
+    expect(isTicketInFlight({ "recovery-pass": "stalled", implement: "stalled" })).toBe(false);
+  });
 });
 
 describe("listInFlightTickets / readMaxParallel / computeFreeSlots", () => {

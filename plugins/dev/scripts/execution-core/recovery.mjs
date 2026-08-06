@@ -88,7 +88,7 @@ function peerLivenessConfigured(anchorIssue) {
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
-// CTL-1657: the one non-FSM phase this module knows is legitimately dispatched
+// PROJ-1657: the one non-FSM phase this module knows is legitimately dispatched
 // through the same workers/<ticket>/phase-<name>.json signal-file machinery
 // (recovery-reasoning.mjs's Pass 0r recovery-pass actuator). Anything else
 // unrecognized by isKnownPhase is treated as genuinely unknown data (a typo or
@@ -1897,7 +1897,7 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 // first) renders the final brief. A terminal signal drops the ticket from the
 // reclaim sweep's working set — originally so the every-cool-down re-ask loop
 // (audit RC4) ends once the escalation ask-cap is consumed (the default
-// `stalledReason`); CTL-1657 reuses the same terminal-write for the
+// `stalledReason`); PROJ-1657 reuses the same terminal-write for the
 // no-probe-for-phase escalation (a probe-less phase — e.g. a dead
 // recovery-pass worker — has no retry path at all, so it must go terminal on
 // the FIRST occurrence, not after a cap of asks) via an explicit
@@ -2289,7 +2289,7 @@ export function reclaimDeadWorkIfPossible(
         : 0;
     const capApplies = reason === "no-progress";
     const capSpent = capApplies && priorAsks >= escalationAskCap;
-    // CTL-1657 Codex P1 (round 2): a probe-less phase (recovery-pass today)
+    // PROJ-1657 Codex P1 (round 2): a probe-less phase (recovery-pass today)
     // must terminalize on its FIRST occurrence, same as a spent no-progress
     // cap — there is no retry budget to wait out. Fold it into the same
     // "must terminalize locally, regardless of breaker/cooldown state" gate
@@ -2425,7 +2425,7 @@ export function reclaimDeadWorkIfPossible(
       );
       return "escalation-cap-terminal";
     }
-    // CTL-1657: a probe-less phase (e.g. a dead recovery-pass worker, which
+    // PROJ-1657: a probe-less phase (e.g. a dead recovery-pass worker, which
     // reuses this signal-file machinery but has no registered work-done probe
     // to retry against) has no retry path at all — there is nothing a second
     // attempt could do differently. Unlike the "no-progress" cap above (which
@@ -2437,7 +2437,7 @@ export function reclaimDeadWorkIfPossible(
       markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason: reason });
       log.warn(
         { ticket, phase, reason },
-        "ctl-1657: no-probe-for-phase escalation — parked terminal immediately (no retry path exists for a probe-less phase)"
+        "proj-1657: no-probe-for-phase escalation — parked terminal immediately (no retry path exists for a probe-less phase)"
       );
       return "escalation-cap-terminal";
     }
@@ -2903,7 +2903,7 @@ export function reclaimDeadWorkIfPossible(
   // swallowed by the CTL-702 per-worker isolation in scheduler.mjs, and could
   // never actually be reclaimed.
   //
-  // CTL-1657 Codex P2: the guard is scoped to RECOVERY_PASS_PHASE specifically,
+  // PROJ-1657 Codex P2: the guard is scoped to RECOVERY_PASS_PHASE specifically,
   // NOT a blanket "any unknown phase" — signal-reader.mjs accepts arbitrary
   // phase-*.json files with an unvalidated raw.phase, so a genuinely unknown
   // string (a typo, a corrupt signal, a future dispatch type not yet added
@@ -2952,7 +2952,7 @@ export function reclaimDeadWorkIfPossible(
   //     the status trigger above suppresses it first, so this branch only
   //     escalates a genuinely reclaim-eligible (absent/idle-confirmed) worker.
   //
-  //     CTL-1657 Codex P2 (round 2): before escalating, check whether the
+  //     PROJ-1657 Codex P2 (round 2): before escalating, check whether the
   //     worker's own phase.<phase>.complete event was already seen — mirrors
   //     the CTL-778 alive-branch guard above, but for the DEAD case, where
   //     there is no probe to re-check (a probe-less phase has none by
@@ -2961,6 +2961,21 @@ export function reclaimDeadWorkIfPossible(
   //     finished; reconciling it to `done` (not escalating it to `stalled`)
   //     avoids a false needs-human park on work that already succeeded.
   if (!hasProbe(phase)) {
+    // PROJ-1657 Codex P2 (round 4): recovery-emit.mjs's `escalated` subcommand
+    // already parks this signal `needs-human` with a worker-authored decision
+    // brief (mergeExplanationIntoSignal) when the recovery-pass worker itself
+    // decided it couldn't resolve the ticket — the worker then died before its
+    // phase-completion event landed. Mirrors the needs-input guard at the top
+    // of reclaimDeadWork: an already-parked signal is a resolved outcome, not
+    // an unverifiable dead worker, so it must not be overwritten with a
+    // generic no-probe-for-phase escalation that discards the curated brief.
+    if (signal?.status === "needs-human") {
+      log.debug(
+        { ticket, phase },
+        "recovery: no-probe branch skipping already-parked needs-human signal (worker-authored decision preserved)"
+      );
+      return "noop";
+    }
     if (completeEventSeen({ ticket, phase })) {
       if (prevBgJobId) {
         emitReapIntent("phase.reclaim.reap-requested", {
@@ -2968,7 +2983,7 @@ export function reclaimDeadWorkIfPossible(
           phase,
           bgJobId: prevBgJobId,
           worktreePath: signal.raw?.worktreePath,
-          reason: "ctl-1657-no-probe-complete-event-reconcile",
+          reason: "proj-1657-no-probe-complete-event-reconcile",
         }).catch(() => {});
       }
       appendEvent({
@@ -2990,8 +3005,9 @@ export function reclaimDeadWorkIfPossible(
       if (r.code !== 0) {
         log.warn(
           { ticket, phase, code: r.code, stderr: r.stderr },
-          "recovery: no-probe complete-event reconcile — emit-complete failed"
+          "recovery: no-probe complete-event reconcile — emit-complete failed; will retry next tick"
         );
+        return "reclaim-failed";
       }
       return "reclaimed";
     }
