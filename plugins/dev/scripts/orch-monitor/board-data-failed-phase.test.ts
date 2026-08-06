@@ -193,3 +193,55 @@ describe("phaseFailed call-site logic (CTL-1180 false-positive guard)", () => {
     expect(phaseFailed).toBe(false);
   });
 });
+
+// CTL-1648: board derivation must surface attentionReason when failureReason is absent
+describe("deriveCurrentPhase — attentionReason surfacing (CTL-1648)", () => {
+  it("non-terminal stalled phase: surfaces attentionReason as failureReason", () => {
+    const phaseSigs = [
+      { status: "done" },   // triage
+      { status: "done" },   // research
+      { status: "done" },   // plan
+      { status: "stalled", attentionReason: "sdk-overloaded-exhausted",
+        updatedAt: "2026-08-05T01:00:00Z" }, // implement (non-terminal → early return)
+    ];
+    const cur = deriveCurrentPhase(phaseSigs);
+    expect(cur.failureReason).toBe("sdk-overloaded-exhausted");
+  });
+
+  it("terminal failed phase: surfaces attentionReason as failureReason", () => {
+    const phaseSigs = [
+      { status: "done" },
+      { status: "done" },
+      { status: "failed", attentionReason: "preempted-by-priority",
+        updatedAt: "2026-08-05T01:00:00Z" }, // plan terminal → lastTerminal branch
+    ];
+    const cur = deriveCurrentPhase(phaseSigs);
+    expect(cur.failureReason).toBe("preempted-by-priority");
+  });
+
+  it("precedence: failureReason still wins over attentionReason", () => {
+    const phaseSigs = [
+      { status: "done" },
+      { status: "failed", failureReason: "real-terminal-failure",
+        attentionReason: "sdk-backstop", updatedAt: "2026-08-05T01:00:00Z" },
+    ];
+    expect(deriveCurrentPhase(phaseSigs).failureReason).toBe("real-terminal-failure");
+  });
+
+  it("precedence: legacy stalledReason still surfaces when it is the only field", () => {
+    const phaseSigs = [
+      { status: "done" },
+      { status: "stalled", stalledReason: "legacy-stalled",
+        updatedAt: "2026-08-05T01:00:00Z" },
+    ];
+    expect(deriveCurrentPhase(phaseSigs).failureReason).toBe("legacy-stalled");
+  });
+
+  it("none of the three fields → failureReason null (unknown-reason fallback intact)", () => {
+    const phaseSigs = [
+      { status: "done" },
+      { status: "stalled", updatedAt: "2026-08-05T01:00:00Z" },
+    ];
+    expect(deriveCurrentPhase(phaseSigs).failureReason).toBeNull();
+  });
+});
