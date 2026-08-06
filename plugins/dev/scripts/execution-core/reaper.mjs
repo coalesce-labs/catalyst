@@ -14,9 +14,10 @@
 // managed-agents port lands, only the executors here swap to control-plane
 // APIs. The schema, the producers, and the consumer count are all stable.
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { scanEventsChunked } from "./event-tail.mjs";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
@@ -583,11 +584,17 @@ export class Reaper {
     // tree we are not about to remove. Best-effort/fail-open: a salvage failure
     // never blocks the archive+remove.
     try {
-      this.salvageWorktree({
+      // Await so the snapshot completes BEFORE the archive+remove below, and so a
+      // hung salvage is bounded by the seam's own timeout rather than racing the
+      // removal. Forward the ACTUAL triggering reason (event.reason when present,
+      // else the event name) so the salvage telemetry attributes direct merged
+      // cleanups and targeted orphan reaps distinctly (Codex P2).
+      await this.salvageWorktree({
         worktreePath: event.worktree_path,
         ticket: event.ticket,
         branch: event.branch,
         orchId: event.orch_id,
+        reason: event.reason || event.event,
       });
     } catch {
       /* fail-open */
@@ -1097,38 +1104,76 @@ function mapFields(fields = {}) {
   return out;
 }
 
+// CTL-1639: bound the async salvage so a pathological worktree (huge unpushed
+// history / a large untracked tree) can never wedge the shared daemon loop's
+// cleanup indefinitely — salvage is fail-open, so a timeout kills the child and
+// the removal proceeds. Overridable for tests.
+const SALVAGE_TIMEOUT_MS = Number(process.env.CATALYST_SALVAGE_TIMEOUT_MS) || 120_000;
+
 // CTL-1639: default salvage seam — shell out to the single-source-of-truth bash
 // primitive (lib/worktree-salvage.sh) so the git/bundle logic lives in exactly
 // one place (no .mjs twin). Snapshots unpushed commits + dirty tree to
-// ~/catalyst/salvage/ before the reaper removes a PR-merged worktree. Fail-open:
-// any failure returns { ok: false } and the caller ignores it (never blocks the
-// removal below).
-function defaultSalvageWorktree({ worktreePath, ticket, branch, orchId } = {}) {
-  try {
-    if (!worktreePath) return { ok: false, error: "no-worktree-path" };
-    const lib = new URL("../lib/worktree-salvage.sh", import.meta.url).pathname;
-    const res = spawnSync(
-      "bash",
-      [
-        lib,
-        worktreePath,
-        ticket || branch || "unknown",
-        "--site",
-        "reaper-pr-merged",
-        "--reason",
-        "orphans.reap-requested",
-        ...(orchId ? ["--orch", orchId] : []),
-      ],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-    if (res.error) return { ok: false, error: res.error.message };
-    return {
-      ok: (res.status ?? 1) === 0,
-      error: (res.status ?? 1) === 0 ? undefined : res.stderr?.trim() || `exit ${res.status}`,
-    };
-  } catch (err) {
-    return { ok: false, error: String(err?.message || err) }; // fail-open — caller ignores !ok
-  }
+// ~/catalyst/salvage/ before the reaper removes a PR-merged worktree.
+//
+// ASYNC (Codex P1): the bundle/diff/tar can run for seconds on a large worktree,
+// and this runs on execution-core's shared event-loop thread (multi-second SYNC
+// subprocesses starve scheduler ticks — the documented wedge). So use async
+// `spawn` (child runs off-thread; the loop stays free while we await) instead of
+// `spawnSync`, and bound it with a timeout. Returns a Promise; the caller awaits
+// it BEFORE removing the worktree. Fail-open: any failure resolves { ok: false }
+// and the caller ignores it (never blocks the removal below).
+function defaultSalvageWorktree({ worktreePath, ticket, branch, orchId, reason } = {}) {
+  return new Promise((resolve) => {
+    try {
+      if (!worktreePath) return resolve({ ok: false, error: "no-worktree-path" });
+      // fileURLToPath (Codex P2): `.pathname` stays percent-encoded when Catalyst
+      // is installed under a path with spaces / `#` / `%` / non-ASCII, handing bash
+      // a nonexistent script; decode to a real filesystem path.
+      const lib = fileURLToPath(new URL("../lib/worktree-salvage.sh", import.meta.url));
+      const child = spawn(
+        "bash",
+        [
+          lib,
+          worktreePath,
+          ticket || branch || "unknown",
+          "--site",
+          "reaper-pr-merged",
+          // Preserve the ACTUAL triggering reason (Codex P2): this handler serves
+          // both direct pr.merged.cleanup-requested and targeted orphans.reap-requested
+          // events — hardcoding one misattributes the other in the audit telemetry.
+          "--reason",
+          reason || "reaper-pr-merged",
+          ...(orchId ? ["--orch", orchId] : []),
+        ],
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
+      let stderr = "";
+      let settled = false;
+      const done = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+        done({ ok: false, error: `salvage timed out after ${SALVAGE_TIMEOUT_MS}ms` });
+      }, SALVAGE_TIMEOUT_MS);
+      child.stderr?.on("data", (d) => {
+        stderr += d.toString();
+      });
+      child.on("error", (err) => done({ ok: false, error: err.message }));
+      child.on("close", (code) =>
+        done({ ok: code === 0, error: code === 0 ? undefined : stderr.trim() || `exit ${code}` }),
+      );
+    } catch (err) {
+      resolve({ ok: false, error: String(err?.message || err) }); // fail-open — caller ignores !ok
+    }
+  });
 }
 
 async function defaultGitWorktreeRemove(path) {

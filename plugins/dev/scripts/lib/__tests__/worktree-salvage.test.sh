@@ -172,15 +172,15 @@ WT="$(make_repo "${SCRATCH}/t8" --unpushed --dirty)"
 salvage_worktree "$WT" TEST-8 --site t8
 assert_false "git -C '$WT' rev-parse refs/stash >/dev/null 2>&1" "T8 refs/stash still absent"
 
-# ── T9  filename shape ──────────────────────────────────────────────────────
+# ── T9  filename shape (ts + collision-proof unique suffix) ─────────────────
 echo "T9 filename shape"
 reset_events; clean_salvage
 WT="$(make_repo "${SCRATCH}/t9" --unpushed --dirty)"
 salvage_worktree "$WT" TEST-9 --site t9
 BUNDLE="$(ls "${CATALYST_SALVAGE_DIR}"/*.bundle 2>/dev/null | head -1)"
 PATCH="$(ls "${CATALYST_SALVAGE_DIR}"/*.patch 2>/dev/null | head -1)"
-assert_true "[[ '$(basename "$BUNDLE")' =~ ^TEST-9-[0-9]{8}T[0-9]{6}Z\.bundle$ ]]" "T9 bundle name shape"
-assert_true "[[ '$(basename "$PATCH")' =~ ^TEST-9-[0-9]{8}T[0-9]{6}Z\.patch$ ]]" "T9 patch name shape"
+assert_true "[[ '$(basename "$BUNDLE")' =~ ^TEST-9-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.bundle$ ]]" "T9 bundle name shape (ts+pid+rand)"
+assert_true "[[ '$(basename "$PATCH")' =~ ^TEST-9-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.patch$ ]]" "T9 patch name shape (ts+pid+rand)"
 
 # ── T10 non-git / missing path → returns 0, emits failed ────────────────────
 echo "T10 non-git / missing path"
@@ -204,7 +204,7 @@ assert_eq "ORCH-X" "$(jq -r '.attributes["catalyst.orchestrator.id"]' <<<"$LINE"
 assert_eq "my-reason" "$(jq -r '.body.payload.reason' <<<"$LINE")" "T11 payload.reason"
 assert_eq "my-site" "$(jq -r '.body.payload.site' <<<"$LINE")" "T11 payload.site"
 assert_eq "TEST-11" "$(jq -r '.body.payload.ticket' <<<"$LINE")" "T11 payload.ticket"
-for k in bundle patch untracked_tar commits_saved files_changed untracked_count; do
+for k in bundle patch index_patch untracked_tar commits_saved files_changed untracked_count; do
   assert_true "jq -e '.body.payload | has(\"$k\")' <<<'$LINE' >/dev/null" "T11 payload has $k"
 done
 
@@ -218,6 +218,58 @@ assert_eq "INFO" "$(jq -r '.severityText' <<<"$(last_event_line)")" "T12 skipped
 # ── T13 events land in monthly file ─────────────────────────────────────────
 echo "T13 monthly event file"
 assert_true "[[ -f '$EVENT_LOG' ]]" "T13 events in ${CATALYST_EVENTS_DIR}/YYYY-MM.jsonl"
+
+# ── T14 index-only staged delta captured separately (Codex P1) ──────────────
+# Stage a change, then restore the WORKING file back to HEAD content. `git diff
+# HEAD` (working-vs-HEAD) is then empty, but the staged delta must still be saved.
+echo "T14 index-only staged delta"
+reset_events; clean_salvage
+WT="$(make_repo "${SCRATCH}/t14")"
+( cd "$WT"
+  printf 'staged-change\n' >> base.txt
+  git add base.txt
+  git checkout-index -f base.txt   # restore working file to HEAD; index keeps the staged delta
+  printf 'base\n' > base.txt        # belt: working tree == HEAD content
+)
+salvage_worktree "$WT" TEST-14 --site t14
+IDXPATCH="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-14-*.index.patch 2>/dev/null | head -1)"
+assert_true  "[[ -s '$IDXPATCH' ]]" "T14 index patch written for staged-only delta"
+assert_true  "grep -q 'staged-change' '$IDXPATCH'" "T14 index patch carries the staged content"
+assert_eq "worktree.salvage.created" "$(jq -r '.attributes["event.name"]' <<<"$(last_event_line)")" "T14 created (not skipped)"
+
+# ── T15 binary tracked change → bytes captured via --binary (Codex P1) ──────
+echo "T15 binary tracked change"
+reset_events; clean_salvage
+WT="$(make_repo "${SCRATCH}/t15")"
+( cd "$WT"
+  printf '\x00\x01\x02BIN' > blob.bin; git add blob.bin; git commit --quiet -m "add binary"
+  git push --quiet origin HEAD:refs/heads/main 2>/dev/null || true
+  printf '\x00\x01\x02\x03\x04CHANGED' > blob.bin   # tracked binary edit
+)
+salvage_worktree "$WT" TEST-15 --site t15
+PATCH="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-15-*.patch 2>/dev/null | head -1)"
+assert_true "[[ -s '$PATCH' ]]" "T15 patch written for binary edit"
+assert_true "grep -q 'GIT binary patch' '$PATCH'" "T15 patch is a restorable git binary patch (not a 'differ' marker)"
+
+# ── T16 collision-proof names — two salvages, same ticket, same second ───────
+echo "T16 collision-proof artifact names"
+reset_events; clean_salvage
+WT="$(make_repo "${SCRATCH}/t16" --unpushed)"
+salvage_worktree "$WT" TEST-16 --site t16a
+salvage_worktree "$WT" TEST-16 --site t16b
+NBUNDLES="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-16-*.bundle 2>/dev/null | wc -l | tr -d ' ')"
+assert_true "[[ '$NBUNDLES' -eq 2 ]]" "T16 two rapid salvages keep two distinct bundles (no silent overwrite)"
+
+# ── T17 bundle I/O failure with commits present → failed, not skipped ────────
+# A read-only salvage dir with unpushed commits present must report failed (the
+# work was NOT saved), never skipped (which would imply an otherwise-clean tree).
+echo "T17 bundle I/O failure is not an empty-bundle skip"
+reset_events
+WT="$(make_repo "${SCRATCH}/t17" --unpushed)"
+RO_DIR="${SCRATCH}/t17-ro"; mkdir -p "$RO_DIR"; chmod 500 "$RO_DIR"
+CATALYST_SALVAGE_DIR="${RO_DIR}/salvage" salvage_worktree "$WT" TEST-17 --site t17
+assert_eq "worktree.salvage.failed" "$(jq -r '.attributes["event.name"]' <<<"$(last_event_line)")" "T17 unpushed + unwritable dir → failed (not skipped)"
+chmod 700 "$RO_DIR" 2>/dev/null || true
 
 # ── Sentinel-guard: sourcing twice is a no-op ───────────────────────────────
 echo "Extra: idempotent source"

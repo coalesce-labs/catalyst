@@ -1311,9 +1311,15 @@ sweep_worktrees() {
           # CTL-1639: always snapshot the unpushed commits locally FIRST, before
           # any removal and independent of SWEEP_SALVAGE_PUSH — the local bundle
           # is the always-on additive safety net the network push (default-off,
-          # HEAD-only) never was.
-          command -v salvage_worktree >/dev/null 2>&1 && \
-            salvage_worktree "$wt" "$wt_id" --site "orphan-sweep-unpushed" || true
+          # HEAD-only) never was. Dry-run stays side-effect free (Codex P2): a
+          # preview log, no bundle/patch/tar artifacts and no telemetry, mirroring
+          # the SAFE branch's early is_dry check.
+          if is_dry; then
+            log "[dry-run] would salvage unpushed commits (bundle to salvage dir): $wt"
+          else
+            command -v salvage_worktree >/dev/null 2>&1 && \
+              salvage_worktree "$wt" "$wt_id" --site "orphan-sweep-unpushed" || true
+          fi
           if [[ "$SWEEP_SALVAGE_PUSH" == "1" ]]; then
             if salvage_push_then_remove "$wt" "$wt_id"; then
               if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
@@ -1340,9 +1346,14 @@ sweep_worktrees() {
           # snapshot the uncommitted diff to ~/catalyst/salvage/ first so the work
           # is on disk even if an operator later force-cleans the tree by hand —
           # closing the "preserved only by never being reaped" data-loss gap.
-          command -v salvage_worktree >/dev/null 2>&1 && \
-            salvage_worktree "$wt" "$(basename "$wt")" --site "orphan-sweep-dirty" || true
-          log "skip SALVAGE_DIRTY (snapshotted uncommitted changes, keeping tree): $wt"
+          # Dry-run stays side-effect free (Codex P2): preview only.
+          if is_dry; then
+            log "[dry-run] would salvage uncommitted changes (patch to salvage dir), keeping tree: $wt"
+          else
+            command -v salvage_worktree >/dev/null 2>&1 && \
+              salvage_worktree "$wt" "$(basename "$wt")" --site "orphan-sweep-dirty" || true
+            log "skip SALVAGE_DIRTY (snapshotted uncommitted changes, keeping tree): $wt"
+          fi
           _sweep_count salvageSkipped
           ;;
         KEEP)

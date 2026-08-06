@@ -77,6 +77,12 @@ on:
       - "plugins/dev/scripts/migrate-dual-harness.sh"
       - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
+      # CTL-1639: worktree-salvage-sites.test.sh scans phase-teardown/SKILL.md for
+      # the salvage-before-destroy source-order invariant. That skill lives OUTSIDE
+      # plugins/dev/scripts/ (not covered by the scripts/** glob), so a change
+      # confined to the teardown removal block would skip this workflow and the
+      # ordering backstop couldn't catch a destroy-before-salvage regression.
+      - "plugins/dev/skills/phase-teardown/**"
       # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
       # every member package's install (incl. execution-core, broker, otel-forward).
       - "package.json"
@@ -130,6 +136,9 @@ on:
       - "plugins/dev/scripts/migrate-dual-harness.sh"
       - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
+      # CTL-1639: see the pull_request note above — phase-teardown/SKILL.md is
+      # scanned by worktree-salvage-sites.test.sh but lives outside scripts/**.
+      - "plugins/dev/skills/phase-teardown/**"
       # CTL-1628: see the pull_request note above.
       - "package.json"
       - "bun.lock"
