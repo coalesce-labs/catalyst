@@ -194,4 +194,32 @@ describe("withHttpRetry", () => {
     expect(sleepDelays).toEqual([1000, 2000]);
     expect(calls).toBe(3);
   });
+
+  test("rechecks the ACTUAL deadline after sleeping — no attempt once a sleep overruns (CTL-1506)", async () => {
+    let calls = 0;
+    let nowVal = 0;
+    await expect(withHttpRetry(async () => {
+      calls++;
+      throw new HttpError(503);
+    }, { baseMs: 100, maxElapsedMs: 250 }, {
+      now: () => nowVal,
+      sleep: async (ms) => { nowVal += ms * 10; }, // a suspended host: sleep overruns 10x
+    })).rejects.toBeInstanceOf(HttpError);
+    // Projected 0+100<250 → sleep, but the sleep lands at now=1000 ≥ 250, so the post-sleep
+    // recheck stops instead of firing another request past the window.
+    expect(calls).toBe(1);
+  });
+
+  test("aborts the retry loop when the signal fires (CTL-1506)", async () => {
+    const ac = new AbortController();
+    let calls = 0;
+    await expect(withHttpRetry(async () => {
+      calls++;
+      ac.abort(); // e.g. daemon SIGTERM during a retry
+      throw new HttpError(503);
+    }, { baseMs: 0, maxElapsedMs: 60_000 }, {
+      now: () => 0, sleep: async () => {}, signal: ac.signal,
+    })).rejects.toBeInstanceOf(HttpError);
+    expect(calls).toBe(1); // stopped after the first failure — no retry, caller DLQs
+  });
 });

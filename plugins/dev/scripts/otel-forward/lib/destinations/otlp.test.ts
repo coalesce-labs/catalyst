@@ -125,6 +125,23 @@ describe("buildOtlpPayload", () => {
     const lr = payload.resourceLogs[0].scopeLogs[0].logRecords[0];
     expect("logRecordUid" in lr).toBe(false);
   });
+
+  test("an unparseable ts never yields a NaN/null timeUnixNano (CTL-1506 Codex P2)", () => {
+    const bad = { ...SAMPLE_EVENT, ts: "not-a-date", observedTs: "also-bad" } as unknown as CanonicalEvent;
+    const payload = buildOtlpPayload([bad]) as any;
+    const lr = payload.resourceLogs[0].scopeLogs[0].logRecords[0];
+    // A NaN would JSON-serialize to null and 400 the whole batch (dropping co-riders).
+    expect(Number.isFinite(lr.timeUnixNano)).toBe(true);
+    expect(lr.timeUnixNano).toBeGreaterThan(0);
+    expect(Number.isFinite(lr.observedTimeUnixNano)).toBe(true);
+  });
+
+  test("falls back to observedTs when ts is unparseable (CTL-1506)", () => {
+    const ev = { ...SAMPLE_EVENT, ts: "garbage" } as unknown as CanonicalEvent; // observedTs valid
+    const payload = buildOtlpPayload([ev]) as any;
+    const lr = payload.resourceLogs[0].scopeLogs[0].logRecords[0];
+    expect(lr.timeUnixNano).toBe(Date.parse(SAMPLE_EVENT.observedTs!) * 1_000_000);
+  });
 });
 
 // CTL-764 Phase 6: worker.transition attribute pass-through
@@ -989,6 +1006,28 @@ describe("OtlpSender CTL-1506 Codex remediation", () => {
     expect(resolved).toBeGreaterThan(0);    // resolver invoked at emit time
     expect(existsSync(logPath)).toBe(true); // wrote to the resolved path
     expect(readDrops(logPath).length).toBe(1);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("a record within the delivery margin of the cutoff is held back, not sent (Codex P2)", async () => {
+    let fetchCalls = 0;
+    global.fetch = mock(() => { fetchCalls++; return Promise.resolve(new Response(null, { status: 200 })); }) as unknown as typeof fetch;
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "margin-dlq.jsonl");
+    const eventLogPath = join(dir, "margin-events.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: 10_000, // margin = min(timeoutMs 5000, window/4 = 2500) = 2500 → send-window 7500ms
+      timeoutMs: 5000,
+    });
+    // 8s old: inside the 10s window but inside the 2.5s margin band → held back, never POSTed.
+    await sender.flush([makeEvent({ ts: new Date(Date.now() - 8_000).toISOString() })]);
+    expect(fetchCalls).toBe(0);
+    const drops = readDrops(eventLogPath);
+    expect(drops.length).toBe(1);
+    expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
     rmSync(dir, { recursive: true });
   });
 });

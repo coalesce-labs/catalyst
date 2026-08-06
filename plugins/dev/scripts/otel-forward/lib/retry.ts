@@ -56,6 +56,9 @@ export const DEFAULT_HTTP_RETRY_POLICY: Required<HttpRetryPolicy> = {
 export interface HttpRetryClock {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** CTL-1506 (Codex P1): abort the retry loop early (e.g. on daemon shutdown) so a
+   *  long backoff can't outlive the launcher's SIGKILL grace — the caller then DLQs. */
+  signal?: AbortSignal;
 }
 
 export async function withHttpRetry<T>(
@@ -74,6 +77,7 @@ export async function withHttpRetry<T>(
     } catch (err) {
       const isTerminal = err instanceof HttpError && classifyStatus(err.status) === "terminal";
       if (isTerminal) throw err;
+      if (clock.signal?.aborted) throw err; // CTL-1506 (Codex P1): shutdown → stop, caller DLQs
       const elapsed = now() - start;
       if (elapsed >= p.maxElapsedMs) throw err;
       const backoff = Math.min(p.baseMs * p.factor ** attempt, p.maxDelayMs);
@@ -87,6 +91,11 @@ export async function withHttpRetry<T>(
       if (elapsed + wanted >= p.maxElapsedMs) throw err;
       attempt++;
       await sleep(wanted);
+      // CTL-1506 (Codex P2): recheck the ACTUAL deadline after sleeping — a delayed event
+      // loop or a suspended host can make sleep() resolve past maxElapsedMs, and we must
+      // not start another request (and its timeout) beyond the window. Also re-honor abort.
+      if (clock.signal?.aborted) throw err;
+      if (now() - start >= p.maxElapsedMs) throw err;
     }
   }
 }

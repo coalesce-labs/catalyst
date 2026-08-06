@@ -95,12 +95,18 @@ const currentEventLogPath = () => join(EVENTS_DIR, `${CURRENT_MONTH()}.jsonl`);
 
 const OTLP_DLQ_PATH = join(CATALYST_DIR, "otel-forward-dlq-otlp.jsonl");
 
+// CTL-1506 (Codex P1): module-scoped so senders can carry the shutdown signal — an
+// aborted flush stops retrying and DLQs immediately, keeping shutdown inside the
+// launcher's SIGKILL grace. The SIGTERM/SIGINT handlers below (in the main block) abort it.
+const ac = new AbortController();
+
 const senders = {
   otlp: cfg.otlp.enabled
     ? new OtlpSender({
         endpoint: cfg.otlp.endpoint,
         dlqPath: OTLP_DLQ_PATH,
         eventLogPath: currentEventLogPath,
+        signal: ac.signal,
         // CTL-1506: age window + retry window from config
         lokiAcceptWindowMs: cfg.otlp.lokiAcceptWindowMs,
         httpRetryPolicy: { maxElapsedMs: cfg.otlp.maxRetryElapsedMs },
@@ -205,8 +211,16 @@ function flushDest(
 ): Promise<void> {
   if (!sender || buffer.length === 0) return Promise.resolve();
   if (inFlight[key]) return inFlight[key]!; // coalesce this destination's tick
-  const batch = buffer.splice(0, Math.max(1, batchSize)); // CTL-1506: honor batchSize
-  const p = sender.flush(batch).finally(() => {
+  // CTL-1506 (Codex P1/P2): drain the WHOLE buffer this flush (so a batchSize cap can't
+  // leave an ever-growing in-memory remainder the checkpoint advances past), but send it
+  // in ≤ batchSize chunks so no single request exceeds the destination's payload limit.
+  const drained = buffer.splice(0);
+  const size = Math.max(1, batchSize);
+  const p = (async () => {
+    for (let i = 0; i < drained.length; i += size) {
+      await sender.flush(drained.slice(i, i + size));
+    }
+  })().finally(() => {
     inFlight[key] = null;
   });
   inFlight[key] = p;
@@ -222,7 +236,6 @@ async function flushAll(): Promise<void> {
 }
 
 if (import.meta.main) {
-  const ac = new AbortController();
   process.on("SIGTERM", () => {
     ac.abort();
   });
@@ -240,20 +253,25 @@ if (import.meta.main) {
   // CTL-1506 (Codex P2): one timer PER enabled destination at its OWN flushIntervalMs,
   // so a per-forwarder cadence actually takes effect (the old single global-min timer
   // flushed every sink at the fastest configured interval).
+  // CTL-1506 (Codex P1): each timer swallows its flush rejection (logs it) — Bun treats an
+  // unhandled promise rejection as fatal, so a storage/DLQ error in one destination must
+  // not take down the whole daemon (the old global timer consumed rejections via allSettled).
+  const onFlushError = (dest: string) => (err: unknown) =>
+    log.error({ dest, err: err instanceof Error ? err.message : String(err) }, "scheduled flush failed");
   const flushTimers: ReturnType<typeof setInterval>[] = [];
   if (senders.otlp) {
     flushTimers.push(setInterval(() => {
-      void flushDest("otlp", senders.otlp, buffers.otlp, cfg.otlp.batchSize);
+      flushDest("otlp", senders.otlp, buffers.otlp, cfg.otlp.batchSize).catch(onFlushError("otlp"));
     }, cfg.otlp.flushIntervalMs));
   }
   if (senders.posthog) {
     flushTimers.push(setInterval(() => {
-      void flushDest("posthog", senders.posthog, buffers.posthog, cfg.posthog.batchSize);
+      flushDest("posthog", senders.posthog, buffers.posthog, cfg.posthog.batchSize).catch(onFlushError("posthog"));
     }, cfg.posthog.flushIntervalMs));
   }
   if (senders.cae) {
     flushTimers.push(setInterval(() => {
-      void flushDest("cae", senders.cae, buffers.cae, cfg.cloudflareAE.batchSize);
+      flushDest("cae", senders.cae, buffers.cae, cfg.cloudflareAE.batchSize).catch(onFlushError("cae"));
     }, cfg.cloudflareAE.flushIntervalMs));
   }
 
@@ -282,13 +300,11 @@ if (import.meta.main) {
   for (const t of flushTimers) clearInterval(t);
   clearInterval(ckTimer);
   clearInterval(lagTimer);
-  // CTL-1506: let any in-flight per-destination flushes settle, then drain the remainder.
-  // flushAll splices at most batchSize per destination per call, so loop until the buffers
-  // are empty (a persistently-failing sender DLQs its batch and resolves, shrinking the
-  // buffer each pass, so this terminates).
+  // CTL-1506 (Codex P1): shutdown is BOUNDED. ac.abort() (from the SIGTERM/SIGINT handlers)
+  // makes any in-flight retry stop and DLQ, and flushAll drains each buffer in one pass
+  // (each retry now aborts fast → DLQ), so this completes well inside the launcher's grace
+  // instead of waiting out a full 60s retry window.
   await Promise.allSettled(Object.values(inFlight).filter((p): p is Promise<void> => p !== null));
-  while (buffers.otlp.length > 0 || buffers.posthog.length > 0 || buffers.cae.length > 0) {
-    await flushAll();
-  }
+  await flushAll();
   log.info({ processed: stats.processed, skipped: stats.skipped }, "stopped");
 }

@@ -42,6 +42,18 @@ function toAttrArray(obj: Record<string, unknown>): OtlpAttr[] {
   );
 }
 
+// CTL-1506 (Codex P2): never put a NaN timeUnixNano on the wire. An unparseable `ts`
+// would serialize to JSON `null`, which the collector rejects with a terminal 400 that
+// dead-drops every co-rider in the batch. Fall back to observedTs, then to a safe recent
+// clock, so one malformed-timestamp record can't poison an otherwise-valid batch.
+function toUnixNano(primary: string | undefined, fallback: string | undefined): number {
+  const p = primary ? Date.parse(primary) : NaN;
+  if (!Number.isNaN(p)) return p * 1_000_000;
+  const f = fallback ? Date.parse(fallback) : NaN;
+  if (!Number.isNaN(f)) return f * 1_000_000;
+  return Date.now() * 1_000_000;
+}
+
 export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
   return {
     resourceLogs: events.map((ev) => ({
@@ -53,8 +65,8 @@ export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
           scope: { name: "catalyst.otel-forward" },
           logRecords: [
             {
-              timeUnixNano: Date.parse(ev.ts) * 1_000_000,
-              observedTimeUnixNano: Date.parse(ev.observedTs ?? ev.ts) * 1_000_000,
+              timeUnixNano: toUnixNano(ev.ts, ev.observedTs),
+              observedTimeUnixNano: toUnixNano(ev.observedTs ?? ev.ts, ev.ts),
               severityNumber: ev.severityNumber,
               severityText: ev.severityText,
               ...(ev.traceId ? { traceId: ev.traceId } : {}),
@@ -96,6 +108,9 @@ export interface OtlpSenderOpts {
   maxDrainBatches?: number;
   /** Called after each successfully delivered batch (primary or DLQ). Used by Phase 3 lag tracking. */
   onBatchDelivered?: (batch: CanonicalEvent[]) => void;
+  /** CTL-1506 (Codex P1): shutdown signal. When aborted, in-flight retries stop and the
+   *  batch is DLQ'd immediately, so a flush can't outlive the launcher's SIGKILL grace. */
+  signal?: AbortSignal;
 }
 
 // CTL-1008 Phase 4: guard against re-amplifying our own failure events —
@@ -200,17 +215,28 @@ export class OtlpSender {
     windowMs: number
   ): Promise<SendResult> {
     const state = { pending: records, aged: [] as CanonicalEvent[] };
+    // CTL-1506 (Codex P2): partition for send against a slightly stricter cutoff (window
+    // minus a delivery margin) so a record barely inside the window can't cross the cutoff
+    // DURING the request/collector processing and trigger a terminal too-old response that
+    // drops its fresher co-riders. Margin is bounded to ≤ ¼ of the window so it never
+    // inverts the cutoff on small windows.
+    const margin = Math.min(this.opts.timeoutMs ?? 5000, Math.floor(windowMs / 4));
+    const sendWindowMs = Math.max(1, windowMs - margin);
+    const clock: HttpRetryClock = {
+      ...this.opts.retryClock,
+      signal: this.opts.retryClock?.signal ?? this.opts.signal,
+    };
     try {
       await withHttpRetry(
         async () => {
-          const { fresh, aged } = partitionByAge(state.pending, Date.now(), windowMs);
+          const { fresh, aged } = partitionByAge(state.pending, Date.now(), sendWindowMs);
           if (aged.length) state.aged.push(...aged);
           state.pending = fresh;
           if (fresh.length === 0) return; // aged out entirely → nothing to send (success)
           await rawSend(fresh);
         },
         this.opts.httpRetryPolicy,
-        this.opts.retryClock
+        clock
       );
       return { kind: "delivered", delivered: state.pending, aged: state.aged };
     } catch (err) {
@@ -252,11 +278,17 @@ export class OtlpSender {
     const windowMs = this.opts.lokiAcceptWindowMs ?? DEFAULT_LOKI_ACCEPT_WINDOW_MS;
 
     const rawSend = async (b: CanonicalEvent[]) => {
+      // CTL-1506 (Codex P1): abort the in-flight request on shutdown too, not just on the
+      // per-request timeout, so a graceful stop doesn't wait out a slow socket.
+      const timeoutSignal = AbortSignal.timeout(this.opts.timeoutMs ?? 5000);
+      const signal = this.opts.signal
+        ? AbortSignal.any([timeoutSignal, this.opts.signal])
+        : timeoutSignal;
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(buildOtlpPayload(b)),
-        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
+        signal,
       });
       if (!res.ok) {
         throw new HttpError(
