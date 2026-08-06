@@ -2081,6 +2081,36 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
     expect(tick.processed).toBe(0);
   });
 
+  // PROJ-1657 Codex P1 (round 8): a probe-less phase already parked terminal
+  // (stalledReason "no-probe-for-phase") must not re-enter classification —
+  // that would let it default to decision:"defer"/fix_class:"board-health"
+  // and get picked up for a fresh recovery-pass dispatch, reversing the
+  // terminal hand-off to a human.
+  test("no-probe-for-phase terminal signal is skipped — no reclassification, lands in terminalSkipped[]", () => {
+    const posted = [];
+    const events = [];
+    reasoningRecoveryPass(
+      [
+        {
+          ticket: "PROJ-1000",
+          phase: "recovery-pass",
+          evidence: { signal: { stalledReason: "no-probe-for-phase" } },
+        },
+      ],
+      {
+        mode: "enforce",
+        postComment: (t, body) => posted.push({ t, body }),
+        emitEvent: (e) => events.push(e),
+        ...inert,
+      },
+    );
+    expect(posted.length).toBe(0);
+    const tick = events.find((e) => e.type === "recovery.tick").details;
+    expect(tick.terminalSkipped).toEqual(["PROJ-1000"]);
+    expect(tick.processed).toBe(0);
+    expect(events.some((e) => e.type === "recovery.decision" && e.ticket === "PROJ-1000")).toBe(false);
+  });
+
   test("emits a recovery.decision per classified item with the routing rule", () => {
     const events = [];
     reasoningRecoveryPass(

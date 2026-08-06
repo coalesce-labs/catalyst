@@ -26,6 +26,11 @@ describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
     expect(r).toEqual({ category: "skip", action: "skip" });
   });
 
+  test("no-probe-for-phase stalls are SKIPPED — already terminally escalated by PROJ-1657 (no re-ask loop, Codex #3027 round 4 P2)", () => {
+    const r = classifyStalledTicket({ reason: "no-probe-for-phase" });
+    expect(r).toEqual({ category: "skip", action: "skip" });
+  });
+
   test("rebase_refused_dirty_tree → dirty-tree/clear-noise-and-retry", () => {
     const r = classifyStalledTicket({ reason: "rebase_refused_dirty_tree" });
     expect(r.category).toBe("dirty-tree");
