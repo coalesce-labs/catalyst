@@ -4137,34 +4137,58 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     // isolation, but permanently unreclaimable as a result. A non-FSM phase
     // can't be "superseded" in the ordinal sense, so it must skip the guard and
     // fall through to the normal reclaim-eligible path — which, since no probe
-    // is registered for a non-pipeline phase, resolves to a clean one-time
-    // 'escalated' (reason: no-probe-for-phase) rather than an uncaught throw.
-    const escalate = recorder(undefined);
-    const applyLabel = recorder(undefined);
-    const recoveryPassSig = {
-      ticket: "CTL-503",
-      phase: "recovery-pass",
-      status: "running",
-      liveness: { kind: "bg", value: "job-old" },
-      raw: {
-        ticket: "CTL-503",
+    // is registered for a non-pipeline phase, resolves to a one-time terminal
+    // write ('escalation-cap-terminal', stalledReason: no-probe-for-phase)
+    // rather than an uncaught throw, so listInFlightTickets stops counting the
+    // dead worker as an occupied slot forever (Codex #3027 P1).
+    //
+    // Uses a real temp orchDir (not the describe block's shared "/orch"
+    // string) because this path genuinely writes the signal file to disk —
+    // reusing "/orch" would write outside any test's control (Codex #3027 P2
+    // on the ORIGINAL version of this test).
+    const testOrchDir = mkdtempSync(join(tmpdir(), "ctl1657-recovery-pass-"));
+    try {
+      const escalate = recorder(undefined);
+      const applyLabel = recorder(undefined);
+      const recordEscalation = recorder(undefined);
+      const recoveryPassSig = {
+        ticket: "PROJ-503",
         phase: "recovery-pass",
-        orchestrator: "CTL-503",
         status: "running",
-        bg_job_id: "job-old",
-      },
-    };
-    let r;
-    expect(() => {
-      r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
-        statJob: () => null, // dead bg job
-        listTicketPhases: () => ["triage", "research", "plan", "implement"],
-        appendEscalatedEvent: escalate,
-        applyStalledLabel: applyLabel,
-        writeEscalationCoolDown: () => {},
-      });
-    }).not.toThrow();
-    expect(r).toBe("escalated");
+        liveness: { kind: "bg", value: "job-old" },
+        raw: {
+          ticket: "PROJ-503",
+          phase: "recovery-pass",
+          orchestrator: "PROJ-503",
+          status: "running",
+          bg_job_id: "job-old",
+        },
+      };
+      let r;
+      expect(() => {
+        r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+          statJob: () => null, // dead bg job
+          listTicketPhases: () => ["triage", "research", "plan", "implement"],
+          appendEscalatedEvent: escalate,
+          applyStalledLabel: applyLabel,
+          inEscalationCooldownFn: () => false,
+          recordEscalationFn: recordEscalation,
+          breaker: { isOpen: () => false },
+        });
+      }).not.toThrow();
+      expect(r).toBe("escalation-cap-terminal");
+      expect(escalate.calls.length).toBe(1);
+      expect(applyLabel.calls.length).toBe(1);
+      expect(recordEscalation.calls.length).toBe(1);
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-503", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
   });
 });
 

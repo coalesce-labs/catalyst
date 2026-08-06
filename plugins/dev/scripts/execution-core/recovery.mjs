@@ -88,6 +88,13 @@ function peerLivenessConfigured(anchorIssue) {
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
+// CTL-1657: the one non-FSM phase this module knows is legitimately dispatched
+// through the same workers/<ticket>/phase-<name>.json signal-file machinery
+// (recovery-reasoning.mjs's Pass 0r recovery-pass actuator). Anything else
+// unrecognized by isKnownPhase is treated as genuinely unknown data (a typo or
+// a corrupt signal), not a supported dispatch-reuse type — see the reclaim
+// supersede-guard below.
+import { RECOVERY_PASS_PHASE } from "./recovery-reasoning.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
@@ -1885,14 +1892,19 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 // killBgJob, countReviveEvents, writeReviveMarker) + the CTL-638 cool-down +
 // CTL-679 breaker. All have real defaults for prod; tests override every one.
 // markEscalationCapTerminal — CTL-1442. Flip a phase signal to a TERMINAL
-// stalled state after the escalation ask-cap is consumed, persisting the
-// curated CTL-1130 explanation on the signal so the monitor's Needs-You inbox
-// (board-data deriveExplanation, newest-signal-first) renders the final brief.
-// A terminal signal drops the ticket from the reclaim sweep's working set, so
-// the every-cool-down re-ask loop (audit RC4) ends here. Read-modify-write,
-// atomic tmp+rename (mirrors defaultReviveDispatch's signal reset). Never
-// throws — a failed flip falls back to the escalateOnce ask-cap early-return.
-function markEscalationCapTerminal({ orchDir, ticket, phase, explanation }) {
+// stalled state, persisting the curated CTL-1130 explanation on the signal so
+// the monitor's Needs-You inbox (board-data deriveExplanation, newest-signal-
+// first) renders the final brief. A terminal signal drops the ticket from the
+// reclaim sweep's working set — originally so the every-cool-down re-ask loop
+// (audit RC4) ends once the escalation ask-cap is consumed (the default
+// `stalledReason`); CTL-1657 reuses the same terminal-write for the
+// no-probe-for-phase escalation (a probe-less phase — e.g. a dead
+// recovery-pass worker — has no retry path at all, so it must go terminal on
+// the FIRST occurrence, not after a cap of asks) via an explicit
+// `stalledReason` override. Read-modify-write, atomic tmp+rename (mirrors
+// defaultReviveDispatch's signal reset). Never throws — a failed flip falls
+// back to escalateOnce's early-return.
+function markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason = "escalation-ask-cap" }) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   try {
     mkdirSync(dirname(signalPath), { recursive: true });
@@ -1913,7 +1925,7 @@ function markEscalationCapTerminal({ orchDir, ticket, phase, explanation }) {
     if (!sig.ticket) sig.ticket = ticket;
     if (!sig.phase) sig.phase = phase;
     sig.status = "stalled";
-    sig.stalledReason = "escalation-ask-cap";
+    sig.stalledReason = stalledReason;
     sig.explanation = explanation;
     if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
     sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -2400,6 +2412,22 @@ export function reclaimDeadWorkIfPossible(
       );
       return "escalation-cap-terminal";
     }
+    // CTL-1657: a probe-less phase (e.g. a dead recovery-pass worker, which
+    // reuses this signal-file machinery but has no registered work-done probe
+    // to retry against) has no retry path at all — there is nothing a second
+    // attempt could do differently. Unlike the "no-progress" cap above (which
+    // legitimately retries up to escalationAskCap times before going
+    // terminal), go terminal on this FIRST occurrence: leaving the signal at
+    // its prior non-terminal status would let listInFlightTickets keep
+    // counting it as an occupied worker slot forever (Codex #3027 P1).
+    if (reason === "no-probe-for-phase") {
+      markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason: reason });
+      log.warn(
+        { ticket, phase, reason },
+        "ctl-1657: no-probe-for-phase escalation — parked terminal immediately (no retry path exists for a probe-less phase)"
+      );
+      return "escalation-cap-terminal";
+    }
     log.warn({ ticket, phase, reason }, "ctl-587: escalated");
     return "escalated";
   }
@@ -2853,15 +2881,32 @@ export function reclaimDeadWorkIfPossible(
     const i = phaseIndex(p);
     return i > max ? i : max;
   }, -1);
-  // The signal's OWN phase needs the identical isKnownPhase guard: ancillary
-  // dispatches that reuse this same signal-file machinery outside the FSM
-  // (e.g. "recovery-pass", written by recovery-reasoning.mjs) have no ordinal
-  // position, so phaseIndex() throws PhaseFsmError for them. Previously this
-  // was unguarded — every dead recovery-pass worker hit the throw on every
-  // tick, was swallowed by the CTL-702 per-worker isolation in scheduler.mjs,
-  // and could never actually be reclaimed. A non-FSM phase can't be
-  // "superseded" in the ordinal sense, so skip the comparison and fall
-  // through to the normal reclaim-eligible path below.
+  // The signal's OWN phase needs an analogous guard before phaseIndex(phase):
+  // "recovery-pass" (the one non-FSM phase this module knows is legitimately
+  // dispatched through this same signal-file machinery, via
+  // recovery-reasoning.mjs's Pass 0r actuator) has no ordinal position, so
+  // phaseIndex() throws PhaseFsmError for it. Previously this was unguarded —
+  // every dead recovery-pass worker hit the throw on every tick, was
+  // swallowed by the CTL-702 per-worker isolation in scheduler.mjs, and could
+  // never actually be reclaimed.
+  //
+  // CTL-1657 Codex P2: the guard is scoped to RECOVERY_PASS_PHASE specifically,
+  // NOT a blanket "any unknown phase" — signal-reader.mjs accepts arbitrary
+  // phase-*.json files with an unvalidated raw.phase, so a genuinely unknown
+  // string (a typo, a corrupt signal, a future dispatch type not yet added
+  // here) must keep the PRE-fix behavior of doing nothing, not silently reach
+  // the no-probe-for-phase escalation below and mutate Linear/event state for
+  // data this function doesn't understand.
+  if (!isKnownPhase(phase) && phase !== RECOVERY_PASS_PHASE) {
+    log.warn(
+      { ticket, phase },
+      "recovery: unrecognized phase on a reclaim-eligible signal — no-op (not superseded, not escalated)"
+    );
+    return "unknown-phase-noop";
+  }
+  // A non-FSM phase (recovery-pass) can't be "superseded" in the ordinal
+  // sense — isKnownPhase(phase) is false for it, so this comparison is
+  // skipped and it falls through to the reclaim-eligible path below.
   if (isKnownPhase(phase) && phaseIndex(phase) < latestIdx) {
     // CTL-649: emit a reap-intent so the daemon reaper can stop the lingering
     // bg worker. Fire-and-forget — the periodic orphan reaper picks up anything
