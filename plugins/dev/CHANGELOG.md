@@ -1,16 +1,21 @@
 # Changelog
 
-## [12.47.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.46.0...catalyst-dev-v12.47.0) (2026-08-06)
+## [12.47.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.46.0...catalyst-dev-v12.47.0)
+
+Aug 06, 2026
+
+<!-- ai-enhanced -->
+
+### Stranded Ticket Recovery & Monitoring Node Substrate
+
+The board-health delegate now detects mid-pipeline tickets that have gone dark — no worker, no live job, no recent recovery intent — and routes each one to the appropriate revival path (open PR remediation, remote branch resume, or fresh restart). Separately, monitor and developer nodes now run a proper event-mirror substrate instead of the execution core, so observation-only machines no longer accidentally join the dispatch roster; `catalyst doctor` and `verify-node` both surface a dead mirror as a real failure rather than silently passing. Several correctness fixes ship alongside: stranded-ticket evidence was previously never populated due to a map key mismatch, recovery-pass reclaim was silently failing on non-FSM phases, and queued/blocked labels now clear reliably once a ticket starts running.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1644 board-health delegate detects stranded mid-pipeline tickets and routes each to revival or escalation ([#3043](https://github.com/coalesce-labs/catalyst/issues/3043)) ([e807fd5](https://github.com/coalesce-labs/catalyst/commit/e807fd5222181953cadd50a05d428bbde293a1e9))
 * **dev:** CTL-1654 interactive nodes carry event/monitoring substrate without execution layer ([#3016](https://github.com/coalesce-labs/catalyst/issues/3016)) ([42a623c](https://github.com/coalesce-labs/catalyst/commit/42a623cf26e57b18e6c66b89f558c3c8501e5520))
-
-
-### Bug Fixes
-
 * **dev:** address upstream review findings on PR [#2851](https://github.com/coalesce-labs/catalyst/issues/2851) ([#3052](https://github.com/coalesce-labs/catalyst/issues/3052)) ([6414e01](https://github.com/coalesce-labs/catalyst/commit/6414e01cae512c9007c0e2425facdee892fd433e))
 * **dev:** CTL-1571 make queued/blocked labels retractable once a ticket starts ([#3045](https://github.com/coalesce-labs/catalyst/issues/3045)) ([aa5fe53](https://github.com/coalesce-labs/catalyst/commit/aa5fe53b15b663383727831e34bbae786d3b10e7))
 * **dev:** CTL-1657 guard reclaim supersede-check against non-FSM phases ([#3027](https://github.com/coalesce-labs/catalyst/issues/3027)) ([58a3849](https://github.com/coalesce-labs/catalyst/commit/58a3849f3c837856ffdb26e6b9956295d643899f))
