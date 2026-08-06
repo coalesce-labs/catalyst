@@ -978,6 +978,32 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.inv.phantomMergedPr.failed"]).toBe(2);
   });
 
+  // CTL-1607: per-host slot census promoted to chartable recovery.slot.* attributes.
+  test("recovery.board-scan promotes slot* scalars under recovery.slot.* names", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0,
+      gateDecision: "proceed", gateReason: "no wedge",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      invariants: {},
+      slotCapacity: 6, slotInUse: 4, slotFree: 2,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a["recovery.slot.capacity"]).toBe(6);
+    expect(a["recovery.slot.in_use"]).toBe(4);
+    expect(a["recovery.slot.free"]).toBe(2);
+  });
+
+  test("recovery.board-scan omits recovery.slot.* when slot scalars are null", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0, gateDecision: "proceed", gateReason: "r",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0, invariants: {},
+      slotCapacity: null, slotInUse: null, slotFree: null,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect("recovery.slot.capacity" in a).toBe(false);
+    expect("recovery.slot.free" in a).toBe(false);
+  });
+
   test("recovery.board-scan never promotes rosters/move arrays (cardinality)", () => {
     const details = {
       mode: "shadow",

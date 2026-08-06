@@ -69,17 +69,34 @@ function localMonitorBase(env: Record<string, string | undefined>): string {
   return `http://127.0.0.1:${port}`;
 }
 
-/** Decode an `account` SSE frame; null on garbage or a non-posture (available:false) frame. */
-function decodeAccountFrame(data: string): AccountStripSignal | null {
-  try {
-    const parsed: unknown = JSON.parse(data);
-    if (!parsed || typeof parsed !== "object") return null;
-    const p = parsed as Record<string, unknown>;
-    if (typeof p.status !== "string") return null; // e.g. {available:false} → no posture
-    return p as unknown as AccountStripSignal;
-  } catch {
-    return null;
+/**
+ * What to do with a raw (already JSON.parse'd) `/api/accounts` body or SSE
+ * `account` frame payload: apply a valid posture, CLEAR to unavailable, or
+ * ignore malformed/garbage input untouched.
+ *
+ * MIRROR of ui/src/hooks/account-signal-lib.ts's `accountFrameAction` — same
+ * three-way contract, hand-synced per this file's cli/lib mirroring
+ * convention (see account-strip.ts's "MIRROR, not import" note: the cli
+ * bundle never reaches into ui/src). CTL-1653 Codex round-3 finding: before
+ * this existed, the HUD's decode returned null for BOTH garbage AND the
+ * documented `{available:false}` frame, so an already-open HUD kept showing
+ * a stale posture after a node's env file was emptied/reset-to-placeholders
+ * instead of clearing — the round-2 fix closed this gap on the web dashboard
+ * (accountFrameAction) but missed the HUD's separate decode path.
+ */
+export type AccountFrameAction =
+  | { type: "apply"; signal: AccountStripSignal }
+  | { type: "clear" }
+  | { type: "ignore" };
+
+export function accountFrameAction(value: unknown): AccountFrameAction {
+  if (!value || typeof value !== "object") return { type: "ignore" };
+  const p = value as Record<string, unknown>;
+  if (typeof p.status === "string") {
+    return { type: "apply", signal: p as unknown as AccountStripSignal };
   }
+  if (p.available === false) return { type: "clear" };
+  return { type: "ignore" };
 }
 
 /**
@@ -97,6 +114,19 @@ export function useAccountModel(): AccountStripSignal | null {
     let backoff = INITIAL_BACKOFF_MS;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
+    const applySignal = (next: AccountStripSignal | null) => {
+      if (alive) setSignal(next);
+    };
+
+    // Dispatch a raw (already JSON-parsed) frame/body per accountFrameAction:
+    // apply a valid posture, CLEAR to unavailable (a REAL transition, not
+    // noise — must reach the strip), or ignore malformed input untouched.
+    const dispatch = (raw: unknown) => {
+      const action = accountFrameAction(raw);
+      if (action.type === "apply") applySignal(action.signal);
+      else if (action.type === "clear") applySignal(null);
+    };
+
     // Snapshot from /api/accounts so the strip populates immediately (and re-seeds
     // after a drop), not only on the next stream frame. Best-effort.
     const reconcile = async () => {
@@ -104,8 +134,7 @@ export function useAccountModel(): AccountStripSignal | null {
         const r = await fetch(`${base}/api/accounts`);
         if (r.ok && alive) {
           const body: unknown = await r.json();
-          const s = decodeAccountFrame(JSON.stringify(body));
-          if (s && alive) setSignal(s);
+          dispatch(body);
         }
       } catch {
         /* offline — the stream (or a later snapshot) will populate it */
@@ -133,8 +162,13 @@ export function useAccountModel(): AccountStripSignal | null {
       let handled = false; // true once onerror has already handled this src's end
       src.addEventListener("account", (ev) => {
         backoff = INITIAL_BACKOFF_MS; // reset on a real frame
-        const next = decodeAccountFrame(ev.data);
-        if (next && alive) setSignal(next);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(ev.data);
+        } catch {
+          return; // truncated/garbage frame — ignore
+        }
+        dispatch(parsed);
       });
       src.onerror = () => {
         handled = true;

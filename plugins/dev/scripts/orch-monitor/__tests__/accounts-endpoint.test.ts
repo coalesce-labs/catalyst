@@ -126,6 +126,32 @@ describe("/api/accounts", () => {
     });
     expect(r.status).toBe(200);
   });
+  it("a DNS-rebinding-shaped request (foreign Host, header present, no Origin) is rejected (403)", async () => {
+    // CTL-1653 Codex round-3: a page loaded as http://evil.example:<port> that
+    // later re-resolves to THIS server's IP is same-origin to the browser once
+    // rebound — its JS can attach the refresh header with no CORS preflight,
+    // and a same-origin fetch isn't guaranteed to carry Origin either (which
+    // originAllowed(null) would otherwise admit). The Host header is what the
+    // browser's own HTTP stack sets from the page's URL — the attacker's
+    // domain, not this server's real name — so it must be checked too. Same
+    // physical connection (127.0.0.1/localhost) as every other test here, but
+    // an untrusted Host is exactly what a rebound browser would send.
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Host: "evil.example:1234" },
+    });
+    expect(r.status).toBe(403);
+    expect(calls).toBe(before); // no probe spawned
+  });
+  it("a request with the REAL Host (localhost:<port>) + the header succeeds (positive control)", async () => {
+    const before = calls;
+    const port = new URL(base).port;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Host: `localhost:${port}` },
+    });
+    expect(r.status).toBe(200);
+    expect(calls).toBe(before + 1);
+  });
 });
 
 describe("/api/accounts when the accounts env file is absent", () => {
@@ -193,5 +219,120 @@ describe("/api/accounts disabled (accountsProbeExec:null)", () => {
     } catch {
       /* ignore */
     }
+  });
+});
+
+describe("/api/accounts refresh behind an HTTPS reverse proxy", () => {
+  // CTL-1653 Codex round-4: MONITOR_TRUSTED_ORIGINS' documented reverse-proxy
+  // form is a FULL https:// origin, but Host carries no scheme — an
+  // http://-only probe of the trusted set would 403 every legitimate proxied
+  // refresh. The guard must accept a Host that matches a trusted origin under
+  // EITHER scheme.
+  let server: ReturnType<typeof createServer>;
+  let tmpDir = "";
+  let base = "";
+  let calls = 0;
+  let prevTrusted: string | undefined;
+  let prevTlsPeers: string | undefined;
+  beforeAll(() => {
+    prevTrusted = process.env.MONITOR_TRUSTED_ORIGINS;
+    process.env.MONITOR_TRUSTED_ORIGINS = "https://catalyst.internal.example";
+    prevTlsPeers = process.env.MONITOR_TLS_PROXY_PEERS;
+    // Declare the test client's loopback address as the TLS-terminating proxy
+    // peer — scheme is operator-declared config, never header-derived (round-6).
+    process.env.MONITOR_TLS_PROXY_PEERS = "127.0.0.1,::1,::ffff:127.0.0.1";
+    const dirs = mkWtDir("accounts-endpoint-https-");
+    tmpDir = dirs.tmpDir;
+    server = createServer({
+      port: 0,
+      wtDir: dirs.wtDir,
+      startWatcher: false,
+      accountsRefreshFloorMs: 0,
+      accountsProbeExec: () => {
+        calls += 1;
+        return Promise.resolve(FAKE);
+      },
+    });
+    base = `http://localhost:${server.port}`;
+  });
+  afterAll(() => {
+    if (prevTrusted === undefined) delete process.env.MONITOR_TRUSTED_ORIGINS;
+    else process.env.MONITOR_TRUSTED_ORIGINS = prevTrusted;
+    if (prevTlsPeers === undefined) delete process.env.MONITOR_TLS_PROXY_PEERS;
+    else process.env.MONITOR_TLS_PROXY_PEERS = prevTlsPeers;
+    void server.stop(true);
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+  it("a refresh from the DECLARED TLS-proxy peer whose Host matches the https trusted origin is admitted", async () => {
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: {
+        [ACCOUNTS_REFRESH_HEADER]: "1",
+        Host: "catalyst.internal.example",
+        Origin: "https://catalyst.internal.example",
+      },
+    });
+    expect(r.status).toBe(200);
+    expect(calls).toBe(before + 1);
+  });
+  it("an IPv4-mapped peer matches a natural IPv4 declaration (dual-stack normalization)", async () => {
+    // CTL-1653 Codex round-7: a dual-stack bind reports 127.0.0.1 upstreams as
+    // ::ffff:127.0.0.1 — a natural MONITOR_TLS_PROXY_PEERS=127.0.0.1 entry must
+    // still classify the proxied refresh as https. The suite's connections may
+    // arrive under either spelling, so declare ONLY the bare IPv4 form and
+    // assert admission still works (the beforeAll declares all spellings; here
+    // we narrow to the un-mapped one).
+    const saved = process.env.MONITOR_TLS_PROXY_PEERS;
+    process.env.MONITOR_TLS_PROXY_PEERS = "127.0.0.1,::1";
+    try {
+      const before = calls;
+      const r = await fetch(`${base}/api/accounts?refresh=true`, {
+        headers: {
+          [ACCOUNTS_REFRESH_HEADER]: "1",
+          Host: "catalyst.internal.example",
+          Origin: "https://catalyst.internal.example",
+        },
+      });
+      expect(r.status).toBe(200);
+      expect(calls).toBe(before + 1);
+    } finally {
+      process.env.MONITOR_TLS_PROXY_PEERS = saved;
+    }
+  });
+  it("a spoofed X-Forwarded-Proto from a NON-declared peer cannot upgrade the scheme (403)", async () => {
+    // CTL-1653 Codex round-6: the scheme signal is operator-declared config,
+    // never header-derived — any loopback browser can send the header, and
+    // appending proxies put the client's value first. With the declared-peer
+    // set cleared, the SAME loopback client sending X-Forwarded-Proto: https
+    // stays plaintext, and http://catalyst.internal.example is deliberately
+    // NOT in the https-only trusted set.
+    const saved = process.env.MONITOR_TLS_PROXY_PEERS;
+    delete process.env.MONITOR_TLS_PROXY_PEERS;
+    try {
+      const before = calls;
+      const r = await fetch(`${base}/api/accounts?refresh=true`, {
+        headers: {
+          [ACCOUNTS_REFRESH_HEADER]: "1",
+          Host: "catalyst.internal.example",
+          "X-Forwarded-Proto": "https",
+        },
+      });
+      expect(r.status).toBe(403);
+      expect(calls).toBe(before);
+    } finally {
+      process.env.MONITOR_TLS_PROXY_PEERS = saved;
+    }
+  });
+  it("an untrusted Host is still rejected even with the https set configured", async () => {
+    const before = calls;
+    const r = await fetch(`${base}/api/accounts?refresh=true`, {
+      headers: { [ACCOUNTS_REFRESH_HEADER]: "1", Host: "evil.example" },
+    });
+    expect(r.status).toBe(403);
+    expect(calls).toBe(before);
   });
 });

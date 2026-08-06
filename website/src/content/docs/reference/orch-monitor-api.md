@@ -21,10 +21,13 @@ response** (or in the monitor's own environment).
 - **Cached** (~5 min TTL). Repeated calls within the TTL are served from cache — the same `probedAt`
   is returned and no inference call is spent.
 - **`?refresh=true`** forces a fresh probe (operator-initiated; the only per-request probe path).
-  Requires the `X-Catalyst-Refresh` header (any value) **and** a trusted `Origin` when one is
-  present. The header is what actually stops the vector: this route is a GET, so a browser
-  navigating to (or embedding) the URL directly sends no `Origin` at all, and neither a header-less
-  request nor an untrusted `Origin` is accepted — a plain read (no `refresh`) needs neither.
+  Requires the `X-Catalyst-Refresh` header (any value), a trusted `Host` header, **and** a trusted
+  `Origin` when one is present. The header is what stops a simple cross-site request (an `<img>`,
+  a top-level navigation, a plain `<form>` GET — none of those can attach a custom header); the
+  `Host` check is what stops a DNS-rebinding page (one that starts on an attacker domain and later
+  re-resolves to this server's own address, at which point it is same-origin to the browser and can
+  attach the header with no CORS preflight, and may carry no `Origin` at all) — a plain read (no
+  `refresh`) needs none of this.
   ```bash
   curl -H "X-Catalyst-Refresh: 1" "http://localhost:7400/api/accounts?refresh=true"
   ```

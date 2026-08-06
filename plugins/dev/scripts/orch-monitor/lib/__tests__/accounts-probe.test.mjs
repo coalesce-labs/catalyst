@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -280,6 +280,45 @@ describe("defaultAccountsProbeExec (secrets hygiene)", () => {
       const r = await defaultAccountsProbeExec({ envFile });
       expect(r.available).toBe(false);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("an UNREADABLE (permission-denied) env file THROWS instead of looking disabled (CTL-1653 Codex round-3)", async () => {
+    // Root ignores file-mode permission bits, so chmod 000 doesn't actually
+    // block root's own read — skip gracefully rather than false-fail in a
+    // root-run CI container.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const dir = mkdtempSync(join(tmpdir(), "accounts-env-unreadable-"));
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(envFile, 'CLAUDE_TOKEN_ACCTA="sk-ant-oat-X"  # a@x.io\n');
+    chmodSync(envFile, 0o000);
+    try {
+      // A real misconfiguration (broken perms/ownership) must surface as an
+      // error, NOT be swallowed into the same available:false shape as a
+      // genuinely absent/empty/placeholder-only file — that would hide the
+      // permission problem from an operator entirely.
+      await expect(defaultAccountsProbeExec({ envFile })).rejects.toBeTruthy();
+    } finally {
+      chmodSync(envFile, 0o600); // restore so rmSync can clean up
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("that same unreadable-file error becomes the usual status:\"error\" posture through the cache (not available:false)", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const dir = mkdtempSync(join(tmpdir(), "accounts-env-unreadable-cache-"));
+    const envFile = join(dir, "claude-accounts.env");
+    writeFileSync(envFile, 'CLAUDE_TOKEN_ACCTA="sk-ant-oat-X"  # a@x.io\n');
+    chmodSync(envFile, 0o000);
+    try {
+      const exec = () => defaultAccountsProbeExec({ envFile });
+      const p = createAccountsProbe({ exec, ttlMs: 5000, now: () => 1000, node: "n" });
+      const r = await p.get();
+      // createAccountsProbe.runProbe()'s existing catch synthesizes THIS shape
+      // for any exec() rejection — reused as-is, not a new error contract.
+      expect(r.status).toBe("error");
+      expect(r.available).toBeUndefined(); // never silently "disabled"
+    } finally {
+      chmodSync(envFile, 0o600);
       rmSync(dir, { recursive: true, force: true });
     }
   });
