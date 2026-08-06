@@ -92,6 +92,63 @@ describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
   });
 });
 
+describe("STALL_CATEGORY_MAP — #1461 additions", () => {
+  test("source_conflict_resolvable routes to skip (resolve-conflict-sweep already owns it)", () => {
+    expect(classifyStalledTicket({ reason: "source_conflict_resolvable" })).toEqual({ category: "skip", action: "skip" });
+  });
+
+  test("resolve-conflict-cycle-cap-exhausted routes to escalate", () => {
+    expect(classifyStalledTicket({ reason: "resolve-conflict-cycle-cap-exhausted" })).toEqual({ category: "resolve-conflict-cap", action: "escalate" });
+  });
+});
+
+// #1461 Fix 6 (IMPORTANT final-review finding, human-approved design): the
+// failureReason/stalledReason field-name bugfix (defaultCollectUnstuckCandidates,
+// tested below) widened scope beyond the intended target
+// (source_conflict_ctl708_unavailable) — it also admits 5 OTHER previously-invisible
+// stall reasons phase-agent-dispatch writes via the same code path
+// (REBASE_LAST_STALL_REASON, lib/worktree-rebase.sh). None have a validated, safe
+// automated remediation today, so each routes to a distinct, descriptive
+// category with action:"escalate" instead of falling through to "unknown".
+describe("STALL_CATEGORY_MAP — Fix 6: the 5 newly-admitted rebase stall reasons route to typed escalate categories, not 'unknown'", () => {
+  test("thoughts_conflict_with_origin_main → thoughts-conflict/escalate", () => {
+    expect(classifyStalledTicket({ reason: "thoughts_conflict_with_origin_main" }))
+      .toEqual({ category: "thoughts-conflict", action: "escalate" });
+  });
+
+  test("worktree_live_handle_guard_refused → worktree-guard-refused/escalate", () => {
+    expect(classifyStalledTicket({ reason: "worktree_live_handle_guard_refused" }))
+      .toEqual({ category: "worktree-guard-refused", action: "escalate" });
+  });
+
+  test("continue_failed → rebase-continue-failed/escalate", () => {
+    expect(classifyStalledTicket({ reason: "continue_failed" }))
+      .toEqual({ category: "rebase-continue-failed", action: "escalate" });
+  });
+
+  test("no_rebase_in_progress → no-rebase-in-progress/escalate", () => {
+    expect(classifyStalledTicket({ reason: "no_rebase_in_progress" }))
+      .toEqual({ category: "no-rebase-in-progress", action: "escalate" });
+  });
+
+  test("thoughts_symlink_broken → thoughts-symlink-broken/escalate", () => {
+    expect(classifyStalledTicket({ reason: "thoughts_symlink_broken" }))
+      .toEqual({ category: "thoughts-symlink-broken", action: "escalate" });
+  });
+
+  test("none of the 5 fall through to the generic 'unknown' category", () => {
+    for (const reason of [
+      "thoughts_conflict_with_origin_main",
+      "worktree_live_handle_guard_refused",
+      "continue_failed",
+      "no_rebase_in_progress",
+      "thoughts_symlink_broken",
+    ]) {
+      expect(classifyStalledTicket({ reason }).category).not.toBe("unknown");
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // UNSTUCK_SWEEP_INTENT_KIND constant
 // ---------------------------------------------------------------------------
@@ -356,6 +413,53 @@ describe("defaultCollectUnstuckCandidates — shared census builder (CTL-1064)",
     const candidates = defaultCollectUnstuckCandidates({ orchDir });
     expect(candidates).toHaveLength(1);
     expect(candidates[0].evidence.reason).toBe("orphan-sweep-stale");
+  });
+
+  // #1461 Fix 6 (deferred-minor finding): stalledReason takes precedence over
+  // failureReason when BOTH are present with DIFFERENT values — there was
+  // previously no test proving this precedence, only that each field works
+  // alone. The `??` chain (stalledReason ?? failureReason ?? null) is
+  // left-to-right, so stalledReason wins whenever it is non-nullish.
+  test("stalledReason takes precedence over failureReason when both are present with different values", () => {
+    makeWorker("CTL-20021", {
+      status: "stalled",
+      stalledReason: "rebase_refused_dirty_tree",
+      failureReason: "source_conflict_ctl708_unavailable",
+    });
+    const candidates = defaultCollectUnstuckCandidates({ orchDir });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].evidence.reason).toBe("rebase_refused_dirty_tree");
+  });
+
+  // #1461 Fix 6 (deferred-minor finding): the prior guard (`stalledReason ||
+  // failureReason`) and value selection (`stalledReason ?? failureReason`) used
+  // DIFFERENT operators — an empty-string stalledReason ("" is falsy but not
+  // nullish) would pass the `??` value-selection as "" (present) while the `||`
+  // guard would fall through to failureReason for the presence check, an
+  // inconsistent read. Now BOTH the guard and the value use the same `??`
+  // chain: an empty-string stalledReason IS treated as present (matches `??`
+  // semantics throughout), so the candidate's reason is the empty string, not
+  // a silent fallback to failureReason.
+  test("an empty-string stalledReason is treated as present (not falsy) — consistent ?? semantics throughout", () => {
+    makeWorker("CTL-20022", {
+      status: "stalled",
+      stalledReason: "",
+      failureReason: "source_conflict_ctl708_unavailable",
+    });
+    const candidates = defaultCollectUnstuckCandidates({ orchDir });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].evidence.reason).toBe("");
+  });
+
+  test("finds source_conflict_ctl708_unavailable via failureReason (the real producer field), not just stalledReason", () => {
+    makeWorker("CTL-2010", {
+      status: "stalled",
+      failureReason: "source_conflict_ctl708_unavailable",
+      stalledReason: undefined,
+    });
+    const out = defaultCollectUnstuckCandidates({ orchDir });
+    expect(out).toHaveLength(1);
+    expect(out[0].evidence.reason).toBe("source_conflict_ctl708_unavailable");
   });
 
   test("skips running/done signals and tickets with wrong status", () => {

@@ -125,6 +125,12 @@ phase_default_turn_cap() {
 	monitor-merge) echo 50 ;;
 	monitor-deploy) echo 30 ;;
 	remediate) echo 40 ;; # CTL-653: fix-scoped — smaller than implement's 75
+	# resolve-conflict (#1461/ADR-028): rebases a stalled branch onto base and
+	# resolves the classified-resolvable conflict additively, per
+	# resolve-conflict-brief.json. Explicitly scoped like remediate — "the same
+	# fix-capable envelope" per the skill's own docs — rather than falling to
+	# the generic DEFAULT_TURN_CAP.
+	resolve-conflict) echo 40 ;;
 	# recovery-pass (CTL-1176 rung 3): a goal-driven senior-engineer sweep that
 	# resolves conflicts / rebases / merges / re-dispatches across the pipeline.
 	# Higher than remediate's fix-scoped 40 because it iterates to a fleet goal,

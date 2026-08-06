@@ -2335,6 +2335,37 @@ for FIELD in .env .prompt .settings .model .turnCap .sessionName .pluginDirs; do
 done
 
 echo ""
+echo "Test 71 (#1461): resolve-conflict dispatches with turnCap 40 + resolve-conflict-brief.json prior gate"
+fresh_env t71_resolve_conflict
+# resolve-conflict's prior artifact is resolve-conflict-brief.json (the
+# classification + which-phase-stalled envelope resolve-conflict-sweep.mjs
+# writes before dispatch) — create it so the gate passes.
+printf '%s\n' '{"schema":"resolve-conflict-brief/v1","stalledPhase":"implement","conflictFiles":["a.ts"],"conflictTypes":["content"],"base":"main","attempt":1,"maxAttempts":3}' \
+	>"${WORKER_DIR}/resolve-conflict-brief.json"
+"$DISPATCH" --phase resolve-conflict --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1
+SIGNAL_RC="${WORKER_DIR}/phase-resolve-conflict.json"
+if [[ ! -f $SIGNAL_RC ]]; then
+	fail "resolve-conflict signal file created: $SIGNAL_RC"
+else
+	pass "resolve-conflict signal file created"
+	assert_eq "resolve-conflict" "$(jq -r '.phase' "$SIGNAL_RC")" "signal.phase = resolve-conflict"
+	assert_eq "40" "$(jq -r '.turnCap' "$SIGNAL_RC")" "signal.turnCap = 40 (resolve-conflict, fix-scoped like remediate)"
+fi
+
+echo ""
+echo "Test 72 (#1461): resolve-conflict refuses when resolve-conflict-brief.json (prior artifact) is missing"
+fresh_env t72_resolve_conflict
+# No resolve-conflict-brief.json → the prior-artifact gate must refuse (exit 2, no signal).
+"$DISPATCH" --phase resolve-conflict --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/rc.out" 2>/dev/null
+RC_RC=$?
+assert_eq "2" "$RC_RC" "exit code 2 when resolve-conflict's resolve-conflict-brief.json is missing"
+assert_eq "refused" "$(jq -r '.status' "${TEST_DIR}/rc.out" 2>/dev/null || echo "")" \
+	"resolve-conflict stdout JSON status = refused"
+[[ -f "${WORKER_DIR}/phase-resolve-conflict.json" ]] && SIG_RC_EXISTS="yes" || SIG_RC_EXISTS="no"
+assert_eq "no" "$SIG_RC_EXISTS" "no phase-resolve-conflict.json signal written on refusal"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then

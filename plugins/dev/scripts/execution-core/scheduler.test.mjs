@@ -101,6 +101,7 @@ import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
+import { RESOLVED_MARKER_REASON, RESOLVE_CONFLICT_STALL_REASON } from "./resolve-conflict-sweep.mjs"; // #1461: shared marker reasons, not re-typed literals
 
 let orchDir;
 let catalystDir;
@@ -5009,6 +5010,168 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
     expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(true);
     expect(removed.filter((r) => r.t === TICKET && r.l === "needs-human")).toHaveLength(0);
     expect(orphans.some((o) => o.ticket === TICKET)).toBe(true);
+  });
+
+  // #1461: resolve-conflict-sweep marks the active signal failureReason
+  // RESOLVED_MARKER_REASON while a fix is in flight — the terminal sweep must NOT
+  // immediately needs-human this ticket (every candidate would otherwise be flagged
+  // needs-human the same tick the fix is already dispatched). Mirrors T3's fixture
+  // (stalled signal, non-terminal Linear state) but swaps in the resolve-conflict
+  // reason via writeSignalRaw so the raw JSON carries failureReason.
+  test("#1461: does not apply needs-human while resolve-conflict-sweep is actively resolving a ticket", () => {
+    const TICKET = "CTL-1461-T1";
+    writeSignalRaw(TICKET, "implement", {
+      ticket: TICKET,
+      phase: "implement",
+      status: "stalled",
+      failureReason: RESOLVED_MARKER_REASON,
+    });
+
+    const applied = [];
+    const removed = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true };
+      },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
+    };
+    const gateway = {
+      getDescriptor: (id) =>
+        id === TICKET ? { state: "In Progress", removed: false, updatedAt: FRESH } : null,
+    };
+    const orphans = [];
+    const appendOrphanDetectedEvent = (e) => {
+      orphans.push(e);
+      return true;
+    };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      gateway,
+      appendOrphanDetectedEvent,
+      // Force single-host determinism: this dev host's real cluster-repo roster
+      // (real fleet hostnames) otherwise leaks into getClusterHosts() and makes
+      // fenceGuard fail closed regardless of this test's own logic (a false green
+      // pre-implementation, since the new guard runs BEFORE fenceGuard and the
+      // observable "no needs-human" outcome is identical either way). T3's sibling
+      // fixture does NOT pin hosts/hostName either, and is EQUALLY exposed to this
+      // same confound — run in isolation it fails against unmodified code for the
+      // identical reason (verified; see task-11-report.md). It reads as "passing"
+      // only in specific run orders/process states (test-order and/or
+      // getClusterHosts()-caching dependent), not because it is immune. This test
+      // pins hosts/hostName explicitly so it does NOT depend on that same
+      // order/caching-dependent behavior — see task-11-report.md for the full
+      // investigation.
+      hosts: ["solo"],
+      hostName: "solo",
+      // #1461 (final-review finding): this ticket's status:"stalled" signal
+      // ALSO matches the CTL-1176 recovery-pass filter (needs-human/failed/
+      // stalled/unknown), so on a host whose ambient CATALYST_CONFIG_FILE
+      // Layer-2 config has recovery.pass.mode=shadow (e.g. a dev machine
+      // enrolled in the fleet-wide shadow rollout), readRecoveryPassConfig()
+      // picks that up and the recovery-reasoning pass actually runs — and its
+      // OWN default postComment seam shells out to the real
+      // lib/linear-comment-post.sh, making a genuine network call (observed
+      // as "linear-comment-post: token mint failed" in test log output) that
+      // has nothing to do with what THIS test verifies (the terminal-sweep's
+      // needs-human exemption). Pin recovery-pass off explicitly so this test
+      // is hermetic regardless of ambient env/Layer-2 config.
+      recoveryPass: { mode: "off" },
+    });
+
+    // needs-human must never be applied while the fix is in flight.
+    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(false);
+    expect(removed.filter((r) => r.t === TICKET && r.l === "needs-human")).toHaveLength(0);
+    // Still surfaced as an orphan for dashboard visibility.
+    expect(orphans.some((o) => o.ticket === TICKET)).toBe(true);
+  });
+
+  // #1461 Fix 3 (final-review finding): the RESOLVED_MARKER_REASON exemption
+  // above used to `continue`, skipping the ENTIRE rest of the loop iteration —
+  // including convergeStartedHeldLabels (CTL-1068 orphaned held-label
+  // retraction) and the CTL-695 terminal-worker reap nomination, neither of
+  // which has anything to do with needs-human labeling. The fix narrows the
+  // exemption to ONLY the needs-human label call. This test proves both OTHER
+  // steps still run for a ticket under active resolve-conflict resolution.
+  //
+  // convergeDispositionLabel (CTL-764 finding 5) is NOT combined into this
+  // same integration test: it requires a needs-input phase signal, and
+  // byActivePhase (signal-reader.mjs) always ranks a NON-terminal phase (like
+  // needs-input) ahead of a terminal one (like the "stalled" phase carrying
+  // RESOLVED_MARKER_REASON) when picking the ticket's canonical active signal
+  // — so a ticket that would ever trip the OLD `continue` (i.e. whose
+  // canonical signal IS the RESOLVED_MARKER_REASON stall) structurally cannot
+  // simultaneously have a needs-input phase outrank it. Verified by code
+  // inspection instead: convergeDispositionLabel's block sits AFTER the whole
+  // if/else this fix touches, at the SAME loop-body nesting level — the fix
+  // (removing the `continue`, narrowing the skip to just the
+  // labelNeedsHumanUnlessBeliefOwner call) makes it unconditionally reachable
+  // for every ticket exactly like convergeStartedHeldLabels/reap-nomination
+  // below, which ARE directly integration-tested here.
+  test("#1461 Fix 3: RESOLVED_MARKER_REASON exemption is narrowly scoped — held-label retraction and reap nomination still run", () => {
+    const TICKET = "CTL-1461-T2";
+    // The stall this sweep is actively resolving (exempted from needs-human).
+    // Carries a bg_job_id so the CTL-695 reap nomination has something to act on.
+    writeSignalRaw(TICKET, "implement", {
+      ticket: TICKET,
+      phase: "implement",
+      status: "stalled",
+      failureReason: RESOLVED_MARKER_REASON,
+      bg_job_id: "resconf01",
+    });
+    // A stale "queued" held-label marker — exercises convergeStartedHeldLabels'
+    // retraction (CTL-1068), independent of the exemption.
+    const workerDir = join(orchDir, "workers", TICKET);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-queued.applied"), "");
+
+    const applied = [];
+    const removed = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true };
+      },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
+    };
+    const gateway = {
+      getDescriptor: (id) =>
+        id === TICKET ? { state: "In Progress", removed: false, updatedAt: FRESH, labels: [] } : null,
+    };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      gateway,
+      hosts: ["solo"],
+      hostName: "solo",
+      recoveryPass: { mode: "off" }, // see T1's own comment above for why
+    });
+
+    // needs-human exemption still holds.
+    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(false);
+
+    // (1) CTL-1068 held-label retraction still runs.
+    expect(removed.some((r) => r.t === TICKET && r.l === "queued")).toBe(true);
+    expect(existsSync(join(workerDir, ".linear-label-queued.applied"))).toBe(false);
+
+    // (2) CTL-695 terminal-worker reap nomination still runs.
+    const reapEvts = readEventLog().filter(
+      (e) => e.event === "phase.terminal.reap-requested" && e.bg_job_id === "resconf01"
+    );
+    expect(reapEvts.length).toBe(1);
   });
 
   // T4: steady-state-zero-writes — no stalled/failed, no marker → zero needs-human writes
@@ -10679,6 +10842,189 @@ describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass
     // Across the two nodes (this test + the owned-only test) every candidate is
     // covered exactly once — mac-studio handles CTL-B.
     expect(escalate.tickets).toEqual([T_STUDIO]);
+  });
+});
+
+// ── #1461: resolve-conflict-sweep — scheduler wiring (Task 12) ─────────────────
+//
+// schedulerTick wires runResolveConflictSweepPass in exactly like unstuck-sweep:
+// a `resolveConflictSweep` options group (mode/collectCandidates/
+// collectCompletions/... seams), gated on mode !== "off", running every tick
+// (no throttle). These smoke tests only assert the wiring itself — the pure
+// classify/act behavior is covered by resolve-conflict-sweep.test.mjs.
+describe("#1461: resolve-conflict-sweep — scheduler wiring", () => {
+  afterEach(() => __resetForTests()); // reset the module-level in-flight guard between tests
+
+  test("runs every tick when mode is not off, uses the injected collectors", () => {
+    let candidatesCalled = false;
+    let completionsCalled = false;
+    let failuresCalled = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "shadow",
+        collectCandidates: () => {
+          candidatesCalled = true;
+          return [];
+        },
+        collectCompletions: () => {
+          completionsCalled = true;
+          return [];
+        },
+        // #1461 escalation-gap fix (I2 review follow-up): the failures census
+        // seam must be reachable through schedulerTick's real call path exactly
+        // like the candidates/completions seams already are.
+        collectFailures: () => {
+          failuresCalled = true;
+          return [];
+        },
+      },
+    });
+    expect(candidatesCalled).toBe(true);
+    expect(completionsCalled).toBe(true);
+    expect(failuresCalled).toBe(true);
+  });
+
+  // #1461 escalation-gap fix (I2 review follow-up): a genuine end-to-end
+  // reachability check for BOTH new seams (collectFailures,
+  // revertStallAndResetCycle) through schedulerTick's real production wiring —
+  // not just the "was it called" smoke test above. Drives an under-cap failure
+  // in enforce mode and asserts the revert seam receives exactly the
+  // {ticket, stalledPhase} shape defaultCollectResolveConflictFailures produces.
+  test("collectFailures + revertStallAndResetCycle are both reachable through schedulerTick in enforce mode", async () => {
+    const reverted = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "enforce",
+        collectCandidates: () => [],
+        collectCompletions: () => [],
+        collectFailures: () => [{ ticket: "CTL-9201", stalledPhase: "implement", workerDir: join(orchDir, "workers", "CTL-9201") }],
+        cycleCountOf: () => 0, // under the cap
+        revertStallAndResetCycle: (f) => {
+          reverted.push(f);
+          return true;
+        },
+      },
+    });
+    // The resolve-conflict-sweep pass is fire-and-forget (see schedulerTick's own
+    // comment on _resolveConflictSweepInFlight) — let its microtask chain drain.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(reverted).toEqual([{ ticket: "CTL-9201", stalledPhase: "implement" }]);
+  });
+
+  // M3 (review follow-up): injecting ONLY the failures collector (no
+  // candidates/completions override) must NOT silently no-op the whole sweep —
+  // the mode-gate has to recognize collectFailures too.
+  test("does not skip the sweep when ONLY collectFailures is injected (M3 gate fix)", () => {
+    let failuresCalled = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "shadow",
+        collectFailures: () => {
+          failuresCalled = true;
+          return [];
+        },
+      },
+    });
+    expect(failuresCalled).toBe(true);
+  });
+
+  test("is skipped entirely when mode is off", () => {
+    let called = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "off",
+        collectCandidates: () => {
+          called = true;
+          return [];
+        },
+      },
+    });
+    expect(called).toBe(false);
+  });
+
+  // TOCTOU guard (review follow-up): the pass is fire-and-forget with NO
+  // per-tick throttle, so its async classifyLive work can still be pending
+  // when the next tick fires. A module-level in-flight flag must make an
+  // overlapping tick skip starting a second pass entirely — otherwise the
+  // same still-unmarked candidate would be re-collected/re-classified.
+  test("an overlapping tick does not start a second pass while the first is still pending", async () => {
+    let candidatesCalls = 0;
+    const CANDIDATE = {
+      ticket: "CTL-1461-INFLIGHT",
+      phase: "implement",
+      workerDir: join(orchDir, "workers", "CTL-1461-INFLIGHT"),
+      worktreePath: "/tmp/does-not-matter",
+      base: "main",
+      raw: { failureReason: RESOLVE_CONFLICT_STALL_REASON },
+    };
+    // A controllable classifyLive promise this test settles by hand — keeps
+    // tick 1's pass genuinely "in flight" until we say otherwise.
+    let resolveClassify;
+    const pendingClassify = new Promise((res) => {
+      resolveClassify = res;
+    });
+
+    const baseOpts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      resolveConflictSweep: {
+        mode: "shadow",
+        collectCandidates: () => {
+          candidatesCalls++;
+          return [CANDIDATE];
+        },
+        collectCompletions: () => [],
+        classifyLive: () => pendingClassify,
+        cycleCountOf: () => 0,
+      },
+    };
+
+    // Tick 1: starts the pass; classifyLive's promise is still unsettled.
+    schedulerTick(orchDir, baseOpts);
+    expect(candidatesCalls).toBe(1);
+
+    // Tick 2: fires WHILE tick 1's pass is still pending. The in-flight guard
+    // must skip starting a second pass — collectCandidates must NOT be
+    // called again.
+    schedulerTick(orchDir, baseOpts);
+    expect(candidatesCalls).toBe(1);
+
+    // Settle tick 1's pass and let the whole .then/.catch/.finally chain drain.
+    resolveClassify({ resolvable: false, conflictFiles: [], conflictTypes: [] });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Tick 3: the prior pass has now settled (the guard cleared) — a new tick
+    // starts a fresh pass.
+    schedulerTick(orchDir, baseOpts);
+    expect(candidatesCalls).toBe(2);
   });
 });
 

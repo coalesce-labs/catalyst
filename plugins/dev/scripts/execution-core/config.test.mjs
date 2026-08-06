@@ -57,6 +57,7 @@ import {
   getFleetHealthDir,
   getLayer2ConfigPath,
   log,
+  readResolveConflictSweepConfig,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -1475,6 +1476,34 @@ describe("readCoordinationConfig (CTL-1488)", () => {
     } finally {
       prev === undefined ? delete process.env.CATALYST_DIR : (process.env.CATALYST_DIR = prev);
     }
+  });
+});
+
+describe("readResolveConflictSweepConfig", () => {
+  const ORIGINAL_ENV = { ...process.env };
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  test("defaults to off", () => {
+    delete process.env.CATALYST_RESOLVE_CONFLICT_SWEEP;
+    expect(readResolveConflictSweepConfig({})).toEqual({ mode: "off" });
+  });
+
+  test("env CATALYST_RESOLVE_CONFLICT_SWEEP=shadow overrides default", () => {
+    expect(readResolveConflictSweepConfig({ CATALYST_RESOLVE_CONFLICT_SWEEP: "shadow" })).toEqual({ mode: "shadow" });
+  });
+
+  test("env CATALYST_RESOLVE_CONFLICT_SWEEP=enforce overrides default", () => {
+    expect(readResolveConflictSweepConfig({ CATALYST_RESOLVE_CONFLICT_SWEEP: "enforce" })).toEqual({ mode: "enforce" });
+  });
+
+  test("env '0' is the off kill-switch", () => {
+    expect(readResolveConflictSweepConfig({ CATALYST_RESOLVE_CONFLICT_SWEEP: "0" })).toEqual({ mode: "off" });
+  });
+
+  test("an unrecognized env value falls back to off (safe default)", () => {
+    expect(readResolveConflictSweepConfig({ CATALYST_RESOLVE_CONFLICT_SWEEP: "bogus" })).toEqual({ mode: "off" });
   });
 });
 

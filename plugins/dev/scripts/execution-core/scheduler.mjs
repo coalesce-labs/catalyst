@@ -63,7 +63,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
-import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
+import { countRemediateCycles, countTicketEventsInWindow, countResolveConflictAttempts } from "./event-scan.mjs"; // #1461 Fix 2: countResolveConflictAttempts (complete+failed, not completions-only)
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import {
@@ -248,6 +248,30 @@ import {
   defaultCollectUnstuckCandidates,
   emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
+// #1461: resolve-conflict-sweep (ADR-028) — every-tick classify-then-act pass
+// over the resolvable-source-conflict stalled backlog. Structurally mirrors
+// unstuck-sweep.mjs (pure classifier + injected action driver); the census
+// producers + live-classify seam are wired below. Mode='off' by default;
+// operators opt in via CATALYST_RESOLVE_CONFLICT_SWEEP=shadow then =enforce.
+import {
+  runResolveConflictSweepPass,
+  defaultCollectResolveConflictCandidates,
+  defaultCollectResolveConflictCompletions,
+  // #1461 escalation-gap fix: failure census + its revert-and-reset action seam
+  // (a FAILED, not "done", resolve-conflict run — see resolve-conflict-sweep.mjs
+  // for the full rationale).
+  defaultCollectResolveConflictFailures,
+  defaultRevertStallAndResetCycle,
+  classifyLiveConflict,
+  defaultMarkAndDispatch,
+  defaultEscalateCapExhausted,
+  // #1461 Fix 4: the resolve-conflict-sweep's emit seam MUST be
+  // emitResolveConflictEvent (mirrors unstuck-sweep's own emitUnstuckEvent
+  // wiring) — without it, `emit` defaults to undefined and the pass's
+  // internal no-op fallback swallows every shadow/enforce event, leaving
+  // shadow mode completely unobservable.
+  emitResolveConflictEvent,
+} from "./resolve-conflict-sweep.mjs";
 // CTL-1176: Pass 0r — LLM reasoning recovery pass. Ships off by default (ADR-023);
 // operators opt in via CATALYST_RECOVERY_PASS=shadow then =enforce.
 //
@@ -308,6 +332,7 @@ import {
   readSanctionedNeedsHuman,
   readReclaimGatewayFreshMs,
   isThrottled,
+  readResolveConflictSweepConfig, // #1461
 } from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -348,6 +373,10 @@ import {
   WORKER_STATUS_LABELS,
 } from "./label-guard.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs"; // CTL-1605: precedence order for the onTerminalCleared aggregate-arg → pre-clear `from` resolution
+// #1461: the resolve-conflict-sweep in-flight marker reason, shared so the
+// terminal-sweep exemption below (~line 6942) can never silently desync from
+// the literal the sweep itself writes (resolve-conflict-sweep.mjs:26).
+import { RESOLVED_MARKER_REASON } from "./resolve-conflict-sweep.mjs";
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
 import {
@@ -3810,6 +3839,34 @@ export function schedulerTick(
       postComment: _unstuckPostComment = undefined,
       nowMs: _unstuckNowMs = undefined,
     } = {},
+    // #1461: resolve-conflict-sweep seams (ADR-028). Mode resolves from
+    // readResolveConflictSweepConfig() (env CATALYST_RESOLVE_CONFLICT_SWEEP >
+    // 'off' — env-only, unlike unstuckSweep/recoveryPass below, this reader has
+    // no Layer-2 config path) unless overridden. Defaults keep a bare tick
+    // fully inert — no census producer means nothing to collect. Production
+    // wires the real census (defaultCollectResolveConflictCandidates /
+    // defaultCollectResolveConflictCompletions) + act seams via startScheduler.
+    resolveConflictSweep: {
+      mode: _resolveConflictMode = undefined,
+      collectCandidates: _collectResolveConflictCandidates = undefined,
+      collectCompletions: _collectResolveConflictCompletions = undefined,
+      // #1461 escalation-gap fix: failure census + revert-and-reset action seam.
+      // Defaults undefined → inert (bare unit tick has no census → skip
+      // cleanly); production wires defaultCollectResolveConflictFailures +
+      // defaultRevertStallAndResetCycle below.
+      collectFailures: _collectResolveConflictFailures = undefined,
+      revertStallAndResetCycle: _resolveConflictRevertStallAndResetCycle = undefined,
+      classifyLive: _resolveConflictClassifyLive = undefined,
+      cycleCountOf: _resolveConflictCycleCountOf = undefined,
+      markAndDispatch: _resolveConflictMarkAndDispatch = undefined,
+      escalateCapExhausted: _resolveConflictEscalate = undefined,
+      clearStall: _resolveConflictClearStall = undefined,
+      // #1461 Fix 4: default to the real emitter (mirrors unstuckSweep's own
+      // `emit: _unstuckEmit = emitUnstuckEvent` default above) so even a bare
+      // schedulerTick call gets real shadow/enforce observability instead of
+      // silently no-op'ing.
+      emit: _resolveConflictEmit = emitResolveConflictEvent,
+    } = {},
     // CTL-1176: Pass 0r — recovery-reasoning pass seams. Default undefined keeps
     // a bare tick fully inert. Production passes mode from env > Layer-2.
     recoveryPass: { mode: _recoveryPassMode = undefined } = {},
@@ -4850,6 +4907,121 @@ export function schedulerTick(
   }
 
   tick?.lap("unstuck-sweep");
+
+  // #1461: resolve-conflict-sweep — every tick (no throttle: candidates are
+  // rare and the classify step only spawns git for a candidate this sweep
+  // actually owns). Mode='off' by default (ADR-023/ADR-028); operators opt in
+  // via CATALYST_RESOLVE_CONFLICT_SWEEP=shadow then =enforce.
+  //
+  // runResolveConflictSweepPass is intentionally NOT awaited here: schedulerTick
+  // is a plain synchronous function (no `await` anywhere in this file — see
+  // runTick's bare `schedulerTick(...)` call below), so a top-level `await`
+  // would not compile. The pass itself is synchronous in mode='off' (returns
+  // the report directly) and returns a Promise only in shadow/enforce (it needs
+  // `await classifyLive(...)` per-candidate); either way `collectCandidates()` /
+  // `collectCompletions()` run synchronously BEFORE that first internal await
+  // (see resolve-conflict-sweep.mjs), so census wiring is still exercised
+  // deterministically within this tick. The eventual settlement (marked/
+  // escalated/cleared counts for the info log, or a failure for the warn log)
+  // is handled fire-and-forget via .then()/.catch(), mirroring this file's
+  // existing best-effort async discipline (e.g. the delegate-queue enqueue path).
+  //
+  // TOCTOU guard: because this pass is fire-and-forget with NO per-tick
+  // throttle (by design — see above), its async work (classifyLive's real
+  // `git merge-tree` spawn, then markAndDispatch's marker write) can still be
+  // pending when the NEXT tick fires. Without a guard, an overlapping tick
+  // would call collectCandidates() again, see the same still-unmarked
+  // candidate, and re-classify/re-dispatch it. _resolveConflictSweepInFlight
+  // (module-level, declared near _unstuckLastRunMs) makes a new tick skip
+  // starting a new pass while the previous one's promise is still pending; it
+  // is set the instant we decide to run and cleared once the promise settles
+  // (or synchronously below on a pre-Promise throw).
+  {
+    const rcMode = _resolveConflictMode ?? readResolveConflictSweepConfig().mode;
+    if (
+      rcMode !== "off" &&
+      // M3 (review follow-up): the gate must also recognize the failures
+      // collector — without this, a caller injecting ONLY collectFailures
+      // (e.g. a test isolating the failure path, or a future census-only
+      // wiring) would silently no-op the WHOLE sweep, including the
+      // candidates/completions sub-passes that collector's own default is
+      // never consulted for.
+      (_collectResolveConflictCandidates || _collectResolveConflictCompletions || _collectResolveConflictFailures) &&
+      !_resolveConflictSweepInFlight
+    ) {
+      _resolveConflictSweepInFlight = true;
+      try {
+        const rcResult = runResolveConflictSweepPass({
+          mode: rcMode,
+          collectCandidates: _collectResolveConflictCandidates ?? (() => defaultCollectResolveConflictCandidates({ orchDir })),
+          collectCompletions: _collectResolveConflictCompletions ?? (() => defaultCollectResolveConflictCompletions({ orchDir })),
+          // #1461 escalation-gap fix: a resolve-conflict run that lands in ANY
+          // failure shape (failed, stalled, or turn-cap-exhausted — see
+          // RESOLVE_CONFLICT_CYCLE_TERMINAL_STATUSES) — census + the revert-and-reset action seam
+          // (escalateCapExhausted is REUSED below for the at/over-cap outcome, same as the candidates
+          // sub-pass's own cap-exhausted branch).
+          collectFailures: _collectResolveConflictFailures ?? (() => defaultCollectResolveConflictFailures({ orchDir })),
+          revertStallAndResetCycle:
+            _resolveConflictRevertStallAndResetCycle ??
+            ((f) => defaultRevertStallAndResetCycle(orchDir, f.ticket, f.stalledPhase)),
+          classifyLive: _resolveConflictClassifyLive ?? classifyLiveConflict,
+          cycleCountOf: _resolveConflictCycleCountOf ?? ((ticket) => countResolveConflictAttempts({ ticket })),
+          markAndDispatch: _resolveConflictMarkAndDispatch ?? ((c) => defaultMarkAndDispatch({ ...c, orchDir })),
+          escalateCapExhausted: _resolveConflictEscalate ?? defaultEscalateCapExhausted,
+          clearStall: _resolveConflictClearStall ?? defaultClearStall(orchDir, writeStatus),
+          emit: _resolveConflictEmit,
+        });
+        const logRcReport = (rcReport) => {
+          if (
+            rcReport.marked.length ||
+            rcReport.escalated.length ||
+            rcReport.cleared.length ||
+            rcReport.retried.length ||
+            rcReport.wouldMark.length ||
+            rcReport.wouldEscalate.length ||
+            rcReport.wouldClear.length ||
+            rcReport.wouldRetry.length
+          ) {
+            log.info(
+              {
+                mode: rcMode,
+                marked: rcReport.marked.length,
+                escalated: rcReport.escalated.length,
+                cleared: rcReport.cleared.length,
+                retried: rcReport.retried.length,
+              },
+              "scheduler: resolve-conflict-sweep pass (#1461)",
+            );
+          }
+        };
+        if (rcResult && typeof rcResult.then === "function") {
+          rcResult
+            .then(logRcReport)
+            .catch((err) => {
+              log.warn(
+                { step: "resolve-conflict-sweep", err: err?.message },
+                "scheduler: resolve-conflict-sweep pass failed — continuing tick (#1461)",
+              );
+            })
+            .finally(() => {
+              _resolveConflictSweepInFlight = false;
+            });
+        } else {
+          // Defensive only — unreachable given the outer `rcMode !== "off"`
+          // gate (runResolveConflictSweepPass always takes the async-IIFE
+          // branch once mode isn't "off"), but keep the flag correct if that
+          // ever changes.
+          logRcReport(rcResult);
+          _resolveConflictSweepInFlight = false;
+        }
+      } catch (err) {
+        _resolveConflictSweepInFlight = false; // threw before any promise was created
+        log.warn({ step: "resolve-conflict-sweep", err: err.message }, "scheduler: resolve-conflict-sweep pass failed — continuing tick (#1461)");
+      }
+    }
+  }
+
+  tick?.lap("resolve-conflict-sweep");
 
   // CTL-1176: Pass 0r — LLM reasoning recovery pass. Low-frequency autonomous
   // triage of the stalled/failed/needs-human/UNKNOWN backlog. Mode resolves from
@@ -7085,34 +7257,58 @@ export function schedulerTick(
           // linger (hygiene — the recovery router already drops terminal tickets).
           recoveryForgetIntent(ticket, { orchDir });
         } else {
-          // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
-          // label (CTL-1241: skipped when the belief engine owns the reclaim).
-          if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
-            const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
-              env,
-              site: "terminal-sweep",
-              log,
-            });
-            // CTL-764 finding 8: emit worker.transition ONLY when the label write
-            // actually occurred. A persisted .linear-label-needs-human marker after a
-            // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
-            // label — recording a fresh needs-human transition there is a false escalation.
-            if (wrote) {
-              recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
+          // #1461 Fix 3 (final-review finding): exempt a ticket
+          // resolve-conflict-sweep is actively resolving (failureReason/
+          // stalledReason === RESOLVED_MARKER_REASON, imported from
+          // resolve-conflict-sweep.mjs) from immediate needs-human labeling —
+          // otherwise every candidate is flagged needs-human the same tick the
+          // fix is already in flight. A cap-exhausted stall
+          // (resolve-conflict-sweep.mjs's CAP_EXHAUSTED_REASON) is a NORMAL
+          // stalled reason and is NOT exempted — it surfaces exactly like
+          // remediate-cycle-cap-exhausted already does.
+          //
+          // The exemption is narrowly scoped to ONLY the needs-human label
+          // call below — it used to `continue`, which skipped the ENTIRE rest
+          // of this loop iteration: convergeStartedHeldLabels (CTL-1068
+          // orphaned held-label retraction), convergeDispositionLabel (CTL-764
+          // finding 5), and the CTL-695 terminal-worker reap nomination below
+          // all have nothing to do with needs-human labeling and must still
+          // run normally for a ticket under active resolve-conflict resolution.
+          const activeSignal = signalByTicket.get(ticket);
+          const activeReason =
+            activeSignal?.raw?.failureReason ?? activeSignal?.raw?.stalledReason ?? null;
+          if (activeReason !== RESOLVED_MARKER_REASON) {
+            // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
+            // label (CTL-1241: skipped when the belief engine owns the reclaim).
+            if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+              const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
+                env,
+                site: "terminal-sweep",
+                log,
+              });
+              // CTL-764 finding 8: emit worker.transition ONLY when the label write
+              // actually occurred. A persisted .linear-label-needs-human marker after a
+              // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
+              // label — recording a fresh needs-human transition there is a false escalation.
+              if (wrote) {
+                recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
+              }
+            } else {
+              log.warn(
+                { ticket },
+                "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
+              );
+              // CTL-1329: arm the cooldown so the next ticks skip this dir's probe+fence
+              // instead of re-burning Linear quota every tick until the dir is reaped.
+              stampFenceSuppress(orchDir, ticket, now());
             }
-          } else {
-            log.warn(
-              { ticket },
-              "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
-            );
-            // CTL-1329: arm the cooldown so the next ticks skip this dir's probe+fence
-            // instead of re-burning Linear quota every tick until the dir is reaped.
-            stampFenceSuppress(orchDir, ticket, now());
           }
           // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
           // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
           // (runs regardless of fence, matching main; the terminal branch above is
-          // excluded so a finished ticket is never re-surfaced as an orphan).
+          // excluded so a finished ticket is never re-surfaced as an orphan). Runs
+          // unconditionally here (including for the RESOLVED_MARKER_REASON exemption
+          // above) — a single emit, not duplicated.
           emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
         }
       }
@@ -7510,6 +7706,22 @@ let _unstuckLastRunMs = 0;
 // so the 15-min gate persists across ticks without a db write. Reset to 0 on
 // daemon restart (module reload) or via __resetForTests.
 let _stallJanitorCensusLastRunMs = 0;
+
+// #1461: resolve-conflict-sweep in-flight guard. runResolveConflictSweepPass is
+// fire-and-forget (see the wiring block above) — its async work (a real `git
+// merge-tree` subprocess in classifyLive, then the marker write in
+// markAndDispatch) settles strictly AFTER schedulerTick has already returned
+// to the setInterval-driven daemon loop, with no back-pressure between ticks.
+// Since this sweep runs every tick with NO throttle (by design, ADR-028 —
+// unlike unstuck-sweep's 15-min isThrottled gate), an overlapping tick could
+// otherwise re-collect + re-classify + re-dispatch the SAME still-unmarked
+// candidate before the previous tick's pass settles. This flag makes a new
+// tick skip starting a new pass while the prior one is still pending; cleared
+// in the settlement .then()/.catch() (or synchronously for mode='off', which
+// never goes async). Module-level so it persists across ticks without a db
+// write, mirroring _unstuckLastRunMs/_stallJanitorCensusLastRunMs above.
+// Reset to false on daemon restart (module reload) or via __resetForTests.
+let _resolveConflictSweepInFlight = false;
 
 function runTick() {
   try {
@@ -8013,6 +8225,60 @@ function runTick() {
           typeof runningOpts.unstuckPostComment === "function"
             ? runningOpts.unstuckPostComment
             : undefined,
+      },
+      // #1461: wire the real resolve-conflict-sweep census + act seams (ADR-028).
+      // Like stallJanitor/unstuckSweep above, a bare schedulerTick (unit test)
+      // passes no `resolveConflictSweep` so the pass stays inert. Mode/emit
+      // default INSIDE schedulerTick (readResolveConflictSweepConfig() → 'off'
+      // unless CATALYST_RESOLVE_CONFLICT_SWEEP opts in — env-only, no Layer-2
+      // path for this reader) — mirrors stallJanitor/unstuckSweep's own
+      // fallback blocks, which likewise never set `mode` here. Without this
+      // block, setting CATALYST_RESOLVE_CONFLICT_SWEEP=shadow/enforce would
+      // have zero effect in the running daemon (schedulerTick would still see
+      // undefined collectors and skip the pass every tick).
+      resolveConflictSweep: runningOpts.resolveConflictSweep ?? {
+        collectCandidates: () =>
+          defaultCollectResolveConflictCandidates({
+            orchDir: runningOpts.orchDir,
+            // Thread the worktree resolver from each worker's signal so
+            // classifyLiveConflict actually has a path to run `git merge-tree`
+            // against — mirrors the identical resolveWorktreePath closure used
+            // by the unstuckSweep census and stallJanitor J4 GC census above.
+            // Without this, resolveWorktreePath defaults to () => null and
+            // every candidate classifies as "classification-unavailable"
+            // forever (resolve-conflict-sweep.mjs's own header comment flags
+            // this as exactly what Task 12's production wiring must inject).
+            resolveWorktreePath: (ticket) => {
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+              }
+              return null;
+            },
+          }),
+        collectCompletions: () =>
+          defaultCollectResolveConflictCompletions({ orchDir: runningOpts.orchDir }),
+        classifyLive: classifyLiveConflict,
+        // #1461 Fix 2: count DISPATCH ATTEMPTS (complete + failed), not just
+        // successful completions — a repeatedly-FAILING resolve-conflict run
+        // must still reach RESOLVE_CONFLICT_CYCLE_CAP and escalate, instead of
+        // leaving the ticket permanently marked RESOLVED_MARKER_REASON with a
+        // cycleCount pinned at 0 forever.
+        cycleCountOf: (ticket) => countResolveConflictAttempts({ ticket }),
+        markAndDispatch: (c) => defaultMarkAndDispatch({ ...c, orchDir: runningOpts.orchDir }),
+        escalateCapExhausted: defaultEscalateCapExhausted,
+        // clearStall: same real seam as the stallJanitor/unstuckSweep fallback
+        // blocks above (defaultClearStall bound to this tick's real orchDir +
+        // the real writeStatus/linear-write seam) — not a new dependency.
+        clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
+        // #1461 Fix 4: the dedicated resolve-conflict-sweep unified-log emitter
+        // (NOT emitUnstuckEvent — this sweep owns its own closed vocabulary,
+        // RESOLVE_CONFLICT_SWEEP_EVENT_TYPES). Explicit here so production
+        // wiring never silently depends on schedulerTick's own default;
+        // mirrors the unstuckSweep block's `emit: emitUnstuckEvent` above.
+        // Without this, shadow mode produced ZERO event output — an operator
+        // flipping CATALYST_RESOLVE_CONFLICT_SWEEP=shadow had no way to see
+        // what the sweep WOULD have done.
+        emit: emitResolveConflictEvent,
       },
       // CTL-1150: thread the triage-artifact predicate (undefined → inline
       // existsSync default in schedulerTick; test seam via startScheduler).
@@ -8561,6 +8827,7 @@ export function __resetForTests() {
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
   _stallJanitorCensusLastRunMs = 0; // CTL-1324: reset Pass 0j census throttle between tests
+  _resolveConflictSweepInFlight = false; // #1461: reset the in-flight guard between tests
   // rankedAboveSince is cleared by stopScheduler above (CTL-705)
 }
 
