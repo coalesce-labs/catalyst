@@ -93,6 +93,16 @@ if [[ ! -r "$LIB" ]] || ! grep -q 'catalyst_project_github_token' "$LIB"; then
 fi
 cp "$LIB" "$T/helper.sh"
 cp "$LIB" "$T/reconcile.sh"
+# CTL-1623: catalyst-secret-env.sh now sources its sibling catalyst-secret-contract.sh via
+# a BASH_SOURCE-relative path — since the lib is COPIED into $T above (for hermeticity, so
+# a stray edit to the real file mid-run can't change results underfoot), the sibling must be
+# copied alongside it too, or that source line resolves against $T and fails closed.
+CONTRACT_LIB="$(dirname "$LIB")/catalyst-secret-contract.sh"
+if [[ ! -r "$CONTRACT_LIB" ]]; then
+  echo "FATAL: catalyst-secret-contract.sh missing at $CONTRACT_LIB" >&2
+  exit 1
+fi
+cp "$CONTRACT_LIB" "$T/catalyst-secret-contract.sh"
 
 # ─── Probe: run the helper, report booleans/digests only ──────────────────────
 cat > "$T/probe.sh" <<'PROBE'

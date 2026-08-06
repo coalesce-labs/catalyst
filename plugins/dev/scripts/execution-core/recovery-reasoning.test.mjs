@@ -978,6 +978,47 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.inv.phantomMergedPr.failed"]).toBe(2);
   });
 
+  test("recovery.board-scan promotes stranded-mid-pipeline population counters (CTL-1644 Codex R4)", () => {
+    const details = {
+      mode: "shadow",
+      invariantsFailed: 1,
+      gateDecision: "proceed",
+      gateReason: "1 invariant(s) flagged",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      strandedCount: 5,
+      strandedHeldCount: 5, // Phase-2: whole cohort is unknown-salvage (held)
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a.cohort_stranded_mid_pipeline).toBe(5);
+    expect(a.cohort_stranded_held).toBe(5);
+  });
+
+  // CTL-1607: per-host slot census promoted to chartable recovery.slot.* attributes.
+  test("recovery.board-scan promotes slot* scalars under recovery.slot.* names", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0,
+      gateDecision: "proceed", gateReason: "no wedge",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      invariants: {},
+      slotCapacity: 6, slotInUse: 4, slotFree: 2,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a["recovery.slot.capacity"]).toBe(6);
+    expect(a["recovery.slot.in_use"]).toBe(4);
+    expect(a["recovery.slot.free"]).toBe(2);
+  });
+
+  test("recovery.board-scan omits recovery.slot.* when slot scalars are null", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0, gateDecision: "proceed", gateReason: "r",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0, invariants: {},
+      slotCapacity: null, slotInUse: null, slotFree: null,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect("recovery.slot.capacity" in a).toBe(false);
+    expect("recovery.slot.free" in a).toBe(false);
+  });
+
   test("recovery.board-scan never promotes rosters/move arrays (cardinality)", () => {
     const details = {
       mode: "shadow",
@@ -2053,6 +2094,36 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
     const tick = events.find((e) => e.type === "recovery.tick").details;
     expect(tick.terminalSkipped).toEqual(["CTL-999"]);
     expect(tick.processed).toBe(0);
+  });
+
+  // PROJ-1657 Codex P1 (round 8): a probe-less phase already parked terminal
+  // (stalledReason "no-probe-for-phase") must not re-enter classification —
+  // that would let it default to decision:"defer"/fix_class:"board-health"
+  // and get picked up for a fresh recovery-pass dispatch, reversing the
+  // terminal hand-off to a human.
+  test("no-probe-for-phase terminal signal is skipped — no reclassification, lands in terminalSkipped[]", () => {
+    const posted = [];
+    const events = [];
+    reasoningRecoveryPass(
+      [
+        {
+          ticket: "PROJ-1000",
+          phase: "recovery-pass",
+          evidence: { signal: { stalledReason: "no-probe-for-phase" } },
+        },
+      ],
+      {
+        mode: "enforce",
+        postComment: (t, body) => posted.push({ t, body }),
+        emitEvent: (e) => events.push(e),
+        ...inert,
+      },
+    );
+    expect(posted.length).toBe(0);
+    const tick = events.find((e) => e.type === "recovery.tick").details;
+    expect(tick.terminalSkipped).toEqual(["PROJ-1000"]);
+    expect(tick.processed).toBe(0);
+    expect(events.some((e) => e.type === "recovery.decision" && e.ticket === "PROJ-1000")).toBe(false);
   });
 
   test("emits a recovery.decision per classified item with the routing rule", () => {

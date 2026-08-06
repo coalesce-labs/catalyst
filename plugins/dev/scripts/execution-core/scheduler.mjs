@@ -23,6 +23,7 @@ import {
   rmSync,
   renameSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { monitorEventLoopDelay } from "node:perf_hooks";
@@ -346,6 +347,7 @@ import {
   labelNeedsHumanUnlessBeliefOwner,
   resolveAndApplyWorkerStatusLabel,
   WORKER_STATUS_LABELS,
+  labelMarkerBase, // CTL-1571: convergeHeldLabel writes the same once-marker labelOnce does
 } from "./label-guard.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs"; // CTL-1605: precedence order for the onTerminalCleared aggregate-arg → pre-clear `from` resolution
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
@@ -367,7 +369,7 @@ import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
-import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
+import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import {
   getAllTicketDescriptors,
   getAllPrStatuses,
@@ -1945,10 +1947,30 @@ export function convergeHeldLabel(
   // Promise (which read `.removed` as undefined and false-confirmed every removal);
   // the callback therefore fires post-tick in production and callers must not
   // assume it ran before this function returns.
+  // CTL-1571: delete the once-marker (see the apply side below) the moment a
+  // removal is CONFIRMED — mirrors CTL-1567's needs-human fix ("keep the
+  // once-marker in step with the label"). Only HELD_LABELS (blocked/queued) ever
+  // get a marker written here; the legacy "waiting" alias is drained above but
+  // never marked, so clearing its marker path is a harmless no-op (ENOENT).
+  const clearMarker = (label) => {
+    if (!orchDir) return;
+    const base = labelMarkerBase(orchDir, ticket, label);
+    for (const suffix of [".applied", ".skipped"]) {
+      try {
+        unlinkSync(`${base}${suffix}`);
+      } catch {
+        /* ENOENT is the expected case — no marker to clear */
+      }
+    }
+  };
   const settle = (label, res) => {
     if (res != null && typeof res.then === "function") {
       res.then(
-        (r) => onRemoveResult?.(label, r?.removed !== false),
+        (r) => {
+          const removed = r?.removed !== false;
+          if (removed) clearMarker(label);
+          onRemoveResult?.(label, removed);
+        },
         (err) => {
           log.warn(
             { ticket, phase: "admission", err: err?.message },
@@ -1959,7 +1981,9 @@ export function convergeHeldLabel(
       );
       return;
     }
-    onRemoveResult?.(label, res?.removed !== false);
+    const removed = res?.removed !== false;
+    if (removed) clearMarker(label);
+    onRemoveResult?.(label, removed);
   };
   for (const label of HELD_LABELS_REMOVABLE) {
     if (label !== desired && have.has(label)) {
@@ -1989,6 +2013,30 @@ export function convergeHeldLabel(
       );
     }
     writes++;
+    // CTL-1571: write the SAME once-marker labelOnce writes for needs-human, so
+    // convergeStartedHeldLabels (CTL-1068) — which gates retraction on this
+    // marker's existence — can find and retract this label if the ticket is
+    // later admitted and this clear-on-pickup write never lands (a transient
+    // failure, and admission drops the ticket out of the pool that retries it).
+    // A test stub returning undefined counts as success, matching labelOnce's
+    // own convention (applyLabel is otherwise never expected to return undefined
+    // in production). mkdirSync (recursive) guards a ticket whose worker dir
+    // does not exist yet — labelOnce assumes the dir is already there because it
+    // is only ever invoked deep in the dispatch path; convergeHeldLabel runs from
+    // the admission tick, which can precede worker-dir creation.
+    const applied = res === undefined || res?.applied === true;
+    if (orchDir && applied) {
+      const base = labelMarkerBase(orchDir, ticket, desired);
+      try {
+        mkdirSync(dirname(base), { recursive: true });
+        writeFileSync(`${base}.applied`, "");
+      } catch (err) {
+        log.warn(
+          { ticket, label: desired, err: err.message },
+          "ctl-1571: held-label once-marker write failed — retraction may miss this label later"
+        );
+      }
+    }
     if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
       recordLabelCooldown(orchDir, ticket, desired, now());
       log.warn(
@@ -5408,6 +5456,13 @@ export function schedulerTick(
             maxParallel,
             liveCount,
             freeSlots: computeFreeSlots(maxParallel, occupiedCount),
+            // CTL-1607 (Codex #2985 P2): the same new-work admission gate applied
+            // below (`livenessFresh && !draining`, line ~6576) — sampled here so the
+            // board-scan event's PUBLISHED slotFree collapses to 0 on a node that
+            // will not admit. Observational only; the un-gated freeSlots above still
+            // drives the dispatch-liveness invariant. Both seams are pure reads
+            // (livenessIsFresh is already called this tick at ~5703/~6560).
+            admissionGated: !livenessIsFresh() || isDraining(),
           },
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,
@@ -5423,6 +5478,10 @@ export function schedulerTick(
           // → empty-Map / empty-array defaults keep the new invariants
           // observable:false and the holistic failover unreachable (shadow-safe).
           getPrStatusMap: _boardHealth.getPrStatusMap,
+          // CTL-1644: thread the stranded-mid-pipeline evidence seam. Daemon-bound
+          // below; a bare tick passes none → empty-Map default keeps the new invariant
+          // observable:false (shadow-first, ADR-023).
+          getStrandedEvidence: _boardHealth.getStrandedEvidence,
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the
@@ -8075,6 +8134,73 @@ function runTick() {
             /* best-effort — empty PR map on open failure */
           }
           return getAllPrStatuses();
+        },
+        // CTL-1644: build per-ticket actuation + salvageability evidence for
+        // checkStrandedMidPipeline. Called inside assembleBoardState, protected
+        // by the 5-min scan throttle. Uses cheap local sources only:
+        //   - hasWorkerDir: orchDir/workers/<ticket>/ presence (primary actuation signal)
+        //   - hasFreshIntent: active recovery intent within the cooldown window
+        //   - openPr: prStatusMap lookup by the ticket descriptor's prNumber
+        // Phase 3 will add remoteBranchExists / worktreeUnpushed via the
+        // stall-janitor census. hasLiveBg is false for Phase 2 (worker-dir
+        // presence is the primary actuation signal; a worker-dir that exists but
+        // has no live bg job is still "actuated" until the reaper cleans it up).
+        // CTL-1644 (Codex P1): these two salvage fields stay ABSENT (not false)
+        // in Phase 2. classifyRevivalRoute treats absent salvage as UNKNOWN and
+        // returns a non-dispatchable `unknown-salvage` route (held, never
+        // restart-fresh) — so a stranded ticket with a pushed branch is never
+        // discarded before Phase 3 populates the real evidence.
+        getStrandedEvidence: () => {
+          const evidenceMap = new Map();
+          try { openBrokerStateDb(); } catch { /* best-effort */ }
+          let prMap = new Map();
+          let descriptors = [];
+          try { prMap = getAllPrStatuses(); } catch { /* best-effort */ }
+          try { descriptors = getAllTicketDescriptors({ includeRemoved: false }); } catch { /* best-effort */ }
+          for (const d of descriptors) {
+            // CTL-1644: broker rowToTicketDescriptor sets ONLY `.ticket` (e.g.
+            // "CTL-9") — never `.identifier`/`.id` — so key evidence identically
+            // to assembleBoardState's ticketsById (`d.identifier ?? d.ticket ??
+            // d.id`). Without the `.ticket` fallback every descriptor keyed
+            // undefined, the evidence Map came back empty on every real scan, and
+            // checkStrandedMidPipeline short-circuited to observable:false — the
+            // invariant never fired against production data (dark in shadow AND
+            // enforce). The join key must match ticketsById or evidence.get(id) misses.
+            const id = d.identifier ?? d.ticket ?? d.id;
+            if (!id) continue;
+            const hasWorkerDir = existsSync(join(runningOpts.orchDir, "workers", id));
+            let hasFreshIntent = false;
+            try {
+              hasFreshIntent = recoverySkipReason(id, { orchDir: runningOpts.orchDir }) !== null;
+            } catch { /* fail open — no intent treated as not protected */ }
+            let openPr = null;
+            const prNum = d.prNumber ?? d.pr_number ?? null;
+            if (prNum != null) {
+              let repo = null;
+              try {
+                const team = teamOf(id);
+                if (team) repo = ownerRepoFromRepoRoot(getProjectConfig(team)?.repoRoot ?? null);
+              } catch { /* best-effort — number-only fallback */ }
+              // CTL-1644 (Codex P2): reuse board-health's lookupPrStatus so a
+              // known-repo ticket never borrows an UNRELATED repo's #N. The prior
+              // inline `byRepo.values().next().value` fallback picked an arbitrary
+              // repo's row, misrouting a stranded org/y ticket onto org/x#42.
+              // lookupPrStatus returns {ambiguous:true,status:null} on a number-only
+              // collision → status !== "open" → openPr stays null (safe).
+              const entry = lookupPrStatus(prMap, prNum, repo);
+              if (entry && String(entry.status ?? "").toLowerCase() === "open") {
+                openPr = { number: prNum, status: "open" };
+              }
+            }
+            evidenceMap.set(id, {
+              id,
+              hasWorkerDir,
+              hasLiveBg: false, // Phase 3: wire real bg-liveness probe here
+              hasFreshIntent,
+              openPr,
+            });
+          }
+          return evidenceMap;
         },
         // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so
         // the phantom/orphaned-PR cohorts disambiguate a cross-repo #-collision by

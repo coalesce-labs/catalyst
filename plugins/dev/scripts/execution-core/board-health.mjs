@@ -62,6 +62,12 @@ const DEFAULT_THRESHOLDS = {
   // observed population sat like this for WEEKS, so 24h is already far past any
   // legitimate gap while staying well inside "a human would call this stuck".
   unownedInFlightMs: Number(process.env.CATALYST_BH_UNOWNED_INFLIGHT_MS) || 24 * 3_600_000,
+  // CTL-1644: how long an HRW-owned in-flight ticket may have NO actuation (no
+  // worker dir, no live bg, no fresh recovery intent) before the new
+  // checkStrandedMidPipeline invariant flags it and classifies a revival route.
+  // Same 24h default as unownedInFlightMs — both share the "weeks is too long,
+  // 24h is already past any legitimate inter-phase gap" rationale.
+  strandedMidPipelineMs: Number(process.env.CATALYST_BH_STRANDED_MS) || 24 * 3_600_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -136,7 +142,10 @@ function prNumberOf(d) {
 //       – the number collides across repos → {ambiguous:true} so the cohort skips
 //         rather than borrow a wrong repo's status.
 // `repo` is the ticket's GitHub "owner/repo" (or null when underivable).
-function lookupPrStatus(map, prNumber, repo) {
+// Exported (CTL-1644, Codex P2) so the scheduler's getStrandedEvidence builder
+// reuses this exact no-cross-repo-borrow resolution instead of its own inline
+// fallback (which borrowed an arbitrary repo's #N row).
+export function lookupPrStatus(map, prNumber, repo) {
   if (!(map instanceof Map)) return null;
   const byRepo = map.get(prNumber);
   if (!(byRepo instanceof Map) || byRepo.size === 0) return null;
@@ -393,6 +402,12 @@ export function assembleBoardState({
   // must not run), and evaluateInvariants reads board.mode to skip the cohort
   // checks — together making an off scan byte-identical to origin/main.
   mode = undefined,
+  // CTL-1644: per-ticket evidence builder for checkStrandedMidPipeline.
+  // Returns Map<ticketId, Evidence> with actuation + salvageability fields.
+  // Empty-Map default ⇒ the invariant is observable:false until Phase 2 wires
+  // the real implementation (shadow-first "wire-before-observe" pattern, same as
+  // getPrStatusMap). Never invoked in off mode so off stays byte-identical.
+  getStrandedEvidence = () => new Map(),
   now = () => Date.now(),
 } = {}) {
   const nowMs = now();
@@ -455,6 +470,11 @@ export function assembleBoardState({
       maxParallel: capacity?.maxParallel ?? 0,
       liveCount: capacity?.liveCount ?? 0,
       freeSlots: capacity?.freeSlots ?? 0,
+      // CTL-1607: the scheduler's new-work admission gate outcome for THIS tick
+      // (!livenessFresh || draining). Carried so buildBoardScanEvent can collapse
+      // the PUBLISHED slotFree to 0 on a node that will not admit — the emitted
+      // census is observational only; invariants read the un-gated freeSlots above.
+      admissionGated: !!capacity?.admissionGated,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
     // CTL-1432 (B2/B3): deferred board-health anchor candidates + the sanctioned
@@ -472,6 +492,10 @@ export function assembleBoardState({
     // CTL-1157 (Codex #4): the ticket→owner/repo resolver for the composite
     // (repo, number) PR-status lookup. Null when unbound (number-only fallback).
     repoForTicket: typeof repoForTicket === "function" ? repoForTicket : null,
+    // CTL-1644: per-ticket actuation+salvageability evidence for
+    // checkStrandedMidPipeline. Off mode returns an empty Map (byte-identical);
+    // shadow/enforce invoke getStrandedEvidence() once per proceeding scan.
+    strandedEvidence: mode === "off" ? new Map() : safe(() => getStrandedEvidence(), new Map()),
     now: nowMs,
   });
 }
@@ -513,6 +537,11 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // CTL-1475: work that asserts it is in flight while nothing owns it. Cohort-
       // gated like its siblings so the `off` invariant set stays byte-identical.
       unownedInFlight: () => checkUnownedInFlight(boardState, thresholds),
+      // CTL-1644: HRW-owned mid-pipeline tickets with no actuation — classified
+      // by revival route (pr-not-merged / resume-from-remote / adopt / restart-fresh).
+      // observable:false when no evidence seam is provided (shadow-first: Phase 1
+      // dark, Phase 2 wires the real getStrandedEvidence builder).
+      strandedMidPipeline: () => checkStrandedMidPipeline(boardState, thresholds),
     });
   }
   const out = {};
@@ -857,6 +886,118 @@ function checkUnownedInFlight(b, t) {
   );
 }
 
+// CTL-1644: pure revival-route classifier. Exported for unit testing.
+// Precedence: open PR → pr-not-merged; remote branch (no unpushed local) →
+// resume-from-remote (CTL-1640, fully implemented); unpushed local worktree →
+// adopt (CTL-1642, NOT implemented → dispatchable:false); salvage checked and
+// absent → restart-fresh; salvage NOT yet checked → unknown-salvage (held).
+export function classifyRevivalRoute(evidence = {}) {
+  if (evidence.openPr) {
+    return { route: "pr-not-merged", dispatchable: true,
+      rationale: "open PR found — route through existing pr-not-merged remediation" };
+  }
+  // CTL-1644 (Codex P2 round 3): require an EXPLICIT negative local-salvage result
+  // (worktreeUnpushed === false), not merely falsy. If the remote probe succeeded
+  // but the local-worktree probe failed/was omitted, worktreeUnpushed is undefined
+  // and `!undefined` would wrongly pick the dispatchable resume-from-remote route,
+  // discarding unpushed local commits that actually need the held `adopt` route.
+  // Absent local evidence falls through to the unknown-salvage guard below (held).
+  if (evidence.remoteBranchExists && evidence.worktreeUnpushed === false) {
+    return { route: "resume-from-remote", dispatchable: true,
+      rationale: "remote branch exists, no unpushed local — seed a fresh worktree from origin/<ticket> (CTL-1640)" };
+  }
+  if (evidence.worktreeUnpushed) {
+    return { route: "adopt", dispatchable: false, blockedBy: "CTL-1642",
+      rationale: "local worktree with unpushed commits — adopt orphaned worktree (CTL-1642, not yet implemented)" };
+  }
+  // CTL-1644 (Codex P1): restart-fresh re-admits the ticket to Todo — destructive
+  // if it actually had a pushed branch or unpushed local commits. The Phase-2
+  // evidence builder (scheduler.mjs getStrandedEvidence) does NOT yet populate
+  // remoteBranchExists/worktreeUnpushed (Phase 3 wires them via the stall-janitor
+  // census), so ABSENT (undefined) fields mean "salvage not checked" — NOT "no
+  // salvage". Choosing restart-fresh on unchecked evidence risks discarding
+  // salvageable work, so hold as a non-dispatchable unknown-salvage until a
+  // producer proves salvage absent (both fields present AND false → restart-fresh).
+  const salvageChecked =
+    evidence.remoteBranchExists !== undefined && evidence.worktreeUnpushed !== undefined;
+  if (!salvageChecked) {
+    return { route: "unknown-salvage", dispatchable: false, blockedBy: "CTL-1644-phase3",
+      rationale: "salvage evidence not yet populated (remoteBranchExists/worktreeUnpushed unwired until Phase 3) — cannot prove no salvageable state; hold rather than restart-fresh" };
+  }
+  return { route: "restart-fresh", dispatchable: true,
+    rationale: "no salvageable state — re-admit the ticket to Todo for a fresh dispatch" };
+}
+
+// CTL-1644: detect HRW-owned mid-pipeline tickets with no actuation past a
+// configurable age threshold, then classify a revival route for each.
+// Ships dark by default (ADR-023): observable:false when no evidence seam is
+// provided; shadow emits real classifications once Phase 2 wires the real
+// getStrandedEvidence builder; enforce actuation is gated on the `act` seam
+// (Phase 3). Off mode never reaches this check (evaluateInvariants gate).
+function checkStrandedMidPipeline(b, t) {
+  const tickets = b?.ticketsById;
+  const evidence = b?.strandedEvidence instanceof Map ? b.strandedEvidence : null;
+  if (!(tickets instanceof Map) || tickets.size === 0 || !evidence || evidence.size === 0) {
+    // Shadow-first: no evidence seam ⇒ cannot prove actuation-absence ⇒ not observable.
+    return invariant(true, 0, false, [], "no stranded-evidence seam → not observable");
+  }
+  const nowMs = Number.isFinite(b?.now) ? b.now : Date.now();
+  const limit = t?.strandedMidPipelineMs ?? DEFAULT_THRESHOLDS.strandedMidPipelineMs;
+  // A live worker signal exempts the ticket (same semantics as checkUnownedInFlight).
+  // CTL-1644 (Codex P2 round 5): but only a FRESH live-status signal is proof of a
+  // live worker. `readWorkerSignals` keeps returning a dead worker's persisted
+  // `running`/`dispatched` status forever (no terminal signal was written), so
+  // `isLiveWorkerStatus` alone would exempt a long-dead worker. Gate on the same
+  // staleness threshold checkUnownedInFlight uses (`s.ageMs > limit`) so a signal
+  // that has sat "live" past the stranded window no longer masks the ticket.
+  // (The residual — a persisted worker-dir with no live bg job — stays a deliberate
+  // Phase-2 actuation proxy owned by the reaper; the real per-bg liveness probe is
+  // Phase 3's hasLiveBg, which fully closes the dead-worker gap. Treating a
+  // persisted dir as NOT-actuated in Phase 2 would risk restart-freshing a live
+  // worker mid-run — the more dangerous error — so that exemption is intentional.)
+  const hasLiveSignal = new Set(
+    b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)
+      && !(Number.isFinite(s.ageMs) && s.ageMs > limit)).map((s) => s.ticket) ?? [],
+  );
+  const flagged = [];
+  const classified = {};
+  let unobservableAges = 0;
+  for (const [id, d] of tickets) {
+    const state = d?.state ?? d?.linear_state ?? null;
+    if (!state || !IN_FLIGHT_STATE_RE.test(String(state))) continue;
+    if (isTerminalLinearState(d)) continue;
+    // HRW self-ownership: only flag tickets this host owns (foreign owners handle theirs).
+    if (b.ownerForTicket && b.self) {
+      let owner = null;
+      try { owner = b.ownerForTicket(id, b.roster); } catch { owner = null; }
+      if (owner && owner !== b.self) continue;
+    }
+    // needs-human LABEL exemption — mirror checkFrozenNeedsHuman's label check.
+    // A stranded ticket has no signal, so the label is the authoritative parked signal.
+    const labels = labelsOf(d);
+    if (labels && labels.some((l) => NEEDS_HUMAN_LABEL_RE.test(labelName(l)))) continue;
+    // A live worker signal on this ticket means there IS actuation — spare it.
+    if (hasLiveSignal.has(id)) continue;
+    // No evidence row for this ticket ⇒ we cannot prove it is stranded. Fail safe.
+    const e = evidence.get(id);
+    if (!e) { unobservableAges++; continue; }
+    // Any actuation flag exempts the ticket.
+    if (e.hasWorkerDir || e.hasLiveBg || e.hasFreshIntent) continue;
+    const ts = tsMillis(d?.updatedAt ?? d?.updated_at ?? null);
+    if (!Number.isFinite(ts)) { unobservableAges++; continue; }
+    if (nowMs - ts < limit) continue;
+    flagged.push(id);
+    classified[id] = classifyRevivalRoute(e);
+  }
+  return invariant(
+    flagged.length === 0, flagged.length, true, flagged,
+    flagged.length === 0
+      ? "no stranded mid-pipeline tickets"
+      : `${flagged.length} HRW-owned in-flight ticket(s) with no actuation past ${Math.round(limit / 3_600_000)}h`,
+    { classified, unobservableAges, thresholdMs: limit },
+  );
+}
+
 function checkPhantomMergedPr(b) {
   const map = b.prStatusMap;
   if (!(map instanceof Map) || map.size === 0) {
@@ -1169,9 +1310,34 @@ export function proposeMoves(invariants, _b) {
   // and tier1 is reserved for the higher-urgency PR cohorts. Operator-sanctioned
   // tickets are still suppressed via `sanction()`, which is the real escape hatch
   // for "a human is holding this one".
+  //
+  // CTL-1644: a ticket already classified by checkStrandedMidPipeline (the owned
+  // host's precise classify-and-route layer) is SUPPRESSED from the generic
+  // recover-unowned-in-flight move to prevent double-dispatch. The classified route
+  // move (route-stranded-mid-pipeline) carries the specific revival action instead.
+  const strandedClassified = invariants.strandedMidPipeline?.classified ?? {};
   for (const t of invariants.unownedInFlight?.flagged ?? []) {
-    if (!invariants.unownedInFlight.ok && !sanction(t)) {
+    if (!invariants.unownedInFlight.ok && !sanction(t) && !strandedClassified[t]) {
       tier2.push({ ticket: t, move: "recover-unowned-in-flight", rationale: "Linear state claims in-flight but there is no worker and no open PR" });
+    }
+  }
+  // CTL-1644: one tier2 route move per stranded ticket — the delegate picks the
+  // specific revival arm rather than the generic recover-unowned-in-flight sweep.
+  // CTL-1644 (Codex P2, round 2): ONLY a DISPATCHABLE route becomes an anchorable
+  // move. A non-dispatchable route (adopt / unknown-salvage) is surfaced in
+  // boardContext.strandedMidPipeline for visibility (rendered `(hold)`) but must
+  // NEVER anchor an autonomous recovery-pass dispatch: the recovery-pass skill has
+  // no route-aware hold branch and would auto-actuate a route the classifier marked
+  // unsafe. In Phase 2 the scheduler omits salvage evidence, so every stranded
+  // ticket classifies as `unknown-salvage` (held) — this gate keeps the whole
+  // cohort surfaced-but-held (via the invariant + telemetry) until Phase 3 wires
+  // real evidence or an operator acts, rather than restart-freshing on a hunch.
+  for (const t of invariants.strandedMidPipeline?.flagged ?? []) {
+    if (!invariants.strandedMidPipeline.ok && !sanction(t)) {
+      const cls = strandedClassified[t] ?? {};
+      if (cls.dispatchable === false) continue; // held — surface only, never anchor
+      tier2.push({ ticket: t, move: "route-stranded-mid-pipeline",
+        route: cls.route, rationale: cls.rationale ?? "stranded mid-pipeline ticket classified for revival" });
     }
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
@@ -1314,6 +1480,11 @@ export function buildBoardContext(boardState, invariants) {
     // see the failure count and a single anchor, fix one ticket, and leave the rest
     // exactly as stuck. Additive, like the cohorts above; [] when green/unobservable.
     unownedInFlight: invariants.unownedInFlight?.flagged ?? [],
+    // CTL-1644: per-ticket classified revival routes for the delegate. The worker
+    // reads this map to know WHICH arm to dispatch per ticket (pr-not-merged /
+    // resume-from-remote / adopt / restart-fresh) without re-running the board scan.
+    // {} when green or unobservable (shadow-safe).
+    strandedMidPipeline: invariants.strandedMidPipeline?.classified ?? {},
     strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
       host,
       // the tickets HRW-owned by this stranded host — the delegate's actionable
@@ -1337,7 +1508,7 @@ export function buildBoardContext(boardState, invariants) {
 // ── (6) buildBoardScanEvent — PURE. The flat event reused through the CTL-1287
 // emit envelope. Scalars at the top of details (CTL-1291 promotes them to
 // chartable attributes); rosters/move arrays stay in details → body.payload.
-export function buildBoardScanEvent({ mode, invariants, decision, act = null }) {
+export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
   // proposedMoves but never whether anything was dispatched — the blind spot behind
@@ -1349,6 +1520,30 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null }) 
     skippedReason: act?.skippedReason ?? (act?.dispatched === true ? null : "shadow"),
     skippedReasonNoClock: act?.skippedReasonNoClock === true, // CTL-1610
   };
+  // CTL-1607 (Codex #2985 P2 ×3): per-host slot census, corrected so a fleet
+  // consumer can SUM these across hosts without under/over-counting. Null when no
+  // board was threaded (back-compat). Three corrections vs the raw capacity snap:
+  //  · in_use is derived from FREE (capacity − rawFree), so it reflects the FULL
+  //    occupancy basis the scheduler admits against — liveCount + queued board-
+  //    health delegates + in-process SDK workers — not just live bg jobs. (Raw
+  //    board.capacity.freeSlots is already computeFreeSlots(maxParallel,
+  //    occupiedCount), so capacity − rawFree == occupiedCount.)
+  //  · a board-health delegate dispatched THIS scan reserves a slot the scheduler
+  //    charges immediately after this pass returns (scheduler.mjs: occupiedCount++
+  //    on act.dispatched), so free is debited (and in_use credited) by it here.
+  //  · a draining or stale-liveness node admits no new work — the scheduler's
+  //    admission gate collapses its free slots to 0 (`livenessFresh && !draining`)
+  //    — so its PUBLISHED free collapses to 0 too (admissionGated, threaded on
+  //    board.capacity by the scheduler).
+  const _slotCap = board?.capacity?.maxParallel ?? null;
+  const _rawFree = board?.capacity?.freeSlots ?? null;
+  const _slotGated = board?.capacity?.admissionGated === true;
+  const _slotReserved = actOutcome.dispatched ? 1 : 0;
+  const slotFree = _rawFree == null ? null : _slotGated ? 0 : Math.max(0, _rawFree - _slotReserved);
+  const slotInUse =
+    _slotCap == null || _rawFree == null
+      ? null
+      : Math.min(_slotCap, Math.max(0, _slotCap - _rawFree) + _slotReserved);
   return {
     type: "recovery.board-scan",
     ticket: null, // board/fleet-scoped → event.label:null; the board reader ignores it (correct)
@@ -1373,11 +1568,35 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null }) 
       // CTL-1435 (C1): 0/1 so Grafana can chart the dispatch RATE alongside the
       // proposal counts (proposed-vs-dispatched is the actuation-liveness signal).
       actDispatched: actOutcome.dispatched ? 1 : 0,
+      // CTL-1644: scalar count of stranded mid-pipeline tickets this scan so
+      // Grafana can chart the stranded population without parsing the classified map.
+      strandedCount: invariants.strandedMidPipeline?.flagged?.length ?? 0,
+      // CTL-1644 (Codex P2 round 3): scalar count of HELD (dispatchable:false)
+      // stranded tickets — the anchor filter keeps these out of tier2Moves and
+      // boardContext, so this is the only chartable signal that the cohort exists
+      // but is being deliberately held (e.g. the whole Phase-2 unknown-salvage set).
+      strandedHeldCount: Object.values(invariants.strandedMidPipeline?.classified ?? {})
+        .filter((c) => c?.dispatchable === false).length,
+      // CTL-1607: per-host slot census so fleet capacity is visible off-host
+      // (computed above; occupancy-derived in_use, delegate-debited + gate-collapsed
+      // free). A fleet consumer SUMs slotFree directly — never capacity − in_use:
+      // on a draining/stale node free is gate-collapsed to 0 while in_use still
+      // reports actual occupancy, so capacity − in_use overstates admittable free.
+      slotCapacity: _slotCap,
+      slotInUse,
+      slotFree,
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
       ),
       // ── rosters/proposals: stay in body.payload, NEVER promoted (cardinality) ──
       flagged: dedupeFlagged(invariants),
+      // CTL-1644 (Codex P2 round 3): the full per-ticket classified route map
+      // ({route, dispatchable, rationale, ...}), emitted on EVERY scan regardless
+      // of whether anything dispatched. For a held-only board the anchor filter
+      // suppresses tier2Moves and boardContext, so this map is the ONLY place the
+      // route + reason for each held ticket survives to the event-log / HUD /
+      // monitor. Ticket-id keyed → high cardinality → body.payload, never promoted.
+      strandedRoutes: invariants.strandedMidPipeline?.classified ?? {},
       tier1Moves: decision.moves.tier1,
       tier2Moves: decision.moves.tier2,
       tier3Moves: decision.moves.tier3,
@@ -1407,6 +1626,10 @@ export function boardHealthPass({
   getDeferredBoardHealthTickets, // CTL-1432 (B2): deferred board-health anchor candidates
   sanctionedNeedsHuman, // CTL-1432 (B3): sanctioned needs-human latch allowlist
   getPrStatusMap, // CTL-1157: filter_state PR-status reader (daemon-bound)
+  // CTL-1644: per-ticket actuation+salvageability evidence builder for
+  // checkStrandedMidPipeline. Empty-Map default (same shadow-first pattern as
+  // getPrStatusMap) → invariant stays observable:false until Phase 2 wires it.
+  getStrandedEvidence,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
@@ -1431,6 +1654,7 @@ export function boardHealthPass({
     // 5-minute passes. Arrays still work unchanged (resolveDeadHosts is a no-op).
     getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), mode, now,
     getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
+    getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);
@@ -1505,7 +1729,7 @@ export function boardHealthPass({
 
   // CTL-1435 (C1): emit AFTER actuation so the scan event carries the act outcome.
   try {
-    emit(buildBoardScanEvent({ mode, invariants, decision: dec, act: actOutcome })); // shadow AND enforce
+    emit(buildBoardScanEvent({ mode, invariants, decision: dec, act: actOutcome, board })); // shadow AND enforce
   } catch (err) {
     log({ err: err.message }, "board-health: emit failed (continuing)");
   }
