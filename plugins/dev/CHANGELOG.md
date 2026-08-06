@@ -1,5 +1,32 @@
 # Changelog
 
+## [12.46.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.45.0...catalyst-dev-v12.46.0)
+
+Aug 06, 2026
+
+<!-- ai-enhanced -->
+
+### Account Health Visibility & Worktree Resume
+
+The orch-monitor now surfaces Claude account health everywhere you look: a new accounts-probe library (TTL-cached, edge-triggered) backs a `GET /api/accounts` endpoint and `/api/accounts/stream` SSE feed, with a live strip in the Ink HUD and a banner in the web dashboard that fires loudly when an account degrades. Worktree creation now seeds from `origin/<ticket>` when that remote branch exists, so a resumed or reclaimed worktree picks up where the previous worker left off instead of silently orphaning pushed commits. Board-scan events also now carry per-host slot counts (`recovery.slot.capacity`, `recovery.slot.in_use`, `recovery.slot.free`) as chartable Loki attributes, making fleet-wide free-capacity queries like `sum(recovery.slot.free)` possible for the first time.
+
+
+
+### PRs
+
+* **dev:** board-scan events now carry per-host worker-slot counts as ([602d1f2](https://github.com/coalesce-labs/catalyst/commit/602d1f2bd5f7b732f5cfc5a5067f2da417482f66))
+* **dev:** CTL-1607 promote board-scan slot scalars to chartable Loki attributes ([#2985](https://github.com/coalesce-labs/catalyst/issues/2985)) ([602d1f2](https://github.com/coalesce-labs/catalyst/commit/602d1f2bd5f7b732f5cfc5a5067f2da417482f66))
+* **dev:** CTL-1653 accounts-probe lib (probe runner + async TTL cache) ([#3011](https://github.com/coalesce-labs/catalyst/issues/3011)) ([32b6d07](https://github.com/coalesce-labs/catalyst/commit/32b6d071f12d3aa333d41352470a3bd34c8d947b))
+* **dev:** board-health-seam test expects capacity.admissionGated (CTL-1607) ([#3028](https://github.com/coalesce-labs/catalyst/issues/3028)) ([1105e67](https://github.com/coalesce-labs/catalyst/commit/1105e67db71304f25bd39d752062f2659832370b))
+* **dev:** CTL-1640 resume worktree from origin/&lt;ticket&gt; instead of orphaning pushed commits ([#3025](https://github.com/coalesce-labs/catalyst/issues/3025)) ([898e02e](https://github.com/coalesce-labs/catalyst/commit/898e02e136b7a071457f5b437260897309b23050))
+* **dev:** CTL-1655 — consumer-side coordination-mirror comment tail ([#3015](https://github.com/coalesce-labs/catalyst/issues/3015)) ([042d321](https://github.com/coalesce-labs/catalyst/commit/042d321ae9610dd30a4f757a44626bfcb63d6d24))
+* **monitor:** CTL-1653 accept https-configured trusted origins in the refresh Host check ([#3020](https://github.com/coalesce-labs/catalyst/issues/3020)) ([b72a53a](https://github.com/coalesce-labs/catalyst/commit/b72a53a63e6ef865974e8b29be02be4d2e47e90a))
+* **monitor:** CTL-1653 document MONITOR_TLS_PROXY_PEERS + normalize IPv4-mapped peers ([#3023](https://github.com/coalesce-labs/catalyst/issues/3023)) ([fbcaffb](https://github.com/coalesce-labs/catalyst/commit/fbcaffb8c2e651aaa95e3e81fed7db4e00e0b0e8))
+* **monitor:** CTL-1653 operator-declared TLS-proxy peers replace header-derived scheme ([#3022](https://github.com/coalesce-labs/catalyst/issues/3022)) ([e2746dc](https://github.com/coalesce-labs/catalyst/commit/e2746dc26b0519676b85b1be545974074140d38c))
+* **monitor:** CTL-1653 post-merge hardening — stale-strip clear, Bun execPath, non-simple refresh, EOF reconnect, empty-env contract ([#3017](https://github.com/coalesce-labs/catalyst/issues/3017)) ([9eb083a](https://github.com/coalesce-labs/catalyst/commit/9eb083aded55ea855fe4321c4ccbc561503ef219))
+* **monitor:** CTL-1653 post-merge hardening r3 — unavailable transition, Host validation, unreadable-env error ([#3019](https://github.com/coalesce-labs/catalyst/issues/3019)) ([b4b7496](https://github.com/coalesce-labs/catalyst/commit/b4b74960cc4b2178e47c05d3a74d52bd13fa254d))
+* **monitor:** CTL-1653 scheme-aware Host check — never treat an https-only trusted host as plaintext ([#3021](https://github.com/coalesce-labs/catalyst/issues/3021)) ([c081851](https://github.com/coalesce-labs/catalyst/commit/c081851350e3f20887a671493d6316fd56305ae9))
+
 ## [12.45.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.44.0...catalyst-dev-v12.45.0)
 
 Aug 05, 2026
