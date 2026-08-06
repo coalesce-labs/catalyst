@@ -591,6 +591,16 @@ file are never double-written. `catalyst-events tail`/`wait-for` on the observat
 resolve fleet events locally with no polling loop. The fan-in is transport-abstracted (injectable
 `fetchFn`) so a future cloud-changefeed transport drops in without touching the dedup core.
 
+**Worktree salvage-before-destroy (CTL-1639).** Every destructive worktree removal — the
+dispatcher's L3 destroy+recreate, the orphan-sweep, phase-teardown, and the JS reaper's PR-merged
+cleanup — first calls the shared `lib/worktree-salvage.sh` primitive, which snapshots the worktree's
+unpushed commits (`git bundle`), tracked uncommitted diff (`.patch`), and untracked files (`.tar`) to
+`~/catalyst/salvage/` and emits one `worktree.salvage.{created,skipped,failed}` event (service
+`catalyst.worktree-salvage`). The prefix is **unprotected** under the CTL-1142 namespace contract (no
+`isBrokerProtectedName` collision — it routes through `shouldSkipEvent` normally). Salvage is
+best-effort/fail-open — it never blocks a removal — layered on top of the existing fail-closed
+`_removal_guard_ok` live-handle gate. (Retention/GC of `~/catalyst/salvage/` is deferred follow-up.)
+
 ### Linear app-actor self-echo guard (`botUserId`)
 
 The execution-core daemon mirrors phase-agent output to Linear and wakes on human replies, so it
