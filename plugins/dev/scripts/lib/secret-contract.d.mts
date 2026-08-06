@@ -62,6 +62,11 @@ export function isSecretFamilyMember(filename: string): boolean;
 export function resolveLayer2Path(env?: Record<string, string | undefined>): string;
 export function explicitFileOverrideEnvName(id: string): string;
 export function secretFileCandidates(id: string, env?: Record<string, string | undefined>): string[];
+/** Canonical malformed-file validators (CTL-1623 Codex round 2): shared with
+ *  execution-core's rearmGithubTokenFromFile so the resolver and the rearm hook can never
+ *  drift on what counts as a representable credential file. */
+export function containsNul(value: string): boolean;
+export function isValidUtf8RoundTrip(buf: Uint8Array, decoded: string): boolean;
 /** CTL-1616 PR4: linear-worker-actor's per-team-legacy tier path (mirrors
  *  linear-comment-post.sh's _find_layer2_config directory walk-up). */
 export function resolveLegacyPerTeamConfigPath(
