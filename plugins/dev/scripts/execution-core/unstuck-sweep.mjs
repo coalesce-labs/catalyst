@@ -93,6 +93,11 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   // terminal sweep + alert) and is waiting on an operator approval — the
   // unstuck sweep must stay quiet, not re-escalate it every interval.
   "boot-resume-gate-expired":         { category: "skip",           action: "skip" },
+  // PROJ-1657 Codex P2 (round 4): a probe-less phase (recovery-pass today) is
+  // parked terminal on its FIRST occurrence via markEscalationCapTerminal —
+  // same "already fully escalated" shape as escalation-ask-cap above — so the
+  // unstuck sweep must stay quiet here too, not re-escalate every interval.
+  "no-probe-for-phase":               { category: "skip",           action: "skip" },
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.
