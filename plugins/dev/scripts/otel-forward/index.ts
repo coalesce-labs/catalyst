@@ -89,7 +89,9 @@ const CURRENT_MONTH = () => {
   const now = new Date();
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 };
-const EVENT_LOG_PATH = join(EVENTS_DIR, `${CURRENT_MONTH()}.jsonl`);
+// CTL-1506 (Codex P2): resolve the monthly log file on each use, not once at startup —
+// a daemon that crosses a UTC month boundary must write to the file the tailer now reads.
+const currentEventLogPath = () => join(EVENTS_DIR, `${CURRENT_MONTH()}.jsonl`);
 
 const OTLP_DLQ_PATH = join(CATALYST_DIR, "otel-forward-dlq-otlp.jsonl");
 
@@ -98,7 +100,7 @@ const senders = {
     ? new OtlpSender({
         endpoint: cfg.otlp.endpoint,
         dlqPath: OTLP_DLQ_PATH,
-        eventLogPath: EVENT_LOG_PATH,
+        eventLogPath: currentEventLogPath,
         // CTL-1506: age window + retry window from config
         lokiAcceptWindowMs: cfg.otlp.lokiAcceptWindowMs,
         httpRetryPolicy: { maxElapsedMs: cfg.otlp.maxRetryElapsedMs },
@@ -147,8 +149,9 @@ function emitLag(): void {
       lastForwardedTs,
       dlqDepth: dlqDepth(OTLP_DLQ_PATH),
     });
-    mkdirSync(dirname(EVENT_LOG_PATH), { recursive: true });
-    appendFileSync(EVENT_LOG_PATH, JSON.stringify(ev) + "\n");
+    const logPath = currentEventLogPath(); // CTL-1506: resolve per emission (month rollover)
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, JSON.stringify(ev) + "\n");
   } catch {
     // Best-effort — must never throw
   }
@@ -182,39 +185,40 @@ export function getStats() {
   return { ...stats };
 }
 
-async function runFlush(): Promise<void> {
-  const tasks: Promise<void>[] = [];
-  if (senders.otlp && buffers.otlp.length > 0) {
-    const batch = buffers.otlp.splice(0);
-    tasks.push(senders.otlp.flush(batch));
-  }
-  if (senders.posthog && buffers.posthog.length > 0) {
-    const batch = buffers.posthog.splice(0);
-    tasks.push(senders.posthog.flush(batch));
-  }
-  if (senders.cae && buffers.cae.length > 0) {
-    const batch = buffers.cae.splice(0);
-    tasks.push(senders.cae.flush(batch));
-  }
-  await Promise.allSettled(tasks);
+type DestKey = "otlp" | "posthog" | "cae";
+
+// CTL-1506 (Codex P1/P2): serialize each destination's flushes INDEPENDENTLY. A sender's
+// flush() opens a retry window up to maxRetryElapsedMs (default 60 s) while the flush
+// timer fires far more often. A PER-DESTINATION in-flight guard keeps OTLP's DLQ access
+// race-free (no two OtlpSender.flush concurrently entering drainDlqBounded against the
+// same file) WITHOUT coupling healthy sinks to a slow one — a tick for PostHog/CFAE
+// still flushes while OTLP is mid-retry, so their events don't sit in memory (which,
+// with the checkpoint advancing, a restart could otherwise skip). Each flush also splices
+// at most batchSize events, honoring the documented cap.
+const inFlight: Record<DestKey, Promise<void> | null> = { otlp: null, posthog: null, cae: null };
+
+function flushDest(
+  key: DestKey,
+  sender: { flush: (b: CanonicalEvent[]) => Promise<void> } | null,
+  buffer: CanonicalEvent[],
+  batchSize: number
+): Promise<void> {
+  if (!sender || buffer.length === 0) return Promise.resolve();
+  if (inFlight[key]) return inFlight[key]!; // coalesce this destination's tick
+  const batch = buffer.splice(0, Math.max(1, batchSize)); // CTL-1506: honor batchSize
+  const p = sender.flush(batch).finally(() => {
+    inFlight[key] = null;
+  });
+  inFlight[key] = p;
+  return p;
 }
 
-// CTL-1506 (Codex P1): serialize flushes. Each sender's flush() opens a retry window
-// up to maxRetryElapsedMs (default 60 s), but the flush timer fires every FLUSH_MS
-// (default 5 s). Without this guard ~12 flushes could run concurrently during a
-// sustained outage, letting multiple invocations enter drainDlqBounded against the
-// same DLQ file snapshot — replaying queued events more than once and racing its
-// rewrite/unlink. A tick that arrives while a flush is in flight coalesces onto the
-// in-flight promise (a no-op that shares its result); buffered events simply wait for
-// the next flush. Callers that must guarantee a fresh drain (shutdown) await the
-// in-flight one first, then call flush() again.
-let inFlightFlush: Promise<void> | null = null;
-function flush(): Promise<void> {
-  if (inFlightFlush) return inFlightFlush;
-  inFlightFlush = runFlush().finally(() => {
-    inFlightFlush = null;
-  });
-  return inFlightFlush;
+async function flushAll(): Promise<void> {
+  await Promise.allSettled([
+    flushDest("otlp", senders.otlp, buffers.otlp, cfg.otlp.batchSize),
+    flushDest("posthog", senders.posthog, buffers.posthog, cfg.posthog.batchSize),
+    flushDest("cae", senders.cae, buffers.cae, cfg.cloudflareAE.batchSize),
+  ]);
 }
 
 if (import.meta.main) {
@@ -233,12 +237,25 @@ if (import.meta.main) {
     signal: ac.signal,
   });
 
-  const FLUSH_MS = Math.min(
-    cfg.otlp.flushIntervalMs,
-    cfg.posthog.flushIntervalMs,
-    cfg.cloudflareAE.flushIntervalMs
-  );
-  const flushTimer = setInterval(flush, FLUSH_MS);
+  // CTL-1506 (Codex P2): one timer PER enabled destination at its OWN flushIntervalMs,
+  // so a per-forwarder cadence actually takes effect (the old single global-min timer
+  // flushed every sink at the fastest configured interval).
+  const flushTimers: ReturnType<typeof setInterval>[] = [];
+  if (senders.otlp) {
+    flushTimers.push(setInterval(() => {
+      void flushDest("otlp", senders.otlp, buffers.otlp, cfg.otlp.batchSize);
+    }, cfg.otlp.flushIntervalMs));
+  }
+  if (senders.posthog) {
+    flushTimers.push(setInterval(() => {
+      void flushDest("posthog", senders.posthog, buffers.posthog, cfg.posthog.batchSize);
+    }, cfg.posthog.flushIntervalMs));
+  }
+  if (senders.cae) {
+    flushTimers.push(setInterval(() => {
+      void flushDest("cae", senders.cae, buffers.cae, cfg.cloudflareAE.batchSize);
+    }, cfg.cloudflareAE.flushIntervalMs));
+  }
 
   const ckTimer = setInterval(() => {
     writeCheckpoint(CHECKPOINT_PATH, {
@@ -262,13 +279,16 @@ if (import.meta.main) {
 
   await tailer.run();
 
-  clearInterval(flushTimer);
+  for (const t of flushTimers) clearInterval(t);
   clearInterval(ckTimer);
   clearInterval(lagTimer);
-  // CTL-1506: let any in-flight flush settle, then drain whatever buffered since it
-  // started (flush() coalesces onto an in-flight promise, so a single call could
-  // otherwise return the in-flight one and leave the tail unflushed).
-  if (inFlightFlush) await inFlightFlush;
-  await flush();
+  // CTL-1506: let any in-flight per-destination flushes settle, then drain the remainder.
+  // flushAll splices at most batchSize per destination per call, so loop until the buffers
+  // are empty (a persistently-failing sender DLQs its batch and resolves, shrinking the
+  // buffer each pass, so this terminates).
+  await Promise.allSettled(Object.values(inFlight).filter((p): p is Promise<void> => p !== null));
+  while (buffers.otlp.length > 0 || buffers.posthog.length > 0 || buffers.cae.length > 0) {
+    await flushAll();
+  }
   log.info({ processed: stats.processed, skipped: stats.skipped }, "stopped");
 }

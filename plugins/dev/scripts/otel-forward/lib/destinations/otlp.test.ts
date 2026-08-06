@@ -948,4 +948,47 @@ describe("OtlpSender CTL-1506 Codex remediation", () => {
     expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
     rmSync(dir, { recursive: true });
   });
+
+  test("skips the DLQ drain when the primary ages out mid-retry (no confirmed delivery) (Codex P2)", async () => {
+    let fetchCalls = 0;
+    global.fetch = mock(() => {
+      fetchCalls++;
+      return Promise.resolve(new Response(null, { status: 503 })); // retryable, never confirms health
+    }) as unknown as typeof fetch;
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "skipdrain-dlq.jsonl");
+    const eventLogPath = join(dir, "skipdrain-events.jsonl");
+    // A queued entry that must NOT be drained — the backend health was never confirmed.
+    appendToDlq(dlqPath, [makeFreshEvent({ attributes: { "event.name": "queued.event" } })]);
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: 20,
+      httpRetryPolicy: { baseMs: 80, maxElapsedMs: 10_000 },
+    });
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]); // fresh, ages out mid-retry
+    expect(fetchCalls).toBe(1);          // only the primary attempt; drain never ran
+    expect(dlqDepth(dlqPath)).toBe(1);   // seeded entry untouched
+    rmSync(dir, { recursive: true });
+  });
+
+  test("eventLogPath resolver is evaluated at emission time, not construction (month rollover) (Codex P2)", async () => {
+    global.fetch = mock(() => Promise.resolve(new Response(null, { status: 400 }))) as unknown as typeof fetch; // terminal → drop counter
+    const { OtlpSender } = await import("./otlp.ts");
+    const logPath = join(dir, "resolver-events.jsonl");
+    let resolved = 0;
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath: join(dir, "resolver-dlq.jsonl"),
+      eventLogPath: () => { resolved++; return logPath; },
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await sender.flush([makeFreshEvent()]);
+    expect(resolved).toBeGreaterThan(0);    // resolver invoked at emit time
+    expect(existsSync(logPath)).toBe(true); // wrote to the resolved path
+    expect(readDrops(logPath).length).toBe(1);
+    rmSync(dir, { recursive: true });
+  });
 });

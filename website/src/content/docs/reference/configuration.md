@@ -437,8 +437,8 @@ covers architecture, lifecycle, and DLQ operations.
 | -------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `enabled`            | `false`                | Enable the OTLP/HTTP forwarder.                                                                                                                        |
 | `endpoint`           | `http://localhost:4318`| Collector ingest. `OTEL_EXPORTER_OTLP_ENDPOINT` overrides it; a `:4317` port is auto-rewritten to `:4318` for HTTP.                                     |
-| `batchSize`          | `100`                  | Max events per flush batch.                                                                                                                            |
-| `flushIntervalMs`    | `5000`                 | Flush cadence. Flushes are serialized — a tick during an in-flight flush is a no-op (CTL-1506), so this is a floor, not a guarantee of concurrency.     |
+| `batchSize`          | `100`                  | Max events per flush request. Each flush splices at most this many buffered events; any remainder waits for the next tick (CTL-1506).                   |
+| `flushIntervalMs`    | `5000`                 | Per-forwarder flush cadence — each enabled destination runs its own timer at its own interval (CTL-1506). A destination's flushes are serialized independently: a tick arriving while its previous flush is still in flight is a no-op, so this is a floor. |
 | `lokiAcceptWindowMs` | `3600000` (1 h)        | Age cutoff for Loki records (CTL-1506). Records older than this are dropped with a `forward_dropped` (`drop_reason: "aged"`) event before any send. Tune to your Loki `reject_old_samples_max_age`. |
 | `maxRetryElapsedMs`  | `60000` (60 s)         | Max elapsed time for HTTP retry backoff on a retryable failure (`429`/`5xx`/network) before the batch is dead-lettered (CTL-1506). Terminal `4xx` (not `429`) is dropped immediately, never retried or DLQ'd. |
 

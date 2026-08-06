@@ -16,8 +16,11 @@ export interface PosthogConfig { enabled: boolean; apiKey: string; host: string;
 export interface CloudflareAEConfig { enabled: boolean; accountId: string; apiToken: string; dataset: string; batchSize: number; flushIntervalMs: number }
 export interface ForwarderConfig { otlp: OtlpConfig; posthog: PosthogConfig; cloudflareAE: CloudflareAEConfig }
 
+// CTL-1506 (Codex P2): endpoint defaults to the documented localhost collector so an
+// operator who enables OTLP without an explicit endpoint hits a real URL instead of the
+// relative "/v1/logs" (which fails every fetch and silently fills the DLQ).
 const DEFAULTS = {
-  otlp: { enabled: false, endpoint: "", batchSize: 100, flushIntervalMs: 5000, lokiAcceptWindowMs: 3_600_000, maxRetryElapsedMs: 60_000 },
+  otlp: { enabled: false, endpoint: "http://localhost:4318", batchSize: 100, flushIntervalMs: 5000, lokiAcceptWindowMs: 3_600_000, maxRetryElapsedMs: 60_000 },
   posthog: { enabled: false, apiKey: "", host: "https://us.i.posthog.com", batchSize: 50, flushIntervalMs: 10000 },
   cloudflareAE: { enabled: false, accountId: "", apiToken: "", dataset: "catalyst_events", batchSize: 100, flushIntervalMs: 5000 },
 };
@@ -34,7 +37,7 @@ export function loadForwarderConfig(configPath: string, projectKey: string): For
   const otlpEndpointEnv = process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "";
   const otlpEndpoint = otlpEndpointEnv
     ? otlpEndpointEnv.replace(/:4317/, ":4318")
-    : (fw.otlp?.endpoint ?? "");
+    : (fw.otlp?.endpoint || DEFAULTS.otlp.endpoint); // || so an empty configured value falls back
   return {
     otlp: { ...DEFAULTS.otlp, ...(fw.otlp ?? {}), endpoint: otlpEndpoint },
     posthog: { ...DEFAULTS.posthog, ...(fw.posthog ?? {}) },

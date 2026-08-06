@@ -26,6 +26,22 @@ describe("loadForwarderConfig", () => {
     rmSync(dir, { recursive: true });
   });
 
+  test("otlp.endpoint defaults to http://localhost:4318 when unset (CTL-1506)", () => {
+    const cfg = loadForwarderConfig("/nonexistent", "myproject");
+    expect(cfg.otlp.endpoint).toBe("http://localhost:4318");
+  });
+
+  test("empty configured otlp.endpoint falls back to the default (CTL-1506)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "otel-forward-empty-ep-"));
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({
+      catalyst: { observability: { forwarders: { otlp: { enabled: true, endpoint: "" } } } }
+    }));
+    const cfg = loadForwarderConfig(path, "myproject");
+    expect(cfg.otlp.endpoint).toBe("http://localhost:4318");
+    rmSync(dir, { recursive: true });
+  });
+
   test("OTEL_EXPORTER_OTLP_ENDPOINT env overrides config endpoint", () => {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://override:4318";
     const cfg = loadForwarderConfig("/nonexistent", "myproject");

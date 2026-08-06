@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
 import {
   HttpError, classifyStatus, parseRetryAfter,
@@ -11,6 +12,14 @@ import { log } from "../logger.ts";
 import { buildCanonicalEnvelope } from "../canonical.ts";
 
 const destLog = log.child({ destination: "otlp" });
+
+// CTL-1506 (Codex P2): per-PROCESS nonce folded into every emitted event's id. The id
+// hash (buildCanonicalEnvelope) covers only ts+event+idExtra — NOT host/process identity
+// — and truncates the timestamp to whole seconds, so a bare per-instance sequence would
+// still collide across two fleet hosts (or a same-second restart) emitting the same
+// event type/count at the same seq position. A random per-process nonce makes each
+// instance's ids disjoint from every other process's.
+const INSTANCE_NONCE = randomUUID().slice(0, 8);
 
 interface OtlpAttr {
   key: string;
@@ -78,8 +87,11 @@ export interface OtlpSenderOpts {
   retryClock?: HttpRetryClock;
   /** CTL-1506: age window for Loki. Records older than this are dropped before send. */
   lokiAcceptWindowMs?: number;
-  /** Path to append canonical events on flush failure/drop (CTL-1008 Phase 4). */
-  eventLogPath?: string;
+  /** Path to append canonical events on flush failure/drop (CTL-1008 Phase 4). May be a
+   *  resolver so the CURRENT monthly log file is picked at emission time — a long-running
+   *  daemon that crosses a UTC month boundary must not keep writing to the previous
+   *  month's file the tailer no longer reads (CTL-1506 Codex P2). */
+  eventLogPath?: string | (() => string);
   /** Max DLQ batches to drain per flush cycle. Defaults to DEFAULT_MAX_DRAIN_BATCHES. */
   maxDrainBatches?: number;
   /** Called after each successfully delivered batch (primary or DLQ). Used by Phase 3 lag tracking. */
@@ -122,6 +134,11 @@ export class OtlpSender {
     severity: { text: CanonicalEvent["severityText"]; number: number } = { text: "WARN", number: 13 }
   ): void {
     if (!this.opts.eventLogPath) return;
+    // CTL-1506 (Codex P2): resolve the path per emission so a month rollover is honored.
+    const logPath = typeof this.opts.eventLogPath === "function"
+      ? this.opts.eventLogPath()
+      : this.opts.eventLogPath;
+    if (!logPath) return;
     try {
       const ev = buildCanonicalEnvelope({
         serviceName: "catalyst.otel-forward",
@@ -129,11 +146,11 @@ export class OtlpSender {
         severityText: severity.text,
         severityNumber: severity.number,
         payload,
-        idExtra: `${payload.count ?? payload.batchSize ?? ""}:${this.emitSeq++}`,
+        idExtra: `${payload.count ?? payload.batchSize ?? ""}:${INSTANCE_NONCE}:${this.emitSeq++}`,
         attributes: extraAttrs,
       });
-      mkdirSync(dirname(this.opts.eventLogPath), { recursive: true });
-      appendFileSync(this.opts.eventLogPath, JSON.stringify(ev) + "\n");
+      mkdirSync(dirname(logPath), { recursive: true });
+      appendFileSync(logPath, JSON.stringify(ev) + "\n");
     } catch {
       // Best-effort — never throw from event emission
     }
@@ -272,8 +289,13 @@ export class OtlpSender {
       return; // backend unhealthy → skip drain
     }
 
-    // 3) Delivered → bounded drain.
-    if (result.delivered.length) this.opts.onBatchDelivered?.(result.delivered);
+    // 3) Delivered → bounded drain. But ONLY when a real POST actually succeeded
+    //    (delivered.length > 0). If the fresh set aged out entirely during the retry
+    //    backoff, withHttpRetry resolves without ever confirming the backend is healthy
+    //    (Codex P2) — draining then would start another full retry window against a
+    //    possibly-unhealthy backend, exactly the failed-primary case that skips draining.
+    if (result.delivered.length === 0) return;
+    this.opts.onBatchDelivered?.(result.delivered);
     await drainDlqBounded(
       this.opts.dlqPath,
       this.makeDrainSend(rawSend, windowMs),
