@@ -4144,21 +4144,21 @@ export function checkDaemonlessLocal(deps = {}) {
     ];
   }
 
-  // A parsed-but-unusable verify-node result cannot certify daemonless+fresh.
+  // A parsed-but-UNUSABLE verify-node result (empty/unparseable output, jq unavailable)
+  // cannot certify daemonless+fresh at all — that's the generic short-circuit below. A
+  // non-zero exit / "fail" verdict ALONE is NOT unusable: it's the expected shape whenever
+  // ANY required row failed (including one outside `rows`), and the per-row loop below
+  // already fails closed on a missing/unmappable named row. Short-circuiting on exit/verdict
+  // only hid WHICH row failed — e.g. a dead event-mirror reported as a generic "verify-node
+  // unavailable" FAIL instead of naming "event-mirror-running" (CTL-1662 Codex P2).
   const checks = Array.isArray(result?.checks) ? result.checks : [];
-  const exit = typeof result?.exit_code === "number" ? result.exit_code : null;
-  if (
-    checks.length === 0 ||
-    result?.jq === false ||
-    (exit !== null && exit !== 0) ||
-    result?.verdict === "fail"
-  ) {
+  if (checks.length === 0 || result?.jq === false) {
     return [
       mkCheck(
         "verify-node",
         STATUS.FAIL,
         `could not verify daemonless local state — verify-node unavailable/failed ` +
-          `(exit ${exit ?? "?"}, verdict ${result?.verdict ?? "?"}, jq ${result?.jq ?? "?"}, ` +
+          `(exit ${result?.exit_code ?? "?"}, verdict ${result?.verdict ?? "?"}, jq ${result?.jq ?? "?"}, ` +
           `checks ${checks.length}); cannot certify the developer is daemonless + fresh`,
       ),
     ];
