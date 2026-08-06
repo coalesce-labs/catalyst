@@ -4146,7 +4146,7 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     // string) because this path genuinely writes the signal file to disk —
     // reusing "/orch" would write outside any test's control (Codex #3027 P2
     // on the ORIGINAL version of this test).
-    const testOrchDir = mkdtempSync(join(tmpdir(), "ctl1657-recovery-pass-"));
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-recovery-pass-"));
     try {
       const escalate = recorder(undefined);
       const applyLabel = recorder(undefined);
@@ -4199,7 +4199,7 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     // local repair), so a dead recovery-pass worker observed during a Linear
     // outage stayed at "running" — the exact slot-leak this whole ticket
     // exists to close — for the entire duration of the outage.
-    const testOrchDir = mkdtempSync(join(tmpdir(), "ctl1657-breaker-open-"));
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-breaker-open-"));
     try {
       const escalate = recorder(undefined);
       const recoveryPassSig = {
@@ -4230,7 +4230,7 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
   });
 
   test("no-probe-for-phase terminalizes locally even while an escalation cooldown is ACTIVE (regression, Codex #3027 round 2 P1)", () => {
-    const testOrchDir = mkdtempSync(join(tmpdir(), "ctl1657-cooldown-"));
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-cooldown-"));
     try {
       const recoveryPassSig = {
         ticket: "PROJ-505",
