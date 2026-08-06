@@ -978,6 +978,21 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.inv.phantomMergedPr.failed"]).toBe(2);
   });
 
+  test("recovery.board-scan promotes stranded-mid-pipeline population counters (CTL-1644 Codex R4)", () => {
+    const details = {
+      mode: "shadow",
+      invariantsFailed: 1,
+      gateDecision: "proceed",
+      gateReason: "1 invariant(s) flagged",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      strandedCount: 5,
+      strandedHeldCount: 5, // Phase-2: whole cohort is unknown-salvage (held)
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a.cohort_stranded_mid_pipeline).toBe(5);
+    expect(a.cohort_stranded_held).toBe(5);
+  });
+
   // CTL-1607: per-host slot census promoted to chartable recovery.slot.* attributes.
   test("recovery.board-scan promotes slot* scalars under recovery.slot.* names", () => {
     const details = {

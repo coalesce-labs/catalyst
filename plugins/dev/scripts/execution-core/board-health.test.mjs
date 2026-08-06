@@ -21,6 +21,8 @@ import {
   boardHealthPass,
   // CTL-1524 (C4b): lazy deadHosts resolution (array OR thunk)
   resolveDeadHosts,
+  // CTL-1644: pure revival-route classifier
+  classifyRevivalRoute,
 } from "./board-health.mjs";
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
 // exercises the production body.payload.details nesting + attribute promotion.
@@ -82,6 +84,9 @@ function mkBoard(o = {}) {
     // CTL-1432 (B2/B3): deferred board-health anchor candidates + sanctioned latch allowlist.
     deferredBoardHealth: o.deferredBoardHealth ?? [],
     sanctionedNeedsHuman: o.sanctionedNeedsHuman ?? [],
+    // CTL-1644: per-ticket evidence map for the stranded-mid-pipeline check.
+    // Empty Map default ⇒ checkStrandedMidPipeline stays observable:false (shadow-first).
+    strandedEvidence: o.strandedEvidence ?? new Map(),
     now: o.now ?? NOW,
   };
 }
@@ -1907,5 +1912,322 @@ describe("boardHealthPass — latchedNoClock → scan.skippedReasonNoClock (CTL-
     );
     expect(emits[0].details.act.dispatched).toBe(true);
     expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
+  });
+});
+
+// ─── CTL-1644: classifyRevivalRoute — pure route classification ──────────────
+describe("classifyRevivalRoute (CTL-1644)", () => {
+  test("open PR present ⇒ pr-not-merged (highest precedence)", () => {
+    const c = classifyRevivalRoute({ openPr: { number: 42, status: "open" } });
+    expect(c.route).toBe("pr-not-merged");
+    expect(c.dispatchable).toBe(true);
+  });
+
+  test("remote branch exists, no local unpushed worktree ⇒ resume-from-remote", () => {
+    const c = classifyRevivalRoute({ remoteBranchExists: true, worktreeUnpushed: false });
+    expect(c.route).toBe("resume-from-remote");
+    expect(c.dispatchable).toBe(true);
+  });
+
+  test("remote branch exists but local salvage UNCHECKED ⇒ held, NOT resume-from-remote [Codex P2 round 3]", () => {
+    // worktreeUnpushed omitted (local probe failed/skipped): !undefined would have
+    // wrongly picked resume-from-remote and discarded possible unpushed local work.
+    const c = classifyRevivalRoute({ remoteBranchExists: true });
+    expect(c.route).toBe("unknown-salvage");
+    expect(c.dispatchable).toBe(false);
+  });
+
+  test("local worktree with unpushed commits ⇒ adopt (stubbed dispatchable:false, CTL-1642)", () => {
+    const c = classifyRevivalRoute({ worktreeUnpushed: true });
+    expect(c.route).toBe("adopt");
+    expect(c.dispatchable).toBe(false);
+  });
+
+  test("salvage UNCHECKED (fields absent) ⇒ unknown-salvage (held, not restart-fresh) [Codex P1]", () => {
+    // Phase-2 evidence omits remoteBranchExists/worktreeUnpushed → we must NOT
+    // restart-fresh (destructive) on unchecked evidence; hold as non-dispatchable.
+    const c = classifyRevivalRoute({});
+    expect(c.route).toBe("unknown-salvage");
+    expect(c.dispatchable).toBe(false);
+  });
+
+  test("salvage CHECKED and absent (fields present & false) ⇒ restart-fresh", () => {
+    const c = classifyRevivalRoute({
+      openPr: null, remoteBranchExists: false, worktreeUnpushed: false,
+      hasWorkerDir: false, hasLiveBg: false, hasFreshIntent: false,
+    });
+    expect(c.route).toBe("restart-fresh");
+  });
+
+  test("open PR takes precedence over remote branch", () => {
+    const c = classifyRevivalRoute({ openPr: { number: 7 }, remoteBranchExists: true, worktreeUnpushed: true });
+    expect(c.route).toBe("pr-not-merged");
+  });
+});
+
+// ─── CTL-1644: checkStrandedMidPipeline invariant ───────────────────────────
+describe("checkStrandedMidPipeline (CTL-1644)", () => {
+  const HOUR = 3_600_000;
+  const NOW_SMP = Date.parse("2026-08-06T00:00:00.000Z");
+  const at = (hoursAgo) => new Date(NOW_SMP - hoursAgo * HOUR).toISOString();
+  // Board builder: mode:enforce so the cohort gate is open; now fixed.
+  const board = (o = {}) => mkBoard({ now: NOW_SMP, mode: "enforce", ...o });
+  // One stale in-flight ticket in Implement, 72h stale (well past 24h threshold).
+  const one = (over = {}) =>
+    new Map([["CTL-9", { id: "CTL-9", state: "Implement", updatedAt: at(72), ...over }]]);
+  // Evidence stub helper: array of rows → Map<id, evidence>
+  const ev = (rows) => new Map(rows.map((r) => [r.id, r]));
+  // Full "nothing salvageable" evidence row for CTL-9.
+  const noActuation = { id: "CTL-9", hasWorkerDir: false, hasLiveBg: false,
+    hasFreshIntent: false, openPr: null, remoteBranchExists: false, worktreeUnpushed: false };
+
+  test("observable:false when no evidence seam provided (empty Map → shadow-first wiring)", () => {
+    // strandedEvidence defaults to new Map() in mkBoard → size 0 → not observable.
+    const r = evaluateInvariants(board({ ticketsById: one() })).strandedMidPipeline;
+    expect(r.observable).toBe(false);
+    expect(r.ok).toBe(true);
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("flags an HRW-owned in-flight ticket with NO actuation past threshold, and classifies it", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.observable).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.flagged).toEqual(["CTL-9"]);
+    expect(r.classified["CTL-9"].route).toBe("restart-fresh");
+  });
+
+  test("does NOT flag when a worker dir exists (actuation present)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ id: "CTL-9", hasWorkerDir: true }]),
+    })).strandedMidPipeline;
+    expect(r.ok).toBe(true);
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag when a live bg worker exists", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ id: "CTL-9", hasLiveBg: true }]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag when a FRESH live-status signal exists (active worker)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 1 * HOUR }],
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("DOES flag when the only 'live' signal is STALE past threshold [Codex P2 round 5]", () => {
+    // A dead worker's persisted `running` signal (never wrote a terminal signal)
+    // must NOT mask the stranded ticket once it has sat live past the window.
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 72 * HOUR }],
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
+  test("does NOT flag when a fresh recovery intent exists", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ id: "CTL-9", hasFreshIntent: true }]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag a foreign-owned ticket (HRW belongs to another host)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "studio",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag a needs-human LABELLED ticket (parked contract, label not status)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one({ labels: [{ name: "needs-human" }] }),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag before the age threshold (1h stale, threshold is 24h)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one({ updatedAt: at(1) }),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag a terminal ticket (Done)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one({ state: "Done" }),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag Todo/Backlog (not an ownership claim)", () => {
+    for (const state of ["Todo", "Backlog"]) {
+      const r = evaluateInvariants(board({
+        ticketsById: one({ state }),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([noActuation]),
+      })).strandedMidPipeline;
+      expect(r.flagged).toEqual([]);
+    }
+  });
+
+  test("FAILS SAFE on an unreadable timestamp — unknown age is never staleness", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one({ updatedAt: "not-a-date" }),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.ok).toBe(true);
+    expect(r.unobservableAges).toBe(1);
+  });
+
+  test("routes to pr-not-merged when an open PR exists in evidence", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ ...noActuation, openPr: { number: 42, status: "open" } }]),
+    })).strandedMidPipeline;
+    expect(r.classified["CTL-9"].route).toBe("pr-not-merged");
+  });
+
+  test("routes to resume-from-remote when remote branch exists but no worktree", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ ...noActuation, remoteBranchExists: true }]),
+    })).strandedMidPipeline;
+    expect(r.classified["CTL-9"].route).toBe("resume-from-remote");
+  });
+
+  test("mode:off omits the invariant entirely (the off set stays byte-identical)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      mode: "off",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    }));
+    expect(r.strandedMidPipeline).toBeUndefined();
+  });
+
+  test("proposes route-stranded-mid-pipeline in tier2 so the delegate sweeps it", () => {
+    const b = board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    });
+    const moves = proposeMoves(evaluateInvariants(b), { sanctionedNeedsHuman: [] });
+    const m = moves.tier2.find((x) => x.move === "route-stranded-mid-pipeline");
+    expect(m).toBeTruthy();
+    expect(m.ticket).toBe("CTL-9");
+    // must be tier2 (anchorable), never tier3
+    expect(moves.tier3.some((x) => x.ticket === "CTL-9")).toBe(false);
+  });
+
+  test("a classified ticket is suppressed from recover-unowned-in-flight (de-dup)", () => {
+    // CTL-9 triggers BOTH checkStrandedMidPipeline (owned+classified) AND
+    // checkUnownedInFlight. Only the classified route move must appear.
+    const b = board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    });
+    const moves = proposeMoves(evaluateInvariants(b), { sanctionedNeedsHuman: [] });
+    const ctlNineMoves = moves.tier2.filter((m) => m.ticket === "CTL-9");
+    expect(ctlNineMoves.some((m) => m.move === "recover-unowned-in-flight")).toBe(false);
+    expect(ctlNineMoves.some((m) => m.move === "route-stranded-mid-pipeline")).toBe(true);
+  });
+
+  test("buildBoardContext surfaces strandedMidPipeline classified routes", () => {
+    const b = board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    });
+    const ctx = buildBoardContext(b, evaluateInvariants(b));
+    expect(ctx.strandedMidPipeline).toBeDefined();
+    expect(ctx.strandedMidPipeline["CTL-9"]).toBeDefined();
+    expect(ctx.strandedMidPipeline["CTL-9"].route).toBe("restart-fresh");
+  });
+
+  test("buildBoardContext defaults strandedMidPipeline to {} when green (shadow-safe)", () => {
+    const b = board({ ticketsById: one({ updatedAt: at(2) }) });
+    const ctx = buildBoardContext(b, evaluateInvariants(b));
+    expect(ctx.strandedMidPipeline).toEqual({});
+  });
+});
+
+// ─── CTL-1644: getStrandedEvidence off-gate ──────────────────────────────────
+describe("CTL-1644 off-gate — getStrandedEvidence never invoked in off mode", () => {
+  test("assembleBoardState(mode:off) NEVER invokes getStrandedEvidence", () => {
+    let called = 0;
+    const b = assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      getStrandedEvidence: () => { called += 1; return new Map([["CTL-9", {}]]); },
+      mode: "off",
+      now: () => NOW,
+    });
+    expect(called).toBe(0);
+    expect(b.strandedEvidence.size).toBe(0);
+  });
+
+  test("assembleBoardState(mode:shadow) DOES invoke getStrandedEvidence", () => {
+    let called = 0;
+    assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      getStrandedEvidence: () => { called += 1; return new Map(); },
+      mode: "shadow",
+      now: () => NOW,
+    });
+    expect(called).toBe(1);
   });
 });
