@@ -367,7 +367,7 @@ import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
-import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
+import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import {
   getAllTicketDescriptors,
   getAllPrStatuses,
@@ -8097,6 +8097,11 @@ function runTick() {
         // stall-janitor census. hasLiveBg is false for Phase 2 (worker-dir
         // presence is the primary actuation signal; a worker-dir that exists but
         // has no live bg job is still "actuated" until the reaper cleans it up).
+        // CTL-1644 (Codex P1): these two salvage fields stay ABSENT (not false)
+        // in Phase 2. classifyRevivalRoute treats absent salvage as UNKNOWN and
+        // returns a non-dispatchable `unknown-salvage` route (held, never
+        // restart-fresh) — so a stranded ticket with a pushed branch is never
+        // discarded before Phase 3 populates the real evidence.
         getStrandedEvidence: () => {
           const evidenceMap = new Map();
           try { openBrokerStateDb(); } catch { /* best-effort */ }
@@ -8123,19 +8128,20 @@ function runTick() {
             let openPr = null;
             const prNum = d.prNumber ?? d.pr_number ?? null;
             if (prNum != null) {
-              const byRepo = prMap.get(prNum);
-              if (byRepo instanceof Map) {
-                let repo = null;
-                try {
-                  const team = teamOf(id);
-                  if (team) repo = ownerRepoFromRepoRoot(getProjectConfig(team)?.repoRoot ?? null);
-                } catch { /* best-effort — number-only fallback */ }
-                const entry = (repo && byRepo.get(repo))
-                  ?? byRepo.get("")
-                  ?? byRepo.values().next().value;
-                if (entry && String(entry.status ?? "").toLowerCase() === "open") {
-                  openPr = { number: prNum, status: "open" };
-                }
+              let repo = null;
+              try {
+                const team = teamOf(id);
+                if (team) repo = ownerRepoFromRepoRoot(getProjectConfig(team)?.repoRoot ?? null);
+              } catch { /* best-effort — number-only fallback */ }
+              // CTL-1644 (Codex P2): reuse board-health's lookupPrStatus so a
+              // known-repo ticket never borrows an UNRELATED repo's #N. The prior
+              // inline `byRepo.values().next().value` fallback picked an arbitrary
+              // repo's row, misrouting a stranded org/y ticket onto org/x#42.
+              // lookupPrStatus returns {ambiguous:true,status:null} on a number-only
+              // collision → status !== "open" → openPr stays null (safe).
+              const entry = lookupPrStatus(prMap, prNum, repo);
+              if (entry && String(entry.status ?? "").toLowerCase() === "open") {
+                openPr = { number: prNum, status: "open" };
               }
             }
             evidenceMap.set(id, {

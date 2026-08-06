@@ -1935,12 +1935,15 @@ describe("classifyRevivalRoute (CTL-1644)", () => {
     expect(c.dispatchable).toBe(false);
   });
 
-  test("nothing salvageable ⇒ restart-fresh", () => {
+  test("salvage UNCHECKED (fields absent) ⇒ unknown-salvage (held, not restart-fresh) [Codex P1]", () => {
+    // Phase-2 evidence omits remoteBranchExists/worktreeUnpushed → we must NOT
+    // restart-fresh (destructive) on unchecked evidence; hold as non-dispatchable.
     const c = classifyRevivalRoute({});
-    expect(c.route).toBe("restart-fresh");
+    expect(c.route).toBe("unknown-salvage");
+    expect(c.dispatchable).toBe(false);
   });
 
-  test("empty evidence object ⇒ restart-fresh (all fields falsy)", () => {
+  test("salvage CHECKED and absent (fields present & false) ⇒ restart-fresh", () => {
     const c = classifyRevivalRoute({
       openPr: null, remoteBranchExists: false, worktreeUnpushed: false,
       hasWorkerDir: false, hasLiveBg: false, hasFreshIntent: false,

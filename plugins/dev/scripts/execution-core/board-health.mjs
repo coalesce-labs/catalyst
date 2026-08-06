@@ -142,7 +142,10 @@ function prNumberOf(d) {
 //       – the number collides across repos → {ambiguous:true} so the cohort skips
 //         rather than borrow a wrong repo's status.
 // `repo` is the ticket's GitHub "owner/repo" (or null when underivable).
-function lookupPrStatus(map, prNumber, repo) {
+// Exported (CTL-1644, Codex P2) so the scheduler's getStrandedEvidence builder
+// reuses this exact no-cross-repo-borrow resolution instead of its own inline
+// fallback (which borrowed an arbitrary repo's #N row).
+export function lookupPrStatus(map, prNumber, repo) {
   if (!(map instanceof Map)) return null;
   const byRepo = map.get(prNumber);
   if (!(byRepo instanceof Map) || byRepo.size === 0) return null;
@@ -886,7 +889,8 @@ function checkUnownedInFlight(b, t) {
 // CTL-1644: pure revival-route classifier. Exported for unit testing.
 // Precedence: open PR → pr-not-merged; remote branch (no unpushed local) →
 // resume-from-remote (CTL-1640, fully implemented); unpushed local worktree →
-// adopt (CTL-1642, NOT implemented → dispatchable:false); else restart-fresh.
+// adopt (CTL-1642, NOT implemented → dispatchable:false); salvage checked and
+// absent → restart-fresh; salvage NOT yet checked → unknown-salvage (held).
 export function classifyRevivalRoute(evidence = {}) {
   if (evidence.openPr) {
     return { route: "pr-not-merged", dispatchable: true,
@@ -899,6 +903,20 @@ export function classifyRevivalRoute(evidence = {}) {
   if (evidence.worktreeUnpushed) {
     return { route: "adopt", dispatchable: false, blockedBy: "CTL-1642",
       rationale: "local worktree with unpushed commits — adopt orphaned worktree (CTL-1642, not yet implemented)" };
+  }
+  // CTL-1644 (Codex P1): restart-fresh re-admits the ticket to Todo — destructive
+  // if it actually had a pushed branch or unpushed local commits. The Phase-2
+  // evidence builder (scheduler.mjs getStrandedEvidence) does NOT yet populate
+  // remoteBranchExists/worktreeUnpushed (Phase 3 wires them via the stall-janitor
+  // census), so ABSENT (undefined) fields mean "salvage not checked" — NOT "no
+  // salvage". Choosing restart-fresh on unchecked evidence risks discarding
+  // salvageable work, so hold as a non-dispatchable unknown-salvage until a
+  // producer proves salvage absent (both fields present AND false → restart-fresh).
+  const salvageChecked =
+    evidence.remoteBranchExists !== undefined && evidence.worktreeUnpushed !== undefined;
+  if (!salvageChecked) {
+    return { route: "unknown-salvage", dispatchable: false, blockedBy: "CTL-1644-phase3",
+      rationale: "salvage evidence not yet populated (remoteBranchExists/worktreeUnpushed unwired until Phase 3) — cannot prove no salvageable state; hold rather than restart-fresh" };
   }
   return { route: "restart-fresh", dispatchable: true,
     rationale: "no salvageable state — re-admit the ticket to Todo for a fresh dispatch" };

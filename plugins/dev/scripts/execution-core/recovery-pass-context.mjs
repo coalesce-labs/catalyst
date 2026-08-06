@@ -340,6 +340,20 @@ function printDispatchedBrief(ticket, orchDir) {
     if (bc.strandedNodes?.length) {
       console.log(`stranded nodes: ${bc.strandedNodes.map((n) => n.host).join(", ")}`);
     }
+    // CTL-1644 (Codex P1): surface the per-ticket classified revival routes so the
+    // delegate can enumerate this cohort and distinguish pr-not-merged /
+    // resume-from-remote / adopt / restart-fresh / unknown-salvage — instead of
+    // receiving only a generic holistic dispatch. `(hold)` marks a non-dispatchable
+    // route (adopt / unknown-salvage) the worker must NOT auto-actuate.
+    const smp = bc.strandedMidPipeline ?? {};
+    const smpEntries = Object.entries(smp);
+    if (smpEntries.length) {
+      console.log(
+        `stranded mid-pipeline: ${smpEntries
+          .map(([t, r]) => `${t}→${r?.route ?? "?"}${r?.dispatchable === false ? "(hold)" : ""}`)
+          .join(", ")}`,
+      );
+    }
   }
   console.log("--- recent log buffer (tail 40) ---");
   const logs = brief?.diagnosis?.logsOutput || "(no logs captured)";
