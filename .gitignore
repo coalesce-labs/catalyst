@@ -69,6 +69,10 @@ website/.astro/
 # Plugin-local tooling (orch-monitor)
 plugins/dev/scripts/orch-monitor/node_modules/
 
+# Plugin-local tooling (event-mirror, CTL-1654)
+plugins/dev/scripts/event-mirror/node_modules/
+plugins/dev/scripts/event-mirror/bun.lock
+
 # Serena (code-understanding MCP): version project.yml + memories/, ignore per-machine cache/overrides
 .serena/cache/
 .serena/project.local.yml
@@ -80,6 +84,10 @@ mockups/**/*.png
 
 # Ad hoc root-level package install (e.g. `npm install linearis` for local CLI use)
 /node_modules/
+
+# turbo (CTL-1628): per-task run logs/cache, written under each workspace member
+# and at the repo root whenever `turbo run <task>` executes.
+.turbo/
 
 # Worktree-safety machine-local noise marker (see MACHINE_LOCAL_NOISE in
 # plugins/dev/scripts/execution-core/worktree-safety.mjs)

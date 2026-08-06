@@ -8,6 +8,14 @@
 // and self-contained makes it PR-order-independent: the only externalities are
 // the GraphQL `post` seam (injectable) and the Linear API token in the env.
 //
+// CTL-1616 PR3: resolveSecret from the shared zero-import lib/ leaf is NOT a
+// cross-module import of an execution-core sibling (the PR-order-independence
+// rule above is about staying independent of linear-query.mjs/
+// cluster-heartbeat.mjs's release order, not about the shared secret-contract
+// leaf; cluster-sync.mjs and doctor.mjs already set this precedent). Folds
+// defaultPost's own LINEAR_API_TOKEN/LINEAR_API_KEY ladder below.
+import { resolveSecret } from "../lib/secret-contract.mjs";
+//
 // ─── The storage mechanism (VERIFIED via live Linear API probe, 2026-06-08) ──
 // Linear has no custom fields and labels can't model a counter, so the claim +
 // fence + owner-name record is ONE Linear attachment per ticket:
@@ -78,7 +86,7 @@ export function authHeader(token = "") {
 // the caller's try/catch fails safe. Injectable via the `post` option on every
 // public function so tests never touch the network.
 async function defaultPost(query, variables) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   const res = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
     method: "POST",
     headers: {

@@ -20,11 +20,14 @@ import {
 
 const SESSION = "a1b2c3d4-0000-0000-0000-000000000000";
 
-// A roster reader fake: returns whatever JSON the fake file holds. `read` throws
-// when the file is "absent" so we cover the absent-roster single-host default.
+// A roster reader fake: returns whatever JSON the fake cluster.json holds.
+// `read` throws when the file is "absent" so we cover the absent-roster
+// single-host default. CATALYST_CLUSTER_DIR mirrors execution-core's
+// getClusterRepoDir env resolution — readClusterRoster must resolve
+// <CATALYST_CLUSTER_DIR>/cluster.json, never a project .catalyst/hosts.json.
 function rosterDeps(fileContents: string | null) {
   return {
-    env: { CATALYST_CONFIG_FILE: "/repo/.catalyst/config.json" } as NodeJS.ProcessEnv,
+    env: { CATALYST_CLUSTER_DIR: "/catalyst-cluster" } as NodeJS.ProcessEnv,
     read: ((_path: string) => {
       if (fileContents === null) throw new Error("ENOENT");
       return fileContents;
@@ -33,7 +36,7 @@ function rosterDeps(fileContents: string | null) {
 }
 
 describe("readClusterRoster — the single-host default tolerance", () => {
-  it("absent hosts.json → [] (single-host default)", () => {
+  it("absent cluster.json → [] (single-host default)", () => {
     expect(readClusterRoster(rosterDeps(null))).toEqual([]);
   });
 
@@ -41,19 +44,49 @@ describe("readClusterRoster — the single-host default tolerance", () => {
     expect(readClusterRoster(rosterDeps("not-json"))).toEqual([]);
   });
 
-  it("non-array JSON → [] (single-host default)", () => {
-    expect(readClusterRoster(rosterDeps('{"mini":true}'))).toEqual([]);
+  it("non-object JSON → [] (single-host default)", () => {
+    expect(readClusterRoster(rosterDeps('["mini", "mac-studio"]'))).toEqual([]);
   });
 
-  it("empty array → [] (single-host default)", () => {
-    expect(readClusterRoster(rosterDeps("[]"))).toEqual([]);
+  it("object with a non-array roster → [] (single-host default)", () => {
+    expect(readClusterRoster(rosterDeps(JSON.stringify({ schemaVersion: 1, roster: "mini" })))).toEqual(
+      [],
+    );
+  });
+
+  it("empty roster array → [] (single-host default)", () => {
+    expect(
+      readClusterRoster(rosterDeps(JSON.stringify({ schemaVersion: 1, roster: [] }))),
+    ).toEqual([]);
+  });
+
+  it("a too-new schemaVersion is ignored (fail-safe, not trusted) → [] (single-host default)", () => {
+    expect(
+      readClusterRoster(
+        rosterDeps(JSON.stringify({ schemaVersion: 999, roster: ["mini", "mac-studio"] })),
+      ),
+    ).toEqual([]);
   });
 
   it("a real multi-host roster is returned, filtering blanks", () => {
-    expect(readClusterRoster(rosterDeps('["mini", "", "mac-studio"]'))).toEqual([
-      "mini",
-      "mac-studio",
-    ]);
+    expect(
+      readClusterRoster(
+        rosterDeps(JSON.stringify({ schemaVersion: 1, roster: ["mini", "", "mac-studio"] })),
+      ),
+    ).toEqual(["mini", "mac-studio"]);
+  });
+
+  it("cluster-repo roster wins even when a stray hosts.json is present alongside it (CTL-1274/CTL-1628: hosts.json is never read)", () => {
+    const roster = readClusterRoster({
+      env: { CATALYST_CLUSTER_DIR: "/catalyst-cluster" } as NodeJS.ProcessEnv,
+      read: ((path: string) => {
+        if (path.endsWith("hosts.json")) {
+          return JSON.stringify(["legacy-should-never-be-read"]);
+        }
+        return JSON.stringify({ schemaVersion: 1, roster: ["mini", "mac-studio"] });
+      }) as (path: string, encoding: "utf8") => string,
+    });
+    expect(roster).toEqual(["mini", "mac-studio"]);
   });
 });
 

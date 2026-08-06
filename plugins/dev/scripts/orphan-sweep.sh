@@ -79,6 +79,29 @@ SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 export PATH="${PATH}:${SCRIPT_DIR}"
 
+# CTL-1417: self-protection guard — a final belt (fail-closed lsof + cwd check)
+# on the SAFE / SALVAGE_UNPUSHED --force removals below, covering non-`claude`
+# foreign holders and bash-3.2 (where presweep's mapfile fail-closes without
+# ever reaching the removal). No side effects on source.
+# shellcheck source=lib/worktree-remove-guard.sh
+# shellcheck disable=SC1091
+[ -r "${SCRIPT_DIR}/lib/worktree-remove-guard.sh" ] && source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
+
+# _removal_guard_ok <path> — the SINGLE fail-closed predicate every `git worktree
+# remove --force` site gates on (CTL-1417). Returns 0 (safe to force-remove) ONLY
+# when the guard function loaded AND it cleared the path. If the guard lib was
+# missing/unreadable at source-time, `assert_worktree_removal_safe` is undefined —
+# and guard-ABSENCE is treated as a REFUSAL (fail-closed), not a bypass, so a
+# stripped/broken checkout can never reopen the data-loss path. Reason on stderr.
+_removal_guard_ok() {
+  local _wt="${1:-}"
+  if ! command -v assert_worktree_removal_safe >/dev/null 2>&1; then
+    echo "worktree-remove-guard: unavailable — refusing forced removal of ${_wt}" >&2
+    return 1
+  fi
+  assert_worktree_removal_safe "$_wt"
+}
+
 # ─── arg parsing ────────────────────────────────────────────────────────────
 
 DRY_RUN="${SWEEP_DRY_RUN:-0}"
@@ -123,7 +146,14 @@ _resolve_sweep_config_path() {
 }
 
 _cfg_str() {
-  [[ -f "${SWEEP_CONFIG_PATH:-}" ]] && command -v jq >/dev/null 2>&1 || { printf ''; return 0; }
+  # CTL-1612 round 7 post-merge hygiene: explicit if/else instead of
+  # `A && B || C` — shellcheck SC2015 flags that idiom because C also runs
+  # when A is true but B fails, which is not the if-then-else it visually
+  # reads as. Same short-circuit semantics, unambiguous now.
+  if [[ ! -f "${SWEEP_CONFIG_PATH:-}" ]] || ! command -v jq >/dev/null 2>&1; then
+    printf ''
+    return 0
+  fi
   jq -r "$1 // empty" "$SWEEP_CONFIG_PATH" 2>/dev/null || printf ''
 }
 
@@ -818,6 +848,10 @@ _proc_alive_state() {
 
 # _proc_alive <pid> — back-compat boolean wrapper. 0 = NOT confirmed gone (alive
 # OR unprobeable), 1 = confirmed gone. Never used to claim an exit on its own.
+# shellcheck disable=SC2329 # not called anywhere in this file today — kept
+# as the documented back-compat boolean-wrapper API surface per its own
+# comment above, for a caller that sources this file and wants the simple
+# true/false shape instead of _proc_alive_state's three-way result.
 _proc_alive() {
   _proc_alive_state "$1"
   [[ "$_SWEEP_PROC_ALIVE_STATE" != "gone" ]]
@@ -1230,6 +1264,12 @@ sweep_worktrees() {
             }
           fi
           kb="$(_du_kb "$wt")"
+          # CTL-1417: final self-protection belt — skip if the tree is our cwd
+          # or a live process holds a handle under it (never yank a tree an
+          # operator or `make test` is inside).
+          if ! _removal_guard_ok "$wt"; then
+            log "skip (guard refused/unavailable — live handle/self): $wt"; _sweep_count activeSkipped; continue
+          fi
           git worktree remove --force "$wt" 2>/dev/null && {
             log "removed worktree (SAFE): $wt"
             _sweep_count removed; removed_count=$((removed_count+1))
@@ -1261,8 +1301,16 @@ sweep_worktrees() {
               if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
                 deferred=$((deferred+1)); continue
               fi
-              git worktree remove --force "$wt" 2>/dev/null \
-                && { log "removed (salvage) worktree: $wt"; emit_reclaim worktree "$wt"; removed_count=$((removed_count+1)); }
+              if ! _removal_guard_ok "$wt"; then
+                # Mirror the SAFE path: a guard refusal (or an unavailable guard)
+                # RETAINS the tree, so count it as an active skip or activeSkipped
+                # undercounts the worktrees left behind exactly when the guard
+                # fires/is absent (CTL-1417).
+                log "skip (guard refused/unavailable — live handle/self): $wt"; _sweep_count activeSkipped
+              else
+                git worktree remove --force "$wt" 2>/dev/null \
+                  && { log "removed (salvage) worktree: $wt"; emit_reclaim worktree "$wt"; removed_count=$((removed_count+1)); }
+              fi
             fi
           else
             log "salvage (unpushed commits, skip+report): $wt"

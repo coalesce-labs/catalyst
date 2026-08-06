@@ -27,6 +27,8 @@ import {
   defaultCollectTerminalSignalGcCandidates,
   defaultGcTerminalSignals,
   defaultTicketFromCwd,
+  makeEvictWorkerDir,
+  defaultNoEvict,
 } from "./stall-janitor.mjs";
 
 // ---------------------------------------------------------------------------
@@ -1216,5 +1218,152 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
       agentsFresh: true,
     });
     expect(out.some((c) => c.ticket === "CTL-3008")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CTL-1605 — makeEvictWorkerDir (guarded fast-path worker-dir eviction seam)
+// ---------------------------------------------------------------------------
+describe("CTL-1605 makeEvictWorkerDir", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1605-evict-"));
+  });
+  afterEach(() => rmSync(orchDir, { recursive: true, force: true }));
+
+  function seedWorkerDir(ticket) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ ticket, status: "done" }));
+    return dir;
+  }
+
+  test("no live session + fresh snapshot → rmSync the worker dir, returns true", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(false);
+  });
+
+  test("live session in worktree → NO removal, returns false", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [{ cwd: "/wt/CTL-9/src" }],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(true);
+  });
+
+  test("snapshot NOT fresh → NO removal (never evict blind), returns false", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: false,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(true);
+  });
+
+  test("default evictWorkerDir seam (bare unit tick) is a no-op returning false", () => {
+    expect(defaultNoEvict("CTL-9")).toBe(false);
+  });
+
+  // ─── CTL-1605 review finding (stall-janitor.mjs:527) — an unresolved worktree
+  // path must DEFER, not fail open. Pre-fix, `!!worktreePath && ...some(...)`
+  // made a null/thrown resolver read as liveSession:false and fall through to
+  // rmSync — a pre-CTL-615 pathless signal (or a resolver throw) got evicted
+  // even with a LIVE agent whose cwd the probe never got the chance to check. ───
+
+  test("unresolved worktree path (resolver returns null) → DEFERS, no removal, returns false", () => {
+    seedWorkerDir("CTL-20");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [{ cwd: "/wt/CTL-20/src" }], // a LIVE session exists...
+      agentsFresh: true,
+      resolveWorktreePath: () => null, // ...but the probe can't tell — must defer
+    });
+    expect(evict("CTL-20")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-20"))).toBe(true);
+  });
+
+  test("resolveWorktreePath throws → DEFERS (same as an unresolved path), no removal", () => {
+    seedWorkerDir("CTL-21");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => {
+        throw new Error("signal read failed");
+      },
+    });
+    expect(evict("CTL-21")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-21"))).toBe(true);
+  });
+
+  test("resolved worktree path + no live session → still evicts (unaffected by the defer fix)", () => {
+    seedWorkerDir("CTL-22");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-22",
+    });
+    expect(evict("CTL-22")).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-22"))).toBe(false);
+  });
+
+  // ─── CTL-1605 review finding (scheduler.mjs:7611) — in-process SDK/codex-exec
+  // workers have bg_job_id null and are invisible to the agents-roster probe
+  // (`claude agents`); the SDK worker registry fences must be consulted BEFORE
+  // that roster check, or a live in-process worker's signal dir is deletable the
+  // moment Linear goes terminal. ───
+
+  test("isSdkWorkerLive(ticket) true → DEFERS even with an empty agents roster + resolved worktree", () => {
+    seedWorkerDir("CTL-23");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [], // roster empty — bg-keyed probe alone would say "not live"
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-23",
+      isSdkWorkerLive: (t) => t === "CTL-23",
+    });
+    expect(evict("CTL-23")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-23"))).toBe(true);
+  });
+
+  test("isSdkWorkerLiveOnDisk(ticket) true (cross-process projection) → DEFERS", () => {
+    seedWorkerDir("CTL-24");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-24",
+      isSdkWorkerLive: () => false,
+      isSdkWorkerLiveOnDisk: (t) => t === "CTL-24",
+    });
+    expect(evict("CTL-24")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-24"))).toBe(true);
+  });
+
+  test("both SDK fences false (default) → unaffected, evicts as before", () => {
+    seedWorkerDir("CTL-25");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-25",
+    });
+    expect(evict("CTL-25")).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-25"))).toBe(false);
   });
 });

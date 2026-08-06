@@ -29,6 +29,7 @@ import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync,
 import { dirname, basename, join } from "node:path";
 import {
   getEventLogPath,
+  getCoordinationMirrorPath, // CTL-1655: coordination-mirror comment tail
   RECONCILE_INTERVAL_MS,
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
@@ -114,6 +115,14 @@ import {
   getReconcileHealth,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
+// CTL-1628: direct import (not routed through reconcile-health.mjs) — the
+// eligible-set persist-failure event has no consecutive-failure/alert-latch
+// state to track, so it skips recordReconcileFailure and appends straight
+// through the same appendHealthEvent seam used above.
+import {
+  appendReconcileHealthEvent,
+  ELIGIBLE_PERSIST_FAILURE_ACTION,
+} from "./reconcile-health-event.mjs";
 import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
@@ -320,7 +329,9 @@ const knownProjects = new Set();
 // after N consecutive failures the health tracker escalates a canonical
 // `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
 // orch-monitor dashboard surfaces the silently-starving team, and a recovering
-// poll clears the alert. `appendHealthEvent` is an injectable test seam.
+// poll clears the alert. `appendHealthEvent` is an injectable test seam — it
+// also gates the CTL-1628 `monitor.reconcile.eligible_persist_failure.<TEAM>`
+// event fired below when the eligible-set disk projection write fails.
 export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, replica, onSource } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
@@ -355,13 +366,20 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     );
     return;
   }
-  // CTL-867: the poll succeeded — reset the failure streak, refresh the
-  // last-successful-refresh marker, and clear any standing alert. Recorded
-  // BEFORE the projection write so a successful poll counts as a recovery even
-  // if the (rare) projection write below fails.
-  recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   try {
     setProjectEligible(team, tickets, { source: "reconcile", query });
+    // CTL-867/CTL-1628: reset the failure streak, refresh the
+    // last-successful-refresh marker, and clear any standing alert only once
+    // the projection has actually landed on disk. This used to run BEFORE the
+    // persist try/catch (recorded as soon as the poll succeeded), which meant
+    // a *persistent* persist fault (e.g. EACCES on the eligible dir) kept
+    // reconcile-health — and by extension checkFleetFreeze, which reads
+    // getReconcileHealth(team)?.alerting — permanently green while the
+    // scheduler read a stale-forever projection (the CTL-1628 design gap:
+    // "persist failures invisible to reconcile health state"). Moved here so
+    // a persist failure now falls into the catch below instead of being
+    // masked as success.
+    recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   } catch (err) {
     // A projection write/rename failure (disk full, permissions) must NOT
     // crash the daemon: reconcileProject runs inside reconcileAll, itself
@@ -372,6 +390,33 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     log.error(
       { team, err: err.message },
       "eligible-set projection write failed — daemon continues, retry next reconcile"
+    );
+    // CTL-1628: the log line above was invisible to the dashboard —
+    // "monitoring green, scheduler stale". Escalate onto the unified event
+    // log too, via the same appendHealthEvent test seam used for the CTL-867
+    // reconcile-poll escalation above. Unlike that escalation this fires on
+    // every failed persist (no threshold/latch — a stale-on-disk projection
+    // is worth surfacing immediately, not after N consecutive misses).
+    (appendHealthEvent ?? appendReconcileHealthEvent)({
+      team,
+      action: ELIGIBLE_PERSIST_FAILURE_ACTION,
+      reason: err.message,
+    });
+    // CTL-1628: ALSO feed this into the same N-consecutive escalation/
+    // alert-latch tracker recordReconcileFailure already drives for poll
+    // failures, so a *persistent* persist fault escalates monitor.reconcile.
+    // failing and holds checkFleetFreeze's alerting flag true — exactly like
+    // a persistent poll fault does — instead of the marker staying frozen
+    // "healthy" forever. The `eligible-persist-failed:` prefix distinguishes
+    // a persist-origin streak from a poll-origin streak in the health marker
+    // / dashboard without adding a second tracked dimension. `origin: "persist"`
+    // (CTL-1628 r2) additionally lets recordReconcileSuccess's eventual
+    // recovery event name the stage that actually recovered, rather than
+    // hard-coding "reconcile-poll-succeeded" for a streak the poll never failed.
+    recordReconcileFailure(
+      team,
+      `eligible-persist-failed: ${err.message}`,
+      { origin: "persist", ...(appendHealthEvent ? { appendEvent: appendHealthEvent } : {}) }
     );
   }
 }
@@ -397,9 +442,16 @@ export function reconcileAll({ exec, delegateExec, appendHealthEvent, fleetFreez
   // neither the replica nor linearis — new work is frozen fleet-wide, which used
   // to be silent (reconcileProject just preserves the empty prior set). Latched +
   // best-effort inside checkFleetFreeze; a team's recovery clears it.
+  //
+  // CTL-1628 r3: getTeamOrigin threads each team's failure origin ("poll" |
+  // "persist", from reconcile-health.mjs's lastFailureOrigin) so checkFleetFreeze
+  // can tell the documented replica+linearis double outage (all-poll) apart
+  // from an all-teams local disk fault (all-persist) — same alert name, an
+  // accurate cause instead of an operator chasing the wrong subsystem.
   checkFleetFreeze({
     teams: [...seen],
     isTeamFrozen: (t) => getReconcileHealth(t)?.alerting === true,
+    getTeamOrigin: (t) => getReconcileHealth(t)?.lastFailureOrigin ?? "poll",
     ...(fleetFreezeAppend ? { append: fleetFreezeAppend } : {}),
   });
 }
@@ -1390,7 +1442,53 @@ let reconcileTimer = null;
 // CTL triage-entry fix (Phase 0): the poll timer that drains the event log when
 // fs.watch fails to fire (the common case for cross-process appends on macOS).
 let tailerPollTimer = null;
+// CTL-1655: sibling poll timer draining the coordination mirror. The mirror is a
+// cross-process append (written by coordination-publish), so fs.watch alone is
+// unreliable — the same rationale that requires tailerPollTimer above. There is no
+// reconcile backstop for the coordination tail, so without this poll a missed
+// fs.watch event silently drops a cross-host comment wake until restart.
+let coordinationPollTimer = null;
 let tailerOpts = {};
+
+// CTL-1655: bounded commentId-keyed dedup (Phase 1).
+// Shared between the local event-log tail (readNewEvents) and the
+// coordination-mirror tail (readNewCoordinationComments) so whichever sees
+// a given comment first wins and the other skips — preventing duplicate
+// dispatch regardless of which tail ingests the comment on a given host.
+const COMMENT_DEDUP_CAP = 2000; // named constant for documentation + tests
+const commentDedupMap = new Map(); // insertion-ordered → evict oldest on overflow
+
+// commentKeyOf — derive the dedup key for a raw event. Prefers
+// body.payload.commentId (stable across local/echo duplicates), falls back
+// to the envelope id. Returns undefined for a row that has neither (caller
+// skips insertion but does NOT treat as "already seen").
+export function commentKeyOf(event) {
+  const payloadKey = event?.body?.payload?.commentId ?? event?.detail?.commentId;
+  if (payloadKey != null && payloadKey !== "") return String(payloadKey);
+  const envelopeKey = event?.id;
+  if (envelopeKey != null && envelopeKey !== "") return String(envelopeKey);
+  return undefined;
+}
+
+// markAndCheckCommentSeen — returns true if key is already in the dedup set;
+// otherwise inserts it (evicting the oldest entry when at cap) and returns false.
+// A null/undefined key is treated as never-seen and is NOT inserted.
+export function markAndCheckCommentSeen(key) {
+  if (key == null) return false;
+  if (commentDedupMap.has(key)) return true;
+  if (commentDedupMap.size >= COMMENT_DEDUP_CAP) {
+    // Map preserves insertion order — first key is the oldest.
+    commentDedupMap.delete(commentDedupMap.keys().next().value);
+  }
+  commentDedupMap.set(key, true);
+  return false;
+}
+
+// CTL-1655: coordination-mirror cursor (Phase 2).
+let coordinationCursor = 0;
+let coordinationLogPath = "";
+let coordinationLeftoverBuf = "";
+let coordinationWatcher = null; // Phase 3 — fs.watch handle for the mirror file
 
 // fileSizeOrZero — current byte size of a file, or 0 when it does not exist
 // (the poll-only state). Shared by both tailer seeders.
@@ -1504,10 +1602,106 @@ export function readNewEvents({ foldOnly = false } = {}) {
         event,
         foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts
       ); // CTL-681 + CTL-749
+      // CTL-1655: consult the shared cross-source dedup before routing so the
+      // two tails don't double-dispatch the same comment. Per plan §Phase 2
+      // ("whichever tail sees a given comment first wins and the other skips"),
+      // HONOR the result here: if the coordination-mirror tail already processed
+      // this comment (it won the race on the originating host, where the comment
+      // lands in BOTH the local event log and the hub-echoed coordination.jsonl),
+      // skip the redundant handleCommentCreatedEvent — otherwise Phase B
+      // dispatch fires twice for one Linear comment (the CTL-1653 pathology).
+      // foldOnly drains do NOT insert — replayed events must not permanently
+      // poison the dedup set and block their own future live delivery.
+      const eventName681 = event?.attributes?.["event.name"] ?? event?.event;
+      if (eventName681 === "linear.comment.created" && !foldOnly) {
+        if (markAndCheckCommentSeen(commentKeyOf(event))) continue;
+      }
       handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
     }
   } catch {
     // log file not yet created or a transient read error — best-effort
+  }
+}
+
+// readNewCoordinationComments — CTL-1655 Phase 2. Drain bytes appended to
+// the coordination mirror (coordination.jsonl) since the last call, parse
+// each JSONL line, and route ONLY linear.comment.created rows through the
+// shared dedup → handleCommentCreatedEvent path.
+//
+// Design constraints (each guarded by a test):
+//   1. Comment-only filter: only linear.comment.created rows reach onComment.
+//   2. Cross-source dedup: the shared markAndCheckCommentSeen gate prevents a
+//      comment seen by both the local tail and this tail from dispatching twice.
+//   3. Safe degradation: absent/empty mirror file → no-op, no throw.
+//   4. foldOnly boot drain: withholds onComment (no dispatch of replayed comments).
+//   5. Single-host no-op: skips entirely when the cluster has only one host.
+//
+// Exported so tests can drive it deterministically without wiring startTailing.
+export function readNewCoordinationComments({ foldOnly = false } = {}) {
+  // Constraint 5: single-host no-op.
+  if (getClusterHosts().length <= 1) return;
+
+  const mirrorPath = getCoordinationMirrorPath();
+  // Reset cursor on path change (analogous to readNewEvents month-rollover guard).
+  if (mirrorPath !== coordinationLogPath) {
+    coordinationLogPath = mirrorPath;
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(mirrorPath);
+    return;
+  }
+
+  try {
+    const fd = openSync(mirrorPath, "r");
+    const { size } = fstatSync(fd);
+    if (size <= coordinationCursor) {
+      closeSync(fd);
+      return;
+    }
+    const newByteCount = size - coordinationCursor;
+    const buf = Buffer.alloc(newByteCount);
+    readSync(fd, buf, 0, newByteCount, coordinationCursor);
+    closeSync(fd);
+    coordinationCursor = size;
+
+    const text = coordinationLeftoverBuf + buf.toString("utf8");
+    const lines = text.split("\n");
+    coordinationLeftoverBuf = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue; // skip malformed line, keep tailing (constraint 3)
+      }
+      // Constraint 1: comment-only filter.
+      const evName = event?.attributes?.["event.name"] ?? event?.event;
+      if (evName !== "linear.comment.created") continue;
+
+      // Constraint 2: cross-source dedup. foldOnly drains do NOT insert (boot
+      // drain must not permanently poison the dedup set for future live delivery).
+      if (!foldOnly) {
+        const key = commentKeyOf(event);
+        if (markAndCheckCommentSeen(key)) continue; // already processed locally
+      }
+
+      // Constraint 4: foldOnly → withhold onComment.
+      if (foldOnly) continue;
+
+      // Emit observability breadcrumb so operators can confirm the mirror tail fired.
+      // Name satisfies CTL-1142 namespace contract (not filter.* / broker.daemon.* /
+      // phase.<KNOWN_PHASE>.*). The dedup above ensures at-most-once per comment.
+      const ticket = event?.attributes?.["linear.issue.identifier"] ??
+        event?.body?.payload?.ticket ?? event?.detail?.ticket;
+      if (ticket) {
+        log.info({ ticket }, `comment.wake.cross-host.${ticket}`);
+      }
+
+      handleCommentCreatedEvent(event, tailerOpts);
+    }
+  } catch {
+    // mirror file absent or transient read error — safe degradation (constraint 3)
   }
 }
 
@@ -1522,6 +1716,18 @@ export function startTailing() {
     if (filename !== null && filename !== basename(getEventLogPath())) return;
     readNewEvents();
   });
+  // CTL-1655 Phase 3: watch the coordination mirror dir too (multi-host only).
+  if (getClusterHosts().length > 1) {
+    const mirrorPath = getCoordinationMirrorPath();
+    const mirrorDir = dirname(mirrorPath);
+    const mirrorFile = basename(mirrorPath);
+    mkdirSync(mirrorDir, { recursive: true });
+    coordinationWatcher = watch(mirrorDir, (eventType, filename) => {
+      if (eventType !== "change") return;
+      if (filename !== null && filename !== mirrorFile) return;
+      readNewCoordinationComments();
+    });
+  }
   return watcher;
 }
 
@@ -1621,8 +1827,18 @@ export function startMonitor({
     // path below. reconcileAll (above) is the authoritative eligible rebuild and
     // sweepMissingTriage (above) the intended boot triage backstop.
     readNewEvents({ foldOnly: true });
+    // CTL-1655 Phase 3: seed the coordination cursor and boot-drain foldOnly so
+    // historical mirror comments don't dispatch on restart (constraint 4).
+    coordinationLogPath = getCoordinationMirrorPath();
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(coordinationLogPath);
+    readNewCoordinationComments({ foldOnly: true });
   } else {
     seedTailerAtEof();
+    // Seed the coordination cursor at EOF so we don't replay old mirror events.
+    coordinationLogPath = getCoordinationMirrorPath();
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(coordinationLogPath);
   }
   startTailing();
   // CTL triage-entry fix (Phase 0): poll-drain the event log. fs.watch
@@ -1632,6 +1848,19 @@ export function startMonitor({
   // is cheap (readNewEvents reads only bytes past the durable cursor).
   if (tailerPollMs > 0) {
     tailerPollTimer = setInterval(() => readNewEvents(), tailerPollMs);
+    // CTL-1655: poll the coordination mirror on the same cadence so a missed
+    // fs.watch (the common case for cross-process appends on macOS) does not
+    // silently drop cross-host comment wakes. The poll is cheap (reads only
+    // bytes past coordinationCursor) and readNewCoordinationComments re-reads
+    // the roster per call, self-no-op'ing while single-host. Arm it
+    // UNCONDITIONALLY (not gated on the boot-time host count): a daemon that
+    // boots single-host and later has a peer added must still start draining the
+    // mirror without a restart — the startTailing watcher gate is startup-only,
+    // so this poll is the sole path that re-arms on a live roster expansion.
+    coordinationPollTimer = setInterval(
+      () => readNewCoordinationComments(),
+      tailerPollMs
+    );
   }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
@@ -1665,6 +1894,13 @@ export function stopMonitor() {
   }
   watcher?.close();
   watcher = null;
+  // CTL-1655: clear the coordination mirror poll timer and close its watcher.
+  if (coordinationPollTimer) {
+    clearInterval(coordinationPollTimer);
+    coordinationPollTimer = null;
+  }
+  coordinationWatcher?.close();
+  coordinationWatcher = null;
 }
 
 // __tailerOffset — the tailer's current byte offset. Test-only, for
@@ -1688,4 +1924,15 @@ export function __resetForTests() {
   resetLivenessCache();
   __resetReconcileHealthForTests(); // CTL-867: clear per-team reconcile-health map
   _injectedEligibleReplica = null; // CTL-1397: drop the daemon-injected board-list replica reader
+  // CTL-1655: reset coordination and dedup state.
+  coordinationCursor = 0;
+  coordinationLogPath = "";
+  coordinationLeftoverBuf = "";
+  commentDedupMap.clear();
+}
+
+// __resetCommentDedupForTests — clear the comment dedup set. Exported so
+// tests that drive readNewCoordinationComments directly can isolate dedup state.
+export function __resetCommentDedupForTests() {
+  commentDedupMap.clear();
 }

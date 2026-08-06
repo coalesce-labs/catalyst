@@ -494,6 +494,60 @@ function cwdUnder(cwd, root) {
   return c === r || c.startsWith(r + "/");
 }
 
+// ─── CTL-1605: guarded fast-path worker-dir eviction seam ───
+//
+// Safe default consumed by bare unit ticks / un-wired callers: a no-op that
+// removes nothing and reports "did not evict". Until a caller injects the armed
+// makeEvictWorkerDir factory below, the terminal short-circuit clears the label
+// but leaves the dir (the J4 census stays the slow backstop).
+export const defaultNoEvict = () => false;
+
+// makeEvictWorkerDir (CTL-1605) — the guarded fast-path eviction seam consumed by
+// the STEP A terminal short-circuit (resolveAndApplyWorkerStatusLabel). Mirrors the
+// J4 census fences (classifyTerminalSignalGc + the agentsFresh bail): never remove
+// a dir whose worktree hosts a live session, and never evict when the liveness
+// snapshot is not fresh (defer to a trustworthy tick). Also consults the SDK
+// worker registry (in-process, then the cross-process disk projection) BEFORE the
+// agents-roster fence — an in-process SDK/codex-exec worker has bg_job_id null and
+// is invisible to `claude agents`/the roster check (see sdk-worker-registry.mjs
+// header), so without this a live in-process worker's signal dir is deletable the
+// moment Linear goes terminal. Best-effort rmSync — never throws. A no-op default
+// (defaultNoEvict) protects any un-wired caller.
+export function makeEvictWorkerDir({
+  orchDir,
+  agents = [],
+  agentsFresh = true,
+  resolveWorktreePath = () => null,
+  isSdkWorkerLive = () => false,
+  isSdkWorkerLiveOnDisk = () => false,
+}) {
+  return (ticket) => {
+    if (!agentsFresh) return false; // never evict blind (CTL-1315 discipline)
+    if (isSdkWorkerLive(ticket) || isSdkWorkerLiveOnDisk(ticket)) return false; // live in-process/cross-process SDK worker owns this dir
+    let worktreePath = null;
+    try {
+      worktreePath = resolveWorktreePath(ticket);
+    } catch {
+      /* conservative — treat as unresolved */
+    }
+    // CTL-1605 finding: an unresolved worktree path (missing/pre-CTL-615 signal,
+    // or a resolver throw above) must DEFER, not fail open — the live-session
+    // probe below can only clear a ticket it can actually evaluate. The J4 census
+    // stays the slow backstop for a dir that never resolves a worktree.
+    if (!worktreePath) return false;
+    const liveSession =
+      Array.isArray(agents) && agents.some((a) => cwdUnder(a?.cwd, worktreePath));
+    if (liveSession) return false; // a live worker owns this dir
+    try {
+      rmSync(join(orchDir, "workers", ticket), { recursive: true, force: true });
+      return true;
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "ctl-1605: fast-path evict rmSync failed — skipping");
+      return false;
+    }
+  };
+}
+
 // defaultCollectOrphanCandidates — enumerate every ticket whose pipeline reached
 // terminal Done (the .terminal-done.applied marker) and build the J1 classify ctx
 // from read-only probes. `projects` supplies [{team, repoRoot}] for the worktree

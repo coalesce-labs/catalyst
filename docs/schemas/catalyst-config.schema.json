@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://catalyst.coalesce-labs.com/schemas/catalyst-config.schema.json",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/catalyst-config.schema.json",
   "title": "Catalyst Project Config",
   "description": "Schema for .catalyst/config.json — the Layer-1 project config committed to the repository. Contains team-wide settings safe to share. Secrets and host-specific overrides belong in the Layer-2 machine config (~/.config/catalyst/config.json).",
   "type": "object",
@@ -559,6 +559,19 @@
                   "description": "Pristine plugin-source root exported as CLAUDE_PLUGIN_ROOT into the codex worker env. Default null (resolved from the launch spec's pluginDirs at runtime). Env CATALYST_CODEX_PLUGIN_ROOT overrides."
                 }
               }
+            }
+          }
+        },
+        "deployment": {
+          "type": "object",
+          "description": "Fleet-topology declaration (CTL-1617). Unlike orchestration.dispatchMode (node-scoped, relocated to Layer-2 by CTL-1214), deployment mode is genuinely fleet-scoped, so it is a first-class Layer-1 field. A per-host Layer-2 catalyst.deployment.mode value wins over this when present (the exception hatch — e.g. a laptop dev-clone of a cluster-declared repo overriding to single-host).",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["single-host", "cluster", "cloud"],
+              "default": "single-host",
+              "description": "Declares this fleet's deployment topology. 'single-host' (default) — a lone node, no cluster substrate expected. 'cluster' — a coordinated multi-host fleet; roster/HRW/liveness are graded by catalyst doctor. 'cloud' — a managed-container node; the smee webhook tunnel must NOT be live and secrets are platform-delivered. Resolution precedence: env CATALYST_DEPLOYMENT_MODE > Layer-2 catalyst.deployment.mode > this Layer-1 value > constant default 'single-host'. An unset key or an unrecognized value both degrade to 'single-host' (the safest direction) — see lib/deployment-mode.mjs for the full validity ladder."
             }
           }
         },

@@ -37,6 +37,7 @@ import {
   appendFileSync,
   chmodSync,
   mkdirSync,
+  rmSync,
 } from "node:fs";
 import { resolve, basename, dirname, delimiter } from "node:path";
 import { homedir } from "node:os";
@@ -52,6 +53,7 @@ import {
 import { writeSecretConfig } from "./write-secret-config.mjs";
 import { schemaCompat } from "./config-schema.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
+import { SECRET_REGISTRY } from "../lib/secret-contract.mjs";
 
 // Default age key location on every node (the private half; mode 0o600).
 function defaultAgeKeyFile() {
@@ -69,6 +71,12 @@ function defaultConfigDir() {
 // silently ENOENTs and decrypt fails fail-open — a node then runs forever on stale
 // secrets with no signal. Resolving an ABSOLUTE path (and augmenting the spawn
 // PATH) makes that impossible.
+// CTL-1612: hard ceiling on every external spawn this module makes (git, sops). The boot
+// sync is synchronous and now precedes crash recovery, so an unbounded child would block
+// the daemon's startup path with the PID file already on disk — "running" to the launcher,
+// wedged in reality. Generous enough for a cold clone on a slow link; finite is the point.
+const CLUSTER_SYNC_SPAWN_TIMEOUT_MS = Number(process.env.CATALYST_CLUSTER_SYNC_TIMEOUT_MS) || 120_000;
+
 const SOPS_CANDIDATES = ["/opt/homebrew/bin/sops", "/usr/local/bin/sops", "/usr/bin/sops"];
 
 // Directories prepended to the spawn env PATH so sops itself — and any helper it
@@ -133,6 +141,11 @@ function makeSopsDecrypt(ageKeyFile, deps = {}) {
         env: { ...process.env, SOPS_AGE_KEY_FILE: ageKeyFile, PATH: augmentedPath() },
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        // CTL-1612: BOUNDED. clusterSync() now runs synchronously before boot recovery
+        // (so resumed workers never inherit a superseded credential), and the PID file is
+        // already written by then — an unbounded spawn would let the launcher report the
+        // daemon "up" while crash recovery is blocked indefinitely on a stalled sops.
+        timeout: CLUSTER_SYNC_SPAWN_TIMEOUT_MS,
       },
     );
     return JSON.parse(out);
@@ -141,7 +154,13 @@ function makeSopsDecrypt(ageKeyFile, deps = {}) {
 
 // Real `git` runner. Injected as `git` so tests never shell out.
 function defaultGit(args) {
-  execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  // CTL-1612: BOUNDED — see the sops timeout above. A `git pull` that hangs on a
+  // credential prompt or an unreachable remote must not wedge daemon boot.
+  execFileSync("git", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: CLUSTER_SYNC_SPAWN_TIMEOUT_MS,
+  });
 }
 
 // destForSecret — map a secrets/ filename to its ~/.config/catalyst destination.
@@ -210,11 +229,15 @@ export function syncClusterSecrets(opts = {}) {
   const secretsDir = resolve(clusterDir, "secrets");
   let files;
   try {
-    // node-secret-files.sops.json is the bare-file bundle handled by
-    // syncSecretFiles(), NOT a JSON config — exclude it here so it isn't
+    // node-secret-files.sops.json (bare-file bundle → syncSecretFiles) and
+    // profile-files.sops.json (direnv-profile bundle → syncProfileFiles,
+    // CTL-1595) are NOT JSON configs — exclude both so neither is
     // double-processed into a stray config-style file.
     files = readdirSync(secretsDir).filter(
-      (f) => f.endsWith(".sops.json") && f !== "node-secret-files.sops.json",
+      (f) =>
+        f.endsWith(".sops.json") &&
+        f !== "node-secret-files.sops.json" &&
+        f !== "profile-files.sops.json",
     );
   } catch {
     result.ok = false;
@@ -266,10 +289,25 @@ export function syncSecretFiles(opts = {}) {
     ageKeyFile = defaultAgeKeyFile(),
     decrypt = makeSopsDecrypt(ageKeyFile),
     writeFile = defaultWriteFile,
+    // CTL-1612 (Codex P2): read-back seam so we can tell a REWRITE from a real CHANGE.
+    // Never throws — an unreadable/absent destination simply counts as changed.
+    readFile = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return null;
+      }
+    },
     logger = log,
   } = opts;
 
-  const result = { written: [], failed: [], skipped: false, reason: null };
+  // `written` = every entry we (re)materialized; `changed` = the subset whose CONTENT
+  // actually differs from what was already on disk. They diverge constantly: any commit
+  // touching secrets/ makes syncSecretFiles re-decrypt and rewrite the WHOLE bundle, so
+  // `written` lists every bare file even when one unrelated entry rotated. Restart alarms
+  // must key off `changed`, or a routine rotation of some other secret would demand a
+  // daemon+monitor restart for credentials that did not move (Codex P2).
+  const result = { written: [], changed: [], failed: [], skipped: false, reason: null };
   const src = resolve(clusterDir, "secrets", "node-secret-files.sops.json");
   if (!existsSync(src)) {
     result.reason = "absent";
@@ -303,14 +341,145 @@ export function syncSecretFiles(opts = {}) {
     }
     if (typeof content !== "string") continue;
     try {
-      writeFile(resolve(configDir, name), content);
+      const dest = resolve(configDir, name);
+      const prior = readFile(dest); // null = absent/unreadable → treat as changed
+      writeFile(dest, content);
       result.written.push(name);
+      if (prior !== content) result.changed.push(name);
     } catch (err) {
       logger.warn(`[cluster-sync] write ${name} failed (${err?.message ?? err})`);
       // Partial bare-file failure: a REQUESTED file decrypted but did not
       // materialize. Surfaced so the marker does not advance over it (Codex-A).
       result.failed.push(name);
     }
+  }
+  return result;
+}
+
+// ─── CTL-1595: cluster-synced direnv profiles ────────────────────────────────
+
+// The direnv profile surface worker repos' .envrc files consume via
+// `use_profile <name>` (~/.config/direnv/profiles/<name>.env). Before CTL-1595
+// these were HAND-provisioned per host — mini carried six legacy files, mini-2
+// carried none, and catalyst-cloud.env existed nowhere, so catalyst-cloud
+// workers booted tokenless fleet-wide (the CTC-284 verdict-less-death class).
+// XDG-aware (Codex P2): check-setup.sh derives the active direnv path from
+// ${XDG_CONFIG_HOME:-$HOME/.config}/direnv — writing anywhere else would report
+// success while use_profile still finds nothing. Exported for doctor/tests.
+export function defaultProfilesDir(env = process.env) {
+  const xdg = typeof env.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.length > 0
+    ? env.XDG_CONFIG_HOME
+    : resolve(homedir(), ".config");
+  return resolve(xdg, "direnv", "profiles");
+}
+
+// syncProfileFiles — decrypt secrets/profile-files.sops.json (a { "<name>.env":
+// content } map of cluster-shared direnv profiles) and materialize each as a
+// 0o600 file under ~/.config/direnv/profiles. Same contract as syncSecretFiles:
+// fail-open, never throws, basename-only (no path traversal), `failed[]` = a
+// REQUESTED file whose write threw (blocks the marker), absent bundle = no-op.
+// No restart-required surface: direnv re-evaluates per worker spawn, so a
+// rotated profile is live for the NEXT worker without touching the daemon.
+// Sidecar manifest naming the profiles THIS mechanism manages, so a profile
+// deleted from the bundle is REMOVED from disk (stale plaintext credentials
+// must not outlive their rotation) while hand-provisioned node-local profiles
+// are never touched (they are not in the manifest). Codex R2.
+const PROFILES_MANIFEST = ".cluster-managed.json";
+
+export function syncProfileFiles(opts = {}) {
+  const {
+    clusterDir = getClusterRepoDir(),
+    profilesDir = defaultProfilesDir(),
+    ageKeyFile = defaultAgeKeyFile(),
+    decrypt = makeSopsDecrypt(ageKeyFile),
+    writeFile = defaultWriteFile,
+    logger = log,
+  } = opts;
+
+  const result = { written: [], failed: [], removed: [], skipped: false, reason: null };
+  const src = resolve(clusterDir, "secrets", "profile-files.sops.json");
+  if (!existsSync(src)) {
+    result.reason = "absent";
+    return result;
+  }
+  let map;
+  try {
+    map = decrypt(src);
+  } catch (err) {
+    logger.warn(
+      `[cluster-sync] decrypt profile-files failed (${err?.message ?? err}); keeping node-local`,
+    );
+    result.skipped = true;
+    result.reason = "decrypt-failed";
+    return result;
+  }
+  if (!map || typeof map !== "object") {
+    result.reason = "empty";
+    return result;
+  }
+  try {
+    mkdirSync(profilesDir, { recursive: true });
+  } catch {
+    /* profilesDir may exist; ignore */
+  }
+  for (const [name, content] of Object.entries(map)) {
+    // Refuse anything that isn't a bare, non-dotfile basename — no path
+    // traversal — AND require the ".env" suffix (Codex R2): `use_profile x`
+    // looks up profiles/x.env, so a suffix-less key would "succeed" while
+    // remaining invisible to every consumer, and the advanced marker would
+    // never retry the bad SHA.
+    if (
+      typeof name !== "string" ||
+      name !== basename(name) ||
+      name.startsWith(".") ||
+      name.length === 0 ||
+      !name.endsWith(".env")
+    ) {
+      logger.warn(`[cluster-sync] refusing unsafe/non-.env profile-file name "${name}"`);
+      continue;
+    }
+    if (typeof content !== "string") continue;
+    try {
+      writeFile(resolve(profilesDir, name), content);
+      result.written.push(name);
+    } catch (err) {
+      logger.warn(`[cluster-sync] write profile ${name} failed (${err?.message ?? err})`);
+      result.failed.push(name);
+    }
+  }
+
+  // Reconcile removals (Codex R2): a profile PREVIOUSLY managed by this
+  // mechanism but absent from the current bundle is deleted — stale plaintext
+  // credentials must not outlive their rotation. Node-local files (never in
+  // the manifest) are untouched. A failed removal joins failed[] so the
+  // change-detection marker does not advance over the surviving stale file.
+  const manifestPath = resolve(profilesDir, PROFILES_MANIFEST);
+  let prevManaged = [];
+  try {
+    const m = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (Array.isArray(m)) prevManaged = m.filter((n) => typeof n === "string" && n === basename(n) && !n.startsWith("."));
+  } catch {
+    /* absent/corrupt manifest → nothing previously managed */
+  }
+  const current = new Set(Object.keys(map).filter((n) => typeof n === "string"));
+  for (const name of prevManaged) {
+    if (current.has(name)) continue;
+    try {
+      rmSync(resolve(profilesDir, name), { force: true });
+      result.removed.push(name);
+      logger.warn(`[cluster-sync] removed profile ${name} (deleted from the cluster bundle)`);
+    } catch (err) {
+      logger.warn(`[cluster-sync] remove profile ${name} failed (${err?.message ?? err})`);
+      result.failed.push(name);
+    }
+  }
+  // Manifest = everything currently materialized + anything we failed to
+  // remove (so the next sync retries the removal). Best-effort.
+  try {
+    const keep = [...new Set([...result.written, ...prevManaged.filter((n) => !current.has(n) && !result.removed.includes(n))])];
+    writeFile(manifestPath, JSON.stringify(keep));
+  } catch {
+    /* best-effort; worst case a later removal is missed until the next full sync */
   }
   return result;
 }
@@ -325,7 +494,7 @@ const defaultNow = () => new Date().toISOString();
 // returns { status, stdout }. Injected as `gitCapture` so tests never shell out.
 // (defaultGit above is the MUTATING runner used by pullClusterRepo.)
 function defaultGitCapture(args) {
-  const r = spawnSync("git", args, { encoding: "utf8" });
+  const r = spawnSync("git", args, { encoding: "utf8", timeout: CLUSTER_SYNC_SPAWN_TIMEOUT_MS });
   return { status: r.status ?? (r.error ? 1 : 0), stdout: r.stdout ?? "" };
 }
 
@@ -446,7 +615,76 @@ export function emitClusterSecretEvent(opts = {}, io = {}) {
 // execution-core.env is machine-local (not in the bundle), so this entry is an inert
 // no-op — it only ever matches when execution-core.env appears in `status.written` —
 // but encoding it keeps the set faithful to its own contract and future-proofs that path.
-export const ENV_BACKED_SECRET_FILES = new Set(["claude-accounts.env", "execution-core.env"]);
+// CTL-1612: the membership rule generalizes from "sourced into the boot env" to
+// "CAPTURED AT PROCESS START, and therefore NOT live in a running process until it
+// restarts". Two capture mechanisms qualify, and both were previously unenrolled:
+//   (a) `source`d into the daemon's boot env — claude-accounts.env, execution-core.env,
+//       and now github-token (catalyst-execution-core's CTL-1612 _project_shared_github_token).
+//   (b) read ONCE from disk at server boot — webhook-secret and the linear-webhook-secret*
+//       family, resolved inside orch-monitor's loadWebhookConfig() at startup and then
+//       closed over per request (webhook-config.ts), never re-read per delivery.
+// Leaving these out is what let the 2026-08-02 outage look "applied": cluster-sync
+// rewrote github-token, recorded it in `written`, and emitted plain `refreshed` while
+// every running daemon kept 401ing on the revoked value it had captured at boot.
+// CTL-1616 (A2, same-commit derivation, design §2's "same-commit derivation constraint" —
+// judge-unanimous): this Set and the prefix below are now DERIVED from SECRET_REGISTRY
+// (lib/secret-contract.mjs) rather than hand-maintained in parallel with it — the exact
+// divergence-between-two-hand-authored-lists class this ticket exists to close, which would
+// otherwise be recreated one level up (the registry AND this file's own literal Set drifting
+// apart the same way the pre-CTL-1612 secret chains did). The registry's zero-consumer
+// invariant (its own header: "nothing outside this file's own tests imports it yet") is
+// DELIBERATELY RELAXED to exactly this one consumer, in the SAME commit that introduces the
+// registry — the design's explicit exception, not a violation of it.
+//
+// The boot-captured membership rule (both provenance paragraphs above: "sourced into the
+// daemon's boot env" OR "read ONCE from disk at server boot") maps exactly onto three
+// SECRET_DELIVERY types: "bare-file" (github-token, webhook-secret — read once at boot,
+// never re-read per request), "bare-file-family" (linear-webhook-secret — same read-once
+// shape, open-ended filenames), and "env-file" (claude-accounts.env, execution-core.env —
+// `source`d into the boot env). Every OTHER delivery type is explicitly excluded: "env-alias"
+// (linear-api-token) and "config-json" (the Linear actor rows, groq-api-key) are read FRESH
+// on each resolveSecret call, not captured once; "platform-env" (cloud-token) and
+// "local-only" (age-key) are not files this predicate is about at all. Filtering on
+// `delivery` (not `rotation.class`) is deliberate: github-token's rotation.class is
+// "re-armable" (the CTL-1612 timer-rearm mechanism), yet it MUST stay in this exact set —
+// rearm is an in-process live update, orthogonal to "was this file captured once at
+// process/daemon start", which is what determines whether cluster-sync needs to emit a
+// restart-required signal on a change.
+const _BOOT_CAPTURED_DELIVERIES = new Set(["bare-file", "bare-file-family", "env-file"]);
+
+const ENV_BACKED_SECRET_EXACT = new Set(
+  SECRET_REGISTRY.filter((row) => _BOOT_CAPTURED_DELIVERIES.has(row.delivery)).map(
+    (row) => row.id,
+  ),
+);
+
+// The per-team Linear webhook secrets are a FAMILY, not fixed names: webhook-config.ts
+// builds `linear-webhook-secret-${key}` from the Layer-2 config's team keys, so the set of
+// filenames is open-ended and NOT guaranteed lowercase. An exact-match Set or a
+// `/^linear-webhook-secret-[a-z0-9-]+$/` regex would silently no-op on a team key like
+// "CTL" — exactly the miss this predicate exists to prevent. Match case-insensitively on
+// the prefix, requiring at least one character after the dash so the bare prefix
+// "linear-webhook-secret-" and a run-on like "linear-webhook-secretXXX" both stay OUT.
+// Derived from the linear-webhook-secret row's own familyPrefix (falls back to the
+// historical literal only if that row is ever removed from the registry, which the parity
+// test's row-id-set-equality assertion would already have failed loudly on).
+const LINEAR_WEBHOOK_SECRET_PREFIX =
+  SECRET_REGISTRY.find((row) => row.delivery === "bare-file-family")?.familyPrefix ??
+  "linear-webhook-secret-";
+
+// isEnvBackedSecretFile — the boot-captured predicate. Prefer this over direct Set
+// membership; ENV_BACKED_SECRET_FILES stays exported for back-compat with callers/tests
+// that only need the fixed names.
+export function isEnvBackedSecretFile(file) {
+  if (typeof file !== "string" || file.length === 0) return false;
+  const name = file.toLowerCase();
+  if (ENV_BACKED_SECRET_EXACT.has(name)) return true;
+  return (
+    name.startsWith(LINEAR_WEBHOOK_SECRET_PREFIX) && name.length > LINEAR_WEBHOOK_SECRET_PREFIX.length
+  );
+}
+
+export const ENV_BACKED_SECRET_FILES = ENV_BACKED_SECRET_EXACT;
 
 // assessMaterialization — Codex-A. Decide whether a refresh/boot decrypt FULLY
 // succeeded, given the syncClusterSecrets (`sync`) and syncSecretFiles (`files`)
@@ -475,10 +713,11 @@ export const ENV_BACKED_SECRET_FILES = new Set(["claude-accounts.env", "executio
 //   config-refused   — syncClusterSecrets refused (sync.ok === false), empty skipped
 //   secrets-skipped  — a JSON secret was skipped while another succeeded (partial)
 //   bare-write-failed — a bare file decrypted but its write failed (partial)
-function assessMaterialization({ sync, files }) {
+function assessMaterialization({ sync, files, profiles }) {
   const synced = Array.isArray(sync?.synced) ? sync.synced : [];
   const skipped = Array.isArray(sync?.skipped) ? sync.skipped : [];
   const bareFailed = Array.isArray(files?.failed) ? files.failed : [];
+  const profileFailed = Array.isArray(profiles?.failed) ? profiles.failed : [];
 
   // 1. Bare-bundle wholesale failure — the whole node-secret-files.sops.json bundle
   //    failed to decrypt. Checked BEFORE schemaSkipped so a too-new JSON schema can
@@ -490,6 +729,15 @@ function assessMaterialization({ sync, files }) {
   //    checked BEFORE schemaSkipped (same masking rationale).
   if (bareFailed.length > 0) {
     return { fullSuccess: false, reason: "bare-write-failed" };
+  }
+  // 2b. CTL-1595: the profile bundle mirrors the bare bundle — same masking
+  //     rationale, same pre-schemaSkipped placement. An ABSENT bundle is a
+  //     no-op (reason "absent" — not every cluster ships profiles).
+  if (profiles?.reason === "decrypt-failed") {
+    return { fullSuccess: false, reason: "profile-decrypt-failed" };
+  }
+  if (profileFailed.length > 0) {
+    return { fullSuccess: false, reason: "profile-write-failed" };
   }
   // 3. Schema too-new is fail-CLOSED by design — treat as success for the marker.
   //    Reaching here means the bare-file part is already confirmed OK (1–2 above), so
@@ -603,8 +851,12 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // 6. Re-decrypt + materialize (reuse the existing CTL-1211 machinery).
   const sync = syncClusterSecrets({ clusterDir, configDir, ageKeyFile, decrypt: sopsDecrypt, logger });
   const files = syncSecretFiles({ clusterDir, configDir, ageKeyFile, decrypt: sopsDecrypt, logger });
+  // CTL-1595: the direnv-profile bundle rides the same refresh; profilesDir
+  // intentionally NOT overridable from here (tests inject via clusterSync/opts).
+  const profiles = syncProfileFiles({ clusterDir, profilesDir: opts.profilesDir, ageKeyFile, decrypt: sopsDecrypt, logger });
   status.synced = Array.isArray(sync?.synced) ? sync.synced : [];
   status.written = Array.isArray(files?.written) ? files.written : [];
+  status.profiles = Array.isArray(profiles?.written) ? profiles.written : [];
 
   // 7. Advance the marker ONLY on FULL materialization success (Codex-A). A PARTIAL
   // shortfall (a single JSON secret skipped while another succeeded, the config sync
@@ -612,7 +864,36 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // a failure too: advancing the marker over it would make lastSha===HEAD skip the
   // retry forever, stranding the un-applied rotation. On ANY shortfall: emit
   // refresh-failed naming the shortfall, do NOT advance the marker, return ok:false.
-  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files });
+  // 8b. Codex-B: a rotated boot-captured secret file is NOT live in a running process
+  // until it restarts (its value was captured at process start, not read per use). Emit a
+  // DISTINCT loud signal so "refreshed" is never mistaken for "the env secret is applied".
+  //
+  // Key off the files whose CONTENT actually changed, not every file rewritten (Codex P2):
+  // any commit touching secrets/ makes syncSecretFiles re-decrypt and rewrite the WHOLE
+  // bundle, so `written` names every bare file even when one unrelated entry rotated, and
+  // filtering on it would demand a restart on every routine secret update. Fall back to
+  // `written` for a caller-injected syncSecretFiles that predates the `changed` field —
+  // noisier, but a MISSED rotation notice is the silent-stale failure this exists to catch.
+  //
+  // Emitted BEFORE the shortfall early-return, deliberately (Codex P1, round 3). The
+  // rotated secret is already ON DISK at this point; whether some UNRELATED JSON or
+  // profile entry failed to materialize has no bearing on the fact that a restart is now
+  // required. Returning first would drop the notice permanently: the marker stays at the
+  // old sha, so the next attempt re-decrypts and rewrites the same bytes, `changed` comes
+  // back EMPTY, and once the unrelated failure clears the marker advances having never
+  // asked for the restart — leaving the daemon on the old credential forever.
+  const rotated = Array.isArray(files?.changed) ? files.changed : status.written;
+  const restartRequired = rotated.filter((f) => isEnvBackedSecretFile(f));
+  status.restartRequired = restartRequired;
+  for (const file of restartRequired) {
+    logger?.warn?.(
+      `[cluster-sync] boot-captured secret rotated (${file}) — restart the daemon(s) that ` +
+        "read it to apply (its value is captured at process start, not per use)",
+    );
+    emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
+  }
+
+  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles });
   if (!fullSuccess) {
     status.ok = false;
     status.reason = shortfall;
@@ -635,31 +916,15 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   status.changed = true;
   status.reason = "refreshed";
   // Emit only on a real change: sha advanced AND something was materialized.
-  if (lastSha !== head && (status.written.length > 0 || status.synced.length > 0)) {
+  if (lastSha !== head && (status.written.length > 0 || status.synced.length > 0 || status.profiles.length > 0)) {
     emit({
       name: "refreshed",
       node,
       now,
-      payload: { fromSha: lastSha, toSha: head, written: status.written, synced: status.synced },
+      payload: { fromSha: lastSha, toSha: head, written: status.written, synced: status.synced, profiles: status.profiles },
     });
   }
 
-  // 8b. Codex-B: a rotated ENV-BACKED secret file (sourced into process.env at boot)
-  // is NOT live in the running daemon until a restart — the SDK path reads
-  // CLAUDE_CODE_OAUTH_TOKEN from process.env, captured at boot. Emit a DISTINCT loud
-  // signal so the "refreshed" event above is never mistaken for "the env secret is
-  // applied". This is the timer's restart-required surface (the daemon timer calls
-  // this fn); best-effort like every other emit here. Auto-restart is out of scope
-  // (CTL-1398 re-sources the file on the next start, so a manual restart re-arms it).
-  const restartRequired = status.written.filter((f) => ENV_BACKED_SECRET_FILES.has(f));
-  status.restartRequired = restartRequired;
-  for (const file of restartRequired) {
-    logger?.warn?.(
-      `[cluster-sync] env-backed secret rotated (${file}) — daemon restart required to apply ` +
-        "(CLAUDE_CODE_OAUTH_TOKEN is read from process.env at boot)",
-    );
-    emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
-  }
   return status;
 }
 
@@ -694,6 +959,7 @@ export function clusterSync(opts = {}) {
   const pull = pullClusterRepo(opts);
   const sync = syncClusterSecrets(opts);
   const files = syncSecretFiles(opts);
+  const profiles = syncProfileFiles(opts); // CTL-1595: direnv profile bundle
 
   // Seed the marker ONLY when boot materialization FULLY succeeded — the SAME
   // hardened predicate the periodic refresh uses (Codex-A). A WHOLESALE failure (sops
@@ -704,7 +970,7 @@ export function clusterSync(opts = {}) {
   // stays fail-CLOSED (intentional, not a failure) and still seeds. An empty secrets
   // repo (nothing to decrypt) is full success and still seeds.
   const synced = Array.isArray(sync?.synced) ? sync.synced : [];
-  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files });
+  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles });
 
   try {
     const head = gitRevParseHead({ clusterDir, gitCapture });
@@ -717,12 +983,30 @@ export function clusterSync(opts = {}) {
           lastDecryptedAt: now(),
           written: Array.isArray(files?.written) ? files.written : [],
           synced,
+          // CTL-1595: additive — which direnv profiles this node materialized.
+          profiles: Array.isArray(profiles?.written) ? profiles.written : [],
         },
         logger,
       );
     } else if (head && !fullSuccess) {
       // Boot materialization shortfall: DON'T seed the marker (so the periodic
       // refresh keeps retrying and doctor keeps flagging), make it LOUD.
+      // Codex P2 (CTL-1595): "don't seed" is NOT enough when a PRIOR marker
+      // already records this same HEAD — the refresh fast-path would return
+      // head-unchanged forever and never retry after the fs/key issue heals.
+      // Invalidate a same-SHA marker so the next refresh re-attempts. (Generic:
+      // the same wedge existed for bare-file boot shortfalls.)
+      try {
+        const prior = readClusterSyncState(statePath);
+        if (prior?.lastDecryptedSha === head) {
+          rmSync(statePath, { force: true });
+          logger?.warn?.(
+            "[cluster-sync] invalidated same-SHA change marker after boot shortfall — the refresh timer will re-attempt",
+          );
+        }
+      } catch {
+        /* best-effort; worst case is the pre-existing wedge */
+      }
       logger?.warn?.(
         `[cluster-sync] boot decrypt did not fully succeed (${shortfall}) — ` +
           "NOT seeding the change-detection marker; keeping node-local plaintext and retrying on the refresh timer",
@@ -732,7 +1016,7 @@ export function clusterSync(opts = {}) {
   } catch (err) {
     logger?.warn?.(`[cluster-sync] boot marker seed failed (${err?.message ?? err})`);
   }
-  return { pull, sync, files };
+  return { pull, sync, files, profiles };
 }
 
 // Exposed for doctor + tests.
