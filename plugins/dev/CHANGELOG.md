@@ -1,17 +1,22 @@
 # Changelog
 
-## [12.46.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.45.0...catalyst-dev-v12.46.0) (2026-08-06)
+## [12.46.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.45.0...catalyst-dev-v12.46.0)
+
+Aug 06, 2026
+
+<!-- ai-enhanced -->
+
+### Account Health Visibility & Worktree Resume
+
+The orch-monitor now surfaces Claude account health everywhere you look: a new accounts-probe library (TTL-cached, edge-triggered) backs a `GET /api/accounts` endpoint and `/api/accounts/stream` SSE feed, with a live strip in the Ink HUD and a banner in the web dashboard that fires loudly when an account degrades. Worktree creation now seeds from `origin/<ticket>` when that remote branch exists, so a resumed or reclaimed worktree picks up where the previous worker left off instead of silently orphaning pushed commits. Board-scan events also now carry per-host slot counts (`recovery.slot.capacity`, `recovery.slot.in_use`, `recovery.slot.free`) as chartable Loki attributes, making fleet-wide free-capacity queries like `sum(recovery.slot.free)` possible for the first time.
 
 
-### Features
+
+### PRs
 
 * **dev:** board-scan events now carry per-host worker-slot counts as ([602d1f2](https://github.com/coalesce-labs/catalyst/commit/602d1f2bd5f7b732f5cfc5a5067f2da417482f66))
 * **dev:** CTL-1607 promote board-scan slot scalars to chartable Loki attributes ([#2985](https://github.com/coalesce-labs/catalyst/issues/2985)) ([602d1f2](https://github.com/coalesce-labs/catalyst/commit/602d1f2bd5f7b732f5cfc5a5067f2da417482f66))
 * **dev:** CTL-1653 accounts-probe lib (probe runner + async TTL cache) ([#3011](https://github.com/coalesce-labs/catalyst/issues/3011)) ([32b6d07](https://github.com/coalesce-labs/catalyst/commit/32b6d071f12d3aa333d41352470a3bd34c8d947b))
-
-
-### Bug Fixes
-
 * **dev:** board-health-seam test expects capacity.admissionGated (CTL-1607) ([#3028](https://github.com/coalesce-labs/catalyst/issues/3028)) ([1105e67](https://github.com/coalesce-labs/catalyst/commit/1105e67db71304f25bd39d752062f2659832370b))
 * **dev:** CTL-1640 resume worktree from origin/&lt;ticket&gt; instead of orphaning pushed commits ([#3025](https://github.com/coalesce-labs/catalyst/issues/3025)) ([898e02e](https://github.com/coalesce-labs/catalyst/commit/898e02e136b7a071457f5b437260897309b23050))
 * **dev:** CTL-1655 — consumer-side coordination-mirror comment tail ([#3015](https://github.com/coalesce-labs/catalyst/issues/3015)) ([042d321](https://github.com/coalesce-labs/catalyst/commit/042d321ae9610dd30a4f757a44626bfcb63d6d24))
