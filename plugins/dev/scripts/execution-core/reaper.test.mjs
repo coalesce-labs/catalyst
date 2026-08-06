@@ -645,6 +645,122 @@ describe("Reaper._handlePrMergedCleanup", () => {
   });
 });
 
+// CTL-1639 — the PR-merged cleanup must snapshot the worktree's unpushed work to
+// ~/catalyst/salvage/ BEFORE the archive+remove, via the injectable salvageWorktree
+// seam (default shells out to lib/worktree-salvage.sh). Fail-open: a salvage failure
+// never blocks the removal.
+describe("Reaper._handlePrMergedCleanup — CTL-1639 salvage-before-destroy", () => {
+  it("R-S1: calls salvageWorktree exactly once, BEFORE archive and BEFORE gitWorktreeRemove", async () => {
+    const trace = [];
+    const salvageWorktree = mock((arg) => {
+      trace.push(["salvage", arg.worktreePath, arg.ticket]);
+      return { ok: true };
+    });
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }),
+      salvageWorktree,
+      archiveWorktree: (p) => { trace.push(["archive", p]); return { ok: true }; },
+      gitWorktreeRemove: (p) => { trace.push(["wt", p]); return Promise.resolve({ ok: true }); },
+      gitBranchDelete: () => Promise.resolve({ ok: true }),
+      emit: () => Promise.resolve(),
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+    });
+    expect(salvageWorktree).toHaveBeenCalledTimes(1);
+    // Salvage first, then archive, then worktree remove — strict order.
+    expect(trace).toEqual([
+      ["salvage", "/wt/CTL-1", "CTL-1"],
+      ["archive", "/wt/CTL-1"],
+      ["wt", "/wt/CTL-1"],
+    ]);
+  });
+
+  it("R-S2: a salvageWorktree that throws does NOT abort cleanup — archive+remove still run", async () => {
+    const trace = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }),
+      salvageWorktree: () => { throw new Error("boom"); },
+      archiveWorktree: (p) => { trace.push(["archive", p]); return { ok: true }; },
+      gitWorktreeRemove: (p) => { trace.push(["wt", p]); return Promise.resolve({ ok: true }); },
+      gitBranchDelete: () => Promise.resolve({ ok: true }),
+      emit: () => Promise.resolve(),
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+    });
+    expect(trace).toEqual([["archive", "/wt/CTL-1"], ["wt", "/wt/CTL-1"]]);
+  });
+
+  it("R-S3: the unsafe-verdict early return runs BEFORE salvage (never salvage a tree we won't remove)", async () => {
+    const salvageWorktree = mock(() => ({ ok: true }));
+    const archiveWorktree = mock(() => ({ ok: true }));
+    const gitWorktreeRemove = mock(() => Promise.resolve({ ok: true }));
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: false, reasons: ["dirty"] }),
+      salvageWorktree,
+      archiveWorktree,
+      gitWorktreeRemove,
+      gitBranchDelete: () => Promise.resolve({ ok: true }),
+      emit: () => Promise.resolve(),
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+    });
+    expect(salvageWorktree).not.toHaveBeenCalled();
+    expect(archiveWorktree).not.toHaveBeenCalled();
+    expect(gitWorktreeRemove).not.toHaveBeenCalled();
+  });
+
+  it("R-S4: default seam shells out to lib/worktree-salvage.sh (fail-open on a missing worktree)", () => {
+    // Construct a Reaper with no override and assert the wired default is a
+    // function; then drive it against a non-existent worktree to prove it shells
+    // out and fails open (never throws). Sandbox CATALYST_SALVAGE_DIR +
+    // CATALYST_EVENTS_DIR at a scratch path so the child bash's telemetry never
+    // touches the real ~/catalyst/events log.
+    const scratch = mkdtempSync(join(tmpdir(), "reaper-salvage-r4-"));
+    const prevSalvage = process.env.CATALYST_SALVAGE_DIR;
+    const prevEvents = process.env.CATALYST_EVENTS_DIR;
+    process.env.CATALYST_SALVAGE_DIR = join(scratch, "salvage");
+    process.env.CATALYST_EVENTS_DIR = join(scratch, "events");
+    try {
+      const r = new Reaper({ log: silentLog() });
+      expect(typeof r.salvageWorktree).toBe("function");
+      const res = r.salvageWorktree({
+        worktreePath: join(scratch, "not-a-worktree-ctl1639"),
+        ticket: "CTL-1639",
+      });
+      // The bash primitive always exits 0 (fail-open), so the seam reports a
+      // boolean ok even for a non-worktree path (it emits salvage.failed).
+      expect(res && typeof res.ok).toBe("boolean");
+    } finally {
+      if (prevSalvage === undefined) delete process.env.CATALYST_SALVAGE_DIR;
+      else process.env.CATALYST_SALVAGE_DIR = prevSalvage;
+      if (prevEvents === undefined) delete process.env.CATALYST_EVENTS_DIR;
+      else process.env.CATALYST_EVENTS_DIR = prevEvents;
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 // CTL-1218 Part A — defaultAssessWorktreeRemoval must thread an injected orchDirs
 // array into hasOrchProvenance so the LIVE daemon's execution-core worker layout
 // (~/catalyst/execution-core/workers/<ticket>/) is recognized as provenance. The

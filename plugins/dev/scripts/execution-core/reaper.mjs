@@ -206,6 +206,11 @@ export class Reaper {
     // worktree-path archive; tests inject stubs to drive each branch.
     assessWorktreeRemoval = defaultAssessWorktreeRemoval,
     archiveWorktree = archiveWorktreeArtifacts,
+    // CTL-1639: snapshot unpushed work to ~/catalyst/salvage/ before the
+    // PR-merged worktree is archived+removed. Default shells out to the bash
+    // salvage primitive; tests inject a recording stub. Fail-open — a salvage
+    // failure never blocks the removal.
+    salvageWorktree = defaultSalvageWorktree,
     // CTL-649 safety guards:
     //  - includeInteractive: opt-in to reaping interactive (human) sessions.
     //    Default false — the daemon never opts in, so a stepped-away human
@@ -245,6 +250,7 @@ export class Reaper {
     this.cwdExists = cwdExists;
     this.assessWorktreeRemoval = assessWorktreeRemoval;
     this.archiveWorktree = archiveWorktree;
+    this.salvageWorktree = salvageWorktree;
     this.includeInteractive = includeInteractive;
     this.minIdleMs = minIdleMs;
     this.lastSeenMs = lastSeenMs;
@@ -570,6 +576,21 @@ export class Reaper {
         reason: `unsafe:${(verdict.reasons || []).join(",")}`,
       });
       return;
+    }
+    // CTL-1639: snapshot unpushed work to ~/catalyst/salvage/ BEFORE any
+    // destructive op (archive copies only signal docs; gitWorktreeRemove below
+    // is lossy). Runs only past the verdict.safe gate above — we never salvage a
+    // tree we are not about to remove. Best-effort/fail-open: a salvage failure
+    // never blocks the archive+remove.
+    try {
+      this.salvageWorktree({
+        worktreePath: event.worktree_path,
+        ticket: event.ticket,
+        branch: event.branch,
+        orchId: event.orch_id,
+      });
+    } catch {
+      /* fail-open */
     }
     const arch = this.archiveWorktree(event.worktree_path, { ticket: event.ticket });
     if (!arch.ok) {
@@ -1074,6 +1095,40 @@ function mapFields(fields = {}) {
     out[map[k] ?? k] = v;
   }
   return out;
+}
+
+// CTL-1639: default salvage seam — shell out to the single-source-of-truth bash
+// primitive (lib/worktree-salvage.sh) so the git/bundle logic lives in exactly
+// one place (no .mjs twin). Snapshots unpushed commits + dirty tree to
+// ~/catalyst/salvage/ before the reaper removes a PR-merged worktree. Fail-open:
+// any failure returns { ok: false } and the caller ignores it (never blocks the
+// removal below).
+function defaultSalvageWorktree({ worktreePath, ticket, branch, orchId } = {}) {
+  try {
+    if (!worktreePath) return { ok: false, error: "no-worktree-path" };
+    const lib = new URL("../lib/worktree-salvage.sh", import.meta.url).pathname;
+    const res = spawnSync(
+      "bash",
+      [
+        lib,
+        worktreePath,
+        ticket || branch || "unknown",
+        "--site",
+        "reaper-pr-merged",
+        "--reason",
+        "orphans.reap-requested",
+        ...(orchId ? ["--orch", orchId] : []),
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    if (res.error) return { ok: false, error: res.error.message };
+    return {
+      ok: (res.status ?? 1) === 0,
+      error: (res.status ?? 1) === 0 ? undefined : res.stderr?.trim() || `exit ${res.status}`,
+    };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) }; // fail-open — caller ignores !ok
+  }
 }
 
 async function defaultGitWorktreeRemove(path) {
