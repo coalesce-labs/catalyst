@@ -4190,6 +4190,104 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
       rmSync(testOrchDir, { recursive: true, force: true });
     }
   });
+
+  test("no-probe-for-phase terminalizes locally even while the Linear breaker is OPEN (regression, Codex #3027 round 2 P1)", () => {
+    // The terminal write is purely local (tmp+rename to the signal file) — it
+    // must not wait for the breaker to close. Before this fix, escalateOnce
+    // returned "rate-limited-deferred" without ever reaching the terminal
+    // write for this reason (only a spent no-progress cap triggered the
+    // local repair), so a dead recovery-pass worker observed during a Linear
+    // outage stayed at "running" — the exact slot-leak this whole ticket
+    // exists to close — for the entire duration of the outage.
+    const testOrchDir = mkdtempSync(join(tmpdir(), "ctl1657-breaker-open-"));
+    try {
+      const escalate = recorder(undefined);
+      const recoveryPassSig = {
+        ticket: "PROJ-504",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: { ticket: "PROJ-504", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+      };
+      const r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+        statJob: () => null,
+        listTicketPhases: () => [],
+        appendEscalatedEvent: escalate, // must NOT be called — breaker open defers the Linear-facing event
+        applyStalledLabel: recorder(undefined),
+        breaker: { isOpen: () => true },
+      });
+      expect(r).toBe("rate-limited-deferred");
+      expect(escalate.calls.length).toBe(0); // the Linear-facing escalation is still deferred
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-504", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase terminalizes locally even while an escalation cooldown is ACTIVE (regression, Codex #3027 round 2 P1)", () => {
+    const testOrchDir = mkdtempSync(join(tmpdir(), "ctl1657-cooldown-"));
+    try {
+      const recoveryPassSig = {
+        ticket: "PROJ-505",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: { ticket: "PROJ-505", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+      };
+      const r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+        statJob: () => null,
+        listTicketPhases: () => [],
+        appendEscalatedEvent: recorder(undefined),
+        applyStalledLabel: recorder(undefined),
+        breaker: { isOpen: () => false },
+        inEscalationCooldownFn: () => true, // a prior ask already fired within the window
+      });
+      expect(r).toBe("escalation-suppressed");
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-505", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase reconciles to done when the worker's own complete event was already seen (regression, Codex #3027 round 2 P2)", () => {
+    // A recovery-pass worker that emitted phase.recovery-pass.complete and then
+    // crashed before its OWN signal-file update landed genuinely finished its
+    // work. Escalating it to needs-human/stalled would falsely park a ticket
+    // whose recovery pass already succeeded — completeEventSeen must be
+    // checked before treating a probe-less dead signal as unverifiable.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const recoveryPassSig = {
+      ticket: "PROJ-506",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-506", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+    expect(escalate.calls.length).toBe(0); // reconciled to done, never escalated
+  });
 });
 
 describe("readBootSince — CTL-655 boot-time window reader", () => {

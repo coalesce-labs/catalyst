@@ -2289,6 +2289,13 @@ export function reclaimDeadWorkIfPossible(
         : 0;
     const capApplies = reason === "no-progress";
     const capSpent = capApplies && priorAsks >= escalationAskCap;
+    // CTL-1657 Codex P1 (round 2): a probe-less phase (recovery-pass today)
+    // must terminalize on its FIRST occurrence, same as a spent no-progress
+    // cap — there is no retry budget to wait out. Fold it into the same
+    // "must terminalize locally, regardless of breaker/cooldown state" gate
+    // as capSpent, since markEscalationCapTerminal is purely a local
+    // tmp+rename write with no Linear/event I/O of its own.
+    const mustTerminalizeLocally = capSpent || reason === "no-probe-for-phase";
     const reassertTerminalIfLost = () => {
       let already = null;
       try {
@@ -2299,19 +2306,25 @@ export function reclaimDeadWorkIfPossible(
         /* absent/malformed → re-assert below */
       }
       if (already === "stalled") return;
-      markEscalationCapTerminal({ orchDir, ticket, phase, explanation: buildEscExplanation() });
+      markEscalationCapTerminal({
+        orchDir,
+        ticket,
+        phase,
+        explanation: buildEscExplanation(),
+        stalledReason: capSpent ? "escalation-ask-cap" : reason,
+      });
       log.warn(
         { ticket, phase, reason, priorAsks },
         "ctl-1442: ask-cap spent but the signal was not terminal — re-asserted the stalled flip"
       );
     };
     if (breaker.isOpen(now())) {
-      if (capSpent) reassertTerminalIfLost(); // local-only repair — no Linear I/O
+      if (mustTerminalizeLocally) reassertTerminalIfLost(); // local-only repair — no Linear I/O
       log.warn({ ticket, phase, reason }, "ctl-679: escalation deferred — Linear breaker open");
       return "rate-limited-deferred";
     }
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
-      if (capSpent) reassertTerminalIfLost();
+      if (mustTerminalizeLocally) reassertTerminalIfLost();
       return "escalation-suppressed";
     }
     // CTL-1130: build a typed-union explanation classified by the three gates.
@@ -2938,7 +2951,50 @@ export function reclaimDeadWorkIfPossible(
   //     CTL-662: a `busy` worker on a probe-less phase no longer reaches here —
   //     the status trigger above suppresses it first, so this branch only
   //     escalates a genuinely reclaim-eligible (absent/idle-confirmed) worker.
+  //
+  //     CTL-1657 Codex P2 (round 2): before escalating, check whether the
+  //     worker's own phase.<phase>.complete event was already seen — mirrors
+  //     the CTL-778 alive-branch guard above, but for the DEAD case, where
+  //     there is no probe to re-check (a probe-less phase has none by
+  //     definition). A recovery-pass worker that emitted its complete event
+  //     and then crashed before its OWN signal-file update landed genuinely
+  //     finished; reconciling it to `done` (not escalating it to `stalled`)
+  //     avoids a false needs-human park on work that already succeeded.
   if (!hasProbe(phase)) {
+    if (completeEventSeen({ ticket, phase })) {
+      if (prevBgJobId) {
+        emitReapIntent("phase.reclaim.reap-requested", {
+          ticket,
+          phase,
+          bgJobId: prevBgJobId,
+          worktreePath: signal.raw?.worktreePath,
+          reason: "ctl-1657-no-probe-complete-event-reconcile",
+        }).catch(() => {});
+      }
+      appendEvent({
+        phase,
+        ticket,
+        orchId,
+        orchDir,
+        death_signal: lifecycle,
+        prev_state_json_mtime: prevStateJsonMtime,
+        probe_passed: null,
+        probe_checked: null,
+        completion_origin: "inferred-from-complete-event",
+        reclaimed_bg_job_id: prevBgJobId,
+        stopped_bg_job_ids: [],
+        title: `phase ${phase} reclaimed (no probe, but complete event seen)`,
+        body: `Daemon reclaimed dead ${phase} worker for ${ticket}: no work-done probe registered for this phase, but its own phase.${phase}.complete event was already emitted before the signal-file update landed. bg_job_id=${prevBgJobId ?? "?"}.`,
+      });
+      const r = emitComplete({ orchDir, signal });
+      if (r.code !== 0) {
+        log.warn(
+          { ticket, phase, code: r.code, stderr: r.stderr },
+          "recovery: no-probe complete-event reconcile — emit-complete failed"
+        );
+      }
+      return "reclaimed";
+    }
     return escalateOnce("no-probe-for-phase", 0);
   }
 
