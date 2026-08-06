@@ -200,11 +200,16 @@ if git show-ref --verify --quiet "refs/heads/${WORKTREE_NAME}"; then
 	echo "📋 Using existing branch: ${WORKTREE_NAME}"
 	# CTL-1640: local branch wins (policy: no auto-merge), but surface a
 	# divergence from origin/<name> so a stale local branch atop pushed work is
-	# visible. Best-effort, gated like the base fetch; never changes behavior.
-	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
-		&& git ls-remote --exit-code --heads origin "$WORKTREE_NAME" >/dev/null 2>&1; then
+	# visible. Read the LOCALLY-CACHED remote-tracking ref (git rev-parse, no
+	# network) rather than a synchronous `git ls-remote` (Codex #3025 P2): the
+	# reuse path needs no remote data to add the worktree, and createWorktree()
+	# spawns this script without a timeout, so a live ls-remote against a slow or
+	# unreachable origin would block dispatch/reclaim until the transport times out
+	# — all for a cosmetic warning. Best-effort: if the remote-tracking ref is not
+	# present locally, we simply skip the warning.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ]; then
 		LOCAL_SHA="$(git rev-parse --verify --quiet "refs/heads/${WORKTREE_NAME}" 2>/dev/null || true)"
-		REMOTE_SHA="$(git ls-remote --heads origin "$WORKTREE_NAME" 2>/dev/null | awk '{print $1}')"
+		REMOTE_SHA="$(git rev-parse --verify --quiet "refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null || true)"
 		if [ -n "$REMOTE_SHA" ] && [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
 			echo -e "${YELLOW}⚠️  local ${WORKTREE_NAME} (${LOCAL_SHA:0:8}) diverges from origin (${REMOTE_SHA:0:8}); keeping local, not merging (CTL-1640)${NC}" >&2
 		fi
@@ -225,15 +230,21 @@ else
 	# --no-from-remote opt out. This is the missing CTL-783 "resume consumer" —
 	# both normal dispatch and cross-host reclaim funnel through this script, so
 	# they both resume automatically with no .mjs change.
+	# CTL-1640 (Codex #3025 P1/P2): fetch with an EXPLICIT destination refspec so the
+	# remote-tracking ref is written even in a restricted-refspec (e.g. single-branch)
+	# clone, where a bare `git fetch origin <ticket>` returns success but lands the tip
+	# only in FETCH_HEAD — leaving START_POINT (refs/remotes/origin/<ticket>) nonexistent
+	# and failing the worktree add. A single fetch also collapses remote discovery and
+	# retrieval into ONE round-trip: no separate `git ls-remote` existence snapshot (which
+	# both added serial remote I/O and opened a split-window race where a concurrent push
+	# between the snapshot and the fetch could be missed), and a missing ticket ref simply
+	# makes the fetch exit non-zero so we fall through to seeding from base.
 	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
-		&& git ls-remote --exit-code --heads origin "$WORKTREE_NAME" >/dev/null 2>&1; then
-		if git fetch --quiet origin "$WORKTREE_NAME" 2>/dev/null; then
-			START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
-			SEEDED_FROM_REMOTE=true
-			echo "🌱 Resuming from origin/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
-		else
-			echo -e "${YELLOW}⚠️  origin/${WORKTREE_NAME} exists but could not be fetched; falling back to base${NC}" >&2
-		fi
+		&& git fetch --quiet origin \
+			"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
+		START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+		SEEDED_FROM_REMOTE=true
+		echo "🌱 Resuming from origin/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
 	fi
 	if [ "$SEEDED_FROM_REMOTE" = false ] && [ "$SKIP_FETCH" = false ]; then
 		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
