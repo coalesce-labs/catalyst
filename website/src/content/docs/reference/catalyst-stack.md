@@ -31,6 +31,24 @@ The core daemons start **monitor → broker → execution-core** (CTL-1084 known
 | `install-services` | Install the launchd LaunchAgents (stack keep-alive, thoughts-sync, log-shipper) that auto-start on boot. macOS only. |
 | `uninstall-services` | Unload and remove the auto-start LaunchAgents (leaves running daemons up). |
 | `services-status` | Show whether the auto-start LaunchAgents are installed and loaded. |
+| `claude-account status\|switch\|sync` | Inspect and control the fleet's active Claude OAuth account (see below). |
+
+## `claude-account` (CTL-1650)
+
+Fleet-wide Claude OAuth-account control, one command. Reads the durable `setup-token`s in
+`~/.config/catalyst/claude-accounts.env` and (for `switch`) the encrypted selector in the
+`catalyst-cluster` repo's `secrets/node-secret-files.sops.json`.
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Run `claude-accounts-usage.mjs` and print each account's 5h/7d rate-limit utilization, reset times, status, and which account is **ACTIVE**. Exits nonzero if no account reported limits. |
+| `switch <handle> [--yes]` | Flip the fleet's active SDK account (handle form `acctN`, e.g. `acct2`). Guards on the local age key + a `catalyst-cluster` clone, validates the handle is provisioned, **probes the target token's auth before switching** (refuses a 401/expired account), flips the `_catalyst_active_token` selector via a non-interactive `sops edit`, commits + pushes the cluster repo, re-materializes `claude-accounts.env`, restarts the stack, and verifies the new account is now ACTIVE. |
+| `sync [--yes]` | For a second node after a switch was pushed elsewhere: `git pull` the cluster repo, re-materialize `claude-accounts.env`, restart, and verify. |
+
+**Secrets hygiene:** token values are never echoed, logged, or written anywhere but the `0600`
+`~/.config/catalyst/claude-accounts.env` target file. The same token-free posture is surfaced
+headlessly by the orch-monitor `GET /api/accounts` endpoint (see the
+[orch-monitor API](/reference/orch-monitor-api/)).
 
 ## Flags
 

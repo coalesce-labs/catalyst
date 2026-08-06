@@ -155,7 +155,7 @@ fetch for every `--full` repo (CTL-722: not gated on `dispatchMode` any more).
 That step delegates to the standalone
 `plugins/dev/scripts/setup-execution-core-states.sh`, which ensures the team's
 contract workflow states exist (`Todo` + `Research`, `Plan`, `Implement`,
-`Validate`, `PR`; `Triage` already exists), writes the 9-phase → 5-state
+`Validate`, `PR`; `Triage` already exists), writes the 10-phase → 5-state
 collapse `stateMap` (idempotent — preserves user-customised maps), refreshes
 `stateIds`, and upserts the team's entry in the central
 `~/catalyst/execution-core/registry.json`. A Linear-permission failure in

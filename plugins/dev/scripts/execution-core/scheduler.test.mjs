@@ -59,6 +59,9 @@ import {
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
   holisticBoardHealthAct,
+  clearDispositionEmit, // Codex #2970 post-merge round 4: expected-disposition-guarded dedup reset
+  __seedDispositionEmitForTest,
+  __readDispositionEmitForTest,
   __resetForTests,
   __getRunningOpts,
   // CTL-705: Phase 2 helpers
@@ -97,6 +100,7 @@ import { ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW owner computation fo
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
+import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
 
 let orchDir;
 let catalystDir;
@@ -12301,6 +12305,37 @@ describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () 
     expect(needsHuman).toBeDefined();
   });
 
+  // Codex #2970 post-merge round 4: clearDispositionEmit(ticket, expectedDisposition)
+  // must only clear the live entry when it MATCHES what the caller believes it just
+  // cleared — an unconditional clear would corrupt an UNRELATED disposition (e.g. the
+  // daemon calling it for "needs-human" on a ticket whose live entry is actually
+  // "blocked" or "queued"). Seeds lastDispositionEmit directly (via the test-only
+  // helpers) rather than driving a full schedulerTick escalation, which needs
+  // stall-threshold setup shared across this describe block and is not reliably
+  // reproducible standalone.
+  test("clearDispositionEmit only resets a MATCHING dedup entry, never an unrelated one", () => {
+    __seedDispositionEmitForTest("CTL-1", "needs-human");
+
+    // Wrong expected disposition — must be a no-op against the live "needs-human" entry.
+    clearDispositionEmit("CTL-1", "blocked");
+    expect(__readDispositionEmitForTest("CTL-1")).toBe("needs-human");
+
+    // Correct expected disposition — clears it.
+    clearDispositionEmit("CTL-1", "needs-human");
+    expect(__readDispositionEmitForTest("CTL-1")).toBeNull();
+  });
+
+  test("clearDispositionEmit never touches an UNRELATED ticket's entry", () => {
+    __seedDispositionEmitForTest("CTL-1", "needs-human");
+    __seedDispositionEmitForTest("CTL-2", "blocked");
+
+    clearDispositionEmit("CTL-1", "needs-human");
+
+    expect(__readDispositionEmitForTest("CTL-1")).toBeNull();
+    // CTL-2's unrelated "blocked" entry must survive untouched.
+    expect(__readDispositionEmitForTest("CTL-2")).toBe("blocked");
+  });
+
   test("clear needs-human on terminal Done emits worker.transition(toDisposition=null)", () => {
     writeSignal("CTL-764", "research", "done");
     writeSignal("CTL-764", "plan", "done");
@@ -12764,5 +12799,392 @@ describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
     });
     // No recheck marker yet → the very first classify pays the live path.
     expect(seenReplica).toBeUndefined();
+  });
+});
+
+// ─── CTL-1610 (Phase 2): holisticBoardHealthAct latchedNoClock ───────────────
+describe("holisticBoardHealthAct — latchedNoClock (CTL-1610)", () => {
+  test("(CTL-1610) all-candidates-exhausted with a no-clock latch → latchedNoClock:true", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A", "B"], boardContext: {}, decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: (t) => t === "A",
+        invokeRecoveryPass: () => ({ dispatched: false }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r).toMatchObject({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: true });
+  });
+
+  test("(CTL-1610) well-formed exhausted cohort (all clocked) → latchedNoClock:false", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A", "B"], boardContext: {}, decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: () => false,
+        invokeRecoveryPass: () => ({ dispatched: false }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r).toMatchObject({ reason: "all-candidates-exhausted", latchedNoClock: false });
+  });
+
+  test("(CTL-1610) latchHasNoClock defaults to a safe no-op (bare tick → latchedNoClock:false)", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A"], decision: {} },
+      { shouldSkipItem: () => true, skipReason: () => "escalated", invokeRecoveryPass: () => ({}), recordIntent: () => {} },
+    );
+    expect(r.latchedNoClock).toBe(false);
+  });
+});
+
+// ─── CTL-1610 (Phase 3): latchedNoClock triggers repair at call site ──────────
+describe("holisticBoardHealthAct — Phase 3 repair signal (CTL-1610)", () => {
+  test("(CTL-1610) latchedNoClock:true is the repair trigger — caller invokes restampNoClockEscalations", () => {
+    // The repair fn is called by the production `act` callback in scheduler.mjs when
+    // latchedNoClock is true (see the recoveryRestampNoClockEscalations call site).
+    // Verify the signal comes through so the caller can act on it.
+    const r = holisticBoardHealthAct(
+      { candidates: ["CTL-X"], decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: () => true,
+        invokeRecoveryPass: () => ({}),
+        recordIntent: () => {},
+      },
+    );
+    expect(r.latchedNoClock).toBe(true); // caller checks this and calls restampNoClockEscalations
+  });
+});
+
+// ─── CTL-1610 (Phase 3): startScheduler runs repair at startup ────────────────
+describe("startScheduler — Phase 3 startup repair (CTL-1610)", () => {
+  afterEach(() => __resetForTests());
+
+  test("(CTL-1610) startScheduler re-stamps no-clock escalations at startup, independent of board-health mode", () => {
+    // Seed a no-clock escalated intent on disk.
+    const intentDir = join(orchDir, ".recovery-intents");
+    mkdirSync(intentDir, { recursive: true });
+    writeFileSync(
+      join(intentDir, "CTL-1610-STARTUP.json"),
+      JSON.stringify({ escalated: true, decision: "escalate" }) // no ts/lastTs
+    );
+
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    startScheduler({
+      orchDir,
+      dispatch: fakeDispatch(),
+      readEligible: () => [],
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+
+    // After startup, the no-clock entry must have ts/lastTs re-stamped.
+    const after = JSON.parse(readFileSync(join(intentDir, "CTL-1610-STARTUP.json"), "utf8"));
+    expect(typeof after.ts).toBe("number");
+    expect(typeof after.lastTs).toBe("number");
+  });
+});
+
+// ── CTL-1605: terminal-stale worker-status short-circuit (STEP A) ──
+describe("CTL-1605: STEP A terminal-stale short-circuit", () => {
+  afterEach(() => __resetForTests());
+
+  // A writeStatus spy recording label add/remove (mirrors the admission-gate labelSpy).
+  function labelSpy() {
+    const applied = [];
+    const removed = [];
+    const ws = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true, reason: null };
+      },
+      removeLabel: (ticket, label) => {
+        removed.push({ ticket, label });
+        return { removed: true };
+      },
+    };
+    return { ws, applied, removed };
+  }
+
+  test("stale-local Done ticket in triagedWaiting → no blocked/queued applied, dir evicted", () => {
+    // The CTL-1603 stale record: triage:done, NO research signal. The candidate is
+    // blocked-by-an-open-dep and UNLABELED, so WITHOUT the fix STEP A would stamp
+    // "blocked" on a ticket that is already Done. It also wears a stale "queued"
+    // held label to prove the terminal clear fires.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-9", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const evicted = [];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // A.3 batch: live TERMINAL state (Done), blocked by an open dep, wearing a
+      // stale "queued" label that the terminal clear must drain.
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP", { state: "Done", labels: ["queued"] }), {
+        "CTL-DEP": "In Progress",
+      }),
+      // CTL-1605: the terminal branch now refreshes labels LIVE instead of
+      // trusting the batch-cached set (see the scheduler-review regression
+      // describe block below for the staleness case this closes) — stub the
+      // live read so this test never shells out to `linearis`.
+      readTicketLabels: () => ({ ok: true, labels: ["queued"] }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    // No held re-stamp — the terminal ticket never reaches convergeHeldLabel.
+    expect(applied.some((a) => a.label === "blocked" || a.label === "queued")).toBe(false);
+    // The stale held label is cleared and the worker dir is evicted.
+    expect(removed).toContainEqual({ ticket: "CTL-9", label: "queued" });
+    expect(evicted).toContain("CTL-9");
+    // Not promoted (dropped from the admission pool before STEP B).
+    expect(r.advanced).toEqual([]);
+    expect(dispatch.calls).toEqual([]);
+  });
+
+  test("non-terminal triagedWaiting ticket → unchanged (still converges 'queued'), no evict", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-10", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const evicted = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1, // saturated → ready-but-unadmitted → "queued"
+      fetchBatch: mkBatch(() => relUnblocked({ state: "Todo" })),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    // Behavior byte-for-byte as before this change: capacity hold converges "queued".
+    expect(applied).toContainEqual({ ticket: "CTL-10", label: "queued" });
+    // A live ticket is never evicted.
+    expect(evicted).toEqual([]);
+  });
+
+  // ─── CTL-1605 Codex thread (scheduler.mjs:5518) — onTerminalCleared now fires
+  // ONCE per ticket with the AGGREGATE outcome, so STEP A's worker.transition
+  // recording must not claim a multi-label ticket is disposition-clear unless
+  // EVERY present worker-status label actually confirmed removal. ───
+
+  test("multi-label terminal ticket, both labels confirm → ONE worker.transition to null (fromDisposition = highest-precedence pre-clear label)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-33", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, removed } = labelSpy();
+    const evicted = [];
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: batchWith(
+        () => relBlockedBy("CTL-DEP7", { state: "Done", labels: ["blocked", "needs-human"] }),
+        { "CTL-DEP7": "In Progress" }
+      ),
+      readTicketLabels: () => ({ ok: true, labels: ["blocked", "needs-human"] }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    expect(removed).toContainEqual({ ticket: "CTL-33", label: "blocked" });
+    expect(removed).toContainEqual({ ticket: "CTL-33", label: "needs-human" });
+    expect(evicted).toContain("CTL-33");
+    const evictTransitions = transitions.filter(
+      (e) => e.ticket === "CTL-33" && e.source === "terminal-stale-evict"
+    );
+    // Exactly ONE aggregate transition, not one per cleared label.
+    expect(evictTransitions).toHaveLength(1);
+    expect(evictTransitions[0]).toMatchObject({ toDisposition: null, fromDisposition: "needs-human" });
+  });
+
+  test("multi-label terminal ticket, needs-human in CTL-1078 backoff (unconfirmed) + blocked confirmed → NO to:null worker.transition (false disposition-clear guarded)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-34", "triage", "done");
+    // Drive needs-human's removal-failure counter to the CTL-1078 backoff threshold
+    // so clearStalledLabel short-circuits BEFORE calling writeStatus.removeLabel.
+    const THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+    for (let i = 0; i < THRESHOLD; i++) {
+      recordRemovalFailure(orchDir, "CTL-34", "needs-human", "auth-error", Date.now());
+    }
+    const dispatch = fakeDispatch();
+    const { ws, removed } = labelSpy();
+    const evicted = [];
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: batchWith(
+        () => relBlockedBy("CTL-DEP8", { state: "Done", labels: ["blocked", "needs-human"] }),
+        { "CTL-DEP8": "In Progress" }
+      ),
+      readTicketLabels: () => ({ ok: true, labels: ["blocked", "needs-human"] }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    // needs-human's removal was never even attempted (backoff-skip); blocked confirmed.
+    expect(removed).toContainEqual({ ticket: "CTL-34", label: "blocked" });
+    expect(removed.some((r) => r.ticket === "CTL-34" && r.label === "needs-human")).toBe(false);
+    // The sticky needs-human label survives on Linear → the worker dir must stay
+    // (not evicted out from under the only retry record for that label).
+    expect(evicted).toEqual([]);
+    // The false "disposition-clear" event this fix exists to stop must NEVER appear.
+    const falseClears = transitions.filter(
+      (e) => e.ticket === "CTL-34" && e.source === "terminal-stale-evict" && e.toDisposition === null
+    );
+    expect(falseClears).toEqual([]);
+  });
+});
+
+// ── CTL-1605 review findings — STEP A live-label refresh + relations-cache
+// invalidation (scheduler.mjs threads PRRT_kwDOP8GlQM6VyO1_ / :5885) ──
+describe("CTL-1605 review: STEP A terminal-stale live label refresh", () => {
+  afterEach(() => __resetForTests());
+
+  function labelSpy() {
+    const applied = [];
+    const removed = [];
+    const ws = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true, reason: null };
+      },
+      removeLabel: (ticket, label) => {
+        removed.push({ ticket, label });
+        return { removed: true };
+      },
+    };
+    return { ws, applied, removed };
+  }
+
+  test("terminal ticket with a STALE (empty) batch-cached label set → refreshes LIVE, clears the REAL held label", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-30", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const evicted = [];
+    let liveReadCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // Batch-cached labels are EMPTY (the ≤TTL-stale snapshot) — without the
+      // fix STEP A would see present=∅ and evict without ever clearing the
+      // ticket's REAL "blocked" label.
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP4", { state: "Done", labels: [] }), {
+        "CTL-DEP4": "In Progress",
+      }),
+      readTicketLabels: (t) => {
+        liveReadCalls++;
+        expect(t).toBe("CTL-30");
+        return { ok: true, labels: ["blocked"] };
+      },
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    expect(liveReadCalls).toBe(1);
+    // The clear used the LIVE label set, not the stale empty batch-cached one.
+    expect(removed).toContainEqual({ ticket: "CTL-30", label: "blocked" });
+    expect(applied.some((a) => a.ticket === "CTL-30")).toBe(false);
+    expect(evicted).toContain("CTL-30");
+  });
+
+  test("terminal ticket whose LIVE label read fails → DEFERS (no clear, no evict) instead of trusting stale/absent labels", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-31", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const evicted = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP5", { state: "Done", labels: ["blocked"] }), {
+        "CTL-DEP5": "In Progress",
+      }),
+      readTicketLabels: () => ({ ok: false, labels: null, code: 1, stderr: "boom" }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    // Fail-safe: no clear was attempted off a read we couldn't trust, and the
+    // stale dir was never evicted out from under a possibly-still-attached label.
+    expect(removed.some((r) => r.ticket === "CTL-31")).toBe(false);
+    expect(evicted).toEqual([]);
+  });
+
+  test("a genuine held-label write during STEP A invalidates the relations cache entry (mirrors the blocked_by edge-write invalidation)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-32", "triage", "done");
+    const cache = createTicketStateCache({ now: () => 0, ttlMs: 60_000 });
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const fetchBatch = (ids, opts) =>
+      fetchTicketsBatch(ids, {
+        ...opts,
+        exec: (chunk) =>
+          chunk.map((id) => ({
+            identifier: id,
+            state: { name: "Todo" },
+            priority: 2,
+            labels: { nodes: [] },
+            relations: { nodes: [] },
+            inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "CTL-DEP6" } }] },
+          })),
+      });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch,
+      cache,
+    });
+    // The tick applied "blocked" (held by the unresolved CTL-DEP6 dependency) —
+    // a genuine write, not a steady-state no-op.
+    expect(applied).toContainEqual({ ticket: "CTL-32", label: "blocked" });
+    // The write invalidated the relations cache entry hydrated earlier THIS
+    // SAME tick, even though its TTL has not elapsed — a later hydrate must
+    // re-read fresh rather than serve the pre-write (unlabeled) descriptor.
+    expect(cache.getRelations("CTL-32")).toBeUndefined();
   });
 });

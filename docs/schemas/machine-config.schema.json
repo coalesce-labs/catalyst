@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://catalyst.coalesce-labs.com/schemas/machine-config.schema.json",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/machine-config.schema.json",
   "title": "Catalyst Machine Config",
   "description": "Schema for ~/.config/catalyst/config.json — the Layer-2 machine-local config. Contains host-specific secrets, concurrency overrides, and webhook registration data. NEVER commit this file to version control.",
   "type": "object",
@@ -131,6 +131,18 @@
                   "description": "Linear user UUID of the app-actor. NOT USED in machine config (this field is for reference only; the operational botUserId is read from Layer 1 catalyst.monitor.linear.botUserId). Kept here for backwards compatibility / documentation of the app-actor identity."
                 }
               }
+            }
+          }
+        },
+        "deployment": {
+          "type": "object",
+          "description": "Per-host deployment-mode override (CTL-1617). Deployment mode is declared fleet-wide in Layer-1 (.catalyst/config.json → catalyst.deployment.mode), but this per-host value wins over it when present — the exception hatch for a laptop dev-clone of a cluster-declared repo, or one cloud worker joining an otherwise-cluster fleet.",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["single-host", "cluster", "cloud"],
+              "description": "Machine-level deployment-mode override (catalyst.deployment.mode). Wins over the Layer-1 value when present; resolution precedence overall is env CATALYST_DEPLOYMENT_MODE > this Layer-2 value > Layer-1 > constant default 'single-host'. An unrecognized value degrades to 'single-host' (the safest direction), never silently to 'cluster'/'cloud'."
             }
           }
         },

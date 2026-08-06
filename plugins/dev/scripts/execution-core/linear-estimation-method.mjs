@@ -22,6 +22,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+// CTL-1616 PR3: fold this file's inline LINEAR_API_TOKEN/LINEAR_API_KEY ladder
+// onto the shared secret-contract engine (design §8 PR3 table).
+import { resolveSecret } from "../lib/secret-contract.mjs";
 
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -76,7 +79,7 @@ function writeCacheFile(teamId, method) {
 // ── Linear API fetch ─────────────────────────────────────────────────────────
 // Identical curl pattern to runBatchOnce in linear-query.mjs.
 function fetchFromLinear(teamId) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   // authHeader — mirrors linear-query.mjs:authHeader.
   const auth = /^lin_oauth/i.test(token) ? `Bearer ${token}` : token;
   const payload = JSON.stringify({

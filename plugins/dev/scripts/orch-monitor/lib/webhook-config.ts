@@ -1,6 +1,13 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { readClusterProjects, type TeamEntry } from "./cluster-roster";
+// CTL-1616 PR4: the linear-worker-actor registry row is the single declared source of the
+// NEW/OLD config-json dotted paths loadLinearAgentConfig reads — imported directly
+// cross-directory (zero-import leaf, node:fs/os/path only) rather than re-derived by hand
+// here, so a future registry change can't silently drift out of parity with this reader.
+// Precedent for this exact direct cross-directory `.mjs` + `.d.mts` import shape:
+// server.ts's `getDeploymentMode` import from "../lib/deployment-mode.mjs".
+import { getSecretRow } from "../../lib/secret-contract.mjs";
 
 export interface WebhookCliConfig {
   smeeChannel: string;
@@ -283,6 +290,26 @@ function readGithubSection(filePath: string): FileExtract | null {
   };
 }
 
+// CTL-1616 PR4: the dotted config-json paths below are single-sourced from the shared secret
+// contract's linear-worker-actor registry row — precedence PARITY with the row's own
+// resolution order (NEW global bot.worker tier, then its per-team-legacy tier), so a future
+// registry change can't silently drift out of sync with this reader. This does NOT fold onto
+// resolveSecret's own return shape: this function's distinct return shape (creds +
+// webhookSecret + botUserId, vs. resolveSecret's canonicalized {clientId,clientSecret} JSON
+// string) is preserved, and this reader still does NOT consult the row's credentialEnvPair
+// tier or its global-legacy tier — it stays the narrower 2-tier reader it has always been
+// (CTL-550); folding it onto the full resolveSecret behavior is out of this PR's scope. The
+// `?? ` literal fallbacks below are defensive only — the row/fields always exist in the
+// current registry; they guard this reader against ever crashing on a future refactor.
+const WORKER_ACTOR_ROW = getSecretRow("linear-worker-actor");
+const NEW_GLOBAL_AGENT_PATH: string[] = (
+  WORKER_ACTOR_ROW?.configJsonPath ?? "catalyst.linear.bot.worker"
+).split(".");
+const OLD_PER_TEAM_AGENT_PATH: string[] = (
+  WORKER_ACTOR_ROW?.legacyConfigTiers?.find((t) => t.scope === "per-team-legacy")?.configJsonPath ??
+  "catalyst.linear.agent"
+).split(".");
+
 /**
  * Load the Linear app-actor (worker) credentials. Reads from two locations with
  * the NEW global path taking precedence over the OLD per-team path:
@@ -327,7 +354,7 @@ export function loadLinearAgentConfig(
   const globalConfigPath = join(homeConfigDir, "config.json");
   try {
     const globalParsed: unknown = JSON.parse(readFileSync(globalConfigPath, "utf8"));
-    const result = extractCreds(globalParsed, ["catalyst", "linear", "bot", "worker"]);
+    const result = extractCreds(globalParsed, NEW_GLOBAL_AGENT_PATH);
     if (result !== null) return result;
   } catch { /* absent / malformed — fall through */ }
 
@@ -336,7 +363,7 @@ export function loadLinearAgentConfig(
   const perTeamConfigPath = join(homeConfigDir, `config-${projectKey}.json`);
   try {
     const perTeamParsed: unknown = JSON.parse(readFileSync(perTeamConfigPath, "utf8"));
-    return extractCreds(perTeamParsed, ["catalyst", "linear", "agent"]);
+    return extractCreds(perTeamParsed, OLD_PER_TEAM_AGENT_PATH);
   } catch {
     return null;
   }

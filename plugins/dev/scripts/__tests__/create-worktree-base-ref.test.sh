@@ -64,6 +64,18 @@ build_scratch() {
 	mkdir -p "$SRC/.catalyst"
 	printf '{"catalyst":{"projectKey":"t"}}\n' >"$SRC/.catalyst/config.json"
 
+	# Hermetic humanlayer.json under the fake HOME so the CTL-845 vendored
+	# thoughts-init (scripts/worktree-thoughts-init.sh) resolves a thoughtsRepo
+	# INSIDE the scratch and succeeds. On CI (no `humanlayer` binary installed)
+	# create-worktree skips thoughts-init entirely and this file is never read;
+	# on a dev box that HAS humanlayer, without it the vendored init exits 1
+	# (no $HOME/.config/humanlayer/humanlayer.json) and rolls the worktree back
+	# before any assertion — so the whole suite is un-runnable locally. Keeps
+	# the fixture fully hermetic in both environments.
+	mkdir -p "$FAKEHOME/.config/humanlayer"
+	printf '{"thoughts":{"user":"tester","thoughtsRepo":"%s/thoughts-repo","reposDir":"repos","globalDir":"global","defaultProfile":"testprofile"}}\n' \
+		"$SCRATCH" >"$FAKEHOME/.config/humanlayer/humanlayer.json"
+
 	cat >"$BIN/humanlayer" <<'STUB'
 #!/usr/bin/env bash
 case "$1 $2" in
@@ -73,6 +85,22 @@ case "$1 $2" in
 esac
 STUB
 	chmod +x "$BIN/humanlayer"
+}
+
+# push_remote_ticket_branch <name> <n_commits> — CTL-1640: create <name> off
+# origin/main with <n_commits> extra commits and push it to origin, using a
+# throwaway clone so $SRC keeps NO local ref (mirrors a surviving host that has
+# never seen the ticket branch, only origin/<ticket> from a pushed draft PR).
+push_remote_ticket_branch() {
+	local NAME="$1" N="$2" i
+	local PUSH="$SCRATCH/pusher-$NAME"
+	git clone -q "$ORIGIN" "$PUSH"
+	git -C "$PUSH" config user.email t@t.t
+	git -C "$PUSH" config user.name t
+	git -C "$PUSH" checkout -q -b "$NAME" origin/main
+	for ((i = 1; i <= N; i++)); do git -C "$PUSH" commit -q --allow-empty -m "$NAME-c$i"; done
+	git -C "$PUSH" push -q -u origin "$NAME"
+	REMOTE_TICKET_TIP="$(git -C "$PUSH" rev-parse "$NAME")"
 }
 
 run_create() { # $1 worktree name; $@ extra args
@@ -108,7 +136,14 @@ rm -rf "$SCRATCH"
 # Case 3 — --reuse-existing on an already-present dir: no fetch, no change.
 echo "Test 3: --reuse-existing short-circuits before fetch"
 build_scratch
-mkdir -p "$WT/wt-reuse" # pre-create the path
+mkdir -p "$WT/wt-reuse/thoughts" # pre-create the path
+# Pre-seed a HEALTHY thoughts/shared symlink so the CTL-1497 reuse-path repair
+# is skipped (it only fires on an unhealthy link, and on a dev box with
+# humanlayer installed the repair of this empty non-git dir cannot resolve a
+# repo and fails). On CI (no humanlayer) the repair block is skipped anyway;
+# this keeps the fixture hermetic in both environments.
+mkdir -p "$SCRATCH/reuse-shared"
+ln -sfn "$SCRATCH/reuse-shared" "$WT/wt-reuse/thoughts/shared"
 run_create wt-reuse --reuse-existing
 assert_eq "0" "$EXIT" "exits 0 on reuse"
 assert_contains "$OUTPUT" "Reusing existing worktree" "reuse path taken"
@@ -128,6 +163,63 @@ else
 fi
 HEAD_SHA="$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null || echo NA)"
 assert_eq "$LOCAL_TIP" "$HEAD_SHA" "worktree HEAD matches local main when fetch is skipped"
+rm -rf "$SCRATCH"
+
+# Case 5 — resume from an origin-only ticket branch (CTL-1640 Scenario 1).
+echo "Test 5: resume from origin-only ticket branch (no local ref)"
+build_scratch
+push_remote_ticket_branch wt-remote-only 3
+# precondition: SRC must have NO local ref for the ticket branch
+if git -C "$SRC" show-ref --verify --quiet refs/heads/wt-remote-only; then
+	fail "precondition: SRC must NOT have a local wt-remote-only ref"
+else
+	pass "precondition: no local wt-remote-only ref in SRC"
+fi
+run_create wt-remote-only
+assert_eq "0" "$EXIT" "exits 0 resuming from origin ticket branch"
+HEAD_SHA="$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null || echo NA)"
+assert_eq "$REMOTE_TICKET_TIP" "$HEAD_SHA" "worktree HEAD matches the pushed ticket tip (commits resumed)"
+if [[ $HEAD_SHA != "$ORIGIN_TIP" ]]; then
+	pass "worktree HEAD is NOT the base tip (not cut from base)"
+else
+	fail "worktree HEAD equals base tip — remote commits orphaned"
+fi
+assert_contains "$OUTPUT" "origin/wt-remote-only" "resume banner mentions origin/wt-remote-only"
+rm -rf "$SCRATCH"
+
+# Case 6 — no remote ticket branch → fresh-from-base unchanged (CTL-1640 Scenario 3).
+echo "Test 6: no remote ticket branch falls through to fresh-from-base"
+build_scratch
+run_create wt-fresh-none
+assert_eq "0" "$EXIT" "exits 0 with no remote ticket branch"
+HEAD_SHA="$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null || echo NA)"
+assert_eq "$ORIGIN_TIP" "$HEAD_SHA" "worktree HEAD matches origin/main base tip"
+if [[ $OUTPUT != *"Resuming from origin/"* ]]; then
+	pass "no resume banner when no remote ticket branch exists"
+else
+	fail "resume banner printed with no remote ticket branch"
+fi
+rm -rf "$SCRATCH"
+
+# Case 7 — --no-from-remote escape hatch overrides an existing remote branch.
+echo "Test 7: --no-from-remote ignores an existing remote ticket branch"
+build_scratch
+push_remote_ticket_branch wt-optout 2
+run_create wt-optout --no-from-remote
+assert_eq "0" "$EXIT" "exits 0 with --no-from-remote"
+HEAD_SHA="$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null || echo NA)"
+assert_eq "$ORIGIN_TIP" "$HEAD_SHA" "worktree HEAD is base tip, not the remote ticket tip"
+rm -rf "$SCRATCH"
+
+# Case 8 — reclaim's own argv (<ticket> main --reuse-existing, dir absent) seeds
+# from origin/<ticket> (CTL-1640 Scenario 2 — cross-host reclaim round-trip).
+echo "Test 8: reclaim argv (--reuse-existing, dir absent) resumes pushed commits"
+build_scratch
+push_remote_ticket_branch wt-reclaim 2
+run_create wt-reclaim --reuse-existing # dir does NOT exist → falls through to branch block
+assert_eq "0" "$EXIT" "reclaim argv exits 0"
+HEAD_SHA="$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null || echo NA)"
+assert_eq "$REMOTE_TICKET_TIP" "$HEAD_SHA" "reclaim rebuild contains the dead host's pushed commits"
 rm -rf "$SCRATCH"
 
 echo ""

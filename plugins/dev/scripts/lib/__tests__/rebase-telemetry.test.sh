@@ -4,6 +4,18 @@
 
 set -uo pipefail
 
+# CTL-1612 round 12 (Codex P2 follow-up): this suite asserts on JSONL fields
+# via `jq` throughout. It was previously only reachable through run-tests.sh's
+# scripts/__tests__ glob (never discovered directly), so a jq-less host never
+# hit it; round 9 wired lib/__tests__/*.test.sh into a direct glob, which now
+# runs this suite unconditionally and hard-fails with jq-not-found errors
+# instead of a proper skip. "SKIP:" (column 0) is the marker run-tests.sh's
+# `grep -q '^SKIP:'` recognizes as a clean skip rather than PASS or FAIL.
+if ! command -v jq >/dev/null 2>&1; then
+	echo "SKIP: rebase-telemetry tests require jq (not on PATH)"
+	exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TELEMETRY_LIB="${LIB_DIR}/rebase-telemetry.sh"

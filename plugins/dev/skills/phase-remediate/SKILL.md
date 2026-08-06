@@ -79,7 +79,44 @@ SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
 [[ -f "$SIGNAL_FILE" ]] || { echo "phase-${PHASE}: signal file missing" >&2; exit 1; }
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
-[[ -n "$PLUGIN_ROOT" ]] || PLUGIN_ROOT="$(dirname "$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo .)")")")"
+if [[ -z "$PLUGIN_ROOT" ]]; then
+  # CTL-1628 Phase A2 post-merge fix: this used to fall back to
+  # `dirname(dirname(dirname($BASH_SOURCE/$0)))`, which in a bash command
+  # block (not a sourced script file) resolves to something bogus like "/" —
+  # a bad PLUGIN_ROOT here means `[[ -x "$YIELD_CHECK" ]]` below just
+  # evaluates false and the CTL-615 duplicate-worker yield gate is skipped
+  # WITHOUT any warning, the exact silent-skip exposure the A2 fix targeted
+  # in _phase-agent-template. Resolve properly via
+  # lib/catalyst-runtime-root.sh's catalyst_dev_scripts (cwd sibling →
+  # marketplace clone → versioned cache), and make a genuine miss LOUD
+  # instead of silently proceeding with a broken PLUGIN_ROOT.
+  RUNTIME_ROOT_LIB=""
+  if [[ -f "./plugins/dev/scripts/lib/catalyst-runtime-root.sh" ]]; then
+    RUNTIME_ROOT_LIB="./plugins/dev/scripts/lib/catalyst-runtime-root.sh"
+  else
+    __rr_mkt="$( ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 || true )"
+    if [[ -n "$__rr_mkt" && -f "$__rr_mkt" ]]; then
+      RUNTIME_ROOT_LIB="$__rr_mkt"
+    else
+      __rr_cache="$( ls -d "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 || true )"
+      [[ -n "$__rr_cache" && -f "$__rr_cache" ]] && RUNTIME_ROOT_LIB="$__rr_cache"
+      unset __rr_cache
+    fi
+    unset __rr_mkt
+  fi
+  DEV_SCRIPTS=""
+  if [[ -n "$RUNTIME_ROOT_LIB" ]]; then
+    # shellcheck disable=SC1090
+    . "$RUNTIME_ROOT_LIB"
+    catalyst_dev_scripts >/dev/null 2>&1 || true
+    DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
+  fi
+  if [[ -z "$DEV_SCRIPTS" ]]; then
+    echo "phase-${PHASE}: FATAL — CLAUDE_PLUGIN_ROOT unset and catalyst_dev_scripts probe missed too; refusing to silently skip the CTL-615 yield gate with a guessed PLUGIN_ROOT" >&2
+    exit 1
+  fi
+  PLUGIN_ROOT="$(dirname "$DEV_SCRIPTS")"
+fi
 
 # 0. Codified bg_job_id yield (CTL-615). If the signal file's bg_job_id names a
 #    DIFFERENT live bg job, we are a redispatch duplicate of a still-running

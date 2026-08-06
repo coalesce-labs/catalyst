@@ -56,6 +56,7 @@ import { getEventLogPath } from "../../execution-core/config.mjs";
 // bun:sqlite/pino edge, so this import is graph-safe.
 import { recordFullRead, scanFileLines } from "./event-log-reader.ts"; // CTL-1529: bounded chunked scan
 import { isLinearTerminal } from "../../execution-core/terminal-state.mjs";
+import { readClusterProjects } from "./cluster-roster.ts";
 
 const execFileP = promisify(execFile);
 
@@ -406,22 +407,12 @@ export function buildTeamRepoMap(teams) {
   return map;
 }
 
-// loadTeamRepoMap() — sync L2-then-L1 config read, fail-open to {}. Same two
-// locations and precedence direction maxParallel() uses (L2 = ~/.config/catalyst,
-// L1 = cwd/.catalyst), preferring the L2 teams[] then L1.
-function readJSONSync(path) {
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return null;
-  }
-}
+// loadTeamRepoMap() — cluster-aware team→repo map (CTL-1603, the 4th CTL-1214
+// Phase 2 migration). readClusterProjects() unions cluster.json with the
+// Layer-1 fallback (cluster wins on conflict, Layer-1-only teams retained)
+// and is sync + fail-open, preserving the const-loaded-once semantics of TEAM_REPO.
 function loadTeamRepoMap() {
-  const l2 = readJSONSync(join(HOME, ".config", "catalyst", "config.json"));
-  const l1 = readJSONSync(join(process.cwd(), ".catalyst", "config.json"));
-  const pickTeams = (c) => c?.catalyst?.monitor?.linear?.teams ?? c?.monitor?.linear?.teams;
-  const teams = pickTeams(l2) ?? pickTeams(l1) ?? [];
-  return buildTeamRepoMap(teams);
+  return buildTeamRepoMap(readClusterProjects());
 }
 
 const TEAM_REPO = loadTeamRepoMap();
@@ -796,7 +787,9 @@ export function deriveCurrentPhase(phaseSigs) {
         model: sig.model || null,
         startedAt: sig.startedAt,
         updatedAt: sig.updatedAt,
-        failureReason: sig.failureReason ?? sig.stalledReason ?? null,
+        // attentionReason inserted between failureReason and stalledReason to match
+        // scheduler.mjs:2666 readDispatchFailureReason precedence (CTL-1648).
+        failureReason: sig.failureReason ?? sig.attentionReason ?? sig.stalledReason ?? null,
       };
     }
     lastTerminal = {
@@ -805,7 +798,7 @@ export function deriveCurrentPhase(phaseSigs) {
       model: sig.model || null,
       startedAt: sig.startedAt,
       updatedAt: sig.updatedAt,
-      failureReason: sig.failureReason ?? sig.stalledReason ?? null,
+      failureReason: sig.failureReason ?? sig.attentionReason ?? sig.stalledReason ?? null,
     };
     lastTerminalIndex = i;
   }
@@ -854,7 +847,7 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remediateSig.updatedAt ?? null,
-      failureReason: remediateSig.failureReason ?? remediateSig.stalledReason ?? null,
+      failureReason: remediateSig.failureReason ?? remediateSig.attentionReason ?? remediateSig.stalledReason ?? null,
     };
   }
   // Case 2: remediate is terminal but more recent than what PHASE_ORDER surfaced.
@@ -869,7 +862,7 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remUpdated || null,
-      failureReason: remediateSig.failureReason ?? remediateSig.stalledReason ?? null,
+      failureReason: remediateSig.failureReason ?? remediateSig.attentionReason ?? remediateSig.stalledReason ?? null,
     };
   }
   return cur;

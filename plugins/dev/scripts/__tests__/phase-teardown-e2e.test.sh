@@ -69,6 +69,19 @@ fi
 TMPROOT="$(mktemp -d -t phase-teardown-test.XXXXXX)"
 trap 'rm -rf "$TMPROOT" "$SKILL_BODY_FILE"' EXIT
 
+# CTL-1417: hermeticity floor (belt outside the per-case HOME="$FAKE_HOME"
+# subshells below). Isolate HOME and neuter global/system git config so no code
+# path outside those subshells can resolve a production $HOME/catalyst/wt/...
+# target to the operator's real worktree — the worktree self-deletion vector.
+export HOME="${TMPROOT}/home"
+mkdir -p "$HOME"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+# Red canary: fail loudly if the isolation is ever not in effect.
+[[ "$HOME" == "$TMPROOT"/* ]] || {
+	echo "FAIL: HOME not isolated to scratch"
+	exit 1
+}
+
 # ─── Helper: build a throwaway git repo + linked worktree ───────────────────
 # Returns the path to the PRIMARY worktree (the repo) via stdout.
 # The TICKET worktree is at <primary>/../wt/<ticket>.

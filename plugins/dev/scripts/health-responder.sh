@@ -105,6 +105,16 @@ SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 export PATH="${PATH}:${SCRIPT_DIR}"
 
+# CTL-1616 PR5: the secret-contract bash mirror — sourced here (once, at script load, NOT
+# inside the bounded token-resolution path) so _token_provisioned's pure-bash fallback ladder
+# (below) can call catalyst_secret_cloud_token_name instead of hand-rolling its own jq-based
+# ladder. SAFE to source unconditionally: the file is pure function/array definitions at
+# source time (idempotent-load-guarded, no subprocess/network/jq call happens until a function
+# is actually invoked) — it cannot itself hang or wedge the sweep the way an unbounded `bun`
+# subprocess could (see _resolve_token_env_via_bun's own bounding below).
+# shellcheck source=lib/catalyst-secret-contract.sh
+source "${SCRIPT_DIR}/lib/catalyst-secret-contract.sh"
+
 # ─── arg parsing ────────────────────────────────────────────────────────────
 
 DRY_RUN="${RESPONDER_DRY_RUN:-0}"
@@ -243,10 +253,13 @@ RESPONDER_CLUSTER_ENV_FILE="${RESPONDER_CLUSTER_ENV_FILE:-${HOME}/.config/cataly
 # false-escalation storm). Mirrors catalyst-stack's install-time token probe
 # byte-for-byte: source both files in a subshell matching launch.sh's view,
 # resolve the env-var NAME via the same config.mjs helper (falls back to the
-# literal CATALYST_CLOUD_TOKEN if bun is unavailable), then check presence of
-# THAT resolved name — never a fixed/guessed variable name.
+# secret-contract bash mirror's catalyst_secret_cloud_token_name if bun is
+# unavailable — CTL-1616 PR5), then check presence of THAT resolved name —
+# never a fixed/guessed variable name.
 # _resolve_token_env_via_bun: prints the resolved env-var NAME from
-# resolveNodeCloudTokenEnv(), or prints nothing on timeout/failure/absence.
+# resolveNodeCloudTokenEnv() — which is itself now a thin delegate over
+# lib/secret-contract.mjs's resolveCloudTokenName (CTL-1616 PR5) — or prints
+# nothing on timeout/failure/absence.
 # Bounded the same way _last_exit_status bounds `launchctl list` (Codex P2
 # round 5): this runs INSIDE _token_provisioned, which runs AFTER the sweep
 # lock is acquired — an unbounded bun call there would let a wedged bun or
@@ -311,11 +324,16 @@ _resolve_token_env_via_bun() {
 # shell) since this responder has no different context to simulate and both
 # the bun path and the bash fallback below need to see a real override.
 # _resolve_token_env_via_bun returning empty means bun was unavailable or its
-# import failed; the fallback then replicates resolveNodeCloudTokenEnv's own
-# precedence in pure bash — env override (from the sourced files) first, then
-# the Layer-2 catalyst.cloud.tokenEnv key, then the standard name — instead
-# of hardcoding the default, which would misclassify a node with a genuinely
-# custom-named token as tokenless whenever bun happens to be unavailable.
+# import failed; the fallback then calls catalyst_secret_cloud_token_name
+# (lib/catalyst-secret-contract.sh, sourced at script load above) — the SAME
+# registry row's bash mirror, not a hand-duplicated ladder — which resolves
+# the identical env-override / Layer-2 catalyst.cloud.tokenEnv / default
+# precedence in pure bash (design §9 PR5: "both cloud-token readers agree
+# byte-for-byte on the resolved env-var name"). Sourcing that lib is cheap
+# (function/array definitions only — no subprocess/network at load time; see
+# the `source` comment above), so this fallback still never blocks on
+# anything heavier than the same jq call the OLD hand-rolled ladder already
+# made.
 _token_provisioned() {
   local probe
   probe="$(
@@ -325,16 +343,11 @@ _token_provisioned() {
     [[ -r "$RESPONDER_TOKEN_FILE" ]] && . "$RESPONDER_TOKEN_FILE"
     name="$(_resolve_token_env_via_bun)"
     if [[ -z "$name" ]]; then
-      if [[ -n "${CATALYST_CLOUD_TOKEN_ENV:-}" ]]; then
-        name="$CATALYST_CLOUD_TOKEN_ENV"
-      else
-        l2_file="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
-        name=""
-        if [[ -r "$l2_file" ]] && command -v jq >/dev/null 2>&1; then
-          name="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$l2_file" 2>/dev/null)"
-        fi
-        [[ -z "$name" ]] && name="CATALYST_CLOUD_TOKEN"
-      fi
+      catalyst_secret_cloud_token_name cloud-token >/dev/null
+      name="$CATALYST_SECRET_TOKEN_NAME"
+      echo "[health-responder] token-env resolved via bash-fallback: ${name}" >&2
+    else
+      echo "[health-responder] token-env resolved via bun: ${name}" >&2
     fi
     [[ -n "${!name:-}" ]] && printf yes || printf no
   )"

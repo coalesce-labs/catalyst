@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths:
       - "plugins/dev/scripts/orch-monitor/**"
+      # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
+      # orch-monitor's (and orch-monitor/ui's) install.
+      - "package.json"
+      - "bun.lock"
+      - "turbo.json"
 
 jobs:
   quality:
@@ -20,7 +25,11 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile && cd ui && bun install --frozen-lockfile
+        # CTL-1628: a single root bun workspace/lockfile now covers both
+        # orch-monitor and orch-monitor/ui as workspace members — install once
+        # at the repo root instead of two separate per-package installs.
+        working-directory: .
+        run: bun install --frozen-lockfile
 
       - name: Typecheck
         run: bun run typecheck

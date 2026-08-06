@@ -791,6 +791,78 @@ describe("buildBoardScanEvent", () => {
     expect(ev.details.flagged).toContain("CTL-1");
     expect(Array.isArray(ev.details.tier1Moves)).toBe(true);
   });
+
+  // CTL-1607: per-host slot census threaded onto the board-scan event.
+  test("threads board.capacity into details.slot* scalars", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 3, freeSlots: 1 } });
+    const decision = decideBoardHealth(invs, board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision, board });
+    expect(ev.details.slotCapacity).toBe(4);
+    expect(ev.details.slotInUse).toBe(3); // capacity − free = 4 − 1
+    expect(ev.details.slotFree).toBe(1);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #1): in_use is derived from capacity − freeSlots, so it
+  // reflects the FULL occupancy basis (liveCount + queued delegates + SDK inflight)
+  // the scheduler admits against — NOT the raw bg liveCount. Here occupancy is 4
+  // (freeSlots 0) while only 1 bg job is live: in_use must be 4, not 1.
+  test("slotInUse reflects occupancy (capacity − free), not bare liveCount", () => {
+    const invs = allGreen();
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 1, freeSlots: 0 } });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
+    expect(ev.details.slotInUse).toBe(4);
+    expect(ev.details.slotFree).toBe(0);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #2): a draining / stale-liveness node admits no new
+  // work, so its PUBLISHED slotFree collapses to 0 — while slotInUse still reports
+  // actual occupancy (capacity − rawFree = 2), not a collapsed value.
+  test("admissionGated collapses slotFree to 0 (in_use still real occupancy)", () => {
+    const invs = allGreen();
+    const board = mkBoard({
+      capacity: { maxParallel: 4, liveCount: 1, freeSlots: 2, admissionGated: true },
+    });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
+    expect(ev.details.slotFree).toBe(0);
+    expect(ev.details.slotInUse).toBe(2);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #3): a board-health delegate dispatched THIS scan
+  // reserves a slot the scheduler charges right after the pass returns, so free is
+  // debited (2 → 1) and in_use credited ((4−2)+1 = 3) here.
+  test("dispatched delegate debits slotFree and credits slotInUse", () => {
+    const invs = allGreen();
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 2, freeSlots: 2 } });
+    const ev = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+      act: { dispatched: true, anchor: "CTL-1" },
+    });
+    expect(ev.details.slotFree).toBe(1);
+    expect(ev.details.slotInUse).toBe(3);
+  });
+
+  test("no board arg → slot* scalars default to null (back-compat)", () => {
+    const invs = allGreen();
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision });
+    expect(ev.details.slotCapacity).toBeNull();
+    expect(ev.details.slotInUse).toBeNull();
+    expect(ev.details.slotFree).toBeNull();
+  });
 });
 
 // ─── buildBoardContext — the whole-board brief the delegate gets injected ────
@@ -1157,7 +1229,7 @@ describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
   test("no act param → default shadow outcome; actDispatched 0", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
     const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decisionFor(invs) });
-    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow", skippedReasonNoClock: false });
     expect(ev.details.actDispatched).toBe(0);
   });
 
@@ -1169,7 +1241,7 @@ describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
       decision: decisionFor(invs),
       act: { dispatched: true, anchor: "CTL-7", skippedReason: null },
     });
-    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null });
+    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null, skippedReasonNoClock: false });
     expect(ev.details.actDispatched).toBe(1);
     expect(ev.reason).toContain("dispatched CTL-7");
   });
@@ -1253,7 +1325,7 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
     boardHealthPass(
       flaggedDeps({ mode: "shadow", emit: (e) => emits.push(e), act: () => { throw new Error("shadow must not act"); } }),
     );
-    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow", skippedReasonNoClock: false });
   });
 
   test("Codex round-2: enforce with NO act seam → skippedReason:no-actuator (a miswired-actuator wedge)", () => {
@@ -1322,7 +1394,7 @@ describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 
     });
     expect(board.ring.boardScans[0]).toEqual({
       tsMs: Date.parse("2026-06-20T11:59:00Z"),
-      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null,
+      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null, skippedReasonNoClock: false,
     });
   });
 });
@@ -1748,5 +1820,92 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   test("buildBoardContext defaults the cohort to [] when green (shadow-safe)", () => {
     const b = board({ ticketsById: one({ updatedAt: at(2) }) });
     expect(buildBoardContext(b, evaluateInvariants(b)).unownedInFlight).toEqual([]);
+  });
+});
+
+// ─── CTL-1610 (Phase 2): skippedReasonNoClock threading ─────────────────────
+describe("checkActuationLiveness — skippedReasonNoClock (CTL-1610)", () => {
+  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, skippedReason: "all-candidates-cooldown", skippedReasonNoClock: false, ...o });
+
+  test("(CTL-1610) all-candidates-exhausted with skippedReasonNoClock:true across the window → flags (wedge)", () => {
+    const boardScans = Array.from({ length: 6 }, () =>
+      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(true);
+    expect(r.actuationLiveness.ok).toBe(false);
+  });
+
+  test("(CTL-1610) all-candidates-exhausted with a valid clock (skippedReasonNoClock:false) stays BENIGN (not flagged)", () => {
+    const boardScans = Array.from({ length: 6 }, () =>
+      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: false }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("(CTL-1610) a dispatched scan within a no-clock-latch window still clears the wedge", () => {
+    const boardScans = [
+      ...Array.from({ length: 5 }, () => mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true })),
+      mkScan({ dispatched: true, skippedReason: null }),
+    ];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+});
+
+describe("buildBoardScanEvent — act.skippedReasonNoClock round-trip (CTL-1610)", () => {
+  test("(CTL-1610) buildBoardScanEvent carries act.skippedReasonNoClock", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const ev = buildBoardScanEvent({ mode: "enforce", invariants: invs, decision,
+      act: { dispatched: false, anchor: null, skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true } });
+    expect(ev.details.act.skippedReasonNoClock).toBe(true);
+  });
+});
+
+// ─── CTL-1610 (Phase 3): boardHealthPass maps actResult.latchedNoClock →
+//     the emitted scan's skippedReasonNoClock (the glue seam between
+//     holisticBoardHealthAct's return and checkActuationLiveness). Added by
+//     phase-verify to close the one line (board-health.mjs:1496) that neither
+//     the holisticBoardHealthAct nor the buildBoardScanEvent test exercised. ──
+describe("boardHealthPass — latchedNoClock → scan.skippedReasonNoClock (CTL-1610)", () => {
+  test("(CTL-1610) an exhausted act with latchedNoClock:true emits skippedReasonNoClock:true", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: true }),
+      }),
+    );
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("all-candidates-exhausted");
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(true);
+  });
+
+  test("(CTL-1610) a well-formed exhausted act (latchedNoClock:false) stays skippedReasonNoClock:false", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: false }),
+      }),
+    );
+    expect(emits[0].details.act.skippedReason).toBe("all-candidates-exhausted");
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
+  });
+
+  test("(CTL-1610) a dispatched act forces skippedReasonNoClock:false regardless of latch signal", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: true, candidate: "CTL-1", latchedNoClock: true }),
+      }),
+    );
+    expect(emits[0].details.act.dispatched).toBe(true);
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
   });
 });
