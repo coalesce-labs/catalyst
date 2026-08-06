@@ -88,6 +88,10 @@ source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 # shellcheck source=lib/ctl708-resolve.sh
 source "${SCRIPT_DIR}/lib/ctl708-resolve.sh"
 ctl708_wire_resolver
+# CTL-1639: salvage a doomed worktree's unpushed work before the L3 recreate
+# destroys it (below). Best-effort/fail-open — never blocks the recreate.
+# shellcheck source=lib/worktree-salvage.sh
+source "${SCRIPT_DIR}/lib/worktree-salvage.sh"
 # shellcheck source=lib/phase-artifact-gate.sh
 source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 
@@ -1092,6 +1096,13 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 					# any auto-remediation path.
 					STALL_REASON="worktree_live_handle_guard_refused"
 				else
+					# CTL-1639: snapshot unpushed commits + dirty tree to
+					# ~/catalyst/salvage/ BEFORE the destroy. This is the
+					# highest-value site — `branch -f` resets the ref AND the tree
+					# is removed, so without salvage both vanish together.
+					salvage_worktree "$_WT_PATH" "$TICKET" \
+						--base "$BASE_BRANCH" --orch "$ORCH_ID" \
+						--reason "$STALL_REASON" --site "dispatch-l3-recreate" || true
 					git -C "$_REPO_ROOT" worktree remove --force "$_WT_PATH" 2>/dev/null || true
 					git -C "$_REPO_ROOT" branch -f "$TICKET" "origin/${BASE_BRANCH}" 2>/dev/null || true
 					# CATALYST_RECREATE_WORKTREE_DIR overrides the worktrees base for

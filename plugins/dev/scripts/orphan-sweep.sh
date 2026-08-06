@@ -87,6 +87,13 @@ export PATH="${PATH}:${SCRIPT_DIR}"
 # shellcheck disable=SC1091
 [ -r "${SCRIPT_DIR}/lib/worktree-remove-guard.sh" ] && source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 
+# CTL-1639: local salvage primitive — snapshot unpushed commits + dirty tree to
+# ~/catalyst/salvage/ before a destructive worktree removal (additive to the
+# push-based salvage_push_then_remove below; fail-open, never blocks a removal).
+# shellcheck source=lib/worktree-salvage.sh
+# shellcheck disable=SC1091
+[ -r "${SCRIPT_DIR}/lib/worktree-salvage.sh" ] && source "${SCRIPT_DIR}/lib/worktree-salvage.sh"
+
 # _removal_guard_ok <path> — the SINGLE fail-closed predicate every `git worktree
 # remove --force` site gates on (CTL-1417). Returns 0 (safe to force-remove) ONLY
 # when the guard function loaded AND it cleared the path. If the guard lib was
@@ -1270,6 +1277,11 @@ sweep_worktrees() {
           if ! _removal_guard_ok "$wt"; then
             log "skip (guard refused/unavailable — live handle/self): $wt"; _sweep_count activeSkipped; continue
           fi
+          # CTL-1639: salvage before remove. SAFE means nothing to save, so this
+          # emits worktree.salvage.skipped — cheap and harmless, and it defends
+          # against a stale SAFE verdict racing an eleventh-hour local edit.
+          command -v salvage_worktree >/dev/null 2>&1 && \
+            salvage_worktree "$wt" "$wt_id" --site "orphan-sweep-safe" || true
           git worktree remove --force "$wt" 2>/dev/null && {
             log "removed worktree (SAFE): $wt"
             _sweep_count removed; removed_count=$((removed_count+1))
@@ -1296,6 +1308,12 @@ sweep_worktrees() {
           ;;
         SALVAGE_UNPUSHED)
           wt_id="$(basename "$wt")"
+          # CTL-1639: always snapshot the unpushed commits locally FIRST, before
+          # any removal and independent of SWEEP_SALVAGE_PUSH — the local bundle
+          # is the always-on additive safety net the network push (default-off,
+          # HEAD-only) never was.
+          command -v salvage_worktree >/dev/null 2>&1 && \
+            salvage_worktree "$wt" "$wt_id" --site "orphan-sweep-unpushed" || true
           if [[ "$SWEEP_SALVAGE_PUSH" == "1" ]]; then
             if salvage_push_then_remove "$wt" "$wt_id"; then
               if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
@@ -1318,7 +1336,13 @@ sweep_worktrees() {
           fi
           ;;
         SALVAGE_DIRTY)
-          log "skip SALVAGE_DIRTY (has real uncommitted changes): $wt"
+          # CTL-1639: the sweep still KEEPS a dirty tree (does not remove it), but
+          # snapshot the uncommitted diff to ~/catalyst/salvage/ first so the work
+          # is on disk even if an operator later force-cleans the tree by hand —
+          # closing the "preserved only by never being reaped" data-loss gap.
+          command -v salvage_worktree >/dev/null 2>&1 && \
+            salvage_worktree "$wt" "$(basename "$wt")" --site "orphan-sweep-dirty" || true
+          log "skip SALVAGE_DIRTY (snapshotted uncommitted changes, keeping tree): $wt"
           _sweep_count salvageSkipped
           ;;
         KEEP)

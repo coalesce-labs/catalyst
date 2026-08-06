@@ -289,6 +289,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/worktree-salvage.test.sh
 
+      - name: worktree-salvage destroy-site wiring tests (CTL-1639)
+        # Deterministic source-order invariant: each destructive bash site
+        # (phase-agent-dispatch L3, orphan-sweep, phase-teardown SKILL.md) must
+        # source the salvage lib AND place its salvage_worktree call BEFORE the
+        # destructive git op. The dispatcher + teardown suites are not CI-gated
+        # (locally flaky), so this static guard is the CI backstop that a future
+        # refactor can't move a destroy ahead of its salvage.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/worktree-salvage-sites.test.sh
+
       - name: daemon shared-GitHub-credential projection test (CTL-1612)
         # Covers _project_shared_github_token: the shared SOPS file WINS over a stale
         # inherited GITHUB_TOKEN/GH_TOKEN (the 2026-08-02 fleet outage), an
