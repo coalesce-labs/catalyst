@@ -5999,23 +5999,66 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
         body: {},
       }) + "\n"
     );
-    // Same shape as recovery.mjs's real default (recovery.mjs:2062-2072), built
+    // Same shape as recovery.mjs's real default (recovery.mjs:2084-2098), built
     // here against the temp path directly since hasCompleteEvent/latestCompleteEventTs
     // both accept an explicit path override.
     const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
       if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
       const ts = latestCompleteEventTs({ ticket, phase, path });
       if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
       if (typeof sinceAttempt === "number") {
         const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
         if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
       }
-      return ts >= sinceIso;
+      return true;
     };
     expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(false);
     expect(
       completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: "2026-06-01T00:00:00Z" })
     ).toBe(true);
+  });
+
+  // Codex review (PR #2851): a redispatch after a completed cycle can reuse
+  // attempt numbers (ordinary scheduler dispatches omit `attempt`, defaulting
+  // back to attempt 1) — the timestamp must reject an OLDER completion before
+  // attempt is ever consulted, or a stale attempt-1 completion from a PRIOR
+  // cycle satisfies a brand-new attempt-1 dispatch even though it predates
+  // the new signal's startedAt.
+  test("Codex PR#2851: an older completion with a REUSED attempt number is still rejected by timestamp", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs, latestCompleteEventAttempt } = await import(
+      "./event-scan.mjs"
+    );
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-reused-attempt-"));
+    const path = join(dir, "events.jsonl");
+    // Prior cycle's attempt-1 completion, well before the new dispatch's startedAt.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: "2026-06-01T00:00:00Z",
+        attributes: { "event.name": "phase.implement.complete.CTL-9", "phase.attempt": 1 },
+        body: {},
+      }) + "\n"
+    );
+    const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return true;
+    };
+    // New dispatch's own attempt also defaults to 1 (ordinary redispatch omits
+    // `attempt`) — eventAttempt(1) >= sinceAttempt(1) would wrongly read "seen"
+    // if attempt were compared before the timestamp.
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED, sinceAttempt: 1 })
+    ).toBe(false);
   });
 
   // CTL-778 follow-up (upstream review, PR #2851): the case sinceIso alone can't
@@ -6043,11 +6086,13 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
       if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
       const ts = latestCompleteEventTs({ ticket, phase, path });
       if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
       if (typeof sinceAttempt === "number") {
         const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
         if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
       }
-      return ts >= sinceIso;
+      return true;
     };
     // Without sinceAttempt, the same-second tie reads as "seen" — the bug.
     expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(true);

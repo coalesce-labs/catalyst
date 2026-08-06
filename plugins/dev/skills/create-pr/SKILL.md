@@ -159,8 +159,9 @@ fi
 # placeholder-identity or blast-radius-anomalous commit reached the real
 # remote before anything could refuse it.
 source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
-if ! VERIFIED_SHA="$(draft_pr_push_verify)"; then
-    PUSH_VERIFY_RC=$?
+PUSH_VERIFY_RC=0
+VERIFIED_SHA="$(draft_pr_push_verify)" || PUSH_VERIFY_RC=$?
+if [[ $PUSH_VERIFY_RC -ne 0 ]]; then
     if [[ $PUSH_VERIFY_RC -eq 4 ]]; then
         echo "create-pr: push refused by safety gate (see log above)" >&2
     else

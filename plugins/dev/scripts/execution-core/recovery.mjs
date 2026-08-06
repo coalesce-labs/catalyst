@@ -2081,15 +2081,26 @@ export function reclaimDeadWorkIfPossible(
     // complete event carry an attempt number, compare THOSE instead of the
     // coarser timestamp. Optional and fail-open — omit it (or an event with no
     // recorded attempt) and behavior is byte-identical to the timestamp-only path.
+    // Codex review (PR #2851): the timestamp must reject an OLDER completion
+    // first — attempts are only a disambiguator within the same second-precision
+    // timestamp window, never a substitute for the timestamp check. An ordinary
+    // scheduler redispatch omits `attempt`, so the dispatcher defaults back to
+    // attempt 1; comparing eventAttempt >= sinceAttempt before ts made a stale
+    // attempt-1 completion from a PRIOR cycle satisfy a brand-new attempt-1
+    // dispatch even though its timestamp predates the new signal's startedAt.
     completeEventSeen = ({ ticket: t, phase: p, sinceIso, sinceAttempt } = {}) => {
       if (!sinceIso) return hasCompleteEvent({ ticket: t, phase: p });
       const ts = latestCompleteEventTs({ ticket: t, phase: p });
       if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      // ts === sinceIso: second-precision tie — attempt is the precise
+      // discriminator when both sides carry one.
       if (typeof sinceAttempt === "number") {
         const eventAttempt = latestCompleteEventAttempt({ ticket: t, phase: p });
         if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
       }
-      return ts >= sinceIso;
+      return true;
     },
     // CTL-658 — resume-session resolver. Maps the dead worker's bg_job_id to a
     // `claude --resume`-compatible UUID (or null) so the revive can continue the
