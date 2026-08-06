@@ -53,7 +53,7 @@ describe("schedulerTick — board-health seam (CTL-1290 §9.4)", () => {
     expect(calls.length).toBe(1);
     const o = calls[0];
     expect(o.mode).toBe("shadow");
-    expect(o.capacity).toEqual({ maxParallel: 4, liveCount: 4, freeSlots: 0 });
+    expect(o.capacity).toEqual({ maxParallel: 4, liveCount: 4, freeSlots: 0, admissionGated: false });
     expect(o.getEligible().map((e) => e.identifier)).toEqual(["CTL-1", "CTL-2"]);
     expect(typeof o.getWorkerSignals).toBe("function");
   });

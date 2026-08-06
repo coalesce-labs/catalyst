@@ -314,13 +314,18 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
   });
 
   const startDaemons = () => {
-    const steps = [
-      worker
-        ? { label: "start-stack", kind: "run", argv: [scripts.stack, "start", "--yes"] }
-        : // developer/monitor: boot-drain so a mis-rostered node still admits 0 work. Best-effort
-          // (CTL-1352 auto-boot-drain is unbuilt) — verify-node confirms it took.
-          { label: "drain", kind: "run", argv: [scripts.catalyst, "drain"], optional: true },
-    ];
+    // CTL-1662 (Codex P1): `catalyst-stack start` is node-class aware (CTL-1654) and is the
+    // ONLY path that provisions + starts the event-mirror LaunchAgent — it is also a no-op
+    // for broker/exec-core/monitor on a non-worker class, so it is safe to run unconditionally.
+    // Previously only the worker branch ran it; a fresh `catalyst install --class developer`
+    // never started the mirror, so the healthcheck's now-required event-mirror-running row
+    // always failed, making every developer install report unhealthy.
+    const steps = [{ label: "start-stack", kind: "run", argv: [scripts.stack, "start", "--yes"] }];
+    if (!worker) {
+      // developer/monitor: boot-drain so a mis-rostered node still admits 0 work. Best-effort
+      // (CTL-1352 auto-boot-drain is unbuilt) — verify-node confirms it took.
+      steps.push({ label: "drain", kind: "run", argv: [scripts.catalyst, "drain"], optional: true });
+    }
     // CTL-1401 (Codex P2): on an ADDITIVE worker install with --executor, `catalyst-stack start --yes`
     // is idempotent and won't restart an already-live exec-core, so the daemon keeps the OLD executor
     // until a manual restart — the install would report the lever set while new work runs on the old
