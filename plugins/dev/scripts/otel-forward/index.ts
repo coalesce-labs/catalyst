@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CanonicalEvent } from "../orch-monitor/lib/canonical-event.ts";
 import { loadForwarderConfig } from "./lib/config.ts";
@@ -25,10 +25,24 @@ import { buildCanonicalEnvelope } from "./lib/canonical.ts";
 const CATALYST_DIR = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const EVENTS_DIR = process.env.CATALYST_EVENTS_DIR ?? join(CATALYST_DIR, "events");
 const CHECKPOINT_PATH = join(CATALYST_DIR, "otel-forward.checkpoint.json");
-const PROJECT_KEY = process.env.CATALYST_PROJECT_KEY ?? "catalyst-workspace";
-// CTL-1506 (Codex P1): derive the Layer-2 path from the project key so a non-default
-// CATALYST_PROJECT_KEY actually reads config-{projectKey}.json (as documented) without
-// requiring a separate CATALYST_CONFIG_PATH override.
+// CTL-1506 (Codex P1): the project key's authoritative source is Layer-1
+// .catalyst/config.json (`catalyst.projectKey`), which links to the Layer-2
+// config-{projectKey}.json. Resolve it in precedence order — CATALYST_PROJECT_KEY env
+// override → Layer-1 key → default — so a non-default key works under the normal
+// `catalyst-monitor.sh forward-start` path (which exports no env var). Absent/malformed
+// Layer-1 file falls back safely to the default.
+function resolveProjectKey(): string {
+  if (process.env.CATALYST_PROJECT_KEY) return process.env.CATALYST_PROJECT_KEY;
+  try {
+    const l1 = JSON.parse(readFileSync(join(process.cwd(), ".catalyst/config.json"), "utf8"));
+    const key = l1?.catalyst?.projectKey;
+    if (typeof key === "string" && key) return key;
+  } catch { /* absent / malformed → default */ }
+  return "catalyst-workspace";
+}
+const PROJECT_KEY = resolveProjectKey();
+// Derive the Layer-2 path from the resolved project key (config-{projectKey}.json),
+// still overridable wholesale via CATALYST_CONFIG_PATH.
 const CONFIG_PATH =
   process.env.CATALYST_CONFIG_PATH ??
   join(homedir(), `.config/catalyst/config-${PROJECT_KEY}.json`);
