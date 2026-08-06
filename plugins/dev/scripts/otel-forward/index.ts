@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CanonicalEvent } from "../orch-monitor/lib/canonical-event.ts";
 import { loadForwarderConfig } from "./lib/config.ts";
@@ -31,13 +31,29 @@ const CHECKPOINT_PATH = join(CATALYST_DIR, "otel-forward.checkpoint.json");
 // override → Layer-1 key → default — so a non-default key works under the normal
 // `catalyst-monitor.sh forward-start` path (which exports no env var). Absent/malformed
 // Layer-1 file falls back safely to the default.
+function findLayer1Config(): string | null {
+  // Walk up from cwd — forward-start may be invoked from a repo subdirectory, so an
+  // exact-cwd lookup would miss the repo-root .catalyst/config.json (Codex P2).
+  let dir = process.cwd();
+  for (let i = 0; i < 40; i++) {
+    const p = join(dir, ".catalyst/config.json");
+    if (existsSync(p)) return p;
+    const parent = dirname(dir);
+    if (parent === dir) break; // reached filesystem root
+    dir = parent;
+  }
+  return null;
+}
 function resolveProjectKey(): string {
   if (process.env.CATALYST_PROJECT_KEY) return process.env.CATALYST_PROJECT_KEY;
-  try {
-    const l1 = JSON.parse(readFileSync(join(process.cwd(), ".catalyst/config.json"), "utf8"));
-    const key = l1?.catalyst?.projectKey;
-    if (typeof key === "string" && key) return key;
-  } catch { /* absent / malformed → default */ }
+  const l1Path = findLayer1Config();
+  if (l1Path) {
+    try {
+      const l1 = JSON.parse(readFileSync(l1Path, "utf8"));
+      const key = l1?.catalyst?.projectKey;
+      if (typeof key === "string" && key) return key;
+    } catch { /* malformed → default */ }
+  }
   return "catalyst-workspace";
 }
 const PROJECT_KEY = resolveProjectKey();
@@ -127,12 +143,17 @@ const senders = {
         // CTL-1506: age window + retry window from config
         lokiAcceptWindowMs: cfg.otlp.lokiAcceptWindowMs,
         httpRetryPolicy: { maxElapsedMs: cfg.otlp.maxRetryElapsedMs },
-        // CTL-1060 Phase 3: advance lastForwardedTs on each confirmed-delivered batch
+        // CTL-1060 Phase 3: advance lastForwardedTs on each confirmed-delivered batch.
+        // CTL-1506 (Codex P2): only fold PARSEABLE timestamps into the watermark — an
+        // unparseable ts (e.g. "not-a-date") is lexicographically larger than an ISO
+        // string, so maxTs would pin lastForwardedTs to it, computeLagMs would then read
+        // NaN (treated as 0), and forward-lag reporting would be silently suppressed —
+        // persisted across restart via the checkpoint.
         onBatchDelivered: (batch) => {
-          const batchMaxTs = batch.reduce(
-            (acc, ev) => maxTs(acc, (ev as CanonicalEvent).ts),
-            undefined as string | undefined
-          );
+          const batchMaxTs = batch.reduce((acc, ev) => {
+            const t = (ev as CanonicalEvent).ts;
+            return t && !Number.isNaN(Date.parse(t)) ? maxTs(acc, t) : acc;
+          }, undefined as string | undefined);
           lastForwardedTs = maxTs(lastForwardedTs, batchMaxTs);
         },
       })
@@ -194,8 +215,9 @@ export function processLine(line: string): void {
       return;
     }
     stats.processed++;
-    // Track newest local event timestamp for lag metric (CTL-1060 Phase 3)
-    if (ev.ts) lastLocalTs = maxTs(lastLocalTs, ev.ts);
+    // Track newest local event timestamp for lag metric (CTL-1060 Phase 3).
+    // CTL-1506 (Codex P2): guard parseability so a malformed ts can't poison the watermark.
+    if (ev.ts && !Number.isNaN(Date.parse(ev.ts))) lastLocalTs = maxTs(lastLocalTs, ev.ts);
     if (senders.otlp) buffers.otlp.push(ev);
     if (senders.posthog) buffers.posthog.push(ev);
     if (senders.cae) buffers.cae.push(ev);

@@ -66,9 +66,12 @@ before any network call:
 | Network error | retryable | Same |
 | `4xx` (not 429) | **terminal** | Dropped with `forward_dropped` event, **never DLQ'd** |
 
-**Age-partitioning:** Before any send, records older than `lokiAcceptWindowMs` (default 1 h) are
-split out, dropped with a `forward_dropped` event (`drop_reason: "aged"`), and the fresh
-remainder is sent. This prevents aged co-riders from dragging fresh records into the DLQ.
+**Age-partitioning:** Before any send, aged records are split out, dropped with a
+`forward_dropped` event (`drop_reason: "aged"`), and the fresh remainder is sent — preventing
+aged co-riders from dragging fresh records into the DLQ. The send-time cutoff is slightly
+stricter than `lokiAcceptWindowMs`: `lokiAcceptWindowMs − min(timeoutMs, lokiAcceptWindowMs/4)`,
+a delivery margin so a near-cutoff record can't age past Loki's window mid-request (see the
+configuration reference for the authoritative schema).
 
 **DLQ drain:** On each successful primary delivery, the bounded drain also age-partitions queued
 batches. A fully-aged DLQ entry is discarded (`drop_reason: "aged"`); a terminal 4xx during drain
