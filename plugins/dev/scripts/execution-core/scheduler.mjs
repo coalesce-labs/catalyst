@@ -961,34 +961,10 @@ export function readPhaseSignals(orchDir, ticket) {
 // same as SETTLED_STATUSES in abort-worker.mjs — a non-terminal `done` is
 // settled-as-a-signal there but still in-flight here. The divergence is
 // intentional; do not collapse the two into one shared constant.
-// PROJ-1657 Codex P1 (round 4): a signal whose phase is one of these represents
-// genuine pipeline work occupying a slot. Phases NOT in this set (e.g.
-// "recovery-pass", the board-health delegate's inspection sweep) are transient
-// artifacts, not pipeline work — hoisted above isTicketInFlight (was CTL-1323,
-// originally declared below it and consumed only by isPhantomWorkerDir) so
-// isTicketInFlight can also read it.
-const REAL_PIPELINE_PHASES = new Set([...PHASES, ...ANCILLARY_PHASES]);
-
 export function isTicketInFlight(signals) {
-  const entries = Object.entries(signals ?? {});
-  if (entries.length === 0) return false;
-  // PROJ-1657 Codex P1 (round 4): a terminally-stalled ANCILLARY signal (e.g.
-  // recovery-pass, once this branch's terminal-write can produce one) must not
-  // by itself flip an otherwise-live ticket to not-in-flight — a recovery pass
-  // that successfully re-dispatched a real pipeline phase and then died before
-  // its own completion event still leaves that pipeline worker running and
-  // consuming a slot. So a bad ancillary status only counts when it is the
-  // ONLY evidence for the ticket (no real pipeline signal exists at all) —
-  // that is exactly the original CTL-1657 case (a dead recovery-pass-only
-  // ticket must still count as reclaimable, not perpetually in-flight).
-  const hasRealPipelineSignal = entries.some(([phase]) => REAL_PIPELINE_PHASES.has(phase));
-  for (const [phase, status] of entries) {
-    if (!REAL_PIPELINE_PHASES.has(phase)) {
-      if (!hasRealPipelineSignal && (status === "failed" || status === "stalled" || status === "aborted")) {
-        return false;
-      }
-      continue;
-    }
+  const phases = Object.keys(signals ?? {});
+  if (phases.length === 0) return false;
+  for (const [phase, status] of Object.entries(signals)) {
     if (status === "failed" || status === "stalled" || status === "aborted") return false;
     // CTL-512: monitor-deploy `skipped` is terminal-success — the producer
     // emits it when no deployment_status event arrived before the timeout
@@ -999,6 +975,12 @@ export function isTicketInFlight(signals) {
   }
   return true;
 }
+
+// CTL-1323: the set of REAL pipeline phases — a signal whose phase is one of these
+// represents genuine pipeline work occupying a slot. Phases NOT in this set (e.g.
+// "recovery-pass", the board-health delegate's inspection sweep) are transient
+// artifacts, not pipeline work.
+const REAL_PIPELINE_PHASES = new Set([...PHASES, ...ANCILLARY_PHASES]);
 
 // CTL-1323: the terminal-SUCCESS statuses that mean a non-pipeline signal is truly
 // inert — no live worker, and no pending operator decision. ONLY these make a dir
