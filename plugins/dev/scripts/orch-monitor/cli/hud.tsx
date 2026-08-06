@@ -55,6 +55,9 @@ import { localHostRef } from "./lib/read-model-cluster.ts";
 // the HUD falls back to its raw `workers/*.json` scan, so it never goes dark.
 import { useReadModel } from "./hooks/useReadModel.ts";
 import { boardWorkersToSignals } from "./lib/read-model-workers.ts";
+// CTL-1653: THIS node's Claude-account posture strip + loud overlay.
+import { useAccountModel } from "./hooks/useAccountModel.ts";
+import { accountStripText, accountOverlayLines } from "./components/account-strip.ts";
 import type { WorkerSignal } from "./lib/worker-signals-reader.ts";
 
 interface AppProps {
@@ -195,6 +198,15 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // the SSE/fetch client path the HUD never had — and consumes the EXACT stream
   // the web/iPad consume, so a fix to the BFF assembly reaches all three readers.
   const readModel = useReadModel();
+  // CTL-1653: this node's Claude-account posture (quiet strip + loud overlay).
+  const accountSig = useAccountModel();
+  const accountStrip = accountStripText(accountSig);
+  const accountOverlay = accountOverlayLines(accountSig);
+  // The always-present strip is 1 row; a rejected-account overlay adds its lines
+  // plus the round border (top+bottom). Folded into chromeRows so the event list
+  // height stays correct.
+  const accountOverlayHeight = accountOverlay.length > 0 ? accountOverlay.length + 2 : 0;
+  const accountChromeRows = 1 + accountOverlayHeight;
   // Map the assembled BoardWorker[] onto the Dashboard's WorkerSignal rows when
   // connected; null tells the Dashboard to use its raw `workers/*.json` scan.
   const readModelWorkers = useMemo<WorkerSignal[] | null>(
@@ -261,7 +273,8 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // chrome = header + prompt-box(3 rows: top-border + content + bottom-border) + status-line(1) + dsl overlay (if any).
   // CTL-386: replaced separator(1) + filter(1) + query(1) with a single rounded PromptInput box(3).
   // CTL-417: split PromptInput into input-row(3) + status-row(1) = 4 rows total.
-  const chromeRows = headerRows + 4 + overlayHeight;
+  // CTL-1653: + the account strip (1 row) + its overlay when the account is rejected.
+  const chromeRows = headerRows + 4 + overlayHeight + accountChromeRows;
   const visibleRows = Math.max(1, layoutRows - chromeRows);
 
   const {
@@ -610,6 +623,23 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           ))}
         </Box>
       )}
+      {/* CTL-1653: loud round-border overlay when the active account is exhausted
+          (rejected) — names the reset time + a sibling with headroom. */}
+      {accountOverlay.length > 0 && (
+        <Box flexShrink={0} flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
+          {accountOverlay.map((line, i) => (
+            <Text key={i} color="red" bold={i === 0}>
+              {line}
+            </Text>
+          ))}
+        </Box>
+      )}
+      {/* CTL-1653: quiet-while-ok account strip; goes inverse (loud) when rejected. */}
+      <Box flexShrink={0}>
+        <Text color={accountStrip.color} inverse={accountStrip.inverse}>
+          {accountStrip.text}
+        </Text>
+      </Box>
       <Box flexShrink={0}>
         <PromptInput
           mode={inputMode}

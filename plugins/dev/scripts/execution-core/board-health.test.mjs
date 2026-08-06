@@ -791,6 +791,78 @@ describe("buildBoardScanEvent", () => {
     expect(ev.details.flagged).toContain("CTL-1");
     expect(Array.isArray(ev.details.tier1Moves)).toBe(true);
   });
+
+  // CTL-1607: per-host slot census threaded onto the board-scan event.
+  test("threads board.capacity into details.slot* scalars", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 3, freeSlots: 1 } });
+    const decision = decideBoardHealth(invs, board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision, board });
+    expect(ev.details.slotCapacity).toBe(4);
+    expect(ev.details.slotInUse).toBe(3); // capacity − free = 4 − 1
+    expect(ev.details.slotFree).toBe(1);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #1): in_use is derived from capacity − freeSlots, so it
+  // reflects the FULL occupancy basis (liveCount + queued delegates + SDK inflight)
+  // the scheduler admits against — NOT the raw bg liveCount. Here occupancy is 4
+  // (freeSlots 0) while only 1 bg job is live: in_use must be 4, not 1.
+  test("slotInUse reflects occupancy (capacity − free), not bare liveCount", () => {
+    const invs = allGreen();
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 1, freeSlots: 0 } });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
+    expect(ev.details.slotInUse).toBe(4);
+    expect(ev.details.slotFree).toBe(0);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #2): a draining / stale-liveness node admits no new
+  // work, so its PUBLISHED slotFree collapses to 0 — while slotInUse still reports
+  // actual occupancy (capacity − rawFree = 2), not a collapsed value.
+  test("admissionGated collapses slotFree to 0 (in_use still real occupancy)", () => {
+    const invs = allGreen();
+    const board = mkBoard({
+      capacity: { maxParallel: 4, liveCount: 1, freeSlots: 2, admissionGated: true },
+    });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
+    expect(ev.details.slotFree).toBe(0);
+    expect(ev.details.slotInUse).toBe(2);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #3): a board-health delegate dispatched THIS scan
+  // reserves a slot the scheduler charges right after the pass returns, so free is
+  // debited (2 → 1) and in_use credited ((4−2)+1 = 3) here.
+  test("dispatched delegate debits slotFree and credits slotInUse", () => {
+    const invs = allGreen();
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 2, freeSlots: 2 } });
+    const ev = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+      act: { dispatched: true, anchor: "CTL-1" },
+    });
+    expect(ev.details.slotFree).toBe(1);
+    expect(ev.details.slotInUse).toBe(3);
+  });
+
+  test("no board arg → slot* scalars default to null (back-compat)", () => {
+    const invs = allGreen();
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision });
+    expect(ev.details.slotCapacity).toBeNull();
+    expect(ev.details.slotInUse).toBeNull();
+    expect(ev.details.slotFree).toBeNull();
+  });
 });
 
 // ─── buildBoardContext — the whole-board brief the delegate gets injected ────
