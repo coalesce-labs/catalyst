@@ -9,6 +9,7 @@ import { __resetDispatchAlertThrottle } from "./dispatch-alert.mjs";
 import {
   buildLinearisArgs,
   runEligibleQuery,
+  runTriageStateQuery,
   __resetEligibleEmptyConfirm,
   fetchTicketState,
   fetchTicketLabels,
@@ -2591,5 +2592,197 @@ describe("fetchTicketState — onExec span seam (CTL-1364)", () => {
     expect(() => fetchTicketState("CTL-9", { exec, onExec })).not.toThrow();
     // the read still resolves despite the throwing seam
     expect(fetchTicketState("CTL-9", { exec, onExec })).toBe("Done");
+  });
+});
+
+describe("classifyTicketResolution replica tier (CTL-1580)", () => {
+  test("replica HIT (any present row) → exists with ZERO live execs", () => {
+    let execs = 0;
+    const exec = () => {
+      execs++;
+      return { code: 0, stdout: "null", stderr: "" };
+    };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Implement" }) };
+    expect(classifyTicketResolution("PROJ-52", { exec, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+
+  test("replica HIT on a terminal row also serves exists (still zero execs)", () => {
+    let execs = 0;
+    const exec = () => {
+      execs++;
+      return { code: 0, stdout: "null", stderr: "" };
+    };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: true, state: "Done" }) };
+    expect(classifyTicketResolution("CTL-1", { exec, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+
+  test("replica MISS falls through to the live read (deletion still definitive)", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { isFresh: () => true, lookup: () => undefined };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("no replica → byte-identical live behavior", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-100", state: { name: "Ready" } }),
+    });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("exists");
+  });
+});
+
+describe("classifyTicketResolution replica-tier freshness gate (CTL-1580 review)", () => {
+  test("a STALE replica row never suppresses the definitive live check", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { isFresh: () => false, lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("a reader without the isFresh accessor is treated as unfresh (fail-closed)", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+});
+
+describe("classifyTicketResolution gateway-tombstone veto (CTL-1580 round 5)", () => {
+  test("a fresh removed:true descriptor bypasses the replica tier — deletion pays the live read", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" }); // live says: gone
+    const gateway = { getDescriptor: () => ({ removed: true, updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }) }; // stale drift row
+    expect(classifyTicketResolution("CTL-9", { exec, gateway, replica })).toBe("not-found");
+  });
+
+  test("a fresh removed:false descriptor still short-circuits before either tier", () => {
+    let execs = 0;
+    const exec = () => { execs++; return { code: 0, stdout: "null", stderr: "" }; };
+    const gateway = { getDescriptor: () => ({ removed: false, state: "Todo", updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => undefined };
+    expect(classifyTicketResolution("CTL-10", { exec, gateway, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+});
+
+describe("classifyTicketResolution bypassCaches (CTL-1580 round 6)", () => {
+  test("bypassCaches skips BOTH tiers even when production injection forces them in", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" }); // live: gone
+    const gateway = { getDescriptor: () => ({ removed: false, state: "Todo", updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, gateway, replica, bypassCaches: true })).toBe("not-found");
+  });
+});
+
+describe("runEligibleQuery structural body validation (CTL-1580 round 6)", () => {
+  test("an exit-0 body without nodes[] throws instead of zeroing the board", () => {
+    const exec = () => ({ code: 0, stdout: JSON.stringify({ error: "Authentication required" }), stderr: "" });
+    expect(() =>
+      runEligibleQuery({ team: "PROJ", status: "Todo" }, { exec, now: () => 0 })
+    ).toThrow(/nodes/);
+  });
+});
+
+// CTL-1589 — runTriageStateQuery: the Triage-state list that makes triage
+// admission level-triggered. REPLICA-ONLY by design (a supplementary read must
+// not add a per-team live list on the reconcile cadence), so the contract these
+// pin is: served from the replica or not at all, never a Linear call, and every
+// non-served case distinguishable via onSource so the caller can log it.
+describe("runTriageStateQuery (CTL-1589)", () => {
+  const query = { team: "CTL", status: "Todo", triageStatus: "Triage", project: null, label: null, priority: null };
+
+  // A replica stub whose triageState() returns a canned board-shaped result.
+  function replicaReturning(nodes) {
+    const calls = [];
+    return { calls, triageState: (q) => { calls.push(q); return { nodes }; } };
+  }
+
+  test("HIT: normalizes the replica board and records onSource('replica')", () => {
+    const replica = replicaReturning([
+      {
+        identifier: "ADV-1374",
+        title: "Stranded in triage",
+        state: "Triage",
+        priority: 1,
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ]);
+    const sources = [];
+    const tickets = runTriageStateQuery(query, {
+      replica,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]).toMatchObject({ identifier: "ADV-1374", state: "Triage", priority: 1 });
+    expect(replica.calls).toEqual([query]); // the whole query reaches triageState()
+    expect(sources).toEqual([["replica", 1]]);
+  });
+
+  // Unlike the eligible board, an empty Triage board is served as-is: there is no
+  // freeze to avoid, so no linearis re-confirmation is worth the quota.
+  test("replica-EMPTY is trusted as-is (no confirmation, no Linear call)", () => {
+    const sources = [];
+    const tickets = runTriageStateQuery(query, {
+      replica: replicaReturning([]),
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica", 0]]);
+  });
+
+  test("the priority floor is NOT applied (mirrors the webhook →Triage predicate)", () => {
+    const replica = replicaReturning([
+      { identifier: "CTL-1", state: "Triage", priority: 4 },
+      { identifier: "CTL-2", state: "Triage", priority: 0 },
+    ]);
+    // A floor of 2 would drop both under runEligibleQuery's filter.
+    const tickets = runTriageStateQuery({ ...query, priority: 2 }, { replica });
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-1", "CTL-2"]);
+  });
+
+  test("replica MISS (undefined) → [] with onSource('replica-miss'), never a linearis spawn", () => {
+    const sources = [];
+    const tickets = runTriageStateQuery(query, {
+      replica: { triageState: () => undefined },
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica-miss", 0]]);
+  });
+
+  test("a THROW out of the replica is swallowed → [] with onSource('replica-miss')", () => {
+    const sources = [];
+    const tickets = runTriageStateQuery(query, {
+      replica: { triageState: () => { throw new Error("db locked"); } },
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica-miss", 0]]);
+  });
+
+  // The replica tier is opt-in per host. With it off this read is INERT — the
+  // marker is what makes that visible rather than a silent no-op.
+  test("no replica wired → [] with onSource('no-replica')", () => {
+    const sources = [];
+    expect(runTriageStateQuery(query, { onSource: (s, c) => sources.push([s, c]) })).toEqual([]);
+    expect(sources).toEqual([["no-replica", 0]]);
+  });
+
+  test("a team with no triageStatus → [] with onSource('no-triage-status'), replica never consulted", () => {
+    const replica = replicaReturning([{ identifier: "CTL-1", state: "Triage" }]);
+    const sources = [];
+    const tickets = runTriageStateQuery(
+      { ...query, triageStatus: null },
+      { replica, onSource: (s, c) => sources.push([s, c]) }
+    );
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["no-triage-status", 0]]);
+    expect(replica.calls).toEqual([]);
+  });
+
+  test("no query at all → [] (never throws into the sweep)", () => {
+    expect(runTriageStateQuery(undefined)).toEqual([]);
+    expect(runTriageStateQuery({})).toEqual([]);
   });
 });

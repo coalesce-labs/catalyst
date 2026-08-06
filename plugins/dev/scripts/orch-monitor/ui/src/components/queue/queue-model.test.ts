@@ -12,6 +12,7 @@ import {
   groupHoldingBuckets,
   holdingTicketIds,
   deadWorkers,
+  partitionHumanHeld,
 } from "./queue-model";
 
 function w(p: Partial<BoardWorker> & { name: string; ticket: string }): BoardWorker {
@@ -404,5 +405,30 @@ describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)
     expect(ids).toContain("CTL-10");
     expect(ids).toContain("CTL-11");
     expect(ids).toContain("CTL-12");
+  });
+});
+
+describe("partitionHumanHeld (CTL-1588)", () => {
+  const q = (id: string, humanHold: "needs-human" | "needs-input" | null = null) => ({ id, humanHold });
+
+  it("splits held rows out of the dispatchable queue, preserving order in both halves", () => {
+    const { dispatchQueue, heldQueue } = partitionHumanHeld([
+      q("CTL-1557"),
+      q("CRM-1", "needs-human"),
+      q("CTL-1417"),
+      q("CRM-5", "needs-input"),
+    ]);
+    expect(dispatchQueue.map((x) => x.id)).toEqual(["CTL-1557", "CTL-1417"]);
+    expect(heldQueue.map((x) => x.id)).toEqual(["CRM-1", "CRM-5"]);
+  });
+
+  it("treats absent/null humanHold as dispatchable", () => {
+    const items: Array<{ id: string; humanHold?: "needs-human" | "needs-input" | null }> = [
+      { id: "A" },
+      q("B", null),
+    ];
+    const { dispatchQueue, heldQueue } = partitionHumanHeld(items);
+    expect(dispatchQueue).toHaveLength(2);
+    expect(heldQueue).toHaveLength(0);
   });
 });

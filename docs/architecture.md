@@ -98,12 +98,156 @@ outage (heartbeat read throws / everyone looks dead) degrades to the **full rost
 only its own HRW slice — never double-acts). The Linear-CAS claim (`cluster-claim.mjs` soft-CAS on
 `catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains the transition-race serializer.
 
-**Worker signal projection (in migration, ADR-018, CTL-483).** Per-worker `workers/<TICKET>.json`
-files are currently written by ~7 scripts with no inter-process locking. CTL-483 moves these
-mutations to a `worker.state_changed` command event consumed by the broker, which projects to a
-shadow `<TICKET>.json.projected`. Phase 1: broker handler + emit helper + dual-write for
-`orchestrate-auto-rebase` (`orchestrate-shadow-diff` verifies byte-for-byte parity). Phase 2: remove
-direct writes (broker sole writer). Phase 3: mirror to SQLite per ADR-011. See ADR-018.
+**Worker signal projection (CTL-532 = ADR-018 Phase 3, shipped; Phase 1 retired, CTL-1628).**
+Per-worker `workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process
+locking; ADR-018 originally proposed closing that gap via a `worker.state_changed` command event and
+a JSON shadow file with a three-phase dual-write cutover. Phase 1 (the JSON shadow-write mechanism)
+stalled at 1 of 7 writers migrated and was retired as dead weight — its only reader was the manual
+`orchestrate-shadow-diff` verification CLI, removed with it; nothing operational ever consumed the
+shadow files. Phase 2's plan (cut over to broker-sole-writer once Phase 1 reached zero drift) is
+dead — it depended on the now-retired Phase 1 drift-check pipeline. The *problem* Phase 2 was meant
+to solve — the seven-script single-writer race — is still open, but it is no longer tracked as this
+ADR's Phase 2: **CTL-1631** now owns it as a standalone ticket, replacing the retired Phase-2 plan
+rather than continuing it. Phase 3 — as originally scoped, a `(orch_id,ticket)` SQLite mirror —
+**did ship**, as **CTL-532**: the broker
+folds every event on the log (not just a dedicated command event) into a pure
+`reduceWorkerStateEvent` reducer via `projectWorkerStateEvent`, and upserts the result into a SQLite
+`worker_state` table (`broker/broker-state.mjs`) — one row per `(orchestrator, ticket)` with phase,
+status, PR number, and revive count. Only `phase`/`status` (and the `last_event_id`/`last_event_ts`
+watermark itself) are gated on that watermark — order-independent for distinct timestamps,
+last-write-wins by processing order on an exact tie; `pr_number` (COALESCE) and `revive_count` (MAX)
+apply unconditionally on every upsert regardless of event order. The table is purely observational —
+it never reads or writes the canonical `workers/<TICKET>.json`. See ADR-018 for the full history.
+
+## Deployment Mode (CTL-1617)
+
+One declared answer — **`catalyst.deployment.mode` ∈ `single-host` | `cluster` | `cloud`** — replaces
+the per-host hand-wiring of mode-dependent choices. Resolved by a zero-import bash+JS pair
+(`plugins/dev/scripts/lib/deployment-mode.mjs` + `lib/catalyst-deployment-mode.sh`), kept honest by
+an exhaustive cross-stack parity fixture matrix (`__tests__/deployment-mode-parity.test.sh`). The
+schema itself (precedence ladder, examples, defaulting, every caveat) lives in its canonical
+reference, `website/src/content/docs/reference/configuration.md` — this section covers only the
+architectural role. **This repo's Layer-1 declares `cluster`**; dev-clones override to `single-host`
+via Layer-2.
+
+- **Degradation is the safety direction**: invalid values settle at their layer as
+  `single-host, recognized:false` (asserting the fewest cross-host guarantees); malformed files are
+  layer-absent in BOTH languages. Two supported, deliberate asymmetry bounds: on a **jq-less host**
+  the bash resolver treats config files as absent (env-else-default, with a
+  `CATALYST_DEPLOYMENT_MODE_JQ_MISSING` breadcrumb for doctor) while the JS resolver still reads
+  them; and file-acceptance parity is defined by jq's parser (multi-document, BOM, and
+  lone-surrogate-escape documents are whole-document-malformed on both sides — the JS reader scans
+  raw text to match).
+- **Consumers today**: `catalyst doctor` (`checkDeploymentModeConsistency`, advisory:
+  declared/inferred, typo FAIL, roster-consistency WARN — every message says "deployment mode",
+  never bare "mode", since `dispatchMode`, executor dispatch-mode telemetry, and the replica
+  reader's `mode` are unrelated concepts) and the orch-monitor smee tunnel gate (a declared-`cloud`
+  node suppresses tunnel start; the replacement cloud-SDK event connection is **future work** — the
+  smee→cloud cutover, ADR-0008 lineage — so `cloud` today means "no smee ingestion", not "cloud
+  ingestion wired"). **Consumer**: the CTL-1616 secret contract's provider-of-record dispatch
+  (below) can receive the full resolution object and never activates a cloud provider on
+  `inferred:true` — but only `catalyst doctor` actually threads `deploymentMode` into its
+  `resolveSecret` calls today. The folded Linear/OAuth call sites (`linear-query.mjs`,
+  `cluster-claim.mjs`, etc.) call `resolveSecret(id)`/`resolveSecret(id, { env })` with no
+  `deploymentMode` argument at all, so the cloud guard never engages for them regardless of the
+  node's declared mode — deployment-mode dispatch for those consumers stays **planned**, not
+  shipped (see the Secret Contract section below).
+- **Orthogonal axes, never merged**: deployment mode (fleet topology) × `catalyst.node.class`
+  (per-machine role: `worker` runs the full execution layer; `monitor`/`developer` run observation
+  substrate only — broker + monitor + event-mirror, no heartbeat/dispatch/recovery) ×
+  `orchestration.dispatchMode` (process substrate within a node).
+- Design + migration plan: `thoughts/shared/research/2026-08-02-ctl-1617-deployment-mode-design.md`.
+
+## Secret Contract (CTL-1616)
+
+The 2026-08-02 fleet 401 outage was four divergent hand-written copies of one secret-resolution
+chain. CTL-1616 generalizes CTL-1612's proven github-token/webhook-secret pair into **one
+registry, two engines**: `plugins/dev/scripts/lib/secret-contract.mjs` (a zero-import JS leaf —
+`node:fs`/`os`/`path` only, so `catalyst doctor`'s bare-Node runtime can import it without pulling
+in `execution-core/config.mjs`'s `bun:sqlite` graph) and its independently-maintained bash mirror
+`lib/catalyst-secret-contract.sh`, held honest by a cross-stack **three-way parity suite**
+(`__tests__/secret-contract-parity.test.sh`: bash and JS each checked against a
+computed-expected value, never merely against each other, plus row-id-set equality between the
+two registries). The schema — the 11 registered secrets, the 7 delivery types, the resolution
+result shape, the cloud guard, and the Layer-2 path chain — is documented in full in its canonical
+reference, `website/src/content/docs/reference/configuration.md`; this section covers only the
+architectural role.
+
+```mermaid
+flowchart LR
+  REG[SECRET_REGISTRY<br/>one frozen row set] --> JS[secret-contract.mjs<br/>zero-import engine]
+  REG -.mirrored.-> SH[catalyst-secret-contract.sh<br/>bash engine]
+  JS <-. three-way parity .-> SH
+  JS --> DOCTOR[catalyst doctor<br/>shadow + 1 live cutover]
+  JS --> LINEAR[10-file Linear-token read<br/>PR3]
+  JS --> MINT[Linear OAuth-mint trio<br/>PR4]
+  JS --> CLOUD[cloud-token name<br/>PR5]
+  SH --> HEALTH[health-responder.sh<br/>bash fallback, PR5]
+```
+
+**Bootstrap classes, one per deployment mode** — the one credential the contract can never itself
+deliver, since it is what unlocks (or stands in for) everything else the chain resolves:
+
+| Mode          | Bootstrap credential                          | Row              |
+| ------------- | ---------------------------------------------- | ----------------- |
+| `single-host` | none — every secret is operator-placed          | — (no row)         |
+| `cluster`     | the SOPS age private key (`~/.config/catalyst/age.key`, `SOPS_AGE_KEY_FILE`-overridable) | `age-key` (`local-only`, presence-checked, value never read) |
+| `cloud`       | `CATALYST_CLOUD_TOKEN` (name itself resolvable via a 3-tier ladder) | `cloud-token` (`platform-env`) |
+
+**Rotation classes** generalize `cluster-sync.mjs`'s "captured at process start" prose into
+structured per-row data: `boot-only` (a value change needs a restart), `re-armable`/`timer`
+(proactively re-checked on a recurring tick — `github-token`'s declared shape; its actual re-arm
+today still runs through the pre-existing CTL-1612 `rearmGithubTokenFromFile`, called every
+daemon cluster-sync tick in `execution-core/daemon.mjs`, not yet through this contract's own
+`registerRearmHook`/`armSecret` seam), and `re-armable`/`on-401`
+(reactively re-minted on an observed auth failure — the Linear OAuth-mint shape). `armSecret()`
+never throws and reports `{ armed, rotated, restartRequired }` — `restartRequired: true` is the
+literal mechanism the 2026-08-02 outage lacked: a `boot-only` row (or a `re-armable` row with no
+hook registered yet — the two degrade identically, by design, so a consumer that never wires the
+arm path can't look safer than one that structurally can't) reports it when a caller invokes
+`armSecret` and the resolved value has changed since the PROCESS's last `armSecret` observation
+for that id (`_lastArmedValue` is module-level, one baseline per secret id shared by every caller
+in the process — caller B observing a rotation resets what caller A sees) — a caller-invoked
+report, not an automatic one fired the moment the value changes. No production call
+site invokes `armSecret` today (a repo-wide search outside tests finds only the definition and a
+comment reference in `linear-remint.mjs`), so this reporting is not yet wired to any running
+daemon.
+
+**Consumers folded onto the contract so far**: the 10-file/12-site Linear-token read
+(`linear-query.mjs` — 3 sites, `cluster-heartbeat.mjs`, `cluster-claim.mjs`,
+`linear-estimation-method.mjs`, `linear-reconcile-cli.mjs`, three `orch-monitor/lib/linear-*`
+fallback readers, `score-tickets.ts`, and the bash `catalyst_resolve_secret linear-api-token`
+snippet in `plugins/dev/skills/phase-triage/SKILL.md`); the Linear OAuth-mint trio
+(`linear-app-actor.sh`'s bash mint, `linear-remint.mjs`'s orchestrator-actor reminter — registered
+as the row's live rearm hook — and `linear-comment-post.sh`'s worker-actor chain, legacy tiers
+preserved verbatim); the cloud-token env-var **name** resolver (`config.mjs`'s
+`resolveNodeCloudTokenEnv` now delegates directly to `resolveCloudTokenName`; `health-responder.sh`'s
+bun-less fallback path instead calls the independently-maintained bash mirror
+`catalyst_secret_cloud_token_name` — kept byte-for-byte with the JS resolver by the parity suite,
+not a shared function call); and
+`catalyst doctor` itself, which consults the contract through `resolveSecret` directly rather
+than a parallel presence check — as a **shadow**
+comparison (INFO-only, never changes a grade) for most checks, with `checkPeerUniqueness` /
+`checkBotCredentials` / `checkWorkerLabels` cut over to the contract as their *live*
+`linear-api-token` answer, and one grade-changing addition: `checkCloudTokenEnv` now FAILs when the
+active deployment mode is declared `cloud` and the `cloud-token` bootstrap row doesn't resolve —
+the one FAIL doctor cannot route around. The GitHub-token/webhook-secret pair that motivated the
+contract (CTL-1612's `catalyst-secret-env.sh` / `github-auth-preflight.mjs`) has **not yet** been
+re-pointed onto the shared engine — both rows exist in the registry today for shadow comparison and
+future consumers, but the live CTL-1612 code path is still its own, pre-existing implementation.
+
+The same PR5 that unified the cloud-token name resolver did adjacent, unrelated cleanup on Groq's
+`GROQ_API_KEY` ladder (`dsl-cli.mjs` and `hud.tsx` joined `broker/config.mjs` on the shared
+`resolveApiKey`) — but that is `lib/api-key-health.mjs`'s pre-existing (CTL-343) resolver, not this
+contract: none of those three call sites import `secret-contract.mjs`, and the registry's own
+`groq-api-key` row has no consumer today besides `checkSecretContract`'s shadow-only observation.
+
+**Secret-env hygiene rule**: the bash engine's `_csc_set_result` exports the non-secret
+`CATALYST_SECRET_LAST_SOURCE`/`_PROVIDER` breadcrumbs for the calling shell's convenience but
+**never** exports the resolved value itself (`CATALYST_SECRET_LAST_VALUE` stays same-shell-only,
+with `export -n` reasserted on every call since bash's export attribute is sticky across
+reassignment) — a long-lived daemon shell must not leak a credential into every child process it
+launches.
 
 ## Agent Teams vs Subagents
 
@@ -215,6 +359,13 @@ active work:
   flip draft→ready (avoids `create-pr`'s "PR already exists" hang).
 - **Config**: `orchestration.draftPr.enabled` (default `true`) — set `false` for no early draft, so
   the PR is created only at the `pr` phase.
+- **Resume consumer (CTL-1640)**: the pushed commits on `origin/<ticket>` are the durable record a
+  new worktree resumes from. `create-worktree.sh` seeds a fresh branch from `origin/<ticket>` when
+  it exists (default-on; `--no-from-remote` opts out), so both normal dispatch and cross-host
+  reclaim (`defaultRebuildWorktree`) rebuild on the dead host's pushed work instead of orphaning it
+  under a fresh branch off base. Resolved straight from git (`origin/<ticket>`), not by reading
+  `.draftPr`. The operator-facing CLI contract (default-on, the `--no-from-remote` / `--skip-fetch`
+  opt-outs) is owned by and documented in `plugins/dev/skills/create-worktree/SKILL.md`.
 - **Deferred**: reading `.draftPr` draft-state as a secondary advancement signal (advancement
   currently driven by signal `status === "done"` only).
 
@@ -312,31 +463,79 @@ Every worker ticket has **two orthogonal axes** — never blurred:
   | `queued`      | converger (admission gate, tick-converged)          | pickup / Done                     |
   | `blocked`     | converger (dependency not terminal, tick-converged) | dep becomes terminal / Done       |
   | `needs-input` | daemon `handleCommentWake` (worker paused, CTL-768) | human reply                       |
-  | `needs-human` | `labelOnce` (sticky — NOT tick-converged)           | `clearStalledLabel` on resolution |
+  | `needs-human` | `labelOnce` (sticky — NOT tick-converged)           | two paths — see below             |
 
 **Precedence** (only one label at a time): `needs-human > needs-input > blocked > queued > none`.
 `needs-human` is **sticky** — it is never included in `TICK_CONVERGED_DISPOSITIONS` and only cleared
-at explicit resolution (Done or terminal-sweep-clear), not on steady-state ticks.
+at explicit resolution, not on steady-state ticks.
 
-**Resolution-gated clearing** — tick-converged labels (`queued`/`blocked`/`needs-input`) are
-re-derived on every tick and applied/removed on diff; `needs-human` is removed only by
-`clearStalledLabel`'s `onRemoved` callback which fires only on confirmed Linear label removal.
+**Resolution-gated clearing — TWO removal paths for `needs-human` (Codex #2970 round 5).**
+Tick-converged labels (`queued`/`blocked`/`needs-input`) are re-derived on every tick and
+applied/removed on diff. `needs-human` is different: it is removed only by an explicit,
+confirmed-removal signal, and there are two of those, not one:
+1. **`clearStalledLabel`'s `onRemoved` callback**, fired only on a confirmed Linear label removal at
+   scheduler-side resolution points (terminal-done-clear, terminal-sweep-clear, no-stall-clear).
+2. **The daemon's `handleCommentWake` needs-human clear** (CTL-1612/#2970) — a *write-gated*,
+   *emission-carrying* removal on a managed ticket's confirmed human reply. It calls `removeLabel`
+   directly (not `clearStalledLabel`), only treats the removal as genuine when the call performed a
+   real write (not a no-op re-check), emits the `worker.transition` clear itself
+   (`appendWorkerTransitionEvent`, bypassing `recordTransition`), and resets the scheduler's
+   in-process `lastDispositionEmit` dedup entry (`clearDispositionEmit`) so the shared chokepoint's
+   only-on-change guard doesn't swallow a later genuine re-escalation. See the producer-split
+   paragraph below for why this path exists separately from `clearStalledLabel`.
 
-Worker transitions are recorded at the scheduler's transition sites, coordinated around a single
-**inline `recordTransition` chokepoint** inside `schedulerTick`. That chokepoint owns sink (3): it
-emits exactly one canonical `worker.transition.<TICKET>` event per genuine change to the unified
-event log, and the only-on-change guard (`lastDispositionEmit`) prevents double-emit on steady-state
-ticks. Its emitter defaults to `null` so a bare unit tick stays silent; **production threads the
-real emitter (`defaultAppendWorkerTransitionEvent`) via `runTick`** — without that wiring every
-`recordTransition` early-returns and the event stream is dark. That event feeds sink (4), OTLP via
-`otel-forward` (dims as attributes — `body.payload` is stripped off-machine). The remaining sinks
-are written at their own scheduler sites around the same transition (not fanned out from inside the
-chokepoint): (1) Linear Status via the `applyPhaseStatus` chokepoint (Axis 1), (2) the
-`worker-status` label via the admission converger (`convergeHeldLabel`) / `labelOnce` (Axis 2), and
-(5) the optional broker `ticket_state_transitions` table (CTL-764 Phase 10). The standalone
-`recordWorkerTransition` module (`record-worker-transition.mjs`) is the extracted, unit-tested
-reference implementation of this same five-sink fan-out contract; the scheduler's live path uses the
-inline `recordTransition` today.
+Worker transitions **originating from the scheduler** are recorded at its transition sites,
+coordinated around a single **inline `recordTransition` chokepoint** inside `schedulerTick`. That
+chokepoint owns sink (3): it emits exactly one canonical `worker.transition.<TICKET>` event per
+genuine change to the unified event log, and the only-on-change guard (`lastDispositionEmit`)
+prevents double-emit on steady-state ticks. Its emitter defaults to `null` so a bare unit tick stays
+silent; **production threads the real emitter (`defaultAppendWorkerTransitionEvent`) via
+`runTick`** — without that wiring every `recordTransition` early-returns and the event stream is
+dark. That event feeds sink (4), OTLP via `otel-forward` (dims as attributes — `body.payload` is
+stripped off-machine) — the only other sink that's actually live. Sink (5), an optional broker
+`ticket_state_transitions` table (CTL-764 Phase 10), was **never implemented** — no schema, no
+writer, no broker consumer exist anywhere in the codebase; it remains a planned item, not a shipped
+one. The remaining scheduler-side sinks are written at their own scheduler sites around the same
+transition (not fanned out from inside the chokepoint): (1) Linear Status via the
+`applyPhaseStatus` chokepoint (Axis 1), (2) the `worker-status` label via the admission converger
+(`convergeHeldLabel`) / `labelOnce` (Axis 2).
+
+**The scheduler chokepoint is not the only `worker.transition` emitter.** The daemon's
+`handleCommentWake` (CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent`
+directly at two structurally distinct sites, both bypassing `recordTransition` — but for different
+reasons, not one shared rationale:
+- The **`needs-input` clear** (a per-signal branch gated on `status === "needs-input"`) removes the
+  label, emits the clear, and then redispatches the parked worker in the same block. Its own code
+  comment explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted
+  here (the daemon removes the durable label out-of-band and redispatches — the scheduler never
+  observes this edge)."
+- The **`needs-human` clear** runs once per comment-wake call, gated on positive human provenance
+  and a managed ticket — before any per-signal / worker-dir lookup, and with **no redispatch** in
+  that block at all. It bypasses `recordTransition` for the same underlying reason (the scheduler's
+  own STICKY needs-human handling explicitly defers clearing to an external confirmed-removal
+  signal, never clearing it itself on a steady-state admission pass), but the "redispatches" half of
+  the quoted rationale above does not apply to this site.
+
+Both are deliberate, self-documented second-producer sites, not a gap in the chokepoint design.
+
+**A separate escalation path emits no `worker.transition` for its disposition change.** Pass 0w's
+hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
+progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
+`bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
+it applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) and
+never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
+emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
+the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
+specifically, not an alternate producer.
+
+The standalone `recordWorkerTransition` module (`record-worker-transition.mjs`) — an extracted,
+unit-tested scaffold for sinks 1–3 only (Linear status, disposition label, event log) whose own doc
+comment flagged sinks 4–5 and full call-site wiring as unfinished ("Phase 5 will wire the production
+defaults... and route all call sites here") — never reached that Phase 5 and was retired as
+consumer-free (CTL-1628): the scheduler's live path has only ever used the inline `recordTransition`
+chokepoint described above. The analogous worker-state projection need (phase/status/PR/revive-count,
+not disposition) is served live by the separate CTL-532 SQLite projection — see "Worker signal
+projection" above.
 
 ### Unified data-flow
 
@@ -357,6 +556,10 @@ flowchart LR
     OM[orch-monitor<br/>web dashboard]
     CE[catalyst-events tail<br/>raw stream]
   end
+  subgraph ObservationNodes["Observation nodes (monitor/developer)"]
+    EM[event-mirror daemon<br/>ssh-tail fan-in] -- "ssh tail -c +N<br/>per-host byte cursor" --> REMOTE_EL[worker host<br/>events/YYYY-MM.jsonl]
+    EM --> EL
+  end
   SJ --> HUD
   PSF -.not yet scanned.-> HUD
   BI --> HUD
@@ -373,6 +576,15 @@ Writers (phase-agent workers, `phase-agent-dispatch`, broker daemon, webhook rec
 `fs.watch` byte-cursor driving `claude stop`/`git worktree remove`/`git branch -D`], `catalyst-hud`,
 orch-monitor) consume that log plus per-run state and broker registry without coordinating. The
 broker and the reaper are each both reader and writer of the same file.
+
+**Event-mirror (CTL-1654) — observation-node fleet feed.** On `monitor`/`developer` nodes,
+`catalyst-stack start` launches the event-mirror daemon (`event-mirror/index.ts` supervised by
+launchd KeepAlive). It fans each worker host's `~/catalyst/events/YYYY-MM.jsonl` into the local
+copy via `ssh tail -c +N`, advancing a per-host byte cursor and deduplicating by event id (in-memory
+ring, scoped to the current month's file). The append is idempotent: events already in the local
+file are never double-written. `catalyst-events tail`/`wait-for` on the observation node then
+resolve fleet events locally with no polling loop. The fan-in is transport-abstracted (injectable
+`fetchFn`) so a future cloud-changefeed transport drops in without touching the dedup core.
 
 ### Linear app-actor self-echo guard (`botUserId`)
 

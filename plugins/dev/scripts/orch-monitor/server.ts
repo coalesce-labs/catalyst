@@ -39,6 +39,7 @@ import type { NavSignal, DaemonHealth } from "./lib/nav-signal.mjs";
 // project it to the tiny per-node footer signal (cluster-signal.mjs). Single-host
 // is an exact identity no-op (one node — the local daemon).
 import { createClusterEntity } from "./lib/cluster-view.mjs";
+import { readPeerRecords, foldPeerSnapshot } from "./lib/peer-liveness.mjs"; // CTL-1551: source-aware peer transport selection + guarded snapshot folding
 import type { ClusterView } from "./lib/cluster-view.mjs";
 // CTL-1092: alias loading + resolution for the prod capacity/liveness wiring.
 // loadHostAliases reads catalyst.host.aliases (fail-open {}); resolveHostAlias
@@ -60,6 +61,16 @@ import {
 // CTL-1100: FSM descriptor endpoint. Confirmed bun:sqlite-free (no computed
 // specifier needed — plain static import is safe for Vite/esbuild graph).
 import { buildFsmDescriptor } from "../lib/fsm-descriptor.mjs";
+// CTL-1617: the canonical deployment-mode resolver — a zero-import leaf
+// (node:fs/node:os/node:path only). Imported directly cross-directory rather
+// than via execution-core/config.mjs's re-export: config.mjs's own import
+// chain reaches bun:sqlite through linear-query.mjs, which doctor.mjs's
+// bare-Node runtime rejects — a constraint that doesn't apply to this file
+// (bun), but the leaf is the single source of truth either way, so importing
+// it directly here avoids adding a needless indirection. Precedent for this
+// exact direct cross-directory `.mjs` import shape: the fsm-descriptor.mjs
+// import immediately above, and ui/src/board/process-surface.test.ts:5.
+import { getDeploymentMode } from "../lib/deployment-mode.mjs";
 // CTL-1100: belief store query functions (pure, db-injected). belief-store-queries.mjs
 // has no static bun:sqlite import — plain static import is safe for Vite/esbuild graph.
 import {
@@ -123,6 +134,34 @@ import {
   respondTicket,
   type RespondTicketResult,
 } from "./lib/respond-ticket.mjs";
+// CTL-1569: the inbox conversation surface. Two routes, deliberately split by
+// posture — GET /thread is a pure REPLICA read (zero Linear API calls, so it is
+// safe on a hover-speed path), POST /reply is the one write that posts a REAL,
+// human-authored Linear comment (the mechanism that actually clears `needs-human`
+// via CTL-1567). The reply path is a SIBLING of /respond, not a replacement: see
+// lib/reply-ticket.mjs for why /respond's synthetic null-author event and its
+// hard held-run requirement make it unusable for this surface.
+import {
+  getConversation,
+  loadGlobalConfig,
+  loadProjectConfig,
+} from "./lib/inbox-conversation.mjs";
+import { replyToTicket } from "./lib/reply-ticket.mjs";
+import { buildTrustedOrigins, isOriginAllowed } from "./lib/trusted-origin.mjs";
+// CTL-1653: node-scoped Claude-account posture surface. The probe runner spawns
+// claude-accounts-usage.mjs in a token-scoped subshell (defaultAccountsProbeExec);
+// the async TTL cache serves /api/accounts + the /api/accounts/stream SSE.
+import { createAccountsProbe, defaultAccountsProbeExec } from "./lib/accounts-probe.mjs";
+import { createAccountsTimer } from "./lib/accounts-timer.mjs";
+import { checkAccountStatusTransition } from "./lib/account-status-latch.mjs";
+import type { CachedAccountsSummary } from "./lib/accounts-probe";
+/** CTL-1653: the injectable child-process seam for the Claude-account probe.
+ *  Production is defaultAccountsProbeExec; tests inject a scripted fake record. */
+type AccountsProbeExec = () => Promise<unknown>;
+/** Canonical ticket key for the conversation routes: a team prefix that may carry
+ *  digits/underscores (`OPS_2-17`), then `-<number>`. Anchored, and containing no
+ *  path characters, so it cannot express a traversal. */
+const CONVERSATION_TICKET_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -225,7 +264,7 @@ import { createEventRing } from "./lib/event-ring";
 import { createMemoizedRead } from "./lib/memoize-fresh.mjs";
 import { readSubStepEvents } from "./lib/substep-reader";
 import { loadOtelConfig } from "./lib/otel-config";
-import { loadWebhookConfig } from "./lib/webhook-config";
+import { loadLinearBotUserIds, loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey, detectProjectKeyFromConfig } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
 // Shared Layer-1 config-path resolver (env pointer > cwd) — keeps
@@ -312,6 +351,10 @@ import {
 // request — the rate-limit win, consistent with the BFF1 (CTL-883) decision.
 import { readTicketDetail } from "./lib/ticket-detail-reader.mjs";
 import { readTicketArtifacts, readTicketArtifactContent } from "./lib/ticket-artifacts-reader.mjs";
+// CTL-1574: a ticket's Linear DISCUSSION (comments + issue_history activity) read
+// from the local CTC replica via the shared @catalyst-cloud/read-model builders.
+// Cache-only like the readers above — never a live Linear call per request.
+import { readTicketDiscussion } from "./lib/ticket-discussion-reader.mjs";
 // CTL-974 pattern: supplemental cached Linear {title, description} fetch for the
 // ticket-detail page. Board title is stale-sourced and the durable cache has no
 // description column, so both must be live-fetched (cached, TTL'd, fail-open).
@@ -367,6 +410,42 @@ const APP_SURFACE_PATHS: ReadonlySet<string> = new Set([
 export function isAppRoute(pathname: string): boolean {
   if (APP_SURFACE_PATHS.has(pathname)) return true;
   return isDetailDeepLinkPath(pathname);
+}
+
+// shouldSeedFreshMintCooldown — CTL-1612 round 7 (Codex P2 follow-up). Pure
+// decision extracted from the monitorAppActorReminter construction (see the
+// CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE comment at that call site) so it is
+// unit-testable without instantiating a whole server. A token being PRESENT
+// is not enough to seed the reminter's long success cooldown — since round 6,
+// linear_app_actor_auth's scoped mode can populate the token via an INHERITED
+// fallback (a broker-inherited token reused because the shell's own mint
+// failed or found no creds) rather than a genuinely fresh mint, and that
+// fallback token could already be near its own expiry. Only "minted" — the
+// companion provenance marker linear_app_actor_auth exports alongside the
+// token — proves a fresh mint just happened and it is safe to suppress the
+// reminter's first poll for the full cooldown window; "inherited", any other
+// value, or an absent/blank token all fall through to false (the untouched
+// -Infinity default — first poll's attempt fires as it always has).
+export function shouldSeedFreshMintCooldown(
+  token: string | undefined,
+  source: string | undefined,
+): boolean {
+  return Boolean(token?.trim()) && source === "minted";
+}
+
+// parsePositiveFiniteDurationMs — CTL-1612 round 12 (Codex P2 follow-up).
+// `Number(value) || fallbackMs` (the prior form at the two call sites below)
+// accepts any negative number as an override, since only 0/NaN are falsy in
+// JS — CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS=-1 makes the cooldown
+// gate pass on every anchor poll, re-minting a production OAuth token on
+// every tick. It also accepts Infinity (no finiteness check), which
+// permanently suppresses re-mint and eventually leaves the monitor running
+// on an expired token. This validates the parsed value is finite AND
+// strictly positive before accepting it; anything else (unset, empty,
+// non-numeric, zero, negative, ±Infinity) falls back to `fallbackMs`.
+export function parsePositiveFiniteDurationMs(raw: string | undefined, fallbackMs: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallbackMs;
 }
 
 export interface CreateServerOptions {
@@ -502,7 +581,16 @@ export interface CreateServerOptions {
      * teams that appear here so the HUD's REPO column populates for Linear
      * events. Empty / absent = no enrichment (pre-CTL-362 behaviour). */
     linearTeams?: Array<{ key: string; vcsRepo: string }>;
+    /** Test override for the smee-client constructor used by the Linear
+     * webhook tunnel — mirrors `webhookConfig.tunnelFactory` above. Omitted
+     * in production (the real smee-client is used). CTL-1617. */
+    tunnelFactory?: SmeeClientFactory;
   } | null;
+  /** App-actor user ids for agent classification on READ surfaces (the
+   *  discussion timeline). Independent of webhook ingestion — configured bot
+   *  ids must classify even when no Linear webhook secret/smee channel is set
+   *  (linearWebhookConfig null). Falls back to linearWebhookConfig?.botUserIds. */
+  linearBotUserIds?: ReadonlySet<string>;
   // CTL-1167: PWA push notifications
   /** false disables the server-side push bridge startup task (useful in tests). Default: true. */
   pushBridge?: boolean;
@@ -510,9 +598,37 @@ export interface CreateServerOptions {
   pushSubscriptionsDbPath?: string;
   /** Override for vapid-keys.json path. Defaults to ${catalystDir}/vapid-keys.json. */
   vapidKeysPath?: string;
+  /**
+   * CTL-1617: override for the deployment-mode reader that gates smee webhook
+   * tunnel startup (a node declared "cloud" must not open a smee tunnel — its
+   * event source is the cloud SDK connection instead). Production defaults to
+   * `getDeploymentMode` (env → Layer-2 → Layer-1 → "single-host"). Tests
+   * inject a deterministic reader so the gate can be exercised for every mode
+   * without touching process.env or real config files.
+   */
+  deploymentModeReader?: (() => string) | null;
+  /**
+   * CTL-1653: override for the child-process Claude-account probe runner.
+   * Production spawns claude-accounts-usage.mjs in a token-scoped subshell
+   * (defaultAccountsProbeExec); tests inject a scripted fake; null disables
+   * the endpoint + periodic timer entirely (returns available:false).
+   */
+  accountsProbeExec?: AccountsProbeExec | null;
+  /** CTL-1653: accounts cache TTL (default 5 min). Also the periodic timer interval. */
+  accountsTtlMs?: number;
+  /** CTL-1653: min age before a forced `?refresh=true` re-probes (default 30 s) —
+   *  the DoS floor that stops a client looping refresh to spend unbounded inference. */
+  accountsRefreshFloorMs?: number;
 }
 
 const DEFAULT_PORT = 7400;
+/**
+ * CTL-1653 (Codex round-2): the header GET /api/accounts?refresh=true requires,
+ * on top of the trusted-origin allowlist — see that route's CROSS-ORIGIN +
+ * SIMPLE-REQUEST GUARD comment for why a header (not just Origin) is needed.
+ * Exported so tests and docs reference the one canonical name.
+ */
+export const ACCOUNTS_REFRESH_HEADER = "x-catalyst-refresh";
 
 function resolveVersion(): string {
   const candidates = [
@@ -831,6 +947,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     commsReader: commsReaderOpt,
     webhookConfig,
     linearWebhookConfig,
+    linearBotUserIds,
     daemonHealthReader: daemonHealthReaderOpt,
     clusterReader: clusterReaderOpt,
     screenLogsExec: screenLogsExecOpt,
@@ -838,6 +955,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
     pushBridge: pushBridgeOpt = true,
     pushSubscriptionsDbPath,
     vapidKeysPath,
+    deploymentModeReader: deploymentModeReaderOpt,
+    accountsProbeExec: accountsProbeExecOpt,
+    accountsTtlMs = 5 * 60 * 1000,
+    accountsRefreshFloorMs = 30 * 1000,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -957,6 +1078,57 @@ export function createServer(opts: CreateServerOptions): BunServer {
     lokiFetcherOpt === null
       ? null
       : (lokiFetcherOpt ?? (lokiUrl ? createLokiFetcher({ baseUrl: lokiUrl }) : null));
+
+  // CTL-1653: the node-scoped Claude-account posture probe (cached ~5 min).
+  // null disables /api/accounts + the periodic timer entirely (available:false),
+  // matching the dbPath-gated endpoints; a scripted exec is injected in tests.
+  const accountsProbe =
+    accountsProbeExecOpt === null
+      ? null
+      : createAccountsProbe({
+          exec: accountsProbeExecOpt ?? defaultAccountsProbeExec,
+          ttlMs: accountsTtlMs,
+          refreshFloorMs: accountsRefreshFloorMs,
+          node: hostName(),
+        });
+
+  // Per-connection SSE subscribers fed by the periodic timer. The timer refreshes
+  // the cache every accountsTtlMs and fans each fresh summary out to all
+  // subscribers, then folds in the Phase-4 edge-triggered transition emit.
+  const accountsSubscribers = new Set<(s: CachedAccountsSummary) => void>();
+  const accountsTimer = accountsProbe
+    ? createAccountsTimer({
+        probe: accountsProbe,
+        intervalMs: accountsTtlMs,
+        onTick: (s) => {
+          for (const send of accountsSubscribers) {
+            try {
+              send(s);
+            } catch {
+              /* a dead subscriber is pruned on its own stream cancel */
+            }
+          }
+          // CTL-1653 Phase 4: edge-triggered account.status.changed emit. Best-
+          // effort — a marker/IO hiccup must never kill the tick. The fn is async,
+          // so a synchronous try/catch cannot see a rejected promise; attach a
+          // .catch() so a future change that introduces a rejection can never
+          // become an unhandled rejection (the synchronous try/catch is retained
+          // for a throw before the first await).
+          try {
+            checkAccountStatusTransition(s).catch((err) => {
+              console.error(`[server] account status transition check rejected:`, err);
+            });
+          } catch (err) {
+            console.error(`[server] account status transition check failed:`, err);
+          }
+        },
+      })
+    : null;
+  // The timer spawns the real Claude-account probe (a Haiku call when
+  // claude-accounts.env exists), so it belongs to the long-running daemon path
+  // only — gate on startWatcher so the hundreds of `startWatcher:false` unit
+  // servers never fork a probe. Tests that exercise the stream inject a fake exec.
+  if (accountsTimer && startWatcher !== false) accountsTimer.start();
 
   // CTL-1050: the service-health registry monitor — ONE severity model shared by
   // the Fleet Ops strip, the outage emitter, the inbox decoration, AND the
@@ -1335,14 +1507,54 @@ export function createServer(opts: CreateServerOptions): BunServer {
     effectiveCapacity: number;
     activeWorkers: number;
   };
+  // CTL-1612 post-merge #2978 (Codex P2 follow-up): server.stop() clears
+  // anchorPollTimer (stops FUTURE ticks) but does nothing about work already
+  // in flight when it's called — the `loadDaemonDeps().then(...)` prime
+  // below (which calls pollAnchorHeartbeats() directly, independent of the
+  // timer, once deps resolve) can still fire after stop() if deps hadn't
+  // resolved yet, and an in-flight `monitorAppActorReminter.attempt()` can
+  // still resolve and mutate `process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN`
+  // after the server has shut down — a real OAuth request outliving the
+  // server instance, observable by anything (tests, or an embedding app)
+  // that keeps the Bun process alive after closing this server. `stopped`
+  // is set synchronously at the top of server.stop (see its definition
+  // below) and checked at the two points that matter: before the
+  // fire-and-forget remint is even attempted (readAnchor, in
+  // pollAnchorHeartbeats below) and before a mint RESULT is applied
+  // (applyToken, in loadDaemonDeps below) — an attempt already past that
+  // checkpoint when stop() fires still completes its network round-trip
+  // (this is a lifecycle guard against post-stop SIDE EFFECTS, not
+  // cancellation of in-flight I/O), but its result is discarded rather than
+  // written to process.env or acted on.
+  let stopped = false;
   let daemonDepsPromise: Promise<{
     readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
     readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
     getHostName: () => string;
     getClusterHosts: () => string[];
     getLivenessAnchorIssue: () => string | null;
-    readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
+    getLokiQueryUrl: () => string | null;
+    // CTL-1612: opts.env lets the monitor's own call site (below) hand this
+    // spawnSync a scoped app-actor env WITHOUT mutating process.env globally —
+    // see the readAnchor wrapper in pollAnchorHeartbeats for why.
+    readPeerHeartbeatsSync: (
+      args: { anchorIssue: string },
+      opts?: { env?: NodeJS.ProcessEnv },
+    ) => Record<string, AnchorPeerRec>;
+    readClusterLivenessFromLokiSyncCached: (args: {
+      lokiUrl: string;
+    }) => Record<string, AnchorPeerRec>;
+    readStickyIdentity: (args: { dir: string }) => string | null;
+    getCatalystRepoDir: () => string;
     deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
+    // CTL-1612 (finding #2, round 2 non-blocking follow-up): cooldown-gated
+    // proactive re-mint of the monitor's scoped app-actor token
+    // (CATALYST_MONITOR_APP_ACTOR_TOKEN). ASYNC — the mint is a
+    // non-blocking child_process.spawn (linear-remint.mjs defaultMintAsync),
+    // so calling this never stalls Bun's single event loop. Resolves true iff
+    // a fresh token was minted and applied; resolves false (never rejects) on
+    // a cooldown no-op, missing creds, or a failed mint.
+    remintAppActorToken: () => Promise<boolean>;
   } | null> | null = null;
   const loadDaemonDeps = () => {
     if (!daemonDepsPromise) {
@@ -1351,29 +1563,159 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const recoveryMod = ["..", "execution-core", "recovery.mjs"].join("/");
           const configMod = ["..", "execution-core", "config.mjs"].join("/");
           const heartbeatSyncMod = ["..", "execution-core", "cluster-heartbeat-sync.mjs"].join("/");
-          const [recovery, config, heartbeatSync, navSignal] = await Promise.all([
-            import(recoveryMod) as Promise<{
-              readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
-              readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
-            }>,
-            import(configMod) as Promise<{
-              getHostName: () => string;
-              getClusterHosts: () => string[];
-              getLivenessAnchorIssue: () => string | null;
-            }>,
-            import(heartbeatSyncMod) as Promise<{
-              readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
-            }>,
-            import("./lib/nav-signal.mjs"),
-          ]);
+          const lokiSyncMod = ["..", "execution-core", "loki-liveness-sync.mjs"].join("/");
+          const hostStickyMod = ["..", "execution-core", "host-sticky.mjs"].join("/");
+          // CTL-1612 (finding #2): the same re-mint machinery execution-core/broker
+          // already use for a mid-run 401 (linear-remint.mjs), loaded lazily
+          // alongside the other execution-core deps (VITE-GRAPH GUARD).
+          const linearRemintMod = ["..", "execution-core", "linear-remint.mjs"].join("/");
+          const [recovery, config, heartbeatSync, lokiSync, hostSticky, navSignal, linearRemint] =
+            await Promise.all([
+              import(recoveryMod) as Promise<{
+                readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
+                readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
+              }>,
+              import(configMod) as Promise<{
+                getHostName: () => string;
+                getClusterHosts: () => string[];
+                getLivenessAnchorIssue: () => string | null;
+                getLokiQueryUrl: () => string | null;
+                getCatalystRepoDir: () => string;
+              }>,
+              import(heartbeatSyncMod) as Promise<{
+                readPeerHeartbeatsSync: (
+                  args: { anchorIssue: string },
+                  opts?: { env?: NodeJS.ProcessEnv },
+                ) => Record<string, AnchorPeerRec>;
+              }>,
+              import(lokiSyncMod) as Promise<{
+                readClusterLivenessFromLokiSyncCached: (args: {
+                  lokiUrl: string;
+                }) => Record<string, AnchorPeerRec>;
+              }>,
+              import(hostStickyMod) as Promise<{
+                readStickyIdentity: (args: { dir: string }) => string | null;
+              }>,
+              import("./lib/nav-signal.mjs"),
+              import(linearRemintMod) as Promise<{
+                createAsyncReminter: (opts?: {
+                  readCreds?: () => { clientId: string; clientSecret: string } | null;
+                  applyToken?: (token: string) => void;
+                  cooldownMs?: number;
+                  failureCooldownMs?: number;
+                  logger?: {
+                    warn: (obj: unknown, msg: string) => void;
+                    info: (obj: unknown, msg: string) => void;
+                  };
+                  initialLastAttempt?: number;
+                }) => { attempt: (now?: number) => Promise<boolean> };
+                readOrchestratorCreds: () => { clientId: string; clientSecret: string } | null;
+              }>,
+            ]);
+          // CTL-1612 (finding #2): proactive, cooldown-gated re-mint of the
+          // monitor's SCOPED app-actor token (never LINEAR_API_TOKEN/LINEAR_API_KEY
+          // — see the CATALYST_MONITOR_APP_ACTOR_TOKEN comment in catalyst-monitor.sh
+          // cmd_start). This substitutes for a REACTIVE on-401 re-mint (the pattern
+          // broker/cache-reconcile.mjs uses via isAuthError(...)) because it is not
+          // available here: the anchor "read" subcommand
+          // (execution-core/cluster-heartbeat.mjs readPeerHeartbeats, called from
+          // runCli's "read" case) catches EVERY post() failure — including an
+          // expired-token 401 — and still writes `{}` + exits 0, so there is no
+          // stderr/exit-code signal this call site could react to.
+          //
+          // CTL-1612 round 2 (Codex P2 follow-up): createAsyncReminter, NOT
+          // createReminter — the sync reminter's default mint is
+          // spawnSync("curl", ... --max-time 30), which would freeze Bun's
+          // single event loop (every other in-flight HTTP/SSE/webhook handler)
+          // for up to 30s on the initial poll and every 45-min refresh. The
+          // async twin's mint is a non-blocking child_process.spawn
+          // (defaultMintAsync); the call site below (readAnchor) fires it and
+          // does NOT await it, so this poll proceeds immediately with whatever
+          // token is already set and a successful mint lands in time for the
+          // NEXT tick.
+          //
+          // failureCooldownMs is intentionally SHORTER than cooldownMs: a
+          // failed mint (network hiccup, Linear outage) should retry soon
+          // rather than riding out the full 45min success-cooldown while every
+          // poll in between sends an expired token and peers look offline.
+          // A SUCCESSFUL mint still only re-attempts after the full cooldownMs.
+          //
+          // CTL-1612 round 5 (Codex P2 follow-up): initialLastAttempt seeds the
+          // cooldown gate with Date.now() WHEN CATALYST_MONITOR_APP_ACTOR_TOKEN is
+          // already present at this construction point — i.e. the shell startup
+          // mint (catalyst-monitor.sh cmd_start → linear_app_actor_auth) already
+          // succeeded before this bun process even started. Without this, the
+          // reminter's lastAttempt starts at -Infinity regardless, so the FIRST
+          // anchor poll's proactive remintAppActorToken() call fires immediately
+          // and re-mints seconds after the shell already did — doubling
+          // production OAuth traffic on every monitor start/restart. A monitor
+          // that never got a shell-level mint (creds absent there, or the
+          // loki-only/no-anchor skip — CTL-1612 rounds 3/5) is unaffected: the
+          // token is absent, so this falls through to the untouched default
+          // (-Infinity — first poll's attempt fires as it always has).
+          //
+          // CTL-1612 round 7 (Codex P2 follow-up): presence alone is no longer
+          // sufficient — since round 6, CATALYST_MONITOR_APP_ACTOR_TOKEN can be
+          // populated by the shell's INHERITED-TOKEN FALLBACK (a broker-inherited
+          // token reused because the shell's own mint failed or found no creds),
+          // not just a genuinely fresh mint. Seeding the full 45min success
+          // cooldown for a fallback token that could already be near expiry
+          // would suppress the reminter's retry for the whole window instead of
+          // the shorter failureCooldownMs — exactly the double-mint bug this
+          // seeding was added to fix, just for the opposite reason (too LONG a
+          // suppression instead of too SHORT). shouldSeedFreshMintCooldown
+          // (module-level, unit-tested) checks the companion
+          // CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE marker linear_app_actor_auth
+          // now also exports alongside the token.
+          const monitorAppActorReminter = linearRemint.createAsyncReminter({
+            readCreds: linearRemint.readOrchestratorCreds,
+            // CTL-1612 post-merge #2978 (Codex P2 follow-up): an attempt() in
+            // flight when server.stop() fires still runs to completion (see
+            // the `stopped` comment above daemonDepsPromise) — this guard is
+            // what makes that harmless: a mint that resolves post-stop is
+            // discarded here instead of writing a fresh token into
+            // process.env for a server instance that no longer exists.
+            applyToken: (token: string) => {
+              if (stopped) return;
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN = token;
+            },
+            cooldownMs: parsePositiveFiniteDurationMs(
+              process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_COOLDOWN_MS,
+              45 * 60_000,
+            ),
+            failureCooldownMs: parsePositiveFiniteDurationMs(
+              process.env.CATALYST_MONITOR_APP_ACTOR_REMINT_FAILURE_COOLDOWN_MS,
+              60_000,
+            ),
+            logger: {
+              warn: (_obj: unknown, msg: string) => console.warn(`[server] ${msg}`),
+              info: (_obj: unknown, msg: string) => console.info(`[server] ${msg}`),
+            },
+            initialLastAttempt: shouldSeedFreshMintCooldown(
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN,
+              process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN_SOURCE,
+            )
+              ? Date.now()
+              : undefined,
+          });
           return {
             readClusterHeartbeats: recovery.readClusterHeartbeats,
             readClusterAdmission: recovery.readClusterAdmission,
             getHostName: config.getHostName,
             getClusterHosts: config.getClusterHosts,
             getLivenessAnchorIssue: config.getLivenessAnchorIssue,
+            getLokiQueryUrl: config.getLokiQueryUrl,
             readPeerHeartbeatsSync: heartbeatSync.readPeerHeartbeatsSync,
+            readClusterLivenessFromLokiSyncCached: lokiSync.readClusterLivenessFromLokiSyncCached,
+            readStickyIdentity: hostSticky.readStickyIdentity,
+            getCatalystRepoDir: config.getCatalystRepoDir,
             deriveDaemonHealth: navSignal.deriveDaemonHealth,
+            // Contract note above: never rejects (defaultMintAsync resolves
+            // null rather than throwing on any spawn/network failure), but the
+            // catch is belt-and-braces since this is called fire-and-forget
+            // (readAnchor below `void`s the return) — an unhandled rejection
+            // here would otherwise crash the process.
+            remintAppActorToken: () => monitorAppActorReminter.attempt().catch(() => false),
           };
         } catch {
           return null; // execution-core unavailable → degrade to offline
@@ -1537,7 +1879,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // can never skew from the liveness overlay. null max_parallel (a peer that never
   // published a slot count) is coerced to 0 to match the reader contract.
   const anchorCapacityCache: {
-    map: Record<string, { maxParallel: number; inFlightCount: number }>;
+    map: Record<
+      string,
+      {
+        maxParallel: number;
+        inFlightCount: number;
+        // CTL-1581: occupancy subset — null when the peer's daemon predates it.
+        activeCount?: number | null;
+        activeTickets?: string[] | null;
+      }
+    >;
   } = { map: {} };
   // CTL-1322: LOCAL-node admission cache, read from the local event log's
   // node.heartbeat admission block (readClusterAdmission). Local-only by design —
@@ -1546,6 +1897,35 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // populated BEFORE the no-anchor early-return so it works single-host too.
   const localAdmissionCache: { map: Record<string, NodeAdmission> } = { map: {} };
   let execCoreDeps: Awaited<ReturnType<typeof loadDaemonDeps>> = null;
+  // CTL-1551: the peer transport the LAST poll actually used ("loki" | "anchor"),
+  // plus PER-HOST source memory — an AUTO fallback poll must not hand a RETAINED
+  // Loki-era heartbeat the anchor's looser window (fold rejects the anchor's
+  // stale records, so the retained entry's provenance is still Loki).
+  let lastPeerSource: string = "loki";
+  const peerSourceByHost: Record<string, string> = {};
+  // Live windows DERIVED from the configured cadences (an operator raising
+  // MONITOR_ANCHOR_POLL_MS or the cache TTL must not shrink the budget below
+  // the real pipeline): beat/publish cadence + poll interval + cache TTL + margin.
+  const peerPollMs = Number(process.env.MONITOR_ANCHOR_POLL_MS) || 60_000;
+  const lokiCacheTtlMs = (() => {
+    const raw = Number(process.env.EXECUTION_CORE_LOKI_LIVENESS_CACHE_MS);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 20_000;
+  })();
+  // Cadences honor the same env overrides the daemon reads (execution-core
+  // config.mjs) so a re-tuned fleet widens the budget in lockstep.
+  const envMs = (name: string, fallback: number): number => {
+    const raw = Number(process.env[name]);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+  };
+  const HEARTBEAT_CADENCE_MS = envMs("EXECUTION_CORE_HEARTBEAT_INTERVAL_MS", 30_000); // node.heartbeat cadence
+  const ANCHOR_PUBLISH_CADENCE_MS = envMs("EXECUTION_CORE_LIVENESS_PUBLISH_INTERVAL_MS", 120_000); // anchor publisher cadence
+  const PEER_WINDOW_MARGIN_MS = 10_000;
+  // Live windows must stay strictly below the 5-min offline grace (classify
+  // checks live BEFORE grace, so a window ≥ grace would render a should-be-
+  // offline host as live). Cap leaves a real degraded band.
+  const PEER_WINDOW_GRACE_CAP_MS = 4 * 60_000;
+  const lokiPeerWindowMs = HEARTBEAT_CADENCE_MS + peerPollMs + lokiCacheTtlMs + PEER_WINDOW_MARGIN_MS;
+  const anchorPeerWindowMs = ANCHOR_PUBLISH_CADENCE_MS + peerPollMs + PEER_WINDOW_MARGIN_MS;
   let anchorPollTimer: ReturnType<typeof setInterval> | null = null;
   const pollAnchorHeartbeats = (): void => {
     try {
@@ -1569,27 +1949,115 @@ export function createServer(opts: CreateServerOptions): BunServer {
       } catch {
         /* keep last admission cache */
       }
-      const anchor = execCoreDeps.getLivenessAnchorIssue();
-      if (!anchor) {
-        anchorHeartbeatCache.map = {}; // no anchor configured → no peers
+      // CTL-1551: source-aware peer read. Since CTL-1420 (#17) the daemons publish
+      // cross-host liveness to the event log → Loki and the Linear-anchor publish
+      // is RETIRED in loki mode — so on a loki fleet the anchor is permanently
+      // stale and reading it painted every peer "offline" with weeks-old capacity.
+      // Selection: CATALYST_LIVENESS_READ_SOURCE=loki → Loki only (daemon parity);
+      // =linear → anchor only (legacy fleets); unset → AUTO: prefer Loki whenever
+      // a query URL resolves and it returns peers, else fall back to the anchor.
+      // The Loki record shape ({last_seen, in_flight_tickets, max_parallel,
+      // in_flight_count}) matches AnchorPeerRec, so both caches below populate
+      // identically from either source. URL resolution: the execution-core config
+      // getter first (env-driven), else the monitor's own otel-config lokiUrl —
+      // already resolved for the Telemetry surfaces, so a launchd monitor with a
+      // bare env still finds the same Loki its other pages use.
+      // URL precedence (CTL-1551 round 3): an EXPLICIT CATALYST_LOKI_QUERY_URL
+      // wins; else the monitor's own configured otel lokiUrl (known-good — its
+      // Telemetry pages already query it); else execution-core's port-swap
+      // HEURISTIC derived from OTEL_EXPORTER_OTLP_ENDPOINT (which can point at
+      // the collector host, not Loki, when the two are split).
+      let cfgLokiUrl: string | null = null;
+      try {
+        cfgLokiUrl = execCoreDeps.getLokiQueryUrl?.() ?? null;
+      } catch {
+        cfgLokiUrl = null;
+      }
+      const explicitLokiUrl = process.env.CATALYST_LOKI_QUERY_URL?.trim() ? cfgLokiUrl : null;
+      const { peers, source: peerSource } = readPeerRecords({
+        rawSource: process.env.CATALYST_LIVENESS_READ_SOURCE,
+        lokiUrl: explicitLokiUrl ?? lokiUrl ?? cfgLokiUrl ?? null,
+        anchorIssue: execCoreDeps.getLivenessAnchorIssue(),
+        readLoki: execCoreDeps.readClusterLivenessFromLokiSyncCached,
+        // CTL-1612: re-mint (cooldown-gated, cheap no-op most ticks — see the
+        // comment on remintAppActorToken above) before every anchor read, then
+        // layer the scoped app-actor token (CATALYST_MONITOR_APP_ACTOR_TOKEN)
+        // onto a COPY of process.env for just this subprocess call. This never
+        // touches the real process.env.LINEAR_API_TOKEN/LINEAR_API_KEY, so
+        // linear-comment.mjs's operator-token resolution is untouched. Absent a
+        // scoped token (mint never succeeded), falls back to plain process.env —
+        // i.e. whatever this call would have resolved before CTL-1612.
+        //
+        // CTL-1612 round 2 (Codex P2 follow-up): remintAppActorToken() is
+        // FIRE-AND-FORGET here (deliberately not awaited — readAnchor itself
+        // must stay synchronous, matching readPeerRecords's synchronous
+        // contract). This poll proceeds immediately with whatever scoped
+        // token is already set (possibly none, possibly stale); a mint that
+        // completes later applies to process.env in the background and is
+        // picked up by the NEXT poll tick. The reminter's own implementation
+        // never rejects (see remintAppActorToken's construction above), so no
+        // unhandled-rejection risk from not chaining a .catch() here too.
+        //
+        // CTL-1612 round 3 (Codex P2 follow-up): NO explicit
+        // CATALYST_LIVENESS_READ_SOURCE=loki check is needed here. This whole
+        // closure is `readPeerRecords`'s `readAnchor` argument (peer-liveness.mjs)
+        // — readPeerRecords early-returns BEFORE ever calling readAnchor
+        // whenever its resolved source is "loki" (both the loki-has-peers and
+        // loki-empty-fallback branches return before reaching the
+        // `readAnchor(...)` call at the bottom of that function), so this
+        // closure — and the remintAppActorToken() call inside it — is already
+        // structurally unreachable in loki-only mode. Covered by
+        // __tests__/peer-liveness.test.ts "explicit loki: trusts an empty
+        // result — never reads the retired anchor" (asserts a readAnchor call
+        // counter stays 0). catalyst-monitor.sh cmd_start carries the actual
+        // gate (skips the mint entirely under CATALYST_LIVENESS_READ_SOURCE=loki)
+        // since that is where the real network call would otherwise happen.
+        readAnchor: (args: { anchorIssue: string }) => {
+          // CTL-1612 post-merge #2978 (Codex P2 follow-up): don't even START
+          // a remint attempt once stopped — see the `stopped` comment above
+          // daemonDepsPromise. This closure can still run post-stop via the
+          // loadDaemonDeps().then(...) prime firing after deps resolve late
+          // (anchorPollTimer being cleared only stops the interval, not that
+          // one already-scheduled continuation).
+          if (!stopped) void execCoreDeps?.remintAppActorToken();
+          const scoped = process.env.CATALYST_MONITOR_APP_ACTOR_TOKEN?.trim();
+          const anchorEnv = scoped
+            ? { ...process.env, LINEAR_API_TOKEN: scoped, LINEAR_API_KEY: scoped }
+            : process.env;
+          return execCoreDeps?.readPeerHeartbeatsSync(args, { env: anchorEnv }) ?? {};
+        },
+      }) as { peers: Record<string, AnchorPeerRec> | null; source: string };
+      // CTL-1551: remember which transport ACTUALLY served this poll — the
+      // liveness window resolver budgets by real transport, not by env intent
+      // (AUTO can fall back to the slower anchor when Loki is empty/down).
+      if (peerSource === "loki" || peerSource === "anchor") lastPeerSource = peerSource;
+      if (peers == null) {
+        anchorHeartbeatCache.map = {}; // no transport configured → no peers
         anchorCapacityCache.map = {};
         return;
       }
-      const peers = execCoreDeps.readPeerHeartbeatsSync({ anchorIssue: anchor });
-      const next: Record<string, string> = {};
-      const nextCap: Record<string, { maxParallel: number; inFlightCount: number }> = {};
+      // CTL-1551: fold the snapshot through the pure guard set — per-host
+      // newest-wins (a stale AUTO anchor fallback can't regress fresher cached
+      // entries), capacity only from capacity-bearing records (a failed
+      // enrichment can't zero valid capacity), and retention for hosts missing
+      // from a partial/empty snapshot. See peer-liveness.mjs foldPeerSnapshot.
+      const folded = foldPeerSnapshot({
+        prevHeartbeats: anchorHeartbeatCache.map,
+        prevCapacity: anchorCapacityCache.map,
+        peers,
+      });
+      // Stamp provenance ONLY for hosts whose folded heartbeat came from THIS
+      // snapshot — retained entries keep the source that produced them.
       for (const [host, rec] of Object.entries(peers)) {
-        if (rec && typeof rec.last_seen === "string" && rec.last_seen.length > 0) {
-          next[host] = rec.last_seen;
-        }
-        if (rec) {
-          const mp = typeof rec.max_parallel === "number" ? rec.max_parallel : 0;
-          const ifc = typeof rec.in_flight_count === "number" ? rec.in_flight_count : 0;
-          nextCap[host] = { maxParallel: mp, inFlightCount: ifc };
+        if (rec?.last_seen && folded.heartbeats[host] === rec.last_seen) {
+          // Key provenance by the PINNED name — the resolver is called with
+          // alias-folded roster names (cluster-view folds heartbeat keys), so a
+          // raw-transport-keyed entry would never be found.
+          peerSourceByHost[resolveHostAlias(host, hostAliases) ?? host] = peerSource;
         }
       }
-      anchorHeartbeatCache.map = next;
-      anchorCapacityCache.map = nextCap;
+      anchorHeartbeatCache.map = folded.heartbeats;
+      anchorCapacityCache.map = folded.capacity;
     } catch {
       // fail-open: keep the last caches; stale entries age out via node-liveness
     }
@@ -1599,8 +2067,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       execCoreDeps = d;
       pollAnchorHeartbeats(); // prime immediately once deps resolve
     });
-    const anchorPollMs = Number(process.env.MONITOR_ANCHOR_POLL_MS) || 60_000;
-    anchorPollTimer = setInterval(pollAnchorHeartbeats, anchorPollMs);
+    anchorPollTimer = setInterval(pollAnchorHeartbeats, peerPollMs);
     anchorPollTimer.unref?.();
   }
 
@@ -1614,7 +2081,59 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // anchor peer cache). createClusterEntity then surfaces any node currently live
   // on the anchor — including a Stage-0 SHADOW node that owns zero tickets —
   // decoupled from the dispatch roster (see cluster-view.mjs CTL-1251 header).
+  // CTL-1551: resolve this monitor's own host through config AND the alias map,
+  // so it matches the (pinned) node names the cluster view renders. getHostName
+  // alone can lag a sticky-identity restore (the daemon pins CATALYST_HOST_NAME
+  // only in its own process) — alias-folding covers the pre-pin raw-name case,
+  // the same normalization every heartbeat key gets. null when unknown.
+  const resolveSelfPinnedHost = (): string | null => {
+    try {
+      // Prefer the daemon's RECORDED sticky identity (host-sticky.mjs): on an
+      // unpinned multi-host install whose OS hostname changed, the daemon
+      // restores the sticky name only inside its own process — this separately
+      // launched monitor would otherwise see the NEW os.hostname(). Fall back
+      // to getHostName, then fold through the alias map like every host key.
+      let raw: string | null = null;
+      try {
+        const dir = execCoreDeps?.getCatalystRepoDir?.();
+        raw = dir ? (execCoreDeps?.readStickyIdentity?.({ dir }) ?? null) : null;
+      } catch {
+        raw = null;
+      }
+      raw = raw ?? execCoreDeps?.getHostName?.() ?? null;
+      if (!raw) return null;
+      return resolveHostAlias(raw, hostAliases) ?? raw;
+    } catch {
+      return null;
+    }
+  };
+
   const clusterEntity = createClusterEntity({
+    // CTL-1551: PER-HOST live window. The SELF host's heartbeats come straight
+    // from the local event log (no transport lag) and keep the default 30s
+    // window — a locally-dead daemon degrades promptly. PEER heartbeats ride a
+    // pipeline with KNOWN lag, so a healthy peer can never satisfy 30s and
+    // would structurally render "degraded"; budget by transport:
+    //   loki (default): ~30s beat + 60s poll + 20s sync cache  → 120s window
+    //   linear anchor:  ~120s publish cadence + 60s poll       → 240s window
+    // "degraded" then means genuinely late; the 5-min offline grace unchanged.
+    intervalMsFor: (host: string) => {
+      const self = resolveSelfPinnedHost();
+      // SELF: the local log is direct (no transport lag) — the window is the
+      // daemon's own configured beat cadence (default 30s), not a literal.
+      if (self && host === self) return HEARTBEAT_CADENCE_MS;
+      // Budget by the transport that produced THIS host's cached heartbeat
+      // (per-host provenance; poll-global source only as a fallback), with the
+      // window DERIVED from the configured cadences — capped below the 5-min
+      // offline grace so classify's live-check can never mask a host that
+      // should already be offline.
+      const src = peerSourceByHost[host] ?? lastPeerSource;
+      const win = src === "anchor" ? anchorPeerWindowMs : lokiPeerWindowMs;
+      return Math.min(win, PEER_WINDOW_GRACE_CAP_MS);
+    },
+    // CTL-1551: the monitor's own identity for the view/signal (SlotDeck's
+    // localHost) — resolved per assemble, alias-folded like every other host key.
+    selfHostProvider: () => resolveSelfPinnedHost(),
     rosterProvider: () => {
       try {
         return execCoreDeps?.getClusterHosts() ?? [];
@@ -1735,6 +2254,75 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const MONITOR_REQUEST_TIMING = process.env.CATALYST_TICK_TIMING !== "off";
   const MONITOR_SLOW_REQUEST_MS =
     Number(process.env.CATALYST_MONITOR_SLOW_REQUEST_MS) || 250;
+
+  // CTL-1573 P1: the allowlist must use the port the server ACTUALLY bound, not
+  // the requested one — `port: 0` asks the OS for an ephemeral port (the test
+  // harness does exactly this), so building from `port` would trust
+  // `localhost:0` and 403 every legitimate request. `server.port` is only known
+  // after Bun.serve() returns, so this is built lazily on first use; by then a
+  // request has arrived, which means the server is bound. Cached thereafter.
+  //
+  // MONITOR_TRUSTED_ORIGINS extends it for deployment-specific names (reverse
+  // proxy, Tailscale MagicDNS) — without it a monitor reached by such a name
+  // would 403 every reply and the surface would be inert.
+  let trustedOriginsCache: Set<string> | null = null;
+  let trustedOriginsBuiltAt = 0;
+  // Bounded freshness. A miss-only refresh picks up ADDED addresses but never
+  // notices a REMOVED one: after DHCP/Tailscale moves us from A to B, a cache
+  // hit keeps trusting A, so once A is reassigned to another host a page there
+  // could drive this route. A short TTL bounds that window without putting an
+  // interface scan on every request.
+  const TRUSTED_ORIGINS_TTL_MS = 60_000;
+
+  // The Vite dev server proxies /api to this monitor without rewriting Origin,
+  // so `bun run dev:ui` posts from http://localhost:5173 and would otherwise
+  // 403. Gated: never trusted in a normal (production) launch.
+  const devUiOrigins =
+    process.env.MONITOR_DEV_UI_ORIGINS ??
+    (process.env.NODE_ENV === "development" ||
+    ["1", "true", "yes", "on"].includes((process.env.MONITOR_DEV_UI ?? "").trim().toLowerCase())
+      ? // ONE spelling: Vite binds a single family, so another process can own the
+        // other family's :5173 and would otherwise get a trusted Origin. This is
+        // Vite's own default host — the URL `bun run dev:ui` prints.
+        "http://localhost:5173"
+      : null);
+
+  const buildTrusted = (): Set<string> =>
+    buildTrustedOrigins({
+      port: server?.port ?? port,
+      extraOrigins: process.env.MONITOR_TRUSTED_ORIGINS ?? null,
+      devOrigins: devUiOrigins,
+      bindHost: hostname,
+    });
+
+  // Allow, rebuilding the allowlist ONCE on a miss before refusing.
+  //
+  // The daemon runs under launchd with KeepAlive=true, so a cached set can long
+  // outlive the network. If Tailscale connects, or DHCP moves the address,
+  // after the set was first built, that new self-address is absent and every
+  // browser reply through it 403s until someone restarts the daemon — the
+  // inertness failure this guard is supposed to avoid. Rebuilding only on the
+  // miss path keeps the hot path a single Set lookup (a rejection is rare, and
+  // an attacker gains nothing: a rebuild re-derives OUR names, never theirs).
+  const originAllowed = (origin: string | null): boolean => {
+    // performance.now() is MONOTONIC. Date.now() steps with the wall clock, so
+    // an NTP correction or a VM snapshot restore could hold `now - builtAt`
+    // below the threshold indefinitely and keep a removed address trusted far
+    // past the documented 60s bound in this long-lived daemon.
+    const now = performance.now();
+    if (trustedOriginsCache === null || now - trustedOriginsBuiltAt >= TRUSTED_ORIGINS_TTL_MS) {
+      trustedOriginsCache = buildTrusted();
+      trustedOriginsBuiltAt = now;
+    }
+    if (isOriginAllowed(origin, trustedOriginsCache)) return true;
+    // Rebuild once more on a miss so a JUST-added address (Tailscale connecting)
+    // is honored immediately rather than waiting out the TTL. A rebuild
+    // re-derives OUR names and addresses, never the caller's, so a rejected
+    // caller gains nothing by forcing it.
+    trustedOriginsCache = buildTrusted();
+    trustedOriginsBuiltAt = now;
+    return isOriginAllowed(origin, trustedOriginsCache);
+  };
 
   const server = Bun.serve({
     port,
@@ -1882,6 +2470,137 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/config") {
           const cfg = loadMonitorConfig(monitorConfigPath);
           return Response.json(cfg);
+        }
+
+        // CTL-1653: GET /api/accounts — THIS node's Claude-account posture
+        // (active account + per-window utilization/resets/status +
+        // siblingWithHeadroom), token-free, cached ~5 min. `?refresh=true`
+        // forces a fresh probe. Disabled (accountsProbeExec:null) → a stable
+        // available:false response, matching the dbPath-gated endpoints. A
+        // no-env-file probe result carries its own available:false (see
+        // deriveAccountsSummary), which overrides the literal below via spread.
+        if (url.pathname === "/api/accounts") {
+          if (!accountsProbe) return Response.json({ available: false, node: hostName() });
+          const refresh = url.searchParams.get("refresh") === "true";
+          // CROSS-ORIGIN + SIMPLE-REQUEST + DNS-REBINDING GUARD on the
+          // state-changing path only. The monitor binds 0.0.0.0 with no auth,
+          // and `refresh=true` is the one per-request probe trigger — spending
+          // a real Haiku call per account (bounded by the refresh floor, but
+          // not to zero).
+          //
+          // The origin allowlist alone (originAllowed, same as the Linear-reply
+          // route) does NOT close this: this route is a GET, and browsers omit
+          // `Origin` on a SIMPLE cross-site request — a bare `<img
+          // src="...?refresh=true">`, a top-level navigation, or a plain <form>
+          // GET carries no Origin at all, and originAllowed(null) is (correctly,
+          // for the POST-route contract that guard was designed for) permissive
+          // (CTL-1653 Codex round-2 finding). Requiring this NON-STANDARD header
+          // closes THAT class of vector: none of those simple-request mechanisms
+          // can ever attach a custom header, and a cross-origin fetch()/XHR that
+          // tried to would trigger a CORS preflight this server does not answer
+          // for arbitrary origins, so the browser never sends the real request.
+          //
+          // DNS REBINDING defeats the header check alone (CTL-1653 Codex
+          // round-3 finding): a page loaded as `http://evil.example:<port>`
+          // that later re-resolves to THIS server's IP is same-origin to the
+          // browser once rebound, so its JS can attach the header with no
+          // preflight — and a same-origin fetch/XHR is not guaranteed to carry
+          // `Origin` either, which originAllowed(null) then admits. The `Host`
+          // header is the fix: it is NOT rebindable to a name we recognize —
+          // the rebound request still arrives with `Host: evil.example:<port>`
+          // (the browser sends whatever host the page's URL named, never OUR
+          // real name/address), so validating Host against the SAME trusted-
+          // origin set used for Origin (reusing `originAllowed` — Host is just
+          // an origin without a scheme) rejects it regardless of whether
+          // Origin is present. curl/non-browser callers stay usable: curl sets
+          // Host from the URL it was given, and localhost/127.0.0.1/the node's
+          // own address are exactly what's trusted.
+          if (refresh) {
+            const hasRefreshHeader = req.headers.get(ACCOUNTS_REFRESH_HEADER) !== null;
+            const hostHeader = req.headers.get("host");
+            // SCHEME-AWARE Host check (Codex rounds 4-6): Host carries no
+            // scheme, but an https://-only MONITOR_TRUSTED_ORIGINS entry
+            // deliberately does NOT trust the plaintext form of the same host.
+            // The scheme signal must be OPERATOR-DECLARED, never header-derived
+            // (round-6): X-Forwarded-Proto is client-spoofable from any
+            // loopback browser, and appending proxies put the client's value
+            // FIRST in the list — no peer-address gate fixes that. When
+            // MONITOR_TLS_PROXY_PEERS is set (comma-separated peer addresses of
+            // the TLS-terminating proxy, e.g. "127.0.0.1,::1"), a request
+            // arriving FROM one of those peers is https by declaration —
+            // headers are ignored entirely. Unset (the default, no TLS proxy),
+            // every request is plaintext and an https-only trusted set
+            // correctly rejects its host.
+            const peer = server.requestIP(req)?.address ?? "";
+            const tlsProxyPeers = (process.env.MONITOR_TLS_PROXY_PEERS ?? "")
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            // Normalize IPv4-mapped spellings (Codex round-7): a dual-stack
+            // bind (MONITOR_HOST=::) reports an IPv4 upstream as
+            // ::ffff:127.0.0.1, which must match a natural "127.0.0.1" entry.
+            const unmap = (a: string) => a.replace(/^::ffff:/i, "");
+            const peerNorm = unmap(peer);
+            const effectiveScheme = tlsProxyPeers.some((p) => unmap(p) === peerNorm)
+              ? "https"
+              : "http";
+            const hostTrusted =
+              hostHeader !== null && originAllowed(`${effectiveScheme}://${hostHeader}`);
+            if (!hasRefreshHeader || !hostTrusted || !originAllowed(req.headers.get("origin"))) {
+              return Response.json(
+                { status: "forbidden", error: "cross-origin refresh rejected" },
+                { status: 403 },
+              );
+            }
+          }
+          const summary = await accountsProbe.get({ refresh });
+          return Response.json({ available: true, ...summary });
+        }
+
+        // CTL-1653: SSE stream of the node's Claude-account posture. Each event:
+        //   event: account\ndata: <summary json>\n\n
+        // On connect, emit the current cached summary immediately (so a fresh
+        // dashboard renders without waiting a whole interval); thereafter the
+        // periodic timer broadcasts each fresh summary to every subscriber.
+        if (url.pathname === "/api/accounts/stream") {
+          const probeRef = accountsProbe;
+          let send: ((s: CachedAccountsSummary) => void) | null = null;
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              const frame = (s: unknown) => {
+                try {
+                  controller.enqueue(encoder.encode(`event: account\ndata: ${JSON.stringify(s)}\n\n`));
+                } catch {
+                  if (send) accountsSubscribers.delete(send);
+                  send = null;
+                }
+              };
+              if (!probeRef) {
+                // Disabled: emit one unavailable frame, no subscription.
+                frame({ available: false, node: hostName() });
+                return;
+              }
+              send = frame;
+              accountsSubscribers.add(send);
+              try {
+                frame(await probeRef.get());
+              } catch (err) {
+                console.error(`[server] accounts stream initial frame failed:`, err);
+              }
+            },
+            cancel() {
+              if (send) accountsSubscribers.delete(send);
+              send = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
         }
 
         // CTL-1152: GET /api/projects — the config-driven project roster. One
@@ -2515,6 +3234,45 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const artifacts = await readTicketArtifacts(ticket);
           return Response.json(artifacts);
+        }
+
+        // CTL-1574: a ticket's Linear discussion — comments + issue_history
+        // activity events, both read from the local CTC replica through the
+        // shared read-model builders. The reader never throws: an absent/locked
+        // replica or an unmirrored ticket comes back
+        // `{ available:false, comments:[], activity:[] }`, which the UI renders
+        // as an honest empty section (never a fabricated "no comments").
+        const ticketDiscussionMatch = url.pathname.match(
+          /^\/api\/ticket-discussion\/([^/]+)$/,
+        );
+        if (ticketDiscussionMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketDiscussionMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const discussion = await readTicketDiscussion(ticket, {
+            catalystDir: CATALYST_DIR,
+          });
+          // Agent classification is `is_bot` OR a configured app-actor author —
+          // Catalyst worker/orchestrator app actors are stored as users with
+          // is_bot=0 (the linear-thread.mjs contract), so is_bot alone would
+          // badge every agent comment as human.
+          const botIds = linearBotUserIds ?? linearWebhookConfig?.botUserIds;
+          if (botIds && discussion.comments.length > 0) {
+            discussion.comments = discussion.comments.map((c) =>
+              c.author_id != null && botIds.has(c.author_id) ? { ...c, is_bot: 1 } : c,
+            );
+          }
+          return Response.json(discussion);
         }
 
         // CTL-1042: serve a ticket's research/plan artifact CONTENT by kind for
@@ -3637,6 +4395,143 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
         }
 
+        // ── CTL-1569: the inbox conversation surface ───────────────────────────
+        //
+        // GET /api/ticket/<ticket>/thread — the ask summary + the last few comments
+        // (newest first) + the ticket's Linear deep link. A pure REPLICA read: it
+        // makes ZERO Linear API calls, which is what makes it safe to fetch on every
+        // row selection against a shared, rate-limited fleet quota. Fails OPEN —
+        // an absent/locked replica yields an unavailable thread, never a 5xx.
+        const threadMatch = url.pathname.match(/^\/api\/ticket\/([^/]+)\/thread$/);
+        if (threadMatch && req.method === "GET") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(threadMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          // CTL-1569: the canonical ticket key allows digits/underscores in the
+          // team prefix (e.g. `OPS_2-17`). A letters-only predicate 400s the entire
+          // conversation surface for such teams. Still anchored + no path
+          // characters, so traversal remains impossible.
+          if (!CONVERSATION_TICKET_RE.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const limitParam = Number(url.searchParams.get("limit"));
+          const conversation = await getConversation(ticket, {
+            // Pass the SERVER-resolved Layer-1 path (--config / CATALYST_CONFIG_PATH).
+            // A cwd-relative fallback misses under launchd, which sets no working
+            // directory — and the legacy `catalyst.monitor.linear.botUserId` lives in
+            // that file, so missing it breaks the agent/human split on legacy hosts.
+            repoConfigPath: monitorConfigPath,
+            ...(Number.isFinite(limitParam) && limitParam > 0
+              ? { limit: Math.min(Math.floor(limitParam), 50) }
+              : {}),
+          });
+          return Response.json(conversation, { status: 200 });
+        }
+
+        // POST /api/ticket/<ticket>/reply — post the operator's reply to Linear as a
+        // REAL human-authored comment. This is the resolution mechanism: once the
+        // comment lands, Linear's webhook drives the daemon's comment-wake, which
+        // clears `needs-human` unconditionally and first (CTL-1567, ~4s end to end).
+        //
+        // Deliberately UNLIKE /respond:
+        //   • NO typed-confirm. The typed gate exists for destructive verbs (stop a
+        //     worker); forcing an operator to retype the ticket id to send a chat
+        //     reply would defeat the entire surface. The reply text IS the intent.
+        //   • NO held-run requirement. The tickets that most need answering are
+        //     parked with no worker dir at all, and /respond 404s exactly those.
+        //
+        // EVERY non-2xx here must cause the UI to RESTORE the row (§4) — the row is
+        // never silently lost. `bot_identity` is the loud refusal that prevents the
+        // whole feature from shipping inert: an app-actor comment is ignored by
+        // CTL-1567, so it is refused BEFORE posting rather than faking success.
+        const replyMatch = url.pathname.match(/^\/api\/ticket\/([^/]+)\/reply$/);
+        if (replyMatch && req.method === "POST") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(replyMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!CONVERSATION_TICKET_RE.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          // CROSS-ORIGIN GUARD. This route posts operator-authored text to Linear,
+          // and the server binds 0.0.0.0 with no auth. `req.json()` parses a body
+          // regardless of Content-Type, so a plain `text/plain` form POST from any
+          // page the operator visits would otherwise be a valid request — the
+          // browser could not read the response, but the comment would still be
+          // posted as them to any guessable ticket.
+          //
+          // CTL-1573 P1: this used to compare `Origin` against the request's own
+          // `Host` header. Both are attacker-chosen under DNS rebinding (the page
+          // and the target then share one origin), so that comparison could not
+          // reject the very case it existed for. `Origin` is now checked against
+          // an allowlist the attacker cannot influence — see lib/trusted-origin.mjs
+          // for the rebinding walkthrough and the inertness trade-off.
+          if (!originAllowed(req.headers.get("origin"))) {
+            return Response.json(
+              { status: "forbidden", error: "cross-origin reply rejected" },
+              { status: 403 },
+            );
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = (await req.json()) as Record<string, unknown>;
+          } catch {
+            return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+          }
+          const text = typeof body.body === "string" ? body.body : "";
+          const [globalConfig, projectConfig] = await Promise.all([
+            loadGlobalConfig(),
+            // Explicit resolved path — NOT process.cwd(). The launchd wrapper sets
+            // neither a working directory nor CATALYST_PROJECT_KEY, so a
+            // cwd-relative lookup leaves the Layer-2 token unresolved and every
+            // reply returns `no_token` on the persistent launch path.
+            loadProjectConfig({ repoConfigPath: monitorConfigPath }),
+          ]);
+          const result = await replyToTicket(
+            { ticket, body: text },
+            { config: globalConfig, projectConfig },
+          );
+          switch (result.status) {
+            case "replied":
+              // The comment is live and human-authored. The UI marks the row
+              // resolved optimistically and reconciles against the label.
+              return Response.json(result, { status: 200 });
+            case "empty_body":
+              return Response.json(
+                { ...result, error: "an empty reply was not sent" },
+                { status: 400 },
+              );
+            case "not_found":
+              return Response.json(
+                {
+                  ...result,
+                  error: `no Linear issue ${ticket} to reply to`,
+                },
+                { status: 404 },
+              );
+            case "bot_identity":
+            case "no_token":
+            case "error":
+            default:
+              // 502: the write did NOT act. Surfaced verbatim so the operator sees
+              // WHY (especially the app-actor refusal) and the row comes back.
+              return Response.json(
+                {
+                  ...result,
+                  error:
+                    (result as { message?: string }).message ??
+                    "reply was not posted to Linear",
+                },
+                { status: 502 },
+              );
+          }
+        }
+
         // CTL-886 (BFF4) companion P3: one phase signal served VERBATIM — the raw
         // phase-<phase>.json contents (model, bg_job_id, generation, status,
         // timestamps, host, pr) untransformed, for the worker header / PHASE
@@ -4733,74 +5628,107 @@ export function createServer(opts: CreateServerOptions): BunServer {
     );
   }
 
+  // CTL-1617: deployment-mode gate for BOTH smee tunnels below (GitHub +
+  // Linear). A node declared "cloud" expects the cloud SDK event connection
+  // (future work — PR #2755 lineage) as its event source, not the smee
+  // tunnel; a live tunnel on a declared-cloud node is contrary-to-mode
+  // (design §2/§6). Resolved ONCE here (not per-tunnel) so both gates agree
+  // within a single startup. Every other deployment mode — including the
+  // inferred "single-host" default every host resolves today, since nothing
+  // in the live fleet declares a deployment mode yet — leaves this branch
+  // false, so tunnel startup is byte-for-byte unchanged (design §9 PR3
+  // success criterion: provable no-op on the live fleet).
+  const resolveDeploymentModeForTunnelGate =
+    deploymentModeReaderOpt ?? getDeploymentMode;
+  const deploymentModeForTunnelGate = resolveDeploymentModeForTunnelGate();
+  const cloudModeSuppressesTunnels = deploymentModeForTunnelGate === "cloud";
+
   if (webhookConfig && webhookHandler) {
-    const tunnelTarget =
-      webhookConfig.target ?? `http://localhost:${server.port}/api/webhook`;
-    webhookTunnel = createWebhookTunnel({
-      source: webhookConfig.smeeChannel,
-      target: tunnelTarget,
-      logger: {
-        info: (m) => console.info(m),
-        error: (m) => console.error(m),
-      },
-      factory: webhookConfig.tunnelFactory,
-    });
-    void webhookTunnel.start().catch((err: unknown) => {
-      console.error(
-        `[server] webhook tunnel start failed:`,
-        err instanceof Error ? err.message : String(err),
+    if (cloudModeSuppressesTunnels) {
+      // Loud on purpose: a declared-cloud node silently not opening the
+      // GitHub webhook tunnel would be undiagnosable otherwise (a channel is
+      // configured, so the OLD gate at `webhookConfig && webhookHandler`
+      // alone would have started it).
+      console.info(
+        `[server] suppressing GitHub webhook smee tunnel start: deployment mode is "cloud" (event ingestion is the cloud SDK connection, not the smee tunnel)`,
       );
-    });
-    if (webhookReplay && webhookSubscriber) {
-      const replay = webhookReplay;
-      const subscriber = webhookSubscriber;
-      // CTL-216: subscribe to configured watchRepos before replay so they're
-      // present in subscriber.listSubscribed() when replay runs. Errors per
-      // repo are tolerated by ensureSubscribed (logged + continue).
-      const watchRepos = webhookConfig.watchRepos ?? [];
-      const watchSubscriptions =
-        watchRepos.length > 0
-          ? Promise.allSettled(
-              watchRepos.map((repo) => subscriber.ensureSubscribed(repo)),
-            )
-          : Promise.resolve();
-      // 1-hour replay window — wide enough to cover most outages, narrow enough
-      // to keep startup latency under a few seconds.
-      const since = new Date(Date.now() - 60 * 60_000);
-      void watchSubscriptions
-        .then(() => replay.replaySince(subscriber.listSubscribed(), since))
-        .then((count) => {
-          if (count > 0) {
-            console.info(
-              `[server] replayed ${count} webhook deliveries from the last hour`,
+    } else {
+      const tunnelTarget =
+        webhookConfig.target ?? `http://localhost:${server.port}/api/webhook`;
+      webhookTunnel = createWebhookTunnel({
+        source: webhookConfig.smeeChannel,
+        target: tunnelTarget,
+        logger: {
+          info: (m) => console.info(m),
+          error: (m) => console.error(m),
+        },
+        factory: webhookConfig.tunnelFactory,
+      });
+      void webhookTunnel.start().catch((err: unknown) => {
+        console.error(
+          `[server] webhook tunnel start failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+      if (webhookReplay && webhookSubscriber) {
+        const replay = webhookReplay;
+        const subscriber = webhookSubscriber;
+        // CTL-216: subscribe to configured watchRepos before replay so they're
+        // present in subscriber.listSubscribed() when replay runs. Errors per
+        // repo are tolerated by ensureSubscribed (logged + continue).
+        const watchRepos = webhookConfig.watchRepos ?? [];
+        const watchSubscriptions =
+          watchRepos.length > 0
+            ? Promise.allSettled(
+                watchRepos.map((repo) => subscriber.ensureSubscribed(repo)),
+              )
+            : Promise.resolve();
+        // 1-hour replay window — wide enough to cover most outages, narrow enough
+        // to keep startup latency under a few seconds.
+        const since = new Date(Date.now() - 60 * 60_000);
+        void watchSubscriptions
+          .then(() => replay.replaySince(subscriber.listSubscribed(), since))
+          .then((count) => {
+            if (count > 0) {
+              console.info(
+                `[server] replayed ${count} webhook deliveries from the last hour`,
+              );
+            }
+          })
+          .catch((err: unknown) => {
+            console.error(
+              `[server] webhook replay failed:`,
+              err instanceof Error ? err.message : String(err),
             );
-          }
-        })
-        .catch((err: unknown) => {
-          console.error(
-            `[server] webhook replay failed:`,
-            err instanceof Error ? err.message : String(err),
-          );
-        });
+          });
+      }
     }
   }
 
   const linearSmeeChannel = opts.linearWebhookConfig?.smeeChannel ?? "";
   if (linearSmeeChannel.length > 0) {
-    linearWebhookTunnel = createWebhookTunnel({
-      source: linearSmeeChannel,
-      target: `http://localhost:${server.port}/api/webhook/linear`,
-      logger: {
-        info: (m) => console.info(`[linear-tunnel] ${m}`),
-        error: (m) => console.error(`[linear-tunnel] ${m}`),
-      },
-    });
-    void linearWebhookTunnel.start().catch((err: unknown) => {
-      console.error(
-        `[server] linear webhook tunnel start failed:`,
-        err instanceof Error ? err.message : String(err),
+    if (cloudModeSuppressesTunnels) {
+      // Same rationale as the GitHub branch above — loud on purpose.
+      console.info(
+        `[server] suppressing Linear webhook smee tunnel start: deployment mode is "cloud" (event ingestion is the cloud SDK connection, not the smee tunnel)`,
       );
-    });
+    } else {
+      linearWebhookTunnel = createWebhookTunnel({
+        source: linearSmeeChannel,
+        target: `http://localhost:${server.port}/api/webhook/linear`,
+        logger: {
+          info: (m) => console.info(`[linear-tunnel] ${m}`),
+          error: (m) => console.error(`[linear-tunnel] ${m}`),
+        },
+        factory: opts.linearWebhookConfig?.tunnelFactory,
+      });
+      void linearWebhookTunnel.start().catch((err: unknown) => {
+        console.error(
+          `[server] linear webhook tunnel start failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    }
   }
 
   if (pidFile) {
@@ -4817,10 +5745,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const originalStop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
+    // CTL-1612 post-merge #2978 (Codex P2 follow-up): set FIRST, synchronously,
+    // before any other cleanup — see the `stopped` comment above
+    // daemonDepsPromise for what this guards (the fire-and-forget remint in
+    // readAnchor, and applyToken's process.env write).
+    stopped = true;
     for (const u of unsubscribers) u();
     watcher?.stop();
     boardSnapshot.stop();
     serviceHealth.stop();
+    accountsTimer?.stop(); // CTL-1653: stop the periodic Claude-account probe
+    accountsSubscribers.clear();
     prFetcher?.stop();
     previewFetcher?.stop();
     linear?.stop();
@@ -4859,6 +5794,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
     () => eventRing.listenerCount();
   (server as unknown as { __sseClientCount?: () => number }).__sseClientCount =
     () => sseClients.size;
+  // CTL-1612 post-merge #2978 (Codex P2 follow-up): same CTL-1224 debug-seam
+  // convention — exposes the `stopped` lifecycle flag (see its comment above
+  // daemonDepsPromise) so a test can assert it flips synchronously, before
+  // any other stop() cleanup runs. The UI never reads this.
+  (server as unknown as { __stopped?: () => boolean }).__stopped = () => stopped;
 
   return server;
 }
@@ -4910,6 +5850,11 @@ if (import.meta.main) {
   const RUNS_DIR = `${CATALYST_DIR}/runs`;
   const parsedPort = parseInt(process.env.MONITOR_PORT ?? "", 10);
   const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : DEFAULT_PORT;
+  // CTL-1573: the bind address. Default stays 0.0.0.0 (IPv4) for compatibility.
+  // Exposed because the reference doc names `::` (dual-stack) as the real remedy
+  // for the family-squatting residual — an undocumented remedy nobody can apply
+  // is not a remedy.
+  const HOST = (process.env.MONITOR_HOST ?? "").trim() || "0.0.0.0";
   const DB_PATH =
     process.env.CATALYST_DB_FILE ?? `${CATALYST_DIR}/catalyst.db`;
 
@@ -4943,6 +5888,13 @@ if (import.meta.main) {
     process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
     configPath,
     projectKey,
+  );
+  // Loaded independently of loadWebhookConfig: that loader returns null when no
+  // webhook transport is configured, discarding the ids — but read surfaces
+  // (the discussion timeline) still need them to classify agent comments.
+  const linearBotIdsForReads = loadLinearBotUserIds(
+    process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
+    configPath,
   );
   const webhookConfig =
     fullWebhookConfig &&
@@ -5023,6 +5975,7 @@ if (import.meta.main) {
     );
     const srv = createServer({
       port: PORT,
+      hostname: HOST,
       wtDir: WT_DIR,
       runsDir: RUNS_DIR,
       dbPath: DB_PATH,
@@ -5039,6 +5992,9 @@ if (import.meta.main) {
       inboxSummaryProvider,
       webhookConfig,
       linearWebhookConfig,
+      // Independent of webhook wiring: configured app-actor ids classify agent
+      // comments on the discussion surface even when webhooks are disabled.
+      linearBotUserIds: linearBotIdsForReads.size > 0 ? linearBotIdsForReads : undefined,
       projectsConfigPath: configPath,
       monitorConfigPath: configPath,
     });

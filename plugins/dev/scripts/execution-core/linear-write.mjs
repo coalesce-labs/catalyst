@@ -256,12 +256,17 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
 // and overwrite with the remainder (or --clear-labels when nothing remains).
 // This keeps the write inside linearis and preserves the issue's other labels.
 //
-// Idempotent: if the label is already absent we return { removed: true } without
-// a write. A failed read is { removed: false, reason } where reason is
+// Idempotent: if the label is already absent we return { removed: true, wrote: false }
+// without a write. A failed read is { removed: false, reason } where reason is
 // "auth-error" when the read's stderr matches isAuthError, otherwise "transient".
 // CTL-1078: injectable readLabels seam (defaults to readTicketLabels) returns the
 // richer { ok, labels, code, stderr } shape so the auth-vs-transient distinction
 // can be made. fetchLabels is accepted for back-compat (old test stubs). Never throws.
+// Codex #2970 round 3: `removed` alone can't distinguish "confirmed absent, no write
+// needed" from "this call performed the write" — both return removed:true. Callers that
+// must not double-record a state CHANGE (e.g. emitting a worker.transition clear once per
+// genuine removal, not once per no-op re-check on a duplicate webhook / second host) gate
+// on the additive `wrote` field instead.
 export async function removeLabel(
   ticket,
   label,
@@ -283,12 +288,12 @@ export async function removeLabel(
     if (!readResult.ok) {
       const reason = isAuthError(readResult.stderr ?? "") ? "auth-error" : "transient";
       log.warn({ ticket, label, reason, stderr: readResult.stderr }, "removeLabel: read failed");
-      return { removed: false, reason };
+      return { removed: false, wrote: false, reason };
     }
     const current = readResult.labels;
     if (!current.includes(label)) {
       // Idempotent: the label is already gone, no write needed.
-      return { removed: true };
+      return { removed: true, wrote: false };
     }
     const remaining = current.filter((l) => l !== label);
     let res;
@@ -317,12 +322,12 @@ export async function removeLabel(
     if ((res.code ?? res.status ?? 0) !== 0) {
       const reason = classifyLabelFailure(res.stderr ?? "");
       log.warn({ ticket, label, reason, stderr: res.stderr }, "removeLabel: write failed");
-      return { removed: false, reason };
+      return { removed: false, wrote: false, reason };
     }
-    return { removed: true };
+    return { removed: true, wrote: true };
   } catch (err) {
     log.warn({ ticket, label, reason: "transient", err: err.message }, "removeLabel: threw");
-    return { removed: false, reason: "transient" };
+    return { removed: false, wrote: false, reason: "transient" };
   }
 }
 

@@ -31,7 +31,9 @@ export type DetailLens = (typeof LENS_VALUES)[number];
 
 /** Which ticket-detail tab is active. Absent on the URL = the `spec` default
  *  (dropped from the URL to keep it clean, same idiom as scope:"all"). CTL-996. */
-export const TAB_VALUES = ["lifecycle", "cost", "activity", "execution"] as const;
+// CTL-1574 added "discussion" — the Linear conversation (comments + state
+// changes). Distinct from "activity", which is the execution event stream.
+export const TAB_VALUES = ["lifecycle", "cost", "activity", "discussion", "execution"] as const;
 export type DetailTab = (typeof TAB_VALUES)[number];
 
 /**

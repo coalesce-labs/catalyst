@@ -22,12 +22,7 @@ import type { ClusterSignal } from "@/lib/cluster-signal";
 import { assignSlots, isLiveWorker, slotLabel } from "./queue-model";
 import { TickerNumber } from "./ticker-number";
 import { buildCapacityBadges } from "./capacity-badges";
-import {
-  aggregateClusterCapacity,
-  assignClusterSlots,
-  filterSlotsByNode,
-  nodeCapacity,
-} from "./cluster-capacity";
+import { assignClusterSlots, filterSlotsByNode } from "./cluster-capacity";
 import type { ClusterSlot } from "./cluster-capacity";
 
 // The state word + its color for a slot's worker (mirrors workerStatusText).
@@ -165,7 +160,19 @@ function EmptyCard({ slotLabel, first }: { slotLabel: string; first: boolean }) 
 
 // RemoteSlotCard — lightweight card for a remote node's in-flight ticket (CTL-1092).
 // Shows host chip + ticket id only; no worker detail (cross-node tail is CTL-885).
-function RemoteSlotCard({ slot }: { slot: ClusterSlot }) {
+function RemoteSlotCard({
+  slot,
+  local = false,
+  onOpenTicket,
+}: {
+  slot: ClusterSlot;
+  /** CTL-1588: a heartbeat-only slot on the SELF host (SDK/codex-exec worker the
+   *  live-agent list cannot see) renders through this lightweight card too —
+   *  label it honestly and keep the ticket clickable. */
+  local?: boolean;
+  onOpenTicket?: (key: string) => void;
+}) {
+  const ticket = slot.ticket;
   return (
     <div
       style={{
@@ -180,14 +187,27 @@ function RemoteSlotCard({ slot }: { slot: ClusterSlot }) {
       }}
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 10, color: C.fgDim, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono }}>
-          {slotLabel(slot.slotIndex + 1)}
+        <span style={{ fontSize: 10, color: slot.over ? C.yellow : C.fgDim, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono }}>
+          {slot.over ? "OVER" : slotLabel(slot.slotIndex + 1)}
         </span>
-        <span style={{ fontSize: 10, color: C.fgDim, fontFamily: C.mono }}>remote</span>
+        <span style={{ fontSize: 10, color: C.fgDim, fontFamily: C.mono }}>{local ? "local" : "remote"}</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
         <span style={{ fontSize: 10, color: C.fgDim, background: C.s3, borderRadius: 4, padding: "2px 5px", fontFamily: C.mono }}>{slot.host}</span>
-        <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 600, color: C.blue }}>{slot.ticket}</span>
+        {/* CTL-1581: count-based fallback slots (old-daemon/anchor peers) have no
+            ticket label — an honest "busy" beats a false Open. */}
+        <span
+          style={{
+            fontFamily: C.mono,
+            fontSize: 13,
+            fontWeight: 600,
+            color: ticket ? C.blue : C.fgDim,
+            cursor: ticket && onOpenTicket ? "pointer" : undefined,
+          }}
+          onClick={ticket && onOpenTicket ? () => onOpenTicket(ticket) : undefined}
+        >
+          {ticket ?? "busy"}
+        </span>
       </div>
     </div>
   );
@@ -242,18 +262,38 @@ export function SlotDeck({
 }) {
   const infoById = new Map(tickets.map((t) => [t.id, t]));
 
-  // Cluster-mode path: use aggregateClusterCapacity + assignClusterSlots
+  // Cluster-mode path: assignClusterSlots renders the deck; the header counts
+  // its occupied boxes directly (CTL-1581)
   if (clusterSignal && clusterSignal.nodes.length > 1) {
-    const localHost = clusterSignal.nodes.find((n) => n.status === "live")?.host ?? "";
+    // CTL-1551: prefer the signal's explicit self identity — with peers now
+    // legitimately "live" (Loki transport), first-live-node picks the wrong
+    // host on any monitor that isn't first in the roster. The old heuristic
+    // remains only as a fallback for pre-CTL-1551 cached frames.
+    const localHost =
+      clusterSignal.selfHost ??
+      clusterSignal.nodes.find((n) => n.status === "live")?.host ??
+      "";
     const allSlots = assignClusterSlots({
       nodes: clusterSignal.nodes as any,
       localHost,
       localWorkers: workers,
     });
     const displaySlots = selectedNode === "all" ? allSlots : filterSlotsByNode(allSlots, selectedNode);
-    const cap = selectedNode === "all"
-      ? aggregateClusterCapacity(clusterSignal.nodes as any)
-      : nodeCapacity(clusterSignal.nodes as any, selectedNode);
+    // CTL-1581: the occupied count derives from the SAME slots the deck
+    // renders, so the count and the boxes can never disagree (the old aggregate
+    // counted the heartbeat's ownership number while the boxes rendered
+    // occupancy — "1/4 in use" over a deck of all-Open cards). The DENOMINATOR
+    // stays the CONFIGURED capacity: over-capacity boxes are extra cards, and
+    // counting them in the denominator would launder a real 5/4 into 5/5.
+    const occupiedCount = displaySlots.filter((s) => s.occupied).length;
+    const displayNodes = (clusterSignal.nodes as { host: string; status: string; maxParallel?: number }[])
+      .filter((n) => n.status !== "offline" && (selectedNode === "all" || n.host === selectedNode));
+    const configuredCap = displayNodes.reduce((sum, n) => sum + (n.maxParallel ?? 0), 0);
+    const cap = {
+      maxParallel: configuredCap,
+      inFlight: occupiedCount,
+      freeSlots: Math.max(0, configuredCap - occupiedCount),
+    };
 
     return (
       <section>
@@ -286,13 +326,21 @@ export function SlotDeck({
                     key={`slot-${slot.worker.name}`}
                     w={slot.worker}
                     ticket={infoById.get(slot.worker.tickets?.[0] ?? "")}
-                    slotLabel={slotLabel(slot.slotIndex + 1)}
+                    slotLabel={slot.over ? "OVER" : slotLabel(slot.slotIndex + 1)}
                     onOpenTicket={onOpenTicket}
                   />
                 );
               }
-              // Remote slot with ticket label
-              return <RemoteSlotCard key={`remote-${slot.host}-${slot.slotIndex}`} slot={slot} />;
+              // Ticket-label slot: a remote node's worker, or a SELF-host worker
+              // only the heartbeat can see (CTL-1588: SDK/codex-exec executors).
+              return (
+                <RemoteSlotCard
+                  key={`remote-${slot.host}-${slot.slotIndex}`}
+                  slot={slot}
+                  local={slot.host === localHost}
+                  onOpenTicket={onOpenTicket}
+                />
+              );
             })}
           </AnimatePresence>
         </div>

@@ -111,15 +111,32 @@ export function mergeHeartbeatsNewestWins(...maps) {
 export function overlayClusterLiveness(
   hosts,
   lastSeenByHost,
-  { now = Date.now(), intervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS, graceMs = DEFAULT_LIVENESS_GRACE_MS } = {},
+  {
+    now = Date.now(),
+    intervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
+    graceMs = DEFAULT_LIVENESS_GRACE_MS,
+    // CTL-1551: optional PER-HOST live-window resolver — (host) => ms | undefined.
+    // The self host's heartbeats arrive directly from the local event log (no
+    // lag), while PEER heartbeats ride a transport with known pipeline latency,
+    // so one shared window is either too loose for self or too tight for peers.
+    // undefined/absent → the shared intervalMs.
+    intervalMsFor = null,
+  } = {},
 ) {
   const roster = Array.isArray(hosts) ? hosts : [];
   const seen = lastSeenByHost && typeof lastSeenByHost === "object" ? lastSeenByHost : {};
   return roster.map((host) => {
     const lastSeen = typeof seen[host] === "string" && seen[host].length > 0 ? seen[host] : null;
+    let hostIntervalMs = intervalMs;
+    try {
+      const v = typeof intervalMsFor === "function" ? intervalMsFor(host) : undefined;
+      if (Number.isFinite(v) && v > 0) hostIntervalMs = v;
+    } catch {
+      /* resolver failure → shared default; classification must never throw */
+    }
     return {
       host,
-      status: classifyHostLiveness(lastSeen, now, { intervalMs, graceMs }),
+      status: classifyHostLiveness(lastSeen, now, { intervalMs: hostIntervalMs, graceMs }),
       lastSeen,
     };
   });

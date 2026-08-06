@@ -29,6 +29,7 @@ import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync,
 import { dirname, basename, join } from "node:path";
 import {
   getEventLogPath,
+  getCoordinationMirrorPath, // CTL-1655: coordination-mirror comment tail
   RECONCILE_INTERVAL_MS,
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
@@ -52,6 +53,8 @@ import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
   runEligibleQuery,
+  runTriageStateQuery as defaultRunTriageStateQuery, // CTL-1589: level-triggered Triage-state read
+  fetchTicketState as defaultFetchTicketState, // CTL-1589: last-moment stale-row revalidation
   fetchTicketAssignee,
   isAssigneeClaimable,
   isClaimable,
@@ -112,6 +115,14 @@ import {
   getReconcileHealth,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
+// CTL-1628: direct import (not routed through reconcile-health.mjs) — the
+// eligible-set persist-failure event has no consecutive-failure/alert-latch
+// state to track, so it skips recordReconcileFailure and appends straight
+// through the same appendHealthEvent seam used above.
+import {
+  appendReconcileHealthEvent,
+  ELIGIBLE_PERSIST_FAILURE_ACTION,
+} from "./reconcile-health-event.mjs";
 import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
@@ -318,7 +329,9 @@ const knownProjects = new Set();
 // after N consecutive failures the health tracker escalates a canonical
 // `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
 // orch-monitor dashboard surfaces the silently-starving team, and a recovering
-// poll clears the alert. `appendHealthEvent` is an injectable test seam.
+// poll clears the alert. `appendHealthEvent` is an injectable test seam — it
+// also gates the CTL-1628 `monitor.reconcile.eligible_persist_failure.<TEAM>`
+// event fired below when the eligible-set disk projection write fails.
 export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, replica, onSource } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
@@ -353,13 +366,20 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     );
     return;
   }
-  // CTL-867: the poll succeeded — reset the failure streak, refresh the
-  // last-successful-refresh marker, and clear any standing alert. Recorded
-  // BEFORE the projection write so a successful poll counts as a recovery even
-  // if the (rare) projection write below fails.
-  recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   try {
     setProjectEligible(team, tickets, { source: "reconcile", query });
+    // CTL-867/CTL-1628: reset the failure streak, refresh the
+    // last-successful-refresh marker, and clear any standing alert only once
+    // the projection has actually landed on disk. This used to run BEFORE the
+    // persist try/catch (recorded as soon as the poll succeeded), which meant
+    // a *persistent* persist fault (e.g. EACCES on the eligible dir) kept
+    // reconcile-health — and by extension checkFleetFreeze, which reads
+    // getReconcileHealth(team)?.alerting — permanently green while the
+    // scheduler read a stale-forever projection (the CTL-1628 design gap:
+    // "persist failures invisible to reconcile health state"). Moved here so
+    // a persist failure now falls into the catch below instead of being
+    // masked as success.
+    recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   } catch (err) {
     // A projection write/rename failure (disk full, permissions) must NOT
     // crash the daemon: reconcileProject runs inside reconcileAll, itself
@@ -370,6 +390,33 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     log.error(
       { team, err: err.message },
       "eligible-set projection write failed — daemon continues, retry next reconcile"
+    );
+    // CTL-1628: the log line above was invisible to the dashboard —
+    // "monitoring green, scheduler stale". Escalate onto the unified event
+    // log too, via the same appendHealthEvent test seam used for the CTL-867
+    // reconcile-poll escalation above. Unlike that escalation this fires on
+    // every failed persist (no threshold/latch — a stale-on-disk projection
+    // is worth surfacing immediately, not after N consecutive misses).
+    (appendHealthEvent ?? appendReconcileHealthEvent)({
+      team,
+      action: ELIGIBLE_PERSIST_FAILURE_ACTION,
+      reason: err.message,
+    });
+    // CTL-1628: ALSO feed this into the same N-consecutive escalation/
+    // alert-latch tracker recordReconcileFailure already drives for poll
+    // failures, so a *persistent* persist fault escalates monitor.reconcile.
+    // failing and holds checkFleetFreeze's alerting flag true — exactly like
+    // a persistent poll fault does — instead of the marker staying frozen
+    // "healthy" forever. The `eligible-persist-failed:` prefix distinguishes
+    // a persist-origin streak from a poll-origin streak in the health marker
+    // / dashboard without adding a second tracked dimension. `origin: "persist"`
+    // (CTL-1628 r2) additionally lets recordReconcileSuccess's eventual
+    // recovery event name the stage that actually recovered, rather than
+    // hard-coding "reconcile-poll-succeeded" for a streak the poll never failed.
+    recordReconcileFailure(
+      team,
+      `eligible-persist-failed: ${err.message}`,
+      { origin: "persist", ...(appendHealthEvent ? { appendEvent: appendHealthEvent } : {}) }
     );
   }
 }
@@ -395,9 +442,16 @@ export function reconcileAll({ exec, delegateExec, appendHealthEvent, fleetFreez
   // neither the replica nor linearis — new work is frozen fleet-wide, which used
   // to be silent (reconcileProject just preserves the empty prior set). Latched +
   // best-effort inside checkFleetFreeze; a team's recovery clears it.
+  //
+  // CTL-1628 r3: getTeamOrigin threads each team's failure origin ("poll" |
+  // "persist", from reconcile-health.mjs's lastFailureOrigin) so checkFleetFreeze
+  // can tell the documented replica+linearis double outage (all-poll) apart
+  // from an all-teams local disk fault (all-persist) — same alert name, an
+  // accurate cause instead of an operator chasing the wrong subsystem.
   checkFleetFreeze({
     teams: [...seen],
     isTeamFrozen: (t) => getReconcileHealth(t)?.alerting === true,
+    getTeamOrigin: (t) => getReconcileHealth(t)?.lastFailureOrigin ?? "poll",
     ...(fleetFreezeAppend ? { append: fleetFreezeAppend } : {}),
   });
 }
@@ -726,6 +780,15 @@ function dispatchTriage(
     // tests never spawn a real linearis write; default = the label-guard path.
     labelNeedsHuman = (dir, t) =>
       labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, { site: "triage-redispatch-cap" }),
+    // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
+    // ticket's LIVE state must still equal this workflow-state name at launch.
+    // null/undefined (the webhook path, eligible-half candidates) skips the check.
+    requireTriageState = null,
+    fetchLiveState = defaultFetchTicketState,
+    // CTL-1589 (Codex R7): the candidate row's replica updatedAt (ISO). A row
+    // updated AFTER a cached negative verdict invalidates the marker — the
+    // ticket may have legitimately re-entered Triage.
+    candidateUpdatedAt = null,
   }
 ) {
   if (!orchDir) {
@@ -850,6 +913,79 @@ function dispatchTriage(
   // the triage worker as CATALYST_CLUSTER_GENERATION (mirrors CTL-864 scheduler
   // path). null on single-host → writeClusterGeneration and dispatchTicket both
   // treat null as a no-op (fence token is omitted from the env).
+  // CTL-1589 (Codex R3+R4): live revalidation for a Triage-BOARD candidate.
+  // Placement is deliberate on BOTH sides: AFTER the drain/HRW/delegate/cap
+  // gates (R3 P1 — the bare live read fires only for a dispatch this host would
+  // genuinely make, so the rate is bounded by launch attempts, never a
+  // per-sweep/per-candidate probe) and BEFORE the cross-host claim (R4 P1 — a
+  // skip must not bump the fence generation out from under a live later-phase
+  // worker holding the current one). A replica row can have MISSED the ticket's
+  // exit from Triage (delivery hole), and the CTL-758 guard refuses only
+  // TERMINAL backward writes — without this check the later status write could
+  // drag an advanced ticket back to Triage. FAIL-CLOSED (R4 P1): an unreadable
+  // live state skips this sweep — a stranded ticket loses one cycle (the next
+  // sweep retries), while proceeding blind could double-launch AND regress the
+  // ticket's state. No verdict caching: a cached positive could go stale after
+  // a failed dispatch and redispatch an advanced ticket on the next sweep.
+  if (requireTriageState) {
+    // NEGATIVE-verdict cache (Codex R6): a failed validation is not a launch,
+    // so a persistently-stale row (unhealed delivery hole) would otherwise pay
+    // one bare read per sweep forever. Caching ONLY negatives keeps R4's
+    // no-stale-positive property — a fresh negative marker just extends the
+    // skip of an already-skipped ticket, and expiry re-reads (2 reads/hour cap
+    // per stuck ticket).
+    const revalDir = join(orchDir, ".triage-revalidate");
+    const revalPath = join(revalDir, `${identifier}.json`);
+    try {
+      const m = JSON.parse(readFileSync(revalPath, "utf8"));
+      const rowMs = candidateUpdatedAt ? Date.parse(candidateUpdatedAt) : NaN;
+      // A replica row updated AFTER the verdict invalidates it (Codex R7): the
+      // ticket may have legitimately re-entered Triage since the negative.
+      const invalidated = Number.isFinite(rowMs) && typeof m?.ts === "number" && rowMs > m.ts;
+      if (!invalidated && typeof m?.ts === "number" && Date.now() - m.ts < TRIAGE_REVALIDATE_NEGATIVE_MS) {
+        log.debug(
+          { identifier, cachedLive: m.live ?? null },
+          "dispatchTriage: Triage-board revalidation negative still cached — skipping without a read (CTL-1589)"
+        );
+        return false;
+      }
+    } catch {
+      /* absent/corrupt marker → read */
+    }
+    let live = null;
+    try {
+      // AUTHORITATIVE read only (Codex R7): no gateway/replica tier — a ≤60s
+      // cached "Triage" from the webhook-fed descriptor store could approve a
+      // duplicate launch on a just-advanced ticket, and the replica is the very
+      // source being audited. The negative cache above owns the read-rate
+      // bound, so the bare read stays ≤2/hour per stuck candidate.
+      live = fetchLiveState(identifier);
+    } catch {
+      live = null;
+    }
+    if (live !== requireTriageState) {
+      try {
+        mkdirSync(revalDir, { recursive: true });
+        writeFileSync(revalPath, JSON.stringify({ ts: Date.now(), live }));
+      } catch {
+        /* marker is best-effort; worst case is a re-read next sweep */
+      }
+      log.info(
+        { identifier, live, expected: requireTriageState },
+        live == null
+          ? "dispatchTriage: Triage-board candidate's live state unreadable — holding this sweep (CTL-1589)"
+          : "dispatchTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
+      );
+      return false;
+    }
+    // Positive: clear any expired negative so a healed ticket never waits on
+    // stale forensics. Best-effort.
+    try {
+      renameSync(revalPath, `${revalPath}.cleared`);
+    } catch {
+      /* no marker to clear */
+    }
+  }
   let clusterGeneration = null;
   if (multiHost) {
     const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
@@ -1085,6 +1221,48 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
   return true;
 }
 
+// triageStateTickets — the CTL-1589 half of the sweep's ticket source: the
+// tickets currently SITTING IN this team's Triage state, read from the local
+// replica. Fail-open — an unavailable board yields [] and the sweep degrades to
+// its pre-CTL-1589 eligible-only behavior rather than aborting the pass. The
+// unavailable cases are logged at WARN and never silent: with the replica tier
+// off (or its writer dead) this half of the fix is INERT, and a stranded Triage
+// ticket would otherwise look like a mysterious no-op.
+// TRIAGE_REVALIDATE_NEGATIVE_MS — how long a NEGATIVE launch-revalidation
+// verdict (stale/unreadable) suppresses re-reading a Triage-board candidate.
+// See the negative-verdict cache inside dispatchTriage (Codex R6).
+const TRIAGE_REVALIDATE_NEGATIVE_MS = 30 * 60 * 1000;
+
+function triageStateTickets(entry, { replica, runTriageState }) {
+  const query = resolveEligibleQuery(entry);
+  const onSource = (source, count) => {
+    const line = { team: query.team, triage_source: source, triage_count: count };
+    if (source === "replica") log.info(line, "triage sweep: Triage-state source");
+    else if (source === "no-triage-status") log.debug(line, "triage sweep: team configures no Triage state");
+    else
+      log.warn(
+        line,
+        "triage sweep: Triage-state board unavailable — sweeping the eligible set only (CTL-1589)"
+      );
+  };
+  try {
+    const rows = runTriageState(query, { replica, onSource });
+    // No dwell filter (Codex R3): issues.updated_at is generic last-modified, so
+    // a frequently-touched stranded ticket would never pass an age gate. A young
+    // row racing the →Triage webhook is harmless — dispatchTriage is idempotent
+    // (in-flight signals no-op, artifacts skip) and the launch-imminent live
+    // revalidation (dispatchTriage requireTriageState) is the stale-row guard.
+    // Tag the source so ONLY this half pays that live revalidation.
+    return rows.map((t) => ({ ...t, fromTriageBoard: true }));
+  } catch (err) {
+    log.warn(
+      { team: query.team, err: err.message },
+      "sweepMissingTriage: Triage-state read threw — sweeping the eligible set only (CTL-1589)"
+    );
+    return [];
+  }
+}
+
 // sweepMissingTriage — the reconcile-path analogue of the CTL-625 webhook guard
 // (handleStateChangedEvent →Ready branch). After reconcileAll has (re)populated
 // the eligible sets, dispatch triage for every eligible ticket that lacks a
@@ -1094,6 +1272,18 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
 // research dispatch dead-locks on phase-agent-dispatch's prior_artifact_missing
 // gate, looping prior_artifact_missing → 60s cooldown → retry forever (CTL-711:
 // CTL-704/705/706/710 each needed a manual triage dispatch after a restart).
+//
+// CTL-1589: the eligible set alone is NOT a sufficient source. It is fed by a
+// Todo-only query, so a ticket sitting in the TRIAGE state appears in neither
+// half of the retry loop — and the only path that ever noticed it, the →Triage
+// webhook, is edge-triggered and one-shot. A delegated ticket whose dispatch was
+// consumed and whose worker dir later vanished therefore stranded in Triage
+// forever (live: ADV-1374, ADV-1376, CTL-1381, OTL-5). The sweep now iterates the
+// UNION of the eligible set and the team's Triage-state board, deduped by ticket
+// id — making triage admission level-triggered. Only the sweep's ticket SOURCE
+// widens: Triage-state tickets are NOT added to the eligible projection (the
+// scheduler's new-work pull, the phantom sweep, and the dependency graph all
+// consume that, and a Triage ticket is never scheduler-pulled).
 //
 // Idempotent by construction: hasTriageArtifact skips already-triaged tickets
 // (no duplicate dispatch on normal webhook-driven tickets), and an in-flight
@@ -1138,6 +1328,13 @@ export function sweepMissingTriage({
   // CTL-1481: worker:<host> label-stamp seam — threaded through to
   // dispatchTriage (undefined → real default; tests inject a fake).
   stampWorkerLabel,
+  // CTL-1589: the Triage-state read seams. `replica` defaults to the same
+  // daemon-injected board reader reconcileProject uses, so the sweep is served
+  // from the local replica with no Linear call at all.
+  replica = _injectedEligibleReplica,
+  runTriageState = defaultRunTriageStateQuery,
+  // CTL-1589 (Codex R2): live-state read for stale-row revalidation; injectable.
+  fetchLiveState = defaultFetchTicketState,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1154,12 +1351,44 @@ export function sweepMissingTriage({
     hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
-    for (const t of getEligibleSet(p.team)) {
+    const triageStatusName = resolveEligibleQuery(p)?.triageStatus ?? null;
+    // CTL-1589: Triage-state board ∪ eligible set, deduped by ticket id. The
+    // STRANDED half walks first (Codex R1): under sustained admission load an
+    // eligible-first walk let fresh Todo tickets drain the per-sweep budget
+    // every sweep, starving the level-triggered recovery exactly when the fleet
+    // is busy. The stranded set is small and self-draining (one successful
+    // triage removes the ticket permanently), while the eligible half retries
+    // on the next 60s sweep — so stranded-first costs the Todo path at most one
+    // sweep of latency. DUAL-PRESENCE (Codex R5): a feed hole can leave a stale
+    // Triage row for a ticket the live-confirmed eligible query reports as
+    // Todo — the Triage copy would walk first, fail launch revalidation, and
+    // its `seen` entry would then skip the genuinely dispatchable eligible
+    // copy every sweep. The eligible copy is the authoritative one (it came
+    // from a live-confirmed source and pays no revalidation), so a
+    // dual-present ticket keeps ONLY that copy.
+    const eligibleSet = getEligibleSet(p.team);
+    const eligibleIds = new Set(eligibleSet.map((t) => t.identifier));
+    const seen = new Set();
+    const candidates = [
+      ...triageStateTickets(p, { replica, runTriageState }).filter(
+        (t) => !eligibleIds.has(t.identifier)
+      ),
+      ...eligibleSet,
+    ];
+    for (const t of candidates) {
+      if (seen.has(t.identifier)) continue;
+      seen.add(t.identifier);
       // Codex R4: at a saturated fleet, still ROUTE capped tickets (their park is
       // capacity-independent and dispatchTriage's cap gate runs before its
       // budget gate); everything else waits for the next sweep.
       if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      // CTL-1589 (Codex R4): a Triage-STATE ticket whose triage worker is
+      // in-flight right now has no artifact yet and would route to an
+      // idempotent no-op launch — which still decrements the sweep budget
+      // (code 0) and would pay a pointless live revalidation read. Skip it
+      // here; the eligible half keeps its pre-existing behavior.
+      if (t.fromTriageBoard && isTriageInFlight(readTriageSignalStatus(orchDir, t.identifier))) continue;
       // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
       // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
       // where the stale completion signal is retired immediately before a real
@@ -1171,6 +1400,11 @@ export function sweepMissingTriage({
         appendEvent,
         orchId: t.identifier,
         budget,
+        // CTL-1589 (Codex R3): Triage-BOARD candidates must still be in the
+        // Triage state at launch; eligible-half candidates skip the check.
+        requireTriageState: t.fromTriageBoard ? triageStatusName : null,
+        candidateUpdatedAt: t.fromTriageBoard ? (t.updatedAt ?? null) : null,
+        fetchLiveState,
         botUserIds,
         botWriteId,
         gateway,
@@ -1208,7 +1442,53 @@ let reconcileTimer = null;
 // CTL triage-entry fix (Phase 0): the poll timer that drains the event log when
 // fs.watch fails to fire (the common case for cross-process appends on macOS).
 let tailerPollTimer = null;
+// CTL-1655: sibling poll timer draining the coordination mirror. The mirror is a
+// cross-process append (written by coordination-publish), so fs.watch alone is
+// unreliable — the same rationale that requires tailerPollTimer above. There is no
+// reconcile backstop for the coordination tail, so without this poll a missed
+// fs.watch event silently drops a cross-host comment wake until restart.
+let coordinationPollTimer = null;
 let tailerOpts = {};
+
+// CTL-1655: bounded commentId-keyed dedup (Phase 1).
+// Shared between the local event-log tail (readNewEvents) and the
+// coordination-mirror tail (readNewCoordinationComments) so whichever sees
+// a given comment first wins and the other skips — preventing duplicate
+// dispatch regardless of which tail ingests the comment on a given host.
+const COMMENT_DEDUP_CAP = 2000; // named constant for documentation + tests
+const commentDedupMap = new Map(); // insertion-ordered → evict oldest on overflow
+
+// commentKeyOf — derive the dedup key for a raw event. Prefers
+// body.payload.commentId (stable across local/echo duplicates), falls back
+// to the envelope id. Returns undefined for a row that has neither (caller
+// skips insertion but does NOT treat as "already seen").
+export function commentKeyOf(event) {
+  const payloadKey = event?.body?.payload?.commentId ?? event?.detail?.commentId;
+  if (payloadKey != null && payloadKey !== "") return String(payloadKey);
+  const envelopeKey = event?.id;
+  if (envelopeKey != null && envelopeKey !== "") return String(envelopeKey);
+  return undefined;
+}
+
+// markAndCheckCommentSeen — returns true if key is already in the dedup set;
+// otherwise inserts it (evicting the oldest entry when at cap) and returns false.
+// A null/undefined key is treated as never-seen and is NOT inserted.
+export function markAndCheckCommentSeen(key) {
+  if (key == null) return false;
+  if (commentDedupMap.has(key)) return true;
+  if (commentDedupMap.size >= COMMENT_DEDUP_CAP) {
+    // Map preserves insertion order — first key is the oldest.
+    commentDedupMap.delete(commentDedupMap.keys().next().value);
+  }
+  commentDedupMap.set(key, true);
+  return false;
+}
+
+// CTL-1655: coordination-mirror cursor (Phase 2).
+let coordinationCursor = 0;
+let coordinationLogPath = "";
+let coordinationLeftoverBuf = "";
+let coordinationWatcher = null; // Phase 3 — fs.watch handle for the mirror file
 
 // fileSizeOrZero — current byte size of a file, or 0 when it does not exist
 // (the poll-only state). Shared by both tailer seeders.
@@ -1322,10 +1602,106 @@ export function readNewEvents({ foldOnly = false } = {}) {
         event,
         foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts
       ); // CTL-681 + CTL-749
+      // CTL-1655: consult the shared cross-source dedup before routing so the
+      // two tails don't double-dispatch the same comment. Per plan §Phase 2
+      // ("whichever tail sees a given comment first wins and the other skips"),
+      // HONOR the result here: if the coordination-mirror tail already processed
+      // this comment (it won the race on the originating host, where the comment
+      // lands in BOTH the local event log and the hub-echoed coordination.jsonl),
+      // skip the redundant handleCommentCreatedEvent — otherwise Phase B
+      // dispatch fires twice for one Linear comment (the CTL-1653 pathology).
+      // foldOnly drains do NOT insert — replayed events must not permanently
+      // poison the dedup set and block their own future live delivery.
+      const eventName681 = event?.attributes?.["event.name"] ?? event?.event;
+      if (eventName681 === "linear.comment.created" && !foldOnly) {
+        if (markAndCheckCommentSeen(commentKeyOf(event))) continue;
+      }
       handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
     }
   } catch {
     // log file not yet created or a transient read error — best-effort
+  }
+}
+
+// readNewCoordinationComments — CTL-1655 Phase 2. Drain bytes appended to
+// the coordination mirror (coordination.jsonl) since the last call, parse
+// each JSONL line, and route ONLY linear.comment.created rows through the
+// shared dedup → handleCommentCreatedEvent path.
+//
+// Design constraints (each guarded by a test):
+//   1. Comment-only filter: only linear.comment.created rows reach onComment.
+//   2. Cross-source dedup: the shared markAndCheckCommentSeen gate prevents a
+//      comment seen by both the local tail and this tail from dispatching twice.
+//   3. Safe degradation: absent/empty mirror file → no-op, no throw.
+//   4. foldOnly boot drain: withholds onComment (no dispatch of replayed comments).
+//   5. Single-host no-op: skips entirely when the cluster has only one host.
+//
+// Exported so tests can drive it deterministically without wiring startTailing.
+export function readNewCoordinationComments({ foldOnly = false } = {}) {
+  // Constraint 5: single-host no-op.
+  if (getClusterHosts().length <= 1) return;
+
+  const mirrorPath = getCoordinationMirrorPath();
+  // Reset cursor on path change (analogous to readNewEvents month-rollover guard).
+  if (mirrorPath !== coordinationLogPath) {
+    coordinationLogPath = mirrorPath;
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(mirrorPath);
+    return;
+  }
+
+  try {
+    const fd = openSync(mirrorPath, "r");
+    const { size } = fstatSync(fd);
+    if (size <= coordinationCursor) {
+      closeSync(fd);
+      return;
+    }
+    const newByteCount = size - coordinationCursor;
+    const buf = Buffer.alloc(newByteCount);
+    readSync(fd, buf, 0, newByteCount, coordinationCursor);
+    closeSync(fd);
+    coordinationCursor = size;
+
+    const text = coordinationLeftoverBuf + buf.toString("utf8");
+    const lines = text.split("\n");
+    coordinationLeftoverBuf = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue; // skip malformed line, keep tailing (constraint 3)
+      }
+      // Constraint 1: comment-only filter.
+      const evName = event?.attributes?.["event.name"] ?? event?.event;
+      if (evName !== "linear.comment.created") continue;
+
+      // Constraint 2: cross-source dedup. foldOnly drains do NOT insert (boot
+      // drain must not permanently poison the dedup set for future live delivery).
+      if (!foldOnly) {
+        const key = commentKeyOf(event);
+        if (markAndCheckCommentSeen(key)) continue; // already processed locally
+      }
+
+      // Constraint 4: foldOnly → withhold onComment.
+      if (foldOnly) continue;
+
+      // Emit observability breadcrumb so operators can confirm the mirror tail fired.
+      // Name satisfies CTL-1142 namespace contract (not filter.* / broker.daemon.* /
+      // phase.<KNOWN_PHASE>.*). The dedup above ensures at-most-once per comment.
+      const ticket = event?.attributes?.["linear.issue.identifier"] ??
+        event?.body?.payload?.ticket ?? event?.detail?.ticket;
+      if (ticket) {
+        log.info({ ticket }, `comment.wake.cross-host.${ticket}`);
+      }
+
+      handleCommentCreatedEvent(event, tailerOpts);
+    }
+  } catch {
+    // mirror file absent or transient read error — safe degradation (constraint 3)
   }
 }
 
@@ -1340,6 +1716,18 @@ export function startTailing() {
     if (filename !== null && filename !== basename(getEventLogPath())) return;
     readNewEvents();
   });
+  // CTL-1655 Phase 3: watch the coordination mirror dir too (multi-host only).
+  if (getClusterHosts().length > 1) {
+    const mirrorPath = getCoordinationMirrorPath();
+    const mirrorDir = dirname(mirrorPath);
+    const mirrorFile = basename(mirrorPath);
+    mkdirSync(mirrorDir, { recursive: true });
+    coordinationWatcher = watch(mirrorDir, (eventType, filename) => {
+      if (eventType !== "change") return;
+      if (filename !== null && filename !== mirrorFile) return;
+      readNewCoordinationComments();
+    });
+  }
   return watcher;
 }
 
@@ -1439,8 +1827,18 @@ export function startMonitor({
     // path below. reconcileAll (above) is the authoritative eligible rebuild and
     // sweepMissingTriage (above) the intended boot triage backstop.
     readNewEvents({ foldOnly: true });
+    // CTL-1655 Phase 3: seed the coordination cursor and boot-drain foldOnly so
+    // historical mirror comments don't dispatch on restart (constraint 4).
+    coordinationLogPath = getCoordinationMirrorPath();
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(coordinationLogPath);
+    readNewCoordinationComments({ foldOnly: true });
   } else {
     seedTailerAtEof();
+    // Seed the coordination cursor at EOF so we don't replay old mirror events.
+    coordinationLogPath = getCoordinationMirrorPath();
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(coordinationLogPath);
   }
   startTailing();
   // CTL triage-entry fix (Phase 0): poll-drain the event log. fs.watch
@@ -1450,6 +1848,19 @@ export function startMonitor({
   // is cheap (readNewEvents reads only bytes past the durable cursor).
   if (tailerPollMs > 0) {
     tailerPollTimer = setInterval(() => readNewEvents(), tailerPollMs);
+    // CTL-1655: poll the coordination mirror on the same cadence so a missed
+    // fs.watch (the common case for cross-process appends on macOS) does not
+    // silently drop cross-host comment wakes. The poll is cheap (reads only
+    // bytes past coordinationCursor) and readNewCoordinationComments re-reads
+    // the roster per call, self-no-op'ing while single-host. Arm it
+    // UNCONDITIONALLY (not gated on the boot-time host count): a daemon that
+    // boots single-host and later has a peer added must still start draining the
+    // mirror without a restart — the startTailing watcher gate is startup-only,
+    // so this poll is the sole path that re-arms on a live roster expansion.
+    coordinationPollTimer = setInterval(
+      () => readNewCoordinationComments(),
+      tailerPollMs
+    );
   }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
@@ -1483,6 +1894,13 @@ export function stopMonitor() {
   }
   watcher?.close();
   watcher = null;
+  // CTL-1655: clear the coordination mirror poll timer and close its watcher.
+  if (coordinationPollTimer) {
+    clearInterval(coordinationPollTimer);
+    coordinationPollTimer = null;
+  }
+  coordinationWatcher?.close();
+  coordinationWatcher = null;
 }
 
 // __tailerOffset — the tailer's current byte offset. Test-only, for
@@ -1506,4 +1924,15 @@ export function __resetForTests() {
   resetLivenessCache();
   __resetReconcileHealthForTests(); // CTL-867: clear per-team reconcile-health map
   _injectedEligibleReplica = null; // CTL-1397: drop the daemon-injected board-list replica reader
+  // CTL-1655: reset coordination and dedup state.
+  coordinationCursor = 0;
+  coordinationLogPath = "";
+  coordinationLeftoverBuf = "";
+  commentDedupMap.clear();
+}
+
+// __resetCommentDedupForTests — clear the comment dedup set. Exported so
+// tests that drive readNewCoordinationComments directly can isolate dedup state.
+export function __resetCommentDedupForTests() {
+  commentDedupMap.clear();
 }

@@ -569,6 +569,22 @@ describe("buildRescueDispatchArgs", () => {
     expect(args).not.toContain("--branch");
     expect(args).toContain("--dispatch");
   });
+
+  // CTL-1620 REGRESSION: the module resolved its template as ../templates/ from
+  // execution-core/ — a directory that has never existed — so every live rescue
+  // dispatch died in orchestrate-rebase's awk render. The bug shipped because no
+  // test ever touched the resolved path; this pins BOTH dispatch file arguments
+  // to real files on disk.
+  it("resolves --prompt-template and the orchestrate-rebase bin to files that exist", () => {
+    const args = buildRescueDispatchArgs("CTL-30", {
+      prNumber: 300, orchId: "CTL-30", orchDir: "/orch",
+      worktreePath: "/wt", base: "main", signalFile: "/orch/workers/CTL-30/rescue.json",
+    });
+    const tmpl = args[args.indexOf("--prompt-template") + 1];
+    expect(tmpl.endsWith("plugins/dev/templates/rescue-rebase-prompt.md")).toBe(true);
+    expect(existsSync(tmpl)).toBe(true);
+    expect(existsSync(args[0])).toBe(true); // ORCHESTRATE_REBASE_BIN
+  });
 });
 
 describe("escalation default seam", () => {

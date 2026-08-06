@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.5.0...catalyst-pm-v7.6.0) (2026-08-04)
+
+
+### Features
+
+* **dev:** CTL-1628 catalyst-runtime-root resolver — fold Tier 1 duplicates + 4 latent resolver bugs (Phase A2) ([#2946](https://github.com/coalesce-labs/catalyst/issues/2946)) ([c01ef76](https://github.com/coalesce-labs/catalyst/commit/c01ef76bd7ec44fee32369f732848494187c1b97))
+
+
+### Bug Fixes
+
+* **pm:** CTL-1616 complete PR3 — the score-tickets.ts fold missed the [#2919](https://github.com/coalesce-labs/catalyst/issues/2919) commit ([#2921](https://github.com/coalesce-labs/catalyst/issues/2921)) ([7a31c7a](https://github.com/coalesce-labs/catalyst/commit/7a31c7aa8015ab8e58dbeb19a3933b2d59e31d8b))
+* **pm:** CTL-1616 harden the score-tickets contract loader ([#2921](https://github.com/coalesce-labs/catalyst/issues/2921) post-merge Codex x2) ([#2922](https://github.com/coalesce-labs/catalyst/issues/2922)) ([6324535](https://github.com/coalesce-labs/catalyst/commit/63245356811ee275dafadb7622f987e8385709d0))
+
 ## [7.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.4.0...catalyst-pm-v7.5.0)
 
 Jul 02, 2026

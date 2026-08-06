@@ -375,8 +375,12 @@ where `REPO_ROOT` is the repo root (the worktree's checkout path, e.g. the direc
 team's estimation method with a single GraphQL call:
 
 ```bash
+# Token via the shared secret contract (CTL-1616) — never a hand-rolled
+# LINEAR_API_TOKEN/LINEAR_API_KEY ladder.
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/catalyst-secret-contract.sh"
+catalyst_resolve_secret linear-api-token >/dev/null
 curl -s -X POST https://api.linear.app/graphql \
-  -H "Authorization: ${LINEAR_API_TOKEN:-$LINEAR_API_KEY}" \
+  -H "Authorization: ${CATALYST_SECRET_LAST_VALUE}" \
   -H "Content-Type: application/json" \
   -d '{"query":"query($k:String!){teams(filter:{key:{eq:$k}}){nodes{issueEstimation{type allowZero extended}}}}", "variables":{"k":"<TEAM_KEY>"}}' \
   | jq -r '.data.teams.nodes[0].issueEstimation.type'

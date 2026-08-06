@@ -10,6 +10,8 @@ import {
   readCacheReconcileConfig,
   startCacheReconcileTimer,
   rotateWindow,
+  linearisBodyError,
+  createReplicaFetcher,
 } from "./cache-reconcile.mjs";
 
 // pinoLikeLogger — methods THROW if invoked with the wrong `this`, exactly like
@@ -518,5 +520,116 @@ describe("reconcileCacheState two-tier selection (CTL-1288)", () => {
       bl.forEach((t) => backlogSeen.add(t));
     }
     expect([...backlogSeen].sort()).toEqual(["CTL-Z1", "CTL-Z2"]); // backlog fully covered, never starved
+  });
+});
+
+describe("reconcileCacheState — mid-run auth re-mint (CTL-1577)", () => {
+  test("auth-shaped fetch failure triggers ONE reminter.attempt", async () => {
+    let attempts = 0;
+    const out = await reconcileCacheState({
+      mode: "shadow",
+      getAll: () => [desc({ ticket: "CTL-1" }), desc({ ticket: "CTL-2" })],
+      fetch: async () => ({ state: null, labels: null, error: "Authentication required, not authenticated (401)" }),
+      upsert: () => { throw new Error("must not write"); },
+      reminter: { attempt: () => { attempts++; return false; } },
+    });
+    expect(out.failed).toBe(2);
+    expect(attempts).toBe(2); // attempt() is called per auth failure; cooldown lives inside the reminter
+  });
+
+  test("non-auth failure (timeout/429) never calls the reminter", async () => {
+    let attempts = 0;
+    const out = await reconcileCacheState({
+      mode: "shadow",
+      getAll: () => [desc()],
+      fetch: async () => ({ state: null, labels: null, error: "timeout after 30s" }),
+      upsert: () => {},
+      reminter: { attempt: () => { attempts++; return true; } },
+    });
+    expect(out.failed).toBe(1);
+    expect(attempts).toBe(0);
+  });
+});
+
+describe("linearisBodyError (CTL-1577 round 2)", () => {
+  test("surfaces an exit-zero error-shaped body as the error string", () => {
+    expect(linearisBodyError({ error: "Authentication required" })).toBe(
+      "Authentication required",
+    );
+  });
+
+  test("null for normal issue payloads, arrays, and empty errors", () => {
+    expect(linearisBodyError({ state: { name: "Todo" }, labels: { nodes: [] } })).toBeNull();
+    expect(linearisBodyError([])).toBeNull();
+    expect(linearisBodyError({ error: "" })).toBeNull();
+    expect(linearisBodyError(null)).toBeNull();
+  });
+});
+
+describe("createReplicaFetcher (CTL-1571)", () => {
+  const hitReader = {
+    isFresh: () => true,
+    stateAndLabels: () => ({
+      state: { terminal: false, state: "Implement" },
+      labels: [{ id: "l1", name: "monitor" }, { id: "l2", name: "bug" }],
+    }),
+  };
+
+  test("replica HIT serves state+labels from ONE snapshot with zero live calls", async () => {
+    let liveCalls = 0;
+    const fetch = createReplicaFetcher({
+      getReader: async () => hitReader,
+      fallback: async () => { liveCalls++; return { state: null, labels: null, error: "x" }; },
+    });
+    const out = await fetch("CTL-1");
+    expect(out).toEqual({ state: "Implement", labels: ["monitor", "bug"], error: null });
+    expect(liveCalls).toBe(0);
+  });
+
+  test("no reader on this runtime → pure live fallback", async () => {
+    const fetch = createReplicaFetcher({
+      getReader: async () => null,
+      fallback: async () => ({ state: "Todo", labels: [], error: null }),
+    });
+    expect(await fetch("CTL-2")).toEqual({ state: "Todo", labels: [], error: null });
+  });
+
+  test("stale replica falls back loudly to live", async () => {
+    let warned = 0;
+    const fetch = createReplicaFetcher({
+      getReader: async () => ({ ...hitReader, isFresh: () => false }),
+      fallback: async () => ({ state: "Done", labels: null, error: null }),
+      logger: { warn: () => { warned++; }, info() {}, debug() {} },
+    });
+    expect((await fetch("CTL-3")).state).toBe("Done");
+    expect(warned).toBe(1);
+  });
+
+  test("snapshot MISS (undefined — absent row OR half-seeded pair) falls back to live", async () => {
+    const fetch = createReplicaFetcher({
+      getReader: async () => ({ isFresh: () => true, stateAndLabels: () => undefined }),
+      fallback: async () => ({ state: null, labels: null, error: "timeout after 30s" }),
+    });
+    expect((await fetch("CTL-4")).error).toBe("timeout after 30s");
+  });
+
+  test("an old reader shape without stateAndLabels falls back (never partial reads)", async () => {
+    let liveCalls = 0;
+    const fetch = createReplicaFetcher({
+      getReader: async () => ({ isFresh: () => true, lookup: () => ({ terminal: true, state: "Done" }), labels: () => [] }),
+      fallback: async () => { liveCalls++; return { state: "Done", labels: [], error: null }; },
+    });
+    expect(await fetch("CTL-5")).toEqual({ state: "Done", labels: [], error: null });
+    expect(liveCalls).toBe(1);
+  });
+
+  test("empty label set is a defined HIT (no fallback)", async () => {
+    let liveCalls = 0;
+    const fetch = createReplicaFetcher({
+      getReader: async () => ({ isFresh: () => true, stateAndLabels: () => ({ state: { terminal: false, state: "Todo" }, labels: [] }) }),
+      fallback: async () => { liveCalls++; return { state: null, labels: null, error: "x" }; },
+    });
+    expect(await fetch("CTL-6")).toEqual({ state: "Todo", labels: [], error: null });
+    expect(liveCalls).toBe(0);
   });
 });

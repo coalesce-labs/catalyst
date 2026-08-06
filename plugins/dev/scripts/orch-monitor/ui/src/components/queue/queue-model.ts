@@ -62,6 +62,19 @@ export function ordinal(n: number): string {
   return `${n}${suffix}`;
 }
 
+/** CTL-1588: split the eligible queue into genuinely dispatchable rows and
+ *  human-held rows (needs-human/needs-input park). Held rows must never enter
+ *  the rank/tint math — presenting a parked ticket as "dispatching next" is a
+ *  lie the admission gate will not honor. Order is preserved within each half. */
+export function partitionHumanHeld<T extends { humanHold?: string | null }>(
+  queue: readonly T[],
+): { dispatchQueue: T[]; heldQueue: T[] } {
+  const dispatchQueue: T[] = [];
+  const heldQueue: T[] = [];
+  for (const q of queue) (q.humanHold ? heldQueue : dispatchQueue).push(q);
+  return { dispatchQueue, heldQueue };
+}
+
 // ── slot assignment ────────────────────────────────────────────────────────────
 
 export interface SlotAssignment {

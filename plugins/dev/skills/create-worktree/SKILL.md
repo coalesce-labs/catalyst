@@ -34,13 +34,26 @@ When this command is invoked:
 3. **Create the worktree**: Use the create-worktree.sh script:
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/scripts/create-worktree.sh" <worktree_name> [base_branch]
+   "${CLAUDE_PLUGIN_ROOT}/scripts/create-worktree.sh" <worktree_name> [base_branch] [--no-from-remote] [--skip-fetch]
    ```
 
    The script automatically:
    - Reads `catalyst.worktree.setup` from config for project-specific setup
    - Copies `.claude/` and `.catalyst/` directories
    - Falls back to auto-detected setup if no config (dependency install + thoughts init)
+
+   **Resume-from-remote (default-on, CTL-1640).** When a NEW branch is being created and
+   `origin/<worktree_name>` already exists (e.g. a pushed draft PR's commits, CTL-783), the worktree
+   is seeded from that remote tip instead of being cut fresh off the base branch — so a re-dispatch
+   or a cross-host reclaim rebuilds on the pushed work rather than orphaning it under a fresh branch.
+   This is automatic; the script prints a `🌱 Resuming from origin/<name>` banner when it fires. An
+   existing **local** branch always wins over the remote (no auto-merge); the resume applies only
+   when there is no local branch yet.
+
+   To opt out and force a fresh branch off the base (ignore any matching origin branch), pass
+   **`--no-from-remote`**. To suppress all origin fetches entirely (offline), pass **`--skip-fetch`**
+   (which also disables the resume). Confirm with the user which they want before overriding the
+   default when a matching origin branch may carry stale or already-merged history.
 
 4. **Project setup** (handled by script based on config):
 

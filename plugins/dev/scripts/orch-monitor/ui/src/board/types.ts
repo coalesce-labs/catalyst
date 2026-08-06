@@ -262,6 +262,11 @@ export interface BoardQueueItem {
   /** CTL-1066: active dispatch retry cool-down; drives the "retrying in …" chip.
    *  null when not cooling down. expiresAt is epoch ms; consecutiveFailures is the attempt count. */
   dispatchCooldown?: { expiresAt: number; consecutiveFailures: number } | null;
+  /** CTL-1588: the human-hold keeping this eligible ticket from actually
+   *  dispatching ("needs-human" | "needs-input"), stamped from the parked
+   *  descriptor set. The queue renders these in a separate held tail, never
+   *  tinted as an imminent dispatch. null/absent = genuinely dispatchable. */
+  humanHold?: "needs-human" | "needs-input" | null;
 }
 
 export interface BoardConfig {

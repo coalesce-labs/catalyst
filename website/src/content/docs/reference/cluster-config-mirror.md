@@ -128,3 +128,32 @@ dotted event keys directly:
 
 Use the snake_case field names (strip the `ratelimit.` prefix) so the heartbeat attachment stays
 human-readable. The source event keys remain the canonical names — this shape is a derived view.
+
+---
+
+## Account status-transition event (CTL-1653)
+
+Event name: `account.status.changed` (v2 OTel envelope, `event.entity: "account"`, severity INFO).
+
+**Edge-triggered, not per-sample.** Unlike `account.ratelimit.sampled` (which is emitted every poll
+tick from the interactive-login `/api/oauth/usage` probe), `account.status.changed` is appended by
+the orch-monitor's periodic probe **only** on the ACTIVE account's `ok`↔`rejected` transition — one
+event per edge, never on a same-status repeat. It is sourced from the CTL-1650 durable-token header
+probe ([`claude-accounts-usage.mjs`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/claude-accounts-usage.mjs)),
+a different path from the CTL-812 usage sampler; the two coexist. A transport `error` (sensor
+failure) is distinct from `rejected` (account exhausted) and does **not** trip the transition.
+
+| Attribute key | Type | Meaning |
+|---|---|---|
+| `account.handle` | string | The account label (`acctN`) that transitioned |
+| `account.email` | string | The account email (from the env-file inline comment) |
+| `account.status` | string | The new status — `"rejected"` (exhausted) or `"ok"` (recovered) |
+| `account.binding_window` | string | The binding window driving the status — `"five_hour"` \| `"seven_day"` |
+| `node.name` | string | The node whose active account transitioned |
+
+The node identity is also carried on the envelope's `resource["host.name"]`. The edge is latched
+durably at `~/catalyst/account-status-latch.json` (atomic write, emit-then-advance) so a monitor
+restart mid-episode does not re-emit. Consumers must treat absent keys as unknown, not as a value.
+
+The same posture is available as a pull surface — the token-free `GET /api/accounts` endpoint and
+its `GET /api/accounts/stream` SSE (see the [orch-monitor API](/reference/orch-monitor-api/)).

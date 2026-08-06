@@ -75,6 +75,21 @@ describe("buildHeartbeatEnvelope (CTL-859)", () => {
     const env = buildHeartbeatEnvelope();
     expect(env.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
   });
+
+  // ── CTL-1551: max_parallel as a Loki-reachable attribute ──
+  test("carries catalyst.node.max_parallel when maxParallelFn supplies a positive int", () => {
+    const env = buildHeartbeatEnvelope({ maxParallelFn: () => 3 });
+    expect(env.attributes["catalyst.node.max_parallel"]).toBe(3);
+  });
+
+  test("omits catalyst.node.max_parallel when unknown — never a fake 0", () => {
+    for (const bad of [null, 0, -1, 2.5, "3", NaN, undefined]) {
+      const env = buildHeartbeatEnvelope({ maxParallelFn: () => bad });
+      expect("catalyst.node.max_parallel" in env.attributes).toBe(false);
+    }
+    const noFn = buildHeartbeatEnvelope();
+    expect("catalyst.node.max_parallel" in noFn.attributes).toBe(false);
+  });
 });
 
 describe("emitHeartbeatEvent (CTL-859)", () => {
@@ -403,5 +418,57 @@ describe("emitHeartbeatEvent forwards governanceFn + admissionFn (CTL-1322 seam 
     expect(line.body.payload.governance.beliefsShadow).toBe(true);
     expect(line.body.payload.admission.holdReason).toBe("liveness-cold");
     expect(line.body.payload.admission.accepting).toBe(false);
+  });
+});
+
+describe("heartbeat active-tickets attributes (CTL-1581)", () => {
+  test("carries the injected ACTIVE tickets as a comma-joined attribute + count", () => {
+    const env = buildHeartbeatEnvelope({
+      inFlightTicketsFn: () => ["PROJ-1", "PROJ-2", "PROJ-3"],
+      activeTicketsFn: () => ["PROJ-2"],
+    });
+    expect(env.attributes["catalyst.node.active_tickets"]).toBe("PROJ-2");
+    expect(env.attributes["catalyst.node.active_count"]).toBe(1);
+    // ownership signal unchanged alongside
+    expect(env.attributes["catalyst.node.in_flight_count"]).toBe(3);
+  });
+
+  test("defaults to empty + 0 with no fn; non-array fails safe", () => {
+    const env = buildHeartbeatEnvelope();
+    expect(env.attributes["catalyst.node.active_tickets"]).toBe("");
+    expect(env.attributes["catalyst.node.active_count"]).toBe(0);
+    const bad = buildHeartbeatEnvelope({ activeTicketsFn: () => "nope" });
+    expect(bad.attributes["catalyst.node.active_count"]).toBe(0);
+  });
+});
+
+describe("localActiveTickets (CTL-1581 — slot-occupancy subset)", () => {
+  test("counts running/dispatched signals; parked needs-human holds no slot", async () => {
+    const { mkdtempSync: mkd, mkdirSync, writeFileSync: wf, rmSync: rms } = await import("node:fs");
+    const { tmpdir: td } = await import("node:os");
+    const { join: j } = await import("node:path");
+    const dir = mkd(j(td(), "active-tickets-"));
+    const w = (ticket, status, phase = "implement") => {
+      mkdirSync(j(dir, "workers", ticket), { recursive: true });
+      wf(
+        j(dir, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status, host: { name: "mini" } })
+      );
+    };
+    w("PROJ-1", "running");
+    w("PROJ-2", "needs-human");
+    w("PROJ-3", "dispatched");
+    w("PROJ-4", "done");
+    // needs-input holds its slot (job still counted against maxParallel)…
+    w("PROJ-5", "needs-input");
+    // …but a triage worker never occupies (intake — the deck's carve-out).
+    w("PROJ-6", "running", "triage");
+    const { localActiveTickets, localInFlightTickets } = await import("./cluster-heartbeat-publisher.mjs");
+    expect(localActiveTickets("mini", { orchDir: dir }).sort()).toEqual(["PROJ-1", "PROJ-3", "PROJ-5"]);
+    // ownership keeps counting the parked dir AND triage
+    expect(localInFlightTickets("mini", { orchDir: dir }).sort()).toEqual([
+      "PROJ-1", "PROJ-2", "PROJ-3", "PROJ-5", "PROJ-6",
+    ]);
+    rms(dir, { recursive: true, force: true });
   });
 });

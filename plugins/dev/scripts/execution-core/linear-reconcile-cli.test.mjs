@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs, main, defaultCheckOpenPrs } from "./linear-reconcile-cli.mjs";
+import { parseArgs, main, defaultCheckOpenPrs, buildReadState } from "./linear-reconcile-cli.mjs";
 import { defaultDeriveAttachmentPrs } from "./open-pr-gate.mjs";
 import { readDeclaration, listDeclarations } from "./linear-reconcile-store.mjs";
 
@@ -796,4 +796,125 @@ test("ENUMERATOR (CTL-1157): an UNDERIVABLE repo is UNVERIFIABLE (never runs gh 
   expect(r.ok).toBe(false);
   expect(r.unverifiable).toBe(true);
   expect(r.reason).toBe("repo-underivable");
+});
+
+// CTL-1619: --graphql token fallback
+test("--graphql: buildReadState uses LINEAR_API_KEY when LINEAR_API_TOKEN is absent", async () => {
+  const savedToken = process.env.LINEAR_API_TOKEN;
+  const savedKey = process.env.LINEAR_API_KEY;
+  const savedFetch = globalThis.fetch;
+  let seenAuth = null;
+  try {
+    delete process.env.LINEAR_API_TOKEN;
+    process.env.LINEAR_API_KEY = "lin_api_fromkey";
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return {
+        ok: true,
+        json: async () => ({ data: { issues: { nodes: [{ state: { name: "Done" } }] } } }),
+      };
+    };
+    const readState = await buildReadState({ graphql: true });
+    const state = await readState("CTL-1");
+    expect(state).toBe("Done");
+    expect(seenAuth).toBe("lin_api_fromkey");
+  } finally {
+    if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+    else process.env.LINEAR_API_TOKEN = savedToken;
+    if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedKey;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test("--graphql: buildReadState falls back to LINEAR_API_KEY when LINEAR_API_TOKEN is empty", async () => {
+  // CTL-1619 / Codex: an EMPTY LINEAR_API_TOKEN must not defeat the
+  // LINEAR_API_KEY fallback — the shared secret-contract engine's env-alias
+  // resolver (resolveEnvAliasOnly, lib/secret-contract.mjs) already treats a
+  // zero-length string as absent and falls through to the next alias, so
+  // this behavior survives the CTL-1616 PR3 fold onto resolveSecret.
+  const savedToken = process.env.LINEAR_API_TOKEN;
+  const savedKey = process.env.LINEAR_API_KEY;
+  const savedFetch = globalThis.fetch;
+  let seenAuth = null;
+  try {
+    process.env.LINEAR_API_TOKEN = "";
+    process.env.LINEAR_API_KEY = "lin_api_fromkey";
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return {
+        ok: true,
+        json: async () => ({ data: { issues: { nodes: [{ state: { name: "Done" } }] } } }),
+      };
+    };
+    const readState = await buildReadState({ graphql: true });
+    const state = await readState("CTL-1");
+    expect(state).toBe("Done");
+    expect(seenAuth).toBe("lin_api_fromkey");
+  } finally {
+    if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+    else process.env.LINEAR_API_TOKEN = savedToken;
+    if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedKey;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+// CTL-1616 PR3 (documented behavior normalization, not a regression): this
+// file previously trimmed LINEAR_API_TOKEN before the presence check, so a
+// WHITESPACE-ONLY value was treated as blank and fell through to
+// LINEAR_API_KEY — an extra hardening unique to this file (design §1's
+// "linear-reconcile-cli.mjs:209 drops the alias" divergence row was about the
+// MISSING-alias case, but this file's fix went further than the other 11
+// LINEAR_API_TOKEN/LINEAR_API_KEY call sites, which used plain `??` ladders
+// that never trim). Folding onto the shared secret-contract engine
+// (resolveEnvAliasOnly: presence = non-empty string, no trim) puts all 12
+// sites on ONE rule (design §9 PR3 success criterion). Note the engine rule
+// is NOT identical to the old `??` ladders either: they treated an
+// EMPTY-STRING token as set (blank auth header), where the engine falls
+// through to LINEAR_API_KEY — that second normalization is flagged in the
+// PR body. Under the unified rule a whitespace-only LINEAR_API_TOKEN is
+// "set" and wins over LINEAR_API_KEY.
+test("--graphql: buildReadState treats a whitespace-only LINEAR_API_TOKEN as SET (unified with the other 11 sites)", async () => {
+  const savedToken = process.env.LINEAR_API_TOKEN;
+  const savedKey = process.env.LINEAR_API_KEY;
+  const savedFetch = globalThis.fetch;
+  let seenAuth = null;
+  try {
+    process.env.LINEAR_API_TOKEN = "   ";
+    process.env.LINEAR_API_KEY = "lin_api_fromkey";
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return {
+        ok: true,
+        json: async () => ({ data: { issues: { nodes: [{ state: { name: "Done" } }] } } }),
+      };
+    };
+    const readState = await buildReadState({ graphql: true });
+    const state = await readState("CTL-1");
+    expect(state).toBe("Done");
+    expect(seenAuth).toBe("   ");
+  } finally {
+    if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+    else process.env.LINEAR_API_TOKEN = savedToken;
+    if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedKey;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test("--graphql: buildReadState with neither var set throws naming both variables", async () => {
+  const savedToken = process.env.LINEAR_API_TOKEN;
+  const savedKey = process.env.LINEAR_API_KEY;
+  try {
+    delete process.env.LINEAR_API_TOKEN;
+    delete process.env.LINEAR_API_KEY;
+    const readState = await buildReadState({ graphql: true });
+    await expect(readState("CTL-1")).rejects.toThrow(/LINEAR_API_TOKEN \/ LINEAR_API_KEY not set/);
+  } finally {
+    if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+    else process.env.LINEAR_API_TOKEN = savedToken;
+    if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedKey;
+  }
 });

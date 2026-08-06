@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://catalyst.coalesce-labs.com/schemas/state-json-contract.schema.json",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/state-json-contract.schema.json",
   "title": "Claude Code Job State File (External Contract)",
   "$comment": "EXTERNAL: this file is written by Claude Code, not Catalyst. Catalyst reads it read-only. This schema documents the fields Catalyst depends on. The authoritative source of truth for this file's shape is the Claude Code application itself. Field names and semantics may change across Claude Code versions. Catalyst currently handles both the >=2.x form (resumeSessionId) and the <2.x form (linkScanPath) as a fallback.",
   "description": "Schema documenting the fields Catalyst reads from ~/.claude/jobs/{bg_job_id}/state.json. This file is owned and written exclusively by Claude Code. Catalyst reads it read-only for session continuation and job liveness probes. Do NOT write to or delete this file from Catalyst code.",
