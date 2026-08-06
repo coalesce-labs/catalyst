@@ -26,6 +26,29 @@
 #   catalyst-stack verify-updater [--json] [--no-e2e]
 #   catalyst-stack verify-node [--json]
 #   catalyst-stack sync-cloud-env
+#   catalyst-stack claude-account status
+#   catalyst-stack claude-account switch <handle> [--yes]
+#   catalyst-stack claude-account sync [--yes]
+#
+# claude-account (CTL-1650):
+#   Fleet-wide Claude OAuth-account control, one command.
+#   status         — run claude-accounts-usage.mjs and print per-account rate-limit
+#                    usage (5h/7d windows, which account is ACTIVE). Exits nonzero if
+#                    no account reported limits.
+#   switch <handle> — flip the fleet's active SDK account (handle form: acctN, e.g.
+#                    acct2). Guards on the local age key + a catalyst-cluster clone,
+#                    validates the handle is provisioned, probes its token auth
+#                    BEFORE switching (refuses a 401/expired account), flips the
+#                    `_catalyst_active_token` selector in
+#                    secrets/node-secret-files.sops.json via a non-interactive `sops
+#                    edit`, commits + pushes the cluster repo, re-materializes
+#                    ~/.config/catalyst/claude-accounts.env, restarts the stack, and
+#                    verifies the usage tool now reports the new account ACTIVE.
+#   sync            — for a second node after a switch was pushed elsewhere: git pull
+#                    the cluster repo, re-materialize claude-accounts.env, restart,
+#                    and verify.
+#   Token values are never echoed, logged, or written anywhere but the 0600
+#   ~/.config/catalyst/claude-accounts.env target file.
 #
 # sync-cloud-env (CTL-1307):
 #   Project the cluster-shared CATALYST_CLOUD_TOKEN (decrypted by cluster-sync into
@@ -2787,6 +2810,435 @@ cmd_verify_node() {
   return $?
 }
 
+# ─── claude-account (CTL-1650) ──────────────────────────────────────────────
+# Fleet-wide Claude OAuth-account control: report per-account usage, and flip
+# WHICH durable setup-token the SDK executor boots as (the `_catalyst_active_token`
+# selector line inside secrets/node-secret-files.sops.json's claude-accounts.env
+# entry, decrypted by execution-core/cluster-sync.mjs into
+# ~/.config/catalyst/claude-accounts.env on every node — see catalyst-execution-core's
+# `source "$_accounts_env"` under executor=sdk).
+#
+# SECRETS HYGIENE (hard rule, mirrors claude-accounts-usage.mjs): token VALUES are
+# NEVER echoed, logged, or captured into a variable that outlives a single pipeline.
+# Membership checks pipe straight to `grep -q`; the temp EDITOR script contains only
+# a sed program built from account HANDLES (acctN labels), never a token value; the
+# script is removed after use.
+
+CA_AGE_KEY_FILE_DEFAULT="${HOME}/.config/catalyst/age.key"
+CA_ACCOUNTS_ENV_DEFAULT="${HOME}/.config/catalyst/claude-accounts.env"
+# Known absolute sops install locations, checked in order before a PATH scan — same
+# posture as execution-core/cluster-sync.mjs's SOPS_CANDIDATES (CTL-1393: a restricted
+# daemon/shell PATH frequently omits /opt/homebrew/bin), plus ~/.local/bin (CTL-1650).
+CA_SOPS_CANDIDATES=("/opt/homebrew/bin/sops" "/usr/local/bin/sops" "/usr/bin/sops" "${HOME}/.local/bin/sops")
+
+_ca_age_key_file()    { echo "${CATALYST_AGE_KEY_FILE:-$CA_AGE_KEY_FILE_DEFAULT}"; }
+# CTL-1650 Codex fix: mirror execution-core/config.mjs's getClusterRepoDir() exactly —
+# CATALYST_CLUSTER_DIR is the explicit override; absent that, the cluster repo lives
+# under CATALYST_DIR (default ~/catalyst), not a hardcoded ~/catalyst. A node that sets
+# CATALYST_DIR (e.g. a non-default install root) would otherwise have execution-core
+# and this command disagree on where the cluster repo is.
+_ca_cluster_repo_dir() { echo "${CATALYST_CLUSTER_DIR:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-cluster}"; }
+_ca_accounts_env_file() { echo "${CLAUDE_ACCOUNTS_ENV:-$CA_ACCOUNTS_ENV_DEFAULT}"; }
+_ca_secrets_file()     { echo "$(_ca_cluster_repo_dir)/secrets/node-secret-files.sops.json"; }
+_ca_usage_script()     { echo "${SCRIPT_DIR}/claude-accounts-usage.mjs"; }
+
+# _ca_valid_handle HANDLE — true iff HANDLE matches the provisioned-account form
+# `acctN` (digits only after the literal "acct" — rejects "acct-2", "ACCT2", "",
+# and anything with shell/regex metacharacters, since it's later interpolated into
+# a sed program and a `git commit` message).
+_ca_valid_handle() {
+  [[ "$1" =~ ^acct[0-9]+$ ]]
+}
+
+# _ca_resolve_sops — absolute sops path: known install dirs first, then PATH. Prints
+# nothing and returns 1 when sops is unresolvable anywhere.
+_ca_resolve_sops() {
+  local c
+  for c in "${CA_SOPS_CANDIDATES[@]}"; do
+    [[ -x "$c" ]] && { echo "$c"; return 0; }
+  done
+  command -v sops 2>/dev/null && return 0
+  return 1
+}
+
+_ca_node_runtime() {
+  if command -v bun >/dev/null 2>&1; then echo bun
+  elif command -v node >/dev/null 2>&1; then echo node
+  else return 1
+  fi
+}
+
+# _ca_parse_active_handle_stream — reads a claude-accounts.env body from STDIN and
+# prints just the "acctN" handle from its `_catalyst_active_token="$CLAUDE_TOKEN_acctN"`
+# selector line. Never captures the input into a variable, so a caller piping in a
+# live sops decrypt (which carries token VALUES on other lines) never lands a token
+# value in a variable — only the selector's handle NAME (no leading `$`) reaches
+# stdout. Prints nothing (rc 1) when the selector line is absent — NEVER guesses.
+_ca_parse_active_handle_stream() {
+  local line
+  line="$(grep -m1 -oE '_catalyst_active_token="\$CLAUDE_TOKEN_[A-Za-z0-9_]+"' 2>/dev/null)" || return 1
+  [[ -n "$line" ]] || return 1
+  sed -E 's/.*CLAUDE_TOKEN_([A-Za-z0-9_]+)".*/\1/' <<<"$line"
+}
+
+# _ca_current_active_handle [ENV_FILE] — reads the `_catalyst_active_token="$CLAUDE_TOKEN_acctN"`
+# selector line out of the locally-materialized claude-accounts.env and prints just
+# "acctN". Prints nothing (rc 1) when the file or the line is absent — NEVER guesses.
+# NOTE: this reads the LOCAL file, which can be stale vs. the cluster repo if another
+# node has switched since this node last synced — `switch` derives its `old_handle`
+# from a fresh sops decrypt instead (see _ca_parse_active_handle_stream) for exactly
+# that reason; this helper remains correct for `sync`, which always re-materializes
+# the local file from a fresh decrypt before reading it.
+_ca_current_active_handle() {
+  local env_file="${1:-$(_ca_accounts_env_file)}"
+  [[ -f "$env_file" ]] || return 1
+  _ca_parse_active_handle_stream < "$env_file"
+}
+
+# _ca_sed_program OLD NEW — the sed -E program that flips ONLY the
+# `_catalyst_active_token=` selector reference from $CLAUDE_TOKEN_OLD to
+# $CLAUDE_TOKEN_NEW, and leaves every `CLAUDE_TOKEN_<label>=` DEFINITION line alone
+# (those never have a `$`-prefixed reference immediately after `_catalyst_active_token=`).
+# The quote before/after the handle is matched as an OPTIONAL literal backslash + `"`,
+# because the real target is sops's decrypted-for-edit JSON temp file, where the
+# claude-accounts.env content is itself a JSON string — so a `"` inside it is
+# rendered as the 2-char escape `\"`, not a bare `"` (verified against a live
+# `sops edit` round-trip; a plain env-file fixture matches too, since the backslash
+# is optional). Bounding on the trailing quote (real or escaped) also prevents a
+# handle from matching as a bare prefix of a longer one (acct1 vs acct10).
+# The trailing `g` flag matters: sops's decrypted-for-edit temp file is the WHOLE env
+# rendered as a single JSON string line, so a `g`-less program only flips the FIRST
+# occurrence of the pattern on that line — e.g. a stray commented-out selector earlier
+# in the file would eat the substitution and leave the real, active selector untouched
+# while sops still reports "changed" (silently committing a no-op edit).
+_ca_sed_program() {
+  local old="$1" new="$2"
+  local pre='s/(_catalyst_active_token=\\?")\$CLAUDE_TOKEN_'
+  local mid='(\\?")/\1\$CLAUDE_TOKEN_'
+  local suf='\2/g'
+  printf '%s' "${pre}${old}${mid}${new}${suf}"
+}
+
+# _ca_flip_selector_file FILE OLD NEW — apply _ca_sed_program in place (BSD/GNU-sed
+# portable via the `.bak` suffix form). Exposed standalone so tests can exercise the
+# real transform against a fixture file without going anywhere near sops/network.
+_ca_flip_selector_file() {
+  local file="$1" old="$2" new="$3"
+  sed -E -i.bak -e "$(_ca_sed_program "$old" "$new")" "$file" || return 1
+  rm -f "${file}.bak"
+}
+
+# _ca_write_editor_script OUT_FILE OLD NEW — writes the temporary EDITOR script `sops
+# edit` invokes (sops calls it with the decrypted-for-edit temp file as $1) to flip the
+# selector, then chmod +x's it. Standalone (CTL-1650 Codex fix) so tests can assert on
+# the generated content and execute it against a real fixture with the system sed,
+# without going anywhere near sops/git/network.
+_ca_write_editor_script() {
+  local out_file="$1" old="$2" new="$3"
+  {
+    echo "#!/usr/bin/env bash"
+    echo "set -euo pipefail"
+    # No `--` end-of-options marker here: BSD/Apple sed does not accept it in this
+    # position and fails with "illegal option". Safe to omit — "$1" is sops's own
+    # mktemp path for the decrypted-for-edit temp file, which never starts with a dash.
+    printf 'sed -E -i.bak -e %q "$1"\n' "$(_ca_sed_program "$old" "$new")"
+    echo 'rm -f "$1.bak"'
+  } > "$out_file"
+  chmod +x "$out_file"
+}
+
+# _ca_confirm PROMPT ASSUME_YES — same y/N gate every other catalyst-stack
+# interactive step (e.g. ensure_proxy_deps) uses; --yes skips the prompt.
+_ca_confirm() {
+  local prompt="$1" assume_yes="$2" ans
+  [[ "$assume_yes" == "yes" ]] && return 0
+  read -r -p "${prompt} [y/N] " ans
+  [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+# _ca_entry_rejected_reason ENTRY_JSON — inspects one account's claude-accounts-usage.mjs
+# --json entry (see claude-accounts-usage.mjs's gatherAccount/fetchUnifiedLimits) and
+# prints a short reason when Anthropic itself has rejected that account (429/exhausted).
+# A 429 still carries the unified rate-limit headers, so `.error` stays empty on a
+# rejected account (only a genuine 401/403/network failure sets `.error`) — callers
+# that check `.error` alone miss this case. Rejection is judged on the BINDING window
+# (selected by `.representativeClaim`: five_hour|seven_day) falling back to overall
+# status when representativeClaim is absent. Prints nothing when not rejected.
+_ca_entry_rejected_reason() {
+  local entry="$1"
+  printf '%s' "$entry" | jq -r '
+    def bindingStatus:
+      if .representativeClaim == "five_hour" then (.fiveHour.status // "")
+      elif .representativeClaim == "seven_day" then (.sevenDay.status // "")
+      else (.overallStatus // "") end;
+    if (.overallStatus // "") == "rejected" then
+      "overall status rejected"
+    elif bindingStatus == "rejected" then
+      "binding window (" + (.representativeClaim // "?") + ") status rejected"
+    else empty end
+  ' 2>/dev/null
+}
+
+# _ca_probe_handle_ok HANDLE — runs claude-accounts-usage.mjs --json against the
+# CURRENTLY materialized ~/.config/catalyst/claude-accounts.env (which already holds
+# every provisioned account's token, regardless of which one is "active" — see the
+# tool's own header) and requires HANDLE's entry to report no error (i.e. it got real
+# rate-limit headers back, not a 401/403/network failure) AND to not be rate-limited/
+# rejected by Anthropic (a 429 reports empty .error too — see _ca_entry_rejected_reason).
+# Never prints token values; only JSON already scrubbed of them by the usage tool itself.
+_ca_probe_handle_ok() {
+  local handle="$1" rt script json entry err rejected
+  rt="$(_ca_node_runtime)" || fail "neither bun nor node found on PATH — cannot run claude-accounts-usage.mjs"
+  script="$(_ca_usage_script)"
+  [[ -f "$script" ]] || fail "claude-accounts-usage.mjs missing at ${script}"
+  json="$("$rt" "$script" --json 2>/dev/null)" || true
+  entry="$(printf '%s' "$json" | jq -c --arg h "$handle" '.accounts[]? | select(.label == $h)' 2>/dev/null)"
+  [[ -n "$entry" ]] || return 1
+  err="$(printf '%s' "$entry" | jq -r '.error // empty' 2>/dev/null)"
+  [[ -z "$err" ]] || return 1
+  rejected="$(_ca_entry_rejected_reason "$entry")"
+  [[ -z "$rejected" ]]
+}
+
+# _ca_verify_active HANDLE — sources the just-materialized claude-accounts.env (which
+# sets CLAUDE_CODE_OAUTH_TOKEN from whichever account is now selected) in a subshell
+# and confirms the usage tool reports HANDLE — and only HANDLE — as ACTIVE. Prints the
+# tool's human report and returns nonzero on any mismatch.
+_ca_verify_active() {
+  local handle="$1" rt script dest json active active_entry active_err active_rejected
+  rt="$(_ca_node_runtime)" || fail "neither bun nor node found on PATH — cannot verify"
+  script="$(_ca_usage_script)"
+  dest="$(_ca_accounts_env_file)"
+  json="$(
+    # shellcheck disable=SC1090
+    . "$dest" >/dev/null 2>&1
+    "$rt" "$script" --json 2>/dev/null
+  )" || true
+  active="$(printf '%s' "$json" | jq -r '[.accounts[]? | select(.isActive == true) | .label] | first // empty' 2>/dev/null)"
+  if [[ "$active" != "$handle" ]]; then
+    warn "verify: usage tool reports active account '${active:-<none>}', expected '${handle}'"
+    return 1
+  fi
+  # `isActive` is a token-value match only (usage.mjs) — it is set regardless of auth
+  # outcome, so an account can be isActive=true with a live auth error, OR with no auth
+  # error but a rate-limited/rejected status (a 429 still parses the unified headers,
+  # so .error stays empty — see _ca_entry_rejected_reason). Check both before declaring
+  # victory.
+  active_entry="$(printf '%s' "$json" | jq -c --arg h "$handle" '[.accounts[]? | select(.label == $h)] | first // empty' 2>/dev/null)"
+  active_err="$(printf '%s' "$active_entry" | jq -r '.error // empty' 2>/dev/null)"
+  if [[ -n "$active_err" ]]; then
+    warn "verify: ${handle} is selected but reports an auth error: ${active_err}"
+    return 1
+  fi
+  active_rejected="$(_ca_entry_rejected_reason "$active_entry")"
+  if [[ -n "$active_rejected" ]]; then
+    warn "verify: ${handle} is selected but is rate-limited/rejected by Anthropic (${active_rejected})"
+    return 1
+  fi
+  log "claude-account: verified — ${handle} is ACTIVE"
+  (
+    # shellcheck disable=SC1090
+    . "$dest" >/dev/null 2>&1
+    "$rt" "$script"
+  )
+}
+
+cmd_claude_account_status() {
+  local rt script dest
+  [[ $# -eq 0 ]] || fail "unknown claude-account status arg: $1"
+  rt="$(_ca_node_runtime)" || fail "neither bun nor node found on PATH — cannot run claude-accounts-usage.mjs"
+  script="$(_ca_usage_script)"
+  [[ -f "$script" ]] || fail "claude-accounts-usage.mjs missing at ${script}"
+  dest="$(_ca_accounts_env_file)"
+  # CTL-1650 Codex fix: source the materialized accounts env first (same pattern as
+  # _ca_verify_active below) so CLAUDE_CODE_OAUTH_TOKEN reflects the file's selector.
+  # Without this, a fresh shell (or a shell that predates the most recent switch/sync)
+  # has no/stale CLAUDE_CODE_OAUTH_TOKEN, so the usage tool's isActive value-match
+  # against it sees nothing and `status` omits or mislabels ACTIVE.
+  (
+    # shellcheck disable=SC1090
+    . "$dest" >/dev/null 2>&1
+    "$rt" "$script"
+  )
+}
+
+cmd_claude_account_switch() {
+  local handle="${1:-}"
+  [[ -n "$handle" ]] || fail "usage: catalyst-stack claude-account switch <handle> [--yes] (e.g. acct2)"
+  shift
+  local assume_yes="${ASSUME_YES:-no}"
+  for a in "$@"; do
+    case "$a" in
+      --yes) assume_yes="yes" ;;
+      *) fail "unknown claude-account switch arg: $a" ;;
+    esac
+  done
+
+  _ca_valid_handle "$handle" || fail "invalid handle '${handle}' — must match ^acct[0-9]+\$ (e.g. acct2)"
+
+  local age_key; age_key="$(_ca_age_key_file)"
+  [[ -f "$age_key" ]] || fail "no age key at ${age_key} — this node cannot decrypt cluster secrets"
+
+  local cluster_dir; cluster_dir="$(_ca_cluster_repo_dir)"
+  [[ -d "${cluster_dir}/.git" ]] || fail "no cluster repo clone at ${cluster_dir}"
+
+  # Refuse on a dirty/staged clone: `git commit` with no pathspec commits the WHOLE
+  # index, so any bystander pre-staged change would be silently swept into the
+  # secrets commit and pushed fleet-wide. The commit below is also pathspec'd to the
+  # sops file as defense in depth, but this guard is what stops the switch happening
+  # at all against a dirty clone.
+  local dirty; dirty="$(cd "$cluster_dir" && git status --porcelain)"
+  [[ -z "$dirty" ]] || fail "cluster repo ${cluster_dir} has uncommitted or staged changes — refusing to switch (they would be swept into the secrets commit); commit, stash, or discard them first"
+
+  # Pre-edit sync: `switch` mutates shared fleet state, so start from origin's tip.
+  # Without this, a push below can be rejected as non-fast-forward any time another
+  # node has pushed since this clone last moved.
+  log "claude-account switch: syncing ${cluster_dir} with origin..."
+  ( cd "$cluster_dir" && git pull --ff-only ) \
+    || fail "git pull --ff-only failed in ${cluster_dir} — resolve the divergence manually, then retry switch"
+
+  local sops_bin; sops_bin="$(_ca_resolve_sops)" || fail "sops binary not found (checked known install dirs + PATH)"
+
+  local secrets_file; secrets_file="$(_ca_secrets_file)"
+  [[ -f "$secrets_file" ]] || fail "missing ${secrets_file}"
+
+  log "claude-account switch: validating CLAUDE_TOKEN_${handle} is provisioned..."
+  if ! SOPS_AGE_KEY_FILE="$age_key" "$sops_bin" -d --extract '["claude-accounts.env"]' "$secrets_file" 2>/dev/null \
+      | grep -q "^CLAUDE_TOKEN_${handle}="; then
+    fail "CLAUDE_TOKEN_${handle} not found in claude-accounts.env — is '${handle}' a provisioned account?"
+  fi
+
+  # Derive old_handle from the just-pulled SOPS content, NOT the locally-materialized
+  # claude-accounts.env (CTL-1650 Codex fix): the local file goes stale the moment any
+  # OTHER node switches, so reading it here could flip a selector that's already been
+  # flipped remotely — corrupting the sed program's OLD side and either no-op'ing
+  # ("has not changed") or, worse, matching nothing and silently doing nothing useful.
+  # The decrypted stream is piped straight into the parser and never captured in a
+  # variable — it carries every account's token VALUE on other lines; only the
+  # selector's handle NAME (no token) is extracted.
+  local old_handle; old_handle="$(
+    SOPS_AGE_KEY_FILE="$age_key" "$sops_bin" -d --extract '["claude-accounts.env"]' "$secrets_file" 2>/dev/null \
+      | _ca_parse_active_handle_stream
+  )" || fail "could not determine the currently active account from the cluster repo's claude-accounts.env selector (freshly pulled from ${secrets_file}) — refusing to guess which selector line to flip"
+  local local_hint; local_hint="$(_ca_current_active_handle 2>/dev/null || echo '?')"
+  [[ "$local_hint" != "$old_handle" ]] && log "claude-account switch: note — local claude-accounts.env selector (${local_hint}) differs from the cluster repo's (${old_handle}); using the cluster repo's as authoritative"
+
+  if [[ "$old_handle" == "$handle" ]]; then
+    log "claude-account switch: ${handle} is already the active account — nothing to do"
+    return 0
+  fi
+
+  log "claude-account switch: probing ${handle}'s token auth before switching..."
+  _ca_probe_handle_ok "$handle" \
+    || fail "${handle} is not usable right now (auth failure, e.g. 401/expired, or rate-limited/rejected by Anthropic) — refusing to switch to a broken account"
+
+  _ca_confirm "Switch fleet active Claude account ${old_handle} -> ${handle}?" "$assume_yes" || fail "aborted"
+
+  log "claude-account switch: flipping selector ${old_handle} -> ${handle} in ${secrets_file}..."
+  local editor_script; editor_script="$(mktemp)"
+  trap 'rm -f "$editor_script"' EXIT
+  _ca_write_editor_script "$editor_script" "$old_handle" "$handle"
+
+  local edit_out edit_rc
+  edit_out="$(SOPS_AGE_KEY_FILE="$age_key" EDITOR="$editor_script" "$sops_bin" edit "$secrets_file" 2>&1)"
+  edit_rc=$?
+  rm -f "$editor_script"
+  trap - EXIT
+  if printf '%s' "$edit_out" | grep -qi "has not changed"; then
+    fail "sops reported no change — the selector pattern for ${old_handle} did not match in ${secrets_file} (schema drift?): ${edit_out}"
+  fi
+  if [[ $edit_rc -ne 0 ]]; then
+    fail "sops edit failed: ${edit_out}"
+  fi
+  log "  → ${edit_out:-selector flipped}"
+
+  log "claude-account switch: committing + pushing ${cluster_dir}..."
+  (
+    cd "$cluster_dir" || exit 1
+    git add secrets/node-secret-files.sops.json || exit 1
+    # Pathspec'd so this commits ONLY the sops file, never whatever else happens to
+    # be staged in the index (defense in depth alongside the pre-edit dirty guard
+    # above).
+    git commit -qm "chore(secrets): switch active Claude account ${old_handle} -> ${handle}" \
+      -- secrets/node-secret-files.sops.json || exit 1
+    if ! git push; then
+      # Push rejected (e.g. another node pushed first). The flip is already
+      # committed locally — roll it back so the clone matches origin again and a
+      # retried `switch` starts clean instead of wedging behind a stale local
+      # commit (a retry would otherwise re-flip an already-flipped file, sops
+      # would report "no change", and the command would hard-fail with a
+      # misleading "schema drift?" message with no way out).
+      git reset --hard HEAD~1 >/dev/null 2>&1
+      exit 1
+    fi
+  ) || fail "cluster repo commit/push failed in ${cluster_dir} — local commit rolled back (clone matches origin again); retry switch"
+
+  log "claude-account switch: re-materializing local claude-accounts.env..."
+  local dest; dest="$(_ca_accounts_env_file)"
+  mkdir -p "$(dirname "$dest")"
+  ( umask 077; SOPS_AGE_KEY_FILE="$age_key" "$sops_bin" -d --extract '["claude-accounts.env"]' "$secrets_file" > "$dest" ) \
+    || fail "sops decrypt of claude-accounts.env failed"
+  chmod 600 "$dest"
+
+  log "claude-account switch: restarting stack..."
+  if [[ "$assume_yes" == "yes" ]]; then cmd_restart --yes; else cmd_restart; fi
+
+  _ca_verify_active "$handle" || fail "claude-account switch: post-switch verification failed"
+}
+
+cmd_claude_account_sync() {
+  local assume_yes="${ASSUME_YES:-no}"
+  for a in "$@"; do
+    case "$a" in
+      --yes) assume_yes="yes" ;;
+      *) fail "unknown claude-account sync arg: $a" ;;
+    esac
+  done
+
+  local age_key; age_key="$(_ca_age_key_file)"
+  [[ -f "$age_key" ]] || fail "no age key at ${age_key} — this node cannot decrypt cluster secrets"
+
+  local cluster_dir; cluster_dir="$(_ca_cluster_repo_dir)"
+  [[ -d "${cluster_dir}/.git" ]] || fail "no cluster repo clone at ${cluster_dir}"
+
+  local sops_bin; sops_bin="$(_ca_resolve_sops)" || fail "sops binary not found (checked known install dirs + PATH)"
+
+  local secrets_file; secrets_file="$(_ca_secrets_file)"
+
+  _ca_confirm "Pull cluster secrets + restart the stack on this node?" "$assume_yes" || fail "aborted"
+
+  log "claude-account sync: pulling ${cluster_dir}..."
+  ( cd "$cluster_dir" && git pull --ff-only ) || fail "git pull --ff-only failed in ${cluster_dir}"
+
+  [[ -f "$secrets_file" ]] || fail "missing ${secrets_file} after pull"
+
+  log "claude-account sync: re-materializing local claude-accounts.env..."
+  local dest; dest="$(_ca_accounts_env_file)"
+  mkdir -p "$(dirname "$dest")"
+  ( umask 077; SOPS_AGE_KEY_FILE="$age_key" "$sops_bin" -d --extract '["claude-accounts.env"]' "$secrets_file" > "$dest" ) \
+    || fail "sops decrypt of claude-accounts.env failed"
+  chmod 600 "$dest"
+
+  local handle; handle="$(_ca_current_active_handle "$dest")" \
+    || fail "could not determine the active account after sync"
+
+  log "claude-account sync: restarting stack..."
+  if [[ "$assume_yes" == "yes" ]]; then cmd_restart --yes; else cmd_restart; fi
+
+  _ca_verify_active "$handle" || fail "claude-account sync: post-sync verification failed"
+}
+
+cmd_claude_account() {
+  local sub="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$sub" in
+    status) cmd_claude_account_status "$@" ;;
+    switch) cmd_claude_account_switch "$@" ;;
+    sync)   cmd_claude_account_sync "$@" ;;
+    *) fail "usage: catalyst-stack claude-account status | switch <handle> [--yes] | sync [--yes]" ;;
+  esac
+}
+
 # ─── Dispatch ───────────────────────────────────────────────────────────────
 # Guard so the file can be sourced (e.g. by __tests__/verify-updater.test.sh) to
 # reach the pure helpers WITHOUT running a command. When executed directly,
@@ -2806,10 +3258,11 @@ case "${1:-}" in
   verify-node)        shift; cmd_verify_node "$@" ;;
   services-status)    shift; cmd_services_status ;;
   sync-cloud-env)     shift; cmd_sync_cloud_env "$@" ;;
+  claude-account)     shift; cmd_claude_account "$@" ;;
   status|"") cmd_status ;;
   -h|--help)
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-cloud-sync | verify-updater | verify-node | services-status)" ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-cloud-sync | verify-updater | verify-node | services-status | claude-account)" ;;
 esac
 fi
