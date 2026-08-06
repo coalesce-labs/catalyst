@@ -84,7 +84,7 @@ echo "setup-plugin-source (CTL-992) tests"
 # in a comment), confuses bash 3.2's quote-tracking across the nested
 # heredoc/substitution boundary — bash 4+/5 parses it fine, but a fresh macOS
 # node (whose `bash` is the stock 3.2 until Homebrew's is on PATH) fails with a
-# syntax error deep in the file, far from the actual apostrophe (CTL-1214
+# syntax error deep in the file, far from the actual apostrophe (PROJ-1214
 # verify: this exact class of bug silently broke node onboarding).
 if [[ -x /bin/bash ]]; then
   t0() {
