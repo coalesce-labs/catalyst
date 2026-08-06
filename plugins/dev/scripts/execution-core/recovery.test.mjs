@@ -4268,6 +4268,13 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     const emit = recorder({ code: 0 });
     const appendEvent = recorder(undefined);
     const escalate = recorder(undefined);
+    // Codex #3027 round 3 P2: this signal carries bg_job_id "job-old", so the
+    // reconcile branch's emitReapIntent call must be stubbed — without this
+    // seam the test invokes the PRODUCTION reap-intent producer, which
+    // synchronously appends a real "phase.reclaim.reap-requested" record to
+    // the live ~/catalyst/events/YYYY-MM.jsonl on whatever machine runs the
+    // suite, polluting the unified event log with a fake PROJ-506 request.
+    const reapIntent = recorder(Promise.resolve());
     const recoveryPassSig = {
       ticket: "PROJ-506",
       phase: "recovery-pass",
@@ -4282,11 +4289,13 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
       emitComplete: emit,
       appendEvent,
       appendEscalatedEvent: escalate,
+      emitReapIntent: reapIntent,
       postReclaimMirror: () => {},
     });
     expect(r).toBe("reclaimed");
     expect(emit.calls.length).toBe(1);
     expect(escalate.calls.length).toBe(0); // reconciled to done, never escalated
+    expect(reapIntent.calls[0][0]).toBe("phase.reclaim.reap-requested");
   });
 });
 
