@@ -443,8 +443,13 @@ start_event_mirror() {
     warn "launchctl bootstrap failed for $EVENT_MIRROR_AGENT_PLIST — event-mirror not started"
     return 1
   fi
-  # RunAtLoad=false: kick explicitly so the service is live immediately after bootstrap.
-  launchctl kickstart -k "gui/$(id -u)/${EVENT_MIRROR_AGENT_LABEL}" >/dev/null 2>&1 || true
+  # CTL-1662 (Codex P2): RunAtLoad=true already starts the job the instant it's bootstrapped
+  # — verified live (bootout + bootstrap-only, no kickstart, self-starts). A follow-up
+  # `kickstart -k` here is not just redundant, it's the exact "settling hold" race this repo's
+  # own health-responder contract warns about elsewhere (docs/health-responder.md): forcing a
+  # restart on a job that's already mid-first-tick can kill it before its cursor is persisted,
+  # then the replacement reloads the stale cursor with an empty in-memory dedup set and
+  # re-appends fleet events already written. Let RunAtLoad do the starting; don't kick it.
   log "  → event-mirror LaunchAgent started (log: $EVENT_MIRROR_LOG)"
 }
 stop_event_mirror() {
@@ -459,10 +464,17 @@ stop_event_mirror() {
   rm -f "$EVENT_MIRROR_AGENT_PLIST"
   log "  → event-mirror stopped and uninstalled"
 }
-# _vn_event_mirror_running — "yes" when a bun process is running event-mirror/index.ts.
-# launch.sh always resolves the canonical path before exec'ing bun, so pgrep-by-path is stable.
+# _vn_event_mirror_running — "yes" when THIS user's event-mirror LaunchAgent has a live PID.
+# CTL-1662 (Codex P2): a bare `pgrep -f event-mirror/index.ts` is unscoped — on a shared
+# multi-user Mac another account's mirror process would falsely satisfy this developer's
+# required check even though the current developer's own LaunchAgent is absent or dead.
+# `launchctl list` only ever sees the CALLER's own per-user launchd domain, so checking the
+# specific EVENT_MIRROR_AGENT_LABEL there is both user-scoped and launcher-scoped (not just
+# any process that happens to match the path).
 _vn_event_mirror_running() {
-  if pgrep -f "event-mirror/index.ts" >/dev/null 2>&1; then echo yes; else echo no; fi
+  local pid
+  pid="$(launchctl list 2>/dev/null | awk -v label="$EVENT_MIRROR_AGENT_LABEL" '$3 == label {print $1; exit}')"
+  if [[ "$pid" =~ ^[0-9]+$ ]]; then echo yes; else echo no; fi
 }
 
 # ─── Hotpatch (CTL-940: one-checkout nodes) ─────────────────────────────────
@@ -1311,8 +1323,15 @@ PLIST
 
 # render_event_mirror_plist <launcher> — emit the event-mirror LaunchAgent plist XML to stdout
 # (CTL-1654). Pure: no filesystem or launchctl side effects, so it is unit-testable.
-# KeepAlive=true so launchd restarts on crash. RunAtLoad=false: start_event_mirror
-# kickstarts explicitly after bootstrap so the service is live immediately.
+# KeepAlive=true so launchd restarts on crash. RunAtLoad=true so it self-starts at
+# every login AND the instant it's bootstrapped (CTL-1662) — this node's class may
+# never install the STACK_AGENT (developer/monitor nodes typically only run
+# adopt-updater, not install-services), so the dedicated per-daemon agent must be
+# self-sufficient, matching the updater/cloud-sync/log-shipper agents' own
+# convention. start_event_mirror does NOT additionally kickstart after bootstrap —
+# RunAtLoad already starts it immediately, and a redundant `kickstart -k` risks the
+# same settling-window race the health-responder contract warns about elsewhere
+# (docs/health-responder.md).
 render_event_mirror_plist() {
   local launcher="$1"
   # CTL-1654 (Codex P2 "pass mirror host overrides into launchd"): capture the roster
@@ -1355,7 +1374,7 @@ render_event_mirror_plist() {
   </array>
 
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 
   <key>KeepAlive</key>
   <true/>
@@ -2855,6 +2874,7 @@ _vn_run_developer() {
   _vn_emit "exec-core-stopped"  T1 true "$(_vn_v_daemon_down execution-core "$(_vn_exec_core_running)")"
   _vn_emit "plugins-fresh"      T1 true "$(_vn_v_updater "$(_vn_updater_ec)")"
   _vn_emit "read-replica"       T1 true "$(_vn_v_read_replica developer "$(_vn_read_replica_base)")"
+  _vn_emit "event-mirror-running" T1 true "$(_vn_v_daemon_up event-mirror "$(_vn_event_mirror_running)")"
   _vn_emit "would-not-own-work" T1 true "$(_vn_v_dev_no_work "$in_roster" "$multi_host" "$drained" "$roster_src")"
 }
 

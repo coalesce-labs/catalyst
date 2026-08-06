@@ -218,5 +218,19 @@ else
 fi
 
 echo ""
+echo "=== Phase 4: event-mirror plist survives reboot (CTL-1662) ==="
+echo ""
+
+# RunAtLoad must be true: a developer/monitor node typically never installs the
+# STACK_AGENT (install-services), only adopt-updater — so the dedicated event-mirror
+# agent must self-start at login like the updater/cloud-sync/log-shipper agents do,
+# not rely solely on start_event_mirror's one-time kickstart.
+if grep -A1 '<key>RunAtLoad</key>' <<<"$PLIST_BARE" | grep -q '<true/>'; then
+  PASSES=$((PASSES + 1)); echo "  PASS: event-mirror plist has RunAtLoad=true (survives reboot/login)"
+else
+  FAILURES=$((FAILURES + 1)); echo "  FAIL: event-mirror plist RunAtLoad is not true — will not self-start after reboot"
+fi
+
+echo ""
 echo "=== Results: ${PASSES} pass, ${FAILURES} fail ==="
 [[ $FAILURES -eq 0 ]]
