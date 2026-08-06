@@ -173,6 +173,21 @@ export function reasoningRecoveryPass(items, opts = {}) {
       continue;
     }
 
+    // PROJ-1657 Codex P1 (round 8): a probe-less phase already parked terminal
+    // via markEscalationCapTerminal (stalledReason "no-probe-for-phase" — a dead
+    // recovery-pass worker with no retry path) has no typed failure signature,
+    // so defaultClassifyTicket would fall through to its generic
+    // decision:"defer"/fix_class:"board-health" case. readDeferredBoardHealthIntents
+    // later picks that defer up as a holistic board-health candidate, and
+    // holisticBoardHealthAct can dispatch a brand-new recovery-pass generation
+    // for it — silently reversing the terminal hand-off to a human this branch
+    // just declared. Same skip shape as the linearTerminal guard above.
+    if (item.evidence?.signal?.stalledReason === "no-probe-for-phase") {
+      log(`recovery-reasoning: ${item.ticket} skipped (terminal no-probe-for-phase)`);
+      tickStats.terminalSkipped.push(item.ticket);
+      continue;
+    }
+
     // DIAGNOSE: reuse diagnostician evidence. If the caller didn't attach
     // logsOutput, capture it read-only now (claude logs + bg job state). This is
     // a pure collector — no env gate, no side effects (CTL-937 captureEvidence).
