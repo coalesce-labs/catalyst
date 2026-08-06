@@ -635,15 +635,28 @@ gh pr view --json number,state,mergeStateStatus,mergeable,statusCheckRollup
 3. `git add … && git commit && git push` to re-trigger CI.
 4. Re-probe after CI completes; if CLEAN, proceed to Step 3 (merge).
 
-**Step 2 — Review branch** (unresolved bot-review threads): delegate to
-`/catalyst-dev:review-comments <PR> --headless` — do NOT hand-roll `resolveReviewThread` calls here.
-That skill owns the round-aware severity policy (fix every P0/P1 on every review round; on round 2+,
-defer P2/P3 to a follow-up ticket instead of chasing them inline — see its Step 1.5 and "Deferring
-low-priority findings after round one") and already resolves each thread it addresses, whether by
-fixing it or by reply-and-defer. After it returns:
-1. Post `@codex review` via `plugins/dev/scripts/lib/gh-pr-comment.sh <PR> "@codex review" --idempotent`
-   to re-trigger the automated reviewer. Wait bounded (`catalyst-events wait-for`) for re-review.
-2. Escalate ONLY a finding that is a genuine judgment call (human `CHANGES_REQUESTED` or a design
+**Step 2 — Review branch** (unresolved bot-review threads): apply `/catalyst-dev:review-comments`'s
+round-aware severity policy inline — do NOT invoke that skill via a nested slash command; slash
+commands cannot nest inside a running skill or a `claude --bg` worker (see "/goal condition"
+above), and this worker's allowed tools don't include `Skill`. Do the equivalent yourself:
+1. For each unresolved bot thread, read its priority tag (P0/P1/P2/P3) and determine the reviewing
+   bot's round: how many times that bot login has submitted a review on this PR.
+2. Classify disagreement/judgment-call findings first, regardless of priority tag — a P2 tag does
+   not make a finding non-judgmental. Those go to step 6 (escalate), not steps 3-4.
+3. P0/P1 (any round): read the thread body, address the finding in code, commit, and resolve the
+   thread via the `resolveReviewThread` GraphQL mutation (reuse
+   `orchestrate-resolve-fixed-threads`'s mutation).
+4. P2/P3, bot-authored only (never a human reviewer's comment — see review-comments' "Deferring
+   low-priority findings after round one"): round 1 is a judgment call, same fix-or-defer choice as
+   step 3 vs. below. Round 2+ always defers: file a follow-up ticket, reply linking it, resolve the
+   thread. If ticket filing fails, fall back to fixing it inline rather than leaving the thread
+   stuck on an optional dependency.
+5. Only if step 3 or 4 actually pushed a code change (HEAD moved), post `@codex review` via
+   `plugins/dev/scripts/lib/gh-pr-comment.sh <PR> "@codex review" --idempotent` to re-trigger the
+   automated reviewer, then wait bounded (`catalyst-events wait-for`) for re-review. A pass that
+   only deferred findings (no push) must NOT re-trigger — reviewing the same unchanged SHA again
+   can resurface the same findings as fresh threads and file duplicate follow-up tickets.
+6. Escalate ONLY a finding that is a genuine judgment call (human `CHANGES_REQUESTED` or a design
    decision you cannot resolve) — write the finding to `.review-escalations.jsonl` and use it as
    the curated escalation brief (PR + thread linked, never the opaque `pr_not_merged` string).
 
