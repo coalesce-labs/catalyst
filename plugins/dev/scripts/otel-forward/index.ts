@@ -182,7 +182,7 @@ export function getStats() {
   return { ...stats };
 }
 
-async function flush(): Promise<void> {
+async function runFlush(): Promise<void> {
   const tasks: Promise<void>[] = [];
   if (senders.otlp && buffers.otlp.length > 0) {
     const batch = buffers.otlp.splice(0);
@@ -197,6 +197,24 @@ async function flush(): Promise<void> {
     tasks.push(senders.cae.flush(batch));
   }
   await Promise.allSettled(tasks);
+}
+
+// CTL-1506 (Codex P1): serialize flushes. Each sender's flush() opens a retry window
+// up to maxRetryElapsedMs (default 60 s), but the flush timer fires every FLUSH_MS
+// (default 5 s). Without this guard ~12 flushes could run concurrently during a
+// sustained outage, letting multiple invocations enter drainDlqBounded against the
+// same DLQ file snapshot — replaying queued events more than once and racing its
+// rewrite/unlink. A tick that arrives while a flush is in flight coalesces onto the
+// in-flight promise (a no-op that shares its result); buffered events simply wait for
+// the next flush. Callers that must guarantee a fresh drain (shutdown) await the
+// in-flight one first, then call flush() again.
+let inFlightFlush: Promise<void> | null = null;
+function flush(): Promise<void> {
+  if (inFlightFlush) return inFlightFlush;
+  inFlightFlush = runFlush().finally(() => {
+    inFlightFlush = null;
+  });
+  return inFlightFlush;
 }
 
 if (import.meta.main) {
@@ -247,6 +265,10 @@ if (import.meta.main) {
   clearInterval(flushTimer);
   clearInterval(ckTimer);
   clearInterval(lagTimer);
+  // CTL-1506: let any in-flight flush settle, then drain whatever buffered since it
+  // started (flush() coalesces onto an in-flight promise, so a single call could
+  // otherwise return the in-flight one and leave the tail unflushed).
+  if (inFlightFlush) await inFlightFlush;
   await flush();
   log.info({ processed: stats.processed, skipped: stats.skipped }, "stopped");
 }

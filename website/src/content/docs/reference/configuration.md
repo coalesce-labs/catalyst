@@ -388,6 +388,63 @@ precisely so your real `linear.apiToken` here still gets tried and used instead 
 shadowed. Generate a personal key at Linear → Settings → API → Personal API keys (`lin_api_...`, not
 an OAuth `lin_oauth_...` value) and put it here.
 
+## Event forwarders (`catalyst.observability.forwarders`)
+
+The `catalyst-otel-forward` daemon tails the canonical event log
+(`~/catalyst/events/YYYY-MM.jsonl`) and fans events out to OTLP/HTTP, PostHog, and Cloudflare
+Analytics Engine. Config lives in the Layer-2 file above under
+`catalyst.observability.forwarders`. **All forwarders are disabled by default.** This section is
+the authoritative schema; the developer reference `plugins/dev/references/event-forwarding.md`
+covers architecture, lifecycle, and DLQ operations.
+
+```json
+{
+  "catalyst": {
+    "observability": {
+      "forwarders": {
+        "otlp": {
+          "enabled": true,
+          "endpoint": "http://localhost:4318",
+          "batchSize": 100,
+          "flushIntervalMs": 5000,
+          "lokiAcceptWindowMs": 3600000,
+          "maxRetryElapsedMs": 60000
+        },
+        "posthog": {
+          "enabled": false,
+          "apiKey": "phc_...",
+          "host": "https://us.i.posthog.com",
+          "batchSize": 50,
+          "flushIntervalMs": 10000
+        },
+        "cloudflareAE": {
+          "enabled": false,
+          "accountId": "...",
+          "apiToken": "...",
+          "dataset": "catalyst_events",
+          "batchSize": 100,
+          "flushIntervalMs": 5000
+        }
+      }
+    }
+  }
+}
+```
+
+### OTLP forwarder keys
+
+| Key                  | Default                | Description                                                                                                                                             |
+| -------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false`                | Enable the OTLP/HTTP forwarder.                                                                                                                        |
+| `endpoint`           | `http://localhost:4318`| Collector ingest. `OTEL_EXPORTER_OTLP_ENDPOINT` overrides it; a `:4317` port is auto-rewritten to `:4318` for HTTP.                                     |
+| `batchSize`          | `100`                  | Max events per flush batch.                                                                                                                            |
+| `flushIntervalMs`    | `5000`                 | Flush cadence. Flushes are serialized — a tick during an in-flight flush is a no-op (CTL-1506), so this is a floor, not a guarantee of concurrency.     |
+| `lokiAcceptWindowMs` | `3600000` (1 h)        | Age cutoff for Loki records (CTL-1506). Records older than this are dropped with a `forward_dropped` (`drop_reason: "aged"`) event before any send. Tune to your Loki `reject_old_samples_max_age`. |
+| `maxRetryElapsedMs`  | `60000` (60 s)         | Max elapsed time for HTTP retry backoff on a retryable failure (`429`/`5xx`/network) before the batch is dead-lettered (CTL-1506). Terminal `4xx` (not `429`) is dropped immediately, never retried or DLQ'd. |
+
+PostHog and Cloudflare AE keys mirror the JSON above; see the developer reference for their
+delivery semantics.
+
 ## Cluster machine-level cloud token (`CATALYST_CLOUD_TOKEN`, CTL-1307)
 
 `CATALYST_CLOUD_TOKEN` is a single **shared** service credential — the catalyst-cloud `ADMIN_TOKEN`

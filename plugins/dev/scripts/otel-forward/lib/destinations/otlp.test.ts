@@ -839,3 +839,113 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
     rmSync(dir, { recursive: true });
   });
 });
+
+// CTL-1506: Codex-review remediation (severity, per-attempt aging, unique ids)
+describe("OtlpSender CTL-1506 Codex remediation", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "otlp-codex-test-"));
+  });
+
+  function makeEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return { ...SAMPLE_EVENT, ...overrides };
+  }
+  function makeFreshEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return makeEvent({ ts: new Date().toISOString(), ...overrides });
+  }
+  function makeAgedEvent(): CanonicalEvent {
+    return makeEvent({ ts: new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString() });
+  }
+  function readEvents(p: string, name: string): CanonicalEvent[] {
+    if (!existsSync(p)) return [];
+    return readFileSync(p, "utf8").trim().split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l) as CanonicalEvent)
+      .filter((e) => e.attributes["event.name"] === name);
+  }
+  const readDrops = (p: string) => readEvents(p, "catalyst.observability.forward_dropped");
+
+  test("forward_failed carries ERROR/17; forward_dropped stays WARN/13 (Codex P2)", async () => {
+    // Failure path → ERROR
+    global.fetch = mock(() => Promise.reject(new Error("down"))) as unknown as typeof fetch;
+    const { OtlpSender } = await import("./otlp.ts");
+    const failLog = join(dir, "sev-failed.jsonl");
+    const failSender = new OtlpSender({
+      endpoint: "http://127.0.0.1:1",
+      dlqPath: join(dir, "sev-failed-dlq.jsonl"),
+      eventLogPath: failLog,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await failSender.flush([makeFreshEvent()]);
+    const failed = readEvents(failLog, "catalyst.observability.forward_failed");
+    expect(failed.length).toBe(1);
+    expect(failed[0].severityText).toBe("ERROR");
+    expect(failed[0].severityNumber).toBe(17);
+
+    // Drop path (terminal 4xx) → WARN
+    global.fetch = mock(() => Promise.resolve(new Response(null, { status: 400 }))) as unknown as typeof fetch;
+    const dropLog = join(dir, "sev-drop.jsonl");
+    const dropSender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath: join(dir, "sev-drop-dlq.jsonl"),
+      eventLogPath: dropLog,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await dropSender.flush([makeFreshEvent()]);
+    const drops = readDrops(dropLog);
+    expect(drops.length).toBe(1);
+    expect(drops[0].severityText).toBe("WARN");
+    expect(drops[0].severityNumber).toBe(13);
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("drop counters emitted in the same second get distinct ids (Codex P2)", async () => {
+    global.fetch = mock(() => Promise.resolve(new Response(null, { status: 200 }))) as unknown as typeof fetch;
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "uid-dlq.jsonl");
+    const eventLogPath = join(dir, "uid-events.jsonl");
+    // Two equally-sized aged DLQ entries → two aged drops (count=1 each) in one drain.
+    appendToDlq(dlqPath, [makeAgedEvent()]);
+    appendToDlq(dlqPath, [makeAgedEvent()]);
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: 3_600_000,
+    });
+    await sender.flush([makeFreshEvent()]);
+    const drops = readDrops(eventLogPath);
+    expect(drops.length).toBe(2);
+    // Identical ts (whole-second), event name, and count — distinct only via the seq.
+    expect(new Set(drops.map((d) => d.id)).size).toBe(2);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("a record that ages out mid-retry is dropped-with-counter, never re-POSTed or DLQ'd (Codex P2)", async () => {
+    let fetchCalls = 0;
+    global.fetch = mock(() => {
+      fetchCalls++;
+      return Promise.resolve(new Response(null, { status: 503 })); // retryable
+    }) as unknown as typeof fetch;
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "midage-dlq.jsonl");
+    const eventLogPath = join(dir, "midage-events.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: 20, // 20ms window
+      httpRetryPolicy: { baseMs: 80, maxElapsedMs: 10_000 }, // first backoff 80ms > window
+    });
+    // Fresh at entry; ages past the 20ms window during the 80ms retry backoff.
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]);
+    expect(fetchCalls).toBe(1);           // never re-POSTed the now-aged record
+    expect(dlqDepth(dlqPath)).toBe(0);    // not dead-lettered
+    const drops = readDrops(eventLogPath);
+    expect(drops.length).toBe(1);
+    expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
+    rmSync(dir, { recursive: true });
+  });
+});

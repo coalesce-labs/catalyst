@@ -158,4 +158,40 @@ describe("withHttpRetry", () => {
     expect(err).toBeInstanceOf(HttpError);
     expect(calls).toBe(1);
   });
+
+  // CTL-1506 (Codex P2): the loop must recheck the deadline BEFORE starting another
+  // attempt. The old code capped the delay to the remaining window and always retried
+  // once more — burning an extra request timeout past maxElapsedMs and, for a long
+  // Retry-After, sending before the server asked.
+  test("stops instead of firing a doomed extra attempt when Retry-After exceeds the window (CTL-1506)", async () => {
+    const sleepDelays: number[] = [];
+    let calls = 0;
+    let nowVal = 0;
+    await expect(withHttpRetry(async () => {
+      calls++;
+      throw new HttpError(429, 5000); // server asks for 5s; window is only 3s
+    }, { baseMs: 0, maxElapsedMs: 3000 }, {
+      now: () => nowVal,
+      sleep: async (ms) => { sleepDelays.push(ms); nowVal += ms; },
+    })).rejects.toBeInstanceOf(HttpError);
+    expect(calls).toBe(1);         // no doomed second attempt
+    expect(sleepDelays).toEqual([]); // and no early sleep-then-send before the requested time
+  });
+
+  test("never sleeps-then-sends once the backoff would cross maxElapsedMs (CTL-1506)", async () => {
+    const sleepDelays: number[] = [];
+    let calls = 0;
+    let nowVal = 0;
+    await expect(withHttpRetry(async () => {
+      calls++;
+      throw new HttpError(503);
+    }, { baseMs: 1000, factor: 2, maxElapsedMs: 3500 }, {
+      now: () => nowVal,
+      sleep: async (ms) => { sleepDelays.push(ms); nowVal += ms; },
+    })).rejects.toBeInstanceOf(HttpError);
+    // 0+1000<3500 → sleep 1000; 1000+2000<3500 → sleep 2000; 3000+4000>=3500 → stop.
+    // Every scheduled sleep stayed inside the window — no capped-then-doomed final attempt.
+    expect(sleepDelays).toEqual([1000, 2000]);
+    expect(calls).toBe(3);
+  });
 });

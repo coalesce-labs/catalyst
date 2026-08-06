@@ -75,7 +75,10 @@ batches. A fully-aged DLQ entry is discarded (`drop_reason: "aged"`); a terminal
 is discarded (`drop_reason: "terminal_4xx"`); a retryable error stops the drain and requeues
 (preserving CTL-1060 backpressure).
 
-**Config knobs:**
+**Config knobs:** The authoritative schema for every forwarder key — including
+`lokiAcceptWindowMs` and `maxRetryElapsedMs` — lives in the user-facing configuration reference,
+`website/src/content/docs/reference/configuration.md` (§ "Event forwarders"). Summarized here for
+convenience:
 
 | Key | Default | Description |
 |-----|---------|-------------|

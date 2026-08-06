@@ -78,9 +78,15 @@ export async function withHttpRetry<T>(
       if (elapsed >= p.maxElapsedMs) throw err;
       const backoff = Math.min(p.baseMs * p.factor ** attempt, p.maxDelayMs);
       const retryAfter = err instanceof HttpError ? err.retryAfterMs : undefined;
-      const delay = Math.min(Math.max(backoff, retryAfter ?? 0), p.maxElapsedMs - elapsed);
+      const wanted = Math.max(backoff, retryAfter ?? 0);
+      // CTL-1506 (Codex P2): if the required wait would land us at/after the deadline,
+      // stop now rather than sleeping-then-firing a doomed extra attempt. The old code
+      // capped the delay to the remaining window and always retried once more, which
+      // burned another request timeout past maxElapsedMs and — when a server sent a
+      // Retry-After longer than the remaining window — sent before it asked us to.
+      if (elapsed + wanted >= p.maxElapsedMs) throw err;
       attempt++;
-      await sleep(Math.max(0, delay));
+      await sleep(wanted);
     }
   }
 }
