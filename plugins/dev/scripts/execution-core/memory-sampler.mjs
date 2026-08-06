@@ -10,6 +10,7 @@
 // markOom, resolveMeta) so tick() is fully unit-testable with no real I/O.
 
 import { execFileSync } from "node:child_process";
+import { freemem } from "node:os";
 import { getAgentsCached } from "./claude-agents.mjs";
 import { claudeStop } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
@@ -39,6 +40,18 @@ function defaultPsLines() {
   }
 }
 
+// defaultHostFreeMb — os.freemem() is a plain syscall wrapper (no subprocess),
+// portable across the fleet's hosts. Returns null on any failure so a bad read
+// degrades to "headroom unknown" (classifyMemPressure then falls back to the
+// absolute killThresholdMb backstop only — never crashes the tick).
+function defaultHostFreeMb() {
+  try {
+    return Math.round(freemem() / 1024 / 1024);
+  } catch {
+    return null;
+  }
+}
+
 function defaultResolveMeta(agent) {
   const parsed = parseSessionName(agent.name);
   let shortId = null;
@@ -62,17 +75,48 @@ function safe(fn) {
 
 /**
  * classifyMemPressure — pure classifier from RSS in MB to pressure level.
- * Boundary-exact: >= kill is KILL, >= warn is WARN, else OK.
+ * Boundary-exact: >= warn is at least WARN, else OK.
+ *
+ * CTL-1533 — headroom-aware KILL, not a flat per-process ceiling. The original
+ * design killed any worker whose OWN RSS crossed killThresholdMb, independent
+ * of whether the HOST actually needed the memory back — which fired on
+ * legitimate, healthy workers (a Node/Rust test suite routinely needing
+ * 5-9.5 GB) even with tens of GB of free RAM sitting idle. Two paths to KILL
+ * now:
+ *   1. Absolute backstop — rssMb >= killThresholdMb, unconditionally. A true
+ *      last-resort ceiling for a runaway that could crash the host before the
+ *      next sample, regardless of current headroom.
+ *   2. Headroom-aware — rssMb >= warnThresholdMb AND the HOST's free memory
+ *      is below hostFreeFloorMb. A worker using a lot of memory is only a
+ *      problem once the host itself is actually short — the same worker on a
+ *      host with plenty of headroom is left alone.
+ * hostFreeMb/hostFreeFloorMb are optional: omitting either (e.g. a caller that
+ * hasn't wired host-memory sampling) disables path 2 and falls back to the
+ * pre-CTL-1533 flat-threshold behavior via path 1 alone.
  *
  * @param {number} rssMb
  * @param {object} thresholds
  * @param {number} thresholds.warnThresholdMb
- * @param {number} thresholds.killThresholdMb
+ * @param {number} thresholds.killThresholdMb   absolute backstop (path 1)
+ * @param {number} [thresholds.hostFreeMb]       current host free memory, MB
+ * @param {number} [thresholds.hostFreeFloorMb]  headroom floor, MB (path 2)
  * @returns {"OK"|"WARN"|"KILL"}
  */
-export function classifyMemPressure(rssMb, { warnThresholdMb, killThresholdMb }) {
+export function classifyMemPressure(
+  rssMb,
+  { warnThresholdMb, killThresholdMb, hostFreeMb, hostFreeFloorMb }
+) {
   if (rssMb >= killThresholdMb) return "KILL";
-  if (rssMb >= warnThresholdMb) return "WARN";
+  if (rssMb >= warnThresholdMb) {
+    if (
+      typeof hostFreeMb === "number" &&
+      typeof hostFreeFloorMb === "number" &&
+      hostFreeMb < hostFreeFloorMb
+    ) {
+      return "KILL";
+    }
+    return "WARN";
+  }
   return "OK";
 }
 
@@ -88,6 +132,7 @@ export function classifyMemPressure(rssMb, { warnThresholdMb, killThresholdMb })
  * @param {Function} [opts.killWorker]                     claudeStop(shortId)
  * @param {Function} [opts.markOom]                        signal-file writer
  * @param {Function} [opts.resolveMeta]                    agent → { ticket, phase, shortId }
+ * @param {Function} [opts.getHostFreeMb]                  () => free host memory in MB, or null
  */
 export function startMemorySampler({
   clock = realClock(),
@@ -102,9 +147,16 @@ export function startMemorySampler({
   killWorker = claudeStop,
   markOom = defaultMarkWorkerOom,
   resolveMeta = defaultResolveMeta,
+  getHostFreeMb = defaultHostFreeMb,
 } = {}) {
-  const { intervalMs, warnThresholdMb, killThresholdMb, killEnabled, killSustainedSamples } =
-    config;
+  const {
+    intervalMs,
+    warnThresholdMb,
+    killThresholdMb,
+    hostFreeFloorMb,
+    killEnabled,
+    killSustainedSamples,
+  } = config;
   const aboveKillSince = new Map(); // sessionId → consecutive kill-threshold sample count
 
   function tick() {
@@ -116,6 +168,9 @@ export function startMemorySampler({
       log.warn({ err: err?.message }, "memory-sampler: tick failed");
       return;
     }
+
+    // Host-wide, not per-worker: one read per tick (CTL-1533).
+    const hostFreeMb = safe(() => getHostFreeMb()) ?? null;
 
     const live = new Set();
     for (const a of agents) {
@@ -130,11 +185,17 @@ export function startMemorySampler({
         phase: meta.phase ?? null,
         rss_mb: rssMb,
         swap_mb: null,
+        host_free_mb: hostFreeMb,
       };
 
       emit(MEMORY_EVENT_SAMPLED, base);
 
-      const level = classifyMemPressure(rssMb, { warnThresholdMb, killThresholdMb });
+      const level = classifyMemPressure(rssMb, {
+        warnThresholdMb,
+        killThresholdMb,
+        hostFreeMb,
+        hostFreeFloorMb,
+      });
 
       if (level === "WARN") {
         emit(MEMORY_EVENT_WARN, { ...base, threshold_mb: warnThresholdMb });

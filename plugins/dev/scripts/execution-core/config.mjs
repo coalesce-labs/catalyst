@@ -1223,8 +1223,27 @@ export const MEMORY_SAMPLE_INTERVAL_MS =
 export const WORKER_RSS_WARN_MB =
   Number(process.env.EXECUTION_CORE_WORKER_RSS_WARN_MB) || 1500;
 
+// Absolute per-worker RSS backstop (CTL-1533): kills regardless of host
+// headroom. Raised from the original flat 4000 — that number fired on
+// legitimate, healthy-host workers (a real Node test suite measured
+// 4937-9587 MB) and was the direct cause of repeated false-positive
+// verify-phase kills in one month across multiple repos, escalated to
+// needs-human with tens of GB of free RAM sitting idle on the host. This
+// is now a true last-resort ceiling for a genuinely pathological runaway
+// (a malloc bomb spiking faster than one sample interval), not the
+// everyday trigger — WORKER_HOST_FREE_FLOOR_MB below is that.
 export const WORKER_RSS_KILL_MB =
-  Number(process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB) || 4000;
+  Number(process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB) || 24_000;
+
+// CTL-1533 — headroom-aware kill floor: a WARN-level worker (>= warnThresholdMb)
+// only actually gets killed once HOST free memory drops below this floor.
+// A single fixed MB floor (not a percentage of total) is deliberate: it's the
+// same "how much headroom does the OS + everything else need" margin
+// regardless of whether the host has 16 GB or 48 GB, so the guard self-tunes
+// across the fleet without per-host config — a smaller host's lower total
+// naturally hits this floor sooner under the same absolute pressure.
+export const WORKER_HOST_FREE_FLOOR_MB =
+  Number(process.env.EXECUTION_CORE_HOST_FREE_FLOOR_MB) || 4096;
 
 export const WORKER_OOM_KILLER =
   process.env.EXECUTION_CORE_WORKER_OOM_KILLER !== "0";
@@ -1237,7 +1256,8 @@ export function readMemorySamplerConfig() {
     enabled: process.env.CATALYST_MEMORY_SAMPLER !== "0",
     intervalMs: Number(process.env.EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS) || 30_000,
     warnThresholdMb: Number(process.env.EXECUTION_CORE_WORKER_RSS_WARN_MB) || 1500,
-    killThresholdMb: Number(process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB) || 4000,
+    killThresholdMb: Number(process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB) || 24_000,
+    hostFreeFloorMb: Number(process.env.EXECUTION_CORE_HOST_FREE_FLOOR_MB) || 4096,
     killEnabled: process.env.EXECUTION_CORE_WORKER_OOM_KILLER !== "0",
     killSustainedSamples: Number(process.env.EXECUTION_CORE_KILL_SUSTAINED_SAMPLES) || 3,
   };

@@ -100,6 +100,7 @@ const MEM_ENVS = [
   "EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS",
   "EXECUTION_CORE_WORKER_RSS_WARN_MB",
   "EXECUTION_CORE_WORKER_RSS_KILL_MB",
+  "EXECUTION_CORE_HOST_FREE_FLOOR_MB",
   "EXECUTION_CORE_WORKER_OOM_KILLER",
   "EXECUTION_CORE_KILL_SUSTAINED_SAMPLES",
 ];
@@ -126,7 +127,10 @@ describe("readMemorySamplerConfig (CTL-685)", () => {
     expect(cfg.enabled).toBe(true);
     expect(cfg.intervalMs).toBe(30_000);
     expect(cfg.warnThresholdMb).toBe(1500);
-    expect(cfg.killThresholdMb).toBe(4000);
+    // CTL-1533: raised from 4000 — now a last-resort absolute backstop, not
+    // the everyday trigger (see hostFreeFloorMb below, the headroom-aware gate).
+    expect(cfg.killThresholdMb).toBe(24_000);
+    expect(cfg.hostFreeFloorMb).toBe(4096);
     expect(cfg.killEnabled).toBe(true);
     expect(cfg.killSustainedSamples).toBe(3);
   });
@@ -149,11 +153,13 @@ describe("readMemorySamplerConfig (CTL-685)", () => {
   test("numeric env overrides parse correctly", () => {
     process.env.EXECUTION_CORE_WORKER_RSS_WARN_MB = "2048";
     process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB = "6000";
+    process.env.EXECUTION_CORE_HOST_FREE_FLOOR_MB = "8192";
     process.env.EXECUTION_CORE_KILL_SUSTAINED_SAMPLES = "5";
     process.env.EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS = "60000";
     const cfg = readMemorySamplerConfig();
     expect(cfg.warnThresholdMb).toBe(2048);
     expect(cfg.killThresholdMb).toBe(6000);
+    expect(cfg.hostFreeFloorMb).toBe(8192);
     expect(cfg.killSustainedSamples).toBe(5);
     expect(cfg.intervalMs).toBe(60000);
   });

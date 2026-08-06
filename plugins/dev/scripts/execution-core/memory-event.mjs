@@ -40,6 +40,7 @@ export function buildMemoryEnvelope(name, payload = {}, { now } = {}) {
     phase = null,
     rss_mb = null,
     swap_mb = null,
+    host_free_mb = null,
     threshold_mb = null,
     sample_count = null,
   } = payload;
@@ -69,6 +70,7 @@ export function buildMemoryEnvelope(name, payload = {}, { now } = {}) {
         phase,
         rss_mb,
         swap_mb,
+        host_free_mb,
         threshold_mb,
         sample_count,
       },

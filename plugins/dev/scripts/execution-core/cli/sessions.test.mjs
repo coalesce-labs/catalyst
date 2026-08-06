@@ -1024,12 +1024,33 @@ describe("buildRows memPressure (CTL-685)", () => {
     expect(rows[0].memPressure).toBe("WARN");
   });
 
-  it("memPressure is KILL for a high-RSS session (5000 MB)", async () => {
+  it("memPressure is WARN, not KILL, for a high-RSS session (5000 MB) — CTL-1533", async () => {
+    // buildRows doesn't wire host-memory sampling (it's a synchronous CLI/HUD
+    // read-path, not the sampler), so classifyMemPressure's headroom-aware KILL
+    // path is disabled here and only the absolute backstop (now 24000 MB,
+    // raised from the pre-CTL-1533 flat 4000) can escalate to KILL. 5000 MB
+    // alone is no longer alarming — it's exactly the class of legitimate,
+    // healthy-host worker (a Node/Rust test suite) the old flat threshold
+    // wrongly flagged.
     const s = session(1003);
     const rows = await buildRows({
       agents: [s],
       signalsByBgJobId: new Map(),
       psLines: psLinesForRss(1003, 5120000),
+      cwdExists: () => true,
+      linearStateFor: () => null,
+      lastSeen: () => null,
+      now: 0,
+    });
+    expect(rows[0].memPressure).toBe("WARN");
+  });
+
+  it("memPressure is KILL at the absolute backstop (24000 MB) — CTL-1533", async () => {
+    const s = session(1004);
+    const rows = await buildRows({
+      agents: [s],
+      signalsByBgJobId: new Map(),
+      psLines: psLinesForRss(1004, 24_000 * 1024),
       cwdExists: () => true,
       linearStateFor: () => null,
       lastSeen: () => null,

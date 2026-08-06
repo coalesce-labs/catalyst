@@ -55,6 +55,8 @@ function harness({
   killSustainedSamples = 3,
   warnThresholdMb = 1500,
   killThresholdMb = 4000,
+  hostFreeFloorMb = 4096,
+  getHostFreeMb = () => 33_000, // default: plenty of headroom, matches aldebaran's normal state
 }) {
   const emitted = [];
   const killed = [];
@@ -66,6 +68,7 @@ function harness({
       intervalMs: 30_000,
       warnThresholdMb,
       killThresholdMb,
+      hostFreeFloorMb,
       killEnabled,
       killSustainedSamples,
     },
@@ -79,6 +82,7 @@ function harness({
       phase: "implement",
       shortId: SHORT,
     }),
+    getHostFreeMb,
   });
   return { w, emitted, killed, marked, clock };
 }
@@ -109,6 +113,57 @@ describe("classifyMemPressure (pure)", () => {
 
   test("above kill threshold → KILL", () => {
     expect(classifyMemPressure(5000, thresholds)).toBe("KILL");
+  });
+});
+
+describe("classifyMemPressure — headroom-aware KILL (CTL-1533)", () => {
+  // A high-memory worker that would have hit the OLD flat killThresholdMb,
+  // but the new absolute backstop is raised well above it.
+  const highBackstop = { warnThresholdMb: 1500, killThresholdMb: 24_000 };
+
+  test("above warnThreshold but host has plenty of free memory → WARN, not KILL", () => {
+    expect(
+      classifyMemPressure(9500, { ...highBackstop, hostFreeMb: 33_000, hostFreeFloorMb: 4096 })
+    ).toBe("WARN");
+  });
+
+  test("above warnThreshold AND host free memory below the floor → KILL", () => {
+    expect(
+      classifyMemPressure(2000, { ...highBackstop, hostFreeMb: 3000, hostFreeFloorMb: 4096 })
+    ).toBe("KILL");
+  });
+
+  test("exactly at the host-free floor is NOT below it → WARN", () => {
+    expect(
+      classifyMemPressure(2000, { ...highBackstop, hostFreeMb: 4096, hostFreeFloorMb: 4096 })
+    ).toBe("WARN");
+  });
+
+  test("one MB below the floor → KILL", () => {
+    expect(
+      classifyMemPressure(2000, { ...highBackstop, hostFreeMb: 4095, hostFreeFloorMb: 4096 })
+    ).toBe("KILL");
+  });
+
+  test("host free memory omitted (no headroom wiring) → falls back to flat-threshold behavior", () => {
+    // Below the (raised) absolute backstop, no host info at all → same as pre-CTL-1533: WARN only.
+    expect(classifyMemPressure(9500, highBackstop)).toBe("WARN");
+  });
+
+  test("hostFreeFloorMb omitted but hostFreeMb present → headroom path stays disabled (both required)", () => {
+    expect(classifyMemPressure(2000, { ...highBackstop, hostFreeMb: 100 })).toBe("WARN");
+  });
+
+  test("absolute backstop still fires even when host has free memory (runaway safety valve)", () => {
+    expect(
+      classifyMemPressure(24_000, { ...highBackstop, hostFreeMb: 33_000, hostFreeFloorMb: 4096 })
+    ).toBe("KILL");
+  });
+
+  test("below warnThreshold is OK regardless of host pressure", () => {
+    expect(
+      classifyMemPressure(1000, { ...highBackstop, hostFreeMb: 0, hostFreeFloorMb: 4096 })
+    ).toBe("OK");
   });
 });
 
@@ -287,6 +342,82 @@ test("stop() calls clock.clearInterval with the registered handle", () => {
   expect(clock.wasCleared()).toBe(false);
   w.stop();
   expect(clock.wasCleared()).toBe(true);
+});
+
+// ─── Headroom-aware tick behaviour (CTL-1533) ────────────────────────────────
+
+test("a high-RSS worker is NOT killed when the host has plenty of free memory", () => {
+  const agentsRef = { current: [agent()] };
+  // 9500 MB — well above warnThresholdMb, well below the raised 24000 MB backstop.
+  const psRef = { current: fakePsLines(12345, 9_500 * 1024) };
+  const { w, killed, emitted } = harness({
+    agentsRef,
+    psRef,
+    killThresholdMb: 24_000,
+    hostFreeFloorMb: 4096,
+    getHostFreeMb: () => 33_000, // matches aldebaran's real measured headroom
+    killSustainedSamples: 3,
+  });
+
+  w.tick(); w.tick(); w.tick();
+  expect(killed.length).toBe(0);
+  expect(emitted.filter((e) => e.name === MEMORY_EVENT_KILLED).length).toBe(0);
+  // Still warns — the ladder is intact, just doesn't escalate to KILL.
+  expect(emitted.filter((e) => e.name === MEMORY_EVENT_WARN).length).toBeGreaterThan(0);
+});
+
+test("the same worker IS killed once host free memory drops below the floor", () => {
+  const agentsRef = { current: [agent()] };
+  const psRef = { current: fakePsLines(12345, 9_500 * 1024) };
+  const { w, killed, marked, emitted } = harness({
+    agentsRef,
+    psRef,
+    killThresholdMb: 24_000,
+    hostFreeFloorMb: 4096,
+    getHostFreeMb: () => 2_000, // host is genuinely short on memory
+    killSustainedSamples: 3,
+  });
+
+  w.tick(); w.tick(); w.tick();
+  expect(killed.length).toBe(1);
+  expect(marked.length).toBe(1);
+  expect(emitted.filter((e) => e.name === MEMORY_EVENT_KILLED).length).toBe(1);
+});
+
+test("sampled + warn payloads carry host_free_mb for observability", () => {
+  const agentsRef = { current: [agent()] };
+  const psRef = { current: fakePsLines(12345, 1_800 * 1024) };
+  const { w, emitted } = harness({ agentsRef, psRef, getHostFreeMb: () => 12_345 });
+
+  w.tick();
+  const sampled = emitted.find((e) => e.name === MEMORY_EVENT_SAMPLED);
+  const warn = emitted.find((e) => e.name === MEMORY_EVENT_WARN);
+  expect(sampled.payload.host_free_mb).toBe(12_345);
+  expect(warn.payload.host_free_mb).toBe(12_345);
+});
+
+test("getHostFreeMb throwing does not crash the tick (degrades to backstop-only)", () => {
+  const agentsRef = { current: [agent()] };
+  const psRef = { current: fakePsLines(12345, 9_500 * 1024) };
+  const { w, killed, emitted } = harness({
+    agentsRef,
+    psRef,
+    killThresholdMb: 24_000,
+    hostFreeFloorMb: 4096,
+    getHostFreeMb: () => {
+      throw new Error("os.freemem failed");
+    },
+    killSustainedSamples: 3,
+  });
+
+  expect(() => {
+    w.tick(); w.tick(); w.tick();
+  }).not.toThrow();
+  // hostFreeMb resolves to null → headroom path disabled → below the raised
+  // backstop → never kills, same as the pre-CTL-1533 fallback.
+  expect(killed.length).toBe(0);
+  const sampled = emitted.find((e) => e.name === MEMORY_EVENT_SAMPLED);
+  expect(sampled.payload.host_free_mb).toBe(null);
 });
 
 test("rss_mb in sampled payload rounds correctly from KB snapshot", () => {
