@@ -124,11 +124,15 @@ prompt_value() {
 	local reply=""
 	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
 		echo "$prompt [${default}] → ${default} (non-interactive)" >&2
-		echo "$default"
+		# printf, not echo: a value of exactly -n/-e/-E is an echo option and would
+		# emit nothing, silently blanking that field (e.g. an explicit invalid
+		# deployment mode would round-trip to "" and read as unset instead of the
+		# recognized:false error). printf '%s' treats the value as data, never a flag.
+		printf '%s\n' "$default"
 		return 0
 	fi
 	read -p "$prompt " -r reply || reply=""
-	echo "${reply:-$default}"
+	printf '%s\n' "${reply:-$default}"
 }
 
 # Merge a patch object into .catalyst.<section> of a config JSON string (CTL-843).
@@ -1340,6 +1344,46 @@ setup_project_config() {
 		[[ -n "$_existing_prof" ]] && thoughts_profile="$_existing_prof"
 	fi
 
+	# Deployment mode (CTL-1622): default single-host, but PRESERVE an existing
+	# committed value (mirrors the thoughts preservation above) so a config
+	# regeneration never clobbers a fleet's declared cluster/cloud back to
+	# single-host. Validation is deferred to the resolver + `catalyst doctor`
+	# (same as ticket prefix), so accept any value here.
+	local deployment_mode="single-host"
+	if [[ -f "$config_file" ]]; then
+		local _existing_mode
+		# Preserve the value whenever the key is PRESENT and NON-NULL — including an
+		# explicit `false`/number/garbage — rather than `// empty` (which jq treats
+		# `false` as absent, silently resetting a misconfig to single-host and masking
+		# the resolver's recognized:false / `catalyst doctor` failure). JSON `null` is
+		# excluded on purpose: the resolver treats null as the "unset" sentinel
+		# (fallthrough → inferred:true, recognized:true, doctor passes), so it must be
+		# handled like an absent key here — `tostring` would coerce it to the string
+		# "null", an unrecognized value that flips doctor to FAIL after regeneration.
+		# Deferred validation (resolver + doctor) is what surfaces a genuinely bad value.
+		_existing_mode=$(jq -r 'if (.catalyst.deployment | objects | has("mode")) and (.catalyst.deployment.mode != null) then (.catalyst.deployment.mode | tostring) else empty end' "$config_file" 2>/dev/null)
+		[[ -n "$_existing_mode" ]] && deployment_mode="$_existing_mode"
+	fi
+
+	echo ""
+	echo "Deployment Mode Configuration:"
+	echo "  Declares this project's fleet topology (CTL-1617):"
+	echo "    single-host  one machine runs everything (default; dev clones)"
+	echo "    cluster      multiple machines share ticket ownership"
+	echo "    cloud        hosted control plane (no local smee tunnel)"
+	echo "  Written to .catalyst/config.json as the fleet default; override"
+	echo "  per-host via ~/.config/catalyst/config.json (Layer-2)."
+	echo ""
+	deployment_mode=$(prompt_value "Enter deployment mode (single-host|cluster|cloud) [${deployment_mode}]:" "${deployment_mode}")
+
+	# JSON-encode the (deliberately-unvalidated) deployment value before it lands
+	# in the heredoc below, so a pasted quote/backslash/newline can't produce a
+	# malformed .catalyst/config.json that the next jq consumer aborts on — after
+	# the file has already been overwritten. jq -Rn emits the value WITH its
+	# surrounding quotes, so the heredoc interpolates it bare (no wrapping "").
+	local deployment_mode_json
+	deployment_mode_json=$(jq -Rn --arg v "$deployment_mode" '$v')
+
 	# Create/update config
 	cat >"$config_file" <<EOF
 {
@@ -1352,6 +1396,9 @@ setup_project_config() {
     "project": {
       "ticketPrefix": "${ticket_prefix}",
       "name": "${project_name}"
+    },
+    "deployment": {
+      "mode": ${deployment_mode_json}
     },
     "linear": {
       "teamKey": "${ticket_prefix}",
@@ -1382,6 +1429,7 @@ EOF
 	echo "✓ ticketPrefix: ${ticket_prefix}"
 	echo "✓ linear.teamKey: ${ticket_prefix}"
 	echo "✓ linear.stateMap: defaults (will be updated with actual Linear states after API setup)"
+	echo "✓ deployment.mode: ${deployment_mode}"
 	echo ""
 }
 
@@ -2323,9 +2371,27 @@ print_summary() {
 	print_header "Next Steps"
 	echo ""
 
-	echo "1. Install Catalyst plugin in Claude Code:"
-	echo "   /plugin marketplace add coalesce-labs/catalyst"
-	echo "   /plugin install catalyst-dev"
+	# Resolve setup-plugin-source.sh next to THIS script. Via the `curl … | bash`
+	# flow (or when run from a non-catalyst target repo) BASH_SOURCE is empty/stdin
+	# and no such script exists locally, so print a runnable clone+run command
+	# instead of a relative path that would fail.
+	local _pss_dir _pss_script
+	_pss_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _pss_dir=""
+	_pss_script="${_pss_dir}/plugins/dev/scripts/setup-plugin-source.sh"
+
+	echo "1. Provision plugin-source (live plugin loading — NOT the marketplace cache,"
+	echo "   which lags releases and drifts per node):"
+	if [ -n "$_pss_dir" ] && [ -f "$_pss_script" ]; then
+		echo "   bash ${_pss_script}"
+	else
+		echo "   # Run from a catalyst checkout (this setup script was not run from one):"
+		echo "   git clone https://github.com/coalesce-labs/catalyst.git ~/catalyst-src \\"
+		echo "     && bash ~/catalyst-src/plugins/dev/scripts/setup-plugin-source.sh"
+	fi
+	echo "   → sets the pluginDirs machine-config key (workers load plugin-source via"
+	echo "     phase-agent-dispatch --plugin-dir) AND installs the interactive \`claude\`"
+	echo "     --plugin-dir wrapper in your shell rc (~/.zshrc or ~/.bashrc). Open a new"
+	echo "     shell to pick it up."
 	echo ""
 
 	echo "2. Restart Claude Code to load configuration"

@@ -131,4 +131,62 @@ describe("daemon integration", () => {
     const statsAfter = mod.getStats();
     expect(statsAfter.processed).toBe(statsBefore.processed + 1);
   });
+
+  test("processLine counts pino-shaped records as processed (CTL-1424)", async () => {
+    const mod = await import("./index.ts");
+    const pinoLine = JSON.stringify({ level: 40, time: 1751500000000, msg: "warn line" });
+    const statsBefore = mod.getStats();
+    mod.processLine(pinoLine);
+    const statsAfter = mod.getStats();
+    expect(statsAfter.processed).toBe(statsBefore.processed + 1);
+    expect(statsAfter.skipped).toBe(statsBefore.skipped);
+  });
+
+  test("canonical event with existing severity is emitted unchanged through processLine (CTL-1424 AC bullet 2)", async () => {
+    const mod = await import("./index.ts");
+    const canonicalLine = JSON.stringify({
+      ts: "2026-05-08T00:00:01Z",
+      attributes: { "event.name": "some.error.event" },
+      resource: { "service.name": "catalyst.some-service", "service.namespace": "catalyst", "service.version": "1.0.0" },
+      severityText: "ERROR",
+      severityNumber: 17,
+      traceId: null,
+      spanId: null,
+      body: { message: "error" },
+    });
+    const statsBefore = mod.getStats();
+    mod.processLine(canonicalLine);
+    const statsAfter = mod.getStats();
+    expect(statsAfter.processed).toBe(statsBefore.processed + 1);
+  });
+});
+
+describe("pino records through tailer shouldForward (CTL-1424)", () => {
+  test("tailer emits pino-shaped lines via onLine", async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { createTailer } = await import("./lib/tail.ts");
+
+    const dir = mkdtempSync(join(tmpdir(), "pino-tail-"));
+    const file = join(dir, "2026-05.jsonl");
+    writeFileSync(file, JSON.stringify({ level: 40, time: 1751500000000, msg: "warn line" }) + "\n");
+
+    const emitted: string[] = [];
+    const ac = new AbortController();
+    const tailer = createTailer({
+      filePath: file,
+      offset: 0,
+      onLine: (l) => emitted.push(l),
+      signal: ac.signal,
+      pollMs: 10,
+    });
+    await tailer.drain();
+    ac.abort();
+
+    expect(emitted.length).toBe(1);
+    const parsed = JSON.parse(emitted[0]);
+    expect(parsed.level).toBe(40);
+    rmSync(dir, { recursive: true });
+  });
 });

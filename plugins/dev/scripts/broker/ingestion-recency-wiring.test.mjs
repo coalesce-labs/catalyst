@@ -375,6 +375,39 @@ describe("github/linear activity-gated recency (CTL-1122 PR2)", () => {
     runWatchdogTick();
     expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
   });
+
+  // (g) REGRESSION GUARD (CTL-1523 review F2). The shared activity reader became
+  // TRI-STATE (true / false / null-for-unknown) so the broker-degraded detector could
+  // stop treating an unreadable worker table as "proven idle". This CTL-1122 gate must
+  // NOT inherit that nuance: it stays FAIL-CLOSED, so an unavailable reading forces
+  // "up" exactly as the old catch-returns-false did. An unreadable worker table must
+  // never license a github-silence page.
+  test("(g) github stale but the ACTIVITY READ FAILS → gate stays closed, no alarm", () => {
+    dispatchActiveWorker(); // a row exists, but…
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - staleGithubMs, id: "gh-old" });
+    closeBrokerStateDb(); // …the DB handle is gone → the read throws → activity unknown
+    expect(() => runWatchdogTick()).not.toThrow();
+    expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
+    expect(__getRecencyAlarmForTest(GITHUB_SERVICE_NAME).downEmitted).toBe(false);
+  });
+
+  test("(g') an OPEN github outage clears when the activity read fails (fail-closed → up)", () => {
+    dispatchActiveWorker();
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - staleGithubMs, id: "gh-old" });
+    runWatchdogTick(); // → stale (gate open)
+    expect(__getRecencyAlarmForTest(GITHUB_SERVICE_NAME).downEmitted).toBe(true);
+
+    closeBrokerStateDb(); // activity now unknown
+    runWatchdogTick();
+    // Unchanged CTL-1122 semantics: unknown forces "up", which pairs the open outage
+    // with a recovered rather than holding it.
+    const rec = readIngestionEvents(getEventLogPath()).find(
+      (e) => e.attributes["event.name"] === "catalyst.ingestion.recovered",
+    );
+    expect(rec).toBeDefined();
+    expect(rec.attributes["event.label"]).toBe(GITHUB_SERVICE_NAME);
+    expect(__getRecencyAlarmForTest(GITHUB_SERVICE_NAME).downEmitted).toBe(false);
+  });
 });
 
 describe("kill-switch CATALYST_INGESTION_RECENCY=0 (CTL-1122)", () => {

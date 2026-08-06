@@ -144,13 +144,97 @@ _interval_seconds() {
 
 # ─── template substitution ──────────────────────────────────────────────────
 
+# _escape_repl VALUE — make VALUE safe to inject into the plist via sed
+# (CTL-1510 item 3, kept in lockstep with install-health-responder.sh): a path
+# like "/Volumes/Catalyst & Data" otherwise breaks TWICE — `&` is sed's
+# whole-match metacharacter (mangled program path → silent exit-127 loop) and
+# a raw `&`/`<`/`>` is invalid inside an XML <string>. A sed pipeline, NOT
+# bash parameter expansion (Codex P1: /bin/bash 3.2 drops the backslash from
+# `${v//&/\\&}`). Backslash-double first, XML-entity-escape second,
+# sed-metacharacter-escape last.
+_escape_repl() {
+  printf '%s' "$1" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g' \
+    -e 's/[&|]/\\&/g'
+}
+
+# ── CTL-1531: the widened-branch rollout knob must SURVIVE reinstallation ───
+#
+# This installer unconditionally regenerates and replaces the LaunchAgent plist,
+# and it runs on every routine `catalyst-stack install-services`. Before CTL-1531
+# the documented way to flip vector 1's widened branch to `enforce` was to
+# hand-edit the installed plist — which the very next install silently reverted.
+# A rollout knob a routine reinstall resets is worse than none, so the value is
+# now part of the shipped template and is RESOLVED here.
+#
+# Precedence (each step only applies when it yields off|shadow|enforce):
+#   1. an explicit SWEEP_PROC_WIDEN in the installing environment — an operator
+#      saying "flip it now": `SWEEP_PROC_WIDEN=enforce bash install-orphan-sweep.sh`
+#   2. .catalyst/config.json → catalyst.sweep.procWiden — a declared, committed
+#      intent, which should win over a stale value baked into an older plist
+#   3. the value ALREADY IN the installed plist — this is the clause that makes a
+#      hand-flip survive a routine reinstall
+#   4. "shadow" — ADR-023 dark-by-default
+# Anything unrecognized falls back to `shadow` LOUDLY (never to `enforce`: a typo
+# must not arm a process killer).
+
+_installed_widen_mode() {
+  [[ -f "$DEST" ]] || { printf ''; return 0; }
+  grep -A2 '<key>SWEEP_PROC_WIDEN</key>' "$DEST" 2>/dev/null \
+    | sed -n 's|.*<string>\(.*\)</string>.*|\1|p' \
+    | head -1
+}
+
+_config_widen_mode() {
+  local dir="$PWD" cfg=""
+  while [[ "$dir" != "/" && -n "$dir" ]]; do
+    if [[ -f "$dir/.catalyst/config.json" ]]; then cfg="$dir/.catalyst/config.json"; break; fi
+    dir="$(dirname "$dir")"
+  done
+  [[ -n "$cfg" ]] && command -v jq >/dev/null 2>&1 || { printf ''; return 0; }
+  jq -r '.catalyst.sweep.procWiden // empty' "$cfg" 2>/dev/null || printf ''
+}
+
+_resolve_widen_mode() {
+  local candidate
+  for candidate in "${SWEEP_PROC_WIDEN:-}" "$(_config_widen_mode)" "$(_installed_widen_mode)"; do
+    case "$candidate" in
+      off|shadow|enforce) printf '%s' "$candidate"; return 0 ;;
+      "") ;;
+      # SET-BUT-INVALID SHORT-CIRCUITS TO shadow — it must NOT fall through to a
+      # lower-precedence source. Continuing the loop meant a mistyped rollback
+      # (`SWEEP_PROC_WIDEN=shdow`) was warned about and then IGNORED in favour of
+      # an `enforce` already sitting in the config or the installed plist — so the
+      # operator's attempt to DISARM the killer re-armed it, contradicting the
+      # contract three lines above ("never to enforce: a typo must not arm a
+      # process killer"). An explicit-but-unrecognized value is a clear intent to
+      # change the mode, and the only safe reading of an unparseable intent is the
+      # dark default.
+      *)
+        echo "install-orphan-sweep.sh: SWEEP_PROC_WIDEN='${candidate}' is not one of off|shadow|enforce — falling back to 'shadow' (NOT to any lower-precedence value)" >&2
+        printf 'shadow'
+        return 0
+        ;;
+    esac
+  done
+  printf 'shadow'
+}
+
 _substitute() {
-  local interval
+  local interval widen
   interval="$(_interval_seconds)"
+  # No _escape_repl needed: _resolve_widen_mode only ever returns one of the
+  # three literals off|shadow|enforce, so the substitution can carry no sed
+  # metacharacter and no XML-unsafe byte. (Anything else was already rejected.)
+  widen="$(_resolve_widen_mode)"
   sed \
-    -e "s|REPLACE_WITH_ABSOLUTE|${BAKE_DIR}|g" \
-    -e "s|REPLACE_HOME|${HOME}|g" \
+    -e "s|REPLACE_WITH_ABSOLUTE|$(_escape_repl "$BAKE_DIR")|g" \
+    -e "s|REPLACE_HOME|$(_escape_repl "$HOME")|g" \
     -e "s|REPLACE_START_INTERVAL|${interval}|g" \
+    -e "s|REPLACE_SWEEP_PROC_WIDEN|${widen}|g" \
     "$TEMPLATE"
 }
 

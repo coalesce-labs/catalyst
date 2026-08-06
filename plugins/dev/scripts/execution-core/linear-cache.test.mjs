@@ -176,4 +176,45 @@ describe("createTicketStateCache — relations store (CTL-784)", () => {
     // state-store stats untouched by relation lookups (only the setRelations prime)
     expect(c.stats().hits).toBe(0);
   });
+
+  // CTL-1436 (A4): the negative cache — a short backoff for probeBackoff callers.
+  it("isNegativelyCached is false on a cold ticket; true within negTtlMs of setNegative", () => {
+    let t = 1000;
+    const c = createTicketStateCache({ now: () => t, negTtlMs: 300_000 });
+    expect(c.isNegativelyCached("CTL-1")).toBe(false);
+    c.setNegative("CTL-1");
+    t = 1000 + 299_000;
+    expect(c.isNegativelyCached("CTL-1")).toBe(true);
+  });
+
+  it("negative entry expires past negTtlMs", () => {
+    let t = 1000;
+    const c = createTicketStateCache({ now: () => t, negTtlMs: 300_000 });
+    c.setNegative("CTL-1");
+    t = 1000 + 300_001;
+    expect(c.isNegativelyCached("CTL-1")).toBe(false);
+  });
+
+  it("a fresh success (set) clears the negative backoff", () => {
+    const c = createTicketStateCache({ now: () => 0 });
+    c.setNegative("CTL-1");
+    expect(c.isNegativelyCached("CTL-1")).toBe(true);
+    c.set("CTL-1", "Done"); // the ticket came back → drop the backoff
+    expect(c.isNegativelyCached("CTL-1")).toBe(false);
+  });
+
+  it("invalidate clears the negative backoff too", () => {
+    const c = createTicketStateCache({ now: () => 0 });
+    c.setNegative("CTL-1");
+    c.invalidate("CTL-1");
+    expect(c.isNegativelyCached("CTL-1")).toBe(false);
+  });
+
+  it("negTtlMs is independent of the positive ttlMs", () => {
+    let t = 0;
+    const c = createTicketStateCache({ now: () => t, ttlMs: 60_000, negTtlMs: 300_000 });
+    c.setNegative("CTL-1");
+    t = 120_000; // past the 60s positive TTL, well within the 300s negative TTL
+    expect(c.isNegativelyCached("CTL-1")).toBe(true);
+  });
 });

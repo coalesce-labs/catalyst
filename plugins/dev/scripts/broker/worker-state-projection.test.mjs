@@ -44,7 +44,7 @@ beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "ws-proj-"));
   openBrokerStateDb(join(tmpDir, "t.db"));
   // Snapshot CATALYST_DIR so replay tests that redirect it cannot leak into
-  // sibling test files (worker-state.test.mjs also reads this env var).
+  // sibling test files.
   savedCatalystDir = process.env.CATALYST_DIR;
 });
 
@@ -801,6 +801,71 @@ describe("projection integration (CTL-532)", () => {
       const meta = getProjectionMeta();
       expect(meta).not.toBeNull();
       expect(meta.eventsFolded).toBeGreaterThan(0);
+    } finally {
+      if (prevDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prevDir;
+    }
+  });
+
+  // CTL-1529 (Codex P2). The boot replay exists FOR the crash case, and a log the
+  // broker crashed mid-append ends with a complete record and NO trailing newline.
+  // scanEventsChunked holds that text back in `leftover` for an incremental reader
+  // to complete next pass — but this replay is one-shot, so discarding the return
+  // value dropped the record entirely. The pre-CTL-1529 `raw.split("\n")` replay
+  // folded it, and the dropped record is the NEWEST worker-state transition — the
+  // one that decides which phase a ticket resumes at.
+  test("CRASH-TRUNCATED LOG: the final record without a trailing newline is still folded", () => {
+    const prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = tmpDir;
+    try {
+      const lines = [
+        JSON.stringify(
+          canonicalPhaseEvent({
+            name: "phase.research.complete.CTL-77",
+            id: "t1",
+            ts: "2026-05-21T01:00:00.000Z",
+          })
+        ),
+        JSON.stringify(
+          canonicalPhaseEvent({
+            name: "phase.plan.complete.CTL-77",
+            id: "t2",
+            ts: "2026-05-21T02:00:00.000Z",
+          })
+        ),
+      ];
+      const path = monthLogPath(tmpDir);
+      mkdtempSyncEnsure(path);
+      writeFileSync(path, lines.join("\n")); // NO trailing newline — crash-truncated
+      replayWorkerStateProjection();
+      // Without the fix this is "research": the newest transition is invisible.
+      expect(getWorkerState("orch-1", "CTL-77").phase).toBe("plan");
+      expect(getProjectionMeta().eventsFolded).toBe(2);
+    } finally {
+      if (prevDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prevDir;
+    }
+  });
+
+  test("a genuinely partial final line is still skipped (not half-folded)", () => {
+    const prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = tmpDir;
+    try {
+      const path = monthLogPath(tmpDir);
+      mkdtempSyncEnsure(path);
+      writeFileSync(
+        path,
+        JSON.stringify(
+          canonicalPhaseEvent({
+            name: "phase.research.complete.CTL-78",
+            id: "t3",
+            ts: "2026-05-21T01:00:00.000Z",
+          })
+        ) + '\n{"ts":"2026-05-21T02:00:0',
+      );
+      replayWorkerStateProjection();
+      expect(getWorkerState("orch-1", "CTL-78").phase).toBe("research");
+      expect(getProjectionMeta().eventsFolded).toBe(1);
     } finally {
       if (prevDir === undefined) delete process.env.CATALYST_DIR;
       else process.env.CATALYST_DIR = prevDir;

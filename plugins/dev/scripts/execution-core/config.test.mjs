@@ -8,8 +8,8 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
-import { tmpdir, hostname } from "node:os";
-import { join } from "node:path";
+import { tmpdir, hostname, homedir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   readWaitWatcherConfig,
   EVENT_DEBOUNCE_MS,
@@ -37,6 +37,9 @@ import {
   CLUSTER_SYNC_INTERVAL_MS,
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
+  readCoordinationConfig,
+  getCoordinationMirrorPath,
+  readSanctionedNeedsHuman,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
   readLinearReplica,
   getReplicaDbPath,
@@ -46,6 +49,14 @@ import {
   resolveExecutor,
   getExecutor,
   dispatchModeForExecutor,
+  resolveExecutorForPhase,
+  readExecutorByPhaseLayer1,
+  hasInProcessExecutorRoute,
+  codexConfig,
+  readFleetHealthConfig,
+  getFleetHealthDir,
+  getLayer2ConfigPath,
+  log,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -295,6 +306,76 @@ describe("getHostName (CTL-859)", () => {
   });
 });
 
+describe("getLayer2ConfigPath — CTL-1616 PR6 dual-read shadow-diff", () => {
+  const ENV_KEYS = ["CATALYST_LAYER2_CONFIG_FILE", "CATALYST_MACHINE_CONFIG", "XDG_CONFIG_HOME"];
+  let saved = {};
+  let warnCalls;
+  let origWarn;
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    warnCalls = [];
+    origWarn = log.warn;
+    log.warn = (...args) => warnCalls.push(args);
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    log.warn = origWarn;
+  });
+
+  test("agree case: no overrides at all — silent, returns the homedir default (both chains agree)", () => {
+    const expected = resolve(homedir(), ".config", "catalyst", "config.json");
+    expect(getLayer2ConfigPath()).toBe(expected);
+    expect(warnCalls.length).toBe(0);
+  });
+
+  test("agree case: CATALYST_LAYER2_CONFIG_FILE set — both chains check it first, silent", () => {
+    process.env.CATALYST_LAYER2_CONFIG_FILE = "/explicit/pr6-agree/config.json";
+    expect(getLayer2ConfigPath()).toBe("/explicit/pr6-agree/config.json");
+    expect(warnCalls.length).toBe(0);
+  });
+
+  test("differ case: CATALYST_MACHINE_CONFIG set (legacy ignores it) — warns once, the LEGACY path wins (observe-only until the reader sweep)", () => {
+    process.env.CATALYST_MACHINE_CONFIG = "/machine/pr6-machine-config-test/config.json";
+    const result = getLayer2ConfigPath();
+    expect(result).toBe(resolve(homedir(), ".config", "catalyst", "config.json"));
+    expect(warnCalls.length).toBe(1);
+    const msg = warnCalls[0][0];
+    expect(msg).toContain(resolve(homedir(), ".config", "catalyst", "config.json"));
+    expect(msg).toContain("/machine/pr6-machine-config-test/config.json");
+  });
+
+  test("differ case: XDG_CONFIG_HOME set (legacy ignores it) — warns once, the LEGACY path wins (observe-only until the reader sweep)", () => {
+    process.env.XDG_CONFIG_HOME = "/xdg/pr6-xdg-test";
+    const result = getLayer2ConfigPath();
+    expect(result).toBe(resolve(homedir(), ".config", "catalyst", "config.json"));
+    expect(warnCalls.length).toBe(1);
+  });
+
+  test("dedup: repeated calls with the SAME divergence warn only once (mirrors getNodeClass's _warnedNodeClass pattern)", () => {
+    process.env.CATALYST_MACHINE_CONFIG = "/machine/pr6-dedup-test/config.json";
+    getLayer2ConfigPath();
+    getLayer2ConfigPath();
+    getLayer2ConfigPath();
+    expect(warnCalls.length).toBe(1);
+  });
+
+  test("env override beats CATALYST_MACHINE_CONFIG on the canonical chain too — both agree, silent", () => {
+    process.env.CATALYST_LAYER2_CONFIG_FILE = "/explicit/pr6-precedence-test/config.json";
+    process.env.CATALYST_MACHINE_CONFIG = "/machine/should-not-win/config.json";
+    expect(getLayer2ConfigPath()).toBe("/explicit/pr6-precedence-test/config.json");
+    expect(warnCalls.length).toBe(0);
+  });
+});
+
 describe("getClusterHosts cluster-repo source (CTL-859 / CTL-1211 / CTL-1274)", () => {
   // CTL-1274: the per-repo .catalyst/hosts.json roster is RETIRED. The roster's
   // single durable home is the catalyst-cluster repo's cluster.json. A project
@@ -423,7 +504,15 @@ describe("executor flag + resolver (CTL-1365a)", () => {
   // CATALYST_NODE_CLASS + a temp Layer-2 file keep the node-class default
   // deterministic (worker → "bg" in Phase 1) so the precedence assertions don't
   // depend on the host's real Layer-2 config.
-  const ENVS = ["CATALYST_EXECUTOR", "CATALYST_NODE_CLASS", "CATALYST_LAYER2_CONFIG_FILE"];
+  const ENVS = [
+    "CATALYST_EXECUTOR",
+    "CATALYST_NODE_CLASS",
+    "CATALYST_LAYER2_CONFIG_FILE",
+    // CTL-1457 follow-up (Gap 1): scrub the env override so an ambient value on the
+    // host running the suite can never perturb the existing resolveExecutorForPhase /
+    // executorByPhase tests (which pass no env bag → default process.env).
+    "CATALYST_EXECUTOR_BY_PHASE",
+  ];
   let saved = {};
   let tmp, l1, l2;
 
@@ -451,19 +540,20 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     writeFileSync(l1, JSON.stringify({ catalyst: { orchestration: { executor } } }));
 
   test("EXECUTORS + DISPATCH_MODES are frozen closed enums", () => {
-    expect(EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy"]);
+    expect(EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy", "codex-exec"]);
     expect(Object.isFrozen(EXECUTORS)).toBe(true);
-    expect(DISPATCH_MODES).toEqual(["phase-agents", "oneshot-legacy", "sdk"]);
+    expect(DISPATCH_MODES).toEqual(["phase-agents", "oneshot-legacy", "sdk", "codex-exec"]);
     expect(Object.isFrozen(DISPATCH_MODES)).toBe(true);
     expect(() => {
       EXECUTORS.push("rogue");
     }).toThrow();
   });
 
-  test("dispatchModeForExecutor maps bg→phase-agents, sdk→sdk, oneshot-legacy→oneshot-legacy, unknown→phase-agents", () => {
+  test("dispatchModeForExecutor maps bg→phase-agents, sdk→sdk, oneshot-legacy→oneshot-legacy, codex-exec→codex-exec, unknown→phase-agents", () => {
     expect(dispatchModeForExecutor("bg")).toBe("phase-agents");
     expect(dispatchModeForExecutor("sdk")).toBe("sdk");
     expect(dispatchModeForExecutor("oneshot-legacy")).toBe("oneshot-legacy");
+    expect(dispatchModeForExecutor("codex-exec")).toBe("codex-exec");
     expect(dispatchModeForExecutor("nonsense")).toBe("phase-agents");
     expect(dispatchModeForExecutor(undefined)).toBe("phase-agents");
   });
@@ -516,7 +606,7 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     const orig = console.warn;
     // The console-shim path logs WARN to stderr; capture via process.stderr.write.
     const origWrite = process.stderr.write.bind(process.stderr);
-    process.stderr.write = (chunk, ...rest) => {
+    process.stderr.write = (chunk) => {
       warnings.push(String(chunk));
       return true;
     };
@@ -558,6 +648,212 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     process.env.CATALYST_EXECUTOR = "   ";
     writeL1("sdk"); // empty env falls through to Layer-1
     expect(resolveExecutor(l1).executor).toBe("sdk");
+  });
+
+  // --- CTL-1457: codex-exec value, compound aliases, per-phase routing, codexConfig ---
+
+  test("resolveExecutor accepts codex-exec + canonicalizes compound aliases; rejects unknown (existing behavior preserved)", () => {
+    process.env.CATALYST_EXECUTOR = "codex-exec";
+    const r = resolveExecutor(l1);
+    expect(r.executor).toBe("codex-exec");
+    expect(r.recognized).toBe(true);
+
+    // compound aliases canonicalize to the bare value
+    process.env.CATALYST_EXECUTOR = "claude-bg";
+    expect(resolveExecutor(l1).executor).toBe("bg");
+    process.env.CATALYST_EXECUTOR = "claude-sdk";
+    expect(resolveExecutor(l1).executor).toBe("sdk");
+    process.env.CATALYST_EXECUTOR = "claude-oneshot";
+    expect(resolveExecutor(l1).executor).toBe("oneshot-legacy");
+    // aliases are case-normalized (normalized is already toLowerCase)
+    process.env.CATALYST_EXECUTOR = "  CLAUDE-SDK ";
+    expect(resolveExecutor(l1).executor).toBe("sdk");
+
+    // an unknown value is STILL rejected → bg (most restrictive) + recognized:false
+    process.env.CATALYST_EXECUTOR = "totally-bogus";
+    const u = resolveExecutor(l1);
+    expect(u.executor).toBe("bg");
+    expect(u.recognized).toBe(false);
+  });
+
+  const writeExecutorByPhase = (map) =>
+    writeFileSync(l1, JSON.stringify({ catalyst: { orchestration: { executorByPhase: map } } }));
+
+  test("resolveExecutorForPhase returns the executorByPhase entry when the phase is routed", () => {
+    writeExecutorByPhase({ triage: "codex-exec" });
+    const r = resolveExecutorForPhase("triage", { configPath: l1 });
+    expect(r.executor).toBe("codex-exec");
+    expect(r.source).toBe("executorByPhase");
+  });
+
+  test("resolveExecutorForPhase canonicalizes a compound alias in the map", () => {
+    writeExecutorByPhase({ triage: "claude-sdk" });
+    expect(resolveExecutorForPhase("triage", { configPath: l1 }).executor).toBe("sdk");
+  });
+
+  test("resolveExecutorForPhase falls back to the node executor when the phase key is absent (unrouted = today)", () => {
+    writeExecutorByPhase({ triage: "codex-exec" });
+    const r = resolveExecutorForPhase("implement", { configPath: l1 });
+    expect(r.executor).toBe("bg"); // node-class default; unrouted behaves exactly as before
+    expect(r.source).toBe("default");
+  });
+
+  test("resolveExecutorForPhase with NO executorByPhase key returns the node executor", () => {
+    writeL1("sdk"); // top-level executor only, no per-phase map
+    expect(resolveExecutorForPhase("triage", { configPath: l1 }).executor).toBe("sdk");
+  });
+
+  test("resolveExecutorForPhase THROWS on an unknown executor value in the map (no silent fallback)", () => {
+    writeExecutorByPhase({ triage: "gpt-9000" });
+    expect(() => resolveExecutorForPhase("triage", { configPath: l1 })).toThrow(/gpt-9000/);
+    expect(() => resolveExecutorForPhase("triage", { configPath: l1 })).toThrow(/triage/);
+  });
+
+  // --- CTL-1457 follow-up (Gap 1): CATALYST_EXECUTOR_BY_PHASE env override ---
+  // The env map is the DURABLE, clobber-safe routing home (the per-node Layer-1 file is
+  // git-reset every few minutes). Precedence mirrors resolveExecutor's env-over-Layer-1.
+  // Uses the injected {env} bag pattern (like readBoardHealthConfig({env})).
+
+  test("CATALYST_EXECUTOR_BY_PHASE env map REPLACES the Layer-1 file (env > Layer-1)", () => {
+    writeExecutorByPhase({ triage: "bg" }); // Layer-1 file says bg
+    const env = { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' };
+    // readExecutorByPhaseLayer1 returns the ENV map, not the file map.
+    expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "codex-exec" });
+    // resolveExecutorForPhase threads env → routes to the env value.
+    const r = resolveExecutorForPhase("triage", { configPath: l1, env });
+    expect(r.executor).toBe("codex-exec");
+    expect(r.source).toBe("executorByPhase");
+  });
+
+  test("the env override works even with NO Layer-1 file present (durable routing pin)", () => {
+    // No writeExecutorByPhase — l1 does not exist. The env map still routes.
+    const env = { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' };
+    expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "codex-exec" });
+    expect(resolveExecutorForPhase("triage", { configPath: l1, env }).executor).toBe("codex-exec");
+  });
+
+  test("malformed CATALYST_EXECUTOR_BY_PHASE JSON → warn + fall through to the Layer-1 file (NOT a throw)", () => {
+    writeExecutorByPhase({ triage: "sdk" });
+    const env = { CATALYST_EXECUTOR_BY_PHASE: "{not valid json" };
+    expect(() => readExecutorByPhaseLayer1(l1, env)).not.toThrow();
+    // Fell through to the Layer-1 file.
+    expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "sdk" });
+    expect(resolveExecutorForPhase("triage", { configPath: l1, env }).executor).toBe("sdk");
+  });
+
+  test("CATALYST_EXECUTOR_BY_PHASE that parses to a NON-object (array) → warn + fall through", () => {
+    writeExecutorByPhase({ triage: "sdk" });
+    const env = { CATALYST_EXECUTOR_BY_PHASE: '["triage","codex-exec"]' };
+    expect(() => readExecutorByPhaseLayer1(l1, env)).not.toThrow();
+    expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "sdk" }); // file wins
+  });
+
+  test("CATALYST_EXECUTOR_BY_PHASE with a NON-STRING route value → warn + fall through (Codex #2655)", () => {
+    // A valid object whose value isn't a string ({"triage":false}/{"triage":null}) must
+    // NOT be accepted — it would make triage look unrouted AND hide the Layer-1 route.
+    writeExecutorByPhase({ triage: "codex-exec" });
+    for (const bad of ['{"triage":false}', '{"triage":null}', '{"triage":123}', '{"triage":{"nested":"x"}}']) {
+      const env = { CATALYST_EXECUTOR_BY_PHASE: bad };
+      expect(() => readExecutorByPhaseLayer1(l1, env)).not.toThrow();
+      // Falls through to the Layer-1 file — the durable route is preserved, not lost.
+      expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "codex-exec" });
+      expect(resolveExecutorForPhase("triage", { configPath: l1, env }).executor).toBe("codex-exec");
+    }
+  });
+
+  test("empty / whitespace / unset CATALYST_EXECUTOR_BY_PHASE → Layer-1 file behavior unchanged", () => {
+    writeExecutorByPhase({ triage: "codex-exec" });
+    expect(readExecutorByPhaseLayer1(l1, {})).toEqual({ triage: "codex-exec" });
+    expect(readExecutorByPhaseLayer1(l1, { CATALYST_EXECUTOR_BY_PHASE: "   " })).toEqual({
+      triage: "codex-exec",
+    });
+    // The default-arg (process.env) form is unchanged too (env is scrubbed by ENVS).
+    expect(readExecutorByPhaseLayer1(l1)).toEqual({ triage: "codex-exec" });
+  });
+
+  test("hasInProcessExecutorRoute over the env-override map arms the in-process gate", () => {
+    const env = { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' };
+    expect(hasInProcessExecutorRoute(readExecutorByPhaseLayer1(l1, env))).toBe(true);
+  });
+
+  // CTL-1457 (N1): hasInProcessExecutorRoute — does the map route ANY phase in-process?
+  test("hasInProcessExecutorRoute: true when a phase routes to codex-exec", () => {
+    expect(hasInProcessExecutorRoute({ triage: "codex-exec" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: true when a phase routes to sdk", () => {
+    expect(hasInProcessExecutorRoute({ implement: "sdk" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: true via a compound alias (claude-sdk→sdk)", () => {
+    expect(hasInProcessExecutorRoute({ plan: "claude-sdk" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: false for an all-bg map (no in-process route)", () => {
+    expect(hasInProcessExecutorRoute({ triage: "bg", plan: "claude-bg" })).toBe(false);
+  });
+  test("hasInProcessExecutorRoute: false for an empty / absent / non-object map", () => {
+    expect(hasInProcessExecutorRoute({})).toBe(false);
+    expect(hasInProcessExecutorRoute(undefined)).toBe(false);
+    expect(hasInProcessExecutorRoute(null)).toBe(false);
+    expect(hasInProcessExecutorRoute("codex-exec")).toBe(false); // non-object → false
+  });
+  test("hasInProcessExecutorRoute: case-insensitive, whitespace-tolerant", () => {
+    expect(hasInProcessExecutorRoute({ triage: " Codex-Exec " })).toBe(true);
+  });
+
+  test("codexConfig resolves defaults (home ~/catalyst/codex-home, bin codex, model null, writableRoots [catalystDir])", () => {
+    // l1 has no codex key; env bag empty → pure defaults. catalystDir() reads the
+    // hermetic CATALYST_DIR pinned by test-setup.mjs.
+    const cfg = codexConfig({ configPath: l1, env: {} });
+    expect(cfg.codexHome).toBe(`${process.env.CATALYST_DIR}/codex-home`);
+    expect(cfg.bin).toBe("codex");
+    expect(cfg.model).toBeNull();
+    expect(cfg.writableRoots).toEqual([process.env.CATALYST_DIR]);
+    expect(cfg.pluginRoot).toBeNull();
+  });
+
+  test("codexConfig honors env overrides (CATALYST_CODEX_HOME/BIN/MODEL/PLUGIN_ROOT)", () => {
+    const cfg = codexConfig({
+      configPath: l1,
+      env: {
+        CATALYST_CODEX_HOME: "/custom/codex-home",
+        CATALYST_CODEX_BIN: "/opt/bin/codex",
+        CATALYST_CODEX_MODEL: "o4-mini",
+        CATALYST_CODEX_PLUGIN_ROOT: "/plugins/root",
+      },
+    });
+    expect(cfg.codexHome).toBe("/custom/codex-home");
+    expect(cfg.bin).toBe("/opt/bin/codex");
+    expect(cfg.model).toBe("o4-mini");
+    expect(cfg.pluginRoot).toBe("/plugins/root");
+  });
+
+  test("codexConfig reads Layer-1 catalyst.orchestration.codex.* (env wins over Layer-1)", () => {
+    writeFileSync(
+      l1,
+      JSON.stringify({
+        catalyst: {
+          orchestration: {
+            codex: {
+              codexHome: "/l1/codex-home",
+              bin: "codex-l1",
+              model: "gpt-l1",
+              writableRoots: ["/root/a", "/root/b"],
+              pluginRoot: "/l1/plugins",
+            },
+          },
+        },
+      }),
+    );
+    const cfg = codexConfig({ configPath: l1, env: {} });
+    expect(cfg.codexHome).toBe("/l1/codex-home");
+    expect(cfg.bin).toBe("codex-l1");
+    expect(cfg.model).toBe("gpt-l1");
+    expect(cfg.writableRoots).toEqual(["/root/a", "/root/b"]);
+    expect(cfg.pluginRoot).toBe("/l1/plugins");
+
+    // env override wins over the Layer-1 value
+    const overridden = codexConfig({ configPath: l1, env: { CATALYST_CODEX_BIN: "/env/codex" } });
+    expect(overridden.bin).toBe("/env/codex");
+    expect(overridden.model).toBe("gpt-l1"); // untouched keys still come from Layer-1
   });
 });
 
@@ -1052,6 +1348,22 @@ describe("readDeadDocWorkerConfig (CTL-1245)", () => {
   });
 });
 
+describe("readSanctionedNeedsHuman (CTL-1432 B3)", () => {
+  const saved = process.env.CATALYST_BH_SANCTIONED_LATCHES;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CATALYST_BH_SANCTIONED_LATCHES;
+    else process.env.CATALYST_BH_SANCTIONED_LATCHES = saved;
+  });
+  test("env list → parsed, trimmed, empties dropped", () => {
+    process.env.CATALYST_BH_SANCTIONED_LATCHES = "CTL-1, CTL-2 ,, CTL-3";
+    expect(readSanctionedNeedsHuman()).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+  });
+  test("(Codex P2) an EMPTY env var explicitly clears the allowlist → [] (does not fall through to Layer-2)", () => {
+    process.env.CATALYST_BH_SANCTIONED_LATCHES = "";
+    expect(readSanctionedNeedsHuman()).toEqual([]);
+  });
+});
+
 describe("readBoardHealthConfig (CTL-1290)", () => {
   const BH_ENVS = ["CATALYST_BOARD_HEALTH", "CATALYST_LAYER2_CONFIG_FILE"];
   let saved = {}, tmp;
@@ -1105,6 +1417,64 @@ describe("readBoardHealthConfig (CTL-1290)", () => {
   test("accepts an injected env bag (env param overrides process.env)", () => {
     process.env.CATALYST_BOARD_HEALTH = "shadow";
     expect(readBoardHealthConfig({ CATALYST_BOARD_HEALTH: "0" }).mode).toBe("off");
+  });
+});
+
+describe("readCoordinationConfig (CTL-1488)", () => {
+  const CO_ENVS = ["CATALYST_COORDINATION_MODE", "CATALYST_COORDINATION_HUB_URL", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of CO_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1488-co-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of CO_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("default (no env, no Layer-2) is 'off' — NOT 'shadow' like board-health", () => {
+    expect(readCoordinationConfig({}).mode).toBe("off");
+  });
+  test("CATALYST_COORDINATION_MODE=0 is the kill-switch regardless of Layer-2", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "0" }).mode).toBe("off");
+  });
+  test("env overrides Layer-2; Layer-2 overrides default", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "enforce" }).mode).toBe("enforce");
+  });
+  test("env off / shadow / enforce are honored", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "off" }).mode).toBe("off");
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "shadow" }).mode).toBe("shadow");
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "enforce" }).mode).toBe("enforce");
+  });
+  test("garbage env → falls back to off (fail-safe: the process/egress stays inert)", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "banana" }).mode).toBe("off");
+  });
+  test("reads catalyst.coordination.mode + hubUrl from Layer-2 when env absent", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { coordination: { mode: "shadow", hubUrl: "https://hub.example" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    const c = readCoordinationConfig();
+    expect(c.mode).toBe("shadow");
+    expect(c.hubUrl).toBe("https://hub.example");
+  });
+  test("env CATALYST_COORDINATION_HUB_URL overrides Layer-2 hubUrl; unset hubUrl is null", () => {
+    expect(readCoordinationConfig({}).hubUrl).toBeNull();
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_HUB_URL: "https://env.hub" }).hubUrl).toBe("https://env.hub");
+  });
+  test("malformed Layer-2 file → off (never throws)", () => {
+    const cfg = join(tmp, "config.json"); writeFileSync(cfg, "{ not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readCoordinationConfig().mode).toBe("off");
+  });
+  test("getCoordinationMirrorPath resolves coordination.jsonl under CATALYST_DIR", () => {
+    const prev = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = tmp;
+    try {
+      expect(getCoordinationMirrorPath()).toBe(join(tmp, "coordination.jsonl"));
+    } finally {
+      prev === undefined ? delete process.env.CATALYST_DIR : (process.env.CATALYST_DIR = prev);
+    }
   });
 });
 
@@ -1202,5 +1572,140 @@ describe("getReplicaDbPath (CTL-1340)", () => {
     expect(getReplicaDbPath()).toBe("/tmp/a/catalyst-replica.db");
     process.env.CATALYST_DIR = "/tmp/b";
     expect(getReplicaDbPath()).toBe("/tmp/b/catalyst-replica.db");
+  });
+});
+
+// ─── CTL-1091 (Codex P2): resolveRestoreHoldMs validation contract ───────────
+import { resolveRestoreHoldMs } from "./config.mjs";
+
+describe("resolveRestoreHoldMs — restore-hold override validation (CTL-1091 P2)", () => {
+  const DEF = 600_000;
+
+  test("unset (undefined) → default", () => {
+    expect(resolveRestoreHoldMs(undefined, DEF)).toBe(DEF);
+  });
+
+  test("empty string → default (NOT 0 — closes the Number(\"\")===0 bug)", () => {
+    expect(resolveRestoreHoldMs("", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("   ", DEF)).toBe(DEF);
+  });
+
+  test("explicit \"0\" → 0 (opt-out preserved, disables the hold)", () => {
+    expect(resolveRestoreHoldMs("0", DEF)).toBe(0);
+  });
+
+  test("negative → default (invalid)", () => {
+    expect(resolveRestoreHoldMs("-5", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("-1", DEF)).toBe(DEF);
+  });
+
+  test("non-numeric → default", () => {
+    expect(resolveRestoreHoldMs("abc", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("NaN", DEF)).toBe(DEF);
+  });
+
+  test("valid positive → honored", () => {
+    expect(resolveRestoreHoldMs("120000", DEF)).toBe(120_000);
+  });
+
+  test("non-string (defensive) → default", () => {
+    expect(resolveRestoreHoldMs(null, DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs(5000, DEF)).toBe(DEF);
+  });
+});
+
+// ─── readFleetHealthConfig — hysteresis band + machine-appropriate swap (CTL-1503) ───
+// Net-new coverage: config.test.mjs previously had ZERO fleet-health tests. The
+// swap trip default is raised above the normal-swap ceiling and a paired lower
+// `swapUsedMbClearThreshold` is added for the hysteresis band. Both are wired
+// through the same env > Layer-1 > default precedence chain (fleetHealthNumber).
+describe("readFleetHealthConfig (CTL-1503)", () => {
+  const FH_ENVS = [
+    "CATALYST_FLEET_HEALTH",
+    "EXECUTION_CORE_FLEET_HEALTH_INTERVAL_MS",
+    "EXECUTION_CORE_FLEET_JOBS_THRESHOLD",
+    "EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD",
+    "EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD",
+    "EXECUTION_CORE_FLEET_AGENTS_THRESHOLD",
+    "EXECUTION_CORE_FLEET_PROCS_THRESHOLD",
+    "EXECUTION_CORE_FLEET_SELF_HEAL",
+    "EXECUTION_CORE_FLEET_SUSTAINED_TICKS",
+  ];
+  let saved;
+  let tmp;
+  beforeEach(() => {
+    saved = {};
+    for (const k of FH_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1503-fh-"));
+  });
+  afterEach(() => {
+    for (const k of FH_ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const writeL1 = (fleetHealth) => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { orchestration: { fleetHealth } } }));
+    return cfg;
+  };
+
+  test("defaults: raised swap trip (24576) + lower clear (16384), rest unchanged", () => {
+    const cfg = readFleetHealthConfig();
+    expect(cfg.swapUsedMbThreshold).toBe(24576);
+    expect(cfg.swapUsedMbClearThreshold).toBe(16384);
+    expect(cfg.jobsThreshold).toBe(500);
+    expect(cfg.agentsThreshold).toBe(12);
+    expect(cfg.procsThreshold).toBe(40);
+    expect(cfg.intervalMs).toBe(120000);
+    expect(cfg.selfHealEnabled).toBe(false);
+    expect(cfg.sustainedTicks).toBe(2);
+  });
+
+  test("env precedence: swap trip + clear thresholds honored from env", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD = "9000";
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "7000";
+    const cfg = readFleetHealthConfig();
+    expect(cfg.swapUsedMbThreshold).toBe(9000);
+    expect(cfg.swapUsedMbClearThreshold).toBe(7000);
+  });
+
+  test("Layer-1 precedence: swap trip + clear read from .catalyst/config.json", () => {
+    const cfg = readFleetHealthConfig(
+      writeL1({ swapUsedMbThreshold: 5000, swapUsedMbClearThreshold: 4000 }),
+    );
+    expect(cfg.swapUsedMbThreshold).toBe(5000);
+    expect(cfg.swapUsedMbClearThreshold).toBe(4000);
+  });
+
+  test("env beats Layer-1 when both set (clear threshold)", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "7000";
+    const cfg = readFleetHealthConfig(writeL1({ swapUsedMbClearThreshold: 4000 }));
+    expect(cfg.swapUsedMbClearThreshold).toBe(7000);
+  });
+
+  test("invalid clear value (negative) falls through to the default", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "-5";
+    expect(readFleetHealthConfig().swapUsedMbClearThreshold).toBe(16384);
+  });
+
+  test("invalid clear value (NaN / empty) falls through to the default", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "abc";
+    expect(readFleetHealthConfig().swapUsedMbClearThreshold).toBe(16384);
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "";
+    expect(readFleetHealthConfig().swapUsedMbClearThreshold).toBe(16384);
+  });
+});
+
+describe("getFleetHealthDir (CTL-1503)", () => {
+  test("resolves the fleet-health marker dir under the execution-core dir", () => {
+    const dir = getFleetHealthDir();
+    expect(dir).toContain("execution-core");
+    expect(dir.endsWith("fleet-health")).toBe(true);
   });
 });

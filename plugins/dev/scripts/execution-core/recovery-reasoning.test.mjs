@@ -12,14 +12,26 @@ import {
   generateRemediateBrief,
   buildRecoveryEnvelope,
   defaultRecordIntent,
+  readDeferredBoardHealthIntents,
   defaultShouldSkipItem,
   defaultForgetIntent,
   defaultInvokeRemediateCapped,
   defaultInvokeRecoveryPass,
+  defaultWriteEscalationSignal,
   RECOVERY_PASS_CYCLE_CAP,
   RECOVERY_PASS_PHASE,
   RECOVERY_MAX_ATTEMPTS,
   RECOVERY_COOLDOWN_MS,
+  RECOVERY_TERMINAL_INTENT_TTL_MS,
+  RECOVERY_LEAVE_ALONE_TTL_MS,
+  recordVerdict,
+  defaultSkipReason,
+  escalateExhaustedIntents,
+  classifyPrNotMerged,
+  PR_NOT_MERGED_REASON,
+  defaultClearIntentCooldown,
+  defaultLatchHasNoClock,
+  restampNoClockEscalations,
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -529,6 +541,46 @@ describe("reasoningRecoveryPass", () => {
     expect(events.filter((e) => e.type === "recovery.would-escalate").length).toBe(1);
   });
 
+  // CTL-1157 F #5 (Codex round-4): a `defer` decision must NOT write the cooldown
+  // marker in SHADOW mode — defaultShouldSkipItem honors a defer marker in enforce too,
+  // so a shadow-written marker would silently suppress the ticket after an operator
+  // flips shadow→enforce (shadow mutating enforce scheduler state). Enforce still writes.
+  const deferClassifier = () => ({
+    decision: "defer",
+    fix_class: "board-health",
+    details: { reason: "untyped stuck item" },
+  });
+
+  test("defer in SHADOW emits would-defer but writes NO cooldown marker", () => {
+    const intents = [];
+    const events = [];
+    const result = reasoningRecoveryPass([baseItem], {
+      mode: "shadow",
+      classifyTicket: deferClassifier,
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(result.results[0].decision).toBe("defer");
+    expect(intents).toEqual([]); // shadow mutates NO scheduler state
+    expect(events.some((e) => e.type === "recovery.would-defer")).toBe(true);
+  });
+
+  test("defer in ENFORCE writes the cooldown-only defer marker", () => {
+    const intents = [];
+    const events = [];
+    reasoningRecoveryPass([baseItem], {
+      mode: "enforce",
+      classifyTicket: deferClassifier,
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(intents).toHaveLength(1);
+    expect(intents[0].intent).toMatchObject({ decision: "defer" });
+    expect(events.some((e) => e.type === "recovery.deferred")).toBe(true);
+  });
+
   test("format diagnosis comment correctly", () => {
     const items = [
       {
@@ -783,7 +835,7 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
       mode: "enforce",
       queueSize: 12,
       processed: 3,
-      decisions: { fix_seam: 1, fix_bounded_llm: 1, escalate: 1 },
+      decisions: { fix_seam: 1, fix_bounded_llm: 1, escalate: 1, defer: 4 },
       actions: { fixed: 2, fixFailed: 0, escalated: 1, deferred: 0, errors: 0 },
       ledgerSkipped: ["CTL-1", "CTL-2"],
       terminalSkipped: ["CTL-3"],
@@ -795,6 +847,9 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.decisions.fix_seam"]).toBe(1);
     expect(a["recovery.decisions.fix_bounded_llm"]).toBe(1);
     expect(a["recovery.decisions.escalate"]).toBe(1);
+    // CTL-1157 GROUP B: the defer counter must be promoted so defer volume is
+    // queryable after otel-forward (else it's left only in body.payload.details).
+    expect(a["recovery.decisions.defer"]).toBe(4);
     expect(a["recovery.actions.fixed"]).toBe(2);
     expect(a["recovery.actions.fix_failed"]).toBe(0);
     expect(a["recovery.actions.escalated"]).toBe(1);
@@ -896,6 +951,57 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.inv.workerAge.failed"]).toBe(0);
     // board-scoped → event.label is null (the board reader ignores it; no per-ticket fold)
     expect(a["event.label"]).toBeNull();
+  });
+
+  // CTL-1157 SLICE 3 (OTEL turn-56): the three stuck-cohort failed-counts promote
+  // under the AGREED underscored top-level names (queryable structured metadata, not
+  // body-buried), in ADDITION to the camelCase recovery.inv.<key>.failed mirror.
+  test("recovery.board-scan promotes the three cohort failed-counts under cohort_* names", () => {
+    const details = {
+      mode: "shadow",
+      invariantsFailed: 3,
+      gateDecision: "proceed",
+      gateReason: "3 invariant(s) flagged",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      invariants: {
+        phantomMergedPr: { ok: false, failed: 2, observable: true },
+        orphanedOpenPr: { ok: false, failed: 1, observable: true },
+        frozenNeedsHuman: { ok: false, failed: 4, observable: true },
+        needsHumanPile: { ok: true, failed: 0, observable: true },
+      },
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a.cohort_phantom_merged_pr).toBe(2);
+    expect(a.cohort_orphaned_pr).toBe(1);
+    expect(a.cohort_frozen_needs_human).toBe(4);
+    // the camelCase per-invariant mirror still rides alongside (back-compat)
+    expect(a["recovery.inv.phantomMergedPr.failed"]).toBe(2);
+  });
+
+  // CTL-1607: per-host slot census promoted to chartable recovery.slot.* attributes.
+  test("recovery.board-scan promotes slot* scalars under recovery.slot.* names", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0,
+      gateDecision: "proceed", gateReason: "no wedge",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      invariants: {},
+      slotCapacity: 6, slotInUse: 4, slotFree: 2,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a["recovery.slot.capacity"]).toBe(6);
+    expect(a["recovery.slot.in_use"]).toBe(4);
+    expect(a["recovery.slot.free"]).toBe(2);
+  });
+
+  test("recovery.board-scan omits recovery.slot.* when slot scalars are null", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0, gateDecision: "proceed", gateReason: "r",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0, invariants: {},
+      slotCapacity: null, slotInUse: null, slotFree: null,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect("recovery.slot.capacity" in a).toBe(false);
+    expect("recovery.slot.free" in a).toBe(false);
   });
 
   test("recovery.board-scan never promotes rosters/move arrays (cardinality)", () => {
@@ -1035,6 +1141,468 @@ describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
   test("forgetIntent with no orchDir / no ticket → false (fail-soft)", () => {
     expect(defaultForgetIntent("CTL-309", { orchDir: null })).toBe(false);
     expect(defaultForgetIntent("", { orchDir })).toBe(false);
+  });
+});
+
+// CTL-1431: the escalated latch is TTL-bounded. Within the terminal TTL it still
+// skips (hand off to human); once it ages past RECOVERY_TERMINAL_INTENT_TTL_MS the
+// ticket re-enters the recovery triage funnel. The critical invariant is the DIRECT
+// return false on expiry — the escalated branch must short-circuit, never fall
+// through to the attempts-exhausted branch (which has no age gate and would re-latch).
+describe("recovery-intent terminal TTL (CTL-1431)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-ttl-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("(a) escalated intent younger than TTL still skips (returns true)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-A", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const within = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS - 1;
+    expect(defaultShouldSkipItem("CTL-1431-A", { orchDir, now: () => within })).toBe(true);
+  });
+
+  test("(b) escalated intent older than TTL re-enters triage (returns false)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-B", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    expect(defaultShouldSkipItem("CTL-1431-B", { orchDir, now: () => past })).toBe(false);
+  });
+
+  test("(c) escalated + attempts ≥ MAX but older than TTL still returns false (short-circuit, not fall-through)", () => {
+    const t0 = 1_000_000_000_000;
+    // attempts pinned well above RECOVERY_MAX_ATTEMPTS: if the escalated branch fell
+    // THROUGH to the attempts-exhausted branch (which has no age gate), this expired
+    // intent would skip (true). It must short-circuit to false instead.
+    defaultRecordIntent(
+      "CTL-1431-C",
+      { decision: "escalate", attempts: RECOVERY_MAX_ATTEMPTS + 3 },
+      { orchDir, now: () => t0 },
+    );
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    expect(defaultShouldSkipItem("CTL-1431-C", { orchDir, now: () => past })).toBe(false);
+  });
+
+  test("(d) keys off lastTs not ts: fresh lastTs with a stale ts is NOT expired (returns true)", () => {
+    const t0 = 1_000_000_000_000;
+    const TTL = RECOVERY_TERMINAL_INTENT_TTL_MS;
+    // First escalate sets ts = lastTs = t0.
+    defaultRecordIntent("CTL-1431-D", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // A later write advances lastTs to t1 but PRESERVES the first-action ts at t0.
+    const t1 = t0 + TTL;
+    defaultRecordIntent("CTL-1431-D", { decision: "fix", fix_class: "x" }, { orchDir, now: () => t1 });
+    // Evaluate at t1 + TTL/2: age off lastTs is TTL/2 (< TTL → skip), but age off the
+    // stale ts would be 1.5·TTL (> TTL → would re-enter). Keying off lastTs → true.
+    const nowT = t1 + TTL / 2;
+    expect(defaultShouldSkipItem("CTL-1431-D", { orchDir, now: () => nowT })).toBe(true);
+  });
+
+  test("(F3, CTL-1610-updated) a LEGACY hand-crafted timestamp-less escalation is still terminal (defaultSkipReason:2136 unchanged)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F3", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // clearIntentCooldown no longer strips escalated timestamps (see CTL-1610 test below);
+    // this simulates only a pre-fix on-disk artifact by editing the file directly.
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1431-F3.json");
+    const data = JSON.parse(readFileSync(p, "utf8"));
+    delete data.ts;
+    delete data.lastTs;
+    writeFileSync(p, JSON.stringify(data));
+    expect(defaultShouldSkipItem("CTL-1431-F3", { orchDir, now: () => t0 + 1 })).toBe(true);
+  });
+
+  test("(CTL-1610) clearIntentCooldown on an escalated entry is a no-op and preserves BOTH timestamps", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-A", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1610-A.json");
+    const before = JSON.parse(readFileSync(p, "utf8"));
+    expect(before.escalated).toBe(true);
+    expect(typeof before.ts).toBe("number");
+    expect(typeof before.lastTs).toBe("number");
+
+    // A failed dispatch tries to reset the cooldown timer; on an escalated entry it must refuse.
+    expect(defaultClearIntentCooldown("CTL-1610-A", { orchDir })).toBe(false);
+
+    const after = JSON.parse(readFileSync(p, "utf8"));
+    expect(after.ts).toBe(before.ts);
+    expect(after.lastTs).toBe(before.lastTs);
+    // And the entry still ages out via the 7-day TTL rather than latching forever.
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    expect(defaultShouldSkipItem("CTL-1610-A", { orchDir, now: () => past })).toBe(false);
+  });
+
+  test("(CTL-1610) clearIntentCooldown STILL clears a non-escalated (cooldown/defer) entry", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-B", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    expect(defaultClearIntentCooldown("CTL-1610-B", { orchDir })).toBe(true);
+    const after = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-B.json"), "utf8"));
+    expect(after.lastTs).toBeUndefined();
+    expect(after.ts).toBeUndefined();
+  });
+
+  test("(F2) a fix recorded AFTER TTL expiry drops the escalated latch (no silent re-latch)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F2", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    const entry = defaultRecordIntent(
+      "CTL-1431-F2",
+      { decision: "fix", fix_class: "x" },
+      { orchDir, now: () => past },
+    );
+    // The ticket has re-entered triage; a follow-up fix must NOT re-latch it for
+    // another 7 days. escalated is cleared → the entry is governed by attempts/cooldown.
+    expect(entry.escalated).toBe(false);
+  });
+
+  test("(F2) a fix recorded WITHIN the TTL preserves the escalated latch", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F2b", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const within = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS - 1;
+    const entry = defaultRecordIntent(
+      "CTL-1431-F2b",
+      { decision: "fix", fix_class: "x" },
+      { orchDir, now: () => within },
+    );
+    expect(entry.escalated).toBe(true);
+  });
+});
+
+// ─── CTL-1610 (Phase 2): defaultLatchHasNoClock ─────────────────────────────
+describe("defaultLatchHasNoClock (CTL-1610 Phase 2)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "latch-no-clock-"));
+  });
+  afterEach(() => {
+    try { rmSync(orchDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  test("(CTL-1610) defaultLatchHasNoClock: true iff escalated AND no numeric ts/lastTs", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-C", { decision: "escalate" }, { orchDir, now: () => t0 });
+    expect(defaultLatchHasNoClock("CTL-1610-C", { orchDir })).toBe(false); // clocked
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1610-C.json");
+    const d = JSON.parse(readFileSync(p, "utf8")); delete d.ts; delete d.lastTs; writeFileSync(p, JSON.stringify(d));
+    expect(defaultLatchHasNoClock("CTL-1610-C", { orchDir })).toBe(true);  // latched, no clock
+    // non-escalated entries are never a no-clock latch
+    defaultRecordIntent("CTL-1610-D", { decision: "dispatched" }, { orchDir, now: () => t0 });
+    expect(defaultLatchHasNoClock("CTL-1610-D", { orchDir })).toBe(false);
+    // absent ledger → false
+    expect(defaultLatchHasNoClock("CTL-1610-NONE", { orchDir })).toBe(false);
+  });
+});
+
+// ─── CTL-1610 (Phase 3): restampNoClockEscalations ─────────────────────────
+describe("restampNoClockEscalations (CTL-1610 Phase 3)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "restamp-"));
+  });
+  afterEach(() => {
+    try { rmSync(orchDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  test("(CTL-1610) restampNoClockEscalations re-stamps ONLY escalated+no-clock entries (idempotent)", () => {
+    const t0 = 1_000_000_000_000;
+    // (1) latched no-clock → gets re-stamped
+    defaultRecordIntent("CTL-1610-E", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const pe = pathJoin(orchDir, ".recovery-intents", "CTL-1610-E.json");
+    const de = JSON.parse(readFileSync(pe, "utf8")); delete de.ts; delete de.lastTs; writeFileSync(pe, JSON.stringify(de));
+    // (2) clocked escalation → untouched
+    defaultRecordIntent("CTL-1610-F", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // (3) non-escalated → untouched
+    defaultRecordIntent("CTL-1610-G", { decision: "dispatched" }, { orchDir, now: () => t0 });
+
+    const now = () => t0 + 5;
+    const changed = restampNoClockEscalations({ orchDir, now });
+    expect(changed).toEqual(["CTL-1610-E"]);
+    const after = JSON.parse(readFileSync(pe, "utf8"));
+    expect(after.escalated).toBe(true);
+    expect(after.ts).toBe(t0 + 5);
+    expect(after.lastTs).toBe(t0 + 5);
+    // idempotent: a second run finds nothing to do
+    expect(restampNoClockEscalations({ orchDir, now })).toEqual([]);
+  });
+
+  test("(CTL-1610 Codex P2) a per-file write failure does not abort the scan — remaining entries are healed", () => {
+    const t0 = 1_000_000_000_000;
+    // Three no-clock escalated entries; all seeded as timestamp-less latches.
+    for (const ticket of ["CTL-1610-H", "CTL-1610-I", "CTL-1610-J"]) {
+      defaultRecordIntent(ticket, { decision: "escalate" }, { orchDir, now: () => t0 });
+      const p = pathJoin(orchDir, ".recovery-intents", `${ticket}.json`);
+      const d = JSON.parse(readFileSync(p, "utf8")); delete d.ts; delete d.lastTs; writeFileSync(p, JSON.stringify(d));
+    }
+    // Overwrite H with invalid JSON — readFileSync succeeds but JSON.parse throws,
+    // simulating a mid-scan race (TOCTOU) or a corrupt file.
+    writeFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-H.json"), "NOT_JSON{{{");
+    // Overwrite J with a directory — readFileSync throws, also per-file isolated.
+    const pJ = pathJoin(orchDir, ".recovery-intents", "CTL-1610-J.json");
+    rmSync(pJ); mkdirSync(pJ);
+
+    const now = () => t0 + 5;
+    const changed = restampNoClockEscalations({ orchDir, now });
+    // I must be healed even though H (bad JSON) and J (directory) failed.
+    expect(changed).toContain("CTL-1610-I");
+    const afterI = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-I.json"), "utf8"));
+    expect(afterI.ts).toBe(t0 + 5);
+  });
+});
+
+// ─── CTL-1439 (P0a): verdict persistence — recordVerdict + leave-alone ──────
+// A recovery-pass session's ACTUAL conclusion (fixed / leave-alone / escalate)
+// must land in the ledger instead of the dispatch-time placeholder, and a
+// leave-alone verdict must not burn a fix attempt (RC2/RC1 of the 2026-07-08
+// root-cause audit).
+describe("recordVerdict + leave-alone TTL (CTL-1439 P0a)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-verdict-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  const readLedger = (ticket) =>
+    JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", `${ticket}.json`), "utf8"));
+
+  test("leave-alone REFUNDS the dispatch attempt (attempts 2 → 1) and records the verdict", () => {
+    const t0 = 1_000_000_000_000;
+    // Two dispatch-time writes (the holistic act's auto-increment) → attempts 2.
+    defaultRecordIntent("CTL-400", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    defaultRecordIntent("CTL-400", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 + 1 });
+    expect(readLedger("CTL-400").attempts).toBe(2);
+
+    const entry = recordVerdict(
+      "CTL-400",
+      { verdict: "leave-alone", reason: "needs-human label is stale; human actively driving" },
+      { orchDir, now: () => t0 + 2 },
+    );
+    expect(entry.decision).toBe("leave-alone");
+    expect(entry.attempts).toBe(1); // refunded — a reviewed-healthy pass must not burn an attempt
+    expect(entry.verdict).toBe("leave-alone");
+    expect(entry.verdictReason).toBe("needs-human label is stale; human actively driving");
+    expect(typeof entry.verdictTs).toBe("number");
+  });
+
+  test("leave-alone on an absent ledger → attempts floors at 0 (never negative)", () => {
+    const entry = recordVerdict(
+      "CTL-401",
+      { verdict: "leave-alone", reason: "false positive" },
+      { orchDir, now: () => 1_000_000_000_000 },
+    );
+    expect(entry.attempts).toBe(0);
+    expect(entry.decision).toBe("leave-alone");
+  });
+
+  test("fixed PINS attempts (no double count for the same dispatch) and records the verdict", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-402", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    const entry = recordVerdict(
+      "CTL-402",
+      { verdict: "fixed", reason: "rebased + merged #9999" },
+      { orchDir, now: () => t0 + 1 },
+    );
+    expect(entry.decision).toBe("fixed");
+    expect(entry.attempts).toBe(1); // pinned — the dispatch already counted this attempt
+    expect(entry.verdict).toBe("fixed");
+  });
+
+  test("escalate verdict latches escalated:true (existing terminal semantics)", () => {
+    const t0 = 1_000_000_000_000;
+    const entry = recordVerdict(
+      "CTL-403",
+      { verdict: "escalate", reason: "value judgment on two valid shapes" },
+      { orchDir, now: () => t0 },
+    );
+    expect(entry.decision).toBe("escalate");
+    expect(entry.escalated).toBe(true);
+    expect(defaultShouldSkipItem("CTL-403", { orchDir, now: () => t0 + 1 })).toBe(true);
+  });
+
+  test("unknown verdict → null (no ledger write)", () => {
+    expect(recordVerdict("CTL-404", { verdict: "wat" }, { orchDir })).toBeNull();
+    expect(existsSync(pathJoin(orchDir, ".recovery-intents", "CTL-404.json"))).toBe(false);
+  });
+
+  test("shouldSkipItem: leave-alone WITHIN the TTL → skip (no re-review thrash)", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-405", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    expect(
+      defaultShouldSkipItem("CTL-405", { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS - 1 }),
+    ).toBe(true);
+  });
+
+  test("shouldSkipItem: leave-alone PAST the TTL → re-enters DIRECTLY, even at attempts >= max", () => {
+    const t0 = 1_000_000_000_000;
+    // Force attempts to the cap, then a leave-alone verdict (no refund path used —
+    // attempts pinned high deliberately to prove the direct-return short-circuit).
+    defaultRecordIntent("CTL-406", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    recordVerdict("CTL-406", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 + 1 });
+    // Past the leave-alone TTL: must return false DIRECTLY (re-enter), not fall
+    // through to the attempts latch (mirrors the CTL-1431 escalated short-circuit).
+    expect(
+      defaultShouldSkipItem("CTL-406", { orchDir, now: () => t0 + 1 + RECOVERY_LEAVE_ALONE_TTL_MS + 1 }),
+    ).toBe(false);
+  });
+
+  test("shouldSkipItem: escalated latch takes precedence over a later leave-alone decision", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-407", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // A later leave-alone write preserves the sticky escalated latch (human-owned;
+    // only the terminal TTL or a human ages it out).
+    const entry = recordVerdict("CTL-407", { verdict: "leave-alone", reason: "looks fine" }, { orchDir, now: () => t0 + 2 });
+    expect(entry.escalated).toBe(true);
+    expect(
+      defaultShouldSkipItem("CTL-407", { orchDir, now: () => t0 + 3 + RECOVERY_LEAVE_ALONE_TTL_MS }),
+    ).toBe(true); // escalated branch (7d TTL) governs, not the shorter leave-alone TTL
+  });
+
+  test("verdict fields survive a SUBSEQUENT dispatch-time write (observability trail)", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-408", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const entry = defaultRecordIntent(
+      "CTL-408",
+      { decision: "dispatched", fix_class: "board-health" },
+      { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS + 5 },
+    );
+    expect(entry.decision).toBe("dispatched");
+    expect(entry.verdict).toBe("leave-alone"); // last verdict preserved until superseded
+    expect(entry.verdictReason).toBe("healthy");
+  });
+
+  test("a NEW verdict overwrites the preserved prior verdict fields", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-409", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const entry = recordVerdict("CTL-409", { verdict: "fixed", reason: "merged the green PR" }, { orchDir, now: () => t0 + 5 });
+    expect(entry.verdict).toBe("fixed");
+    expect(entry.verdictReason).toBe("merged the green PR");
+    expect(entry.verdictTs).toBe(t0 + 5);
+  });
+
+  test("a TERMINAL verdict-less write (fix / escalate) CLEARS stale verdict fields — the ledger never contradicts itself", () => {
+    // Codex P2 (#2586): a leave-alone verdict that ages out and then genuinely
+    // escalates must NOT carry verdict:"leave-alone" on the escalate entry.
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-410", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const escalated = defaultRecordIntent(
+      "CTL-410",
+      { decision: "escalate", reason: "now genuinely stuck" },
+      { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS + 5 },
+    );
+    expect(escalated.decision).toBe("escalate");
+    expect(escalated.verdict).toBeUndefined();
+    expect(escalated.verdictReason).toBeUndefined();
+
+    recordVerdict("CTL-411", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const fixed = defaultRecordIntent(
+      "CTL-411",
+      { decision: "fix", fix_class: "bounded-llm" },
+      { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS + 5 },
+    );
+    expect(fixed.decision).toBe("fix");
+    expect(fixed.verdict).toBeUndefined();
+  });
+
+  test("a defer MARKER write still preserves the verdict trail", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-412", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const deferred = defaultRecordIntent(
+      "CTL-412",
+      { decision: "defer", fix_class: "board-health", attempts: 0 },
+      { orchDir, now: () => t0 + 5 },
+    );
+    expect(deferred.verdict).toBe("leave-alone"); // marker writes keep the trail
+  });
+});
+
+// ─── CTL-1432 (B2): readDeferredBoardHealthIntents ──────────────────────────
+describe("readDeferredBoardHealthIntents (CTL-1432 B2)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-defer-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("returns ONLY defer + fix_class=board-health tickets", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("ADV-1403", { decision: "defer", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    defaultRecordIntent("CTL-900", { decision: "defer", fix_class: "bounded-llm" }, { orchDir, now: () => t0 });
+    defaultRecordIntent("CTL-901", { decision: "fix", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    const out = readDeferredBoardHealthIntents(orchDir);
+    expect(out).toEqual(["ADV-1403"]);
+  });
+
+  test("fail-open: absent dir / no orchDir → []", () => {
+    expect(readDeferredBoardHealthIntents(pathJoin(orchDir, "does-not-exist"))).toEqual([]);
+    expect(readDeferredBoardHealthIntents(null)).toEqual([]);
+  });
+
+  test("(Codex P1 r3) a deferred intent still inside its 30-min cooldown is NOT returned", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("ADV-COOL", { decision: "defer", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    // within cooldown → excluded (it would proceed the gate then be skipped at the act site)
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + 1_000 })).toEqual([]);
+    // past cooldown → included
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + RECOVERY_COOLDOWN_MS + 1 })).toContain("ADV-COOL");
+  });
+
+  test("(CTL-1440 P0b, replaces the r4 FREEZE) re-defer refreshes lastTs; the FROZEN deferredSince anchor keeps the consumer fed", () => {
+    const t0 = 1_000_000_000_000;
+    const e1 = defaultRecordIntent("CTL-BHD", { decision: "defer", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    expect(e1.deferredSince).toBe(t0);
+    // the per-item pass re-defers 40 min later (past cooldown) — lastTs REFRESHES
+    // (so its cooldown gate throttles the next re-process: no RC3 every-2s storm)
+    // while deferredSince stays frozen (so the board-health consumer still sees
+    // the marker as aged — never starved, the r4 guarantee preserved).
+    const e2 = defaultRecordIntent(
+      "CTL-BHD",
+      { decision: "defer", fix_class: "board-health" },
+      { orchDir, now: () => t0 + 40 * 60_000 },
+    );
+    expect(e2.lastTs).toBe(t0 + 40 * 60_000); // refreshed → cooldown gate is real again
+    expect(e2.deferredSince).toBe(t0); // frozen aging anchor
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + 40 * 60_000 + 1 })).toContain("CTL-BHD");
+  });
+
+  test("(CTL-1440) a LEGACY frozen entry (no deferredSince) falls back to its frozen lastTs as the anchor", () => {
+    const t0 = 1_000_000_000_000;
+    mkdirSync(pathJoin(orchDir, ".recovery-intents"), { recursive: true });
+    writeFileSync(
+      pathJoin(orchDir, ".recovery-intents", "CTL-LEG.json"),
+      JSON.stringify({ ticket: "CTL-LEG", ts: t0, lastTs: t0, decision: "defer", fix_class: "board-health", attempts: 0, escalated: false }),
+    );
+    // reader: legacy anchor = lastTs -> aged after cooldown
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + 31 * 60_000 })).toContain("CTL-LEG");
+    // a re-defer upgrades it: deferredSince inherits the legacy frozen lastTs
+    const e2 = defaultRecordIntent(
+      "CTL-LEG",
+      { decision: "defer", fix_class: "board-health" },
+      { orchDir, now: () => t0 + 31 * 60_000 },
+    );
+    expect(e2.deferredSince).toBe(t0);
+  });
+
+  test("a repeated NON-board-health defer still refreshes lastTs (unchanged)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-D", { decision: "defer", fix_class: "bounded-llm" }, { orchDir, now: () => t0 });
+    const e2 = defaultRecordIntent("CTL-D", { decision: "defer", fix_class: "bounded-llm" }, { orchDir, now: () => t0 + 1000 });
+    expect(e2.lastTs).toBe(t0 + 1000);
   });
 });
 
@@ -1513,6 +2081,36 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
     expect(tick.processed).toBe(0);
   });
 
+  // PROJ-1657 Codex P1 (round 8): a probe-less phase already parked terminal
+  // (stalledReason "no-probe-for-phase") must not re-enter classification —
+  // that would let it default to decision:"defer"/fix_class:"board-health"
+  // and get picked up for a fresh recovery-pass dispatch, reversing the
+  // terminal hand-off to a human.
+  test("no-probe-for-phase terminal signal is skipped — no reclassification, lands in terminalSkipped[]", () => {
+    const posted = [];
+    const events = [];
+    reasoningRecoveryPass(
+      [
+        {
+          ticket: "PROJ-1000",
+          phase: "recovery-pass",
+          evidence: { signal: { stalledReason: "no-probe-for-phase" } },
+        },
+      ],
+      {
+        mode: "enforce",
+        postComment: (t, body) => posted.push({ t, body }),
+        emitEvent: (e) => events.push(e),
+        ...inert,
+      },
+    );
+    expect(posted.length).toBe(0);
+    const tick = events.find((e) => e.type === "recovery.tick").details;
+    expect(tick.terminalSkipped).toEqual(["PROJ-1000"]);
+    expect(tick.processed).toBe(0);
+    expect(events.some((e) => e.type === "recovery.decision" && e.ticket === "PROJ-1000")).toBe(false);
+  });
+
   test("emits a recovery.decision per classified item with the routing rule", () => {
     const events = [];
     reasoningRecoveryPass(
@@ -1560,5 +2158,542 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
     expect(env.attributes["event.label"]).toBeNull();
     expect(env.severityText).toBe("INFO");
     expect(env.body.payload.details.queueSize).toBe(3);
+  });
+});
+
+// ─── CTL-1157 F #6 (Codex round-4): escalation signal must carry `ticket` ─────
+// signal-reader parseSignal keys off raw.ticket and status:"needs-human" is
+// non-terminal, so this fresh recovery-pass signal wins over the failed phase.
+// Without a ticket, readWorkerSignals() reports ticket:null and scheduler-recovery /
+// board-health consumers lose the escalated ticket after the first pass.
+describe("defaultWriteEscalationSignal (CTL-1157 F #6)", () => {
+  test("the written phase-recovery-pass.json carries the ticket", () => {
+    const orchDir = mkdtempSync(pathJoin(tmpdir(), "esc-"));
+    try {
+      defaultWriteEscalationSignal(
+        "CTL-42",
+        { escalation_type: "manual", problem: "stuck", call_to_action: "look" },
+        { orchDir },
+      );
+      const p = pathJoin(orchDir, "workers", "CTL-42", "phase-recovery-pass.json");
+      expect(existsSync(p)).toBe(true);
+      const signal = JSON.parse(readFileSync(p, "utf8"));
+      expect(signal.ticket).toBe("CTL-42"); // the fix: never null
+      expect(signal.status).toBe("needs-human");
+      expect(signal.explanation).toBeDefined();
+    } finally {
+      rmSync(orchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── CTL-1440 (P0b): skip-reason vocabulary + the exhausted-intent sweep ─────
+describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-p0b-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  const readLedger = (t) =>
+    JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", `${t}.json`), "utf8"));
+
+  test("skipReason names each branch (and mirrors shouldSkipItem exactly)", () => {
+    const t0 = 1_000_000_000_000;
+    // cooldown
+    defaultRecordIntent("CTL-A", { decision: "dispatched" }, { orchDir, now: () => t0 });
+    expect(defaultSkipReason("CTL-A", { orchDir, now: () => t0 + 1 })).toBe("cooldown");
+    // attempts-exhausted
+    defaultRecordIntent("CTL-B", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    expect(defaultSkipReason("CTL-B", { orchDir, now: () => t0 + RECOVERY_COOLDOWN_MS * 10 })).toBe("attempts-exhausted");
+    // escalated
+    defaultRecordIntent("CTL-C", { decision: "escalate" }, { orchDir, now: () => t0 });
+    expect(defaultSkipReason("CTL-C", { orchDir, now: () => t0 + 1 })).toBe("escalated");
+    // leave-alone
+    recordVerdict("CTL-D", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    expect(defaultSkipReason("CTL-D", { orchDir, now: () => t0 + 1 })).toBe("leave-alone");
+    // defer-cooldown
+    defaultRecordIntent("CTL-E", { decision: "defer", fix_class: "board-health", attempts: 0 }, { orchDir, now: () => t0 });
+    expect(defaultSkipReason("CTL-E", { orchDir, now: () => t0 + 1 })).toBe("defer-cooldown");
+    // absent → null; boolean view agrees everywhere
+    expect(defaultSkipReason("CTL-none", { orchDir })).toBeNull();
+    for (const t of ["CTL-A", "CTL-B", "CTL-C", "CTL-D", "CTL-E", "CTL-none"]) {
+      expect(defaultShouldSkipItem(t, { orchDir, now: () => t0 + 1 })).toBe(
+        defaultSkipReason(t, { orchDir, now: () => t0 + 1 }) !== null,
+      );
+    }
+  });
+
+  test("the sweep escalates an exhausted no-verdict intent LOUDLY (ledger + signal + label + event + comment)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-X", { decision: "dispatched", fix_class: "board-health", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    const comments = [];
+    const labels = [];
+    const signals = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      emitEvent: (e) => events.push(e),
+      postComment: (t, body) => comments.push({ t, body }),
+      labelNeedsHuman: (dir, t) => labels.push(t),
+      writeSignal: (t, payload) => signals.push({ t, payload }),
+    });
+    expect(out).toEqual(["CTL-X"]);
+    const led = readLedger("CTL-X");
+    expect(led.escalated).toBe(true);
+    expect(led.decision).toBe("escalate");
+    expect(led.verdict).toBe("escalate");
+    expect(led.attempts).toBe(RECOVERY_MAX_ATTEMPTS); // pinned — the finding, not a new attempt
+    expect(events[0].type).toBe("recovery.escalated");
+    expect(events[0].ticket).toBe("CTL-X");
+    expect(comments[0].t).toBe("CTL-X");
+    expect(labels).toEqual([orchDir + ":CTL-X"] .map(() => "CTL-X")); // label called with the ticket
+    expect(signals[0].payload.escalation_type).toBe("authorization");
+    // Idempotent: escalated:true excludes it from the next scan.
+    expect(escalateExhaustedIntents(orchDir, { now: () => t0 + 2, emitEvent: (e) => events.push(e), postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {} })).toEqual([]);
+    expect(events.length).toBe(1);
+  });
+
+  test("the sweep excludes verdicts and non-exhausted intents", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-LA", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    defaultRecordIntent("CTL-DEF", { decision: "defer", fix_class: "board-health", attempts: 5 }, { orchDir, now: () => t0 });
+    defaultRecordIntent("CTL-ONE", { decision: "dispatched" }, { orchDir, now: () => t0 }); // attempts 1 < cap
+    recordVerdict("CTL-ESC", { verdict: "escalate", reason: "already escalated" }, { orchDir, now: () => t0 });
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      emitEvent: () => {},
+      postComment: () => {},
+      labelNeedsHuman: () => {},
+      writeSignal: () => {},
+    });
+    expect(out).toEqual([]);
+  });
+
+  test("(Codex R1) a terminal/finished ticket is NEVER swept (isActive gate; fail-open toward active)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-DONE", { decision: "fix", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    defaultRecordIntent("CTL-LIVE", { decision: "fix", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      isActive: (t) => t !== "CTL-DONE",
+      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {},
+    });
+    expect(out).toEqual(["CTL-LIVE"]);
+    expect(readLedger("CTL-DONE").escalated).toBe(false); // untouched — terminal cleanup owns it
+    // a THROWING isActive fails open toward active:
+    defaultRecordIntent("CTL-THROW", { decision: "fix", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const out2 = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2,
+      isActive: (t) => { if (t === "CTL-THROW") throw new Error("read failed"); return true; },
+      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {},
+    });
+    expect(out2).toContain("CTL-THROW");
+  });
+
+  test("(Codex R1) side effects are WITHHELD when the escalated latch did not persist (read-back gate)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-RO", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      recordIntent: () => ({ escalated: true }), // LIES: never writes the file
+      emitEvent: (e) => events.push(e),
+      postComment: () => { throw new Error("must not comment"); },
+      labelNeedsHuman: () => { throw new Error("must not label"); },
+      writeSignal: () => { throw new Error("must not write signal"); },
+    });
+    expect(out).toEqual([]); // latch verification failed → no side effects, retry next tick
+    expect(events).toEqual([]);
+  });
+
+  test("(Codex R1) the HOLISTIC gate keys a board-health defer on the frozen deferredSince anchor", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-HD", { decision: "defer", fix_class: "board-health", attempts: 0 }, { orchDir, now: () => t0 });
+    // the per-item pass re-defers 31 min later — lastTs refreshes
+    defaultRecordIntent("CTL-HD", { decision: "defer", fix_class: "board-health", attempts: 0 }, { orchDir, now: () => t0 + 31 * 60_000 });
+    const shortly = t0 + 31 * 60_000 + 5_000; // 5s after the re-defer
+    // per-item view: throttled by the fresh lastTs
+    expect(defaultSkipReason("CTL-HD", { orchDir, now: () => shortly })).toBe("defer-cooldown");
+    // holistic view: the FROZEN anchor is aged → actionable NOW
+    expect(defaultSkipReason("CTL-HD", { orchDir, now: () => shortly, holistic: true })).toBeNull();
+  });
+
+  test("after the sweep, skipReason flips from attempts-exhausted to escalated (TTL-governed re-entry)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-Y", { decision: "fix", fix_class: "bounded-llm", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + RECOVERY_COOLDOWN_MS * 10 })).toBe("attempts-exhausted");
+    escalateExhaustedIntents(orchDir, { now: () => t0 + 1, emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {} });
+    expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 })).toBe("escalated");
+    // …and B1's terminal TTL ages it back into triage.
+    expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 + RECOVERY_TERMINAL_INTENT_TTL_MS })).toBeNull();
+  });
+});
+
+// ─── CTL-1496: pr_not_merged classification ─────────────────────────────────
+
+describe("classifyPrNotMerged (CTL-1496)", () => {
+  const mkEvidence = () => ({
+    logsOutput: null,
+    signal: { failureReason: PR_NOT_MERGED_REASON },
+    failureReason: PR_NOT_MERGED_REASON,
+    ticket: "CTL-1",
+  });
+  const probeReturning = (o) => () => o;
+
+  test("failing check → bounded-llm fix, brief names the check", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 42,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).toContain("quality");
+  });
+
+  test("unresolved bot thread only → bounded-llm fix (review sub-mode)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 43,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [{ id: "T1", path: "a.ts", line: 3, body: "fix this" }],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).toContain("review");
+  });
+
+  test("human CHANGES_REQUESTED → escalate with PR number in reason, not opaque pr_not_merged", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 44,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H1", body: "redesign", path: "b.ts", line: 9 }],
+        hasChangesRequested: true,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+    expect(r.details.reason).toContain("44");
+    expect(r.details.reason).not.toBe("Failure reason: pr_not_merged");
+  });
+
+  test("no blockers / CLEAN → bounded-llm fix (finish the merge)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 45,
+        mergeStateStatus: "CLEAN",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+
+  test("BLOCKED with no actionable cause → escalate (awaiting required approval, not LLM-fixable)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 46,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no remediable cause");
+  });
+
+  test("DIRTY with no actionable cause → escalate 'no remediable cause' (fallthrough coverage)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 47,
+        mergeStateStatus: "DIRTY",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no remediable cause");
+  });
+
+  test("probe throws → defer (transient), NOT escalate", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: () => { throw new Error("gh down"); },
+    });
+    expect(r.decision).toBe("defer");
+  });
+
+  test("no PR found (prNumber null) → escalate with 'no open PR' reason", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({ prNumber: null }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no open PR");
+  });
+
+  test("generateRemediateBrief('pr-not-merged') mentions gh pr view, @codex review", () => {
+    const b = generateRemediateBrief("pr-not-merged");
+    expect(b).toContain("gh pr view");
+    expect(b).toContain("@codex review");
+  });
+
+  test("generateRemediateBrief('pr-not-merged', probe) embeds check names and thread paths", () => {
+    const probe = {
+      prNumber: 42,
+      mergeStateStatus: "BLOCKED",
+      failingChecks: [{ name: "quality-gate", detailsUrl: null }],
+      unresolvedBotThreads: [{ id: "T1", path: "src/foo.ts", line: 5, body: "fix this" }],
+    };
+    const b = generateRemediateBrief("pr-not-merged", probe);
+    expect(b).toContain("quality-gate");
+    expect(b).toContain("src/foo.ts");
+    expect(b).toContain("@codex review");
+  });
+
+  // REGRESSION GUARD: probe is never called for non-pr_not_merged reasons.
+  test("merge-conflict still bounded-llm without touching the probe", () => {
+    let called = false;
+    const r = defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "merge-conflict" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(called).toBe(false);
+  });
+
+  test("unknown failure without pr_not_merged — probe never called", () => {
+    let called = false;
+    defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "some-other-reason" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(called).toBe(false);
+  });
+
+  test("classifyPrNotMerged exported + produces same result as via defaultClassifyTicket", () => {
+    const probe = probeReturning({
+      prNumber: 50,
+      mergeStateStatus: "BLOCKED",
+      failingChecks: [{ name: "lint", detailsUrl: null }],
+      unresolvedBotThreads: [],
+      unresolvedHumanThreads: [],
+      hasChangesRequested: false,
+    });
+    const via1 = defaultClassifyTicket(mkEvidence(), { probePrBlock: probe });
+    const via2 = classifyPrNotMerged(mkEvidence(), { probePrBlock: probe });
+    expect(via1).toEqual(via2);
+  });
+
+  // ── CTL-1496 remediation (Codex re-review round 2) ──
+
+  // P2: a merely-open human discussion thread (reviewDecision NOT
+  // CHANGES_REQUESTED) must NOT short-circuit to a human-escalation latch when
+  // there is a fixable cause — it follows the actionable path.
+  test("open human thread w/o CHANGES_REQUESTED + failing check → fix (not escalate)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 51,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H9", body: "just a question", path: "x.ts", line: 2 }],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+  });
+
+  // P2: pending required checks (queued/in-progress) are not a failure and not
+  // stuck — defer instead of latching a "no remediable cause" escalation.
+  test("only pending checks, no other cause → defer (retry next tick)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 52,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        pendingChecks: [{ name: "e2e", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("defer");
+    expect(r.details.reason).toContain("e2e");
+  });
+
+  // P2: a failing check still wins over pending — fix, don't defer.
+  test("failing check alongside a pending check → fix (failing wins)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 53,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "unit", detailsUrl: null }],
+        pendingChecks: [{ name: "e2e", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+
+  // P1: the ticket's repo + worktreePath are threaded from the worker signal
+  // into the probe so it resolves the ticket's repository, not the daemon's.
+  test("threads repo + worktreePath from the worker signal into the probe", () => {
+    let seen = null;
+    classifyPrNotMerged(
+      {
+        failureReason: PR_NOT_MERGED_REASON,
+        ticket: "CTL-77",
+        signal: {
+          failureReason: PR_NOT_MERGED_REASON,
+          branchName: "ryan/ctl-77-x",
+          repo: "acme/widgets",
+          worktreePath: "/wt/CTL-77",
+        },
+      },
+      {
+        probePrBlock: (ticket, opts) => {
+          seen = { ticket, ...opts };
+          return { prNumber: 77, mergeStateStatus: "CLEAN", failingChecks: [], unresolvedBotThreads: [], unresolvedHumanThreads: [], hasChangesRequested: false };
+        },
+      },
+    );
+    expect(seen.ticket).toBe("CTL-77");
+    expect(seen.repo).toBe("acme/widgets");
+    expect(seen.worktreePath).toBe("/wt/CTL-77");
+    expect(seen.branch).toBe("ryan/ctl-77-x");
+  });
+});
+
+// ─── CTL-1496 Phase 4: reasoningRecoveryPass end-to-end (enforce + shadow) ──
+
+describe("reasoningRecoveryPass — pr_not_merged end-to-end (CTL-1496 Phase 4)", () => {
+  const mkPrNotMergedItem = () => ({
+    ticket: "CTL-PRNM",
+    evidence: {
+      failureReason: "pr_not_merged",
+      signal: { failureReason: "pr_not_merged" },
+      ticket: "CTL-PRNM",
+      logsOutput: null,
+      jobState: null,
+    },
+  });
+
+  test("enforce: pr_not_merged + failing check → dispatches recovery-pass (fix intent recorded)", () => {
+    const intents = [];
+    const events = [];
+    const items = [mkPrNotMergedItem()];
+    reasoningRecoveryPass(items, {
+      mode: "enforce",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "bounded-llm",
+        details: {
+          reason: "PR #42 failing quality",
+          brief: "…@codex review…",
+        },
+      }),
+      invokeRecoveryPass: (_ticket, _o) => ({
+        success: true,
+        dispatched: true,
+        details: {},
+      }),
+      recordIntent: (t, i) => intents.push({ t, i }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(intents.length).toBeGreaterThan(0);
+    const fixIntent = intents.find((i) => i.i.decision === "fix" || i.i.type === "recovery-pass");
+    expect(fixIntent).toBeDefined();
+    expect(events.some((e) => e.type === "recovery.fixed" || e.type === "recovery.decision")).toBe(true);
+  });
+
+  test("shadow: pr_not_merged + failing check → emits would-fix event, dispatches NOTHING", () => {
+    const events = [];
+    const items = [mkPrNotMergedItem()];
+    reasoningRecoveryPass(items, {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "bounded-llm",
+        details: { reason: "PR #42", brief: "…" },
+      }),
+      invokeRecoveryPass: () => {
+        throw new Error("must not dispatch in shadow mode");
+      },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(events.some((e) => String(e.type).includes("would"))).toBe(true);
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
+  });
+
+  test("shadow: human CHANGES_REQUESTED → emits would-escalate, dispatches NOTHING", () => {
+    const events = [];
+    reasoningRecoveryPass([mkPrNotMergedItem()], {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "escalate",
+        fix_class: "human",
+        details: { reason: "PR #44 blocked by human review — 'redesign' (b.ts:9)" },
+      }),
+      invokeRecoveryPass: () => { throw new Error("must not dispatch in shadow"); },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(events.some((e) => String(e.type).includes("would-escalate") || String(e.type).includes("would"))).toBe(true);
+  });
+
+  test("probe throws in enforce → defer outcome (no dispatch, no escalation latch)", () => {
+    const events = [];
+    const intents = [];
+    reasoningRecoveryPass([mkPrNotMergedItem()], {
+      mode: "enforce",
+      classifyTicket: () => ({
+        decision: "defer",
+        fix_class: "board-health",
+        details: { reason: "pr_not_merged: probe failed (gh down); retry next tick" },
+      }),
+      invokeRecoveryPass: () => { throw new Error("must not dispatch on defer"); },
+      recordIntent: (t, i) => intents.push({ t, i }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    const deferIntent = intents.find((i) => i.i.decision === "defer");
+    expect(deferIntent).toBeDefined();
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
+    expect(events.some((e) => e.type === "recovery.escalated")).toBe(false);
   });
 });

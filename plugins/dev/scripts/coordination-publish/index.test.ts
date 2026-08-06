@@ -1,0 +1,333 @@
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createCoordinationPublisher,
+  seedLocalSeqFromMirror,
+  readCoordinationCheckpoint,
+  currentEventLogPath,
+} from "./index.ts";
+
+// A minimal canonical envelope with a stamped event.stream_class (Phase 2 output).
+function evLine(name: string, streamClass: "coordination" | "telemetry", extra: Record<string, unknown> = {}): string {
+  return (
+    JSON.stringify({
+      ts: "2026-07-21T00:00:00Z",
+      id: `id-${name}-${JSON.stringify(extra)}`,
+      attributes: { "event.name": name, "event.stream_class": streamClass },
+      body: { payload: {} },
+      ...extra,
+    }) + "\n"
+  );
+}
+
+function mirrorRecords(mirrorPath: string): Array<Record<string, unknown>> {
+  if (!existsSync(mirrorPath)) return [];
+  return readFileSync(mirrorPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)", () => {
+  let dir: string, eventsDir: string, filePath: string, mirrorPath: string, checkpointPath: string;
+  let ac: AbortController;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ctl1488-cp-"));
+    eventsDir = join(dir, "events");
+    mkdirSync(eventsDir, { recursive: true });
+    filePath = join(eventsDir, "2026-07.jsonl");
+    mirrorPath = join(dir, "coordination.jsonl");
+    checkpointPath = join(dir, "coordination-publish.checkpoint.json");
+    ac = new AbortController();
+  });
+  afterEach(() => {
+    ac.abort();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("coordination lines land in coordination.jsonl with strictly-increasing local_seq (before any network)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    appendFileSync(filePath, evLine("phase.implement.complete.CTL-2", "coordination", { id: "b" }));
+
+    let publishCalled = false;
+    const pub = createCoordinationPublisher({
+      mode: "shadow",
+      filePath,
+      mirrorPath,
+      checkpointPath,
+      signal: ac.signal,
+      hubClient: { publish: async () => { publishCalled = true; } },
+    });
+    await pub.drain();
+
+    const recs = mirrorRecords(mirrorPath);
+    expect(recs.length).toBe(2);
+    expect(recs[0].local_seq).toBe(1);
+    expect(recs[1].local_seq).toBe(2);
+    expect((recs[1].local_seq as number) > (recs[0].local_seq as number)).toBe(true);
+    // The original envelope is preserved alongside local_seq.
+    expect((recs[0].attributes as Record<string, unknown>)["event.name"]).toBe("phase.plan.complete.CTL-1");
+    // shadow never touches the network.
+    expect(publishCalled).toBe(false);
+  });
+
+  test("telemetry lines are tailed but never written to coordination.jsonl", async () => {
+    writeFileSync(filePath, evLine("host.metrics.sampled", "telemetry"));
+    appendFileSync(filePath, evLine("session.heartbeat", "telemetry"));
+    appendFileSync(filePath, evLine("phase.pr.complete.CTL-3", "coordination", { id: "c" }));
+
+    const pub = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub.drain();
+
+    const recs = mirrorRecords(mirrorPath);
+    expect(recs.length).toBe(1);
+    expect((recs[0].attributes as Record<string, unknown>)["event.name"]).toBe("phase.pr.complete.CTL-3");
+  });
+
+  test("a line missing event.stream_class is treated as non-coordination (fail-closed)", async () => {
+    writeFileSync(filePath, JSON.stringify({ ts: "t", id: "x", attributes: { "event.name": "phase.plan.complete.CTL-9" } }) + "\n");
+    const pub = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(0);
+  });
+
+  test("restart resumes from checkpoint byte offset AND local_seq high-water (no dup/renumber)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    const pub1 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub1.drain();
+    pub1.saveCheckpoint();
+    expect(mirrorRecords(mirrorPath).length).toBe(1);
+    expect(readCoordinationCheckpoint(checkpointPath)?.localSeq).toBe(1);
+
+    // Append a new line and start a fresh publisher from the saved checkpoint.
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));
+    const pub2 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub2.drain();
+
+    const recs = mirrorRecords(mirrorPath);
+    expect(recs.length).toBe(2); // no re-append of the first line
+    expect(recs[0].local_seq).toBe(1);
+    expect(recs[1].local_seq).toBe(2); // continues the high-water, not restart at 1
+  });
+
+  test("a lagged-checkpoint restart does NOT double-append an already-mirrored line (dedup by event id)", async () => {
+    // Round 1: mirror one coordination line, but DON'T save the checkpoint (simulate a crash before
+    // the periodic checkpoint flush).
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "evt-a" }));
+    const pub1 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub1.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(1);
+    // No saveCheckpoint() → the checkpoint is absent/behind.
+
+    // Round 2: a fresh publisher with NO checkpoint re-reads from offset 0 (re-processing evt-a) and
+    // also sees a genuinely new line. evt-a must NOT be re-appended; only evt-b lands.
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "evt-b" }));
+    const pub2 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub2.drain();
+    const recs = mirrorRecords(mirrorPath);
+    expect(recs.map((r) => r.id)).toEqual(["evt-a", "evt-b"]); // evt-a not doubled
+    expect(recs.map((r) => r.local_seq)).toEqual([1, 2]); // continues the high-water, no renumber
+  });
+
+  test("a present-but-LAGGING checkpoint seeds local_seq from the mirror high-water, not the stale ck (review #1)", async () => {
+    // The bug: the checkpoint is flushed on a 10s timer while the mirror is appended continuously, so
+    // a present checkpoint can lag the mirror high-water. Seeding localSeq from ck.localSeq alone then
+    // reuses an already-assigned local_seq on the next new line — repro yields [1,2,2] instead of
+    // [1,2,3], breaking the strictly-increasing/unique invariant.
+
+    // Round 1: mirror evt-a and SAVE a checkpoint at localSeq=1 (offset after evt-a).
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "evt-a" }));
+    const pub1 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub1.drain();
+    pub1.saveCheckpoint();
+    expect(readCoordinationCheckpoint(checkpointPath)?.localSeq).toBe(1);
+
+    // Mirror advances to local_seq=2 (evt-b) but WITHOUT a new checkpoint flush — the checkpoint now
+    // LAGS the mirror (localSeq=1, but mirror high-water is 2).
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "evt-b" }));
+    await pub1.drain();
+    expect(mirrorRecords(mirrorPath).map((r) => r.local_seq)).toEqual([1, 2]);
+    expect(readCoordinationCheckpoint(checkpointPath)?.localSeq).toBe(1); // still stale
+
+    // Restart from the lagging checkpoint (resumes at ck.offset, re-reads evt-b — deduped — then a
+    // genuinely new evt-c). evt-c must continue past the mirror high-water, not collide with evt-b.
+    appendFileSync(filePath, evLine("phase.pr.complete.CTL-3", "coordination", { id: "evt-c" }));
+    const pub2 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub2.drain();
+
+    const seqs = mirrorRecords(mirrorPath).map((r) => r.local_seq);
+    expect(seqs).toEqual([1, 2, 3]); // NOT [1, 2, 2]
+    expect(new Set(seqs).size).toBe(seqs.length); // strictly unique — no reused local_seq
+  });
+
+  test("mode 'off' resolves run() immediately and never writes the mirror", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination"));
+    const pub = createCoordinationPublisher({ mode: "off", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub.run(); // must resolve without hanging on the tail loop
+    await pub.drain();
+    expect(existsSync(mirrorPath)).toBe(false);
+  });
+
+  test("mode 'off' processLine is inert directly — the public method's inert guard early-returns without writing", () => {
+    // The mode='off' test above only exercises run()/drain() (which early-return on tailer===null),
+    // never the `if (inert) return` guard on the public processLine method. Call it directly.
+    const pub = createCoordinationPublisher({ mode: "off", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    pub.processLine(evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }).trimEnd());
+    expect(existsSync(mirrorPath)).toBe(false); // inert guard fired — nothing mirrored
+  });
+
+  test("enforce buffers coordination records for the hub (still writes the mirror first)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    const published: unknown[][] = [];
+    const pub = createCoordinationPublisher({
+      mode: "enforce",
+      filePath,
+      mirrorPath,
+      checkpointPath,
+      signal: ac.signal,
+      hubClient: { publish: async (batch) => { published.push(batch); } },
+    });
+    await pub.drain();
+    // Mirror written synchronously regardless of the hub.
+    expect(mirrorRecords(mirrorPath).length).toBe(1);
+    expect(pub.outboundDepth()).toBe(1);
+    await pub.flushToHub();
+    expect(published.length).toBe(1);
+    expect((published[0] as Array<Record<string, unknown>>)[0].local_seq).toBe(1);
+    expect(pub.outboundDepth()).toBe(0);
+  });
+
+  test("flushToHub retains the batch when publish() throws — no egress loss (CTL-1488 remediate)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));
+    let attempts = 0;
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      // First publish throws (simulate the DLQ ENOSPC/corrupt-line edge where publish() is NOT
+      // throw-proof); the second succeeds.
+      hubClient: { publish: async () => { attempts++; if (attempts === 1) throw new Error("dlq ENOSPC"); } },
+    });
+    await pub.drain();
+    expect(pub.outboundDepth()).toBe(2);
+
+    // The throwing flush must NOT drop the batch from egress.
+    await expect(pub.flushToHub()).rejects.toThrow("dlq ENOSPC");
+    expect(pub.outboundDepth()).toBe(2); // batch retained, not spliced away
+
+    // A subsequent flush delivers the retained rows exactly once.
+    await pub.flushToHub();
+    expect(pub.outboundDepth()).toBe(0);
+    expect(attempts).toBe(2);
+    // Mirror still holds both rows the whole time (local-first — never lost).
+    expect(mirrorRecords(mirrorPath).length).toBe(2);
+  });
+
+  test("enforce mode WITHOUT a hub client (interim Loki inbound path) does not accumulate outbound — no unbounded buffer (Codex P2)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));
+    // enforce + no hubClient == the documented Loki-fallback (inbound-only) topology.
+    const pub = createCoordinationPublisher({ mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub.drain();
+    // The mirror is still written (local-first), but nothing is buffered for a non-existent hub.
+    expect(mirrorRecords(mirrorPath).length).toBe(2);
+    expect(pub.outboundDepth()).toBe(0);
+  });
+
+  test("flushToHub drains the DLQ backlog even when outbound is empty (recovered hub catches up — Codex P1)", async () => {
+    // No coordination lines were tailed, so outbound stays empty. A prior outage could have left a
+    // DLQ backlog; the flush tick must still attempt an independent drain instead of early-returning.
+    let publishCalls = 0;
+    let drainCalls = 0;
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubClient: {
+        publish: async () => { publishCalls++; },
+        drainDlq: async () => { drainCalls++; },
+      },
+    });
+    await pub.drain();
+    expect(pub.outboundDepth()).toBe(0);
+    await pub.flushToHub();
+    expect(drainCalls).toBe(1);   // drained the backlog despite an empty outbound
+    expect(publishCalls).toBe(0); // nothing new to publish → publish() not called
+  });
+
+  test("flushToHub publishes outbound and relies on publish()'s post-success drain (no separate drainDlq) when rows are queued", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    let publishCalls = 0;
+    let drainCalls = 0;
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubClient: {
+        publish: async () => { publishCalls++; },
+        drainDlq: async () => { drainCalls++; },
+      },
+    });
+    await pub.drain();
+    expect(pub.outboundDepth()).toBe(1);
+    await pub.flushToHub();
+    expect(publishCalls).toBe(1); // outbound published
+    expect(drainCalls).toBe(0);   // publish() owns the post-success DLQ drain; no double-drain here
+    expect(pub.outboundDepth()).toBe(0);
+  });
+
+  test("a checkpoint from a PREVIOUS month resets the tail offset to 0 — new-month initial events are not skipped (Codex P1)", async () => {
+    // The daemon tails the CURRENT UTC monthly log; after a rollover the checkpoint's byte offset
+    // belongs to LAST month's file. Applied to the new file it would start mid-stream and skip the
+    // initial lines. currentEventLogPath is the exact file the tailer opens.
+    const curPath = currentEventLogPath(eventsDir);
+    const line1 = evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" });
+    const line2 = evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" });
+    writeFileSync(curPath, line1 + line2);
+    // Stale checkpoint from a prior month, offset PAST the first line of the (unrelated) new file.
+    writeFileSync(
+      checkpointPath,
+      JSON.stringify({ path: join(eventsDir, "2000-01.jsonl"), offset: Buffer.byteLength(line1), localSeq: 0 }),
+    );
+    const pub = createCoordinationPublisher({ mode: "shadow", eventsDir, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub.drain();
+    const recs = mirrorRecords(mirrorPath);
+    // Offset discarded (path mismatch) → re-read from 0 → BOTH lines mirrored, initial one not skipped.
+    expect(recs.map((r) => (r.attributes as Record<string, unknown>)["event.name"])).toEqual([
+      "phase.plan.complete.CTL-1",
+      "phase.verify.complete.CTL-2",
+    ]);
+  });
+
+  test("a checkpoint MATCHING the current month reuses its offset (normal resume — no over-eager re-read)", async () => {
+    const curPath = currentEventLogPath(eventsDir);
+    const line1 = evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" });
+    const line2 = evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" });
+    writeFileSync(curPath, line1 + line2);
+    // Checkpoint path MATCHES the current month; offset is past line1 (already processed).
+    writeFileSync(
+      checkpointPath,
+      JSON.stringify({ path: curPath, offset: Buffer.byteLength(line1), localSeq: 1 }),
+    );
+    const pub = createCoordinationPublisher({ mode: "shadow", eventsDir, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub.drain();
+    const recs = mirrorRecords(mirrorPath);
+    // Only the genuinely-new line2 is mirrored; the honored offset skipped the already-done line1.
+    expect(recs.map((r) => (r.attributes as Record<string, unknown>)["event.name"])).toEqual([
+      "phase.verify.complete.CTL-2",
+    ]);
+  });
+});
+
+describe("seedLocalSeqFromMirror", () => {
+  let dir: string, mirrorPath: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ctl1488-seed-")); mirrorPath = join(dir, "coordination.jsonl"); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("absent mirror → 0", () => {
+    expect(seedLocalSeqFromMirror(mirrorPath)).toBe(0);
+  });
+  test("reads the last line's local_seq", () => {
+    writeFileSync(mirrorPath, JSON.stringify({ local_seq: 1 }) + "\n" + JSON.stringify({ local_seq: 7 }) + "\n");
+    expect(seedLocalSeqFromMirror(mirrorPath)).toBe(7);
+  });
+  test("malformed last line → 0 (never throws)", () => {
+    writeFileSync(mirrorPath, "{ not json\n");
+    expect(seedLocalSeqFromMirror(mirrorPath)).toBe(0);
+  });
+});

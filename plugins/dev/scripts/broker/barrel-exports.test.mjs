@@ -12,7 +12,11 @@
 // parseBootHandoff boot seam; CTL-1161 added 6 — isDaemonLocalMergeSignal,
 // refreshAllPluginCheckouts, startPluginDriftCheck, PLUGIN_DRIFT_CHECK_INTERVAL_MS
 // from plugin-refresh.mjs, and startDriftCheckWatcher from router.mjs; CTL-1171
-// added 2 — BROKER_HEARTBEAT_INTERVAL_MS and buildBrokerHeartbeatEvent).
+// added 2 — BROKER_HEARTBEAT_INTERVAL_MS and buildBrokerHeartbeatEvent; CTL-1523
+// added 4 broker-degraded symbols — the driver, the two event-name constants, and
+// the durable-latch reset seam. The pure classifiers/counters stay module-private
+// by design: the barrel rule for broker-degraded.mjs is DRIVER + EVENT NAMES +
+// RESET SEAM only, so their unit tests import them directly from the leaf module).
 // The count is the length of the enumerated REQUIRED_EXPORTS list below —
 // `grep -cE '^export '` undercounts because most re-exports are multi-name
 // `export { … } from` blocks.
@@ -72,9 +76,6 @@ const REQUIRED_EXPORTS = [
   "getBrokerStateFilePath",
   "buildBrokerState",
   "writeBrokerStateFile",
-  "getProjectedWorkerStatePath",
-  "writeProjectedWorkerState",
-  "handleWorkerStateChanged",
   // tailer
   "loadExistingRegistrations",
   // config
@@ -135,14 +136,21 @@ const REQUIRED_EXPORTS = [
   "INGESTION_STALE",
   "INGESTION_RECOVERED",
   "MONITOR_SERVICE_NAME",
+  // CTL-1523: broker-degraded detector (broker-degraded.mjs) — driver + event names
+  // + reset seam only. The legacy __resetDegradedEmittedForTest name above is now an
+  // alias over __resetBrokerDegradedLatchForTest — one chokepoint, two names.
+  "__resetBrokerDegradedLatchForTest",
+  "checkBrokerDegraded",
+  "BROKER_DEGRADED_EVENT",
+  "BROKER_RECOVERED_EVENT",
 ];
 
 describe("CTL-529 barrel contract", () => {
-  test("all 100 public symbols re-export from ./index.mjs", () => {
+  test("all 101 public symbols re-export from ./index.mjs", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(100);
+    expect(REQUIRED_EXPORTS.length).toBe(101);
   });
 
   test("singleton getters return identity-stable live references", () => {

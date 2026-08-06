@@ -56,6 +56,30 @@ fresh_env() {
 	export CATALYST_SESSION_ID="sess_test_${tag}"
 }
 
+# CTL-1416: hermetic thoughts fixture. The CTL-1081 artifact self-check in
+# phase-agent-emit-complete downgrades research/plan `complete`→`failed` when no
+# gate-visible doc exists under thoughts/shared/<research|plans>. The six tests
+# that run research/CTL-100/complete below historically relied on the developer's
+# *wired* thoughts symlinks incidentally containing a CTL-100-matching doc, so they
+# failed in a bare `git worktree add`. This helper seeds a synthetic own-phase
+# artifact into a per-test scratch project dir and echoes that dir; callers run the
+# emit from inside it via `(cd "$dir" && …)`. Mirrors tests 39/40 (CTL-1081) and
+# 43/44 (CTL-1097). Bash-3.2 safe.
+seed_thoughts_project() {
+	local proj="$1" phase="$2" ticket="$3" sub lc
+	case "$phase" in
+	research) sub="thoughts/shared/research" ;;
+	plan) sub="thoughts/shared/plans" ;;
+	*) sub="" ;;
+	esac
+	if [[ -n $sub ]]; then
+		lc="$(printf '%s' "$ticket" | tr '[:upper:]' '[:lower:]')"
+		mkdir -p "${proj}/${sub}"
+		: >"${proj}/${sub}/2026-07-02-${lc}-fixture.md"
+	fi
+	printf '%s\n' "$proj"
+}
+
 # Read the phase event line from this test's event log. catalyst-session.sh end
 # (which the emit script also invokes) appends session.ended + agent.checkout
 # lines after, so we grep for the phase event prefix instead of tailing.
@@ -72,7 +96,8 @@ read_event_line() {
 
 echo "Test 1: phase-complete emitter writes the canonical event shape"
 fresh_env t1
-"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1)
 LINE=$(read_event_line)
 if [[ -z $LINE ]]; then
 	fail "Test 1: no event line emitted"
@@ -123,7 +148,8 @@ echo "Test 4 (bonus): signal file is updated to status=done on complete"
 fresh_env t4
 SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
 echo '{"status":"in-progress","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
-"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1)
 NEW_STATUS=$(jq -r '.status' "$SIGNAL")
 HAS_COMPLETED=$(jq -r 'has("completedAt")' "$SIGNAL")
 assert_eq "done" "$NEW_STATUS" "signal file status updated to done"
@@ -492,9 +518,10 @@ fresh_env t29
 SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
 echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
 # Drop the env var to reproduce the dropped-prefix bg worker; supply --orch-dir.
-env -u CATALYST_ORCHESTRATOR_DIR "$EMIT_SCRIPT" \
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && env -u CATALYST_ORCHESTRATOR_DIR "$EMIT_SCRIPT" \
 	--phase research --ticket CTL-100 --status complete \
-	--orch-dir "${TEST_DIR}/orch" >/dev/null 2>&1
+	--orch-dir "${TEST_DIR}/orch" >/dev/null 2>&1)
 NEW_STATUS=$(jq -r '.status' "$SIGNAL" 2>/dev/null)
 HAS_COMPLETED=$(jq -r 'has("completedAt")' "$SIGNAL" 2>/dev/null)
 assert_eq "done" "$NEW_STATUS" "--orch-dir flips signal to done with env unset"
@@ -521,7 +548,8 @@ echo "Test 31 (CTL-700 D): event payload omits failure_reason on --status comple
 fresh_env t31
 SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
 echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
-"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete --reason "should be dropped" >/dev/null 2>&1
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete --reason "should be dropped" >/dev/null 2>&1)
 LINE=$(read_event_line)
 HAS_REASON=$(echo "$LINE" | jq -r '.body.payload | has("failure_reason")')
 assert_eq "false" "$HAS_REASON" "failure_reason absent from event payload on complete"
@@ -531,7 +559,8 @@ echo "Test 32 (CTL-700 D): signal file gets failureReason=null on --status compl
 fresh_env t32
 SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
 echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
-"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete --reason "should be dropped" >/dev/null 2>&1
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete --reason "should be dropped" >/dev/null 2>&1)
 FAILURE_REASON=$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)
 assert_eq "null" "$FAILURE_REASON" "signal .failureReason is null on complete"
 
@@ -540,7 +569,8 @@ echo "Test 33 (CTL-700 D): signal clears a stale failureReason on --status compl
 fresh_env t33
 SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
 echo '{"status":"running","ticket":"CTL-100","phase":"research","failureReason":"leftover_from_failed_attempt"}' >"$SIGNAL"
-"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1)
 FAILURE_REASON=$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)
 assert_eq "null" "$FAILURE_REASON" "stale failureReason cleared to null on complete"
 
@@ -729,7 +759,8 @@ fi
 echo ""
 echo "Test 47 (CTL-1410): absent --payload-json → byte-identical default payload (no phase_name)"
 fresh_env t47
-"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1)
 LINE=$(read_event_line)
 PAYLOAD_KEYS=$(echo "$LINE" | jq -cS '.body.payload | keys')
 assert_eq '["phase","status","ticket"]' "$PAYLOAD_KEYS" "default payload keys unchanged (no phase_name leak)"

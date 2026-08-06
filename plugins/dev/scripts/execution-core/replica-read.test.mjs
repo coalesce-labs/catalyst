@@ -327,6 +327,20 @@ function seedEligible() {
   db.run(
     `INSERT INTO issues VALUES ('CTC-100', 'Other team todo', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, NULL, 2700, 60)`,
   );
+  // CTL-1589 (triageState): rows in the TRIAGE state. Invisible to eligible()
+  // (which binds status=Todo) — the exact blind spot that stranded a ticket whose
+  // one-shot →Triage webhook dispatch was consumed.
+  db.run(
+    `INSERT INTO issues VALUES ('CTL-200', 'Sitting in triage', 'Triage', 1, NULL, NULL, NULL, NULL, NULL, NULL, 2900, 50)`,
+  );
+  // Tombstoned Triage row — excluded by removed_at IS NULL.
+  db.run(
+    `INSERT INTO issues VALUES ('CTL-201', 'Removed triage', 'Triage', 1, NULL, NULL, NULL, NULL, NULL, '2026-06-03T00:00:00Z', 2800, 40)`,
+  );
+  // Another team's Triage row — must not leak into a CTL query.
+  db.run(
+    `INSERT INTO issues VALUES ('CTC-200', 'Other team triage', 'Triage', 1, NULL, NULL, NULL, NULL, NULL, NULL, 2700, 30)`,
+  );
   // relations: CTL-100 blocks CTL-9 (forward); CTL-7 blocks CTL-100 (inverse).
   db.run(`INSERT INTO relations VALUES ('blocks', 'CTL-100', 'CTL-9')`);
   db.run(`INSERT INTO relations VALUES ('blocks', 'CTL-7', 'CTL-100')`);
@@ -410,16 +424,24 @@ describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
     expect(reader.eligible({ team: "CTL" })).toBeUndefined();
   });
 
-  test("returns undefined (v1 scope) when query.project is set", () => {
+  // D1 (Stage 0): project-filtered queries are now SERVED from the replica (the
+  // permanent every-tick fall-through to `linearis issues list` for project-scoped
+  // teams is closed). The filter is an EXACT project-name match on the LEFT JOIN.
+  test("D1: serves a project-filtered query from the replica (exact project name)", () => {
     seedEligible();
     reader = createReplicaReader({ dbPath });
-    expect(reader.eligible({ team: "CTL", status: "Todo", project: "Harden" })).toBeUndefined();
+    const res = reader.eligible({ team: "CTL", status: "Todo", project: "Harden the core" });
+    // Only CTL-100 is in proj-1 ("Harden the core"); CTL-101 has no project.
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-100"]);
   });
 
-  test("returns undefined (v1 scope) when query.label is set", () => {
+  test("D1: a project filter that matches nothing → { nodes: [] } (served, NOT undefined)", () => {
     seedEligible();
     reader = createReplicaReader({ dbPath });
-    expect(reader.eligible({ team: "CTL", status: "Todo", label: "bug" })).toBeUndefined();
+    // A defined empty answer — the caller must NOT re-run linearis for it.
+    expect(reader.eligible({ team: "CTL", status: "Todo", project: "Nonexistent" })).toEqual({
+      nodes: [],
+    });
   });
 
   test("returns undefined when the replica file is absent", () => {
@@ -574,5 +596,508 @@ describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
     expect(second.nodes[0].inverseRelations.nodes).toEqual([
       { type: "blocks", issue: { identifier: "CTL-7" } },
     ]);
+  });
+});
+
+// CTL-1589 — triageState(): the tickets SITTING IN the team's Triage state. The
+// level-triggered half of triage admission; eligible() binds status=Todo, so
+// before this a ticket parked in Triage appeared in no replica read at all. It
+// shares eligible()'s body (readBoardByState), so these tests pin the two things
+// that are genuinely its own — the state binding and the triageStatus contract —
+// plus the shared gates, which must hold identically for both readers.
+describe("createReplicaReader.triageState (CTL-1589)", () => {
+  test("selects by triageStatus, excluding Todo rows, removed rows, and other teams", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.triageState({ team: "CTL", status: "Todo", triageStatus: "Triage" });
+    // CTL-200 only: NOT CTL-100/CTL-101 (Todo), NOT CTL-201 (removed), NOT CTC-200.
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-200"]);
+  });
+
+  test("builds the same node shape eligible() does (normalizeTicket-consumable)", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const n = reader.triageState({ team: "CTL", triageStatus: "Triage" }).nodes[0];
+    expect(n.identifier).toBe("CTL-200");
+    expect(n.state).toBe("Triage");
+    expect(n.priority).toBe(1);
+    expect(n.updatedAt).toBe(new Date(2900).toISOString());
+    expect(n.relations.nodes).toEqual([]);
+    expect(n.inverseRelations.nodes).toEqual([]);
+  });
+
+  test("a custom triageStatus name binds through (not hardcoded to 'Triage')", () => {
+    seedEligible();
+    const db = new Database(dbPath);
+    db.run(`UPDATE issues SET state = 'Needs Triage' WHERE identifier = 'CTL-200'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toEqual({ nodes: [] });
+    expect(
+      reader.triageState({ team: "CTL", triageStatus: "Needs Triage" }).nodes.map((n) => n.identifier)
+    ).toEqual(["CTL-200"]);
+  });
+
+  test("a team with genuinely zero Triage rows → { nodes: [] }, NOT undefined", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "ZZZ", triageStatus: "Triage" })).toEqual({ nodes: [] });
+  });
+
+  // Deliberate divergence from eligible(): a missing STATE is a confirmed empty
+  // here, not a fall-through. A team with no configured Triage state has nothing
+  // to sweep, and there is no live query that could answer "the null state".
+  test("triageStatus null/absent → { nodes: [] } (confirmed empty), never a DB read", () => {
+    // No fixture at all — an absent DB would make any real read return undefined,
+    // so a { nodes: [] } here proves the short-circuit ran first.
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: null })).toEqual({ nodes: [] });
+    expect(reader.triageState({ team: "CTL" })).toEqual({ nodes: [] });
+  });
+
+  test("returns undefined (fall through) when team is missing", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  test("respects the freshness gate identically to eligible(): STALE → undefined", () => {
+    seedEligible();
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(dbPath, old, old);
+    try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+    // …and the sibling reader agrees, so the two can't drift apart.
+    expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
+  });
+
+  test("DEAD WRITER (stale .writer.lock, fresh db) → undefined", () => {
+    seedEligible();
+    const old = new Date(Date.now() - 10 * 60_000);
+    writeFileSync(dbPath + ".writer.lock", "");
+    utimesSync(dbPath + ".writer.lock", old, old);
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  test("cursor row ABSENT (mid-reseed) → undefined (fall through), never a partial board", () => {
+    seedEligible();
+    const db = new Database(dbPath);
+    db.run(`DELETE FROM sync_meta WHERE key = 'cursor'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  test("returns undefined when the replica file is absent", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  test("fail-open: DB without the issues table → undefined (query throws)", () => {
+    const empty = new Database(dbPath, { create: true });
+    empty.run(`CREATE TABLE unrelated (x INTEGER)`);
+    empty.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.triageState({ team: "CTL", triageStatus: "Triage" })).toBeUndefined();
+  });
+
+  // The webhook →Triage predicate filters on team + state ONLY, so the
+  // level-triggered read must not be narrowed by the query's project/label —
+  // otherwise the sweep would admit less than the edge-triggered path already does.
+  test("ignores the query's project/label filters (mirrors the webhook →Triage predicate)", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    // CTL-200 has no project and no labels; a project-scoped query still finds it.
+    const res = reader.triageState({
+      team: "CTL",
+      triageStatus: "Triage",
+      project: "Harden the core",
+      label: "bug",
+    });
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-200"]);
+  });
+});
+
+// D1 (Stage 0) — label-filtered eligible(). Needs the issue_labels⋈labels join keyed
+// by the issue's own PK `id`, so this fixture carries the `id` column + the two label
+// tables the corrected join reads (issue_labels(issue_id,label_id) + labels(id,name)).
+function seedEligibleLabeled() {
+  const db = new Database(dbPath, { create: true });
+  db.run(`
+    CREATE TABLE issues (
+      id                TEXT,
+      identifier        TEXT,
+      title             TEXT,
+      state             TEXT,
+      priority          INTEGER,
+      estimate          INTEGER,
+      project_id        TEXT,
+      parent_identifier TEXT,
+      delegate_id       TEXT,
+      delegate_name     TEXT,
+      removed_at        TEXT,
+      updated_at        INTEGER,
+      created_at        INTEGER
+    )
+  `);
+  db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  db.run(`CREATE TABLE relations (type TEXT, issue_identifier TEXT, related_identifier TEXT)`);
+  db.run(`CREATE TABLE projects (id TEXT, name TEXT)`);
+  db.run(`CREATE TABLE labels (id TEXT, name TEXT, removed_at TEXT)`);
+  db.run(`CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)`);
+  db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+  db.run(`INSERT INTO labels VALUES ('lab-bug', 'bug', NULL)`);
+  db.run(`INSERT INTO labels VALUES ('lab-chore', 'chore', NULL)`);
+  // CTL-200 labeled 'bug'; CTL-201 labeled 'chore'; both Todo.
+  db.run(
+    `INSERT INTO issues VALUES ('id-200', 'CTL-200', 'Bug ticket', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, NULL, 3000, 100)`,
+  );
+  db.run(
+    `INSERT INTO issues VALUES ('id-201', 'CTL-201', 'Chore ticket', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, NULL, 2000, 90)`,
+  );
+  db.run(`INSERT INTO issue_labels VALUES ('id-200', 'lab-bug')`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-201', 'lab-chore')`);
+  db.close();
+  freshen();
+}
+
+describe("createReplicaReader.eligible — D1 label filter (Stage 0)", () => {
+  test("serves a label-filtered query from the replica (issue_labels⋈labels by name)", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo", label: "bug" });
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-200"]); // only the 'bug' ticket
+  });
+
+  test("a different label selects the other ticket (join resolves identifier→id correctly)", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo", label: "chore" });
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-201"]);
+  });
+
+  test("a label matching nothing → { nodes: [] } (served, NOT undefined)", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL", status: "Todo", label: "nonexistent" })).toEqual({
+      nodes: [],
+    });
+  });
+
+  test("project + label combined AND both filters", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    // No project set on these rows, so a project filter + label yields nothing.
+    expect(
+      reader.eligible({ team: "CTL", status: "Todo", label: "bug", project: "Harden the core" }),
+    ).toEqual({ nodes: [] });
+  });
+});
+
+// ownership() (Stage 0 / A0) — the per-ticket claim-gate reader. Same freshness +
+// seed-cursor gate as eligible() (NO per-ticket currency gate — the null-vs-non-null
+// trust decision lives in fetchTicketAssignee); any gate-fail / miss → undefined
+// (caller HOLDs / falls through, never claims on unknown).
+function seedOwnership() {
+  const db = new Database(dbPath, { create: true });
+  db.run(
+    `CREATE TABLE issues (identifier TEXT, assignee_id TEXT, delegate_id TEXT, delegate_name TEXT, removed_at TEXT)`,
+  );
+  db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+  db.run(`INSERT INTO issues VALUES ('CTL-300', 'user-1', 'bot-9', 'Bot', NULL)`); // assigned + delegated
+  db.run(`INSERT INTO issues VALUES ('CTL-301', NULL, NULL, NULL, NULL)`); // unassigned/undelegated
+  db.run(`INSERT INTO issues VALUES ('CTL-302', 'user-2', 'user-3', 'Human', NULL)`); // human delegate
+  db.run(`INSERT INTO issues VALUES ('CTL-303', 'user-1', 'bot-9', 'Bot', '2026-06-03T00:00:00Z')`); // removed
+  db.close();
+}
+
+// backdate — push a file's mtime N minutes into the past (liveness/currency fixtures).
+function backdate(path, minutes) {
+  const t = new Date(Date.now() - minutes * 60_000);
+  try {
+    utimesSync(path, t, t);
+  } catch {
+    /* absent */
+  }
+}
+
+describe("createReplicaReader.ownership (Stage 0 / A0)", () => {
+  test("fresh (liveness + seed pass) → HIT { assignee, delegate }", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-300")).toEqual({ assignee: "user-1", delegate: "bot-9" });
+  });
+
+  test("HIT coerces unset assignee/delegate to null", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-301")).toEqual({ assignee: null, delegate: null });
+  });
+
+  test("HIT reports a human delegate verbatim (the claim decision lives in the caller)", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-302")).toEqual({ assignee: "user-2", delegate: "user-3" });
+  });
+
+  test("removed (tombstoned) row → undefined (MISS → caller HOLDs)", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-303")).toBeUndefined();
+  });
+
+  test("absent ticket → undefined", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-404")).toBeUndefined();
+  });
+
+  test("empty/falsy identifier → undefined without touching the DB", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("")).toBeUndefined();
+    expect(reader.ownership(null)).toBeUndefined();
+    expect(reader.ownership(undefined)).toBeUndefined();
+  });
+
+  test("STALE .writer.lock (dead writer) → undefined (liveness gate fails)", () => {
+    seedOwnership();
+    freshen(); // db/-wal fresh (a recent apply just before the writer died)
+    writeFileSync(dbPath + ".writer.lock", "");
+    backdate(dbPath + ".writer.lock", 10); // present-but-stale lock is authoritative → liveness fails
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-300")).toBeUndefined();
+  });
+
+  test("mid-reseed (cursor absent) on a fresh DB → undefined (seed gate)", () => {
+    seedOwnership();
+    const db = new Database(dbPath);
+    db.run(`DELETE FROM sync_meta WHERE key = 'cursor'`);
+    db.close();
+    freshen(); // liveness passes; only the seed is incomplete
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-300")).toBeUndefined();
+  });
+
+  // Regression (Stage-0 review): there is deliberately NO per-ticket currency gate.
+  // File mtime cannot detect PER-TICKET lag, and gating on it re-froze the claim gate
+  // on a genuinely QUIET-but-current feed (the CTL-1397 antipattern). As long as the
+  // writer is LIVE (fresh lock) and the seed is complete, ownership() serves the row
+  // even when the data-file mtimes are old — the null-vs-non-null trust decision is
+  // the caller's (fetchTicketAssignee live-confirms every null delegate).
+  test("STALE data files but LIVE writer + complete seed → HIT (no currency gate)", () => {
+    seedOwnership();
+    backdate(dbPath, 30); // data files stale far beyond any old currency window …
+    backdate(dbPath + "-wal", 30);
+    // … but the writer is alive: a just-heartbeated lock keeps liveness passing.
+    writeFileSync(dbPath + ".writer.lock", "");
+    utimesSync(dbPath + ".writer.lock", new Date(), new Date());
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-300")).toEqual({ assignee: "user-1", delegate: "bot-9" });
+  });
+});
+
+// labels() (CTL-1481 — worker-label visibility projection read). Same freshness +
+// seed-cursor gate as ownership(); any gate-fail/miss/throw → undefined (caller
+// falls through, never trusts a stale/partial label list). Resolves
+// identifier → internal id first (issue_labels keys off the PK, matching the
+// identifier→id resolution eligible()'s label-EXISTS join needs), then joins
+// issue_labels⋈labels for that id.
+function seedLabels() {
+  const db = new Database(dbPath, { create: true });
+  db.run(`CREATE TABLE issues (id TEXT, identifier TEXT, removed_at TEXT)`);
+  db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  db.run(`CREATE TABLE labels (id TEXT, name TEXT, removed_at TEXT)`);
+  db.run(`CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)`);
+  db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+  db.run(`INSERT INTO labels VALUES ('lab-a', 'worker:mini', NULL)`);
+  db.run(`INSERT INTO labels VALUES ('lab-b', 'type:bug', NULL)`);
+  // CTL-400: two live labels attached — the sort-order + basic HIT case.
+  db.run(`INSERT INTO issues VALUES ('id-400', 'CTL-400', NULL)`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-400', 'lab-a')`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-400', 'lab-b')`);
+  // CTL-401: no labels attached at all — a defined, authoritative [].
+  db.run(`INSERT INTO issues VALUES ('id-401', 'CTL-401', NULL)`);
+  // CTL-402: tombstoned issue (removed_at set) — excluded by removed_at IS NULL.
+  db.run(`INSERT INTO issues VALUES ('id-402', 'CTL-402', '2026-06-03T00:00:00Z')`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-402', 'lab-a')`);
+  // CTL-403: one live label ('lab-a') + one tombstoned label ('lab-c') attached —
+  // the tombstoned label must be filtered out of the returned list.
+  db.run(`INSERT INTO labels VALUES ('lab-c', 'worker:mini-2', '2026-06-03T00:00:00Z')`);
+  db.run(`INSERT INTO issues VALUES ('id-403', 'CTL-403', NULL)`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-403', 'lab-a')`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-403', 'lab-c')`);
+  db.close();
+  freshen();
+}
+
+describe("createReplicaReader.labels (CTL-1481 — worker-label visibility read)", () => {
+  test("fresh + seeded issue with 2 labels → sorted [{id,name}] pairs (ORDER BY l.name)", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-400")).toEqual([
+      { id: "lab-b", name: "type:bug" },
+      { id: "lab-a", name: "worker:mini" },
+    ]);
+  });
+
+  test("issue with zero labels → [] (a defined, authoritative empty answer)", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-401")).toEqual([]);
+  });
+
+  test("unknown identifier → undefined (MISS)", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-404")).toBeUndefined();
+  });
+
+  test("tombstoned issue (removed_at set) → undefined", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-402")).toBeUndefined();
+  });
+
+  test("a tombstoned label attached to a live issue is filtered out of the list", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    // CTL-403 has lab-a (live) + lab-c (tombstoned) attached; only lab-a returns.
+    expect(reader.labels("CTL-403")).toEqual([{ id: "lab-a", name: "worker:mini" }]);
+  });
+
+  test("STALE .writer.lock (dead writer) → undefined (liveness gate fails)", () => {
+    seedLabels();
+    writeFileSync(dbPath + ".writer.lock", "");
+    backdate(dbPath + ".writer.lock", 10); // present-but-stale lock is authoritative
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-400")).toBeUndefined();
+  });
+
+  test("mid-reseed (cursor row ABSENT) on a fresh DB → undefined (seed gate)", () => {
+    seedLabels();
+    const db = new Database(dbPath);
+    db.run(`DELETE FROM sync_meta WHERE key = 'cursor'`);
+    db.close();
+    freshen(); // the writer is STILL live; only the seed is incomplete
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-400")).toBeUndefined();
+  });
+
+  test("mid-reseed (cursor present but EMPTY value) → undefined (seed gate)", () => {
+    seedLabels();
+    const db = new Database(dbPath);
+    db.run(`UPDATE sync_meta SET value = '' WHERE key = 'cursor'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-400")).toBeUndefined();
+  });
+
+  test("empty/falsy identifier → undefined without touching the DB", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("")).toBeUndefined();
+    expect(reader.labels(null)).toBeUndefined();
+    expect(reader.labels(undefined)).toBeUndefined();
+  });
+});
+
+describe("createReplicaReader.isFresh (CTL-1571)", () => {
+  test("true with a recent writer.lock heartbeat, false when stale or absent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "replica-isfresh-"));
+    const dbPath = join(dir, "catalyst-replica.db");
+    new Database(dbPath).close();
+    const reader = createReplicaReader({ dbPath });
+    // absent lock → falls back to the db/-wal mtime proxy; db just created → fresh
+    expect(reader.isFresh()).toBe(true);
+    // fresh heartbeat
+    writeFileSync(`${dbPath}.writer.lock`, "1");
+    expect(reader.isFresh()).toBe(true);
+    // stale heartbeat (1h old, threshold 5min) — a PRESENT lock is authoritative,
+    // so this is false even though the db file's own mtime is fresh
+    const old = (Date.now() - 3_600_000) / 1000;
+    utimesSync(`${dbPath}.writer.lock`, old, old);
+    expect(reader.isFresh()).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("createReplicaReader.stateAndLabels (CTL-1571 — one-snapshot pair)", () => {
+  function seedPair() {
+    const db = new Database(dbPath, { create: true });
+    db.run(`CREATE TABLE issues (id TEXT, identifier TEXT, state TEXT, completed_at TEXT, canceled_at TEXT, removed_at TEXT, updated_at INTEGER)`);
+    db.run(`CREATE TABLE labels (id TEXT, name TEXT, removed_at TEXT)`);
+    db.run(`CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)`);
+    db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+    db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+    db.run(`INSERT INTO issues VALUES ('id-1', 'CTL-1', 'Implement', NULL, NULL, NULL, 1000)`);
+    db.run(`INSERT INTO labels VALUES ('lab-a', 'monitor', NULL)`);
+    db.run(`INSERT INTO issue_labels VALUES ('id-1', 'lab-a')`);
+    db.close();
+    freshen();
+  }
+
+  test("HIT returns state + labels as one defined pair", () => {
+    seedPair();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.stateAndLabels("CTL-1")).toEqual({
+      state: { terminal: false, state: "Implement" },
+      labels: [{ id: "lab-a", name: "monitor" }],
+    });
+  });
+
+  test("absent row → undefined — never a partial pair", () => {
+    seedPair();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.stateAndLabels("CTL-999")).toBeUndefined();
+  });
+});
+
+// ── labelsBatch (CTL-1588 #2845) — one snapshot, one IN query ────────────────
+describe("createReplicaReader.labelsBatch", () => {
+  test("returns {identifier: [names]} for the id set in one call; absent ids have no key", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    const out = reader.labelsBatch(["CTL-200", "CTL-201", "CTL-999"]);
+    expect(out).toEqual({ "CTL-200": ["bug"], "CTL-201": ["chore"] });
+  });
+
+  test("a tombstoned label is excluded (same live-label predicate as labels())", () => {
+    seedEligibleLabeled();
+    const db = new Database(dbPath);
+    db.run(`UPDATE labels SET removed_at = '2026-07-31T00:00:00Z' WHERE name = 'bug'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labelsBatch(["CTL-200", "CTL-201"])).toEqual({ "CTL-201": ["chore"] });
+  });
+
+  test("empty/absent input → {} without touching the db", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labelsBatch([])).toEqual({});
+    expect(reader.labelsBatch(undefined)).toEqual({});
+  });
+
+  test("stale writer (no freshness) → undefined (fall through, never a stale answer)", () => {
+    seedEligibleLabeled();
+    // Backdate the DB + -wal well past the default 5-min staleness threshold.
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(dbPath, old, old);
+    try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labelsBatch(["CTL-200"])).toBeUndefined();
   });
 });

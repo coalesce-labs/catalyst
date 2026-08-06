@@ -1,0 +1,58 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "public/assets/**", "public/index.html"]
+    },
+    "orch-monitor-ui#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "../public/assets/**", "../public/index.html"]
+    },
+    "build:ui": {
+      "dependsOn": ["^build"],
+      "outputs": ["public/assets/**", "public/index.html"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "lint": {},
+    "lint:fix": {
+      "cache": false
+    },
+    "knip": {},
+    "knip:ci": {},
+    "audit": {
+      "cache": false
+    },
+    "audit:gen": {
+      "cache": false
+    },
+    "gen:icons": {
+      "cache": false
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "check": {
+      "dependsOn": ["typecheck", "lint", "knip", "audit", "test"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "dev:ui": {
+      "cache": false,
+      "persistent": true
+    },
+    "preview": {
+      "cache": false,
+      "persistent": true
+    },
+    "tauri": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}

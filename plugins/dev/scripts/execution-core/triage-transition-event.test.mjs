@@ -20,6 +20,8 @@ describe("buildTriageTransitionEvent", () => {
     expect(line.endsWith("\n")).toBe(true);
     const ev = JSON.parse(line);
     expect(ev.attributes["event.name"]).toBe("phase.triage.linear-transition.CTL-704");
+    // CTL-1488: coordination-stamped so coordination-publish's fail-closed tailer mirrors it.
+    expect(ev.attributes["event.stream_class"]).toBe("coordination");
     expect(ev.attributes["event.entity"]).toBe("phase");
     expect(ev.attributes["event.action"]).toBe("linear-transition");
     expect(ev.attributes["linear.issue.identifier"]).toBe("CTL-704");

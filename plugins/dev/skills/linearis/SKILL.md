@@ -1,7 +1,8 @@
 ---
 name: linearis-cli
 description:
-  Reference for Linearis CLI commands to interact with Linear project management. Use when working
+  Linear access rule + Linearis CLI reference. READS → query the local replica by direct SQL
+  (`~/catalyst/catalyst-replica.db`); WRITES and list/search → the `linearis` CLI. Use when working
   with Linear tickets, cycles, projects, milestones, or when the user mentions ticket IDs like
   TEAM-123, ENG-456, PROJ-789.
 ---
@@ -10,22 +11,16 @@ description:
 
 > Verified against Linearis v2026.4.9 on 2026-05-31.
 
+> ⚠️ **READ vs WRITE — the rule that governs everything below.** Linear **READS** → query the local
+> replica by direct SQL (`~/catalyst/catalyst-replica.db`), or call `linear_read_ticket <ID>`.
+> **Never** shell `linearis issues read` for a routine read — that hits the rate-limited API and 429s
+> the shared quota. **WRITES** (create/update/state/comment/estimate/label) and **list/search/non-issue
+> domains** → the `linearis` CLI. Full rule + freshness gate: **[Reading Linear](#reading-linear)**.
+
 **CRITICAL: Always use these exact patterns. Do NOT guess or improvise syntax.**
 
 > ⚠️ **Read the [Gotchas & Traps](#gotchas--traps) section before scripting** — `issues list` silently
 > hides Done tickets, `linearis` eats stdin in loops, and there is no `--json` flag. These bite hard.
-
-## Looking Up Syntax
-
-For full flag details, run `linearis usage` (all domains) or `linearis <domain> usage` (one domain).
-The `usage` output is authoritative and always current — prefer it over memorizing flags.
-
-```bash
-linearis usage                # Full overview of every domain and flag
-linearis issues usage         # Just issue operations
-linearis milestones usage     # Just milestone operations
-linearis cycles usage         # Just cycle operations
-```
 
 ## Reading Linear
 
@@ -140,6 +135,18 @@ agent/skill reads and retained only as a fail-open compatibility shim. Prefer di
 additive `_meta` field + duplicate-flag collapsing broke bare-`linearis` jq pipelines.) The
 daemon's own read paths use `replica-read.mjs` directly and are unaffected by this deprecation.
 
+## Looking Up Syntax
+
+For full flag details, run `linearis usage` (all domains) or `linearis <domain> usage` (one domain).
+The `usage` output is authoritative and always current — prefer it over memorizing flags.
+
+```bash
+linearis usage                # Full overview of every domain and flag
+linearis issues usage         # Just issue operations
+linearis milestones usage     # Just milestone operations
+linearis cycles usage         # Just cycle operations
+```
+
 ## Gotchas & Traps
 
 These are non-obvious behaviors that silently produce wrong results. Verified empirically against
@@ -194,13 +201,23 @@ v2026.4.9.
 ### Read a ticket
 
 ```bash
-# Preferred — direct SQL (gate on freshness first; see Reading Linear)
-sqlite3 -json "${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}" \
+# Preferred — self-contained inline replica SQL. No source, no $SCRIPT_DIR — works in any
+# shell. Resolves the DB path the same way the daemon does (gate on freshness first; see
+# Reading Linear):
+DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"
+sqlite3 -json "$DB" \
   "SELECT identifier, title, state, estimate FROM issues WHERE identifier='ENG-123' AND removed_at IS NULL;"
 
-# Fallback only (replica stale/absent) — and surface it as an anomaly + file a ticket
-linearis issues read ENG-123
+# Inside a skill/script, the shared helper does freshness-gate → replica SQL → loud linearis
+# fallback in ONE call. Source it by a RESOLVABLE root — there is NO $SCRIPT_DIR in a bare
+# shell; in a catalyst-dev skill use $CLAUDE_PLUGIN_ROOT:
+source "${CLAUDE_PLUGIN_ROOT:?source in a catalyst-dev skill}/scripts/lib/linear-read-replica.sh"
+json=$(linear_read_ticket ENG-123) || return 1      # linearis-shaped JSON (state.name, estimate, labels.nodes[]…)
+title=$(printf '%s' "$json" | jq -r '.title // empty')
 ```
+
+> `linearis issues read ENG-123` is the STALE/ABSENT **fallback only**. `linear_read_ticket` runs it
+> for you and surfaces the fallback loudly — do **not** shell it directly for a routine read.
 
 ### Search tickets
 

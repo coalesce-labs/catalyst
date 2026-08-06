@@ -43,6 +43,9 @@
   --color-border-subtle: var(--border-subtle);
   --color-fg: var(--fg);
   --color-muted: var(--fg-muted);
+  /* CTL-1574: most-recessive ink (catalyst-cloud app.css parity) — without this
+     mapping `text-fg-dim` compiles to NO css and dim text renders at full --fg. */
+  --color-fg-dim: var(--fg-dim);
   /* CTL-1099: accent is now a per-theme/brand var (was the literal blue #5e9ee8),
      so text-accent + every var(--color-accent) consumer (md-content links,
      ticket-ref pills, blockquote borders, prose-invert links) flips with the

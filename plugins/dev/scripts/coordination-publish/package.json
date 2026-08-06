@@ -1,0 +1,14 @@
+{
+  "name": "catalyst-coordination-publish",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pino": "^9.6.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14"
+  }
+}

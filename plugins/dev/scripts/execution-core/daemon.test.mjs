@@ -120,13 +120,18 @@ describe("startDaemon heartbeat admission wiring (CTL-1322)", () => {
       reconcileBoot: () => ({}),
       startMonitor: () => {},
       startScheduler: () => {},
-      startHeartbeat: (opts) => { captured = opts; return { stop() {}, started: Promise.resolve() }; },
+      startHeartbeat: (opts) => {
+        captured = opts;
+        return { stop() {}, started: Promise.resolve() };
+      },
       watchRegistry: false,
     });
     expect(captured).not.toBe(null);
     expect(typeof captured.admissionFn).toBe("function");
     let admission;
-    expect(() => { admission = captured.admissionFn(); }).not.toThrow();
+    expect(() => {
+      admission = captured.admissionFn();
+    }).not.toThrow();
     expect(admission).toHaveProperty("accepting");
     expect(admission).toHaveProperty("holdReason");
     expect(admission).toHaveProperty("effectiveCapacity");
@@ -512,7 +517,7 @@ describe("startDaemon", () => {
       listProjects: () => [],
     });
     const emptyWarns = warn.mock.calls.filter(
-      (c) => JSON.stringify(c).includes("registry") && JSON.stringify(c).includes("register"),
+      (c) => JSON.stringify(c).includes("registry") && JSON.stringify(c).includes("register")
     );
     expect(emptyWarns.length).toBe(1);
     warn.mockRestore();
@@ -1136,6 +1141,121 @@ describe("startReaperAndTimer — injects a production ProcReaper (CTL-1165 D2)"
     expect(typeof capturedOpts.procReaper.sweep).toBe("function");
     // Default-safe: shadow mode emits would-reap, kills nothing.
     expect(capturedOpts.procReaper.mode).toBe("shadow");
+    // CTL-1531 P1-a: the widened any-command class carries its OWN rollout mode
+    // and it too ships dark. This assertion is what stops a future config change
+    // from arming the widened killer as a side effect of `mode: "enforce"` —
+    // the daemon must pass widenMode through as a SEPARATE, independently
+    // defaulted knob (ADR-023 "dark by default", one knob per actuator).
+    expect(capturedOpts.procReaper.widenMode).toBe("shadow");
+    stopDaemon();
+  });
+
+  // The assertion above is VACUOUS on its own: with an empty procReaper config both
+  // `procCfg.mode ?? "shadow"` and a hypothetical `procCfg.widenMode ?? procCfg.mode
+  // ?? "shadow"` evaluate to "shadow", so it cannot tell an INDEPENDENT knob from one
+  // that merely inherits. This case supplies mode:"enforce" and NO widenMode, which is
+  // exactly the deployment ADR-023 forbids arming implicitly — a host already running
+  // the legacy node/bun reaper in enforce must NOT thereby arm the widened
+  // any-command class. It goes RED under the inheriting mutation.
+  // readOrphanReaperConfig does NO schema validation, so a malformed value reaches
+  // the daemon verbatim. Each of these Number()s to 0, which the constructor treats
+  // as the intentional "uncapped" setting — so a typo would have SILENTLY REMOVED
+  // the widened kill ceiling rather than degrading to the documented default.
+  for (const bad of ["", false, [], {}, "abc", null, "5"]) {
+    test(`malformed widenMaxKills ${JSON.stringify(bad)} degrades to the default cap, never uncapped`, () => {
+      let capturedOpts = null;
+      startDaemon({
+        recover: () => {},
+        reconcileBoot: () => {},
+        startMonitor: () => {},
+        startScheduler: () => {},
+        watchRegistry: false,
+        enableReaper: true,
+        orphanReaperConfig: { procReaper: { widenMaxKills: bad } },
+        makeReaper: (opts) => {
+          capturedOpts = opts;
+          return { handle: () => Promise.resolve(), bootReplay: () => Promise.resolve() };
+        },
+        pollMs: 0,
+        debounceMs: 600_000,
+      });
+      expect(capturedOpts.procReaper.widenMaxKills).toBeGreaterThan(0);
+      stopDaemon();
+    });
+  }
+
+  test("an EXPLICIT numeric 0 is preserved as the documented uncapped escape hatch", () => {
+    // The typo guard above must not take away a real operator choice. `0` is a
+    // number, so it passes through; `""` is not, so it does not.
+    let capturedOpts = null;
+    startDaemon({
+      recover: () => {}, reconcileBoot: () => {}, startMonitor: () => {},
+      startScheduler: () => {}, watchRegistry: false, enableReaper: true,
+      orphanReaperConfig: { procReaper: { widenMaxKills: 0 } },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return { handle: () => Promise.resolve(), bootReplay: () => Promise.resolve() };
+      },
+      pollMs: 0, debounceMs: 600_000,
+    });
+    expect(capturedOpts.procReaper.widenMaxKills).toBe(0);
+    stopDaemon();
+  });
+
+  test("mode:enforce with no widenMode does NOT arm the widened class (independent knob, ADR-023)", () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      orphanReaperConfig: { procReaper: { mode: "enforce" } },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
+      pollMs: 0,
+      debounceMs: 600_000,
+    });
+    expect(capturedOpts.procReaper.mode).toBe("enforce"); // legacy class honours config
+    expect(capturedOpts.procReaper.widenMode).toBe("shadow"); // widened class stays dark
+    // CTL-1531 round 2: and the widened class is CAPPED per run even when the
+    // operator supplies no cap. Omitting the key must land on the module default
+    // (5), never on 0 — which is the DOCUMENTED "uncapped" value.
+    expect(capturedOpts.procReaper.widenMaxKills).toBe(5);
+    stopDaemon();
+  });
+
+  // The cap is operator-tunable, and the daemon must actually thread it through —
+  // otherwise the knob documented in configuration.md / the Layer-1 schema is inert.
+  test("procReaper.widenMaxKills is threaded from config (CTL-1531 round 2)", () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      orphanReaperConfig: { procReaper: { widenMaxKills: 2 } },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
+      pollMs: 0,
+      debounceMs: 600_000,
+    });
+    expect(capturedOpts.procReaper.widenMaxKills).toBe(2);
     stopDaemon();
   });
 });
@@ -1163,7 +1283,10 @@ describe("startReaperAndTimer — binds orchDir into assessWorktreeRemoval prove
       startScheduler: () => {},
       watchRegistry: false,
       enableReaper: true,
-      makeReaper: (opts) => { capturedOpts = opts; return fakeReaper; },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
       pollMs: 0,
       debounceMs: 600_000,
     });
@@ -1278,7 +1401,9 @@ describe("auto-tuner wiring (CTL-684)", () => {
         startScheduler: () => {},
         watchRegistry: false,
         pidFile,
-        startAutoTuner: () => { throw new Error("tuner boot failed"); },
+        startAutoTuner: () => {
+          throw new Error("tuner boot failed");
+        },
       });
     } catch {}
     // PID file must be removed by stopDaemon's cleanup path
@@ -1297,7 +1422,7 @@ describe("handleCommentWake (CTL-549)", () => {
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(
       join(workerDir, `phase-${phase}.json`),
-      JSON.stringify({ ticket, phase, ...data }),
+      JSON.stringify({ ticket, phase, ...data })
     );
   };
 
@@ -1314,9 +1439,12 @@ describe("handleCommentWake (CTL-549)", () => {
       { ticket: "CTL-1", commentId: "c1", body: "Here is the answer" },
       {
         orchDir: orch,
-        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
+        dispatch: (dir, ticket, phase, opts) => {
+          dispatched.push({ ticket, phase, opts });
+          return { code: 0 };
+        },
         removeLabel: async () => {},
-      },
+      }
     );
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0].ticket).toBe("CTL-1");
@@ -1332,9 +1460,12 @@ describe("handleCommentWake (CTL-549)", () => {
       { ticket: "CTL-1", body: "reply" },
       {
         orchDir: orch,
-        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        dispatch: (...a) => {
+          dispatched.push(a);
+          return { code: 0 };
+        },
         removeLabel: async () => {},
-      },
+      }
     );
     expect(dispatched).toHaveLength(0);
   });
@@ -1351,12 +1482,632 @@ describe("handleCommentWake (CTL-549)", () => {
       { ticket: "CTL-1", body: "answer" },
       {
         orchDir: orch,
-        dispatch: () => { dispatchOrder.push("dispatch"); return { code: 0 }; },
-        removeLabel: async (ticket, label) => { removed.push({ ticket, label }); dispatchOrder.push("remove"); },
-      },
+        dispatch: () => {
+          dispatchOrder.push("dispatch");
+          return { code: 0 };
+        },
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+          dispatchOrder.push("remove");
+        },
+      }
     );
     expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" }); // CTL-1067 Bug 3
     expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
+  });
+
+  // ─── CTL-1567: a human response clears needs-human FIRST, unconditionally ───
+  //
+  // Both cases below were silently dropped before this fix, which is why the
+  // "Needs you" list only ever grew. Measured on the live fleet 2026-07-29: 10 of
+  // 12 parked tickets had NO worker dir on either host, and the ones that did
+  // carried `status: "needs-human"` — the one status the loop ignored.
+
+  test("REGRESSION: clears needs-human even when the ticket has NO worker directory", async () => {
+    const orch = tmpOrcDir(); // deliberately no workers/<TICKET>/ at all
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NODIR", body: "here is your answer", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    // The label lives in Linear; a reaped worker dir must not make it unclearable.
+    expect(removed).toContainEqual({ ticket: "PROJ-NODIR", label: "needs-human" });
+  });
+
+  test("REGRESSION: clears needs-human for a signal with status=needs-human", async () => {
+    const orch = tmpOrcDir();
+    // recovery-emit.mjs / recovery-reasoning.mjs write THIS status, which matched
+    // neither the `stalled` nor the `needs-input` branch.
+    writeSignal(orch, "PROJ-NH", "implement", { status: "needs-human" });
+    const removed = [];
+    const cleared = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+        clearStall: ({ ticket, phase }) => {
+          cleared.push({ ticket, phase });
+          return true;
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "PROJ-NH", label: "needs-human" });
+    // …and it is treated like `stalled`, so the stall is cleared too.
+    expect(cleared).toContainEqual({ ticket: "PROJ-NH", phase: "implement" });
+  });
+
+  // Codex #2970: the needs-human clear call site passed {from, to} — keys
+  // buildWorkerTransitionEvent doesn't accept (it wants fromDisposition/
+  // toDisposition) — so the emitted worker.transition envelope carried neither
+  // disposition. This pins the fixed shape, mirroring the finding-11 pattern for
+  // the needs-input clear below.
+  test("emits worker.transition(needs-human→cleared) with fromDisposition/toDisposition set", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH2", "implement", { status: "needs-human" });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH2", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "PROJ-NH2" && e.fromDisposition === "needs-human"
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.toDisposition).toBeNull();
+    expect(cleared.orchId).toBe("PROJ-NH2");
+    expect(cleared.reason).toBe("human-responded");
+    // The old buggy call's {from, to} keys must not resurface.
+    expect(cleared.from).toBeUndefined();
+    expect(cleared.to).toBeUndefined();
+  });
+
+  // Codex #2970 round 3: a no-op re-check (e.g. a duplicate webhook / second host
+  // finding the label already gone) must NOT emit a second "cleared" transition —
+  // only a call that performed a real write does. The marker reconcile still runs
+  // either way (clearedNeedsHuman, not clearedNeedsHumanWrote, gates that block).
+  test("does NOT emit worker.transition(needs-human→cleared) on a no-op ({removed:true, wrote:false})", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH3", "implement", { status: "needs-human" });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH3", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: false }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "PROJ-NH3" && e.fromDisposition === "needs-human"
+    );
+    expect(cleared).toBeUndefined();
+  });
+
+  // Codex #2970 round 3: the daemon and scheduler share lastDispositionEmit
+  // in-process (recordTransition's only-on-change guard). A real out-of-band
+  // clear must reset that shared dedup entry so a later GENUINE re-escalation to
+  // needs-human isn't silently swallowed by the guard comparing against a stale
+  // "needs-human" value.
+  test("resets the scheduler's disposition dedup on a real needs-human clear", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH4", "implement", { status: "needs-human" });
+    const resetTickets = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH4", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(resetTickets).toContain("PROJ-NH4");
+  });
+
+  // Codex #2970 post-merge round 2: {removed:true, wrote:false} is a CONFIRMED
+  // clear performed by a DIFFERENT host (cross-host case) — this process's
+  // lastDispositionEmit entry is just as stale as if it had done the write
+  // itself, so the dedup reset must still fire. Only the transition EMISSION
+  // stays write-gated (only the writer host emits).
+  test("resets the scheduler's disposition dedup on a cross-host needs-human clear (confirmed, not written here)", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH5", "implement", { status: "needs-human" });
+    const resetTickets = [];
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH5", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: false }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(resetTickets).toContain("PROJ-NH5");
+    // The clear was confirmed but not written BY THIS HOST — no emission here.
+    expect(transitions.find((e) => e.fromDisposition === "needs-human")).toBeUndefined();
+  });
+
+  test("does NOT reset the scheduler's disposition dedup when the needs-human removal is not confirmed", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-NH6", "implement", { status: "needs-human" });
+    const resetTickets = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NH6", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: false, reason: "transient" }),
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(resetTickets).toEqual([]);
+  });
+
+  test("resets the scheduler's disposition dedup on a real needs-input clear", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const resetTickets = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(resetTickets).toContain("CTL-1");
+  });
+
+  // Codex #2970 post-merge round 1: the EARLIER needs-input removal (inside the
+  // needs-human block, gated on humanProvenance + isManagedTicket) can itself
+  // perform the real write. The per-signal loop's OWN removeLabel(ticket,
+  // "needs-input") call then observes the label already absent ({wrote:false}) —
+  // without threading the earlier call's write, the emission this genuine clear
+  // earned would be silently dropped.
+  test("does not lose the needs-input clear emission when the EARLIER (needs-human-block) removal performed the real write", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-RACE", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    let needsInputCalls = 0;
+    await handleCommentWake(
+      { ticket: "PROJ-RACE", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) => {
+          if (label === "needs-human") return { removed: true, wrote: false }; // never applied on this ticket
+          // needs-input: the FIRST call (the earlier needs-human-block cleanup)
+          // performs the real write; the SECOND call (the per-signal loop) finds
+          // it already gone.
+          needsInputCalls += 1;
+          return needsInputCalls === 1
+            ? { removed: true, wrote: true }
+            : { removed: true, wrote: false };
+        },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const needsInputClears = transitions.filter(
+      (e) => e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    // Exactly one emission for the one genuine write — not zero (lost), not two
+    // (double-counted).
+    expect(needsInputClears).toHaveLength(1);
+  });
+
+  // Codex #2970 post-merge round 3: needsInputWroteEarly was declared once,
+  // BEFORE the per-signal loop, and never reset — with multiple needs-input
+  // signals for the same ticket, that one early Linear write funded a SEPARATE
+  // emission per signal instead of exactly one.
+  test("emits exactly ONE needs-input clear when the ticket has multiple needs-input signals and the early removal earned the write", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-MULTI", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    writeSignal(orch, "PROJ-MULTI", "verify", {
+      status: "needs-input",
+      parkedFrom: "verify",
+    });
+    const transitions = [];
+    let needsInputCalls = 0;
+    await handleCommentWake(
+      { ticket: "PROJ-MULTI", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) => {
+          if (label === "needs-human") return { removed: true, wrote: false };
+          // The FIRST needs-input call (the earlier needs-human-block cleanup)
+          // performs the real write; every subsequent call — one per signal
+          // file the per-signal loop visits — finds it already gone.
+          needsInputCalls += 1;
+          return needsInputCalls === 1
+            ? { removed: true, wrote: true }
+            : { removed: true, wrote: false };
+        },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const needsInputClears = transitions.filter(
+      (e) => e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(needsInputClears).toHaveLength(1);
+  });
+
+  // Codex #2970 post-merge round 5: the credit-consume line used to run
+  // unconditionally after the try/catch, so a THROWING first per-signal
+  // removeLabel call burned the credit without funding an emission — leaving a
+  // second, successful signal unable to claim it. Consuming it INSIDE the try
+  // (only on success) means a throw preserves the credit for the next iteration.
+  test("credit survives a throwing per-signal removeLabel call, funding a LATER successful signal's emission", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-THROW", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    writeSignal(orch, "PROJ-THROW", "verify", {
+      status: "needs-input",
+      parkedFrom: "verify",
+    });
+    const transitions = [];
+    let needsInputCalls = 0;
+    await handleCommentWake(
+      { ticket: "PROJ-THROW", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) => {
+          if (label === "needs-human") return { removed: true, wrote: false };
+          needsInputCalls += 1;
+          // Call 1: the earlier needs-human-block cleanup earns the real write.
+          if (needsInputCalls === 1) return { removed: true, wrote: true };
+          // Call 2: the FIRST per-signal loop iteration — throws (transient error).
+          if (needsInputCalls === 2) throw new Error("transient Linear 5xx");
+          // Call 3: the SECOND per-signal loop iteration — succeeds, finds it
+          // already gone (the early write already cleared it).
+          return { removed: true, wrote: false };
+        },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const needsInputClears = transitions.filter(
+      (e) => e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(needsInputClears).toHaveLength(1);
+  });
+
+  // Codex #2970 post-merge round 5: the EARLY needs-input removal (inside the
+  // needs-human block) can be a real, confirmed clear on its own — but a ticket
+  // with no local worker dir hits the readdirSync early-return before ever
+  // reaching the per-signal loop's own clearDispositionEmit(ticket, "needs-input")
+  // call. Without resetting it right where the confirmation is known, a live
+  // needs-input dedup entry would survive indefinitely for such a ticket.
+  test("resets the needs-input dedup entry from the EARLY removal when the ticket has no local worker dir", async () => {
+    const orch = tmpOrcDir(); // deliberately no workers/<TICKET>/ at all
+    const resetCalls = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NODIR2", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (_t, label) =>
+          label === "needs-human"
+            ? { removed: true, wrote: false }
+            : { removed: true, wrote: true },
+        appendWorkerTransitionEvent: () => {},
+        clearDispositionEmit: (ticket, expected) => resetCalls.push({ ticket, expected }),
+      }
+    );
+    expect(resetCalls).toContainEqual({ ticket: "PROJ-NODIR2", expected: "needs-input" });
+  });
+
+  // Codex #2970 post-merge round 2, extended to needs-input for consistency with
+  // the needs-human fix: when NEITHER of this invocation's two removeLabel calls
+  // performed the write (a third host already cleared it before either ran), the
+  // clear is still CONFIRMED — the dedup reset must fire even though no emission
+  // does (only the writer host emits).
+  test("resets the scheduler's disposition dedup on a fully cross-host needs-input clear, with no emission", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-RACE2", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    const resetTickets = [];
+    await handleCommentWake(
+      { ticket: "PROJ-RACE2", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: false }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+        clearDispositionEmit: (ticket) => resetTickets.push(ticket),
+      }
+    );
+    expect(
+      transitions.find((e) => e.fromDisposition === "needs-input" && e.toDisposition === null)
+    ).toBeUndefined();
+    expect(resetTickets).toContain("PROJ-RACE2");
+  });
+
+  test("the bot's OWN comment still does NOT clear the label (self-echo guard intact)", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-BOT", body: "parking question", authorId: "bot-uuid" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("also clears needs-input — the board treats BOTH labels as Needs-You", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-BOTH", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => { removed.push(l); },
+        isManagedTicket: () => true,
+        forgetIntent: () => true,
+      }
+    );
+    expect(removed).toContain("needs-human");
+    expect(removed).toContain("needs-input");
+  });
+
+  test("re-arms recovery so the response is not suppressed by the escalated latch", async () => {
+    const orch = tmpOrcDir();
+    const forgotten = [];
+    await handleCommentWake(
+      { ticket: "PROJ-REARM", body: "authorized, try again", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true }),
+        isManagedTicket: () => true,
+        forgetIntent: (t) => { forgotten.push(t); return true; },
+      }
+    );
+    // Without this the .recovery-intents latch survives up to 7 days, the terminal
+    // sweep re-applies needs-human, and the retry the human just authorized is
+    // suppressed — the ticket silently returns to the inbox.
+    expect(forgotten).toEqual(["PROJ-REARM"]);
+  });
+
+  // Both new gates FAIL CLOSED — "not sure" must mean "don't mutate Linear".
+  test("does NOT clear when the ticket is not managed by this installation", async () => {
+    const orch = tmpOrcDir(); // no worker dir, and no registry entry for FOREIGN
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "FOREIGN-1", body: "unrelated comment", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+      }
+    );
+    // The daemon sees EVERY workspace comment; an unmanaged ticket's same-named
+    // needs-human label must not be stripped, and no Linear write may be spent.
+    expect(removed).toHaveLength(0);
+  });
+
+  test("does NOT clear without positive human provenance (botUserId unset)", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NOPROV", body: "who wrote this?", authorId: "someone" },
+      {
+        orchDir: orch,
+        // botUserId intentionally omitted: _isBotId fails OPEN, so "not a known
+        // bot" does not prove "a human". The escalation's OWN app-actor comment
+        // would otherwise clear the label it just applied.
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+        isManagedTicket: () => true,
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("does NOT clear when the comment has no author at all", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-NOAUTHOR", body: "anonymous" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => removed.push({ t, l }),
+        isManagedTicket: () => true,
+      }
+    );
+    expect(removed).toHaveLength(0);
+  });
+
+  test("a Linear write failure does not throw — the wake path stays fail-open", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "PROJ-ERR", "implement", { status: "needs-human" });
+    await handleCommentWake(
+      { ticket: "PROJ-ERR", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => {
+          throw new Error("linear 503");
+        },
+        clearStall: () => true,
+      }
+    );
+    // reaching here without throwing IS the assertion
+    expect(true).toBe(true);
+  });
+
+  // CTL-764 finding 11: the daemon removes the durable needs-input label out-of-band and
+  // redispatches — the scheduler never sees this edge, so the needs-input→cleared
+  // resolution must be recorded here in the canonical worker.transition stream.
+  test("finding 11 — emits worker.transition(needs-input→cleared) on comment wake", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => {},
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) =>
+        e.ticket === "CTL-1" && e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.source).toBe("comment-wake-clear");
+  });
+
+  // CTL-764 finding E: removeLabel reports a failed read/write as {removed:false} without
+  // throwing, so the needs-input→cleared emission must be gated on a CONFIRMED removal —
+  // otherwise the event log says "cleared" while the durable label is still on Linear.
+  test("finding E — does NOT emit the clear when removeLabel reports {removed:false}", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        // needs-human removes fine; needs-input removal FAILS (fail-open, no throw).
+        removeLabel: async (_t, label) =>
+          label === "needs-input" ? { removed: false, reason: "transient" } : { removed: true },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-1" && e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(cleared).toBeUndefined();
+  });
+
+  test("finding E — emits the clear on a confirmed real write ({removed:true, wrote:true})", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-1" && e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.source).toBe("comment-wake-clear");
+  });
+
+  // Codex #2970 round 3: removed:true alone (a no-op re-check on an already-cleared
+  // label — the second-host/duplicate-webhook case) must NOT emit a second "cleared"
+  // transition. Only wrote:true does.
+  test("finding E round 2 — does NOT emit the clear on a no-op ({removed:true, wrote:false})", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: false }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-1" && e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(cleared).toBeUndefined();
   });
 
   test("no-ops when ticket has no worker dir", async () => {
@@ -1366,9 +2117,12 @@ describe("handleCommentWake (CTL-549)", () => {
       { ticket: "CTL-99", body: "hello" },
       {
         orchDir: orch,
-        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        dispatch: (...a) => {
+          dispatched.push(a);
+          return { code: 0 };
+        },
         removeLabel: async () => {},
-      },
+      }
     );
     expect(dispatched).toHaveLength(0);
   });
@@ -1380,9 +2134,12 @@ describe("handleCommentWake (CTL-549)", () => {
       { body: "hello" },
       {
         orchDir: orch,
-        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        dispatch: (...a) => {
+          dispatched.push(a);
+          return { code: 0 };
+        },
         removeLabel: async () => {},
-      },
+      }
     );
     expect(dispatched).toHaveLength(0);
   });
@@ -1400,13 +2157,18 @@ describe("handleCommentWake (CTL-549)", () => {
       { ticket: "CTL-1", commentId: "c1", body: "I am the bot", authorId: "bot-user-id" },
       {
         orchDir: orch,
-        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
-        removeLabel: async (t, l) => { removed.push({ ticket: t, label: l }); },
+        dispatch: (dir, ticket, phase, opts) => {
+          dispatched.push({ ticket, phase, opts });
+          return { code: 0 };
+        },
+        removeLabel: async (t, l) => {
+          removed.push({ ticket: t, label: l });
+        },
         botUserId: "bot-user-id",
-      },
+      }
     );
     expect(dispatched).toHaveLength(0); // self-echo suppressed: no re-dispatch
-    expect(removed).toHaveLength(0);    // and the human-attention label is preserved
+    expect(removed).toHaveLength(0); // and the human-attention label is preserved
   });
 
   test("re-dispatches when comment authorId does NOT match botUserId (human reply)", async () => {
@@ -1421,10 +2183,13 @@ describe("handleCommentWake (CTL-549)", () => {
       { ticket: "CTL-1", commentId: "c2", body: "Here is the answer", authorId: "human-user-id" },
       {
         orchDir: orch,
-        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
+        dispatch: (dir, ticket, phase, opts) => {
+          dispatched.push({ ticket, phase, opts });
+          return { code: 0 };
+        },
         removeLabel: async () => {},
         botUserId: "bot-user-id",
-      },
+      }
     );
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0].ticket).toBe("CTL-1");
@@ -1437,16 +2202,25 @@ describe("handleCommentWake (CTL-549)", () => {
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(
       join(workerDir, "phase-implement.json"),
-      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
-        parkedFrom: "implement", bg_job_id: "held1234", stoppedForHold: true }),
+      JSON.stringify({
+        ticket: "CTL-1",
+        phase: "implement",
+        status: "needs-input",
+        parkedFrom: "implement",
+        bg_job_id: "held1234",
+        stoppedForHold: true,
+      })
     );
     const dispatched = [];
-    await handleCommentWake({ ticket: "CTL-1" }, {
-      orchDir: orch,
-      dispatch: (d, t, p, opts) => dispatched.push({ p, opts }),
-      removeLabel: async () => {},
-      resolveSession: (bg) => (bg === "held1234" ? "uuid-resume" : null),
-    });
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      {
+        orchDir: orch,
+        dispatch: (d, t, p, opts) => dispatched.push({ p, opts }),
+        removeLabel: async () => {},
+        resolveSession: (bg) => (bg === "held1234" ? "uuid-resume" : null),
+      }
+    );
     expect(dispatched[0].opts.resumeSession).toBe("uuid-resume");
     expect(dispatched[0].p).toBe("implement");
   });
@@ -1457,19 +2231,27 @@ describe("handleCommentWake (CTL-549)", () => {
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(
       join(workerDir, "phase-implement.json"),
-      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
-        bg_job_id: "held1234", stoppedForHold: true }),
+      JSON.stringify({
+        ticket: "CTL-1",
+        phase: "implement",
+        status: "needs-input",
+        bg_job_id: "held1234",
+        stoppedForHold: true,
+      })
     );
     recordHoldStop(orch, "CTL-1", "implement", 1_000);
-    await handleCommentWake({ ticket: "CTL-1" }, {
-      orchDir: orch,
-      dispatch: () => {},
-      removeLabel: async () => {},
-      resolveSession: () => "uuid",
-    });
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      {
+        orchDir: orch,
+        dispatch: () => {},
+        removeLabel: async () => {},
+        resolveSession: () => "uuid",
+      }
+    );
     const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
     expect(sig.status).toBe("stalled");
-    expect(sig.stoppedForHold).toBe(false);     // cleared
+    expect(sig.stoppedForHold).toBe(false); // cleared
     expect(inHoldStopCooldown(orch, "CTL-1", "implement", 2_000)).toBe(false); // cooldown cleared
   });
 
@@ -1479,16 +2261,24 @@ describe("handleCommentWake (CTL-549)", () => {
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(
       join(workerDir, "phase-implement.json"),
-      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
-        bg_job_id: "held1234", stoppedForHold: true }),
+      JSON.stringify({
+        ticket: "CTL-1",
+        phase: "implement",
+        status: "needs-input",
+        bg_job_id: "held1234",
+        stoppedForHold: true,
+      })
     );
     const dispatched = [];
-    await handleCommentWake({ ticket: "CTL-1" }, {
-      orchDir: orch,
-      dispatch: (d, t, p, opts) => dispatched.push(opts),
-      removeLabel: async () => {},
-      resolveSession: () => null,
-    });
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      {
+        orchDir: orch,
+        dispatch: (d, t, p, opts) => dispatched.push(opts),
+        removeLabel: async () => {},
+        resolveSession: () => null,
+      }
+    );
     expect(dispatched[0].resumeSession).toBeUndefined();
   });
 
@@ -1498,35 +2288,55 @@ describe("handleCommentWake (CTL-549)", () => {
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(
       join(workerDir, "phase-implement.json"),
-      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
-        parkedFrom: "implement", bg_job_id: "x" }),
+      JSON.stringify({
+        ticket: "CTL-1",
+        phase: "implement",
+        status: "needs-input",
+        parkedFrom: "implement",
+        bg_job_id: "x",
+      })
     );
     const dispatched = [];
     const resolveSpy = [];
-    await handleCommentWake({ ticket: "CTL-1" }, {
-      orchDir: orch,
-      dispatch: (d, t, p, opts) => dispatched.push(opts),
-      removeLabel: async () => {},
-      resolveSession: (bg) => { resolveSpy.push(bg); return "x"; },
-    });
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      {
+        orchDir: orch,
+        dispatch: (d, t, p, opts) => dispatched.push(opts),
+        removeLabel: async () => {},
+        resolveSession: (bg) => {
+          resolveSpy.push(bg);
+          return "x";
+        },
+      }
+    );
     expect(dispatched[0].resumeSession).toBeUndefined();
-    expect(resolveSpy).toEqual([]);             // resolveSession never called
+    expect(resolveSpy).toEqual([]); // resolveSession never called
     const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
-    expect(sig.status).toBe("needs-input");     // not reset
+    expect(sig.status).toBe("needs-input"); // not reset
   });
 
   test("CTL-1067: a stalled signal is cleared via clearStall, not re-dispatched", async () => {
     const orch = tmpOrcDir();
-    writeSignal(orch, "CTL-1", "implement", { status: "stalled", phase: "implement", generation: 2 });
-    const dispatched = [], clears = [], removed = [];
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "stalled",
+      phase: "implement",
+      generation: 2,
+    });
+    const dispatched = [],
+      clears = [],
+      removed = [];
     await handleCommentWake(
       { ticket: "CTL-1" },
       {
         orchDir: orch,
         dispatch: (...a) => dispatched.push(a),
         removeLabel: async (t, l) => removed.push({ ticket: t, label: l }),
-        clearStall: ({ ticket, phase }) => { clears.push({ ticket, phase }); return true; },
-      },
+        clearStall: ({ ticket, phase }) => {
+          clears.push({ ticket, phase });
+          return true;
+        },
+      }
     );
     expect(clears).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
     expect(dispatched).toEqual([]);
@@ -1538,7 +2348,7 @@ describe("handleCommentWake (CTL-549)", () => {
     const dispatched = [];
     await handleCommentWake(
       { ticket: "CTL-1" },
-      { orchDir: orch, dispatch: (...a) => dispatched.push(a), removeLabel: async () => {} },
+      { orchDir: orch, dispatch: (...a) => dispatched.push(a), removeLabel: async () => {} }
     );
     expect(dispatched).toEqual([]);
   });
@@ -1547,7 +2357,9 @@ describe("handleCommentWake (CTL-549)", () => {
 // CTL-749: inbox writer factory functions
 describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
   let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-comment-test-")); });
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "inbox-comment-test-"));
+  });
   afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
 
   test("writes comment entry to inbox.jsonl when ticket is in-flight", () => {
@@ -1556,14 +2368,22 @@ describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
     const writer = createCommentInboxWriter(tmpDir, "");
     writer({ ticket, commentId: "c1", body: "hello", authorId: "u1", authorName: "Ryan" });
     const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
-      .trim().split("\n").map(JSON.parse);
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
     expect(lines[0]).toMatchObject({ kind: "comment", ticket, body: "hello" });
     expect(lines[0].receivedAt).toBeTruthy();
   });
 
   test("skips write when workers/<ticket>/ does not exist (ticket not in-flight)", () => {
     const writer = createCommentInboxWriter(tmpDir, "");
-    writer({ ticket: "CTL-99", commentId: "c1", body: "hello", authorId: "u1", authorName: "Ryan" });
+    writer({
+      ticket: "CTL-99",
+      commentId: "c1",
+      body: "hello",
+      authorId: "u1",
+      authorName: "Ryan",
+    });
     expect(existsSync(join(tmpDir, "workers", "CTL-99", "inbox.jsonl"))).toBe(false);
   });
 
@@ -1579,7 +2399,13 @@ describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
     const ticket = "CTL-99";
     mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
     const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
-    writer({ ticket, commentId: "c2", body: "human reply", authorId: "human-user", authorName: "Alice" });
+    writer({
+      ticket,
+      commentId: "c2",
+      body: "human reply",
+      authorId: "human-user",
+      authorName: "Alice",
+    });
     expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
   });
 
@@ -1590,7 +2416,9 @@ describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
     writer({ ticket, commentId: "c1", body: "first", authorId: "u1", authorName: "A" });
     writer({ ticket, commentId: "c2", body: "second", authorId: "u2", authorName: "B" });
     const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
-      .trim().split("\n").map(JSON.parse);
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
     expect(lines).toHaveLength(2);
     expect(lines[1].body).toBe("second");
   });
@@ -1598,17 +2426,31 @@ describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
 
 describe("inbox writer — createUpdateInboxWriter (CTL-749)", () => {
   let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-update-test-")); });
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "inbox-update-test-"));
+  });
   afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
 
   test("writes description_changed entry when descriptionChanged is true and ticket is in-flight", () => {
     const ticket = "CTL-99";
     mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
     const writer = createUpdateInboxWriter(tmpDir, "");
-    writer({ ticket, description: "new text", descriptionChanged: true, actorId: "u1", actorName: "Ryan" });
+    writer({
+      ticket,
+      description: "new text",
+      descriptionChanged: true,
+      actorId: "u1",
+      actorName: "Ryan",
+    });
     const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
-      .trim().split("\n").map(JSON.parse);
-    expect(lines[0]).toMatchObject({ kind: "description_changed", ticket, description: "new text" });
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    expect(lines[0]).toMatchObject({
+      kind: "description_changed",
+      ticket,
+      description: "new text",
+    });
     expect(lines[0].receivedAt).toBeTruthy();
   });
 
@@ -1630,7 +2472,13 @@ describe("inbox writer — createUpdateInboxWriter (CTL-749)", () => {
     const ticket = "CTL-99";
     mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
     const writer = createUpdateInboxWriter(tmpDir, "bot-id");
-    writer({ ticket, description: "bot edit", descriptionChanged: true, actorId: "bot-id", actorName: "Bot" });
+    writer({
+      ticket,
+      description: "bot edit",
+      descriptionChanged: true,
+      actorId: "bot-id",
+      actorName: "Bot",
+    });
     expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
   });
 });
@@ -1638,7 +2486,9 @@ describe("inbox writer — createUpdateInboxWriter (CTL-749)", () => {
 // readLinearBotUserIds — collects bot UUIDs from Layer-2 new path + Layer-1 back-compat
 describe("readLinearBotUserIds", () => {
   let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "bot-ids-test-")); });
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "bot-ids-test-"));
+  });
   afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
 
   test("returns empty set when both paths are absent", () => {
@@ -1648,9 +2498,12 @@ describe("readLinearBotUserIds", () => {
 
   test("reads worker botUserId from Layer-2 new global path", () => {
     const layer2 = join(tmpDir, "config.json");
-    writeFileSync(layer2, JSON.stringify({
-      catalyst: { linear: { bot: { worker: { botUserId: "worker-uuid-1" } } } }
-    }));
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: { linear: { bot: { worker: { botUserId: "worker-uuid-1" } } } },
+      })
+    );
     const ids = readLinearBotUserIds(null, layer2);
     expect(ids.has("worker-uuid-1")).toBe(true);
     expect(ids.size).toBe(1);
@@ -1658,9 +2511,12 @@ describe("readLinearBotUserIds", () => {
 
   test("reads orchestrator botUserId from Layer-2 new global path", () => {
     const layer2 = join(tmpDir, "config.json");
-    writeFileSync(layer2, JSON.stringify({
-      catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid-1" } } } }
-    }));
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid-1" } } } },
+      })
+    );
     const ids = readLinearBotUserIds(null, layer2);
     expect(ids.has("orch-uuid-1")).toBe(true);
     expect(ids.size).toBe(1);
@@ -1668,16 +2524,19 @@ describe("readLinearBotUserIds", () => {
 
   test("reads both worker and orchestrator botUserIds from Layer-2", () => {
     const layer2 = join(tmpDir, "config.json");
-    writeFileSync(layer2, JSON.stringify({
-      catalyst: {
-        linear: {
-          bot: {
-            worker: { botUserId: "worker-uuid" },
-            orchestrator: { botUserId: "orch-uuid" },
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              worker: { botUserId: "worker-uuid" },
+              orchestrator: { botUserId: "orch-uuid" },
+            },
           },
         },
-      },
-    }));
+      })
+    );
     const ids = readLinearBotUserIds(null, layer2);
     expect(ids.has("worker-uuid")).toBe(true);
     expect(ids.has("orch-uuid")).toBe(true);
@@ -1686,9 +2545,12 @@ describe("readLinearBotUserIds", () => {
 
   test("reads Layer-1 back-compat path (catalyst.monitor.linear.botUserId)", () => {
     const layer1 = join(tmpDir, "layer1.json");
-    writeFileSync(layer1, JSON.stringify({
-      catalyst: { monitor: { linear: { botUserId: "legacy-uuid" } } }
-    }));
+    writeFileSync(
+      layer1,
+      JSON.stringify({
+        catalyst: { monitor: { linear: { botUserId: "legacy-uuid" } } },
+      })
+    );
     const ids = readLinearBotUserIds(layer1, null);
     expect(ids.has("legacy-uuid")).toBe(true);
     expect(ids.size).toBe(1);
@@ -1697,19 +2559,25 @@ describe("readLinearBotUserIds", () => {
   test("merges IDs from both layers; deduplicates when same UUID appears in both", () => {
     const layer1 = join(tmpDir, "layer1.json");
     const layer2 = join(tmpDir, "config.json");
-    writeFileSync(layer1, JSON.stringify({
-      catalyst: { monitor: { linear: { botUserId: "shared-uuid" } } }
-    }));
-    writeFileSync(layer2, JSON.stringify({
-      catalyst: {
-        linear: {
-          bot: {
-            worker: { botUserId: "shared-uuid" },  // same as layer-1 — should dedup
-            orchestrator: { botUserId: "orch-uuid" },
+    writeFileSync(
+      layer1,
+      JSON.stringify({
+        catalyst: { monitor: { linear: { botUserId: "shared-uuid" } } },
+      })
+    );
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              worker: { botUserId: "shared-uuid" }, // same as layer-1 — should dedup
+              orchestrator: { botUserId: "orch-uuid" },
+            },
           },
         },
-      },
-    }));
+      })
+    );
     const ids = readLinearBotUserIds(layer1, layer2);
     expect(ids.has("shared-uuid")).toBe(true);
     expect(ids.has("orch-uuid")).toBe(true);
@@ -1752,7 +2620,9 @@ describe("_isBotId", () => {
 // inbox writers with Set botUserId
 describe("createCommentInboxWriter — Set<string> botUserId", () => {
   let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-set-test-")); });
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "inbox-set-test-"));
+  });
   afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
 
   test("skips write when authorId is in the bot Set (worker id)", () => {
@@ -1785,7 +2655,9 @@ describe("createCommentInboxWriter — Set<string> botUserId", () => {
 
 describe("createUpdateInboxWriter — Set<string> botUserId", () => {
   let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "update-set-test-")); });
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "update-set-test-"));
+  });
   afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
 
   test("skips write when actorId is in the bot Set", () => {
@@ -1814,7 +2686,9 @@ describe("daemon wires onComment and onUpdate to monitorFn (CTL-549 + CTL-749)",
     startDaemon({
       recover: () => {},
       reconcileBoot: () => {},
-      startMonitor: (opts) => { capturedOpts = opts; },
+      startMonitor: (opts) => {
+        capturedOpts = opts;
+      },
       startScheduler: () => {},
       watchRegistry: false,
     });
@@ -1836,7 +2710,9 @@ describe("daemon wires onComment and onUpdate to monitorFn (CTL-549 + CTL-749)",
 // exactly the latent defect the plan-review flagged.
 describe("CTL-1365b: executor flag honored at all four dispatch entry points", () => {
   let prevExecutor;
-  beforeEach(() => { prevExecutor = process.env.CATALYST_EXECUTOR; });
+  beforeEach(() => {
+    prevExecutor = process.env.CATALYST_EXECUTOR;
+  });
   afterEach(() => {
     if (prevExecutor === undefined) delete process.env.CATALYST_EXECUTOR;
     else process.env.CATALYST_EXECUTOR = prevExecutor;
@@ -1848,30 +2724,67 @@ describe("CTL-1365b: executor flag honored at all four dispatch entry points", (
     const captured = {};
     startDaemon({
       recover: () => ({ coldStart: true, workers: {} }),
-      reconcileBoot: (o) => { captured.boot = o.dispatch; return {}; },
-      startMonitor: (o) => { captured.monitor = o.dispatch; captured.onComment = o.onComment; },
-      startScheduler: (o) => { captured.scheduler = o.dispatch; },
+      reconcileBoot: (o) => {
+        captured.boot = o.dispatch;
+        return {};
+      },
+      startMonitor: (o) => {
+        captured.monitor = o.dispatch;
+        captured.onComment = o.onComment;
+      },
+      startScheduler: (o) => {
+        captured.scheduler = o.dispatch;
+      },
       watchRegistry: false,
     });
     stopDaemon();
     return captured;
   };
 
-  test("executor=bg → scheduler + monitor + boot-resume all receive defaultDispatch (byte-identical)", () => {
+  // CTL-1457: the daemon now threads a SINGLE phase-aware dispatchFn (built by
+  // makePhaseAwareDispatchFn) to every site — no longer defaultDispatch by reference.
+  // So the wiring assertion shifts: the three sites receive the SAME closure (no
+  // split-brain), and invoking it under empty routing + executor=bg proves it routes
+  // to the bg arm (defaultDispatch's pipeline, runPhaseAgent called with NO emitEvent
+  // seam — byte-identical to the pre-CTL-1457 path). configPath is null in this
+  // harness ⇒ readExecutorByPhaseLayer1 returns {} ⇒ every phase is unrouted.
+  const invokeRoutes = (dispatchFn, phase = "implement") => {
+    const seen = [];
+    dispatchFn(
+      { orchDir: "/ec", ticket: "CTL-1", phase },
+      {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        runPhaseAgent: (input, opts) => {
+          seen.push({ input, opts });
+          return { code: 0, stdout: "", stderr: "", signal: null };
+        },
+      }
+    );
+    return seen;
+  };
+
+  test("executor=bg → all sites receive the SAME phase-aware dispatchFn that routes to bg (byte-identical behavior)", () => {
     process.env.CATALYST_EXECUTOR = "bg";
     const c = captureThreeSites();
-    expect(c.scheduler).toBe(defaultDispatch); // site 1
-    expect(c.monitor).toBe(defaultDispatch);   // site 2 (→Triage one-shot)
-    expect(c.boot).toBe(defaultDispatch);      // site 4 (boot-resume)
+    expect(c.scheduler).toBe(c.monitor); // sites 1 & 2 — same closure (no split-brain)
+    expect(c.scheduler).toBe(c.boot); // site 4 — same closure
+    expect(typeof c.scheduler).toBe("function");
     expect(typeof c.onComment).toBe("function"); // site 3 wired (routing pinned below)
+    // bg arm: defaultDispatch's pipeline runs and runPhaseAgent gets NO emitEvent seam.
+    const seen = invokeRoutes(c.scheduler);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].opts).toBeUndefined();
   });
 
-  test("executor unset → defaults to bg at all three captured sites (no site hardcodes sdk)", () => {
+  test("executor unset → every site routes to bg (no site hardcodes sdk)", () => {
     delete process.env.CATALYST_EXECUTOR;
     const c = captureThreeSites();
-    expect(c.scheduler).toBe(defaultDispatch);
-    expect(c.monitor).toBe(defaultDispatch);
-    expect(c.boot).toBe(defaultDispatch);
+    expect(c.scheduler).toBe(c.monitor);
+    expect(c.scheduler).toBe(c.boot);
+    const seen = invokeRoutes(c.scheduler);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].opts).toBeUndefined(); // bg arm — no emitEvent wrap
   });
 
   test("executor=sdk → scheduler + monitor + boot-resume all receive sdkDispatch (none hardcodes bg)", () => {
@@ -1894,9 +2807,9 @@ describe("CTL-1365b: executor flag honored at all four dispatch entry points", (
       // receive that SAME wrapped sdk dispatch — consistent (no split-brain) and NOT
       // the bg defaultDispatch. (The bg-fallback sibling test pins the all-bg case.)
       expect(c.scheduler).not.toBe(defaultDispatch); // site 1 — sdk path, not bg
-      expect(c.monitor).toBe(c.scheduler);           // site 2 — same dispatch (no split-brain)
-      expect(c.boot).toBe(c.scheduler);              // site 4 — same dispatch
-      expect(typeof c.onComment).toBe("function");   // site 3 wired
+      expect(c.monitor).toBe(c.scheduler); // site 2 — same dispatch (no split-brain)
+      expect(c.boot).toBe(c.scheduler); // site 4 — same dispatch
+      expect(typeof c.onComment).toBe("function"); // site 3 wired
     } finally {
       if (savedTok === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
       else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedTok;
@@ -1919,9 +2832,15 @@ describe("CTL-1365b: executor flag honored at all four dispatch entry points", (
     delete process.env.ANTHROPIC_API_KEY;
     try {
       const c = captureThreeSites();
-      expect(c.scheduler).toBe(defaultDispatch);
-      expect(c.monitor).toBe(defaultDispatch);
-      expect(c.boot).toBe(defaultDispatch);
+      // All sites receive the SAME phase-aware closure whose bootExecutor is the
+      // degraded "bg". CTL-1457: an unrouted phase keeps the boot executor (the
+      // phase-aware routing only overrides an EXPLICITLY-routed phase), so the
+      // degrade survives — invoking routes to the bg arm (no emitEvent seam), NOT sdk.
+      expect(c.scheduler).toBe(c.monitor);
+      expect(c.scheduler).toBe(c.boot);
+      const seen = invokeRoutes(c.scheduler);
+      expect(seen).toHaveLength(1);
+      expect(seen[0].opts).toBeUndefined();
     } finally {
       if (savedTok === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
       else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedTok;
@@ -1942,19 +2861,37 @@ describe("CTL-1365b: executor flag honored at all four dispatch entry points", (
       mkdirSync(workerDir, { recursive: true });
       writeFileSync(
         join(workerDir, "phase-implement.json"),
-        JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input", parkedFrom: "implement", handoffPath: "/h.md" }),
+        JSON.stringify({
+          ticket: "CTL-1",
+          phase: "implement",
+          status: "needs-input",
+          parkedFrom: "implement",
+          handoffPath: "/h.md",
+        })
       );
       const routed = [];
       // A sentinel standing in for the resolved dispatchFn (sdkDispatch under sdk,
       // defaultDispatch under bg). makeCommentWakeDispatch is exactly what the daemon
       // threads into handleCommentWake's `dispatch`.
-      const resolvedDispatchFn = (args) => { routed.push(args); return { code: 0 }; };
+      const resolvedDispatchFn = (args) => {
+        routed.push(args);
+        return { code: 0 };
+      };
       await handleCommentWake(
         { ticket: "CTL-1", body: "answer" },
-        { orchDir: orch, dispatch: makeCommentWakeDispatch(resolvedDispatchFn), removeLabel: async () => {} },
+        {
+          orchDir: orch,
+          dispatch: makeCommentWakeDispatch(resolvedDispatchFn),
+          removeLabel: async () => {},
+        }
       );
       expect(routed).toHaveLength(1);
-      expect(routed[0]).toMatchObject({ orchDir: orch, ticket: "CTL-1", phase: "implement", handoffPath: "/h.md" });
+      expect(routed[0]).toMatchObject({
+        orchDir: orch,
+        ticket: "CTL-1",
+        phase: "implement",
+        handoffPath: "/h.md",
+      });
     } finally {
       rmSync(orch, { recursive: true, force: true });
     }
@@ -2007,22 +2944,30 @@ describe("CTL-823 gateway wiring", () => {
 // readLinearBotWriteId — resolves the SINGLE bot UUID to write as assignee (CTL-781).
 describe("readLinearBotWriteId (CTL-781)", () => {
   let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "bot-write-id-test-")); });
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "bot-write-id-test-"));
+  });
   afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
 
   test("returns catalyst.linear.bot.orchestrator.botUserId from Layer-2 when present", () => {
     const layer2 = join(tmpDir, "config.json");
-    writeFileSync(layer2, JSON.stringify({
-      catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid-1" } } } }
-    }));
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid-1" } } } },
+      })
+    );
     expect(readLinearBotWriteId(null, layer2)).toBe("orch-uuid-1");
   });
 
   test("falls back to Layer-1 catalyst.monitor.linear.botUserId when Layer-2 absent", () => {
     const layer1 = join(tmpDir, "layer1.json");
-    writeFileSync(layer1, JSON.stringify({
-      catalyst: { monitor: { linear: { botUserId: "legacy-uuid-1" } } }
-    }));
+    writeFileSync(
+      layer1,
+      JSON.stringify({
+        catalyst: { monitor: { linear: { botUserId: "legacy-uuid-1" } } },
+      })
+    );
     expect(readLinearBotWriteId(layer1, null)).toBe("legacy-uuid-1");
   });
 
@@ -2130,7 +3075,11 @@ describe("CTL-862 — daemon boot-log ownership context", () => {
 // LOUDLY (not refuses) when multi-host was configured but resolution went
 // single-host — never a SILENT one-node cluster.
 describe("CTL-1271 — daemon boot roster announcement + silent-single-host guard", () => {
-  const ANCHOR_ENVS = ["CATALYST_LIVENESS_ANCHOR_ISSUE", "CATALYST_STATIC_ROSTER", "CATALYST_LAYER2_CONFIG_FILE"];
+  const ANCHOR_ENVS = [
+    "CATALYST_LIVENESS_ANCHOR_ISSUE",
+    "CATALYST_STATIC_ROSTER",
+    "CATALYST_LAYER2_CONFIG_FILE",
+  ];
   let savedEnv = {};
 
   const baseOpts = () => ({
@@ -2382,5 +3331,83 @@ describe("CTL-1274 — cluster-repo auto-refresh (boot sync + periodic refresh)"
     const afterStop = refreshCalls;
     await delay(40);
     expect(refreshCalls).toBe(afterStop);
+  });
+});
+
+// ── CTL-764 Phase 4: handleCommentWake clears needs-input label ───────────────
+//
+// Phase 4 adds a durable `needs-input` Linear label (set at Pass 0.75 park seam,
+// cleared at the comment-wake genuine-resolution seam). This block ensures
+// handleCommentWake removes it (in its own try/catch, fail-open) in addition to
+// the existing needs-human removal (CTL-1067 Bug 3).
+describe("CTL-764 Phase 4 — handleCommentWake clears durable needs-input label", () => {
+  const tmpOrcDir = () => mkdtempSync(join(tmpdir(), "ctl-764-p4-daemon-"));
+
+  function writeSignalP4(orch, ticket, phase, data) {
+    const workerDir = join(orch, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, ...data })
+    );
+  }
+
+  test("clears 'needs-input' label on comment wake of a needs-input signal", async () => {
+    const orch = tmpOrcDir();
+    writeSignalP4(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-input" });
+  });
+
+  test("still clears 'needs-human' label alongside 'needs-input'", async () => {
+    const orch = tmpOrcDir();
+    writeSignalP4(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" });
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-input" });
+  });
+
+  test("does NOT call removeLabel('needs-input') for a non-needs-input signal (no spurious removal)", async () => {
+    const orch = tmpOrcDir();
+    writeSignalP4(orch, "CTL-1", "implement", { status: "running" });
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "comment" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => {
+          removed.push({ ticket, label });
+        },
+      }
+    );
+    const needsInputRemovals = removed.filter((r) => r.label === "needs-input");
+    expect(needsInputRemovals).toHaveLength(0);
   });
 });

@@ -86,7 +86,12 @@ import { HeaderActions } from "@/components/header-actions";
 // CTL-950: shared-header column derivation. `visibleColumnDefs` picks the single
 // column SET the shared header shows (over EVERY lane combined); `laneColumns`
 // distributes ONE lane's tickets across that fixed set (empty cells kept, aligned).
-import { laneColumns, visibleColumnDefs, PHASE_COLUMNS, type BoardColumnDef } from "./board-display";
+import {
+  laneColumns,
+  visibleColumnDefs,
+  PHASE_COLUMNS,
+  type BoardColumnDef,
+} from "./board-display";
 // ── BOARD3 / CTL-907 + CTL-950: row swimlanes (none | repo | team | project | host) ─
 // The generalized grouping engine (board-grouping.ts) + the shared-header,
 // single-scroll <SwimlaneBoard> (CTL-950): ONE sticky column-header row spanning
@@ -128,20 +133,30 @@ import type { ConnectionStatus } from "@/lib/types";
 // the DOM-free column-derivation tests can read. The Workers phase lens reuses
 // PHASE_COLUMNS from there. The worker status lens keeps its own two columns.
 const WORKER_COLS = [
-  { key: "active", label: "Active", c: LIVE }, { key: "stuck", label: "Stuck", c: C.red },
+  { key: "active", label: "Active", c: LIVE },
+  { key: "stuck", label: "Stuck", c: C.red },
 ];
 // Phase statuses that mean a phase is no longer running. MUST stay in lock-step
 // with the TERMINAL set in lib/board-data.mjs (the data-layer source of truth) —
 // board-phase-drift.test.ts asserts this array equals [...TERMINAL] so a new
 // terminal status added there cannot silently render here as a live phase
 // (CTL-754).
-const TERMINAL_STATUSES = ["done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled"];
+const TERMINAL_STATUSES = [
+  "done",
+  "failed",
+  "stalled",
+  "skipped",
+  "signal_corrupt",
+  "superseded",
+  "canceled",
+];
 // CTL-755 held-indicator label names. MUST stay in lock-step with
 // execution-core/scheduler.mjs HELD_LABEL_BLOCKED / HELD_LABEL_WAITING (and the
 // board-data.mjs copies) — the board-held-indicator drift guard asserts all
 // three agree, so the badge below reads exactly the label the daemon writes.
 const HELD_LABEL_BLOCKED = "blocked";
-const HELD_LABEL_WAITING = "waiting";
+// CTL-764 Phase 4: value renamed "waiting" → "queued" (identifier preserved for drift guard).
+const HELD_LABEL_WAITING = "queued";
 
 // BOARD4 / CTL-908: the List view (BoardList.tsx) reuses these card atoms +
 // formatters as its table cells, rather than re-implementing the live/priority/
@@ -169,7 +184,6 @@ const nodeColor = (host: string): string => {
   // string | undefined.
   return NODE_PALETTE[h % NODE_PALETTE.length] ?? C.blue;
 };
-
 
 export const fmtRuntime = (ms: number | null) => {
   if (!ms || !Number.isFinite(ms) || ms < 0) return "";
@@ -218,10 +232,35 @@ const PULSE_CSS = `
 
 // ── domain viz (hand-rolled per DESIGN.md) ──────────────────────────────────
 export function Dot({ color, pulse }: { color: string; pulse?: boolean }) {
-  return <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block", flex: "0 0 auto", boxShadow: pulse ? `0 0 8px ${color}` : undefined }} />;
+  return (
+    <span
+      style={{
+        width: 8,
+        height: 8,
+        borderRadius: "50%",
+        background: color,
+        display: "inline-block",
+        flex: "0 0 auto",
+        boxShadow: pulse ? `0 0 8px ${color}` : undefined,
+      }}
+    />
+  );
 }
 export function ActivityDot({ state, fallback }: { state: ActiveState; fallback: string }) {
-  if (state === "active") return <span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: LIVE, display: "inline-block", flex: "0 0 auto" }} />;
+  if (state === "active")
+    return (
+      <span
+        className="catalyst-live-dot"
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: LIVE,
+          display: "inline-block",
+          flex: "0 0 auto",
+        }}
+      />
+    );
   if (state === "stuck") return <Dot color={C.red} />;
   return <Dot color={fallback} />;
 }
@@ -229,9 +268,28 @@ export function PhasePill({ phase }: { phase: string }) {
   const c = PHASE_C[phase] || C.blue;
   // muted treatment (dark tint bg + colored fg) — keeps phase identity without
   // a wall of fully-saturated pills competing with the status signal.
-  return <span style={{ fontFamily: C.mono, fontSize: 10.5, padding: "1.5px 8px", borderRadius: 6, color: c, fontWeight: 600, background: `${c}22`, whiteSpace: "nowrap" }}>{phase}</span>;
+  return (
+    <span
+      style={{
+        fontFamily: C.mono,
+        fontSize: 10.5,
+        padding: "1.5px 8px",
+        borderRadius: 6,
+        color: c,
+        fontWeight: 600,
+        background: `${c}22`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {phase}
+    </span>
+  );
 }
-function PhaseStrip({ phaseSummary }: { phaseSummary: { phase: string; status: string; durationMs: number | null }[] }) {
+function PhaseStrip({
+  phaseSummary,
+}: {
+  phaseSummary: { phase: string; status: string; durationMs: number | null }[];
+}) {
   if (!phaseSummary.length) return null;
   return (
     <div style={{ display: "flex", gap: 3, marginTop: 7, flexWrap: "wrap", alignItems: "center" }}>
@@ -241,15 +299,22 @@ function PhaseStrip({ phaseSummary }: { phaseSummary: { phase: string; status: s
         return (
           <Tooltip key={p.phase}>
             <TooltipTrigger asChild>
-              <span style={{
-                width: 16, height: 4, borderRadius: 2, background: c,
-                opacity: p.status === "failed" ? 0.4 : 1,
-                outline: running ? `1px solid ${c}` : undefined,
-                display: "inline-block", flex: "0 0 auto",
-              }} />
+              <span
+                style={{
+                  width: 16,
+                  height: 4,
+                  borderRadius: 2,
+                  background: c,
+                  opacity: p.status === "failed" ? 0.4 : 1,
+                  outline: running ? `1px solid ${c}` : undefined,
+                  display: "inline-block",
+                  flex: "0 0 auto",
+                }}
+              />
             </TooltipTrigger>
             <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>
-              {p.phase}{p.durationMs != null ? ` · ${fmtDuration(p.durationMs)}` : ""}
+              {p.phase}
+              {p.durationMs != null ? ` · ${fmtDuration(p.durationMs)}` : ""}
               {p.status === "failed" ? " · failed" : running ? " · running" : ""}
             </TooltipContent>
           </Tooltip>
@@ -260,31 +325,60 @@ function PhaseStrip({ phaseSummary }: { phaseSummary: { phase: string; status: s
 }
 const PRIORITY_LABEL = ["No priority", "Urgent", "High", "Medium", "Low"];
 export function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
-  const icon = p === 1 ? (
-    <svg width={size} height={size} viewBox="0 0 14 14" aria-label="Urgent">
-      <rect x="0.5" y="0.5" width="13" height="13" rx="3" fill={C.orange} />
-      <rect x="6.1" y="2.8" width="1.8" height="5.2" rx="0.9" fill="#1b1206" />
-      <rect x="6.1" y="9.4" width="1.8" height="1.9" rx="0.95" fill="#1b1206" />
-    </svg>
-  ) : (
-    <svg width={size} height={size} viewBox="0 0 14 14" aria-label={PRIORITY_LABEL[p]}>
-      {[{ x: 1, h: 5 }, { x: 5.5, h: 9 }, { x: 10, h: 13 }].map((b, i) => {
-        const filled = i < (p === 2 ? 3 : p === 3 ? 2 : p === 4 ? 1 : 0);
-        return <rect key={i} x={b.x} y={14 - b.h} width="3" height={b.h} rx="1" fill={filled ? "#d3dae4" : "#424d5c"} />;
-      })}
-    </svg>
-  );
+  const icon =
+    p === 1 ? (
+      <svg width={size} height={size} viewBox="0 0 14 14" aria-label="Urgent">
+        <rect x="0.5" y="0.5" width="13" height="13" rx="3" fill={C.orange} />
+        <rect x="6.1" y="2.8" width="1.8" height="5.2" rx="0.9" fill="#1b1206" />
+        <rect x="6.1" y="9.4" width="1.8" height="1.9" rx="0.95" fill="#1b1206" />
+      </svg>
+    ) : (
+      <svg width={size} height={size} viewBox="0 0 14 14" aria-label={PRIORITY_LABEL[p]}>
+        {[
+          { x: 1, h: 5 },
+          { x: 5.5, h: 9 },
+          { x: 10, h: 13 },
+        ].map((b, i) => {
+          const filled = i < (p === 2 ? 3 : p === 3 ? 2 : p === 4 ? 1 : 0);
+          return (
+            <rect
+              key={i}
+              x={b.x}
+              y={14 - b.h}
+              width="3"
+              height={b.h}
+              rx="1"
+              fill={filled ? "#d3dae4" : "#424d5c"}
+            />
+          );
+        })}
+      </svg>
+    );
   return (
-    <Tooltip><TooltipTrigger asChild><span style={{ display: "inline-flex", flex: "0 0 auto" }}>{icon}</span></TooltipTrigger>
-      <TooltipContent>{PRIORITY_LABEL[p] || "No priority"}</TooltipContent></Tooltip>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span style={{ display: "inline-flex", flex: "0 0 auto" }}>{icon}</span>
+      </TooltipTrigger>
+      <TooltipContent>{PRIORITY_LABEL[p] || "No priority"}</TooltipContent>
+    </Tooltip>
   );
 }
-const SCOPE_ABBR: Record<string, string> = { xs: "XS", small: "S", medium: "M", large: "L", xl: "XL" };
+const SCOPE_ABBR: Record<string, string> = {
+  xs: "XS",
+  small: "S",
+  medium: "M",
+  large: "L",
+  xl: "XL",
+};
 // CTL-957: one-estimate chip — show the Linear estimate (method-aware) when
 // present, else fall back to the triage scope string. NEVER both.
 // `estimateDisplay` is the pre-computed method-aware label from board-data.mjs
 // (fibonacci → "5", tShirt → "M"); when present it takes sole precedence.
-export function ScopeChip({ scope, estimate, estimateDisplay }: {
+export function ScopeChip({
+  scope,
+  estimate,
+  estimateDisplay,
+}: {
   scope: string | null;
   estimate: number | null;
   estimateDisplay?: string | null;
@@ -294,7 +388,9 @@ export function ScopeChip({ scope, estimate, estimateDisplay }: {
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10 }}>{estimateDisplay}</Badge>
+          <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10 }}>
+            {estimateDisplay}
+          </Badge>
         </TooltipTrigger>
         <TooltipContent>estimate: {estimate}</TooltipContent>
       </Tooltip>
@@ -303,8 +399,14 @@ export function ScopeChip({ scope, estimate, estimateDisplay }: {
   // No Linear estimate: fall back to triage scope string.
   if (!scope) return null;
   return (
-    <Tooltip><TooltipTrigger asChild><Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10 }}>{SCOPE_ABBR[scope] || scope}</Badge></TooltipTrigger>
-      <TooltipContent>scope: {scope}</TooltipContent></Tooltip>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10 }}>
+          {SCOPE_ABBR[scope] || scope}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent>scope: {scope}</TooltipContent>
+    </Tooltip>
   );
 }
 export function StatusBadge({ status }: { status: string }) {
@@ -317,31 +419,69 @@ export function StatusBadge({ status }: { status: string }) {
   };
   const m = meta[status];
   if (!m) return null;
-  return <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: m.fg, background: m.bg, whiteSpace: "nowrap" }}>{m.label}</span>;
+  return (
+    <span
+      style={{
+        fontFamily: C.mono,
+        fontSize: 10,
+        padding: "1.5px 7px",
+        borderRadius: 6,
+        color: m.fg,
+        background: m.bg,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {m.label}
+    </span>
+  );
 }
 // CTL-755: held indicator. A triaged-waiting ticket the admission gate is
-// holding before the triage→research promotion carries a `blocked` or `waiting`
-// Linear label. We render a distinct amber "⏸" chip so an operator sees at a
-// glance the ticket is HELD on a dependency (blocked, names the blocker ids) vs
-// merely awaiting capacity/priority (waiting) — NOT silently mid-triage.
-export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | null | undefined; blockers?: string[] }) {
-  if (held !== HELD_LABEL_BLOCKED && held !== HELD_LABEL_WAITING) return null;
+// holding before the triage→research promotion carries a `blocked` or `queued`
+// (formerly `waiting`) Linear label. We render a distinct amber "⏸" chip so an
+// operator sees at a glance the ticket is HELD on a dependency (blocked, names
+// the blocker ids) vs merely awaiting capacity/priority (queued).
+// CTL-764 Phase 4: back-compat — tolerate legacy "waiting" value during rollout.
+export function HeldBadge({
+  held,
+  blockers,
+}: {
+  held: "blocked" | "queued" | "waiting" | null | undefined;
+  blockers?: string[];
+}) {
+  if (held !== HELD_LABEL_BLOCKED && held !== HELD_LABEL_WAITING && held !== "waiting") return null;
   const isBlocked = held === HELD_LABEL_BLOCKED;
   const fg = isBlocked ? C.redSoft : C.yellowSoft;
   const bg = isBlocked ? `${C.red}24` : `${C.yellow}24`;
   const ids = (blockers ?? []).filter(Boolean);
-  const label = isBlocked
-    ? `⏸ blocked${ids.length ? `: ${ids.join(", ")}` : ""}`
-    : "⏸ held";
+  const label = isBlocked ? `⏸ blocked${ids.length ? `: ${ids.join(", ")}` : ""}` : "⏸ queued";
   const tip = isBlocked
     ? ids.length
       ? `Held — blocked on open dependency: ${ids.join(", ")}`
       : "Held — blocked on an open dependency"
-    : "Held — deps satisfied, awaiting capacity or priority";
+    : "Held — deps satisfied, awaiting capacity or priority (queued)";
   return (
-    <Tooltip><TooltipTrigger asChild>
-      <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: fg, background: bg, whiteSpace: "nowrap", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", display: "inline-block" }}>{label}</span>
-    </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          style={{
+            fontFamily: C.mono,
+            fontSize: 10,
+            padding: "1.5px 7px",
+            borderRadius: 6,
+            color: fg,
+            background: bg,
+            whiteSpace: "nowrap",
+            maxWidth: 180,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            display: "inline-block",
+          }}
+        >
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent>
+    </Tooltip>
   );
 }
 // CTL-729: the single "needs attention" badge (operator-approved 2026-06-11). ONE
@@ -350,7 +490,11 @@ export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | nu
 // sub-text saying WHY: "waiting on your answer" vs "escalated — needs human". This
 // is DISTINCT from HeldBadge (the admission-gate blocked/waiting pair). The ONLY
 // new color is the single yellow accent (Linear-calm: color reserved for meaning).
-export function AttentionBadge({ attention }: { attention?: "waiting-on-you" | "needs-human" | null }) {
+export function AttentionBadge({
+  attention,
+}: {
+  attention?: "waiting-on-you" | "needs-human" | null;
+}) {
   if (attention !== "waiting-on-you" && attention !== "needs-human") return null;
   const label =
     attention === "needs-human" ? "⚑ escalated — needs human" : "⏸ waiting on your answer";
@@ -359,9 +503,28 @@ export function AttentionBadge({ attention }: { attention?: "waiting-on-you" | "
       ? "Escalated to you — a human must act (watchdog / needs-human)"
       : "Paused waiting for your answer (a permission grant or prompt)";
   return (
-    <Tooltip><TooltipTrigger asChild>
-      <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: C.yellowSoft, background: `${C.yellow}24`, whiteSpace: "nowrap", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", display: "inline-block" }}>{label}</span>
-    </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          style={{
+            fontFamily: C.mono,
+            fontSize: 10,
+            padding: "1.5px 7px",
+            borderRadius: 6,
+            color: C.yellowSoft,
+            background: `${C.yellow}24`,
+            whiteSpace: "nowrap",
+            maxWidth: 200,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            display: "inline-block",
+          }}
+        >
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent>
+    </Tooltip>
   );
 }
 // CTL-957: dependency chips — compact `blocked_by: X, Y` and `blocks: A`
@@ -378,28 +541,67 @@ export function DepChips({ blockers, blockedBy }: { blockers?: string[]; blocked
       {fwd.length > 0 && (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 6px", borderRadius: 6, color: C.fgDim, background: C.s1, border: `1px solid ${C.borderSubtle}`, whiteSpace: "nowrap", cursor: "default" }}>
+            <span
+              style={{
+                fontFamily: C.mono,
+                fontSize: 10,
+                padding: "1.5px 6px",
+                borderRadius: 6,
+                color: C.fgDim,
+                background: C.s1,
+                border: `1px solid ${C.borderSubtle}`,
+                whiteSpace: "nowrap",
+                cursor: "default",
+              }}
+            >
               {fwd.length === 1 ? `← ${fwd[0]}` : `← ${fwd.length}`}
             </span>
           </TooltipTrigger>
-          <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>blocked by: {fwd.join(", ")}</TooltipContent>
+          <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>
+            blocked by: {fwd.join(", ")}
+          </TooltipContent>
         </Tooltip>
       )}
       {rev.length > 0 && (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 6px", borderRadius: 6, color: C.fgDim, background: C.s1, border: `1px solid ${C.borderSubtle}`, whiteSpace: "nowrap", cursor: "default" }}>
+            <span
+              style={{
+                fontFamily: C.mono,
+                fontSize: 10,
+                padding: "1.5px 6px",
+                borderRadius: 6,
+                color: C.fgDim,
+                background: C.s1,
+                border: `1px solid ${C.borderSubtle}`,
+                whiteSpace: "nowrap",
+                cursor: "default",
+              }}
+            >
               {rev.length === 1 ? `→ ${rev[0]}` : `→ ${rev.length}`}
             </span>
           </TooltipTrigger>
-          <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>blocks: {rev.join(", ")}</TooltipContent>
+          <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>
+            blocks: {rev.join(", ")}
+          </TooltipContent>
         </Tooltip>
       )}
     </>
   );
 }
 export function Cost({ v }: { v: number | null }) {
-  return <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 10.5, color: v == null ? C.fgDim : C.fgMuted }}>{v == null ? "—" : `$${v.toFixed(2)}`}</span>;
+  return (
+    <span
+      style={{
+        fontFamily: C.mono,
+        fontVariantNumeric: "tabular-nums",
+        fontSize: 10.5,
+        color: v == null ? C.fgDim : C.fgMuted,
+      }}
+    >
+      {v == null ? "—" : `$${v.toFixed(2)}`}
+    </span>
+  );
 }
 // CTL-1022: the title is a plain clamped block — NO hover tooltip. The old
 // Tooltip dumped the full title (the "description dump" Ryan flagged) on hover,
@@ -407,7 +609,21 @@ export function Cost({ v }: { v: number | null }) {
 // hover-card can replace it; for now hovering a card title shows nothing.
 export function TitleText({ text, clamp = 2 }: { text: string; clamp?: number }) {
   return (
-    <div style={{ color: C.fg, fontSize: 13, lineHeight: 1.35, margin: clamp === 1 ? "5px 0 6px" : "7px 0 9px", display: "-webkit-box", WebkitLineClamp: clamp, WebkitBoxOrient: "vertical", overflow: "hidden", cursor: "default" }}>{text}</div>
+    <div
+      style={{
+        color: C.fg,
+        fontSize: 13,
+        lineHeight: 1.35,
+        margin: clamp === 1 ? "5px 0 6px" : "7px 0 9px",
+        display: "-webkit-box",
+        WebkitLineClamp: clamp,
+        WebkitBoxOrient: "vertical",
+        overflow: "hidden",
+        cursor: "default",
+      }}
+    >
+      {text}
+    </div>
   );
 }
 
@@ -420,20 +636,31 @@ export function TitleText({ text, clamp = 2 }: { text: string; clamp?: number })
 export function TypePill({ type }: { type: string }) {
   const { icon: Icon, color, label } = typeSymbol(type);
   return (
-    <Tooltip><TooltipTrigger asChild>
-      <span
-        aria-label={label}
-        style={{
-          display: "inline-flex", alignItems: "center", justifyContent: "center",
-          width: 18, height: 18, borderRadius: 5, background: C.s1,
-          border: `1px solid ${C.borderSubtle}`, cursor: "default",
-        }}
-      >
-        {Icon
-          ? <Icon size={11} color={color} strokeWidth={2.25} />
-          : <span style={{ width: 5, height: 5, borderRadius: "50%", background: color }} />}
-      </span>
-    </TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          aria-label={label}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 18,
+            height: 18,
+            borderRadius: 5,
+            background: C.s1,
+            border: `1px solid ${C.borderSubtle}`,
+            cursor: "default",
+          }}
+        >
+          {Icon ? (
+            <Icon size={11} color={color} strokeWidth={2.25} />
+          ) : (
+            <span style={{ width: 5, height: 5, borderRadius: "50%", background: color }} />
+          )}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -451,7 +678,7 @@ export function TypePill({ type }: { type: string }) {
 type OpenDetailFn = (
   kind: DetailKind,
   id: string,
-  ctx: { ids: string[]; lens?: DetailLens; col?: string },
+  ctx: { ids: string[]; lens?: DetailLens; col?: string }
 ) => void;
 
 // CTL-952: motion.div gives each card a stable layoutId keyed by ticket id so
@@ -459,7 +686,27 @@ type OpenDetailFn = (
 // rather than jump-cutting. AnimatePresence (in the column container) handles
 // enter/exit. `useReducedMotion` collapses everything to instant when the OS
 // accessibility preference is set.
-function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, onOpen, blockedBy, repoAccents }: { t: Ticket; colorBy: ColorBy; density?: Density; colIds?: string[]; lens?: DetailLens; col?: string; onOpen?: OpenDetailFn; blockedBy?: string[]; repoAccents?: Record<string, string> }) {
+function TicketCard({
+  t,
+  colorBy,
+  density = "comfortable",
+  colIds,
+  lens,
+  col,
+  onOpen,
+  blockedBy,
+  repoAccents,
+}: {
+  t: Ticket;
+  colorBy: ColorBy;
+  density?: Density;
+  colIds?: string[];
+  lens?: DetailLens;
+  col?: string;
+  onOpen?: OpenDetailFn;
+  blockedBy?: string[];
+  repoAccents?: Record<string, string>;
+}) {
   const accent = accentFor(t, colorBy, repoAccents);
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
@@ -493,7 +740,9 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
       role={onOpen ? "button" : undefined}
       tabIndex={onOpen ? 0 : undefined}
       style={{
-        background: live ? C.s3 : C.s2, borderRadius: 10, padding: compact ? "7px 10px" : "11px 13px",
+        background: live ? C.s3 : C.s2,
+        borderRadius: 10,
+        padding: compact ? "7px 10px" : "11px 13px",
         border: `1px solid ${stuck ? `${C.red}80` : attention ? `${C.yellow}80` : dim ? C.borderSubtle : C.border}`,
         // CTL-729: a quiet yellow left rule when the ticket needs the operator —
         // the same single accent the Inbox "Needs you" row carries. Stuck (red)
@@ -526,45 +775,88 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
           open(true);
         }
       }}
-      onKeyDown={onOpen ? (e) => { if (e.key === "Enter" || e.key === " " || e.key === "o") { e.preventDefault(); open(false); } } : undefined}
+      onKeyDown={
+        onOpen
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " " || e.key === "o") {
+                e.preventDefault();
+                open(false);
+              }
+            }
+          : undefined
+      }
     >
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7 }}>
         <EntityMarker repo={t.repo} state={t.activeState} fallback={accent} />
-        <span style={{ fontFamily: C.mono, fontSize: 11.5, fontWeight: 600, color: C.blue }}>{t.id}</span>
+        <span style={{ fontFamily: C.mono, fontSize: 11.5, fontWeight: 600, color: C.blue }}>
+          {t.id}
+        </span>
         <span style={{ flex: 1 }} />
-        {live && <span style={{ fontFamily: C.mono, fontSize: 10, color: LIVE }}>{t.working ? "working" : "active"}</span>}
+        {live && (
+          <span style={{ fontFamily: C.mono, fontSize: 10, color: LIVE }}>
+            {t.working ? "working" : "active"}
+          </span>
+        )}
         {stuck && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.red }}>stuck</span>}
         {!compact && <TypePill type={t.type} />}
       </div>
       <TitleText text={t.title} clamp={compact ? 1 : 2} />
-      <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7, flexWrap: "wrap" }}>
+      <div
+        style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7, flexWrap: "wrap" }}
+      >
         <PriorityIcon p={t.priority} />
         <PhasePill phase={t.phase} />
         {/* CTL-729: the single needs-attention badge — yellow, with WHY sub-text. */}
         <AttentionBadge attention={t.attention} />
         <HeldBadge held={t.held} blockers={t.blockers} />
         <StatusBadge status={t.status} />
-        {!compact && <ScopeChip scope={t.scope} estimate={t.estimate} estimateDisplay={t.estimateDisplay} />}
+        {!compact && (
+          <ScopeChip scope={t.scope} estimate={t.estimate} estimateDisplay={t.estimateDisplay} />
+        )}
         {!compact && <DepChips blockers={t.blockers} blockedBy={blockedBy} />}
-        {!compact && t.project && <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>{t.project}</Badge>}
+        {!compact && t.project && (
+          <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>
+            {t.project}
+          </Badge>
+        )}
       </div>
       {!compact && <PhaseStrip phaseSummary={t.phaseSummary} />}
       {compact ? (
         // one collapsed meta line: age · turns · (PR or cost)
         <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 6 }}>
-          <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>{fmtAgo(t.updatedAt)}</span>
+          <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
+            {fmtAgo(t.updatedAt)}
+          </span>
           <span style={{ flex: 1 }} />
-          {t.turns != null && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }} title="total turns">{t.turns}t</span>}
-          {t.pr ? <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span> : <Cost v={t.costUSD} />}
+          {t.turns != null && (
+            <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }} title="total turns">
+              {t.turns}t
+            </span>
+          )}
+          {t.pr ? (
+            <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span>
+          ) : (
+            <Cost v={t.costUSD} />
+          )}
         </div>
       ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
           <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
-            {t.activeState == null && t.status !== "done" ? `idle · ${fmtAgo(t.updatedAt)}` : fmtAgo(t.updatedAt)}
+            {t.activeState == null && t.status !== "done"
+              ? `idle · ${fmtAgo(t.updatedAt)}`
+              : fmtAgo(t.updatedAt)}
           </span>
           <span style={{ flex: 1 }} />
-          {t.turns != null && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }} title="total turns">{t.turns}t</span>}
-          {t.pr ? <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span> : <Cost v={t.costUSD} />}
+          {t.turns != null && (
+            <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }} title="total turns">
+              {t.turns}t
+            </span>
+          )}
+          {t.pr ? (
+            <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span>
+          ) : (
+            <Cost v={t.costUSD} />
+          )}
         </div>
       )}
     </motion.div>
@@ -580,11 +872,37 @@ function HostChip({ host }: { host: Worker["host"] }) {
   if (!host?.name) return null;
   const c = nodeColor(host.name);
   return (
-    <Tooltip><TooltipTrigger asChild>
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: C.mono, fontSize: 10, color: c, background: `${c}1f`, border: `1px solid ${c}3a`, padding: "0 6px", borderRadius: 5, whiteSpace: "nowrap" }}>
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: c, display: "inline-block" }} />{host.name}
-      </span>
-    </TooltipTrigger><TooltipContent>node {host.name}</TooltipContent></Tooltip>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            fontFamily: C.mono,
+            fontSize: 10,
+            color: c,
+            background: `${c}1f`,
+            border: `1px solid ${c}3a`,
+            padding: "0 6px",
+            borderRadius: 5,
+            whiteSpace: "nowrap",
+          }}
+        >
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: c,
+              display: "inline-block",
+            }}
+          />
+          {host.name}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>node {host.name}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -592,7 +910,17 @@ function HostChip({ host }: { host: Worker["host"] }) {
 // CTL-952: motion.div with layoutId keyed by worker name — same layout/enter/exit
 // treatment as TicketCard. Workers move between Active/Stuck columns when their
 // state changes; AnimatePresence in the column container triggers enter/exit.
-function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; colIds?: string[]; onOpen?: OpenDetailFn }) {
+function WorkerCard({
+  w,
+  info,
+  colIds,
+  onOpen,
+}: {
+  w: Worker;
+  info?: Ticket;
+  colIds?: string[];
+  onOpen?: OpenDetailFn;
+}) {
   const accent = PHASE_C[w.phase] || C.blue;
   const live = w.activeState === "active";
   const stuck = w.activeState === "stuck";
@@ -652,9 +980,20 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
       }}
       role={onOpen ? "button" : undefined}
       tabIndex={onOpen ? 0 : undefined}
-      onKeyDown={onOpen ? (e) => { if (e.key === "Enter" || e.key === " " || e.key === "o") { e.preventDefault(); open(false); } } : undefined}
+      onKeyDown={
+        onOpen
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " " || e.key === "o") {
+                e.preventDefault();
+                open(false);
+              }
+            }
+          : undefined
+      }
       style={{
-        background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
+        background: live ? C.s3 : C.s2,
+        borderRadius: 10,
+        padding: "11px 13px",
         border: `1px solid ${stuck ? `${C.red}80` : attention ? `${C.yellow}80` : C.border}`,
         // CTL-729: the ONE yellow rule when this worker needs the operator —
         // identical accent to the ticket card. Stuck (red) takes precedence.
@@ -673,31 +1012,84 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
     >
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <EntityMarker repo={w.repo} state={w.activeState} fallback={accent} />
-        <span style={{ fontFamily: C.mono, fontSize: 12.5, fontWeight: 700, color: C.blue }}>{w.ticket}</span>
+        <span style={{ fontFamily: C.mono, fontSize: 12.5, fontWeight: 700, color: C.blue }}>
+          {w.ticket}
+        </span>
         {w.sessionId && (
-          <Tooltip><TooltipTrigger asChild>
-            <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim, background: C.s1, border: `1px solid ${C.borderSubtle}`, padding: "0 5px", borderRadius: 5 }}>{w.sessionId.slice(0, 7)}</span>
-          </TooltipTrigger><TooltipContent>worker {w.sessionId} · {w.name}</TooltipContent></Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                style={{
+                  fontFamily: C.mono,
+                  fontSize: 10,
+                  color: C.fgDim,
+                  background: C.s1,
+                  border: `1px solid ${C.borderSubtle}`,
+                  padding: "0 5px",
+                  borderRadius: 5,
+                }}
+              >
+                {w.sessionId.slice(0, 7)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              worker {w.sessionId} · {w.name}
+            </TooltipContent>
+          </Tooltip>
         )}
-        {w.tickets.length > 1 && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>+{w.tickets.length - 1}</span>}
+        {w.tickets.length > 1 && (
+          <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
+            +{w.tickets.length - 1}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
-        {attempt > 1 && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.yellow }}>retry #{attempt}</span>}
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>{fmtRuntime(w.runtimeMs)}</span>
+        {attempt > 1 && (
+          <span style={{ fontFamily: C.mono, fontSize: 10, color: C.yellow }}>
+            retry #{attempt}
+          </span>
+        )}
+        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
+          {fmtRuntime(w.runtimeMs)}
+        </span>
       </div>
       {info?.title && <TitleText text={info.title} />}
-      <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: info?.title ? 0 : 9 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          flexWrap: "wrap",
+          marginTop: info?.title ? 0 : 9,
+        }}
+      >
         {info && <PriorityIcon p={info.priority} />}
         <PhasePill phase={w.phase} />
         {/* CTL-729: the single needs-attention badge, same yellow as the ticket. */}
         <AttentionBadge attention={attentionState} />
         {/* CTL-909 / SURF1: owning host.name on every worker card. */}
         <HostChip host={w.host} />
-        <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>{w.repo}</Badge>
-        {info?.model && <Badge variant="secondary" style={{ fontFamily: C.mono, fontSize: 10 }}>{info.model}</Badge>}
+        <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
+          {w.repo}
+        </Badge>
+        {info?.model && (
+          <Badge variant="secondary" style={{ fontFamily: C.mono, fontSize: 10 }}>
+            {info.model}
+          </Badge>
+        )}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: live ? LIVE : stuck ? C.red : C.fgDim }}>
-          {live ? (w.working ? "working now" : seen ? `active · ${seen}` : "active") : stuck ? `stuck · ${seen ?? "?"}` : w.status}
+        <span
+          style={{ fontFamily: C.mono, fontSize: 10, color: live ? LIVE : stuck ? C.red : C.fgDim }}
+        >
+          {live
+            ? w.working
+              ? "working now"
+              : seen
+                ? `active · ${seen}`
+                : "active"
+            : stuck
+              ? `stuck · ${seen ?? "?"}`
+              : w.status}
         </span>
         <span style={{ flex: 1 }} />
         <Cost v={w.costUSD} />
@@ -718,14 +1110,17 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
 // summed across the lanes (so the top header chip reads the WHOLE board's depth).
 function sharedHeaderTotals(
   defs: readonly BoardColumnDef[],
-  perLaneCounts: { count: number; live: number }[][],
+  perLaneCounts: { count: number; live: number }[][]
 ): SharedColumn[] {
   return defs.map((def, i) => {
     let count = 0;
     let live = 0;
     for (const lane of perLaneCounts) {
       const cell = lane[i];
-      if (cell) { count += cell.count; live += cell.live; }
+      if (cell) {
+        count += cell.count;
+        live += cell.live;
+      }
     }
     return { key: def.key, label: def.label, c: def.c, count, live };
   });
@@ -750,11 +1145,31 @@ function buildBlockedByIndex(tickets: Ticket[]): Record<string, string[]> {
 // lane's cards come from `laneColumns(laneItems, defs)` (empty cells kept). The
 // card render + the column order are byte-identical to the legacy TicketBoard.
 function TicketSwimlaneBoard({
-  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, embedded = false, onOpen, laneColors, repoAccents,
+  tickets,
+  groupBy,
+  swimlane,
+  colorBy,
+  density,
+  order,
+  showEmpty,
+  fill,
+  embedded = false,
+  onOpen,
+  laneColors,
+  repoAccents,
 }: {
-  tickets: Ticket[]; groupBy: "linear" | "phase"; swimlane: GroupBy; colorBy: ColorBy;
-  density: Density; order: Ordering; showEmpty: boolean; fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
-  laneColors?: Record<string, string>; repoAccents?: Record<string, string>;
+  tickets: Ticket[];
+  groupBy: "linear" | "phase";
+  swimlane: GroupBy;
+  colorBy: ColorBy;
+  density: Density;
+  order: Ordering;
+  showEmpty: boolean;
+  fill: boolean;
+  embedded?: boolean;
+  onOpen?: OpenDetailFn;
+  laneColors?: Record<string, string>;
+  repoAccents?: Record<string, string>;
 }) {
   const defs = visibleColumnDefs(tickets, { groupBy, showEmptyColumns: showEmpty });
   const blockedByIdx = buildBlockedByIndex(tickets);
@@ -768,7 +1183,18 @@ function TicketSwimlaneBoard({
         count: c.items.length,
         live: c.live,
         cards: c.items.map((t) => (
-          <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} colIds={colIds} lens={groupBy} col={c.key} onOpen={onOpen} blockedBy={blockedByIdx[t.id]} repoAccents={repoAccents} />
+          <TicketCard
+            key={t.id}
+            t={t}
+            colorBy={colorBy}
+            density={density}
+            colIds={colIds}
+            lens={groupBy}
+            col={c.key}
+            onOpen={onOpen}
+            blockedBy={blockedByIdx[t.id]}
+            repoAccents={repoAccents}
+          />
         )),
       };
     });
@@ -798,10 +1224,22 @@ function TicketSwimlaneBoard({
 // swimlane is active the caller already falls the lens back to status/phase so
 // host is not double-encoded (rows AND columns).
 function WorkerSwimlaneBoard({
-  workers, tickets, swimlane, grouping, fill, embedded = false, onOpen, laneColors,
+  workers,
+  tickets,
+  swimlane,
+  grouping,
+  fill,
+  embedded = false,
+  onOpen,
+  laneColors,
 }: {
-  workers: Worker[]; tickets: Ticket[]; swimlane: GroupBy; grouping: WorkerGrouping;
-  fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
+  workers: Worker[];
+  tickets: Ticket[];
+  swimlane: GroupBy;
+  grouping: WorkerGrouping;
+  fill: boolean;
+  embedded?: boolean;
+  onOpen?: OpenDetailFn;
   laneColors?: Record<string, string>;
 }) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
@@ -830,11 +1268,20 @@ function WorkerSwimlaneBoard({
       const items = colWorkers(laneItems, def.key);
       // Status columns are already split by liveness (Active/Stuck), so the "N
       // live" chip is redundant there; surface it only in the phase / node lens.
-      const live = grouping === "status" ? 0 : items.filter((w) => w.activeState === "active").length;
+      const live =
+        grouping === "status" ? 0 : items.filter((w) => w.activeState === "active").length;
       return {
         count: items.length,
         live,
-        cards: items.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} colIds={workerIds} onOpen={onOpen} />),
+        cards: items.map((w) => (
+          <WorkerCard
+            key={w.name}
+            w={w}
+            info={infoById[w.ticket]}
+            colIds={workerIds}
+            onOpen={onOpen}
+          />
+        )),
       };
     });
   const columns = sharedHeaderTotals(defs, [deriveLane(workers)]);
@@ -863,10 +1310,32 @@ function WorkerSwimlaneBoard({
 type View = "tickets" | "workers";
 // WorkerGrouping ("status" | "phase" | "node") is now owned by worker-grouping.ts
 // (CTL-909 / SURF1) so the column derivation + the type stay in lock-step.
-function Seg<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: { k: T; label: string }[] }) {
+function Seg<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { k: T; label: string }[];
+}) {
   return (
-    <ToggleGroup type="single" value={value} onValueChange={(v) => v && onChange(v as T)} variant="outline" size="sm">
-      {options.map((o) => <ToggleGroupItem key={o.k} value={o.k} style={{ fontSize: 12, color: value === o.k ? C.fg : C.fgMuted }}>{o.label}</ToggleGroupItem>)}
+    <ToggleGroup
+      type="single"
+      value={value}
+      onValueChange={(v) => v && onChange(v as T)}
+      variant="outline"
+      size="sm"
+    >
+      {options.map((o) => (
+        <ToggleGroupItem
+          key={o.k}
+          value={o.k}
+          style={{ fontSize: 12, color: value === o.k ? C.fg : C.fgMuted }}
+        >
+          {o.label}
+        </ToggleGroupItem>
+      ))}
     </ToggleGroup>
   );
 }
@@ -921,10 +1390,16 @@ export function Board({
   useEffect(() => {
     let alive = true;
     const conn = connectBoard({
-      onSnapshot: (p) => { if (alive) setData(p); },
-      onStatus: (s) => { if (alive) setStatus(s); },
+      onSnapshot: (p) => {
+        if (alive) setData(p);
+      },
+      onStatus: (s) => {
+        if (alive) setStatus(s);
+      },
     });
-    const onVis = () => { if (!document.hidden) conn.requestReconcile(); };
+    const onVis = () => {
+      if (!document.hidden) conn.requestReconcile();
+    };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       alive = false;
@@ -939,8 +1414,14 @@ export function Board({
   // `setRepo` keep their names so every downstream filter + the in-grid Seg are
   // unchanged; the value is now shared with the workspace switcher.
   const { scope: repo, setScope: setRepo } = useRepoScope(repos);
-  const fWorkers = useMemo(() => (data?.workers ?? []).filter((w) => repo === "all" || w.repo === repo), [data, repo]);
-  const fTickets = useMemo(() => (data?.tickets ?? []).filter((t) => repo === "all" || t.repo === repo), [data, repo]);
+  const fWorkers = useMemo(
+    () => (data?.workers ?? []).filter((w) => repo === "all" || w.repo === repo),
+    [data, repo]
+  );
+  const fTickets = useMemo(
+    () => (data?.tickets ?? []).filter((t) => repo === "all" || t.repo === repo),
+    [data, repo]
+  );
   // CTL-909 / SURF1: distinct host names across the (repo-filtered) workers — the
   // node filter's option list. With one node this is a single entry, so the
   // filter control hides (isMultiHost === false) and the single-host case stays
@@ -955,7 +1436,7 @@ export function Board({
       : hostFilter;
   const nodeWorkers = useMemo(
     () => filterWorkersByHost(fWorkers, activeHostFilter),
-    [fWorkers, activeHostFilter],
+    [fWorkers, activeHostFilter]
   );
   // CTL-930 Phase 3: swimlanes engage under any workspace scope. The repo scope
   // narrows the entity set (fTickets/fWorkers at :841–842) and the axis groups
@@ -969,11 +1450,11 @@ export function Board({
   const resolvedColors = useResolvedRepoColors();
   const laneColors = useMemo(
     () => Object.fromEntries(Object.entries(resolvedColors).map(([k, v]) => [k, v.bg])),
-    [resolvedColors],
+    [resolvedColors]
   );
   const repoAccents = useMemo(
     () => Object.fromEntries(Object.entries(resolvedColors).map(([k, v]) => [k, v.text])),
-    [resolvedColors],
+    [resolvedColors]
   );
 
   // CTL-989: the single card-open seam — a CLIENT-SIDE router navigation to the
@@ -996,19 +1477,26 @@ export function Board({
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div style={{
-        [BOARD_VH_VAR]: boardRootHeight(embedded),
-        background: C.s1, color: C.fg, // CTL-1013: board is the content canvas (s1), not chrome (s0)
-        // CTL-989 board-height fix: embedded → fill the AppShell inset content slot
-        // via the flex chain (`flex:1; minHeight:0`) so there is no dead space below
-        // the columns. Standalone (board.html) keeps the 100vh root. The
-        // `--cat-board-vh` var still resolves to 100% (embedded) / 100vh (standalone)
-        // for the QueueView scroller + the standalone Swimlane calc.
-        ...(embedded ? { flex: 1, minHeight: 0 } : { height: `var(${BOARD_VH_VAR})` }),
-        display: "flex", flexDirection: "column", fontSize: 13,
-        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-        overflow: "hidden",
-      } as unknown as React.CSSProperties}>
+      <div
+        style={
+          {
+            [BOARD_VH_VAR]: boardRootHeight(embedded),
+            background: C.s1,
+            color: C.fg, // CTL-1013: board is the content canvas (s1), not chrome (s0)
+            // CTL-989 board-height fix: embedded → fill the AppShell inset content slot
+            // via the flex chain (`flex:1; minHeight:0`) so there is no dead space below
+            // the columns. Standalone (board.html) keeps the 100vh root. The
+            // `--cat-board-vh` var still resolves to 100% (embedded) / 100vh (standalone)
+            // for the QueueView scroller + the standalone Swimlane calc.
+            ...(embedded ? { flex: 1, minHeight: 0 } : { height: `var(${BOARD_VH_VAR})` }),
+            display: "flex",
+            flexDirection: "column",
+            fontSize: 13,
+            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            overflow: "hidden",
+          } as unknown as React.CSSProperties
+        }
+      >
         <style>{PULSE_CSS}</style>
         {/* CTL-930: in-board header (Catalyst swatch + Tabs nav + status cluster)
             DELETED — the left sidebar is now the sole navigation and the app footer
@@ -1023,10 +1511,16 @@ export function Board({
         <HeaderActions>
           {/* CTL-1144: combined board total — quiet, mono, no accent color. */}
           {view === "tickets" && data && (
-            <span style={{
-              fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 12,
-              fontWeight: 600, color: C.fg, whiteSpace: "nowrap",
-            }}>
+            <span
+              style={{
+                fontFamily: C.mono,
+                fontVariantNumeric: "tabular-nums",
+                fontSize: 12,
+                fontWeight: 600,
+                color: C.fg,
+                whiteSpace: "nowrap",
+              }}
+            >
               {formatIssueCount(fTickets.length)}
             </span>
           )}
@@ -1040,32 +1534,67 @@ export function Board({
               : "Workers the daemon has deployed — active vs stuck"}
           </span>
           {view === "tickets" && (
-            <span style={{ fontSize: 11, color: C.fgDim, background: C.s1, border: `1px solid ${C.border}`, borderRadius: 4, padding: "1px 6px", whiteSpace: "nowrap" }}>
+            <span
+              style={{
+                fontSize: 11,
+                color: C.fgDim,
+                background: C.s1,
+                border: `1px solid ${C.border}`,
+                borderRadius: 4,
+                padding: "1px 6px",
+                whiteSpace: "nowrap",
+              }}
+            >
               {lens === "phase" ? "Pipeline phase" : "Linear stage"}
             </span>
           )}
           {/* BOARD2 / CTL-906: the lens / colorBy / repo-lanes toggles folded into
               ONE Display-options popover, reading/writing the persisted prefs. */}
           {view === "tickets" && <DisplayOptionsPopover repos={repos} />}
-          {view === "workers" && <>
-            {/* CTL-1098: Dispatch vs Board surface switch — labeled "Board" (not
+          {view === "workers" && (
+            <>
+              {/* CTL-1098: Dispatch vs Board surface switch — labeled "Board" (not
                 "Pipeline") to avoid colliding with the grouping toggle's Pipeline option. */}
-            <Seg value={workerSurface} onChange={setWorkerSurface} options={[{ k: "dispatch", label: "Dispatch" }, { k: "board", label: "Board" }]} />
-            {workerSurface === "board" && <>
-              {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node — board screen only. */}
-              <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }, { k: "node", label: "Node" }]} />
-              {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host. Shown
+              <Seg
+                value={workerSurface}
+                onChange={setWorkerSurface}
+                options={[
+                  { k: "dispatch", label: "Dispatch" },
+                  { k: "board", label: "Board" },
+                ]}
+              />
+              {workerSurface === "board" && (
+                <>
+                  {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node — board screen only. */}
+                  <Seg
+                    value={workerGrouping}
+                    onChange={setWorkerGrouping}
+                    options={[
+                      { k: "status", label: "Status" },
+                      { k: "phase", label: "Pipeline" },
+                      { k: "node", label: "Node" },
+                    ]}
+                  />
+                  {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host. Shown
                   only for a multi-node fleet — with a single node the filter is
                   inert, so the single-host case stays chrome-free (identity no-op). */}
-              {showNodeFilter && (
-                <Seg
-                  value={activeHostFilter}
-                  onChange={setHostFilter}
-                  options={[{ k: HOST_FILTER_ALL, label: "All nodes" }, ...workerHosts.map((h) => ({ k: h, label: h === UNATTRIBUTED_HOST ? "Unattributed" : h }))]}
-                />
+                  {showNodeFilter && (
+                    <Seg
+                      value={activeHostFilter}
+                      onChange={setHostFilter}
+                      options={[
+                        { k: HOST_FILTER_ALL, label: "All nodes" },
+                        ...workerHosts.map((h) => ({
+                          k: h,
+                          label: h === UNATTRIBUTED_HOST ? "Unattributed" : h,
+                        })),
+                      ]}
+                    />
+                  )}
+                </>
               )}
-            </>}
-          </>}
+            </>
+          )}
           {/* CTL-948 / CTL-989: dep-graph link — a client-side navigate to
               /dep-graph (an `onDepGraph` prop still wins for back-compat callers). */}
           <button
@@ -1075,9 +1604,15 @@ export function Board({
                 : void navigate({ to: "/dep-graph", search: (prev) => prev })
             }
             style={{
-              fontFamily: C.mono, fontSize: 11, padding: "3px 10px", borderRadius: 6,
-              background: "transparent", border: `1px solid ${C.border}`,
-              color: C.fgMuted, cursor: "pointer", whiteSpace: "nowrap",
+              fontFamily: C.mono,
+              fontSize: 11,
+              padding: "3px 10px",
+              borderRadius: 6,
+              background: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.fgMuted,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
             }}
             title="Open backlog dependency graph"
           >
@@ -1091,21 +1626,24 @@ export function Board({
             space below the columns). `minHeight:0` lets it shrink inside the flex
             parent; `display:flex` is the load-bearing addition. */}
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
+          {!data && (
+            <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>
+          )}
           {/* BOARD3 / CTL-907: row swimlanes. <SwimlaneBoard> groups the entities
               through the pure board-grouping engine and renders one labeled lane
               per group around the SAME column board — collapsing to the bare flat
               board for a single lane (the identity no-op: none / single-team /
               single-node / single-repo / single-repo-scope). The TicketBoard /
               WorkerBoard renderers are unchanged. */}
-          {data && view === "tickets" && (
+          {data &&
+            view === "tickets" &&
             // BOARD4 / CTL-908: fork the Tickets body on the Layout toggle. "list"
             // renders the dense BoardList table (its own swimlane sectioning via
             // groupListRows, so NOT wrapped in SwimlaneBoard); "board" keeps the
             // untouched column kanban. Flipping back restores the kanban with the
             // SAME lens/filters/density/live cards — all live in shared atoms, never
             // in BoardList.
-            prefs.layout === "list" ? (
+            (prefs.layout === "list" ? (
               <BoardList
                 kind="ticket"
                 tickets={fTickets}
@@ -1135,8 +1673,7 @@ export function Board({
                 laneColors={laneColors}
                 repoAccents={repoAccents}
               />
-            )
-          )}
+            ))}
           {data && view === "workers" && workerSurface === "dispatch" && (
             // CTL-1098: Dispatch screen — ControlTower owns its own scroll container.
             // The pipeline board is NOT mounted here, so the swimlane's sticky header
@@ -1166,7 +1703,9 @@ export function Board({
               workers={nodeWorkers}
               tickets={data.tickets}
               swimlane={swimlane}
-              grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
+              grouping={
+                swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping
+              }
               fill={true}
               embedded={true}
               onOpen={onOpen}

@@ -8,7 +8,7 @@ description:
   plus tiered Gherkin (Given/When/Then) acceptance criteria — even for backend bugs and chores."
 disable-model-invocation: false
 user-invocable: true
-allowed-tools: Read, Write, Edit, Grep, Glob, Bash(linearis *), Bash(jq *)
+allowed-tools: Read, Write, Edit, Grep, Glob, Bash(linearis *), Bash(jq *), Bash(source *), Bash(linear_read_ticket *)
 version: 1.0.0
 ---
 
@@ -234,7 +234,16 @@ Scenario: Dispatch still waits for completion before returning  # invariant
    estimate, priority there (see `feedback_linear_ticket_hygiene`).
 
 ### REWRITE (existing ticket)
-1. Read the **full** existing ticket (title + description + comments) — never partial.
+1. Read the **full** existing ticket — never partial. Title + description come from
+   the replica (per the `linearis` skill's "Reading Linear" rule) — read it in ONE
+   command (the helper's function is only defined in the shell that sourced it):
+   `source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh" && linear_read_ticket "$TICKET"`
+   (freshness gate → SQL → loud linearis fallback). **Comments are not mirrored** —
+   fetch them via `linearis comments list "$TICKET"`, and for any comment with a
+   discussion thread also fetch its replies (`linearis issues replies <thread>`) so
+   technical detail in replies isn't dropped when you rewrite (see
+   `/catalyst-dev:linearis`); this stays on `linearis` and is structurally outside
+   the `issues read` detector.
 2. **Preserve all technical content** (file refs, repro steps, root-cause notes, SHAs). You are
    restructuring, not deleting. Move technical detail under a `## Technical notes` section below the
    Gherkin so it stays but doesn't lead.

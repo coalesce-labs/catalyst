@@ -41,6 +41,8 @@ describe("buildLinearStateWriteEvent", () => {
     expect(line.endsWith("\n")).toBe(true);
     const ev = JSON.parse(line);
     expect(ev.attributes["event.name"]).toBe("linear.state.write.CTL-757");
+    // CTL-1488: coordination-stamped so coordination-publish's fail-closed tailer mirrors it.
+    expect(ev.attributes["event.stream_class"]).toBe("coordination");
     expect(ev.attributes["event.entity"]).toBe("linear");
     expect(ev.attributes["event.action"]).toBe("state-write");
     expect(ev.attributes["linear.issue.identifier"]).toBe("CTL-757");

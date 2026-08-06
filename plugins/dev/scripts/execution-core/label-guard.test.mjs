@@ -2,7 +2,7 @@
 // escalation cool-down primitives (CTL-638). Run:
 //   cd plugins/dev/scripts/execution-core && bun test label-guard.test.mjs
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import {
   clearStalledLabel,
   inEscalationCooldown,
   recordEscalation,
+  readEscalationRecord,
   escalationCooldownPath,
   ESCALATION_COOLDOWN_MS,
   recordRemovalFailure,
@@ -18,6 +19,8 @@ import {
   inRemovalBackoff,
   beliefOwnsNeedsHuman,
   labelNeedsHumanUnlessBeliefOwner,
+  resolveAndApplyWorkerStatusLabel,
+  WORKER_STATUS_LABELS,
 } from "./label-guard.mjs";
 
 let orchDir;
@@ -251,7 +254,58 @@ describe("inEscalationCooldown / recordEscalation", () => {
       phase: "monitor-merge",
       reason: "revive-budget-exhausted",
       escalatedAt: 9_876_543,
+      // CTL-1442: the ask-cap fields ride the same marker.
+      askCount: 1,
+      asks: [9_876_543],
     });
+  });
+
+  // ─── CTL-1442: consecutive-ask counting on the cool-down marker ───
+
+  test("same-reason asks accrue askCount + a bounded ask history", () => {
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 2_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 3_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(3);
+    expect(rec.asks).toEqual([1_000, 2_000, 3_000]);
+  });
+
+  test("a DIFFERENT reason restarts the count (a new question, not a repeat)", () => {
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 2_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", 3_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(1);
+    expect(rec.asks).toEqual([3_000]);
+  });
+
+  test("the ask history is bounded to the last 10 entries", () => {
+    for (let i = 1; i <= 14; i++) {
+      recordEscalation(orchDir, "CTL-9", "pr", "no-progress", i * 1_000);
+    }
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(14);
+    expect(rec.asks.length).toBe(10);
+    expect(rec.asks[rec.asks.length - 1]).toBe(14_000);
+  });
+
+  test("readEscalationRecord: absent/malformed → null (fail-open)", () => {
+    expect(readEscalationRecord(orchDir, "CTL-none", "pr")).toBeNull();
+    mkdirSync(join(orchDir, ".escalation-cooldowns"), { recursive: true });
+    writeFileSync(escalationCooldownPath(orchDir, "CTL-bad", "pr"), "not json");
+    expect(readEscalationRecord(orchDir, "CTL-bad", "pr")).toBeNull();
+  });
+
+  test("a LEGACY marker (no askCount) counts as a fresh ask on the next record", () => {
+    mkdirSync(join(orchDir, ".escalation-cooldowns"), { recursive: true });
+    writeFileSync(
+      escalationCooldownPath(orchDir, "CTL-9", "pr"),
+      JSON.stringify({ ticket: "CTL-9", phase: "pr", reason: "no-progress", escalatedAt: 500 })
+    );
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(1); // legacy marker had no count → restart at 1
   });
 
   test("recordEscalation swallows mkdir/writeFile failures (warn-only, no throw)", () => {
@@ -758,5 +812,398 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
       log: { info: () => {} },
     });
     expect(ws.calls.length).toBe(1);
+  });
+
+  // CTL-764 finding 8: the return value gates the caller's worker.transition emission
+  // — a fresh apply is `true`; a no-op (persisted marker / belief deferral) is `false`.
+  test("CTL-764 finding 8 — returns true on a fresh apply (a label write happened)", () => {
+    const ws = makeWS();
+    mkdirSync(join(orchDir, "workers", "CTL-8A"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8A", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(true);
+  });
+
+  test("CTL-764 finding 8 — returns false on a persisted marker (labelOnce no-op after restart)", () => {
+    const ws = makeWS();
+    const dir = join(orchDir, "workers", "CTL-8B");
+    mkdirSync(dir, { recursive: true });
+    // A needs-human already applied this lifetime — the once-marker persists on disk.
+    writeFileSync(join(dir, ".linear-label-needs-human.applied"), "");
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8B", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+    expect(ws.calls.length).toBe(0); // labelOnce short-circuited on the marker — no write
+  });
+
+  test("CTL-764 finding 8 — returns false when deferring to the belief owner", () => {
+    const ws = makeWS();
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8C", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+  });
+
+  // CTL-764 finding C: the return must reflect a CONFIRMED apply, not a bare first
+  // attempt. labelOnce returns true for any first write attempt — including outcomes
+  // where applyLabel reported applied:false — so gating a worker.transition on the raw
+  // labelOnce boolean records a needs-human escalation that never actually landed.
+  test("finding C — returns false when applyLabel is attempted but not applied (rate-limited)", () => {
+    const calls = [];
+    const ws = {
+      applyLabel: (args) => {
+        calls.push(args);
+        return { applied: false, reason: "rate-limited" };
+      },
+    };
+    mkdirSync(join(orchDir, "workers", "CTL-C1"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C1", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    // The attempt happened (transient → no marker, retries next tick) but the label
+    // did not land, so no transition should be recorded.
+    expect(calls.length).toBe(1);
+    expect(wrote).toBe(false);
+  });
+
+  test("finding C — returns false on an unrecoverable failure (exclusive-conflict, .skipped written)", () => {
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-C2"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C2", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+    // The .skipped marker is still written (storm-break) even though nothing applied.
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-C2", ".linear-label-needs-human.skipped"))
+    ).toBe(true);
+  });
+
+  test("finding C — returns true ONLY on a confirmed applied:true", () => {
+    const ws = { applyLabel: () => ({ applied: true }) };
+    mkdirSync(join(orchDir, "workers", "CTL-C3"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C3", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(true);
+  });
+});
+
+// ─── CTL-1605: terminal-aware worker-status chokepoint ───
+
+describe("resolveAndApplyWorkerStatusLabel", () => {
+  test("WORKER_STATUS_LABELS is the frozen group source-of-truth", () => {
+    expect(Object.isFrozen(WORKER_STATUS_LABELS)).toBe(true);
+    expect(new Set(WORKER_STATUS_LABELS)).toEqual(
+      new Set(["needs-human", "needs-input", "blocked", "queued", "waiting"])
+    );
+  });
+
+  test("terminal → clears every present label, evicts, no apply", () => {
+    const removed = [];
+    const evicted = [];
+    const applyDesired = mock(() => {});
+    const writeStatus = {
+      removeLabel: (t, l) => {
+        removed.push(l);
+        return { removed: true };
+      },
+      applyLabel: mock(() => {}),
+    };
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-9", {
+      desired: "blocked",
+      currentLabels: ["blocked", "needs-human"],
+      isTerminal: () => ({ terminal: true, reason: "linear-terminal", state: "Done" }),
+      writeStatus,
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+      applyDesired,
+    });
+    expect(res).toMatchObject({ terminal: true, evicted: true });
+    expect(new Set(removed)).toEqual(new Set(["blocked", "needs-human"]));
+    expect(applyDesired).not.toHaveBeenCalled();
+    expect(evicted).toEqual(["CTL-9"]);
+    expect(writeStatus.applyLabel).not.toHaveBeenCalled();
+  });
+
+  test("non-terminal → invokes applyDesired, no clear, no evict", () => {
+    const applyDesired = mock(() => {});
+    const evict = mock(() => true);
+    const writeStatus = {
+      removeLabel: mock(() => ({ removed: true })),
+      applyLabel: mock(() => {}),
+    };
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-10", {
+      desired: "blocked",
+      currentLabels: [],
+      isTerminal: () => ({ terminal: false }),
+      writeStatus,
+      evictWorkerDir: evict,
+      applyDesired,
+    });
+    expect(res).toMatchObject({ terminal: false });
+    expect(applyDesired).toHaveBeenCalledTimes(1);
+    expect(evict).not.toHaveBeenCalled();
+    expect(writeStatus.removeLabel).not.toHaveBeenCalled();
+  });
+
+  test("terminal but no worker-status label present → evicts, zero removeLabel", () => {
+    const writeStatus = {
+      removeLabel: mock(() => ({ removed: true })),
+      applyLabel: mock(() => {}),
+    };
+    const evict = mock(() => true);
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-11", {
+      desired: null,
+      currentLabels: ["some-unrelated-label"],
+      isTerminal: () => ({ terminal: true, state: "Canceled" }),
+      writeStatus,
+      evictWorkerDir: evict,
+      applyDesired: mock(() => {}),
+    });
+    expect(res.terminal).toBe(true);
+    expect(writeStatus.removeLabel).not.toHaveBeenCalled();
+    expect(evict).toHaveBeenCalledTimes(1);
+  });
+
+  test("isTerminal throws → fail-safe NOT-terminal, applyDesired runs", () => {
+    const applyDesired = mock(() => {});
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-12", {
+      desired: "queued",
+      currentLabels: [],
+      isTerminal: () => {
+        throw new Error("linear 400");
+      },
+      writeStatus: { removeLabel: mock(() => ({ removed: true })), applyLabel: mock(() => {}) },
+      evictWorkerDir: mock(() => true),
+      applyDesired,
+    });
+    expect(res.terminal).toBe(false);
+    expect(applyDesired).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── CTL-1605 Codex thread (scheduler.mjs:5518) — onTerminalCleared now fires
+  // EXACTLY ONCE per call with the AGGREGATE outcome across every present
+  // worker-status label, never once per label. The old per-label firing let a
+  // single confirmed removal on a multi-label ticket report a clear even when a
+  // sibling label (e.g. the sticky needs-human) never confirmed removal. ───
+
+  test("terminal clear, all present labels confirm → onTerminalCleared fires ONCE with null", () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-13", {
+      desired: null,
+      currentLabels: ["queued", "needs-human"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: { removeLabel: () => ({ removed: true }), applyLabel: mock(() => {}) },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+    });
+    expect(cleared).toEqual([null]);
+  });
+
+  test("single label confirmed → onTerminalCleared fires ONCE with null (backward compat)", () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-13b", {
+      desired: null,
+      currentLabels: ["queued"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: { removeLabel: () => ({ removed: true }), applyLabel: mock(() => {}) },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+    });
+    expect(cleared).toEqual([null]);
+  });
+
+  test("async removeLabel resolving removed:true → onTerminalCleared fires once on resolve, not eagerly", async () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-14", {
+      desired: null,
+      currentLabels: ["blocked"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: () => Promise.resolve({ removed: true }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+    });
+    // NOT fired synchronously off the Promise object.
+    expect(cleared).toEqual([]);
+    // Extra hop vs the pre-fix version: the aggregate fire now runs off
+    // Promise.all(outcomes).then(...), one microtask hop past the per-label settle.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cleared).toEqual([null]);
+  });
+
+  test("async removeLabel resolving removed:false → onTerminalCleared fires once with the surviving label, never null", async () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-15", {
+      desired: null,
+      currentLabels: ["blocked"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: () => Promise.resolve({ removed: false, reason: "rate-limited" }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cleared).toEqual(["blocked"]);
+  });
+
+  test("multi-label ticket, needs-human backoff-skipped + blocked confirmed → onTerminalCleared fires ONCE with \"needs-human\", never null", () => {
+    const workerDir = join(orchDir, "workers", "CTL-13c");
+    mkdirSync(workerDir, { recursive: true });
+    const now = 5_000_000;
+    const THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+    for (let i = 0; i < THRESHOLD; i++) {
+      recordRemovalFailure(orchDir, "CTL-13c", "needs-human", "auth-error", now);
+    }
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-13c", {
+      desired: null,
+      // DISPOSITIONS precedence order is needs-human, needs-input, blocked, queued —
+      // "blocked" outranks "needs-human" numerically LOWER index wins (needs-human is
+      // index 0, the highest precedence), so with needs-human surviving it must win
+      // over blocked as the reported survivor regardless of iteration order.
+      currentLabels: ["blocked", "needs-human"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: (t, l) => (l === "blocked" ? { removed: true } : { removed: true }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+      now: () => now,
+    });
+    // needs-human is in CTL-1078 backoff → its removal is skipped (unconfirmed);
+    // blocked confirms. Aggregate must report the surviving "needs-human", never null.
+    expect(cleared).toEqual(["needs-human"]);
+  });
+
+  // ─── CTL-1605 review finding (label-guard.mjs:519) — eviction gated on
+  // CONFIRMED removal of every present label, not merely on the removals being
+  // ISSUED. Retry-loss: STEP A / J3 / J4 all key their candidate sets off
+  // workers/<T>/ existing on disk — evicting on an unconfirmed/failed removal
+  // destroys the only retry record and strands the stale Linear label forever. ───
+
+  test("async removals ALL confirmed → evict is DEFERRED past the call (not synchronous) then fires once settled", async () => {
+    let resolveBlocked, resolveQueued;
+    const evicted = [];
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-16", {
+      desired: null,
+      currentLabels: ["blocked", "queued"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: (t, l) =>
+          l === "blocked"
+            ? new Promise((r) => { resolveBlocked = r; })
+            : new Promise((r) => { resolveQueued = r; }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: (t) => { evicted.push(t); return true; },
+      applyDesired: mock(() => {}),
+    });
+    // Not every present label settled synchronously → evict cannot be decided yet.
+    expect(res.evicted).toBe(false);
+    expect(evicted).toEqual([]);
+    resolveBlocked({ removed: true });
+    resolveQueued({ removed: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Only NOW — once every present label's removal is CONFIRMED — does eviction fire.
+    expect(evicted).toEqual(["CTL-16"]);
+  });
+
+  test("async removals where ONE fails (removed:false) → evict NEVER fires, even after all settle", async () => {
+    const evicted = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-17", {
+      desired: null,
+      currentLabels: ["blocked", "queued"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: (t, l) =>
+          l === "blocked"
+            ? Promise.resolve({ removed: true })
+            : Promise.resolve({ removed: false, reason: "rate-limited" }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: (t) => { evicted.push(t); return true; },
+      applyDesired: mock(() => {}),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // One label never confirmed removed → the worker dir stays (the only retry
+    // record for the still-attached label) instead of being evicted underneath it.
+    expect(evicted).toEqual([]);
+  });
+
+  test("sync removals where ONE fails (removed:false) → evict withheld synchronously (evicted:false)", () => {
+    const evicted = [];
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-18", {
+      desired: null,
+      currentLabels: ["blocked", "queued"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: (t, l) => (l === "blocked" ? { removed: true } : { removed: false, reason: "transient" }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: (t) => { evicted.push(t); return true; },
+      applyDesired: mock(() => {}),
+    });
+    expect(res.evicted).toBe(false);
+    expect(evicted).toEqual([]);
+  });
+
+  test("needs-human in CTL-1078 backoff (unconfirmed) → evict withheld even though the removal was never even attempted", () => {
+    const workerDir = join(orchDir, "workers", "CTL-19");
+    mkdirSync(workerDir, { recursive: true });
+    const now = 5_000_000;
+    // Drive clearStalledLabel's removal-failure counter to the backoff threshold.
+    const THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+    for (let i = 0; i < THRESHOLD; i++) {
+      recordRemovalFailure(orchDir, "CTL-19", "needs-human", "auth-error", now);
+    }
+    const evicted = [];
+    let removeLabelCalls = 0;
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-19", {
+      desired: null,
+      currentLabels: ["needs-human"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: () => { removeLabelCalls++; return { removed: true }; },
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: (t) => { evicted.push(t); return true; },
+      applyDesired: mock(() => {}),
+      now: () => now,
+    });
+    // Backoff short-circuits BEFORE removeLabel is ever called (CTL-1078 storm-break).
+    expect(removeLabelCalls).toBe(0);
+    // A backoff-skip is not a confirmed removal → evict must stay withheld.
+    expect(res.evicted).toBe(false);
+    expect(evicted).toEqual([]);
   });
 });

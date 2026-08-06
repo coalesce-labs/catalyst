@@ -157,3 +157,29 @@ test("stop() clears the interval", () => {
   w.stop();
   expect(clock.wasCleared()).toBe(true);
 });
+
+test("background agent with end_turn snapshot emits nothing (CTL-682)", () => {
+  // Same WAITING_USER snapshot, but kind:"background" → the loop must skip it
+  // before classify/emit, so no agent.waiting_on_user is produced.
+  const agentsRef = {
+    current: [{ sessionId: SID, status: "idle", kind: "background", cwd: "/wt" }],
+  };
+  const snapRef = { current: WAITING_USER_SNAP };
+  const { w, emitted } = harness({ agentsRef, snapRef });
+
+  w.tick();
+  expect(emitted).toEqual([]);
+  w.stop();
+});
+
+test("interactive agent still emits agent.waiting_on_user (CTL-682 guard is background-only)", () => {
+  const agentsRef = {
+    current: [{ sessionId: SID, status: "idle", kind: "interactive", cwd: "/wt" }],
+  };
+  const snapRef = { current: WAITING_USER_SNAP };
+  const { w, emitted } = harness({ agentsRef, snapRef });
+
+  w.tick();
+  expect(emitted.map((e) => e.name)).toEqual(["agent.waiting_on_user"]);
+  w.stop();
+});

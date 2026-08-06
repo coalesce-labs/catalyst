@@ -23,6 +23,8 @@ import { deriveFooterCounts } from "@/components/footer-counts";
 import { useNavSignalContext } from "@/hooks/use-nav-signal";
 import { useClusterSignalContext } from "@/hooks/use-cluster-signal";
 import { nodeStatusLabel } from "@/lib/cluster-signal";
+import { useAccountSignalContext } from "@/hooks/use-account-signal";
+import { accountIndicatorLabel, type AccountTone } from "@/hooks/account-signal-lib";
 import { daemonLabel } from "@/lib/nav-signal";
 // CTL-1172: shared service-health context + fold helper for the right indicator.
 import { useServiceHealthContext } from "@/hooks/use-service-health";
@@ -50,10 +52,21 @@ const RIGHT_LABEL: Record<ServiceSeverity, string> = {
   unknown: "SERVICES ?",
 };
 
+// CTL-1653: the account-indicator tone → footer text color. It stays QUIET while
+// ok/unknown and never goes loud here (the AccountBanner owns the loud surface) —
+// a `rejected` posture reads as a colored-but-inline red text, not a banner.
+const ACCOUNT_TONE_COLOR: Record<AccountTone, string> = {
+  quiet: C.fgMuted,
+  warn: C.yellow,
+  loud: C.red,
+  muted: C.fgDim,
+};
+
 export function AppFooter() {
   const { payload, status } = useBoardSnapshot();
   const nav = useNavSignalContext();
   const cluster = useClusterSignalContext();
+  const account = useAccountSignalContext();
   const { services, unavailable } = useServiceHealthContext();
   const push = usePushSubscription();
 
@@ -157,10 +170,10 @@ export function AppFooter() {
             {" · "}
             {counts.free} free
           </span>
-          {counts.waiting > 0 && (
+          {counts.queued > 0 && (
             <span style={{ color: C.fgDim }}>
               {" · "}
-              {counts.waiting} waiting
+              {counts.queued} queued
             </span>
           )}
         </span>
@@ -179,6 +192,20 @@ export function AppFooter() {
         >
           ENABLE NOTIFS
         </button>
+      )}
+
+      {/* CTL-1653: compact, quiet-while-ok Claude-account indicator (active
+          handle + binding-window pct). Muted while `error` (sensor broken),
+          amber while `degraded`. It never goes loud here — the AccountBanner
+          owns the loud exhausted surface. Absent until the first SSE frame. */}
+      {account && (
+        <span
+          className="font-mono text-[10px]"
+          style={{ color: ACCOUNT_TONE_COLOR[accountIndicatorLabel(account).tone] }}
+          title="Active Claude account posture"
+        >
+          {accountIndicatorLabel(account).text}
+        </span>
       )}
 
       {/* Spacer */}

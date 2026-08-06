@@ -22,14 +22,33 @@ import { resolve, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
 let db = null;
+// CTL-1157 (Codex round-6 follow-up): track the path the singleton handle is open on.
+// openBrokerStateDb ignored a NEW dbPath when a handle was already open, so a caller
+// that left the singleton open on path A (e.g. the exec-core scheduler's board-health
+// binding, which now opens the DB every tick) would hand path A's handle to a later
+// caller/test that asked for path B — its reads/writes then silently hit the wrong DB
+// (the gateway-read cross-file test pollution). Reopen when the requested path differs.
+// Production is unaffected: every real caller uses DEFAULT_DB_PATH, so the path always
+// matches and the handle is reused verbatim.
+let dbOpenPath = null;
 
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
 const DEFAULT_DB_PATH = resolve(CATALYST_DIR, "filter-state.db");
 
 export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
-  if (db) return db;
+  if (db && dbOpenPath === dbPath) return db; // already open on the SAME path → reuse
+  if (db && dbOpenPath !== dbPath) {
+    // Open on a DIFFERENT path → close the stale handle and reopen on the requested one.
+    try {
+      db.close();
+    } catch {
+      /* best-effort */
+    }
+    db = null;
+  }
   mkdirSync(dirname(dbPath), { recursive: true });
   db = new Database(dbPath, { create: true });
+  dbOpenPath = dbPath;
   db.run("PRAGMA journal_mode=WAL");
   // CTL-821: don't fail instantly on transient WAL contention (live broker +
   // orch-monitor + test drivers can hold handles on the same file).
@@ -229,6 +248,7 @@ export function closeBrokerStateDb() {
     db.close();
     db = null;
   }
+  dbOpenPath = null;
 }
 
 function ensure() {
@@ -262,6 +282,23 @@ export function setFilterStateMerged(interestId, mergeCommitSha) {
        SET merge_commit_sha = ?, status = 'merged', updated_at = ?
        WHERE interest_id = ?`,
     [mergeCommitSha, nowIso(), interestId]
+  );
+  return result.changes > 0 ? { interestId } : null;
+}
+
+// setFilterStateClosed — CTL-1157 (Codex round-7): mark a PR's lifecycle row 'closed'
+// when it was closed WITHOUT merging. Before this the github.pr.closed webhook only
+// recorded a wake reason and never updated filter_state, so the row stayed 'open'
+// indefinitely — and board-health's orphaned-open-PR cohort then treated the
+// already-closed PR as a stale orphan forever, dispatching recovery for a PR that no
+// longer exists. 'closed' matches neither the orphaned cohort's `status === "open"`
+// nor the phantom cohort's merged/deployed test, so the PR is correctly excluded.
+export function setFilterStateClosed(interestId) {
+  const result = ensure().run(
+    `UPDATE filter_state
+       SET status = 'closed', updated_at = ?
+       WHERE interest_id = ?`,
+    [nowIso(), interestId]
   );
   return result.changes > 0 ? { interestId } : null;
 }
@@ -647,6 +684,58 @@ export function getAllTicketDescriptors({ includeRemoved = false } = {}) {
     ? `SELECT * FROM ticket_state ORDER BY ticket`
     : `SELECT * FROM ticket_state WHERE removed_at IS NULL ORDER BY ticket`;
   return ensure().prepare(sql).all().map(rowToTicketDescriptor);
+}
+
+// getAllPrStatuses — CTL-1157: one batch read of the filter_state lifecycle
+// table for board-health's phantom-merged-PR / orphaned-open-PR invariants. A
+// PR's status walks a monotone lifecycle (open → merged → deploying → deployed/
+// failed), so for each (repo, pr_number) the most-recently-updated row is the
+// current status. ORDER BY updated_at DESC + first-row-per-(repo,number) wins.
+//
+// MULTI-REPO COLLISION (CTL-1157, Codex #4): a (repo, pr_number) pair — NOT
+// pr_number alone — identifies a PR. With filter_state rows from >1 GitHub repo,
+// PR numbers collide: a merged #42 in repo X and an open #42 in repo Y are
+// DIFFERENT PRs. Keying by pr_number ALONE forced an `ambiguous` skip whenever a
+// number appeared in two repos — which is safe for phantom-merged (no false
+// phantom) but HID a genuine orphaned open PR whenever an unrelated repo happened
+// to reuse the number. The proper fix is COMPOSITE keying: this returns a nested
+// `Map<number, Map<repo, {status,updatedAt,repo}>>`, so a caller that knows the
+// ticket's repo (board-health resolves it from the registry) can look up the
+// EXACT (repo, number) entry and never confuse two repos' #42. The number-only
+// `ambiguous` fallback now exists ONLY at lookup time and ONLY when the ticket's
+// repo is genuinely underivable AND the number collides (board-health's
+// lookupPrStatus owns that last-resort).
+//
+// Returns Map<number, Map<repoKey, {status,updatedAt,repo}>> (frozen once at
+// board-assemble time). The inner key is the repo string ("" for a null/empty
+// repo) so single-repo installs always have exactly one inner entry per number
+// (no collision → number-only lookup stays byte-identical). Empty outer map when
+// filter_state has no rows → the new invariants stay observable:false
+// (shadow-safe by default).
+export function getAllPrStatuses() {
+  const rows = ensure()
+    .prepare(`SELECT pr_number, repo, status, updated_at FROM filter_state ORDER BY updated_at DESC`)
+    .all();
+  const map = new Map();
+  for (const row of rows) {
+    if (row.pr_number == null) continue;
+    const repo = row.repo ?? null;
+    const repoKey = repo ?? "";
+    let byRepo = map.get(row.pr_number);
+    if (!byRepo) {
+      byRepo = new Map();
+      map.set(row.pr_number, byRepo);
+    }
+    // First row for a given (repo, number) wins (ORDER BY updated_at DESC); a later
+    // row for the SAME (repo, number) is an older lifecycle state → keep the newer.
+    if (byRepo.has(repoKey)) continue;
+    byRepo.set(repoKey, {
+      status: row.status,
+      updatedAt: row.updated_at,
+      repo,
+    });
+  }
+  return map;
 }
 
 // getTicketDescriptorByUuid — the UUID→identifier index lookup. Linear's

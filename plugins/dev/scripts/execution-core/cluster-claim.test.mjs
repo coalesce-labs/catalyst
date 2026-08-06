@@ -5,7 +5,7 @@
 // API does (attachmentCreate with the same url returns the same node with new
 // metadata), so claimTicket's read→write→read-back soft-CAS exercises real
 // semantics.
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 
 import {
   fenceUrl,
@@ -234,6 +234,28 @@ describe("writeClaim — upsert the attachment", () => {
       err = e;
     }
     expect(err?.message).toMatch(/no issue found/);
+  });
+
+  // CTL-863 fleet-unfreeze (entourage follow-up to #2552): a pre-resolved issueId
+  // override skips the ResolveIssueId round-trip entirely.
+  it("an issueId override SKIPS resolveIssueId — only UpsertFence is called", async () => {
+    const { post, store, calls } = makeFakeLinear();
+    const written = await writeClaim(
+      "CTL-842",
+      { owner_host: "mini", generation: 1, phase: "triage" },
+      { post, issueId: "uuid-CTL-842" },
+    );
+    expect(written.owner_host).toBe("mini");
+    expect(calls.length).toBe(1); // ONLY the UpsertFence write — no ResolveIssueId call
+    expect(calls[0].query).toContain("UpsertFence");
+    expect(store.get("CTL-842").owner_host).toBe("mini");
+  });
+
+  it("no issueId override → falls through to resolveIssueId unchanged", async () => {
+    const { post, calls } = makeFakeLinear();
+    await writeClaim("CTL-842", { owner_host: "mini", generation: 1, phase: "triage" }, { post, issueId: null });
+    expect(calls[0].query).toContain("ResolveIssueId");
+    expect(calls[1].query).toContain("UpsertFence");
   });
 });
 
@@ -516,6 +538,35 @@ describe("runCli — the spawnSync CLI surface (CTL-850)", () => {
     expect(code).toBe(1);
   });
 
+  // CTL-863 fleet-unfreeze (entourage follow-up to #2552).
+  it("resolve-issue-id: prints {issueId} and exits 0", async () => {
+    const { post } = makeFakeLinear();
+    const { code, out } = await captureStdout(() =>
+      runCli(["resolve-issue-id", "CTL-842"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ issueId: "uuid-CTL-842" });
+  });
+
+  it("resolve-issue-id: {issueId:null} on a missing ticket", async () => {
+    const { post } = makeFakeLinear({ missingIssues: new Set(["CTL-999"]) });
+    const { code, out } = await captureStdout(() =>
+      runCli(["resolve-issue-id", "CTL-999"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ issueId: null });
+  });
+
+  it("claim: an optional 4th issueId arg skips ResolveIssueId (only ReadFence/UpsertFence calls)", async () => {
+    const { post, calls } = makeFakeLinear();
+    const { code, out } = await captureStdout(() =>
+      runCli(["claim", "CTL-842", "mini", "triage", "uuid-CTL-842"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ won: true, generation: 1 });
+    expect(calls.some((c) => c.query.includes("ResolveIssueId"))).toBe(false);
+  });
+
   it("claim: preempts a stale cross-host claim via the default threshold (CTL-1297)", async () => {
     // claimed_at at the Unix epoch is centuries stale relative to any real Date.now(),
     // so the default 300_000ms threshold fires without needing to inject `now`.
@@ -536,5 +587,39 @@ describe("runCli — the spawnSync CLI surface (CTL-850)", () => {
     const result = JSON.parse(out);
     expect(result.won).toBe(true);
     expect(result.generation).toBe(3); // bumped past generation 2
+  });
+});
+
+// CTL-1616 PR3: defaultPost's token resolution folds onto the shared
+// secret-contract engine (resolveSecret) — this is the synthetic
+// LINEAR_API_KEY-only fixture the design mandates, proven here by asserting
+// the Authorization header defaultPost actually sends (every other test in
+// this file injects its own fake `post`, bypassing defaultPost entirely).
+describe("defaultPost — secret-contract fold (CTL-1616 PR3)", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("LINEAR_API_KEY-only fixture: defaultPost sends it as the Authorization header when LINEAR_API_TOKEN is absent", async () => {
+    const savedToken = process.env.LINEAR_API_TOKEN;
+    const savedKey = process.env.LINEAR_API_KEY;
+    let seenAuth = null;
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return { ok: true, json: async () => ({ data: { issue: { id: "issue-1" } } }) };
+    };
+    try {
+      delete process.env.LINEAR_API_TOKEN;
+      process.env.LINEAR_API_KEY = "lin_api_fromkey";
+      const issueId = await resolveIssueId("CTL-9");
+      expect(issueId).toBe("issue-1");
+      expect(seenAuth).toBe("lin_api_fromkey");
+    } finally {
+      if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+      else process.env.LINEAR_API_TOKEN = savedToken;
+      if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = savedKey;
+    }
   });
 });

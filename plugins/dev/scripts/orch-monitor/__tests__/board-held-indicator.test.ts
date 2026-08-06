@@ -27,14 +27,14 @@ import { heldFor, HELD_LABEL_BLOCKED, HELD_LABEL_WAITING } from "../lib/board-da
 // would trip TS7016. This mirrors how board-phase-drift.test.ts reads Board.tsx
 // as text. We extract the two `export const HELD_LABEL_* = "…"` literals.
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SCHED_SRC = readFileSync(
-  join(HERE, "..", "..", "execution-core", "scheduler.mjs"),
-  "utf8",
-);
+const SCHED_SRC = readFileSync(join(HERE, "..", "..", "execution-core", "scheduler.mjs"), "utf8");
 function schedLabel(name: string): string {
   // eslint-disable-next-line security/detect-non-literal-regexp
   const m = new RegExp(`export\\s+const\\s+${name}\\s*=\\s*"([^"]+)"`).exec(SCHED_SRC);
-  if (!m) throw new Error(`board-held-indicator: could not locate \`export const ${name}\` in scheduler.mjs`);
+  if (!m)
+    throw new Error(
+      `board-held-indicator: could not locate \`export const ${name}\` in scheduler.mjs`
+    );
   return m[1];
 }
 const SCHED_BLOCKED = schedLabel("HELD_LABEL_BLOCKED");
@@ -46,9 +46,16 @@ test("heldFor → 'blocked' when the blocked label is present", () => {
   expect(heldFor(["feature", "orchestrator", "blocked"])).toBe("blocked");
 });
 
-test("heldFor → 'waiting' when only the waiting label is present", () => {
-  expect(heldFor(["waiting"])).toBe("waiting");
-  expect(heldFor(["chore", "waiting"])).toBe("waiting");
+test("heldFor → 'queued' when the queued label is present (Phase 4 rename)", () => {
+  expect(heldFor(["queued"])).toBe("queued");
+  expect(heldFor(["chore", "queued"])).toBe("queued");
+});
+
+test("heldFor → back-compat: legacy 'waiting' label maps to 'queued'", () => {
+  // CTL-764 Phase 4: HELD_LABEL_WAITING value changed from "waiting" to "queued".
+  // The HUD back-compat-maps the old label so a mid-rollout board is never blank.
+  expect(heldFor(["waiting"])).toBe("queued");
+  expect(heldFor(["chore", "waiting"])).toBe("queued");
 });
 
 test("heldFor → 'blocked' wins when both labels are somehow present (more severe)", () => {
@@ -76,7 +83,7 @@ test("board-data held labels equal scheduler.mjs source of truth (no drift)", ()
         `  scheduler:  blocked=${JSON.stringify(SCHED_BLOCKED)} waiting=${JSON.stringify(SCHED_WAITING)}\n` +
         `  board-data: blocked=${JSON.stringify(HELD_LABEL_BLOCKED)} waiting=${JSON.stringify(HELD_LABEL_WAITING)}\n` +
         `The daemon writes these labels and the board reads them — they must match. ` +
-        `scheduler.mjs is the source of truth.`,
+        `scheduler.mjs is the source of truth.`
     );
   }
   expect(HELD_LABEL_BLOCKED).toBe(SCHED_BLOCKED);
@@ -90,10 +97,13 @@ test("Board.tsx held label constants equal scheduler.mjs source of truth (no dri
   const grab = (name: string) => {
     // eslint-disable-next-line security/detect-non-literal-regexp
     const m = new RegExp(`const\\s+${name}\\s*=\\s*"([^"]+)"`).exec(BOARD_TSX);
-    if (!m) throw new Error(`board-held-indicator: could not locate \`const ${name}\` in Board.tsx`);
+    if (!m)
+      throw new Error(`board-held-indicator: could not locate \`const ${name}\` in Board.tsx`);
     return m[1];
   };
   expect(grab("HELD_LABEL_BLOCKED")).toBe(SCHED_BLOCKED);
+  // CTL-764 Phase 4: value renamed from "waiting" to "queued". Both scheduler.mjs
+  // (daemon writer) and Board.tsx (display) must carry the same value.
   expect(grab("HELD_LABEL_WAITING")).toBe(SCHED_WAITING);
 });
 
@@ -102,7 +112,8 @@ test("Board.tsx defines a HeldBadge and wires it from the ticket's held field", 
   expect(BOARD_TSX).toContain("function HeldBadge");
   // The chip is rendered in TicketCard from t.held (+ t.blockers).
   expect(BOARD_TSX).toContain("<HeldBadge held={t.held} blockers={t.blockers} />");
-  // It distinguishes blocked vs waiting with the pause glyph.
+  // It distinguishes blocked vs queued (was "waiting") with the pause glyph.
   expect(BOARD_TSX).toContain("⏸ blocked");
-  expect(BOARD_TSX).toContain("⏸ waiting");
+  // CTL-764 Phase 4: display text updated from "⏸ waiting" to "⏸ queued".
+  expect(BOARD_TSX).toContain("⏸ queued");
 });

@@ -175,7 +175,147 @@ describe("assembleBoard wiring — parked needs-human synthetic tickets", () => 
   });
 
   it("assembleBoard dedupes against existing card ids and appends parkedTickets", () => {
-    expect(boardDataSrc).toContain("synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles, linfo)");
+    // Whitespace-insensitive: Prettier may reflow the call across multiple lines,
+    // so assert the arg order (the wiring that matters), not the exact layout.
+    const nospace = (s: string) => s.replace(/\s+/g, "");
+    expect(nospace(boardDataSrc)).toContain(
+      nospace(
+        "synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles, linfo)",
+      ),
+    );
     expect(boardDataSrc).toContain("...parkedTickets");
+  });
+});
+
+// ── CTL-1588: the queue must carry the human-hold annotation ─────────────────
+// "Dispatching next" is the raw eligible projection minus in-flight tickets; a
+// parked needs-human ticket that is still Todo in Linear sits in it and was
+// rendered as an imminent dispatch. The fix stamps `humanHold` from the SAME
+// parked descriptor set the attention cards use (annotate-not-hide — the eligible
+// projection itself must stay untouched: Pass-0a and the scheduler consume it).
+describe("CTL-1588: queue humanHold annotation (source contract)", () => {
+  const nospace = (s: string) => s.replace(/\s+/g, "");
+
+  it("assembleBoard builds the humanHold map from parkedNeedsHuman", () => {
+    expect(nospace(boardDataSrc)).toContain(nospace("const humanHoldByTicket = new Map("));
+    expect(nospace(boardDataSrc)).toContain(
+      nospace(`p.labels.includes("needs-human") ? "needs-human" : "needs-input"`),
+    );
+  });
+
+  it("every queue item is stamped with humanHold (null when dispatchable)", () => {
+    expect(nospace(boardDataSrc)).toContain(
+      nospace("humanHold: humanHoldByTicket.get(e.id) ?? null"),
+    );
+  });
+});
+
+// ── CTL-1588 follow-up: replica fallback for queue humanHold ─────────────────
+// The parked set is webhook-fed (single-homed receiver) — a label this node's
+// broker never saw left CRM-1/2/5/6 ranked as imminent dispatches on mini-2
+// while the replica carried their needs-human. readReplicaHumanHolds fills the
+// gap from the CTC replica with the same gate/fail-open contract as titles.
+describe("readReplicaHumanHolds (CTL-1588 follow-up)", () => {
+  const readReplicaHumanHolds = (cacheMod as Record<string, unknown>)
+    .readReplicaHumanHolds as (opts?: {
+    ids?: string[];
+    dbPath?: string;
+    readerFactory?: (o: { dbPath: string }) => unknown;
+  }) => Promise<Record<string, string>>;
+
+  const factoryWith = (labelsById: Record<string, Array<{ name: string }> | null>) => () => ({
+    labels: (id: string) => labelsById[id],
+    close: () => {},
+  });
+
+  it("maps needs-human and needs-input labels from replica label nodes", async () => {
+    const out = await readReplicaHumanHolds({
+      ids: ["CRM-1", "CRM-5", "CRM-9"],
+      readerFactory: factoryWith({
+        "CRM-1": [{ name: "needs-human" }],
+        "CRM-5": [{ name: "etl" }, { name: "needs-input" }],
+        "CRM-9": [{ name: "etl" }],
+      }),
+    });
+    expect(out).toEqual({ "CRM-1": "needs-human", "CRM-5": "needs-input" });
+  });
+
+  it("needs-human outranks needs-input on a dual-labeled ticket", async () => {
+    const out = await readReplicaHumanHolds({
+      ids: ["CRM-2"],
+      readerFactory: factoryWith({ "CRM-2": [{ name: "needs-input" }, { name: "needs-human" }] }),
+    });
+    expect(out).toEqual({ "CRM-2": "needs-human" });
+  });
+
+  it("fails open: throwing factory yields {}, unreadable single row is skipped", async () => {
+    const throwing = () => {
+      throw new Error("no replica");
+    };
+    expect(await readReplicaHumanHolds({ ids: ["A"], readerFactory: throwing })).toEqual({});
+    const out = await readReplicaHumanHolds({
+      ids: ["A", "B"],
+      readerFactory: () => ({
+        labels: (id: string) => {
+          if (id === "A") throw new Error("bad row");
+          return [{ name: "needs-human" }];
+        },
+        close: () => {},
+      }),
+    });
+    expect(out).toEqual({ B: "needs-human" });
+  });
+
+  it("empty ids short-circuits to {}", async () => {
+    expect(await readReplicaHumanHolds({ ids: [] })).toEqual({});
+  });
+});
+
+describe("CTL-1588 follow-up: queue humanHold merges replica holds (source contract)", () => {
+  const nospace = (s: string) => s.replace(/\s+/g, "");
+  it("assembleBoard reads replica holds for the queue ids and lets the parked set win", () => {
+    expect(nospace(boardDataSrc)).toContain(
+      nospace("const replicaHolds = await readReplicaHumanHolds({ ids: notInFlight.map((e) => e.id) })"),
+    );
+    expect(nospace(boardDataSrc)).toContain(nospace("...Object.entries(replicaHolds),"));
+  });
+});
+
+describe("readReplicaHumanHolds — batched path (#2845 Codex)", () => {
+  const readReplicaHumanHolds = (cacheMod as Record<string, unknown>)
+    .readReplicaHumanHolds as (opts?: {
+    ids?: string[];
+    readerFactory?: (o: { dbPath: string }) => unknown;
+  }) => Promise<Record<string, string>>;
+
+  it("prefers labelsBatch (one call) over per-id labels", async () => {
+    let batchCalls = 0;
+    let perIdCalls = 0;
+    const out = await readReplicaHumanHolds({
+      ids: ["CRM-1", "CRM-5", "CRM-9"],
+      readerFactory: () => ({
+        labelsBatch: (ids: string[]) => {
+          batchCalls += 1;
+          expect(ids.sort()).toEqual(["CRM-1", "CRM-5", "CRM-9"]);
+          return { "CRM-1": ["needs-human"], "CRM-5": ["etl", "needs-input"] };
+        },
+        labels: () => {
+          perIdCalls += 1;
+          return [];
+        },
+        close: () => {},
+      }),
+    });
+    expect(out).toEqual({ "CRM-1": "needs-human", "CRM-5": "needs-input" });
+    expect(batchCalls).toBe(1);
+    expect(perIdCalls).toBe(0);
+  });
+
+  it("an undefined batch (stale writer / mid-reseed) fails open to {}", async () => {
+    const out = await readReplicaHumanHolds({
+      ids: ["CRM-1"],
+      readerFactory: () => ({ labelsBatch: () => undefined, close: () => {} }),
+    });
+    expect(out).toEqual({});
   });
 });

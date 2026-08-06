@@ -24,6 +24,7 @@ function offlineNode(host: string): SignalNode {
 function worker(name: string, hostName: string, ticket: string, startedAt = 1000): BoardWorker {
   return {
     name,
+    ticket,
     tickets: [ticket],
     phase: "implement",
     status: "running",
@@ -91,6 +92,58 @@ describe("assignClusterSlots (CTL-1092)", () => {
     });
     expect(out.filter((s) => s.occupied).length).toBe(0);
     expect(out.length).toBe(6); // 3 + 3 empty slots
+  });
+
+  it("unions self-host heartbeat tickets the worker list cannot see (CTL-1588: SDK executors)", () => {
+    // SDK/codex-exec executor children carry no bg-job id, so localWorkers can be
+    // EMPTY while the node's own heartbeat reports genuinely running tickets.
+    const out = assignClusterSlots({
+      nodes: [liveNode("mini-2", 4, 2, ["CTL-1417", "CTL-1557"])],
+      localHost: "mini-2",
+      localWorkers: [],
+    });
+    const occupied = out.filter((s) => s.occupied);
+    expect(occupied.map((s) => s.ticket)).toEqual(["CTL-1417", "CTL-1557"]);
+    expect(out.length).toBe(4); // 2 occupied + 2 empty — deck agrees with the pill
+  });
+
+  it("dedupes heartbeat tickets already covered by a rich local worker (CTL-1588)", () => {
+    const out = assignClusterSlots({
+      nodes: [liveNode("mini", 4, 2, ["CTL-1", "CTL-2"])],
+      localHost: "mini",
+      localWorkers: [worker("w1", "mini", "CTL-1")],
+    });
+    const occupied = out.filter((s) => s.occupied);
+    expect(occupied.length).toBe(2);
+    expect(occupied[0]?.worker?.ticket).toBe("CTL-1");
+    expect(occupied[1]?.ticket).toBe("CTL-2");
+    expect(out.length).toBe(4);
+  });
+
+  it("marks unioned heartbeat tickets beyond capacity as over (CTL-1588)", () => {
+    const out = assignClusterSlots({
+      nodes: [liveNode("mini", 1, 2, ["CTL-1", "CTL-2"])],
+      localHost: "mini",
+      localWorkers: [worker("w1", "mini", "CTL-1")],
+    });
+    const over = out.filter((s) => s.over);
+    expect(over.length).toBe(1);
+    expect(over[0]?.ticket).toBe("CTL-2");
+  });
+
+  it("caps heartbeat-only additions by activeCount so worker turnover never double-counts (CTL-1588)", () => {
+    // Stale cached heartbeat still names CTL-OLD; a fresh local worker already
+    // replaced it with CTL-NEW. activeCount (1) is authoritative — no phantom
+    // second slot, no phantom OVER card.
+    const out = assignClusterSlots({
+      nodes: [{ host: "mini", status: "live", maxParallel: 4, inFlightCount: 1, activeCount: 1, freeSlots: 3, tickets: ["CTL-OLD"] }],
+      localHost: "mini",
+      localWorkers: [worker("w1", "mini", "CTL-NEW")],
+    });
+    const occupied = out.filter((s) => s.occupied);
+    expect(occupied.length).toBe(1);
+    expect(occupied[0]?.worker?.ticket).toBe("CTL-NEW");
+    expect(out.filter((s) => s.over).length).toBe(0);
   });
 
   it("offline node produces no slot cards", () => {

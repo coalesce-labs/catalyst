@@ -66,6 +66,24 @@ describe("buildCanonicalEnvelope", () => {
     expect(envelope.spanId).toBeNull();
   });
 
+  // CTL-1488 Phase 2: every builder stamps event.stream_class. filter.wake.* is
+  // broker-internal → telemetry (never coordination); a phase.* routed through
+  // the same builder → coordination.
+  test("CTL-1488: stamps event.stream_class = 'telemetry' for a filter.wake.* (broker-internal) event", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const envelope = buildCanonicalEnvelope({
+      event: "filter.wake.sess_abc",
+      orchestrator: "orch_1",
+      detail: { reason: "PR #1 merged" },
+    });
+    expect(envelope.attributes["event.stream_class"]).toBe("telemetry");
+  });
+  test("CTL-1488: stamps event.stream_class = 'coordination' for a phase.* event routed through the broker builder", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const envelope = buildCanonicalEnvelope({ event: "phase.plan.complete.CTL-1", worker: "CTL-1" });
+    expect(envelope.attributes["event.stream_class"]).toBe("coordination");
+  });
+
   // CTL-1135: caused_by — the triggering event id. For filter.wake.* the cause is
   // the source event that matched; auto-derive it from detail.source_event_ids[0].
   test("CTL-1135: caused_by auto-derives from detail.source_event_ids[0]", async () => {

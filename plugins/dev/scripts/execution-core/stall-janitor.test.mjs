@@ -27,6 +27,8 @@ import {
   defaultCollectTerminalSignalGcCandidates,
   defaultGcTerminalSignals,
   defaultTicketFromCwd,
+  makeEvictWorkerDir,
+  defaultNoEvict,
 } from "./stall-janitor.mjs";
 
 // ---------------------------------------------------------------------------
@@ -839,6 +841,22 @@ describe("defaultCollectStallClearCandidates (CTL-1005 J3)", () => {
     expect(out[0].alreadyCleared).toBe(true);
   });
 
+  test("census skips non-ticket dir names (CTL-1504) — .catalyst never probed", () => {
+    mkStalled("CTL-854", "plan");
+    mkStalled(".catalyst", "plan");
+    const seen = [];
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: (t) => { seen.push(t); return false; },
+      resolveWorktreePath: () => "/wt/x",
+      artifactPresent: () => true,
+      artifactComplete: () => true,
+    });
+    expect(seen).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).toContain("CTL-854");
+  });
+
   // CTL-1045 Bug 5: doctrine guard — once-marker is file-backed and survives
   // across daemon restarts (per worker-dir lifetime, NOT per daemon lifetime).
   test("CTL-1045 Bug 5: once-marker survives across a simulated daemon restart (per worker-dir lifetime)", () => {
@@ -1083,58 +1101,71 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
   }
 
   test("includes a terminal ticket with a failed signal", () => {
-    mkWorkerSignal("CTL-1242-A");
+    mkWorkerSignal("CTL-3001");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
-      isLinearTerminalOrMerged: (id) => id === "CTL-1242-A",
+      isLinearTerminalOrMerged: (id) => id === "CTL-3001",
     });
-    expect(out.some((c) => c.ticket === "CTL-1242-A")).toBe(true);
-    const c = out.find((c) => c.ticket === "CTL-1242-A");
+    expect(out.some((c) => c.ticket === "CTL-3001")).toBe(true);
+    const c = out.find((c) => c.ticket === "CTL-3001");
     expect(c.linearTerminalOrMerged).toBe(true);
     expect(c.inFlight).toBe(false);
     expect(c.liveSessionInWorktree).toBe(false);
   });
 
   test("excludes non-terminal tickets", () => {
-    mkWorkerSignal("CTL-1242-B");
+    mkWorkerSignal("CTL-3002");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => false,
     });
-    expect(out.some((c) => c.ticket === "CTL-1242-B")).toBe(false);
+    expect(out.some((c) => c.ticket === "CTL-3002")).toBe(false);
+  });
+
+  test("census skips non-ticket dir names (CTL-1504) — .catalyst never probed", () => {
+    mkWorkerSignal("CTL-3001");
+    mkWorkerSignal(".catalyst");
+    const seen = [];
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: (t) => { seen.push(t); return true; },
+    });
+    expect(seen).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).toContain("CTL-3001");
   });
 
   test("excludes in-flight tickets", () => {
-    mkWorkerSignal("CTL-1242-C");
+    mkWorkerSignal("CTL-3003");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
-      inFlightTickets: new Set(["CTL-1242-C"]),
+      inFlightTickets: new Set(["CTL-3003"]),
     });
-    const c = out.find((o) => o.ticket === "CTL-1242-C");
+    const c = out.find((o) => o.ticket === "CTL-3003");
     expect(c?.inFlight).toBe(true);
   });
 
   test("live-session-in-worktree sets liveSessionInWorktree:true", () => {
-    mkWorkerSignal("CTL-1242-D");
+    mkWorkerSignal("CTL-3004");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
-      agents: [{ cwd: "/wt/CTL-1242-D/subdir" }],
-      resolveWorktreePath: () => "/wt/CTL-1242-D",
+      agents: [{ cwd: "/wt/CTL-3004/subdir" }],
+      resolveWorktreePath: () => "/wt/CTL-3004",
     });
-    const c = out.find((o) => o.ticket === "CTL-1242-D");
+    const c = out.find((o) => o.ticket === "CTL-3004");
     expect(c?.liveSessionInWorktree).toBe(true);
   });
 
   test("alreadyGcd:true when .janitor-gc.applied marker present", () => {
-    const d = mkWorkerSignal("CTL-1242-E");
+    const d = mkWorkerSignal("CTL-3005");
     writeFileSync(join(d, ".janitor-gc.applied"), "");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
     });
-    const c = out.find((o) => o.ticket === "CTL-1242-E");
+    const c = out.find((o) => o.ticket === "CTL-3005");
     expect(c?.alreadyGcd).toBe(true);
   });
 
@@ -1143,18 +1174,18 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
     // phase-triage.json (status done) reads as in-flight (triage != TERMINAL_PHASE),
     // so the census marks inFlight:true. listInFlightTickets computes that Set in
     // production; here we inject it to keep this a stall-janitor-local unit test.
-    const d = join(orchDir, "workers", "CTL-1315-REPRO");
+    const d = join(orchDir, "workers", "CTL-3006");
     mkdirSync(d, { recursive: true });
     writeFileSync(
       join(d, "phase-triage.json"),
-      JSON.stringify({ ticket: "CTL-1315-REPRO", status: "done" }),
+      JSON.stringify({ ticket: "CTL-3006", status: "done" }),
     );
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
-      inFlightTickets: new Set(["CTL-1315-REPRO"]),
+      inFlightTickets: new Set(["CTL-3006"]),
     });
-    const c = out.find((o) => o.ticket === "CTL-1315-REPRO");
+    const c = out.find((o) => o.ticket === "CTL-3006");
     expect(c).toBeDefined();
     expect(c.linearTerminalOrMerged).toBe(true);
     expect(c.inFlight).toBe(true);
@@ -1166,7 +1197,7 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
 
   test("CTL-1315 freshness gate: agentsFresh:false collects NO candidates (never reap blind)", () => {
     // A would-be candidate (terminal, failed signal) that the census normally emits...
-    mkWorkerSignal("CTL-1315-COLD");
+    mkWorkerSignal("CTL-3007");
     // ...is withheld entirely when the agents snapshot is not fresh, because
     // liveSessionInWorktree (the sole live-worker fence for a terminal ticket) is
     // unreliable on a cold/stale snapshot. Deferring avoids reaping a genuinely-live
@@ -1180,12 +1211,159 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
   });
 
   test("CTL-1315 freshness gate: agentsFresh:true (the default) still collects candidates", () => {
-    mkWorkerSignal("CTL-1315-WARM");
+    mkWorkerSignal("CTL-3008");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
       agentsFresh: true,
     });
-    expect(out.some((c) => c.ticket === "CTL-1315-WARM")).toBe(true);
+    expect(out.some((c) => c.ticket === "CTL-3008")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CTL-1605 — makeEvictWorkerDir (guarded fast-path worker-dir eviction seam)
+// ---------------------------------------------------------------------------
+describe("CTL-1605 makeEvictWorkerDir", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1605-evict-"));
+  });
+  afterEach(() => rmSync(orchDir, { recursive: true, force: true }));
+
+  function seedWorkerDir(ticket) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ ticket, status: "done" }));
+    return dir;
+  }
+
+  test("no live session + fresh snapshot → rmSync the worker dir, returns true", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(false);
+  });
+
+  test("live session in worktree → NO removal, returns false", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [{ cwd: "/wt/CTL-9/src" }],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(true);
+  });
+
+  test("snapshot NOT fresh → NO removal (never evict blind), returns false", () => {
+    seedWorkerDir("CTL-9");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: false,
+      resolveWorktreePath: () => "/wt/CTL-9",
+    });
+    expect(evict("CTL-9")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-9"))).toBe(true);
+  });
+
+  test("default evictWorkerDir seam (bare unit tick) is a no-op returning false", () => {
+    expect(defaultNoEvict("CTL-9")).toBe(false);
+  });
+
+  // ─── CTL-1605 review finding (stall-janitor.mjs:527) — an unresolved worktree
+  // path must DEFER, not fail open. Pre-fix, `!!worktreePath && ...some(...)`
+  // made a null/thrown resolver read as liveSession:false and fall through to
+  // rmSync — a pre-CTL-615 pathless signal (or a resolver throw) got evicted
+  // even with a LIVE agent whose cwd the probe never got the chance to check. ───
+
+  test("unresolved worktree path (resolver returns null) → DEFERS, no removal, returns false", () => {
+    seedWorkerDir("CTL-20");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [{ cwd: "/wt/CTL-20/src" }], // a LIVE session exists...
+      agentsFresh: true,
+      resolveWorktreePath: () => null, // ...but the probe can't tell — must defer
+    });
+    expect(evict("CTL-20")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-20"))).toBe(true);
+  });
+
+  test("resolveWorktreePath throws → DEFERS (same as an unresolved path), no removal", () => {
+    seedWorkerDir("CTL-21");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => {
+        throw new Error("signal read failed");
+      },
+    });
+    expect(evict("CTL-21")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-21"))).toBe(true);
+  });
+
+  test("resolved worktree path + no live session → still evicts (unaffected by the defer fix)", () => {
+    seedWorkerDir("CTL-22");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-22",
+    });
+    expect(evict("CTL-22")).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-22"))).toBe(false);
+  });
+
+  // ─── CTL-1605 review finding (scheduler.mjs:7611) — in-process SDK/codex-exec
+  // workers have bg_job_id null and are invisible to the agents-roster probe
+  // (`claude agents`); the SDK worker registry fences must be consulted BEFORE
+  // that roster check, or a live in-process worker's signal dir is deletable the
+  // moment Linear goes terminal. ───
+
+  test("isSdkWorkerLive(ticket) true → DEFERS even with an empty agents roster + resolved worktree", () => {
+    seedWorkerDir("CTL-23");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [], // roster empty — bg-keyed probe alone would say "not live"
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-23",
+      isSdkWorkerLive: (t) => t === "CTL-23",
+    });
+    expect(evict("CTL-23")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-23"))).toBe(true);
+  });
+
+  test("isSdkWorkerLiveOnDisk(ticket) true (cross-process projection) → DEFERS", () => {
+    seedWorkerDir("CTL-24");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-24",
+      isSdkWorkerLive: () => false,
+      isSdkWorkerLiveOnDisk: (t) => t === "CTL-24",
+    });
+    expect(evict("CTL-24")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-24"))).toBe(true);
+  });
+
+  test("both SDK fences false (default) → unaffected, evicts as before", () => {
+    seedWorkerDir("CTL-25");
+    const evict = makeEvictWorkerDir({
+      orchDir,
+      agents: [],
+      agentsFresh: true,
+      resolveWorktreePath: () => "/wt/CTL-25",
+    });
+    expect(evict("CTL-25")).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-25"))).toBe(false);
   });
 });

@@ -12,6 +12,7 @@ import {
   appendFileSync,
   existsSync,
   readFileSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,8 @@ import {
   readPhaseSignals,
   isTicketInFlight,
   listInFlightTickets,
+  computeDispatchSurvivingRoster, // CTL-1091 Phase 3: positive-liveness dispatch roster
+  resolveDispatchRoster, // CTL-1091: shared dispatch-roster resolver (liveness + deflap + outage)
   readMaxParallel,
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
@@ -55,6 +58,10 @@ import {
   verifyDispatchedSignal,
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
+  holisticBoardHealthAct,
+  clearDispositionEmit, // Codex #2970 post-merge round 4: expected-disposition-guarded dedup reset
+  __seedDispositionEmitForTest,
+  __readDispositionEmitForTest,
   __resetForTests,
   __getRunningOpts,
   // CTL-705: Phase 2 helpers
@@ -78,6 +85,12 @@ import {
   inHoldStopCooldown,
   recordHoldStop,
   clearHoldStopCooldown,
+  // CTL-764 Phase 4: generalised disposition converger
+  convergeDispositionLabel,
+  HELD_LABEL_WAITING,
+  HELD_LABEL_NEEDS_INPUT,
+  // CTL-1524 (C4a): hoisted dead-host computation (one surviving-roster read)
+  computeDeadHosts,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
@@ -87,6 +100,7 @@ import { ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW owner computation fo
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
+import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
 
 let orchDir;
 let catalystDir;
@@ -1143,11 +1157,36 @@ describe("dispatch cool-down escalation", () => {
     expect(applied).toEqual([]);
   });
 
+  // CTL-764 finding 13: the return value gates the caller's worker.transition emission.
+  test("finding 13 — maybeEscalateDispatchFailures returns true when it writes the label", () => {
+    const applied = [];
+    const ws = fakeWriteStatus(applied);
+    const wrote = maybeEscalateDispatchFailures(
+      orchDir,
+      { ticket: "CTL-13A", phase: "research", code: 2, consecutiveFailures: 3 },
+      { writeStatus: ws, appendEvent: () => {} }
+    );
+    expect(wrote).toBe(true);
+  });
+
+  test("finding 13 — returns false below the escalation threshold (no write)", () => {
+    const applied = [];
+    const ws = fakeWriteStatus(applied);
+    const wrote = maybeEscalateDispatchFailures(
+      orchDir,
+      { ticket: "CTL-13B", phase: "research", code: 2, consecutiveFailures: 2 },
+      { writeStatus: ws, appendEvent: () => {} }
+    );
+    expect(wrote).toBe(false);
+  });
+
   test("schedulerTick escalates after N consecutive same-code refusals on new-work", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 2 });
     const applied = [];
     const ws = fakeWriteStatus(applied);
+    // CTL-764 finding 13: the escalation must also record a worker.transition.
+    const transitions = [];
     let t = 0;
     for (let i = 0; i < 3; i++) {
       schedulerTick(orchDir, {
@@ -1166,9 +1205,17 @@ describe("dispatch cool-down escalation", () => {
         liveBackgroundCount: () => 0,
         now: () => (t += 31 * 60 * 1000),
         hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is escalation
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
       });
     }
     expect(applied).toContainEqual({ ticket: "CTL-7", label: "needs-human" });
+    // CTL-764 finding 13: a ticket escalated solely by dispatch failures gets a
+    // worker.transition(toDisposition="needs-human", source="dispatch-failures").
+    const escalation = transitions.find(
+      (e) => e.ticket === "CTL-7" && e.toDisposition === "needs-human"
+    );
+    expect(escalation).toBeDefined();
+    expect(escalation.source).toBe("dispatch-failures");
   });
 });
 
@@ -1323,6 +1370,26 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     expect(sig.stalledReason).toBe("phantom-ticket");
   });
 
+  test("does NOT quarantine a live in-process SDK worker (CTL-1410 Phase B)", () => {
+    // An SDK worker has NO bg id (liveness.value null), so the bg gate can't
+    // protect it — only the in-process registry probe can. not-found +
+    // not-eligible would otherwise quarantine it.
+    writeSignal("CTL-9", "implement", "running");
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: resolveTo("not-found"),
+      isBgJobAlive: () => false,
+      isSdkWorkerLive: (ticket) => ticket === "CTL-9",
+    });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-9", "phase-implement.json"), "utf8")
+    );
+    expect(sig.status).toBe("running"); // untouched
+    expect(r.quarantinedPhantoms ?? []).toEqual([]);
+  });
+
   test("does NOT quarantine when Linear resolution is unknown (outage safety)", () => {
     writeSignal("CTL-100", "implement", "running");
     schedulerTick(orchDir, {
@@ -1356,6 +1423,178 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
         .status
     ).toBe("running");
     expect(classifyCalls).toBe(0); // eligible short-circuits before the Linear probe
+  });
+
+  // ── CTL-1570: the sweep must not spend Linear budget on dirs it can resolve locally ──
+
+  test("never probes a phantom recovery-pass:done dir the broker vouches alive (CTL-1570)", () => {
+    // A terminal-success non-pipeline dir is already excluded from slot accounting
+    // (isPhantomWorkerDir, CTL-1323) — probing it every tick bought nothing and
+    // burned one live linearis read per tick per dir (the 2026-07-29 quota incident).
+    writeSignal("PROJ-200", "recovery-pass", "done");
+    let classifyCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: {
+        getDescriptor: (t) =>
+          t === "PROJ-200" ? { removed: false, updatedAt: new Date().toISOString() } : null,
+      },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(0); // FRESH alive descriptor → resolved locally, zero reads
+  });
+
+  test("a STALE alive descriptor cannot suppress deletion verification (CTL-1570)", () => {
+    // Missed removal webhook: the store retains an old { removed:false } row.
+    // Past PHANTOM_DESCRIPTOR_FRESH_MS it may no longer vouch — the dir falls to
+    // the bounded probe path (one live read per window, not zero forever).
+    writeSignal("PROJ-206", "recovery-pass", "done");
+    const staleTs = new Date(Date.now() - 60 * 60_000).toISOString(); // 1h old
+    let classifyCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: {
+        getDescriptor: (t) => (t === "PROJ-206" ? { removed: false, updatedAt: staleTs } : null),
+      },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(1); // stale vouch rejected → bounded verification
+  });
+
+  test("a phantom dir with NO gateway gets bounded deletion verification, not per-tick reads (CTL-1570)", () => {
+    // Gateway miss (standalone no-gateway daemon, unreadable db, missed webhook):
+    // deletion can't be ruled out locally, so ONE probe per cool-down window is
+    // allowed — never one per tick.
+    writeSignal("PROJ-205", "recovery-pass", "done");
+    let classifyCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(classifyCalls).toBe(1); // bounded: one verification per window
+  });
+
+  test("a phantom dir whose ticket the broker saw DELETED still reaches the probe and quarantines (CTL-1570)", () => {
+    // Bounded deletion-verification: no live read is spent on a phantom dir unless
+    // the descriptor store says the ticket was removed — then the probe proceeds so
+    // the deleted ticket's debris is quarantined instead of persisting forever.
+    writeSignal("PROJ-203", "recovery-pass", "done");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: { getDescriptor: (t) => (t === "PROJ-203" ? { removed: true } : null) },
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(1); // removed descriptor re-arms the probe
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "PROJ-203", "phase-recovery-pass.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled"); // quarantined — debris of a deleted ticket
+    expect(sig.stalledReason).toBe("phantom-ticket");
+  });
+
+  test("an inconclusive deletion probe backs off — at most one live read per window (CTL-1570)", () => {
+    // removed:true descriptor + "unknown" probe (rate-limited / outage) leaves the
+    // dir phantom and the tombstone persistent; the marker-file backoff must cap
+    // the retry at one probe per DELETION_PROBE_INTERVAL_MS, not one per tick.
+    writeSignal("PROJ-204", "recovery-pass", "done");
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway: { getDescriptor: (t) => (t === "PROJ-204" ? { removed: true } : null) },
+      isBgJobAlive: () => false,
+    };
+    let classifyCalls = 0;
+    const classifyResolution = () => {
+      classifyCalls++;
+      return "unknown"; // inconclusive — dir stays phantom, tombstone persists
+    };
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    expect(classifyCalls).toBe(1); // first tick probes
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    schedulerTick(orchDir, { ...opts, classifyResolution });
+    expect(classifyCalls).toBe(1); // subsequent ticks inside the window are throttled
+  });
+
+  test("still probes a HELD (needs-human) recovery-pass dir — not over-skipped (CTL-1570)", () => {
+    // A parked/escalated recovery dir is NOT phantom (operator surface) and keeps
+    // its existence check, so a deleted ticket behind a needs-human dir is still
+    // detectable. Only terminal-success debris is exempt.
+    writeSignal("PROJ-201", "recovery-pass", "needs-human");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(1); // held dir keeps its probe
+  });
+
+  test("threads the gateway into the phantom probe (CTL-1570)", () => {
+    // classifyTicketResolution has a 10-minute gateway short-circuit
+    // (GATEWAY_EXISTS_FRESH_MS) that can only fire when the gateway is passed.
+    // The sweep's call site historically passed only { exec }, so every probe
+    // fell through to a live linearis read.
+    writeSignal("PROJ-202", "implement", "running");
+    // CTL-1580: a DUE live recheck deliberately passes only { exec } — pre-seed
+    // a fresh recheck marker so this test observes the steady-state threading.
+    mkdirSync(join(orchDir, ".replica-vouch-rechecks"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".replica-vouch-rechecks", "PROJ-202"),
+      JSON.stringify({ ticket: "PROJ-202", probedAt: Date.now() })
+    );
+    const gateway = { getDescriptor: () => null };
+    let seenOpts = null;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      gateway,
+      classifyResolution: (ticket, opts) => {
+        if (ticket === "PROJ-202") seenOpts = opts;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(seenOpts?.gateway).toBe(gateway); // descriptor-store tier is reachable
   });
 
   // ── CTL-1336: zero-spawn bg-liveness gate. The skip DECISION (fresh+alive / fresh+dead /
@@ -2106,9 +2345,30 @@ describe("schedulerTick — new-work pull", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
     const dispatch = fakeDispatch();
     const eligible = [
-      { identifier: "CTL-1", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
-      { identifier: "CTL-2", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
-      { identifier: "CTL-3", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      {
+        identifier: "CTL-1",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-2",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-3",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
     ];
     const r = schedulerTick(orchDir, {
       readEligible: () => eligible,
@@ -2121,6 +2381,65 @@ describe("schedulerTick — new-work pull", () => {
       listStartedTickets: () => new Set(),
     });
     // maxParallel 3 − 2 SDK in-flight = 1 free slot → only ONE new ticket admitted.
+    expect(r.dispatched).toHaveLength(1);
+  });
+
+  // CTL-1457 (T2): a codex-exec node prelaunches the SAME no-bg_job_id "dispatched"
+  // signals (queued behind a semaphore), so its in-flight workers must reduce free
+  // slots EXACTLY like sdk — else a codex node at maxParallel keeps over-admitting.
+  test("dispatchMode=codex-exec: in-flight codex workers reduce new-work free slots (same as sdk)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = ["CTL-1", "CTL-2", "CTL-3"].map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // no bg jobs
+      countSdkInflight: () => 2, // 2 in-process codex workers already in flight
+      dispatchMode: "codex-exec",
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // maxParallel 3 − 2 codex in-flight = 1 free slot → only ONE new ticket admitted.
+    expect(r.dispatched).toHaveLength(1);
+  });
+
+  // CTL-1457 (N1): the PRIMARY rollout routes ONE phase to codex-exec/sdk on a node
+  // whose boot dispatchMode is still "phase-agents" (bg). There the mode gate is false,
+  // so WITHOUT hasInProcessRoute the routed no-bg workers are invisible and the tick
+  // over-admits past maxParallel. With hasInProcessRoute=true the occupancy gate arms
+  // countSdkInflight even under bg — matching executorByPhase={triage:codex-exec}.
+  test("dispatchMode=phase-agents + hasInProcessRoute: routed no-bg workers reduce free slots (the Phase-5 bg-node scenario)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = ["CTL-1", "CTL-2", "CTL-3"].map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // no bg jobs
+      countSdkInflight: () => 2, // 2 routed no-bg (codex) workers already in flight
+      dispatchMode: "phase-agents", // NODE mode is bg — only the per-phase route is in-process
+      hasInProcessRoute: true, // executorByPhase={triage:codex-exec}
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // maxParallel 3 − 2 routed in-flight = 1 free slot → only ONE new ticket admitted.
     expect(r.dispatched).toHaveLength(1);
   });
 
@@ -2139,7 +2458,14 @@ describe("schedulerTick — new-work pull", () => {
     // One eligible NEW ticket which, on the STALE tick-top count (0), would wrongly be
     // admitted into the slot the research→plan advance just took.
     const eligible = [
-      { identifier: "CTL-X", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      {
+        identifier: "CTL-X",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
     ];
     // Stateful SDK occupancy: 0 in-flight at tick top (CTL-7's research:done is terminal —
     // not counted), incremented as each in-process SDK worker's prelaunch writes a
@@ -2151,7 +2477,7 @@ describe("schedulerTick — new-work pull", () => {
         sdkInflightNow += 1; // an SDK launch writes a `dispatched` nested signal (no bg id)
         return { code: 0 };
       },
-      { calls: [] },
+      { calls: [] }
     );
     const r = schedulerTick(orchDir, {
       readEligible: () => eligible,
@@ -2192,7 +2518,14 @@ describe("schedulerTick — new-work pull", () => {
     // the single slot. CTL-X's priority is immaterial to the guard under test (the slot
     // budget), only to which ticket wins the STEP-A competition.
     const eligible = [
-      { identifier: "CTL-X", priority: 3, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      {
+        identifier: "CTL-X",
+        priority: 3,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
     ];
     // CLAIM-ONLY success: the promotion's dispatch returns ok (→ verifyOk → promotedCount++)
     // but LOSES the single-flight race, so the WINNER (a different dispatcher) writes the
@@ -2203,7 +2536,7 @@ describe("schedulerTick — new-work pull", () => {
         dispatch.calls.push(args);
         return { code: 0 }; // NOTE: no sdkInflight increment — models the lost-race claim
       },
-      { calls: [] },
+      { calls: [] }
     );
     const r = schedulerTick(orchDir, {
       readEligible: () => eligible,
@@ -2237,13 +2570,18 @@ describe("schedulerTick — new-work pull", () => {
     mkdirSync(wdir, { recursive: true });
     writeFileSync(
       bootResumePendingPath(orchDir, "CTL-300"),
-      JSON.stringify({ ticket: "CTL-300", phase: "implement", worktreePath: "/wt/CTL-300" }),
+      JSON.stringify({ ticket: "CTL-300", phase: "implement", worktreePath: "/wt/CTL-300" })
     );
     writeFileSync(bootResumeApprovedPath(orchDir, "CTL-300"), "");
     // defaultReviveDispatch requires an existing signal it resets to stalled.
     writeFileSync(
       join(wdir, "phase-implement.json"),
-      JSON.stringify({ ticket: "CTL-300", phase: "implement", status: "running", bg_job_id: "bg-x" }),
+      JSON.stringify({
+        ticket: "CTL-300",
+        phase: "implement",
+        status: "running",
+        bg_job_id: "bg-x",
+      })
     );
     const dispatch = Object.assign(
       (args) => {
@@ -2251,11 +2589,16 @@ describe("schedulerTick — new-work pull", () => {
         // mimic a landed dispatch (runnable signal) so the revive counts success.
         writeFileSync(
           join(wdir, "phase-implement.json"),
-          JSON.stringify({ ticket: "CTL-300", phase: "implement", status: "dispatched", bg_job_id: "bg-y" }),
+          JSON.stringify({
+            ticket: "CTL-300",
+            phase: "implement",
+            status: "dispatched",
+            bg_job_id: "bg-y",
+          })
         );
         return { code: 0 };
       },
-      { calls: [] },
+      { calls: [] }
     );
     schedulerTick(orchDir, {
       readEligible: () => [],
@@ -2264,7 +2607,9 @@ describe("schedulerTick — new-work pull", () => {
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
     });
-    expect(dispatch.calls.some((c) => c.ticket === "CTL-300" && c.phase === "implement")).toBe(true);
+    expect(dispatch.calls.some((c) => c.ticket === "CTL-300" && c.phase === "implement")).toBe(
+      true
+    );
     // Sentinels cleared ⇒ the approval path ran through the threaded dispatch and
     // succeeded (defaultDispatch would have failed the registry lookup → retained).
     expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-300"))).toBe(false);
@@ -2276,16 +2621,40 @@ describe("schedulerTick — new-work pull", () => {
     const dispatch = fakeDispatch();
     let sdkCalled = false;
     const eligible = [
-      { identifier: "CTL-1", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
-      { identifier: "CTL-2", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
-      { identifier: "CTL-3", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      {
+        identifier: "CTL-1",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-2",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-3",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
     ];
     const r = schedulerTick(orchDir, {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      countSdkInflight: () => { sdkCalled = true; return 99; },
+      countSdkInflight: () => {
+        sdkCalled = true;
+        return 99;
+      },
       // dispatchMode omitted → defaults to "phase-agents" (bg)
       hasTriageArtifact: () => true,
       listStartedTickets: () => new Set(),
@@ -4008,6 +4377,7 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // CTL-682: deterministic in-flight count (matches r1)
     });
 
     // CTL-9 now has a worker dir → excluded from the pull. research:dispatched
@@ -4521,14 +4891,18 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
     const applied = [];
     const writeStatus = {
       ...noWrites1242(),
-      applyLabel: (a) => { applied.push(a); return { applied: true }; },
-      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true };
+      },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
     };
     const gateway = {
       getDescriptor: (id) =>
-        id === TICKET
-          ? { state: "Done", removed: false, updatedAt: FRESH }
-          : null,
+        id === TICKET ? { state: "Done", removed: false, updatedAt: FRESH } : null,
     };
 
     schedulerTick(orchDir, {
@@ -4565,15 +4939,19 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
     const applied = [];
     const writeStatus = {
       ...noWrites1242(),
-      applyLabel: (a) => { applied.push(a); return { applied: true }; },
-      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true };
+      },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
     };
     // Linear state is non-terminal; PR is merged → terminal via pr-merged path
     const gateway = {
       getDescriptor: (id) =>
-        id === TICKET
-          ? { state: "In Review", removed: false, updatedAt: FRESH }
-          : null,
+        id === TICKET ? { state: "In Review", removed: false, updatedAt: FRESH } : null,
     };
     const prAdapter = { prView: () => ({ state: "MERGED", mergedAt: "2026-06-17T00:00:00Z" }) };
 
@@ -4601,17 +4979,24 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
     const removed = [];
     const writeStatus = {
       ...noWrites1242(),
-      applyLabel: (a) => { applied.push(a); return { applied: true }; },
-      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true };
+      },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
     };
     const gateway = {
       getDescriptor: (id) =>
-        id === TICKET
-          ? { state: "In Progress", removed: false, updatedAt: FRESH }
-          : null,
+        id === TICKET ? { state: "In Progress", removed: false, updatedAt: FRESH } : null,
     };
     const orphans = [];
-    const appendOrphanDetectedEvent = (e) => { orphans.push(e); return true; };
+    const appendOrphanDetectedEvent = (e) => {
+      orphans.push(e);
+      return true;
+    };
 
     schedulerTick(orchDir, {
       readEligible: () => [],
@@ -4638,8 +5023,14 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
     const nhWrites = [];
     const writeStatus = {
       ...noWrites1242(),
-      applyLabel: (a) => { if (a.label === "needs-human") nhWrites.push({ kind: "apply", ...a }); return { applied: true }; },
-      removeLabel: (t, l) => { if (l === "needs-human") nhWrites.push({ kind: "remove", t, l }); return { removed: true }; },
+      applyLabel: (a) => {
+        if (a.label === "needs-human") nhWrites.push({ kind: "apply", ...a });
+        return { applied: true };
+      },
+      removeLabel: (t, l) => {
+        if (l === "needs-human") nhWrites.push({ kind: "remove", t, l });
+        return { removed: true };
+      },
     };
 
     schedulerTick(orchDir, {
@@ -4660,7 +5051,10 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
     const applied = [];
     const writeStatus = {
       ...noWrites1242(),
-      applyLabel: (a) => { applied.push(a); return { applied: true }; },
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true };
+      },
       removeLabel: () => ({ removed: true }),
     };
     // gateway returns null → fetchTicketState returns null → non-terminal (D5 fail-safe)
@@ -5273,12 +5667,13 @@ describe("preflightWorkspaceLabels (CTL-585, CTL-874)", () => {
     // Exactly ONE workspace-scoped query regardless of team count (no per-team --team).
     expect(execCalls).toHaveLength(1);
     expect(execCalls[0].args).not.toContain("--team");
-    // Warns for the two missing required labels (blocked, waiting), team-independent.
+    // Warns for the three missing required labels (blocked, queued, needs-input),
+    // team-independent. CTL-764 Phase 4: "waiting" renamed to "queued"; needs-input added.
     const missing = warnings
       .filter((w) => w.msg.includes("missing required label"))
       .map((w) => w.obj.label)
       .sort();
-    expect(missing).toEqual(["blocked", "waiting"]);
+    expect(missing).toEqual(["blocked", "needs-input", "queued"]);
   });
 
   test("does not throw on a linearis spawn failure", () => {
@@ -5295,11 +5690,12 @@ describe("preflightWorkspaceLabels (CTL-585, CTL-874)", () => {
     expect(() => preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog })).not.toThrow();
   });
 
-  test("CTL-874: all three worker-status labels present produces zero warnings", () => {
+  test("CTL-874: all four worker-status labels present produces zero warnings", () => {
     // Regression: the pre-CTL-874 preflight used --team, which never returns
     // workspace-scoped labels, so it warned on EVERY boot even when the labels
     // existed. With --scope workspace and the full required set present, the
     // boot is silent.
+    // CTL-764 Phase 4: "waiting" renamed to "queued"; needs-input added as 4th member.
     const warnings = [];
     const fakeLog = {
       warn: (obj, msg) => warnings.push({ obj, msg }),
@@ -5313,7 +5709,8 @@ describe("preflightWorkspaceLabels (CTL-585, CTL-874)", () => {
           { name: "worker-status", color: "#000" },
           { name: "needs-human", color: "#fff" },
           { name: "blocked" },
-          { name: "waiting" },
+          { name: "queued" },
+          { name: "needs-input" },
           { name: "bug" },
         ],
       }),
@@ -5444,6 +5841,187 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     ).not.toThrow();
     // No marker on a thrown apply → retried next tick.
     expect(existsSync(join(orchDir, "workers", "CTL-23", ".terminal-done.applied"))).toBe(false);
+  });
+
+  // CTL-1157 (THE REVERSAL — ALARM-NOT-BLOCK): the terminal sweep writes Done
+  // DIRECTLY (no agent to reason). It no longer REFUSES on an open PR — it PROCEEDS
+  // (never wedges the board) and emits the loud recovery.done-applied-with-open-pr
+  // alarm so observability would justify adding a hard block later. A clean Done is
+  // silent.
+  test("CTL-1157: an OPEN PR does NOT block the terminal-sweep Done write — it PROCEEDS and fires the alarm", () => {
+    writeSignal("CTL-24", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => ({ ok: false, prs: [{ number: 321, state: "OPEN" }] });
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1); // proceeds — board never wedges
+    expect(existsSync(join(orchDir, "workers", "CTL-24", ".terminal-done.applied"))).toBe(true);
+    // The alarm fired with the ticket, the open PR list, and the backstop label.
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].ticket).toBe("CTL-24");
+    expect(alarms[0].by).toBe("terminal-sweep");
+    expect(alarms[0].openPrs.map((p) => p.number)).toEqual([321]);
+  });
+
+  // CTL-1157 (Codex GROUP-A fix #1 — UNVERIFIABLE ≠ CLEAN): a thrown/unverifiable
+  // enumeration is NOT a clean list. Per alarm-not-block the sweep still PROCEEDS
+  // (never wedges), but it now SURFACES the unverifiable Done via the loud alarm
+  // (flagged unverifiable) rather than silently assuming zero open PRs.
+  test("CTL-1157: an UNVERIFIABLE enumeration (gh throw) PROCEEDS and FIRES the alarm (unverifiable, surfaced not silent)", () => {
+    writeSignal("CTL-25", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => {
+      throw new Error("`gh` not authenticated");
+    };
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1); // proceeds — alarm-not-block (never wedges)
+    expect(existsSync(join(orchDir, "workers", "CTL-25", ".terminal-done.applied"))).toBe(true);
+    // unverifiable ⇒ could-not-confirm-clean ⇒ surface it (not silent).
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].ticket).toBe("CTL-25");
+    expect(alarms[0].by).toBe("terminal-sweep");
+    expect(alarms[0].unverifiable).toBe(true);
+    expect(alarms[0].openPrs).toEqual([]); // no KNOWN open PR, but still alarmed
+  });
+
+  // The structured {ok:false, unverifiable:true} return (no throw) — e.g. the
+  // attachment-view-failure path or an underivable repo — alarms the same way.
+  test("CTL-1157: a RETURNED unverifiable fact (no throw) also PROCEEDS and FIRES the alarm", () => {
+    writeSignal("CTL-27", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => ({
+      ok: false,
+      unverifiable: true,
+      reason: "repo-underivable",
+      prs: [],
+    });
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1);
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].unverifiable).toBe(true);
+  });
+
+  test("CTL-1157: no open PR (clean) writes Done, stamps the marker, and is SILENT (no alarm)", () => {
+    writeSignal("CTL-26", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => ({ ok: true, prs: [] });
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1); // legitimate completion preserved
+    expect(existsSync(join(orchDir, "workers", "CTL-26", ".terminal-done.applied"))).toBe(true);
+    expect(alarms).toEqual([]); // clean Done is silent
+  });
+
+  // CTL-1157 GROUP B (Done-event accuracy): an idempotent terminal SKIP (Linear
+  // already Done) returns {applied:true, action:"skipped"} and performs NO actual
+  // write. Emitting recovery.done-applied for it would corrupt OTEL's Done-move
+  // counts, and the open-PR alarm could fire for an already-Done ticket carrying a
+  // stale open PR. The marker still lands (once-semantics), but NEITHER emit fires.
+  test("CTL-1157: an idempotent SKIP (action:'skipped') stamps the marker but emits NO done-applied and NO alarm — even with a stale open PR", () => {
+    writeSignal("CTL-28", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      ...terminalNoWrites(),
+      // already-Done in Linear → no real write, just the idempotent skip outcome.
+      applyTerminalDone: () => ({ applied: true, action: "skipped" }),
+    };
+    // A stale open PR is present — would have alarmed on a REAL Done write.
+    const checkOpenPrs = () => ({ ok: false, prs: [{ number: 999, state: "OPEN" }] });
+    const doneApplied = [];
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneApplied: (ev) => doneApplied.push(ev),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    // Once-semantics: the marker still lands on the confirming tick.
+    expect(existsSync(join(orchDir, "workers", "CTL-28", ".terminal-done.applied"))).toBe(true);
+    // But a SKIP is not a "move" — no done-applied, no open-PR alarm.
+    expect(doneApplied).toEqual([]);
+    expect(alarms).toEqual([]);
+  });
+
+  // CTL-1157 GROUP B: a REAL Done write (no action:"skipped") still emits the broad
+  // recovery.done-applied move (guards against the skipped-gate over-suppressing).
+  test("CTL-1157: a REAL terminal-sweep Done (applied, not skipped) DOES emit recovery.done-applied", () => {
+    writeSignal("CTL-29", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: () => ({ applied: true, action: "applied" }),
+    };
+    const doneApplied = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs: () => ({ ok: true, prs: [] }),
+      emitDoneApplied: (ev) => doneApplied.push(ev),
+    });
+    expect(doneApplied).toHaveLength(1);
+    expect(doneApplied[0].ticket).toBe("CTL-29");
+    expect(doneApplied[0].by).toBe("terminal-sweep");
   });
 });
 
@@ -5665,7 +6243,12 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "phase-research.json"),
-      JSON.stringify({ ticket: "CTL-104", phase: "research", status: "dispatched", bg_job_id: null })
+      JSON.stringify({
+        ticket: "CTL-104",
+        phase: "research",
+        status: "dispatched",
+        bg_job_id: null,
+      })
     );
     // Default (bg) verification still demotes it (the CTL-611 contract is unchanged)…
     expect(verifyDispatchedSignal(orchDir, "CTL-104", "research")).toEqual({
@@ -5673,7 +6256,9 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
       reason: "bg_job_id_missing",
     });
     // …but the SDK-aware path accepts it.
-    expect(verifyDispatchedSignal(orchDir, "CTL-104", "research", { requireBgJob: false })).toEqual({ ok: true });
+    expect(verifyDispatchedSignal(orchDir, "CTL-104", "research", { requireBgJob: false })).toEqual(
+      { ok: true }
+    );
   });
 
   test("requireBgJob:false also accepts a 'done' signal (idempotent duplicate sdk dispatch)", () => {
@@ -5683,7 +6268,9 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
       join(dir, "phase-research.json"),
       JSON.stringify({ ticket: "CTL-105", phase: "research", status: "done", bg_job_id: null })
     );
-    expect(verifyDispatchedSignal(orchDir, "CTL-105", "research", { requireBgJob: false })).toEqual({ ok: true });
+    expect(verifyDispatchedSignal(orchDir, "CTL-105", "research", { requireBgJob: false })).toEqual(
+      { ok: true }
+    );
     // bg verification rejects a `done` status as not-runnable (unchanged).
     expect(verifyDispatchedSignal(orchDir, "CTL-105", "research").ok).toBe(false);
   });
@@ -5695,10 +6282,12 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
       join(dir, "phase-research.json"),
       JSON.stringify({ ticket: "CTL-106", phase: "research", status: "stalled", bg_job_id: null })
     );
-    expect(verifyDispatchedSignal(orchDir, "CTL-106", "research", { requireBgJob: false })).toEqual({
-      ok: false,
-      reason: "status_not_runnable",
-    });
+    expect(verifyDispatchedSignal(orchDir, "CTL-106", "research", { requireBgJob: false })).toEqual(
+      {
+        ok: false,
+        reason: "status_not_runnable",
+      }
+    );
   });
 
   // CTL-1367 P2-G: the SDK path (requireBgJob:false) treats a MISSING signal as a
@@ -5710,16 +6299,20 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
     mkdirSync(dir, { recursive: true });
     // No phase-research.json signal; a fresh claim from the winning dispatcher.
     writeFileSync(join(dir, "research.claim.1"), JSON.stringify({ generation: 1 }));
-    expect(verifyDispatchedSignal(orchDir, "CTL-107", "research", { requireBgJob: false })).toEqual({ ok: true });
+    expect(verifyDispatchedSignal(orchDir, "CTL-107", "research", { requireBgJob: false })).toEqual(
+      { ok: true }
+    );
   });
 
   test("requireBgJob:false: missing signal + NO claim → still signal_missing", () => {
     const dir = join(orchDir, "workers", "CTL-108");
     mkdirSync(dir, { recursive: true });
-    expect(verifyDispatchedSignal(orchDir, "CTL-108", "research", { requireBgJob: false })).toEqual({
-      ok: false,
-      reason: "signal_missing",
-    });
+    expect(verifyDispatchedSignal(orchDir, "CTL-108", "research", { requireBgJob: false })).toEqual(
+      {
+        ok: false,
+        reason: "signal_missing",
+      }
+    );
   });
 
   // The bg path (requireBgJob defaults true) is byte-identical: a fresh claim does
@@ -5750,7 +6343,7 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
 
   test("advancement sweep demotes rc=0 + missing bg job to failure", () => {
     // FSM owes plan; fakeDispatch returns rc=0 but does NOT write the signal.
-    writeSignal("CTL-200", "research", "done");
+    writeSignal("PROJ-200", "research", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 0, writeSignal: false });
 
@@ -5762,11 +6355,11 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
 
     expect(dispatch.calls).toHaveLength(1);
     // Demotion: no advance recorded.
-    expect(result?.advanced ?? []).not.toContainEqual({ ticket: "CTL-200", phase: "plan" });
+    expect(result?.advanced ?? []).not.toContainEqual({ ticket: "PROJ-200", phase: "plan" });
     // Cool-down marker exists (failure-on-disk effect).
-    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-200", "plan"))).toBe(true);
+    expect(existsSync(dispatchCooldownPath(orchDir, "PROJ-200", "plan"))).toBe(true);
     // Exactly one event emitted with verify_failed reason + code=0.
-    const events = dispatchFailedEvents("CTL-200");
+    const events = dispatchFailedEvents("PROJ-200");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "plan",
@@ -5776,13 +6369,13 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
   });
 
   test("advancement sweep emits phase.dispatch.failed on rc!=0", () => {
-    writeSignal("CTL-201", "research", "done");
+    writeSignal("PROJ-201", "research", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 1 });
 
     schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
 
-    const events = dispatchFailedEvents("CTL-201");
+    const events = dispatchFailedEvents("PROJ-201");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "plan",
@@ -5801,10 +6394,15 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const backstops = [];
     let rejectQuery;
-    const queryFailed = new Promise((_res, rej) => { rejectQuery = rej; });
+    const queryFailed = new Promise((_res, rej) => {
+      rejectQuery = rej;
+    });
     const dispatch = Object.assign(
-      () => { dispatch.calls.push({}); return queryFailed; }, // async (sdk) shape
-      { calls: [] },
+      () => {
+        dispatch.calls.push({});
+        return queryFailed;
+      }, // async (sdk) shape
+      { calls: [] }
     );
     schedulerTick(orchDir, {
       readEligible: () => eligibleOne("CTL-204"),
@@ -5819,7 +6417,8 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
     expect(backstops).toHaveLength(0); // nothing yet — the promise is still pending
     rejectQuery(new Error("buildSdkEnv exploded"));
     await queryFailed.catch(() => {});
-    await Promise.resolve(); await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(backstops).toHaveLength(1);
     expect(backstops[0]).toMatchObject({ ticket: "CTL-204", phase: "research", status: "failed" });
     expect(backstops[0].reason).toMatch(/buildSdkEnv exploded/);
@@ -5829,8 +6428,11 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const backstops = [];
     const dispatch = Object.assign(
-      () => { dispatch.calls.push({}); return Promise.resolve({ code: 0 }); },
-      { calls: [] },
+      () => {
+        dispatch.calls.push({});
+        return Promise.resolve({ code: 0 });
+      },
+      { calls: [] }
     );
     schedulerTick(orchDir, {
       readEligible: () => eligibleOne("CTL-205"),
@@ -5842,7 +6444,8 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
       emitBackstop: (a) => backstops.push(a),
     });
     expect(dispatch.calls).toHaveLength(1);
-    await Promise.resolve(); await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(backstops).toHaveLength(0); // clean resolution → worker owns its terminal event
   });
 
@@ -5851,14 +6454,14 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
     const dispatch = fakeDispatch({ code: 1 });
 
     schedulerTick(orchDir, {
-      readEligible: () => eligibleOne("CTL-202"),
+      readEligible: () => eligibleOne("PROJ-202"),
       dispatch,
       now: () => 1_000,
       liveBackgroundCount: () => 0, // CTL-611: deterministic free slot post-CTL-657 rebase
       hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is dispatch.failed event
     });
 
-    const events = dispatchFailedEvents("CTL-202");
+    const events = dispatchFailedEvents("PROJ-202");
     expect(events).toHaveLength(1);
     expect(events[0].body.payload).toMatchObject({
       target_phase: "research",
@@ -7711,14 +8314,15 @@ describe("CTL-755: admission gate", () => {
     });
     expect(d1.calls).toEqual([]); // no promotion
     expect(r1.advanced).toEqual([]);
-    expect(s1.applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    // CTL-764 Phase 4: awaiting-capacity label is now "queued" (was "waiting").
+    expect(s1.applied).toContainEqual({ ticket: "CTL-7", label: "queued" });
     expect(h1.events[0]).toMatchObject({
       ticket: "CTL-7",
       reason: "awaiting-capacity-or-priority",
       blockers: [],
     });
 
-    // Tick 2: the slot frees → CTL-7 is admitted, promoted, and "waiting" cleared.
+    // Tick 2: the slot frees → CTL-7 is admitted, promoted, and "queued" cleared.
     const d2 = fakeDispatch();
     const s2 = labelSpy();
     const r2 = schedulerTick(orchDir, {
@@ -7727,11 +8331,12 @@ describe("CTL-755: admission gate", () => {
       writeStatus: s2.ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0, // slot freed
-      fetchBatch: mkBatch(() => relUnblocked({ labels: ["waiting"] })),
+      // CTL-764 Phase 4: ticket wears the new "queued" label (renamed from "waiting").
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["queued"] })),
     });
     expect(d2.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(r2.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
-    expect(s2.removed).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    expect(s2.removed).toContainEqual({ ticket: "CTL-7", label: "queued" });
   });
 
   test("promotion clears BOTH held labels (clear-on-pickup regression anchor)", () => {
@@ -7747,11 +8352,13 @@ describe("CTL-755: admission gate", () => {
       liveBackgroundCount: () => 0,
       // Both stale labels present (defensive — should never co-exist, but the
       // converge must clear both on pickup).
-      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked", "waiting"] })),
+      // CTL-764 Phase 4: label value renamed "waiting" → "queued".
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked", "queued"] })),
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(removed).toContainEqual({ ticket: "CTL-7", label: "blocked" });
-    expect(removed).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    // CTL-764 Phase 4: "queued" (was "waiting") removed on pickup.
+    expect(removed).toContainEqual({ ticket: "CTL-7", label: "queued" });
     expect(applied).toEqual([]);
   });
 
@@ -7861,7 +8468,8 @@ describe("CTL-755: admission gate", () => {
     // and the held event names CTL-A as the unmet blocker.
     expect(applied).toContainEqual({ ticket: "CTL-B", label: "blocked" });
     expect(applied).not.toContainEqual({ ticket: "CTL-A", label: "blocked" });
-    expect(applied).not.toContainEqual({ ticket: "CTL-A", label: "waiting" });
+    // CTL-764 Phase 4: "waiting" renamed to "queued".
+    expect(applied).not.toContainEqual({ ticket: "CTL-A", label: "queued" });
     const bHeld = held.events.find((e) => e.ticket === "CTL-B");
     expect(bHeld).toMatchObject({ reason: "blocked-by-open-dependency", blockers: ["CTL-A"] });
   });
@@ -8062,11 +8670,12 @@ describe("CTL-755: admission gate", () => {
       hasTriageArtifact: () => true,
     });
     // The single slot goes to the higher-priority new work; CTL-7 is held
-    // "waiting" (ready, lost the selection), not promoted.
+    // "queued" (ready, lost the selection), not promoted.
+    // CTL-764 Phase 4: "waiting" renamed to "queued".
     expect(r.advanced).toEqual([]);
     expect(r.dispatched).toEqual(["CTL-X"]);
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-X", phase: "research" }]);
-    expect(applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "queued" });
   });
 
   test("staleness gate (livenessIsFresh=false) holds the triage→research promotion", () => {
@@ -8085,8 +8694,9 @@ describe("CTL-755: admission gate", () => {
     });
     expect(dispatch.calls).toEqual([]); // promotion held
     expect(r.advanced).toEqual([]);
-    // Deps are satisfied (in readyIds) but the promotion budget is 0 → "waiting".
-    expect(applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    // Deps are satisfied (in readyIds) but the promotion budget is 0 → "queued".
+    // CTL-764 Phase 4: "waiting" renamed to "queued".
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "queued" });
   });
 
   test("early-exit: zero triaged-waiting tickets → fetchBatch never called (zero Linear cost)", () => {
@@ -9150,6 +9760,9 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is HRW/claim
+      // dispatch, not the label write, and a won multi-host claim now fires it.
+      stampWorkerLabel: () => ({ stamped: true }),
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       now: () => 1_000,
@@ -9212,6 +9825,9 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is
+      // clusterGeneration forwarding, not the label write.
+      stampWorkerLabel: () => ({ stamped: true }),
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       now: () => 1_000,
@@ -9277,6 +9893,9 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is the
+      // cluster-generation persist, not the label write.
+      stampWorkerLabel: () => ({ stamped: true }),
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       now: () => 1_000,
@@ -9299,6 +9918,648 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
       now: () => 1_000,
     });
     expect(existsSync(join(orchDir, "workers", TICKET, "cluster-generation.json"))).toBe(false);
+  });
+
+  // CTL-1481: the worker:<host> label visibility-projection stamp fires right
+  // after a won multi-host claim, mirroring the emitFenceClaimed gate.
+  test("CTL-1481: a won multi-host claim fires stampWorkerLabel with the ticket + host", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchCreatesDir();
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    const calls = [];
+    const stampWorkerLabel = (arg) => {
+      calls.push(arg);
+      return { stamped: true };
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      stampWorkerLabel,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is the label stamp wiring
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ ticket: TICKET, hostName: OWNER });
+  });
+
+  test("CTL-1481: single-host dispatch never fires stampWorkerLabel (multiHost gate)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchCreatesDir();
+    const calls = [];
+    const stampWorkerLabel = (arg) => {
+      calls.push(arg);
+      return { stamped: true };
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch: recordClaim({ won: false, generation: null }),
+      stampWorkerLabel,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("CTL-1481: a thrown stampWorkerLabel never blocks the dispatch success path", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchCreatesDir();
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    const stampWorkerLabel = () => {
+      throw new Error("linearis exploded");
+    };
+    const result = schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      stampWorkerLabel,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(1); // dispatch still succeeded
+    expect(result?.dispatched).toEqual([TICKET]);
+  });
+});
+
+// ── CTL-1091: new-work dispatch fails over an OFFLINE HRW owner ───────────────
+//
+// The new-work ready filter (scheduler.mjs) must hash ownership over the LIVE
+// (surviving) roster, not the raw roster, so a ticket whose HRW owner is offline
+// fails over to a live host instead of stranding in Todo forever. Mirrors the
+// CTL-1191 recovery-side seam: an injectable dispatchSurvivingRoster override
+// drives the shed set deterministically without writing heartbeat events.
+describe("schedulerTick — new-work dispatch fails over an offline HRW owner (CTL-1091)", () => {
+  const ROSTER = ["mini", "laptop"];
+  // CTL-3 hashes to "laptop" under [mini,laptop]; under [mini] alone it fails
+  // over to mini (survivor identity). Anchor the fixture to the real HRW math.
+  const LAPTOP_OWNED_ID = "CTL-3";
+  expect(ownerForTicket(LAPTOP_OWNED_ID, ROSTER)).toBe("laptop");
+  expect(ownerForTicket(LAPTOP_OWNED_ID, ["mini"])).toBe("mini");
+
+  const eligibleOne = (id = LAPTOP_OWNED_ID) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  test("dispatches a laptop-owned ticket from mini when laptop is OFFLINE (shed)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      // laptop shed → survivors = [mini]; mini now owns CTL-3 → dispatched.
+      dispatchSurvivingRoster: ["mini"],
+      // won claim so the dispatch proceeds past the multi-host claim gate.
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls.map((a) => a.ticket)).toContain(LAPTOP_OWNED_ID);
+  });
+
+  test("does NOT dispatch a laptop-owned ticket from mini when laptop is LIVE", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      // both live → laptop still owns CTL-3 → mini filters it out.
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  test("single-host is a strict no-op (dispatches, HRW identity)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["mini"],
+      hostName: "mini",
+      // multiHost=false short-circuits the ownership filter entirely; no
+      // surviving-roster read fires regardless of any override.
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls.map((a) => a.ticket)).toContain(LAPTOP_OWNED_ID);
+  });
+
+  test("fails open: total liveness outage degrades to the full roster (no override)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    // No dispatchSurvivingRoster override → the real computeDispatchSurvivingRoster
+    // runs. Use fake hosts guaranteed ABSENT from the real heartbeat feed so
+    // positive-liveness sees NO live host → fail-safe degrades to the FULL roster
+    // [hosta,hostb]. CTL-1 hashes to hostb over that roster, so hosta does NOT
+    // dispatch it (today's raw-roster behavior preserved on a dead feed).
+    const OUTAGE_ROSTER = ["hosta", "hostb"];
+    expect(ownerForTicket("CTL-1", OUTAGE_ROSTER)).toBe("hostb");
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-1"),
+      dispatch,
+      hosts: OUTAGE_ROSTER,
+      hostName: "hosta",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  // CTL-1091 Phase 2: the deflap path (no dispatchSurvivingRoster override) must
+  // persist .liveness-deflap.json atomically — the file exists after a multi-host
+  // tick and no partial `.tmp` sibling is left behind.
+  test("Phase 2: a multi-host tick writes .liveness-deflap.json atomically (no .tmp left)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      // A mini-owned eligible ticket forces the ready filter (→ _dispatchRoster())
+      // to run without a dispatchSurvivingRoster override, so the real deflap
+      // read/compute/write path fires.
+      readEligible: () => eligibleOne("CTL-1"),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(true);
+    const leftoverTmp = readdirSync(orchDir).filter((f) => f.startsWith(".liveness-deflap.json.tmp"));
+    expect(leftoverTmp).toEqual([]);
+  });
+
+  // CTL-1091 (Codex P1 #1): the deflap observation state must refresh on EVERY
+  // multi-host tick, even with NO ready work. Before the fix, _dispatchRoster()
+  // (the sole persist:true / writeDeflapState path) ran only inside the ready
+  // filter, so an idle board (empty eligible → empty ready) never wrote the file —
+  // a peer that departed while the board was quiet kept a stale continuous liveSince
+  // and was re-admitted immediately on return, skipping the restore hold. Assert the
+  // file is written even when there is nothing to dispatch.
+  test("Phase 2 (P1 #1): a multi-host tick with NO ready work still refreshes .liveness-deflap.json", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(false);
+    schedulerTick(orchDir, {
+      readEligible: () => [], // EMPTY board → no ready tickets → ready.filter never runs
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0); // nothing dispatched
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(true); // …but deflap refreshed
+  });
+});
+
+// ── CTL-1091 / CTL-1057: computeDispatchSurvivingRoster positive-liveness ──────
+//
+// Dispatch ownership requires POSITIVE liveness (seen within grace), unlike the
+// recovery-side computeSurvivingRoster (fail-open deadHosts). This sheds a host
+// that has NEVER heartbeated (absent from lastSeen) so its HRW slice fails over,
+// while a total feed outage still fail-safes to the full roster.
+describe("computeDispatchSurvivingRoster — positive liveness (CTL-1091/CTL-1057)", () => {
+  const NOW = 10_000_000;
+  const recent = new Date(NOW - 1_000).toISOString();
+  const stale = new Date(NOW - 700_000).toISOString(); // older than 10-min grace
+
+  test("sheds a NEVER-live host (absent from lastSeen) — the CTL-1057 case", () => {
+    const roster = ["mini", "ghost"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent }), // ghost never heartbeated
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("sheds a host whose last heartbeat is older than grace", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent, laptop: stale }),
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("keeps every host seen within grace", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      nowMs: NOW,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
+
+  test("fail-safe: NObody live (total outage) → full roster, never strands", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({}), // no host seen at all
+      nowMs: NOW,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
+
+  test("fail-safe: a heartbeat-read throw → full roster", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      nowMs: NOW,
+    });
+    expect(out).toEqual(roster);
+  });
+
+  test("single-host is a strict no-op (no read)", () => {
+    let read = false;
+    const out = computeDispatchSurvivingRoster(["solo"], {
+      readHeartbeats: () => {
+        read = true;
+        return {};
+      },
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["solo"]);
+    expect(read).toBe(false);
+  });
+});
+
+// ── CTL-1091: resolveDispatchRoster — the shared liveness+deflap+outage resolver ─
+//
+// The single source of truth both dispatch sites (scheduler new-work + monitor
+// triage) call, so they can never drift. Composes positive-liveness → restore
+// deflap → outage fail-safe. Uses a real temp orchDir for the .liveness-deflap.json
+// read/write and an injected readHeartbeats for the feed.
+describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => {
+  const NOW = 10_000_000;
+  const recent = new Date(NOW - 1_000).toISOString();
+  const HOLD = 600_000;
+
+  test("single-host is a strict no-op", () => {
+    const out = resolveDispatchRoster({
+      roster: ["solo"],
+      orchDir,
+      self: "solo",
+      nowMs: NOW,
+      readHeartbeats: () => ({}),
+    });
+    expect(out).toEqual(["solo"]);
+  });
+
+  test("sheds a never-live host and dispatches over the live survivor", () => {
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent }), // ghost never live
+      persist: true,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("holds a freshly-restored host out for the deflap window", () => {
+    // Seed prevState: laptop was shed last tick (liveSince:null) → newly restored.
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ laptop: { liveSince: null } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }), // both live now
+      persist: true,
+    });
+    expect(out).toEqual(["mini"]); // laptop held out (restore hold)
+  });
+
+  // CTL-1091 correctness review #1: on a TOTAL feed outage the resolver must
+  // degrade to the FULL roster and NOT let the deflap partially re-shed a
+  // just-departed host (which would re-home its slice, violating the outage
+  // invariant). This is the exact reproduction from the review.
+  test("total outage → FULL roster even when prevState marks a host shed (no partial re-shed)", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ A: { liveSince: null }, C: { liveSince: 0 } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["A", "B", "C"],
+      orchDir,
+      self: "A",
+      nowMs: 700_000,
+      holdMs: HOLD,
+      readHeartbeats: () => ({}), // NOBODY positively live → total outage
+      persist: true,
+    });
+    // Must be the full roster, NOT the partial [B,C] the naive deflap produced.
+    expect(out.slice().sort()).toEqual(["A", "B", "C"]);
+  });
+
+  test("read-throw (outage) → full roster, observation state left intact", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ laptop: { liveSince: 1234 } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      persist: true,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+    // prevState preserved (we learned nothing this tick).
+    const persisted = JSON.parse(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8"));
+    expect(persisted.laptop.liveSince).toBe(1234);
+  });
+
+  test("persist:false does NOT write the deflap file", () => {
+    resolveDispatchRoster({
+      roster: ["mini", "ghost"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({ mini: recent }),
+      persist: false,
+    });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(false);
+  });
+
+  // CTL-1091 verify F3 (coverage): pin the SOLE-WRITER invariant on the read-only
+  // (monitor) path even when the deflap actually mutates observation state — a
+  // freshly-restored host is held, so nextState differs from prevState, yet
+  // persist:false must still leave the file untouched. Guards a regression that
+  // made the monitor path (resolveDispatchRoster persist:false) write the file.
+  test("persist:false leaves the deflap file untouched even when the deflap holds a host", () => {
+    // Seed a restored host so the resolve computes fresh observation state.
+    const seeded = JSON.stringify({ laptop: { liveSince: null } });
+    writeFileSync(join(orchDir, ".liveness-deflap.json"), seeded);
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }), // both live now
+      persist: false,
+    });
+    expect(out).toEqual(["mini"]); // laptop held (deflap active → nextState differs)
+    // File byte-identical to the seed — read-only path wrote nothing.
+    expect(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8")).toBe(seeded);
+  });
+
+  // CTL-1091 verify F2 (silent-failure): the outage→full-roster degrade must fire
+  // the onDegrade observability hook so cross-host failover turning OFF is not
+  // invisible. Two outage shapes; the caught error rides along on a read-throw.
+  test("onDegrade fires on a read-throw outage with the caught error message", () => {
+    const calls = [];
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+    expect(calls.length).toBe(1);
+    expect(calls[0].reason).toBe("heartbeat-read-threw");
+    expect(calls[0].error).toBe("loki down");
+  });
+
+  test("onDegrade fires when NOBODY is positively live (reason nobody-positively-live)", () => {
+    const calls = [];
+    resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({}), // empty feed → nobody live
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(calls.length).toBe(1);
+    expect(calls[0].reason).toBe("nobody-positively-live");
+    expect(calls[0].error).toBe(null);
+  });
+
+  test("onDegrade does NOT fire on the happy (some-live) path", () => {
+    const calls = [];
+    resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(calls.length).toBe(0);
+  });
+
+  test("an onDegrade that throws never breaks the roster resolve", () => {
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({}),
+      persist: false,
+      onDegrade: () => {
+        throw new Error("observability blew up");
+      },
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
+});
+
+// ── CTL-1091 ticket-Gherkin scenarios (end-to-end over schedulerTick) ──────────
+//
+// One describe per ticket scenario. Co-located here (not a standalone file) to
+// reuse the outer beforeEach's CATALYST_DIR redirect — otherwise the real event
+// log would leak into computeSurvivingRoster and make these non-deterministic.
+// Liveness is injected via dispatchSurvivingRoster; the soft-CAS via claimDispatch.
+describe("CTL-1091 ticket scenarios — offline-node ownership shedding", () => {
+  const ROSTER = ["mini", "laptop"];
+  const T_MINI = "CTL-1"; // HRW owner over [mini,laptop] === mini
+  const T_LAPTOP = "CTL-3"; // HRW owner over [mini,laptop] === laptop
+  // Anchor fixtures to the real HRW math.
+  expect(ownerForTicket(T_MINI, ROSTER)).toBe("mini");
+  expect(ownerForTicket(T_LAPTOP, ROSTER)).toBe("laptop");
+  expect(ownerForTicket(T_LAPTOP, ["mini"])).toBe("mini"); // fails over to survivor
+
+  const elig = (...ids) =>
+    ids.map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+
+  const dispatchedIds = (dispatch) => dispatch.calls.map((a) => a.ticket).sort();
+
+  test("scenario 1 — backlog flows while the laptop is OFF: mini dispatches ALL", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_MINI, T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      dispatchSurvivingRoster: ["mini"], // laptop shed
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // Both the mini-hashed AND the laptop-hashed ticket dispatch from mini.
+    expect(dispatchedIds(dispatch)).toEqual([T_LAPTOP, T_MINI].sort());
+  });
+
+  test("scenario 2a — laptop rejoins and takes its OWN slice back", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"], // both live (past hold)
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatchedIds(dispatch)).toEqual([T_LAPTOP]);
+  });
+
+  test("scenario 2b — NO mid-flight handback: a ticket mini already claimed stays with mini", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claims = [];
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      // laptop owns T_LAPTOP by HRW and attempts the claim, but mini holds the
+      // fence → the soft-CAS is LOST → laptop does not re-dispatch (no handback).
+      claimDispatch: (arg) => {
+        claims.push(arg);
+        return { won: false, generation: 2 };
+      },
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(claims).toHaveLength(1); // the claim was ATTEMPTED (path unchanged)
+    expect(dispatch.calls).toHaveLength(0); // but LOST → not dispatched
+  });
+
+  test("scenario 3 — both hosts race a transition: the soft-CAS yields EXACTLY one dispatch", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // mini's tick: it believes laptop is dead → it owns T_LAPTOP → wins the CAS.
+    const dMini = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch: dMini,
+      hosts: ROSTER,
+      hostName: "mini",
+      dispatchSurvivingRoster: ["mini"],
+      claimDispatch: () => ({ won: true, generation: 5 }), // mini wins
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // laptop's concurrent tick: it believes it is live → it owns T_LAPTOP too, but
+    // the fence CAS is already held by mini → LOST.
+    const dLaptop = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch: dLaptop,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      claimDispatch: () => ({ won: false, generation: 5 }), // laptop loses the CAS
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // Exactly one host dispatched the contested ticket.
+    expect(dMini.calls).toHaveLength(1);
+    expect(dLaptop.calls).toHaveLength(0);
   });
 });
 
@@ -9425,14 +10686,14 @@ describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass
 //
 // The reasoning pass must NOT reason over a ticket already finished (terminal
 // Linear state / merged PR) — doing so burns cooldown + re-posts diagnoses on a
-// Done ticket. The pass writes a per-ticket marker under .recovery-intents/ for
-// every item it processes (shadow mode), so the marker's presence/absence is the
-// observable. Single-host so the ownership gate is identity (we isolate the
+// Done ticket. In shadow the pass emits a per-item recovery.would-* event for every
+// item it processes (CTL-1157 F #5 retired the .recovery-intents cooldown marker in
+// shadow), so the event's presence/absence is the observable. Single-host so the
+// ownership gate is identity (we isolate the
 // terminal filter). A gateway descriptor supplies the Linear state without any
 // network — "Done" ⇒ terminal ⇒ filtered; "In Progress" ⇒ kept.
 describe("CTL-1191 — reasoning pass skips terminal tickets (Pass 0r terminal-state filter)", () => {
-  const recoveryIntentMarker = (ticket) =>
-    join(orchDir, ".recovery-intents", `${ticket}.json`);
+  const recoveryIntentMarker = (ticket) => join(orchDir, ".recovery-intents", `${ticket}.json`);
 
   test("a Done ticket is filtered out; an in-flight stalled ticket is processed", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -9465,12 +10726,21 @@ describe("CTL-1191 — reasoning pass skips terminal tickets (Pass 0r terminal-s
         applyTerminalDone: () => {},
         applyLabel: () => ({ applied: true }),
       },
-      recoveryPass: { mode: "shadow" }, // shadow still writes the cooldown marker
+      recoveryPass: { mode: "shadow" },
     });
 
-    // The in-flight ticket was reasoned over (marker written); the Done ticket
-    // was filtered BEFORE the pass (no marker — never processed).
-    expect(existsSync(recoveryIntentMarker("CTL-LIVE"))).toBe(true);
+    // CTL-1157 F #5: shadow no longer writes a cooldown marker for a DEFERRED (untyped
+    // stuck) item — that would mutate enforce scheduler state. So the observable that
+    // the in-flight CTL-LIVE was PROCESSED is now its recovery.would-defer EVENT; the
+    // terminal CTL-DONE, filtered BEFORE the pass, has NO per-item reasoning event
+    // (recovery.decision / recovery.would-*) and is never cooled down.
+    const events = readEventLog().map((e) => JSON.stringify(e));
+    expect(events.some((e) => e.includes("CTL-LIVE") && e.includes("would-defer"))).toBe(true);
+    expect(
+      events.some(
+        (e) => e.includes("CTL-DONE") && (e.includes("recovery.decision") || e.includes("would-"))
+      )
+    ).toBe(false);
     expect(existsSync(recoveryIntentMarker("CTL-DONE"))).toBe(false);
   });
 });
@@ -9621,6 +10891,15 @@ describe("CTL-834 — convergeHeldLabel apply cool-down", () => {
     expect(cd("CTL-1", "blocked")).toBe(false);
   });
 
+  // CTL-764 finding 1: the rename dropped the legacy "waiting" out of HELD_LABELS, so
+  // clear-on-pickup stopped removing it. It must stay in the removable set (never applied).
+  test("finding 1 — clear-on-pickup (desired=null) removes the legacy 'waiting' label", () => {
+    const ws = makeWs({ applied: true, reason: null });
+    const writes = convergeHeldLabel("CTL-1", ["waiting"], null, ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(1);
+    expect(ws.removeLabel.calls).toContainEqual(["CTL-1", "waiting"]);
+  });
+
   test("unrecoverable apply (exclusive-conflict) → arms the cool-down marker", () => {
     const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
     const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 });
@@ -9698,7 +10977,8 @@ describe("CTL-834 — convergeHeldLabel apply cool-down", () => {
 
   test("desired=null with a stale held label → removes it (cool-down path not taken)", () => {
     const ws = makeWs({ applied: true });
-    const writes = convergeHeldLabel("CTL-1", ["waiting"], null, ws, { orchDir, now: () => 1000 });
+    // CTL-764 Phase 4: HELD_LABEL_WAITING value is now "queued" (was "waiting").
+    const writes = convergeHeldLabel("CTL-1", ["queued"], null, ws, { orchDir, now: () => 1000 });
     expect(writes).toBe(1);
     expect(ws.removeLabel.calls).toHaveLength(1);
     expect(ws.applyLabel.calls).toHaveLength(0);
@@ -10375,13 +11655,14 @@ describe("CTL-1068: convergeStartedHeldLabels (unit)", () => {
     };
   }
 
-  test("retracts a present 'waiting' marker → removeLabel once + marker deleted", () => {
+  test("retracts a present 'queued' marker → removeLabel once + marker deleted", () => {
+    // CTL-764 Phase 4: marker renamed from ".linear-label-waiting" to ".linear-label-queued".
     seedWorker("CTL-764");
-    writeFileSync(markerPath("CTL-764", "waiting", "applied"), "");
+    writeFileSync(markerPath("CTL-764", "queued", "applied"), "");
     const { removed, ws } = removeSpy();
     convergeStartedHeldLabels(orchDir, "CTL-764", ws, { multiHost: false });
-    expect(removed).toEqual([{ ticket: "CTL-764", label: "waiting" }]);
-    expect(existsSync(markerPath("CTL-764", "waiting", "applied"))).toBe(false);
+    expect(removed).toEqual([{ ticket: "CTL-764", label: "queued" }]);
+    expect(existsSync(markerPath("CTL-764", "queued", "applied"))).toBe(false);
   });
 
   test("steady-state: no held marker → ZERO removeLabel calls", () => {
@@ -10391,49 +11672,65 @@ describe("CTL-1068: convergeStartedHeldLabels (unit)", () => {
     expect(removed).toEqual([]);
   });
 
+  // CTL-764 finding 1: a STARTED ticket still wearing the legacy "waiting" marker
+  // (pre-rename) must have it retracted too — the removable superset includes it.
+  test("finding 1 — retracts a legacy 'waiting' marker", () => {
+    seedWorker("CTL-905");
+    writeFileSync(markerPath("CTL-905", "waiting", "applied"), "");
+    const { removed, ws } = removeSpy();
+    convergeStartedHeldLabels(orchDir, "CTL-905", ws, { multiHost: false });
+    expect(removed).toEqual([{ ticket: "CTL-905", label: "waiting" }]);
+    expect(existsSync(markerPath("CTL-905", "waiting", "applied"))).toBe(false);
+  });
+
   test("retracts BOTH labels when both markers present", () => {
     seedWorker("CTL-901");
     writeFileSync(markerPath("CTL-901", "blocked", "applied"), "");
-    writeFileSync(markerPath("CTL-901", "waiting", "skipped"), "");
+    // CTL-764 Phase 4: marker renamed "waiting" → "queued".
+    writeFileSync(markerPath("CTL-901", "queued", "skipped"), "");
     const { removed, ws } = removeSpy();
     convergeStartedHeldLabels(orchDir, "CTL-901", ws, { multiHost: false });
     expect(removed).toContainEqual({ ticket: "CTL-901", label: "blocked" });
-    expect(removed).toContainEqual({ ticket: "CTL-901", label: "waiting" });
+    expect(removed).toContainEqual({ ticket: "CTL-901", label: "queued" });
   });
 
   test("desired=label is a Stage-2 seam: that label is NOT retracted", () => {
     seedWorker("CTL-902");
     writeFileSync(markerPath("CTL-902", "blocked", "applied"), "");
-    writeFileSync(markerPath("CTL-902", "waiting", "applied"), "");
+    // CTL-764 Phase 4: marker renamed "waiting" → "queued".
+    writeFileSync(markerPath("CTL-902", "queued", "applied"), "");
     const { removed, ws } = removeSpy();
     convergeStartedHeldLabels(orchDir, "CTL-902", ws, { desired: "blocked", multiHost: false });
-    expect(removed).toEqual([{ ticket: "CTL-902", label: "waiting" }]);
+    expect(removed).toEqual([{ ticket: "CTL-902", label: "queued" }]);
     expect(existsSync(markerPath("CTL-902", "blocked", "applied"))).toBe(true);
   });
 
   test("half-clear Case A: label already absent (removeLabel {removed:true}) → marker still deleted", () => {
     seedWorker("CTL-903");
-    writeFileSync(markerPath("CTL-903", "waiting", "applied"), "");
+    // CTL-764 Phase 4: marker renamed "waiting" → "queued".
+    writeFileSync(markerPath("CTL-903", "queued", "applied"), "");
     const ws = { removeLabel: () => ({ removed: true }) };
     convergeStartedHeldLabels(orchDir, "CTL-903", ws, { multiHost: false });
-    expect(existsSync(markerPath("CTL-903", "waiting", "applied"))).toBe(false);
+    expect(existsSync(markerPath("CTL-903", "queued", "applied"))).toBe(false);
   });
 
   test("fence guard suppresses retraction on a stale-fenced multi-host node", () => {
     seedWorker("CTL-904");
-    writeFileSync(markerPath("CTL-904", "waiting", "applied"), "");
+    // CTL-764 Phase 4: marker renamed "waiting" → "queued".
+    writeFileSync(markerPath("CTL-904", "queued", "applied"), "");
     const { removed, ws } = removeSpy();
     convergeStartedHeldLabels(orchDir, "CTL-904", ws, {
       multiHost: true,
       fenceGuard: () => false,
     });
     expect(removed).toEqual([]);
-    expect(existsSync(markerPath("CTL-904", "waiting", "applied"))).toBe(true);
+    expect(existsSync(markerPath("CTL-904", "queued", "applied"))).toBe(true);
   });
 
   test("emits a held-label-orphaned-in-flight audit event ONLY on confirmed removal", () => {
     seedWorker("CTL-905");
-    writeFileSync(markerPath("CTL-905", "waiting", "applied"), "");
+    // CTL-764 Phase 4: marker renamed "waiting" → "queued".
+    writeFileSync(markerPath("CTL-905", "queued", "applied"), "");
     const audits = [];
     const ws = { removeLabel: () => ({ removed: true }) };
     convergeStartedHeldLabels(orchDir, "CTL-905", ws, {
@@ -10446,7 +11743,8 @@ describe("CTL-1068: convergeStartedHeldLabels (unit)", () => {
 
   test("onRetract callback fires (re-arm hook) once per retracted label", () => {
     seedWorker("CTL-906");
-    writeFileSync(markerPath("CTL-906", "waiting", "applied"), "");
+    // CTL-764 Phase 4: marker renamed "waiting" → "queued".
+    writeFileSync(markerPath("CTL-906", "queued", "applied"), "");
     let rearms = 0;
     convergeStartedHeldLabels(
       orchDir,
@@ -10471,11 +11769,12 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
     applyTerminalDone() {},
   });
 
-  test("admitted-then-failed ticket drains its stale 'waiting' label", () => {
+  test("admitted-then-failed ticket drains its stale 'queued' label", () => {
     writeSignal("CTL-764", "triage", "done");
     writeSignal("CTL-764", "research", "done"); // admitted: has research+; pre-pickup gate excludes it
     writeSignal("CTL-764", "implement", "failed");
-    writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-waiting.applied"), "");
+    // CTL-764 Phase 4: marker renamed ".linear-label-waiting" → ".linear-label-queued".
+    writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-queued.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const removed = [];
     const writeStatus = {
@@ -10487,8 +11786,8 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
       },
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(removed).toContainEqual({ t: "CTL-764", l: "waiting" });
-    expect(existsSync(join(orchDir, "workers", "CTL-764", ".linear-label-waiting.applied"))).toBe(
+    expect(removed).toContainEqual({ t: "CTL-764", l: "queued" });
+    expect(existsSync(join(orchDir, "workers", "CTL-764", ".linear-label-queued.applied"))).toBe(
       false
     );
   });
@@ -10496,7 +11795,8 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
   test("pre-pickup triaged ticket is NOT retracted by the started-sweep", () => {
     // triage-only signal → pre-pickup pool (A.7 owns it, section 3 must skip)
     writeSignal("CTL-7", "triage", "done");
-    writeFileSync(join(orchDir, "workers", "CTL-7", ".linear-label-waiting.applied"), "");
+    // CTL-764 Phase 4: marker renamed ".linear-label-waiting" → ".linear-label-queued".
+    writeFileSync(join(orchDir, "workers", "CTL-7", ".linear-label-queued.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const removed = [];
     const writeStatus = {
@@ -10514,8 +11814,8 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
       liveBackgroundCount: () => 1,
     });
     // The started-sweep gate excluded CTL-7; the marker must be untouched.
-    expect(removed.filter((r) => r.t === "CTL-7" && r.l === "waiting")).toHaveLength(0);
-    expect(existsSync(join(orchDir, "workers", "CTL-7", ".linear-label-waiting.applied"))).toBe(
+    expect(removed.filter((r) => r.t === "CTL-7" && r.l === "queued")).toHaveLength(0);
+    expect(existsSync(join(orchDir, "workers", "CTL-7", ".linear-label-queued.applied"))).toBe(
       true
     );
   });
@@ -10534,14 +11834,15 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
       },
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(removed.filter((r) => r.l === "blocked" || r.l === "waiting")).toHaveLength(0);
+    expect(removed.filter((r) => r.l === "blocked" || r.l === "queued")).toHaveLength(0);
   });
 
   test("retraction emits a held-label-orphaned-in-flight state-write event", () => {
     writeSignal("CTL-764", "triage", "done");
     writeSignal("CTL-764", "research", "done"); // admitted; pre-pickup gate excludes it
     writeSignal("CTL-764", "implement", "failed");
-    writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-waiting.applied"), "");
+    // CTL-764 Phase 4: marker renamed ".linear-label-waiting" → ".linear-label-queued".
+    writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-queued.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const events = [];
     const writeStatus = {
@@ -10591,7 +11892,8 @@ describe("CTL-1068: marker-hygiene and re-arm (Phase 3 regression)", () => {
     writeSignal("CTL-907", "triage", "done");
     writeSignal("CTL-907", "research", "done"); // admitted; pre-pickup gate excludes it
     writeSignal("CTL-907", "implement", "failed");
-    writeFileSync(join(orchDir, "workers", "CTL-907", ".linear-label-waiting.applied"), "");
+    // CTL-764 Phase 4: marker renamed ".linear-label-waiting" → ".linear-label-queued".
+    writeFileSync(join(orchDir, "workers", "CTL-907", ".linear-label-queued.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const removed = [];
     const writeStatus = {
@@ -10604,8 +11906,8 @@ describe("CTL-1068: marker-hygiene and re-arm (Phase 3 regression)", () => {
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     // Marker must be gone after Tick A retraction.
-    expect(removed).toContainEqual({ t: "CTL-907", l: "waiting" });
-    expect(existsSync(join(orchDir, "workers", "CTL-907", ".linear-label-waiting.applied"))).toBe(
+    expect(removed).toContainEqual({ t: "CTL-907", l: "queued" });
+    expect(existsSync(join(orchDir, "workers", "CTL-907", ".linear-label-queued.applied"))).toBe(
       false
     );
     // The onRetract callback clears lastHeldEmitState for this ticket — no further assertion
@@ -10766,3 +12068,1123 @@ describe("drained-sentinel emission (CTL-1095)", () => {
 // CTL-1290: the board-health scheduler-seam tests live in board-health-seam.test.mjs
 // (a CI-included file) — scheduler.test.mjs is excluded from the CI allowlist for
 // its real-timer suite, so the seam coverage would not run here.
+
+// ── CTL-764 Phase 4: convergeDispositionLabel ─────────────────────────────────
+//
+// Generalization of convergeHeldLabel to the full worker-status disposition set
+// (queued/blocked/needs-input/needs-human). Key invariants:
+//   • queued/blocked/needs-input tick-converge (diff + cool-down, 0 writes on
+//     steady-state).
+//   • needs-human is NEVER tick-converged — it is sticky (labelOnce).
+//   • Precedence suppression: a ticket already carrying needs-human causes
+//     convergeDispositionLabel to make ZERO writes when the desired is a lower
+//     disposition; and the converger NEVER issues removeLabel('needs-human').
+//   • desired=null removes stale queued/blocked/needs-input but leaves needs-human
+//     untouched.
+//
+// Reuses the CTL-834 makeWs() helper pattern from the convergeHeldLabel block.
+describe("CTL-764 Phase 4 — convergeDispositionLabel", () => {
+  const makeWs = (applyResult = { applied: true, reason: null }) => {
+    const applyLabel = (...a) => {
+      applyLabel.calls.push(a);
+      return applyResult;
+    };
+    applyLabel.calls = [];
+    const removeLabel = (...a) => {
+      removeLabel.calls.push(a);
+    };
+    removeLabel.calls = [];
+    return { applyLabel, removeLabel };
+  };
+
+  test("HELD_LABEL_WAITING value is 'queued' (renamed from 'waiting')", () => {
+    expect(HELD_LABEL_WAITING).toBe("queued");
+  });
+
+  test("HELD_LABEL_NEEDS_INPUT is 'needs-input'", () => {
+    expect(HELD_LABEL_NEEDS_INPUT).toBe("needs-input");
+  });
+
+  test("queued: apply on empty labels → 1 write", () => {
+    const ws = makeWs();
+    const writes = convergeDispositionLabel("CTL-1", [], "queued", ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls).toHaveLength(1);
+    expect(ws.applyLabel.calls[0][0]).toMatchObject({ ticket: "CTL-1", label: "queued" });
+  });
+
+  test("queued: steady-state (label already present) → 0 writes", () => {
+    const ws = makeWs();
+    const writes = convergeDispositionLabel("CTL-1", ["queued"], "queued", ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    expect(writes).toBe(0);
+    expect(ws.applyLabel.calls).toHaveLength(0);
+  });
+
+  test("blocked: tick-converge → apply once", () => {
+    const ws = makeWs();
+    const writes = convergeDispositionLabel("CTL-1", [], "blocked", ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls[0][0]).toMatchObject({ ticket: "CTL-1", label: "blocked" });
+  });
+
+  test("needs-input: durable — desired='needs-input' on clean ticket → applyLabel once", () => {
+    const ws = makeWs();
+    const writes = convergeDispositionLabel("CTL-1", [], "needs-input", ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls[0][0]).toMatchObject({ ticket: "CTL-1", label: "needs-input" });
+  });
+
+  test("precedence suppression: ticket has needs-human → zero writes when desired=blocked", () => {
+    const ws = makeWs();
+    const writes = convergeDispositionLabel("CTL-1", ["needs-human"], "blocked", ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    expect(writes).toBe(0);
+    expect(ws.applyLabel.calls).toHaveLength(0);
+    expect(ws.removeLabel.calls).toHaveLength(0);
+  });
+
+  test("precedence suppression: ticket has needs-human → zero writes when desired=queued", () => {
+    const ws = makeWs();
+    const writes = convergeDispositionLabel("CTL-1", ["needs-human"], "queued", ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    expect(writes).toBe(0);
+  });
+
+  test("precedence suppression: ticket has needs-human → zero writes when desired=needs-input", () => {
+    const ws = makeWs();
+    const writes = convergeDispositionLabel("CTL-1", ["needs-human"], "needs-input", ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    expect(writes).toBe(0);
+  });
+
+  test("NEVER issues removeLabel('needs-human') when converging lower three", () => {
+    const ws = makeWs();
+    convergeDispositionLabel("CTL-1", ["needs-human", "blocked"], null, ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    const removedLabels = ws.removeLabel.calls.map((c) => c[1] ?? c[0]);
+    expect(removedLabels).not.toContain("needs-human");
+  });
+
+  test("desired=null removes stale 'queued' but leaves needs-human untouched", () => {
+    const ws = makeWs();
+    convergeDispositionLabel("CTL-1", ["queued", "needs-human"], null, ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    const removedLabels = ws.removeLabel.calls.map((c) => c[1] ?? c[0]);
+    expect(removedLabels).toContain("queued");
+    expect(removedLabels).not.toContain("needs-human");
+  });
+
+  test("desired=null removes stale 'needs-input' but leaves needs-human untouched", () => {
+    const ws = makeWs();
+    convergeDispositionLabel("CTL-1", ["needs-input", "needs-human"], null, ws, {
+      orchDir,
+      now: () => 1000,
+    });
+    const removedLabels = ws.removeLabel.calls.map((c) => c[1] ?? c[0]);
+    expect(removedLabels).toContain("needs-input");
+    expect(removedLabels).not.toContain("needs-human");
+  });
+
+  test("queued rename: admission awaiting-capacity now applies 'queued' (not 'waiting')", () => {
+    // The value formerly applied at awaiting-capacity-or-priority was 'waiting'.
+    // Phase 4 renames HELD_LABEL_WAITING value to 'queued' so the admission write is 'queued'.
+    expect(HELD_LABEL_WAITING).toBe("queued");
+    const ws = makeWs();
+    convergeDispositionLabel("CTL-1", [], HELD_LABEL_WAITING, ws, { orchDir, now: () => 1000 });
+    expect(ws.applyLabel.calls[0][0]).toMatchObject({ label: "queued" });
+  });
+
+  test("desired=blocked removes sibling 'queued' label", () => {
+    const ws = makeWs();
+    convergeDispositionLabel("CTL-1", ["queued"], "blocked", ws, { orchDir, now: () => 1000 });
+    const removedLabels = ws.removeLabel.calls.map((c) => c[1] ?? c[0]);
+    expect(removedLabels).toContain("queued");
+    expect(ws.applyLabel.calls[0][0]).toMatchObject({ label: "blocked" });
+  });
+
+  // CTL-764 finding 1: the legacy pre-migration "waiting" value is removable (never
+  // applied — only "queued" is) so a mid-rollout ticket carrying it is drained.
+  test("finding 1 — desired='queued' removes the legacy 'waiting' label", () => {
+    const ws = makeWs();
+    convergeDispositionLabel("CTL-1", ["waiting"], "queued", ws, { orchDir, now: () => 1000 });
+    const removedLabels = ws.removeLabel.calls.map((c) => c[1] ?? c[0]);
+    expect(removedLabels).toContain("waiting");
+    expect(ws.applyLabel.calls[0][0]).toMatchObject({ label: "queued" });
+  });
+
+  test("finding 1 — desired=null removes the legacy 'waiting' label", () => {
+    const ws = makeWs();
+    convergeDispositionLabel("CTL-1", ["waiting"], null, ws, { orchDir, now: () => 1000 });
+    const removedLabels = ws.removeLabel.calls.map((c) => c[1] ?? c[0]);
+    expect(removedLabels).toContain("waiting");
+  });
+});
+
+// ── CTL-764 Phase 5 — recordTransition closure: worker.transition events ──
+
+describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () => {
+  // Reset the in-memory lastDispositionEmit dedup before each test so the only-on-change
+  // guard starts from a clean slate (also models a daemon restart — finding 10). Without
+  // this the tests leak disposition state into each other and become order-dependent.
+  beforeEach(() => __resetForTests());
+  const noWrites = () => ({
+    applyPhaseStatus() {},
+    applyTerminalDone() {},
+    applyLabel: () => ({}),
+    removeLabel: () => ({ removed: false }),
+  });
+
+  test("Pass-1 advance emits one worker.transition event with toStage", () => {
+    // Advance: research→plan dispatch. No plan signal so deriveAdvancement returns plan.
+    writeSignal("CTL-764", "triage", "done");
+    writeSignal("CTL-764", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      writeStatus: {
+        ...noWrites(),
+        applyPhaseStatus: ({ ticket, phase }) => ({
+          applied: true,
+          from_state: "In Progress",
+          to_state: "In Review",
+          action: phase,
+        }),
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const advance = transitions.find((e) => e.toStage && e.ticket === "CTL-764");
+    expect(advance).toBeDefined();
+    expect(advance.source).toBe("scheduler-advance");
+  });
+
+  test("terminal-sweep needs-human apply emits worker.transition(toDisposition='needs-human')", () => {
+    // Terminal stalled ticket triggers needs-human
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "implement", "failed");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: {
+        ...noWrites(),
+        applyLabel: ({ ticket, label }) => ({ applied: true, label }),
+        removeLabel: () => ({ removed: false }),
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      env: {},
+    });
+    const needsHuman = transitions.find(
+      (e) => e.toDisposition === "needs-human" && e.ticket === "CTL-764"
+    );
+    expect(needsHuman).toBeDefined();
+  });
+
+  // Codex #2970 post-merge round 4: clearDispositionEmit(ticket, expectedDisposition)
+  // must only clear the live entry when it MATCHES what the caller believes it just
+  // cleared — an unconditional clear would corrupt an UNRELATED disposition (e.g. the
+  // daemon calling it for "needs-human" on a ticket whose live entry is actually
+  // "blocked" or "queued"). Seeds lastDispositionEmit directly (via the test-only
+  // helpers) rather than driving a full schedulerTick escalation, which needs
+  // stall-threshold setup shared across this describe block and is not reliably
+  // reproducible standalone.
+  test("clearDispositionEmit only resets a MATCHING dedup entry, never an unrelated one", () => {
+    __seedDispositionEmitForTest("CTL-1", "needs-human");
+
+    // Wrong expected disposition — must be a no-op against the live "needs-human" entry.
+    clearDispositionEmit("CTL-1", "blocked");
+    expect(__readDispositionEmitForTest("CTL-1")).toBe("needs-human");
+
+    // Correct expected disposition — clears it.
+    clearDispositionEmit("CTL-1", "needs-human");
+    expect(__readDispositionEmitForTest("CTL-1")).toBeNull();
+  });
+
+  test("clearDispositionEmit never touches an UNRELATED ticket's entry", () => {
+    __seedDispositionEmitForTest("CTL-1", "needs-human");
+    __seedDispositionEmitForTest("CTL-2", "blocked");
+
+    clearDispositionEmit("CTL-1", "needs-human");
+
+    expect(__readDispositionEmitForTest("CTL-1")).toBeNull();
+    // CTL-2's unrelated "blocked" entry must survive untouched.
+    expect(__readDispositionEmitForTest("CTL-2")).toBe("blocked");
+  });
+
+  test("clear needs-human on terminal Done emits worker.transition(toDisposition=null)", () => {
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "plan", "done");
+    writeSignal("CTL-764", "monitor-deploy", "done");
+    // Mark the needs-human label as applied so clearStalledLabel removes it
+    mkdirSync(join(orchDir, "workers", "CTL-764"), { recursive: true });
+    writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-needs-human.applied"), "");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: {
+        ...noWrites(),
+        removeLabel: () => ({ removed: true }),
+        applyTerminalDone: () => ({ applied: false, skipped: "already-done" }),
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) =>
+        e.toDisposition === null && e.fromDisposition === "needs-human" && e.ticket === "CTL-764"
+    );
+    expect(cleared).toBeDefined();
+  });
+
+  test("steady-state tick emits zero worker.transition events", () => {
+    // Blocked ticket that was already blocked last tick (lastDispositionEmit tracks it)
+    writeSignal("CTL-764", "triage", "done");
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "implement", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 0 }));
+    const transitions = [];
+    const writeStatus = {
+      ...noWrites(),
+      applyPhaseStatus: () => ({ applied: false, skipped: "already-in-state" }),
+    };
+    // First tick: emits the disposition event
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const firstCount = transitions.length;
+    // Second tick: same state → no new transition event for that ticket
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    // If a disposition event was emitted in tick 1, it must NOT be re-emitted in tick 2
+    const tick2Events = transitions.slice(firstCount);
+    const tick2Disposition = tick2Events.filter(
+      (e) => e.ticket === "CTL-764" && e.toDisposition !== undefined
+    );
+    expect(tick2Disposition).toHaveLength(0);
+  });
+
+  // CTL-764 finding 7: a normally-completed ticket has no needs-human marker, so the
+  // Done stage transition must fire next to terminalDoneOnce — not only from the
+  // label-clear hook (which never runs when there is nothing to clear).
+  test("finding 7 — terminal Done emits a stage transition with no needs-human marker", () => {
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "teardown", "done"); // TERMINAL_PHASE done → terminalDoneOnce fires
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: {
+        ...noWrites(),
+        // A REAL Done write: applied + action !== "skipped" + a from_state to carry.
+        applyTerminalDone: () => ({ applied: true, action: "done", from_state: "In Review" }),
+        removeLabel: () => ({ removed: false }),
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const done = transitions.find((e) => e.toStage === "done" && e.ticket === "CTL-764");
+    expect(done).toBeDefined();
+    expect(done.source).toBe("terminal-done");
+    expect(done.fromStage).toBe("In Review");
+  });
+
+  // CTL-764 finding 10: after a daemon restart lastDispositionEmit is empty; a first-seen
+  // clear (fromDisposition proven) must still emit. The pre-fix guard normalized the empty
+  // `last` to null and dropped the needs-human→cleared transition on the no-stall path.
+  test("finding 10 — a first-seen clear (empty dedup) emits the needs-human→cleared transition", () => {
+    writeSignal("CTL-764", "triage", "done");
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "implement", "done"); // healthy: no stall, NOT terminal
+    mkdirSync(join(orchDir, "workers", "CTL-764"), { recursive: true });
+    writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-needs-human.applied"), "");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 0 }));
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: { ...noWrites(), removeLabel: () => ({ removed: true }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) =>
+        e.fromDisposition === "needs-human" && e.toDisposition === null && e.ticket === "CTL-764"
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.source).toBe("no-stall-clear");
+  });
+
+  // CTL-764 finding 5: a needs-input park must apply the durable Linear label via
+  // convergeDispositionLabel (the sole applier) and emit worker.transition — before this
+  // fix production never called it, so only the local signal changed.
+  test("finding 5 — needs-input park applies the durable label + emits worker.transition", () => {
+    writeSignal("CTL-764", "triage", "done");
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "implement", "needs-input");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const applied = [];
+    const transitions = [];
+    // Broker projection hit with no labels yet → convergeDispositionLabel applies once.
+    const gateway = {
+      getDescriptor: (id) => (id === "CTL-764" ? { labels: [], removed: false } : null),
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: {
+        ...noWrites(),
+        applyLabel: ({ ticket, label }) => {
+          applied.push({ ticket, label });
+          return { applied: true, reason: null };
+        },
+      },
+      gateway,
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    expect(applied).toContainEqual({ ticket: "CTL-764", label: "needs-input" });
+    const park = transitions.find(
+      (e) => e.toDisposition === "needs-input" && e.ticket === "CTL-764"
+    );
+    expect(park).toBeDefined();
+    expect(park.source).toBe("needs-input-park");
+  });
+
+  // CTL-764 finding B: a triaged-waiting ticket already wearing the sticky needs-human
+  // label (e.g. a dependency-cycle escalation persisted across restart) stays held, but
+  // convergeHeldLabel can't apply the lower disposition (exclusive worker-status group).
+  // The lower-disposition worker.transition must be SUPPRESSED so the two-axis stream is
+  // not falsely downgraded below needs-human.
+  test("finding B — a held ticket wearing needs-human suppresses the lower-disposition emit", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 0 })); // no slot → held
+    writeSignal("CTL-B", "triage", "done"); // triaged-waiting
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // Held by a non-terminal blocker AND already wearing needs-human on Linear.
+      fetchBatch: mkBatch({
+        "CTL-B": relBlockedBy("CTL-BLK", { labels: ["needs-human"] }),
+        "CTL-BLK": descOf("Triage"),
+      }),
+      hasTriageArtifact: () => true,
+      writeStatus: noWrites(),
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const lowered = transitions.find(
+      (e) => e.ticket === "CTL-B" && (e.toDisposition === "blocked" || e.toDisposition === "queued")
+    );
+    expect(lowered).toBeUndefined();
+  });
+
+  // CTL-764 finding F: after a daemon restart lastDispositionEmit is empty. A ticket still
+  // wearing "blocked" on Linear that is admitted this tick (desired=null) must still emit
+  // the genuine blocked→cleared transition — the fix passes the current held label as
+  // fromDisposition so recordTransition's first-seen-clear allowance fires.
+  test("finding F — an admitted held ticket emits blocked→cleared after a restart (fromDisposition proven)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-F", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: () => ({ removed: true }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-F" && e.fromDisposition === "blocked" && e.toDisposition === null
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.source).toBe("scheduler-admission");
+  });
+
+  // CTL-764 r4 finding 1: the restart clear must gate on a CONFIRMED removal.
+  // removeLabel reports transient failures as {removed:false} without throwing —
+  // Linear still wears the label, so emitting cleared would fork the stream from
+  // Linear. The emission is skipped; a later tick re-converges and emits then.
+  test("r4 finding 1 — a failed removeLabel suppresses the restart clear emission", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R41", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: () => ({ removed: false }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R41" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeUndefined();
+  });
+
+  // CTL-764 r4 finding 2: a pre-migration "waiting" label is only a removable alias of
+  // "queued" — the restart clear must emit the canonical queued→cleared, never a fifth
+  // disposition value the two-axis vocabulary doesn't define.
+  test("r4 finding 2 — legacy waiting normalizes to queued on the restart clear", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R42", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["waiting"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: () => ({ removed: true }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R42" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.fromDisposition).toBe("queued");
+  });
+
+  // CTL-764 r5: the PRODUCTION removeLabel (linear-write.mjs) is ASYNC. The r4 capture
+  // inspected the returned Promise synchronously — `.removed` read as undefined, so every
+  // removal false-confirmed and the failed-removal suppression was a no-op in prod. The
+  // seam is now thenable-aware: the clear emits (or is suppressed) when the write RESOLVES.
+  test("r5 — an async removeLabel resolving {removed:false} suppresses the clear (prod shape)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R51", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: async () => ({ removed: false }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    await new Promise((r) => setTimeout(r, 0)); // let the write settle
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R51" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeUndefined();
+  });
+
+  test("r5 — an async removeLabel resolving {removed:true} emits the clear post-settle (prod shape)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R52", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: async () => ({ removed: true }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    await new Promise((r) => setTimeout(r, 0)); // let the write settle
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R52" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.fromDisposition).toBe("blocked");
+  });
+
+  test("r5 — an async removeLabel REJECTION suppresses the clear (fail-open, warn only)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R53", "triage", "done");
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: () => Promise.reject(new Error("boom")) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R53" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeUndefined();
+  });
+});
+
+// ─── CTL-1524 (C4a) — computeDeadHosts calls computeSurvivingRoster ONCE ──────
+// The daemon's board-health binding used to read
+//   roster.filter((h) => !computeSurvivingRoster(roster).includes(h))
+// which re-ran the whole surviving computation once PER HOST. computeSurvivingRoster's
+// default readHeartbeats is readClusterHeartbeats — a whole-file read of the event log
+// (883MB on mini, ~305ms under bun), so at N=2 one deadHosts evaluation cost TWO full-log
+// reads (~610ms), which is exactly the measured 609.6ms "board-health" lap floor.
+describe("computeDeadHosts (CTL-1524 C4a)", () => {
+  test("invokes computeSurvivingRoster EXACTLY ONCE regardless of roster size", () => {
+    for (const size of [2, 3, 8, 25]) {
+      const roster = Array.from({ length: size }, (_, i) => `host-${i}`);
+      let calls = 0;
+      computeDeadHosts(roster, {
+        computeSurviving: (r) => {
+          calls++;
+          return r.slice(0, 1); // only the first host survives
+        },
+      });
+      expect(calls).toBe(1); // NOT `size` — the pre-CTL-1524 binding scaled with N
+    }
+  });
+
+  test("returns exactly the roster minus the surviving set", () => {
+    const roster = ["mini", "mini-2", "laptop"];
+    const dead = computeDeadHosts(roster, { computeSurviving: () => ["mini"] });
+    expect(dead.sort()).toEqual(["laptop", "mini-2"]);
+  });
+
+  test("byte-identical to the old per-host filter for every REACHABLE survivor subset", () => {
+    const roster = ["a", "b", "c", "d"];
+    // Every NON-EMPTY subset — the full reachable range of computeSurvivingRoster,
+    // which guarantees `alive.length > 0 ? alive : roster` and so can never return
+    // []. (The unreachable empty case is deliberately NOT byte-identical: see the
+    // degenerate-survivor-set test below, where the old filter would have called the
+    // entire fleet dead and the new one fails safe to no failover.)
+    const subsets = [["a"], ["b", "d"], ["a", "b", "c", "d"], ["a", "c"], ["d"]];
+    for (const surviving of subsets) {
+      const oldWay = roster.filter((h) => !surviving.includes(h));
+      const newWay = computeDeadHosts(roster, { computeSurviving: () => surviving });
+      expect(newWay).toEqual(oldWay);
+    }
+  });
+
+  test("single-host / empty / non-array roster → EMPTY dead set with NO read at all", () => {
+    let calls = 0;
+    const spy = (r) => {
+      calls++;
+      return r;
+    };
+    expect(computeDeadHosts(["solo"], { computeSurviving: spy })).toEqual([]);
+    expect(computeDeadHosts([], { computeSurviving: spy })).toEqual([]);
+    expect(computeDeadHosts(null, { computeSurviving: spy })).toEqual([]);
+    expect(computeDeadHosts(undefined, { computeSurviving: spy })).toEqual([]);
+    expect(calls).toBe(0); // N<=1 short-circuits before the heartbeat read
+  });
+
+  test("FAIL-SAFE preserved: a degrade-to-full-roster survivor set yields NO dead hosts", () => {
+    // computeSurvivingRoster returns the FULL roster when the heartbeat read throws or
+    // everyone looks dead. That must mean "no failover this tick", never "all dead".
+    const roster = ["mini", "mini-2"];
+    expect(computeDeadHosts(roster, { computeSurviving: (r) => r })).toEqual([]);
+  });
+
+  test("a degenerate survivor set (empty/non-array/throw) yields NO dead hosts, never 'all dead'", () => {
+    const roster = ["mini", "mini-2"];
+    // computeSurvivingRoster never returns empty (`alive.length > 0 ? alive : roster`),
+    // so these mean the computation misbehaved — not that the fleet died. Declaring
+    // every host dead here would hand the whole board to a foreign failover.
+    expect(computeDeadHosts(roster, { computeSurviving: () => [] })).toEqual([]);
+    expect(computeDeadHosts(roster, { computeSurviving: () => null })).toEqual([]);
+    expect(computeDeadHosts(roster, { computeSurviving: () => undefined })).toEqual([]);
+    expect(
+      computeDeadHosts(roster, {
+        computeSurviving: () => {
+          throw new Error("heartbeat read blew up");
+        },
+      })
+    ).toEqual([]);
+  });
+});
+
+// ── CTL-1580: non-phantom probe cool-down + replica threading ──
+describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
+  test("a stuck dir's classify is bounded to one per DELETION_PROBE_INTERVAL_MS", () => {
+    writeSignal("PROJ-52", "implement", "running");
+    let classifies = 0;
+    const deps = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifies++;
+        return "exists"; // real stuck ticket — never quarantined
+      },
+      isBgJobAlive: () => false,
+    };
+    schedulerTick(orchDir, deps);
+    schedulerTick(orchDir, deps);
+    schedulerTick(orchDir, deps);
+    // First tick probes (and records the marker); the next two are inside the
+    // cool-down window and must NOT re-probe — this was the every-tick live
+    // read of a quiet stuck ticket (the PROJ-52 burn).
+    expect(classifies).toBe(1);
+  });
+
+  test("the replica reader is threaded into classifyResolution's options (recheck not due)", () => {
+    writeSignal("CTL-77", "implement", "running");
+    // Pre-seed a FRESH live-recheck marker so the periodic replica bypass is
+    // not due — the tier should then be threaded through.
+    mkdirSync(join(orchDir, ".replica-vouch-rechecks"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".replica-vouch-rechecks", "CTL-77"),
+      JSON.stringify({ ticket: "CTL-77", probedAt: Date.now() })
+    );
+    const replica = { lookup: () => ({ terminal: false, state: "Implement" }) };
+    let seenReplica = null;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: (_t, opts) => {
+        seenReplica = opts?.replica ?? null;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+      replica,
+    });
+    expect(seenReplica).toBe(replica);
+  });
+
+  test("a DUE live recheck bypasses the replica tier for one classify (apply-drift guard)", () => {
+    writeSignal("CTL-78", "implement", "running");
+    const replica = { lookup: () => ({ terminal: false, state: "Implement" }) };
+    let seenReplica = "unset";
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: (_t, opts) => {
+        seenReplica = opts?.replica;
+        return "exists";
+      },
+      isBgJobAlive: () => false,
+      replica,
+    });
+    // No recheck marker yet → the very first classify pays the live path.
+    expect(seenReplica).toBeUndefined();
+  });
+});
+
+// ─── CTL-1610 (Phase 2): holisticBoardHealthAct latchedNoClock ───────────────
+describe("holisticBoardHealthAct — latchedNoClock (CTL-1610)", () => {
+  test("(CTL-1610) all-candidates-exhausted with a no-clock latch → latchedNoClock:true", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A", "B"], boardContext: {}, decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: (t) => t === "A",
+        invokeRecoveryPass: () => ({ dispatched: false }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r).toMatchObject({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: true });
+  });
+
+  test("(CTL-1610) well-formed exhausted cohort (all clocked) → latchedNoClock:false", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A", "B"], boardContext: {}, decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: () => false,
+        invokeRecoveryPass: () => ({ dispatched: false }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r).toMatchObject({ reason: "all-candidates-exhausted", latchedNoClock: false });
+  });
+
+  test("(CTL-1610) latchHasNoClock defaults to a safe no-op (bare tick → latchedNoClock:false)", () => {
+    const r = holisticBoardHealthAct(
+      { candidates: ["A"], decision: {} },
+      { shouldSkipItem: () => true, skipReason: () => "escalated", invokeRecoveryPass: () => ({}), recordIntent: () => {} },
+    );
+    expect(r.latchedNoClock).toBe(false);
+  });
+});
+
+// ─── CTL-1610 (Phase 3): latchedNoClock triggers repair at call site ──────────
+describe("holisticBoardHealthAct — Phase 3 repair signal (CTL-1610)", () => {
+  test("(CTL-1610) latchedNoClock:true is the repair trigger — caller invokes restampNoClockEscalations", () => {
+    // The repair fn is called by the production `act` callback in scheduler.mjs when
+    // latchedNoClock is true (see the recoveryRestampNoClockEscalations call site).
+    // Verify the signal comes through so the caller can act on it.
+    const r = holisticBoardHealthAct(
+      { candidates: ["CTL-X"], decision: {} },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "escalated",
+        latchHasNoClock: () => true,
+        invokeRecoveryPass: () => ({}),
+        recordIntent: () => {},
+      },
+    );
+    expect(r.latchedNoClock).toBe(true); // caller checks this and calls restampNoClockEscalations
+  });
+});
+
+// ─── CTL-1610 (Phase 3): startScheduler runs repair at startup ────────────────
+describe("startScheduler — Phase 3 startup repair (CTL-1610)", () => {
+  afterEach(() => __resetForTests());
+
+  test("(CTL-1610) startScheduler re-stamps no-clock escalations at startup, independent of board-health mode", () => {
+    // Seed a no-clock escalated intent on disk.
+    const intentDir = join(orchDir, ".recovery-intents");
+    mkdirSync(intentDir, { recursive: true });
+    writeFileSync(
+      join(intentDir, "CTL-1610-STARTUP.json"),
+      JSON.stringify({ escalated: true, decision: "escalate" }) // no ts/lastTs
+    );
+
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    startScheduler({
+      orchDir,
+      dispatch: fakeDispatch(),
+      readEligible: () => [],
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+
+    // After startup, the no-clock entry must have ts/lastTs re-stamped.
+    const after = JSON.parse(readFileSync(join(intentDir, "CTL-1610-STARTUP.json"), "utf8"));
+    expect(typeof after.ts).toBe("number");
+    expect(typeof after.lastTs).toBe("number");
+  });
+});
+
+// ── CTL-1605: terminal-stale worker-status short-circuit (STEP A) ──
+describe("CTL-1605: STEP A terminal-stale short-circuit", () => {
+  afterEach(() => __resetForTests());
+
+  // A writeStatus spy recording label add/remove (mirrors the admission-gate labelSpy).
+  function labelSpy() {
+    const applied = [];
+    const removed = [];
+    const ws = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true, reason: null };
+      },
+      removeLabel: (ticket, label) => {
+        removed.push({ ticket, label });
+        return { removed: true };
+      },
+    };
+    return { ws, applied, removed };
+  }
+
+  test("stale-local Done ticket in triagedWaiting → no blocked/queued applied, dir evicted", () => {
+    // The CTL-1603 stale record: triage:done, NO research signal. The candidate is
+    // blocked-by-an-open-dep and UNLABELED, so WITHOUT the fix STEP A would stamp
+    // "blocked" on a ticket that is already Done. It also wears a stale "queued"
+    // held label to prove the terminal clear fires.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-9", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const evicted = [];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // A.3 batch: live TERMINAL state (Done), blocked by an open dep, wearing a
+      // stale "queued" label that the terminal clear must drain.
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP", { state: "Done", labels: ["queued"] }), {
+        "CTL-DEP": "In Progress",
+      }),
+      // CTL-1605: the terminal branch now refreshes labels LIVE instead of
+      // trusting the batch-cached set (see the scheduler-review regression
+      // describe block below for the staleness case this closes) — stub the
+      // live read so this test never shells out to `linearis`.
+      readTicketLabels: () => ({ ok: true, labels: ["queued"] }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    // No held re-stamp — the terminal ticket never reaches convergeHeldLabel.
+    expect(applied.some((a) => a.label === "blocked" || a.label === "queued")).toBe(false);
+    // The stale held label is cleared and the worker dir is evicted.
+    expect(removed).toContainEqual({ ticket: "CTL-9", label: "queued" });
+    expect(evicted).toContain("CTL-9");
+    // Not promoted (dropped from the admission pool before STEP B).
+    expect(r.advanced).toEqual([]);
+    expect(dispatch.calls).toEqual([]);
+  });
+
+  test("non-terminal triagedWaiting ticket → unchanged (still converges 'queued'), no evict", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-10", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const evicted = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1, // saturated → ready-but-unadmitted → "queued"
+      fetchBatch: mkBatch(() => relUnblocked({ state: "Todo" })),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    // Behavior byte-for-byte as before this change: capacity hold converges "queued".
+    expect(applied).toContainEqual({ ticket: "CTL-10", label: "queued" });
+    // A live ticket is never evicted.
+    expect(evicted).toEqual([]);
+  });
+
+  // ─── CTL-1605 Codex thread (scheduler.mjs:5518) — onTerminalCleared now fires
+  // ONCE per ticket with the AGGREGATE outcome, so STEP A's worker.transition
+  // recording must not claim a multi-label ticket is disposition-clear unless
+  // EVERY present worker-status label actually confirmed removal. ───
+
+  test("multi-label terminal ticket, both labels confirm → ONE worker.transition to null (fromDisposition = highest-precedence pre-clear label)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-33", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, removed } = labelSpy();
+    const evicted = [];
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: batchWith(
+        () => relBlockedBy("CTL-DEP7", { state: "Done", labels: ["blocked", "needs-human"] }),
+        { "CTL-DEP7": "In Progress" }
+      ),
+      readTicketLabels: () => ({ ok: true, labels: ["blocked", "needs-human"] }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    expect(removed).toContainEqual({ ticket: "CTL-33", label: "blocked" });
+    expect(removed).toContainEqual({ ticket: "CTL-33", label: "needs-human" });
+    expect(evicted).toContain("CTL-33");
+    const evictTransitions = transitions.filter(
+      (e) => e.ticket === "CTL-33" && e.source === "terminal-stale-evict"
+    );
+    // Exactly ONE aggregate transition, not one per cleared label.
+    expect(evictTransitions).toHaveLength(1);
+    expect(evictTransitions[0]).toMatchObject({ toDisposition: null, fromDisposition: "needs-human" });
+  });
+
+  test("multi-label terminal ticket, needs-human in CTL-1078 backoff (unconfirmed) + blocked confirmed → NO to:null worker.transition (false disposition-clear guarded)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-34", "triage", "done");
+    // Drive needs-human's removal-failure counter to the CTL-1078 backoff threshold
+    // so clearStalledLabel short-circuits BEFORE calling writeStatus.removeLabel.
+    const THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+    for (let i = 0; i < THRESHOLD; i++) {
+      recordRemovalFailure(orchDir, "CTL-34", "needs-human", "auth-error", Date.now());
+    }
+    const dispatch = fakeDispatch();
+    const { ws, removed } = labelSpy();
+    const evicted = [];
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: batchWith(
+        () => relBlockedBy("CTL-DEP8", { state: "Done", labels: ["blocked", "needs-human"] }),
+        { "CTL-DEP8": "In Progress" }
+      ),
+      readTicketLabels: () => ({ ok: true, labels: ["blocked", "needs-human"] }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    // needs-human's removal was never even attempted (backoff-skip); blocked confirmed.
+    expect(removed).toContainEqual({ ticket: "CTL-34", label: "blocked" });
+    expect(removed.some((r) => r.ticket === "CTL-34" && r.label === "needs-human")).toBe(false);
+    // The sticky needs-human label survives on Linear → the worker dir must stay
+    // (not evicted out from under the only retry record for that label).
+    expect(evicted).toEqual([]);
+    // The false "disposition-clear" event this fix exists to stop must NEVER appear.
+    const falseClears = transitions.filter(
+      (e) => e.ticket === "CTL-34" && e.source === "terminal-stale-evict" && e.toDisposition === null
+    );
+    expect(falseClears).toEqual([]);
+  });
+});
+
+// ── CTL-1605 review findings — STEP A live-label refresh + relations-cache
+// invalidation (scheduler.mjs threads PRRT_kwDOP8GlQM6VyO1_ / :5885) ──
+describe("CTL-1605 review: STEP A terminal-stale live label refresh", () => {
+  afterEach(() => __resetForTests());
+
+  function labelSpy() {
+    const applied = [];
+    const removed = [];
+    const ws = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => {
+        applied.push(a);
+        return { applied: true, reason: null };
+      },
+      removeLabel: (ticket, label) => {
+        removed.push({ ticket, label });
+        return { removed: true };
+      },
+    };
+    return { ws, applied, removed };
+  }
+
+  test("terminal ticket with a STALE (empty) batch-cached label set → refreshes LIVE, clears the REAL held label", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-30", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const evicted = [];
+    let liveReadCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // Batch-cached labels are EMPTY (the ≤TTL-stale snapshot) — without the
+      // fix STEP A would see present=∅ and evict without ever clearing the
+      // ticket's REAL "blocked" label.
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP4", { state: "Done", labels: [] }), {
+        "CTL-DEP4": "In Progress",
+      }),
+      readTicketLabels: (t) => {
+        liveReadCalls++;
+        expect(t).toBe("CTL-30");
+        return { ok: true, labels: ["blocked"] };
+      },
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    expect(liveReadCalls).toBe(1);
+    // The clear used the LIVE label set, not the stale empty batch-cached one.
+    expect(removed).toContainEqual({ ticket: "CTL-30", label: "blocked" });
+    expect(applied.some((a) => a.ticket === "CTL-30")).toBe(false);
+    expect(evicted).toContain("CTL-30");
+  });
+
+  test("terminal ticket whose LIVE label read fails → DEFERS (no clear, no evict) instead of trusting stale/absent labels", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-31", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const evicted = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP5", { state: "Done", labels: ["blocked"] }), {
+        "CTL-DEP5": "In Progress",
+      }),
+      readTicketLabels: () => ({ ok: false, labels: null, code: 1, stderr: "boom" }),
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+    });
+    // Fail-safe: no clear was attempted off a read we couldn't trust, and the
+    // stale dir was never evicted out from under a possibly-still-attached label.
+    expect(removed.some((r) => r.ticket === "CTL-31")).toBe(false);
+    expect(evicted).toEqual([]);
+  });
+
+  test("a genuine held-label write during STEP A invalidates the relations cache entry (mirrors the blocked_by edge-write invalidation)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-32", "triage", "done");
+    const cache = createTicketStateCache({ now: () => 0, ttlMs: 60_000 });
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const fetchBatch = (ids, opts) =>
+      fetchTicketsBatch(ids, {
+        ...opts,
+        exec: (chunk) =>
+          chunk.map((id) => ({
+            identifier: id,
+            state: { name: "Todo" },
+            priority: 2,
+            labels: { nodes: [] },
+            relations: { nodes: [] },
+            inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "CTL-DEP6" } }] },
+          })),
+      });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch,
+      cache,
+    });
+    // The tick applied "blocked" (held by the unresolved CTL-DEP6 dependency) —
+    // a genuine write, not a steady-state no-op.
+    expect(applied).toContainEqual({ ticket: "CTL-32", label: "blocked" });
+    // The write invalidated the relations cache entry hydrated earlier THIS
+    // SAME tick, even though its TTL has not elapsed — a later hydrate must
+    // re-read fresh rather than serve the pre-write (unlabeled) descriptor.
+    expect(cache.getRelations("CTL-32")).toBeUndefined();
+  });
+});

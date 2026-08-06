@@ -26,6 +26,12 @@ import {
   upsertTicketDescriptor,
 } from "./broker-state.mjs";
 import { extractLabelNames } from "./backfill-ticket-labels.mjs";
+import { linearAsyncReminter, isAuthError } from "../execution-core/linear-remint.mjs";
+// Node-safe by design (its header commits to node-builtin-only imports) — unlike
+// replica-read.mjs, which must stay behind a lazy guarded import (see below).
+import { emitLinearReadEvent } from "../execution-core/linear-read-event.mjs";
+// Already a static broker dependency via index.mjs — safe under the node fallback.
+import { readLinearReplica } from "../execution-core/config.mjs";
 
 // Mode knob: env CATALYST_CACHE_RECONCILE overrides Layer-2 config; operators
 // opt in via =shadow (log would-write, touch nothing) then =enforce (write).
@@ -138,6 +144,118 @@ export function decideReconcile({ current, fetchedState, fetchedLabels }) {
   };
 }
 
+// ── Replica-first fetch (CTL-1571) ───────────────────────────────────────────
+// The reconcile's drift source is the LOCAL replica, not live Linear: the
+// replica already mirrors state+labels for every cached ticket (webhook +
+// cloud-sync fed), so walking it costs zero API budget. Live linearis remains
+// ONLY the loud fallback for a stale replica or a ticket the replica does not
+// carry.
+//
+// replica-read.mjs top-level-imports bun:sqlite, and the broker's launcher
+// (catalyst-broker resolve_runtime) falls back to NODE when bun is absent — a
+// static import here would crash broker start on such a host (the constraint
+// execution-core/monitor.mjs:42 documents). Hence the memoized, computed-
+// specifier, guarded dynamic import: a runtime that cannot load it degrades to
+// pure live fetch (source="linearis" bypass), never a crash.
+const REPLICA_READ_MODULE = ["..", "execution-core", "replica-read.mjs"].join("/");
+let replicaReaderPromise;
+function getReplicaReader() {
+  // Kill-switch first (Codex review): CATALYST_LINEAR_REPLICA / Layer-2
+  // linearReplica.mode is the replica tier's operator off-switch everywhere
+  // else (daemon tier included) — an operator who disabled a suspect replica
+  // must not have the enforce reconciler keep writing broker cache fields from
+  // it. Checked per call (not memoized) so a restartless env flip is honored;
+  // config.mjs is already a static broker dependency (index.mjs), node-safe.
+  if (readLinearReplica().mode !== "on") return Promise.resolve(null);
+  if (replicaReaderPromise === undefined) {
+    replicaReaderPromise = import(REPLICA_READ_MODULE)
+      .then((m) => m.createReplicaReader())
+      .catch(() => null);
+  }
+  return replicaReaderPromise;
+}
+
+// recordReconcileRead — CTL-1403 telemetry for every reconcile read, replica
+// hits included, so the burn (and the savings) are visible in Loki. op is
+// "cache_reconcile" (distinct from the daemon's "read_ticket") and the service
+// is the broker's own. Best-effort — never breaks the fetch.
+function recordReconcileRead(source, result, ticket) {
+  try {
+    emitLinearReadEvent({
+      source,
+      result,
+      op: "cache_reconcile",
+      entity: ticket,
+      serviceName: "catalyst.broker",
+    });
+  } catch {
+    /* telemetry must never break a reconcile read */
+  }
+}
+
+/**
+ * createReplicaFetcher — compose the replica-first fetch with a live fallback.
+ * Same contract as fetchLive: resolves { state, labels, error }, never rejects.
+ * Fallback taxonomy (mirrors linear-query.mjs): reader unavailable on this
+ * host/runtime → source "linearis" (bypass); reader present but stale replica
+ * or ticket MISS → source "linearis_miss" (loud — a healthy fleet should see
+ * ~none of these). Injectable seams for tests.
+ */
+export function createReplicaFetcher({ getReader = getReplicaReader, fallback = fetchLive, logger } = {}) {
+  const log = logSink(logger);
+  // A fallback read "succeeded" only if reconcile can USE it — both-null with
+  // no error is the same unusable shape reconcile counts as failed (Codex
+  // review: an exit-0 `{}` body must not inflate the ok counters).
+  const liveResult = (live) =>
+    live.error || (live.state === null && live.labels === null) ? "failed" : "ok";
+  return async function fetchWithReplicaFirst(ticket) {
+    const reader = await getReader();
+    if (!reader) {
+      const live = await fallback(ticket);
+      recordReconcileRead("linearis", liveResult(live), ticket);
+      return live;
+    }
+    if (!reader.isFresh()) {
+      log("warn", { ticket }, "cache-reconcile: replica STALE — falling back to live linearis");
+      const live = await fallback(ticket);
+      recordReconcileRead("linearis_miss", liveResult(live), ticket);
+      return live;
+    }
+    // ONE transactional snapshot for BOTH projections (Codex review round 2):
+    // separate lookup()+labels() calls could straddle a completing re-seed and
+    // hand back a MIXED pair; stateAndLabels() pins one snapshot and returns
+    // undefined (never a partial pair) on any miss — including the half-seeded
+    // shape where lookup would serve but the gated labels() refuses.
+    const pair = typeof reader.stateAndLabels === "function" ? reader.stateAndLabels(ticket) : undefined;
+    if (pair === undefined) {
+      log("warn", { ticket }, "cache-reconcile: replica MISS — falling back to live linearis");
+      const live = await fallback(ticket);
+      recordReconcileRead("linearis_miss", liveResult(live), ticket);
+      return live;
+    }
+    recordReconcileRead("replica", "ok", ticket);
+    return {
+      state: pair.state.state,
+      labels: pair.labels.map((l) => l.name),
+      error: null,
+    };
+  };
+}
+
+// NOTE: no module-level default fetcher — reconcileCacheState constructs one
+// per pass with ITS logger (Codex review: a module-level instance permanently
+// captured a no-op sink, silencing the required loud stale/MISS fallback).
+
+// linearisBodyError — the error string when a linearis JSON body is error-shaped
+// (`{"error": "..."}`) despite a zero exit, else null. Exported for tests
+// (CTL-1577 round 2: an exit-zero auth body must not read as a silent null row).
+export function linearisBodyError(json) {
+  if (json && typeof json === "object" && !Array.isArray(json) && typeof json.error === "string" && json.error) {
+    return json.error;
+  }
+  return null;
+}
+
 // fetchLive — ASYNC `linearis issues read <ticket>` (CTL-1282). Uses non-blocking
 // `spawn` (NOT spawnSync) so a pass never freezes the broker's event loop:
 // webhook routing keeps flowing while we await each read. linearis emits JSON by
@@ -176,6 +294,14 @@ function fetchLive(ticket) {
         finish({ state: null, labels: null, error: `unparseable JSON: ${String(e)}` });
         return;
       }
+      // linearis can exit ZERO with an error-shaped JSON body (observed contract:
+      // execution-core/linear-query.test.mjs) — surface it as the error, so an
+      // auth failure reaches the re-minter instead of reading as a null row.
+      const bodyError = linearisBodyError(json);
+      if (bodyError) {
+        finish({ state: null, labels: null, error: bodyError });
+        return;
+      }
       finish({ state: extractState(json), labels: extractLabelNames(json), error: null });
     });
   });
@@ -210,9 +336,18 @@ export async function reconcileCacheState({
   // exceeds its budget, and Backlog always gets a reserved floor of the cap.
   cursor = { active: null, backlog: null },
   getAll = getAllTicketDescriptors,
-  fetch = fetchLive,
-  upsert = upsertTicketDescriptor,
   logger,
+  // CTL-1571: replica-first — live linearis only as the loud fallback for a
+  // stale replica / uncarried ticket. A healthy pass costs zero API reads.
+  // Constructed HERE (not module-level) so the pass's own logger reaches the
+  // fetcher's loud stale/MISS warnings.
+  fetch = createReplicaFetcher({ logger }),
+  upsert = upsertTicketDescriptor,
+  // CTL-1577: the startup mint (catalyst-broker cmd_start) runs ONCE; a broker
+  // crossing the OAuth expiry boundary re-mints here mid-run (cooldown-guarded
+  // ASYNC singleton — spawn, not spawnSync, so a slow OAuth endpoint never
+  // freezes webhook routing on the broker event loop).
+  reminter = linearAsyncReminter,
 } = {}) {
   const log = logSink(logger);
   const inCursor = cursor ?? { active: null, backlog: null };
@@ -272,6 +407,12 @@ export async function reconcileCacheState({
     }
     if (live.error || (live.state === null && live.labels === null)) {
       failed += 1;
+      // CTL-1577: an auth-shaped failure means the token expired — refresh
+      // process.env so the NEXT linearis spawn (this pass or the label
+      // backfill) inherits a fresh app-actor token. Non-auth failures skip:
+      // a re-mint cannot help a 429/timeout/parse error. Awaited so the pass
+      // retries with the fresh token on its very next read.
+      if (isAuthError(live.error)) await reminter.attempt();
       // CTL-1288 trade-off: the cursor advances to the last TAKEN ticket (not the
       // last SUCCEEDED), so a fetch-failed ticket's retry waits until its tier
       // wraps rather than next interval. This is DELIBERATE forward progress: a

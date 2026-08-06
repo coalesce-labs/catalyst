@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { join } from "path";
 import { sessionIdFromPid, readWorkerTasks } from "./task-reader";
+import { readTailUtf8 } from "./event-log-reader";
 
 export interface TaskSummary {
   total: number;
@@ -54,8 +55,12 @@ function tailLines(filePath: string, maxBytes: number): string[] {
     const size = statSync(filePath).size;
     if (size === 0) return [];
 
-    const content = readFileSync(filePath, "utf8");
-    const trimmed = size <= maxBytes ? content : content.slice(-maxBytes);
+    // CTL-1529: was `readFileSync(filePath, "utf8")` followed by
+    // `content.slice(-maxBytes)` — a whole-file read of an append-only session
+    // stream (tens of MB on a long worker run) to keep the last 32 KiB.
+    // readTailUtf8 seeks instead, and drops the leading fragment line that the
+    // byte-slice used to hand to JSON.parse.
+    const trimmed = readTailUtf8(filePath, maxBytes);
 
     return trimmed.split("\n").filter((l: string) => l.trim().length > 0);
   } catch {

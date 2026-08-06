@@ -108,6 +108,10 @@ export function buildResumeEvent({ ticket, response, now = new Date() }) {
     },
     attributes: {
       "event.name": "linear.comment.created",
+      // CTL-1488: DIRECT canonical writer (bypasses buildCanonicalEvent); stamp the stream class or
+      // coordination-publish's fail-closed filter drops this web-resume trigger. `linear.*` is a
+      // coordination prefix, so the value is invariably "coordination" (like the sibling fixed-name writers).
+      "event.stream_class": "coordination",
       "event.entity": "linear",
       "event.action": "comment.created",
       "event.label": ticket,

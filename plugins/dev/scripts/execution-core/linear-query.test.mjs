@@ -1,10 +1,15 @@
 // Unit tests for the execution-core Linear eligible query (CTL-535 Phase 2).
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-query.test.mjs
 
-import { describe, test, expect, mock, beforeEach } from "bun:test";
+import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { __resetDispatchAlertThrottle } from "./dispatch-alert.mjs";
 import {
   buildLinearisArgs,
   runEligibleQuery,
+  runTriageStateQuery,
   __resetEligibleEmptyConfirm,
   fetchTicketState,
   fetchTicketLabels,
@@ -28,6 +33,7 @@ import {
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { isLinearTerminal } from "./terminal-state.mjs"; // CTL-1340: replica-tier terminal assertions
+import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420: reset the shared breaker singleton between empty-path tests
 
 // A fake exec returning a canned linearis result. `exec(cmd, args)` ->
 // { code, stdout, stderr } — the injectable seam runEligibleQuery uses so a
@@ -230,7 +236,14 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
   // CTL-1397 (3/n): the empty-board re-confirm cadence is module-scoped state —
   // clear it before each test so an empty result is always "due" for re-confirm
   // (the deterministic baseline), regardless of test order.
-  beforeEach(() => __resetEligibleEmptyConfirm());
+  // CTL-1420: the CTL-679 breaker is a process-wide singleton that a prior test
+  // in this file can leave OPEN; the default breakerIsOpen reads it, so reset it
+  // to CLOSED here for a deterministic baseline. Tests that exercise the
+  // breaker-open freeze-avoidance path inject breakerIsOpen:()=>true explicitly.
+  beforeEach(() => {
+    __resetEligibleEmptyConfirm();
+    linearBreaker.recordSuccess(); // → closed (no-op if already closed)
+  });
 
   // A replica stub whose eligible() returns a canned linearis-list-shaped result.
   function replicaReturning(nodes) {
@@ -320,11 +333,17 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
       execCalls.push(clock);
       return { code: 0, stdout: ticketsJson([{ identifier: "CTL-9", state: { name: "Todo" }, priority: 2 }]), stderr: "" };
     };
-    const t1 = runEligibleQuery(query, { exec: mkExec(), replica, now });
+    // CTL-1420: pin the breaker CLOSED — this test exercises the closed-breaker
+    // reconfirm cadence. (The non-empty confirm's default delegate-batch spawn can
+    // 429 and trip the real breaker singleton; without pinning, the 2nd call would
+    // hit the breaker-open freeze-avoidance branch and trust the empty.) A stub
+    // delegateExec also keeps the unit test off the network.
+    const opts = { replica, now, breakerIsOpen: () => false, reconfirmMs: 300_000, delegateExec: () => ({ code: 0, stdout: "{}", stderr: "" }) };
+    const t1 = runEligibleQuery(query, { exec: mkExec(), ...opts });
     expect(t1.map((t) => t.identifier)).toEqual(["CTL-9"]); // real board served (hole)
     // 1s later: the non-empty confirm did NOT cache → still falls through (no zeroing).
     clock += 1_000;
-    const t2 = runEligibleQuery(query, { exec: mkExec(), replica, now });
+    const t2 = runEligibleQuery(query, { exec: mkExec(), ...opts });
     expect(execCalls).toHaveLength(2); // linearis called BOTH times — never suppressed
     expect(t2.map((t) => t.identifier)).toEqual(["CTL-9"]);
   });
@@ -363,13 +382,83 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
     expect(exec2.calls).toHaveLength(1);
   });
 
-  test("replica-EMPTY, breaker OPEN (exec short-circuits circuit-open) with no recent confirm → THROWS → preserve prior (never trusts the empty)", () => {
+  // CTL-1420 (freeze-avoidance): the pre-1420 behavior was to THROW here →
+  // reconcileProject preserved the (empty) prior set → a fleet-wide admission
+  // FREEZE for the breaker's whole open window. Now a DEFINED replica-empty
+  // (which already cleared the reader's writer-liveness + seed-complete +
+  // snapshot gates) is TRUSTED during breaker-open instead of freezing. The
+  // linearis reconfirm is never attempted (it could only short-circuit anyway).
+  test("CTL-1420: replica-EMPTY, breaker OPEN, no recent confirm → TRUSTS the fresh replica-empty (no linearis, no throw), onSource('replica-empty-breaker-open', 0)", () => {
     const replica = replicaReturning([]);
-    // A breaker-open exec short-circuits locally: code 1, 'circuit-open' (no quota
-    // spent). runEligibleQuery throws → reconcileProject preserves the prior set,
-    // rather than trusting an unconfirmed replica-empty as authoritative.
-    const exec = fakeExec({ code: 1, stderr: "circuit-open" });
-    expect(() => runEligibleQuery(query, { exec, replica })).toThrow(/exit 1/);
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec: execMustNotRun(), // proves the doomed linearis reconfirm is skipped
+      replica,
+      breakerIsOpen: () => true,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica-empty-breaker-open", 0]]);
+    expect(replica.calls).toEqual([query]); // the replica WAS consulted
+  });
+
+  // CTL-1420: the fix is breaker-GATED — a CLOSED breaker preserves the exact
+  // pre-1420 behavior (fall through to the linearis confirm so a feed-hole is
+  // never trusted as empty; the ≤1-confirm/team/window cadence is intact).
+  test("CTL-1420: replica-EMPTY, breaker CLOSED, no recent confirm → still falls through to the linearis confirm (unchanged)", () => {
+    const replica = replicaReturning([]);
+    const exec = fakeExec({ stdout: ticketsJson([]) });
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec,
+      replica,
+      breakerIsOpen: () => false,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(exec.calls).toHaveLength(1); // linearis WAS called (breaker closed)
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["linearis", 0]]); // served + cached by the linearis path
+  });
+
+  // CTL-1420: a breaker-open reconcile must NEVER fabricate work — a genuinely
+  // NON-EMPTY replica is still served verbatim (the freeze-avoidance branch only
+  // fires on an empty board), so real Todo work dispatches during a quota storm.
+  test("CTL-1420: replica NON-EMPTY, breaker OPEN → serves the real board (freeze-avoidance never masks real work)", () => {
+    const replica = replicaReturning([{ identifier: "CTL-1416", state: "Todo", priority: 2 }]);
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec: execMustNotRun(),
+      replica,
+      breakerIsOpen: () => true,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-1416"]);
+    expect(sources).toEqual([["replica", 1]]);
+  });
+
+  // CTL-1420 review finding (guard): the freeze-avoidance branch trusts the empty
+  // WITHOUT caching the empty-confirm marker. If it did cache it, the linearis
+  // reconfirm would be suppressed for EMPTY_RECONFIRM_MS after the breaker closes
+  // — trusting a CTL-139 feed-hole as a real empty board. This asserts the marker
+  // stays unset: once the breaker closes, an empty STILL reconfirms via linearis.
+  test("CTL-1420: breaker-open trust does NOT cache the empty-confirm marker → after the breaker closes the next empty still reconfirms via linearis", () => {
+    const replica = replicaReturning([]);
+    // Breaker OPEN: trust the empty, no exec, and (crucially) no marker cached.
+    const t1 = runEligibleQuery(query, { exec: execMustNotRun(), replica, breakerIsOpen: () => true });
+    expect(t1).toEqual([]);
+    // Breaker now CLOSED: if the open branch had cached the marker, this empty
+    // would be trusted with NO linearis call. It must reconfirm instead.
+    const exec = fakeExec({ stdout: ticketsJson([]) });
+    const sources = [];
+    const t2 = runEligibleQuery(query, {
+      exec,
+      replica,
+      breakerIsOpen: () => false,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(exec.calls).toHaveLength(1); // reconfirmed — the open branch left the marker unset
+    expect(t2).toEqual([]);
+    expect(sources).toEqual([["linearis", 0]]);
   });
 
   test("cadence: after a successful empty confirm, empties trust the replica until the window elapses, then re-confirm once per team", () => {
@@ -381,7 +470,7 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
       execCalls.push(clock);
       return { code: 0, stdout: ticketsJson([]), stderr: "" };
     };
-    const call = () => runEligibleQuery(query, { exec: mkExec(), replica, now });
+    const call = () => runEligibleQuery(query, { exec: mkExec(), replica, now, reconfirmMs: 300_000 });
     call(); // t0: cold → linearis confirms empty → caches
     clock += 60_000; call(); // +1m: within window → trust replica (no exec)
     clock += 60_000; call(); // +2m: within window → trust replica (no exec)
@@ -675,6 +764,252 @@ describe("fetchTicketState — cache (CTL-634)", () => {
     fetchTicketState("CTL-1", { exec });
     fetchTicketState("CTL-1", { exec });
     expect(calls).toBe(2);
+  });
+});
+
+// CTL-1403 — fetchTicketState emits a reads-by-source `catalyst.linear.read`
+// event (service.name=catalyst.execution-core) on the replica-HIT tier and the
+// live-exec tier, but NOT on the in-mem cache tier (Option A: count only reads
+// that consulted the SQLite replica or shelled to Linear). source maps: replica
+// HIT → `replica`; reaching live-exec with a replica passed (consulted+missed) →
+// `linearis_miss`; with no replica (never consulted = bypass) → `linearis`.
+describe("fetchTicketState — reads-by-source emit (CTL-1403)", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "lq-read-emit-"));
+    process.env.CATALYST_DIR = dir;
+  });
+  afterEach(() => {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+  function readEvents() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    try {
+      return readFileSync(join(dir, "events", `${ym}.jsonl`), "utf8")
+        .trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+        .filter((e) => e.attributes?.["event.name"] === "catalyst.linear.read");
+    } catch { return []; }
+  }
+  const okNode = (state) => ({ code: 0, stdout: JSON.stringify({ state: { name: state }, updatedAt: "2026-07-08T00:00:00.000Z" }), stderr: "" });
+
+  test("replica HIT → source=replica, result=ok, service.name=catalyst.execution-core", () => {
+    const replica = { lookup: (id) => (id === "CTL-1" ? { terminal: false, state: "Todo" } : undefined) };
+    expect(fetchTicketState("CTL-1", { exec: () => { throw new Error("must not exec on replica hit"); }, replica })).toBe("Todo");
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("replica");
+    expect(events[0].attributes["linear.read.result"]).toBe("ok");
+    expect(events[0].attributes["event.label"]).toBe("CTL-1");
+    expect(events[0].attributes["linear.read.op"]).toBe("read_ticket");
+    expect(events[0].resource["service.name"]).toBe("catalyst.execution-core");
+    expect(events[0].severityText).toBe("INFO");
+  });
+
+  test("replica passed but MISS → live exec ok → source=linearis_miss, with age_ms", () => {
+    const replica = { lookup: () => undefined }; // consulted, missed
+    expect(fetchTicketState("CTL-2", { exec: () => okNode("Done"), replica })).toBe("Done");
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis_miss");
+    expect(events[0].attributes["linear.read.result"]).toBe("ok");
+    expect(typeof events[0].attributes["linear.read.age_ms"]).toBe("number");
+  });
+
+  test("NO replica passed → live exec → source=linearis (the bypass case)", () => {
+    expect(fetchTicketState("CTL-3", { exec: () => okNode("Ready") })).toBe("Ready");
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis");
+    expect(events[0].attributes["linear.read.result"]).toBe("ok");
+  });
+
+  test("live exec fails (code!=0) → result=failed, WARN", () => {
+    const replica = { lookup: () => undefined };
+    expect(fetchTicketState("CTL-4", { exec: () => ({ code: 1, stdout: "", stderr: "boom" }), replica })).toBeNull();
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis_miss");
+    expect(events[0].attributes["linear.read.result"]).toBe("failed");
+    expect(events[0].severityText).toBe("WARN");
+  });
+
+  test("live exec code:0 but NO state (deleted/error body) → result=failed (Codex P2)", () => {
+    // A missing/deleted ticket returns code:0 + an error body — parses fine, no state.
+    const exec = () => ({ code: 0, stdout: JSON.stringify({ error: "not found" }), stderr: "" });
+    expect(fetchTicketState("CTL-6", { exec })).toBeNull();
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.result"]).toBe("failed"); // NOT ok — no state served
+    expect(events[0].severityText).toBe("WARN");
+    expect("linear.read.age_ms" in events[0].attributes).toBe(false); // no data → no age
+  });
+
+  test("in-mem cache HIT is NOT counted (tier-1 exclusion)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    // First read: no replica → live exec → emits ONE (source=linearis).
+    fetchTicketState("CTL-5", { exec: () => okNode("Todo"), cache });
+    // Second read: served from cache → NO new emit.
+    fetchTicketState("CTL-5", { exec: () => { throw new Error("must not exec on cache hit"); }, cache });
+    const events = readEvents();
+    expect(events.length).toBe(1); // only the first (live) read counted
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis");
+  });
+});
+
+// CTL-1436 (A4): probeBackoff — the terminal-probe / GC census backs off from
+// re-reading a replica-MISS ticket live after its live read FAILS, so a ticket that
+// keeps 429-ing isn't re-hammered every tick (CTL-679 breaker-flap mitigation).
+// Scoped to probeBackoff callers → the CTL-634 blocker-hydration path
+// (never-cache-null, re-read promptly) is untouched — proven by the "does NOT cache
+// a failed read" test above, which uses the default probeBackoff:false.
+describe("fetchTicketState — probeBackoff negative cache (CTL-1436 A4)", () => {
+  let tmpDir;
+  let prevDir;
+  beforeEach(() => {
+    __resetDispatchAlertThrottle();
+    prevDir = process.env.CATALYST_DIR;
+    tmpDir = mkdtempSync(join(tmpdir(), "a4-backoff-"));
+    process.env.CATALYST_DIR = tmpDir; // redirect the event log the fallback alert appends to
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+  const fail429 = () => ({ code: 1, stdout: "", stderr: "429" });
+  function eventLogBody() {
+    const dir = join(tmpDir, "events");
+    let files = [];
+    try { files = readdirSync(dir); } catch { return ""; }
+    return files.map((f) => readFileSync(join(dir, f), "utf8")).join("");
+  }
+
+  test("a failed live read backs the ticket off → the second call SKIPS exec (returns null)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => { calls += 1; return fail429(); };
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(calls).toBe(1); // second call short-circuited on the negative cache
+  });
+
+  test("WITHOUT probeBackoff (blocker-hydration default) a failed read re-execs — CTL-634 invariant preserved", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => { calls += 1; return fail429(); };
+    fetchTicketState("CTL-1", { exec, cache }); // probeBackoff defaults false
+    fetchTicketState("CTL-1", { exec, cache });
+    expect(calls).toBe(2);
+  });
+
+  test("the backoff expires past negTtlMs → re-execs", () => {
+    let t = 0;
+    const cache = createTicketStateCache({ now: () => t, negTtlMs: 300_000 });
+    let calls = 0;
+    const exec = () => { calls += 1; return fail429(); };
+    fetchTicketState("CTL-1", { exec, cache, probeBackoff: true });
+    t = 300_001;
+    fetchTicketState("CTL-1", { exec, cache, probeBackoff: true });
+    expect(calls).toBe(2);
+  });
+
+  test("a SUCCESS sets no backoff and is positively cached", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => { calls += 1; return { code: 0, stdout: JSON.stringify({ state: { name: "Done" } }), stderr: "" }; };
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBe("Done");
+    expect(cache.isNegativelyCached("CTL-1")).toBe(false);
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBe("Done");
+    expect(calls).toBe(1); // positive cache hit
+  });
+
+  test("probeBackoff with NO cache is a safe no-op (every call execs, never throws)", () => {
+    let calls = 0;
+    const exec = () => { calls += 1; return fail429(); };
+    expect(fetchTicketState("CTL-1", { exec, probeBackoff: true })).toBeNull();
+    expect(fetchTicketState("CTL-1", { exec, probeBackoff: true })).toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  test("a successful-but-STATELESS read (deleted/missing ticket: code:0, no state) also backs off (Codex #2579)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    // Linear returns a missing ticket as code:0 with an error body (parses fine, no state).
+    const exec = () => { calls += 1; return { code: 0, stdout: JSON.stringify({ error: "Entity not found" }), stderr: "" }; };
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(cache.isNegativelyCached("CTL-1")).toBe(true); // no-state → backed off
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(calls).toBe(1); // second call short-circuited on the negative cache
+  });
+
+  test("a failed probeBackoff read emits the loud ticket_state_live_fallback alert", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    fetchTicketState("CTL-77", { exec: fail429, cache, probeBackoff: true });
+    const body = eventLogBody();
+    expect(body).toContain("catalyst.alert.ticket_state_live_fallback");
+    expect(body).toContain("CTL-77");
+  });
+});
+
+// CTL-1504 — fetchTicketState reads STDERR: the linearis CLI now exits nonzero
+// for a genuinely-missing / malformed ticket id, with the not-found body on
+// stderr. A definitive-missing read is BENIGN (negative-cached, no WARN alert);
+// a transient nonzero (429/auth/network/timeout) stays loud.
+describe("fetchTicketState — stderr definitive-missing (CTL-1504)", () => {
+  let tmpDir;
+  let prevDir;
+  beforeEach(() => {
+    __resetDispatchAlertThrottle();
+    prevDir = process.env.CATALYST_DIR;
+    tmpDir = mkdtempSync(join(tmpdir(), "ctl1504-fts-"));
+    process.env.CATALYST_DIR = tmpDir;
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+  function eventLogBody() {
+    const dir = join(tmpDir, "events");
+    let files = [];
+    try { files = readdirSync(dir); } catch { return ""; }
+    return files.map((f) => readFileSync(join(dir, f), "utf8")).join("");
+  }
+
+  test("nonzero + not-found stderr → null, negative-cached, NO WARN alert (CTL-1504)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = fakeExec({ code: 1, stdout: "", stderr: '{"error":"Issue with identifier \\"CTL-9\\" not found"}' });
+    expect(fetchTicketState("CTL-9", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(cache.isNegativelyCached("CTL-9")).toBe(true); // still backed off
+    const body = eventLogBody();
+    // benign missing → NO live-fallback alert at all for this identifier
+    expect(body).not.toContain("catalyst.alert.ticket_state_live_fallback");
+  });
+
+  test("nonzero + invalid-identifier stderr → null, benign (no WARN)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = fakeExec({ code: 1, stderr: '{"error":"Invalid issue identifier format: \\".catalyst\\". Expected format: TEAM-123"}' });
+    expect(fetchTicketState(".catalyst", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(eventLogBody()).not.toContain("catalyst.alert.ticket_state_live_fallback");
+  });
+
+  test("nonzero + transient (auth stderr) → null, WARN reason:'error' (stays loud)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = fakeExec({ code: 1, stderr: "auth failed" });
+    expect(fetchTicketState("CTL-9", { exec, cache, probeBackoff: true })).toBeNull();
+    const body = eventLogBody();
+    expect(body).toContain("catalyst.alert.ticket_state_live_fallback");
+    expect(body).toContain('"reason":"error"');
+  });
+
+  test("timeout → WARN reason:'timeout' unchanged", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = () => ({ code: 124, stdout: "", stderr: "", timedOut: true });
+    expect(fetchTicketState("CTL-9", { exec, cache, probeBackoff: true })).toBeNull();
+    const body = eventLogBody();
+    expect(body).toContain("catalyst.alert.ticket_state_live_fallback");
+    expect(body).toContain('"reason":"timeout"');
   });
 });
 
@@ -1100,6 +1435,14 @@ describe("classifyTicketResolution (CTL-671)", () => {
     expect(classifyTicketResolution("CTL-100", { exec })).toBe("unknown");
   });
 
+  test("nonzero exit: identifier-missing → not-found; bare HTTP 404 → unknown (Codex P1)", () => {
+    // The Linear identifier-missing shape quarantines; a transient transport 404 must NOT.
+    const missing = fakeExec({ code: 1, stdout: "", stderr: '{"error":"Issue with identifier \\"CTL-9\\" not found"}' });
+    expect(classifyTicketResolution("CTL-9", { exec: missing })).toBe("not-found");
+    const http404 = fakeExec({ code: 1, stdout: "", stderr: "HTTP 404 Not Found" });
+    expect(classifyTicketResolution("CTL-100", { exec: http404 })).toBe("unknown");
+  });
+
   test("REAL linearis resolvable shape (exit 0 + identifier/id) → exists", () => {
     const exec = fakeExec({
       code: 0,
@@ -1112,16 +1455,31 @@ describe("classifyTicketResolution (CTL-671)", () => {
     expect(classifyTicketResolution("CTL-671", { exec })).toBe("exists");
   });
 
-  test("explicit not-found stderr with nonzero exit → unknown (NOT not-found — fail safe)", () => {
-    // A nonzero exit is ambiguous (auth/network/not-found all exit nonzero);
-    // never quarantine on it. This is the load-bearing safety assertion.
-    const exec = fakeExec({ code: 1, stderr: "linearis: issue CTL-9 not found" });
-    expect(classifyTicketResolution("CTL-9", { exec })).toBe("unknown");
+  // CHANGED (CTL-1504): the CLI now exits 1 for a genuinely-missing ticket with
+  // the not-found body on stderr. That IS a definitive not-found →
+  // quarantine-eligible (was 'unknown' under the stale 2026-05-27 contract).
+  test("nonzero exit + not-found stderr → not-found (CTL-1504 — was 'unknown')", () => {
+    const exec = fakeExec({ code: 1, stderr: '{"error":"Issue with identifier \\"CTL-9\\" not found"}' });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("not-found");
   });
 
+  test("nonzero exit + plain-string not-found stderr → not-found (CTL-1504)", () => {
+    const exec = fakeExec({ code: 1, stderr: "linearis: issue CTL-9 not found" });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("not-found");
+  });
+
+  // UNCHANGED safety: a transient nonzero (no not-found body) is still ambiguous —
+  // a Linear outage never quarantines a real ticket.
   test("auth/network failure → unknown (never quarantines a real ticket)", () => {
     const exec = fakeExec({ code: 1, stderr: "auth failed" });
     expect(classifyTicketResolution("CTL-100", { exec })).toBe("unknown");
+  });
+
+  // UNCHANGED: invalid-identifier-format is NOT /not\s*found/ → stays unknown (and
+  // is unreachable past the census guard anyway).
+  test("nonzero + invalid-identifier-format stderr → unknown (strict)", () => {
+    const exec = fakeExec({ code: 1, stderr: '{"error":"Invalid issue identifier format: \\"x\\"."}' });
+    expect(classifyTicketResolution("x", { exec })).toBe("unknown");
   });
 
   test("unparseable stdout → unknown", () => {
@@ -1504,6 +1862,134 @@ describe("fetchTicketAssignee (CTL-781)", () => {
     const r = fetchTicketAssignee("CTL-8", { exec });
     expect(r).toEqual({ known: true, assignee: BOT });
     expect(exec.calls.length).toBe(1);
+  });
+});
+
+// ─── Stage 0 / A1: fetchTicketAssignee replica-ownership fast-path ───────────
+describe("fetchTicketAssignee — replica ownership (A1, Stage 0)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+  const HUMAN = "11111111-1111-1111-1111-111111111111";
+
+  test("replica HIT with a NON-NULL delegate → trusted, never consults gateway/exec/fetchDelegate", () => {
+    const replica = { ownership: mock(() => ({ assignee: HUMAN, delegate: BOT })) };
+    const gateway = {
+      getDescriptor: () => {
+        throw new Error("gateway must NOT be read on a trusted (non-null) replica HIT");
+      },
+    };
+    const exec = () => {
+      throw new Error("live exec must NOT run on a trusted replica HIT");
+    };
+    const fetchDelegate = () => {
+      throw new Error("live delegate must NOT run on a trusted replica HIT");
+    };
+    const r = fetchTicketAssignee("CTL-1", { replica, gateway, exec, fetchDelegate });
+    expect(r).toEqual({ known: true, assignee: HUMAN, delegate: BOT });
+    expect(replica.ownership).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression (Stage-0 review, Lens 1): a NULL-delegate replica HIT must NOT be
+  // trusted. A per-ticket-lagged replica can read delegate=null while a just-applied
+  // human/actor delegation is still queued — trusting it would self-delegate over the
+  // real owner and claim (a stomp). So a null-delegate HIT falls through to the
+  // gateway/live chain, which live-confirms the delegate (CTL-1174 latch fix) and
+  // observes the human's real delegation.
+  test("replica HIT with a NULL delegate → NOT trusted, live-confirms via the gateway path", () => {
+    const replica = { ownership: () => ({ assignee: null, delegate: null }) };
+    // Gateway cached-null delegate → the CTL-1174 latch fix live-confirms it; the
+    // confirm returns the human's REAL delegation, so the null is never trusted.
+    const gateway = fakeGateway({ ticket: "CTL-1", assignee: HUMAN, delegate: null, removed: false, updatedAt: FRESH() });
+    const fetchDelegate = mock(() => ({ known: true, delegate: HUMAN }));
+    const r = fetchTicketAssignee("CTL-1", { replica, gateway, fetchDelegate });
+    expect(fetchDelegate).toHaveBeenCalledTimes(1); // fell through + live-confirmed the null
+    expect(r).toEqual({ known: true, assignee: HUMAN, delegate: HUMAN });
+  });
+
+  test("replica MISS (undefined) falls through to the existing gateway path UNCHANGED", () => {
+    const mkGateway = () =>
+      fakeGateway({ ticket: "CTL-1", assignee: HUMAN, delegate: BOT, removed: false, updatedAt: FRESH() });
+    const withMiss = fetchTicketAssignee("CTL-1", {
+      replica: { ownership: () => undefined },
+      gateway: mkGateway(),
+    });
+    const withoutReplica = fetchTicketAssignee("CTL-1", { gateway: mkGateway() });
+    expect(withMiss).toEqual({ known: true, assignee: HUMAN, delegate: BOT });
+    expect(withMiss).toEqual(withoutReplica); // byte-identical to today's behavior on a miss
+  });
+
+  test("replica MISS + gateway miss → today's live read chain (fetchDelegate injected)", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
+    const fetchDelegate = () => ({ known: true, delegate: null });
+    const r = fetchTicketAssignee("CTL-4", {
+      replica: { ownership: () => undefined },
+      gateway: fakeGateway(null),
+      exec,
+      fetchDelegate,
+    });
+    expect(r).toEqual({ known: true, assignee: BOT, delegate: null });
+    expect(exec.calls.length).toBe(1); // fell through to the live read
+  });
+});
+
+// ─── Stage 0 / D2: runEligibleQuery breaker-open replica-miss hardening ──────
+describe("runEligibleQuery — D2 (breaker-open replica miss)", () => {
+  let tmpDir;
+  let prevDir;
+  beforeEach(() => {
+    __resetEligibleEmptyConfirm();
+    __resetDispatchAlertThrottle();
+    prevDir = process.env.CATALYST_DIR;
+    tmpDir = mkdtempSync(join(tmpdir(), "d2-alert-"));
+    process.env.CATALYST_DIR = tmpDir; // redirect the event log the alert appends to
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const missReplica = () => ({ eligible: () => undefined }); // a replica MISS (fall-through)
+
+  function eventLogBody() {
+    const dir = join(tmpDir, "events");
+    const files = readdirSync(dir);
+    return files.map((f) => readFileSync(join(dir, f), "utf8")).join("");
+  }
+
+  test("undefined-miss + breaker OPEN → throws (preserve-prior), NO linearis spawn, alert emitted", () => {
+    const exec = mock(() => ({ code: 0, stdout: ticketsJson([]), stderr: "" }));
+    const sources = [];
+    expect(() =>
+      runEligibleQuery(
+        { team: "CTL", status: "Todo" },
+        {
+          exec,
+          replica: missReplica(),
+          breakerIsOpen: () => true,
+          onSource: (s, n) => sources.push([s, n]),
+        },
+      ),
+    ).toThrow(/breaker open/);
+    expect(exec).not.toHaveBeenCalled(); // did NOT spawn into the open breaker
+    expect(sources).toEqual([["eligible-source-unavailable-breaker-open", 0]]);
+    const body = eventLogBody();
+    expect(body).toContain("catalyst.alert.eligible_source_unavailable");
+    expect(body).toContain("eligible_source_unavailable");
+  });
+
+  test("undefined-miss + breaker CLOSED → spawns linearis as before (no alert, no throw)", () => {
+    const exec = fakeExec({ code: 0, stdout: ticketsJson([]) });
+    const tickets = runEligibleQuery(
+      { team: "CTL", status: "Todo" },
+      {
+        exec,
+        replica: missReplica(),
+        breakerIsOpen: () => false,
+        delegateExec: () => ({ code: 0, stdout: "{}", stderr: "" }),
+      },
+    );
+    expect(tickets).toEqual([]);
+    expect(exec.calls.length).toBe(1); // fell through to the live linearis path
   });
 });
 
@@ -2106,5 +2592,197 @@ describe("fetchTicketState — onExec span seam (CTL-1364)", () => {
     expect(() => fetchTicketState("CTL-9", { exec, onExec })).not.toThrow();
     // the read still resolves despite the throwing seam
     expect(fetchTicketState("CTL-9", { exec, onExec })).toBe("Done");
+  });
+});
+
+describe("classifyTicketResolution replica tier (CTL-1580)", () => {
+  test("replica HIT (any present row) → exists with ZERO live execs", () => {
+    let execs = 0;
+    const exec = () => {
+      execs++;
+      return { code: 0, stdout: "null", stderr: "" };
+    };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Implement" }) };
+    expect(classifyTicketResolution("PROJ-52", { exec, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+
+  test("replica HIT on a terminal row also serves exists (still zero execs)", () => {
+    let execs = 0;
+    const exec = () => {
+      execs++;
+      return { code: 0, stdout: "null", stderr: "" };
+    };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: true, state: "Done" }) };
+    expect(classifyTicketResolution("CTL-1", { exec, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+
+  test("replica MISS falls through to the live read (deletion still definitive)", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { isFresh: () => true, lookup: () => undefined };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("no replica → byte-identical live behavior", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-100", state: { name: "Ready" } }),
+    });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("exists");
+  });
+});
+
+describe("classifyTicketResolution replica-tier freshness gate (CTL-1580 review)", () => {
+  test("a STALE replica row never suppresses the definitive live check", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { isFresh: () => false, lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("a reader without the isFresh accessor is treated as unfresh (fail-closed)", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    const replica = { lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+});
+
+describe("classifyTicketResolution gateway-tombstone veto (CTL-1580 round 5)", () => {
+  test("a fresh removed:true descriptor bypasses the replica tier — deletion pays the live read", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" }); // live says: gone
+    const gateway = { getDescriptor: () => ({ removed: true, updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }) }; // stale drift row
+    expect(classifyTicketResolution("CTL-9", { exec, gateway, replica })).toBe("not-found");
+  });
+
+  test("a fresh removed:false descriptor still short-circuits before either tier", () => {
+    let execs = 0;
+    const exec = () => { execs++; return { code: 0, stdout: "null", stderr: "" }; };
+    const gateway = { getDescriptor: () => ({ removed: false, state: "Todo", updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => undefined };
+    expect(classifyTicketResolution("CTL-10", { exec, gateway, replica })).toBe("exists");
+    expect(execs).toBe(0);
+  });
+});
+
+describe("classifyTicketResolution bypassCaches (CTL-1580 round 6)", () => {
+  test("bypassCaches skips BOTH tiers even when production injection forces them in", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" }); // live: gone
+    const gateway = { getDescriptor: () => ({ removed: false, state: "Todo", updatedAt: new Date().toISOString() }) };
+    const replica = { isFresh: () => true, lookup: () => ({ terminal: false, state: "Todo" }) };
+    expect(classifyTicketResolution("CTL-9", { exec, gateway, replica, bypassCaches: true })).toBe("not-found");
+  });
+});
+
+describe("runEligibleQuery structural body validation (CTL-1580 round 6)", () => {
+  test("an exit-0 body without nodes[] throws instead of zeroing the board", () => {
+    const exec = () => ({ code: 0, stdout: JSON.stringify({ error: "Authentication required" }), stderr: "" });
+    expect(() =>
+      runEligibleQuery({ team: "PROJ", status: "Todo" }, { exec, now: () => 0 })
+    ).toThrow(/nodes/);
+  });
+});
+
+// CTL-1589 — runTriageStateQuery: the Triage-state list that makes triage
+// admission level-triggered. REPLICA-ONLY by design (a supplementary read must
+// not add a per-team live list on the reconcile cadence), so the contract these
+// pin is: served from the replica or not at all, never a Linear call, and every
+// non-served case distinguishable via onSource so the caller can log it.
+describe("runTriageStateQuery (CTL-1589)", () => {
+  const query = { team: "CTL", status: "Todo", triageStatus: "Triage", project: null, label: null, priority: null };
+
+  // A replica stub whose triageState() returns a canned board-shaped result.
+  function replicaReturning(nodes) {
+    const calls = [];
+    return { calls, triageState: (q) => { calls.push(q); return { nodes }; } };
+  }
+
+  test("HIT: normalizes the replica board and records onSource('replica')", () => {
+    const replica = replicaReturning([
+      {
+        identifier: "ADV-1374",
+        title: "Stranded in triage",
+        state: "Triage",
+        priority: 1,
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ]);
+    const sources = [];
+    const tickets = runTriageStateQuery(query, {
+      replica,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]).toMatchObject({ identifier: "ADV-1374", state: "Triage", priority: 1 });
+    expect(replica.calls).toEqual([query]); // the whole query reaches triageState()
+    expect(sources).toEqual([["replica", 1]]);
+  });
+
+  // Unlike the eligible board, an empty Triage board is served as-is: there is no
+  // freeze to avoid, so no linearis re-confirmation is worth the quota.
+  test("replica-EMPTY is trusted as-is (no confirmation, no Linear call)", () => {
+    const sources = [];
+    const tickets = runTriageStateQuery(query, {
+      replica: replicaReturning([]),
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica", 0]]);
+  });
+
+  test("the priority floor is NOT applied (mirrors the webhook →Triage predicate)", () => {
+    const replica = replicaReturning([
+      { identifier: "CTL-1", state: "Triage", priority: 4 },
+      { identifier: "CTL-2", state: "Triage", priority: 0 },
+    ]);
+    // A floor of 2 would drop both under runEligibleQuery's filter.
+    const tickets = runTriageStateQuery({ ...query, priority: 2 }, { replica });
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-1", "CTL-2"]);
+  });
+
+  test("replica MISS (undefined) → [] with onSource('replica-miss'), never a linearis spawn", () => {
+    const sources = [];
+    const tickets = runTriageStateQuery(query, {
+      replica: { triageState: () => undefined },
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica-miss", 0]]);
+  });
+
+  test("a THROW out of the replica is swallowed → [] with onSource('replica-miss')", () => {
+    const sources = [];
+    const tickets = runTriageStateQuery(query, {
+      replica: { triageState: () => { throw new Error("db locked"); } },
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica-miss", 0]]);
+  });
+
+  // The replica tier is opt-in per host. With it off this read is INERT — the
+  // marker is what makes that visible rather than a silent no-op.
+  test("no replica wired → [] with onSource('no-replica')", () => {
+    const sources = [];
+    expect(runTriageStateQuery(query, { onSource: (s, c) => sources.push([s, c]) })).toEqual([]);
+    expect(sources).toEqual([["no-replica", 0]]);
+  });
+
+  test("a team with no triageStatus → [] with onSource('no-triage-status'), replica never consulted", () => {
+    const replica = replicaReturning([{ identifier: "CTL-1", state: "Triage" }]);
+    const sources = [];
+    const tickets = runTriageStateQuery(
+      { ...query, triageStatus: null },
+      { replica, onSource: (s, c) => sources.push([s, c]) }
+    );
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["no-triage-status", 0]]);
+    expect(replica.calls).toEqual([]);
+  });
+
+  test("no query at all → [] (never throws into the sweep)", () => {
+    expect(runTriageStateQuery(undefined)).toEqual([]);
+    expect(runTriageStateQuery({})).toEqual([]);
   });
 });

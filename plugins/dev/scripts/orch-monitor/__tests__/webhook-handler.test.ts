@@ -470,6 +470,38 @@ describe("createWebhookHandler", () => {
     expect(eventLog.appends[0]?.attributes["event.name"]).toBe("github.pr.labeled");
   });
 
+  // CTL-1532: the appended envelope must carry the provider's own delivery id.
+  // This is the join key for the smee/catalyst-cloud parity harness — the cloud
+  // feed carries the same value as `deliveryId`. Without it the join matches ZERO
+  // rows, and a mismatch-only harness cannot distinguish that from perfect parity.
+  it("stamps webhook.delivery.id from the x-github-delivery header", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      eventLog,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "labeled",
+          pull_request: {
+            number: 326,
+            merged: true,
+            merged_at: "2026-05-04T06:42:52Z",
+          },
+        },
+        { "x-github-delivery": "2b236380-8929-11f1-8d49-f40528cd5182" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.attributes["webhook.delivery.id"]).toBe(
+      "2b236380-8929-11f1-8d49-f40528cd5182",
+    );
+  });
+
   it("release.published is accepted (200) and logged", async () => {
     const eventLog = new FakeEventLog();
     const handler = createWebhookHandler({

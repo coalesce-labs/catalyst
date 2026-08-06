@@ -18,7 +18,9 @@ import {
   Semaphore,
   scrubSecrets,
   defaultEmitBackstop,
+  defaultAppendEventLog,
   flipSignalDoneOnSuccess,
+  runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
@@ -139,6 +141,41 @@ describe("buildSdkEnv", () => {
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("tok");
     // Base env preserved.
     expect(env.PATH).toBe("/bin");
+    // CTL-1457: the in-process SDK worker is attributed so its emit-complete
+    // stamps catalyst.executor="sdk" on the completion event.
+    expect(env.CATALYST_EXECUTOR_ID).toBe("sdk");
+  });
+});
+
+// ── runPrelaunch executor attribution (CTL-1457) ──────────────────────────────
+
+describe("runPrelaunch — executorId threads CATALYST_EXECUTOR_ID (CTL-1457)", () => {
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("executorId set → CATALYST_EXECUTOR_ID in the prelaunch spawn env", () => {
+    const spawn = spy();
+    runPrelaunch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "triage", worktreePath: "/wt/CTL-1" },
+      { spawn, executorId: "codex-exec" }
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_EXECUTOR_ID).toBe("codex-exec");
+  });
+
+  test("executorId omitted → CATALYST_EXECUTOR_ID absent (byte-identical prelaunch)", () => {
+    const spawn = spy();
+    runPrelaunch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "triage", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect("CATALYST_EXECUTOR_ID" in spawn.calls[0].opts.env).toBe(false);
   });
 });
 
@@ -1589,6 +1626,338 @@ describe("sdkRunPhaseAgent — overload shape table", () => {
       });
       expect(r.code).toBe(0);
       expect(attempt).toBe(2);
+    }
+  });
+});
+
+// ── CTL-1410 Phase B: in-process worker-registry wiring ───────────────────────
+// The registry is the SDK-native liveness source of truth (sdk-worker-registry.mjs).
+// The runner must register exactly once per real launch (after the spec resolves,
+// before the query loop), swap the abort controller per retry, heartbeat on
+// streamed messages, and deregister on EVERY exit path — while the three
+// pre-launch early-returns never register at all.
+
+describe("sdkRunPhaseAgent — CTL-1410 Phase B (worker registry wiring)", () => {
+  const fakeRegistry = () => {
+    const state = { registered: [], handles: [] };
+    const registerWorker = (entry) => {
+      state.registered.push(entry);
+      const h = {
+        controllers: [],
+        touches: 0,
+        deregistered: 0,
+        setAbortController(ac) {
+          h.controllers.push(ac);
+        },
+        touch() {
+          h.touches += 1;
+        },
+        deregister() {
+          h.deregistered += 1;
+        },
+      };
+      state.handles.push(h);
+      return h;
+    };
+    return { registerWorker, state };
+  };
+
+  test("registers after spec resolve, before the query; wires the AC; touches per message; deregisters on success", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = fakeRegistry();
+    let registeredAtQuery = -1;
+    const sink = {};
+    const runQuery = ({ prompt, options }) => {
+      registeredAtQuery = state.registered.length;
+      sink.options = options;
+      return (async function* () {
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    };
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, runQuery, registerWorker });
+    expect(r.code).toBe(0);
+    expect(state.registered).toHaveLength(1);
+    expect(registeredAtQuery).toBe(1); // registered BEFORE the query launched
+    expect(state.registered[0]).toMatchObject({
+      ticket: "CTL-100",
+      phase: "implement",
+      worktreePath: "/wt/CTL-100",
+      generation: 1,
+      orchDir: "/ec",
+    });
+    const h = state.handles[0];
+    expect(h.controllers).toHaveLength(1);
+    expect(h.controllers[0]).toBe(sink.options.abortController); // the SAME ac query() got
+    expect(h.touches).toBe(2); // one per streamed message
+    expect(h.deregistered).toBe(1);
+  });
+
+  test("deregisters when the query throws (generic sdk-threw path)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = fakeRegistry();
+    const runQuery = () =>
+      (async function* () {
+        throw new Error("boom");
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(1);
+    expect(state.handles[0].deregistered).toBe(1);
+  });
+
+  test("deregisters when the overload backoff exhausts", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = fakeRegistry();
+    const runQuery = () =>
+      (async function* () {
+        yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      sleep: () => Promise.resolve(),
+      backoff: { baseMs: 1, capMs: 2 },
+      maxRetries: 1,
+      emitEvent: () => {},
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(1);
+    expect(state.registered).toHaveLength(1); // register once, NOT per retry
+    expect(state.handles[0].deregistered).toBe(1);
+  });
+
+  test("swaps the abort controller on every retry (distinct AC per attempt)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = fakeRegistry();
+    let attempt = 0;
+    const runQuery = () =>
+      (async function* () {
+        attempt += 1;
+        if (attempt === 1) {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 429 });
+        } else {
+          yield resultMsg();
+        }
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      sleep: () => Promise.resolve(),
+      backoff: { baseMs: 1, capMs: 2 },
+      emitEvent: () => {},
+    });
+    expect(r.code).toBe(0);
+    const h = state.handles[0];
+    expect(h.controllers).toHaveLength(2);
+    expect(h.controllers[0]).not.toBe(h.controllers[1]);
+    expect(h.deregistered).toBe(1);
+  });
+
+  test("auth-guard early return never registers", async () => {
+    const { registerWorker, state } = fakeRegistry();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      env: { ANTHROPIC_API_KEY: "sk", CLAUDE_CODE_OAUTH_TOKEN: "t" },
+      oauthToken: "t",
+      registerWorker,
+      emitEvent: () => {},
+    });
+    expect(r.code).toBe(1);
+    expect(state.registered).toHaveLength(0);
+  });
+
+  test("idempotent prelaunch never registers", async () => {
+    const spec = makeSpec({ status: "claim-lost", idempotent: true });
+    const { spawn } = spawnReturningSpec({ spec });
+    const { registerWorker, state } = fakeRegistry();
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, registerWorker });
+    expect(r.code).toBe(0);
+    expect(state.registered).toHaveLength(0);
+  });
+
+  test("failed prelaunch never registers", async () => {
+    const { spawn } = spawnReturningSpec({ code: 1 });
+    const { registerWorker, state } = fakeRegistry();
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, registerWorker });
+    expect(r.code).toBe(1);
+    expect(state.registered).toHaveLength(0);
+  });
+});
+
+// ── CTL-1422: session capture + worker.session.* lifecycle events ─────────────
+// The init message's session_id is the warm-resume key: it must reach the
+// registry (durable projection) and the unified event log (fleet view) the
+// moment it is known. stopped fires on every post-capture exit path.
+
+describe("sdkRunPhaseAgent — CTL-1422 (session capture + lifecycle events)", () => {
+  const sessionRegistry = () => {
+    const state = { handles: [] };
+    const registerWorker = () => {
+      const h = { sessionIds: [], deregistered: 0 };
+      h.setAbortController = () => {};
+      h.touch = () => {};
+      h.setSessionId = (id) => h.sessionIds.push(id);
+      h.deregister = () => { h.deregistered += 1; };
+      state.handles.push(h);
+      return h;
+    };
+    return { registerWorker, state };
+  };
+  const initMsg = { type: "system", subtype: "init", session_id: "sess-abc" };
+
+  test("captures session_id from the init message → registry + started/stopped events", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = sessionRegistry();
+    const events = [];
+    const runQuery = fakeQuery([initMsg, resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+    });
+    expect(r.code).toBe(0);
+    expect(state.handles[0].sessionIds).toEqual(["sess-abc"]);
+    const started = events.filter(([n]) => n === "worker.session.started");
+    expect(started).toHaveLength(1);
+    expect(started[0][1]).toMatchObject({
+      ticket: "CTL-100", phase: "implement", session_id: "sess-abc", generation: 1,
+    });
+    const stopped = events.filter(([n]) => n === "worker.session.stopped");
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0][1]).toMatchObject({ ticket: "CTL-100", session_id: "sess-abc" });
+  });
+
+  test("a resume dispatch seeds registerWorker with the known UUID (crash-before-init safety)", async () => {
+    const spec = makeSpec({ resumeSession: "sess-prev" });
+    const { spawn } = spawnReturningSpec({ spec });
+    const registered = [];
+    const runQuery = fakeQuery([resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery,
+      registerWorker: (e) => {
+        registered.push(e);
+        return { setAbortController() {}, touch() {}, setSessionId() {}, deregister() {} };
+      },
+      emitEvent: () => {},
+    });
+    expect(r.code).toBe(0);
+    expect(registered[0]).toMatchObject({ ticket: "CTL-100", sessionId: "sess-prev" });
+  });
+
+  test("a resume dispatch emits worker.session.resumed instead of started", async () => {
+    const spec = makeSpec({ resumeSession: "sess-prev" });
+    const { spawn } = spawnReturningSpec({ spec });
+    const { registerWorker } = sessionRegistry();
+    const events = [];
+    const runQuery = fakeQuery([{ ...initMsg, session_id: "sess-prev" }, resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+    });
+    expect(r.code).toBe(0);
+    expect(events.filter(([n]) => n === "worker.session.resumed")).toHaveLength(1);
+    expect(events.filter(([n]) => n === "worker.session.started")).toHaveLength(0);
+  });
+
+  test("no init message → no session events, no registry call, no crash", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = sessionRegistry();
+    const events = [];
+    const runQuery = fakeQuery([resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+    });
+    expect(r.code).toBe(0);
+    expect(state.handles[0].sessionIds).toEqual([]);
+    expect(events.filter(([n]) => String(n).startsWith("worker.session."))).toHaveLength(0);
+  });
+
+  test("stopped still fires when the query throws AFTER the init message", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = sessionRegistry();
+    const events = [];
+    const runQuery = () =>
+      (async function* () {
+        yield initMsg;
+        throw new Error("boom");
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(1);
+    expect(state.handles[0].sessionIds).toEqual(["sess-abc"]);
+    expect(events.filter(([n]) => n === "worker.session.stopped")).toHaveLength(1);
+  });
+
+  test("Phase B fakes without setSessionId do not crash (optional-chained)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const legacyHandle = { setAbortController: () => {}, touch: () => {}, deregister: () => {} };
+    const runQuery = fakeQuery([initMsg, resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery,
+      registerWorker: () => legacyHandle,
+      emitEvent: () => {},
+    });
+    expect(r.code).toBe(0);
+  });
+});
+
+describe("sdkRunPhaseAgent — CTL-1422 session change across retries", () => {
+  test("an overload retry with a NEW session closes the old one (stopped) before starting the new", async () => {
+    const { spawn } = spawnReturningSpec();
+    const events = [];
+    let attempt = 0;
+    const runQuery = () =>
+      (async function* () {
+        attempt += 1;
+        yield { type: "system", subtype: "init", session_id: `sess-${attempt}` };
+        if (attempt === 1) {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+        } else {
+          yield resultMsg();
+        }
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery,
+      registerWorker: () => ({ setAbortController() {}, touch() {}, setSessionId() {}, deregister() {} }),
+      sleep: () => Promise.resolve(),
+      backoff: { baseMs: 1, capMs: 2 },
+      emitEvent: (n, p) => events.push([n, p]),
+    });
+    expect(r.code).toBe(0);
+    const lifecycle = events
+      .filter(([n]) => String(n).startsWith("worker.session."))
+      .map(([n, p]) => `${n.split(".").pop()}:${p.session_id}`);
+    expect(lifecycle).toEqual([
+      "started:sess-1",
+      "stopped:sess-1", // closed when the retry re-keyed the session
+      "started:sess-2",
+      "stopped:sess-2", // the finally close
+    ]);
+  });
+});
+
+describe("defaultAppendEventLog — CTL-1488 stamps the coordination stream class", () => {
+  test("the terminal-fallback phase event carries event.stream_class=coordination", () => {
+    const prev = process.env.CATALYST_DIR;
+    const dir = mkdtempSync(join(tmpdir(), "sdk-ctl1488-"));
+    process.env.CATALYST_DIR = dir; // getEventLogPath() re-resolves from CATALYST_DIR per call
+    try {
+      defaultAppendEventLog({ phase: "implement", ticket: "CTL-1", status: "failed", reason: "sdk-threw" });
+      const now = new Date();
+      const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      const logPath = join(dir, "events", `${ym}.jsonl`);
+      const line = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).pop();
+      const ev = JSON.parse(line);
+      expect(ev.attributes["event.name"]).toBe("phase.implement.failed.CTL-1");
+      // Without the stamp, coordination-publish/index.ts:166 (fail-closed) excludes it from the mirror.
+      expect(ev.attributes["event.stream_class"]).toBe("coordination");
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

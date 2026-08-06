@@ -4,7 +4,8 @@
 // failing probe crosses to down only after 3 ticks (the registry tick is the
 // counter clock).
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import * as fs from "fs";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -12,6 +13,17 @@ import {
   createServiceHealthMonitor,
   readEmissionAge,
 } from "../lib/service-health-monitor";
+
+// bytesRequested — total `length` argument across readSync calls. The spy's
+// call tuple resolves to the 3-arg `readSync(fd, buffer, opts)` overload under
+// TS, so index positionally through `unknown[]` rather than fighting the
+// overload set (CTL-1529).
+function bytesRequested(calls: readonly unknown[][]): number {
+  return calls.reduce<number>(
+    (sum, c) => sum + (typeof c[3] === "number" ? c[3] : 0),
+    0,
+  );
+}
 
 let catalystDir: string;
 
@@ -54,6 +66,58 @@ describe("readEmissionAge", () => {
     writeEvent("2026-06-11T11:58:00.000Z", "broker");
     const age = readEmissionAge(catalystDir, { serviceName: "execution-core" }, now);
     expect(age).toBeNull();
+  });
+
+  // ── CTL-1529 ─────────────────────────────────────────────────────────────
+  // This function's comment has always said "Read only the tail of the file —
+  // Cap at 512KB to bound the read". The code did `readFileSync(path, "utf8")`
+  // and THEN sliced the last 512 KB back off, i.e. it materialized the entire
+  // monthly event log (344 MB on mini) to keep 0.15% of it, on every poll of a
+  // 15-second health tick. The guard could not see it because the argument was
+  // a bare `path` variable rather than a spelled-out event-log expression.
+  it("reads only the 512 KiB tail of a multi-megabyte log, not the whole file", () => {
+    const now = Date.parse("2026-06-11T12:00:00.000Z");
+    const path = join(catalystDir, "events", "2026-06.jsonl");
+    // ~6 MB of older noise, then the match we actually want, at the end.
+    const noise =
+      JSON.stringify({
+        ts: "2026-06-11T00:00:00.000Z",
+        attributes: { "event.name": "noise" },
+        resource: { "service.name": "other" },
+        pad: "q".repeat(400),
+      }) + "\n";
+    writeFileSync(path, noise.repeat(12_000));
+    writeEvent("2026-06-11T11:58:00.000Z", "broker");
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    let age: number | null;
+    try {
+      age = readEmissionAge(catalystDir, { serviceName: "broker" }, now);
+      expect(readFileSyncSpy.mock.calls.filter((c) => c[0] === path)).toEqual([]);
+      const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
+      expect(requested).toBeGreaterThan(0);
+      expect(requested).toBeLessThanOrEqual(512 * 1024);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+    // …and the answer is unchanged: the newest match is still found.
+    expect(age).not.toBeNull();
+    expect(age!).toBeGreaterThanOrEqual(2 * 60_000 - 1000);
+    expect(age!).toBeLessThan(3 * 60_000);
+  });
+
+  it("still finds a match that sits DEEPER than one chunk but inside the 512 KiB tail", () => {
+    const now = Date.parse("2026-06-11T12:00:00.000Z");
+    const path = join(catalystDir, "events", "2026-06.jsonl");
+    writeEvent("2026-06-11T11:58:00.000Z", "broker");
+    const noise =
+      JSON.stringify({ ts: "2026-06-11T11:59:00.000Z", attributes: {}, resource: {}, pad: "q".repeat(400) }) + "\n";
+    writeFileSync(path, noise.repeat(500), { flag: "a" }); // ~250 KB after the match
+    const age = readEmissionAge(catalystDir, { serviceName: "broker" }, now);
+    expect(age).not.toBeNull();
+    expect(age!).toBeLessThan(3 * 60_000);
   });
 });
 

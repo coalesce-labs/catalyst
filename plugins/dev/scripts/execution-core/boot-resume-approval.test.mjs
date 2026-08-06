@@ -11,7 +11,12 @@ import {
   processApprovedResumes,
   bootResumePendingPath,
   bootResumeApprovedPath,
+  listPendingApprovals,
+  approveBootResume,
+  surfaceStalePendingApprovals,
+  BOOT_RESUME_PENDING_TTL_MS,
 } from "./boot-resume.mjs";
+import { readFileSync } from "node:fs";
 import { defaultReviveDispatch } from "./recovery.mjs"; // CTL-1367 P1: real revive seam for the async-dispatch behavior test
 
 let orchDir;
@@ -235,5 +240,102 @@ describe("processApprovedResumes (CTL-644)", () => {
       appendEvent: () => true,
     });
     expect(res).toMatchObject({ dispatched: 0, failed: 0 });
+  });
+});
+
+// ─── CTL-1443 (P1-loop-3): the gate becomes operable — list / approve / expire ─
+describe("boot-resume approval surfacing (CTL-1443)", () => {
+  const writeGate = (ticket, phase, requestedAtMs) => {
+    mkdirSync(join(orchDir, "workers", ticket), { recursive: true });
+    writeFileSync(
+      bootResumePendingPath(orchDir, ticket),
+      JSON.stringify({ ticket, phase, worktreePath: "/wt", requestedAt: new Date(requestedAtMs).toISOString() }),
+    );
+  };
+
+  test("listPendingApprovals enumerates gates with age + approval state", () => {
+    const now = Date.now();
+    writeGate("OTL-41", "recovery-pass", now - 5 * 3600e3);
+    writeGate("CTL-1", "implement", now - 1000);
+    writeFileSync(bootResumeApprovedPath(orchDir, "CTL-1"), "");
+    const gates = listPendingApprovals(orchDir, { now: () => now });
+    const byTicket = Object.fromEntries(gates.map((g) => [g.ticket, g]));
+    expect(byTicket["OTL-41"].phase).toBe("recovery-pass");
+    expect(byTicket["OTL-41"].approved).toBe(false);
+    expect(byTicket["OTL-41"].ageMs).toBeGreaterThan(4 * 3600e3);
+    expect(byTicket["CTL-1"].approved).toBe(true);
+  });
+
+  test("approveBootResume writes the sentinel; refuses without a gate", () => {
+    writeGate("OTL-41", "recovery-pass", Date.now());
+    expect(approveBootResume(orchDir, "OTL-41")).toEqual({ approved: true });
+    expect(existsSync(bootResumeApprovedPath(orchDir, "OTL-41"))).toBe(true);
+    expect(approveBootResume(orchDir, "CTL-none").approved).toBe(false);
+  });
+
+  test("a stale gate surfaces ONCE: needs-human signal with a brief + alert + surfacedAt stamp", () => {
+    const now = Date.now();
+    writeGate("OTL-41", "recovery-pass", now - BOOT_RESUME_PENDING_TTL_MS - 1000);
+    const alerts = [];
+    const labels = [];
+    const out = surfaceStalePendingApprovals({
+      orchDir,
+      now: () => now,
+      emitAlert: (a) => alerts.push(a),
+      labelNeedsHuman: (dir, t) => labels.push(t),
+    });
+    expect(out).toEqual(["OTL-41"]);
+    // Codex P1: the needs-human LABEL is what deriveAttention keys on — the
+    // signal explanation alone never reaches the Needs-You bucket.
+    expect(labels).toEqual(["OTL-41"]);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "OTL-41", "phase-recovery-pass.json"), "utf8"),
+    );
+    expect(sig.status).toBe("stalled"); // terminal-sweep-owned label lifecycle (Codex R2)
+    expect(sig.stalledReason).toBe("boot-resume-gate-expired");
+    expect(sig.ticket).toBe("OTL-41");
+    expect(sig.explanation.escalation_type).toBe("authorization");
+    expect(sig.explanation.call_to_action).toContain("boot-resume-approve");
+    expect(sig.worktreePath).toBe("/wt"); // Codex P2: preserved for the CTL-615 revive cross-check
+    expect(alerts[0].identifier).toBe("OTL-41");
+    // idempotent: the surfacedAt stamp suppresses a second surfacing
+    const out2 = surfaceStalePendingApprovals({ orchDir, now: () => now, emitAlert: (a) => alerts.push(a), labelNeedsHuman: () => {} });
+    expect(out2).toEqual([]);
+    expect(alerts.length).toBe(1);
+    // and approval still works after surfacing (marker retained)
+    expect(approveBootResume(orchDir, "OTL-41")).toEqual({ approved: true });
+  });
+
+  test("fresh and approved gates are never surfaced", () => {
+    const now = Date.now();
+    writeGate("CTL-2", "implement", now - 1000); // fresh
+    writeGate("CTL-3", "implement", now - BOOT_RESUME_PENDING_TTL_MS - 1000); // stale but approved
+    writeFileSync(bootResumeApprovedPath(orchDir, "CTL-3"), "");
+    expect(surfaceStalePendingApprovals({ orchDir, now: () => now, emitAlert: () => {}, labelNeedsHuman: () => {} })).toEqual([]);
+  });
+
+  test("processApprovedResumes runs the sweep (stale gate surfaces on the normal tick path)", () => {
+    const now = Date.now();
+    writeGate("CTL-4", "implement", now - BOOT_RESUME_PENDING_TTL_MS - 1000);
+    const alerts = [];
+    processApprovedResumes({
+      orchDir,
+      reviveDispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      emitStaleGateAlert: (a) => alerts.push(a),
+      staleGateLabelNeedsHuman: () => {},
+    });
+    expect(alerts.length).toBe(1);
+    expect(alerts[0].identifier).toBe("CTL-4");
+  });
+});
+
+describe("boot-resume approval lifetime (CTL-1443 Codex R2)", () => {
+  test("classifyStalledTicket skips gate-expired parks (no unstuck re-ask loop)", async () => {
+    const { classifyStalledTicket } = await import("./unstuck-sweep.mjs");
+    expect(classifyStalledTicket({ reason: "boot-resume-gate-expired" })).toEqual({
+      category: "skip",
+      action: "skip",
+    });
   });
 });

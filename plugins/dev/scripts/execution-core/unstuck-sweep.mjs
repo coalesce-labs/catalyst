@@ -17,6 +17,7 @@ import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { log, getEventLogPath } from "./config.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "./unstuck-sweep-event-types.mjs";
+import { isTicketKey } from "./ticket-key.mjs";
 
 export { UNSTUCK_SWEEP_EVENT_TYPES };
 
@@ -83,6 +84,20 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   source_conflict_ctl708_unavailable: { category: "source-conflict", action: "force-push-if-clean" },
   "orphan-sweep-stale":               { category: "orphan-stale",   action: "emit-phase-complete-if-merged" },
   "remediate-cycle-cap-exhausted":    { category: "remediate-cap",  action: "escalate" },
+  // CTL-1442 (Codex R5): a ticket parked by the no-progress escalation ask-cap
+  // is ALREADY terminally escalated (needs-human + brief + final event) — the
+  // unstuck sweep must stay quiet, not re-escalate it every interval (that
+  // would recreate the ask loop through a different subsystem).
+  "escalation-ask-cap":               { category: "skip",           action: "skip" },
+  // CTL-1443: a gate-expired park is already surfaced (brief + label via the
+  // terminal sweep + alert) and is waiting on an operator approval — the
+  // unstuck sweep must stay quiet, not re-escalate it every interval.
+  "boot-resume-gate-expired":         { category: "skip",           action: "skip" },
+  // PROJ-1657 Codex P2 (round 4): a probe-less phase (recovery-pass today) is
+  // parked terminal on its FIRST occurrence via markEscalationCapTerminal —
+  // same "already fully escalated" shape as escalation-ask-cap above — so the
+  // unstuck sweep must stay quiet here too, not re-escalate every interval.
+  "no-probe-for-phase":               { category: "skip",           action: "skip" },
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.
@@ -123,6 +138,7 @@ export function defaultCollectUnstuckCandidates({
   for (const d of workerDirs) {
     if (!d.isDirectory()) continue;
     const ticket = d.name;
+    if (!isTicketKey(ticket)) continue; // CTL-1504: never probe a non-ticket dir name
     try {
       const workerDir = join(orchDir, "workers", ticket);
       let signalFiles;

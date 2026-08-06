@@ -25,13 +25,17 @@ const DOT_COLOR: Record<HoldingBucket["kind"], string> = {
   "needs-you": C.yellow,
   stalled: C.yellow,
   blocked: C.red,
-  waiting: C.fgDim,
+  queued: C.fgDim,
+  "needs-input": C.fgDim,
+  "needs-human": C.red,
 };
 const BUCKET_LABEL: Record<HoldingBucket["kind"], string> = {
   "needs-you": "Needs you",
   stalled: "Stalled — gave up",
   blocked: "Blocked by dependencies",
-  waiting: "Held — awaiting capacity",
+  queued: "Held — awaiting capacity",
+  "needs-input": "Waiting for input",
+  "needs-human": "Needs human review",
 };
 
 function ColorDot({ color }: { color: string }) {
@@ -174,7 +178,9 @@ export function HoldingBuckets({
           <Bucket bucket={buckets.needsYou} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
           <Bucket bucket={buckets.stalled} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
           <Bucket bucket={buckets.blocked} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
-          <Bucket bucket={buckets.waiting} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
+          <Bucket bucket={buckets.queued} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
+          <Bucket bucket={buckets.needsInput} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
+          <Bucket bucket={buckets.needsHuman} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
         </>
       )}
     </section>

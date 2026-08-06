@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildEventEnvelope,
   classifyWorker,
   jobLifecycle,
   reconstructWorkerState,
@@ -47,6 +48,8 @@ import {
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
 import { existsSync, appendFileSync, chmodSync } from "node:fs";
+import { recordEscalation } from "./label-guard.mjs"; // CTL-1442: seed reason-change scenarios
+import { defaultClearStall } from "./scheduler.mjs"; // CTL-1442: operator re-arm resets the ask budget
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 
 let orchDir;
@@ -1959,6 +1962,36 @@ describe("CTL-664: reclaim Linear mirror", () => {
     expect(r).toBe("reclaim-failed");
     expect(mirror.calls.length).toBe(0);
   });
+
+  // CTL-863 regression: the caller MUST thread the live cluster gate + host
+  // identity into postReclaimMirror. Before this fix reclaimDeadWorkIfPossible
+  // omitted multiHost/self, so defaultPostReclaimMirror always saw multiHost=false
+  // and the fence zombie-guard was inert on a real ≥2-host cluster. The gate MUST
+  // arrive in the SECOND (options) argument — that is where defaultPostReclaimMirror
+  // reads multiHost/self/gateway (Codex P2, recovery.mjs:2360); passing them in the
+  // first (payload) arg left the guard reading the default multiHost=false (inert).
+  test("CTL-863: reclaimDeadWorkIfPossible threads multiHost/self/gateway into postReclaimMirror (2nd arg)", () => {
+    const mirror = recorder(undefined);
+    reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: () => true },
+      emitComplete: () => ({ code: 0 }),
+      appendEvent: () => {},
+      postReclaimMirror: mirror,
+      repoRoot: "/repo",
+      multiHost: true,
+      self: "host-A",
+      gateway: { probe: "sentinel" },
+    });
+    expect(mirror.calls.length).toBe(1);
+    // The options object (2nd arg) carries the fence gate — the position
+    // defaultPostReclaimMirror actually destructures.
+    expect(mirror.calls[0][1]).toMatchObject({
+      multiHost: true,
+      self: "host-A",
+      gateway: { probe: "sentinel" },
+    });
+  });
 });
 
 // defaultPostReclaimMirror — driven through its injected existsSync / writeMarker
@@ -2597,6 +2630,229 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
       orchDir: s.orch,
       ticket: "CTL-9",
     });
+  });
+});
+
+// --- CTL-1442: no-progress escalation ask-cap → terminal, never re-ask forever
+//
+// ADV-1374/1376 fired `phase.triage.escalated` (`reason:"no-progress"`) every
+// cool-down window for DAYS (audit RC4): the 10-min cool-down only throttles,
+// nothing ever transitioned the ticket, and the broker cannot consume the
+// `escalated` action. After ESCALATION_ASK_CAP consecutive same-reason asks the
+// escalation now goes terminal: the phase signal flips to stalled with the
+// curated explanation persisted (→ the monitor Needs-You inbox), and further
+// sweeps stop emitting.
+describe("reclaimDeadWorkIfPossible — CTL-1442 escalation ask-cap", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1442-"));
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  function setupAt(orchPath, overrides = {}) {
+    const sig = {
+      ...implementSignal({ ticket: "CTL-9", status: "running", bgJobId: "bg-9" }),
+      phase: overrides.phase ?? "pr",
+    };
+    sig.raw.phase = overrides.phase ?? "pr";
+    return {
+      orch: orchPath,
+      sig,
+      opts: {
+        repoRoot: "/repo",
+        statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+        jobLifecycle: () => "dead-gone",
+        progressMark: () => 0, // zero forward progress → the no-progress STOP path
+        readProgressMark: () => 0,
+        writeProgressMark: recorder(undefined),
+        probes: { [overrides.phase ?? "pr"]: recorder(false) },
+        emitComplete: recorder({ code: 0 }),
+        appendEvent: recorder(undefined),
+        appendReviveEvent: recorder(undefined),
+        appendEscalatedEvent: recorder(undefined),
+        appendReviveSuppressedEvent: recorder(undefined),
+        reviveDispatch: recorder({ code: 0 }),
+        applyStalledLabel: recorder({ applied: true }),
+        killBgJob: recorder(undefined),
+        countReviveEvents: recorder(0),
+        writeReviveMarker: recorder(undefined),
+        now: () => 1_000 + 6 * 60 * 1000,
+        staleMs: 5 * 60 * 1000,
+        // real fs-backed cool-down + ask-cap primitives (defaults)
+      },
+    };
+  }
+
+  test("the cap-consuming ask flips the signal TERMINAL with the brief persisted; later sweeps never re-ask", () => {
+    let clock = 5_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+
+    // Asks 1..3 (each past the 10-min cool-down window). Default cap = 3.
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3);
+
+    // The 3rd (cap-consuming) ask parked the ticket terminal: stalled signal
+    // with the curated explanation persisted for the Needs-You inbox.
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    const written = JSON.parse(readFileSync(sigPath, "utf8"));
+    expect(written.status).toBe("stalled");
+    expect(written.stalledReason).toBe("escalation-ask-cap");
+    expect(written.explanation).toBeTruthy();
+    expect(typeof written.needsHumanSince).toBe("string");
+
+    // 50 more sweeps, each past the cool-down window: ZERO further events —
+    // the ask-cap early-return holds even though this test keeps feeding the
+    // same (now-stale) in-memory signal back in.
+    for (let i = 0; i < 50; i++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // NOT 53
+  });
+
+  test("the ask history rides the event payload (attempts is no longer [] forever)", () => {
+    let clock = 9_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // ask 1 — no prior history
+    clock += 10 * 60 * 1000 + 1;
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // ask 2 — carries ask-1's ts
+
+    const secondAsk = s.opts.appendEscalatedEvent.calls[1][0];
+    const attempts = secondAsk.extras?.explanation?.attempts;
+    expect(Array.isArray(attempts)).toBe(true);
+    expect(attempts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a lost terminal flip is RE-ASSERTED on the next sweep (no silent capacity leak)", () => {
+    let clock = 20_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled");
+    // Simulate the flip being lost (crash between record and write / manual rm).
+    rmSync(sigPath, { force: true });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    // Re-asserted terminal, but NO new event (the cap stays spent).
+    const reasserted = JSON.parse(readFileSync(sigPath, "utf8"));
+    expect(reasserted.status).toBe("stalled");
+    // Codex R3: the re-created body carries identity — readWorkerSignals derives
+    // ticket/phase from the JSON, and a null-ticket stalled row breaks the inbox.
+    expect(reasserted.ticket).toBe("CTL-9");
+    expect(reasserted.phase).toBe("pr");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3);
+  });
+
+  test("defaultClearStall re-arms the ask budget (operator re-arm = fresh cycle)", () => {
+    let clock = 30_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // cap spent
+    // Operator replies → the stall janitor clears the stall; it must also
+    // remove the escalation-cooldown marker so the retry gets fresh asks.
+    defaultClearStall(orchDir, {})({ ticket: "CTL-9", phase: "pr" });
+    expect(
+      existsSync(join(orchDir, ".escalation-cooldowns", "CTL-9-pr.json")),
+    ).toBe(false);
+    // The retried phase no-progresses again → a FRESH ask fires (count restarted).
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(4);
+  });
+
+  test("(R2) a lost flip is re-asserted even INSIDE the cooldown window (no slot held for 10 min)", () => {
+    let clock = 40_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    rmSync(sigPath, { force: true }); // flip lost right after the cap-consuming ask
+    clock += 30 * 1000; // only 30s later — WELL inside the fresh cooldown window
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled"); // re-asserted now, not after 10 min
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // still no new events
+  });
+
+  test("(R4) a lost flip is repaired even while the Linear breaker is OPEN (local-only rewrite)", () => {
+    let clock = 60_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    rmSync(sigPath, { force: true });
+    // breaker OPEN: the repair still lands (no Linear I/O involved)
+    s.opts.breaker = { isOpen: () => true, recordRateLimited: () => {} };
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // no new events
+  });
+
+  test("(R4) a MALFORMED signal is rewritten like a missing one (parse failure cannot orphan the row)", () => {
+    let clock = 70_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    writeFileSync(sigPath, "{truncated"); // corrupt it
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    const repaired = JSON.parse(readFileSync(sigPath, "utf8"));
+    expect(repaired.status).toBe("stalled");
+    expect(repaired.ticket).toBe("CTL-9");
+  });
+
+  test("(R2) the attempts history never inherits a DIFFERENT reason's asks", () => {
+    let clock = 50_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    // three unrelated wedged asks on the marker, the last outside the window
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 3);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 2);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 31 * 60 * 1000);
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // first no-progress ask
+    const firstAsk = s.opts.appendEscalatedEvent.calls[0][0];
+    // fresh — no wedged history; exactly the CURRENT ask's timestamp (post-merge
+    // P3: the emitted history includes the ask being made).
+    expect(firstAsk.extras?.explanation?.attempts).toEqual([clock]);
+  });
+
+  test("a DIFFERENT escalation reason does not consume the no-progress cap (reason change resets the count)", () => {
+    let clock = 12_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    // Seed three same-reason asks via the real recordEscalation primitive but
+    // for a DIFFERENT reason — the no-progress cap must not fire off them.
+    // (The last write is past the cool-down window so the sweep's ask proceeds.)
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 3);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 2);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 31 * 60 * 1000);
+
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // no-progress ask 1
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
+    // Not terminal yet — the no-progress count restarted at 1.
+    expect(existsSync(join(orchDir, "workers", "CTL-9", "phase-pr.json"))).toBe(false);
   });
 });
 
@@ -3869,6 +4125,239 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
       });
     }).not.toThrow();
   });
+
+  test("supersede guard tolerates an unknown phase on the SIGNAL ITSELF, not just in listTicketPhases history (regression)", () => {
+    // Non-FSM dispatches (e.g. recovery-reasoning.mjs's Pass 0r recovery-pass
+    // actuator) reuse this same workers/<ticket>/phase-<name>.json signal-file
+    // machinery with phase:"recovery-pass" — a name with no PHASE_LINEAR_KEY
+    // entry and no ordinal position. Before this fix, `phaseIndex(phase)` ran
+    // UNGUARDED (unlike the `dispatched` reduce four lines above, which already
+    // had the isKnownPhase guard), so every dead recovery-pass worker threw
+    // PhaseFsmError on every tick — caught by scheduler.mjs's PROJ-702 per-worker
+    // isolation, but permanently unreclaimable as a result. A non-FSM phase
+    // can't be "superseded" in the ordinal sense, so it must skip the guard and
+    // fall through to the normal reclaim-eligible path — which, since no probe
+    // is registered for a non-pipeline phase, resolves to a one-time terminal
+    // write ('escalation-cap-terminal', stalledReason: no-probe-for-phase)
+    // rather than an uncaught throw, so listInFlightTickets stops counting the
+    // dead worker as an occupied slot forever (Codex #3027 P1).
+    //
+    // Uses a real temp orchDir (not the describe block's shared "/orch"
+    // string) because this path genuinely writes the signal file to disk —
+    // reusing "/orch" would write outside any test's control (Codex #3027 P2
+    // on the ORIGINAL version of this test).
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-recovery-pass-"));
+    try {
+      const escalate = recorder(undefined);
+      const applyLabel = recorder(undefined);
+      const recordEscalation = recorder(undefined);
+      const recoveryPassSig = {
+        ticket: "PROJ-503",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: {
+          ticket: "PROJ-503",
+          phase: "recovery-pass",
+          orchestrator: "PROJ-503",
+          status: "running",
+          bg_job_id: "job-old",
+        },
+      };
+      let r;
+      expect(() => {
+        r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+          statJob: () => null, // dead bg job
+          listTicketPhases: () => ["triage", "research", "plan", "implement"],
+          appendEscalatedEvent: escalate,
+          applyStalledLabel: applyLabel,
+          inEscalationCooldownFn: () => false,
+          recordEscalationFn: recordEscalation,
+          breaker: { isOpen: () => false },
+        });
+      }).not.toThrow();
+      expect(r).toBe("escalation-cap-terminal");
+      expect(escalate.calls.length).toBe(1);
+      expect(applyLabel.calls.length).toBe(1);
+      expect(recordEscalation.calls.length).toBe(1);
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-503", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase terminalizes locally even while the Linear breaker is OPEN (regression, Codex #3027 round 2 P1)", () => {
+    // The terminal write is purely local (tmp+rename to the signal file) — it
+    // must not wait for the breaker to close. Before this fix, escalateOnce
+    // returned "rate-limited-deferred" without ever reaching the terminal
+    // write for this reason (only a spent no-progress cap triggered the
+    // local repair), so a dead recovery-pass worker observed during a Linear
+    // outage stayed at "running" — the exact slot-leak this whole ticket
+    // exists to close — for the entire duration of the outage.
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-breaker-open-"));
+    try {
+      const escalate = recorder(undefined);
+      const recoveryPassSig = {
+        ticket: "PROJ-504",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: { ticket: "PROJ-504", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+      };
+      const r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+        statJob: () => null,
+        listTicketPhases: () => [],
+        appendEscalatedEvent: escalate, // must NOT be called — breaker open defers the Linear-facing event
+        applyStalledLabel: recorder(undefined),
+        breaker: { isOpen: () => true },
+      });
+      expect(r).toBe("rate-limited-deferred");
+      expect(escalate.calls.length).toBe(0); // the Linear-facing escalation is still deferred
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-504", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase terminalizes locally even while an escalation cooldown is ACTIVE (regression, Codex #3027 round 2 P1)", () => {
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-cooldown-"));
+    try {
+      const recoveryPassSig = {
+        ticket: "PROJ-505",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: { ticket: "PROJ-505", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+      };
+      const r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+        statJob: () => null,
+        listTicketPhases: () => [],
+        appendEscalatedEvent: recorder(undefined),
+        applyStalledLabel: recorder(undefined),
+        breaker: { isOpen: () => false },
+        inEscalationCooldownFn: () => true, // a prior ask already fired within the window
+      });
+      expect(r).toBe("escalation-suppressed");
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-505", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase reconciles to done when the worker's own complete event was already seen (regression, Codex #3027 round 2 P2)", () => {
+    // A recovery-pass worker that emitted phase.recovery-pass.complete and then
+    // crashed before its OWN signal-file update landed genuinely finished its
+    // work. Escalating it to needs-human/stalled would falsely park a ticket
+    // whose recovery pass already succeeded — completeEventSeen must be
+    // checked before treating a probe-less dead signal as unverifiable.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    // Codex #3027 round 3 P2: this signal carries bg_job_id "job-old", so the
+    // reconcile branch's emitReapIntent call must be stubbed — without this
+    // seam the test invokes the PRODUCTION reap-intent producer, which
+    // synchronously appends a real "phase.reclaim.reap-requested" record to
+    // the live ~/catalyst/events/YYYY-MM.jsonl on whatever machine runs the
+    // suite, polluting the unified event log with a fake PROJ-506 request.
+    const reapIntent = recorder(Promise.resolve());
+    const recoveryPassSig = {
+      ticket: "PROJ-506",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-506", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      emitReapIntent: reapIntent,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+    expect(escalate.calls.length).toBe(0); // reconciled to done, never escalated
+    expect(reapIntent.calls[0][0]).toBe("phase.reclaim.reap-requested");
+  });
+
+  test("no-probe-for-phase skips an already-parked needs-human signal instead of re-escalating (regression, Codex #3027 round 4 P2)", () => {
+    // recovery-emit.mjs's `escalated` subcommand already parked this signal
+    // needs-human with a worker-authored decision brief before the worker
+    // died (crashed before its phase-completion event landed). Re-escalating
+    // with a generic no-probe-for-phase brief would discard that curated
+    // explanation — mirrors the pre-existing needs-input guard.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const recoveryPassSig = {
+      ticket: "PROJ-507",
+      phase: "recovery-pass",
+      status: "needs-human",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-507", phase: "recovery-pass", status: "needs-human", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => false,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("noop");
+    expect(escalate.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+  });
+
+  test("no-probe-for-phase returns 'reclaim-failed' when the complete-event-seen emit-complete repair fails (regression, Codex #3027 round 4 P2)", () => {
+    // The other completion-reconciliation branches (PROJ-778 alive-probe-reclaim,
+    // and branch (B) of reclaimDeadWork) both return 'reclaim-failed' on a
+    // non-zero emitComplete — this branch must match so scheduler.mjs doesn't
+    // bucket a failed signal repair as a successful reclaim.
+    const emit = recorder({ code: 1, stderr: "boom" });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const reapIntent = recorder(Promise.resolve());
+    const recoveryPassSig = {
+      ticket: "PROJ-508",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-508", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      emitReapIntent: reapIntent,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(emit.calls.length).toBe(1);
+  });
 });
 
 describe("readBootSince — CTL-655 boot-time window reader", () => {
@@ -4637,6 +5126,127 @@ describe("readClusterHeartbeats — cross-host peer merge (CTL-1090)", () => {
   });
 });
 
+// ─── CTL-1091 (Codex P1 #3): requirePeerView — dispatch must NOT fail-open ────
+// The DISPATCH positive-liveness path passes requirePeerView:true so that a
+// multi-host roster with no trustworthy cross-host view THROWS (→ readPositiveLive
+// catch → resolveDispatchRoster outage degrade → full roster) instead of returning
+// a local-only map (self's own heartbeat), which would collapse the dispatch roster
+// to [self] and make every live host grab every ready ticket. RECOVERY keeps the
+// default (false) fail-open so an unseen peer is never reclaimed on a transient
+// Loki/Linear hiccup. These tests pin the asymmetry.
+describe("readClusterHeartbeats — requirePeerView dispatch strict mode (CTL-1091 P1 #3)", () => {
+  let tmpDir;
+  let logPath;
+  let prevSource;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ctl1091-strict-hb-"));
+    logPath = join(tmpDir, "events.jsonl");
+    writeFileSync(logPath, makeHbLine("mini", "2026-06-13T01:00:00Z") + "\n");
+    // Pin the liveness source so peerLivenessConfigured() is driven by anchorIssue
+    // (linear source) and NOT by an ambient CATALYST_LIVENESS_READ_SOURCE=loki with
+    // no Loki URL — which would make peerLivenessConfigured always false and mask the
+    // configured-vs-unconfigured distinction these tests pin. (CI runs with a clean
+    // env; a dev machine may have the loki source exported.)
+    prevSource = process.env.CATALYST_LIVENESS_READ_SOURCE;
+    process.env.CATALYST_LIVENESS_READ_SOURCE = "linear";
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    if (prevSource === undefined) delete process.env.CATALYST_LIVENESS_READ_SOURCE;
+    else process.env.CATALYST_LIVENESS_READ_SOURCE = prevSource;
+  });
+
+  test("strict + multi-host + peer transport UNCONFIGURED → THROWS (no silent local-only map)", () => {
+    expect(() =>
+      readClusterHeartbeats({
+        logPath,
+        roster: ["mini", "laptop"],
+        anchorIssue: null, // unconfigured (linear source) → no cross-host view
+        readPeers: () => ({}),
+        requirePeerView: true,
+      }),
+    ).toThrow(/cross-host liveness view/i);
+  });
+
+  test("strict + multi-host + peer read THROWS → propagates (not swallowed)", () => {
+    expect(() =>
+      readClusterHeartbeats({
+        logPath,
+        roster: ["mini", "laptop"],
+        anchorIssue: "CTL-9999",
+        readPeers: () => { throw new Error("Linear down"); },
+        requirePeerView: true,
+      }),
+    ).toThrow(/Linear down/);
+  });
+
+  test("strict + multi-host + peer read returns EMPTY {} (genuine, no throw) → local map, NOT an outage", () => {
+    // A SUCCESSFUL-but-empty read (no peers heartbeating yet / all genuinely absent)
+    // must NOT be treated as an outage — the reader returns {} without throwing, so
+    // readClusterHeartbeats returns the local self-only map and the dispatch resolver
+    // legitimately fails over. Only a determinate FAILURE (which the strict readers now
+    // throw on) routes to the full-roster fallback. See the reader-level strict tests.
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers: () => ({}), // genuine empty success (no throw)
+      requirePeerView: true,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBeUndefined();
+  });
+
+  test("strict + multi-host + peer read OK → merges normally (happy path unaffected)", () => {
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers: () => ({
+        laptop: { host: "laptop", last_seen: "2026-06-13T00:55:00Z", in_flight_tickets: [] },
+      }),
+      requirePeerView: true,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBe("2026-06-13T00:55:00Z");
+  });
+
+  test("strict + SINGLE-host → peer reader never called, never throws (no-op)", () => {
+    expect(() =>
+      readClusterHeartbeats({
+        logPath,
+        roster: ["mini"],
+        anchorIssue: null,
+        readPeers: () => { throw new Error("must not be called single-host"); },
+        requirePeerView: true,
+      }),
+    ).not.toThrow();
+  });
+
+  test("recovery (default requirePeerView:false) stays FAIL-OPEN on the same conditions", () => {
+    // unconfigured transport
+    expect(() =>
+      readClusterHeartbeats({
+        logPath,
+        roster: ["mini", "laptop"],
+        anchorIssue: null,
+        readPeers: () => ({}),
+      }),
+    ).not.toThrow();
+    // peer read throws
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers: () => { throw new Error("Linear down"); },
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z"); // local map preserved
+    expect(result.laptop).toBeUndefined();
+  });
+});
+
 // ─── CTL-1090: deadHosts flags a stale peer (pure function, no change needed) ─
 
 describe("deadHosts — flags a stale peer in merged lastSeen (CTL-1090)", () => {
@@ -4680,6 +5290,10 @@ describe("reclaimDeadHostWork — peer in_flight_tickets seam (CTL-1090)", () =>
         rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-7" }),
         thoughtsPull: () => ({ ok: true }),
         dispatch: (od, ticket) => { dispatched.push(ticket); return { code: 0 }; },
+        // CTL-1481: stub the label-stamp seam — this test's subject is the
+        // peer in_flight_tickets seam, not the label write, and a won claim
+        // now fires it (else this would hit the real network default).
+        stampWorkerLabel: () => ({ stamped: true }),
       },
     );
     expect(dispatched.sort()).toEqual(["CTL-7", "CTL-8"]);
@@ -4840,6 +5454,120 @@ describe("phaseAlreadyComplete — event-log dedup (CTL-863)", () => {
   });
 });
 
+// ─── CTL-1514: streaming default path + batched checker ──────────────────────
+import { makeBatchedPhaseCompleteChecker } from "./recovery.mjs";
+import { scanEventsChunked } from "./event-tail.mjs";
+import { statSync as ctl1514StatSync } from "node:fs";
+
+function ctl1514TempLog(names) {
+  const dir = mkdtempSync(join(tmpdir(), "ctl1514-recov-"));
+  const path = join(dir, "events.jsonl");
+  writeFileSync(
+    path,
+    names.map((n) => JSON.stringify({ attributes: { "event.name": n } })).join("\n") + "\n"
+  );
+  return path;
+}
+
+describe("phaseAlreadyComplete — streaming default path (CTL-1514)", () => {
+  test("default path (logPath, no readLog) streams the file and finds the event", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-900", "phase.plan.complete.CTL-800"]);
+    expect(phaseAlreadyComplete("CTL-900", "research", { logPath: path })).toBe(true);
+    expect(phaseAlreadyComplete("CTL-800", "plan", { logPath: path })).toBe(true);
+  });
+
+  test("default path returns false for a non-present (ticket, phase)", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-900"]);
+    expect(phaseAlreadyComplete("CTL-900", "plan", { logPath: path })).toBe(false);
+    expect(phaseAlreadyComplete("CTL-123", "research", { logPath: path })).toBe(false);
+  });
+
+  test("default path returns false on a missing file (never throws)", () => {
+    expect(
+      phaseAlreadyComplete("CTL-900", "research", { logPath: join(tmpdir(), "nope-1514.jsonl") })
+    ).toBe(false);
+  });
+});
+
+describe("makeBatchedPhaseCompleteChecker — one pass for N tickets (CTL-1514)", () => {
+  test("correct true/false per (ticket, phase); whole log read once, later calls only resume", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-100", "phase.plan.complete.CTL-200"]);
+    const fromOffsets = [];
+    const scan = (opts) => {
+      fromOffsets.push(opts.fromOffset);
+      return scanEventsChunked(opts);
+    };
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path, scan });
+
+    expect(check("CTL-100", "research")).toBe(true);
+    expect(check("CTL-200", "plan")).toBe(true);
+    expect(check("CTL-300", "research")).toBe(false); // not complete
+    expect(check("CTL-100", "plan")).toBe(false); // wrong phase
+
+    // The first call reads the whole log from offset 0; every later call resumes
+    // from the prior cursor (never re-reads from 0) — one full pass for N tickets,
+    // the rest are zero-byte delta scans.
+    const size = ctl1514StatSync(path).size;
+    expect(fromOffsets[0]).toBe(0);
+    expect(fromOffsets.slice(1)).toEqual([size, size, size]);
+  });
+
+  test("observes a completion appended AFTER the first lookup (Codex P1: no stale duplicate dispatch)", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-100"]);
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path });
+    expect(check("CTL-100", "research")).toBe(true); // first (full) scan
+    expect(check("CTL-200", "plan")).toBe(false); // not present yet
+    // A live host appends CTL-200's completion mid-sweep, after the first lookup:
+    appendFileSync(
+      path,
+      JSON.stringify({ attributes: { "event.name": "phase.plan.complete.CTL-200" } }) + "\n"
+    );
+    // The incremental cursor picks up the newly-appended bytes → true, not stale false.
+    expect(check("CTL-200", "plan")).toBe(true);
+  });
+
+  test("lazy — never scans when no check is invoked (zero dead-host tickets ⇒ zero reads)", () => {
+    let scanCalls = 0;
+    const scan = () => {
+      scanCalls++;
+      return { endOffset: 0, leftover: "" };
+    };
+    makeBatchedPhaseCompleteChecker({ logPath: "/whatever", scan });
+    expect(scanCalls).toBe(0);
+  });
+
+  test("re-scans the new month's file after the log path rolls over (Codex P2 on #2729)", () => {
+    const monthA = ctl1514TempLog(["phase.research.complete.CTL-100"]);
+    const monthB = ctl1514TempLog(["phase.plan.complete.CTL-200"]);
+    let current = monthA;
+    // logPath as a resolver mimics getEventLogPath() re-resolving each call; a UTC
+    // month boundary mid-sweep flips it to the new file.
+    const check = makeBatchedPhaseCompleteChecker({ logPath: () => current });
+    expect(check("CTL-100", "research")).toBe(true); // scanned month A
+    expect(check("CTL-200", "plan")).toBe(false); // not in A yet
+    current = monthB; // month rolls over
+    expect(check("CTL-200", "plan")).toBe(true); // new file scanned from 0
+    expect(check("CTL-100", "research")).toBe(true); // prior-month completion still deduped
+  });
+
+  test("resets the cursor when the same-path log is replaced/truncated (Codex P2 on #2729)", () => {
+    const path = ctl1514TempLog([
+      "phase.research.complete.CTL-100",
+      "phase.plan.complete.CTL-200",
+      "phase.verify.complete.CTL-300",
+    ]);
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path });
+    expect(check("CTL-300", "verify")).toBe(true); // scans the full file, cursor at EOF
+    // Legacy rotation rewrites a SHORTER file at the SAME path with a new completion.
+    writeFileSync(
+      path,
+      JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } }) + "\n"
+    );
+    // size < cursor → reset to 0 → the replacement is scanned, not skipped past.
+    expect(check("CTL-900", "research")).toBe(true);
+  });
+});
+
 // ─── CTL-863: reclaimDeadHostWork ────────────────────────────────────────────
 
 import { reclaimDeadHostWork } from "./recovery.mjs";
@@ -4860,6 +5588,10 @@ const makeBaseDeps = (overrides = {}) => ({
   alreadyComplete: () => false,
   rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-900" }),
   dispatch: () => ({ code: 0 }),
+  // CTL-1481: stub the label-stamp seam by default — this describe block's
+  // default `claim` always wins, so every test that doesn't override
+  // stampWorkerLabel would otherwise hit the real (network-touching) default.
+  stampWorkerLabel: () => ({ stamped: true }),
   ...overrides,
 });
 
@@ -4882,6 +5614,47 @@ describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
     );
     expect(dispatched).toBe(true);
     expect(r.taken).toEqual([{ ticket: "CTL-900", phase: "implement", generation: 5 }]);
+  });
+
+  // CTL-1481: the worker:<host> label visibility-projection stamp fires right
+  // after a won takeover claim, mirroring the emitFenceClaimed gate.
+  test("CTL-1481: a won takeover claim fires stampWorkerLabel with the ticket + host", async () => {
+    const calls = [];
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        stampWorkerLabel: (arg) => { calls.push(arg); return { stamped: true }; },
+      }),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ ticket: "CTL-900", hostName: "mini" });
+    expect(r.taken).toHaveLength(1);
+  });
+
+  test("CTL-1481: a lost claim never fires stampWorkerLabel", async () => {
+    const calls = [];
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        claim: () => ({ won: false, generation: null }),
+        stampWorkerLabel: (arg) => { calls.push(arg); return { stamped: true }; },
+      }),
+    );
+    expect(calls).toHaveLength(0);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("CTL-1481: a thrown stampWorkerLabel never blocks the takeover dispatch", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        stampWorkerLabel: () => { throw new Error("linearis exploded"); },
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(true);
+    expect(r.taken).toHaveLength(1);
   });
 
   test("HRW says another survivor owns it → skip (no claim, no dispatch)", async () => {
@@ -4976,6 +5749,64 @@ describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
     );
     expect(dispatches.sort()).toEqual(["CTL-900", "CTL-901"]);
     expect(r.taken).toHaveLength(2);
+  });
+
+  // ── CTL-863 follow-up regression (Codex P2 #3 + #5) — the takeover fence must
+  // both (a) EMIT fence.claimed as soon as the claim wins (not gated on a
+  // successful redispatch) and (b) PERSIST the won generation to
+  // cluster-generation.json so the heartbeat publisher can re-emit it and keep
+  // the reclaimed ticket's projection fresh. These are filesystem-observable
+  // (emitFenceClaimed / writeLocalClusterGeneration are not injectable seams).
+  describe("takeover fence durability", () => {
+    let catalystDir;
+    let orchDir;
+    let savedCatalystDir;
+    beforeEach(() => {
+      catalystDir = mkdtempSync(join(tmpdir(), "ctl863-fence-catalyst-"));
+      orchDir = mkdtempSync(join(tmpdir(), "ctl863-fence-orch-"));
+      savedCatalystDir = process.env.CATALYST_DIR;
+      process.env.CATALYST_DIR = catalystDir; // isolate the event log write
+    });
+    afterEach(() => {
+      if (savedCatalystDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = savedCatalystDir;
+      rmSync(catalystDir, { recursive: true, force: true });
+      rmSync(orchDir, { recursive: true, force: true });
+    });
+
+    const eventLogText = () => {
+      const dir = join(catalystDir, "events");
+      if (!existsSync(dir)) return "";
+      return readdirSync(dir)
+        .map((f) => readFileSync(join(dir, f), "utf8"))
+        .join("");
+    };
+
+    test("#3: a successful takeover PERSISTS the won generation to cluster-generation.json", async () => {
+      mkdirSync(join(orchDir, "workers", "CTL-900"), { recursive: true });
+      const r = await reclaimDeadHostWork(
+        { orchDir },
+        makeBaseDeps({ rebuildWorktree: () => ({ ok: true, cwd: join(orchDir, "wt") }) }),
+      );
+      expect(r.taken).toHaveLength(1);
+      const gen = JSON.parse(
+        readFileSync(join(orchDir, "workers", "CTL-900", "cluster-generation.json"), "utf8"),
+      );
+      expect(gen).toEqual({ generation: 5 });
+    });
+
+    test("#5: fence.claimed is emitted at claim-win even when the redispatch never succeeds", async () => {
+      // rebuildWorktree fails → no dispatch, taken stays empty — but the claim
+      // already bumped the generation, so the durable projection MUST record the
+      // takeover regardless (else a partitioned old owner keeps a fresh-looking
+      // self-owned projection under projection-first).
+      const r = await reclaimDeadHostWork(
+        { orchDir },
+        makeBaseDeps({ rebuildWorktree: () => ({ ok: false, cwd: null }) }),
+      );
+      expect(r.taken).toEqual([]);
+      expect(eventLogText()).toContain("fence.claimed.CTL-900");
+    });
   });
 });
 
@@ -5166,5 +5997,68 @@ describe("CTL-1065: reclaimDeadWorkIfPossible escalated event carries explanatio
     const expl = call.extras?.explanation;
     expect(expl).toBeTruthy();
     expect(validateExplanation(expl).valid).toBe(true);
+  });
+});
+
+// ─── CTL-1420 (#17): readClusterHeartbeats source-aware peer gate ─────────────
+// In "loki" mode the cross-host peer read is gated on a resolvable Loki URL (NOT the
+// Linear anchor); in "linear" mode (the default, covered above) it gates on the anchor.
+describe("readClusterHeartbeats — loki source gate (CTL-1420 #17)", () => {
+  const ENVS = ["CATALYST_LIVENESS_READ_SOURCE", "CATALYST_LOKI_QUERY_URL", "OTEL_EXPORTER_OTLP_ENDPOINT"];
+  const NO_LOG = "/nonexistent/ctl1420/events.jsonl"; // readFileSync throws → local map empty
+  let saved = {};
+  beforeEach(() => {
+    for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    process.env.CATALYST_LIVENESS_READ_SOURCE = "loki";
+  });
+  afterEach(() => {
+    for (const k of ENVS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    saved = {};
+  });
+
+  test("loki + Loki URL configured → peer merge runs (and does NOT require the Linear anchor)", () => {
+    process.env.CATALYST_LOKI_QUERY_URL = "http://loki:3100";
+    const readPeers = () => ({ "mini-2": { last_seen: "2026-06-08T00:05:00Z", in_flight_tickets: [] } });
+    const result = readClusterHeartbeats({
+      logPath: NO_LOG,
+      roster: ["mini", "mini-2"],
+      anchorIssue: null, // loki mode must NOT depend on the Linear anchor
+      readPeers,
+    });
+    expect(result["mini-2"]).toBe("2026-06-08T00:05:00Z");
+  });
+
+  test("loki but NO Loki URL → peer read SKIPPED (local-map only), even with an anchor set", () => {
+    const readPeers = () => { throw new Error("must not read: no Loki URL configured"); };
+    const result = readClusterHeartbeats({
+      logPath: NO_LOG,
+      roster: ["mini", "mini-2"],
+      anchorIssue: "CTL-9", // loki mode gates on the Loki URL, not this anchor
+      readPeers,
+    });
+    expect(result).toEqual({});
+  });
+});
+
+// --- CTL-1488 Phase 2: caused_by + event.stream_class parity ----------------
+// buildEventEnvelope is the hand-rolled execution-core builder. Bring it to
+// ADR-022 parity with the shared TS/bash builders: a present caused_by field
+// (value or null) and an event.stream_class attribute on every phase.* envelope.
+describe("buildEventEnvelope — CTL-1488 caused_by + event.stream_class parity", () => {
+  test("caused_by threads through when provided, null by default (ADR-022 parity)", () => {
+    const line = buildEventEnvelope({ phase: "verify", ticket: "CTL-1", action: "escalated", reason: "x" });
+    expect(JSON.parse(line).caused_by).toBeNull(); // additive default — parity with canonical-event.sh:340
+    const withCause = buildEventEnvelope({
+      phase: "verify",
+      ticket: "CTL-1",
+      action: "escalated",
+      reason: "x",
+      causedBy: "evt-abc",
+    });
+    expect(JSON.parse(withCause).caused_by).toBe("evt-abc");
+  });
+  test("stamps attributes['event.stream_class'] = 'coordination' for every phase.* envelope", () => {
+    const line = buildEventEnvelope({ phase: "verify", ticket: "CTL-1", action: "escalated", reason: "x" });
+    expect(JSON.parse(line).attributes["event.stream_class"]).toBe("coordination");
   });
 });

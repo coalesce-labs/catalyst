@@ -9,10 +9,16 @@ import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
 import { createTailer } from "./lib/tail.ts";
 import { log } from "./lib/logger.ts";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { OtlpSender } from "./lib/destinations/otlp.ts";
 import { PosthogSender } from "./lib/destinations/posthog.ts";
 import { CloudflareAESender } from "./lib/destinations/cloudflare-ae.ts";
-import { isFlatEvent, normalizeFlatEvent } from "./lib/normalize.ts";
+import {
+  isFlatEvent,
+  normalizeFlatEvent,
+  isPinoRecord,
+  normalizePinoRecord,
+} from "./lib/normalize.ts";
 import { dlqDepth } from "./lib/dlq.ts";
 import { buildCanonicalEnvelope } from "./lib/canonical.ts";
 
@@ -46,7 +52,10 @@ export function maxTs(a: string | undefined, b: string | undefined): string | un
 }
 
 /** Returns lagMs = localNewestTs - lastForwardedTs in ms, clamped to ≥ 0. Returns 0 when either timestamp is undefined. */
-export function computeLagMs(localNewestTs: string | undefined, lastForwardedTs: string | undefined): number {
+export function computeLagMs(
+  localNewestTs: string | undefined,
+  lastForwardedTs: string | undefined
+): number {
   if (!localNewestTs || !lastForwardedTs) return 0;
   const delta = Date.parse(localNewestTs) - Date.parse(lastForwardedTs);
   return delta > 0 ? delta : 0;
@@ -124,6 +133,9 @@ function emitLag(): void {
   // startup line then went silent, reading as down). Rides the Alloy .log stream,
   // independent of the event pipeline this daemon itself ships.
   logDaemonHeartbeat(log, "otel-forward");
+  // CTL-1517: per-process RSS/heap OTel gauge on the same tick (fire-and-forget; never
+  // throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
+  void emitProcessMemoryMetric({ serviceName: "catalyst.otel-forward", log });
   // Skip on cold start before any event has been processed or delivered
   if (!lastLocalTs && !lastForwardedTs) return;
   try {
@@ -142,7 +154,12 @@ function emitLag(): void {
 export function processLine(line: string): void {
   try {
     let ev = JSON.parse(line) as CanonicalEvent;
-    if (isFlatEvent(ev)) ev = normalizeFlatEvent(ev as unknown as Record<string, unknown>);
+    // pino BEFORE flat: an execution-core pino WARN/ERROR may carry a structured
+    // `event` field (e.g. reaper.mjs), which isFlatEvent would otherwise claim
+    // and strip of its severity. isPinoRecord (numeric level + string msg) never
+    // matches a real flat catalyst event, so this ordering is safe (CTL-1424).
+    if (isPinoRecord(ev)) ev = normalizePinoRecord(ev as unknown as Record<string, unknown>);
+    else if (isFlatEvent(ev)) ev = normalizeFlatEvent(ev as unknown as Record<string, unknown>);
     if (!ev.attributes) {
       stats.skipped++;
       return;

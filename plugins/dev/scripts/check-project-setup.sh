@@ -92,7 +92,7 @@ if ! command -v smee &>/dev/null; then
 	warnings+=("  Install: npm install -g smee-client")
 fi
 
-if [[ -f "$HOME_CONFIG_PATH" ]]; then
+if [[ -f $HOME_CONFIG_PATH ]]; then
 	SMEE_CHANNEL=$(jq -r '.catalyst.monitor.github.smeeChannel // empty' "$HOME_CONFIG_PATH" 2>/dev/null)
 	if [[ -z $SMEE_CHANNEL ]]; then
 		warnings+=("Missing catalyst.monitor.github.smeeChannel in $HOME_CONFIG_PATH — webhook tunnel won't start")
@@ -103,16 +103,42 @@ else
 	warnings+=("  Run: bash plugins/dev/scripts/setup-webhooks.sh")
 fi
 
-# 3. Check CLAUDE.md has Catalyst snippet
+# 3. Check CLAUDE.md has Catalyst snippet — a thin `@AGENTS.md` bridge (the
+#    CTL-1530 dual-harness layout) deliberately does NOT repeat the phrase
+#    itself; it lives in the imported AGENTS.md instead. Follow a whole-line
+#    `@AGENTS.md` bridge to AGENTS.md before concluding the snippet is
+#    missing, so a correctly migrated bridge repo isn't told to re-add it to
+#    the wrong file. Only warn when BOTH the bridge target and CLAUDE.md
+#    itself lack the phrase.
+# Resolve the snippet template from the INSTALLED plugin, not the consumer
+# repo's cwd — downstream projects don't vendor plugins/dev/templates/.
+SNIPPET_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../templates/CLAUDE_SNIPPET.md"
 if [[ -f "CLAUDE.md" ]]; then
-	if ! grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+	# Bridge detection FIRST: on a real @AGENTS.md bridge the canonical file is
+	# AGENTS.md, so the snippet must be validated THERE regardless of whether a
+	# stray duplicate still sits in CLAUDE.md (Codex reads only AGENTS.md — a
+	# CLAUDE.md-only copy would leave it without the workflow while checkup
+	# reads green). The -E trailing [[:space:]]* tolerates CRLF/whitespace,
+	# matching the migrator's normalized detection.
+	if grep -qE '^@AGENTS\.md[[:space:]]*$' CLAUDE.md 2>/dev/null && [[ -f "AGENTS.md" ]]; then
+		if ! grep -q "Catalyst Development Workflow" AGENTS.md 2>/dev/null; then
+			warnings+=("CLAUDE.md is a thin @AGENTS.md bridge, but the imported AGENTS.md is missing the Catalyst workflow snippet")
+			warnings+=("  Add the snippet from: ${SNIPPET_TEMPLATE}")
+			warnings+=("  Or run: cat \"${SNIPPET_TEMPLATE}\" >> AGENTS.md")
+			if grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+				warnings+=("  (a copy exists in CLAUDE.md — move it into AGENTS.md so both agents see it)")
+			fi
+		fi
+	elif grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+		: # monolithic CLAUDE.md with the snippet present directly
+	else
 		warnings+=("CLAUDE.md is missing the Catalyst workflow snippet")
-		warnings+=("  Add the snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
-		warnings+=("  Or run: cat plugins/dev/templates/CLAUDE_SNIPPET.md >> CLAUDE.md")
+		warnings+=("  Add the snippet from: ${SNIPPET_TEMPLATE}")
+		warnings+=("  Or run: cat \"${SNIPPET_TEMPLATE}\" >> CLAUDE.md")
 	fi
 else
 	warnings+=("No CLAUDE.md found — agents will lack project-level workflow context")
-	warnings+=("  Create one and add the Catalyst snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
+	warnings+=("  Create one and add the Catalyst snippet from: ${SNIPPET_TEMPLATE}")
 fi
 
 # 4. Check config.json exists and has required fields
@@ -255,8 +281,8 @@ if [[ -n $CONFIG_PATH ]]; then
 					-H "Authorization: ${GIT_AUTO_TOKEN}" \
 					-d "$ga_payload" 2>/dev/null || true)
 				if [[ -n $ga_resp ]] && ! echo "$ga_resp" | jq -e '.errors' >/dev/null 2>&1; then
-					git_auto_nodes=$(echo "$ga_resp" \
-						| jq -c '.data.teams.nodes[0].gitAutomationStates.nodes // []' 2>/dev/null)
+					git_auto_nodes=$(echo "$ga_resp" |
+						jq -c '.data.teams.nodes[0].gitAutomationStates.nodes // []' 2>/dev/null)
 					if [[ -n $git_auto_nodes && $git_auto_nodes != "null" ]]; then
 						mkdir -p "$CATALYST_CONFIG"
 						tmp_cache="$(mktemp)"
@@ -267,9 +293,9 @@ if [[ -n $CONFIG_PATH ]]; then
 							--argjson nodes "$git_auto_nodes" \
 							--argjson ts "$(date +%s)" \
 							'.[$k] = { fetchedAt: $ts, nodes: $nodes }' \
-							> "$tmp_cache" 2>/dev/null \
-							&& mv "$tmp_cache" "$GIT_AUTO_CACHE" \
-							|| rm -f "$tmp_cache"
+							>"$tmp_cache" 2>/dev/null &&
+							mv "$tmp_cache" "$GIT_AUTO_CACHE" ||
+							rm -f "$tmp_cache"
 					fi
 				fi
 			fi
@@ -290,6 +316,80 @@ if [[ -n $CONFIG_PATH ]]; then
 					warnings+=("Linear 'merge' git automation for team '$TEAM_KEY' points at '$merge_state' (expected 'Done')")
 				fi
 			fi
+		fi
+
+		# CTL-764: worker-status label group check (hot-path, TTL-cached). Reuses the
+		# GIT_AUTO_TOKEN acquired above. Shared cache key: .[TEAM_KEY].workerStatusLabels
+		# preserves the gitAutomation sibling written above. Warnings only — never alters
+		# exit code. No per-project token → silently skipped (same gate as git-automation).
+		if [[ -n $GIT_AUTO_TOKEN && -n $TEAM_KEY ]]; then
+			WS_CACHE="${CATALYST_CONFIG}/linear-git-automation-cache.json"
+			WS_TTL=$((6 * 60 * 60))
+			ws_members=""
+			ws_status="" # "" | "no_group" | "found"
+			if [[ -f $WS_CACHE ]]; then
+				ws_cache_ts=$(jq -r --arg k "$TEAM_KEY" \
+					'.[$k].workerStatusLabels.fetchedAt // empty' \
+					"$WS_CACHE" 2>/dev/null)
+				if [[ -n $ws_cache_ts ]]; then
+					now_ts=$(date +%s)
+					age=$((now_ts - ws_cache_ts))
+					if [[ $age -ge 0 && $age -lt $WS_TTL ]]; then
+						ws_status="found"
+						ws_members=$(jq -c --arg k "$TEAM_KEY" \
+							'.[$k].workerStatusLabels.members // []' \
+							"$WS_CACHE" 2>/dev/null)
+					fi
+				fi
+			fi
+
+			if [[ -z $ws_status ]] && command -v curl &>/dev/null; then
+				ws_query='query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+				ws_payload=$(jq -nc --arg q "$ws_query" '{query: $q}')
+				ws_resp=$(curl -s --max-time 5 -X POST https://api.linear.app/graphql \
+					-H "Content-Type: application/json" \
+					-H "Authorization: ${GIT_AUTO_TOKEN}" \
+					-d "$ws_payload" 2>/dev/null || true)
+				if [[ -n $ws_resp ]] && ! echo "$ws_resp" | jq -e '.errors' >/dev/null 2>&1; then
+					all_labels=$(echo "$ws_resp" | jq -c '.data.issueLabels.nodes // []' 2>/dev/null)
+					ws_group_id=$(echo "$all_labels" | jq -r \
+						'.[] | select(.name == "worker-status" and .isGroup == true) | .id // empty' \
+						2>/dev/null | head -1)
+					if [[ -n $ws_group_id ]]; then
+						ws_status="found"
+						ws_members=$(echo "$all_labels" | jq -c --arg pid "$ws_group_id" \
+							'[.[] | select(.parent.id == $pid) | .name]' 2>/dev/null)
+						mkdir -p "$CATALYST_CONFIG"
+						tmp_ws="$(mktemp)"
+						existing_ws_cache='{}'
+						[[ -f $WS_CACHE ]] && existing_ws_cache="$(cat "$WS_CACHE" 2>/dev/null || echo '{}')"
+						echo "$existing_ws_cache" | jq \
+							--arg k "$TEAM_KEY" \
+							--argjson members "$ws_members" \
+							--argjson ts "$(date +%s)" \
+							'.[$k].workerStatusLabels = { fetchedAt: $ts, members: $members }' \
+							>"$tmp_ws" 2>/dev/null &&
+							mv "$tmp_ws" "$WS_CACHE" ||
+							rm -f "$tmp_ws"
+					else
+						ws_status="no_group"
+					fi
+				fi
+			fi
+
+			case "$ws_status" in
+			found)
+				for _ws_exp in queued blocked needs-input needs-human; do
+					if ! echo "$ws_members" | jq -e --arg n "$_ws_exp" \
+						'map(. == $n) | any' >/dev/null 2>&1; then
+						warnings+=("worker-status label '${_ws_exp}' missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh")
+					fi
+				done
+				;;
+			no_group)
+				warnings+=("worker-status label group missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh")
+				;;
+			esac
 		fi
 	fi
 
@@ -336,7 +436,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #     port/CA diagnostics live in check-setup.sh; here we keep it cheap (read the
 #     file in a subshell, no network) and warn only.
 DAEMON_ENV_FILE="${CATALYST_EXECUTION_CORE_ENV:-$CATALYST_CONFIG/execution-core.env}"
-if [[ -f "$DAEMON_ENV_FILE" ]]; then
+if [[ -f $DAEMON_ENV_FILE ]]; then
 	daemon_env_vals=$(
 		set +euo pipefail
 		set -a
@@ -344,7 +444,7 @@ if [[ -f "$DAEMON_ENV_FILE" ]]; then
 		. "$DAEMON_ENV_FILE" 2>/dev/null
 		set +a
 		printf 'PROXY=%s\nUSE_ENV_PROXY=%s\n' \
-			"${HTTPS_PROXY:-${HTTP_PROXY:-}}" "${NODE_USE_ENV_PROXY:-}"
+			"${HTTPS_PROXY:-${HTTP_PROXY-}}" "${NODE_USE_ENV_PROXY-}"
 	)
 	de_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^PROXY=//p')
 	de_use_env_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^USE_ENV_PROXY=//p')
@@ -368,14 +468,14 @@ if [[ -x $MONITOR_SCRIPT ]]; then
 			local_tunnel=$(curl -s --max-time 2 "http://localhost:${MONITOR_PORT_RESOLVED}/api/status/webhook-tunnel" 2>/dev/null || true)
 			smee_url=$(echo "$local_tunnel" | jq -r '.smeeUrl // empty' 2>/dev/null || true)
 			tunnel_connected=$(echo "$local_tunnel" | jq -r '.connected // empty' 2>/dev/null || true)
-			if [[ -n "$smee_url" && "$tunnel_connected" != "true" ]]; then
+			if [[ -n $smee_url && $tunnel_connected != "true" ]]; then
 				warnings+=("Webhook tunnel not connected (smeeUrl=${smee_url}) — GitHub events won't reach the daemon")
 				warnings+=("  Restart the monitor: $MONITOR_SCRIPT restart")
 			fi
 		fi
 	else
 		# Daemon stopped. Behavior splits on autonomous vs interactive.
-		if [[ -n ${CATALYST_AUTONOMOUS:-} ]] || [[ ! -t 0 ]]; then
+		if [[ -n ${CATALYST_AUTONOMOUS-} ]] || [[ ! -t 0 ]]; then
 			echo -e "${YELLOW}WARN: orch-monitor daemon not running${NC}" >&2
 			echo "  Event-driven skills will degrade to polling fallback." >&2
 			echo "  Start with: $MONITOR_SCRIPT start" >&2
@@ -385,15 +485,15 @@ if [[ -x $MONITOR_SCRIPT ]]; then
 			echo "to slower polling fallback without it."
 			read -r -p "Start the monitor now? [Y/n] " yn
 			case "$yn" in
-				[Nn]*)
-					warnings+=("orch-monitor daemon not running — event-driven skills will degrade to polling")
-					;;
-				*)
-					if ! "$MONITOR_SCRIPT" start; then
-						errors+=("Failed to start orch-monitor — check log: ${CATALYST_DIR:-$HOME/catalyst}/monitor.log")
-						errors+=("  Investigate: tail -50 \"${CATALYST_DIR:-$HOME/catalyst}/monitor.log\"")
-					fi
-					;;
+			[Nn]*)
+				warnings+=("orch-monitor daemon not running — event-driven skills will degrade to polling")
+				;;
+			*)
+				if ! "$MONITOR_SCRIPT" start; then
+					errors+=("Failed to start orch-monitor — check log: ${CATALYST_DIR:-$HOME/catalyst}/monitor.log")
+					errors+=("  Investigate: tail -50 \"${CATALYST_DIR:-$HOME/catalyst}/monitor.log\"")
+				fi
+				;;
 			esac
 		fi
 	fi
@@ -443,18 +543,126 @@ if [[ -n $CONFIG_PATH ]]; then
 		# set -e would abort on rc=1; tolerate non-zero so we can branch on rc.
 		DRIFT_OUT=$(bash "$DRIFT_SCRIPT" --config "$CONFIG_PATH" --template "$TEMPLATE_PATH" 2>&1) && DRIFT_RC=0 || DRIFT_RC=$?
 		case $DRIFT_RC in
-			0) ;;
-			1)
-				while IFS= read -r line; do
-					[[ -n $line ]] && warnings+=("$line")
-				done <<<"$DRIFT_OUT"
-				;;
-			*)
-				# Collapse newlines so the warning stays a single bullet.
-				warnings+=("check-config-drift exited $DRIFT_RC: ${DRIFT_OUT//$'\n'/ }")
-				;;
+		0) ;;
+		1)
+			while IFS= read -r line; do
+				[[ -n $line ]] && warnings+=("$line")
+			done <<<"$DRIFT_OUT"
+			;;
+		*)
+			# Collapse newlines so the warning stays a single bullet.
+			warnings+=("check-config-drift exited $DRIFT_RC: ${DRIFT_OUT//$'\n'/ }")
+			;;
 		esac
 	fi
+fi
+
+# 8. Linear read path — replica-first reflex (CTL-1397 / CTL-1420 follow-up)
+#    CTL-1397 pivoted agent Linear READS to direct SQLite against the local
+#    catalyst-replica.db (writer-fed from Catalyst Cloud). Bare `linearis issues
+#    read <ID>` instead hits the personal ~2500/hr Linear key and 429s under load.
+#    Affirm "reads → replica" when the replica is FRESH; WARN (advisory, NEVER fatal)
+#    only when the operator has OPTED IN (CATALYST_LINEAR_REPLICA=on) but the replica
+#    is STALE/missing — so a downstream/non-fleet host that never runs the replica is
+#    NOT nagged and is NOT flipped out of "Project setup OK". Freshness is the SAME
+#    two-gate check the read helper enforces (writer.lock < 5min AND a sync_meta
+#    cursor) — sourced, not duplicated, so the gate can't drift from read behavior.
+REPLICA_LIB=""
+if [[ -f "${SCRIPT_DIR}/lib/linear-read-replica.sh" ]]; then
+	REPLICA_LIB="${SCRIPT_DIR}/lib/linear-read-replica.sh"
+elif [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh" ]]; then
+	REPLICA_LIB="${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"
+fi
+if [[ -n $REPLICA_LIB ]]; then
+	# Defines replica_fresh() (print-free, rc-only) + CATALYST_REPLICA_DB /
+	# CATALYST_LINEAR_REPLICA_STALE_MS defaults. Idempotent; safe under set -e.
+	# shellcheck source=lib/linear-read-replica.sh disable=SC1090,SC1091
+	source "$REPLICA_LIB"
+	_replica_stale_s=$((${CATALYST_LINEAR_REPLICA_STALE_MS:-300000} / 1000))
+	if replica_fresh; then
+		echo -e "${GREEN}Linear reads → local replica${NC} (${CATALYST_REPLICA_DB}) — do NOT use bare 'linearis issues read <ID>' for single-ticket reads (it hits the personal Linear key and 429s under load)."
+	elif [[ -f $CATALYST_REPLICA_DB ]]; then
+		warnings+=("Linear replica STALE (writer heartbeat >${_replica_stale_s}s or seed incomplete) — single-ticket reads fall back to the personal Linear key (rate-limited, 429-prone). Check the cloud-sync writer: bash plugins/dev/scripts/check-setup.sh")
+	elif [[ ${CATALYST_LINEAR_REPLICA-} == on ]]; then
+		warnings+=("CATALYST_LINEAR_REPLICA=on but no replica at $CATALYST_REPLICA_DB — single-ticket reads fall back to the personal Linear key (rate-limited, 429-prone). Start the cloud-sync writer: catalyst-stack adopt-cloud-sync")
+	fi
+	# else (no replica, not opted in): silent — the replica is fleet-internal infra a
+	# downstream install never runs; nagging it would be a permanent false alarm.
+fi
+
+# 9. Agent house rules present — the "Working the Loop" reflexes (CTL general-instructions).
+#    The agent-instructions doc is meant to teach EVERY agent (including an interactive,
+#    non-slash-command session) three default reflexes that are otherwise buried in
+#    skills: (a) subscribe to the event log instead of polling GitHub/CI/Linear,
+#    (b) read a single Linear ticket from the local replica, (c) recognize an
+#    automated reviewer's 👍-reaction clean pass. A recent interactive session polled
+#    GitHub for 99 min and missed a passed review because these were framed as
+#    skill-internal, not house rules. This checkup nags (WARN, never fatal) when a
+#    Catalyst-managed project's agent doc is missing any reflex.
+#
+#    The block must live in the file the driving agent actually LOADS: AGENTS.md when
+#    CLAUDE.md is a thin `@AGENTS.md` bridge (AGENTS.md is imported), otherwise the
+#    monolithic CLAUDE.md directly. So we accept a marker found in EITHER doc, and only
+#    run the check when at least one agent doc exists (a repo with neither is outside
+#    the framework — nagging it would be a false alarm). Canonical block to copy:
+#    plugins/dev/templates/agents-house-rules.md. Markers matched case-insensitively.
+# Only check a repo that already has an agent doc — a doc-less repo is out of the
+# framework here (foundry:setup-catalyst seeds those directly). Delegate the actual
+# detection to the seeder's dry-run rather than re-implementing grep: the seeder is
+# fence-aware, import-aware (checks the doc the agent actually loads), and matches
+# whole-line sentinels — re-implementing that here drifted. rc 0 = present/current,
+# rc 10 = missing or stale, other = seeder/setup error.
+SEEDER="${SCRIPT_DIR}/ensure-agent-house-rules.sh"
+if [[ ( -f AGENTS.md || -f CLAUDE.md ) && -x "$SEEDER" ]]; then
+	hr_rc=0
+	bash "$SEEDER" --quiet >/dev/null 2>&1 || hr_rc=$?
+	if [[ $hr_rc -eq 0 ]]; then
+		echo -e "${GREEN}Agent house rules present${NC} — the managed 'Working the Loop' block is current."
+	elif [[ $hr_rc -eq 10 ]]; then
+		warnings+=("Agent doc is missing or has a stale 'Working the Loop' house-rules block (the reflexes an interactive agent needs: event-log-over-polling, 👍-review detection, replica reads). Fix: bash ${SEEDER} --fix (idempotent; run from the repo root or pass --repo DIR).")
+	else
+		warnings+=("Could not verify the agent house-rules block (ensure-agent-house-rules.sh returned ${hr_rc} — an ambiguous/duplicate block, or a setup issue). Inspect: bash ${SEEDER}")
+	fi
+fi
+
+# 10. Dual-harness layout — Claude Code AND Codex both load instructions + skills (CTL-1530).
+#     migrate-dual-harness.sh classifies the repo against the target layout (AGENTS.md canonical
+#     + thin `@AGENTS.md` CLAUDE.md bridge + a `.agents/skills` dir with a `.claude/skills`
+#     symlink onto it) and reports exactly what's needed to converge a single-harness repo
+#     (Claude-only monolithic CLAUDE.md, or Codex-only AGENTS.md-with-no-bridge). Delegate
+#     detection to the script's own dry-run rather than re-implementing its classification here
+#     (same rationale as §9's seeder delegation) — warn, never fatal. Guarded like §9: skip a
+#     repo with no agent doc and no skills dir at all (nothing to converge).
+DUAL_HARNESS_SCRIPT="${SCRIPT_DIR}/migrate-dual-harness.sh"
+if [[ ( -e AGENTS.md || -L AGENTS.md || -e CLAUDE.md || -L CLAUDE.md || -e .claude/skills || -L .claude/skills || -e .agents/skills || -L .agents/skills ) && -x "$DUAL_HARNESS_SCRIPT" ]]; then
+	dh_rc=0
+	bash "$DUAL_HARNESS_SCRIPT" --repo "$PWD" --quiet >/dev/null 2>&1 || dh_rc=$?
+	case $dh_rc in
+	0)
+		# rc 0 also covers "no-harness once skills are clean" (migrate-dual-harness.sh's
+		# documented behavior when neither doc exists) — printing the green dual-harness
+		# line in that case would be a false green: the docs pair is still missing
+		# entirely. Only claim the dual-harness layout is OK when at least one doc exists.
+		if [[ ! -f AGENTS.md && ! -f CLAUDE.md ]]; then
+			warnings+=("Dual-harness skills wiring is current but the AGENTS.md/CLAUDE.md docs pair is missing — Fix: bash ${SEEDER} --repo . --fix, then re-run checkup")
+		else
+			echo -e "${GREEN}✓ dual-harness layout OK${NC} — AGENTS.md/CLAUDE.md bridge and skills wiring are current."
+		fi
+		;;
+	10)
+		if [[ ! -f AGENTS.md && ! -f CLAUDE.md ]]; then
+			warnings+=("Repo has no AGENTS.md/CLAUDE.md docs pair AND needs skills wiring (dual-harness dry-run rc=10) — Fix in order: bash ${SEEDER} --repo . --fix (creates the docs pair), then bash ${DUAL_HARNESS_SCRIPT} --repo . --fix (wires .agents/skills + .claude/skills), then re-run this checkup")
+		else
+			warnings+=("Repo is single-harness (missing @AGENTS.md bridge, skills wiring, or the AGENTS.md skills pointer) — Fix: bash ${DUAL_HARNESS_SCRIPT} --repo . --fix")
+		fi
+		;;
+	11)
+		warnings+=("CLAUDE.md is monolithic and needs the intelligent AGENTS.md/CLAUDE.md split — run the catalyst-foundry:migrate-dual-harness skill")
+		;;
+	*)
+		warnings+=("Dual-harness layout is ambiguous (migrate-dual-harness.sh returned ${dh_rc}) — inspect: bash ${DUAL_HARNESS_SCRIPT} --repo .")
+		;;
+	esac
 fi
 
 # Report errors (fatal)

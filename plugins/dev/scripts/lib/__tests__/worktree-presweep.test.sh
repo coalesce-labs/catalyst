@@ -9,6 +9,16 @@
 
 set -uo pipefail
 
+# CTL-1612 round 14 (Codex): the subject lib pipes fixture JSON through jq
+# unconditionally, and round 9's direct lib/__tests__ glob now runs this suite
+# on hosts where only the shell-wrapper path used to reach it. Without jq the
+# suite hard-fails instead of skipping. "SKIP:" (column 0) is the marker
+# run-tests.sh's `grep -q '^SKIP:'` recognizes as a clean skip.
+if ! command -v jq >/dev/null 2>&1; then
+	echo "SKIP: worktree-presweep tests require jq (not on PATH)"
+	exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PRESWEEP="$LIB_DIR/worktree-presweep.sh"

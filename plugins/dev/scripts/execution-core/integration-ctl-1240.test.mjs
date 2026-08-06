@@ -15,6 +15,8 @@ import {
   mkdirSync,
   rmSync,
   writeFileSync,
+  readFileSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -141,9 +143,31 @@ describe("CTL-1240 Phase 1 — gateway threaded through startScheduler spine", (
     // PRE-FIX: gateway is dropped at startScheduler → this assertion fails (calls.length === 0).
     expect(gateway.calls.length).toBeGreaterThan(0);
 
-    // Behavioral proof: Done ticket was filtered (terminal → no marker);
-    // In-Progress ticket was processed (non-terminal → marker written).
-    expect(existsSync(recoveryIntentMarker(LIVE_TICKET))).toBe(true);
+    // Behavioral proof: Done ticket was filtered (terminal → not processed);
+    // In-Progress ticket was processed (non-terminal). CTL-1157 F #5 retired the
+    // recovery-intent MARKER as the observable — shadow mode no longer writes a
+    // cooldown marker for a DEFERRED (untyped stuck) item (it would mutate enforce
+    // scheduler state). The processing observable is now the recovery.would-defer
+    // EVENT in the unified log (under the redirected CATALYST_DIR): the non-terminal
+    // LIVE ticket emits it; the terminal DONE ticket is filtered by Pass 0r → no
+    // recovery event names it.
+    const eventsDir = join(catalystDir, "events");
+    const eventLines = existsSync(eventsDir)
+      ? readdirSync(eventsDir)
+          .flatMap((f) => readFileSync(join(eventsDir, f), "utf8").split("\n"))
+          .filter(Boolean)
+      : [];
+    // LIVE (non-terminal) was PROCESSED by the reasoning pass → per-item would-defer.
+    expect(eventLines.some((l) => l.includes(LIVE_TICKET) && l.includes("would-defer"))).toBe(true);
+    // DONE (terminal) was FILTERED by Pass 0r before the reasoning pass → it has NO
+    // per-item reasoning event (recovery.decision / recovery.would-*). It legitimately
+    // appears in the whole-board recovery.board-scan snapshot — that is a census, not
+    // processing — so match only the per-item event names, not a bare "recovery.".
+    const donePerItem = eventLines.some(
+      (l) => l.includes(DONE_TICKET) && (l.includes("recovery.decision") || l.includes("would-")),
+    );
+    expect(donePerItem).toBe(false);
+    // And the DONE ticket is still never cooled down (terminal → filtered before processing).
     expect(existsSync(recoveryIntentMarker(DONE_TICKET))).toBe(false);
   });
 });

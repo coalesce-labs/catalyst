@@ -1,4 +1,6 @@
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 interface NoteEntry {
   text: string;
@@ -23,6 +25,14 @@ export function openDb(
   dbPath: string = `${DEFAULT_DB_DIR}/annotations.db`,
 ): Database {
   if (db) return db;
+  // `create: true` creates the DB file but NOT its parent directory. Ensure the
+  // dir exists first so opening against a fresh CATALYST_DIR (a CI runner or a
+  // first-boot host where ~/catalyst does not yet exist) doesn't fail with
+  // "unable to open database file". In production ~/catalyst already exists, so
+  // this is a no-op. Skip for the in-memory sentinel.
+  if (dbPath !== ":memory:") {
+    mkdirSync(dirname(dbPath), { recursive: true });
+  }
   db = new Database(dbPath, { create: true });
   db.run("PRAGMA journal_mode=WAL");
   db.run(`

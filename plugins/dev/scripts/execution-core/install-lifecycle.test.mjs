@@ -168,7 +168,7 @@ describe("parseArgs", () => {
     expect(parseArgs(["install", "--executor"]).errors).toContain("--executor requires a value");
     expect(parseArgs(["install", "--executor="]).errors).toContain("--executor requires a value");
     // the valid set the install accepts (asserted against the exported constant)
-    expect(VALID_EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy"]);
+    expect(VALID_EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy", "codex-exec"]);
   });
 });
 
@@ -219,13 +219,15 @@ describe("isDrainedStatus (teardown guard requires zero in-flight, not just drai
 
 // ───────────────────────── planPhases: the per-class invariant ─────────────────────────
 describe("planPhases — per-class correctness (pure)", () => {
-  test("install/developer adopts the updater + drains; NEVER runs install-services", () => {
+  test("install/developer adopts the updater + starts the (node-class-aware) stack + drains; NEVER runs install-services", () => {
     const plan = planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS });
     const labels = stepLabels(plan);
     expect(labels).toContain("adopt-updater");
     expect(labels).not.toContain("install-services");
+    // CTL-1662: start-stack is the only path that provisions the event-mirror LaunchAgent;
+    // it's node-class-aware (CTL-1654) and a no-op for broker/exec-core on developer/monitor.
+    expect(labels).toContain("start-stack");
     expect(labels).toContain("drain");
-    expect(labels).not.toContain("start-stack");
   });
   test("install/worker runs the full work stack; NEVER adopts the updater", () => {
     const plan = planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS });

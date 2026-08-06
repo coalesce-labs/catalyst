@@ -6,7 +6,10 @@
 // CTL-529: final extraction of the execution-core module split. tailer.mjs
 // imports config + state + router; only the index barrel imports tailer.
 
-import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, readFileSync } from "node:fs";
+import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync } from "node:fs";
+// CTL-1529: bounded boot replay. tailParsedEvents returns the last N parsed events
+// in file order from a small window near EOF.
+import { tailParsedEvents } from "../execution-core/event-tail.mjs";
 import { resolve, basename } from "node:path";
 import { getEventLogPath, log, CATALYST_DIR, LOOKBACK_LINES } from "./config.mjs";
 import {
@@ -127,17 +130,21 @@ export function startTailing() {
   });
 }
 
+// CTL-1529: this used to readFileSync the ENTIRE monthly event log (883 MB on
+// mini) and split it into ~1.4M strings purely to look at `.slice(-LOOKBACK_LINES)`
+// — the last 1000 lines. The broker reloads ~30 s after every merge to main, so
+// that cost was paid constantly, and on a node runtime the read threw
+// ERR_STRING_TOO_LONG into a bare catch: the broker silently recovered ZERO filter
+// interests, so `filter.wake.*` routing went dark for every pre-existing
+// registration and phase agents blocked on wakes that never came.
+//
+// tailParsedEvents reads a small window near EOF and parses only that, in file
+// order — which is exactly what the chronological replay below needs. Replay was
+// ALREADY explicitly lossy at LOOKBACK_LINES, so bounding the read changes no
+// behavior. It also does the JSON parsing (and malformed-line skipping) itself.
 export function loadExistingRegistrations(logPath = lastLogPath) {
   try {
-    const content = readFileSync(logPath, "utf8");
-    const lines = content.split("\n").filter((l) => l.trim());
-    for (const line of lines.slice(-LOOKBACK_LINES)) {
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        continue;
-      }
+    for (const event of tailParsedEvents({ path: logPath, maxLines: LOOKBACK_LINES })) {
       const name = getEventName(event);
       if (name === "filter.register") handleRegister(event);
       if (name === "filter.deregister") handleDeregister(event);

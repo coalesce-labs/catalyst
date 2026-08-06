@@ -212,12 +212,22 @@ if (import.meta.main) {
     // diagnosis; the dispatcher still launches with today's defaults.
     process.stderr.write(`workflow-rules resolve: ${e.message}\n`);
   }
-  const lines = [...(resolved.preamble ?? []), ...(resolved.postamble ?? [])];
+  // CTL-1420 follow-up: every phase worker inherits the replica-first read reflex
+  // at runtime. Prepended (not appended) so it leads, and composes with any
+  // per-phase preamble/postamble rather than being clobbered at the spawn site.
+  const REPLICA_FIRST =
+    "Linear reads → local replica: read a single ticket from the Catalyst replica per the " +
+    "`linearis` skill's \"Reading Linear\" rule — source " +
+    "`${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh` then `linear_read_ticket <ID>` " +
+    "(it is a shell FUNCTION, not an executable — you must source the helper first), or inline " +
+    "`sqlite3` on `catalyst-replica.db`. Never a bare `linearis issues read <ID>` (it 429s the " +
+    "shared quota). Writes and list/search stay on `linearis`.";
+  const lines = [REPLICA_FIRST, ...(resolved.preamble ?? []), ...(resolved.postamble ?? [])];
   process.stdout.write(
     JSON.stringify({
       model: resolved.model ?? null,
       effort: resolved.effort ?? null,
-      appendSystemPrompt: lines.length ? lines.join("\n") : null,
+      appendSystemPrompt: lines.join("\n"),
     })
   );
 }

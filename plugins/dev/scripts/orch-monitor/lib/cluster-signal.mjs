@@ -59,6 +59,11 @@ export function deriveClusterSignal(view) {
     if (n.maxParallel != null) node.maxParallel = n.maxParallel;
     if (n.inFlightCount != null) node.inFlightCount = n.inFlightCount;
     if (n.freeSlots != null) node.freeSlots = n.freeSlots;
+    // CTL-1581: slot-occupancy subset — activeCount drives the deck/pill counts;
+    // the ACTIVE ticket ids ride as `tickets` (the SlotDeck's remote-occupancy
+    // field, previously never populated — every remote slot rendered Open).
+    if (n.activeCount != null) node.activeCount = n.activeCount;
+    if (Array.isArray(n.activeTickets)) node.tickets = n.activeTickets;
     // CTL-1322: per-node admission (local node only). Conditional-copy keeps the SSE
     // frame tiny + back-compat — a node without admission omits both fields so the UI
     // renders "live". effectiveCapacity/activeWorkers are intentionally NOT projected.
@@ -70,6 +75,12 @@ export function deriveClusterSignal(view) {
     // A malformed/absent view degrades to the single-host empty signal (the footer
     // simply shows its unknown/muted dot until the first real frame lands).
     singleHost: view?.singleHost ?? true,
+    // CTL-1551: pass the monitor's own identity through so the UI (SlotDeck
+    // localHost) never infers self from "first live node" — with peers now
+    // legitimately live, that heuristic picks the wrong host.
+    ...(typeof view?.selfHost === "string" && view.selfHost.length > 0
+      ? { selfHost: view.selfHost }
+      : {}),
     nodes: projected,
     generatedAt:
       typeof view?.generatedAt === "string" ? view.generatedAt : "",

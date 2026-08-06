@@ -444,6 +444,12 @@ describe("buildResumeEvent — the daemon's resume trigger shape", () => {
     const ev = buildResumeEvent({ ticket: "CTL-845", response: null });
     expect(ev.body.payload.body).toBe("");
   });
+
+  it("stamps event.stream_class=coordination so coordination-publish's fail-closed filter mirrors it (CTL-1488)", () => {
+    const ev = buildResumeEvent({ ticket: "CTL-845", response: "go", now: new Date("2026-06-09T00:00:00Z") });
+    // Without the stamp, coordination-publish/index.ts (fail-closed) drops this coordination event.
+    expect(ev.attributes["event.stream_class"]).toBe("coordination");
+  });
 });
 
 describe("emitResumeEvent — append to the unified event log", () => {

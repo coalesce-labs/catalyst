@@ -32,10 +32,19 @@
 
 // Default 60 s TTL; env-overridable to match the SCHEDULER_*_MS env idiom.
 const DEFAULT_TTL_MS = Number(process.env.LINEAR_STATE_CACHE_TTL_MS) || 60_000;
+// CTL-1436 (A4): the NEGATIVE-cache TTL — how long a probeBackoff caller (the
+// terminal-probe / GC census) backs off from re-reading a ticket live after a
+// FAILED live read (429 / timeout / unparseable). Longer than the positive TTL:
+// these are old parked tickets the replica doesn't track, so a failed live probe
+// need not retry every tick. This store is CONSULTED ONLY on probeBackoff calls,
+// so the blocker-hydration path keeps the CTL-634 "a null read re-reads promptly"
+// invariant untouched.
+const DEFAULT_NEG_TTL_MS = Number(process.env.LINEAR_STATE_NEG_TTL_MS) || 5 * 60_000;
 
-export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS } = {}) {
+export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS, negTtlMs = DEFAULT_NEG_TTL_MS } = {}) {
   const entries = new Map(); // identifier -> { state, expiresAt }
   const relationsEntries = new Map(); // identifier -> { desc, expiresAt } (CTL-784)
+  const negativeEntries = new Map(); // identifier -> expiresAt (CTL-1436 A4)
   let hits = 0;
   let misses = 0;
   let relHits = 0;
@@ -56,6 +65,23 @@ export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS 
     // Fail-safe: never cache a missing state. A null fetch must re-read.
     if (state == null) return;
     entries.set(identifier, { state, expiresAt: now() + ttlMs });
+    negativeEntries.delete(identifier); // CTL-1436: a fresh success clears any backoff
+  }
+
+  // CTL-1436 (A4): negative-cache read/write — a SHORT backoff for probeBackoff
+  // callers (terminal-probe / GC census) so a ticket whose live read just FAILED
+  // (or found nothing) is not re-hammered against live Linear every tick. Kept
+  // entirely separate from the positive `entries` store and consulted ONLY when a
+  // caller opts in via fetchTicketState({ probeBackoff:true }), so the CTL-634
+  // never-cache-null invariant for blocker hydration is preserved.
+  function isNegativelyCached(identifier) {
+    const exp = negativeEntries.get(identifier);
+    if (exp && exp > now()) return true;
+    if (exp) negativeEntries.delete(identifier); // expired — drop eagerly
+    return false;
+  }
+  function setNegative(identifier) {
+    negativeEntries.set(identifier, now() + negTtlMs);
   }
 
   // getRelations — CTL-784 read-through for the full relation descriptor. TTL is
@@ -91,6 +117,7 @@ export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS 
   function invalidate(identifier) {
     entries.delete(identifier);
     relationsEntries.delete(identifier);
+    negativeEntries.delete(identifier); // CTL-1436: clear backoff on explicit invalidation
   }
 
   function stats() {
@@ -106,5 +133,5 @@ export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS 
     return { hits: relHits, misses: relMisses, hitRate: total === 0 ? 0 : relHits / total };
   }
 
-  return { get, set, getRelations, setRelations, invalidate, stats, relationsStats };
+  return { get, set, isNegativelyCached, setNegative, getRelations, setRelations, invalidate, stats, relationsStats };
 }

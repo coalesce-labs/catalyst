@@ -12,7 +12,7 @@ sidebar:
 
 Every `catalyst-*` CLI is installed onto your `PATH` by
 [`install-cli.sh`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/install-cli.sh) (into
-`~/.catalyst/bin` by default). This page lists all 29 of them — one line of
+`~/.catalyst/bin` by default). This page lists all 30 of them — one line of
 purpose plus the key subcommands — grouped by area. Run any tool with `--help`
 for full syntax. The richer tools have their own reference pages (e.g.
 [catalyst-stack](/reference/catalyst-stack/)).
@@ -108,6 +108,12 @@ Manage global orchestrator state at ~/catalyst/state.json (flock-protected RMW +
 **Key subcommands:** `init`, `register`, `update`, `worker`, `heartbeat`, `attention`, `resolve-attention`, `event`, `archive`, `gc`
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-state.sh)
+
+### boot-resume-approve
+
+List boot-resume-gated tickets and approve one — writes the .boot-resume-approved sentinel so the daemon dispatches the gated phase without a restart (CTL-1443).
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/boot-resume-approve.mjs)
 
 ### catalyst-db
 

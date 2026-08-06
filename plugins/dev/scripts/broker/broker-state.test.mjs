@@ -22,7 +22,9 @@ import {
   // filter_state (backward compat)
   upsertFilterStateOpen,
   setFilterStateMerged,
+  setFilterStateClosed,
   getFilterStateByInterest,
+  getAllPrStatuses,
 } from "./broker-state.mjs";
 
 let tmpDir;
@@ -192,6 +194,20 @@ describe("filter_state (CTL-284 backward compat)", () => {
     expect(state.mergeCommitSha).toBe("sha-abc");
   });
 
+  // CTL-1157 (Codex round-7): a PR closed WITHOUT merging must leave 'open' so
+  // board-health's orphaned-open-PR cohort stops treating it as a stale orphan forever.
+  test("setFilterStateClosed transitions an open row to closed", () => {
+    upsertFilterStateOpen({ interestId: "sess-closed", prNumber: 503, repo: "org/repo" });
+    const res = setFilterStateClosed("sess-closed");
+    expect(res).toEqual({ interestId: "sess-closed" });
+    const state = getFilterStateByInterest("sess-closed");
+    expect(state.status).toBe("closed"); // no longer "open"
+  });
+
+  test("setFilterStateClosed is a no-op (null) when the interest has no row", () => {
+    expect(setFilterStateClosed("sess-absent")).toBeNull();
+  });
+
   test("both tables coexist in the same DB file", () => {
     upsertFilterStateOpen({ interestId: "coexist-1", prNumber: 1, repo: "r" });
     upsertAgent({ agentId: "coexist-agent", agentName: "a", sessionId: "coexist-agent" });
@@ -199,5 +215,40 @@ describe("filter_state (CTL-284 backward compat)", () => {
     expect(getFilterStateByInterest("coexist-1")).not.toBeNull();
     expect(getAgentBySession("coexist-agent")).not.toBeNull();
     expect(getTicketState("CTL-1")).not.toBeNull();
+  });
+});
+
+// ─── getAllPrStatuses — composite (repo, pr_number) keying (CTL-1157, Codex #4) ─
+
+describe("getAllPrStatuses — composite (repo, pr_number) keying (CTL-1157)", () => {
+  test("a cross-repo PR-number collision keeps BOTH repos' statuses (no shadowing)", () => {
+    // #42 exists in TWO GitHub repos: merged in org/x, still open in org/y. They
+    // are DIFFERENT PRs. The old number-only keying forced an `ambiguous` skip; the
+    // composite shape keeps a per-repo entry so a caller that knows the ticket's
+    // repo resolves the EXACT (repo, number) — org/x→merged, org/y→open — and never
+    // confuses the two (the false-phantom / hidden-orphan bug is gone at the source).
+    upsertFilterStateOpen({ interestId: "x-42", prNumber: 42, repo: "org/x" });
+    setFilterStateMerged("x-42", "sha-x");
+    upsertFilterStateOpen({ interestId: "y-42", prNumber: 42, repo: "org/y" });
+    const byRepo = getAllPrStatuses().get(42);
+    expect(byRepo).toBeInstanceOf(Map);
+    expect(byRepo.size).toBe(2);
+    expect(byRepo.get("org/x")).toMatchObject({ status: "merged", repo: "org/x" });
+    expect(byRepo.get("org/y")).toMatchObject({ status: "open", repo: "org/y" });
+  });
+
+  test("a SAME-repo repeated PR number collapses to ONE inner entry (most-recent wins, not a collision)", () => {
+    upsertFilterStateOpen({ interestId: "z-7a", prNumber: 7, repo: "org/z" });
+    upsertFilterStateOpen({ interestId: "z-7b", prNumber: 7, repo: "org/z" });
+    const byRepo = getAllPrStatuses().get(7);
+    expect(byRepo.size).toBe(1); // single repo → no collision
+    expect(byRepo.get("org/z")).toMatchObject({ status: "open", repo: "org/z" });
+  });
+
+  test("a non-colliding PR carries its repo + status under its repo key", () => {
+    upsertFilterStateOpen({ interestId: "solo-9", prNumber: 9, repo: "org/solo" });
+    const byRepo = getAllPrStatuses().get(9);
+    expect(byRepo.size).toBe(1);
+    expect(byRepo.get("org/solo")).toMatchObject({ status: "open", repo: "org/solo" });
   });
 });

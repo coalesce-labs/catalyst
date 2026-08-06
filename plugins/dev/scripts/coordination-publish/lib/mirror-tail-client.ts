@@ -1,0 +1,332 @@
+// mirror-tail-client — CTL-1488 Phase 5. The INBOUND half of the coordination mirror.
+//
+// Pulls OTHER hosts' coordination rows from the catalyst-cloud hub's HTTP
+// /coordination/changes contract (Phase 4) into the local ~/catalyst/coordination.jsonl, deduped by
+// event.id, so each host materializes the full cross-host coordination stream. Cursor lifecycle:
+// no saved cursor → since=0 full drain → steady-state delta poll → HTTP-409 cursor_underflow → full
+// resync. The transport is abstracted behind `ChangeSource` so the merge logic NEVER branches on it —
+// the interim Loki-tail source (interim-loki-source.ts) drops in behind the same interface when the
+// hub isn't configured.
+//
+// Local-first invariant preserved: this only ever APPENDS remote rows the local tailer didn't write.
+// A host's own rows (written by index.ts with a `local_seq`) are reconciled by event.id and never
+// double-appended when the hub echoes them back.
+
+import {
+  appendFileSync,
+  mkdirSync,
+  readFileSync,
+  existsSync,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
+} from "node:fs";
+import { dirname } from "node:path";
+import { buildCanonicalEnvelope } from "../../otel-forward/lib/canonical.ts";
+
+export const SERVICE_NAME = "catalyst.coordination-publish";
+/** Inbound counterpart to hub-client's coordination_publish_degraded (the OUTBOUND signal). */
+export const INBOUND_DEGRADED_EVENT_NAME =
+  "catalyst.observability.coordination_mirror_tail_degraded";
+
+/** One coordination delta as the hub's /coordination/changes NDJSON emits it. */
+export interface CoordinationDelta {
+  seq: number;
+  host: string | null;
+  event_id: string;
+  event_name: string;
+  ts: string | null;
+  caused_by: string | null;
+  attributes: unknown;
+  resource: unknown;
+}
+
+/** The result of one pull: rows + head cursor, an underflow signal (resync), or a transient error. */
+export type PullResult =
+  | { ok: true; deltas: CoordinationDelta[]; headSeq: number }
+  | { ok: false; underflow: true }
+  | { ok: false; error: true };
+
+/** Transport-agnostic source of coordination deltas. Hub (HTTP) or interim Loki both implement this. */
+export interface ChangeSource {
+  pullChanges(since: number): Promise<PullResult>;
+}
+
+type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+
+/** Read the set of event ids already present in the mirror (the `id` field of every line). */
+export function readMirrorEventIds(mirrorPath: string): Set<string> {
+  const ids = new Set<string>();
+  if (!existsSync(mirrorPath)) return ids;
+  const text = readFileSync(mirrorPath, "utf8");
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    try {
+      const obj = JSON.parse(line) as { id?: unknown };
+      if (typeof obj.id === "string") ids.add(obj.id);
+    } catch {
+      // skip malformed line
+    }
+  }
+  return ids;
+}
+
+/** Reconstruct a mirror row from a remote delta. `id` mirrors the local rows' `id` so dedup is uniform;
+ *  `hub_seq` (not local_seq) marks it as pulled-in, not locally tailed. */
+function deltaToMirrorRow(d: CoordinationDelta): Record<string, unknown> {
+  return {
+    id: d.event_id,
+    ts: d.ts,
+    caused_by: d.caused_by,
+    attributes: d.attributes,
+    resource: d.resource,
+    host: d.host,
+    hub_seq: d.seq,
+  };
+}
+
+export interface MirrorTailClientOpts {
+  mirrorPath: string;
+  source: ChangeSource;
+  signal?: AbortSignal;
+  /** Seed the hub cursor (tests / resume). null → first tick is a since=0 full drain. */
+  startHubSeq?: number | null;
+  /** Injected logger; defaults to console.error. */
+  logError?: (msg: string) => void;
+  /**
+   * Append a coordination_mirror_tail_degraded event here after N consecutive failed ticks, so a
+   * sustained inbound outage is observable (event + metric) instead of only a repeating daemon.log
+   * line — the INBOUND counterpart to hub-client's outbound degraded signal (CTL-1488 remediate).
+   * Omitted → no event emission (the pre-existing console.error-only behavior).
+   */
+  eventLogPath?: string;
+  /** Consecutive failed-tick count that trips the inbound degraded event. Default 5. */
+  degradedThreshold?: number;
+}
+
+export interface MirrorTailClient {
+  tick: () => Promise<void>;
+  currentHubSeq: () => number | null;
+}
+
+export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailClient {
+  let lastHubSeq: number | null = opts.startHubSeq ?? null;
+  const logError = opts.logError ?? ((m: string) => console.error(`[coordination-mirror-tail] ${m}`));
+  const degradedThreshold = opts.degradedThreshold ?? 5;
+  let consecutiveFailures = 0;
+
+  // review #4: incremental mirror dedup. The mirror is append-only and never rotated, so re-reading
+  // AND re-parsing the whole file on every ~2s tick made per-tick CPU + transient memory grow
+  // unbounded with mirror size. Instead keep the seen-id set in memory and, each tick, ingest ONLY
+  // the bytes appended since the last read — by this client OR by the local publisher (index.ts)
+  // writing its own rows to the same mirror out-of-band. That preserves the own-row echo dedup (a
+  // read-once-at-startup set would miss the local publisher's post-startup appends and double-append
+  // its echoed-back rows) while bounding per-tick work to new data.
+  let seenIds: Set<string> | null = null;
+  let mirrorOffset = 0; // byte offset up to which the mirror has been ingested into seenIds
+  let pending = ""; // carry a partial trailing line (no newline yet) across ticks
+
+  /** Ingest any mirror bytes appended since the last tick into the in-memory seen-id set, then
+   *  return it. First call reads from 0 (seeds from an existing mirror); a shrink (truncate/rotate)
+   *  restarts the scan. Bounded by NEW bytes, not total size. Best-effort: an I/O fault leaves the
+   *  set as-is (the caller's append still dedups against what we have). */
+  function ingestNewMirrorRows(): Set<string> {
+    if (seenIds === null) {
+      seenIds = new Set<string>();
+      mirrorOffset = 0;
+      pending = "";
+    }
+    if (!existsSync(opts.mirrorPath)) return seenIds;
+    let fd: number;
+    try {
+      fd = openSync(opts.mirrorPath, "r");
+    } catch {
+      return seenIds;
+    }
+    try {
+      const size = fstatSync(fd).size;
+      if (size < mirrorOffset) {
+        // Truncation / rotation — the file is smaller than where we stopped. Rescan from the start.
+        seenIds = new Set<string>();
+        mirrorOffset = 0;
+        pending = "";
+      }
+      if (size > mirrorOffset) {
+        const len = size - mirrorOffset;
+        const buf = Buffer.allocUnsafe(len);
+        const n = readSync(fd, buf, 0, len, mirrorOffset);
+        mirrorOffset += n;
+        pending += buf.subarray(0, n).toString("utf8");
+      }
+    } finally {
+      closeSync(fd);
+    }
+    let nl: number;
+    while ((nl = pending.indexOf("\n")) >= 0) {
+      const line = pending.slice(0, nl);
+      pending = pending.slice(nl + 1);
+      if (!line) continue;
+      try {
+        const obj = JSON.parse(line) as { id?: unknown };
+        if (typeof obj.id === "string") seenIds.add(obj.id);
+      } catch {
+        // skip malformed line
+      }
+    }
+    return seenIds;
+  }
+
+  /** A pull that returned rows (or an empty steady-state) — the inbound path is healthy again. */
+  function recordSuccess(): void {
+    consecutiveFailures = 0;
+  }
+
+  /** A failed/errored tick. Emit the inbound degraded event exactly once at the threshold crossing
+   *  (mirrors hub-client.maybeEmitDegraded), so a sustained outage isn't per-tick spam but is never
+   *  silent. Best-effort: writing the event must never throw and never block the poll loop. */
+  function recordFailure(reason: string): void {
+    logError(reason);
+    consecutiveFailures++;
+    if (consecutiveFailures !== degradedThreshold || !opts.eventLogPath) return;
+    try {
+      const ev = buildCanonicalEnvelope({
+        serviceName: SERVICE_NAME,
+        eventName: INBOUND_DEGRADED_EVENT_NAME,
+        severityText: "ERROR",
+        severityNumber: 17,
+        payload: { consecutiveFailures, lastSince: lastHubSeq ?? 0, reason },
+        idExtra: String(consecutiveFailures),
+      });
+      mkdirSync(dirname(opts.eventLogPath), { recursive: true });
+      appendFileSync(opts.eventLogPath, JSON.stringify(ev) + "\n");
+    } catch {
+      // Best-effort — a failure to write the degraded event must never crash the tick.
+    }
+  }
+
+  function mergeDeltas(deltas: CoordinationDelta[]): void {
+    if (deltas.length === 0) return;
+    const seen = ingestNewMirrorRows(); // picks up own-rows appended out-of-band since last tick
+    mkdirSync(dirname(opts.mirrorPath), { recursive: true });
+    for (const d of deltas) {
+      if (!d.event_id || seen.has(d.event_id)) continue; // dedup: own rows + already-pulled remote rows
+      const row = JSON.stringify(deltaToMirrorRow(d)) + "\n";
+      appendFileSync(opts.mirrorPath, row);
+      seen.add(d.event_id);
+    }
+    // Advance mirrorOffset ONLY by bytes actually read+parsed — never by assuming our appended rows are
+    // the only bytes written since the scan above. The local publisher (index.ts) and, during a restart
+    // overlap, a second daemon append to the same mirror out-of-band; a row landing between the scan and
+    // our append would shift every later offset, making the next scan start mid-line — dropping the local
+    // id as a malformed fragment and double-appending it when the source later echoes it back. Re-ingesting
+    // keeps mirrorOffset at the true EOF and captures the local id; idempotent for our own rows (in `seen`).
+    ingestNewMirrorRows();
+  }
+
+  async function tick(): Promise<void> {
+    if (opts.signal?.aborted) return;
+    const since = lastHubSeq ?? 0;
+    let res: PullResult;
+    try {
+      res = await opts.source.pullChanges(since);
+    } catch (err) {
+      recordFailure(`pull threw: ${err instanceof Error ? err.message : String(err)}`);
+      return; // no-op tick, retried next tick
+    }
+
+    if (!res.ok && "underflow" in res) {
+      // Cursor evicted past `since` — full resync from 0.
+      lastHubSeq = null;
+      let resync: PullResult;
+      try {
+        resync = await opts.source.pullChanges(0);
+      } catch (err) {
+        recordFailure(`resync pull threw: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+      if (resync.ok) {
+        // mergeDeltas does local mirror I/O (readSync + appendFileSync); a transient fault
+        // (ENOSPC/EACCES) must route through recordFailure — same observable degraded signal as a
+        // pull outage — not throw out of this fire-and-forget tick as a silent unhandled rejection
+        // (review #5 / silent-failure). Leave the cursor unadvanced so the rows are re-pulled.
+        try {
+          mergeDeltas(resync.deltas);
+        } catch (err) {
+          recordFailure(`resync merge threw: ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+        lastHubSeq = Math.max(resync.headSeq, seqCeiling(resync.deltas, 0));
+        recordSuccess();
+      } else {
+        recordFailure("resync pull failed (transient); retrying next tick");
+      }
+      return;
+    }
+    if (!res.ok) {
+      // Transient error — leave the cursor untouched, retry next tick.
+      recordFailure("pull failed (transient); retrying next tick");
+      return;
+    }
+
+    try {
+      mergeDeltas(res.deltas);
+    } catch (err) {
+      // Same as the resync path: a local mirror-write fault is an observable inbound degradation,
+      // not a silent throw. Cursor stays put so the deltas are re-pulled next tick (review #5).
+      recordFailure(`merge threw: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    lastHubSeq = Math.max(res.headSeq, seqCeiling(res.deltas, lastHubSeq ?? 0));
+    recordSuccess();
+  }
+
+  return { tick, currentHubSeq: () => lastHubSeq };
+}
+
+function seqCeiling(deltas: CoordinationDelta[], floor: number): number {
+  let m = floor;
+  for (const d of deltas) if (typeof d.seq === "number" && d.seq > m) m = d.seq;
+  return m;
+}
+
+export interface HubChangeSourceOpts {
+  hubUrl: string;
+  fetchImpl?: FetchLike;
+  timeoutMs?: number;
+}
+
+/**
+ * The hub HTTP transport: GET <hubUrl>/coordination/changes?since=<seq>, NDJSON body parsed into
+ * deltas. 409 → underflow (resync); any network / non-2xx (other than 409) → error (retry next tick).
+ */
+export function createHubChangeSource(opts: HubChangeSourceOpts): ChangeSource {
+  const fetchImpl = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
+  const base = opts.hubUrl.replace(/\/$/, "");
+  return {
+    async pullChanges(since: number): Promise<PullResult> {
+      const url = `${base}/coordination/changes?since=${since}`;
+      try {
+        const res = await fetchImpl(url, { signal: AbortSignal.timeout(opts.timeoutMs ?? 5000) });
+        if (res.status === 409) return { ok: false, underflow: true };
+        if (!res.ok) return { ok: false, error: true };
+        const text = await res.text();
+        const deltas: CoordinationDelta[] = [];
+        let headSeq = since;
+        for (const line of text.split("\n")) {
+          if (!line) continue;
+          try {
+            const d = JSON.parse(line) as CoordinationDelta;
+            deltas.push(d);
+            if (typeof d.seq === "number" && d.seq > headSeq) headSeq = d.seq;
+          } catch {
+            // skip malformed NDJSON line
+          }
+        }
+        return { ok: true, deltas, headSeq };
+      } catch {
+        return { ok: false, error: true };
+      }
+    },
+  };
+}

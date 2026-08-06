@@ -70,6 +70,27 @@ export function getProjectConfig(team) {
   return listProjects().find((p) => p.team === team) ?? null;
 }
 
+// ownerRepoFromRepoRoot — map a registry `repoRoot` filesystem path to the GitHub
+// "owner/repo" slug that filter_state.repo stores (the GitHub webhook's
+// `repository.full_name`, e.g. "coalesce-labs/catalyst"). The registry only knows
+// the on-disk repoRoot; our checkout convention nests it under a `/github/<owner>/
+// <repo>` segment ("/Users/x/code-repos/github/coalesce-labs/catalyst" →
+// "coalesce-labs/catalyst"), mirroring monitor-config's registry derivation and
+// doctor.mjs's _ownerRepoFromRepoRoot. Returns null when no such segment exists —
+// the documented TRUE residual: a repoRoot we cannot reconcile to an owner/repo
+// leaves the ticket's repo underivable, so board-health falls back to the
+// number-only ambiguous skip rather than guess. Pure string op (no IO).
+export function ownerRepoFromRepoRoot(repoRoot) {
+  if (typeof repoRoot !== "string") return null;
+  const i = repoRoot.indexOf("/github/");
+  if (i === -1) return null;
+  const seg = repoRoot
+    .slice(i + "/github/".length)
+    .split("/")
+    .filter(Boolean);
+  return seg.length >= 2 ? `${seg[0]}/${seg[1]}` : null;
+}
+
 // resolveEligibleQuery — normalize a registry entry into the runnable query the
 // monitor + linear-query layer needs. The entry's `team` lives at the top level
 // (the eligibleQuery object never carries it); this is the single place it is

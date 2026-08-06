@@ -37,6 +37,7 @@ DEFAULT_PATH="${CATALYST_PLUGIN_SOURCE:-$HOME/catalyst/plugin-source}"
 CHECKOUT_PATH=""
 REPO_URL=""
 FORCE=0
+INSTALL_WRAPPER=1
 
 usage() {
 	cat <<EOF
@@ -51,6 +52,10 @@ Options:
   --repo-url URL    Clone source. Defaults to this repo's origin (https).
   --force           Re-register even if pluginDirs is already set to a
                     different path.
+  --no-interactive-wrapper
+                    Skip installing the interactive \`claude\` shell wrapper
+                    (used by the non-interactive install-lifecycle acquire step,
+                    which must not touch the user's shell rc files).
   -h|--help         Show this message.
 EOF
 }
@@ -70,6 +75,7 @@ while [[ $# -gt 0 ]]; do
 			fi
 			REPO_URL="$2"; shift 2 ;;
 		--force) FORCE=1; shift ;;
+		--no-interactive-wrapper) INSTALL_WRAPPER=0; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
@@ -83,6 +89,101 @@ require_cmd() {
 }
 require_cmd git
 require_cmd jq
+
+# rc_files_for_interactive_shell — the interactive-shell rc file(s) to install the
+# `claude` wrapper into, picked by the login shell ($SHELL) — mirroring the
+# convention setup-catalyst.sh uses for its PATH lines. zsh → ~/.zshrc; bash →
+# ~/.bashrc (+ ~/.bash_profile when it already exists, for macOS login shells that
+# read it instead of ~/.bashrc); unknown → both zsh and bash so a supported
+# interactive shell is always covered. The wrapper body is bash/zsh-portable
+# (case/local/arrays), so the same block works in either rc file.
+rc_files_for_interactive_shell() {
+	case "${SHELL:-}" in
+		*zsh) printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc" ;;
+		*bash)
+			printf '%s\n' "$HOME/.bashrc"
+			if [[ -e "$HOME/.bash_profile" ]]; then printf '%s\n' "$HOME/.bash_profile"; fi
+			;;
+		*) printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc" ;;
+	esac
+}
+
+# install_interactive_claude_wrapper — the interactive counterpart of the worker
+# --plugin-dir wiring. Phase workers get plugin-source via phase-agent-dispatch's
+# --plugin-dir flags (resolved from the pluginDirs machine-config key); a plain
+# interactive `claude` session has NO such mechanism (Claude Code exposes no env/
+# settings key for live local-plugin loading — only the --plugin-dir CLI flag), so
+# it would silently fall back to the version-keyed marketplace cache (which lags
+# releases — the exact staleness this whole setup avoids). This appends a guarded,
+# idempotent shell `claude` function that injects --plugin-dir for every plugin in
+# the checkout. It goes in the interactive rc (~/.zshrc / ~/.bashrc) — NOT ~/.zshenv
+# — so it never leaks into non-interactive/daemon `claude --bg` spawns (which
+# already get --plugin-dir from the dispatcher) and double-inject.
+#
+# BEST-EFFORT: this is a non-essential convenience — the essential pluginDirs config
+# write has already run by the time we are called. A missing rc directory, a
+# read-only rc, or any write failure must warn-and-continue, never abort the script
+# (the caller invokes us as `… || warn`, which also disables `set -e` inside here).
+# Symlinked rc files (dotfiles repos) are rewritten IN PLACE (truncate-through-the-
+# link) so a routine rerun updates the symlink target instead of replacing the
+# symlink with a regular file.
+install_interactive_claude_wrapper() {
+	local checkout="$1" rc dir tmp
+	local start="# >>> catalyst plugin-source (managed) >>>"
+	local end="# <<< catalyst plugin-source (managed) <<<"
+	local block
+	block="$(cat <<WRAP
+${start}
+# Interactive \`claude\` loads catalyst plugins LIVE from the plugin-source checkout
+# (never the lagging marketplace cache). Phase workers get this via
+# phase-agent-dispatch's --plugin-dir; this is the interactive equivalent.
+claude() {
+  case "\${1:-}" in
+    plugin|mcp|config|update|doctor|install|migrate-installer|--help|-h|--version|-v)
+      command claude "\$@"; return ;;
+  esac
+  local base="${checkout}/plugins" d
+  local args=()
+  if [ -d "\$base" ]; then
+    for d in "\$base"/*/; do
+      [ -f "\${d}.claude-plugin/plugin.json" ] && args+=(--plugin-dir "\${d%/}")
+    done
+  fi
+  command claude "\${args[@]}" "\$@"
+}
+${end}
+WRAP
+	)"
+
+	while IFS= read -r rc; do
+		if [[ -z "$rc" ]]; then continue; fi
+		dir="$(dirname "$rc")"
+		if [[ ! -d "$dir" ]]; then
+			echo "WARN: skipping interactive wrapper in ${rc} — directory ${dir} does not exist." >&2
+			continue
+		fi
+		# Read-only rc file (or dir, for a not-yet-created rc): warn and skip.
+		if { [[ -e "$rc" && ! -w "$rc" ]]; } || { [[ ! -e "$rc" && ! -w "$dir" ]]; }; then
+			echo "WARN: skipping interactive wrapper in ${rc} — not writable." >&2
+			continue
+		fi
+		# Idempotent: strip any prior managed block, then append the current one.
+		# The strip rewrites the rc IN PLACE (cat >"$rc" truncates through a symlink,
+		# preserving a dotfiles-repo symlink instead of replacing it with a file).
+		if [[ -f "$rc" ]] && grep -qF "$start" "$rc"; then
+			tmp="$(mktemp "${TMPDIR:-/tmp}/.catalyst-rc.XXXXXX")" || { echo "WARN: mktemp failed for ${rc}" >&2; continue; }
+			if awk -v s="$start" -v e="$end" '$0==s{skip=1} !skip{print} $0==e{skip=0}' "$rc" >"$tmp"; then
+				cat "$tmp" >"$rc" || { echo "WARN: could not rewrite ${rc}" >&2; rm -f "$tmp"; continue; }
+			fi
+			rm -f "$tmp"
+		fi
+		if printf '%s\n' "$block" >>"$rc"; then
+			echo "Installed the interactive \`claude\` plugin-source wrapper in ${rc}."
+		else
+			echo "WARN: could not append interactive wrapper to ${rc}." >&2
+		fi
+	done < <(rc_files_for_interactive_shell)
+}
 
 CHECKOUT_PATH="${CHECKOUT_PATH:-$DEFAULT_PATH}"
 
@@ -154,23 +255,33 @@ if [[ "$CURRENT" == "$TARGET_DIR" && $FORCE -eq 0 ]]; then
 	echo "pluginDirs already registered as ${TARGET_DIR} in ${MACHINE_CFG} — leaving as-is."
 	echo "  checkout: ${CHECKOUT_PATH}"
 	echo "  HEAD:     ${HEAD_SHA}"
-	exit 0
+else
+	# Same-directory tmp so the final mv is an atomic same-filesystem rename
+	# (a default mktemp lands on a different volume on macOS, making mv a
+	# non-atomic copy+unlink — a crash mid-write would corrupt the config).
+	tmp="$(mktemp "$(dirname "$MACHINE_CFG")/.config.json.XXXXXX")"
+	trap 'rm -f "$tmp"' EXIT
+	jq --arg pd "$TARGET_DIR" '
+		.catalyst //= {}
+		| .catalyst.orchestration //= {}
+		| .catalyst.orchestration.pluginDirs = $pd
+	' "$MACHINE_CFG" > "$tmp"
+	mv "$tmp" "$MACHINE_CFG"
+
+	echo "Registered pluginDirs in ${MACHINE_CFG}:"
+	echo "  old: ${CURRENT:-<unset>}"
+	echo "  new: ${TARGET_DIR}"
+	echo "  checkout: ${CHECKOUT_PATH}"
+	echo "  HEAD:     ${HEAD_SHA}"
 fi
 
-# Same-directory tmp so the final mv is an atomic same-filesystem rename
-# (a default mktemp lands on a different volume on macOS, making mv a
-# non-atomic copy+unlink — a crash mid-write would corrupt the config).
-tmp="$(mktemp "$(dirname "$MACHINE_CFG")/.config.json.XXXXXX")"
-trap 'rm -f "$tmp"' EXIT
-jq --arg pd "$TARGET_DIR" '
-	.catalyst //= {}
-	| .catalyst.orchestration //= {}
-	| .catalyst.orchestration.pluginDirs = $pd
-' "$MACHINE_CFG" > "$tmp"
-mv "$tmp" "$MACHINE_CFG"
-
-echo "Registered pluginDirs in ${MACHINE_CFG}:"
-echo "  old: ${CURRENT:-<unset>}"
-echo "  new: ${TARGET_DIR}"
-echo "  checkout: ${CHECKOUT_PATH}"
-echo "  HEAD:     ${HEAD_SHA}"
+# ─── 3. Interactive `claude` wrapper (best-effort, LAST) ────────────────────
+# Runs after the essential pluginDirs config write so a non-fatal rc-file failure
+# can never skip it. Skipped entirely (--no-interactive-wrapper) when invoked by
+# the non-interactive install-lifecycle acquire step, which must not touch the
+# user's shell rc files. The `|| warn` guard also disables `set -e` inside the
+# function so a read-only/managed-dotfiles rc warns instead of aborting.
+if [[ $INSTALL_WRAPPER -eq 1 ]]; then
+	install_interactive_claude_wrapper "$CHECKOUT_PATH" \
+		|| echo "WARN: interactive \`claude\` wrapper not installed (non-fatal) — pluginDirs config is set; plain \`claude\` will use the marketplace cache until you add the wrapper manually." >&2
+fi

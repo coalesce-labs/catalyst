@@ -28,8 +28,12 @@ export interface TicketDetail {
   description: null;
   /** Component/held labels from the descriptor. */
   labels: string[];
-  /** Held classification from the labels ("blocked" | "waiting" | null). */
-  held: "blocked" | "waiting" | null;
+  /**
+   * Held classification from the labels. CTL-764 Phase 4 renamed "waiting" →
+   * "queued"; the legacy "waiting" label back-compat-maps to "queued", so both
+   * appear in the union (mirrors board-data.d.mts BoardTicket.held).
+   */
+  held: "blocked" | "queued" | "waiting" | null;
   /** Held-since timestamp — no cache column today, so always null (honest). */
   heldSince: null;
   /** Forward + reverse relation graph edges. */

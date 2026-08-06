@@ -32,11 +32,14 @@ import {
   getClusterHosts,
   getHostName,
   getLivenessAnchorIssue,
+  getLivenessReadSource, // CTL-1420 (#17): loki|linear cross-host liveness source
+  getLokiQueryUrl, // CTL-1420 (#17): Loki base URL for the liveness read
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
   GHOST_GRACE_MS,
   HEARTBEAT_GRACE_MS,
+  HEARTBEAT_TAIL_WINDOW_MS, // CTL-1529: bounded heartbeat tail target window
   ZOMBIE_STALE_FLOOR_MS,
   NEVER_STARTED_MS,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
@@ -46,10 +49,53 @@ import {
 // transcripts so a doc worker mid in-process fan-out is never judged silent
 // (CTL-662-safe). Used ONLY to break the cold-snapshot doc-phase 6h tie below.
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
-import { readPeerHeartbeatsSync } from "./cluster-heartbeat-sync.mjs";
+import { scanEventsChunked, scanEventsSince, DEFAULT_TAIL_MAX_BYTES } from "./event-tail.mjs"; // CTL-1514 / CTL-1529: bounded event-log scans
+// CTL-863 fleet-unfreeze (entourage follow-up to #2552): readPeerHeartbeatsSyncCached is
+// the CACHED reader — a 45s in-process TTL cache around the same anchor-issue read, safe
+// here because dead-host detection already tolerates a far larger (10-min) staleness
+// grace. The uncached readPeerHeartbeatsSync stays available in cluster-heartbeat-sync.mjs
+// for callers that want the live read every time (e.g. cli/cluster.mjs's human-invoked
+// `status` verb).
+import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
+import { readClusterLivenessFromLokiSyncCached } from "./loki-liveness-sync.mjs"; // CTL-1420 (#17): Loki liveness read
+
+// CTL-1420 (#17): source-aware cross-host peer-liveness read. "loki" reads the
+// unified event log via Loki (fail-open, Linear-free); "linear" is the legacy anchor
+// attachment. Both return the SAME { [host]: {last_seen, in_flight_tickets} } shape,
+// so readClusterHeartbeats / defaultOwnedTicketsForHost are unchanged below the seam.
+// The `anchorIssue` arg is only meaningful in linear mode (loki uses getLokiQueryUrl()).
+// CTL-1091 (Codex P1 follow-up): `strict` propagates to the underlying reader so a
+// DETERMINATE peer-read FAILURE throws (dispatch outage → full roster) rather than
+// fail-opening to `{}` (which is indistinguishable from a genuinely-empty success and
+// would let the strict path keep [self] and grab every peer's work). The cached
+// wrappers spread it straight through to the sync reader on a miss; a cache HIT (a
+// recent determinate success) legitimately skips the read. Default false = recovery's
+// fail-open.
+function defaultReadPeers(anchorIssue, { strict = false } = {}) {
+  if (getLivenessReadSource() === "loki") {
+    return readClusterLivenessFromLokiSyncCached({ lokiUrl: getLokiQueryUrl() }, { strict });
+  }
+  return readPeerHeartbeatsSyncCached({ anchorIssue }, { strict });
+}
+
+// peerLivenessConfigured — is the cross-host peer read wired for the ACTIVE source?
+// loki → a Loki query URL resolves; linear → the anchor issue is set. Gates the
+// multi-host merge so a source with no transport configured is an exact no-op
+// (local-map-only) instead of a wasted/failing read.
+function peerLivenessConfigured(anchorIssue) {
+  return getLivenessReadSource() === "loki" ? Boolean(getLokiQueryUrl()) : Boolean(anchorIssue);
+}
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
+// PROJ-1657: the one non-FSM phase this module knows is legitimately dispatched
+// through the same workers/<ticket>/phase-<name>.json signal-file machinery
+// (recovery-reasoning.mjs's Pass 0r recovery-pass actuator). Anything else
+// unrecognized by isKnownPhase is treated as genuinely unknown data (a typo or
+// a corrupt signal), not a supported dispatch-reuse type — see the reclaim
+// supersede-guard below.
+import { RECOVERY_PASS_PHASE } from "./recovery-reasoning.mjs";
+import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
@@ -70,7 +116,12 @@ import { claimDispatchSync } from "./cluster-claim-sync.mjs";
 import { dispatchTicket, defaultDispatch, settleDispatchSync, sdkSignalRunnable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) revive dispatch synchronously + backstop a rejected async dispatch
 import { createWorktree } from "./worktree.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
+// CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
+import { emitFenceClaimed } from "./fence-event.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
+// CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
+// won cluster claim. Never the claim arbiter — see worker-label.mjs header.
+import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
 // the scheduler's fetchTicketState + cache (threaded via reclaimOpts) so a
@@ -85,6 +136,8 @@ import {
   labelOnce,
   inEscalationCooldown as defaultInEscalationCooldown,
   recordEscalation as defaultRecordEscalation,
+  readEscalationRecord as defaultReadEscalationRecord, // CTL-1442: ask-cap gate
+  ESCALATION_ASK_CAP, // CTL-1442
   labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
 import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
@@ -311,8 +364,12 @@ function buildEventEnvelope({
   severityText = "WARN",
   severityNumber = 13,
   ticketType = UNKNOWN_TICKET_TYPE,
+  // CTL-1488: id of the triggering event (additive; null when absent). Parity
+  // with the shared TS/bash builders' caused_by (ADR-022 absence-detection).
+  causedBy = null,
 }) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const eventName = `phase.${phase}.${action}.${ticket}`;
   return (
     JSON.stringify({
       ts,
@@ -322,21 +379,26 @@ function buildEventEnvelope({
       severityNumber,
       traceId: randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
+      // CTL-1488: caused_by parity with canonical-event.sh:340 / canonical-event.ts:258.
+      caused_by: causedBy,
       resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
       attributes: {
-        "event.name": `phase.${phase}.${action}.${ticket}`,
+        "event.name": eventName,
         "event.entity": "phase",
         "event.action": action,
         "event.label": ticket,
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
         "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE,
+        // CTL-1488: coordination/telemetry split label (single source of truth).
+        "event.stream_class": classifyEventStream(eventName),
         ...vetAttrs(attrExtras), // CTL-1291: chartable gauge numbers
       },
       body: { payload: { phase, ticket, status: action, reason, ...payloadExtras } },
     }) + "\n"
   );
 }
+export { buildEventEnvelope }; // CTL-1488: exported for direct parity tests
 
 // appendEnvelopeBestEffort — try to append; return true on success, false on
 // any failure. Revive event callers gate the dispatch on this return value:
@@ -613,12 +675,15 @@ export function defaultPostReclaimMirror(
       return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
     },
     multiHost = false,
+    // CTL-863: threaded through for the Stage-1 projection-first fence read.
+    gateway = undefined,
+    self = undefined,
   } = {}
 ) {
   const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
   if (exists(marker)) return; // first-writer-wins
   // CTL-863: zombie guard — a post-takeover paused host must not post a mirror comment.
-  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+  if (!fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
     log.warn(
       { ticket, phase },
       "ctl-863: stale fence — suppressing postReclaimMirror comment (zombie guard)"
@@ -1826,6 +1891,57 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 // (appendReviveEvent, appendEscalatedEvent, reviveDispatch, applyStalledLabel,
 // killBgJob, countReviveEvents, writeReviveMarker) + the CTL-638 cool-down +
 // CTL-679 breaker. All have real defaults for prod; tests override every one.
+// markEscalationCapTerminal — CTL-1442. Flip a phase signal to a TERMINAL
+// stalled state, persisting the curated CTL-1130 explanation on the signal so
+// the monitor's Needs-You inbox (board-data deriveExplanation, newest-signal-
+// first) renders the final brief. A terminal signal drops the ticket from the
+// reclaim sweep's working set — originally so the every-cool-down re-ask loop
+// (audit RC4) ends once the escalation ask-cap is consumed (the default
+// `stalledReason`); PROJ-1657 reuses the same terminal-write for the
+// no-probe-for-phase escalation (a probe-less phase — e.g. a dead
+// recovery-pass worker — has no retry path at all, so it must go terminal on
+// the FIRST occurrence, not after a cap of asks) via an explicit
+// `stalledReason` override. Read-modify-write, atomic tmp+rename (mirrors
+// defaultReviveDispatch's signal reset). Never throws — a failed flip falls
+// back to escalateOnce's early-return.
+function markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason = "escalation-ask-cap" }) {
+  const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+  try {
+    mkdirSync(dirname(signalPath), { recursive: true });
+    // Codex R4: a truncated/malformed signal must be treated like a MISSING one
+    // (parse failure must not abort the rewrite — readWorkerSignals skips
+    // malformed files, so leaving it broken loses the inbox association).
+    let sig = {};
+    if (existsSync(signalPath)) {
+      try {
+        sig = JSON.parse(readFileSync(signalPath, "utf8")) ?? {};
+      } catch {
+        sig = {};
+      }
+    }
+    // Codex R3: when re-creating a removed/unreadable signal, seed identity —
+    // readWorkerSignals derives ticket/phase from the BODY, not the path, and a
+    // ticket:null stalled row breaks the Needs-You association.
+    if (!sig.ticket) sig.ticket = ticket;
+    if (!sig.phase) sig.phase = phase;
+    sig.status = "stalled";
+    sig.stalledReason = stalledReason;
+    sig.explanation = explanation;
+    if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
+    sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const tmp = `${signalPath}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(sig, null, 2));
+    renameSync(tmp, signalPath);
+    return true;
+  } catch (err) {
+    log.warn(
+      { ticket, phase, err: err.message },
+      "ctl-1442: escalation-cap terminal signal write failed — the ask-cap early-return still suppresses re-asks"
+    );
+    return false;
+  }
+}
+
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -1866,6 +1982,15 @@ export function reclaimDeadWorkIfPossible(
     // I/O, or to drive the cool-down clock independently of `now`.
     inEscalationCooldownFn = defaultInEscalationCooldown,
     recordEscalationFn = defaultRecordEscalation,
+    // CTL-1442 — the ask-cap gate: after escalationAskCap consecutive same-reason
+    // no-progress asks (default 3, env CATALYST_ESCALATION_ASK_CAP) the
+    // escalation goes TERMINAL (stalled signal + persisted brief) instead of
+    // re-asking every cool-down window forever (ADV-1374/1376 fired for days;
+    // audit RC4). Scoped to reason "no-progress" — the alive busy-ceiling and
+    // no-probe asks keep their existing unbounded-but-throttled behavior (their
+    // signals belong to live workers a terminal flip could fight).
+    readEscalationRecordFn = defaultReadEscalationRecord,
+    escalationAskCap = ESCALATION_ASK_CAP,
     // CTL-606 — supersede guard. Returns the ticket's dispatched phase names so
     // the guard can detect a dead signal the pipeline has already advanced past.
     listTicketPhases = (t) => listDispatchedPhases(orchDir, t),
@@ -1972,6 +2097,15 @@ export function reclaimDeadWorkIfPossible(
     // The intentDb is obtained from beliefs.db (CATALYST_BELIEFS_SHADOW=1 gate);
     // it is threaded in from the scheduler's reclaimOpts alongside fetchState/cache.
     intentDb = null,
+    // CTL-863: cluster-size gate + host identity for the postReclaimMirror fence
+    // zombie-guard. The scheduler threads its live per-tick values (scheduler.mjs
+    // reclaimOpts); the fail-safe defaults (multiHost:false → guard trusts local,
+    // the safe single-host floor) keep every unit test that omits them unchanged.
+    // Without this thread the guard call at defaultPostReclaimMirror always saw
+    // multiHost=false and was inert on a real ≥2-host cluster.
+    multiHost = false,
+    self = undefined,
+    gateway = undefined,
   } = {}
 ) {
   const klass = classifyWorker(signal, { statJob });
@@ -2141,16 +2275,64 @@ export function reclaimDeadWorkIfPossible(
     // Defer: skip the audit event + label write entirely (no cool-down record,
     // so a genuine escalation re-fires cleanly once the breaker closes). A
     // transient 429 is not a human-intervention condition.
+    // CTL-1442: the ask-cap state (no-progress only). Consecutive same-reason
+    // asks are counted in the cool-down marker; a spent cap means the ticket was
+    // parked terminal (or should have been — the flip can be lost to a crash).
+    // Read BEFORE the breaker AND cooldown gates (Codex R2/R4): the terminal
+    // rewrite is purely LOCAL, so neither an open Linear breaker nor the
+    // cool-down window may defer repairing a lost flip — a dead running signal
+    // would otherwise hold a slot for the whole outage/window.
+    const priorEscRecord = readEscalationRecordFn(orchDir, ticket, phase);
+    const priorAsks =
+      priorEscRecord?.reason === reason && typeof priorEscRecord?.askCount === "number"
+        ? priorEscRecord.askCount
+        : 0;
+    const capApplies = reason === "no-progress";
+    const capSpent = capApplies && priorAsks >= escalationAskCap;
+    // PROJ-1657 Codex P1 (round 2): a probe-less phase (recovery-pass today)
+    // must terminalize on its FIRST occurrence, same as a spent no-progress
+    // cap — there is no retry budget to wait out. Fold it into the same
+    // "must terminalize locally, regardless of breaker/cooldown state" gate
+    // as capSpent, since markEscalationCapTerminal is purely a local
+    // tmp+rename write with no Linear/event I/O of its own.
+    const mustTerminalizeLocally = capSpent || reason === "no-probe-for-phase";
+    const reassertTerminalIfLost = () => {
+      let already = null;
+      try {
+        already = JSON.parse(
+          readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"),
+        )?.status;
+      } catch {
+        /* absent/malformed → re-assert below */
+      }
+      if (already === "stalled") return;
+      markEscalationCapTerminal({
+        orchDir,
+        ticket,
+        phase,
+        explanation: buildEscExplanation(),
+        stalledReason: capSpent ? "escalation-ask-cap" : reason,
+      });
+      log.warn(
+        { ticket, phase, reason, priorAsks },
+        "ctl-1442: ask-cap spent but the signal was not terminal — re-asserted the stalled flip"
+      );
+    };
     if (breaker.isOpen(now())) {
+      if (mustTerminalizeLocally) reassertTerminalIfLost(); // local-only repair — no Linear I/O
       log.warn({ ticket, phase, reason }, "ctl-679: escalation deferred — Linear breaker open");
       return "rate-limited-deferred";
     }
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
+      if (mustTerminalizeLocally) reassertTerminalIfLost();
       return "escalation-suppressed";
     }
     // CTL-1130: build a typed-union explanation classified by the three gates.
     // push_rejected_no_workflow_scope → MANUAL (capability boundary, D-recovery);
     // all other reasons → AUTHORIZATION (agent can retry with authority).
+    // CTL-1442: wrapped as a (pure) builder so the spent-cap re-assert can
+    // produce a fresh brief lazily without duplicating the CTL-1130 logic.
+    function buildEscExplanation() {
     const escType = reasonToType(reason);
     const whyField = reasonToWhyField(reason, finalAttemptCount);
     let explanation;
@@ -2181,7 +2363,22 @@ export function reclaimDeadWorkIfPossible(
             could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
             authorize_label: `retry ${ticket} ${phase}`,
             observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
-            attempts: extras?.attempts ?? [],
+            // CTL-1442: truthful ask history — this call site historically passed
+            // no extras, so the payload showed attempts:[] forever while asking
+            // "authorize retry?" every window (audit RC4). Scoped to the SAME
+            // reason (Codex R2): a fresh no-progress ask must not inherit an
+            // unrelated wedged-never-started history.
+            // Codex (post-merge #2590 P3): include the CURRENT ask — the marker
+            // is written after the emit, so the record alone is one ask behind
+            // (the terminal brief would show 2 of 3 timestamps).
+            attempts:
+              extras?.attempts ??
+              [
+                ...(priorEscRecord?.reason === reason && Array.isArray(priorEscRecord?.asks)
+                  ? priorEscRecord.asks
+                  : []),
+                now(),
+              ],
           };
     try {
       explanation = buildExplanation(explanationFields);
@@ -2194,6 +2391,16 @@ export function reclaimDeadWorkIfPossible(
         canExecute: escType !== "manual",
       });
     }
+    return explanation;
+    }
+    // CTL-1442: the ask-cap is already spent (and we are OUTSIDE the cooldown —
+    // the in-window case re-asserted above). Re-assert the flip idempotently,
+    // never re-emit the event/label.
+    if (capSpent) {
+      reassertTerminalIfLost();
+      return "escalation-capped";
+    }
+    const explanation = buildEscExplanation();
     const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
       phase,
@@ -2205,6 +2412,35 @@ export function reclaimDeadWorkIfPossible(
     });
     applyStalledLabel({ orchDir, ticket });
     recordEscalationFn(orchDir, ticket, phase, reason, now());
+    // CTL-1442: this ask consumed the cap → go TERMINAL. Flip the phase signal
+    // to stalled with the curated explanation persisted on it (deriveExplanation
+    // renders it in the monitor's Needs-You inbox), so the reclaim sweep stops
+    // re-evaluating the ticket and the operator sees ONE final, complete ask
+    // instead of an endless every-10-min echo.
+    if (capApplies && priorAsks + 1 >= escalationAskCap) {
+      markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
+      log.warn(
+        { ticket, phase, reason, asks: priorAsks + 1 },
+        "ctl-1442: escalation ask-cap reached — parked terminal (stalled + needs-human + brief); re-arm by deleting the .escalation-cooldowns marker AND the stalled phase signal (or reply on the ticket — the stall janitor clears both)"
+      );
+      return "escalation-cap-terminal";
+    }
+    // PROJ-1657: a probe-less phase (e.g. a dead recovery-pass worker, which
+    // reuses this signal-file machinery but has no registered work-done probe
+    // to retry against) has no retry path at all — there is nothing a second
+    // attempt could do differently. Unlike the "no-progress" cap above (which
+    // legitimately retries up to escalationAskCap times before going
+    // terminal), go terminal on this FIRST occurrence: leaving the signal at
+    // its prior non-terminal status would let listInFlightTickets keep
+    // counting it as an occupied worker slot forever (Codex #3027 P1).
+    if (reason === "no-probe-for-phase") {
+      markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason: reason });
+      log.warn(
+        { ticket, phase, reason },
+        "proj-1657: no-probe-for-phase escalation — parked terminal immediately (no retry path exists for a probe-less phase)"
+      );
+      return "escalation-cap-terminal";
+    }
     log.warn({ ticket, phase, reason }, "ctl-587: escalated");
     return "escalated";
   }
@@ -2333,14 +2569,21 @@ export function reclaimDeadWorkIfPossible(
         );
         return "reclaim-failed";
       }
-      postReclaimMirror({
-        orchDir,
-        ticket,
-        phase,
-        deathSignal: "alive-probe-done",
-        probeChecked: describeProbe(phase),
-        reclaimedBgJobId: prevBgJobId,
-      });
+      postReclaimMirror(
+        {
+          orchDir,
+          ticket,
+          phase,
+          deathSignal: "alive-probe-done",
+          probeChecked: describeProbe(phase),
+          reclaimedBgJobId: prevBgJobId,
+        },
+        // CTL-863 (Codex P2, recovery.mjs:2360): thread the live cluster gate as
+        // the SECOND (options) argument — that is where defaultPostReclaimMirror
+        // reads multiHost/self/gateway. Passing them in the first (payload) arg
+        // left the fence zombie-guard seeing multiHost=false (inert on ≥2 hosts).
+        { multiHost, self, gateway }
+      );
       log.info(
         { ticket, phase },
         "ctl-778: alive-but-idle worker reclaimed (complete event + probe)"
@@ -2651,7 +2894,33 @@ export function reclaimDeadWorkIfPossible(
     const i = phaseIndex(p);
     return i > max ? i : max;
   }, -1);
-  if (phaseIndex(phase) < latestIdx) {
+  // The signal's OWN phase needs an analogous guard before phaseIndex(phase):
+  // "recovery-pass" (the one non-FSM phase this module knows is legitimately
+  // dispatched through this same signal-file machinery, via
+  // recovery-reasoning.mjs's Pass 0r actuator) has no ordinal position, so
+  // phaseIndex() throws PhaseFsmError for it. Previously this was unguarded —
+  // every dead recovery-pass worker hit the throw on every tick, was
+  // swallowed by the PROJ-702 per-worker isolation in scheduler.mjs, and could
+  // never actually be reclaimed.
+  //
+  // PROJ-1657 Codex P2: the guard is scoped to RECOVERY_PASS_PHASE specifically,
+  // NOT a blanket "any unknown phase" — signal-reader.mjs accepts arbitrary
+  // phase-*.json files with an unvalidated raw.phase, so a genuinely unknown
+  // string (a typo, a corrupt signal, a future dispatch type not yet added
+  // here) must keep the PRE-fix behavior of doing nothing, not silently reach
+  // the no-probe-for-phase escalation below and mutate Linear/event state for
+  // data this function doesn't understand.
+  if (!isKnownPhase(phase) && phase !== RECOVERY_PASS_PHASE) {
+    log.warn(
+      { ticket, phase },
+      "recovery: unrecognized phase on a reclaim-eligible signal — no-op (not superseded, not escalated)"
+    );
+    return "unknown-phase-noop";
+  }
+  // A non-FSM phase (recovery-pass) can't be "superseded" in the ordinal
+  // sense — isKnownPhase(phase) is false for it, so this comparison is
+  // skipped and it falls through to the reclaim-eligible path below.
+  if (isKnownPhase(phase) && phaseIndex(phase) < latestIdx) {
     // CTL-649: emit a reap-intent so the daemon reaper can stop the lingering
     // bg worker. Fire-and-forget — the periodic orphan reaper picks up anything
     // the reconciler missed.
@@ -2682,7 +2951,66 @@ export function reclaimDeadWorkIfPossible(
   //     CTL-662: a `busy` worker on a probe-less phase no longer reaches here —
   //     the status trigger above suppresses it first, so this branch only
   //     escalates a genuinely reclaim-eligible (absent/idle-confirmed) worker.
+  //
+  //     PROJ-1657 Codex P2 (round 2): before escalating, check whether the
+  //     worker's own phase.<phase>.complete event was already seen — mirrors
+  //     the PROJ-778 alive-branch guard above, but for the DEAD case, where
+  //     there is no probe to re-check (a probe-less phase has none by
+  //     definition). A recovery-pass worker that emitted its complete event
+  //     and then crashed before its OWN signal-file update landed genuinely
+  //     finished; reconciling it to `done` (not escalating it to `stalled`)
+  //     avoids a false needs-human park on work that already succeeded.
   if (!hasProbe(phase)) {
+    // PROJ-1657 Codex P2 (round 4): recovery-emit.mjs's `escalated` subcommand
+    // already parks this signal `needs-human` with a worker-authored decision
+    // brief (mergeExplanationIntoSignal) when the recovery-pass worker itself
+    // decided it couldn't resolve the ticket — the worker then died before its
+    // phase-completion event landed. Mirrors the needs-input guard at the top
+    // of reclaimDeadWork: an already-parked signal is a resolved outcome, not
+    // an unverifiable dead worker, so it must not be overwritten with a
+    // generic no-probe-for-phase escalation that discards the curated brief.
+    if (signal?.status === "needs-human") {
+      log.debug(
+        { ticket, phase },
+        "recovery: no-probe branch skipping already-parked needs-human signal (worker-authored decision preserved)"
+      );
+      return "noop";
+    }
+    if (completeEventSeen({ ticket, phase })) {
+      if (prevBgJobId) {
+        emitReapIntent("phase.reclaim.reap-requested", {
+          ticket,
+          phase,
+          bgJobId: prevBgJobId,
+          worktreePath: signal.raw?.worktreePath,
+          reason: "proj-1657-no-probe-complete-event-reconcile",
+        }).catch(() => {});
+      }
+      appendEvent({
+        phase,
+        ticket,
+        orchId,
+        orchDir,
+        death_signal: lifecycle,
+        prev_state_json_mtime: prevStateJsonMtime,
+        probe_passed: null,
+        probe_checked: null,
+        completion_origin: "inferred-from-complete-event",
+        reclaimed_bg_job_id: prevBgJobId,
+        stopped_bg_job_ids: [],
+        title: `phase ${phase} reclaimed (no probe, but complete event seen)`,
+        body: `Daemon reclaimed dead ${phase} worker for ${ticket}: no work-done probe registered for this phase, but its own phase.${phase}.complete event was already emitted before the signal-file update landed. bg_job_id=${prevBgJobId ?? "?"}.`,
+      });
+      const r = emitComplete({ orchDir, signal });
+      if (r.code !== 0) {
+        log.warn(
+          { ticket, phase, code: r.code, stderr: r.stderr },
+          "recovery: no-probe complete-event reconcile — emit-complete failed; will retry next tick"
+        );
+        return "reclaim-failed";
+      }
+      return "reclaimed";
+    }
     return escalateOnce("no-probe-for-phase", 0);
   }
 
@@ -2754,14 +3082,21 @@ export function reclaimDeadWorkIfPossible(
     }
     // CTL-664: mirror the reclaim to Linear (after emit-complete succeeds, so a
     // reclaim-failed never posts). Reuses the Phase 2 consts — no recomputation.
-    postReclaimMirror({
-      orchDir,
-      ticket,
-      phase,
-      deathSignal: death_signal,
-      probeChecked: probe_checked,
-      reclaimedBgJobId: prevBgJobId,
-    });
+    postReclaimMirror(
+      {
+        orchDir,
+        ticket,
+        phase,
+        deathSignal: death_signal,
+        probeChecked: probe_checked,
+        reclaimedBgJobId: prevBgJobId,
+      },
+      // CTL-863 (Codex P2, recovery.mjs:2360): thread the live cluster gate as
+      // the SECOND (options) argument — that is where defaultPostReclaimMirror
+      // reads multiHost/self/gateway. Passing them in the first (payload) arg
+      // left the fence zombie-guard seeing multiHost=false (inert on ≥2 hosts).
+      { multiHost, self, gateway }
+    );
     // CTL-932 fix #3: the phase SUCCEEDED (work committed) — clear any stale
     // never-started attempt marker so a much-later legitimate re-dispatch of the
     // same (ticket, phase) starts the wedge budget fresh instead of inheriting a
@@ -2986,12 +3321,11 @@ export function reclaimDeadWorkIfPossible(
 export function recoverStartup({ orchDir, exec, statJob, detectCold = detectColdStart } = {}) {
   if (!orchDir) throw new Error("recoverStartup: orchDir is required");
 
-  // (1) Routing state — reconcileAll re-reads the registry + polls Linear per
-  //     team; reconcileProject internally swallows poll/write failures.
-  reconcileAll({ exec });
-  const projects = listProjects().map((p) => p.team);
-
-  // (2) Durable event-log cursor — what the monitor's fast path will resume at.
+  // (1) Durable event-log cursor — what the monitor's fast path will resume at.
+  //     Captured BEFORE reconcileAll: since CTL-1580 the eligible-list query
+  //     emits catalyst.linear.read telemetry into this same log, so measuring
+  //     after reconcile would fold the boot's OWN telemetry into the resume
+  //     cursor and a fresh boot could never observe "no prior log" (CTL-1593).
   const logPath = getEventLogPath();
   let fileSize = 0;
   try {
@@ -3003,6 +3337,11 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
   }
   const cursor = loadCursor();
   const startOffset = resolveStartOffset({ cursor, logPath, fileSize });
+
+  // (2) Routing state — reconcileAll re-reads the registry + polls Linear per
+  //     team; reconcileProject internally swallows poll/write failures.
+  reconcileAll({ exec });
+  const projects = listProjects().map((p) => p.team);
 
   // (3) Dispatch/worker state — classify in-flight claude --bg workers.
   const workers = reconstructWorkerState(orchDir, { statJob });
@@ -3024,75 +3363,533 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
   };
 }
 
+// ─── CTL-859 / CTL-1529: cluster heartbeat reads ─────────────────────────────
+//
+// HEARTBEAT_TAIL_MAX_BYTES — CTL-1529 byte cap for the bounded heartbeat tail.
+// See DEFAULT_TAIL_MAX_BYTES in event-tail.mjs for the derivation; overridable per
+// host because log density varies ~3x across the fleet.
+//
+// The override is parsed with the BOUNDED-INT discipline this codebase already uses
+// for env knobs (config.mjs::resolveRestoreHoldMs) rather than a bare
+// `Number(env) || default`, because a bare parse accepts two values that break the
+// cap in opposite directions (Codex P2):
+//
+//   • NEGATIVE — scanEventsSince clamps the cap with `Math.max(1, …)`, so `-1`
+//     becomes a ONE-BYTE budget. Every nontrivial multi-host liveness read then
+//     returns covered:false, makeTickHeartbeatReader throws HeartbeatWindowError on
+//     every tick, and BOTH liveness gates degrade to the full roster CONTINUOUSLY —
+//     dead-host failover and the dispatch shed silently switch off fleet-wide, with
+//     nothing but a config typo to show for it.
+//   • Infinity — `Math.min(Infinity, MAX_SAFE_INTEGER)` is an effectively unbounded
+//     cap, which reinstates exactly the whole-log read this ticket removed.
+//
+// So: finite, positive, integer, and clamped to a documented [MIN, MAX] band.
+// Anything else falls back to the default LOUDLY (never silently) — a mistyped
+// knob must be visible in the daemon log, not inferred weeks later from a stranded
+// ticket.
+//
+// MIN 1 MiB  — one chunkSize. Below this the tail cannot even span a single read,
+//              so no window is provable and the cap is indistinguishable from
+//              "disable liveness".
+//
+//              NOTE (round 2): this floor is MECHANICAL, not semantic — it says
+//              "at least one chunk", not "enough bytes to decide anything". Byte
+//              counts cannot carry a time guarantee, because log density varies
+//              ~3x across the fleet and ~9x between a quiet host and a burst; the
+//              same 1 MiB spans 14 minutes on a busy day and 36 on a quiet one.
+//              A byte MIN therefore CANNOT be the thing that makes stale-vs-absent
+//              decidable, and it must not be read as if it were. What makes it
+//              decidable is the TIME assertion in scanLocalHeartbeats: `covered`
+//              is proved against HEARTBEAT_TAIL_WINDOW_MS, so a cap too small for
+//              the configured window yields covered:false → HeartbeatWindowError →
+//              the documented full-roster degrade. An operator who sets a small
+//              cap now gets a loud refusal instead of a silent "everyone absent".
+// MAX 1 GiB  — above the largest monthly log ever observed in the fleet (883 MB on
+//              mini), so it still admits a legitimate "scan everything on this host"
+//              override while keeping the read bounded by a NUMBER rather than by
+//              whatever the file happens to be.
+export const HEARTBEAT_TAIL_MIN_BYTES = 1024 * 1024; // 1 MiB
+export const HEARTBEAT_TAIL_CEILING_BYTES = 1024 * 1024 * 1024; // 1 GiB
+
+export function resolveHeartbeatTailMaxBytes(
+  raw,
+  {
+    defaultBytes = DEFAULT_TAIL_MAX_BYTES,
+    min = HEARTBEAT_TAIL_MIN_BYTES,
+    max = HEARTBEAT_TAIL_CEILING_BYTES,
+    onInvalid = null,
+  } = {},
+) {
+  // Unset / empty is not "invalid" — it is the documented way to take the default,
+  // and must stay silent.
+  if (raw === undefined || raw === null) return defaultBytes;
+  const str = String(raw).trim();
+  if (str === "") return defaultBytes;
+
+  const n = Number(str);
+  let reason = null;
+  if (!Number.isFinite(n)) {
+    // Covers NaN ("abc"), Infinity, and -Infinity in one gate.
+    reason = "not a finite number";
+  } else {
+    const v = Math.floor(n);
+    if (v < min) reason = `below the ${min}B minimum`;
+    else if (v > max) reason = `above the ${max}B maximum`;
+    else return v;
+  }
+  if (typeof onInvalid === "function") onInvalid({ raw: str, reason, defaultBytes, min, max });
+  return defaultBytes;
+}
+
+export const HEARTBEAT_TAIL_MAX_BYTES = resolveHeartbeatTailMaxBytes(
+  process.env.EXECUTION_CORE_HEARTBEAT_TAIL_MAX_BYTES,
+  {
+    onInvalid: ({ raw, reason, defaultBytes, min, max }) => {
+      try {
+        log.warn(
+          { raw, reason, min, max, usingBytes: defaultBytes },
+          "ctl-1529: EXECUTION_CORE_HEARTBEAT_TAIL_MAX_BYTES is invalid — ignoring it and using the default cap",
+        );
+      } catch {
+        /* logger unavailable (bare import in a test) — the fallback still applies */
+      }
+    },
+  },
+);
+
+// HeartbeatWindowError — CTL-1529. Raised when the bounded tail could NOT prove it
+// spans HEARTBEAT_TAIL_WINDOW_MS (the TARGET window — round 2; it used to be the
+// far weaker HEARTBEAT_GRACE_MS) and the caller asked for that guarantee.
+//
+// Tagged with a distinct `code` because readClusterHeartbeats ALREADY throws for
+// an unrelated reason (requirePeerView with no trustworthy cross-host view) and
+// both throws land in the same catch sites.
+//
+// BE PRECISE ABOUT WHAT THIS BUYS TODAY: no production code reads `err.code` —
+// grep it and the only hit is the assignment below. Every current catch site
+// degrades to the FULL roster for BOTH throws, which is the correct and
+// deliberately identical response. So the tag is for DIAGNOSIS (a log line or a
+// human reading a stack) and to make a future caller ABLE to distinguish cap
+// exhaustion from a transport outage — it does not distinguish them today.
+// Claiming otherwise would overstate the code, which is the exact defect this
+// change set kept finding elsewhere.
+export class HeartbeatWindowError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "HeartbeatWindowError";
+    this.code = "ERR_HEARTBEAT_WINDOW_UNCOVERED";
+  }
+}
+
+// ─── the tail HORIZON, and the one place it is not free (CTL-1529 round 3) ────
+//
+// THE RESIDUAL, stated plainly because the earlier docstring denied it existed.
+// Bounding the heartbeat read replaces an UNBOUNDED horizon (the whole-file read
+// looked all the way back to the start of the month) with a FINITE one
+// (HEARTBEAT_TAIL_WINDOW_MS, 12 h at the shipped defaults). Inside the window
+// nothing changes. OUTSIDE it there is a real behaviour difference, and it is a
+// REGRESSION vs origin/main, not merely a gap:
+//
+//   a host whose newest heartbeat is OLDER than windowMs is not in the tail, so
+//   it is ABSENT from `lastSeen` — and `deadHosts` is fail-OPEN, so absent means
+//   "not proven dead" and its in-flight work is NEVER reclaimed. The whole-file
+//   read saw that host, classified it PRESENT-BUT-STALE, and reclaimed it.
+//
+// Measured on this ticket's own 24 h fixture: a host last seen 20 h ago is
+// `deadHosts → ["ancient","stale"]` under origin/main and `["stale"]` here.
+//
+// WHY THE RESIDUAL IS ACCEPTED. Recovery runs on every scheduler tick, so a host
+// that dies while the fleet is running is detected within HEARTBEAT_GRACE_MS
+// (10 min) — twelve hours before it can fall out of the horizon. Reaching the
+// stranding case requires the SURVIVING daemon to have also been down (or its
+// ticks failing) for longer than the whole window, which is itself an incident.
+// The tradeoff is deliberate: an unbounded horizon costs a 883 MB read on every
+// liveness gate on every tick, which is the outage this ticket exists to stop.
+//
+// WHAT IS NOT ACCEPTED IS THE SILENCE. Under the first two rounds this stranding
+// produced no event, no log line, and `covered:true` — the caller was told the
+// tail was trustworthy and given a map in which a dead host looked like a host
+// that had simply never been heard of. So the residual now SIGNALS.
+//
+// hostsBeyondTailHorizon — pure. The rostered hosts a COVERED tail could not
+// speak for. Deliberately does not distinguish "dead beyond the horizon" from
+// "never heard of": the tail cannot tell those apart, and that indistinguishability
+// IS the finding. `covered:false` returns [] because that case is already loud
+// (HeartbeatWindowError → the documented full-roster degrade).
+export function hostsBeyondTailHorizon({ lastSeen = {}, roster = [], covered = true } = {}) {
+  if (!covered) return [];
+  if (!Array.isArray(roster)) return [];
+  return roster.filter(
+    (h) => typeof h === "string" && h.length > 0 && !(typeof lastSeen[h] === "string" && lastSeen[h].length > 0),
+  );
+}
+
+// BEYOND_HORIZON_WARN_INTERVAL_MS — the per-host re-warn period for the sink
+// below. The liveness gates run on every scheduler tick (seconds), so an
+// unthrottled warn would turn one stranded host into a log flood and get muted;
+// a throttle that never re-fires would make a PERSISTENT strand invisible after
+// its first tick. Hourly is the compromise: the first observation warns
+// immediately, and the condition keeps re-announcing itself for as long as it holds.
+export const BEYOND_HORIZON_WARN_INTERVAL_MS = 60 * 60 * 1000;
+
+const beyondHorizonLastWarnMs = new Map();
+
+// resetBeyondHorizonThrottle — test seam. The throttle is module state on purpose
+// (it must survive across the tick's several readClusterHeartbeats calls); this
+// lets a test assert both the emit and the suppression deterministically.
+export function resetBeyondHorizonThrottle() {
+  beyondHorizonLastWarnMs.clear();
+}
+
+// warnHostsBeyondTailHorizon — the DEFAULT sink: one WARN per host per interval,
+// on the exec-core daemon .log, which Alloy ships to Loki. A log line (not an
+// event) on purpose: this fires from inside the heartbeat READ path, and
+// appending to `~/catalyst/events/*.jsonl` from the reader of that same file is
+// how the CTL-346 filter-wake loop happened. Returns the hosts it actually
+// emitted for, so callers/tests can assert the throttle.
+export function warnHostsBeyondTailHorizon({ hosts = [], windowMs, oldestTs = null, nowMs = Date.now() } = {}) {
+  const emitted = [];
+  for (const host of hosts) {
+    const prev = beyondHorizonLastWarnMs.get(host);
+    if (prev !== undefined && nowMs - prev < BEYOND_HORIZON_WARN_INTERVAL_MS) continue;
+    beyondHorizonLastWarnMs.set(host, nowMs);
+    emitted.push(host);
+  }
+  for (const host of emitted) {
+    try {
+      log.warn(
+        { host, windowMs, oldestTs },
+        "ctl-1529: rostered host is absent from a COVERED heartbeat tail — it is either dead beyond " +
+          "the configured window or never seen here; recovery is fail-open so its work will NOT be " +
+          "reclaimed. Raise EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS or reclaim by hand.",
+      );
+    } catch {
+      /* logger unavailable (bare import in a test) — the throttle bookkeeping still applies */
+    }
+  }
+  return emitted;
+}
+
+// scanLocalHeartbeats — CTL-1529. ONE bounded, time-covering pass over the LOCAL
+// monthly event log that projects every `node.heartbeat` record twice:
+//   • lastSeen[host]   — newest ts per host (readClusterHeartbeats)
+//   • admission[host]  — the newest record's admission block (readClusterAdmission)
+// Both readers used to make their own separate whole-file read of the very same
+// lines; sharing one pass is why this returns both.
+//
+// THE CRUX — why this is time-bounded and not byte-bounded. `deadHosts` is the one
+// consumer that distinguishes ABSENT from PRESENT-BUT-STALE: absent ⇒ "not proven
+// dead" ⇒ never reclaimed; stale ⇒ dead ⇒ reclaimed and re-homed. A fixed
+// N-megabyte tail silently converts the second into the first (on a busy day 1 MB
+// of this log spans ~14 minutes), so a genuinely dead host's work strands forever
+// with no event and no log line.
+//
+// COVERAGE IS PROVED AGAINST THE TARGET WINDOW, NOT THE GRACE WINDOW (round 2).
+// The first cut passed `requiredSinceMs = nowMs - graceMs`, which certified only
+// "the tail reaches back 10 minutes" — i.e. only that it can see who is ALIVE.
+// That is the wrong guarantee for the property this whole change rests on, and
+// it is wrong in a specific, degenerate way: a tail spanning exactly the grace
+// window contains, BY DEFINITION, only hosts still inside it. Every stale host is
+// older than now-grace and therefore OUTSIDE the tail, so `sawStale` is
+// structurally impossible and `covered:true` asserts nothing about
+// stale-vs-absent. Measured on a 42 MiB / 30 h fixture with a host dead 6 h:
+// maxBytes at 1 MiB (the mechanical byte MIN) and at 8 MiB both reported
+// `covered:true, sawStale:false` — a whole band of accepted configurations in
+// which dead-host failover was off and NOTHING said so.
+//
+// So the required floor is the TARGET window. `Math.max` keeps graceMs as an
+// absolute floor for a caller that passes a degenerate windowMs directly (the env
+// path can't: resolveHeartbeatTailWindowMs enforces MIN = 2x grace).
+//
+// WHAT `covered:true` ACTUALLY GUARANTEES (round 3 — the round-2 wording claimed
+// more than the code delivers, and this is the exact overstatement being fixed):
+//
+//   IT DOES MEAN: the tail provably spans windowMs, so EVERY host that
+//   heartbeated within the last windowMs is present in `lastSeen` with its true
+//   newest ts. Stale-vs-alive is decidable for all of them; that is the property
+//   the liveness gates need and it now holds.
+//
+//   IT DOES **NOT** MEAN: a host missing from `lastSeen` is genuinely absent.
+//   The round-2 comment said exactly that ("genuinely absent rather than merely
+//   beyond my reach") and it is FALSE. A host whose newest heartbeat predates
+//   windowMs is missing for precisely the "beyond my reach" reason — and
+//   `deadHosts` is fail-open, so it is silently never reclaimed. See "the tail
+//   HORIZON" above HeartbeatWindowError for the measured regression vs the
+//   whole-file read, why the finite horizon is accepted, and
+//   `hostsBeyondTailHorizon` — which makes the residue observable so this is a
+//   BOUNDED, ANNOUNCED horizon rather than a silent one.
+//
+// Returns { lastSeen, admission, covered, oldestTs, windowBytes, size, reachedBof }.
+// `covered:false` is the ONLY new state (cap exhausted before the target window) —
+// it is reported, never swallowed; readClusterHeartbeats turns it into a throw for
+// callers that opt in. Peak transient is ONE chunk regardless of file size.
+export function scanLocalHeartbeats({
+  logPath = getEventLogPath(),
+  nowMs = Date.now(),
+  graceMs = HEARTBEAT_GRACE_MS,
+  windowMs = HEARTBEAT_TAIL_WINDOW_MS,
+  maxBytes = HEARTBEAT_TAIL_MAX_BYTES,
+  chunkSize = undefined,
+  initialWindow = undefined,
+  onRead = null,
+  scan = scanEventsSince,
+} = {}) {
+  const lastSeen = {};
+  const newest = {}; // host -> { ts, admission|null }
+  let res;
+  try {
+    res = scan({
+      path: logPath,
+      targetSinceMs: nowMs - windowMs,
+      // The GUARANTEE, not merely the floor — see "COVERAGE IS PROVED AGAINST
+      // THE TARGET WINDOW" above. graceMs survives only as an absolute floor.
+      requiredSinceMs: nowMs - Math.max(windowMs, graceMs),
+      maxBytes,
+      ...(chunkSize === undefined ? {} : { chunkSize }),
+      ...(initialWindow === undefined ? {} : { initialWindow }),
+      onRead,
+      // Cheap pre-JSON.parse gate, preserved verbatim from the whole-file readers.
+      lineFilter: (line) => line.includes(HEARTBEAT_EVENT),
+      onEvent: (evt) => {
+        if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) return;
+        const host = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+        const ts = evt?.ts;
+        if (typeof host !== "string" || host.length === 0) return;
+        if (typeof ts !== "string" || ts.length === 0) return;
+        // Keep the latest ts per host (ISO-8601 sorts lexicographically; the local
+        // log is uniformly second-precision — heartbeat-event.mjs strips millis).
+        if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
+        // Track the newest line per host EVEN IF it carries no admission, so a
+        // fresh heartbeat with admission:null correctly clears a stale hold.
+        const prev = newest[host];
+        if (!prev || ts > prev.ts) {
+          newest[host] = { ts, admission: evt?.body?.payload?.admission ?? null };
+        }
+      },
+    });
+  } catch {
+    // An unexpected I/O failure means we learned NOTHING this pass. Report it as
+    // uncovered rather than as an empty-but-trustworthy map: an empty map would
+    // read as "every host absent", and for the recovery consumer that is the
+    // strand direction. covered:false routes opted-in callers to the documented
+    // full-roster degrade instead.
+    return {
+      lastSeen: {},
+      admission: {},
+      covered: false,
+      oldestTs: null,
+      windowBytes: 0,
+      size: 0,
+      reachedBof: false,
+    };
+  }
+  const admission = {};
+  for (const [host, rec] of Object.entries(newest)) {
+    if (rec.admission && typeof rec.admission === "object") admission[host] = rec.admission;
+  }
+  return {
+    lastSeen,
+    admission,
+    covered: res.covered,
+    oldestTs: res.oldestTs,
+    windowBytes: res.windowBytes,
+    size: res.size,
+    reachedBof: res.reachedBof,
+  };
+}
+
+// makeHeartbeatScanMemo — CTL-1529. ONE local heartbeat scan shared by every
+// consumer inside a single scheduler tick.
+//
+// LIFETIME IS THE CLOSURE, and that is the whole safety argument: the daemon
+// constructs a fresh memo at the top of each `runTick` and lets it fall out of
+// scope when the tick ends, so a cached scan can never be observed by a LATER
+// tick. There is no TTL to misconfigure and no global to forget to invalidate.
+// Lazy — nothing is read until the first consumer actually asks.
+export function makeHeartbeatScanMemo({ scan = scanLocalHeartbeats, ...opts } = {}) {
+  let memo = null;
+  return () => (memo ??= scan(opts));
+}
+
+// makeTickHeartbeatReader — CTL-1529. The per-tick drop-in for
+// `readClusterHeartbeats` that (a) shares one local scan across the tick's 3-4
+// liveness consumers and (b) opts INTO the grace-window guarantee, so a tail that
+// cannot prove its depth throws instead of quietly reporting a stale host as
+// absent. Every production consumer of this reader already catches and degrades to
+// the FULL roster — which is the conservative direction for BOTH the fail-open
+// recovery gate (empty dead set ⇒ no reclaim) and the positive-liveness dispatch
+// gate (outage ⇒ each node owns only its own HRW slice).
+//
+// It does NOT collapse the two gates into one call: each consumer still passes its
+// own `requirePeerView` and still runs its own peer merge on a COPY of the shared
+// map. Only the expensive local file scan is shared (CTL-1524 kept those two paths
+// deliberately separate; this preserves that).
+export function makeTickHeartbeatReader({ scanLocal = null, ...scanOpts } = {}) {
+  const memo = scanLocal ?? makeHeartbeatScanMemo(scanOpts);
+  return (opts = {}) => readClusterHeartbeats({ ...opts, scanLocal: memo, requireGraceWindow: true });
+}
+
 // readClusterHeartbeats — CTL-859. Scan the unified event log for
 // `node.heartbeat` events and return the most-recent ISO timestamp seen for
-// each host: { [hostName]: lastSeenISO }. DORMANT for now — no caller consumes
-// this in PR1; later PRs (takeover/healing) use it to decide "dead" = no
-// heartbeat for a generous grace window (see the design doc: 5–10 min).
+// each host: { [hostName]: lastSeenISO }, merged with the cross-host peer view.
 //
 // Reads the host name from the event payload (body.payload["host.name"]),
 // falling back to the resource block (resource["host.name"]). Best-effort:
-// missing log, unreadable file, and malformed lines are skipped, never thrown.
+// missing log, unreadable file, and malformed lines are skipped, never thrown —
+// EXCEPT for the two documented opt-in throws (requirePeerView, requireGraceWindow),
+// both of which route to a conservative full-roster degrade at every call site.
 // `logPath` is injectable for tests; defaults to the same getEventLogPath()
 // every emitter uses.
+//
+// CTL-1529: the local scan is a BOUNDED time-covering tail (scanLocalHeartbeats),
+// not a whole-file read. Peak transient is one chunk regardless of log size.
 export function readClusterHeartbeats({
   logPath = getEventLogPath(),
   roster = getClusterHosts(),
   anchorIssue = getLivenessAnchorIssue(),
-  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+  readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
+  // CTL-1529 bounded-read seams. `scanLocal` is a zero-arg memo (makeHeartbeatScanMemo)
+  // shared across a tick; when supplied it WINS over logPath/nowMs/tuning. Tuning
+  // params exist for tests — production uses the config-derived defaults.
+  nowMs = Date.now(),
+  graceMs = HEARTBEAT_GRACE_MS,
+  windowMs = HEARTBEAT_TAIL_WINDOW_MS,
+  maxBytes = HEARTBEAT_TAIL_MAX_BYTES,
+  chunkSize = undefined,
+  initialWindow = undefined,
+  onRead = null,
+  scanLocal = null,
+  // CTL-1529: opt IN to the tail-window guarantee. TRUE ⇒ a tail that cannot
+  // prove it spans windowMs THROWS (HeartbeatWindowError) instead of returning a
+  // map in which "absent" is meaningless. (Round 2: the proof is against the
+  // TARGET window; against graceMs alone it certified only who is alive, which
+  // is exactly the question the caller is NOT asking.) Set by makeTickHeartbeatReader for the
+  // liveness gates, whose catches all degrade to the FULL roster. Left FALSE for
+  // display/CLI callers (orch-monitor's footer + cluster view,
+  // archive-stale-host-workers) which have no try/catch and already render an
+  // absent host as offline — a truncated best-effort map is strictly better for
+  // them than a 500 or a crash.
+  requireGraceWindow = false,
+  // CTL-1529 round 3: sink for the "rostered host beyond the tail horizon" signal.
+  // Defaults to the throttled daemon-log warn; injectable so tests can assert the
+  // emission WITHOUT depending on the logger or on the module-level throttle.
+  onBeyondHorizon = null,
+  // CTL-1091 (Codex P1 #3): when TRUE — the DISPATCH positive-liveness path — a
+  // multi-host roster with NO trustworthy cross-host view THROWS instead of
+  // returning a local-only map. "No trustworthy view" = the peer transport is
+  // unconfigured OR the peer read threw. Without this the local event log always
+  // carries self's own fresh heartbeat, so the positive-liveness filter would see
+  // live=[self] (nonempty, no throw), skip the resolver's outage branch, shrink the
+  // dispatch roster to [self], and make every live host own every ready ticket —
+  // contending for its peers' work instead of taking the documented
+  // outage → FULL-roster fallback (each node owns only its own HRW slice). The throw
+  // routes through readPositiveLive's catch → resolveDispatchRoster's outage degrade.
+  // RECOVERY keeps the default (false) fail-open: an unseen peer is "not proven dead"
+  // and must NOT be reclaimed, so a Loki/Linear hiccup there must never break
+  // liveness. This is the dispatch(positive) vs recovery(fail-open) asymmetry in
+  // docs/architecture.md.
+  requirePeerView = false,
 } = {}) {
-  const lastSeen = {};
-  let raw;
-  try {
-    raw = readFileSync(logPath, "utf8");
-  } catch {
-    // no event log yet — continue to peer merge below if multi-host
+  // CTL-1529: bounded, time-covering tail — no longer a whole-file readFileSync.
+  const scanned = scanLocal
+    ? scanLocal()
+    : scanLocalHeartbeats({
+        logPath,
+        nowMs,
+        graceMs,
+        windowMs,
+        maxBytes,
+        chunkSize,
+        initialWindow,
+        onRead,
+      });
+  if (requireGraceWindow && !scanned.covered) {
+    throw new HeartbeatWindowError(
+      `ctl-1529: bounded heartbeat tail could not prove ${Math.max(windowMs, graceMs)}ms of coverage ` +
+        `(scanned ${scanned.windowBytes}B of ${scanned.size}B, oldest=${scanned.oldestTs ?? "none"}); ` +
+        `refusing to report a stale host as absent — caller degrades to the full roster`,
+    );
   }
-  if (raw) {
-    for (const line of raw.split("\n")) {
-      if (!line) continue;
-      if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
-      let evt;
-      try {
-        evt = JSON.parse(line);
-      } catch {
-        continue; // partial/garbage line
+  // COPY: the peer merge below mutates this map, and `scanned` may be a memo
+  // shared with the tick's other liveness consumers (whose peer view differs).
+  const lastSeen = { ...scanned.lastSeen };
+
+  // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
+  // CTL-1420 (#17): gate on the ACTIVE source's transport (loki: Loki URL; linear:
+  // anchor issue) so a source with no transport is a clean local-map-only no-op.
+  if (Array.isArray(roster) && roster.length > 1) {
+    if (!peerLivenessConfigured(anchorIssue)) {
+      // No cross-host transport. CTL-1091 P1 #3: for the DISPATCH path this is NOT a
+      // safe local-map-only no-op — self's own heartbeat alone would collapse the
+      // dispatch roster to [self]. Surface it as an outage so the resolver degrades
+      // to the FULL roster. Recovery (requirePeerView=false) keeps the local-map-only
+      // no-op (an unconfigured transport must not manufacture "dead" peers to reclaim).
+      if (requirePeerView) {
+        throw new Error(
+          "ctl-1091: dispatch requires a cross-host liveness view but no peer transport is configured (multi-host)",
+        );
       }
-      if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
-      const host = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
-      const ts = evt?.ts;
-      if (typeof host !== "string" || host.length === 0) continue;
-      if (typeof ts !== "string" || ts.length === 0) continue;
-      // Keep the latest ts per host (ISO-8601 sorts lexicographically).
-      if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
+    } else {
+      let peers = {};
+      try {
+        // strict:requirePeerView makes the reader THROW on a determinate failure
+        // (timeout/nonzero/unparseable) instead of collapsing it to `{}` — the default
+        // readers otherwise fail-open, so a failed peer read would look identical to a
+        // genuinely-empty one and the dispatch roster would silently shrink to [self]
+        // (Codex P1 follow-up). A genuinely-empty SUCCESSFUL read still returns `{}`
+        // (legitimate all-peers-absent → [self] failover).
+        peers = readPeers(anchorIssue, { strict: requirePeerView }) ?? {};
+      } catch (err) {
+        // CTL-1091 P1 #3: DISPATCH surfaces the read failure as an outage (→ full
+        // roster). RECOVERY stays fail-open — a Loki/Linear hiccup must never break
+        // liveness (unseen ≠ dead).
+        if (requirePeerView) throw err;
+        peers = {};
+      }
+      for (const [host, rec] of Object.entries(peers)) {
+        const ts = rec?.last_seen;
+        if (typeof ts !== "string" || ts.length === 0) continue;
+        // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
+        // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
+        // would sort ABOVE real ISO strings lexicographically and then make the host
+        // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
+        // false) — can never poison the merge.
+        const peerMs = Date.parse(ts);
+        if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
+        // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
+        // lexicographically: the local event log carries second-precision ts
+        // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
+        // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
+        // lexicographic compare would discard a genuinely newer peer ts.
+        const cur = lastSeen[host];
+        if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+      }
     }
   }
 
-  // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
-  if (Array.isArray(roster) && roster.length > 1 && anchorIssue) {
-    let peers = {};
-    try {
-      peers = readPeers(anchorIssue) ?? {};
-    } catch {
-      peers = {}; // fail-open: a Linear hiccup must never break liveness
-    }
-    for (const [host, rec] of Object.entries(peers)) {
-      const ts = rec?.last_seen;
-      if (typeof ts !== "string" || ts.length === 0) continue;
-      // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
-      // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
-      // would sort ABOVE real ISO strings lexicographically and then make the host
-      // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
-      // false) — can never poison the merge.
-      const peerMs = Date.parse(ts);
-      if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
-      // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
-      // lexicographically: the local event log carries second-precision ts
-      // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
-      // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
-      // lexicographic compare would discard a genuinely newer peer ts.
-      const cur = lastSeen[host];
-      if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+  // CTL-1529 round 3 — ANNOUNCE THE HORIZON. A rostered host still missing from a
+  // COVERED map is one this read cannot speak for: dead beyond windowMs, or never
+  // seen. Either way `deadHosts` fail-opens and its work is not reclaimed, which
+  // under rounds 1-2 happened with no event, no log line, and covered:true. See
+  // "the tail HORIZON" above HeartbeatWindowError.
+  //
+  // Gated on requireGraceWindow (⇒ the LIVENESS GATES, via makeTickHeartbeatReader)
+  // for two reasons: those are the only callers whose DECISION the gap changes, and
+  // the display/CLI callers (orch-monitor footer, cluster view,
+  // archive-stale-host-workers) already render an absent host as offline — warning
+  // there would be noise on a path that strands nothing.
+  //
+  // AFTER the peer merge, deliberately: a host absent from the local tail but
+  // present in the cross-host view is fully accounted for and must not warn.
+  if (requireGraceWindow && scanned.covered) {
+    const beyond = hostsBeyondTailHorizon({ lastSeen, roster, covered: true });
+    if (beyond.length > 0) {
+      const emit = onBeyondHorizon ?? warnHostsBeyondTailHorizon;
+      try {
+        emit({ hosts: beyond, windowMs, oldestTs: scanned.oldestTs, nowMs });
+      } catch {
+        // Observability must never break liveness — the map is returned regardless.
+      }
     }
   }
 
@@ -3112,66 +3909,159 @@ export function readClusterHeartbeats({
 // whose newest admission is null/absent is omitted. Best-effort/fail-open: missing
 // or unreadable log → {}; malformed lines skipped; never throws. `logPath`
 // injectable for tests.
-export function readClusterAdmission({ logPath = getEventLogPath() } = {}) {
-  const byHost = {}; // host -> { ts, admission|null }
-  let raw;
-  try {
-    raw = readFileSync(logPath, "utf8");
-  } catch {
-    return {}; // no event log yet
-  }
-  for (const line of raw.split("\n")) {
-    if (!line) continue;
-    if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
-    let evt;
-    try {
-      evt = JSON.parse(line);
-    } catch {
-      continue; // partial/garbage line
+//
+// CTL-1529: bounded. This is the SIBLING whole-file read the ticket's inventory
+// found next to readClusterHeartbeats — same lines, same newest-per-host reduce,
+// but unmemoized on the monitor's 60s anchor poll, so it was the single
+// highest-FREQUENCY full read in the fleet. It now shares scanLocalHeartbeats'
+// one bounded pass. NO grace-window guarantee is required here: admission is a
+// display projection with no liveness semantics, and its fail-open direction is
+// "no admission info ⇒ render live", never a fabricated hold. A truncated window
+// can therefore only omit a hold, which is exactly the pre-existing fail-open
+// posture (a missing/unreadable log already returned {}).
+export function readClusterAdmission({
+  logPath = getEventLogPath(),
+  nowMs = Date.now(),
+  chunkSize = undefined,
+  initialWindow = undefined,
+  maxBytes = HEARTBEAT_TAIL_MAX_BYTES,
+  onRead = null,
+  scanLocal = null,
+} = {}) {
+  const scanned = scanLocal
+    ? scanLocal()
+    : scanLocalHeartbeats({ logPath, nowMs, maxBytes, chunkSize, initialWindow, onRead });
+  return { ...scanned.admission };
+}
+
+// makeBatchedPhaseCompleteChecker — CTL-1514. Same (ticket, phase) => bool
+// contract as phaseAlreadyComplete, but backed by ONE full-file scan across all
+// tickets a reclaim call processes instead of one whole-file readFileSync per
+// ticket. Built on the shared scanEventsChunked primitive (CTL-673) so a 300MB+ /
+// ~478K-line log never materializes into a whole-file string + array.
+//
+// The scan is INCREMENTAL, not frozen-at-first-lookup: the first call reads the
+// whole log [0, EOF) into `seen` and remembers the byte cursor; each subsequent
+// call reads only the newly-appended bytes [cursor, newEOF) before answering. So
+// a completion appended by a live host mid-sweep (after the first lookup but
+// before a later ticket's dedup check) is still observed — the previous
+// per-ticket full read would have seen it, and this must too, or recovery
+// dispatches a duplicate phase (Codex P1 on #2729). Cost stays ~one full pass per
+// batch: the first call reads everything, later calls read only the delta (0
+// bytes ⇒ just an openSync+fstatSync). Lazy — never scans until first called.
+// Best-effort: an unreadable log leaves `seen` as-is and fails open to
+// "not complete", same posture as phaseAlreadyComplete.
+export function makeBatchedPhaseCompleteChecker({ logPath = null, scan = scanEventsChunked } = {}) {
+  const seen = new Set();
+  let scannedPath = null;
+  let cursor = 0;
+  let leftover = "";
+  const ingest = (e) => {
+    const name = e?.attributes?.["event.name"];
+    if (typeof name === "string" && name.startsWith("phase.") && name.includes(".complete.")) {
+      seen.add(name);
     }
-    if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
-    const host = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
-    const ts = evt?.ts;
-    if (typeof host !== "string" || host.length === 0) continue;
-    if (typeof ts !== "string" || ts.length === 0) continue;
-    // Track the newest line per host EVEN IF it carries no admission, so a fresh
-    // heartbeat with admission:null correctly clears a host's stale hold.
-    const admission = evt?.body?.payload?.admission;
-    const prev = byHost[host];
-    if (!prev || ts > prev.ts) byHost[host] = { ts, admission: admission ?? null };
-  }
-  const out = {};
-  for (const [host, rec] of Object.entries(byHost)) {
-    if (rec.admission && typeof rec.admission === "object") out[host] = rec.admission;
-  }
-  return out;
+  };
+  return (ticket, phase) => {
+    // Re-resolve the month-partitioned log path on EVERY check (unless a test pins
+    // logPath): a reclaim sweep that spans a UTC month boundary must pick up
+    // completions written to the NEW month's YYYY-MM.jsonl, or it redispatches an
+    // already-complete phase (Codex P2 on #2729). On rollover the cursor resets to
+    // scan the new file from 0, while `seen` carries forward so prior-month
+    // completions still dedup.
+    const path = typeof logPath === "function" ? logPath() : logPath ?? getEventLogPath();
+    try {
+      // Reset the cursor on a path change (month rollover) OR an in-place
+      // truncation/replacement — legacy rotation rewrites a SHORTER file at the same
+      // path, and if size < cursor the old offset is beyond the new EOF so its prefix
+      // would be skipped, permanently missing a completion (mirrors event-scan.mjs's
+      // size<cursor reset). Codex P2 on #2729.
+      let size = null;
+      try {
+        size = statSync(path).size;
+      } catch {
+        /* missing/unreadable → the scan below no-ops; keep prior `seen` */
+      }
+      if (path !== scannedPath || (size !== null && size < cursor)) {
+        cursor = 0;
+        leftover = "";
+        scannedPath = path;
+      }
+      const { endOffset, leftover: next } = scan({
+        path,
+        fromOffset: cursor,
+        leftover,
+        onEvent: ingest,
+      });
+      cursor = endOffset;
+      leftover = next;
+      // A completion written as the final record WITHOUT a trailing newline sits in
+      // `next` (never emitted as a complete line); ingest it if it parses so dedup
+      // doesn't miss it (idempotent — re-parsing the same leftover later is harmless).
+      if (next) {
+        try {
+          const finalName = JSON.parse(next)?.attributes?.["event.name"];
+          if (
+            typeof finalName === "string" &&
+            finalName.startsWith("phase.") &&
+            finalName.includes(".complete.")
+          ) {
+            seen.add(finalName);
+          }
+        } catch {
+          /* genuinely partial line — skip */
+        }
+      }
+    } catch {
+      /* best-effort — keep what we have; fail open to "not complete" */
+    }
+    return seen.has(`phase.${phase}.complete.${ticket}`);
+  };
 }
 
 // phaseAlreadyComplete — true when the unified event log already contains a
 // `phase.<phase>.complete.<ticket>` event. The resume path checks this before
 // re-dispatching so a survivor never re-emits a completion the dead host already
 // emitted (dedup). Best-effort: a missing/unreadable log ⇒ false; never throws.
-export function phaseAlreadyComplete(
-  ticket,
-  phase,
-  { readLog = () => readFileSync(getEventLogPath(), "utf8") } = {}
-) {
+export function phaseAlreadyComplete(ticket, phase, { readLog = null, logPath = getEventLogPath() } = {}) {
   const needle = `phase.${phase}.complete.${ticket}`;
-  let raw;
+  // Back-compat / test seam: when a caller supplies raw text directly, parse it
+  // exactly as before (all existing unit tests inject readLog).
+  if (readLog) {
+    let raw;
+    try {
+      raw = readLog();
+    } catch {
+      return false;
+    }
+    for (const line of raw.split("\n")) {
+      if (!line || !line.includes(needle)) continue;
+      try {
+        if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
+      } catch {
+        // partial/malformed line — skip
+      }
+    }
+    return false;
+  }
+  // CTL-1514: default path streams via the shared scanEventsChunked primitive so
+  // a 300MB+ log never materializes into one whole-file string + array for a
+  // single-ticket lookup. (Memory-bounded; scanEventsChunked has no early-exit,
+  // so wall-clock is still O(bytes) — the hot-path time win comes from the
+  // batched checker collapsing N calls into 1, above.)
+  let found = false;
   try {
-    raw = readLog();
+    scanEventsChunked({
+      path: logPath,
+      fromOffset: 0,
+      onEvent: (e) => {
+        if (!found && e?.attributes?.["event.name"] === needle) found = true;
+      },
+    });
   } catch {
     return false;
   }
-  for (const line of raw.split("\n")) {
-    if (!line || !line.includes(needle)) continue;
-    try {
-      if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
-    } catch {
-      // partial/malformed line — skip
-    }
-  }
-  return false;
+  return found;
 }
 
 // RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
@@ -3185,6 +4075,13 @@ const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
 // return roster hosts whose newest heartbeat is older than (nowMs - graceMs).
 // A host ABSENT from lastSeen is NOT flagged dead: with per-host local logs the
 // survivor may simply never have seen it (Open Question 1). Conservative: unknown ⇒ alive.
+//
+// CTL-1529: this fail-open rule is what turns the tail's finite horizon into a
+// stranded ticket. A host whose newest heartbeat predates HEARTBEAT_TAIL_WINDOW_MS
+// is absent from `lastSeen` for a reason that is NOT "never seen", but this
+// function cannot tell the difference and therefore declines to reclaim. The
+// horizon is announced by `hostsBeyondTailHorizon` /
+// `warnHostsBeyondTailHorizon` at the read, not here — `deadHosts` stays pure.
 export function deadHosts({ lastSeen, roster, graceMs, nowMs }) {
   const cutoff = nowMs - graceMs;
   return roster.filter((h) => {
@@ -3221,19 +4118,20 @@ export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd 
 
 // defaultOwnedTicketsForHost — return the in-flight tickets for a dead host.
 // Primary path (CTL-1090): read the dead host's published `in_flight_tickets`
-// from the cross-host liveness channel (one Linear read = liveness + tickets).
-// Fallback: scan the local worker signal directory for non-terminal signals
-// dispatched from the dead host (the original local-only behavior, unchanged).
+// from the cross-host liveness channel (one read = liveness + tickets). CTL-1420
+// (#17): that channel is now source-aware — Loki (default reader) or the legacy
+// Linear anchor. Fallback: scan the local worker signal directory for non-terminal
+// signals dispatched from the dead host (the original local-only behavior, unchanged).
 // `anchorIssue`/`readPeers` are injectable for unit tests.
 function defaultOwnedTicketsForHost(
   deadHost,
   {
     orchDir,
     anchorIssue = getLivenessAnchorIssue(),
-    readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+    readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
   } = {}
 ) {
-  if (anchorIssue) {
+  if (peerLivenessConfigured(anchorIssue)) {
     try {
       const peerMap = readPeers(anchorIssue);
       const rec = peerMap?.[deadHost];
@@ -3256,6 +4154,30 @@ function defaultOwnedTicketsForHost(
   return [...tickets];
 }
 
+// writeLocalClusterGeneration — persist a won cross-host fence generation to
+// workers/<ticket>/cluster-generation.json (idempotent tmp+rename). This is a
+// LOCAL inline copy of scheduler.mjs::writeClusterGeneration: recovery.mjs must
+// NOT import scheduler.mjs (scheduler.mjs already imports reclaimDeadWorkIfPossible
+// from here — the reverse edge would be a cycle; same rationale as
+// cluster-heartbeat-publisher.mjs::localClusterGeneration, which inlines the READ).
+// Writes the SAME { generation } shape at the SAME path the heartbeat publisher's
+// readGeneration reads, so a taken-over ticket's fence keeps getting refreshed on
+// the heartbeat cadence (Codex P2, recovery.mjs:3371). Non-finite generation
+// (single-host / null claim) is never persisted; best-effort (a missing worker dir
+// or I/O failure silently no-ops, like writeWorkerPriority).
+function writeLocalClusterGeneration(orchDir, ticket, generation) {
+  if (!Number.isFinite(generation)) return;
+  const p = join(orchDir, "workers", ticket, "cluster-generation.json");
+  try {
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ generation }));
+    renameSync(tmp, p);
+  } catch {
+    // best-effort — missing worker dir or I/O failure; the heartbeat re-emit just
+    // won't refresh this ticket until a later successful write.
+  }
+}
+
 // reclaimDeadHostWork — takeover sweep (CTL-863, Part A).
 //
 // When a host goes silent (heartbeat silence > graceMs), surviving hosts detect it,
@@ -3271,7 +4193,12 @@ function defaultOwnedTicketsForHost(
 export async function reclaimDeadHostWork(
   { orchDir },
   {
-    readHeartbeats = () => readClusterHeartbeats({}),
+    // CTL-1529: the bare default opts INTO the grace-window guarantee. This sweep
+    // is the one that turns "proven dead" into reclaimed work, so it must never act
+    // on a tail that cannot prove it spans the grace window — the throw propagates
+    // to the caller's .catch and the sweep is skipped for this tick (conservative:
+    // no reclaim on unproven data). Production threads the tick's SHARED reader in.
+    readHeartbeats = () => readClusterHeartbeats({ requireGraceWindow: true }),
     roster = getClusterHosts(),
     self = getHostName(),
     graceMs = HEARTBEAT_GRACE_MS,
@@ -3280,7 +4207,9 @@ export async function reclaimDeadHostWork(
     ownerForTicket: ownerFn = ownerForTicket,
     claim = (ticket, phase) => claimDispatchSync({ ticket, hostName: self, phase }),
     inferResume = (ticket, cwd) => inferResumePhase(ticket, { cwd }),
-    alreadyComplete = (ticket, phase) => phaseAlreadyComplete(ticket, phase),
+    // CTL-1514: batched default — ONE streaming log pass shared across every
+    // ticket this call processes, instead of one whole-file read per ticket.
+    alreadyComplete = makeBatchedPhaseCompleteChecker(),
     rebuildWorktree = (ticket) => {
       const result = defaultRebuildWorktree(ticket, { orchDir });
       return result;
@@ -3288,6 +4217,13 @@ export async function reclaimDeadHostWork(
     thoughtsPull = (cwd) => defaultThoughtsPull(cwd),
     dispatch = (od, ticket, phase, cwd) =>
       dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
+    // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
+    // takeover claim (same gate as emitFenceClaimed). Injectable so tests
+    // drive/assert the stamp without touching Linear. `replica` is the daemon's
+    // createReplicaReader, threaded from the tick so the stamp's label read is
+    // replica-first (live fallback is loud inside the stamp).
+    stampWorkerLabel = defaultStampWorkerLabel,
+    replica = undefined,
   } = {}
 ) {
   const taken = [];
@@ -3310,6 +4246,33 @@ export async function reclaimDeadHostWork(
       // Soft-CAS claim: bump generation to take ownership.
       const claimRes = claim(ticket, NEW_WORK_ENTRY_PHASE);
       if (!claimRes?.won) continue;
+
+      // CTL-863: emit fence.claimed for the TAKEOVER bump AS SOON AS THE CLAIM
+      // WINS — NOT gated on a successful redispatch (Codex P2, recovery.mjs:3358).
+      // The generation is ALREADY bumped by the soft-CAS above, so the superseded
+      // (dead/partitioned) host is superseded in the claim store regardless of
+      // whether the rebuild/inference/dispatch below succeeds; the durable
+      // projection must record that fact now, or a later-failing takeover would
+      // leave the old owner a fresh-looking self-owned projection under
+      // projection-first. Linear-free local append; multi-host only (reclaim
+      // never runs at roster<=1). Phase is the entry phase we claimed on (the
+      // resume phase is inferred later and doesn't change fence ownership).
+      if (Number.isFinite(claimRes.generation)) {
+        emitFenceClaimed({
+          ticket,
+          owner_host: self,
+          generation: claimRes.generation,
+          phase: NEW_WORK_ENTRY_PHASE,
+        });
+      }
+      // CTL-1481: best-effort worker:<host> label stamp — a visibility
+      // projection of the takeover claim we just won, NEVER the claim arbiter
+      // itself. Best-effort swallow (mirrors writeLocalClusterGeneration below).
+      try {
+        stampWorkerLabel({ ticket, hostName: self, knownHosts: roster, replica, log });
+      } catch {
+        // best-effort — a failed/thrown stamp never blocks the takeover.
+      }
 
       // Rebuild the worktree on the ticket branch.
       const wt = rebuildWorktree(ticket);
@@ -3335,6 +4298,14 @@ export async function reclaimDeadHostWork(
       const r = dispatch(orchDir, ticket, phase, wt.cwd);
       if (r?.code === 0) {
         taken.push({ ticket, phase, generation: claimRes.generation });
+        // CTL-863 (Codex P2, recovery.mjs:3371): persist the won takeover
+        // generation now that the worker dir provably exists (dispatch
+        // succeeded), mirroring the scheduler/monitor claim-win pairing. The
+        // heartbeat publisher's readGeneration reads this file to re-emit
+        // fence.claimed on the 120s cadence, keeping the reclaimed ticket's
+        // projection FRESH — without it the initial takeover fence ages past
+        // FENCE_FRESH_MS and guarded writes fall back to Linear / fail closed.
+        writeLocalClusterGeneration(orchDir, ticket, claimRes.generation);
       }
     }
   }
@@ -3355,8 +4326,13 @@ function defaultThoughtsPull(cwd) {
   }
 }
 
-// defaultRebuildWorktree — fetch the ticket branch and add/reuse the worktree.
-// Best-effort; returns { ok, cwd }. Fail-open: errors produce { ok: false, cwd: null }.
+// defaultRebuildWorktree — rebuild the ticket's worktree on a surviving host.
+// CTL-1640: create-worktree.sh now seeds a fresh branch from origin/<ticket>
+// when it exists (the dead host's pushed draft-PR commits, CTL-783), so reclaim
+// rebuilds on that pushed work; it falls back to the base tip otherwise. Both
+// this reclaim path and normal dispatch share the same script argv, so neither
+// needs a flag. Best-effort; returns { ok, cwd }. Fail-open: errors produce
+// { ok: false, cwd: null }.
 function defaultRebuildWorktree(ticket, { orchDir }) {
   try {
     const repoRoot = join(orchDir, "..", "..");

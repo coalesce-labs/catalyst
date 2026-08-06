@@ -1,5 +1,34 @@
 # Changelog
 
+## [7.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.5.0...catalyst-pm-v7.6.0) (2026-08-04)
+
+
+### Features
+
+* **dev:** CTL-1628 catalyst-runtime-root resolver — fold Tier 1 duplicates + 4 latent resolver bugs (Phase A2) ([#2946](https://github.com/coalesce-labs/catalyst/issues/2946)) ([c01ef76](https://github.com/coalesce-labs/catalyst/commit/c01ef76bd7ec44fee32369f732848494187c1b97))
+
+
+### Bug Fixes
+
+* **pm:** CTL-1616 complete PR3 — the score-tickets.ts fold missed the [#2919](https://github.com/coalesce-labs/catalyst/issues/2919) commit ([#2921](https://github.com/coalesce-labs/catalyst/issues/2921)) ([7a31c7a](https://github.com/coalesce-labs/catalyst/commit/7a31c7aa8015ab8e58dbeb19a3933b2d59e31d8b))
+* **pm:** CTL-1616 harden the score-tickets contract loader ([#2921](https://github.com/coalesce-labs/catalyst/issues/2921) post-merge Codex x2) ([#2922](https://github.com/coalesce-labs/catalyst/issues/2922)) ([6324535](https://github.com/coalesce-labs/catalyst/commit/63245356811ee275dafadb7622f987e8385709d0))
+
+## [7.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.4.0...catalyst-pm-v7.5.0)
+
+Jul 02, 2026
+
+<!-- ai-enhanced -->
+
+### Direct SQLite Linear Reads
+
+Agents now query the local Catalyst Cloud replica (`~/catalyst/catalyst-replica.db`) directly with SQL instead of routing through the `catalyst-linear` CLI wrapper, giving them full access to issues, labels, and relations in a single query — including joins the CLI couldn't do. A freshness gate mirrors the daemon's own liveness checks, and any stale or missing replica triggers a loud fallback to `linearis` rather than a silent reroute. The `catalyst-linear` CLI is now deprecated and kept only as a compatibility shim.
+
+
+
+### PRs
+
+* **dev:** CTL-1397 — pivot agent Linear reads to direct SQLite; deprecate catalyst-linear CLI ([#2514](https://github.com/coalesce-labs/catalyst/issues/2514)) ([249c9d6](https://github.com/coalesce-labs/catalyst/commit/249c9d67c12d58f79aa07fa44289afa57b29c5db))
+
 ## [7.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.3.0...catalyst-pm-v7.4.0)
 
 Jul 01, 2026

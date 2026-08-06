@@ -36,12 +36,49 @@ const CLAIM_TIMEOUT_MS = Number(process.env.EXECUTION_CORE_CLAIM_TIMEOUT_MS) || 
 // via the env passthrough at the spawn call below. When set, overrides the
 // 300_000 ms (5 min) default stale-claim preemption threshold (CTL-1297).
 
-// claimDispatchSync — soft-CAS claim `ticket` for `hostName` at `phase`,
-// synchronously. Returns { won, generation }. won:false on any failure
-// (fail-closed). `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable so the
-// unit tests never spawn a real process.
-export function claimDispatchSync(
-  { ticket, hostName, phase },
+// ─── permanent in-process cache: ticket identifier → issue UUID (CTL-863 fleet-unfreeze, entourage follow-up to #2552) ──
+//
+// #2552 cached the ReadFence read (82% of the fence traffic) below via
+// fenceCheckSyncCached, but left the "entourage" queries uncached: every claim
+// resolves the ticket's identifier → UUID via `query ResolveIssueId` inside writeClaim,
+// even though a ticket's issue UUID can never change once Linear assigns it. Unlike the
+// ReadFence read (a TTL cache, because the underlying claim/fence state genuinely
+// changes on a cadence), this is safe to cache PERMANENTLY — there is no staleness
+// window to reason about.
+//
+// resolveIssueId is bundled inside the `claim` CLI subcommand (one subprocess call does
+// read + resolve + write + read-back), so caching it here means: pre-resolve the UUID
+// via the small standalone `resolve-issue-id` subcommand (cached after the first
+// success), then pass the resolved UUID into `claim` so ITS internal resolveIssueId call
+// is skipped. A cache miss/disable falls back to the pre-follow-up behavior byte-for-byte
+// (claim resolves the ticket itself). Deliberately NOT applied to the CAS reads
+// (readClaim, inside claimTicket) — those are the actual fencing correctness check, not
+// an immutable mapping, so caching them would risk a false win/lose (see claimTicket's
+// own doc comment).
+//
+// CATALYST_ANCHOR_UUID_CACHE — shared with cluster-heartbeat-sync.mjs's identical anchor
+// cache (same env name, same semantics: one operator knob for "cache identifier→UUID
+// resolution permanently" across both entourage call sites). "0" disables; any other
+// value (including unset) keeps it on.
+const issueIdCache = new Map();
+
+// clearIssueIdCache — test-only reset of the module-scope cache between cases.
+export function clearIssueIdCache() {
+  issueIdCache.clear();
+}
+
+function issueIdCacheEnabled(env) {
+  return env?.CATALYST_ANCHOR_UUID_CACHE !== "0";
+}
+
+// resolveIssueIdSync — spawn `node cluster-claim.mjs resolve-issue-id <ticket>` and
+// return the resolved UUID, or null on ANY failure (spawn error, timeout, non-zero exit,
+// unparseable stdout, or a resolution miss) — fail-open: the caller treats null as
+// "could not pre-resolve" and falls back to letting `claim` resolve it inline, exactly as
+// before this follow-up. `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable so unit
+// tests never spawn a real process.
+export function resolveIssueIdSync(
+  { ticket },
   {
     spawn = spawnSync,
     nodeBin = process.execPath,
@@ -51,7 +88,61 @@ export function claimDispatchSync(
   } = {},
 ) {
   try {
-    const res = spawn(nodeBin, [cli, "claim", ticket, hostName, phase], {
+    const res = spawn(nodeBin, [cli, "resolve-issue-id", ticket], {
+      encoding: "utf8",
+      env,
+      timeout,
+    });
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") return null;
+    const line = res.stdout.trim().split("\n").filter(Boolean).pop();
+    const parsed = JSON.parse(line);
+    return typeof parsed?.issueId === "string" && parsed.issueId.length > 0 ? parsed.issueId : null;
+  } catch {
+    return null;
+  }
+}
+
+// resolveIssueIdSyncCached — the cached entry point. A hit returns immediately with
+// ZERO subprocess spawn. A miss spawns resolveIssueIdSync and caches ONLY a truthy
+// (successfully resolved) UUID — a null (any failure) is never cached, so the very next
+// call retries for real instead of latching a transient hiccup forever. `env` is the
+// test seam gating the cache; every other option passes straight through to
+// resolveIssueIdSync on a miss.
+export function resolveIssueIdSyncCached({ ticket }, { env = process.env, ...rest } = {}) {
+  if (!issueIdCacheEnabled(env)) {
+    return resolveIssueIdSync({ ticket }, { env, ...rest });
+  }
+  const cached = issueIdCache.get(ticket);
+  if (cached) return cached;
+  const issueId = resolveIssueIdSync({ ticket }, { env, ...rest });
+  if (issueId) issueIdCache.set(ticket, issueId);
+  return issueId;
+}
+
+// claimDispatchSync — soft-CAS claim `ticket` for `hostName` at `phase`,
+// synchronously. Returns { won, generation }. won:false on any failure
+// (fail-closed). `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable so the
+// unit tests never spawn a real process.
+// CTL-863 follow-up: `resolveIssueId` is the injectable pre-resolve seam (defaults to
+// resolveIssueIdSyncCached) — a resolved UUID is threaded into the `claim` argv so that
+// subprocess skips its own ResolveIssueId call. A null (miss/disabled+failed) falls back
+// to the pre-follow-up 3-arg form untouched.
+export function claimDispatchSync(
+  { ticket, hostName, phase },
+  {
+    spawn = spawnSync,
+    nodeBin = process.execPath,
+    cli = CLUSTER_CLAIM_CLI,
+    env = process.env,
+    timeout = CLAIM_TIMEOUT_MS,
+    resolveIssueId = resolveIssueIdSyncCached,
+  } = {},
+) {
+  try {
+    const issueId = resolveIssueId({ ticket }, { spawn, nodeBin, cli, env, timeout });
+    const args = [cli, "claim", ticket, hostName, phase];
+    if (issueId) args.push(issueId);
+    const res = spawn(nodeBin, args, {
       encoding: "utf8",
       env,
       timeout,
@@ -123,4 +214,83 @@ export function fenceCheckSync(
   } catch {
     return { current: false, stale: false };
   }
+}
+
+// ─── in-process TTL cache around the fence read (CTL-863 fleet-unfreeze, urgent interim) ──
+//
+// The CTL-863 fence guards (fenceGuard, fence-guard.mjs) call fenceCheckSync
+// before EVERY external-write site — ~11 call sites across scheduler.mjs,
+// recovery.mjs, and stale-pr-rescue-timer.mjs. Each call spawns a FRESH `node
+// cluster-claim.mjs fence-check <ticket> <gen>` subprocess (a new process, so
+// caching INSIDE cluster-claim.mjs would be cold every time) that issues
+// Linear's `query ReadFence` (an attachment read). Live-proxy-confirmed at
+// ~5,000/hr — 62% of ALL Linear traffic on the shared app-actor bucket —
+// saturating it and tripping the CTL-679 rate-limit breaker open, which
+// freezes fleet dispatch entirely.
+//
+// fenceCheckSyncCached wraps fenceCheckSync with an in-process TTL cache that
+// lives in THIS module (imported once by the long-running daemon process —
+// scheduler.mjs / recovery.mjs / stale-pr-rescue-timer.mjs — so the Map
+// persists across calls, unlike the per-call subprocess). Keyed by
+// `${ticket}::${generation}`, NOT ticket alone: isFenceCurrent's answer is a
+// function of BOTH — a takeover can leave the same ticket at a different
+// current generation, so two different generations asked about the same
+// ticket are NOT interchangeable answers.
+//
+// The underlying fence only changes on the heartbeat cadence (~2 min,
+// cluster-heartbeat.mjs), so caching a read for up to 45s cannot observe a
+// staler fence than genuinely existed at write time — safe by construction,
+// not a race. This is the INTERIM stopgap; the durable fix replaces the
+// read-per-check pattern with an event-log-derived fence (see
+// thoughts/shared/plans/2026-07-03-fence-to-eventlog.md).
+//
+// Only a DETERMINATE read is cached: {current:true} or {current:false,
+// stale:true} (a confirmed non-current generation). The indeterminate bucket —
+// {current:false, stale:false}, i.e. a spawn error/timeout/other exit — is a
+// FAILURE, not an answer. fenceGuard fail-closes on it (suppresses the write),
+// so caching a transient hiccup would extend a false "not current" verdict for
+// the full TTL instead of retrying on the very next call. Never cached.
+//
+// CATALYST_FENCE_READ_CACHE_MS — TTL override in ms, read from the same `env`
+// seam fenceCheckSync already threads through to the spawned subprocess. 0
+// disables the cache entirely (every call falls through to a real
+// fenceCheckSync) — an escape hatch for debugging/verification. Unset/invalid
+// → the 45s default.
+const FENCE_READ_CACHE_MS_DEFAULT = 45_000;
+
+// fenceReadCache — module-scope Map(`${ticket}::${generation}` -> {result, ts}).
+const fenceReadCache = new Map();
+
+// clearFenceReadCache — test-only reset of the module-scope cache between cases.
+export function clearFenceReadCache() {
+  fenceReadCache.clear();
+}
+
+function resolveFenceReadCacheMs(env) {
+  const raw = Number(env?.CATALYST_FENCE_READ_CACHE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : FENCE_READ_CACHE_MS_DEFAULT;
+}
+
+// fenceCheckSyncCached — the cached entry point. fence-guard.mjs's default
+// `check` seam points here so every real external-write-site fence check
+// benefits without any change to fenceGuard's decision logic or fail-closed
+// semantics — this only decides whether to skip the underlying read, never
+// what the read means. `now`/`env` are injectable for tests; every other
+// option (`spawn`/`nodeBin`/`cli`/`timeout`) passes straight through to
+// fenceCheckSync unchanged on a cache miss.
+export function fenceCheckSyncCached({ ticket, generation }, { now = Date.now, env = process.env, ...rest } = {}) {
+  const ttlMs = resolveFenceReadCacheMs(env);
+  const key = `${ticket}::${generation}`;
+  if (ttlMs > 0) {
+    const cached = fenceReadCache.get(key);
+    if (cached && now() - cached.ts < ttlMs) {
+      return cached.result;
+    }
+  }
+  const result = fenceCheckSync({ ticket, generation }, { env, ...rest });
+  // Cache only a determinate read (never the indeterminate/error bucket).
+  if (ttlMs > 0 && (result.current === true || result.stale === true)) {
+    fenceReadCache.set(key, { result, ts: now() });
+  }
+  return result;
 }

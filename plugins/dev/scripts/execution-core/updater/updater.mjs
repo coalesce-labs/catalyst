@@ -54,6 +54,7 @@ import {
 import { getEventLogPath, getNodeClass, getHostName, HEARTBEAT_INTERVAL_MS } from "../config.mjs";
 import { hostName, hostId } from "../lib/host-identity.mjs";
 import { logDaemonHeartbeat } from "../../lib/daemon-heartbeat.mjs";
+import { emitProcessMemoryMetric } from "../../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { initTracing, shutdownTracing, emitUpdaterRefreshSpan } from "../tracing.mjs";
 
 export const UPDATER_SERVICE_NAME = "catalyst.updater";
@@ -463,6 +464,8 @@ export function startUpdater({
 
   const heartbeat = () => {
     logDaemonHeartbeat(log, "updater"); // CTL-1280 .log liveness marker
+    // CTL-1517: per-process RSS/heap OTel gauge on the same tick (fire-and-forget).
+    emitProcessMemoryMetric({ serviceName: UPDATER_SERVICE_NAME, log }).catch(() => {});
     try {
       const line = `${JSON.stringify(buildUpdaterHeartbeatEnvelope({ nowFn, nodeClass, hostNameVal, checkouts: lastCheckouts }))}\n`;
       const logPath = getLogPathFn();

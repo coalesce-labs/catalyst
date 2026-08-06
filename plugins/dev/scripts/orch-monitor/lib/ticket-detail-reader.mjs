@@ -93,7 +93,7 @@ function reverseRelations(ticket, allDescriptors) {
 //   ticket, linearState, priority, assignee, resolution, updatedAt,
 //   description (always null — narrative not cached),
 //   labels: string[],
-//   held: "blocked" | "waiting" | null,
+//   held: "blocked" | "queued" | "waiting" | null,  // CTL-764: "waiting"→"queued"
 //   heldSince: null,           // no timestamp in the cache today (honest null)
 //   relations: {
 //     forward: [{ type, id }], // edges THIS ticket declares

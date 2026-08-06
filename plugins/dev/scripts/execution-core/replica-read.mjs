@@ -77,15 +77,59 @@ function coerceMs(v) {
 // The `issues` table has team_id (UUID) but NO team_key column, so we filter by
 // the Linear identifier prefix: identifiers are `<teamKey>-<number>`, so
 // `identifier LIKE 'CTL-%'` selects exactly team CTL (the hyphen disambiguates
-// CTL- from CTC-). state is the workflow-state NAME string (matches query.status).
+// CTL- from CTC-). state is the workflow-state NAME string — bound to
+// query.status by eligible(), to query.triageStatus by triageState() (CTL-1589).
 // removed_at IS NULL drops tombstones. LIMIT 200 matches linear-query DEFAULT_LIMIT.
-const ELIGIBLE_SELECT = `SELECT i.identifier, i.title, i.state, i.priority, i.estimate, i.updated_at, i.created_at, i.parent_identifier, i.delegate_id, i.delegate_name, p.name AS project_name FROM issues i LEFT JOIN projects p ON p.id = i.project_id WHERE i.identifier LIKE ? AND i.state = ? AND i.removed_at IS NULL ORDER BY i.updated_at DESC LIMIT ?`;
+// The eligible board-list query, split HEAD/TAIL so D1 (project/label filters)
+// can inject extra WHERE clauses before the ORDER BY without a second SELECT.
+const ELIGIBLE_SELECT_HEAD = `SELECT i.identifier, i.title, i.state, i.priority, i.estimate, i.updated_at, i.created_at, i.parent_identifier, i.delegate_id, i.delegate_name, p.name AS project_name FROM issues i LEFT JOIN projects p ON p.id = i.project_id WHERE i.identifier LIKE ? AND i.state = ? AND i.removed_at IS NULL`;
+const ELIGIBLE_SELECT_TAIL = ` ORDER BY i.updated_at DESC LIMIT ?`;
 const ELIGIBLE_LIMIT = 200;
+
+// buildEligibleSelect — assemble the eligible SELECT with optional D1 project/label
+// filters. project → `AND p.name = ?` (the LEFT JOIN projects.name already in HEAD);
+// label → an EXISTS over issue_labels⋈labels keyed by the issue's own PK id, matching
+// the label NAME (issue_labels(issue_id,label_id) + labels(id,name); the identifier→id
+// resolution the cloud schema needs). Bind order MUST mirror the appended clauses:
+// [likePattern, status, (project?), (label?), LIMIT].
+function buildEligibleSelect({ project, label } = {}) {
+  let sql = ELIGIBLE_SELECT_HEAD;
+  if (project != null) sql += ` AND p.name = ?`;
+  if (label != null)
+    sql += ` AND EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id AND l.name = ?)`;
+  return sql + ELIGIBLE_SELECT_TAIL;
+}
+
+// ownership(id) — the per-ticket claim-gate reader (Stage 0 / A0). One index-backed
+// row-read of the assignee + delegate the CTL-1174 gate needs, so the daemon can
+// decide human/tool ownership Linear-free. Gated (in ownership() below) by the SAME
+// freshness + seed-cursor gate as eligible() — a gate-fail/miss/unreadable returns
+// undefined so the caller HOLDs / falls through to the live confirm and NEVER claims
+// on unknown. There is deliberately NO per-ticket currency gate here: file mtime
+// proves the writer is LIVE, not that THIS ticket's delegate change was applied, so
+// a caller must never TRUST a null delegate from the replica — fetchTicketAssignee
+// live-confirms every null delegate and trusts only a non-null (actor-set) one,
+// matching the gateway path (see linear-query.mjs).
+const OWNERSHIP_SELECT = `SELECT assignee_id, delegate_id, delegate_name FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
 // Relation enrichment, mirroring normalizeDetail in linear-cli.mjs. forward:
 // edges this issue OWNS (relatedIssue is the target); inverse: edges that point
 // AT this issue (the blocked-by edge the scheduler gates on).
 const RELATIONS_FORWARD_SELECT = `SELECT type, related_identifier FROM relations WHERE issue_identifier = ?`;
 const RELATIONS_INVERSE_SELECT = `SELECT type, issue_identifier FROM relations WHERE related_identifier = ?`;
+
+// labels(identifier) SELECTs (CTL-1481 — the worker-label visibility projection's
+// replica-backed read). issue_labels keys off the issue's internal PK, not its
+// display identifier, so this resolves identifier → id first (same resolution
+// buildEligibleSelect's label-EXISTS join needs, just materialized as a row
+// instead of tested for existence).
+const LABELS_ISSUE_ID_SELECT = `SELECT id FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
+// labels.removed_at IS filtered here — a deliberate NEW decision for this
+// accessor. No existing SELECT in this file filters labels.removed_at (the
+// EXISTS join in buildEligibleSelect only tests `l.name = ?`, tombstone-blind),
+// but a caller LISTING a ticket's labels must never see a removed one: a
+// tombstoned label name can be recycled/reused by a later live label, so
+// surfacing it here would misreport what's actually attached today.
+const LABELS_SELECT = `SELECT l.id, l.name FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = ? AND l.removed_at IS NULL ORDER BY l.name`;
 
 // CTL-1397 (P1 fix) — the SEED-COMPLETENESS gate. The mtime gate
 // (isReplicaFresh) proves the cloud-sync writer is LIVE; it does NOT prove the
@@ -141,6 +185,20 @@ function isReplicaFresh(dbPath) {
   }
   return Date.now() - newest <= thresholdMs;
 }
+
+// NOTE (Stage 0): there is intentionally NO coarse "currency" guard on ownership().
+// An earlier draft gated ownership() on the db/`-wal` mtimes being within a currency
+// window, on the theory that a live-but-lagging writer could leave a just-delegated
+// ticket reading `delegate=null` locally. But file mtime cannot detect PER-TICKET
+// lag: it only proves SOME apply happened recently, not that THIS ticket's change
+// was applied — so it gave false confidence in the dangerous direction (a fresh
+// mtime with a stale row) while FALSELY tripping in the safe direction (a genuinely
+// QUIET-but-current feed reads as "stale" and re-froze the claim gate on the exact
+// `-wal`-staleness antipattern CTL-1397 removed — see isReplicaFresh's rationale
+// above). The correct instrument lives at the trust boundary instead:
+// fetchTicketAssignee live-confirms every NULL delegate and trusts only a NON-NULL
+// (actor-set) delegate, so a stale null can never self-delegate + claim, and a quiet
+// feed still serves the authoritative non-null case Linear-free.
 
 export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
   let db = null;
@@ -241,24 +299,15 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  // eligible(query) → { nodes: [...] } | undefined  (CTL-1397)
-  //   A VALID answer is { nodes: [...] } — even { nodes: [] } (a fresh replica
-  //   with genuinely zero eligible tickets is a REAL answer, NOT a miss; the
-  //   caller must NOT fall through and re-run linearis for it).
-  //   undefined = "fall through to linearis" — returned when:
-  //     - the query is missing team or status (can't build the filter), OR
-  //     - query.project or query.label is set (v1 scope: filtered queries stay
-  //       on linearis — the replica filter is team+state only), OR
-  //     - the replica file is absent OR STALE by mtime (writer-liveness gate), OR
-  //     - any throw (→ dropHandle + undefined).
-  //   Fail-open everywhere: this tier can only ACCELERATE; any doubt falls
-  //   through to today's linearis behavior, never makes discovery WORSE.
-  const eligible = (query) => {
-    // Guard: need both filter dimensions, and v1 does NOT serve project/label
-    // filtered queries (the SQL filters team+state only — a project/label query
-    // would silently over-return, so fall through to linearis instead).
-    if (!query || !query.team || !query.status) return undefined;
-    if (query.project != null || query.label != null) return undefined;
+  // readBoardByState(team, state, {project, label}) → { nodes: [...] } | undefined
+  //   The shared body of eligible() (CTL-1397) and triageState() (CTL-1589): the
+  //   writer-liveness gate, then the seed-completeness cursor + the board rows +
+  //   the relation enrichment inside ONE deferred read snapshot, then the node
+  //   projection. The ONLY thing the two callers vary is which workflow-state
+  //   string binds to `i.state` (and whether the D1 project/label filters apply),
+  //   so keeping one body means the gates can never drift between them.
+  //   undefined = "fall through to linearis" (gate fail / any throw).
+  const readBoardByState = (team, state, { project = null, label = null } = {}) => {
     // Freshness GATE (writer-liveness proxy) — a stale/absent replica falls
     // through so a dead writer can never freeze discovery on a stale board.
     if (!isReplicaFresh(dbPath)) return undefined;
@@ -286,9 +335,13 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
         // snapshot as the board below so a re-seed can't slip between the two.
         // undefined here = gate failed → fall through to linearis.
         if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined;
-        const rows = handle
-          .prepare(ELIGIBLE_SELECT)
-          .all(`${query.team}-%`, query.status, ELIGIBLE_LIMIT);
+        // D1: bind order mirrors buildEligibleSelect's appended clauses —
+        // [likePattern, status, (project?), (label?), LIMIT].
+        const params = [`${team}-%`, state];
+        if (project != null) params.push(project);
+        if (label != null) params.push(label);
+        params.push(ELIGIBLE_LIMIT);
+        const rows = handle.prepare(buildEligibleSelect({ project, label })).all(...params);
         const fwdStmt = handle.prepare(RELATIONS_FORWARD_SELECT);
         const invStmt = handle.prepare(RELATIONS_INVERSE_SELECT);
         return rows.map((row) => {
@@ -341,5 +394,212 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  return { lookup, freshness, titles, eligible, close: dropHandle };
+  // eligible(query) → { nodes: [...] } | undefined  (CTL-1397)
+  //   A VALID answer is { nodes: [...] } — even { nodes: [] } (a fresh replica
+  //   with genuinely zero eligible tickets is a REAL answer, NOT a miss; the
+  //   caller must NOT fall through and re-run linearis for it).
+  //   undefined = "fall through to linearis" — returned when:
+  //     - the query is missing team or status (can't build the filter), OR
+  //     - the replica file is absent OR STALE by mtime (writer-liveness gate), OR
+  //     - any throw (→ dropHandle + undefined).
+  //   Fail-open everywhere: this tier can only ACCELERATE; any doubt falls
+  //   through to today's linearis behavior, never makes discovery WORSE.
+  const eligible = (query) => {
+    // Guard: need both filter dimensions.
+    // D1 (Stage 0): project/label filtered queries ARE now served from the replica
+    // (the replica carries projects + issue_labels⋈labels), closing the permanent
+    // every-tick fall-through to `linearis issues list` for project/label-scoped
+    // teams — buildEligibleSelect appends the matching WHERE clauses.
+    if (!query || !query.team || !query.status) return undefined;
+    return readBoardByState(query.team, query.status, {
+      project: query.project ?? null,
+      label: query.label ?? null,
+    });
+  };
+
+  // triageState(query) → { nodes: [...] } | undefined  (CTL-1589)
+  //   The board of tickets currently SITTING IN the team's Triage state — the
+  //   read the reconcile-path triage sweep needs and that eligible() cannot
+  //   supply, because eligible() binds `query.status` (Todo). Before this, a
+  //   ticket parked in Triage appeared in NO replica read at all, so once its
+  //   one-shot →Triage webhook dispatch was consumed (and its worker dir later
+  //   vanished) nothing could ever re-notice it: triage admission was
+  //   EDGE-triggered only. This is the level-triggered half.
+  //
+  //   Filtered on team + state ONLY — deliberately no project/label/priority.
+  //   That mirrors the webhook →Triage predicate (monitor.mjs's
+  //   `parsed.toState === query.triageStatus`, which applies no other filter),
+  //   so the level-triggered sweep admits EXACTLY what the edge-triggered path
+  //   admits rather than a narrower set.
+  //
+  //   Return contract mirrors eligible(), with one deliberate difference:
+  //     - no team           → undefined (can't build the filter)
+  //     - no triageStatus   → { nodes: [] } — a CONFIRMED empty, not a miss. A
+  //         team with no configured Triage state genuinely has nothing to sweep,
+  //         so reporting "unknown" would make the caller log an anomaly for a
+  //         deliberate configuration.
+  //     - gate fail / throw → undefined (unavailable)
+  const triageState = (query) => {
+    if (!query || !query.team) return undefined;
+    if (!query.triageStatus) return { nodes: [] };
+    return readBoardByState(query.team, query.triageStatus);
+  };
+
+  // ownership(id) → { assignee, delegate } | undefined  (Stage 0 / A0, A1)
+  //   The per-ticket claim-gate reader: the ticket's current assignee + delegate
+  //   UUIDs (each null when unset), read Linear-free from the local replica.
+  //   Gated IDENTICALLY to eligible() — writer LIVENESS (isReplicaFresh, on the
+  //   `.writer.lock` heartbeat) + the seed-completeness cursor (inside the read
+  //   snapshot). ANY gate-fail, a MISS (absent/removed row), or any throw →
+  //   undefined, so the caller HOLDs / falls through to the live confirm and NEVER
+  //   claims on unknown (L1-1 fail-safe). The per-ticket null-vs-non-null trust
+  //   decision lives at the caller (fetchTicketAssignee): a null delegate is always
+  //   live-confirmed, a non-null one is trusted — so ownership() needs no currency
+  //   gate of its own (see the isReplicaCurrent removal note above).
+  //
+  //   Gate order:
+  //     1. !isReplicaFresh   → undefined            (dead/stale writer)
+  //     2. seed cursor absent → undefined            (mid-reseed)
+  //     3. no row            → undefined            (absent/removed; MISS)
+  //     4. HIT               → { assignee, delegate }
+  const ownership = (identifier) => {
+    if (!identifier) return undefined;
+    // 1. LIVENESS — a dead/stale writer must never serve ownership.
+    if (!isReplicaFresh(dbPath)) return undefined;
+    try {
+      const handle = open();
+      // 2+3+4 in ONE deferred read snapshot (same shape as eligible()): the
+      // seed-completeness cursor and the ownership row come from one consistent
+      // snapshot so a forced re-seed can't slip between the gate and the read.
+      const row = handle.transaction(() => {
+        if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined; // mid-reseed
+        return handle.prepare(OWNERSHIP_SELECT).get(identifier);
+      })();
+      if (!row) return undefined; // seed-gate fail / absent / removed → MISS (HOLD)
+      return { assignee: row.assignee_id ?? null, delegate: row.delegate_id ?? null };
+    } catch {
+      // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  // labels(id) → [{ id, name }] | undefined  (CTL-1481 — worker-label visibility
+  // projection read). The replica-backed accessor a `worker:<host>` label reader
+  // can consult instead of a live linearis label fetch. Gated IDENTICALLY to
+  // eligible()/ownership(): writer LIVENESS (isReplicaFresh) + the seed-completeness
+  // cursor, both resolved inside one deferred read snapshot. ANY gate-fail, a MISS
+  // (absent/removed issue), or any throw → undefined — the caller falls through to
+  // a live read, never trusts a stale/partial label list.
+  //
+  //   HIT (issue exists, ≥1 live label attached) → [{id, name}, ...], sorted by name.
+  //   HIT (issue exists, zero labels attached)    → [] — a DEFINED, authoritative
+  //     empty answer (not a miss); the caller must NOT treat it as "unknown".
+  //   MISS/gate-fail/throw                        → undefined.
+  //
+  //   Gate order:
+  //     1. !isReplicaFresh    → undefined  (dead/stale writer)
+  //     2. seed cursor absent → undefined  (mid-reseed)
+  //     3. no issue row       → undefined  (absent/removed; MISS)
+  //     4. HIT                → [{id, name}] (possibly empty)
+  const labels = (identifier) => {
+    if (!identifier) return undefined;
+    // 1. LIVENESS — a dead/stale writer must never serve a label list.
+    if (!isReplicaFresh(dbPath)) return undefined;
+    try {
+      const handle = open();
+      // 2+3+4 in ONE deferred read snapshot (same shape as ownership()): the
+      // seed-completeness cursor, the identifier→id resolution, and the label
+      // rows come from one consistent snapshot so a forced re-seed can't slip
+      // between the gate and the reads.
+      const rows = handle.transaction(() => {
+        if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined; // mid-reseed
+        const issue = handle.prepare(LABELS_ISSUE_ID_SELECT).get(identifier);
+        if (!issue) return undefined; // absent/removed → MISS
+        return handle.prepare(LABELS_SELECT).all(issue.id);
+      })();
+      if (!rows) return undefined; // seed-gate fail / absent / removed → MISS
+      return rows.map((row) => ({ id: row.id, name: row.name }));
+    } catch {
+      // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  // stateAndLabels — BOTH projections from ONE deferred read transaction
+  // (CTL-1571 review): a re-seed completing between separate lookup() and
+  // labels() calls could hand the caller a MIXED pair (pre-reseed state +
+  // post-reseed labels), which enforce-mode reconcile would then write — and a
+  // stale terminal state persists, since reconcile skips terminal rows. One
+  // bun:sqlite transaction() (BEGIN DEFERRED — read-only-safe) pins both reads
+  // to a single snapshot. undefined on ANY miss/throw (never a partial pair) —
+  // callers fall through to live.
+  const stateAndLabels = (identifier) => {
+    if (!identifier) return undefined;
+    try {
+      const run = open().transaction(() => {
+        const state = lookup(identifier);
+        if (state === undefined) return undefined;
+        const lbls = labels(identifier);
+        if (lbls === undefined) return undefined;
+        return { state, labels: lbls };
+      });
+      return run();
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  // labelsBatch(identifiers) → { identifier: [name…] } | undefined (CTL-1588
+  // #2845): ONE freshness check + ONE deferred snapshot + ONE IN query for a
+  // bounded id set. The monitor's queue hold-annotation reads every
+  // not-in-flight ticket per board assemble — per-id labels() calls would cost
+  // N transactions (and N freshness stats) on a 3s refresh cadence. undefined =
+  // fall through (stale writer / mid-reseed / throw). An id with no rows simply
+  // has no key: no label knowledge is fabricated for absent/removed tickets.
+  const labelsBatch = (identifiers) => {
+    const wanted = [...new Set((Array.isArray(identifiers) ? identifiers : []).filter(Boolean))];
+    if (wanted.length === 0) return {};
+    if (!isReplicaFresh(dbPath)) return undefined;
+    try {
+      const handle = open();
+      const rows = handle.transaction(() => {
+        if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined; // mid-reseed
+        const ph = wanted.map(() => "?").join(",");
+        return handle
+          .prepare(
+            `SELECT i.identifier AS identifier, l.name AS name FROM issues i JOIN issue_labels il ON il.issue_id = i.id JOIN labels l ON l.id = il.label_id WHERE i.identifier IN (${ph}) AND i.removed_at IS NULL AND l.removed_at IS NULL`
+          )
+          .all(...wanted);
+      })();
+      if (!rows) return undefined;
+      const out = {};
+      for (const r of rows) (out[r.identifier] ??= []).push(r.name);
+      return out;
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  return {
+    lookup,
+    freshness,
+    titles,
+    eligible,
+    triageState, // CTL-1589
+    ownership,
+    labels,
+    labelsBatch,
+    stateAndLabels,
+    // isFresh — WRITER-LIVENESS gate (the `.writer.lock` heartbeat), bound to
+    // this reader's dbPath. Callers composing replica-first reads (the broker's
+    // cache-reconcile, CTL-1571) gate on THIS, not on freshness(): freshness()
+    // measures data-staleness (MAX(updated_at)), which reads a quiet-but-current
+    // feed as stale — the exact false-negative CTL-1397 fixed for -wal mtime.
+    isFresh: () => isReplicaFresh(dbPath),
+    close: dropHandle,
+  };
 }

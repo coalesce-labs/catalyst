@@ -21,7 +21,7 @@ coordinates, monitors, and verifies.
 > phase skills (`phase-triage` … `phase-monitor-deploy`) per ticket, advancing on
 > `phase.<name>.complete.<ticket>` broker events. The phase-agents mode is the post-2026-06-15 path
 > that keeps worker dispatch on the subscription pool. See
-> [Phase agents](https://catalyst.coalesce-labs.com/reference/orchestration/phase-agents/) for the
+> [Phase agents](https://catalyst.coalescelabs.ai/reference/orchestration/phase-agents/) for the
 > pipeline, model assignment, cost economics, and the end-to-end runbook.
 
 ## Prerequisites
@@ -468,10 +468,12 @@ if [ -z "$COMMS_BIN" ] || [ ! -x "$COMMS_BIN" ]; then
 fi
 
 # Build the registration JSON with all workers from all waves
-# Use linearis CLI to read ticket titles (run `linearis issues usage` for syntax)
+# Read ticket titles via the replica (per the `linearis` skill's "Reading Linear"
+# rule). A bare linearis loop also burns shared quota AND eats stdin without </dev/null.
+source "${CATALYST_DEV_SCRIPTS}/lib/linear-read-replica.sh"
 WORKERS_JSON="{}"
 for TICKET_ID in "${ALL_TICKETS[@]}"; do
-  TITLE=$(linearis issues read "$TICKET_ID" | jq -r '.title')  # see `linearis issues usage`
+  TITLE=$(linear_read_ticket "$TICKET_ID" | jq -r '.title')
   WORKERS_JSON=$(echo "$WORKERS_JSON" | jq \
     --arg tid "$TICKET_ID" --arg title "$TITLE" \
     '. + {($tid): {ticketId: $tid, title: $title, status: "dispatched", phase: 0, branch: null, pr: null, updatedAt: "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'", needsAttention: false, attentionReason: null}}')
@@ -634,7 +636,8 @@ healthcheck:
 # CTL-452: --config gates the dispatch mode. With dispatchMode = "phase-agents",
 # the dispatcher launches phase-triage agents on `claude --bg` (subscription pool)
 # via `phase-agent-dispatch`, and the wake handler in this Phase 4 advances each
-# worker through the 9-phase sequence. With dispatchMode = "oneshot-legacy" or
+# worker through this script's 9-phase sequence (triage..monitor-deploy; this
+# legacy wake table does not dispatch teardown). With dispatchMode = "oneshot-legacy" or
 # no --config, the dispatcher uses the legacy `-p oneshot` worker (one long
 # claude session per ticket). Phase advancement calls always pass explicit
 # `--phase <name> --ticket <T>` and bypass the dispatchMode default.
@@ -656,7 +659,8 @@ as reference for the underlying machinery.
   --ticket "${TICKET}" \
   --completed-phase "${COMPLETED_PHASE}"
 # Emits one-line JSON: {"advanced": true|false, "fromPhase": "<name>", "toPhase": "<next>|null", ...}
-# The helper resolves the next phase via the canonical 9-phase sequence,
+# The helper resolves the next phase via this script's own 9-phase sequence
+# (triage..monitor-deploy — this legacy wake table does not dispatch teardown),
 # refuses to double-dispatch (idempotent), and delegates to dispatch-next
 # with --phase <next> --ticket <T>. If `completed-phase = monitor-deploy`,
 # the ticket has reached the terminal phase and no further advance happens.
@@ -978,7 +982,8 @@ The helper emits four deterministic interests (route without Groq):
 - `phase_lifecycle` (CTL-452, CTL-484, CTL-512) — `phase.<name>.complete.<TICKET>`,
   `phase.<name>.failed.<TICKET>`, `phase.<name>.turn-cap-exhausted.<TICKET>`, and
   `phase.<name>.skipped.<TICKET>` events emitted by phase agents. One interest per active ticket,
-  covering all 9 phase names. The turn-cap status routes through `orchestrate-revive`'s continuation
+  covering all 9 phase names (triage..monitor-deploy — this legacy interest set does not include
+  teardown). The turn-cap status routes through `orchestrate-revive`'s continuation
   branch (separate budget from error revives). The skipped status (CTL-512, monitor-deploy
   terminal-no-deploy) routes the same as complete via `orchestrate-phase-advance` — advance no-ops
   on monitor-deploy, so the wake's purpose is to free the wave slot via the scheduler's in-flight
@@ -1170,7 +1175,7 @@ scan so the response stays proportional. Every reaction reads authoritative stat
 | `github.deployment*`                                                                            | Record deploy outcome on the worker's signal file                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `linear.issue.state_changed`                                                                    | Reconcile Linear state with the worker signal                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `filter.wake.${ORCH_NAME}` (matched on full dotted `event.name`)                                | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source                                                                                                                                                                                                                                          |
-| `phase.<name>.complete.<TICKET>` (via phase_lifecycle, CTL-452)                                 | Resolve the next phase via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`; that helper looks up the next phase in the canonical 9-phase sequence and calls `orchestrate-dispatch-next --phase <next> --ticket <T>`. If `completed-phase=monitor-deploy`, no advance (terminal). The advance is idempotent under redundant wakes                                                                                                                        |
+| `phase.<name>.complete.<TICKET>` (via phase_lifecycle, CTL-452)                                 | Resolve the next phase via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`; that helper looks up the next phase in this script's own 9-phase sequence (triage..monitor-deploy; this legacy wake table does not dispatch teardown) and calls `orchestrate-dispatch-next --phase <next> --ticket <T>`. If `completed-phase=monitor-deploy`, no advance (terminal). The advance is idempotent under redundant wakes                                                                                                                        |
 | `phase.<name>.failed.<TICKET>` (via phase_lifecycle, CTL-452)                                   | Run `orchestrate-revive` once for the affected ticket; on the **second** failure (reviveCount ≥ MAX_REVIVES), mark worker `stalled` and post `attention` to the shared comms channel. Matches the existing one-retry-then-escalate handling for legacy oneshot workers                                                                                                                                                                                                    |
 | `phase.<name>.turn-cap-exhausted.<TICKET>` (via phase_lifecycle, CTL-484)                       | Run `orchestrate-revive` (same script — its continuation branch handles this status). The branch reads `handoffPath` from the per-phase signal, dispatches a `claude --bg --resume` continuation with `CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH` + `CATALYST_CONTINUATION_COUNT`, and bumps `.continuationCount` on a budget separate from `.reviveCount` (default 3). On budget exhaustion: `stalled` + `attentionReason="continuation-budget-exhausted"` |
 | `phase.<name>.skipped.<TICKET>` (via phase_lifecycle, CTL-512)                                   | Same as `complete`: resolve via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`. Only emitted by `phase-monitor-deploy` when no `deployment_status` event arrived before `PHASE_DEPLOY_TIMEOUT_SEC`. Because `completed-phase=monitor-deploy`, the advance no-ops (terminal); the wake's purpose is to free the wave slot via the scheduler's in-flight predicate (`scheduler.mjs:isTicketInFlight`)                                                                                                                                                                       |

@@ -1,10 +1,1403 @@
 {
-  "generated_at": "2026-06-06T23:22:00.931Z",
+  "generated_at": "2026-07-31T03:23:01.701Z",
   "schema": "catalyst.estimation.corpus.v1",
   "entries": [
     {
+      "ticket_id": "CTL-1574",
+      "title": "Operators should see a ticket's activity feed (comments + state changes) in the monitor inbox and ticket page so replies happen in context",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=2108→XL, files=16→L, domains=1→S; FE+BE→floor-M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 2108,
+        "changed_files": 16,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1577",
+      "title": "The broker should authenticate to Linear as the app-actor so its board walk stops draining the operator's personal quota",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=299→M, files=7→M, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 299,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1551",
+      "title": "The Workers page should report peer liveness and capacity from the live source, not a 20-day-stale Linear anchor",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=289→M, files=12→M, domains=1→S",
+      "signals": {
+        "loc": 289,
+        "changed_files": 12,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1569",
+      "title": "An operator should be able to read and reply to a parked ticket's thread from the inbox",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "LOC=5581→XL, files=22→L, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 5581,
+        "changed_files": 22,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1570",
+      "title": "The scheduler should not spend a live Linear read every tick on finished recovery debris so the fleet stays under its API quota",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=287→M, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 287,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1091",
+      "title": "A sometimes-on node should shed its ticket ownership while offline so its share of the backlog never starves",
+      "tier": 2,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "high",
+      "rationale": "LOC=1780→L, files=15→M, domains=2→M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 1780,
+        "changed_files": 15,
+        "domains": [
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-682",
+      "title": "The wait-watcher should ignore completed background agents, and scheduler tests should not depend on live worker state",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "high",
+      "rationale": "LOC=35→XS, files=3→S, domains=1→S, cost=$6.08→XS, turns=144→S, wall=0.22h→XS; human re-score override (compound-log)",
+      "signals": {
+        "loc": 35,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 6.0752,
+        "turns": 144,
+        "wall_hours": 0.2241
+      }
+    },
+    {
+      "ticket_id": "CTL-764",
+      "title": "The daemon should record every worker state transition through one chokepoint so that Linear, OTEL, the event log, and the dashboard all stay in sync",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "high",
+      "rationale": "LOC=168→S, files=2→XS, domains=1→S, cost=$1.21→XS, turns=30→XS, wall=0.05h→XS",
+      "signals": {
+        "loc": 168,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 1.207,
+        "turns": 30,
+        "wall_hours": 0.0509
+      }
+    },
+    {
+      "ticket_id": "CTL-1531",
+      "title": "The orphan reaper should evict any orphaned process whose worktree is gone, not just node/bun, so runaway debris cannot burn cores for hours",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=6406→XL, files=18→L, domains=5→XL; 3+-dirs(+1)",
+      "signals": {
+        "loc": 6406,
+        "changed_files": 18,
+        "domains": [
+          ".github",
+          "AGENTS.md",
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1423",
+      "title": "Background channel-watchers should be supervised and alert on death so a dead watcher is never silent",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=1711→L, files=23→L, domains=1→S",
+      "signals": {
+        "loc": 1711,
+        "changed_files": 23,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1530",
+      "title": "Catalyst setup should migrate a single-harness repo so that both Claude Code and Codex load its instructions and skills",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "high",
+      "rationale": "LOC=71→S, files=1→XS, domains=1→S, turns=26→XS, wall=0.00h→XS",
+      "signals": {
+        "loc": 71,
+        "changed_files": 1,
+        "domains": [
+          "plugins/foundry"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 26,
+        "wall_hours": 0.0039
+      }
+    },
+    {
+      "ticket_id": "CTL-1524",
+      "title": "The scheduler tick should stop blocking the shared event loop so node.heartbeat stays within one interval (supersedes CTL-1170)",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=983→L, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 983,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1523",
+      "title": "The broker should report daemon-degraded only when registration is actually broken, not when the fleet is merely idle",
+      "tier": 1,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "low",
+      "rationale": "LOC=2328→XL, files=15→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 2328,
+        "changed_files": 15,
+        "domains": [
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1522",
+      "title": "Daemon-degraded pushes should fire only on a sustained outage so that a transient heartbeat stall never buzzes Ryan's phone",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=371→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 371,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1170",
+      "title": "Execution-core heartbeat should stay under one interval — investigate 60–102s gaps (event-loop stalls)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=386→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 386,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1503",
+      "title": "fleet.health.degraded flaps every ~3min — add hysteresis + a recovered event + relativize the absolute swap threshold",
+      "tier": 2,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=817→L, files=9→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 817,
+        "changed_files": 9,
+        "domains": [
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1517",
+      "title": "observability: emit per-process RSS/heap gauge per daemon (service_name+pid) so leaks are attributable",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=509→M, files=10→M, domains=1→S",
+      "signals": {
+        "loc": 509,
+        "changed_files": 10,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1518",
+      "title": "mini-2 catalyst.agent host-metrics reporter dead 10 days: respawn + self-heal backstop + silence alert",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=583→M, files=7→M, domains=1→S",
+      "signals": {
+        "loc": 583,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1515",
+      "title": "orch-monitor: route readBacklog/readTunnelEventStats through the bounded event-ring (kill residual full-file reads)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=439→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 439,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1514",
+      "title": "execution-core scheduler: tail event log by cursor, stop whole-file readFileSync stalling the tick",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=477→M, files=5→S, domains=1→S",
+      "signals": {
+        "loc": 477,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1516",
+      "title": "broker: evict _emittedWakeCache + lastHeartbeat/workerToOrchestrator entries in runWatchdogTick",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=239→M, files=4→S, domains=2→M",
+      "signals": {
+        "loc": 239,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1519",
+      "title": "investigate mini-2 execution-core 6.2GB/fd=879: confirm in-process SDK executor RSS (sawtooth vs leak)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=133→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 133,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1510",
+      "title": "health-responder hardening follow-ups — five deferred Codex round-5 edges (writer-plist CATALYST_DIR, Alloy on non-worker classes, installer sed/XML escaping, prune degradation, cap TOCTOU)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=69→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 69,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1508",
+      "title": "cloud-sync replica writer self-heal is not exit-safe — a hung close() on a half-open socket leaves a silent zombie launchd never restarts (mini-2 keeps dying)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=421→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 421,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1509",
+      "title": "P1 catalyst.alert.* are emit-only — build an out-of-process alert-responder / daemon-health watchdog that takes remediation action (starting with replica_stalled → restart cloud-sync)",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "low",
+      "rationale": "LOC=2123→XL, files=12→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 2123,
+        "changed_files": 12,
+        "domains": [
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1452",
+      "title": "Fix unstuck-act-seams parity test: exempt action:skip map entries (CI red on main since the CTL-1442/1443 skip routes)",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=5→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 5,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1500",
+      "title": "agent-browser leaks headed Chrome that never tears down — starves fleet worker hosts",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=857→L, files=10→M, domains=2→M",
+      "signals": {
+        "loc": 857,
+        "changed_files": 10,
+        "domains": [
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1451",
+      "title": "A4 follow-up: widen probeBackoff to the recovery-filter terminal reads (the last issues-read breaker driver — ADV-1433 read-storm)",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=13→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 13,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1443",
+      "title": "Boot-resume approval gate: surface pending markers (Needs-You + alert), add an approve CLI, and expire stale gates loudly",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=9→XS, files=2→XS, domains=2→M; FE+BE→floor-M",
+      "signals": {
+        "loc": 9,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1442",
+      "title": "No-progress escalation loop: terminate after N asks (terminal stall + needs-human + brief) instead of re-emitting forever",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=449→M, files=7→M, domains=1→S",
+      "signals": {
+        "loc": 449,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1441",
+      "title": "Triage re-dispatch loop: monitor must honor the completion signal + cap re-dispatches (never silently re-triage forever)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=503→M, files=5→S, domains=2→M",
+      "signals": {
+        "loc": 503,
+        "changed_files": 5,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1440",
+      "title": "Terminal-state policy: attempts-exhausted recovery intents escalate + needs-human, never silent-latch (and fix the all-candidates-cooldown misnomer)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=567→M, files=5→S, domains=1→S",
+      "signals": {
+        "loc": 567,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1439",
+      "title": "Recovery-pass verdict persistence: post the verdict to Linear + write the real decision to the ledger (stop act-and-discard)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=751→M, files=9→M, domains=2→M",
+      "signals": {
+        "loc": 751,
+        "changed_files": 9,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1433",
+      "title": "Kill the eligible empty-reconfirm live Linear read: trust the freshness-gated replica-empty",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=24→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 24,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1432",
+      "title": "Delegate un-latch: dispatch deferred board-health intents + stop re-proposing the 5 sanctioned human latches",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=414→M, files=8→M, domains=2→M",
+      "signals": {
+        "loc": 414,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1431",
+      "title": "TTL on terminal recovery-intents + one-time June sweep (un-latch stuck escalations)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=412→M, files=5→S, domains=2→M",
+      "signals": {
+        "loc": 412,
+        "changed_files": 5,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1430",
+      "title": "Instrument the Linear circuit breaker: reason+caller on OPEN + durable linear.ratelimit.breaker event",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=473→M, files=7→M, domains=2→M",
+      "signals": {
+        "loc": 473,
+        "changed_files": 7,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1420",
+      "title": "New work should still be admitted when the Linear API quota is exhausted so the board never freezes fleet-wide",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "low",
+      "rationale": "LOC=18→XS, files=3→S, domains=2→M",
+      "signals": {
+        "loc": 18,
+        "changed_files": 3,
+        "domains": [
+          "AGENTS.md",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1505",
+      "title": "Delegate parks needs-human on a source conflict without an off-worker rebase retry — implement CTL-708 auto-rebase-resolve",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=143→S, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 143,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1504",
+      "title": "Scheduler probes non-ticket dir names + deleted-ticket phantoms as Linear ids — guard the census + classify not-found (CTC delegate poison)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=304→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 304,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1457",
+      "title": "The daemon should dispatch phase workers on Codex so board work can run on a second executor",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=140→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 140,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1496",
+      "title": "The fleet should drive a blocked PR to merge by fixing failed checks and addressing review findings, instead of paging a human",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "low",
+      "rationale": "LOC=1939→L, files=14→M, domains=4→XL; 3+-dirs(+1)",
+      "signals": {
+        "loc": 1939,
+        "changed_files": 14,
+        "domains": [
+          ".claude",
+          ".github",
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1488",
+      "title": "The fleet should durably order and share coordination events across hosts, with safe fallback if the hub is down",
+      "tier": 2,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=2600→XL, files=41→XL, domains=2→M",
+      "signals": {
+        "loc": 2600,
+        "changed_files": 41,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1497",
+      "title": "A reused worktree should repair its thoughts/shared symlink so handoffs written there always sync (CTL-513 residual)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=67→S, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 67,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-513",
+      "title": "create-worktree.sh: humanlayer thoughts init race during parallel batch creation leaves worker worktree without thoughts/ — silent failure surfaces 30min later as phase-plan prior_artifact_missing",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=154→S, files=2→XS, domains=1→S, cost=$165.35→L, turns=730→XL, wall=1.17h→M",
+      "signals": {
+        "loc": 154,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 165.3484,
+        "turns": 730,
+        "wall_hours": 1.1692
+      }
+    },
+    {
+      "ticket_id": "CTL-1127",
+      "title": "Inbox list cards should show the project icon and let the title breathe instead of cramming it onto one line",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=335→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 335,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1174",
+      "title": "Delegate read-side: make claim gate + broker cache + eligible-set contentKey delegate-aware [HUMAN-REVIEW-GATE]",
+      "tier": 1,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=865→L, files=18→L, domains=1→S",
+      "signals": {
+        "loc": 865,
+        "changed_files": 18,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1483",
+      "title": "A fresh-workspace install should provision the worker-status label group under the new Linear API generation (isGroup now required)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=189→S, files=2→XS, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 189,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1481",
+      "title": "Operators should see which worker node owns each in-flight ticket on the Linear board so that fleet ownership is visible at a glance",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "high",
+      "rationale": "LOC=153→S, files=2→XS, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 153,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1403",
+      "title": "catalyst-linear should emit reads-by-source on every read (catalyst.linear.read{source,result}) — success + failure, CLI event-log + daemon",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=754→M, files=11→M, domains=2→M",
+      "signals": {
+        "loc": 754,
+        "changed_files": 11,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1437",
+      "title": "A4 follow-up — widen probeBackoff to the every-tick terminal-Done sweep (the actual issues-read flap driver, CTL-1329)",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=11→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 11,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1436",
+      "title": "A4 — cut the issues-read breaker flap: negative-cache fetchTicketState replica-MISS live reads + loud MISS alert",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=228→M, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 228,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1435",
+      "title": "Self-observing actuation-liveness: act-outcome on board-scan + checkActuationLiveness invariant (WS-C C1+C2)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=528→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 528,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-863",
+      "title": "The cluster should self-heal when a host dies mid-work by reclaiming its tickets and resuming from durable artifacts",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=858→L, files=9→M, domains=1→S",
+      "signals": {
+        "loc": 858,
+        "changed_files": 9,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1424",
+      "title": "An operator should see catalyst operational logs tagged with OTel severity (pino level → SeverityNumber/Text at emit)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=440→M, files=12→M, domains=1→S",
+      "signals": {
+        "loc": 440,
+        "changed_files": 12,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1422",
+      "title": "A daemon restart should resume in-flight SDK workers from their session transcripts so the fleet can be stopped and restarted at will",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=644→M, files=7→M, domains=1→S",
+      "signals": {
+        "loc": 644,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-850",
+      "title": "Behavioral cutover: wire HRW ownership + Linear-CAS claim + fence-checks into dispatch (absorbs CTL-851)",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=491→M, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 491,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
       "ticket_id": "CTL-789",
-      "title": "Compound Engineering: engineering + estimation feedback loops (epic)",
+      "title": "Engineering quality compounds over time through per-ticket friction capture, estimation calibration, and a shared learnings store (epic)",
       "tier": 2,
       "tshirt": "XS",
       "points": 1,
@@ -28,6 +1421,372 @@
       }
     },
     {
+      "ticket_id": "CTL-646",
+      "title": "The needs-human label should be cleared when a ticket resumes or completes so operators can trust it as a real-time attention signal",
+      "tier": 3,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "no measurable signals; defaulting to M",
+      "signals": {
+        "loc": null,
+        "changed_files": null,
+        "domains": [],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": 7.6762,
+        "turns": 176,
+        "wall_hours": 0.2724
+      }
+    },
+    {
+      "ticket_id": "CTL-1407",
+      "title": "Operators should see each account's remaining rate-limit budget continuously, not just occasionally from one host",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=38→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 38,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1398",
+      "title": "executor=sdk must stay armed across every daemon start/host/install/reload (launcher sources the SOPS account env)",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=27→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 27,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1396",
+      "title": "Make the SDK-executor rollout verifiable: doctor checks the running daemon's SDK env + phase agents record actual turn counts",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=774→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 774,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1393",
+      "title": "Cluster nodes should auto-detect and refresh rotated SOPS secrets (loudly), instead of materializing only at daemon boot",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=1560→L, files=7→M, domains=1→S",
+      "signals": {
+        "loc": 1560,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1330",
+      "title": "Instrument the daemons (execution-core, broker, monitor) with tick/phase tracing — per-pass timing + event-loop logs (on) and OTLP spans (off-first→on-sampled)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=428→M, files=7→M, domains=2→M",
+      "signals": {
+        "loc": 428,
+        "changed_files": 7,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1290",
+      "title": "The execution-core should run a holistic board-health delegate pass on cadence (shadow-first) that watches the whole board and proposes safe moves with full observability",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=1589→L, files=12→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 1589,
+        "changed_files": 12,
+        "domains": [
+          ".github",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1416",
+      "title": "The phase-event wrapper tests should pass in a bare worktree with no thoughts repo wired",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=49→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 49,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1418",
+      "title": "An operator reading catalyst-agent logs should not see a pino-unavailable WARN on every spawn so real signals aren't buried",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=59→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 59,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1405",
+      "title": "sdkDispatch injects emitEvent into the wrong param — phase-turns telemetry never reaches the event log (CTL-1396 regression)",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=36→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 36,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1402",
+      "title": "cloud-sync should enable @catalyst-cloud/sdk telemetry:true to emit native catalyst.replica.* (apply/freshness/lag/cursor) — CTL-1395 (2/n)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=182→S, files=6→M, domains=2→M",
+      "signals": {
+        "loc": 182,
+        "changed_files": 6,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1397",
+      "title": "Agents should read Linear via direct SQL against the replica (not the catalyst-linear CLI) so reads never burn the shared API quota",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=253→M, files=14→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 253,
+        "changed_files": 14,
+        "domains": [
+          "AGENTS.md",
+          "plugins/dev",
+          "plugins/legacy"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1391",
+      "title": "Agents should read Linear through a replica-aware catalyst-linear CLI (read-model first, linearis fallback) so the replica-first rule is actually executable from skills",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=1258→L, files=10→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 1258,
+        "changed_files": 10,
+        "domains": [
+          ".github",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1406",
+      "title": "Background and SDK workers should report context-window usage so the dashboard stops showing No-data",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "low",
+      "rationale": "LOC=209→M, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 209,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1404",
+      "title": "Phase-agent SDK workers should emit Claude Code built-in claude_code_* OTel telemetry (token/cost/session) as bg workers did",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=90→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 90,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
       "ticket_id": "CTL-787",
       "title": "Headless session.context emission for claude --bg phase agents",
       "tier": 2,
@@ -38,6 +1797,3739 @@
       "signals": {
         "loc": 1065,
         "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-812",
+      "title": "catalyst-agent: standalone host telemetry & multi-account Claude usage agent (sender side)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=166→S, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 166,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-760",
+      "title": "Per-worker OTEL tagging via --settings injection + statusLine + canonical resource block",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=539→M, files=12→M, domains=1→S",
+      "signals": {
+        "loc": 539,
+        "changed_files": 12,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1394",
+      "title": "Each node should run a supervised CatalystReplica writer and read Linear from its fresh local replica so it stops failing on rate limits",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=1060→L, files=13→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 1060,
+        "changed_files": 13,
+        "domains": [
+          ".github",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1367",
+      "title": "CTL-1365b SDK executor — pre-Phase-2-canary hardening checklist (gates flipping a node to executor=sdk)",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=209→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 209,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1382",
+      "title": "A coding agent should reach catalyst-doctor through its installed symlink so that catalyst doctor resolves its driver instead of failing with a missing doctor.mjs path",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=37→XS, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 37,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1392",
+      "title": "Skills, agents, and docs should instruct agents to read the Catalyst Cloud replica first (evidence-based fallback to linearis) so the prose layer matches the cutover",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "LOC=107→S, files=13→M, domains=4→XL; 3+-dirs(+1)",
+      "signals": {
+        "loc": 107,
+        "changed_files": 13,
+        "domains": [
+          "AGENTS.md",
+          "plugins/dev",
+          "plugins/pm",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1369",
+      "title": "Observable install / uninstall / fresh-reinstall lifecycle per node class (backup + telemetry)",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=1027→L, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 1027,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1386",
+      "title": "A visitor should find a complete catalyst CLI command reference on the docs site so that every catalyst-* tool incl. the catalyst umbrella is documented in one place",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=302→M, files=4→S, domains=2→M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 302,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1387",
+      "title": "A visitor should find a complete catalyst CLI command reference on the docs site so every catalyst-* tool incl. the catalyst umbrella is documented in one place",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=690→M, files=6→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 690,
+        "changed_files": 6,
+        "domains": [
+          ".github",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1385",
+      "title": "Board ticket rows use wrong design tokens — bright row dividers and mismatched selected-state background",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=4→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 4,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1383",
+      "title": "A coding agent should get usage from --help on every user-facing catalyst-* CLI so that --help is a reliable consistent way to learn a tool",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=256→M, files=8→M, domains=2→M",
+      "signals": {
+        "loc": 256,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev",
+          "plugins/pm-ops"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1378",
+      "title": "Board titles: parked-ID fallback, dispatch-queue payload, CATALYST_DIR replica parity (#2421 edges)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=179→S, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 179,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1374",
+      "title": "Monitor PWA should self-recover stale lazy chunks after a redeploy (SW versioning + cache-control + retain old chunks)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=413→M, files=5→S, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 413,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1375",
+      "title": "Repo-icon detection should resolve favicons for private repos (Adva) — monitor daemon gh token scope",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=597→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 597,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1371",
+      "title": "Catalyst should drive every ticket to its correct Linear state from PR reality, without native Linear automation",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=64→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 64,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1373",
+      "title": "Icon-picker 'Reload' should hard-reset the PWA SW + caches so stranded icons actually recover",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=105→S, files=3→S, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 105,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1370",
+      "title": "Icon-picker search self-heals a transient glyph-chunk failure (don't cache a rejected manifest promise)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=235→M, files=3→S, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 235,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1372",
+      "title": "Catalyst Monitor PWA should bound long-session memory so a tab doesn't grow to multiple GB overnight",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=165→S, files=5→S, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 165,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1355",
+      "title": "catalyst doctor grades a node against its class-specific rubric",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "low",
+      "rationale": "LOC=966→L, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 966,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1223",
+      "title": "Auto-pull must rebuild + hot-reload the orch-monitor UI on UI merges (fail-loud, no silent stale dist)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=657→M, files=4→S, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 657,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1349",
+      "title": "A daemonless developer node stays plugin-fresh with no broker running",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=761→M, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 761,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1368",
+      "title": "catalyst.node.class becomes a core fleet-wide resource dimension on all telemetry",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=652→M, files=37→XL, domains=2→M",
+      "signals": {
+        "loc": 652,
+        "changed_files": 37,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1348",
+      "title": "A standalone launchd updater becomes the sole plugin-pull owner on every class",
+      "tier": 2,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=1810→L, files=14→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 1810,
+        "changed_files": 14,
+        "domains": [
+          ".github",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1347",
+      "title": "View the board from a phone while the laptop is closed, served by the always-on worker",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=9→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 9,
+        "changed_files": 1,
+        "domains": [
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1346",
+      "title": "A developer node reads board data from a worker's monitor via the existing resolver",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=480→M, files=7→M, domains=2→M",
+      "signals": {
+        "loc": 480,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-731",
+      "title": "Triage-entry dispatch storm: make triage the scheduler entry phase + graceful predecessor kick-back",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=13→XS, files=2→XS, domains=1→S, turns=190→S, wall=45.66h→XL",
+      "signals": {
+        "loc": 13,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 190,
+        "wall_hours": 45.6574
+      }
+    },
+    {
+      "ticket_id": "CTL-783",
+      "title": "Draft-PR-early: implement opens a draft PR on first commit; PR phase flips it ready",
+      "tier": 1,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "high",
+      "rationale": "LOC=475→M, files=10→M, domains=3→L, cost=$102.86→M, turns=659→XL, wall=1.08h→M; 3+-dirs(+1)",
+      "signals": {
+        "loc": 475,
+        "changed_files": 10,
+        "domains": [
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 102.8611,
+        "turns": 659,
+        "wall_hours": 1.0826
+      }
+    },
+    {
+      "ticket_id": "CTL-1344",
+      "title": "Operator can declare a node's class, read through one getNodeClass() seam",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "low",
+      "rationale": "LOC=331→M, files=4→S, domains=3→L; FE+BE→floor-M; 3+-dirs(+1)",
+      "signals": {
+        "loc": 331,
+        "changed_files": 4,
+        "domains": [
+          ".github",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-920",
+      "title": "Operators should see the terminal HUD show the exact same cluster picture as the web and iPad — one assembly, many readers — instead of the HUD scanning raw files on its own",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "LOC=1045→L, files=11→M, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 1045,
+        "changed_files": 11,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1339",
+      "title": "Scheduler tick should not stall ~15–30s on a rate-limited linearis read (per-signal terminal-check timeout)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=242→M, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 242,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1362",
+      "title": "Per-tick trace_id collides across daemon restarts (tick_id resets) — fold a per-boot nonce so it's unique per (boot, tick)",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=42→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 42,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1337",
+      "title": "Tier-3 span and Tier-1 tick-timing log should share one deterministic per-tick trace_id so trace↔logs round-trips both ways",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=155→S, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 155,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1186",
+      "title": "Operator should run `catalyst doctor` to prove a new node is healthy and correctly partitioned before activation",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=1613→L, files=5→S, domains=1→S",
+      "signals": {
+        "loc": 1613,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1285",
+      "title": "The Alloy log-shipper should auto-restart and survive stack restarts so that fleet telemetry never silently dies",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "low",
+      "rationale": "LOC=298→M, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 298,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1133",
+      "title": "Web users should install the orch-monitor as a chrome-less PWA so they get an app window without a native install",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=324→M, files=9→M, domains=1→S",
+      "signals": {
+        "loc": 324,
+        "changed_files": 9,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1340",
+      "title": "Scheduler terminal-checks should read terminal-ness from the local Catalyst-Cloud replica (inert seam, flag off)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=528→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 528,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-671",
+      "title": "Guard + monitor runaway phase-dispatch loops (phantom/non-resolving tickets) — CTL-9 spammed 24k failed-dispatch events",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "high",
+      "rationale": "LOC=1002→L, files=17→L, domains=3→L, cost=$375.60→XL, turns=1614→XL, wall=3.08h→M; 3+-dirs(+1)",
+      "signals": {
+        "loc": 1002,
+        "changed_files": 17,
+        "domains": [
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 375.6033,
+        "turns": 1614,
+        "wall_hours": 3.077
+      }
+    },
+    {
+      "ticket_id": "CTL-1341",
+      "title": "A timed-out linearis read should trip the rate-limit breaker so a degraded pass short-circuits (bound the per-pass aggregate)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=66→S, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 66,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-679",
+      "title": "Add rate-limit backoff / circuit breaker to execution-core Linear calls",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=412→M, files=11→M, domains=1→S",
+      "signals": {
+        "loc": 412,
+        "changed_files": 11,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1331",
+      "title": "Board-health delegate should run off the synchronous scheduler tick so a slow LLM session can't wedge dispatch",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=248→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 248,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1334",
+      "title": "Telemetry should carry one canonical short host.name across logs/metrics/traces so signals join on host",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=48→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 48,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1336",
+      "title": "Pass 0a phantom-sweep should read the warm agents snapshot so a hung `claude agents` RPC can't wedge the scheduler tick",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=101→S, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 101,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1328",
+      "title": "Rulebook /rules should render the belief layers as a swim-lane board with click-to-source drawer so the whole engine is scannable",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=3721→XL, files=32→XL, domains=1→S",
+      "signals": {
+        "loc": 3721,
+        "changed_files": 32,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1338",
+      "title": "tracing.mjs should degrade to no-op when @opentelemetry/api is absent so importing scheduler.mjs never crashes orch-monitor's quality job",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=17→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 17,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-990",
+      "title": "Research-phase rebase infinite-loops on dirty worktree noise (continue_failed flood) — must stash noise + circuit-break",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=574→M, files=9→M, domains=1→S",
+      "signals": {
+        "loc": 574,
+        "changed_files": 9,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-790",
+      "title": "Fix CTL-731 liveness deadline race: setImmediate-deferred verdict + child.exitCode check",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=181→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 181,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1261",
+      "title": "Operator should ship daemon .log files to the OTel collector via an off-the-shelf Grafana Alloy config so the liveness hold is queryable in Loki without ssh",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "low",
+      "rationale": "LOC=456→M, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 456,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1252",
+      "title": "Monitor host-swimlane double-counts one machine as host.name vs physical hostname (mini vs mini.rozich)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=171→S, files=10→M, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 171,
+        "changed_files": 10,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1332",
+      "title": "Log shipper should preserve daemon pino fields as queryable structured data so Tier-1 metrics can be derived",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=40→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 40,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1300",
+      "title": "The board-health delegate should ACT on a real board anomaly by dispatching one holistic recovery-pass delegate with whole-board context, so the board self-heals instead of only emitting shadow scans",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=264→M, files=7→M, domains=2→M",
+      "signals": {
+        "loc": 264,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1176",
+      "title": "A reasoning recovery sweep should clear or correctly escalate every stuck/failed/needs-human ticket, so the human inbox holds only genuine human-decisions",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=78→S, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 78,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1277",
+      "title": "The board should reflect each ticket's live state and labels so the delegate and humans stop acting on stale cache data",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=92→S, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 92,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1329",
+      "title": "Scheduler should not exhaust Linear OAuth quota on stale-fenced orphan worker dirs (multi-host)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=220→M, files=3→S, domains=2→M",
+      "signals": {
+        "loc": 220,
+        "changed_files": 3,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1324",
+      "title": "The orchestrator daemon should keep dispatching work while cleaning up old worktrees, instead of freezing until cleanup finishes",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=258→M, files=7→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 258,
+        "changed_files": 7,
+        "domains": [
+          ".github",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1323",
+      "title": "A ticket touched by a recovery-pass should not be stranded from the new-work pull forever",
+      "tier": 1,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "low",
+      "rationale": "LOC=204→M, files=4→S, domains=3→L; FE+BE→floor-M; 3+-dirs(+1)",
+      "signals": {
+        "loc": 204,
+        "changed_files": 4,
+        "domains": [
+          ".github",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1322",
+      "title": "A draining/holding daemon (not accepting work) should be visible in telemetry + alertable, not hidden behind a healthy heartbeat",
+      "tier": 1,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=831→L, files=21→L, domains=2→M",
+      "signals": {
+        "loc": 831,
+        "changed_files": 21,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1321",
+      "title": "The execution-core daemon should boot accepting work by default — never come up silently drained after a restart",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=213→M, files=7→M, domains=2→M",
+      "signals": {
+        "loc": 213,
+        "changed_files": 7,
+        "domains": [
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1292",
+      "title": "A node that joins the cluster should come up fully working on first boot instead of silently half-provisioned",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=1182→L, files=9→M, domains=1→S",
+      "signals": {
+        "loc": 1182,
+        "changed_files": 9,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1315",
+      "title": "The stall-janitor should reap a Linear-terminal worker dir even when its only signal is a stale triage-done",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=172→S, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 172,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1317",
+      "title": "The Rulebook surface should render without crashing on the cfg threshold fetch",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=11→XS, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 11,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1311",
+      "title": "The board should not show finished or deleted tickets as live cards — auto-reap stale worker dirs once a ticket is terminal or absent from Linear",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=55→S, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 55,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1092",
+      "title": "Operators should see cluster capacity at a glance — overall by default, per-node on demand, with capacity changes over time",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "LOC=1922→L, files=35→XL, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 1922,
+        "changed_files": 35,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1307",
+      "title": "Every cluster node should carry the same CATALYST_CLOUD_TOKEN at the machine level, sourced from the catalyst-cluster repo",
+      "tier": 1,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "low",
+      "rationale": "LOC=808→L, files=11→M, domains=4→XL; 3+-dirs(+1)",
+      "signals": {
+        "loc": 808,
+        "changed_files": 11,
+        "domains": [
+          ".github",
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1306",
+      "title": "The orphan-sweep reaper should keep running regardless of where the installer was invoked from, so worktree/cache debris is reclaimed instead of silently piling up behind a dead LaunchAgent",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=465→M, files=6→M, domains=2→M",
+      "signals": {
+        "loc": 465,
+        "changed_files": 6,
+        "domains": [
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1304",
+      "title": "Contributors should get repo context from one portable AGENTS.md source of truth, with a thin Claude-Code-specific CLAUDE.md, so context stops being duplicated and Codex-isms stop leaking in",
+      "tier": 2,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=2346→XL, files=8→M, domains=6→XL; 3+-dirs(+1)",
+      "signals": {
+        "loc": 2346,
+        "changed_files": 8,
+        "domains": [
+          ".claude",
+          ".github",
+          "AGENTS.md",
+          "CLAUDE.md",
+          "docs",
+          "scripts"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1298",
+      "title": "CI should fail when daemon.mjs has an unresolved import, so a boot-breaking merge can't reach main",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "high",
+      "rationale": "LOC=10→XS, files=1→XS, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 10,
+        "changed_files": 1,
+        "domains": [
+          ".github"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1302",
+      "title": "The board-health delegate should anchor its holistic dispatch to a ticket THIS host owns, so on a multi-host board it acts on owned flagged work instead of HRW-skipping and stalling",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=109→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 109,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1204",
+      "title": "CI and pre-commit should reject any commit that introduces a real secret (gitleaks gate)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=300→M, files=6→M, domains=4→XL; 3+-dirs(+1); human re-score override (compound-log)",
+      "signals": {
+        "loc": 300,
+        "changed_files": 6,
+        "domains": [
+          ".github",
+          ".gitleaks.toml",
+          "plugins/dev",
+          "scripts"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1299",
+      "title": "The execution-core recovery-pass should mechanically FIX bounded-LLM-class stalls instead of only escalating, so a stuck ticket gets a dispatched fix worker not just a Linear comment",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=85→S, files=3→S, domains=2→M",
+      "signals": {
+        "loc": 85,
+        "changed_files": 3,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1297",
+      "title": "The daemon should dispatch an HRW-owned Todo ticket even when another host holds the cross-host triage claim, so multi-host dispatch never orphans tickets",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=188→S, files=4→S, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 188,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1167",
+      "title": "Operator should receive push notifications on the installed PWA (browser + iPad)",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=1403→L, files=19→L, domains=1→S",
+      "signals": {
+        "loc": 1403,
+        "changed_files": 19,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1030",
+      "title": "Catalyst hosts should reclaim stale ticket worktrees automatically so headless nodes never run out of disk",
+      "tier": 2,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=1928→L, files=9→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 1928,
+        "changed_files": 9,
+        "domains": [
+          ".catalyst",
+          "plugins/dev",
+          "setup-catalyst.sh"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1242",
+      "title": "Reap stale needs-human on terminal tickets — Linear label, host marker, AND board cache",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=1242→L, files=12→M, domains=1→S",
+      "signals": {
+        "loc": 1242,
+        "changed_files": 12,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1239",
+      "title": "Board deriveAttention must cross-check Linear terminal state",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=246→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 246,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1093",
+      "title": "Node identity should survive a network hostname change without splitting the fleet's history",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=770→M, files=13→M, domains=2→M",
+      "signals": {
+        "loc": 770,
+        "changed_files": 13,
+        "domains": [
+          ".gitignore",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-774",
+      "title": "Operators should be able to answer \"is anything wedged and what needs me?\" at a glance in the monitor dashboard",
+      "tier": 3,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "no measurable signals; defaulting to M",
+      "signals": {
+        "loc": null,
+        "changed_files": null,
+        "domains": [],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": 1.5401,
+        "turns": 36,
+        "wall_hours": 0.0576
+      }
+    },
+    {
+      "ticket_id": "CTL-1004",
+      "title": "Operators should see orphaned worktrees and ghost sessions cleaned up automatically after tickets reach Done",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=415→M, files=10→M, domains=1→S",
+      "signals": {
+        "loc": 415,
+        "changed_files": 10,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1222",
+      "title": "Clicking an escalation notification should open the app directly on the surface where the operator takes that action",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=756→M, files=10→M, domains=2→M",
+      "signals": {
+        "loc": 756,
+        "changed_files": 10,
+        "domains": [
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1205",
+      "title": "The daemon should garbage-collect completed tickets' worker-state dirs so the liveness snapshot stays fresh and new work isn't held",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=783→M, files=6→M, domains=2→M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 783,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1171",
+      "title": "Broker should emit a periodic liveness heartbeat so an idle broker doesn't false-report 'down'",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=92→S, files=3→S, domains=1→S",
+      "signals": {
+        "loc": 92,
+        "changed_files": 3,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1165",
+      "title": "bg-worker reaper still leaking — mini exhausted 17GB swap from never-reaped jobs (CTL-657 insufficient)",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "medium",
+      "rationale": "LOC=3473→XL, files=23→L, domains=4→XL; 3+-dirs(+1)",
+      "signals": {
+        "loc": 3473,
+        "changed_files": 23,
+        "domains": [
+          ".github",
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1005",
+      "title": "The scheduler should auto-clear a stalled ticket and re-dispatch when the missing prior artifact has since arrived",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=1078→L, files=5→S, domains=1→S",
+      "signals": {
+        "loc": 1078,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1108",
+      "title": "An escalation that gave up after exhausting fix attempts should tell the human what failed, what was tried, and the decision to make — not just a bare Respond button",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=255→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 255,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1291",
+      "title": "Operators should be able to chart the numbers control-loop events carry — queue depth, processed, parallelism, slots — not just that an event fired",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=225→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 225,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1287",
+      "title": "Operators should see why the recovery delegate did or did not fire each tick via structured recovery.tick/recovery.decision events",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=189→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 189,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1260",
+      "title": "The recovery delegate should keep the whole board moving (holistic), not just resolve the flagged items",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=171→S, files=1→XS, domains=1→S",
+      "signals": {
+        "loc": 171,
+        "changed_files": 1,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-867",
+      "title": "Monitor silently preserves stale eligible set on persistent per-team reconcile failure — a whole team starves invisibly",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=845→L, files=10→M, domains=1→S",
+      "signals": {
+        "loc": 845,
+        "changed_files": 10,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1288",
+      "title": "The cache reconcile should cover the whole board via a rotation cursor so phantom stuck tickets clear instead of drifting past the per-pass cap",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "low",
+      "rationale": "LOC=284→M, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 284,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1282",
+      "title": "The board cache reconcile should run without blocking the broker event loop (async pass + re-entrancy guard)",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "low",
+      "rationale": "LOC=202→M, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 202,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1274",
+      "title": "Make the catalyst-cluster repo the roster source and retire the per-repo roster files",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=571→M, files=9→M, domains=2→M",
+      "signals": {
+        "loc": 571,
+        "changed_files": 9,
+        "domains": [
+          ".catalyst",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1279",
+      "title": "The recovery delegate (and humans) should have a wired-in observability cookbook so it can diagnose, unstick, and file findings from live telemetry",
+      "tier": 1,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "low",
+      "rationale": "LOC=415→M, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 415,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": false
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1280",
+      "title": "Each long-running daemon should emit a periodic heartbeat log line so liveness monitoring is deterministic",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=83→S, files=7→M, domains=1→S",
+      "signals": {
+        "loc": 83,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1245",
+      "title": "Recovery: revive dead-but-running-signalled workers (the board-stuck root cause)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=359→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 359,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1262",
+      "title": "Operator should see the stable Catalyst node name on every otel-forward event as a distinct resource attribute so dashboards and the delegate can attribute signals per node",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=183→S, files=5→S, domains=1→S",
+      "signals": {
+        "loc": 183,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1123",
+      "title": "Stack-health outages and needs-human pile-ups should reach the operator out-of-band, not only the dashboard",
+      "tier": 1,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=741→M, files=8→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 741,
+        "changed_files": 8,
+        "domains": [
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1161",
+      "title": "A merge should reliably refresh the running stack even when the GitHub push webhook is missed",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=405→M, files=5→S, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 405,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1211",
+      "title": "Adopt cluster config architecture: fleet repo + SOPS secrets + scoped config API + schema versioning",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=779→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 779,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1273",
+      "title": "The fleet roster should live in one shared place, never copied into project repos",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=1579→L, files=11→M, domains=1→S",
+      "signals": {
+        "loc": 1579,
+        "changed_files": 11,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1263",
+      "title": "Operator should start/stop/status the daemon-log shipper as part of catalyst-stack so it runs per-host alongside the other daemons with its own pid",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=342→M, files=5→S, domains=1→S",
+      "signals": {
+        "loc": 342,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1255",
+      "title": "cluster-heartbeat publish broken: malformed resolve query + missing required attachment title (liveness never published)",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=127→S, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 127,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1090",
+      "title": "Cluster hosts should see each other's liveness so a dead or sleeping node's work is visible and reclaimable",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=1283→L, files=11→M, domains=1→S",
+      "signals": {
+        "loc": 1283,
+        "changed_files": 11,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1122",
+      "title": "A surviving daemon should detect and alarm when webhook ingestion goes silent",
+      "tier": 1,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=500→M, files=9→M, domains=3→L; 3+-dirs(+1)",
+      "signals": {
+        "loc": 500,
+        "changed_files": 9,
+        "domains": [
+          "docs",
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1191",
+      "title": "Fleet should re-home new work off an offline host via a liveness-filtered HRW roster so reboots don't starve dispatch",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=420→M, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 420,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1258",
+      "title": "Every place the monitor shows a project mark should render the project's icon — custom glyph or repo favicon — not a fallback dot",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=217→M, files=9→M, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 217,
+        "changed_files": 9,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1248",
+      "title": "Operators should be able to reorder projects in the monitor navigation so the most important ones stay closest at hand",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=398→M, files=9→M, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 398,
+        "changed_files": 9,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1253",
+      "title": "Picker doesn't show detected repo favicons even when discovery returns them (Adva)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=105→S, files=4→S, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 105,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1257",
+      "title": "Monitor RSS ratchets to ~7GB: 3s board-recompute does 3x un-ringed full reads of the event log (continuation of CTL-1215/1224)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=666→M, files=9→M, domains=1→S",
+      "signals": {
+        "loc": 666,
+        "changed_files": 9,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1224",
+      "title": "Route the per-SSE-connect backlog + per-client live tail through the shared event-ring so N dashboard clients don't each full-read the log (completes CTL-1215)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=505→M, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 505,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1220",
+      "title": "Auto-recovered work should show as 'auto-fixed / triaged' with an action log in the monitor inbox, not as 'needs you'",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=756→M, files=10→M, domains=2→M",
+      "signals": {
+        "loc": 756,
+        "changed_files": 10,
+        "domains": [
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1215",
+      "title": "The monitor should serve event-log queries from a single shared in-memory tail so N dashboard consumers don't each trigger a full-log re-read",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "medium",
+      "rationale": "LOC=1436→L, files=18→L, domains=1→S",
+      "signals": {
+        "loc": 1436,
+        "changed_files": 18,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-673",
+      "title": "execution-core daemon re-reads the full event log per scheduler tick — incremental/byte-offset scan to bound RSS",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=534→M, files=7→M, domains=1→S, cost=$187.21→L, turns=774→XL, wall=1.44h→M",
+      "signals": {
+        "loc": 534,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 187.2114,
+        "turns": 774,
+        "wall_hours": 1.4415
+      }
+    },
+    {
+      "ticket_id": "CTL-1232",
+      "title": "Add /debug/memory + /debug/heap-snapshot endpoints (+ full-read counters) to diagnose the monitor's ~6.5GB RSS",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=261→M, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 261,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1226",
+      "title": "Operator should pick a project icon from a searchable icon grid, not a dropdown",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=478→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 478,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1254",
+      "title": "Icon picker 'All icons' is empty + unsearchable — virtualizer scroll container collapses to 0 height",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=57→S, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 57,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1156",
+      "title": "The monitor server should resolve project config from an explicit path so it can run headless or in the cloud",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=286→M, files=6→M, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 286,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1212",
+      "title": "Operators should manage a project's configuration from one grouped settings page, opened in a click from the nav",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=530→M, files=11→M, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 530,
+        "changed_files": 11,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1118",
+      "title": "A merge that changes UI source should actually rebuild and serve the new bundle — hot-reload must not skip the UI build",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=247→M, files=2→XS, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 247,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1234",
+      "title": "Selecting a project icon should update the left nav immediately, not only after a reload",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=359→M, files=4→S, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 359,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1241",
+      "title": "Wire belief state into recovery evidence + make R12 the single needs-human owner",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "high",
+      "rationale": "LOC=1235→L, files=12→M, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 1235,
+        "changed_files": 12,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1240",
+      "title": "Wire gateway tier into scheduler tick (Linear read-hammer fix)",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=263→M, files=3→S, domains=2→M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 263,
+        "changed_files": 3,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1243",
+      "title": "Route source_conflict to bounded-LLM; retire legacy give-up comment",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=94→S, files=5→S, domains=2→M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 94,
+        "changed_files": 5,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1246",
+      "title": "Catalyst thoughts should route to the coalesce-labs repo (not groundworkapp) so cluster research isn't polluted",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=857→L, files=6→M, domains=1→S",
+      "signals": {
+        "loc": 857,
+        "changed_files": 6,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1249",
+      "title": "Icon picker 'All icons' hangs on Loading — the lazy Phosphor chunk is 4.9MB and takes ~24s to fetch",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "LOC=3749→XL, files=13→M, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 3749,
+        "changed_files": 13,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1251",
+      "title": "Cross-host liveness is dormant: nodes don't publish heartbeats to the anchor, so the dashboard can't show peers live",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=406→M, files=7→M, domains=1→S",
+      "signals": {
+        "loc": 406,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-736",
+      "title": "Retire the revive-storm guard stack: state.json death-trigger + fencing claim + progress probe",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=41→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 41,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1233",
+      "title": "Icon picker is laggy while typing and bloats the bundle — virtualize the grid + lazy-load Phosphor",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=760→M, files=14→M, domains=1→S",
+      "signals": {
+        "loc": 760,
+        "changed_files": 14,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1236",
+      "title": "Bake data-driven thoughts pull-sync timer into the installer + pull-before-read in research skills",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=842→L, files=12→M, domains=1→S",
+      "signals": {
+        "loc": 842,
+        "changed_files": 12,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1235",
+      "title": "Emit running Catalyst version + commit from the agent (build-info gauge for release comparison + audit)",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=13→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 13,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1237",
+      "title": "bg phase-workers omit host.name in OTEL_RESOURCE_ATTRIBUTES → claude_code metrics land with host_name=null",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=47→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 47,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1221",
+      "title": "When recovery escalates, the LLM should author an executive-framed, length-aware notification (background, trade-off, CTA) pushed via PWA/native",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=756→M, files=10→M, domains=2→M",
+      "signals": {
+        "loc": 756,
+        "changed_files": 10,
+        "domains": [
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1227",
+      "title": "Operators should see per-host disk-free + worktree-dir telemetry so they catch disk pressure before nodes fill up",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=759→M, files=7→M, domains=1→S",
+      "signals": {
+        "loc": 759,
+        "changed_files": 7,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1225",
+      "title": "Operator should save project settings on the first click, with visible confirmation",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=67→S, files=5→S, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 67,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1218",
+      "title": "Automated reaper should permanently remove squash-merged orphan worktrees so the cleanup queue self-drains instead of re-deferring forever",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "low",
+      "rationale": "LOC=936→L, files=11→M, domains=1→S",
+      "signals": {
+        "loc": 936,
+        "changed_files": 11,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1219",
+      "title": "unstuck-sweep should mechanically clear typed stalls via registered act-seams (enforce) so dirty-tree / source-conflict / orphan-stale stalls self-resolve without a human",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=1311→L, files=4→S, domains=1→S",
+      "signals": {
+        "loc": 1311,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1142",
+      "title": "The lifecycle-event namespace contract should be enforced by a parity test across all producers",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=576→M, files=7→M, domains=2→M",
+      "signals": {
+        "loc": 576,
+        "changed_files": 7,
+        "domains": [
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-937",
+      "title": "A diagnostician agent should wake on stuck states the daemon can't classify, with humans as the second line of escalation",
+      "tier": 2,
+      "tshirt": "XS",
+      "points": 1,
+      "confidence": "medium",
+      "rationale": "LOC=24→XS, files=2→XS, domains=1→S",
+      "signals": {
+        "loc": 24,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-653",
+      "title": "Remediate phase: autonomous verify→remediate loop (cap 3) instead of stalling to needs-human",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "high",
+      "rationale": "LOC=1129→L, files=17→L, domains=3→L, cost=$290.17→XL, turns=980→XL, wall=2.70h→M; 3+-dirs(+1)",
+      "signals": {
+        "loc": 1129,
+        "changed_files": 17,
+        "domains": [
+          ".catalyst",
+          "docs",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 290.1686,
+        "turns": 980,
+        "wall_hours": 2.698
+      }
+    },
+    {
+      "ticket_id": "CTL-1064",
+      "title": "Stuck tickets should be deep-dived and auto-unstuck, with only genuine decisions escalated to a human",
+      "tier": 2,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "high",
+      "rationale": "LOC=3636→XL, files=22→L, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 3636,
+        "changed_files": 22,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1152",
+      "title": "Operators should see every configured Catalyst project in the monitor sidebar so that onboarded projects appear without hardcoding",
+      "tier": 1,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "LOC=1020→L, files=12→M, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 1020,
+        "changed_files": 12,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1135",
+      "title": "The event log envelope should carry monotonic seq + caused_by so consumers can order and trace causally",
+      "tier": 1,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=120→S, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 120,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 0,
+        "turns": 0,
+        "wall_hours": 0
+      }
+    },
+    {
+      "ticket_id": "CTL-1203",
+      "title": "Secrets should be 600 and never git-tracked, enforced by the installer and asserted by doctor",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=688→M, files=12→M, domains=2→M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 688,
+        "changed_files": 12,
+        "domains": [
+          "plugins/dev",
+          "setup-catalyst.sh"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1187",
+      "title": "Operator should read a single SHARED-vs-PER-NODE config + quota-field contract so mirrors and consumers stay consistent",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=194→S, files=4→S, domains=2→M; FE+BE→floor-M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 194,
+        "changed_files": 4,
+        "domains": [
+          "plugins/dev",
+          "website"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1188",
+      "title": "Operator should manage the cluster (status/add/remove/rename/anchor/tune/drain) through one CLI instead of hand-edits",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "high",
+      "rationale": "LOC=682→M, files=5→S, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 682,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1202",
+      "title": "Each node should pin host identity via CATALYST_HOST_NAME so telemetry and scheduler agree regardless of wired/wireless hostname",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=234→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 234,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1208",
+      "title": "Operators should pick a project icon from a curated, color-tinted icon set, not just an auto-detected favicon",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "high",
+      "rationale": "LOC=1240→L, files=24→L, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 1240,
+        "changed_files": 24,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1183",
+      "title": "Operator should fetch a seed node's shared join bundle from an armed listener so a new node can mirror its config",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "medium",
+      "rationale": "LOC=754→M, files=8→M, domains=1→S",
+      "signals": {
+        "loc": 754,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1207",
+      "title": "Operators should be able to pick a project's icon and color and have it persist server-side across clients",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=173→S, files=9→M, domains=1→S; FE+BE→floor-M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 173,
+        "changed_files": 9,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1206",
+      "title": "Operators returning from a ticket detail should land back on the board exactly where they left it — including the scroll inside a column",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "high",
+      "rationale": "LOC=173→S, files=5→S, domains=1→S; FE+BE→floor-M; human re-score override (compound-log)",
+      "signals": {
+        "loc": 173,
+        "changed_files": 5,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1185",
+      "title": "Operator should run a one-line `catalyst-join` that provisions a new node by mirroring the seed and resumes after failure",
+      "tier": 2,
+      "tshirt": "L",
+      "points": 8,
+      "confidence": "high",
+      "rationale": "LOC=1224→L, files=2→XS, domains=1→S; human re-score override (compound-log)",
+      "signals": {
+        "loc": 1224,
+        "changed_files": 2,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-729",
+      "title": "The daemon should detect and escalate phase workers that are running but producing no output or commits so that frozen workers don't hold slots indefinitely",
+      "tier": 1,
+      "tshirt": "XL",
+      "points": 13,
+      "confidence": "high",
+      "rationale": "LOC=2019→XL, files=26→L, domains=1→S, cost=$4.10→XS, turns=676→XL, wall=86.88h→XL",
+      "signals": {
+        "loc": 2019,
+        "changed_files": 26,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": 4.0953,
+        "turns": 676,
+        "wall_hours": 86.8838
+      }
+    },
+    {
+      "ticket_id": "CTL-1168",
+      "title": "The Tickets board should feel as tight and finished as Linear's — capped column bands, tighter spacing, stronger row hues, no edge fade, and a scroll that reaches the top",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "LOC=898→L, files=8→M, domains=1→S; FE+BE→floor-M",
+      "signals": {
+        "loc": 898,
+        "changed_files": 8,
+        "domains": [
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": true,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-935",
+      "title": "Operators should see where the new liveness verdicts disagree with today's guards before anything gates on them",
+      "tier": 2,
+      "tshirt": "M",
+      "points": 5,
+      "confidence": "low",
+      "rationale": "LOC=3515→XL, files=27→L, domains=2→M",
+      "signals": {
+        "loc": 3515,
+        "changed_files": 27,
+        "domains": [
+          ".github",
+          "plugins/dev"
+        ],
+        "has_migration": false,
+        "has_frontend": false,
+        "has_backend": true
+      },
+      "actuals": {
+        "cost_usd": null,
+        "turns": null,
+        "wall_hours": null
+      }
+    },
+    {
+      "ticket_id": "CTL-1184",
+      "title": "Operator should mint a one-time seed join token that arms the bundle listener for a single node join",
+      "tier": 2,
+      "tshirt": "S",
+      "points": 3,
+      "confidence": "medium",
+      "rationale": "LOC=343→M, files=5→S, domains=1→S",
+      "signals": {
+        "loc": 343,
+        "changed_files": 5,
         "domains": [
           "plugins/dev"
         ],
@@ -194,54 +5686,6 @@
         "cost_usd": null,
         "turns": null,
         "wall_hours": null
-      }
-    },
-    {
-      "ticket_id": "CTL-790",
-      "title": "Fix CTL-731 liveness deadline race: setImmediate-deferred verdict + child.exitCode check",
-      "tier": 2,
-      "tshirt": "S",
-      "points": 3,
-      "confidence": "medium",
-      "rationale": "LOC=181→S, files=2→XS, domains=1→S",
-      "signals": {
-        "loc": 181,
-        "changed_files": 2,
-        "domains": [
-          "plugins/dev"
-        ],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": true
-      },
-      "actuals": {
-        "cost_usd": null,
-        "turns": null,
-        "wall_hours": null
-      }
-    },
-    {
-      "ticket_id": "CTL-731",
-      "title": "Triage-entry dispatch storm: make triage the scheduler entry phase + graceful predecessor kick-back",
-      "tier": 1,
-      "tshirt": "XS",
-      "points": 1,
-      "confidence": "medium",
-      "rationale": "LOC=13→XS, files=2→XS, domains=1→S, turns=190→S, wall=45.66h→XL",
-      "signals": {
-        "loc": 13,
-        "changed_files": 2,
-        "domains": [
-          "plugins/dev"
-        ],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": true
-      },
-      "actuals": {
-        "cost_usd": 0,
-        "turns": 190,
-        "wall_hours": 45.6574
       }
     },
     {
@@ -494,32 +5938,6 @@
         "cost_usd": 177.6686,
         "turns": 662,
         "wall_hours": 5.379
-      }
-    },
-    {
-      "ticket_id": "CTL-671",
-      "title": "Guard + monitor runaway phase-dispatch loops (phantom/non-resolving tickets) — CTL-9 spammed 24k failed-dispatch events",
-      "tier": 1,
-      "tshirt": "XL",
-      "points": 13,
-      "confidence": "high",
-      "rationale": "LOC=1002→L, files=17→L, domains=3→L, cost=$375.60→XL, turns=1614→XL, wall=3.08h→M; 3+-dirs(+1)",
-      "signals": {
-        "loc": 1002,
-        "changed_files": 17,
-        "domains": [
-          "docs",
-          "plugins/dev",
-          "website"
-        ],
-        "has_migration": false,
-        "has_frontend": true,
-        "has_backend": true
-      },
-      "actuals": {
-        "cost_usd": 375.6033,
-        "turns": 1614,
-        "wall_hours": 3.077
       }
     },
     {
@@ -1689,56 +7107,6 @@
       }
     },
     {
-      "ticket_id": "CTL-673",
-      "title": "execution-core daemon re-reads the full event log per scheduler tick — incremental/byte-offset scan to bound RSS",
-      "tier": 1,
-      "tshirt": "M",
-      "points": 5,
-      "confidence": "high",
-      "rationale": "LOC=534→M, files=7→M, domains=1→S, cost=$187.21→L, turns=774→XL, wall=1.44h→M",
-      "signals": {
-        "loc": 534,
-        "changed_files": 7,
-        "domains": [
-          "plugins/dev"
-        ],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": true
-      },
-      "actuals": {
-        "cost_usd": 187.2114,
-        "turns": 774,
-        "wall_hours": 1.4415
-      }
-    },
-    {
-      "ticket_id": "CTL-653",
-      "title": "Remediate phase: autonomous verify→remediate loop (cap 3) instead of stalling to needs-human",
-      "tier": 1,
-      "tshirt": "XL",
-      "points": 13,
-      "confidence": "high",
-      "rationale": "LOC=1129→L, files=17→L, domains=3→L, cost=$290.17→XL, turns=980→XL, wall=2.70h→M; 3+-dirs(+1)",
-      "signals": {
-        "loc": 1129,
-        "changed_files": 17,
-        "domains": [
-          ".catalyst",
-          "docs",
-          "plugins/dev"
-        ],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": true
-      },
-      "actuals": {
-        "cost_usd": 290.1686,
-        "turns": 980,
-        "wall_hours": 2.698
-      }
-    },
-    {
       "ticket_id": "CTL-641",
       "title": "Per-phase work-done probes (extend WORK_DONE_PROBES beyond implement)",
       "tier": 1,
@@ -1884,30 +7252,6 @@
       }
     },
     {
-      "ticket_id": "CTL-760",
-      "title": "Per-worker OTEL tagging via --settings injection + statusLine + canonical resource block",
-      "tier": 2,
-      "tshirt": "M",
-      "points": 5,
-      "confidence": "medium",
-      "rationale": "LOC=539→M, files=12→M, domains=1→S",
-      "signals": {
-        "loc": 539,
-        "changed_files": 12,
-        "domains": [
-          "plugins/dev"
-        ],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": true
-      },
-      "actuals": {
-        "cost_usd": null,
-        "turns": null,
-        "wall_hours": null
-      }
-    },
-    {
       "ticket_id": "CTL-757",
       "title": "Emit canonical linear.state.write audit event on every Linear state transition (writer attribution + from→to)",
       "tier": 2,
@@ -1971,30 +7315,6 @@
         ],
         "has_migration": false,
         "has_frontend": true,
-        "has_backend": true
-      },
-      "actuals": {
-        "cost_usd": null,
-        "turns": null,
-        "wall_hours": null
-      }
-    },
-    {
-      "ticket_id": "CTL-736",
-      "title": "Retire the revive-storm guard stack: state.json death-trigger + fencing claim + progress probe",
-      "tier": 2,
-      "tshirt": "XS",
-      "points": 1,
-      "confidence": "medium",
-      "rationale": "LOC=41→XS, files=2→XS, domains=1→S",
-      "signals": {
-        "loc": 41,
-        "changed_files": 2,
-        "domains": [
-          "plugins/dev"
-        ],
-        "has_migration": false,
-        "has_frontend": false,
         "has_backend": true
       },
       "actuals": {
@@ -2307,30 +7627,6 @@
         "changed_files": 3,
         "domains": [
           ".catalyst",
-          "plugins/dev"
-        ],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": true
-      },
-      "actuals": {
-        "cost_usd": null,
-        "turns": null,
-        "wall_hours": null
-      }
-    },
-    {
-      "ticket_id": "CTL-679",
-      "title": "Add rate-limit backoff / circuit breaker to execution-core Linear calls",
-      "tier": 2,
-      "tshirt": "M",
-      "points": 5,
-      "confidence": "medium",
-      "rationale": "LOC=412→M, files=11→M, domains=1→S",
-      "signals": {
-        "loc": 412,
-        "changed_files": 11,
-        "domains": [
           "plugins/dev"
         ],
         "has_migration": false,
@@ -25676,28 +30972,6 @@
       }
     },
     {
-      "ticket_id": "CTL-513",
-      "title": "",
-      "tier": null,
-      "tshirt": "S",
-      "points": 3,
-      "confidence": "low",
-      "rationale": "reconstructed from CTL-746 actuals corpus",
-      "signals": {
-        "loc": 312,
-        "changed_files": 2,
-        "domains": [],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": false
-      },
-      "actuals": {
-        "cost_usd": 140.408796,
-        "turns": 374,
-        "wall_hours": 1.683
-      }
-    },
-    {
       "ticket_id": "CTL-530",
       "title": "",
       "tier": null,
@@ -26248,28 +31522,6 @@
       }
     },
     {
-      "ticket_id": "CTL-682",
-      "title": "",
-      "tier": null,
-      "tshirt": "S",
-      "points": 3,
-      "confidence": "low",
-      "rationale": "reconstructed from CTL-746 actuals corpus",
-      "signals": {
-        "loc": null,
-        "changed_files": null,
-        "domains": [],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": false
-      },
-      "actuals": {
-        "cost_usd": 6.797868,
-        "turns": 144,
-        "wall_hours": 0.2351
-      }
-    },
-    {
       "ticket_id": "CTL-683",
       "title": "",
       "tier": null,
@@ -26424,28 +31676,6 @@
       }
     },
     {
-      "ticket_id": "CTL-729",
-      "title": "",
-      "tier": null,
-      "tshirt": "M",
-      "points": 5,
-      "confidence": "low",
-      "rationale": "reconstructed from CTL-746 actuals corpus",
-      "signals": {
-        "loc": null,
-        "changed_files": null,
-        "domains": [],
-        "has_migration": false,
-        "has_frontend": false,
-        "has_backend": false
-      },
-      "actuals": {
-        "cost_usd": 0,
-        "turns": 561,
-        "wall_hours": 3.987
-      }
-    },
-    {
       "ticket_id": "CTL-737",
       "title": "",
       "tier": null,
@@ -26578,5 +31808,5 @@
       }
     }
   ],
-  "count": 1186
+  "count": 1400
 }

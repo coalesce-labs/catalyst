@@ -1,5 +1,608 @@
 # Changelog
 
+## [12.46.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.45.0...catalyst-dev-v12.46.0)
+
+Aug 06, 2026
+
+<!-- ai-enhanced -->
+
+### Account Health Visibility & Worktree Resume
+
+The orch-monitor now surfaces Claude account health everywhere you look: a new accounts-probe library (TTL-cached, edge-triggered) backs a `GET /api/accounts` endpoint and `/api/accounts/stream` SSE feed, with a live strip in the Ink HUD and a banner in the web dashboard that fires loudly when an account degrades. Worktree creation now seeds from `origin/<ticket>` when that remote branch exists, so a resumed or reclaimed worktree picks up where the previous worker left off instead of silently orphaning pushed commits. Board-scan events also now carry per-host slot counts (`recovery.slot.capacity`, `recovery.slot.in_use`, `recovery.slot.free`) as chartable Loki attributes, making fleet-wide free-capacity queries like `sum(recovery.slot.free)` possible for the first time.
+
+
+
+### PRs
+
+* **dev:** board-scan events now carry per-host worker-slot counts as ([602d1f2](https://github.com/coalesce-labs/catalyst/commit/602d1f2bd5f7b732f5cfc5a5067f2da417482f66))
+* **dev:** CTL-1607 promote board-scan slot scalars to chartable Loki attributes ([#2985](https://github.com/coalesce-labs/catalyst/issues/2985)) ([602d1f2](https://github.com/coalesce-labs/catalyst/commit/602d1f2bd5f7b732f5cfc5a5067f2da417482f66))
+* **dev:** CTL-1653 accounts-probe lib (probe runner + async TTL cache) ([#3011](https://github.com/coalesce-labs/catalyst/issues/3011)) ([32b6d07](https://github.com/coalesce-labs/catalyst/commit/32b6d071f12d3aa333d41352470a3bd34c8d947b))
+* **dev:** board-health-seam test expects capacity.admissionGated (CTL-1607) ([#3028](https://github.com/coalesce-labs/catalyst/issues/3028)) ([1105e67](https://github.com/coalesce-labs/catalyst/commit/1105e67db71304f25bd39d752062f2659832370b))
+* **dev:** CTL-1640 resume worktree from origin/&lt;ticket&gt; instead of orphaning pushed commits ([#3025](https://github.com/coalesce-labs/catalyst/issues/3025)) ([898e02e](https://github.com/coalesce-labs/catalyst/commit/898e02e136b7a071457f5b437260897309b23050))
+* **dev:** CTL-1655 — consumer-side coordination-mirror comment tail ([#3015](https://github.com/coalesce-labs/catalyst/issues/3015)) ([042d321](https://github.com/coalesce-labs/catalyst/commit/042d321ae9610dd30a4f757a44626bfcb63d6d24))
+* **monitor:** CTL-1653 accept https-configured trusted origins in the refresh Host check ([#3020](https://github.com/coalesce-labs/catalyst/issues/3020)) ([b72a53a](https://github.com/coalesce-labs/catalyst/commit/b72a53a63e6ef865974e8b29be02be4d2e47e90a))
+* **monitor:** CTL-1653 document MONITOR_TLS_PROXY_PEERS + normalize IPv4-mapped peers ([#3023](https://github.com/coalesce-labs/catalyst/issues/3023)) ([fbcaffb](https://github.com/coalesce-labs/catalyst/commit/fbcaffb8c2e651aaa95e3e81fed7db4e00e0b0e8))
+* **monitor:** CTL-1653 operator-declared TLS-proxy peers replace header-derived scheme ([#3022](https://github.com/coalesce-labs/catalyst/issues/3022)) ([e2746dc](https://github.com/coalesce-labs/catalyst/commit/e2746dc26b0519676b85b1be545974074140d38c))
+* **monitor:** CTL-1653 post-merge hardening — stale-strip clear, Bun execPath, non-simple refresh, EOF reconnect, empty-env contract ([#3017](https://github.com/coalesce-labs/catalyst/issues/3017)) ([9eb083a](https://github.com/coalesce-labs/catalyst/commit/9eb083aded55ea855fe4321c4ccbc561503ef219))
+* **monitor:** CTL-1653 post-merge hardening r3 — unavailable transition, Host validation, unreadable-env error ([#3019](https://github.com/coalesce-labs/catalyst/issues/3019)) ([b4b7496](https://github.com/coalesce-labs/catalyst/commit/b4b74960cc4b2178e47c05d3a74d52bd13fa254d))
+* **monitor:** CTL-1653 scheme-aware Host check — never treat an https-only trusted host as plaintext ([#3021](https://github.com/coalesce-labs/catalyst/issues/3021)) ([c081851](https://github.com/coalesce-labs/catalyst/commit/c081851350e3f20887a671493d6316fd56305ae9))
+
+## [12.45.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.44.0...catalyst-dev-v12.45.0)
+
+Aug 05, 2026
+
+<!-- ai-enhanced -->
+
+### Claude Account Switching Command
+
+The new `catalyst-stack claude-account` command handles the full Claude SDK account rotation workflow in one step: `status` shows per-account utilization and reset times, `switch <handle>` validates the target, flips the SOPS secret, commits, pushes, and verifies the new account is active and error-free. A `sync` subcommand lets a second node adopt a pushed switch without repeating the full procedure. The release also fixes the orchestration monitor surfacing "unknown reason" for stalled tickets that actually had a specific `attentionReason` like `sdk-overloaded-exhausted`, and patches a broker bug where pre-workspace `node_modules` debris could shadow root installs and leave daemons running stale dependency versions.
+
+
+
+### PRs
+
+* **dev:** CTL-1650 catalyst-stack claude-account subcommand + commit the accounts-usage tool ([#3004](https://github.com/coalesce-labs/catalyst/issues/3004)) ([779ef08](https://github.com/coalesce-labs/catalyst/commit/779ef08989caff53a3b9a9d2bb85e0c97e18914b))
+* **broker:** CTL-1646 — prune pre-workspace member node_modules before a root install ([#2997](https://github.com/coalesce-labs/catalyst/issues/2997)) ([598e3c8](https://github.com/coalesce-labs/catalyst/commit/598e3c8ace0fe63f20f9acae8edbb31bab50d019))
+* **dev:** CTL-1623 export the canonical malformed-file validators instead of duplicating them ([#2984](https://github.com/coalesce-labs/catalyst/issues/2984)) ([c2b070e](https://github.com/coalesce-labs/catalyst/commit/c2b070e8d4afac497382b251aad8f2fb6efa13ab))
+* **dev:** CTL-1623 make the github-token rearm hook reject malformed files + run the bash parity suite in CI ([#2983](https://github.com/coalesce-labs/catalyst/issues/2983)) ([160abbf](https://github.com/coalesce-labs/catalyst/commit/160abbf2805c610ed9229fa906ef80754badcc05))
+* **dev:** CTL-1623 resolve github-token/webhook-secret through the secret contract ([#2981](https://github.com/coalesce-labs/catalyst/issues/2981)) ([94de78a](https://github.com/coalesce-labs/catalyst/commit/94de78ac6bc0210fff3fd35a9ad9ac6f5052b5f2))
+* **dev:** CTL-1648 — surface attentionReason in board stalled-phase derivation ([#3003](https://github.com/coalesce-labs/catalyst/issues/3003)) ([778b92d](https://github.com/coalesce-labs/catalyst/commit/778b92d1aca342c448bdab21208bf96b9d1ab9fd))
+* **dev:** CTL-1650 harden claude-account for BSD sed, stale selectors, and rate-limited targets ([#3006](https://github.com/coalesce-labs/catalyst/issues/3006)) ([4f6fb68](https://github.com/coalesce-labs/catalyst/commit/4f6fb681c5d013ea14f39c88d43eb621a658c1bb))
+
+## [12.44.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.43.0...catalyst-dev-v12.44.0) (2026-08-04)
+
+
+### Features
+
+* **dev:** CTL-1616 cloud-token name-resolver unification + Groq resolveApiKey adoption (PR5) ([#2927](https://github.com/coalesce-labs/catalyst/issues/2927)) ([be673ea](https://github.com/coalesce-labs/catalyst/commit/be673ea4ffee3ec5b2695b056bc13627843b8bbd))
+* **dev:** CTL-1616 doctor cloud-guard escalation + shadow-diffed Layer-2 stragglers (PR6) ([#2929](https://github.com/coalesce-labs/catalyst/issues/2929)) ([56fbe72](https://github.com/coalesce-labs/catalyst/commit/56fbe72c4a5a24a4c8357e3dea462c4c576fe8f8))
+* **dev:** CTL-1616 doctor secret-contract shadow pass (PR2, zero grade change) ([#2916](https://github.com/coalesce-labs/catalyst/issues/2916)) ([0377813](https://github.com/coalesce-labs/catalyst/commit/037781399fa01aaa0a6e78a5bd54fd5243eda009))
+* **dev:** CTL-1616 fold the 9-file Linear read into the secret contract + doctor cutover (PR3) ([#2919](https://github.com/coalesce-labs/catalyst/issues/2919)) ([01294fc](https://github.com/coalesce-labs/catalyst/commit/01294fc9a538c2c09ec51b913f0fdd84c510e8a4))
+* **dev:** CTL-1616 fold the OAuth-mint trio + read-only 4th onto the secret contract (PR4) ([#2924](https://github.com/coalesce-labs/catalyst/issues/2924)) ([22afee0](https://github.com/coalesce-labs/catalyst/commit/22afee0a6e20df27cbe9a49e1194df80be0de1a8))
+* **dev:** CTL-1622 setup-catalyst prompts for and persists catalyst.deployment.mode ([#2912](https://github.com/coalesce-labs/catalyst/issues/2912)) ([3af40d2](https://github.com/coalesce-labs/catalyst/commit/3af40d23edc067ab4e21c2d2b84b6be68cd32074))
+* **dev:** CTL-1628 catalyst-runtime-root resolver — fold Tier 1 duplicates + 4 latent resolver bugs (Phase A2) ([#2946](https://github.com/coalesce-labs/catalyst/issues/2946)) ([c01ef76](https://github.com/coalesce-labs/catalyst/commit/c01ef76bd7ec44fee32369f732848494187c1b97))
+* **dev:** CTL-1628 root bun workspace + turbo (Phase A1) ([#2945](https://github.com/coalesce-labs/catalyst/issues/2945)) ([a61c8a8](https://github.com/coalesce-labs/catalyst/commit/a61c8a8a297bfc4e47821200a80bc18cc56e54a9))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1616 clear the sticky export attribute on the value breadcrumb ([#2926](https://github.com/coalesce-labs/catalyst/issues/2926)) ([ea1e474](https://github.com/coalesce-labs/catalyst/commit/ea1e4742b3117fa23ef3025804232ccaf40685b1))
+* **dev:** CTL-1616 declare the split-brain Layer-2 layout unsupported + finish the observe-only story ([#2931](https://github.com/coalesce-labs/catalyst/issues/2931)) ([ca7ec68](https://github.com/coalesce-labs/catalyst/commit/ca7ec68f78ab340d9940de1f4b9ad67744dcceb2))
+* **dev:** CTL-1616 divergence check round 3 — reject relative paths, per-service remedy, no committed ticket prefix ([#2939](https://github.com/coalesce-labs/catalyst/issues/2939)) ([6c134b1](https://github.com/coalesce-labs/catalyst/commit/6c134b168587f87c8399ada56c08d6534c3e88c5))
+* **dev:** CTL-1616 divergence check round 4 — prefix-agnostic assertion + no dead-end remedy ([#2941](https://github.com/coalesce-labs/catalyst/issues/2941)) ([b811eb0](https://github.com/coalesce-labs/catalyst/commit/b811eb069cd4f304f865387346e9039cfae76b93))
+* **dev:** CTL-1616 harden the layer2-path-divergence check ([#2931](https://github.com/coalesce-labs/catalyst/issues/2931) round-2 Codex x2) ([#2938](https://github.com/coalesce-labs/catalyst/issues/2938)) ([694dc20](https://github.com/coalesce-labs/catalyst/commit/694dc202fa4e2d8fd933ebf4c7ad393f64cdd449))
+* **dev:** CTL-1616 keep the resolved secret VALUE out of child-process environments ([#2925](https://github.com/coalesce-labs/catalyst/issues/2925)) ([2c6901c](https://github.com/coalesce-labs/catalyst/commit/2c6901cd6431360971fa4d55db773286513bf1f5))
+* **dev:** CTL-1616 PR6 follow-up — observe-only Layer-2 shadow + doctor coherence ([#2929](https://github.com/coalesce-labs/catalyst/issues/2929) Codex x4) ([#2930](https://github.com/coalesce-labs/catalyst/issues/2930)) ([64dddf5](https://github.com/coalesce-labs/catalyst/commit/64dddf564ef3f15081fe4c87b7d7ea5ba745daf8))
+* **dev:** CTL-1617 align doctor webhook-ingestion with the declared deployment mode ([#2918](https://github.com/coalesce-labs/catalyst/issues/2918)) ([d1d66e9](https://github.com/coalesce-labs/catalyst/commit/d1d66e9d50692b6e27d885c0cd063dcb66d83243))
+* **dev:** CTL-1617 close the three late [#2918](https://github.com/coalesce-labs/catalyst/issues/2918) Codex findings on the mode-aligned doctor grant ([#2920](https://github.com/coalesce-labs/catalyst/issues/2920)) ([905dbaa](https://github.com/coalesce-labs/catalyst/commit/905dbaad528109b95be72f12ed29658106157fbb))
+* **dev:** CTL-1617 harden the join webhook-wiring gate (Codex follow-up to [#2913](https://github.com/coalesce-labs/catalyst/issues/2913)) ([#2914](https://github.com/coalesce-labs/catalyst/issues/2914)) ([0bd14f8](https://github.com/coalesce-labs/catalyst/commit/0bd14f8e051a7dafc2db9d43a750e9f1932ab3fc))
+* **dev:** CTL-1628 A1 isolate bun sniff from project config (Codex [#2966](https://github.com/coalesce-labs/catalyst/issues/2966) post-merge) ([#2967](https://github.com/coalesce-labs/catalyst/issues/2967)) ([ef09cb4](https://github.com/coalesce-labs/catalyst/commit/ef09cb4f5f8c1c9b7fbd93aa189ccc1e6fa5d231))
+* **dev:** CTL-1628 A1 multiline-tolerant jq-less packageManager sniff (Codex [#2948](https://github.com/coalesce-labs/catalyst/issues/2948) post-merge) ([#2964](https://github.com/coalesce-labs/catalyst/issues/2964)) ([bac5434](https://github.com/coalesce-labs/catalyst/commit/bac5434f31807a7721a58f633ae649fa3c06ad60))
+* **dev:** CTL-1628 A1 post-merge hardening (Codex [#2945](https://github.com/coalesce-labs/catalyst/issues/2945) threads) ([#2948](https://github.com/coalesce-labs/catalyst/issues/2948)) ([c3f6944](https://github.com/coalesce-labs/catalyst/commit/c3f6944c73521204d3df405e01816d3546a2e094))
+* **dev:** CTL-1628 A1 retry TMPDIR when safe-cache mktemp fails (Codex [#2972](https://github.com/coalesce-labs/catalyst/issues/2972) post-merge) ([#2975](https://github.com/coalesce-labs/catalyst/issues/2975)) ([14bd0b6](https://github.com/coalesce-labs/catalyst/commit/14bd0b6b5c00ef1fa8a620cedf5fc86ef288506d))
+* **dev:** CTL-1628 A1 sniff scratch-dir hardening + tier fallthrough (Codex [#2967](https://github.com/coalesce-labs/catalyst/issues/2967) post-merge) ([#2972](https://github.com/coalesce-labs/catalyst/issues/2972)) ([92226cb](https://github.com/coalesce-labs/catalyst/commit/92226cbe636ca4a994fdf1e549211bb00c4f7796))
+* **dev:** CTL-1628 A1 tiered packageManager detection (Codex [#2964](https://github.com/coalesce-labs/catalyst/issues/2964) post-merge) ([#2966](https://github.com/coalesce-labs/catalyst/issues/2966)) ([1f22f0e](https://github.com/coalesce-labs/catalyst/commit/1f22f0eb6d0c9f6a6ddeada0599697d85423da8c))
+* **dev:** CTL-1628 A1 verify TMPDIR parent + scratch-dir before trusting it (Codex [#2975](https://github.com/coalesce-labs/catalyst/issues/2975) post-merge) ([#2977](https://github.com/coalesce-labs/catalyst/issues/2977)) ([27517ec](https://github.com/coalesce-labs/catalyst/commit/27517ec4759fe60374bbb6424037702b351d61c5))
+* **dev:** CTL-1628 A2 post-merge hardening (Codex [#2946](https://github.com/coalesce-labs/catalyst/issues/2946) threads) ([#2947](https://github.com/coalesce-labs/catalyst/issues/2947)) ([831a469](https://github.com/coalesce-labs/catalyst/commit/831a46978f3f766be7fbfbabc919514cf4431683))
+* **dev:** CTL-1628 comment-wake emission accounting + cross-host dedup reset (Codex [#2970](https://github.com/coalesce-labs/catalyst/issues/2970) post-merge) ([#2973](https://github.com/coalesce-labs/catalyst/issues/2973)) ([36e4cf4](https://github.com/coalesce-labs/catalyst/commit/36e4cf4d8c07d22537fed6051c3ef7aa68ea1b1c))
+* **dev:** CTL-1628 credit survives throw + early-path needs-input dedup clear (Codex [#2974](https://github.com/coalesce-labs/catalyst/issues/2974) post-merge) ([#2976](https://github.com/coalesce-labs/catalyst/issues/2976)) ([666044d](https://github.com/coalesce-labs/catalyst/commit/666044d186b3901f20d4998a0cfca37178d3a958))
+* **dev:** CTL-1628 delete unreachable catalyst-filter daemon body (keep alias) ([#2949](https://github.com/coalesce-labs/catalyst/issues/2949)) ([6a7d4cd](https://github.com/coalesce-labs/catalyst/commit/6a7d4cdc9ac92c695157144b17d936ef6957679d))
+* **dev:** CTL-1628 freeze-cause telemetry mirror, legacy hydration default, persist retry ([#2968](https://github.com/coalesce-labs/catalyst/issues/2968)) ([8fffff5](https://github.com/coalesce-labs/catalyst/commit/8fffff507586a96dd013b37a348b9104573e8792))
+* **dev:** CTL-1628 heartbeat publisher — require Linear anchor only in linear read-source mode ([#2958](https://github.com/coalesce-labs/catalyst/issues/2958)) ([3247e76](https://github.com/coalesce-labs/catalyst/commit/3247e76273b817863113b407188ea911f78151aa))
+* **dev:** CTL-1628 orch-monitor roster readers → cluster.json roster (stop-worker fence + cross-node tail) ([#2959](https://github.com/coalesce-labs/catalyst/issues/2959)) ([7d5b93d](https://github.com/coalesce-labs/catalyst/commit/7d5b93dc0974f8f0563bbe483a927b2dcb725585))
+* **dev:** CTL-1628 retire ADR-018 JSON-shadow scaffolding + unused recordWorkerTransition module; document CTL-532 as the live projection ([#2961](https://github.com/coalesce-labs/catalyst/issues/2961)) ([3600198](https://github.com/coalesce-labs/catalyst/commit/360019832e086b48c3978f0ee838f0b6f08f100b))
+* **dev:** CTL-1628 single-consume early-write credit + disposition-scoped dedup reset (Codex [#2973](https://github.com/coalesce-labs/catalyst/issues/2973) post-merge) ([#2974](https://github.com/coalesce-labs/catalyst/issues/2974)) ([c877a25](https://github.com/coalesce-labs/catalyst/commit/c877a2533edfe6caac3d0cb8ede237a19239ca33))
+* **dev:** CTL-1628 surface eligible-set projection-write failure as health event ([#2960](https://github.com/coalesce-labs/catalyst/issues/2960)) ([c04f1a7](https://github.com/coalesce-labs/catalyst/commit/c04f1a7549c08e139c32e9bc10eec65eec5a4e8d))
+* **monitor:** mint app-actor Linear token on monitor start (supersedes [#2905](https://github.com/coalesce-labs/catalyst/issues/2905)) ([#2978](https://github.com/coalesce-labs/catalyst/issues/2978)) ([f6fdeb9](https://github.com/coalesce-labs/catalyst/commit/f6fdeb99a8ba106dd2c86308e08d3b5add847ef0))
+* **monitor:** post-merge hardening — scan reachability, stop-cancels-remint, bash probe status ([#2979](https://github.com/coalesce-labs/catalyst/issues/2979)) ([34c5467](https://github.com/coalesce-labs/catalyst/commit/34c5467248f35efbeb0d6dce5bbf5c5c052e8c65))
+
+## [12.43.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.42.0...catalyst-dev-v12.43.0)
+
+Aug 03, 2026
+
+<!-- ai-enhanced -->
+
+### Deployment Mode Resolver & Credential Hardening
+
+This release introduces a unified deployment-mode resolver (`single-host`, `cluster`, or `cloud`) that reads identically in bash and JS, with advisory doctor checks and gated tunnel/webhook behavior wired across execution-core, orch-monitor, and `catalyst-join.sh`. It also fixes a live credential outage: daemon processes now re-arm their GitHub token from disk on every cluster-sync tick rather than inheriting a frozen env at boot, and `linear-reconcile-cli` correctly falls back to `LINEAR_API_KEY` when `LINEAR_API_TOKEN` is absent. Several reliability fixes round out the release: stale `needs-human`/`blocked` labels can no longer be re-applied to tickets already terminal in Linear, escalated recovery intents no longer latch permanently past their 7-day TTL, and the board no longer shows zero tickets for teams registered only in `cluster.json`.
+
+
+
+### PRs
+
+* **dev:** CTL-1603 — fix board showing zero tickets for cluster-only teams ([#2868](https://github.com/coalesce-labs/catalyst/issues/2868)) ([47a8c78](https://github.com/coalesce-labs/catalyst/commit/47a8c781f09ccf611388dc62dac085727f5a4599))
+* **dev:** CTL-1610 — fix escalated-intent permanent latch and actuation-liveness blind spot ([#2882](https://github.com/coalesce-labs/catalyst/issues/2882)) ([69dd8ad](https://github.com/coalesce-labs/catalyst/commit/69dd8ad4b4f473a84d856f997339ea1564dd123a))
+* **dev:** CTL-1616 secret-contract registry pair + cluster-sync derivation (PR1) ([#2902](https://github.com/coalesce-labs/catalyst/issues/2902)) ([1275440](https://github.com/coalesce-labs/catalyst/commit/127544096dcca03d0c0e1002c576b6b6f65307e9))
+* **dev:** CTL-1617 deployment-mode resolver in isolation (PR1 of 7) ([#2895](https://github.com/coalesce-labs/catalyst/issues/2895)) ([581ad4f](https://github.com/coalesce-labs/catalyst/commit/581ad4fcfe44d5978a5697621f5f8d8393097a96))
+* **dev:** CTL-1617 doctor deployment-mode tunnel-consistency check (PR6 of 7) ([#2906](https://github.com/coalesce-labs/catalyst/issues/2906)) ([4ac3bea](https://github.com/coalesce-labs/catalyst/commit/4ac3bea29c7823d57fe67305351277d359ae1ed5))
+* **dev:** CTL-1617 execution-core wiring + advisory deployment-mode doctor checks (PR2 of 7) ([#2899](https://github.com/coalesce-labs/catalyst/issues/2899)) ([374c1b3](https://github.com/coalesce-labs/catalyst/commit/374c1b3ff9b8e630ceca80b12994d602699c61fd))
+* **dev:** CTL-1617 gate catalyst-join webhook wiring on declared deployment mode (PR5 of 7) ([#2913](https://github.com/coalesce-labs/catalyst/issues/2913)) ([1b983f3](https://github.com/coalesce-labs/catalyst/commit/1b983f3254718ed83a6904e198f57196802f3b7b))
+* **dev:** CTL-1617 gate orch-monitor smee tunnels on deployment mode (PR3 of 7) ([#2900](https://github.com/coalesce-labs/catalyst/issues/2900)) ([a73ce21](https://github.com/coalesce-labs/catalyst/commit/a73ce21e5abb5c92f28e1dc48caa96f23b98ea56))
+* **dev:** CTL-1605 — route worker-status labels through a terminal-aware chokepoint ([#2872](https://github.com/coalesce-labs/catalyst/issues/2872)) ([8855c10](https://github.com/coalesce-labs/catalyst/commit/8855c108b5878bfc76cc59e2f706af0ce139a1a4))
+* **dev:** CTL-1612 arm daemon credentials from the shared secret files at boot ([#2884](https://github.com/coalesce-labs/catalyst/issues/2884)) ([ea5d031](https://github.com/coalesce-labs/catalyst/commit/ea5d031218eaab012dcbcc8760728cb75a6ec28a))
+* **dev:** CTL-1617 jq-exact lone-surrogate acceptance in the deployment-mode reader ([#2907](https://github.com/coalesce-labs/catalyst/issues/2907)) ([84e7682](https://github.com/coalesce-labs/catalyst/commit/84e7682ffb3c527adca5281a05b0b342424027f4))
+* **dev:** CTL-1617 whole-document lone-surrogate parity + architecture-doc precision ([#2904](https://github.com/coalesce-labs/catalyst/issues/2904)) ([6b1cfd8](https://github.com/coalesce-labs/catalyst/commit/6b1cfd8e118df55d69b56b13b9ea8554da5cc06e))
+* **dev:** CTL-1619 adopt LINEAR_API_KEY fallback in linear-reconcile-cli --graphql ([#2893](https://github.com/coalesce-labs/catalyst/issues/2893)) ([bb0fff5](https://github.com/coalesce-labs/catalyst/commit/bb0fff52bd0f3e5d482af3e52276292ccf902a75))
+* **dev:** CTL-1620 resolve the rescue prompt template from plugins/dev/templates ([#2892](https://github.com/coalesce-labs/catalyst/issues/2892)) ([cf13213](https://github.com/coalesce-labs/catalyst/commit/cf13213751b1a8dca489d98bfc007d6ba4b2aacf))
+
+## [12.42.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.41.0...catalyst-dev-v12.42.0)
+
+Aug 02, 2026
+
+<!-- ai-enhanced -->
+
+### Worktree Guard & DNS Rebinding Fix
+
+The monitor's reply endpoint now validates `Origin` against a trusted allowlist of loopback addresses, local hostnames, and non-loopback IPs — closing a DNS rebinding hole where an attacker-controlled page could post Linear comments as the operator. Separately, every shell-side `git worktree remove --force` call now runs a safety check that refuses removal if your current directory is inside the target or any process holds an open handle under it, protecting against accidental self-deletion that the Node reaper never covered.
+
+
+
+### PRs
+
+* **dev:** CTL-1417 — worktree-removal self-protection guard ([#2556](https://github.com/coalesce-labs/catalyst/issues/2556)) ([24b9a76](https://github.com/coalesce-labs/catalyst/commit/24b9a76e19630d214d3993220be98a5ed0cb0ad5))
+* **dev:** CTL-1573 validate reply Origin against a trusted allowlist, not the request Host ([#2857](https://github.com/coalesce-labs/catalyst/issues/2857)) ([10ecce7](https://github.com/coalesce-labs/catalyst/commit/10ecce7513d6d4cc40e30f5e0ca9256b048fed01))
+
+## [12.41.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.40.0...catalyst-dev-v12.41.0)
+
+Jul 31, 2026
+
+<!-- ai-enhanced -->
+
+### Slot Deck Fixes & Direnv Profile Sync
+
+The slot deck now correctly shows which slots are occupied — SDK/executor workers are visible to the deck, held tickets are separated into a "Held — awaiting you" section rather than ranked as imminent dispatches, and header counts derive from the deck's own boxes so the two can never contradict each other. Triage admission is now level-triggered, meaning tickets already sitting in Triage when a worker dir vanishes get picked up on the next sweep instead of stranded. `cluster-sync` also gains a new `syncProfileFiles` step that materializes direnv profiles from a SOPS bundle, so worker repos get the right environment variables on every host without hand-provisioning files.
+
+
+
+### PRs
+
+* **dev:** CTL-1585 discussion newest-first in inbox, inline on detail page, Spec tab renamed Detail ([#2832](https://github.com/coalesce-labs/catalyst/issues/2832)) ([bc34131](https://github.com/coalesce-labs/catalyst/commit/bc3413100fcfda64f70bfa0cf8839254ee5ac17e))
+* **dev:** CTL-1595 cluster-sync materializes direnv profiles from a SOPS bundle ([#2849](https://github.com/coalesce-labs/catalyst/issues/2849)) ([a0daa05](https://github.com/coalesce-labs/catalyst/commit/a0daa05229706f6aec926116ba84cf8179447993))
+* **dev:** CTL-1581 slot deck renders occupancy, not ownership — counts derive from the boxes ([#2826](https://github.com/coalesce-labs/catalyst/issues/2826)) ([719bc9a](https://github.com/coalesce-labs/catalyst/commit/719bc9aa9b7d9e866beb8831dc82808fbc6873e7))
+* **dev:** CTL-1588 queue humanHold falls back to replica labels when the webhook-fed store has gaps ([#2845](https://github.com/coalesce-labs/catalyst/issues/2845)) ([9d40a77](https://github.com/coalesce-labs/catalyst/commit/9d40a777303edc3756ea97d348cd918f9347dd9a))
+* **dev:** CTL-1588 slot deck sees SDK-executor workers; queue partitions human-held tickets ([#2840](https://github.com/coalesce-labs/catalyst/issues/2840)) ([df05fa6](https://github.com/coalesce-labs/catalyst/commit/df05fa6a2a1645a2eb8ff5c15316b1c6526482bc))
+* **dev:** CTL-1589 level-triggered triage sweep — pick up tickets already sitting in Triage ([#2843](https://github.com/coalesce-labs/catalyst/issues/2843)) ([4fc6993](https://github.com/coalesce-labs/catalyst/commit/4fc69936c7c19a094321e45011ea070965a7b2a8))
+* **dev:** CTL-1593 capture the recovery cursor before reconcileAll so boot telemetry can't shift it ([#2844](https://github.com/coalesce-labs/catalyst/issues/2844)) ([45343f8](https://github.com/coalesce-labs/catalyst/commit/45343f8fbb825fcdbf82c95a8e655e260db43b28))
+
+## [12.40.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.39.1...catalyst-dev-v12.40.0)
+
+Jul 31, 2026
+
+<!-- ai-enhanced -->
+
+### Inbox Conversation Surface & Linear API Burn Fixes
+
+The inbox is now a full conversation surface: you can read a parked ticket's ask summary, thread, and suggested replies — and post a response as yourself without leaving the inbox. Alongside this, a cluster of Linear API quota fixes lands together: the Workers page now reads peer liveness and capacity from Loki instead of a stale Linear anchor, the broker authenticates as the app actor so reconcile reads no longer bill your personal API bucket, and several scheduler paths that were firing live Linear probes on every tick now use the replica or a cooldown window instead.
+
+
+
+### PRs
+
+* **dev:** CTL-1569 make the inbox a conversation surface (ask summary + thread + inline reply) ([#2801](https://github.com/coalesce-labs/catalyst/issues/2801)) ([1d59e75](https://github.com/coalesce-labs/catalyst/commit/1d59e754b83e37053fcdb565c30a7f52caf3e6e0))
+* **dev:** CTL-1574 ticket activity feed (Discussion) in monitor inbox + ticket page ([#2815](https://github.com/coalesce-labs/catalyst/issues/2815)) ([d22b757](https://github.com/coalesce-labs/catalyst/commit/d22b75720552d8c6697aa88e80f10041d2b31108))
+* **dev:** CTL-1551 budget the peer-liveness live window for transport lag ([#2809](https://github.com/coalesce-labs/catalyst/issues/2809)) ([8ad9ff5](https://github.com/coalesce-labs/catalyst/commit/8ad9ff5fba4b7367bad48ffb9073a98a149580a6))
+* **dev:** CTL-1551 Workers page reads peer liveness+capacity from Loki, not the dead Linear anchor ([#2808](https://github.com/coalesce-labs/catalyst/issues/2808)) ([3b095af](https://github.com/coalesce-labs/catalyst/commit/3b095afe471a1dc03983fc1ef4d9c4be103744f4))
+* **dev:** CTL-1570 stop the phantom sweep spending a live Linear read per tick on workerless dirs ([#2803](https://github.com/coalesce-labs/catalyst/issues/2803)) ([8028469](https://github.com/coalesce-labs/catalyst/commit/8028469e2f4202225c200bfa9c21d69766194529))
+* **dev:** CTL-1571 cache-reconcile reads the replica, not live Linear ([#2824](https://github.com/coalesce-labs/catalyst/issues/2824)) ([59fa625](https://github.com/coalesce-labs/catalyst/commit/59fa625b75409b71c19adde8839c5e3dbd28a8de))
+* **dev:** CTL-1577 broker authenticates to Linear as the app-actor ([#2814](https://github.com/coalesce-labs/catalyst/issues/2814)) ([0a209a1](https://github.com/coalesce-labs/catalyst/commit/0a209a195dd6f79560e9390ef7dafbc372aa6e8d))
+* **dev:** CTL-1580 stop per-tick live probes of stuck tickets; instrument the invisible reads ([#2825](https://github.com/coalesce-labs/catalyst/issues/2825)) ([ea6db1b](https://github.com/coalesce-labs/catalyst/commit/ea6db1b3535f0be33d6cc7407596ad57a088f205))
+
+## [12.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.39.0...catalyst-dev-v12.39.1)
+
+Jul 30, 2026
+
+<!-- ai-enhanced -->
+
+### Needs-Human Clears on Reply
+
+When a developer responds to a parked ticket, it now immediately drops off the "Needs you" list — no matter whether the worker directory still exists. Previously, most parked tickets were permanently stuck in that state because the clear was gated on a local directory that gets cleaned up after a worker is reaped.
+
+
+
+### PRs
+
+* **dev:** CTL-1567 clear needs-human the moment a human responds ([#2796](https://github.com/coalesce-labs/catalyst/issues/2796)) ([2f71e13](https://github.com/coalesce-labs/catalyst/commit/2f71e13cfdb24aaf7e1b5e07b50d58e47ef3feea))
+
+## [12.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.38.0...catalyst-dev-v12.39.0)
+
+Jul 29, 2026
+
+<!-- ai-enhanced -->
+
+### Supervised Watchers, Orphan Reaper & Board Health
+
+Channel-watchers now run as supervised launchd daemons that emit a heartbeat every interval and trigger a broker dead-man's switch alert when a watcher goes silent for more than three intervals. The orphan reaper drops its node/bun/turbo allowlist and now reaps any process whose cwd sits under a deleted worktree, batching the cwd lookups into a single `lsof` call to keep sweep cost under 730 ms. Two new board-health checks round out the release: one flags in-flight tickets with no worker, no signal file, and no open PR, and one bounds every read of the monthly event log to a time-covering tail — cutting a 341 MB scan from 1,114 MB peak RSS to 143 MB flat.
+
+
+
+### PRs
+
+* **dev:** CTL-1423 — supervised background channel-watchers with ([6701521](https://github.com/coalesce-labs/catalyst/commit/67015210656b7f742fe6a4d30b80038e16a199c7))
+* **dev:** CTL-1423 — Supervised background channel-watchers with heartbeat + dead-man's-switch alerting ([#2557](https://github.com/coalesce-labs/catalyst/issues/2557)) ([6701521](https://github.com/coalesce-labs/catalyst/commit/67015210656b7f742fe6a4d30b80038e16a199c7))
+* **dev:** CTL-1475 flag work that claims to be in flight while nothing owns it ([#2763](https://github.com/coalesce-labs/catalyst/issues/2763)) ([d022893](https://github.com/coalesce-labs/catalyst/commit/d022893cf4852b27f02a906bb846903b2d936738))
+* **dev:** CTL-1531 reap orphaned processes by ownership evidence, not a node/bun allowlist ([#2756](https://github.com/coalesce-labs/catalyst/issues/2756)) ([c0267ba](https://github.com/coalesce-labs/catalyst/commit/c0267badfe5f750a7e2277097c9ce8da1b7a338b))
+* **dev:** CTL-1529 bound every read of the monthly event log (time-covering tail + shared per-tick scan) ([#2757](https://github.com/coalesce-labs/catalyst/issues/2757)) ([ab49964](https://github.com/coalesce-labs/catalyst/commit/ab49964c66f001287a5c2859c9b148d2e173b06b))
+
+## [12.38.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.37.0...catalyst-dev-v12.38.0)
+
+Jul 27, 2026
+
+<!-- ai-enhanced -->
+
+### Dual-Harness Migration & Event Loop Fix
+
+Run `migrate-dual-harness.sh` to migrate a single-harness repo (Claude-only or Codex-only) to the vendor-neutral dual-harness layout where both Claude Code and Codex share the same instructions and skills — checkup §10 and a new foundry skill handle the split automatically. A daemon event loop stall that caused 72–97 second heartbeat gaps during worktree cleanup bursts is also resolved, along with a fix that stamps provider delivery IDs onto webhook envelopes so the smee-vs-cloud parity harness can actually join on them.
+
+
+
+### PRs
+
+* **dev:** CTL-1530 dual-harness migration (migrate-dual-harness.sh + checkup §10 + foundry skill) ([#2753](https://github.com/coalesce-labs/catalyst/issues/2753)) ([0afc204](https://github.com/coalesce-labs/catalyst/commit/0afc204fd049cf6b9f9c6f7a2a87b5a032742bec))
+* **dev:** CTL-1524 unblock the daemon event loop in wt-cleanup-drain (free provenance gate first + bounded burst) ([#2747](https://github.com/coalesce-labs/catalyst/issues/2747)) ([d31c9c6](https://github.com/coalesce-labs/catalyst/commit/d31c9c609534d67fd872938ac10c86d19c875bda))
+* **dev:** CTL-1532 stamp the provider delivery id on webhook envelopes ([#2751](https://github.com/coalesce-labs/catalyst/issues/2751)) ([708437b](https://github.com/coalesce-labs/catalyst/commit/708437b1acfaf235d5cb6882ce5a27f116f06f55))
+
+## [12.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.36.0...catalyst-dev-v12.37.0)
+
+Jul 26, 2026
+
+<!-- ai-enhanced -->
+
+### Daemon Stability & Memory Audit Remediation
+
+This release fixes a cluster of runtime reliability issues discovered during a live memory and health audit on production nodes. The most impactful changes stop a 115-second scheduler stall caused by reading a 300 MB event log on every tick (now a bounded cursor scan), close a file-descriptor leak in the delegate-runner that was trending toward EMFILE, and silence ~300 spurious "daemon degraded" phone notifications per day by replacing a naked edge trigger in the notification filter with a 180-second sustained-state hold. Also included: per-process RSS/heap OTel gauges on every daemon so future leaks can be attributed to a specific service, edge-triggered fleet-health probes that fire once per degradation episode instead of on every tick, and a health-responder backstop that now supervises the host-metrics sampler so a silently dead agent gets auto-kickstarted rather than going unnoticed for days.
+
+
+
+### PRs
+
+* **dev:** CTL-1503 edge-triggered fleet-health probe (hysteresis band + recovered event + durable latch) ([#2704](https://github.com/coalesce-labs/catalyst/issues/2704)) ([a4dc53e](https://github.com/coalesce-labs/catalyst/commit/a4dc53e23923cfc63487e9a14e4b2f533836effc))
+* **dev:** CTL-1517 per-process RSS/heap OTel gauge on every daemon (leak attribution) ([#2732](https://github.com/coalesce-labs/catalyst/issues/2732)) ([8c85824](https://github.com/coalesce-labs/catalyst/commit/8c85824aeba204f9c02fefb942789b13d51bbf96))
+* **dev:** CTL-1518 health-responder supervises com.catalyst.agent sampler (self-heal backstop) ([#2731](https://github.com/coalesce-labs/catalyst/issues/2731)) ([b3ae705](https://github.com/coalesce-labs/catalyst/commit/b3ae705d24ddada36b9f93437130c4668e8bd9d7))
+* **dev:** CTL-1510 health-responder hardening — token-aware exit-0 gate, sweep lock, cron backstop + 5 more edges ([#2714](https://github.com/coalesce-labs/catalyst/issues/2714)) ([92ac2ec](https://github.com/coalesce-labs/catalyst/commit/92ac2ecf6ee70098518438fd67ad89dc05feea69))
+* **dev:** CTL-1513 bash-3.2 comment-parsing crash in _token_provisioned (production hotfix) ([#2719](https://github.com/coalesce-labs/catalyst/issues/2719)) ([ffd7da1](https://github.com/coalesce-labs/catalyst/commit/ffd7da1eb8df739a33115f84f6f5b5cf97772add))
+* **dev:** CTL-1514 tail event log by cursor in execution-core (stop 115s scheduler stalls) ([#2729](https://github.com/coalesce-labs/catalyst/issues/2729)) ([ac009d9](https://github.com/coalesce-labs/catalyst/commit/ac009d9994ba69a899fedf40b083e7154e3a9dff))
+* **dev:** CTL-1515 bound orch-monitor readBacklog/readTunnelEventStats fallbacks (chunked scan) ([#2730](https://github.com/coalesce-labs/catalyst/issues/2730)) ([9ea4502](https://github.com/coalesce-labs/catalyst/commit/9ea4502f2dc04d61dbe60558942657347143deae))
+* **dev:** CTL-1516 bound broker _emittedWakeCache + heartbeat/orchestrator maps ([#2728](https://github.com/coalesce-labs/catalyst/issues/2728)) ([2001242](https://github.com/coalesce-labs/catalyst/commit/20012422935a92e53718d99a2c63ac4e428605b0))
+* **dev:** CTL-1519 close delegate-runner log fd after detached spawn (fd leak → EMFILE) ([#2727](https://github.com/coalesce-labs/catalyst/issues/2727)) ([5709d17](https://github.com/coalesce-labs/catalyst/commit/5709d1786aed452fce8c98a83d2a22b6e6ac0049))
+* **dev:** CTL-1522 hold daemon-degraded notifications so a transient heartbeat stall never pushes ([#2739](https://github.com/coalesce-labs/catalyst/issues/2739)) ([5b56cef](https://github.com/coalesce-labs/catalyst/commit/5b56cef189fad0143314989a4a9bd4ed6cbc88fb))
+* **dev:** CTL-1523 stop the broker reporting daemon-degraded on an idle fleet ([#2740](https://github.com/coalesce-labs/catalyst/issues/2740)) ([4a58ddd](https://github.com/coalesce-labs/catalyst/commit/4a58ddda026b22640c008bf34d46d0472a119c72))
+
+## [12.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.35.0...catalyst-dev-v12.36.0)
+
+Jul 25, 2026
+
+<!-- ai-enhanced -->
+
+### Cloud-Sync Self-Heal & Daemon Health Responder
+
+Two fixes targeting the root causes of the 2026-07-23 replica-writer outage. The cloud-sync writer now exits cleanly within a bounded timeout on both stall and shutdown paths, writes a breadcrumb when it self-heals, and detects half-open sockets in roughly 2 ticks instead of 80+ minutes using SDK `lastFrameAt`. A new stateless launchd sweep runs every 3 minutes to catch the case where the writer dies and launchd fails to respawn it — kicking it back with a bounded, escalating retry rather than depending on `KeepAlive` alone. After merging, run `catalyst-stack install-services` on affected nodes and verify with `catalyst doctor`.
+
+
+
+### PRs
+
+* **dev:** CTL-1509 daemon-health responder — stateless launchd sweep kickstarts a dead/stale cloud-sync writer (bounded, escalating) ([#2710](https://github.com/coalesce-labs/catalyst/issues/2710)) ([6e0ec37](https://github.com/coalesce-labs/catalyst/commit/6e0ec376cb66152f98f872da3685e54a41c1e932))
+* **dev:** CTL-1508 exit-safe cloud-sync self-heal + selfheal breadcrumb + lastFrameAt stall classifier ([#2709](https://github.com/coalesce-labs/catalyst/issues/2709)) ([1e33520](https://github.com/coalesce-labs/catalyst/commit/1e33520fdca612d9f8b02e42bf6fe277f2687ee9))
+
+## [12.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.34.0...catalyst-dev-v12.35.0)
+
+Jul 23, 2026
+
+<!-- ai-enhanced -->
+
+### Agent Browser Leak Fix & Scheduler Hardening
+
+Leaked agent-browser Chrome processes that outlived their worker sessions — sometimes pegging a CPU core indefinitely — are now reaped automatically by a new vector in the hourly orphan sweep, which targets runaway or idle Chrome-for-Testing instances while leaving personal Chrome untouched. Workers also receive an idle-timeout environment variable at dispatch so agent-browser shuts itself down after 5 minutes of inactivity on supported versions. Two scheduler fixes round out the release: phantom ticket directories (like `.catalyst`) no longer poison board-health checks, and a transient source conflict during dispatch-time rebase now triggers a single retry against a fresh base before parking the ticket as needs-human.
+
+
+
+### PRs
+
+* **dev:** CTL-1500 reap leaked agent-browser Chrome + idle-timeout + setup-tooling ownership ([#2702](https://github.com/coalesce-labs/catalyst/issues/2702)) ([74fa0a8](https://github.com/coalesce-labs/catalyst/commit/74fa0a8ea2eda2bb96ef53772a320366ef3e87b7))
+* **dev:** CTL-1504 guard scheduler census sites + classify not-found (stop CTC-phantom board-health poison) ([#2698](https://github.com/coalesce-labs/catalyst/issues/2698)) ([6d6d154](https://github.com/coalesce-labs/catalyst/commit/6d6d15411b4fe469b175db9b4ed29a3628d38bf6))
+* **dev:** CTL-1505 retry rebase against fresh origin/&lt;base&gt; before parking a source conflict ([#2701](https://github.com/coalesce-labs/catalyst/issues/2701)) ([17de576](https://github.com/coalesce-labs/catalyst/commit/17de576be99523a232415334918010708ec00ef0))
+
+## [12.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.33.0...catalyst-dev-v12.34.0)
+
+Jul 23, 2026
+
+<!-- ai-enhanced -->
+
+### Autonomous PR Block Recovery
+
+When a PR fails to merge, the recovery pass now probes GitHub live — checking CI status, unresolved bot review threads, and review decisions — and routes autonomously: bounded fixes get dispatched to a worker, while genuine human gates (CHANGES_REQUESTED from a person, no open PR found) escalate with specific context instead of an opaque failure message. A `CATALYST_EXECUTOR_BY_PHASE` JSON env var also lands in this release, letting you set durable per-phase executor routing in `execution-core.env` without it being wiped by the broker's periodic `git reset`. The recovery pass feature ships behind `CATALYST_RECOVERY_PASS=shadow|enforce` and is off by default.
+
+
+
+### PRs
+
+* **dev:** CTL-1496 recovery-pass drives blocked PR to merge instead of escalating ([#2689](https://github.com/coalesce-labs/catalyst/issues/2689)) ([bec5e03](https://github.com/coalesce-labs/catalyst/commit/bec5e038be26256572fed0342c93cda1dc5bb31b))
+* **dev:** CTL-1457 follow-up — CATALYST_EXECUTOR_BY_PHASE env override (durable per-node routing) ([#2655](https://github.com/coalesce-labs/catalyst/issues/2655)) ([3afb50a](https://github.com/coalesce-labs/catalyst/commit/3afb50aea8e18ea3cc26c52b38d01dd6f66f6536))
+
+## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0)
+
+Jul 22, 2026
+
+<!-- ai-enhanced -->
+
+### Dispatch Roster Failover & Worktree Repair
+
+Offline and never-live hosts no longer strand their share of the ticket backlog — dispatch ownership now hashes over a liveness-filtered roster with restore-side deflap hysteresis, so a live host picks up any slice whose owner has gone dark. A separate fix repairs worktrees whose `thoughts/shared` was left as a plain directory instead of a symlink, so handoffs and research written into reused worktrees actually sync instead of silently accumulating in a dead-end local dir.
+
+
+
+### PRs
+
+* **dev:** CTL-1091 Phase 1 — route dispatch gates through the surviving roster ([#2671](https://github.com/coalesce-labs/catalyst/issues/2671)) ([2fb23ee](https://github.com/coalesce-labs/catalyst/commit/2fb23ee46d292a3e2975ca05a6e5c6856239346f))
+* **dev:** CTL-1497 — repair thoughts/shared on the worktree reuse path; guards test -L not -d ([#2685](https://github.com/coalesce-labs/catalyst/issues/2685)) ([c4bf08c](https://github.com/coalesce-labs/catalyst/commit/c4bf08c23f2cb8f442e152aa92090ab47a39b0ac))
+
+## [12.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.31.0...catalyst-dev-v12.32.0)
+
+Jul 21, 2026
+
+<!-- ai-enhanced -->
+
+### Agent House-Rules Auto-Seeding & Inbox Polish
+
+Any repo you enroll in Catalyst now automatically receives the "Working the Loop" agent house-rules block — seeded into AGENTS.md (or CLAUDE.md if that's what the repo uses) without any manual setup. The block itself has been hardened: Linear reads must go through the `catalyst-dev:linearis` skill rather than raw API calls or hand-rolled sqlite, and a contradictory degraded escape that could reintroduce shared-quota burn has been removed. Inbox rows also get a cleaner look — favicon restored, unwrapped ID, two-line title, and corrected pane accent.
+
+
+
+### PRs
+
+* **dev:** auto-seed agent house-rules on every enrolled repo + Codex-hardened block ([#2666](https://github.com/coalesce-labs/catalyst/issues/2666)) ([97aa6de](https://github.com/coalesce-labs/catalyst/commit/97aa6deb32e74740ab6ce0a7455332bf0fd6d687))
+* **dev:** CTL-1127 — inbox row: restore favicon, unwrap ID, two-line title, drop verb cluster, fix pane accent ([#1991](https://github.com/coalesce-labs/catalyst/issues/1991)) ([2cda8d5](https://github.com/coalesce-labs/catalyst/commit/2cda8d55464efc9ddfffd608b2f60eff4a426f2e))
+* **dev:** CTL-682 — wait-watcher skips background agents; pin scheduler test live-count seam ([#2670](https://github.com/coalesce-labs/catalyst/issues/2670)) ([4fd98b2](https://github.com/coalesce-labs/catalyst/commit/4fd98b2b6d8b1db55673d304b3f45a4d7d83f88f))
+* **dev:** drop the Linear-API degraded escape (contradicted the absolute replica rule) ([#2668](https://github.com/coalesce-labs/catalyst/issues/2668)) ([507b227](https://github.com/coalesce-labs/catalyst/commit/507b227d46b6fb285c178dc9385c6fc35e0f66e5))
+
+## [12.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.1...catalyst-dev-v12.31.0)
+
+Jul 19, 2026
+
+<!-- ai-enhanced -->
+
+### Agent House Rules & Replica Read Fix
+
+Two changes land together to make unattended agents less error-prone. A new "Working the Loop" block is now seeded into every project's `AGENTS.md` via `agents-house-rules.md`, teaching agents to subscribe to the unified event log instead of polling GitHub or CI, detect automated review approvals via reactions, and read Linear tickets from the local replica rather than the live API. Alongside that, the replica-read instruction itself is corrected — background agents were silently falling through to bare `linearis` because `linear_read_ticket` is a shell function that never resolves in an unattended Bash session; the instruction now leads with the `sqlite3` form that works in any shell. Run `check-project-setup.sh` to verify your projects have the new reflex markers in place.
+
+
+
+### PRs
+
+* **dev:** agent house-rules block + checkup (CTL general-instructions) ([#2663](https://github.com/coalesce-labs/catalyst/issues/2663)) ([e6e67db](https://github.com/coalesce-labs/catalyst/commit/e6e67dbbc07c9b4ad2c327069d43565dafbfd451))
+* **dev:** CTL-1420 replica-read rule pointed bg/daemon agents at a shell function not on PATH ([#2661](https://github.com/coalesce-labs/catalyst/issues/2661)) ([efd9a2b](https://github.com/coalesce-labs/catalyst/commit/efd9a2b85075a57a6c5e1f958078bd3621528536))
+
+## [12.30.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.0...catalyst-dev-v12.30.1)
+
+Jul 17, 2026
+
+<!-- ai-enhanced -->
+
+### Replica-Read Detector Fixed
+
+The Linear replica-read detector introduced in a prior release was never actually firing, leaving agents free to burn the shared API quota on reads the replica could have served. The fix rewrites the command-word matching from a single anchored regex to a token walk that correctly resolves the real command past environment assignments, wrapper prefixes like `direnv exec .`, and shell keywords — and now recognizes both `linear` and `linearis`. The enforce mode remedy path is also corrected to an absolute location so it's actually sourceable in the repos where the hook now fires.
+
+
+
+### PRs
+
+* **dev:** CTL-1420 replica-read detector was blind to the `linear` alias + wrapper prefixes ([#2658](https://github.com/coalesce-labs/catalyst/issues/2658)) ([19f7ada](https://github.com/coalesce-labs/catalyst/commit/19f7ada2e3c7253526e2e248fa76cac235ae6331))
+
+## [12.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.29.1...catalyst-dev-v12.30.0)
+
+Jul 15, 2026
+
+<!-- ai-enhanced -->
+
+### Codex Executor & Worker Label Ownership
+
+The daemon can now dispatch phase workers to OpenAI Codex via a new `codex-exec` executor adapter, routed per-phase through `executorByPhase` config with zero behavior change until you explicitly flip a phase to it. Linear boards now show which node owns each in-flight ticket via stamped `worker:<host>` labels — ownership is board-filterable and readable from the local replica without a live Linear call. Both worker-label provisioning paths (`reconcile_worker_host_labels` and `reconcile_worker_status_labels`) are hardened against the current Linear API's `isGroup:true` requirement, which broke fresh-workspace installs; run the setup script on any new node to provision labels cleanly.
+
+
+
+### PRs
+
+* **dev:** CTL-1457 codex-exec executor adapter — daemon dispatches phase workers on Codex ([#2639](https://github.com/coalesce-labs/catalyst/issues/2639)) ([1ae616a](https://github.com/coalesce-labs/catalyst/commit/1ae616a42cc311ceb59ab715ed92868dfba9e535))
+* **dev:** CTL-1481 worker:&lt;host&gt; label ownership — Linear board shows which node owns each ticket ([#2650](https://github.com/coalesce-labs/catalyst/issues/2650)) ([47946d7](https://github.com/coalesce-labs/catalyst/commit/47946d7f2fd6953f9e2aed322de032183cb16655))
+* **dev:** CTL-1481 follow-up — worker group create needs isGroup:true (live API drift) ([#2651](https://github.com/coalesce-labs/catalyst/issues/2651)) ([f6099a9](https://github.com/coalesce-labs/catalyst/commit/f6099a9123f1f84c1dffb2ab6532ab3b16a335e6))
+* **dev:** CTL-1483 mirror isGroup:true fix to reconcile_worker_status_labels ([#2653](https://github.com/coalesce-labs/catalyst/issues/2653)) ([e1d5d0c](https://github.com/coalesce-labs/catalyst/commit/e1d5d0c382675ecffbd84644957941be5ae6c2ee))
+
+## [12.29.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.29.0...catalyst-dev-v12.29.1)
+
+Jul 14, 2026
+
+<!-- ai-enhanced -->
+
+### Thenable-Aware Removal Confirmation
+
+The `removeLabel` async bug is fixed — previously, inspecting a Promise's `.removed` property always returned `undefined`, so failed removals were silently treated as successful. The fix makes the result handler thenable-aware, deferring the admission clear emission until the async write actually resolves or rejects.
+
+
+
+### PRs
+
+* **dev:** CTL-764 follow-up — round-5: thenable-aware removal confirmation ([#2636](https://github.com/coalesce-labs/catalyst/issues/2636)) ([2df9d10](https://github.com/coalesce-labs/catalyst/commit/2df9d109504f8f8dad451bd4bd0d24a7dd186799))
+
+## [12.29.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.28.0...catalyst-dev-v12.29.0)
+
+Jul 13, 2026
+
+<!-- ai-enhanced -->
+
+### Two-Axis Worker State Model
+
+Worker state transitions now fan out through a single `recordTransition` chokepoint that writes to all five sinks — Linear Status, worker-status label, event log, OTLP, and broker table — on every confirmed state change, with per-sink fail-open isolation so one unavailable sink can't block the others. A new `convergeDispositionLabel` function enforces full disposition precedence (`needs-human > needs-input > blocked > queued`), and the `worker-status` Linear label group is provisioned automatically by `setup-execution-core-states.sh`. The HUD queue UI now reflects the corrected disposition buckets, and `waiting` has been renamed to `queued` throughout.
+
+
+
+### PRs
+
+* **dev:** CTL-764 two-axis worker-state model — recordTransition chokepoint, worker-status labels, convergeDispositionLabel ([#2597](https://github.com/coalesce-labs/catalyst/issues/2597)) ([2ebbed3](https://github.com/coalesce-labs/catalyst/commit/2ebbed317d76f7963b2c22544c85060440e3f482))
+* **dev:** CTL-764 follow-up — Codex round-3 emission gating + gitleaks allowlist (greens main) ([#2631](https://github.com/coalesce-labs/catalyst/issues/2631)) ([27781cf](https://github.com/coalesce-labs/catalyst/commit/27781cfd3df2d0ebe6efceb55d9bb26474b87a10))
+* **dev:** CTL-764 follow-up — Codex round-4 emission/fallback edge cases ([#2632](https://github.com/coalesce-labs/catalyst/issues/2632)) ([3fa0429](https://github.com/coalesce-labs/catalyst/commit/3fa04294909c120fe30351ef8e8d6bf93e384f7b))
+* **dev:** CTL-764 follow-up — declare synthesizeOrphanTickets in board-data.d.mts (greens main quality gate) ([#2630](https://github.com/coalesce-labs/catalyst/issues/2630)) ([96ea021](https://github.com/coalesce-labs/catalyst/commit/96ea0213ab6b7a6bafb2b325ecdfbe278dabc2aa))
+
+## [12.28.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.27.0...catalyst-dev-v12.28.0)
+
+Jul 09, 2026
+
+<!-- ai-enhanced -->
+
+### Liveness Off Linear
+
+Cross-host dead-host detection now reads from Loki instead of Linear, eliminating the ~120 heartbeat writes per hour that were tripping the rate-limit breaker. Two live-deploy bugs in the initial reader were caught and fixed: stale streams no longer win the newest-host race, and in-flight ticket enrichment now runs as a separate fail-open query. The switch is gated behind `CATALYST_LIVENESS_READ_SOURCE=loki` — set it on all hosts simultaneously to enable; unset to revert instantly.
+
+
+
+### PRs
+
+* **dev:** CTL-1420 ([#17](https://github.com/coalesce-labs/catalyst/issues/17)) — move cross-host liveness off Linear → event log + Loki (PR1a: heartbeat carries in-flight tickets) ([#2575](https://github.com/coalesce-labs/catalyst/issues/2575)) ([ff99913](https://github.com/coalesce-labs/catalyst/commit/ff9991380ea87f283df83ccc3318f9ef44ca0bf1))
+* **dev:** CTL-1420 ([#17](https://github.com/coalesce-labs/catalyst/issues/17)) — read cross-host liveness from Loki + retire the Linear heartbeat publish (PR1b) ([#2604](https://github.com/coalesce-labs/catalyst/issues/2604)) ([9924aa2](https://github.com/coalesce-labs/catalyst/commit/9924aa2f94f03a7613a8df6bfdb56be06ce1314f))
+* **dev:** CTL-1420 ([#17](https://github.com/coalesce-labs/catalyst/issues/17)) follow-up — loki-liveness reader: newest-across-streams + two-query tickets ([#2606](https://github.com/coalesce-labs/catalyst/issues/2606)) ([4aa925b](https://github.com/coalesce-labs/catalyst/commit/4aa925bf95e830ebf591f92da90536a4efb48172))
+* **dev:** CTL-1443 follow-up — sync CLI reference for boot-resume-approve (unblocks CI) ([#2603](https://github.com/coalesce-labs/catalyst/issues/2603)) ([7d34bd8](https://github.com/coalesce-labs/catalyst/commit/7d34bd8a0aaacc8081d44f7dbe08e8ce324da581))
+* **dev:** CTL-1451 (A4 final widening) — probeBackoff on the recovery-filter + reclaim terminal reads (kills the ADV-1433 read-storm) ([#2608](https://github.com/coalesce-labs/catalyst/issues/2608)) ([6d4928f](https://github.com/coalesce-labs/catalyst/commit/6d4928f34a463aa3e31f9f59a06dcbcd4f5f0f6f))
+* **dev:** CTL-1452 — parity test exempts action:skip STALL_CATEGORY_MAP entries (restores exec-core CI on main) ([#2610](https://github.com/coalesce-labs/catalyst/issues/2610)) ([6e550ba](https://github.com/coalesce-labs/catalyst/commit/6e550baad3517eca8dbdce9bc93a5d474e2612c8))
+
+## [12.27.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.26.0...catalyst-dev-v12.27.0)
+
+Jul 08, 2026
+
+<!-- ai-enhanced -->
+
+### Recovery Loop Elimination & Escalation Fixes
+
+This release closes five compounding loops that caused the recovery pass to silently discard verdicts, re-triage tickets indefinitely, and emit no-progress escalations forever. Recovery-pass sessions now persist a single verdict (`fixed`, `leave-alone`, or `escalate`) to the event log, ledger, and Linear in every case — and exhausted intents surface loudly as needs-human with a rendered brief instead of latching silently. Infinite escalation loops are capped and go terminal, triage re-dispatches are bounded per ticket, and the boot-resume approval gate finally has a CLI (`boot-resume-approve.mjs --list` / `<ticket>`) so gated recovery passes can actually be unblocked.
+
+
+
+### PRs
+
+* **dev:** CTL-1439 (P0a) — recovery-pass verdict persistence + surfacing (stop act-and-discard) ([#2586](https://github.com/coalesce-labs/catalyst/issues/2586)) ([af29551](https://github.com/coalesce-labs/catalyst/commit/af295516601800db3ccbddb0a3af2ebcabfc661f))
+* **dev:** CTL-1440 (P0b) — attempts-exhausted → loud escalation, RC3 defer-storm decoupling, truthful skip reasons ([#2593](https://github.com/coalesce-labs/catalyst/issues/2593)) ([1ef0e57](https://github.com/coalesce-labs/catalyst/commit/1ef0e57f34c671d2f5d5455ba5530f5dcf35d601))
+* **dev:** CTL-1443 (P1-loop-3) — operable boot-resume approval gate (approve CLI + 48h expiry into Needs-You + alert) ([#2596](https://github.com/coalesce-labs/catalyst/issues/2596)) ([a6aa271](https://github.com/coalesce-labs/catalyst/commit/a6aa2716bc303453ce54142c8611557ec2ecf4f6))
+* **dev:** CTL-1441 (P1-loop-2) — terminate the triage re-dispatch loop (cap + mismatch surfacing + WORKER_DIR hardening) ([#2588](https://github.com/coalesce-labs/catalyst/issues/2588)) ([9dd5309](https://github.com/coalesce-labs/catalyst/commit/9dd5309ebfa6185bd748f9f62badcec06ee33e7e))
+* **dev:** CTL-1442 (P1-loop-1) — no-progress escalations go terminal after N asks (stop the every-10-min forever loop) ([#2590](https://github.com/coalesce-labs/catalyst/issues/2590)) ([001557c](https://github.com/coalesce-labs/catalyst/commit/001557cd7ce6498496c8cd0b16e6c840391c3d1f))
+
+## [12.26.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.25.0...catalyst-dev-v12.26.0)
+
+Jul 08, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Read Observability & Actuation Liveness
+
+Every Linear read now emits a `catalyst.linear.read` event with `source` and `result` attributes, so your OTEL collector can derive read totals and a staleness histogram — and alert on replica bypasses before the 429 breaker trips. The delegate's board-scan events now record whether a proposed move was actually dispatched, and a new `checkActuationLiveness` invariant flags sustained propose-but-never-dispatch conditions automatically. A negative cache on terminal-probe and census reads stops replica-miss tickets from firing live Linear reads every tick, which was the primary driver of breaker flaps.
+
+
+
+### PRs
+
+* **dev:** CTL-1403 — emit reads-by-source (catalyst.linear.read{source,result}) on every Linear read ([#2582](https://github.com/coalesce-labs/catalyst/issues/2582)) ([d23e8b1](https://github.com/coalesce-labs/catalyst/commit/d23e8b15ac71c8a020c85b950dc76ca6802c00fa))
+* **dev:** CTL-1435 (WS-C C1+C2) — self-observing actuation-liveness (act-outcome on board-scan + checkActuationLiveness invariant) ([#2576](https://github.com/coalesce-labs/catalyst/issues/2576)) ([06bb61f](https://github.com/coalesce-labs/catalyst/commit/06bb61f29c0afbf6830861d0fd82d2a9ea6c3794))
+* **dev:** CTL-1436 (WS-A A4) — negative-cache fetchTicketState replica-MISS live reads (stop the issues-read breaker flap) ([#2579](https://github.com/coalesce-labs/catalyst/issues/2579)) ([7f99ddc](https://github.com/coalesce-labs/catalyst/commit/7f99ddcbad765101540d6581928f4667b1136c69))
+* **dev:** CTL-1437 (A4 follow-up) — widen probeBackoff to the every-tick terminal-Done sweep ([#2581](https://github.com/coalesce-labs/catalyst/issues/2581)) ([52d58cc](https://github.com/coalesce-labs/catalyst/commit/52d58cc8e8cece98e950a27083c1c5ef8686c091))
+
+## [12.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.24.0...catalyst-dev-v12.25.0)
+
+Jul 07, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Breaker Observability & Board Health Actuation
+
+The Linear circuit breaker now records why it opened (rate-limit 429 vs. timeout) and which caller triggered it, making the 12–22 daily trips on mini attributable and falsifiable from logs for the first time. On the board-health side, deferred recovery intents now have a live consumer so they actually dispatch instead of rotting, operator-sanctioned needs-human latches are suppressed from re-proposal so genuinely stuck tickets surface, and stale escalated recovery intents expire after 7 days instead of pinning tickets in needs-human forever. The top measured breaker driver — eligible empty-reconfirm firing a live Linear read every quiet tick — is also removed entirely; a replica-empty is now trusted directly with zero live Linear reads.
+
+
+
+### PRs
+
+* **dev:** CTL-1430 (WS-A A1) — instrument the Linear breaker (reason+caller on OPEN + durable linear.ratelimit.breaker event) ([#2565](https://github.com/coalesce-labs/catalyst/issues/2565)) ([ec03e6f](https://github.com/coalesce-labs/catalyst/commit/ec03e6ff5fef75845cccdc4edaa9141b782107e5))
+* **dev:** CTL-1431 (WS-B B1) — TTL on terminal recovery-intents + one-time June sweep ([#2567](https://github.com/coalesce-labs/catalyst/issues/2567)) ([9c5bb13](https://github.com/coalesce-labs/catalyst/commit/9c5bb13487f3c66ce5bd87d86ea4871f8ee1a392))
+* **dev:** CTL-1432 (WS-B B2+B3) — dispatch deferred board-health intents + suppress sanctioned needs-human latches ([#2570](https://github.com/coalesce-labs/catalyst/issues/2570)) ([880261e](https://github.com/coalesce-labs/catalyst/commit/880261eb7e487ef39ecba6199a359c9d741e1ba9))
+* **dev:** CTL-1433 (WS-A A2) — raise the eligible empty-reconfirm TTL above the reconcile interval (cut the top breaker driver, keep drift validation) ([#2572](https://github.com/coalesce-labs/catalyst/issues/2572)) ([96ea944](https://github.com/coalesce-labs/catalyst/commit/96ea944ce707f0feacb7ed473be0523fff276889))
+
+## [12.24.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.1...catalyst-dev-v12.24.0)
+
+Jul 04, 2026
+
+<!-- ai-enhanced -->
+
+### Durable Fence Event Log & Done Path Fix
+
+The fence write path now appends durable `fence.claimed`/`fence.released` events to the canonical event log instead of relying solely on Linear, eliminating the risk of fence emits triggering the admission freeze. A bug in `fenceGuard` that caused it to compare the wrong generation counter — blocking every ticket from reaching `Done` automatically on multi-host rosters — is now fixed by reading the correct cross-host claim generation from `cluster-generation.json`. Pino log levels are also now mapped to OTel `SeverityNumber`/`SeverityText` at emit time, so operational logs no longer arrive in Loki as UNKNOWN severity.
+
+
+
+### PRs
+
+* **dev:** CTL-1424 — otel-forward pino level → OTel SeverityNumber/Text at emit ([#2558](https://github.com/coalesce-labs/catalyst/issues/2558)) ([514fd7e](https://github.com/coalesce-labs/catalyst/commit/514fd7eb818ee999d202b82918ee04130f163a7a))
+* **dev:** CTL-863 — durable fence→event-log migration (N=1-gated), supersedes the interim ReadFence cache ([#2553](https://github.com/coalesce-labs/catalyst/issues/2553)) ([0e70424](https://github.com/coalesce-labs/catalyst/commit/0e704242c402233b1713ec098a888e0f1590c3f4))
+* **dev:** CTL-1157 (A1) — fence-guard reads the cross-host claim generation (unblocks the Done path) ([#2563](https://github.com/coalesce-labs/catalyst/issues/2563)) ([cb35036](https://github.com/coalesce-labs/catalyst/commit/cb35036f324b3167917d99cde786089819710d15))
+
+## [12.23.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.0...catalyst-dev-v12.23.1)
+
+Jul 03, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Rate-Limit Freeze Fixes
+
+A cluster of fixes targeting the shared Linear bucket saturation that was freezing fleet dispatch and silently stalling replicas. Fence-guard reads are now cached (45s TTL), anchor UUID lookups are cached permanently, and dispatch reads route through the replica instead of hitting Linear live — together dropping breaker trips from ~18 per 3 minutes to near zero. A cloud-sync stall watchdog now detects frozen replica sockets and self-heals via process restart rather than sitting silent for hours, and interactive `claude` sessions now load plugins from `~/catalyst/plugin-source` on the same path as workers.
+
+
+
+### PRs
+
+* **dev:** cloud-sync stall watchdog + loud alert — stop silent replica freezes ([#2547](https://github.com/coalesce-labs/catalyst/issues/2547)) ([fd74bda](https://github.com/coalesce-labs/catalyst/commit/fd74bda299288d5ca6992e1b438cb1e83cd9312d))
+* **dev:** cluster-heartbeat — back off the shared bucket on a rate-class Linear 400/429 (CTL-1420 follow-up) ([#2539](https://github.com/coalesce-labs/catalyst/issues/2539)) ([01d8844](https://github.com/coalesce-labs/catalyst/commit/01d88449f3845db47f33bad6ec346a0797e8a71e))
+* **dev:** CTL-1420 — dispatch reads via replica (Stage 0: ownership→replica, eligible breaker-aware) ([#2551](https://github.com/coalesce-labs/catalyst/issues/2551)) ([32f34dd](https://github.com/coalesce-labs/catalyst/commit/32f34dd39780ab1846ff77fdab6a97fb0976784b))
+* **dev:** CTL-863 — cache the fence entourage (ResolveIssueId anchor-UUID + GetIssueByIdentifier) to fully clear the shared bucket ([#2554](https://github.com/coalesce-labs/catalyst/issues/2554)) ([19e5a66](https://github.com/coalesce-labs/catalyst/commit/19e5a66f625db000a9806d354f33d4253146ca49))
+* **dev:** CTL-863 — interim in-process TTL cache for fence ReadFence to unfreeze the shared Linear bucket ([#2552](https://github.com/coalesce-labs/catalyst/issues/2552)) ([3cc975e](https://github.com/coalesce-labs/catalyst/commit/3cc975e60755fa9c131ee45c2ef986036f3aa5d5))
+* **dev:** standard plugin-source loading for interactive sessions + drop marketplace guidance ([#2549](https://github.com/coalesce-labs/catalyst/issues/2549)) ([8c96b1f](https://github.com/coalesce-labs/catalyst/commit/8c96b1faa74c9642cb0bc7b1176557f149c477aa))
+
+## [12.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.22.0...catalyst-dev-v12.23.0)
+
+Jul 02, 2026
+
+<!-- ai-enhanced -->
+
+### Warm Resume & Replica-First Reads
+
+A daemon restart now continues in-flight SDK work from its existing transcript instead of cold-restarting — making fleet-wide stop/restart-all a routine, low-cost operation. Alongside that, replica-first Linear reads are now a standard reflex across every agent path: enforced in core context, phase-worker preambles, and a new PreToolUse hook that can catch and block bare `linearis issues read` calls before they hit the rate-limited API key.
+
+
+
+### PRs
+
+* **dev:** CTL-1397 enforcement — replica-first Linear reads as a standard prerequisite reflex ([#2543](https://github.com/coalesce-labs/catalyst/issues/2543)) ([98dfbac](https://github.com/coalesce-labs/catalyst/commit/98dfbac7216d6ede87b6edf22d690b1188d7cbd1))
+* **dev:** CTL-1422 — warm resume: a daemon restart continues in-flight SDK work ([#2544](https://github.com/coalesce-labs/catalyst/issues/2544)) ([cca2892](https://github.com/coalesce-labs/catalyst/commit/cca2892b8182a5f9a8b93cf7c812d9337c5ea566))
+
+## [12.22.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.21.0...catalyst-dev-v12.22.0)
+
+Jul 02, 2026
+
+<!-- ai-enhanced -->
+
+### SDK Worker Registry & Fleet Resilience
+
+This release introduces a unified in-process SDK worker registry that tracks live workers with heartbeats, sticky abort semantics, and disk projections — closing the liveness blind spots that left the scheduler, delegate queue, and worktree refresh timer unable to see workers running outside the bg executor. Alongside that, a Linear quota storm can no longer freeze fleet admission: when the circuit breaker is open, a provably-real replica-empty is now trusted directly instead of looping into a failing linearis reconfirm. Agent reads also move off the `catalyst-linear` CLI to direct SQLite queries against the local replica, giving agents full join support and a single, well-defined freshness rule; `catalyst-linear` is now a deprecated shim.
+
+
+
+### PRs
+
+* **dev:** CTL-1157 — Self-Healing Delegate wave 1 (board-health sees + acts on stuck work; shadow-gated, dark merge) ([#2503](https://github.com/coalesce-labs/catalyst/issues/2503)) ([32d2218](https://github.com/coalesce-labs/catalyst/commit/32d2218b962467ed8e3307e6146f3d657fb030d5))
+* **dev:** CTL-1397 — pivot agent Linear reads to direct SQLite; deprecate catalyst-linear CLI ([#2514](https://github.com/coalesce-labs/catalyst/issues/2514)) ([249c9d6](https://github.com/coalesce-labs/catalyst/commit/249c9d67c12d58f79aa07fa44289afa57b29c5db))
+* **dev:** CTL-1402 — bump @catalyst-cloud/sdk → ^0.3.1 + telemetry:true (replica apply-failures observable) ([#2517](https://github.com/coalesce-labs/catalyst/issues/2517)) ([0e2883f](https://github.com/coalesce-labs/catalyst/commit/0e2883f675bf8ddc07b9793c24a0b512015e2e97))
+* **dev:** CTL-1410 (Phase A) — in-band terminal signal flips for event-only phases + SDK success safety net ([#2524](https://github.com/coalesce-labs/catalyst/issues/2524)) ([ba06b66](https://github.com/coalesce-labs/catalyst/commit/ba06b66b01367091d3badfb107324d29d31c9135))
+* **dev:** CTL-1410 (Phase B) — unified in-process SDK worker registry + liveness re-points ([#2529](https://github.com/coalesce-labs/catalyst/issues/2529)) ([89fd452](https://github.com/coalesce-labs/catalyst/commit/89fd45209aed6fcbee213d6a4decf49c950a0fb8))
+* **dev:** CTL-1421 — doctor asserts the worker plugin path is a fresh pristine plugin-source ([#2537](https://github.com/coalesce-labs/catalyst/issues/2537)) ([e1c48f3](https://github.com/coalesce-labs/catalyst/commit/e1c48f310b49d638c59955943acd79b31ddf1c51))
+* **dev:** catalyst-cloud[#127](https://github.com/coalesce-labs/catalyst/issues/127) — bump @catalyst-cloud/sdk → ^0.4.0 (forward-compat filter + auto-reseed backfill) ([#2525](https://github.com/coalesce-labs/catalyst/issues/2525)) ([3d4bc40](https://github.com/coalesce-labs/catalyst/commit/3d4bc40e174a7e03d4f98bded60c0186e2118e7b))
+* **dev:** CTL-1416 — bash-3.2-safe emit-complete session-end + hermetic thoughts fixture for its tests ([#2535](https://github.com/coalesce-labs/catalyst/issues/2535)) ([aaeba1e](https://github.com/coalesce-labs/catalyst/commit/aaeba1e7bc04b9f12cf116294d12e84325818d1b))
+* **dev:** CTL-1416 — make `phase-agent-emit-complete` bash-3.2-safe ([aaeba1e](https://github.com/coalesce-labs/catalyst/commit/aaeba1e7bc04b9f12cf116294d12e84325818d1b))
+* **dev:** CTL-1418 — quiet catalyst-agent's pino-unavailable shim notice ([#2533](https://github.com/coalesce-labs/catalyst/issues/2533)) ([7aa8af4](https://github.com/coalesce-labs/catalyst/commit/7aa8af48e43252b6d5ee838eac88722b1ad73050))
+* **dev:** CTL-1420 — unfreeze fleet admission during a Linear quota storm ([#2538](https://github.com/coalesce-labs/catalyst/issues/2538)) ([b2955e1](https://github.com/coalesce-labs/catalyst/commit/b2955e1c4f92f66f9a8c06ce071911773467144c))
+
 ## [12.21.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.20.0...catalyst-dev-v12.21.0)
 
 Jul 01, 2026

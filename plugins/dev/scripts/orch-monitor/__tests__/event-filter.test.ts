@@ -97,4 +97,24 @@ describe("createFilterStream", () => {
     f.close();
     expect(() => f.close()).not.toThrow();
   });
+
+  it("write returns a boolean and drain() resolves (backpressure contract, CTL-1515)", async () => {
+    const f = createFilterStream(".a == 1");
+    // The chunked predicate scan relies on write's return value + drain() to stay
+    // memory-bounded: await drain() only when write returns false.
+    expect(typeof f.write('{"a":1}')).toBe("boolean");
+    await f.drain(); // resolves immediately when not backpressured — must not hang
+    expect(typeof f.write('{"a":2}')).toBe("boolean");
+    f.close();
+    // After close, write is a no-op returning true (never asks the caller to wait).
+    expect(f.write('{"a":3}')).toBe(true);
+    await f.drain();
+  });
+
+  it("passthrough (empty predicate) write returns true and drain resolves", async () => {
+    const f = createFilterStream("");
+    expect(f.write('{"a":1}')).toBe(true);
+    await f.drain();
+    f.close();
+  });
 });

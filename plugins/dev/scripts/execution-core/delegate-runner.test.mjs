@@ -34,7 +34,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
-import { drainOnce } from "./delegate-runner-entry.mjs";
+import { drainOnce, resolveEffectiveDelegateExecutor } from "./delegate-runner-entry.mjs";
 import { DELEGATE_QUEUE_DIR, claimIntent } from "./delegate-queue.mjs";
 
 let orchDir;
@@ -168,6 +168,31 @@ describe("drainOnce — drains a queued intent → launched", () => {
     expect(listQueueFiles().some((f) => f.includes(".claimed-"))).toBe(false);
 
     expect(res.drained).toBe(1);
+  });
+
+  // CTL-1157 F P1 (Codex round-4): under executor=sdk the recovery-pass runs as an
+  // IN-PROCESS query() that settles asynchronously; invokeFn surfaces its settled chain
+  // in details.pendingSdk. drainOnce must collect those into result.pending so the
+  // detached entrypoint can await them before process.exit (else it kills the worker it
+  // just launched). bg dispatch has no pendingSdk → result.pending stays empty.
+  test("collects details.pendingSdk (executor=sdk) into result.pending; bg leaves it empty", () => {
+    seedQueued("CTL-1");
+    const pendingSdk = Promise.resolve({ code: 0 });
+    const sdkDeps = makeDeps();
+    sdkDeps.executor = "sdk";
+    sdkDeps.invokeFn = () => ({
+      dispatched: true,
+      details: { bg_job_id: null, worktreePath: "/wt/CTL-1", pendingSdk },
+    });
+    const sdkRes = drainOnce(sdkDeps);
+    expect(Array.isArray(sdkRes.pending)).toBe(true);
+    expect(sdkRes.pending).toContain(pendingSdk);
+
+    seedQueued("CTL-2");
+    const bgDeps = makeDeps();
+    bgDeps.invokeFn = () => ({ dispatched: true, details: { bg_job_id: "bg-1", worktreePath: "/wt/CTL-2" } });
+    const bgRes = drainOnce(bgDeps);
+    expect(bgRes.pending).toEqual([]); // bg job is a separate OS process — nothing to await
   });
 
   test("emits phase.dispatch.requested then phase.dispatch.launched (in order, with bg_job_id)", () => {
@@ -334,6 +359,119 @@ describe("drainOnce — free-slot re-check", () => {
     drainOnce(deps);
     expect(readIntent("CTL-5").status).toBe("launched");
   });
+
+  // GROUP C: an sdk dispatch settles synchronously with NO bg job, so countBg
+  // cannot see this pass's launches. drainOnce must count them locally so it does
+  // not overrun maxParallel across multiple queued intents in one drain.
+  test("executor=sdk: with maxParallel=1 and two queued intents, only ONE launches (the second un-claims)", () => {
+    seedQueued("CTL-SDK-1");
+    seedQueued("CTL-SDK-2");
+    let invokes = 0;
+    const deps = makeDeps({
+      maxParallel: 1,
+      executor: "sdk",
+      // sdk dispatch is synchronous & invisible to countBg — it stays 0 the
+      // whole pass, exactly the condition that used to let BOTH intents launch.
+      countBackgroundAgents: () => 0,
+      invokeFn: () => {
+        invokes++;
+        return { dispatched: true, details: {} }; // sdk: no bg_job_id
+      },
+    });
+
+    const res = drainOnce(deps);
+
+    expect(invokes).toBe(1); // slot limit honored despite the static bg count
+    expect(res.drained).toBe(1);
+    const statuses = ["CTL-SDK-1", "CTL-SDK-2"].map((t) => readIntent(t).status).sort();
+    expect(statuses).toEqual(["launched", "queued"]); // one launched, one held
+    expect(deps._emitted.launched).toHaveLength(1);
+  });
+
+  // The bg path is unchanged: localLaunched is never consulted (executor != sdk),
+  // so the per-intent countBg check governs exactly as before.
+  test("executor=bg: localLaunched is NOT consulted (bg jobs surface in countBg)", () => {
+    seedQueued("CTL-BG-1");
+    seedQueued("CTL-BG-2");
+    let invokes = 0;
+    const deps = makeDeps({
+      maxParallel: 8,
+      executor: "bg",
+      countBackgroundAgents: () => 0, // plenty of headroom for both
+      invokeFn: (ticket) => {
+        invokes++;
+        return { dispatched: true, details: { bg_job_id: `bg-${ticket}` } };
+      },
+    });
+
+    const res = drainOnce(deps);
+
+    expect(invokes).toBe(2);
+    expect(res.drained).toBe(2);
+  });
+
+  // CTL-1157 (Codex round-6): the sdk slot budget is countBg + a ONCE-sampled
+  // pre-existing sdk baseline + localLaunched — three DISJOINT terms. The earlier
+  // round-6 attempt re-read countSdkInflight per iteration AND added localLaunched,
+  // which double-counted each launch (the synchronous prelaunch signal is on disk
+  // before invokeFn returns, so a per-iteration re-read already sees this pass's
+  // launches) and halved effective parallelism at maxParallel>=2.
+  test("executor=sdk: baseline sampled ONCE — all queued intents launch when slots are free (no halving)", () => {
+    seedQueued("CTL-SDK-A");
+    seedQueued("CTL-SDK-B");
+    seedQueued("CTL-SDK-C");
+    let sdkCalls = 0;
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => {
+        sdkCalls++;
+        return 0; // no pre-existing sdk work
+      },
+      invokeFn: () => ({ dispatched: true, details: { bg_job_id: null, worktreePath: "/wt", pendingSdk: null } }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(3); // ALL three — not ceil(3/2)=2 (the double-count bug)
+    expect(sdkCalls).toBe(1); // sampled ONCE as a baseline, never re-read per iteration
+  });
+
+  test("executor=sdk: PRE-EXISTING sdk workers (baseline) consume slots — only free slots launch", () => {
+    seedQueued("CTL-SDK-A");
+    seedQueued("CTL-SDK-B");
+    seedQueued("CTL-SDK-C");
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => 2, // two sdk phase workers already in flight → 1 free slot
+      invokeFn: () => ({ dispatched: true, details: { bg_job_id: null, worktreePath: "/wt", pendingSdk: null } }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(1); // only the one genuinely-free slot launches
+  });
+
+  test("executor=sdk: a baseline sdk count failure fails CLOSED (holds every intent)", () => {
+    seedQueued("CTL-SDK-A");
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => {
+        throw new Error("signal scan failed");
+      },
+      invokeFn: () => ({ dispatched: true, details: {} }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(0); // never launch on an untrustworthy sdk occupancy count
+    expect(readIntent("CTL-SDK-A").status).toBe("queued"); // un-claimed back to queued
+  });
 });
 
 describe("drainOnce — live-worker supersede (idempotency)", () => {
@@ -365,6 +503,32 @@ describe("drainOnce — live-worker supersede (idempotency)", () => {
     const deps = makeDeps({ isBgJobAlive: () => false });
     drainOnce(deps);
     expect(readIntent("CTL-7").status).toBe("launched");
+  });
+
+  // CTL-1157 (GROUP-3 #2): under executor=sdk the recovery-pass worker runs in-process
+  // with NO bg_job_id — a dispatched|running signal there is LIVE. A second drain scan
+  // must SUPERSEDE (not re-launch) it, otherwise the same ticket double-dispatches.
+  test("sdk: a running recovery-pass worker with NO bg_job_id → superseded (no re-dispatch) when executor==='sdk'", () => {
+    seedQueued("CTL-sdk");
+    seedRecoveryPassSignal("CTL-sdk", "running", null); // sdk shape: no bg id
+    const deps = makeDeps({ executor: "sdk", isBgJobAlive: () => false });
+    let invoked = false;
+    deps.invokeFn = () => {
+      invoked = true;
+      return { dispatched: true, details: {} };
+    };
+    const res = drainOnce(deps);
+    expect(invoked).toBe(false);
+    expect(existsSync(intentPath("CTL-sdk"))).toBe(false); // GC'd, not launched
+    expect(res.superseded).toBe(1);
+  });
+
+  test("bg (default): a running worker with NO bg_job_id does NOT supersede → dispatches (byte-identical)", () => {
+    seedQueued("CTL-bgnull");
+    seedRecoveryPassSignal("CTL-bgnull", "running", null);
+    const deps = makeDeps({ isBgJobAlive: () => false }); // no executor → bg
+    drainOnce(deps);
+    expect(readIntent("CTL-bgnull").status).toBe("launched");
   });
 });
 
@@ -539,6 +703,7 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
     const clock = fakeClock();
     const spy = makeSpawnSpy();
     let openedLogPath = null;
+    let closedFd = null;
     startDelegateRunnerTimer({
       enabled: true,
       intervalMs: 15000,
@@ -551,6 +716,12 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
       openLogFd: (p) => {
         openedLogPath = p;
         return 77; // a fake fd
+      },
+      // CTL-1519: inject the closer so the real closeSync(77) is NEVER called on
+      // an unrelated live descriptor — and assert the fd handed to the child is
+      // the exact one closed afterward.
+      closeLogFd: (fd) => {
+        closedFd = fd;
       },
     });
     clock.advance(15000);
@@ -565,6 +736,8 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
     // the log target is under <orchDir>/logs/delegate-runner.log
     expect(openedLogPath).toContain(join(orchDir, "logs"));
     expect(openedLogPath).toContain("delegate-runner.log");
+    // CTL-1519: the parent's copy of that exact fd is closed post-spawn.
+    expect(closedFd).toBe(77);
   });
 
   test("DETACHED INVARIANT — the spawn fn is the injectable async spawn, NEVER spawnSync", () => {
@@ -583,6 +756,9 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
       clock,
       isRunnerRunning: () => false,
       openLogFd: () => 5,
+      // CTL-1519: inject the closer so the default closeSync(5) never touches a
+      // real (possibly bun-internal) descriptor in the test process.
+      closeLogFd: () => {},
     });
     clock.advance(15000);
     // Exactly one async spawn; no third positional that smells synchronous.
@@ -672,5 +848,124 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
       openLogFd: () => 5,
     });
     expect(unrefed).toBe(true);
+  });
+
+  // CTL-1519: the parent's log fd is closed on EVERY kick, so open/close stay
+  // balanced and the daemon's live fd count is bounded (not growing with uptime).
+  // This is the guard that goes RED on the pre-fix code (nothing closed) and
+  // GREEN after — it directly encodes the fd-leak-regression contract that the
+  // live lsof on mini-2 exposed (1319 handles to one delegate-runner.log).
+  test("CTL-1519 — closes the parent log fd every kick; open/close balanced across N ticks (no fd leak)", () => {
+    const clock = fakeClock();
+    const opened = [];
+    const closed = [];
+    let nextFd = 100;
+    // spawn spy that ALSO pins ordering: closeLogFd must NOT have fired yet at
+    // the moment spawn() is invoked (the parent must close strictly AFTER the
+    // detached child has inherited its dup — else the child logs to a dead fd).
+    const spawn = () => {
+      expect(closed).toHaveLength(opened.length - 1); // this kick's fd not closed yet
+      return { unref() {}, pid: 1234 };
+    };
+    startDelegateRunnerTimer({
+      enabled: true,
+      intervalMs: 15000,
+      orchDir,
+      entryPath: "/fake/entry.mjs",
+      spawn,
+      clock,
+      isRunnerRunning: () => false,
+      openLogFd: () => {
+        const fd = nextFd++;
+        opened.push(fd);
+        return fd;
+      },
+      closeLogFd: (fd) => {
+        closed.push(fd);
+      },
+    });
+    const N = 50;
+    clock.advance(15000 * N);
+
+    expect(opened).toHaveLength(N);
+    // every opened fd is closed, in open order → net live parent fds after N ticks = 0.
+    expect(closed).toEqual(opened);
+    expect(opened.filter((fd) => !closed.includes(fd))).toHaveLength(0);
+  });
+
+  // CTL-1519: the close lives in a `finally`, so the just-opened fd is released
+  // even when spawn() itself throws (EAGAIN/EMFILE) — the very error path where
+  // leaking it would compound descriptor exhaustion. The throw stays swallowed
+  // by the callback's outer guard (no kick ever escalates out of the timer).
+  test("CTL-1519 — closes the log fd even when spawn throws (finally); no leak on the error path", () => {
+    const clock = fakeClock();
+    const closed = [];
+    expect(() => {
+      startDelegateRunnerTimer({
+        enabled: true,
+        intervalMs: 15000,
+        orchDir,
+        entryPath: "/fake/entry.mjs",
+        spawn: () => {
+          throw new Error("EAGAIN");
+        },
+        clock,
+        isRunnerRunning: () => false,
+        openLogFd: () => 9,
+        closeLogFd: (fd) => {
+          closed.push(fd);
+        },
+      });
+      clock.advance(15000);
+    }).not.toThrow();
+    // the fd opened for the failed spawn is still released in the finally.
+    expect(closed).toEqual([9]);
+  });
+});
+
+// CTL-1457 (N4): the DETACHED delegate child re-resolves the executor and must apply
+// the SAME codex→bg degrade the daemon did at boot — else it keeps launching unusable
+// codex for every recovery-pass delegate on a node the daemon already degraded to bg.
+describe("resolveEffectiveDelegateExecutor — codex→bg degrade in the detached child", () => {
+  test("codex-exec node with a FAILING codex precondition degrades to bg", () => {
+    const executor = resolveEffectiveDelegateExecutor({
+      getExecutor: () => "codex-exec",
+      resolveSdkBoot: (e) => ({ executor: e }), // sdk gate passes codex-exec through
+      resolveCodexBoot: () => ({ eligible: false, reason: "codex auth missing" }),
+      logger: { warn: () => {} },
+    });
+    expect(executor).toBe("bg");
+  });
+
+  test("codex-exec node with an ELIGIBLE codex precondition stays codex-exec", () => {
+    const executor = resolveEffectiveDelegateExecutor({
+      getExecutor: () => "codex-exec",
+      resolveSdkBoot: (e) => ({ executor: e }),
+      resolveCodexBoot: () => ({ eligible: true, reason: null }),
+      logger: { warn: () => {} },
+    });
+    expect(executor).toBe("codex-exec");
+  });
+
+  test("a bg node never consults the codex gate (byte-identical)", () => {
+    let codexChecked = false;
+    const executor = resolveEffectiveDelegateExecutor({
+      getExecutor: () => "bg",
+      resolveSdkBoot: (e) => ({ executor: e }),
+      resolveCodexBoot: () => { codexChecked = true; return { eligible: false }; },
+      logger: { warn: () => {} },
+    });
+    expect(executor).toBe("bg");
+    expect(codexChecked).toBe(false);
+  });
+
+  test("the sdk→bg degrade still applies (sdk gate returns bg on a failing precondition)", () => {
+    const executor = resolveEffectiveDelegateExecutor({
+      getExecutor: () => "sdk",
+      resolveSdkBoot: () => ({ executor: "bg" }), // sdk auth precondition failed → bg
+      resolveCodexBoot: () => ({ eligible: true }),
+      logger: { warn: () => {} },
+    });
+    expect(executor).toBe("bg");
   });
 });

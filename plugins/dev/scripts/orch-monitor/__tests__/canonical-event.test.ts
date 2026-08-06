@@ -133,6 +133,30 @@ describe("buildCanonicalEvent", () => {
     expect(noCause.caused_by).toBeNull();
   });
 
+  it("CTL-1488: stamps event.stream_class from the event name (coordination vs telemetry)", () => {
+    const coord = buildCanonicalEvent({
+      ts: "2026-07-21T00:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.github" },
+      attributes: { "event.name": "github.pr.merged" },
+      body: {},
+    });
+    expect(coord.attributes["event.stream_class"]).toBe("coordination");
+
+    const tele = buildCanonicalEvent({
+      ts: "2026-07-21T00:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.session" },
+      attributes: { "event.name": "session.phase" },
+      body: {},
+    });
+    expect(tele.attributes["event.stream_class"]).toBe("telemetry");
+  });
+
   it("respects an explicit observedTs and overrides defaults", () => {
     const ev = buildCanonicalEvent({
       ts: "2026-05-08T18:00:00.000Z",

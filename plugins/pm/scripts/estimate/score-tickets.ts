@@ -40,6 +40,155 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+
+// CTL-1616 PR3 (#2921 Codex P2), folded onto lib/catalyst-runtime-root.mjs's
+// catalystDevScripts (CTL-1628 Phase A2): this file's inline
+// LINEAR_API_TOKEN/LINEAR_API_KEY ladder reads through the shared
+// secret-contract engine, located via a LAZY, LAYOUT-AWARE import, not an
+// eager relative one — catalyst-pm can run from the versioned marketplace
+// cache, where catalyst-dev is a SEPARATELY-installed directory and
+// ../../../dev/... does not exist (an eager import would kill EVERY score
+// operation before main()). Only the --check-labels branch needs the
+// module, so a miss is an actionable error there and harmless everywhere
+// else.
+//
+// CIRCULARITY: catalystDevScripts itself lives inside the catalyst-dev
+// scripts dir this file is trying to locate, so it cannot be used to find
+// itself — loadCatalystRuntimeRoot below is the minimal bootstrap (same
+// search skeleton the OLD inline ladder used) that locates ONLY
+// lib/catalyst-runtime-root.mjs. Once that one file is found and imported,
+// its catalystDevScripts becomes the SINGLE authoritative decision-maker
+// (resolution order, sort -V newest-wins, LOUD-miss messaging) for every
+// OTHER catalyst-dev .mjs this file needs — here, lib/secret-contract.mjs —
+// instead of re-deriving that decision a second time inline.
+type ResolveSecretFn = (
+  id: string,
+  opts?: { env?: Record<string, string | undefined> },
+) => { value: string | null; source: string | null; provider: string | null };
+
+type CatalystRuntimeRootModule = {
+  catalystDevScripts: (
+    requestingPlugin?: string,
+    opts?: { env?: Record<string, string | undefined>; cwd?: string },
+  ) => { path: string | null; source: string | null };
+};
+
+async function loadCatalystRuntimeRoot(): Promise<CatalystRuntimeRootModule> {
+  const glob = (await import("node:fs")).globSync ?? null;
+  const candidates: string[] = [];
+  // 0. explicit override — catalyst_dev_scripts's own highest-priority source:
+  //    honor a configured CATALYST_DEV_SCRIPTS.
+  const devScripts = process.env.CATALYST_DEV_SCRIPTS;
+  if (devScripts) candidates.push(resolve(devScripts, "lib/catalyst-runtime-root.mjs"));
+  // 1. source-checkout sibling of this plugin; 2. repo-root cwd
+  candidates.push(
+    resolve(import.meta.dir, "../../../dev/scripts/lib/catalyst-runtime-root.mjs"),
+    resolve(process.cwd(), "plugins/dev/scripts/lib/catalyst-runtime-root.mjs"),
+  );
+  if (glob) {
+    // 3. installed marketplace clone(s); 4. versioned cache — newest last, so
+    // reverse for newest-first. Each glob is individually guarded: on Bun
+    // 1.2.x globSync THROWS ENOENT when the pattern's root dir is absent
+    // (#2921 post-merge P1) — a missing optional layout must not abort the
+    // search before valid candidates are tried.
+    for (const pat of [
+      `${homedir()}/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/catalyst-runtime-root.mjs`,
+      `${homedir()}/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/catalyst-runtime-root.mjs`,
+    ]) {
+      try {
+        candidates.push(...glob(pat).sort().reverse());
+      } catch {
+        /* absent optional layout root — skip */
+      }
+    }
+  }
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      const mod = await import(p);
+      if (typeof mod.catalystDevScripts === "function") return mod as CatalystRuntimeRootModule;
+    }
+  }
+  throw new Error(
+    "score-tickets --check-labels requires the catalyst-dev plugin (shared lib/catalyst-runtime-root.mjs); " +
+      "it was not found in the source checkout, repo cwd, marketplace clone, or versioned cache. " +
+      "Fix: install/enable catalyst-dev — claude plugin install catalyst-dev@catalyst",
+  );
+}
+
+async function loadResolveSecret(): Promise<ResolveSecretFn> {
+  try {
+    const runtimeRoot = await loadCatalystRuntimeRoot();
+    const { path: devScripts } = runtimeRoot.catalystDevScripts(process.env.CLAUDE_PLUGIN_ROOT, {
+      cwd: process.cwd(),
+    });
+    if (!devScripts) {
+      // catalystDevScripts already printed its own LOUD stderr diagnostic.
+      throw new Error("catalystDevScripts could not resolve the catalyst-dev scripts dir");
+    }
+    const secretContractPath = resolve(devScripts, "lib/secret-contract.mjs");
+    if (!existsSync(secretContractPath)) {
+      throw new Error(`resolved catalyst-dev scripts dir (${devScripts}) has no lib/secret-contract.mjs`);
+    }
+    const mod = await import(secretContractPath);
+    if (typeof mod.resolveSecret !== "function") {
+      throw new Error(`${secretContractPath} does not export resolveSecret`);
+    }
+    return mod.resolveSecret as ResolveSecretFn;
+  } catch {
+    // CTL-1628 A2 verify-round-2 fix: the primary path above only searches
+    // for THIS PR's own new lib/catalyst-runtime-root.mjs (via
+    // loadCatalystRuntimeRoot). A cache-installed catalyst-dev that predates
+    // this fold — the CTL-1536 cross-plugin sidecar/mutating-pair
+    // version-skew window, where catalyst-pm's cache updates before
+    // catalyst-dev's cache refreshes — has lib/secret-contract.mjs but NOT
+    // yet lib/catalyst-runtime-root.mjs, so the primary path throws before
+    // ever reaching secret-contract.mjs. Round 1 compensated for the
+    // identical window in the bash shims (require-catalyst-dev.sh); this
+    // mirrors that fix here: fall back to the exact pre-fold direct glob
+    // ladder for lib/secret-contract.mjs instead of hard-failing.
+    return loadResolveSecretPreFold();
+  }
+}
+
+// Pre-fold fallback (CTL-1628 A2 verify-round-2): the EXACT search this file
+// used before the CTL-1628 fold — same order, same per-glob try/catch — so
+// score-tickets still resolves the secret contract in the CTL-1536 skew
+// window described above, wherever the pre-fold inline resolver did.
+async function loadResolveSecretPreFold(): Promise<ResolveSecretFn> {
+  const glob = (await import("node:fs")).globSync ?? null;
+  const candidates: string[] = [];
+  const devScripts = process.env.CATALYST_DEV_SCRIPTS;
+  if (devScripts) candidates.push(resolve(devScripts, "lib/secret-contract.mjs"));
+  candidates.push(
+    resolve(import.meta.dir, "../../../dev/scripts/lib/secret-contract.mjs"),
+    resolve(process.cwd(), "plugins/dev/scripts/lib/secret-contract.mjs"),
+  );
+  if (glob) {
+    for (const pat of [
+      `${homedir()}/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/secret-contract.mjs`,
+      `${homedir()}/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/secret-contract.mjs`,
+    ]) {
+      try {
+        candidates.push(...glob(pat).sort().reverse());
+      } catch {
+        /* absent optional layout root — skip */
+      }
+    }
+  }
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      const mod = await import(p);
+      if (typeof mod.resolveSecret === "function") return mod.resolveSecret as ResolveSecretFn;
+    }
+  }
+  throw new Error(
+    "score-tickets --check-labels requires the catalyst-dev plugin (shared secret contract lib/secret-contract.mjs); " +
+      "it was not found in the source checkout, repo cwd, marketplace clone, or versioned cache. " +
+      "Fix: install/enable catalyst-dev — claude plugin install catalyst-dev@catalyst",
+  );
+}
 
 // -- Types -------------------------------------------------------------------
 
@@ -880,8 +1029,8 @@ async function main(): Promise<void> {
 
   let skipSet = new Set<string>();
   if (opts.checkLabels) {
-    const token =
-      process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+    const resolveSecret = await loadResolveSecret(); // CTL-1616 PR3 (lazy, layout-aware)
+    const token = resolveSecret("linear-api-token").value ?? "";
     if (!token) {
       console.warn(
         "[score] --check-labels: LINEAR_API_TOKEN not set; skipping label filter",

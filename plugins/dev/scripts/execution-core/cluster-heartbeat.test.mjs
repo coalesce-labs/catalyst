@@ -4,9 +4,11 @@
 import { describe, test, expect } from "bun:test";
 import {
   heartbeatUrl,
+  isRateClassLinearError,
   parseHeartbeatMetadata,
   publishHeartbeat,
   readPeerHeartbeats,
+  resolveIssueId,
   runCli,
 } from "./cluster-heartbeat.mjs";
 
@@ -130,6 +132,34 @@ describe("publishHeartbeat", () => {
       { post, now: () => "2026-06-13T01:00:00Z" },
     );
     expect(rec.in_flight_tickets).toEqual([]);
+  });
+
+  // CTL-863 fleet-unfreeze (entourage follow-up to #2552): a pre-resolved issueId
+  // override skips the ResolveIssueId round-trip entirely.
+  test("an issueId override SKIPS resolveIssueId — only attachmentCreate is called", async () => {
+    const calls = [];
+    const post = async (q, v) => {
+      calls.push(q);
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    const rec = await publishHeartbeat(
+      { anchorIssue: "CTL-9999", host: "mini" },
+      { post, now: () => "2026-06-13T01:00:00Z", issueId: "uuid-anchor" },
+    );
+    expect(rec.host).toBe("mini");
+    expect(calls.length).toBe(1); // ONLY attachmentCreate — no ResolveIssueId call
+    expect(calls[0]).toContain("attachmentCreate");
+  });
+
+  test("no issueId override → falls through to resolveIssueId unchanged", async () => {
+    const calls = [];
+    const post = async (q) => {
+      calls.push(q);
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    await publishHeartbeat({ anchorIssue: "CTL-9999", host: "mini" }, { post, issueId: null });
+    expect(calls.some((q) => q.includes("ResolveIssue"))).toBe(true);
   });
 });
 
@@ -261,5 +291,132 @@ describe("runCli", () => {
   test("unknown subcommand exits 1", async () => {
     const { code } = await captureStdout(() => runCli(["bogus"], {}));
     expect(code).toBe(1);
+  });
+
+  // CTL-863 fleet-unfreeze (entourage follow-up to #2552).
+  test("resolve-anchor: prints {issueId} and exits 0", async () => {
+    const post = async (q) => {
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-anchor" } };
+      throw new Error("unexpected query");
+    };
+    const { code, out } = await captureStdout(() => runCli(["resolve-anchor", "CTL-9999"], { post }));
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ issueId: "uuid-anchor" });
+  });
+
+  test("resolve-anchor: {issueId:null} when the anchor cannot be resolved", async () => {
+    const post = async () => ({ issue: null });
+    const { code, out } = await captureStdout(() => runCli(["resolve-anchor", "CTL-9999"], { post }));
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ issueId: null });
+  });
+
+  test("publish: an optional 5th issueId arg skips ResolveIssueId (only attachmentCreate)", async () => {
+    const calls = [];
+    const post = async (q) => {
+      calls.push(q);
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    const { code, out } = await captureStdout(() =>
+      runCli(["publish", "CTL-9999", "mini", "CTL-1", "", "uuid-anchor"], {
+        post,
+        now: () => "2026-06-13T01:00:00Z",
+      }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out).host).toBe("mini");
+    expect(calls.some((q) => q.includes("ResolveIssue"))).toBe(false);
+  });
+});
+
+// CTL-1420 follow-up: rate-class discriminator + defaultPost body-reading.
+describe("isRateClassLinearError (CTL-1420)", () => {
+  test("recognizes Linear's RATELIMITED complexity code (served as HTTP 400)", () => {
+    expect(isRateClassLinearError('{"errors":[{"extensions":{"code":"RATELIMITED"}}]}')).toBe(true);
+  });
+  test("recognizes the classic 429 rate-limit message", () => {
+    expect(isRateClassLinearError("Rate limit exceeded. Only 5000 requests are allowed per hour")).toBe(true);
+    expect(isRateClassLinearError("linear graphql http 429")).toBe(true);
+  });
+  test("does NOT flag a genuine bad-request 400 (query/schema error)", () => {
+    expect(isRateClassLinearError('{"errors":[{"message":"Field foo is not defined by type IssueFilter","extensions":{"code":"INVALID_INPUT"}}]}')).toBe(false);
+  });
+  test("empty / nullish input is not rate-class", () => {
+    expect(isRateClassLinearError("")).toBe(false);
+    expect(isRateClassLinearError(null)).toBe(false);
+    expect(isRateClassLinearError(undefined)).toBe(false);
+  });
+});
+
+describe("defaultPost — !res.ok body handling (CTL-1420)", () => {
+  const realFetch = globalThis.fetch;
+  function mockFetch({ ok, status, body }) {
+    globalThis.fetch = async () => ({
+      ok,
+      status,
+      text: async () => body,
+      json: async () => JSON.parse(body),
+    });
+  }
+  function restore() {
+    globalThis.fetch = realFetch;
+  }
+
+  test("a rate-class 400 (RATELIMITED) is READ and TAGGED [RATELIMITED] in the thrown error", async () => {
+    mockFetch({ ok: false, status: 400, body: '{"errors":[{"extensions":{"code":"RATELIMITED"},"message":"complexity limit"}]}' });
+    try {
+      await expect(resolveIssueId("CTL-9")).rejects.toThrow(/\[RATELIMITED\]/);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a genuine bad-request 400 SURFACES the body but is NOT tagged rate-class", async () => {
+    mockFetch({ ok: false, status: 400, body: '{"errors":[{"message":"Field foo is not defined by type IssueFilter"}]}' });
+    try {
+      let msg = "";
+      await resolveIssueId("CTL-9").catch((e) => { msg = e.message; });
+      expect(msg).toContain("http 400");
+      expect(msg).toContain("IssueFilter"); // body surfaced (was previously discarded)
+      expect(msg).not.toContain("[RATELIMITED]"); // not masked as rate-limited
+    } finally {
+      restore();
+    }
+  });
+
+  test("a 429 is tagged rate-class even if the body is unreadable", async () => {
+    globalThis.fetch = async () => ({ ok: false, status: 429, text: async () => { throw new Error("no body"); } });
+    try {
+      await expect(resolveIssueId("CTL-9")).rejects.toThrow(/\[RATELIMITED\]/);
+    } finally {
+      restore();
+    }
+  });
+
+  // CTL-1616 PR3: defaultPost's token resolution folds onto the shared
+  // secret-contract engine (resolveSecret) — this is the synthetic
+  // LINEAR_API_KEY-only fixture the design mandates, proven here by asserting
+  // the Authorization header defaultPost actually sends.
+  test("LINEAR_API_KEY-only fixture: defaultPost sends it as the Authorization header when LINEAR_API_TOKEN is absent", async () => {
+    const savedToken = process.env.LINEAR_API_TOKEN;
+    const savedKey = process.env.LINEAR_API_KEY;
+    let seenAuth = null;
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return { ok: true, json: async () => ({ data: { issue: { id: "issue-1" } } }) };
+    };
+    try {
+      delete process.env.LINEAR_API_TOKEN;
+      process.env.LINEAR_API_KEY = "lin_api_fromkey";
+      const issueId = await resolveIssueId("CTL-9");
+      expect(issueId).toBe("issue-1");
+      expect(seenAuth).toBe("lin_api_fromkey");
+    } finally {
+      restore();
+      if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+      else process.env.LINEAR_API_TOKEN = savedToken;
+      if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = savedKey;
+    }
   });
 });

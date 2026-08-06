@@ -136,8 +136,10 @@ export function resolvePipelineRail(ticket: Pick<BoardTicket, "phase" | "phaseSu
 
 // ── HELD banner ─────────────────────────────────────────────────────────────
 
-/** The banner's severity tone (drives the border color in the skin). */
-export type HeldTone = "blocked" | "waiting";
+/** The banner's severity tone (drives the border color in the skin).
+ *  CTL-764: the awaiting-capacity value was renamed "waiting" → "queued"
+ *  (BoardTicket.held widened to match); legacy "waiting" tolerated during rollout. */
+export type HeldTone = "blocked" | "queued" | "waiting";
 
 export interface HeldBanner {
   /** blocked → red border; waiting → yellow border (design §4.2). */
@@ -158,7 +160,7 @@ export const HELD_DURATION_MARKER = "NEEDS-PLUMBING" as const;
  *
  *   - `held == null`  → returns null (the banner does NOT render at all).
  *   - `held === "blocked"` → red-bordered banner naming `blockers[]`.
- *   - `held === "waiting"` → yellow-bordered banner; no blockers.
+ *   - `held === "queued"` (legacy "waiting") → yellow-bordered banner; no blockers.
  *   - held-duration is ALWAYS the NEEDS-PLUMBING marker (no timestamp exists).
  *
  * Pure: no side effects. A `blocked` hold with an absent/empty `blockers` array
@@ -170,7 +172,7 @@ export function resolveHeldBanner(
 ): HeldBanner | null {
   if (ticket.held == null) return null;
   return {
-    tone: ticket.held, // "blocked" | "waiting" — the type narrows here
+    tone: ticket.held, // "blocked" | "queued" | "waiting" — the null-guard narrows here
     blockers: ticket.held === "blocked" ? (ticket.blockers ?? []) : [],
     durationMarker: HELD_DURATION_MARKER,
   };

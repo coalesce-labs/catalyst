@@ -25,7 +25,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 process.chdir(resolve(HERE, "..", "..", "..", ".."));
 
 // board-data.mjs is plain JS — import dynamically so TS doesn't choke on the path.
-const { buildTeamRepoMap, repoFor, teamFor } = await import("./lib/board-data.mjs");
+// board-data.mjs computes its TEAM_REPO map ONCE at module-load from process.cwd().
+// Under `bun test` many files share one module cache, so if any earlier test
+// imported board-data.mjs from the orch-monitor package cwd (no .catalyst/config.json
+// there) the cached map is empty and these config-driven resolvers would fail —
+// an import-order race that is order-fragile across platforms/runs. Force a FRESH
+// module evaluation with a cache-busting query so loadTeamRepoMap() re-runs under
+// THIS test's chdir'd cwd (the repo root), making the assertions deterministic
+// regardless of who imported board-data.mjs first.
+// The cache-busting query defeats TS module resolution (the specifier is a
+// template literal), so cast back to the statically-resolved module type to keep
+// the exports fully typed (`typeof import(...)` is type-only — no runtime import).
+const { buildTeamRepoMap, repoFor, teamFor } = (await import(
+  `./lib/board-data.mjs?repo-for-test=${Date.now()}`
+)) as typeof import("./lib/board-data.mjs");
 
 // The committed fixture mirrors .catalyst/config.json → catalyst.monitor.linear.teams.
 const TEAMS = [

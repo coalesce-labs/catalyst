@@ -30,6 +30,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
+import { isSdkWorkerLive as registrySdkWorkerLive } from "./sdk-worker-registry.mjs";
 
 // The queue dir name, derived from orchDir exactly like recovery-reasoning.mjs
 // derives `.recovery-intents/` (recoveryIntentPath: join(orchDir, ".recovery-intents", …)).
@@ -91,15 +92,30 @@ function resolveMaxParallel(src) {
 //
 // A live recovery-pass worker for the anchor already exists when
 // workers/<TICKET>/phase-recovery-pass.json is dispatched|running AND its
-// bg_job_id is alive per the injected isBgJobAlive. Reads the signal file
-// directly (the same shape phase-agent-dispatch writes: {status, bg_job_id}).
-function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive) {
+// worker is alive. Three probes, most-precise first:
+//   bg worker (bg_job_id set)  → isBgJobAlive(bgJobId).
+//   sdk worker (bg_job_id null) → the in-process registry probe (CTL-1410
+//     Phase B — the exact same-process liveness fact), FALLING BACK to the
+//     CTL-1157 GROUP-3 #2 coarse rule: under executor==="sdk" any
+//     dispatched|running no-bg-id signal is presumed LIVE (fail-closed against
+//     double-dispatch for callers where the registry is blind — e.g. a
+//     worker registered before a daemon restart, or an out-of-process caller).
+// Reads the signal file directly (the same shape phase-agent-dispatch writes:
+// {status, bg_job_id}).
+function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, isSdkWorkerLive, executor) {
   const signalPath = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
   const sig = readIntentFile(signalPath);
   if (!sig) return false;
   if (sig.status !== "dispatched" && sig.status !== "running") return false;
   const bgJobId = sig.bg_job_id ?? null;
-  if (!bgJobId) return false;
+  if (!bgJobId) {
+    try {
+      if (isSdkWorkerLive(ticket) === true) return true; // precise in-process fact
+    } catch {
+      /* fall through to the coarse rule */
+    }
+    return executor === "sdk"; // CTL-1157 fail-closed fallback (registry-blind callers)
+  }
   try {
     return isBgJobAlive(bgJobId) === true;
   } catch {
@@ -115,7 +131,7 @@ function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive) {
 //   2. a live recovery-pass worker for the anchor already exists           → worker-live
 //   3. hard ceiling: countQueuedDelegates >= maxParallel                   → queue-full
 //
-// deps: { orchDir, isBgJobAlive, now, maxParallel }.
+// deps: { orchDir, isBgJobAlive, isSdkWorkerLive, executor, now, maxParallel }.
 export function enqueueDelegateIntent(anchor, payload = {}, deps = {}) {
   const orchDir = deps.orchDir;
   if (!orchDir) return { enqueued: false, reason: "no-orch-dir" };
@@ -123,6 +139,14 @@ export function enqueueDelegateIntent(anchor, payload = {}, deps = {}) {
 
   const now = deps.now ?? (() => Date.now());
   const isBgJobAlive = deps.isBgJobAlive ?? (() => false);
+  // CTL-1157 (GROUP-3 #2): the resolved executor ("sdk" | else). Threaded from the
+  // scheduler (dispatchMode==="sdk"). The coarse sdk-aware fallback for the
+  // live-worker probe. Absent/"bg" → byte-identical to pre-CTL-1157.
+  const executor = deps.executor ?? null;
+  // CTL-1410 Phase B: the precise probe — default = the real in-process
+  // registry (enqueue runs inside the daemon process, the same one that
+  // registered the worker).
+  const isSdkWorkerLive = deps.isSdkWorkerLive ?? registrySdkWorkerLive;
 
   // (1) queue-file existence — one non-terminal intent per anchor.
   const existing = readIntentFile(intentPath(orchDir, anchor));
@@ -131,7 +155,7 @@ export function enqueueDelegateIntent(anchor, payload = {}, deps = {}) {
   }
 
   // (2) live recovery-pass worker — never even queue a redundant run.
-  if (recoveryPassWorkerLive(orchDir, anchor, isBgJobAlive)) {
+  if (recoveryPassWorkerLive(orchDir, anchor, isBgJobAlive, isSdkWorkerLive, executor)) {
     return { enqueued: false, reason: "worker-live" };
   }
 
@@ -249,6 +273,14 @@ export function gcDelegateIntents(orchDir, now, deps = {}) {
   const ttlMs = Number.isFinite(deps.ttlMs) ? deps.ttlMs : DEFAULT_INTENT_TTL_MS;
   const isBgJobAlive = deps.isBgJobAlive ?? (() => false);
   const nowMs = typeof now === "number" ? now : Date.now();
+  // CTL-1157 (GROUP-3 #2): the resolved executor ("sdk" | else), threaded from the
+  // scheduler (dispatchMode==="sdk"). Under sdk a delegate launches an IN-PROCESS
+  // query() and its intent flips to `launched` with bg_job_id:null LEGITIMATELY —
+  // dropping it as "dead bg job" (case c) would free the reservation and let the
+  // next scan re-dispatch the same in-flight ticket. When sdk-aware, a launched
+  // no-bg_job_id intent is kept LIVE; its cleanup rides the worker-terminal (case b)
+  // + TTL (case a) paths instead. Absent/"bg" → byte-identical to today.
+  const executor = deps.executor ?? null;
 
   let removed = 0;
   for (const name of entries) {
@@ -276,7 +308,12 @@ export function gcDelegateIntents(orchDir, now, deps = {}) {
       const bgJobId = intent.bg_job_id ?? null;
       let alive = false;
       try {
-        alive = bgJobId ? isBgJobAlive(bgJobId) === true : false;
+        // CTL-1157 (GROUP-3 #2): under sdk a launched delegate carries NO bg_job_id
+        // (in-process query()) — that is a LIVE worker, not a dead bg job. Keep it
+        // (its cleanup rides case b's worker-terminal check + case a's TTL). Under
+        // bg a missing/dead bg_job_id stays droppable (byte-identical).
+        if (!bgJobId) alive = executor === "sdk";
+        else alive = isBgJobAlive(bgJobId) === true;
       } catch {
         alive = false;
       }

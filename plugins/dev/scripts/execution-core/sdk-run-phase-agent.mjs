@@ -65,8 +65,10 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } fr
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getEventLogPath } from "./config.mjs";
+import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: stamp stream class on the direct terminal-fallback writer
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
+import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
@@ -465,7 +467,12 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
 // which does NOT retry). Mirror of phase-agent-dispatch's mark_launch_failed. The
 // 2-arg shape is the seam defaultEmitBackstop injects for the failed/overloaded
 // (non-turn-cap) backstops.
-function defaultWriteSignalStalled(signalFile, reason) {
+// CTL-1457: exported so the sibling codex-exec launch verb
+// (codex-run-phase-agent.mjs) reuses the SAME "flip a still-in-flight signal to
+// stalled" writer instead of duplicating the atomic tmp+rename + P3
+// terminal-clobber guard. Its closure deps (defaultWriteSignalTerminal,
+// SIGNAL_TERMINAL_STATUSES) travel with it.
+export function defaultWriteSignalStalled(signalFile, reason) {
   return defaultWriteSignalTerminal(signalFile, "stalled", reason);
 }
 
@@ -540,10 +547,11 @@ export function flipSignalDoneOnSuccess(signalFile, generation) {
 // v2 envelope `phase.<phase>.<status>.<ticket>` to the unified event log so the
 // terminal event is NEVER silently dropped (the broker routes on
 // attributes["event.name"]). Best-effort; never throws.
-function defaultAppendEventLog({ phase, ticket, status, reason }) {
+export function defaultAppendEventLog({ phase, ticket, status, reason }) {
   try {
     const path = getEventLogPath();
     mkdirSync(dirname(path), { recursive: true });
+    const eventName = `phase.${phase}.${status}.${ticket}`;
     const line = JSON.stringify({
       ts: new Date().toISOString(),
       resource: {
@@ -552,7 +560,10 @@ function defaultAppendEventLog({ phase, ticket, status, reason }) {
         "catalyst.node.class": nodeClass(),
       },
       attributes: {
-        "event.name": `phase.${phase}.${status}.${ticket}`,
+        "event.name": eventName,
+        // CTL-1488: DIRECT canonical writer — bypasses buildCanonicalEvent, so stamp the stream class
+        // or coordination-publish's fail-closed filter silently drops this terminal event.
+        "event.stream_class": classifyEventStream(eventName),
         "linear.issue.identifier": ticket,
         "catalyst.worker.ticket": ticket,
       },
@@ -651,9 +662,15 @@ function isLaunchSpec(obj) {
 //                   signal, or a lost single-flight claim). NOT a failure (item 18):
 //                   the existing/winning worker owns the phase; the caller returns
 //                   success without launching query().
-function runPrelaunch(
+// CTL-1457: exported so the sibling codex-exec launch verb
+// (codex-run-phase-agent.mjs) drives the IDENTICAL Stage-A shared pre-launch
+// (single-flight claim + fenced "dispatched" signal + generation token + rebase +
+// prompt/env composition) instead of copying the spawn block. Its closure deps
+// (PHASE_AGENT_DISPATCH_BIN, isLaunchSpec, PRELAUNCH_SPEC_STATUSES,
+// getPrelaunchTimeoutMs) travel with it — the codex module never re-declares them.
+export function runPrelaunch(
   { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
-  { spawn = spawnSync } = {},
+  { spawn = spawnSync, executorId } = {},
 ) {
   const args = [
     "--phase", phase,
@@ -667,6 +684,10 @@ function runPrelaunch(
   const extraEnv = {};
   if (handoffPath) extraEnv.CATALYST_HANDOFF_PATH = handoffPath;
   if (clusterGeneration != null) extraEnv.CATALYST_CLUSTER_GENERATION = String(clusterGeneration);
+  // CTL-1457: attribute the signal file (phase-agent-dispatch reads
+  // CATALYST_EXECUTOR_ID → writes executor:<id> into the "dispatched" signal +
+  // DISPATCH_ENV). Omitted when unset so a bare prelaunch stays byte-identical.
+  if (executorId) extraEnv.CATALYST_EXECUTOR_ID = executorId;
   const env = {
     ...process.env,
     CATALYST_ORCHESTRATOR_DIR: orchDir,
@@ -746,6 +767,12 @@ export function buildSdkEnv(specEnv, { base = process.env, oauthToken, settingsE
   delete env.ANTHROPIC_AUTH_TOKEN;
   env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
   delete env.CATALYST_RECREATE_ATTEMPTED;
+  // CTL-1457: attribute the in-process SDK worker (mirror where buildCodexEnv
+  // sets codex-exec). The phase skill body's phase-agent-emit-complete reads this
+  // to stamp catalyst.executor="sdk" on the completion event. The prelaunch
+  // spec.env already carries it (runPrelaunch executorId), but set it explicitly
+  // so the worker is attributed even when the spec array omits it.
+  env.CATALYST_EXECUTOR_ID = "sdk";
   return env;
 }
 
@@ -945,6 +972,7 @@ export async function sdkRunPhaseAgent(
     random = Math.random,
     maxRetries = 5, // bound the 429/529 backoff
     backoff = {}, // { baseMs, capMs } overrides for tests
+    registerWorker = defaultRegisterSdkWorker, // CTL-1410 Phase B: the in-process worker registry
   } = {},
 ) {
   // ── AUTH GUARD: refuse BEFORE any side effect (no claim, no signal) ───────
@@ -958,7 +986,7 @@ export async function sdkRunPhaseAgent(
   //    rebase + prompt/env composition) via phase-agent-dispatch prelaunch-only ─
   const pre = runPrelaunch(
     { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
-    { spawn },
+    { spawn, executorId: "sdk" }, // CTL-1457: prelaunch writes executor:"sdk" into the signal file
   );
   // CTL-1367 item 18: an idempotent prelaunch (claim-lost / existing
   // dispatched|running|done signal) is a NO-OP SUCCESS, NOT a failure — the
@@ -1005,6 +1033,24 @@ export async function sdkRunPhaseAgent(
   const env = buildSdkEnv(spec.env, { base: authEnv, oauthToken, settingsEnv: spec.settings?.env });
   const options = buildQueryOptions(spec, env, { turnCap });
 
+  // CTL-1410 Phase B: register in the in-process worker registry — the SDK-native
+  // liveness fact (bg_job_id is null, so every bg-keyed probe is blind to this
+  // worker). Registered BEFORE sem.acquire on purpose: a parked waiter already
+  // owns its claim + "dispatched" signal, so the phantom-sweep / worktree-refresh
+  // consumers must see it as live while it queues. The three early-returns above
+  // never register (no claim, or another worker owns the phase).
+  const reg = registerWorker({
+    ticket,
+    phase,
+    worktreePath: spec.worktreePath ?? worktreePath,
+    generation: spec.generation,
+    orchDir,
+    // CTL-1422 review fix (D): a warm resume knows its session UUID up front —
+    // seed the projection so a crash before the first streamed message doesn't
+    // break the warm chain (the init capture below overwrites/confirms it).
+    sessionId: spec.resumeSession ?? null,
+  });
+
   // ── LAUNCH VERB: the in-process query() loop, under the concurrency cap ───
   //
   // CTL-1367 item 16 (semaphore scope — DOCUMENTED DECISION): the cap wraps ONLY
@@ -1018,15 +1064,42 @@ export async function sdkRunPhaseAgent(
   // workers are, by the scheduler's maxParallel admission gate upstream.
   const sem = semaphore ?? sharedSemaphore(maxParallel);
   const release = await sem.acquire();
+  // CTL-1422: the live SDK session UUID — the warm-resume key. Captured from the
+  // first streamed message that carries one (the init message; a 429-retry starts
+  // a NEW session, so a changed id re-captures). Persisted to the registry
+  // projection the moment it is known (a daemon crash must not lose it) and
+  // announced on the unified event log (worker.session.started|resumed) so the
+  // fleet view / orphan lookback can be built centrally (Loki ships the same log).
+  let sessionId = null;
   try {
     let lastOverload = null;
     for (let i = 0; i <= maxRetries; i++) {
       const ac = new AbortController();
+      // Phase B: expose the per-attempt controller so cancel/abort (preemption,
+      // watchdog) can reach the live query; a pending abort fires immediately.
+      reg.setAbortController(ac);
       let result = null;
       let thrown = null;
       try {
         const q = runQuery({ prompt: spec.prompt, options: { ...options, abortController: ac } });
         for await (const m of q) {
+          reg.touch(); // registry heartbeat (internally throttled to disk)
+          if (typeof m?.session_id === "string" && m.session_id && m.session_id !== sessionId) {
+            // A 429-retry starts a NEW session: close the old id first so the
+            // log never carries a dangling started (the "interrupted" shape is
+            // reserved for real crashes/kills).
+            if (sessionId) {
+              emitEvent("worker.session.stopped", {
+                ticket, phase, session_id: sessionId, generation: spec.generation ?? null,
+              });
+            }
+            sessionId = m.session_id;
+            reg.setSessionId?.(sessionId); // optional-chained: Phase B test fakes lack it
+            emitEvent(
+              spec.resumeSession ? "worker.session.resumed" : "worker.session.started",
+              { ticket, phase, session_id: sessionId, generation: spec.generation ?? null },
+            );
+          }
           if (m?.type === "result") result = m; // exactly one terminal
         }
       } catch (err) {
@@ -1136,6 +1209,16 @@ export async function sdkRunPhaseAgent(
     // Unreachable (the loop always returns), but keep a defined shape.
     return { code: 1, stdout: "", stderr: "sdk: retry loop exhausted", signal: null };
   } finally {
+    // CTL-1422: the lifecycle close — "started/resumed without a stopped" is the
+    // boot-time (and Loki) definition of an interrupted session, so stopped must
+    // fire on EVERY post-capture exit path. A daemon crash/SIGKILL skips this by
+    // nature, which is exactly what makes the interrupted session harvestable.
+    if (sessionId) {
+      emitEvent("worker.session.stopped", {
+        ticket, phase, session_id: sessionId, generation: spec.generation ?? null,
+      });
+    }
+    reg.deregister(); // every post-registration exit path, including throws
     release();
   }
 }

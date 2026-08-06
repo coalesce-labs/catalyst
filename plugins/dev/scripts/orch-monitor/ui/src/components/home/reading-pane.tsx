@@ -22,7 +22,7 @@
 // StatusIcon glyph are the HOME2 Catalyst hand-rolls. Emphasis is a whisper of
 // background TINT + a left accent BAR (the attention-bar pattern) — NEVER a
 // bordered sub-card, never cyan (cyan is reserved for the live signal).
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { CheckCircle2, ExternalLink as ExternalLinkIcon } from "lucide-react";
 
 // CTL-1041: a small, restrained Claude logomark for the View-in-Claude pill — the
@@ -54,6 +54,7 @@ import {
   accentFor,
   askFor,
   blockerFor,
+  escalationAccentFor,
   escalationExplanationFor,
   heroKindFor,
   optionsFor,
@@ -80,6 +81,18 @@ import {
   mergeSummaryIntoTicket,
   type InboxSummaryResponse,
 } from "./inbox-summary-data";
+// CTL-1569: the conversation surface — the ask summary, the newest-first thread,
+// and the inline reply that posts a real Linear comment as the operator (which is
+// what actually clears `needs-human`, per CTL-1567).
+import { Conversation } from "./conversation";
+import type { ReplyOutcome } from "@/board/conversation-client";
+// CTL-1574: the Linear discussion timeline — comment cards interleaved with the
+// ticket's state-change history, read from the local replica. LAZY: it renders
+// comment markdown, and a static import would put the whole marked/highlight.js
+// stack on the home route's critical path (see pane-discussion.tsx).
+const PaneDiscussion = lazy(() =>
+  import("./pane-discussion").then((m) => ({ default: m.PaneDiscussion })),
+);
 
 // ── inbox summary fetch-on-select (CTL-1042) ──────────────────────────────────
 type InboxSummaryState =
@@ -234,12 +247,13 @@ function WhatsNeededNow({
 
   // CTL-1110: needs-human rows with a structured explanation use the CTA-led card.
   if (escalation != null) {
+    const escAccent = escalationAccentFor(row);
     return (
       <section
         data-pane-hero="escalation"
-        data-pane-accent="amber"
+        data-pane-accent={escAccent}
         data-pane-escalation
-        className={cn("mt-4 rounded-sm py-3 pr-4 pl-4", accentClasses("amber"))}
+        className={cn("mt-4 rounded-sm py-3 pr-4 pl-4", accentClasses(escAccent))}
       >
         <p className="text-[11px] font-medium uppercase tracking-wide text-muted">
           What's needed now
@@ -379,6 +393,7 @@ export function ReadingPane({
   workers,
   onAct,
   respondStatus = "idle",
+  onReplied,
 }: {
   row: InboxRow | null;
   /** The resident read-model workers — the View-in-Claude session id is the
@@ -390,6 +405,9 @@ export function ReadingPane({
   onAct?: (id: string) => void;
   /** CTL-903 (HOME5): the optimistic write status for the selected row. */
   respondStatus?: RespondRowStatus;
+  /** CTL-1569: the inline reply's outcome. The surface uses it to optimistically
+   *  clear the row on a CONFIRMED post and to leave it in place on any failure. */
+  onReplied?: (outcome: ReplyOutcome) => void;
 }) {
   if (!row) return <NothingSelected />;
 
@@ -486,10 +504,44 @@ export function ReadingPane({
           <WhatsNeededNow row={effectiveRow} onAct={onAct} respondStatus={respondStatus} />
         )}
 
+        {/* CTL-1569: the conversation — the derived ask ("what would satisfy
+            this?"), the Linear deep link, the inline reply box, and the
+            newest-first thread. Only needs-you rows carry it, so running/done rows
+            stay calm. It renders NOTHING while loading or on a read failure (fails
+            soft), and suppresses the reply affordance for synthesized rows with no
+            Linear ticket behind them. */}
+        {needsYou && (
+          <Conversation
+            ticket={row.id}
+            enabled
+            // The RESOLVING reply path is offered only on a true `attention` row.
+            // `needsYou` also covers the scheduler's `blocked` and `queued` rows,
+            // and a human comment cannot resolve those: the daemon's comment-wake
+            // removes only `needs-human`/`needs-input`, never the admission-gate
+            // labels. Offering it there would optimistically hide the row and then
+            // roll it back after the grace window — a worse experience than not
+            // offering it. The thread stays READABLE either way; only the reply
+            // affordance is withheld.
+            canResolveByReply={row.section === "attention"}
+            onReplied={onReplied}
+          />
+        )}
+
         <Separator className="mt-6" />
 
         {/* About — summary, goal, and the where-it's-at phase strip (for ANY item). */}
         <About row={effectiveRow} />
+
+        {/* Discussion — the Linear conversation: comment cards interleaved with
+            the ticket's state-change history (CTL-1574). Carried by ANY item, so
+            running and done rows get the context the needs-you-only Conversation
+            block above never reaches them with. Collapsed to the newest few turns
+            so the pane stays scannable; "Show all N" opens the full stream. */}
+        <Suspense fallback={null}>
+          {/* key: remount per ticket so the previous selection's fetched
+              discussion never paints under the new ticket's header. */}
+          <PaneDiscussion key={row.id} ticket={row.id} />
+        </Suspense>
       </div>
     </ScrollArea>
   );

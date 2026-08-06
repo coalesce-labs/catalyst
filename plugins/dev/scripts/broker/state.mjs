@@ -67,9 +67,12 @@ export function clearOrchestratorStatusMap() {
 let brokerStartedAt = null;
 let lastWakeAt = null;
 let lastRegisterAt = null;
-// One-shot guard for broker.daemon.degraded — set on emission, cleared whenever
-// interests.size > 0 so a future empty window re-arms.
-let degradedEmittedAt = null;
+// CTL-1523: the CTL-352 one-shot `degradedEmittedAt` guard is RETIRED. It lived
+// only here in module memory (never persisted — buildBrokerState has no such key),
+// so every broker restart re-armed it and re-fired broker.daemon.degraded: all 104
+// July emissions on mini landed on the first watchdog tick past the startup grace.
+// Its replacement is the DURABLE latch in broker-degraded.mjs — the single
+// chokepoint for that episode state.
 // CTL-643: boot-time GC pass result, surfaced in broker.state.json so operators
 // can see "the broker pruned N stale interests on its last start."
 let gcLastRunAt = null;
@@ -93,12 +96,6 @@ export function getLastRegisterAt() {
 export function setLastRegisterAt(value) {
   lastRegisterAt = value;
 }
-export function getDegradedEmittedAt() {
-  return degradedEmittedAt;
-}
-export function setDegradedEmittedAt(value) {
-  degradedEmittedAt = value;
-}
 export function getGcLastRunAt() {
   return gcLastRunAt;
 }
@@ -120,9 +117,6 @@ export function __setBrokerStartedAtForTest(iso) {
 export function __resetBrokerStartedAtForTest() {
   brokerStartedAt = null;
 }
-export function __resetDegradedEmittedForTest() {
-  degradedEmittedAt = null;
-}
 // CTL-419: backdate a session's heartbeat timestamp so tests can simulate staleness.
 export function __setHeartbeatForTest(sessionId, tsMs) {
   const existing = lastHeartbeat.get(sessionId);
@@ -132,7 +126,8 @@ export function __resetBrokerLivenessForTest() {
   brokerStartedAt = null;
   lastWakeAt = null;
   lastRegisterAt = null;
-  degradedEmittedAt = null;
+  // CTL-1523: the degraded episode is no longer part of this liveness block —
+  // reset it with __resetBrokerDegradedLatchForTest() (broker-degraded.mjs).
   gcLastRunAt = null;
   gcLastPrunedCount = null;
 }

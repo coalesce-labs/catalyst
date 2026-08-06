@@ -19,6 +19,17 @@ import { resolve } from "node:path";
 // import in try/catch and substitute a console-shim with the same
 // pino-compatible surface so the agent degrades gracefully instead of aborting
 // at module-load.
+
+// shimNoticeEnabled — CTL-1418: the console-shim IS the expected steady state
+// for the standalone agent (no node_modules → pino unresolvable), so falling
+// back is normal operation, not a fault. The agent is a short-lived one-shot
+// emitter spawned constantly, so emitting the "pino unavailable" notice on every
+// spawn floods the log (6.2k identical lines observed). Only surface it when
+// debug logging is explicitly requested. Pure + exported for unit testing.
+export function shimNoticeEnabled(logLevel = process.env.LOG_LEVEL) {
+  return /^(debug|trace)$/i.test(logLevel ?? "");
+}
+
 let log;
 try {
   const { default: pino } = await import("pino");
@@ -46,9 +57,13 @@ try {
     trace: emit("trace"),
     child: () => log,
   };
-  process.stderr.write(
-    `[catalyst-agent] WARN: pino unavailable (${err?.message ?? err}); using console shim\n`,
-  );
+  // Expected path for the standalone agent — only surface it under debug/trace,
+  // else it floods the log once per spawn (CTL-1418).
+  if (shimNoticeEnabled()) {
+    process.stderr.write(
+      `[catalyst-agent] pino unavailable (${err?.message ?? err}); using console shim\n`,
+    );
+  }
 }
 export { log };
 
@@ -67,6 +82,16 @@ export function getEventLogPath() {
   const now = new Date();
   const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   return resolve(catalystDir(), "events", `${ym}.jsonl`);
+}
+
+// The liveness breadcrumb the standalone agent atomically refreshes after every
+// `--once` tick (CTL-1518). health-responder.sh reads its MTIME (not its body)
+// to tell a silently-dead launchd-managed sampler from a healthy one — the same
+// dead-on-mini-2-for-10-days failure the responder now backstops. Resolved from
+// the SAME CATALYST_DIR root as the event log so a CATALYST_DIR override moves
+// both together (the responder resolves the identical path).
+export function getHeartbeatPath() {
+  return resolve(catalystDir(), "catalyst-agent.heartbeat");
 }
 
 // --- Cadence floor ---

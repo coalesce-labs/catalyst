@@ -46,4 +46,7 @@ regexes = [
   # Public OAuth client identifier in catalyst-agent/accounts.mjs — a public
   # client_id (not a secret); exact value only.
   '''^9d1c250a-e61b-44d9-88ed-5944d1962f5e$''',
+  # doctor.mjs comment "token present, CATALYST_EXECUTOR=sdk → PASS" — generic-api-key
+  # false-positives the env assignment as a key (main gitleaks red since 4f7aac4b).
+  '''^CATALYST_EXECUTOR=sdk$''',
 ]
