@@ -184,7 +184,11 @@ fi
 # ── 5. Active sessions ────────────────────────────────────────────────────────
 
 SESSIONS_JSON="[]"
-SESS_SCRIPT=$(ls ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/catalyst-session.sh 2>/dev/null | head -1 || true)
+# CTL-1628 Phase A2 bug fix: was `| head -1`, which picks the LEXICALLY FIRST
+# (oldest) cached version when multiple are present — every other cache probe
+# in this repo (require-catalyst-dev.sh, lib/catalyst-runtime-root.sh, …)
+# picks newest via `sort -V | tail -1`. Align with that.
+SESS_SCRIPT=$(ls ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/catalyst-session.sh 2>/dev/null | sort -V | tail -1 || true)
 if [ -n "$SESS_SCRIPT" ] && [ -x "$SESS_SCRIPT" ]; then
   SESSIONS_JSON=$("$SESS_SCRIPT" list --active --json 2>/dev/null | jq -c '.' 2>/dev/null) || SESSIONS_JSON="[]"
 fi

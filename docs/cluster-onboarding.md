@@ -39,9 +39,9 @@ config-merge → **doctor** (the CTL-1186 `catalyst-doctor` gate) → stack. It 
 idempotent — re-run after any failure and it resumes from the failed stage.
 
 **Result:** the node is provisioned and the stack is running under launchd, but its
-own cluster roster is untouched, so it owns **zero tickets** (Stage-0 SHADOW).
-Activation (adding it to the roster) is a deliberate later step — see
-[Activation](#activation-m2).
+cluster roster (whichever of the two mechanisms below you use) is untouched, so it
+owns **zero tickets** (Stage-0 SHADOW). Activation (adding it to the roster) is a
+deliberate later step — see [Activation](#activation-m2).
 
 ### Convenience wrapper (seed-driven)
 
@@ -161,7 +161,11 @@ Check the onboard script's verification output:
 > node** — if they disagree, HRW partitioning disagrees too, which risks
 > double-dispatch or a node silently owning nothing.
 
-To activate mini-2 via the static-roster escape hatch (no `catalyst-cluster` repo needed):
+Pick ONE roster mechanism (see the precedence chain above) and use it identically on
+every node — mixing mechanisms across nodes is exactly the disagreement the chain
+warns about.
+
+### Option A — static-roster escape hatch (no `catalyst-cluster` repo needed)
 
 1. **Verify each node's own reported identity first** (see the host-identity
    gotcha below — a node's `catalyst.host.name` is NOT guaranteed to match the
@@ -177,6 +181,59 @@ To activate mini-2 via the static-roster escape hatch (no `catalyst-cluster` rep
      > /tmp/cfg.json && mv /tmp/cfg.json ~/.config/catalyst/config.json
    chmod 600 ~/.config/catalyst/config.json
    ```
+
+### Option B — committed `catalyst-cluster` roster (durable, versioned)
+
+**Prerequisite:** **every** activated node — not just the machine performing this edit — needs its
+own local clone of the private `catalyst-cluster` repo at the default `CATALYST_CLUSTER_DIR`
+location (`~/catalyst/catalyst-cluster`). `cluster-sync` only pulls an *existing* clone (it never
+clones fresh), and `resolveClusterHosts()` reads `cluster.json.roster` from that same local clone to
+resolve the fleet roster; without it, a node fails open to the `static`/`single-host` roster source
+(it silently treats itself as the only host in the fleet), which risks HRW double-ownership against
+nodes that do see the shared roster. A read-only clone is sufficient for that; only the machine used
+to perform the roster edit below additionally needs *write* access (push rights) to the repo. Like
+the age key, `catalyst-join` does **not** clone this repo (see the Scope note in "Provisioning the
+shared cloud token" below) — the clone is a pre-existing prerequisite provisioned once, separately,
+on each node. See the [config-mirror contract](../website/src/content/docs/reference/cluster-config-mirror.md)
+for the full SHARED/PER-NODE classification.
+
+1. **Add to committed roster:** in the private `catalyst-cluster` repo, add the node's name to
+   `cluster.json` `roster[]` and push:
+   ```bash
+   # in the catalyst-cluster repo
+   jq '.roster += ["mini-2"]' cluster.json > /tmp/cluster.json && mv /tmp/cluster.json cluster.json
+   git add cluster.json && git commit -m "feat: activate mini-2 to cluster roster (CTL-1217)"
+   git push
+   ```
+   `cluster-sync` pulls the update on every node and the next scheduler tick honors it — no restart
+   needed. See the [config-mirror contract](../website/src/content/docs/reference/cluster-config-mirror.md)
+   for the full SHARED/PER-NODE classification.
+
+2. **Re-run the join on the activated node to wire webhook ingestion** — the
+   Stage-0 join deliberately skipped webhook wiring (`stage0-roster-guard` in
+   the webhook-wiring gate: wiring a roster≤1 node would double-dispatch, since
+   runtime fencing is roster-derived). The join's progress marker records
+   `webhookWiringDeferred` for this case. Once the node is in the committed
+   roster, re-run the join **with fresh credentials** — the original join
+   token was single-use, and a seed-fetched bundle is deleted after the join
+   (it carries live bot tokens), so a bare `--no-resume` re-run would exit at
+   the token preflight:
+   ```bash
+   # On the seed host: mint a fresh single-use join token
+   catalyst cluster join-token
+
+   # On the activated node: full re-run with the fresh token
+   CATALYST_SEED=<seed-host:7400> CATALYST_JOIN_TOKEN=jt_<fresh> \
+     bash catalyst-join.sh --no-resume   # re-evaluates the gate at roster>1 and wires
+   ```
+   (For an offline `--bundle` join, reuse the retained bundle file instead:
+   `bash catalyst-join.sh --bundle <path> --no-resume`.)
+   Until this runs, `catalyst-doctor` FAILs `webhook-ingestion` on the
+   activated node — that FAIL is the loud signal this step was missed, not a
+   new problem. (This step is specific to Option B — the static roster has no
+   committed repo to re-sync from, so Option A skips it.)
+
+### Then, regardless of which option you used
 
 3. **Restart the stack on every node** (see the "plist env changes need a real
    restart" gotcha below — a `launchctl kickstart` alone is not sufficient).

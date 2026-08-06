@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import {
   STATUS,
@@ -31,6 +31,9 @@ import {
   checkRepoIconTokenScope,
   defaultConfiguredRepos,
   checkNodeClass,
+  checkDeploymentModeConsistency,
+  checkSecretContract,
+  checkLayer2PathDivergence,
   checkReadReplicaReachable,
   checkMonitorProductionBuild,
   checkWontOwnWork,
@@ -47,6 +50,8 @@ import {
   parseArgs,
   runDoctor,
 } from "./doctor.mjs";
+import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
+import { TICKET_KEY_RE } from "./ticket-key.mjs";
 import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";
 // CTL-1369 PR4: parity source for doctor's inlined defaultPluginPullOwner.
 import { resolvePluginPullOwner } from "../broker/plugin-refresh.mjs";
@@ -209,6 +214,20 @@ describe("checkHrwPartition", () => {
 
 // ─── Phase 3: checkPeerUniqueness ────────────────────────────────────────────
 
+// CTL-1616 PR3: resolveSecretContract is the LIVE answer now (hasLinearToken's
+// default routes through it — see resolveLinearTokenLive in doctor.mjs). Every
+// test below still injects an explicit `hasLinearToken` too, which simply
+// overrides that default outright, so `resolveSecretContract` below is inert
+// where both are present — kept only so these fixtures read the same whether
+// or not a future edit drops the `hasLinearToken` override. Full DI throughout
+// means none of these behavioral assertions depend on whatever
+// LINEAR_API_TOKEN/LINEAR_API_KEY happen to be set in the runner's ambient
+// environment.
+const agreeingSecretContract = (present) => () =>
+  present
+    ? { value: "contract-token", source: "inherited", provider: "env-alias" }
+    : { value: null, source: "none", provider: "env-alias" };
+
 describe("checkPeerUniqueness", () => {
   it("INFO-skips when no liveness anchor issue is configured", async () => {
     const checks = await checkPeerUniqueness({
@@ -228,6 +247,7 @@ describe("checkPeerUniqueness", () => {
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
       hasLinearToken: () => false,
+      resolveSecretContract: agreeingSecretContract(false),
       readPeerHeartbeats: async () => ({}),
     });
     expect(checks).toHaveLength(1);
@@ -294,6 +314,7 @@ describe("checkPeerUniqueness", () => {
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
       hasLinearToken: () => true,
+      resolveSecretContract: agreeingSecretContract(true),
       readPeerHeartbeats: async () => ({
         "mac-studio": { host: "mac-studio", last_seen: "2026-06-15T00:00:00Z", in_flight_tickets: [] },
         "mini": { host: "mini", last_seen: "2026-06-15T00:00:00Z", in_flight_tickets: [] },
@@ -313,6 +334,7 @@ describe("checkPeerUniqueness", () => {
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
       hasLinearToken: () => true,
+      resolveSecretContract: agreeingSecretContract(true),
       readPeerHeartbeats: async () => ({
         "mac-studio": { host: "mac-studio", last_seen: "2026-06-15T00:00:00Z", in_flight_tickets: [] },
         "laptop": { host: "laptop", last_seen: "2026-06-15T00:00:00Z", in_flight_tickets: [] },
@@ -329,6 +351,7 @@ describe("checkPeerUniqueness", () => {
       getHostName: () => "mini",
       getLivenessAnchorIssue: () => "CTL-9999",
       hasLinearToken: () => true,
+      resolveSecretContract: agreeingSecretContract(true),
       readPeerHeartbeats: async () => ({}),
     });
     expect(checks).toHaveLength(1);
@@ -345,6 +368,13 @@ const fakeFetch = (body, ok = true) => async (url, opts) => ({
   json: async () => body,
 });
 
+// CTL-1616 PR3: resolveSecretContract is the LIVE answer now (linearToken's
+// default routes through it — see resolveLinearTokenLive in doctor.mjs).
+// Every test below still injects an explicit `linearToken` too, which simply
+// overrides that default outright, so these pre-existing assertions never
+// depend on the real registry resolver — which would read the runner's
+// actual LINEAR_API_TOKEN/LINEAR_API_KEY/~/.config/catalyst and make this
+// describe's behavior environment-dependent.
 describe("checkBotCredentials", () => {
   it("passes when the Linear viewer id is in the local bot-id set", async () => {
     const checks = await checkBotCredentials({
@@ -352,6 +382,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const identity = checks.find((c) => c.name === "bot-identity");
     expect(identity).toBeDefined();
@@ -368,6 +399,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "wrong-user-999", name: "Wrong", email: "wrong@example.com" } } }),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const identity = checks.find((c) => c.name === "bot-identity");
     expect(identity).toBeDefined();
@@ -382,6 +414,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ errors: [{ message: "Authentication failed" }] }),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const connectivity = checks.find((c) => c.name === "linear-connectivity");
     expect(connectivity).toBeDefined();
@@ -395,6 +428,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "",
       fetch: fakeFetch({}),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(false),
     });
     const connectivity = checks.find((c) => c.name === "linear-connectivity");
     expect(connectivity).toBeDefined();
@@ -411,6 +445,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
       expectedBotUserId: "different-expected-id",
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const parity = checks.find((c) => c.name === "bot-parity");
     expect(parity).toBeDefined();
@@ -424,6 +459,7 @@ describe("checkBotCredentials", () => {
       linearToken: () => "lin_api_abc",
       fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
       expectedBotUserId: null,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     const parity = checks.find((c) => c.name === "bot-parity");
     expect(parity).toBeDefined();
@@ -616,7 +652,26 @@ describe("checkDaemonToolPath", () => {
 describe("checkWebhookIngestion", () => {
   // Isolate the env-var secret fallbacks the check honors (matching
   // webhook-config.ts) so a dev shell with these set can't mask a dangling key.
-  const SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_LINEAR_WEBHOOK_SECRET"];
+  const SECRET_ENVS = [
+    "CATALYST_WEBHOOK_SECRET",
+    "CATALYST_LINEAR_WEBHOOK_SECRET",
+    "CATALYST_SMEE_SECRET",
+    "GH_WH_CUSTOM", // custom github env name used in tests below
+    "LIN_WH_CUSTOM", // custom linear env name used in Phase 2 tests
+    // Layer-1 config pointers: the default env-name readers now resolve via
+    // resolveDoctorLayer1Path() (CTL-1618 Codex P1), which honors these. A test
+    // runner that inherits them pointing at a project with custom webhookSecretEnv
+    // names would otherwise make the cases that omit githubSecretEnvName/
+    // linearSecretEnvName environment-dependent (Codex P2). Clear both here.
+    "CATALYST_CONFIG_FILE",
+    "CATALYST_CONFIG_PATH",
+    // CTL-1616 PR2 (A2): the shadow-only resolveSecretContract dependency
+    // (default resolveSecret) honors CATALYST_CONFIG_DIR via
+    // secretFileCandidates — an inherited value pointing at a real config dir
+    // would make the shadow comparison below environment-dependent even
+    // though every test here also injects an agreeing fixture.
+    "CATALYST_CONFIG_DIR",
+  ];
   let savedEnv = {};
   beforeEach(() => {
     for (const k of SECRET_ENVS) { savedEnv[k] = process.env[k]; delete process.env[k]; }
@@ -635,6 +690,7 @@ describe("checkWebhookIngestion", () => {
 
   it("PASSes a single-host node regardless of monitor config (double-dispatch guard)", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: singleHost,
       monitor: null,
       secretFileNonEmpty: noSecrets,
@@ -646,9 +702,11 @@ describe("checkWebhookIngestion", () => {
 
   it("FAILs a multiHost node with no webhook route enabled", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "" }, linear: {} },
       secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(false),
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("NO webhook route");
@@ -656,18 +714,94 @@ describe("checkWebhookIngestion", () => {
 
   it("PASSes a multiHost node with the GitHub route fully wired", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { github: { smeeChannel: "https://smee.io/GH" } },
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
   });
 
+  it("GitHub: custom webhookSecretEnv with ONLY the on-disk file present → FAIL (file not projected into a custom name)", () => {
+    // Runtime reads process.env['GH_WH_CUSTOM']; the projection only exports the
+    // default CATALYST_WEBHOOK_SECRET, so the file is NOT a valid proxy here.
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "GH_WH_CUSTOM",
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+      resolveSecretContract: agreeingSecretContract(false),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("NO webhook route");
+  });
+
+  it("GitHub: custom webhookSecretEnv whose env var IS set → PASS (doctor reads the configured name)", () => {
+    process.env.GH_WH_CUSTOM = "hmac-value";
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "GH_WH_CUSTOM",
+      secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(true),
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("GitHub: CATALYST_SMEE_SECRET legacy fallback set (no file, default name unset) → PASS", () => {
+    process.env.CATALYST_SMEE_SECRET = "legacy-hmac";
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
+      secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(true),
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("GitHub: default name + on-disk file present → PASS (regression guard — projection wires the default)", () => {
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+      resolveSecretContract: agreeingSecretContract(true),
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("GitHub: custom webhookSecretEnv set to EMPTY string, CATALYST_SMEE_SECRET set → FAIL (?? parity: empty primary does NOT fall through)", () => {
+    // Runtime webhook-config.ts:429 is `process.env[name] ?? CATALYST_SMEE_SECRET ?? ""`.
+    // An empty (but defined) primary is not nullish, so `??` short-circuits to "" and
+    // the route is DISABLED (secret.length === 0) — the SMEE fallback is never reached.
+    // A `||`-of-length chain would wrongly pick up SMEE and false-PASS here.
+    process.env.GH_WH_CUSTOM = ""; // explicitly empty
+    process.env.CATALYST_SMEE_SECRET = "legacy-hmac";
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      githubSecretEnvName: "GH_WH_CUSTOM",
+      secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(false),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("NO webhook route");
+  });
+
   it("PASSes a multiHost node with a keyed Linear route fully wired", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
       secretFileNonEmpty: (_dir, name) => name === "linear-webhook-secret-ctl",
+      resolveSecretContract: agreeingSecretContract(false),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain("linear keys=1");
@@ -675,6 +809,7 @@ describe("checkWebhookIngestion", () => {
 
   it("FAILs a multiHost node with a half-wired webhookId (id set, secret file missing)", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       // github route IS wired (so the failure is specifically the dangling key)
       monitor: {
@@ -682,6 +817,75 @@ describe("checkWebhookIngestion", () => {
         linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
       },
       secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // ctl secret absent
+      resolveSecretContract: agreeingSecretContract(true),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("half-wired");
+    expect(checks[0].detail).toContain("ctl");
+  });
+
+  it("Linear: keyed webhook wired purely via per-key linearWebhookSecretEnv env var → PASS", () => {
+    process.env.LIN_WH_CUSTOM = "lin-hmac";
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
+      linearSecretEnvName: "LIN_WH_CUSTOM",
+      secretFileNonEmpty: noSecrets, // no file, no global CATALYST_LINEAR_WEBHOOK_SECRET
+      resolveSecretContract: agreeingSecretContract(false),
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("linear keys=1");
+  });
+
+  it("Linear: per-key env name configured but empty, global CATALYST_LINEAR_WEBHOOK_SECRET set → PASS", () => {
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "global-hmac";
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
+      linearSecretEnvName: "LIN_WH_CUSTOM", // set as a name, but the var itself is unset
+      secretFileNonEmpty: noSecrets,
+      resolveSecretContract: agreeingSecretContract(false),
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("Linear: per-key env set to EMPTY string, no global → FAIL half-wired (?? parity: empty per-key does NOT fall through)", () => {
+    // resolveSecret (webhook-config.ts:157-171) is
+    // `(perKeyEnv) ?? CATALYST_LINEAR_WEBHOOK_SECRET ?? ""`. An empty (defined)
+    // per-key var short-circuits to "" and the key is dropped — the global is
+    // never reached. Here there is no global either, so the key is dangling.
+    process.env.LIN_WH_CUSTOM = ""; // explicitly empty
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" }, // github wired so failure is the dangling key
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
+      },
+      githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
+      linearSecretEnvName: "LIN_WH_CUSTOM",
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // github ok, ctl absent everywhere
+      resolveSecretContract: agreeingSecretContract(true),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("half-wired");
+    expect(checks[0].detail).toContain("ctl");
+  });
+
+  it("Linear: no file, per-key env name configured but unset, no global → FAIL half-wired", () => {
+    const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+      resolveRoster: multiHost,
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" }, // github wired so failure is the dangling key
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
+      },
+      githubSecretEnvName: "CATALYST_WEBHOOK_SECRET",
+      linearSecretEnvName: "LIN_WH_CUSTOM",
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // github ok, ctl absent everywhere
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("half-wired");
@@ -690,12 +894,14 @@ describe("checkWebhookIngestion", () => {
 
   it("PASSes when all routes and keyed secrets resolve", () => {
     const checks = checkWebhookIngestion({
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
       resolveRoster: multiHost,
       monitor: {
         github: { smeeChannel: "https://smee.io/GH" },
         linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" }, adv: { webhookId: "wh-adv" } },
       },
       secretFileNonEmpty: allSecrets,
+      resolveSecretContract: agreeingSecretContract(true),
     });
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain("linear keys=2");
@@ -1588,8 +1794,13 @@ describe("checkCloudTokenEnv", () => {
       throw new Error("ENOENT");
     };
 
+  // A2/A3 hermeticity: agree with the hand-rolled hardcoded name so these
+  // pre-existing tests never reach the real resolveSecret (whose answer
+  // depends on CATALYST_CLOUD_TOKEN_ENV / the developer's Layer-2 config).
+  const agreeingCloudTokenContract = () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" });
+
   it("INFO when no token is decrypted (local-only node)", () => {
-    const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile: reader({}) });
+    const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile: reader({}), resolveSecretContract: agreeingCloudTokenContract });
     expect(checks[0].name).toBe("cloud-token");
     expect(checks[0].status).toBe(STATUS.INFO);
   });
@@ -1599,6 +1810,7 @@ describe("checkCloudTokenEnv", () => {
       configDir: CFG,
       zshenvPath: ZSH,
       readFile: reader({ cloud: clusterCloud("tok") }),
+      resolveSecretContract: agreeingCloudTokenContract,
     });
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("NOT projected");
@@ -1609,6 +1821,7 @@ describe("checkCloudTokenEnv", () => {
       configDir: CFG,
       zshenvPath: ZSH,
       readFile: reader({ cloud: clusterCloud("new"), env: exportLine("old") + "\n" }),
+      resolveSecretContract: agreeingCloudTokenContract,
     });
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("STALE");
@@ -1619,6 +1832,7 @@ describe("checkCloudTokenEnv", () => {
       configDir: CFG,
       zshenvPath: ZSH,
       readFile: reader({ cloud: clusterCloud("tok"), env: exportLine("tok") + "\n", zsh: "export OTHER=1\n" }),
+      resolveSecretContract: agreeingCloudTokenContract,
     });
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("source-guard");
@@ -1633,11 +1847,16 @@ describe("checkCloudTokenEnv", () => {
         env: exportLine("tok") + "\n",
         zsh: "# >>> catalyst cloud-token env (CTL-1307) >>>\n. cluster.env\n",
       }),
+      resolveSecretContract: agreeingCloudTokenContract,
     });
     expect(checks[0].status).toBe(STATUS.PASS);
   });
 
   it("never returns a FAIL status (the token is optional)", () => {
+    // Hermeticity (#2929 follow-up): pin an inferred mode so an ambient
+    // CATALYST_DEPLOYMENT_MODE=cloud on the host cannot arm the PR6
+    // escalation inside this pre-PR6 invariant test.
+    const pinnedMode = { mode: "single-host", source: "default", inferred: true, recognized: false };
     // Every branch must be at most WARN — absence/drift must not block activation.
     const branches = [
       reader({}),
@@ -1645,9 +1864,190 @@ describe("checkCloudTokenEnv", () => {
       reader({ cloud: clusterCloud("new"), env: exportLine("old") + "\n" }),
     ];
     for (const readFile of branches) {
-      const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile });
+      const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile, resolveSecretContract: agreeingCloudTokenContract, deploymentMode: pinnedMode });
       for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
     }
+  });
+
+  // ─── CTL-1616 PR6 §7 FAIL escalation (design §5) ───────────────────────────
+  describe("cloud-token-bootstrap FAIL escalation (CTL-1616 PR6)", () => {
+    const DECLARED_CLOUD = { mode: "cloud", source: "env", inferred: false, recognized: true };
+    // Every mode this escalation must be INERT for — the "zero grade change on
+    // every live host" success criterion (design §9 PR6): both minis are
+    // cluster, the laptop is single-host, and an inferred default must never
+    // fire this either.
+    const NON_DECLARED_CLOUD_MODES = [
+      { mode: "single-host", source: "default", inferred: true, recognized: true },
+      { mode: "single-host", source: "layer2", inferred: false, recognized: true },
+      { mode: "cluster", source: "layer1", inferred: false, recognized: true },
+      // Belt-and-suspenders (design §12 Q3): a hand-constructed cloud+inferred:false
+      // object with recognized:false must also stay inert.
+      { mode: "cloud", source: "env", inferred: false, recognized: false },
+    ];
+
+    it("FAILs cloud-token-bootstrap, naming the resolved env-var name and the §4 short-circuit consequence, when declared cloud mode's bootstrap credential does not resolve", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: DECLARED_CLOUD,
+        resolveSecretContract: () => ({
+          value: null,
+          source: "none",
+          provider: "platform-env",
+          envVar: "CATALYST_CLOUD_TOKEN",
+          envVarSource: "default",
+        }),
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(boot).toBeDefined();
+      expect(boot.status).toBe(STATUS.FAIL);
+      expect(boot.detail).toContain("CATALYST_CLOUD_TOKEN");
+      expect(boot.detail.toLowerCase()).toContain("cloud");
+      expect(boot.detail.toLowerCase()).toContain("short-circuit");
+    });
+
+    it("names a CUSTOM resolved env-var name in the FAIL detail — never hardcodes CATALYST_CLOUD_TOKEN", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: DECLARED_CLOUD,
+        resolveSecretContract: () => ({
+          value: null,
+          source: "none",
+          provider: "platform-env",
+          envVar: "MY_CUSTOM_CLOUD_TOKEN",
+          envVarSource: "layer2",
+        }),
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(boot.status).toBe(STATUS.FAIL);
+      expect(boot.detail).toContain("MY_CUSTOM_CLOUD_TOKEN");
+    });
+
+    it("PASSes cloud-token-bootstrap when declared cloud mode's bootstrap credential DOES resolve", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: DECLARED_CLOUD,
+        resolveSecretContract: () => ({
+          value: "the-real-token",
+          source: "platform-env",
+          provider: "platform-env",
+          envVar: "CATALYST_CLOUD_TOKEN",
+          envVarSource: "default",
+        }),
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(boot).toBeDefined();
+      expect(boot.status).toBe(STATUS.PASS);
+    });
+
+    it("a throwing resolver in declared cloud mode degrades to a shadow-throw INFO row, never a crash", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: DECLARED_CLOUD,
+        resolveSecretContract: () => {
+          throw new Error("boom");
+        },
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap-secret-contract-shadow");
+      expect(boot).toBeDefined();
+      expect(boot.status).toBe(STATUS.INFO);
+      expect(checks.some((c) => c.status === STATUS.FAIL)).toBe(false);
+    });
+
+    it("is structurally INERT (contributes zero checks — not even INFO) for every non-declared-cloud deployment mode: zero grade change on every live host", () => {
+      for (const deploymentMode of NON_DECLARED_CLOUD_MODES) {
+        const checks = checkCloudTokenEnv({
+          configDir: CFG,
+          zshenvPath: ZSH,
+          readFile: reader({}),
+          deploymentMode,
+          // A resolver that WOULD FAIL if consulted — proves the gate short-circuits
+          // before ever calling it, not merely that its result happens to be non-FAIL.
+          resolveSecretContract: () => {
+            throw new Error("must never be called for this deployment mode");
+          },
+        });
+        expect(checks.find((c) => c.name === "cloud-token-bootstrap")).toBeUndefined();
+        expect(checks.find((c) => c.name === "cloud-token-bootstrap-secret-contract-shadow")).toBeUndefined();
+      }
+    });
+
+    it("declared cloud + platform token + NO cluster-sync file: coherent report — bootstrap PASS and the primary INFO names the platform env as the source (#2929 P2)", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: { mode: "cloud", source: "layer1", inferred: false, recognized: true },
+        // Dual-shape fixture: name fields satisfy the name-shadow (agrees with
+        // the hardcoded literal), value satisfies the bootstrap resolution.
+        resolveSecretContract: () => ({
+          value: "platform-injected",
+          source: "platform-env",
+          provider: "platform-env",
+          envVar: "CATALYST_CLOUD_TOKEN",
+          envVarSource: "default",
+        }),
+      });
+      const bootstrap = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(bootstrap).toBeDefined();
+      expect(bootstrap.status).toBe(STATUS.PASS);
+      const primary = checks.find((c) => c.name === "cloud-token");
+      expect(primary.status).toBe(STATUS.INFO);
+      expect(primary.detail).toContain("expected on a declared-cloud node");
+      expect(primary.detail).not.toContain("local-only");
+    });
+
+    it("fails OPEN to today's INFO-only behavior when the injected deploymentMode itself is undefined/throws (never crashes checkCloudTokenEnv)", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({}),
+        deploymentMode: undefined,
+        resolveSecretContract: agreeingCloudTokenContract,
+      });
+      expect(checks.find((c) => c.name === "cloud-token-bootstrap")).toBeUndefined();
+      expect(checks[0].status).toBe(STATUS.INFO);
+    });
+
+    // ─── §9 PR6 invariant (design §9 success criterion) ──────────────────────
+    it("END-TO-END with the REAL engine: a synthetic declared-cloud run with no platform token produces the FAIL and PROVABLY never touches the file-search path", () => {
+      // A real cluster-cloud.json/cluster.env/zshenv trio IS present (so the
+      // hand-rolled branches above would otherwise PASS) — the point of this
+      // test is that the NEW escalation fires independently, via the real
+      // resolveSecret engine, and that engine's cloud guard short-circuits
+      // before ever touching the file the CATALYST_CONFIG_DIR fixture below
+      // would otherwise satisfy.
+      const checks = checkCloudTokenEnv({
+        configDir: CFG,
+        zshenvPath: ZSH,
+        readFile: reader({
+          cloud: clusterCloud("tok"),
+          env: exportLine("tok") + "\n",
+          zsh: "# >>> catalyst cloud-token env (CTL-1307) >>>\n. cluster.env\n",
+        }),
+        deploymentMode: DECLARED_CLOUD,
+        // env has NO CATALYST_CLOUD_TOKEN — the real engine's cloud branch is a
+        // pure env-alias read (no file search at all), so this is genuinely
+        // absent regardless of the cluster-cloud.json/cluster.env fixtures above.
+        resolveSecretContract: (id, opts) => resolveSecretReal(id, { ...opts, env: {} }),
+      });
+      const boot = checks.find((c) => c.name === "cloud-token-bootstrap");
+      expect(boot).toBeDefined();
+      expect(boot.status).toBe(STATUS.FAIL);
+      expect(boot.detail).toContain("CATALYST_CLOUD_TOKEN");
+      // The original hand-rolled cluster-cloud.json/cluster.env/zshenv check
+      // still PASSes on its own terms (proving the two questions are genuinely
+      // orthogonal, not that one silently overrides the other).
+      expect(checks[0].name).toBe("cloud-token");
+      expect(checks[0].status).toBe(STATUS.PASS);
+    });
   });
 });
 
@@ -1956,6 +2356,891 @@ describe("checksForClass — checkSdkDaemonEnv registration (CTL-1396)", () => {
   });
 });
 
+describe("checksForClass — checkDeploymentModeConsistency registration (CTL-1617)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+
+  it("worker rubric includes checkDeploymentModeConsistency beside checkNodeClass", () => {
+    const s = src(nodeClassOf({ class: "worker", raw: "worker" }));
+    expect(s).toContain("checkNodeClass");
+    expect(s).toContain("checkDeploymentModeConsistency");
+  });
+
+  it("developer rubric includes checkDeploymentModeConsistency — a fleet-topology fact, not worker-only", () => {
+    const s = src(nodeClassOf({ class: "developer", raw: "developer" }));
+    expect(s).toContain("checkDeploymentModeConsistency");
+  });
+
+  it("monitor rubric includes checkDeploymentModeConsistency", () => {
+    const s = src(nodeClassOf({ class: "monitor", raw: "monitor" }));
+    expect(s).toContain("checkDeploymentModeConsistency");
+  });
+
+  it("an inferred (unset) node class still grades against the worker suite, deployment mode included", () => {
+    const inferred = nodeClassOf({ class: "worker", source: "default", inferred: true, recognized: true, raw: null });
+    const s = src(inferred);
+    expect(s).toContain("checkDeploymentModeConsistency");
+  });
+
+  it("unrecognized node class short-circuits to the single node-class FAIL — deployment mode not graded", () => {
+    const nc = nodeClassOf({ recognized: false, raw: "developr", class: "monitor" });
+    const suite = checksForClass(nc);
+    expect(suite).toHaveLength(1);
+  });
+
+  it("the deployment-mode thunk actually runs checkDeploymentModeConsistency and returns its checks", async () => {
+    const s = checksForClass(nodeClassOf({ class: "worker", raw: "worker" }));
+    const thunk = s.find((f) => f.toString().includes("checkDeploymentModeConsistency"));
+    expect(thunk).toBeDefined();
+    const out = await thunk();
+    expect(out.some((c) => c.name === "deployment-mode")).toBe(true);
+  });
+});
+
+// ─── CTL-1616 PR2: checkSecretContract (secret-contract shadow pass) ────────
+
+describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)", () => {
+  const CLOUD_MODE = { mode: "cloud", source: "env", inferred: false, recognized: true };
+
+  it("checkSecretContract passes an explicitly-injected deploymentMode through to the resolver", () => {
+    const seen = [];
+    checkSecretContract({
+      deploymentMode: CLOUD_MODE,
+      resolveSecretFn: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(2);
+    for (const dm of seen) expect(dm).toEqual(CLOUD_MODE);
+  });
+
+  it("checkSecretContract supplies a deploymentMode by DEFAULT (the resolver is never mode-blind)", () => {
+    const seen = [];
+    checkSecretContract({
+      resolveSecretFn: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(2);
+    // resolveDeploymentMode() never throws and always returns a resolution
+    // object — the shadow must thread it, not undefined.
+    for (const dm of seen) {
+      expect(dm).toBeDefined();
+      expect(typeof dm.mode).toBe("string");
+    }
+  });
+
+  it("CTL-1616 PR3 cutover: checkPeerUniqueness's LIVE resolveSecretContract call also receives a deploymentMode", async () => {
+    // No hasLinearToken override here (unlike the rest of this file's fixtures)
+    // — it must be absent so the default (which calls resolveSecretContract
+    // via resolveLinearTokenLive) actually runs and this assertion exercises
+    // something real.
+    const seen = [];
+    await checkPeerUniqueness({
+      getHostName: () => "mini",
+      getLivenessAnchorIssue: () => "CTL-1",
+      readPeerHeartbeats: async () => ({}),
+      resolveSecretContract: (id, opts) => {
+        seen.push(opts?.deploymentMode);
+        return { value: null, source: "none", provider: "none" };
+      },
+    });
+    expect(seen.length).toBe(1);
+    expect(seen[0]).toBeDefined();
+    expect(typeof seen[0].mode).toBe("string");
+  });
+
+  it("DEFAULT deploymentMode derives from the INJECTED env, not the host process.env (#2916 round-3)", () => {
+    // env declares cloud with no bootstrap token; deploymentMode dep omitted.
+    // Both halves must resolve from the same injected env: the bootstrap
+    // short-circuit must fire even though the HOST's mode is not cloud.
+    const env = { CATALYST_DEPLOYMENT_MODE: "cloud", GROQ_API_KEY: "gk-live", LINEAR_API_TOKEN: "lin-live" };
+    const checks = checkSecretContract({ env, resolveSecretFn: resolveSecretReal });
+    for (const c of checks) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("no resolution");
+    }
+  });
+
+  it("non-Error resolver throws (Symbol, null-proto object, revoked Proxy) stay inside the shadow (#2916 round-3/4 P3)", () => {
+    const { proxy: revokedProxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    for (const thrown of [Symbol("boom"), Object.create(null), revokedProxy]) {
+      const checks = checkSecretContract({
+        resolveSecretFn: () => {
+          throw thrown;
+        },
+      });
+      expect(checks.length).toBe(2);
+      for (const c of checks) {
+        expect(c.status).toBe(STATUS.INFO);
+        expect(c.detail).toContain("SHADOW RESOLVER THREW");
+      }
+    }
+  });
+
+  it("END-TO-END: declared cloud mode activates the engine's bootstrap short-circuit through checkSecretContract", () => {
+    // Real engine, cloud mode declared, NO platform bootstrap token in env:
+    // every non-bootstrap resolution must short-circuit to no-resolution
+    // (design §4 rule 2) — even though GROQ_API_KEY is right there in env
+    // (proof the file/env ladder was NOT consulted).
+    const env = { GROQ_API_KEY: "gk-live", LINEAR_API_TOKEN: "lin-live" };
+    const checks = checkSecretContract({ env, deploymentMode: CLOUD_MODE, resolveSecretFn: resolveSecretReal });
+    for (const c of checks) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("no resolution");
+    }
+    // Control: same env WITHOUT cloud mode — the normal ladder resolves both.
+    const control = checkSecretContract({ env, deploymentMode: { mode: "single-host", source: "default", inferred: true, recognized: false }, resolveSecretFn: resolveSecretReal });
+    for (const c of control) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("resolves");
+    }
+  });
+});
+
+describe("checkLayer2PathDivergence (#2930 round-2)", () => {
+  it("returns zero rows when the chains agree (every live host)", () => {
+    expect(checkLayer2PathDivergence({ env: {} })).toHaveLength(0);
+    expect(
+      checkLayer2PathDivergence({ env: { CATALYST_LAYER2_CONFIG_FILE: "/pin/config.json" } }),
+    ).toHaveLength(0);
+  });
+
+  it("FAILs a MACHINE_CONFIG-divergent host, naming both paths and the CATALYST_LAYER2_CONFIG_FILE pin", () => {
+    const checks = checkLayer2PathDivergence({
+      env: { CATALYST_MACHINE_CONFIG: "/machine/split-test/config.json" },
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("/machine/split-test/config.json");
+    expect(checks[0].detail).toContain("CATALYST_LAYER2_CONFIG_FILE");
+  });
+
+  it("does NOT fail on an alias-equivalent spelling of the same file (#2931 round-2)", () => {
+    const home = homedir();
+    const checks = checkLayer2PathDivergence({
+      env: {
+        CATALYST_MACHINE_CONFIG: join(home, ".config", "catalyst", "..", "catalyst", "config.json"),
+      },
+    });
+    expect(checks).toHaveLength(0);
+  });
+
+  it("REJECTS a relative configured path instead of cwd-normalizing it into agreement (#2938 round-2)", () => {
+    const checks = checkLayer2PathDivergence({
+      env: { CATALYST_MACHINE_CONFIG: "config.json" },
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("RELATIVE");
+    expect(checks[0].detail).toContain("ABSOLUTE CATALYST_LAYER2_CONFIG_FILE");
+  });
+
+  it("remedy names the every-supervised-service pin requirement without a committed ticket prefix", () => {
+    const checks = checkLayer2PathDivergence({
+      env: { CATALYST_MACHINE_CONFIG: "/machine/split-test/config.json" },
+    });
+    expect(checks[0].detail).toContain("EVERY supervised service");
+    // Prefix-agnostic ticket scan DERIVED from the canonical grammar
+    // (ticket-key.mjs TICKET_KEY_RE, anchors stripped for substring scanning)
+    // so a future grammar extension cannot silently stale this assertion —
+    // and the assertion itself commits no repo-specific prefix (the very
+    // rule it enforces).
+    const ticketScanRe = new RegExp(`\\b${TICKET_KEY_RE.source.replace(/^\^|\$$/g, "")}\\b`);
+    expect(checks[0].detail).not.toMatch(ticketScanRe);
+  });
+
+  it("fails OPEN (zero rows) when a resolver throws", () => {
+    expect(
+      checkLayer2PathDivergence({
+        env: {},
+        canonicalPathFn: () => {
+          throw new Error("boom");
+        },
+      }),
+    ).toHaveLength(0);
+  });
+});
+
+describe("checkSecretContract (CTL-1616 PR2)", () => {
+  it("emits one INFO observation per shadow-covered secret id (linear-api-token, groq-api-key)", () => {
+    const checks = checkSecretContract({
+      resolveSecretFn: (id) => ({ value: `v-${id}`, source: "inherited", provider: "env-alias" }),
+    });
+    const names = checks.map((c) => c.name);
+    expect(names).toContain("secret-contract-linear-api-token");
+    expect(names).toContain("secret-contract-groq-api-key");
+    for (const c of checks) expect(c.status).toBe(STATUS.INFO);
+  });
+
+  it("never emits WARN or FAIL, even when every resolution is absent (zero grade change)", () => {
+    const checks = checkSecretContract({ resolveSecretFn: () => ({ value: null, source: "none", provider: null }) });
+    for (const c of checks) expect(c.status).toBe(STATUS.INFO);
+    expect(summarize(checks)).toEqual({ pass: 0, warn: 0, fail: 0, ok: true });
+  });
+
+  it("uses the injected resolver, not the real registry, when one is provided", () => {
+    let calledWith = [];
+    checkSecretContract({
+      env: { X: "1" },
+      deploymentMode: { mode: "cluster", inferred: false },
+      resolveSecretFn: (id, opts) => {
+        calledWith.push([id, opts]);
+        return { value: null, source: "none", provider: null };
+      },
+    });
+    expect(calledWith.map(([id]) => id)).toEqual(["linear-api-token", "groq-api-key"]);
+    expect(calledWith[0][1]).toEqual({ env: { X: "1" }, deploymentMode: { mode: "cluster", inferred: false } });
+  });
+});
+
+describe("checksForClass — checkSecretContract registration (CTL-1616 PR2)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+
+  it("worker rubric includes checkSecretContract beside checkDeploymentModeConsistency", () => {
+    const s = src(nodeClassOf({ class: "worker", raw: "worker" }));
+    expect(s).toContain("checkDeploymentModeConsistency");
+    expect(s).toContain("checkSecretContract");
+  });
+
+  it("developer rubric includes checkSecretContract — fleet-topology-independent, not worker-only", () => {
+    const s = src(nodeClassOf({ class: "developer", raw: "developer" }));
+    expect(s).toContain("checkSecretContract");
+  });
+
+  it("monitor rubric includes checkSecretContract", () => {
+    const s = src(nodeClassOf({ class: "monitor", raw: "monitor" }));
+    expect(s).toContain("checkSecretContract");
+  });
+
+  it("an unrecognized node class short-circuits to the single node-class FAIL — secret contract not graded", () => {
+    const nc = nodeClassOf({ recognized: false, raw: "developr", class: "monitor" });
+    const suite = checksForClass(nc);
+    expect(suite).toHaveLength(1);
+  });
+
+  it("the secret-contract thunk actually runs checkSecretContract and returns its (INFO-only) checks", async () => {
+    const s = checksForClass(nodeClassOf({ class: "worker", raw: "worker" }));
+    const thunk = s.find((f) => f.toString().includes("checkSecretContract()"));
+    expect(thunk).toBeDefined();
+    const out = await thunk();
+    expect(out.some((c) => c.name === "secret-contract-linear-api-token")).toBe(true);
+    for (const c of out) expect(c.status).toBe(STATUS.INFO);
+  });
+});
+
+// ─── CTL-1616 PR2/PR3: secret-contract shadow — zero grade change ──────────
+//
+// The shadow discipline (design §7/§9) still covers the 2 call sites PR3 left
+// alone — checkWebhookIngestion (webhook-secret) and checkCloudTokenEnv
+// (cloud-token) — where the contract is CONSULTED AND COMPARED but decides
+// NOTHING — every disagreement surfaces as an extra INFO row; every agreement
+// surfaces nothing extra. checkPeerUniqueness/checkBotCredentials/
+// checkWorkerLabels were cut over to the contract as their LIVE answer in
+// PR3 (see the "secret-contract cutover" describe above and
+// doctor-worker-labels.test.mjs) — they no longer have an "agree/disagree"
+// axis at all. These tests prove both remaining-shadow halves plus the invariant
+// that grades/exit-code are IDENTICAL either way.
+describe("checkWebhookIngestion — deployment-mode alignment (CTL-1617, #2913 Codex P1)", () => {
+  // Hermeticity: the linear/github env legs read process.env directly — an
+  // ambient CATALYST_LINEAR_WEBHOOK_SECRET would wire the half-wired fixture.
+  const MODE_ALIGN_ENVS = [
+    "CATALYST_WEBHOOK_SECRET",
+    "CATALYST_SMEE_SECRET",
+    "CATALYST_LINEAR_WEBHOOK_SECRET",
+    "CATALYST_DEPLOYMENT_MODE",
+  ];
+  let savedModeAlignEnv = {};
+  beforeEach(() => {
+    savedModeAlignEnv = {};
+    for (const k of MODE_ALIGN_ENVS) {
+      savedModeAlignEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+  afterEach(() => {
+    for (const k of MODE_ALIGN_ENVS) {
+      if (savedModeAlignEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedModeAlignEnv[k];
+    }
+  });
+  const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const NO_ROUTE_DEPS = {
+    resolveRoster: multiHost,
+    monitor: { github: {}, linear: {} },
+    secretFileNonEmpty: () => false,
+    resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+  };
+  const mode = (m, extra = {}) => ({ mode: m, source: "layer1", inferred: false, recognized: true, ...extra });
+
+  it("declared single-host: multiHost roster + no route is the ALIGNED PASS", () => {
+    const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("single-host") });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.PASS);
+    expect(primary.detail).toContain('declared deployment mode "single-host"');
+    expect(primary.detail).toContain("intentionally not wired");
+  });
+
+  it("declared cloud: WARN, not PASS — cloud replacement ingestion does not exist yet (#2918 follow-up)", () => {
+    const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("cloud") });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.WARN);
+    expect(primary.detail).toContain("no event ingestion at all");
+  });
+
+  it("declared non-cluster with a DANGLING Linear key: half-wired FAIL fires before the aligned grant (#2918 follow-up ordering)", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      // no github route at all + linear webhookId without its secret →
+      // both wired flags false → the old code granted the aligned PASS
+      // before ever reaching the dangling check.
+      monitor: { github: {}, linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
+      secretFileNonEmpty: () => false,
+      linearSecretEnvName: null,
+      resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+      resolveDeploymentModeFn: () => mode("single-host"),
+    });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.FAIL);
+    expect(primary.detail).toContain("half-wired");
+    expect(primary.detail).toContain("does not excuse config residue");
+  });
+
+  it("declared CLUSTER keeps the FAIL — the missed-activation-step-2b signal must survive", () => {
+    const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("cluster") });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.FAIL);
+    expect(primary.detail).toContain("NO webhook route");
+  });
+
+  it("inferred mode keeps the FAIL — pre-migration guarantee unchanged", () => {
+    const checks = checkWebhookIngestion({
+      ...NO_ROUTE_DEPS,
+      resolveDeploymentModeFn: () => ({ mode: "single-host", source: "default", inferred: true, recognized: false }),
+    });
+    expect(checks.find((c) => c.name === "webhook-ingestion").status).toBe(STATUS.FAIL);
+  });
+
+  it("throwing mode resolver degrades to the FAIL (grading fails closed)", () => {
+    const checks = checkWebhookIngestion({
+      ...NO_ROUTE_DEPS,
+      resolveDeploymentModeFn: () => {
+        throw new Error("resolver exploded");
+      },
+    });
+    expect(checks.find((c) => c.name === "webhook-ingestion").status).toBe(STATUS.FAIL);
+  });
+
+  it("half-wired Linear webhooks stay FAIL even under a declared non-cluster mode (config residue is an error)", () => {
+    // github route wired (so the no-route alignment branch is NOT taken),
+    // linear key dangling — the half-wired FAIL must survive the declared
+    // non-cluster mode: partially-present config is an error, only the
+    // fully-absent route is the aligned state.
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" },
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
+      },
+      secretFileNonEmpty: (dir, name) => name === "webhook-secret",
+      linearSecretEnvName: null,
+      resolveSecretContract: () => ({ value: "x", source: "file", provider: "bare-file" }),
+      resolveDeploymentModeFn: () => mode("single-host"),
+    });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.FAIL);
+    expect(primary.detail).toContain("half-wired");
+  });
+});
+
+describe("secret-contract cutover — checkPeerUniqueness/checkBotCredentials (CTL-1616 PR3)", () => {
+  // PR3 (design §9) flips these two call sites from PR2's shadow-comparison to
+  // the contract as their LIVE answer — hasLinearToken/linearToken now DEFAULT
+  // to resolveSecretContract's own resolution, and the PR2 shadow-disagreement
+  // row these sites used to emit is retired (there is no second, independently
+  // hand-rolled answer left to disagree with). These tests replace the CTL-1616
+  // PR2 "shadow — zero grade change" describe for these two functions.
+  describe("checkPeerUniqueness", () => {
+    const base = {
+      getHostName: () => "mini",
+      getLivenessAnchorIssue: () => "CTL-9999",
+      readPeerHeartbeats: async () => ({}),
+    };
+
+    it("resolveSecretContract resolving absent → hasLinearToken() false, no-token WARN, never a shadow row", async () => {
+      const checks = await checkPeerUniqueness({
+        ...base,
+        resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+      });
+      expect(checks).toHaveLength(1);
+      expect(checks[0].name).toBe("peer-uniqueness");
+      expect(checks[0].status).toBe(STATUS.WARN);
+      expect(checks[0].detail).toContain("no LINEAR_API_TOKEN");
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    it("resolveSecretContract resolving present → hasLinearToken() true, proceeds past the token gate", async () => {
+      const checks = await checkPeerUniqueness({
+        ...base,
+        resolveSecretContract: () => ({ value: "contract-token", source: "inherited", provider: "env-alias" }),
+      });
+      expect(checks).toHaveLength(1);
+      expect(checks[0].name).toBe("peer-uniqueness");
+      expect(checks[0].status).toBe(STATUS.WARN); // the EMPTY-heartbeats WARN, not the no-token WARN
+      expect(checks[0].detail).toContain("empty");
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    // CTL-1616 PR3 success criterion (design §9): a LINEAR_API_KEY-only
+    // environment (no LINEAR_API_TOKEN) must resolve identically through the
+    // live cutover. Exercises the REAL resolveSecret default end-to-end — no
+    // hasLinearToken/resolveSecretContract override at all.
+    it("LINEAR_API_KEY-only fixture (real resolveSecret default): honors the alias, proceeds past the token gate", async () => {
+      const savedToken = process.env.LINEAR_API_TOKEN;
+      const savedKey = process.env.LINEAR_API_KEY;
+      const savedMode = process.env.CATALYST_DEPLOYMENT_MODE;
+      try {
+        delete process.env.LINEAR_API_TOKEN;
+        // Hermeticity (#2929 follow-up): an ambient declared-cloud host mode
+        // would arm the engine's cloud guard through the REAL resolver and
+        // short-circuit linear-api-token — this test is about the alias.
+        delete process.env.CATALYST_DEPLOYMENT_MODE;
+        process.env.LINEAR_API_KEY = "lin_api_fromkey";
+        const checks = await checkPeerUniqueness(base);
+        expect(checks).toHaveLength(1);
+        expect(checks[0].detail).toContain("empty"); // past the token gate
+      } finally {
+        if (savedMode === undefined) delete process.env.CATALYST_DEPLOYMENT_MODE;
+        else process.env.CATALYST_DEPLOYMENT_MODE = savedMode;
+        if (savedMode === undefined) delete process.env.CATALYST_DEPLOYMENT_MODE;
+        else process.env.CATALYST_DEPLOYMENT_MODE = savedMode;
+        if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+        else process.env.LINEAR_API_TOKEN = savedToken;
+        if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+        else process.env.LINEAR_API_KEY = savedKey;
+      }
+    });
+  });
+
+  describe("checkBotCredentials", () => {
+    it("resolveSecretContract resolving present → linearToken() returns it, proceeds to the connectivity probe", async () => {
+      const checks = await checkBotCredentials({
+        readLinearBotUserIds: () => new Set(["bot-user-123"]),
+        fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
+        resolveSecretContract: () => ({ value: "contract-token", source: "inherited", provider: "env-alias" }),
+      });
+      const connectivity = checks.find((c) => c.name === "linear-connectivity");
+      expect(connectivity.status).toBe(STATUS.PASS);
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    it("resolveSecretContract resolving absent → linearToken() empty, the no-token WARN path, never a shadow row", async () => {
+      const checks = await checkBotCredentials({
+        readLinearBotUserIds: () => new Set(["bot-user-123"]),
+        fetch: fakeFetch({}),
+        resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+      });
+      const connectivity = checks.find((c) => c.name === "linear-connectivity");
+      expect(connectivity.status).toBe(STATUS.WARN);
+      expect(connectivity.detail).toContain("no LINEAR_API_TOKEN");
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    // CTL-1616 PR3 success criterion (design §9): a LINEAR_API_KEY-only
+    // environment resolves identically through the live cutover — real
+    // resolveSecret default, no override at all.
+    it("LINEAR_API_KEY-only fixture (real resolveSecret default): honors the alias, reaches the connectivity probe", async () => {
+      const savedToken = process.env.LINEAR_API_TOKEN;
+      const savedKey = process.env.LINEAR_API_KEY;
+      const savedMode = process.env.CATALYST_DEPLOYMENT_MODE;
+      try {
+        delete process.env.LINEAR_API_TOKEN;
+        // Hermeticity (#2929 follow-up): an ambient declared-cloud host mode
+        // would arm the engine's cloud guard through the REAL resolver and
+        // short-circuit linear-api-token — this test is about the alias.
+        delete process.env.CATALYST_DEPLOYMENT_MODE;
+        process.env.LINEAR_API_KEY = "lin_api_fromkey";
+        const checks = await checkBotCredentials({
+          readLinearBotUserIds: () => new Set(["bot-user-123"]),
+          fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
+        });
+        const connectivity = checks.find((c) => c.name === "linear-connectivity");
+        expect(connectivity.status).toBe(STATUS.PASS);
+      } finally {
+        if (savedMode === undefined) delete process.env.CATALYST_DEPLOYMENT_MODE;
+        else process.env.CATALYST_DEPLOYMENT_MODE = savedMode;
+        if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+        else process.env.LINEAR_API_TOKEN = savedToken;
+        if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+        else process.env.LINEAR_API_KEY = savedKey;
+      }
+    });
+  });
+
+  describe("checkWebhookIngestion — CATALYST_CONFIG_DIR override the hand-rolled path ignores", () => {
+    // Isolate the same env-var fallbacks the top-level checkWebhookIngestion
+    // describe isolates (this block sits outside that describe's own
+    // beforeEach/afterEach scope) — an ambient CATALYST_WEBHOOK_SECRET /
+    // CATALYST_SMEE_SECRET would otherwise make ghEnvSecret true regardless of
+    // the file-search divergence this block is isolating.
+    const SHADOW_SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_SMEE_SECRET", "CATALYST_CONFIG_DIR", "CATALYST_DEPLOYMENT_MODE", "CATALYST_WEBHOOK_SECRET_FILE"];
+    let savedEnv = {};
+    let tmpDir;
+    beforeEach(() => {
+      for (const k of SHADOW_SECRET_ENVS) { savedEnv[k] = process.env[k]; delete process.env[k]; }
+      tmpDir = mkdtempSync(join(tmpdir(), "ctl1616-webhook-shadow-"));
+      process.env.CATALYST_CONFIG_DIR = tmpDir;
+      // #2916 round-2 (Codex P2): PIN the deployment mode via the env override
+      // (highest resolver precedence) — this block uses the REAL resolveSecret,
+      // and on a host whose machine config declares cloud (without a bootstrap
+      // token) the engine's cloud short-circuit would report webhook-secret
+      // absent despite the temp file, swallowing the expected disagreement row.
+      // Pinning single-host isolates the fixture from the host's declared mode
+      // while keeping real secret-file resolution.
+      process.env.CATALYST_DEPLOYMENT_MODE = "single-host";
+      // A real, non-empty webhook-secret file at the CATALYST_CONFIG_DIR path —
+      // secretFileCandidates (and so resolveSecret) honor this override;
+      // defaultWebhookConfigDir() does NOT (design §7's cited divergence).
+      writeFileSync(join(tmpDir, "webhook-secret"), "hmac-value-from-override\n");
+    });
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true });
+      for (const k of SHADOW_SECRET_ENVS) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
+
+    it("disagree: hand-rolled (hardcoded configDir) finds nothing, contract (honors CATALYST_CONFIG_DIR) finds the file", () => {
+      const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+      const checks = checkWebhookIngestion({
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+        // configDir NOT overridden here → defaults to defaultWebhookConfigDir(),
+        // which hardcodes ~/.config/catalyst and never looks at CATALYST_CONFIG_DIR.
+        secretFileNonEmpty: () => false, // hand-rolled sees nothing at its (wrong) dir
+        // resolveSecretContract left at its real default (resolveSecret) — it DOES
+        // honor CATALYST_CONFIG_DIR via secretFileCandidates and finds the file above.
+      });
+      const primary = checks.find((c) => c.name === "webhook-ingestion");
+      // CTL-1617 mode-alignment: this fixture pins CATALYST_DEPLOYMENT_MODE=
+      // single-host (declared, recognized), so a multiHost roster with no
+      // route is now the ALIGNED PASS ("intentionally not wired"), not a
+      // FAIL. The point of this test is the shadow divergence row below,
+      // which is unaffected by the primary's grade.
+      expect(primary.status).toBe(STATUS.PASS);
+      expect(primary.detail).toContain("intentionally not wired");
+      const shadow = checks.find((c) => c.name === "webhook-ingestion-secret-contract-shadow");
+      expect(shadow).toBeDefined();
+      expect(shadow.status).toBe(STATUS.INFO);
+      expect(shadow.detail).toContain('secret="webhook-secret"');
+      expect(shadow.detail).toContain("hand-rolled=absent");
+      expect(shadow.detail).toContain("contract={value:present");
+    });
+
+    it("agree: once the hand-rolled configDir is ALSO pointed at the override, no shadow row", () => {
+      const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+      const checks = checkWebhookIngestion({
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+        configDir: tmpDir,
+        secretFileNonEmpty: (dir, name) => {
+          try {
+            return readFileSync(join(dir, name), "utf8").trim().length > 0;
+          } catch {
+            return false;
+          }
+        },
+      });
+      const primary = checks.find((c) => c.name === "webhook-ingestion");
+      expect(primary.status).toBe(STATUS.PASS);
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+  });
+
+  describe("checkCloudTokenEnv — hardcoded env-var NAME vs the contract's resolved name", () => {
+  it("replica-name divergence: resolveNodeCloudTokenEnv disagrees with the contract → loud INFO row (#2916 round-3)", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: "/cfg",
+      zshenvPath: "/home/.zshenv",
+      readFile: () => {
+        throw new Error("ENOENT");
+      },
+      resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+      resolveReplicaTokenEnv: () => ({ envVar: "OTHER_TOKEN", source: "layer2" }),
+    });
+    const shadow = checks.find(
+      (c) => c.name === "cloud-token-secret-contract-shadow" && c.detail.includes("replica-token resolver"),
+    );
+    expect(shadow).toBeDefined();
+    expect(shadow.status).toBe(STATUS.INFO);
+    expect(shadow.detail).toContain('"OTHER_TOKEN"');
+    // primary grade untouched
+    const primary = checks.find((c) => c.name === "cloud-token");
+    expect(primary.status).toBe(STATUS.INFO);
+  });
+
+  it("replica-name divergence fires against the REAL resolveNodeCloudTokenEnv (production shape, #2916 round-4)", () => {
+    const saved = process.env.CATALYST_CLOUD_TOKEN_ENV;
+    process.env.CATALYST_CLOUD_TOKEN_ENV = "OTHER_TOKEN";
+    try {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => {
+          throw new Error("ENOENT");
+        },
+        resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+        // resolveReplicaTokenEnv left at its REAL default — returns { envVar, source }
+      });
+      const shadow = checks.find(
+        (c) => c.name === "cloud-token-secret-contract-shadow" && c.detail.includes("replica-token resolver"),
+      );
+      expect(shadow).toBeDefined();
+      expect(shadow.detail).toContain('"OTHER_TOKEN"');
+    } finally {
+      if (saved === undefined) delete process.env.CATALYST_CLOUD_TOKEN_ENV;
+      else process.env.CATALYST_CLOUD_TOKEN_ENV = saved;
+    }
+  });
+
+  it("replica-name agreement: no replica-divergence row", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: "/cfg",
+      zshenvPath: "/home/.zshenv",
+      readFile: () => {
+        throw new Error("ENOENT");
+      },
+      resolveSecretContract: () => ({ envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+      resolveReplicaTokenEnv: () => ({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" }),
+    });
+    expect(checks.some((c) => (c.detail ?? "").includes("replica-token resolver"))).toBe(false);
+  });
+
+    it("agree: contract resolves the same default name → no shadow row", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => { throw new Error("ENOENT"); },
+        resolveSecretContract: () => ({ value: null, source: "none", envVar: "CATALYST_CLOUD_TOKEN", envVarSource: "default" }),
+      });
+      expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    });
+
+    it("disagree: contract resolves a CUSTOM env-var name (Layer-2 catalyst.cloud.tokenEnv) the hand-rolled check never looks at", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => { throw new Error("ENOENT"); },
+        resolveSecretContract: () => ({
+          value: "tok",
+          source: "platform-env",
+          envVar: "MY_CUSTOM_CLOUD_TOKEN",
+          envVarSource: "layer2",
+        }),
+      });
+      const primary = checks.find((c) => c.name === "cloud-token");
+      expect(primary.status).toBe(STATUS.INFO); // unchanged (no cluster-cloud.json → local-only)
+      const shadow = checks.find((c) => c.name === "cloud-token-secret-contract-shadow");
+      expect(shadow).toBeDefined();
+      expect(shadow.status).toBe(STATUS.INFO);
+      expect(shadow.detail).toContain('hardcodes env-var name "CATALYST_CLOUD_TOKEN"');
+      expect(shadow.detail).toContain('resolves "MY_CUSTOM_CLOUD_TOKEN"');
+    });
+
+    it("never returns a FAIL status even with a shadow disagreement present (the token stays optional)", () => {
+      const checks = checkCloudTokenEnv({
+        configDir: "/cfg",
+        zshenvPath: "/home/.zshenv",
+        readFile: () => { throw new Error("ENOENT"); },
+        resolveSecretContract: () => ({ value: "tok", source: "platform-env", envVar: "OTHER_NAME", envVarSource: "env" }),
+      });
+      for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
+    });
+  });
+
+  describe("grades and exit code are IDENTICAL with the shadow present, agree or disagree", () => {
+    // summarize() only counts PASS/WARN/FAIL — INFO rows (agree = none, disagree =
+    // one extra) never move pass/warn/fail counts or `ok` (design §7/§9's own
+    // exit-code invariant, doctor.mjs:1728-1736). checkPeerUniqueness no longer
+    // has an "agree vs disagree" axis post-PR3-cutover (there is only ONE
+    // answer now — the contract's own) — see the "secret-contract cutover"
+    // describe above for its replacement coverage.
+
+    it("checkWebhookIngestion: summarize() is identical across an agree and a disagree fixture", () => {
+      const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+      const fixture = (resolveSecretContract) =>
+        checkWebhookIngestion({
+          resolveRoster: multiHost,
+          monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+          secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+          resolveSecretContract,
+        });
+      const agree = fixture(() => ({ value: "x", source: "shared-file", provider: "bare-file" }));
+      const disagree = fixture(() => ({ value: null, source: "none", provider: "bare-file" }));
+      expect(disagree.length).toBe(agree.length + 1);
+      expect(summarize(agree)).toEqual(summarize(disagree));
+    });
+  });
+});
+
+// ─── CTL-1616 PR2 (B1): shadow resolver must be throw-safe ──────────────────
+//
+// None of the 6 shadow call sites may let a throwing resolveSecretContract/
+// resolveSecretFn dependency propagate: runDoctor's `Promise.all(fns.map(fn
+// => Promise.resolve().then(fn)))` has no per-check isolation, so an uncaught
+// throw from ANY check fn rejects the whole Promise.all and crashes doctor
+// with zero report output (proven — see the "runDoctor" describe below). Each
+// test here injects a resolver that throws and asserts: (a) the check still
+// returns its normal graded rows, unchanged, (b) a LOUD INFO throw-row
+// appears, (c) no FAIL/WARN is introduced by the throw itself.
+const THROWING_RESOLVER = () => {
+  throw new Error("boom: registry lookup exploded");
+};
+
+describe("secret-contract shadow — resolver throw-safety (CTL-1616 PR2/PR3)", () => {
+  // CTL-1616 PR3 cutover: checkPeerUniqueness/checkBotCredentials no longer
+  // run a shadow comparison — resolveLinearTokenLive (doctor.mjs) wraps the
+  // injected resolveSecretContract in the same safeResolveSecretContract B1
+  // discipline, but a throw now degrades directly to "no token" (the ordinary
+  // WARN path), never an extra INFO row (there is no shadow row left to emit).
+  it("checkPeerUniqueness: a throwing resolveSecretContract degrades to the no-token WARN, never crashes, no shadow row", async () => {
+    const checks = await checkPeerUniqueness({
+      getHostName: () => "mini",
+      getLivenessAnchorIssue: () => "CTL-9999",
+      readPeerHeartbeats: async () => ({}),
+      resolveSecretContract: THROWING_RESOLVER,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("peer-uniqueness");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("no LINEAR_API_TOKEN");
+    expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    expect(summarize(checks).fail).toBe(0);
+  });
+
+  it("checkBotCredentials: a throwing resolveSecretContract degrades to the no-token WARN path, never crashes, no shadow row", async () => {
+    const checks = await checkBotCredentials({
+      readLinearBotUserIds: () => new Set(["bot-user-123"]),
+      fetch: fakeFetch({ data: { viewer: { id: "bot-user-123", name: "Bot", email: "bot@example.com" } } }),
+      expectedBotUserId: null,
+      resolveSecretContract: THROWING_RESOLVER,
+    });
+    const connectivity = checks.find((c) => c.name === "linear-connectivity");
+    expect(connectivity.status).toBe(STATUS.WARN);
+    expect(connectivity.detail).toContain("no LINEAR_API_TOKEN");
+    expect(checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    expect(summarize(checks).fail).toBe(0);
+  });
+
+  it("checkWebhookIngestion: a throwing resolver still returns the normal graded row plus a throw-row", () => {
+    const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" }, linear: {} },
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+      resolveSecretContract: THROWING_RESOLVER,
+    });
+    const primary = checks.find((c) => c.name === "webhook-ingestion");
+    expect(primary.status).toBe(STATUS.PASS); // unchanged
+    const throwRow = checks.find((c) => c.name === "webhook-ingestion-secret-contract-shadow");
+    expect(throwRow).toBeDefined();
+    expect(throwRow.status).toBe(STATUS.INFO);
+    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(throwRow.detail).toContain('secret="webhook-secret"');
+    expect(summarize(checks).fail).toBe(0);
+  });
+
+  it("checkCloudTokenEnv: a throwing resolver still returns the normal graded row plus a throw-row", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: "/cfg",
+      zshenvPath: "/home/.zshenv",
+      readFile: () => { throw new Error("ENOENT"); },
+      resolveSecretContract: THROWING_RESOLVER,
+    });
+    const primary = checks.find((c) => c.name === "cloud-token");
+    expect(primary).toBeDefined();
+    expect(primary.status).toBe(STATUS.INFO); // unchanged (local-only, no cluster-cloud.json)
+    const throwRow = checks.find((c) => c.name === "cloud-token-secret-contract-shadow");
+    expect(throwRow).toBeDefined();
+    expect(throwRow.status).toBe(STATUS.INFO);
+    expect(throwRow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(throwRow.detail).toContain('secret="cloud-token"');
+    for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
+  });
+
+  it("checkSecretContract: a resolver that throws for one id still resolves the other id normally", () => {
+    const checks = checkSecretContract({
+      resolveSecretFn: (id) => {
+        if (id === "groq-api-key") throw new Error("groq lookup exploded");
+        return { value: `v-${id}`, source: "inherited", provider: "env-alias" };
+      },
+    });
+    const linear = checks.find((c) => c.name === "secret-contract-linear-api-token");
+    expect(linear).toBeDefined();
+    expect(linear.status).toBe(STATUS.INFO);
+    expect(linear.detail).toContain("secret contract resolves");
+    const groqThrow = checks.find((c) => c.name === "secret-contract-groq-api-key-secret-contract-shadow");
+    expect(groqThrow).toBeDefined();
+    expect(groqThrow.status).toBe(STATUS.INFO);
+    expect(groqThrow.detail).toContain("SHADOW RESOLVER THREW");
+    expect(groqThrow.detail).toContain("groq lookup exploded");
+    expect(summarize(checks)).toEqual({ pass: 0, warn: 0, fail: 0, ok: true });
+  });
+
+  it("checkSecretContract: a resolver that always throws never produces a FAIL/WARN or an empty result", () => {
+    const checks = checkSecretContract({ resolveSecretFn: THROWING_RESOLVER });
+    expect(checks.length).toBe(2); // one throw-row per shadow-covered id
+    for (const c of checks) {
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain("SHADOW RESOLVER THREW");
+    }
+    expect(summarize(checks)).toEqual({ pass: 0, warn: 0, fail: 0, ok: true });
+  });
+
+  // CTL-1616 PR3 cutover: checkPeerUniqueness's resolveSecretContract is now
+  // the LIVE answer, not a shadow — a throwing resolver degrades to "no
+  // token" (the ordinary WARN doctor already has for a genuinely absent
+  // token), not an extra INFO row. runDoctor must still never crash.
+  it("runDoctor: a throwing resolveSecretContract does not crash the run — degrades to the same WARN shape as a genuinely absent token", async () => {
+    const controlChecks = [
+      () => [mkCheck("always-pass", STATUS.PASS, "ok")],
+      async () =>
+        checkPeerUniqueness({
+          getHostName: () => "mini",
+          getLivenessAnchorIssue: () => "CTL-9999",
+          readPeerHeartbeats: async () => ({}),
+          resolveSecretContract: () => ({ value: null, source: "none", provider: "env-alias" }),
+        }),
+    ];
+    const throwingChecks = [
+      () => [mkCheck("always-pass", STATUS.PASS, "ok")],
+      async () =>
+        checkPeerUniqueness({
+          getHostName: () => "mini",
+          getLivenessAnchorIssue: () => "CTL-9999",
+          readPeerHeartbeats: async () => ({}),
+          resolveSecretContract: THROWING_RESOLVER,
+        }),
+    ];
+    let controlExit, throwingExit;
+    const logs = { control: null, throwing: null };
+    controlExit = await runDoctor({ checks: controlChecks, json: true, log: (s) => { logs.control = s; } });
+    throwingExit = await runDoctor({ checks: throwingChecks, json: true, log: (s) => { logs.throwing = s; } });
+    expect(throwingExit).toBe(controlExit); // exit code (FAIL count) unaffected
+    expect(logs.throwing).not.toBeNull(); // doctor produced report output — did not crash
+    const throwingReport = JSON.parse(logs.throwing);
+    const controlReport = JSON.parse(logs.control);
+    expect(throwingReport.checks.length).toBe(controlReport.checks.length); // no extra row — no shadow left to emit
+    expect(throwingReport.checks.some((c) => c.name.includes("secret-contract-shadow"))).toBe(false);
+    const peerRow = throwingReport.checks.find((c) => c.name === "peer-uniqueness");
+    expect(peerRow.status).toBe("warn");
+    expect(peerRow.detail).toContain("no LINEAR_API_TOKEN");
+  });
+});
+
 // ─── checkConfigScopeLeak (CTL-1214) ─────────────────────────────────────────
 
 // A kitchen-sink Layer-1 config carrying every relocated stanza (the historical
@@ -2142,6 +3427,385 @@ describe("checkNodeClass (CTL-1355)", () => {
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("developr");
     expect(checks[0].detail).toContain("not one of");
+  });
+});
+
+// ─── CTL-1617: deployment-mode consistency grading ───────────────────────────
+
+const deploymentModeOf = (over = {}) => ({
+  mode: "single-host",
+  source: "layer1",
+  inferred: false,
+  recognized: true,
+  raw: "single-host",
+  ...over,
+});
+
+const rosterOf = (over = {}) => ({
+  hosts: ["mini"],
+  source: "single-host",
+  multiHost: false,
+  ...over,
+});
+
+describe("checkDeploymentModeConsistency (CTL-1617)", () => {
+  describe("check 1: deployment-mode", () => {
+    it("PASSes an explicit, recognized deployment mode showing value + source", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm.status).toBe(STATUS.PASS);
+      expect(dm.detail).toContain("cluster");
+      expect(dm.detail).toContain("layer1");
+    });
+
+    it("WARNs (not FAILs) an inferred deployment mode by default, naming the declare-it fix", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        resolveRoster: () => rosterOf(),
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm.status).toBe(STATUS.WARN);
+      expect(dm.detail).toContain("deployment mode");
+      expect(dm.detail).toContain("not declared");
+      expect(dm.detail).toContain("catalyst.deployment.mode");
+      expect(dm.detail).toContain("CATALYST_DEPLOYMENT_MODE");
+    });
+
+    it("escalates an inferred deployment mode to FAIL under strict:true (install-verification profile)", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        resolveRoster: () => rosterOf(),
+        strict: true,
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm.status).toBe(STATUS.FAIL);
+    });
+
+    it("does not FAIL on an inferred deployment mode when strict is false (default)", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        resolveRoster: () => rosterOf(),
+        strict: false,
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm.status).not.toBe(STATUS.FAIL);
+    });
+
+    it("deployment-mode is always emitted even for an unrecognized explicit value", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host", // resolver already degraded the typo to single-host
+          source: "env",
+          inferred: false,
+          recognized: false,
+          raw: "clustre",
+        }),
+        resolveRoster: () => rosterOf(),
+      });
+      const dm = checks.find((c) => c.name === "deployment-mode");
+      expect(dm).toBeDefined();
+      expect(dm.status).not.toBe(STATUS.FAIL); // check 2 owns the FAIL for this case
+    });
+  });
+
+  describe("check 2: deployment-mode-recognized", () => {
+    it("FAILs an explicit UNRECOGNIZED deployment mode, naming the raw value and the enum", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "env",
+          inferred: false,
+          recognized: false,
+          raw: "clustre",
+        }),
+        resolveRoster: () => rosterOf(),
+      });
+      const rec = checks.find((c) => c.name === "deployment-mode-recognized");
+      expect(rec).toBeDefined();
+      expect(rec.status).toBe(STATUS.FAIL);
+      expect(rec.detail).toContain("clustre");
+      expect(rec.detail).toContain("not one of");
+      expect(rec.detail).toContain("deployment mode");
+    });
+
+    it("is absent entirely when the deployment mode is recognized", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "single-host", recognized: true }),
+        resolveRoster: () => rosterOf(),
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-recognized")).toBeUndefined();
+    });
+  });
+
+  describe("check 3: deployment-mode-roster-consistency", () => {
+    it("is GATED on inferred:false — absent entirely for an inferred deployment mode", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        // A multi-host roster would trip the WARN below if this check ran —
+        // proving the gate, not just an absence-of-signal false negative.
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-roster-consistency")).toBeUndefined();
+    });
+
+    it('WARNs when declared "single-host" but a multi-host roster resolved', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "single-host", source: "layer2" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.WARN);
+      expect(rc.detail).toContain("single-host");
+      expect(rc.detail).toContain("multi-host roster");
+    });
+
+    it('WARNs when declared "cluster" but no authoritative roster resolved (source=single-host)', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini"], source: "single-host", multiHost: false }),
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.WARN);
+      expect(rc.detail).toContain("cluster");
+      expect(rc.detail).toContain("no authoritative roster");
+    });
+
+    it('WARNs when declared "cloud" but no authoritative roster resolved (source=single-host)', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini"], source: "single-host", multiHost: false }),
+        // check 4 also fires for mode==="cloud" — pin an unreachable fetch so it
+        // resolves deterministically (INFO) and doesn't touch this test's assertions.
+        fetch: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.WARN);
+      expect(rc.detail).toContain("cloud");
+    });
+
+    it('PASSes when declared "single-host" and the roster is single-host', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "single-host", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini"], source: "single-host", multiHost: false }),
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.PASS);
+    });
+
+    it('PASSes when declared "cluster" and an authoritative multi-host roster resolved', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).toBe(STATUS.PASS);
+    });
+
+    it("never FAILs — roster inconsistency is always advisory (WARN), even on garbage roster shapes", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => ({}), // malformed/empty resolver result
+      });
+      const rc = checks.find((c) => c.name === "deployment-mode-roster-consistency");
+      expect(rc.status).not.toBe(STATUS.FAIL);
+    });
+  });
+
+  describe("check 4: deployment-mode-tunnel-consistency", () => {
+    it('is absent entirely when declared deployment mode is "single-host"', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "single-host", source: "layer1" }),
+        resolveRoster: () => rosterOf(),
+        fetch: async () => {
+          throw new Error("should never be called for a non-cloud deployment mode");
+        },
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-tunnel-consistency")).toBeUndefined();
+    });
+
+    it('is absent entirely when declared deployment mode is "cluster"', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+        resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+        fetch: async () => {
+          throw new Error("should never be called for a non-cloud deployment mode");
+        },
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-tunnel-consistency")).toBeUndefined();
+    });
+
+    it('is absent entirely when the deployment mode is inferred (never "cloud" by construction)', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({
+          mode: "single-host",
+          source: "default",
+          inferred: true,
+          recognized: true,
+          raw: null,
+        }),
+        resolveRoster: () => rosterOf(),
+        fetch: async () => {
+          throw new Error("should never be called for a non-cloud deployment mode");
+        },
+      });
+      expect(checks.find((c) => c.name === "deployment-mode-tunnel-consistency")).toBeUndefined();
+    });
+
+    it('WARNs when a live smee tunnel is observed on a declared "cloud" node', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf(),
+        webhookTunnelBaseUrl: "http://localhost:7400",
+        fetch: async () => ({ ok: true, status: 200, json: async () => ({ connected: true }) }),
+      });
+      const tc = checks.find((c) => c.name === "deployment-mode-tunnel-consistency");
+      expect(tc).toBeDefined();
+      expect(tc.status).toBe(STATUS.WARN);
+      expect(tc.detail).toContain("deployment mode");
+      expect(tc.detail.toLowerCase()).toContain("cloud");
+      expect(tc.detail.toLowerCase()).toContain("smee");
+    });
+
+    it('PASSes when no smee tunnel is observed on a declared "cloud" node', async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf(),
+        webhookTunnelBaseUrl: "http://localhost:7400",
+        fetch: async () => ({ ok: true, status: 200, json: async () => ({ connected: false }) }),
+      });
+      const tc = checks.find((c) => c.name === "deployment-mode-tunnel-consistency");
+      expect(tc.status).toBe(STATUS.PASS);
+    });
+
+    it("INFOs (never FAILs) when the local monitor is unreachable", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf(),
+        webhookTunnelBaseUrl: "http://localhost:7400",
+        fetch: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+      });
+      const tc = checks.find((c) => c.name === "deployment-mode-tunnel-consistency");
+      expect(tc.status).toBe(STATUS.INFO);
+      expect(tc.status).not.toBe(STATUS.FAIL);
+      expect(tc.detail).toContain("could not verify");
+    });
+
+    it("INFOs (never FAILs) when the local monitor responds with a non-2xx status", async () => {
+      const checks = await checkDeploymentModeConsistency({
+        deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+        resolveRoster: () => rosterOf(),
+        webhookTunnelBaseUrl: "http://localhost:7400",
+        fetch: async () => ({ ok: false, status: 502 }),
+      });
+      const tc = checks.find((c) => c.name === "deployment-mode-tunnel-consistency");
+      expect(tc.status).toBe(STATUS.INFO);
+      expect(tc.status).not.toBe(STATUS.FAIL);
+    });
+
+    it("defaults webhookTunnelBaseUrl to http://localhost:${MONITOR_PORT||7400} (port-resolution spike)", async () => {
+      const priorPort = process.env.MONITOR_PORT;
+      delete process.env.MONITOR_PORT;
+      try {
+        let requestedUrl = null;
+        await checkDeploymentModeConsistency({
+          deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+          resolveRoster: () => rosterOf(),
+          fetch: async (url) => {
+            requestedUrl = url;
+            return { ok: true, status: 200, json: async () => ({ connected: false }) };
+          },
+        });
+        expect(requestedUrl).toBe("http://localhost:7400/api/status/webhook-tunnel");
+      } finally {
+        if (priorPort === undefined) delete process.env.MONITOR_PORT;
+        else process.env.MONITOR_PORT = priorPort;
+      }
+    });
+  });
+
+  describe("every message says \"deployment mode\" fully qualified", () => {
+    it("across PASS/WARN/FAIL branches, never bare \"mode\"", async () => {
+      const scenarios = (
+        await Promise.all([
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({ mode: "cluster", source: "layer1" }),
+            resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+          }),
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({
+              mode: "single-host",
+              source: "default",
+              inferred: true,
+              recognized: true,
+              raw: null,
+            }),
+            resolveRoster: () => rosterOf(),
+          }),
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({
+              mode: "single-host",
+              source: "env",
+              inferred: false,
+              recognized: false,
+              raw: "clustre",
+            }),
+            resolveRoster: () => rosterOf(),
+          }),
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({ mode: "single-host", source: "layer2" }),
+            resolveRoster: () => rosterOf({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true }),
+          }),
+          checkDeploymentModeConsistency({
+            deploymentMode: deploymentModeOf({ mode: "cloud", source: "env" }),
+            resolveRoster: () => rosterOf(),
+            webhookTunnelBaseUrl: "http://localhost:7400",
+            fetch: async () => ({ ok: true, status: 200, json: async () => ({ connected: true }) }),
+          }),
+        ])
+      ).flat();
+      for (const c of scenarios) {
+        expect(c.detail.toLowerCase()).toContain("deployment mode");
+      }
+    });
+  });
+
+  it("defaults resolveRoster to the real resolveClusterHosts when uninjected (no throw)", async () => {
+    // Smoke test only — proves the default seam wires without throwing; does
+    // not assert on the (environment-dependent) resulting status.
+    await expect(
+      checkDeploymentModeConsistency({ deploymentMode: deploymentModeOf({ mode: "single-host" }) }),
+    ).resolves.toBeDefined();
   });
 });
 

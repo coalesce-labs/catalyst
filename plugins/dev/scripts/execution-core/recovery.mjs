@@ -4379,8 +4379,13 @@ function defaultThoughtsPull(cwd) {
   }
 }
 
-// defaultRebuildWorktree — fetch the ticket branch and add/reuse the worktree.
-// Best-effort; returns { ok, cwd }. Fail-open: errors produce { ok: false, cwd: null }.
+// defaultRebuildWorktree — rebuild the ticket's worktree on a surviving host.
+// CTL-1640: create-worktree.sh now seeds a fresh branch from origin/<ticket>
+// when it exists (the dead host's pushed draft-PR commits, CTL-783), so reclaim
+// rebuilds on that pushed work; it falls back to the base tip otherwise. Both
+// this reclaim path and normal dispatch share the same script argv, so neither
+// needs a flag. Best-effort; returns { ok, cwd }. Fail-open: errors produce
+// { ok: false, cwd: null }.
 function defaultRebuildWorktree(ticket, { orchDir }) {
   try {
     const repoRoot = join(orchDir, "..", "..");

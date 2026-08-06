@@ -1087,6 +1087,54 @@ touch "$AGENT_PLIST_FILE"; touch -t 202501010000 "$AGENT_HEARTBEAT_FILE"
 run "T74: the agent block runs clean under real /bin/bash (production interpreter)" \
   bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 /bin/bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'unbound variable' && exit 1; grep -qF '$AGENT_KICK' '${KICKSTART_LOG}'"
 
+# ─── Phase 15: CTL-1616 PR5 — cloud-token fixture-matrix completion (T75–T77) ─
+#
+# T57-T59 (Phase 13, above) already cover the BASH-FALLBACK column of the design §9 PR5
+# fixture matrix ({env-override, layer2, default} x {bun-path, bash-fallback}) with bun
+# unavailable. T49x/T59 already cover the bun-path x default cell with REAL bun. T75-T76
+# close the two remaining cells — bun-path x env-override and bun-path x layer2-override —
+# with REAL bun (not mocked), completing all 6 matrix cells across this suite. No bun mock is
+# installed here, so `_resolve_token_env_via_bun` exercises the real config.mjs
+# resolveNodeCloudTokenEnv() delegate (which itself now folds onto lib/secret-contract.mjs's
+# resolveCloudTokenName — CTL-1616 PR5).
+
+_agent_reset
+touch "$PLIST"
+export MOCK_LAST_EXIT=0
+mkdir -p "${HOME}/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN_ENV=MY_CUSTOM_TOKEN\nexport MY_CUSTOM_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T75: bun AVAILABLE + env-override token name resolves via the bun path (fixture-matrix cell)" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}' && printf '%s' \"\$out\" | grep -q 'token-env resolved via bun: MY_CUSTOM_TOKEN'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG"
+
+printf 'export ANOTHER_CUSTOM_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+printf '{"catalyst":{"cloud":{"tokenEnv":"ANOTHER_CUSTOM_TOKEN"}}}' > "${SCRATCH}/layer2-config.json"
+run "T76: bun AVAILABLE + Layer-2 tokenEnv override resolves via the bun path (fixture-matrix cell)" \
+  bash -c "out=\$(CATALYST_LAYER2_CONFIG_FILE='${SCRATCH}/layer2-config.json' RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}' && printf '%s' \"\$out\" | grep -q 'token-env resolved via bun: ANOTHER_CUSTOM_TOKEN'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG" "${SCRATCH}/layer2-config.json"
+unset MOCK_LAST_EXIT
+
+# T77 (bash 3.2, CTL-1616 PR5): the sourced lib/catalyst-secret-contract.sh + the new
+# catalyst_secret_cloud_token_name call inside _token_provisioned's `probe="$(...)"` body must
+# not reintroduce the T64 comment-in-subshell defect — the function CALL itself is the only
+# thing textually inside that substitution (its definition lives in the separately-sourced
+# file, parsed before the subshell is ever entered), but this pins the empirical guarantee
+# under the real production interpreter with the bash-fallback path forced (bun mocked off).
+cat > "$MOCKBIN/bun" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$MOCKBIN/bun"
+_agent_reset
+touch "$PLIST"
+export MOCK_LAST_EXIT=0
+mkdir -p "${HOME}/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T77: bash-fallback path (bun unavailable) runs clean under real /bin/bash (production interpreter)" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 /bin/bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'unbound variable' && exit 1; printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$MOCKBIN/bun"
+unset MOCK_LAST_EXIT
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""

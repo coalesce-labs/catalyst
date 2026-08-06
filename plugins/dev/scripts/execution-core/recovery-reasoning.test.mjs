@@ -29,6 +29,9 @@ import {
   escalateExhaustedIntents,
   classifyPrNotMerged,
   PR_NOT_MERGED_REASON,
+  defaultClearIntentCooldown,
+  defaultLatchHasNoClock,
+  restampNoClockEscalations,
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -975,6 +978,32 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.inv.phantomMergedPr.failed"]).toBe(2);
   });
 
+  // CTL-1607: per-host slot census promoted to chartable recovery.slot.* attributes.
+  test("recovery.board-scan promotes slot* scalars under recovery.slot.* names", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0,
+      gateDecision: "proceed", gateReason: "no wedge",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      invariants: {},
+      slotCapacity: 6, slotInUse: 4, slotFree: 2,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a["recovery.slot.capacity"]).toBe(6);
+    expect(a["recovery.slot.in_use"]).toBe(4);
+    expect(a["recovery.slot.free"]).toBe(2);
+  });
+
+  test("recovery.board-scan omits recovery.slot.* when slot scalars are null", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0, gateDecision: "proceed", gateReason: "r",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0, invariants: {},
+      slotCapacity: null, slotInUse: null, slotFree: null,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect("recovery.slot.capacity" in a).toBe(false);
+    expect("recovery.slot.free" in a).toBe(false);
+  });
+
   test("recovery.board-scan never promotes rosters/move arrays (cardinality)", () => {
     const details = {
       mode: "shadow",
@@ -1175,17 +1204,46 @@ describe("recovery-intent terminal TTL (CTL-1431)", () => {
     expect(defaultShouldSkipItem("CTL-1431-D", { orchDir, now: () => nowT })).toBe(true);
   });
 
-  test("(F3) escalated with NO timestamp stays terminal (clear-cooldown case, returns true)", () => {
+  test("(F3, CTL-1610-updated) a LEGACY hand-crafted timestamp-less escalation is still terminal (defaultSkipReason:2136 unchanged)", () => {
     const t0 = 1_000_000_000_000;
     defaultRecordIntent("CTL-1431-F3", { decision: "escalate" }, { orchDir, now: () => t0 });
-    // Delete both timestamps, mimicking defaultClearIntentCooldown (which keeps
-    // `escalated` as a deliberate terminal latch). Such an entry can't be aged out.
+    // clearIntentCooldown no longer strips escalated timestamps (see CTL-1610 test below);
+    // this simulates only a pre-fix on-disk artifact by editing the file directly.
     const p = pathJoin(orchDir, ".recovery-intents", "CTL-1431-F3.json");
     const data = JSON.parse(readFileSync(p, "utf8"));
     delete data.ts;
     delete data.lastTs;
     writeFileSync(p, JSON.stringify(data));
     expect(defaultShouldSkipItem("CTL-1431-F3", { orchDir, now: () => t0 + 1 })).toBe(true);
+  });
+
+  test("(CTL-1610) clearIntentCooldown on an escalated entry is a no-op and preserves BOTH timestamps", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-A", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1610-A.json");
+    const before = JSON.parse(readFileSync(p, "utf8"));
+    expect(before.escalated).toBe(true);
+    expect(typeof before.ts).toBe("number");
+    expect(typeof before.lastTs).toBe("number");
+
+    // A failed dispatch tries to reset the cooldown timer; on an escalated entry it must refuse.
+    expect(defaultClearIntentCooldown("CTL-1610-A", { orchDir })).toBe(false);
+
+    const after = JSON.parse(readFileSync(p, "utf8"));
+    expect(after.ts).toBe(before.ts);
+    expect(after.lastTs).toBe(before.lastTs);
+    // And the entry still ages out via the 7-day TTL rather than latching forever.
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    expect(defaultShouldSkipItem("CTL-1610-A", { orchDir, now: () => past })).toBe(false);
+  });
+
+  test("(CTL-1610) clearIntentCooldown STILL clears a non-escalated (cooldown/defer) entry", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-B", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    expect(defaultClearIntentCooldown("CTL-1610-B", { orchDir })).toBe(true);
+    const after = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-B.json"), "utf8"));
+    expect(after.lastTs).toBeUndefined();
+    expect(after.ts).toBeUndefined();
   });
 
   test("(F2) a fix recorded AFTER TTL expiry drops the escalated latch (no silent re-latch)", () => {
@@ -1212,6 +1270,87 @@ describe("recovery-intent terminal TTL (CTL-1431)", () => {
       { orchDir, now: () => within },
     );
     expect(entry.escalated).toBe(true);
+  });
+});
+
+// ─── CTL-1610 (Phase 2): defaultLatchHasNoClock ─────────────────────────────
+describe("defaultLatchHasNoClock (CTL-1610 Phase 2)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "latch-no-clock-"));
+  });
+  afterEach(() => {
+    try { rmSync(orchDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  test("(CTL-1610) defaultLatchHasNoClock: true iff escalated AND no numeric ts/lastTs", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-C", { decision: "escalate" }, { orchDir, now: () => t0 });
+    expect(defaultLatchHasNoClock("CTL-1610-C", { orchDir })).toBe(false); // clocked
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1610-C.json");
+    const d = JSON.parse(readFileSync(p, "utf8")); delete d.ts; delete d.lastTs; writeFileSync(p, JSON.stringify(d));
+    expect(defaultLatchHasNoClock("CTL-1610-C", { orchDir })).toBe(true);  // latched, no clock
+    // non-escalated entries are never a no-clock latch
+    defaultRecordIntent("CTL-1610-D", { decision: "dispatched" }, { orchDir, now: () => t0 });
+    expect(defaultLatchHasNoClock("CTL-1610-D", { orchDir })).toBe(false);
+    // absent ledger → false
+    expect(defaultLatchHasNoClock("CTL-1610-NONE", { orchDir })).toBe(false);
+  });
+});
+
+// ─── CTL-1610 (Phase 3): restampNoClockEscalations ─────────────────────────
+describe("restampNoClockEscalations (CTL-1610 Phase 3)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "restamp-"));
+  });
+  afterEach(() => {
+    try { rmSync(orchDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  test("(CTL-1610) restampNoClockEscalations re-stamps ONLY escalated+no-clock entries (idempotent)", () => {
+    const t0 = 1_000_000_000_000;
+    // (1) latched no-clock → gets re-stamped
+    defaultRecordIntent("CTL-1610-E", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const pe = pathJoin(orchDir, ".recovery-intents", "CTL-1610-E.json");
+    const de = JSON.parse(readFileSync(pe, "utf8")); delete de.ts; delete de.lastTs; writeFileSync(pe, JSON.stringify(de));
+    // (2) clocked escalation → untouched
+    defaultRecordIntent("CTL-1610-F", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // (3) non-escalated → untouched
+    defaultRecordIntent("CTL-1610-G", { decision: "dispatched" }, { orchDir, now: () => t0 });
+
+    const now = () => t0 + 5;
+    const changed = restampNoClockEscalations({ orchDir, now });
+    expect(changed).toEqual(["CTL-1610-E"]);
+    const after = JSON.parse(readFileSync(pe, "utf8"));
+    expect(after.escalated).toBe(true);
+    expect(after.ts).toBe(t0 + 5);
+    expect(after.lastTs).toBe(t0 + 5);
+    // idempotent: a second run finds nothing to do
+    expect(restampNoClockEscalations({ orchDir, now })).toEqual([]);
+  });
+
+  test("(CTL-1610 Codex P2) a per-file write failure does not abort the scan — remaining entries are healed", () => {
+    const t0 = 1_000_000_000_000;
+    // Three no-clock escalated entries; all seeded as timestamp-less latches.
+    for (const ticket of ["CTL-1610-H", "CTL-1610-I", "CTL-1610-J"]) {
+      defaultRecordIntent(ticket, { decision: "escalate" }, { orchDir, now: () => t0 });
+      const p = pathJoin(orchDir, ".recovery-intents", `${ticket}.json`);
+      const d = JSON.parse(readFileSync(p, "utf8")); delete d.ts; delete d.lastTs; writeFileSync(p, JSON.stringify(d));
+    }
+    // Overwrite H with invalid JSON — readFileSync succeeds but JSON.parse throws,
+    // simulating a mid-scan race (TOCTOU) or a corrupt file.
+    writeFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-H.json"), "NOT_JSON{{{");
+    // Overwrite J with a directory — readFileSync throws, also per-file isolated.
+    const pJ = pathJoin(orchDir, ".recovery-intents", "CTL-1610-J.json");
+    rmSync(pJ); mkdirSync(pJ);
+
+    const now = () => t0 + 5;
+    const changed = restampNoClockEscalations({ orchDir, now });
+    // I must be healed even though H (bad JSON) and J (directory) failed.
+    expect(changed).toContain("CTL-1610-I");
+    const afterI = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-I.json"), "utf8"));
+    expect(afterI.ts).toBe(t0 + 5);
   });
 });
 

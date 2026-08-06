@@ -8,8 +8,8 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
-import { tmpdir, hostname } from "node:os";
-import { join } from "node:path";
+import { tmpdir, hostname, homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 // Mirrors getHostName()'s fallback: strip everything after the FIRST dot, not
 // just a trailing ".local". A naive `.replace(/\.local$/, "")` only agrees with
@@ -66,6 +66,8 @@ import {
   readFleetHealthConfig,
   getFleetHealthDir,
   readResolveConflictSweepConfig,
+  getLayer2ConfigPath,
+  log,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -318,6 +320,76 @@ describe("getHostName (CTL-859)", () => {
     process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
     const expected = firstDnsLabel(hostname());
     expect(getHostName()).toBe(expected);
+  });
+});
+
+describe("getLayer2ConfigPath — CTL-1616 PR6 dual-read shadow-diff", () => {
+  const ENV_KEYS = ["CATALYST_LAYER2_CONFIG_FILE", "CATALYST_MACHINE_CONFIG", "XDG_CONFIG_HOME"];
+  let saved = {};
+  let warnCalls;
+  let origWarn;
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    warnCalls = [];
+    origWarn = log.warn;
+    log.warn = (...args) => warnCalls.push(args);
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    log.warn = origWarn;
+  });
+
+  test("agree case: no overrides at all — silent, returns the homedir default (both chains agree)", () => {
+    const expected = resolve(homedir(), ".config", "catalyst", "config.json");
+    expect(getLayer2ConfigPath()).toBe(expected);
+    expect(warnCalls.length).toBe(0);
+  });
+
+  test("agree case: CATALYST_LAYER2_CONFIG_FILE set — both chains check it first, silent", () => {
+    process.env.CATALYST_LAYER2_CONFIG_FILE = "/explicit/pr6-agree/config.json";
+    expect(getLayer2ConfigPath()).toBe("/explicit/pr6-agree/config.json");
+    expect(warnCalls.length).toBe(0);
+  });
+
+  test("differ case: CATALYST_MACHINE_CONFIG set (legacy ignores it) — warns once, the LEGACY path wins (observe-only until the reader sweep)", () => {
+    process.env.CATALYST_MACHINE_CONFIG = "/machine/pr6-machine-config-test/config.json";
+    const result = getLayer2ConfigPath();
+    expect(result).toBe(resolve(homedir(), ".config", "catalyst", "config.json"));
+    expect(warnCalls.length).toBe(1);
+    const msg = warnCalls[0][0];
+    expect(msg).toContain(resolve(homedir(), ".config", "catalyst", "config.json"));
+    expect(msg).toContain("/machine/pr6-machine-config-test/config.json");
+  });
+
+  test("differ case: XDG_CONFIG_HOME set (legacy ignores it) — warns once, the LEGACY path wins (observe-only until the reader sweep)", () => {
+    process.env.XDG_CONFIG_HOME = "/xdg/pr6-xdg-test";
+    const result = getLayer2ConfigPath();
+    expect(result).toBe(resolve(homedir(), ".config", "catalyst", "config.json"));
+    expect(warnCalls.length).toBe(1);
+  });
+
+  test("dedup: repeated calls with the SAME divergence warn only once (mirrors getNodeClass's _warnedNodeClass pattern)", () => {
+    process.env.CATALYST_MACHINE_CONFIG = "/machine/pr6-dedup-test/config.json";
+    getLayer2ConfigPath();
+    getLayer2ConfigPath();
+    getLayer2ConfigPath();
+    expect(warnCalls.length).toBe(1);
+  });
+
+  test("env override beats CATALYST_MACHINE_CONFIG on the canonical chain too — both agree, silent", () => {
+    process.env.CATALYST_LAYER2_CONFIG_FILE = "/explicit/pr6-precedence-test/config.json";
+    process.env.CATALYST_MACHINE_CONFIG = "/machine/should-not-win/config.json";
+    expect(getLayer2ConfigPath()).toBe("/explicit/pr6-precedence-test/config.json");
+    expect(warnCalls.length).toBe(0);
   });
 });
 

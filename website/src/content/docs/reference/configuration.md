@@ -433,9 +433,9 @@ packaging — one declarative field that sets sensible **defaults for levers tha
 
 | Class       | What it is                                                                                                                                                                                                                                                                            |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `developer` | A daemonless client you chat on. Not in the cluster roster, boots drained, runs no execution-core daemon or broker — it reads board UI data from a worker's monitor (agent Linear reads follow the two-mode rule — see the `catalyst-dev:linearis` skill's "Reading Linear" section). |
+| `developer` | A daemonless client you chat on. Not in the cluster roster, boots drained, runs no execution-core daemon or broker — it reads board UI data from a worker's monitor (agent Linear reads follow the two-mode rule — see the `catalyst-dev:linearis` skill's "Reading Linear" section). On `catalyst-stack start`, the event-mirror daemon fans worker host event logs into the local copy so `catalyst-events tail`/`wait-for` see fleet events. |
 | `worker`    | Runs the full stack and picks up work (the default; a laptop that both runs the daemon and is chatted on is a "head-full worker").                                                                                                                                                    |
-| `monitor`   | A reporting host. An **enum slot only** for now — its class-specific build-out is descoped until a real reporting node exists.                                                                                                                                                        |
+| `monitor`   | A dedicated reporting host (CTL-1654). Like `developer` it carries the observation substrate (broker + monitor + event-mirror) without the execution layer (no heartbeat, no dispatch, no recovery). The event-mirror daemon (`event-mirror/index.ts`, launchd-supervised) fans each worker host's event log into the local `~/catalyst/events/YYYY-MM.jsonl` via ssh-tail with per-host byte cursors, so `catalyst-events tail`/`wait-for` resolve fleet events locally. Verify with `catalyst-stack verify-node`. |
 
 The class is **machine-local**, so it lives in **Layer-2** (`~/.config/catalyst/config.json`) beside
 `catalyst.host.name` — the same repo is checked out on every machine, so the role is per-machine,
@@ -530,6 +530,295 @@ name — never the value).
 ```json
 { "catalyst": { "linearReplica": { "mode": "on" } } }
 ```
+
+## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
+
+`catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from
+side effects — whether a webhook tunnel happens to be configured, whether a cluster roster happens to
+resolve to more than one host. It is resolved **identically** by two independently maintained
+implementations — `lib/deployment-mode.mjs` (Node/ESM) and `lib/catalyst-deployment-mode.sh` (the
+Bash mirror, since Bash cannot import a JS leaf) — kept honest by a fixture-matrix cross-stack parity
+test (`__tests__/deployment-mode-parity.test.sh`).
+
+| Value                  | Meaning                                                                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `single-host` (default) | A lone node — no cluster substrate expected.                                                                                  |
+| `cluster`               | A coordinated multi-host fleet; roster/HRW/liveness are graded by `catalyst doctor`.                                          |
+| `cloud`                 | A managed-container node; the smee webhook tunnel must NOT be live and secrets are platform-delivered.                       |
+
+A 4th `both` value was deliberately rejected (CTL-1617 design §2) — the provider's own
+`webhook.delivery.id` already makes concurrent smee+cloud ingestion dedup-safe without one.
+
+Deployment mode is genuinely **fleet-scoped**, so — unlike `catalyst.node.class` — it lives primarily
+in **Layer-1** (committed, shared by the whole repo checkout), with a **Layer-2 override** as the
+exception hatch (e.g. a laptop dev-clone of a cluster-declared repo overriding to `single-host`):
+
+In `.catalyst/config.json` (Layer-1, fleet-wide default):
+
+```json
+{ "catalyst": { "deployment": { "mode": "cluster" } } }
+```
+
+In `~/.config/catalyst/config.json` (Layer-2, per-host override):
+
+```json
+{ "catalyst": { "deployment": { "mode": "single-host" } } }
+```
+
+**This repository declares `cluster`** (CTL-1617 PR4 — the working installation is a 2-host fleet).
+A dev-clone on a machine that runs no Catalyst stack should set the Layer-2 `single-host` override
+above; without it, `catalyst doctor` on that machine reports a declared-cluster-but-no-roster
+deployment-mode WARN (advisory only — nothing else changes).
+
+**Resolution** (`resolveDeploymentMode()` / `catalyst_resolve_deployment_mode`):
+
+| Precedence | Source                                                |
+| ---------- | ------------------------------------------------------ |
+| 1          | `CATALYST_DEPLOYMENT_MODE` env var                     |
+| 2          | `catalyst.deployment.mode` in the Layer-2 config       |
+| 3          | `catalyst.deployment.mode` in the Layer-1 config       |
+| 4          | constant default `single-host`                         |
+
+- **Absent everywhere ⇒ `single-host`** — zero-config, zero-behavior-change. (Once wired: a WARN
+  will note the value was inferred — the resolver itself is deliberately log-free; the WARN lives in
+  the `getDeploymentMode()` convenience wrapper, and doctor wiring lands in PR2 of the CTL-1617
+  migration plan.)
+- **An explicit but unrecognized value** (a typo) never silently activates cluster/cloud behavior —
+  it degrades to `single-host` (the safest direction) at the layer it was found. (Future behavior,
+  PR2: `catalyst doctor` will FAIL until the value is corrected.)
+- A missing/malformed config file, or a present-but-non-string value (`true`, `123`, `[]`), both
+  settle rather than throw — see `lib/deployment-mode.mjs`'s `classifyCandidate` for the full validity
+  ladder.
+- **ENV-vs-FILE asymmetry**: `CATALYST_DEPLOYMENT_MODE` is captured into a long-lived daemon's
+  environment once, at launch. Layer-1/Layer-2 file edits are picked up **live**, on every call. A
+  daemon needs restarting for an env change to take effect.
+- **jq-absent degradation (Bash resolver only)**: when `jq` is unavailable, a Layer-1/Layer-2 file
+  that could otherwise decide the mode is treated as absent (falls through) instead of failing the
+  caller; the resolver exports `CATALYST_DEPLOYMENT_MODE_JQ_MISSING=1` as a breadcrumb (reset at the
+  start of every resolution, so it always reflects the latest call). Grading that breadcrumb is
+  future doctor work (PR2) — nothing consumes it yet.
+
+PR1 (this file) ships the resolver in isolation — nothing outside its own tests imports it yet; wiring
+into webhook ingestion gating, secret-provider selection, and `catalyst doctor`'s roster-consistency
+checks lands in later PRs of the CTL-1617 migration plan.
+
+## Secret contract registry (CTL-1616)
+
+Every secret Catalyst resolves — the GitHub token, the Linear API token, the OAuth-mint
+credentials, the cloud token, the Groq key, the cluster age-key — is a row in **one frozen
+registry**, `SECRET_REGISTRY` in `plugins/dev/scripts/lib/secret-contract.mjs`. It **models** what
+used to be independently hand-rolled resolution ladders per secret (the 2026-08-02 fleet 401
+outage was four divergent copies of one chain) — the Linear-token read and the Linear OAuth-mint
+trio are live consumers of it, but the `github-token`/`webhook-secret` rows and the `groq-api-key`
+row are not yet RESOLVED through the registry: the live GitHub-token/webhook-secret value paths
+(CTL-1612's `catalyst-secret-env.sh` / `github-auth-preflight.mjs`) and Groq's pre-existing
+`lib/api-key-health.mjs` ladder remain their own, unrepointed implementations — but the
+`github-token`/`webhook-secret` ROWS do have one live production consumer already:
+`execution-core/cluster-sync.mjs` imports `SECRET_REGISTRY` and derives its boot-captured secret
+membership (which changed credentials require daemon-restart signaling) from these rows' delivery
+types, so their fields are load-bearing even before the resolution cutover (`docs/architecture.md`'s
+Secret Contract section has the full per-row cutover status). Bash cannot import a JS leaf, so the registry has a
+second, independently-maintained encoding — `plugins/dev/scripts/lib/catalyst-secret-contract.sh` —
+kept honest by a cross-stack **three-way parity test**
+(`__tests__/secret-contract-parity.test.sh`): bash and JS must each match a computed-expected
+value, never merely match each other, and the two registries must enumerate identical row-id sets.
+Both files are zero-import leaves (`node:fs`/`node:os`/`node:path` only on the JS side) so
+`catalyst doctor`, which runs under bare Node, can import the engine without pulling in
+`execution-core/config.mjs`'s `bun:sqlite`-reaching module graph.
+
+### Registry rows
+
+A row is a data fact, not code — the ~7-case engine below is what walks it. Every row declares:
+
+| Field           | Meaning                                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------------- |
+| `id`            | Canonical identity; doubles as the SOPS bare-file basename for file-backed rows.                             |
+| `envNames`      | Env-var aliases, precedence order (empty for rows with no direct env alias).                                |
+| `delivery`      | One of the 7 delivery types below.                                                                           |
+| `configJsonPath`| Dotted path inside the resolved Layer-2 JSON, for `config-json`/`platform-env` rows; `null` otherwise.       |
+| `rotation`      | `{ class, trigger? }` — see Rotation below.                                                                  |
+| `bootstrapFor`  | `"cluster"` \| `"cloud"` \| `null` — the deployment mode this row bootstraps.                                |
+
+Rows with a more specific shape declare additional fields: `familyPrefix` (the one
+`bare-file-family` row), `defaultLocalPath` (the one `local-only` row, resolved relative to
+`HOME`), and — `linear-worker-actor` only — `credentialEnvPair` (an env-var pair checked ahead of
+every config-file tier) and `legacyConfigTiers` + `requiredObjectFields` (§ Linear worker-actor
+tiers below).
+
+The 11 seed rows:
+
+| id                          | delivery          | rotation                | bootstrapFor | notes                                                                 |
+| ---------------------------- | ----------------- | ------------------------ | ------------ | ---------------------------------------------------------------------- |
+| `github-token`                | `bare-file`        | `re-armable` / `timer`   | —            | aliases `GH_TOKEN`, `GITHUB_TOKEN`                                    |
+| `webhook-secret`               | `bare-file`        | `boot-only`              | —            | env alias `CATALYST_WEBHOOK_SECRET`                                   |
+| `linear-webhook-secret`        | `bare-file-family` | `boot-only`              | —            | `familyPrefix: "linear-webhook-secret-"`; a predicate, not a scalar   |
+| `claude-accounts.env`          | `env-file`         | `boot-only`              | —            | presence-only (a whole sourced env file, not one value)               |
+| `execution-core.env`           | `env-file`         | `boot-only`              | —            | same shape as `claude-accounts.env`                                   |
+| `linear-api-token`             | `env-alias`        | `re-armable` / `on-401`  | —            | aliases `LINEAR_API_TOKEN`, `LINEAR_API_KEY`                          |
+| `linear-orchestrator-actor`    | `config-json`      | `re-armable` / `on-401`  | —            | `catalyst.linear.bot.orchestrator` — kept separate from worker-actor  |
+| `linear-worker-actor`          | `config-json`      | `boot-only`              | —            | `catalyst.linear.bot.worker` + a legacy fallback chain (below)        |
+| `groq-api-key`                 | `config-json`      | `boot-only`              | —            | env alias `GROQ_API_KEY`, config path `groq.apiKey`                   |
+| `cloud-token`                  | `platform-env`     | `boot-only`              | `cloud`      | default env-var `CATALYST_CLOUD_TOKEN`; the NAME is itself resolvable |
+| `age-key`                      | `local-only`       | `n/a`                    | `cluster`    | presence-checked only, never value-read; default `~/.config/catalyst/age.key` |
+
+`linear-orchestrator-actor` and `linear-worker-actor` are deliberately separate rows — they mint
+identically and differ only in their config path, an easy-to-collapse-wrongly refactor the registry
+exists to prevent.
+
+### Delivery types
+
+The engine dispatches on exactly one of 7 delivery types — parity cost between the bash and JS
+implementations scales per type, not per row:
+
+| Delivery           | Resolution chain                                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `bare-file`          | explicit `CATALYST_<ID>_FILE` override → `CATALYST_CONFIG_DIR` → the directory holding `CATALYST_LAYER2_CONFIG_FILE` (or its `~/.config/catalyst/config.json` default) → XDG dir → falls back to an inherited env alias if no file is found |
+| `bare-file-family`   | not a resolvable scalar — a membership predicate (`isSecretFamilyMember`) over an open-ended prefix family          |
+| `env-file`           | presence/non-empty check of a whole file at the same bare-file candidate paths (the file is *sourced*, not read for one value) |
+| `env-alias`          | first non-empty `envNames` entry, in order — no file search at all                                                  |
+| `config-json`        | env alias (if any) → the resolved Layer-2 JSON's `configJsonPath`                                                   |
+| `platform-env`       | the row's env-var **name** is itself resolved (env override → Layer-2 name override → default), then that variable's value is read |
+| `local-only`         | `statSync` presence check of a single path only — the value is never read                                           |
+
+**Bare-file candidate directory ≠ `resolveLayer2Path()`.** `secretFileCandidates()`
+(`secret-contract.mjs:607-620`, mirrored in `catalyst-secret-contract.sh:355-380`) builds its
+Layer-2-directory candidate straight from `CATALYST_LAYER2_CONFIG_FILE` (or the hardcoded
+`~/.config/catalyst/config.json` default) — it does **not** call `resolveLayer2Path()`, so a
+`CATALYST_MACHINE_CONFIG`-only override is never consulted here, unlike every `config-json`/
+`platform-env` row (below). An operator who sets only `CATALYST_MACHINE_CONFIG=/custom/config.json`
+and drops a sibling `/custom/github-token` next to it will find that file skipped: both engines
+still search the home/XDG locations. Provision bare-file secrets via `CATALYST_CONFIG_DIR`, the
+XDG directory, or `CATALYST_LAYER2_CONFIG_FILE` itself so both engines look in the same place.
+
+### Resolution result
+
+`resolveSecret(id, { env, deploymentMode, cwd })` (JS) / `catalyst_resolve_secret <id>` (bash)
+never throws. It returns `{ value, source, provider, rotation, ...extras }` for a known id, or
+`{ value: null, source: null, provider: null, rotation: null }` for an unknown one. `provider` is
+the row's `delivery` — a logging breadcrumb only; callers never branch on it. `source` is one of
+`shared-file` | `operator-override` | `inherited` | `config-json` | `legacy-config-json` |
+`platform-env` | `present` | `absent` | `none` — with two exceptions, both of them a *known* id
+whose `source` collapses to `null` while `provider`/`rotation` stay populated (unlike the
+unknown-id shape, where every field is `null`): the one `bare-file-family` row
+(`linear-webhook-secret`) has no scalar value, so it resolves to
+`{ value: null, source: null, provider: "bare-file-family", rotation: {...} }`; and, in genuine
+cloud mode, any row other than the `cloud-token` bootstrap row itself resolves the identical
+`{ value: null, source: null, provider, rotation }` shape (that row's own `provider`/`rotation`)
+when `cloud-token` fails to resolve — the bootstrap short-circuit, § Cloud guard below. Both are
+normal, expected states — not evidence of an unknown id — so callers must not treat a `null`
+`source` as impossible or unknown-id-only. The bash mirror echoes the same three fields
+pipe-joined (`value|source|provider`) and additionally exports non-secret
+`CATALYST_SECRET_LAST_SOURCE`/`_PROVIDER` breadcrumbs for the calling shell — but deliberately
+**never exports the resolved value** (`export -n` is reasserted on every call, since bash's export
+attribute is sticky across reassignment), so a long-lived daemon shell can't leak a credential into
+every child process it launches.
+
+### Cloud guard
+
+The cloud provider only ever activates when the full CTL-1617 deployment-mode object satisfies
+**all three**: `mode === "cloud"`, `inferred === false`, and `recognized !== false`. Because the
+guard lives once in the shared engine, every row gets it for free. When genuinely cloud, resolution
+short-circuits to a pure env-alias read of `envNames` for the secret **value** — no file search for
+the value, ever — with one carve-out: `cloud-token` itself is `platform-env` delivery, and even in
+genuine cloud mode it first resolves its env-var **name** via `resolveCloudTokenName()` (env
+override → the Layer-2 file's `catalyst.cloud.tokenEnv` → default), so a managed container can
+still consult a config file to learn *which* variable to read before reading that variable's
+value. Anything else (single-host, cluster, or an inferred/unrecognized cloud guess) runs the row's
+normal delivery-type chain unchanged.
+
+A second gate — the **bootstrap short-circuit** — applies only in genuine cloud mode: if the active
+mode's `bootstrapFor` row (`cloud-token`) fails to resolve, every *other* cloud-mode secret
+resolution returns `{ value: null, source: null, provider, rotation }` (that row's own `provider`
+and `rotation`, populated) without probing further, so a half-provisioned managed container fails
+loudly and coherently instead of limping through partial resolution. The
+bootstrap row itself is exempt from this check (it must resolve on its own terms).
+
+### Layer-2 path resolution
+
+The registry's canonical Layer-2 config path chain, used by every `config-json`/`platform-env` row
+and exported as `resolveLayer2Path(env)` (JS) / `catalyst_secret_resolve_layer2_path` (bash):
+
+```
+CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG > $XDG_CONFIG_HOME/catalyst/config.json > ~/.config/catalyst/config.json
+```
+
+This is a distinct chain from `lib/deployment-mode.mjs`'s own `resolveLayer2Path`, which
+deliberately mirrors `execution-core/config.mjs`'s legacy homedir-only behavior — the two names
+resolve different things on purpose. `execution-core/config.mjs`'s `getLayer2ConfigPath()` and
+`execution-core/lib/node-class.mjs`'s own copy now delegate to this canonical chain, dual-read
+against their legacy homedir-only chain for one release: the two only disagree on a host that sets
+`CATALYST_MACHINE_CONFIG` or `XDG_CONFIG_HOME` without also setting `CATALYST_LAYER2_CONFIG_FILE`,
+in which case the canonical (new) path wins and a one-time-per-message `WARN` is logged.
+
+### Rotation
+
+Every row declares a rotation class:
+
+| Class                   | Meaning                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------- |
+| `boot-only`              | Captured once (at daemon boot, or per-call for a config-json mint) — a value change requires a restart to take effect. |
+| `re-armable` / `timer`   | Proactively re-checked on a recurring tick — the row's declared shape (`github-token`). Its actual re-arm today still runs through the pre-existing CTL-1612 `rearmGithubTokenFromFile` (called every daemon cluster-sync tick in `execution-core/daemon.mjs`), not through this contract's own `registerRearmHook`/`armSecret` seam — see below, `github-token` remains hookless. |
+| `re-armable` / `on-401`  | Reactively re-minted on an observed auth failure, not a timer (the Linear OAuth-mint shape).      |
+| `n/a`                    | The row's value is never fetched at all (only `age-key` — rotation isn't a question the contract can answer for a presence-only row). |
+
+`armSecret(id, { env, deploymentMode })` never throws and returns `{ armed, rotated,
+restartRequired }`. `restartRequired` is the literal signal the 2026-08-02 outage lacked: it is
+`true` exactly when a `boot-only` row's resolved value has changed since the last observation.
+`registerRearmHook(id, fn)` attaches an in-process rearm implementation to a `re-armable` row — it
+refuses (returns `false`, never throws) against a `boot-only`/`n/a` row, an unknown id, or a
+non-function, so a hookless row can never silently claim "no restart needed". A `re-armable` row
+with **no** hook registered degrades to exactly the same `boot-only`-shaped behavior (resolve
+fresh, diff against the last-observed value, report `restartRequired` on change) — the capability
+ceiling is honest either way. As shipped, `linear-orchestrator-actor` has a real hook (registered
+by `execution-core/linear-remint.mjs` against its cooldown-guarded reminter); `github-token` and
+`linear-api-token` remain hookless, so both currently take the degrade path in practice.
+
+### Linear worker-actor's legacy fallback tiers
+
+`linear-worker-actor` is the one row with a multi-tier fallback chain, folded from
+`lib/linear-comment-post.sh`'s pre-existing four-rung precedence with every rung's precedence order
+preserved. Note the fold GENERALIZED every file-backed tier's location, not just one: pre-fold, the
+primary and global-legacy tiers read a hardcoded `$HOME/.config/catalyst/config.json` and the
+per-team sibling sat beside it — post-fold all three resolve relative to the canonical
+`resolveLayer2Path(env)`, so a `CATALYST_LAYER2_CONFIG_FILE`/`CATALYST_MACHINE_CONFIG` override
+moves all three together. (Deprecating the legacy tiers is an explicit, separate follow-up — not
+part of this fold.)
+
+1. `credentialEnvPair` — `CATALYST_LINEAR_AGENT_CLIENT_ID`/`CATALYST_LINEAR_AGENT_CLIENT_SECRET`,
+   checked first; both must be non-empty.
+2. The primary `configJsonPath` tier (`catalyst.linear.bot.worker`).
+3. `legacyConfigTiers`' `per-team-legacy` tier, tried only once the above both miss: a per-team
+   legacy file (walking up from `cwd` for a `.catalyst/config.json` `projectKey`, reading a sibling
+   `config-<key>.json`) — **the generalization**: that sibling now resolves relative to the
+   canonical `resolveLayer2Path()` directory, not the old script's hardcoded
+   `$HOME/.config/catalyst`, so it moves with `CATALYST_LAYER2_CONFIG_FILE`/`CATALYST_MACHINE_CONFIG`
+   overrides exactly like every other row's Layer-2-relative path. An operator relying on the old
+   hardcoded location under a custom Layer-2 path gets a different (but now-correct-for-the-chain)
+   file here than the pre-fold script read.
+4. `legacyConfigTiers`' `global-legacy` tier, tried only once tier 3 also misses: the global
+   `catalyst.linear.agent` path in the canonical Layer-2 file.
+
+A row that declares `requiredObjectFields` (only `linear-worker-actor`, requiring `clientId` and
+`clientSecret`) must find every named field present and non-blank in a candidate tier's raw
+object value before that tier is allowed to win — a partially-populated tier (e.g. a
+credential-free `{webhookSecret, botUserId}` object) falls through to the next tier instead of
+capturing resolution and failing downstream.
+
+### Doctor integration
+
+`catalyst doctor` consults the contract through `resolveSecret` directly — never a second
+hand-rolled presence check — but for most checks it is **shadow-only observability**: the contract
+is resolved and compared against the check's existing hand-rolled answer, and a disagreement is
+reported as its own `STATUS.INFO` row (`<check>-secret-contract-shadow`) that never changes the
+check's grade or exit code. `checkPeerUniqueness`, `checkBotCredentials`, and `checkWorkerLabels`
+are the one cutover to date: they now read `linear-api-token` from the contract as their **live**
+answer (their old hand-rolled `LINEAR_API_TOKEN ?? LINEAR_API_KEY` read is gone, and so is the
+shadow comparison that has nothing left to compare against). `checkSecretContract` itself remains a
+standalone INFO-only observation (presence of `linear-api-token` and `groq-api-key`) for every node
+class. The one exception that does change doctor's exit code: `checkCloudTokenEnv` FAILs when the
+active deployment mode is declared `cloud` (recognized, not inferred) and the `cloud-token`
+bootstrap row does not resolve — the one FAIL doctor cannot route around, per the cloud guard's
+bootstrap short-circuit above.
 
 ## GitHub merge rules live in GitHub
 
@@ -665,6 +954,7 @@ stops being trusted within the TTL rather than lingering until the daemon restar
 | Env var                    | Default | Notes                                                                                                                                                                                                                                                                                                                       |
 | -------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MONITOR_TRUSTED_ORIGINS`  | unset   | Comma- or whitespace-separated extra origins for deployments reached by a name that cannot be derived from `os.hostname()` — a **reverse proxy** or a full **Tailscale MagicDNS** alias. Accepts full origins (`https://catalyst.example`) or bare `host:port` (`mini-2.tail1234.ts.net:7400`). Entries are taken **exactly as given** (not widened to the bound port) and canonicalized the way a browser serializes `Origin`, so an IDN name may be written in either Unicode or punycode. |
+| `MONITOR_TLS_PROXY_PEERS` | unset | Peer addresses of the **TLS-terminating reverse proxy** (comma-separated, e.g. `127.0.0.1,::1`). Requests arriving *from these peers* are classified `https` when the accounts `?refresh=true` guard probes the trusted-origin set — **required** when `MONITOR_TRUSTED_ORIGINS` lists an `https://` origin served through a local proxy, or every proxied refresh 403s (with it unset, all requests are plaintext). This is a deliberate operator declaration: `X-Forwarded-Proto` is never trusted (client-spoofable, and appending proxies put the client's value first). IPv4-mapped spellings are normalized, so `127.0.0.1` also matches a dual-stack bind's `::ffff:127.0.0.1`. |
 | `MONITOR_DEV_UI=1` / `NODE_ENV=development` | unset | Trusts the Vite dev origin (`http://localhost:5173` — one spelling, since Vite binds a single address family and the other would be available to any local process). **Not needed for the standard `bun run dev:ui` flow** — the Vite proxy sends the monitor's own origin (`ui/vite.config.ts`), so proxied replies are already trusted. Accepts `1`/`true`/`yes`/`on`. Use only for a dev setup that bypasses that proxy, and note it must be set on the **monitor** process (`dev:ui` starts Vite only; the monitor runs out-of-band). |
 | `MONITOR_DEV_UI_ORIGINS` | unset | Overrides the dev origins above (same format), for a non-default Vite port. Same caveat: set it on the monitor process. |
 

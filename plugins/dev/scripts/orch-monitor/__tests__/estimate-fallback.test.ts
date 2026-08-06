@@ -332,3 +332,43 @@ describe("CTL-974: estimateDisplay correct per estimation method", () => {
     expect(deriveEstimateDisplay(null, "tShirt")).toBeNull();
   });
 });
+
+// CTL-1616 PR3: linearAuthHeader's token resolution folds onto the shared
+// secret-contract engine (resolveSecret) — this is the synthetic
+// LINEAR_API_KEY-only fixture the design mandates, proven end-to-end through
+// fillEstimateFallback by asserting the Authorization header actually sent.
+describe("CTL-1616 PR3: secret-contract fold — LINEAR_API_KEY-only fixture", () => {
+  beforeEach(() => {
+    _clearEstimateCache();
+    _clearMethodCache();
+  });
+
+  it("fillEstimateFallback sends LINEAR_API_KEY as the Authorization header when LINEAR_API_TOKEN is absent", async () => {
+    const savedToken = process.env.LINEAR_API_TOKEN;
+    const savedKey = process.env.LINEAR_API_KEY;
+    const originalFetch = globalThis.fetch;
+    let seenAuth: string | null = null;
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      seenAuth = headers.Authorization ?? null;
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({ data: { issues: { nodes: [{ number: 774, estimate: 8, team: { key: "CTL" } }] } } }),
+      } as Response);
+    }) as typeof fetch;
+    try {
+      delete process.env.LINEAR_API_TOKEN;
+      process.env.LINEAR_API_KEY = "lin_api_fromkey";
+      const result = await fillEstimateFallback(["CTL-774"]);
+      expect(result["CTL-774"]).toBe(8);
+      expect(seenAuth as string | null).toBe("lin_api_fromkey");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (savedToken === undefined) delete process.env.LINEAR_API_TOKEN;
+      else process.env.LINEAR_API_TOKEN = savedToken;
+      if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = savedKey;
+    }
+  });
+});

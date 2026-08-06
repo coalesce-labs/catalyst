@@ -31,8 +31,8 @@
     "eslint": "^9",
     "eslint-plugin-security": "^4.0.0",
     "globals": "^17.5.0",
-    "knip": "^6.4.1",
+    "knip": "6.4.1",
     "typescript": "^6.0.2",
-    "typescript-eslint": "^8.58.2"
+    "typescript-eslint": "8.58.2"
   }
 }

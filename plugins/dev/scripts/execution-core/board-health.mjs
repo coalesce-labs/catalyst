@@ -325,6 +325,7 @@ function deriveRing(events, nowMs) {
         // (no-owned-anchor, gate-hold) — including the deferred-only proceed path
         // where proposedMoves is 0.
         skippedReason: d.act?.skippedReason ?? null,
+        skippedReasonNoClock: d.act?.skippedReasonNoClock === true, // CTL-1610
       });
     }
   }
@@ -454,6 +455,11 @@ export function assembleBoardState({
       maxParallel: capacity?.maxParallel ?? 0,
       liveCount: capacity?.liveCount ?? 0,
       freeSlots: capacity?.freeSlots ?? 0,
+      // CTL-1607: the scheduler's new-work admission gate outcome for THIS tick
+      // (!livenessFresh || draining). Carried so buildBoardScanEvent can collapse
+      // the PUBLISHED slotFree to 0 on a node that will not admit — the emitted
+      // census is observational only; invariants read the un-gated freeSlots above.
+      admissionGated: !!capacity?.admissionGated,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
     // CTL-1432 (B2/B3): deferred board-health anchor candidates + the sanctioned
@@ -751,9 +757,14 @@ function checkActuationLiveness(b, t) {
   // owned-but-undispatched wedge (skippedReason ∈ WEDGE_SKIP_REASONS). This catches
   // the deferred-only proceed path (proposedMoves 0) the old proposedMoves>0
   // predicate missed (Codex P2), and ignores benign no-owned-anchor/gate-hold scans.
-  const wedged = recent.every(
-    (s) => s.dispatched !== true && WEDGE_SKIP_REASONS.has(s.skippedReason),
-  );
+  // CTL-1610: all-candidates-exhausted is a wedge ONLY when the cohort has no
+  // running human-review clock (skippedReasonNoClock) — a well-formed exhausted
+  // cohort (valid ts) stays the CTL-1440 benign non-wedge.
+  const isWedgeScan = (s) =>
+    s.dispatched !== true &&
+    (WEDGE_SKIP_REASONS.has(s.skippedReason) ||
+      (s.skippedReason === "all-candidates-exhausted" && s.skippedReasonNoClock === true));
+  const wedged = recent.every(isWedgeScan);
   return invariant(
     !wedged,
     wedged ? 1 : 0,
@@ -1331,7 +1342,7 @@ export function buildBoardContext(boardState, invariants) {
 // ── (6) buildBoardScanEvent — PURE. The flat event reused through the CTL-1287
 // emit envelope. Scalars at the top of details (CTL-1291 promotes them to
 // chartable attributes); rosters/move arrays stay in details → body.payload.
-export function buildBoardScanEvent({ mode, invariants, decision, act = null }) {
+export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
   // proposedMoves but never whether anything was dispatched — the blind spot behind
@@ -1341,7 +1352,32 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null }) 
     dispatched: act?.dispatched === true,
     anchor: act?.anchor ?? null,
     skippedReason: act?.skippedReason ?? (act?.dispatched === true ? null : "shadow"),
+    skippedReasonNoClock: act?.skippedReasonNoClock === true, // CTL-1610
   };
+  // CTL-1607 (Codex #2985 P2 ×3): per-host slot census, corrected so a fleet
+  // consumer can SUM these across hosts without under/over-counting. Null when no
+  // board was threaded (back-compat). Three corrections vs the raw capacity snap:
+  //  · in_use is derived from FREE (capacity − rawFree), so it reflects the FULL
+  //    occupancy basis the scheduler admits against — liveCount + queued board-
+  //    health delegates + in-process SDK workers — not just live bg jobs. (Raw
+  //    board.capacity.freeSlots is already computeFreeSlots(maxParallel,
+  //    occupiedCount), so capacity − rawFree == occupiedCount.)
+  //  · a board-health delegate dispatched THIS scan reserves a slot the scheduler
+  //    charges immediately after this pass returns (scheduler.mjs: occupiedCount++
+  //    on act.dispatched), so free is debited (and in_use credited) by it here.
+  //  · a draining or stale-liveness node admits no new work — the scheduler's
+  //    admission gate collapses its free slots to 0 (`livenessFresh && !draining`)
+  //    — so its PUBLISHED free collapses to 0 too (admissionGated, threaded on
+  //    board.capacity by the scheduler).
+  const _slotCap = board?.capacity?.maxParallel ?? null;
+  const _rawFree = board?.capacity?.freeSlots ?? null;
+  const _slotGated = board?.capacity?.admissionGated === true;
+  const _slotReserved = actOutcome.dispatched ? 1 : 0;
+  const slotFree = _rawFree == null ? null : _slotGated ? 0 : Math.max(0, _rawFree - _slotReserved);
+  const slotInUse =
+    _slotCap == null || _rawFree == null
+      ? null
+      : Math.min(_slotCap, Math.max(0, _slotCap - _rawFree) + _slotReserved);
   return {
     type: "recovery.board-scan",
     ticket: null, // board/fleet-scoped → event.label:null; the board reader ignores it (correct)
@@ -1366,6 +1402,14 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null }) 
       // CTL-1435 (C1): 0/1 so Grafana can chart the dispatch RATE alongside the
       // proposal counts (proposed-vs-dispatched is the actuation-liveness signal).
       actDispatched: actOutcome.dispatched ? 1 : 0,
+      // CTL-1607: per-host slot census so fleet capacity is visible off-host
+      // (computed above; occupancy-derived in_use, delegate-debited + gate-collapsed
+      // free). A fleet consumer SUMs slotFree directly — never capacity − in_use:
+      // on a draining/stale node free is gate-collapsed to 0 while in_use still
+      // reports actual occupancy, so capacity − in_use overstates admittable free.
+      slotCapacity: _slotCap,
+      slotInUse,
+      slotFree,
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
       ),
@@ -1486,6 +1530,7 @@ export function boardHealthPass({
             // [0] anchor and dispatch a later one); fall back to the intended anchor.
             anchor: (dispatched ? actResult?.candidate : null) ?? anchor,
             skippedReason: dispatched ? null : actResult?.reason ?? "all-candidates-cooldown",
+            skippedReasonNoClock: dispatched ? false : (actResult?.latchedNoClock === true), // CTL-1610
           };
         }
       } catch (err) {
@@ -1497,7 +1542,7 @@ export function boardHealthPass({
 
   // CTL-1435 (C1): emit AFTER actuation so the scan event carries the act outcome.
   try {
-    emit(buildBoardScanEvent({ mode, invariants, decision: dec, act: actOutcome })); // shadow AND enforce
+    emit(buildBoardScanEvent({ mode, invariants, decision: dec, act: actOutcome, board })); // shadow AND enforce
   } catch (err) {
     log({ err: err.message }, "board-health: emit failed (continuing)");
   }

@@ -25,7 +25,7 @@
 // Exit code: number of FAIL-level checks (0 = all clear).
 
 import { readFileSync, statSync, existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -57,10 +57,22 @@ import {
   // change-detection marker the daemon's auto-refresh writes.
   getClusterRepoDir,
   getClusterSyncStatePath,
+  // CTL-1617: the one declared deployment-mode answer (single-host/cluster/
+  // cloud), re-exported from the zero-import lib leaf so doctor never grows
+  // a second copy of the resolution ladder.
+  DEPLOYMENT_MODES,
+  resolveDeploymentMode,
 } from "./config.mjs";
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
+// CTL-1616 PR2: the shared secret-contract engine, imported DIRECTLY from the
+// zero-import lib leaf (node:fs/os/path only) — same pattern cluster-sync.mjs
+// already uses (`../lib/secret-contract.mjs`), NOT re-exported through
+// config.mjs, so doctor stays safe under bare Node. SHADOW ONLY in this PR: the
+// contract is consulted and compared, never used to decide a grade (see
+// checkSecretContract + buildContractShadowCheck below).
+import { resolveSecret, resolveLayer2Path } from "../lib/secret-contract.mjs";
 // CTL-1481: the canonical worker-ownership label names — imported (not
 // re-hardcoded) so the doctor can never drift from what the stamper writes.
 // From the zero-import names leaf, NOT worker-label.mjs: doctor runs under
@@ -114,6 +126,137 @@ function readLinearBotUserIds(l1Path, l2Path) {
 export const STATUS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" };
 
 export const mkCheck = (name, status, detail) => ({ name, status, detail });
+
+// ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
+//
+// safeResolveSecretContract — B1: every remaining shadow call site below
+// (checkWebhookIngestion's webhook-secret leg, checkCloudTokenEnv's cloud-token
+// name comparisons, checkSecretContract's own observations) plus the 3 sites
+// PR3 cut over to a LIVE answer (checkPeerUniqueness/checkBotCredentials/
+// checkWorkerLabels via resolveLinearTokenLive) routes its call into the
+// injected resolveSecretContract/resolveSecretFn dependency through here
+// instead of calling it directly. runDoctor's
+// `Promise.all(fns.map(...))` has no per-check isolation (out of scope to add
+// one here — see doctor.test.mjs's B1 tests), so an uncaught throw from ANY
+// check fn crashes the whole suite with zero report output. This wrapper
+// itself never throws: `{ ok: true, value }` on success, `{ ok: false, error }`
+// on throw.
+// resolveDeploymentModeForShadow — the deployment-mode answer threaded into
+// every shadow resolver call (#2916 Codex P2): without it, resolveSecret's
+// cloud guard (deploymentMode.mode === "cloud" && inferred === false) can
+// never activate, so a declared-cloud node's shadow would follow the
+// non-cloud file/config ladder and mask exactly the provider divergence the
+// shadow exists to detect. Throw-safe by the same B1 discipline: a throwing
+// mode resolver degrades to undefined (= the engine's non-cloud path), never
+// a crash.
+function resolveDeploymentModeForShadow(env = process.env) {
+  try {
+    // #2916 round-3 (Codex P2): resolve from the SAME env the secrets resolve
+    // from — a caller-injected env must drive both halves of the shadow, or a
+    // fixture env declaring cloud would resolve secrets under the HOST's mode.
+    return resolveDeploymentMode({ env });
+  } catch {
+    return undefined;
+  }
+}
+
+function safeResolveSecretContract(resolveFn, secretId, opts) {
+  try {
+    return { ok: true, value: resolveFn(secretId, opts) };
+  } catch (err) {
+    return { ok: false, error: err };
+  }
+}
+
+// shadowThrowCheck — the one throw-row shape every shadow call site shares
+// (comparison-based and direct-read alike): LOUD STATUS.INFO, names the
+// secret, quotes the resolver's error, and says explicitly the grade is
+// unaffected — never silenced, never a grade change.
+// shadowErrString — coercion-safe rendering of a caught throw (#2916 round-3
+// Codex P3): a resolver may legally throw a Symbol or a null-prototype object,
+// and interpolating those into a template literal itself throws — which would
+// defeat the very throw-isolation this path exists for.
+function shadowErrString(err) {
+  try {
+    const m = err?.message;
+    if (typeof m === "string" && m) return m;
+    return String(err);
+  } catch {
+    // Even the fallback can throw (a revoked Proxy throws on ANY operation,
+    // including Object.prototype.toString.call) — end at a literal.
+    try {
+      return Object.prototype.toString.call(err);
+    } catch {
+      return "[unrenderable thrown value]";
+    }
+  }
+}
+
+function shadowThrowCheck(checkName, secretId, err) {
+  return mkCheck(
+    `${checkName}-secret-contract-shadow`,
+    STATUS.INFO,
+    `SHADOW RESOLVER THREW secret="${secretId}": ${shadowErrString(err)} — shadow disabled for this check, grade unaffected`,
+  );
+}
+
+// buildContractShadowCheck — the ONE shared helper every injected-shadow call
+// site below uses to build its (0 or 1) shadow-disagreement entry. Design §7/§9
+// discipline: PR2 is a shadow pass — the contract is CONSULTED AND COMPARED but
+// decides NOTHING. Every entry this returns is STATUS.INFO, and summarize()
+// never counts INFO toward pass/warn/fail (doctor.mjs:1728-1736), so no call
+// site that uses this helper can move doctor's exit code (the FAIL count) or
+// its pass/warn/fail summary line.
+//
+// Returns null (no entry, no output) when the hand-rolled and contract answers
+// AGREE — a clean cycle is silent. Returns a loud INFO check naming the secret
+// id, the hand-rolled verdict, and the contract's {source, provider} answer
+// when they DISAGREE — "escalated loudly, never silently reconciled" (house
+// rule): disagreement is surfaced as its own visible check row, never merged
+// into / swallowed by the primary check's own PASS/WARN/FAIL message. The
+// resolver call itself is isolated via safeResolveSecretContract (B1) — a
+// throwing resolver surfaces as a shadowThrowCheck INFO row instead of
+// propagating up through the caller.
+function buildContractShadowCheck({ checkName, secretId, handRolled, resolveSecretContract, env = process.env, deploymentMode = resolveDeploymentModeForShadow(env) }) {
+  const resolution = safeResolveSecretContract(resolveSecretContract, secretId, { env, deploymentMode });
+  if (!resolution.ok) return shadowThrowCheck(checkName, secretId, resolution.error);
+  const contractResolved = resolution.value;
+  const contractPresent = contractResolved?.value != null;
+  if (Boolean(handRolled) === contractPresent) return null;
+  return mkCheck(
+    `${checkName}-secret-contract-shadow`,
+    STATUS.INFO,
+    `SHADOW DISAGREEMENT secret="${secretId}": hand-rolled=${handRolled ? "present" : "absent"} vs ` +
+      `contract={value:${contractPresent ? "present" : "absent"}, source:${contractResolved?.source ?? "none"}, ` +
+      `provider:${contractResolved?.provider ?? "none"}} — never changes this check's grade or exit code`,
+  );
+}
+
+// resolveLinearTokenLive — CTL-1616 PR3 cutover (design §7/§9): the shared
+// accessor checkPeerUniqueness/checkBotCredentials/checkWorkerLabels now use
+// to get the LIVE linear-api-token answer from the contract engine — these 3
+// sites no longer hand-roll their own `LINEAR_API_TOKEN ?? LINEAR_API_KEY`
+// env ladder (that read is GONE), and the PR2 shadow-comparison each of them
+// carried (buildContractShadowCheck against secretId "linear-api-token") is
+// retired with it: there is no longer a second, independently-computed
+// hand-rolled answer to compare the contract against, so the disagreement
+// row these sites used to emit cannot exist anymore. resolveSecret's own
+// contract promises "never throws", but this wraps via
+// safeResolveSecretContract anyway — matching this file's existing
+// defensive convention for every other secret-contract call site — so an
+// injected test double (or a future registry bug) that DOES throw degrades
+// to "no token" (the same WARN/INFO path a genuinely absent token already
+// takes) rather than crashing the whole doctor run. Threads the shared
+// resolveDeploymentModeForShadow() default so the cloud guard activates on a
+// declared-cloud node exactly like every other secret-contract call site in
+// this file (checkCloudTokenEnv, checkSecretContract).
+function resolveLinearTokenLive(resolveSecretContract, deploymentMode = resolveDeploymentModeForShadow()) {
+  const r = safeResolveSecretContract(resolveSecretContract, "linear-api-token", {
+    env: process.env,
+    deploymentMode,
+  });
+  return r.ok ? (r.value?.value ?? null) : null;
+}
 
 // ─── Internal path helpers ───────────────────────────────────────────────────
 
@@ -326,10 +469,11 @@ export async function checkPeerUniqueness(deps = {}) {
   const {
     getHostName: _getHostName = getHostName,
     getLivenessAnchorIssue: _getLivenessAnchorIssue = getLivenessAnchorIssue,
-    hasLinearToken = () =>
-      Boolean(
-        process.env.LINEAR_API_TOKEN?.length || process.env.LINEAR_API_KEY?.length,
-      ),
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
+    resolveSecretContract = resolveSecret,
+    hasLinearToken = () => resolveLinearTokenLive(resolveSecretContract) != null,
     readPeerHeartbeats: _readPeerHeartbeats = readPeerHeartbeats,
   } = deps;
 
@@ -411,8 +555,11 @@ const LINEAR_GQL = "https://api.linear.app/graphql";
 export async function checkBotCredentials(deps = {}) {
   const {
     readLinearBotUserIds: _readLinearBotUserIds = readLinearBotUserIds,
-    linearToken = () =>
-      process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "",
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
+    resolveSecretContract = resolveSecret,
+    linearToken = () => resolveLinearTokenLive(resolveSecretContract) ?? "",
     fetch: _fetch = globalThis.fetch,
     expectedBotUserId = null,
   } = deps;
@@ -922,12 +1069,61 @@ function defaultSecretFileNonEmpty(dir, name) {
   }
 }
 
+// Reads the configurable GitHub webhook-secret env-var NAME from Layer-1
+// (.catalyst/config.json → catalyst.monitor.github.webhookSecretEnv), matching
+// webhook-config.ts:412. Defaults to CATALYST_WEBHOOK_SECRET. CTL-1618.
+// Resolve the Layer-1 path via resolveDoctorLayer1Path() (not layer1Path()) so
+// this reader honors the CATALYST_CONFIG_FILE / CATALYST_CONFIG_PATH pointers the
+// daemon/deploy sets and falls back to ${cwd}/.catalyst/config.json — the SAME
+// Layer-1 the running monitor resolves, so the env name matches at runtime
+// (Codex P1: a plugin-repo read diverges from the active project config).
+function defaultGithubSecretEnvName() {
+  try {
+    const obj = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const name = obj?.catalyst?.monitor?.github?.webhookSecretEnv;
+    return typeof name === "string" && name.length > 0 ? name : "CATALYST_WEBHOOK_SECRET";
+  } catch {
+    return "CATALYST_WEBHOOK_SECRET";
+  }
+}
+
+// Reads the configurable Linear webhook-secret env-var NAME from Layer-1
+// (.catalyst/config.json → catalyst.monitor.linear.webhookSecretEnv), matching
+// webhook-config.ts:264-269. Null when unset (no per-key env override). CTL-1618.
+// Uses resolveDoctorLayer1Path() (not layer1Path()) for the same monitor-parity
+// reason as defaultGithubSecretEnvName above (Codex P1).
+function defaultLinearSecretEnvName() {
+  try {
+    const obj = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const name = obj?.catalyst?.monitor?.linear?.webhookSecretEnv;
+    return typeof name === "string" && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 export function checkWebhookIngestion(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
     monitor = defaultReadMonitor(),
     configDir = defaultWebhookConfigDir(),
     secretFileNonEmpty = defaultSecretFileNonEmpty,
+    githubSecretEnvName = defaultGithubSecretEnvName(), // CTL-1618
+    linearSecretEnvName = defaultLinearSecretEnvName(), // CTL-1618
+    // CTL-1616 PR2: shadow-only contract resolver for the github "webhook-secret"
+    // row — consulted and COMPARED against `ghSecret` below (see the comment at
+    // its use site), never used to decide this check's grade. Surfaces exactly
+    // the divergence design §7 names: defaultWebhookConfigDir() hardcodes
+    // ~/.config/catalyst, ignoring CATALYST_CONFIG_DIR / CATALYST_LAYER2_CONFIG_FILE
+    // / XDG overrides that secretFileCandidates (and so resolveSecret) honors.
+    resolveSecretContract = resolveSecret,
+    // CTL-1617 mode-alignment (#2913 Codex P1): the join's webhook-wiring gate
+    // now skips wiring when a RECOGNIZED non-cluster mode is declared — so a
+    // multiHost-roster node with no route is CONSISTENT config on such a node,
+    // not a failure. Injectable for tests; a throwing resolver degrades to
+    // undefined = the pre-alignment FAIL behavior (grading must fail closed,
+    // unlike the INFO-only shadow's throw handling).
+    resolveDeploymentModeFn = resolveDeploymentMode,
   } = deps;
 
   const roster = resolveRoster();
@@ -943,12 +1139,40 @@ export function checkWebhookIngestion(deps = {}) {
 
   const m = monitor ?? {};
 
-  // GitHub route: smee channel + a github HMAC secret (file or env).
+  // GitHub route: smee channel + a github HMAC secret resolved the way the
+  // running monitor reads it (webhook-config.ts:412,429). The env-var NAME is
+  // configurable (Layer-1 webhookSecretEnv, default CATALYST_WEBHOOK_SECRET);
+  // the CTL-1612 projection lifts the on-disk `webhook-secret` file into the
+  // DEFAULT name only, so the file is a valid proxy solely for the default. CTL-1618.
   const ghSmee = typeof m.github?.smeeChannel === "string" ? m.github.smeeChannel : "";
-  const ghSecret =
-    secretFileNonEmpty(configDir, "webhook-secret") ||
-    (process.env.CATALYST_WEBHOOK_SECRET ?? "").length > 0;
+  // Resolve the env secret with the SAME `??` chain as the runtime
+  // (webhook-config.ts:429): `process.env[name] ?? CATALYST_SMEE_SECRET ?? ""`.
+  // `??` (not `||`) matters — an env var explicitly set to "" is NOT nullish, so
+  // it short-circuits and the legacy CATALYST_SMEE_SECRET fallback is NOT reached,
+  // exactly as the monitor computes it. A prior `||`-of-length chain would let an
+  // empty primary fall through to a set SMEE secret and falsely report the route
+  // wired when the runtime disables it (secret.length === 0). CTL-1618.
+  const ghEnvSecret =
+    (process.env[githubSecretEnvName] ?? process.env.CATALYST_SMEE_SECRET ?? "").length > 0;
+  const ghFileSecret =
+    githubSecretEnvName === "CATALYST_WEBHOOK_SECRET" &&
+    secretFileNonEmpty(configDir, "webhook-secret");
+  const ghSecret = ghEnvSecret || ghFileSecret;
   const githubWired = ghSmee.length > 0 && ghSecret;
+
+  // CTL-1616 PR2: shadow comparison for the github webhook-secret leg only —
+  // the linear-webhook-secret family has no single scalar contract value (it's
+  // a PREDICATE, design §2/§3), so it is not shadow-compared here. Computed
+  // once; appended to every multiHost return below (the single-host early
+  // return above never reaches here — this check doesn't grade secrets in
+  // that mode, so there's nothing to shadow).
+  const webhookShadowCheck = buildContractShadowCheck({
+    checkName: "webhook-ingestion",
+    secretId: "webhook-secret",
+    handRolled: ghSecret,
+    resolveSecretContract,
+  });
+  const webhookShadow = webhookShadowCheck ? [webhookShadowCheck] : [];
 
   // Linear route: smee channel + ≥1 keyed webhookId whose HMAC secret resolves.
   const linear =
@@ -961,22 +1185,92 @@ export function checkWebhookIngestion(deps = {}) {
       typeof e.webhookId === "string" && e.webhookId.length > 0
     );
   });
+  // Linear per-key secret resolved as webhook-config.ts:157-171 does: file →
+  // per-key env (linearWebhookSecretEnv) → global CATALYST_LINEAR_WEBHOOK_SECRET.
+  // The env leg uses the runtime's exact `??` chain, so an empty-string per-key
+  // env var short-circuits (does NOT fall through to the global) — matching
+  // resolveSecret, which returns "" and drops the key. CTL-1618.
   const keySecretWired = (k) =>
     secretFileNonEmpty(
       configDir,
       k === "workspace" ? "linear-webhook-secret" : `linear-webhook-secret-${k}`,
-    ) || (process.env.CATALYST_LINEAR_WEBHOOK_SECRET ?? "").length > 0;
+    ) ||
+    (
+      (linearSecretEnvName !== null ? process.env[linearSecretEnvName] : undefined) ??
+      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
+      ""
+    ).length > 0;
   const wiredKeys = webhookKeys.filter(keySecretWired);
   const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
   const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
 
   if (!githubWired && !linearWired) {
+    // Mode-alignment: a DECLARED (recognized, not inferred) non-cluster mode
+    // means the join gate intentionally skipped wiring — no-route is the
+    // correct state, and the mode/roster mismatch itself is graded by the
+    // deployment-mode checks, not here. Everything else — declared cluster,
+    // inferred/absent mode, or an unresolvable mode — keeps the FAIL: on a
+    // declared-cluster node this FAIL is the intentional loud signal for a
+    // missed activation step 2b (docs/cluster-onboarding.md), and a
+    // pre-migration node must keep its original guarantee.
+    let declaredMode;
+    try {
+      declaredMode = resolveDeploymentModeFn();
+    } catch {
+      declaredMode = undefined;
+    }
+    if (
+      declaredMode &&
+      declaredMode.inferred === false &&
+      declaredMode.recognized === true &&
+      declaredMode.mode !== "cluster"
+    ) {
+      // #2918 follow-up (Codex P2 x2):
+      // (a) The aligned grant applies only to a FULLY-ABSENT route — a
+      //     dangling Linear webhookId without its HMAC secret is config
+      //     residue and must keep the half-wired FAIL even here (this
+      //     branch previously returned before the dangling check below).
+      if (danglingKeys.length > 0) {
+        return [
+          mkCheck(
+            "webhook-ingestion",
+            STATUS.FAIL,
+            `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>) — declared mode "${declaredMode.mode}" does not excuse config residue`,
+          ),
+          ...webhookShadow,
+        ];
+      }
+      // (b) Declared CLOUD is a WARN, not a PASS: cloud suppresses the smee
+      //     tunnels but its replacement ingestion (the cloud SDK event
+      //     connection) does not exist yet — an otherwise-green doctor must
+      //     not certify a node with zero event ingestion. Flips to PASS only
+      //     when a real cloud ingestion check exists to stand in its place.
+      if (declaredMode.mode === "cloud") {
+        return [
+          mkCheck(
+            "webhook-ingestion",
+            STATUS.WARN,
+            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired, but cloud replacement ingestion is NOT yet implemented: this node currently has no event ingestion at all`,
+          ),
+          ...webhookShadow,
+        ];
+      }
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.PASS,
+          `declared deployment mode "${declaredMode.mode}" (source=${declaredMode.source}) — webhook ingestion intentionally not wired despite multiHost roster; the mode/roster mismatch is graded by the deployment-mode checks`,
+        ),
+        ...webhookShadow,
+      ];
+    }
     return [
       mkCheck(
         "webhook-ingestion",
         STATUS.FAIL,
         `multiHost member but NO webhook route enabled — github(smee=${ghSmee ? "set" : "unset"},secret=${ghSecret ? "set" : "unset"}) linear(smee=${linSmee ? "set" : "unset"},wiredKeys=${wiredKeys.length}); monitor-merge/comment-wakes will degrade to polling`,
       ),
+      ...webhookShadow,
     ];
   }
   if (danglingKeys.length > 0) {
@@ -986,6 +1280,7 @@ export function checkWebhookIngestion(deps = {}) {
         STATUS.FAIL,
         `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>)`,
       ),
+      ...webhookShadow,
     ];
   }
   return [
@@ -994,6 +1289,7 @@ export function checkWebhookIngestion(deps = {}) {
       STATUS.PASS,
       `webhook ingestion wired (github=${githubWired}, linear=${linearWired}, linear keys=${wiredKeys.length})`,
     ),
+    ...webhookShadow,
   ];
 }
 
@@ -2256,19 +2552,187 @@ export function checkAgentBrowser(deps = {}) {
   return checks;
 }
 
-// checkCloudTokenEnv — CTL-1307. ADVISORY ONLY (never FAIL): the cluster-shared
-// CATALYST_CLOUD_TOKEN is an OPTIONAL extension — a node stays fully local-only
-// without it, so its absence must NEVER block activation. WARN only on DRIFT: the
-// token has been decrypted from the catalyst-cluster repo (cluster-cloud.json)
-// but is not yet projected into the machine-level env (cluster.env + ~/.zshenv
-// guard). All reads are injectable + fail-open.
+// checkCloudTokenEnv — CTL-1307. ADVISORY for the cluster-shared-token distribution
+// checks below (the `cloud-token` row's original CTL-1307 scope): CATALYST_CLOUD_TOKEN
+// is an OPTIONAL extension for a cluster node — a node stays fully local-only without
+// it, so its absence must NEVER block activation there. WARN only on DRIFT: the token
+// has been decrypted from the catalyst-cluster repo (cluster-cloud.json) but is not yet
+// projected into the machine-level env (cluster.env + ~/.zshenv guard).
+//
+// CTL-1616 PR6 (design §5/§7) ADDS ONE FAIL: when the ACTIVE deployment mode is
+// DECLARED cloud (not cluster's optional extension — the actual managed-platform mode),
+// a missing/unresolvable bootstrap credential IS the one FAIL doctor cannot route
+// around — see the `cloud-token-bootstrap` check below. That escalation is gated
+// entirely on deployment mode and contributes ZERO checks for every other mode, so this
+// function's original ADVISORY/never-FAIL contract is UNCHANGED for single-host,
+// cluster, and inferred nodes — i.e. every live host today. All reads are injectable +
+// fail-open.
+// _isDeclaredCloud — the one gate PR6's escalation and the local-only wording
+// share: a genuinely DECLARED cloud mode (recognized, not inferred).
+function _isDeclaredCloud(dm) {
+  return Boolean(dm && dm.mode === "cloud" && dm.inferred === false && dm.recognized !== false);
+}
+
 export function checkCloudTokenEnv(deps = {}) {
   const {
     configDir = process.env.CATALYST_CONFIG_DIR || resolve(homedir(), ".config", "catalyst"),
     zshenvPath = process.env.CATALYST_ZSHENV_FILE || resolve(homedir(), ".zshenv"),
     readFile = (p) => readFileSync(p, "utf8"),
+    // CTL-1616 PR2: shadow-only contract resolver — this check's hand-rolled
+    // logic hardcodes the env-var NAME "CATALYST_CLOUD_TOKEN" everywhere above
+    // (the `export CATALYST_CLOUD_TOKEN=` string match, the ~/.zshenv guard);
+    // the contract resolves a possibly-CUSTOM name via the same 3-tier ladder
+    // as resolveNodeCloudTokenEnv (env override → Layer-2 catalyst.cloud.tokenEnv
+    // → default). Consulted and COMPARED below, never used to decide this
+    // check's grade — stays INFO-only (design §7).
+    resolveSecretContract = resolveSecret,
+    // #2916 round-3 (Codex P2): the OTHER hand-rolled cloud-token name path —
+    // checkCloudSync's replica-token presence check resolves its env-var name
+    // via resolveNodeCloudTokenEnv(), which can diverge from the contract
+    // (e.g. a CATALYST_MACHINE_CONFIG pointer vs the home Layer-2). Shadowed
+    // here alongside the literal-name comparison so a clean shadow cycle
+    // cannot mask that divergence.
+    resolveReplicaTokenEnv = resolveNodeCloudTokenEnv,
+    // CTL-1616 PR6 (design §5/§7): the §7 FAIL escalation's deployment-mode
+    // input — injectable, same convention as every other secret-contract call
+    // site in this file. Default is throw-safe (resolveDeploymentModeForShadow
+    // catches internally and degrades to undefined), so an unset/throwing
+    // resolver fails OPEN to today's INFO-only behavior (the escalation below
+    // is gated on this being genuinely {mode:"cloud", inferred:false, ...} —
+    // undefined never satisfies that gate).
+    // NOTE (#2929 post-merge Codex P2): the default must apply only when the
+    // caller OMITTED the key — a destructure default also fires on an
+    // explicitly-supplied `deploymentMode: undefined`, silently re-resolving
+    // the HOST's mode and making injected-state tests host-dependent. Hence
+    // the `in`-guarded assignment below instead of a destructure default.
+    deploymentMode: _deploymentModeDep,
   } = deps;
+  const deploymentMode =
+    "deploymentMode" in deps ? _deploymentModeDep : resolveDeploymentModeForShadow();
   const checks = [];
+
+  // CTL-1616 PR6 §7 FAIL ESCALATION (design §5): "the one FAIL doctor cannot
+  // route around." Computed ONCE here (same convention as cloudShadowChecks
+  // just below) and appended at EVERY return point so it fires regardless of
+  // which cluster-cloud.json/cluster.env/zshenv branch this check's existing
+  // hand-rolled logic lands in — those branches answer "is CATALYST_CLOUD_TOKEN
+  // projected from the cluster-sync distribution path", an ORTHOGONAL question
+  // to "is this node's deployment mode declared cloud and did the bootstrap
+  // credential resolve" (design §4's bootstrapFor:"cloud" row IS this same
+  // secret, just consulted through the shared engine rather than the
+  // cluster-sync file trio).
+  //
+  // GATE: fires ONLY when the ACTIVE deployment mode is DECLARED cloud —
+  // recognized (not a typo'd/degraded value) AND not inferred (an operator
+  // explicitly set it, matching checkDeploymentModeConsistency's tunnel-
+  // consistency gate at ~line 3445 and the engine's own cloud guard in
+  // lib/secret-contract.mjs's resolveSecret). Structurally inert (contributes
+  // ZERO checks, hence zero grade change) for every other deployment mode —
+  // single-host, cluster, inferred, or an unrecognized explicit value — so
+  // this is provably a no-op on both live minis (cluster) and the laptop
+  // (single-host). `recognized !== false` mirrors the engine's own
+  // belt-and-suspenders extension (design §12 Q3) rather than requiring
+  // recognized===true, so a deploymentMode object that omits the field
+  // (legacy callers, most fixtures elsewhere in this file) still gates
+  // correctly on inferred alone.
+  const cloudBootstrapEscalationChecks = [];
+  const dm = deploymentMode;
+  if (_isDeclaredCloud(dm)) {
+    const bootstrapResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
+      env: process.env,
+      deploymentMode: dm,
+    });
+    if (!bootstrapResolution.ok) {
+      cloudBootstrapEscalationChecks.push(
+        shadowThrowCheck("cloud-token-bootstrap", "cloud-token", bootstrapResolution.error),
+      );
+    } else {
+      const bootstrapResolved = bootstrapResolution.value;
+      const envVar = typeof bootstrapResolved?.envVar === "string" ? bootstrapResolved.envVar : "CATALYST_CLOUD_TOKEN";
+      if (bootstrapResolved?.value == null) {
+        cloudBootstrapEscalationChecks.push(
+          mkCheck(
+            "cloud-token-bootstrap",
+            STATUS.FAIL,
+            `deployment mode is declared "cloud" but the bootstrap credential (env var ` +
+              `"${envVar}") did not resolve — per the §4 cloud guard's bootstrap short-circuit, ` +
+              `EVERY other cloud-mode secret resolution returns null until this is set (a ` +
+              `half-provisioned managed container); set ${envVar} in the platform environment`,
+          ),
+        );
+      } else {
+        cloudBootstrapEscalationChecks.push(
+          mkCheck(
+            "cloud-token-bootstrap",
+            STATUS.PASS,
+            `deployment mode is declared "cloud" and the bootstrap credential resolved ` +
+              `(env var "${envVar}", source=${bootstrapResolved.envVarSource ?? bootstrapResolved.source})`,
+          ),
+        );
+      }
+    }
+  }
+
+  // CTL-1616 PR2 (B1): computed ONCE here, but pushed at each return point
+  // below so the shadow row is always APPENDED AFTER the primary rows (the
+  // same convention as checkBotCredentials — checks[0] must stay the primary
+  // graded row). This is the one bespoke shadow site (a name-comparison, not
+  // a presence-comparison), so it does its own safeResolveSecretContract
+  // wrap rather than going through buildContractShadowCheck — a throwing
+  // resolver surfaces as a shadowThrowCheck INFO row instead of crashing
+  // this check.
+  const cloudShadowChecks = [];
+  const contractResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
+    env: process.env,
+    // #2930 round-2 (Codex P2): reuse the SAME resolved deploymentMode the
+    // bootstrap gate and the local-only wording use — an independent
+    // re-resolve here made an explicitly-injected mode (incl. undefined)
+    // evaluate the shadow under the HOST's mode.
+    deploymentMode,
+  });
+  if (!contractResolution.ok) {
+    cloudShadowChecks.push(shadowThrowCheck("cloud-token", "cloud-token", contractResolution.error));
+  } else {
+    const contractResolved = contractResolution.value;
+    if (typeof contractResolved?.envVar === "string" && contractResolved.envVar !== "CATALYST_CLOUD_TOKEN") {
+      cloudShadowChecks.push(
+        mkCheck(
+          "cloud-token-secret-contract-shadow",
+          STATUS.INFO,
+          `SHADOW DISAGREEMENT secret="cloud-token": hand-rolled hardcodes env-var name ` +
+            `"CATALYST_CLOUD_TOKEN" but the contract resolves "${contractResolved.envVar}" ` +
+            `(source=${contractResolved.envVarSource ?? "unknown"}) — never changes this check's grade or exit code`,
+        ),
+      );
+    }
+    // Second comparison (#2916 round-3): contract name vs checkCloudSync's
+    // replica-token name path. Throw-safe like every shadow call.
+    // resolveNodeCloudTokenEnv returns { envVar, source } (config.mjs) — read
+    // .envVar, never treat the result as a bare string (#2916 round-4: the
+    // string-typed guard made this comparison unreachable in production).
+    let replicaName = null;
+    try {
+      const replicaResolved = resolveReplicaTokenEnv();
+      replicaName = typeof replicaResolved?.envVar === "string" ? replicaResolved.envVar : null;
+    } catch (err) {
+      cloudShadowChecks.push(shadowThrowCheck("cloud-token-replica-name", "cloud-token", err));
+    }
+    if (
+      typeof contractResolved?.envVar === "string" &&
+      typeof replicaName === "string" &&
+      replicaName !== contractResolved.envVar
+    ) {
+      cloudShadowChecks.push(
+        mkCheck(
+          "cloud-token-secret-contract-shadow",
+          STATUS.INFO,
+          `SHADOW DISAGREEMENT secret="cloud-token": replica-token resolver (resolveNodeCloudTokenEnv) ` +
+            `resolves env-var name "${replicaName}" but the contract resolves "${contractResolved.envVar}" ` +
+            `(source=${contractResolved.envVarSource ?? "unknown"}) — never changes this check's grade or exit code`,
+        ),
+      );
+    }
+  }
 
   let token = "";
   try {
@@ -2284,9 +2748,12 @@ export function checkCloudTokenEnv(deps = {}) {
       mkCheck(
         "cloud-token",
         STATUS.INFO,
-        "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
+        _isDeclaredCloud(deploymentMode)
+          ? "no cluster-sync cloud token file — expected on a declared-cloud node (the platform environment is the token source; see cloud-token-bootstrap)"
+          : "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
       ),
     );
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2306,6 +2773,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cloud token decrypted but NOT projected to ~/.config/catalyst/cluster.env — run 'catalyst-stack sync-cloud-env'",
       ),
     );
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
   if (!clusterEnv.includes(expected)) {
@@ -2316,6 +2784,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cluster.env CATALYST_CLOUD_TOKEN is STALE vs cluster-cloud.json — run 'catalyst-stack sync-cloud-env' and restart cloud daemons",
       ),
     );
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2333,6 +2802,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cluster.env present but ~/.zshenv lacks the source-guard — shells (and shell-launched cloud daemons) won't inherit CATALYST_CLOUD_TOKEN",
       ),
     );
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2343,6 +2813,7 @@ export function checkCloudTokenEnv(deps = {}) {
       "cluster cloud token projected to machine-level env (cluster.env + ~/.zshenv guard)",
     ),
   );
+  checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
   return checks;
 }
 
@@ -2698,7 +3169,11 @@ async function defaultLinearGraphQLPost(query, token) {
 export async function checkWorkerLabels(deps = {}) {
   const {
     getRoster = getClusterHosts,
-    linearToken = () => process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "",
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
+    resolveSecretContract = resolveSecret,
+    linearToken = () => resolveLinearTokenLive(resolveSecretContract) ?? "",
     post = defaultLinearGraphQLPost,
   } = deps;
 
@@ -2711,6 +3186,7 @@ export async function checkWorkerLabels(deps = {}) {
   }
 
   const token = linearToken();
+
   if (!token) {
     return [
       mkCheck("worker-labels", STATUS.INFO, "no LINEAR_API_TOKEN / LINEAR_API_KEY — skipping worker-label check"),
@@ -3028,6 +3504,350 @@ export function checkNodeClass(deps = {}) {
       `catalyst.node.class="${nc.class}" (explicit, source=${nc.source})`,
     ),
   ];
+}
+
+// ─── CTL-1617: deployment-mode consistency grading ───────────────────────────
+
+// checkLayer2PathDivergence — CTL-1616 PR6 follow-up (#2930 round-2 Codex P1).
+// On a host that sets CATALYST_MACHINE_CONFIG or XDG_CONFIG_HOME without
+// CATALYST_LAYER2_CONFIG_FILE, the fleet's Layer-2 readers/writers are SPLIT:
+// legacy readers (catalyst-secret-env.sh, the scheduler's per-tick reload) and
+// the write destinations fed by getLayer2ConfigPath use the legacy home chain,
+// while the registry-based consumers folded in PR3-PR5 (the OAuth mint chain,
+// cloud-token name) use the canonical resolveLayer2Path chain. A credential
+// rotation on such a host writes fresh material where half the readers never
+// look — so the configuration is UNSUPPORTED until the canonical cutover sweep,
+// and this check FAILs it loudly with the real remedy:
+// CATALYST_LAYER2_CONFIG_FILE is tier 1 of BOTH chains, pinning every reader
+// and writer to one file. On every non-divergent host (all live fleet hosts)
+// this check is a silent PASS-less no-op (zero rows).
+export function checkLayer2PathDivergence(deps = {}) {
+  const {
+    env = process.env,
+    legacyPathFn = () =>
+      env.CATALYST_LAYER2_CONFIG_FILE || resolve(homedir(), ".config", "catalyst", "config.json"),
+    canonicalPathFn = () => resolveLayer2Path(env),
+  } = deps;
+  let legacyRaw;
+  let canonicalRaw;
+  try {
+    legacyRaw = legacyPathFn();
+    canonicalRaw = canonicalPathFn();
+  } catch {
+    return []; // fail-open: a throwing resolver must not invent a divergence
+  }
+  // #2938 round-2 (Codex P2): a RELATIVE configured path must never be
+  // cwd-normalized into agreement — resolveLayer2Path preserves the relative
+  // string and canonical consumers read it against THEIR cwd, so a supervised
+  // service with a different cwd reads a different (or missing) file. Reject
+  // it outright instead of comparing.
+  if (!isAbsolute(legacyRaw) || !isAbsolute(canonicalRaw)) {
+    return [
+      mkCheck(
+        "layer2-path-divergence",
+        STATUS.FAIL,
+        `Layer-2 config path is RELATIVE ("${!isAbsolute(legacyRaw) ? legacyRaw : canonicalRaw}") — ` +
+          `each consumer resolves it against its own working directory, so different services read ` +
+          `different files; set an ABSOLUTE CATALYST_LAYER2_CONFIG_FILE (tier 1 of BOTH chains — ` +
+          `an absolute CATALYST_MACHINE_CONFIG pointing anywhere other than the legacy default ` +
+          `path still diverges from the legacy chain and fails the split-brain gate)`,
+      ),
+    ];
+  }
+  // #2931 round-2 (Codex P2): NORMALIZE (absolute-only — cwd-independent)
+  // before comparing, so an equivalent absolute spelling (e.g.
+  // "$HOME/.config/catalyst/../catalyst/config.json") is not a false FAIL.
+  const legacyPath = resolve(legacyRaw);
+  const canonicalPath = resolve(canonicalRaw);
+  if (legacyPath === canonicalPath) return [];
+  return [
+    mkCheck(
+      "layer2-path-divergence",
+      STATUS.FAIL,
+      `Layer-2 config path is SPLIT-BRAIN on this host: legacy chain resolves "${legacyPath}" ` +
+        `(read by catalyst-secret-env.sh + the scheduler reload; fed by cluster-sync writes) but ` +
+        `the registry's canonical chain resolves "${canonicalPath}" (read by the OAuth mint chain ` +
+        `and cloud-token name resolution) — a credential rotation would land where half the ` +
+        `readers never look. This CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME-divergent layout is ` +
+        `unsupported until the canonical reader/writer sweep; set CATALYST_LAYER2_CONFIG_FILE ` +
+        `(tier 1 of BOTH chains) in the environment of EVERY supervised service AND interactive ` +
+        `shell — no single env file covers them all today (execution-core sources ` +
+        `execution-core.env, the monitor's start path sources lib/catalyst-secret-env.sh, shells ` +
+        `have their own profile), so the pin must reach each service's own environment source; a ` +
+        `pin visible only to this doctor run would pass the check while running services still split`,
+    ),
+  ];
+}
+
+// checkDeploymentModeConsistency — grade catalyst.deployment.mode (CTL-1617
+// design §7, all four sub-checks). Every
+// message says "deployment mode" fully qualified: this codebase already has
+// three unrelated "mode" concepts (catalyst.orchestration.dispatchMode, the
+// executor-derived dispatch-mode telemetry, readLinearReplica().mode), so
+// bare "mode" in a doctor line is ambiguous.
+//
+//   1. deployment-mode — always emitted. Explicit+recognized → PASS (value +
+//      source). Explicit+UNRECOGNIZED (the resolver already degraded it to
+//      "single-host") → INFO deferring to deployment-mode-recognized below,
+//      which owns that FAIL — this check's own branches are declared-vs-
+//      inferred, not valid-vs-invalid, so it never duplicates check 2's FAIL.
+//      Inferred (unset everywhere) → WARN with the declare-it message
+//      (mirrors the host-name-source WARN-when-implicit pattern verbatim,
+//      ~line 184 above); escalates to FAIL when `strict:true` (the install-
+//      verification profile — an installer that was supposed to persist the
+//      value and didn't is the CTL-1355 install-correctness pattern, same as
+//      checkNodeClass's strict branch above). NOT wired into any strict
+//      profile by this PR — see the checksForClass wiring note below.
+//   2. deployment-mode-recognized — FAIL when `recognized: false` (explicit
+//      typo, already degraded to single-host by the resolver). Same severity
+//      class as checkNodeClass's typo path.
+//   3. deployment-mode-roster-consistency — GATED on `inferred: false` (a
+//      day-one inferred default on a live multi-host cluster must produce
+//      only check 1's declare-it WARN, not a second warning here). Reuses
+//      the same resolveClusterHosts() resolver checkHostIdentity already
+//      calls (no new probe — a cheap, pure, file-backed read, not a network
+//      call). Declared single-host + a multi-host roster resolved, OR
+//      declared cluster/cloud + no authoritative roster (source=single-host)
+//      → WARN. WARN, never FAIL: a transient cluster-repo git-fetch hiccup,
+//      or the declare-then-join migration window, must not flip a healthy
+//      node's doctor red.
+//   4. deployment-mode-tunnel-consistency — GATED on `dm.mode === "cloud"`.
+//      Structurally provably inert for single-host/cluster/inferred: the
+//      resolver's constant default is always "single-host" (§4 of the
+//      design — nothing ever infers "cloud"), so `mode === "cloud"` can only
+//      be true via an EXPLICIT, RECOGNIZED value — this one gate covers both
+//      "only fires in cloud mode" and "only fires when explicit" from the
+//      design in one condition, with no separate `inferred`/`recognized`
+//      check needed. Probes the LOCAL monitor's
+//      `GET /api/status/webhook-tunnel` (port-resolution spike, CTL-1617 §11
+//      Q2: `MONITOR_PORT` env or 7400 — the exact pattern already live in
+//      checkMonitorProductionBuild (defined later in this file); deliberately NOT
+//      checkReadReplicaReachable's baseUrl, which targets a REMOTE
+//      read-replica by design and FAILs on localhost on purpose).
+//      `connected: true` → WARN: a live smee tunnel on a declared-cloud node
+//      is contrary-to-mode (the cloud SDK connection is the expected event
+//      source). Unreachable monitor / any probe failure → INFO "could not
+//      verify" — NEVER FAIL; a down local monitor must not contaminate this
+//      check (same advisory posture as checkMonitorProductionBuild's
+//      INFO-skip).
+//
+// Injected deps (all have real defaults):
+//   deploymentMode      — the resolveDeploymentMode() result object
+//                          ({mode,source,inferred,recognized,raw})
+//   resolveRoster       — () => { hosts, source, multiHost }
+//   strict              — bool, default false (see check 1 above)
+//   webhookTunnelBaseUrl — check 4 only: local monitor base URL, default
+//                          `http://localhost:${MONITOR_PORT || 7400}`
+//   fetch               — check 4 only: default globalThis.fetch
+export async function checkDeploymentModeConsistency(deps = {}) {
+  const {
+    deploymentMode: dm = resolveDeploymentMode(),
+    resolveRoster = resolveClusterHosts,
+    strict = false,
+    webhookTunnelBaseUrl = `http://localhost:${process.env.MONITOR_PORT || 7400}`,
+    fetch: _fetch = globalThis.fetch,
+  } = deps;
+
+  const checks = [];
+
+  // 1. deployment-mode — always emitted.
+  if (!dm.recognized) {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        STATUS.INFO,
+        `deployment mode "${dm.raw}" is not recognized — see deployment-mode-recognized below`,
+      ),
+    );
+  } else if (dm.inferred) {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        strict ? STATUS.FAIL : STATUS.WARN,
+        `deployment mode not declared — treating this node as "${dm.mode}"; set ` +
+          `catalyst.deployment.mode (Layer-1 for the fleet default, Layer-2 for this ` +
+          `host) or CATALYST_DEPLOYMENT_MODE`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        STATUS.PASS,
+        `deployment mode="${dm.mode}" (explicit, source=${dm.source})`,
+      ),
+    );
+  }
+
+  // 2. deployment-mode-recognized — FAIL on an explicit typo.
+  if (!dm.recognized) {
+    checks.push(
+      mkCheck(
+        "deployment-mode-recognized",
+        STATUS.FAIL,
+        `deployment mode "${dm.raw}" is not one of [${DEPLOYMENT_MODES.join(", ")}] — ` +
+          `treating this node as "${dm.mode}" (safest); correct or unset the value ` +
+          `(source=${dm.source})`,
+      ),
+    );
+  }
+
+  // 3. deployment-mode-roster-consistency — gated on inferred:false.
+  if (!dm.inferred) {
+    const roster = resolveRoster() ?? {};
+    const rosterSource = roster.source ?? "unknown";
+    // "declared" vs "resolved": when the explicit value was a typo the resolver
+    // DEGRADED it to single-host — the operator declared the typo, not the mode
+    // this check is grading. Say "resolved (degraded from an unrecognized
+    // value)" in that case so this WARN cannot contradict check 2's FAIL.
+    const declaredPhrase = dm.recognized
+      ? "declared deployment mode"
+      : "resolved deployment mode (degraded from an unrecognized value)";
+    if (dm.mode === "single-host" && roster.multiHost) {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.WARN,
+          `${declaredPhrase} "single-host" but a multi-host roster resolved ` +
+            `(source=${rosterSource}) — HRW dispatch/recovery gates still partition across it`,
+        ),
+      );
+    } else if ((dm.mode === "cluster" || dm.mode === "cloud") && rosterSource === "single-host") {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.WARN,
+          `${declaredPhrase} "${dm.mode}" but no authoritative roster resolved ` +
+            `(source=single-host) — this node effectively runs single-host`,
+        ),
+      );
+    } else {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.PASS,
+          `${declaredPhrase} "${dm.mode}" is consistent with the resolved roster ` +
+            `(source=${rosterSource}, multiHost=${Boolean(roster.multiHost)})`,
+        ),
+      );
+    }
+  }
+
+  // 4. deployment-mode-tunnel-consistency — gated on mode==="cloud" only (see
+  // the doc comment above: structurally provably inert otherwise, since the
+  // resolver never infers "cloud").
+  if (dm.mode === "cloud") {
+    const base = (typeof webhookTunnelBaseUrl === "string" ? webhookTunnelBaseUrl : "").replace(
+      /\/+$/,
+      "",
+    );
+    try {
+      const res = await _fetch(base + "/api/status/webhook-tunnel", {
+        method: "GET",
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!(res?.ok ?? false)) {
+        checks.push(
+          mkCheck(
+            "deployment-mode-tunnel-consistency",
+            STATUS.INFO,
+            `could not verify webhook-tunnel state for deployment mode "cloud" — ` +
+              `${base}/api/status/webhook-tunnel returned HTTP ${res?.status ?? "?"}`,
+          ),
+        );
+      } else {
+        const body = await res.json();
+        if (body?.connected === true) {
+          checks.push(
+            mkCheck(
+              "deployment-mode-tunnel-consistency",
+              STATUS.WARN,
+              `smee webhook tunnel is live on a node with declared deployment mode ` +
+                `"cloud" — expected event ingestion is the cloud SDK connection, not the ` +
+                `smee tunnel`,
+            ),
+          );
+        } else {
+          checks.push(
+            mkCheck(
+              "deployment-mode-tunnel-consistency",
+              STATUS.PASS,
+              `no smee webhook tunnel is live on this declared-cloud node — consistent ` +
+                `with deployment mode "cloud"`,
+            ),
+          );
+        }
+      }
+    } catch (err) {
+      checks.push(
+        mkCheck(
+          "deployment-mode-tunnel-consistency",
+          STATUS.INFO,
+          `could not verify webhook-tunnel state for deployment mode "cloud" — local ` +
+            `monitor at ${base} could not be verified (unreachable or malformed response: ${err?.message ?? err})`,
+        ),
+      );
+    }
+  }
+
+  return checks;
+}
+
+// ─── CTL-1616 PR2/PR3: secret-contract observability ─────────────────────────
+//
+// checkSecretContract — INFO-ONLY OBSERVATION (design §7/§9), UNCHANGED by the
+// PR3 cutover below. Resolves a handful of SECRET_REGISTRY rows through the
+// shared lib/secret-contract.mjs engine and reports them as INFO-level
+// observations: presence for `linear-api-token` and `groq-api-key` — NEW
+// coverage design §7 asked for ("plus new Linear/Groq presence checks"), since
+// no existing doctor check resolved either through the contract pre-CTL-1616.
+//
+// PR3 (design §9) cuts checkPeerUniqueness/checkBotCredentials/checkWorkerLabels
+// over to the contract as their LIVE answer for linear-api-token — see
+// resolveLinearTokenLive above — which retires the PR2 shadow-comparison those
+// 3 call sites used to run against their own hand-rolled reads (there is no
+// hand-rolled answer left there to compare against). checkSecretContract
+// itself stays exactly what it was in PR2: an INFO-only observation, not a
+// graded check — grading `source` against the active deployment mode's
+// expected provider (PASS/WARN/FAIL) is explicitly NOT part of this cutover
+// and remains open work for a later PR. checkWebhookIngestion's
+// webhook-secret shadow and checkCloudTokenEnv's cloud-token shadow are also
+// UNCHANGED — those secrets cut over in their own later migration PRs (design
+// §8/§9 PR4-PR6), not this one.
+//
+// Every emitted check is STATUS.INFO — summarize() never counts INFO toward
+// pass/warn/fail (doctor.mjs:1728-1736 — see summarize()), so this check
+// cannot move doctor's exit code (the FAIL count) or its pass/warn/fail
+// summary line.
+//
+// Fleet-topology-independent (does not consult resolveRoster) — wired into
+// checksForClass's shared prelude for EVERY class, exactly like
+// checkDeploymentModeConsistency (CTL-1617) just above it.
+export function checkSecretContract(deps = {}) {
+  const { env = process.env, deploymentMode = resolveDeploymentModeForShadow(env), resolveSecretFn = resolveSecret } = deps;
+  const checks = [];
+  for (const id of ["linear-api-token", "groq-api-key"]) {
+    // CTL-1616 PR2 (B1): isolated via safeResolveSecretContract — a throwing
+    // resolver surfaces as a shadowThrowCheck INFO row for this id instead of
+    // crashing the whole doctor run (there is no per-check isolation in
+    // runDoctor's Promise.all).
+    const resolution = safeResolveSecretContract(resolveSecretFn, id, { env, deploymentMode });
+    if (!resolution.ok) {
+      checks.push(shadowThrowCheck(`secret-contract-${id}`, id, resolution.error));
+      continue;
+    }
+    const resolved = resolution.value;
+    checks.push(
+      mkCheck(
+        `secret-contract-${id}`,
+        STATUS.INFO,
+        resolved?.value != null
+          ? `secret contract resolves "${id}" (source=${resolved.source}, provider=${resolved.provider})`
+          : `secret contract has no resolution for "${id}" (source=${resolved?.source ?? "none"})`,
+      ),
+    );
+  }
+  return checks;
 }
 
 // ─── Developer/monitor: read-replica REACHABILITY (CTL-1346 + CTL-1355) ───────
@@ -3672,6 +4492,23 @@ export function checksForClass(nc, opts = {}) {
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
+  // CTL-1617: deployment-mode consistency — a fleet-topology fact independent
+  // of node class, so it runs for every class (unlike nodeClassCheck it is
+  // never the class-selection short-circuit below). strict:false always here
+  // — this PR wires only the non-strict activation rubric (land-dormant,
+  // CTL-1523 convention); the strict install-profile escalation branch exists
+  // in checkDeploymentModeConsistency but is not wired into any profile yet.
+  const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
+  // #2930 round-2: split-brain Layer-2 path layout is unsupported until the
+  // canonical sweep — zero rows on every non-divergent host.
+  const layer2PathDivergenceCheck = () => checkLayer2PathDivergence();
+  // CTL-1616 PR2: secret-contract shadow pass — like deploymentModeCheck, a
+  // fleet-topology-independent fact (does not consult resolveRoster), so it
+  // runs for every class. SHADOW ONLY: every check it (and the injected
+  // resolvers inside checkWebhookIngestion/checkBotCredentials/
+  // checkPeerUniqueness/checkCloudTokenEnv/checkWorkerLabels) emits is
+  // STATUS.INFO — zero grade change (design §7/§9). PR3 flips this to graded.
+  const secretContractCheck = () => checkSecretContract();
 
   // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
   if (!nc.recognized) {
@@ -3728,6 +4565,9 @@ export function checksForClass(nc, opts = {}) {
     // worker-member Claude settings that don't apply to it.
     return [
       nodeClassCheck,
+      deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
+      secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
@@ -3759,6 +4599,9 @@ export function checksForClass(nc, opts = {}) {
     // the FAIL is removed when the monitor rubric lands (CTL-1355 F3).
     return [
       nodeClassCheck,
+      deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
+      secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -3782,6 +4625,9 @@ export function checksForClass(nc, opts = {}) {
   // unchanged, with the node-class check prepended (INFO/PASS — never FAILs here).
   return [
     nodeClassCheck,
+    deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
+    secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),

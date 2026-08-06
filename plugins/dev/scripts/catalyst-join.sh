@@ -48,6 +48,17 @@ DOCTOR_SCRIPT="${CATALYST_JOIN_DOCTOR_SCRIPT:-${SELF_DIR}/catalyst-doctor}"
 REACH_PROBE="${CATALYST_JOIN_REACH_PROBE:-}"
 # CATALYST_JOIN_FETCH_CMD — used in acquire_bundle(); resolved there
 
+# CTL-1617 PR5: the bash mirror of the deployment-mode resolver. Sourced
+# unconditionally here (a normal top-of-script lib dependency, same as every
+# other lib/*.sh a script in this tree relies on). Consulted from exactly one
+# place — merge_shared_config's webhook-wiring gate, below — which decides
+# whether to wire webhook ingestion into this node's Layer-2 config based on
+# the declared deployment mode (falling back to the pre-CTL-1617 roster-
+# length heuristic when the mode is undeclared). See that function's header
+# comment for the full decision rule.
+# shellcheck source=lib/catalyst-deployment-mode.sh
+. "${SELF_DIR}/lib/catalyst-deployment-mode.sh"
+
 # ── Logging helpers ───────────────────────────────────────────────────────────
 info() { echo "[join] $*"; }
 warn() { echo "[join] WARN: $*" >&2; }
@@ -196,6 +207,34 @@ marker_set_failed() {
   local tmp
   tmp="$(mktemp "${MARKER_DIR}/.marker.XXXXXX")"
   jq --arg s "$stage" '.failedStage = $s' "$MARKER_FILE" > "$tmp" && \
+    mv "$tmp" "$MARKER_FILE" || rm -f "$tmp"
+}
+
+# Drop a stage from completedStages so a resume re-executes it. Used when a
+# LATER stage discovers that this stage's output is what needs refreshing
+# (e.g. config-merge failing on a Layer-1 typo that lives in the
+# setup-plugin-source checkout — a plain resume would re-read the same stale
+# clone forever; see the webhook-wiring gate).
+marker_remove_stage() {
+  local stage="$1"
+  [[ -f "$MARKER_FILE" ]] || return 0
+  local tmp
+  tmp="$(mktemp "${MARKER_DIR}/.marker.XXXXXX")"
+  jq --arg s "$stage" '.completedStages -= [$s]' "$MARKER_FILE" > "$tmp" && \
+    mv "$tmp" "$MARKER_FILE" || rm -f "$tmp"
+}
+
+# Record that the webhook-wiring gate deliberately deferred wiring (Stage-0
+# roster guard) so activation tooling / an operator inspecting the marker can
+# see the node is intentionally unwired. config-merge still completes — this
+# breadcrumb, the gate's log note, and doctor's webhook-ingestion FAIL once
+# the node is activated at roster>1 are the recovery signals.
+marker_note_deferred_wiring() {
+  local reason="$1"
+  [[ -f "$MARKER_FILE" ]] || return 0
+  local tmp
+  tmp="$(mktemp "${MARKER_DIR}/.marker.XXXXXX")"
+  jq --arg r "$reason" '.webhookWiringDeferred = {reason: $r}' "$MARKER_FILE" > "$tmp" && \
     mv "$tmp" "$MARKER_FILE" || rm -f "$tmp"
 }
 
@@ -523,7 +562,10 @@ do_provision_thoughts() {
   [[ -x "$pt" ]] || { fail "provision-thoughts.sh not found/executable at $pt"; return 1; }
   local args=(--node-user "${USER:-$(whoami)}")
   local registry="${CATALYST_DIR}/execution-core/registry.json"
-  [[ -f "$registry" ]] || registry="${CATALYST_DIR}/plugin-source/plugins/dev/scripts/execution-core/registry.json"
+  # Same provisioner-parity rule as the webhook-wiring gate below: the checkout
+  # lives where setup-plugin-source.sh put it (CATALYST_PLUGIN_SOURCE or the
+  # $HOME default), not at a from-scratch ${CATALYST_DIR}/plugin-source guess.
+  [[ -f "$registry" ]] || registry="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/plugins/dev/scripts/execution-core/registry.json"
   # First-join fallback org: layer1Identity.projectKey IS the GitHub org that hosts
   # the product/thoughts repos (join-bundle.mjs sets it from Layer-1 catalyst.projectKey).
   # NOT repoUrl's org — repoUrl/pluginSourceUrl point at wherever the catalyst plugin
@@ -627,7 +669,182 @@ merge_shared_config() {
   local roster_len monitor_wh
   roster_len="$(echo "$BUNDLE_JSON" | jq '(.hostsRoster // []) | length')"
   monitor_wh="$(echo "$BUNDLE_JSON" | jq '.monitorWebhooks // null')"
+
+  # CTL-1617 PR5 — FLIPPED (migration plan §9 PR5): the gate below now
+  # decides on the declared deployment mode, not the roster_len heuristic.
+  # The shadow cycle that gated this flip (one full join cycle, both the
+  # multi-host/wire shape and the single-host/skip shape) reported
+  # verdict=AGREE in both; see the PR5 shadow-cycle evidence in the ticket
+  # thread for the exact log lines.
+  #
+  # Rule (design §6 row 2 / §9 PR5, tightened by the post-merge Codex
+  # follow-up — see the three FIX notes below):
+  #   - mode resolves to "cluster" (recognized, NOT inferred) AND the bundle's
+  #     roster_len > 1                                              → wire
+  #   - mode resolves to "cluster" but roster_len <= 1 (FIX 1)       → skip
+  #   - mode resolves to a recognized non-cluster value              → skip
+  #   - mode is declared but UNRECOGNIZED (a typo)                   → the
+  #     config-merge STAGE FAILS outright (FIX 3, below) — it never reaches
+  #     this decision at all
+  #   - mode is ABSENT (inferred:true — a join bundle/repo predating this
+  #     migration) → FALL BACK to the old roster_len heuristic. A newly-
+  #     joining cluster member must never silently lose webhook wiring just
+  #     because neither side of the join has declared a deployment mode yet.
+  #
+  # FIX 1 (P1 — Stage-0 double-dispatch guard, post-merge Codex thread 3):
+  # the ORIGINAL flip let "mode=cluster" wire unconditionally, regardless of
+  # roster length. But the runtime fencing this gate exists to protect is
+  # itself roster-derived (execution-core/monitor.mjs: `multiHost =
+  # roster.length > 1` gates the claimDispatch soft-CAS) — so wiring webhooks
+  # on a roster<=1 node, just because the FLEET declares "cluster", hands a
+  # Stage-0 shadow node (joined but not yet added to the roster) live webhook
+  # ingestion with no dispatch fencing underneath it: the exact double-
+  # dispatch hazard CTL-1284's original roster_len>1 gate existed to prevent.
+  # The mode-declared "wire" branch below therefore re-adds the roster_len>1
+  # conjunct; a declared "cluster" with roster_len<=1 settles on
+  # rule=mode-declared / decision=skip, same as any other non-cluster mode,
+  # with an explicit `note=` field on the log line explaining why (a bare
+  # "skip" here could otherwise read as "mode is not cluster", which would be
+  # wrong). This does NOT reopen the inferred/heuristic path: the heuristic
+  # branch already carries its own roster_len>1 conjunct (see
+  # heuristic_verdict below) and is untouched.
+  #
+  # WHAT THE RESOLVER SEES HERE, mid-join (read this before touching the
+  # block below):
+  #   - Layer-2 candidate is $cfg ITSELF — the very file this function is
+  #     mid-write on. The SHARED-config merge above has already landed
+  #     catalyst.cluster/catalyst.linear/etc into it, but nothing in
+  #     catalyst-join.sh ever writes catalyst.deployment.mode, so Layer-2
+  #     is @ABSENT for this key on every join today — it always falls
+  #     through to Layer-1.
+  #   - catalyst_resolve_deployment_mode's OWN default Layer-1 path is
+  #     CWD-relative (${CATALYST_CONFIG_FILE:-$(pwd)/.catalyst/config.json}),
+  #     and $PWD at config-merge time is wherever the operator invoked
+  #     catalyst-join.sh from (docs/cluster-onboarding.md's one-liner) — it is
+  #     NEVER the plugin-source checkout. That checkout is what the
+  #     setup-plugin-source stage (already run — step 4, before this one)
+  #     provisions, and — since it is a clone of THIS repo's main branch —
+  #     its .catalyst/config.json is the file that actually declares
+  #     "cluster" for this fleet, as of PR4 (#2901). Left at its own default,
+  #     the resolver would see neither file and report "default"
+  #     (inferred:true) on every real join, no matter what this repo
+  #     declares. So the call below points CATALYST_CONFIG_FILE explicitly at
+  #     that checkout's config — a single-command-scoped override (restored
+  #     the instant the call returns; see the bash semantics this relies on)
+  #     — so the gate reads a live Layer-1 signal instead of unconditionally
+  #     reading "default".
+  #   - FIX 2 (P2 — provisioner path parity, post-merge Codex thread 2): that
+  #     checkout path must be derived with setup-plugin-source.sh's OWN
+  #     `DEFAULT_PATH="${CATALYST_PLUGIN_SOURCE:-$HOME/catalyst/plugin-source}"`
+  #     expression, not a from-scratch `${CATALYST_DIR}/plugin-source` guess —
+  #     the two diverge silently whenever CATALYST_DIR != $HOME/catalyst (a
+  #     common override; see CATALYST_DIR's own doc comment atop this script)
+  #     or CATALYST_PLUGIN_SOURCE is set, in which case setup-plugin-source
+  #     provisioned the checkout at ONE path while this gate went looking at
+  #     ANOTHER, found nothing, and silently degraded to inferred/heuristic —
+  #     the exact class of gap this gate was written to close.
+  local pluginsrc_root="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}"
+  local pluginsrc_config="${pluginsrc_root}/.catalyst/config.json"
+  CATALYST_CONFIG_FILE="$pluginsrc_config" catalyst_resolve_deployment_mode >/dev/null
+
+  # FIX 3 (P2 — resume idempotency, post-merge Codex thread 4): this gate
+  # runs inside the append-only config-merge STAGE (do_config_merge, driven
+  # by run_stage). An explicitly-declared-but-UNRECOGNIZED mode (an operator
+  # typo) must never be allowed to silently degrade to mode-declared/skip and
+  # let the stage report success — run_stage would then add "config-merge" to
+  # completedStages, and a resume after the operator fixes the typo would
+  # skip this stage forever and never re-evaluate the wire/skip decision (the
+  # resolver's own single-host default for a bad value is otherwise
+  # indistinguishable, downstream, from a genuinely-declared single-host
+  # fleet). So: FAIL the stage outright, before the wire/skip decision is
+  # even computed (see the ordering note above) and before any config write
+  # for the webhook block below. run_stage's existing failure path
+  # (marker_set_failed "config-merge") already makes this resumable — a
+  # later run_stage "config-merge" call finds no "config-merge" entry in
+  # completedStages and re-executes merge_shared_config from scratch once the
+  # value is fixed.
+  #
+  # The three sources catalyst_resolve_deployment_mode can have settled on
+  # are exactly env / layer2 / layer1 (a "default" source is by definition
+  # inferred:true and never reaches here) — re-read the raw candidate
+  # directly from whichever one SOURCE names, purely for this error message.
+  # (lib/catalyst-deployment-mode.sh deliberately does not export the raw
+  # value itself — see that file's CATALYST_DEPLOYMENT_MODE_INFERRED doc
+  # comment — so the caller reconstructs it here, read-only, best-effort.)
+  if [[ "$CATALYST_DEPLOYMENT_MODE_INFERRED" != "true" && "$CATALYST_DEPLOYMENT_MODE_RECOGNIZED" != "true" ]]; then
+    local raw_mode=""
+    case "$CATALYST_DEPLOYMENT_MODE_SOURCE" in
+      env)
+        raw_mode="${CATALYST_DEPLOYMENT_MODE-}"
+        ;;
+      layer2)
+        local _l2home="${HOME-}"; [[ -z "$_l2home" ]] && _l2home=~
+        local _l2f="${CATALYST_LAYER2_CONFIG_FILE:-${_l2home}/.config/catalyst/config.json}"
+        raw_mode="$(jq -r '.catalyst.deployment.mode // empty' "$_l2f" 2>/dev/null)"
+        ;;
+      layer1)
+        raw_mode="$(jq -r '.catalyst.deployment.mode // empty' "$pluginsrc_config" 2>/dev/null)"
+        ;;
+    esac
+    fail "webhook-wiring gate (CTL-1617 PR5): declared deployment mode is UNRECOGNIZED: value=\"${raw_mode}\" source=${CATALYST_DEPLOYMENT_MODE_SOURCE}."
+    fail "Valid values: single-host|cluster|cloud. Fix the value and re-run catalyst-join.sh — it resumes from the config-merge stage."
+    # When the garbage value came from the LAYER-1 plugin-source checkout, a
+    # plain resume cannot heal: setup-plugin-source is already in
+    # completedStages, so its ff-only pull never re-runs and the same stale
+    # clone is re-read forever, even after the fix is committed upstream.
+    # Invalidate that stage so the resume re-pulls the checkout first.
+    if [[ "$CATALYST_DEPLOYMENT_MODE_SOURCE" == "layer1" ]]; then
+      marker_remove_stage "setup-plugin-source"
+      fail "The bad value lives in the plugin-source checkout (${pluginsrc_config}); the setup-plugin-source stage has been invalidated so the re-run refreshes the checkout before re-evaluating."
+    fi
+    return 1
+  fi
+
+  local heuristic_verdict monitor_wh_state rule decision note=""
   if [[ "${roster_len:-0}" -gt 1 && "$monitor_wh" != "null" ]]; then
+    heuristic_verdict="wire"
+  else
+    heuristic_verdict="skip"
+  fi
+  if [[ "$monitor_wh" != "null" ]]; then monitor_wh_state="present"; else monitor_wh_state="absent"; fi
+
+  if [[ "$CATALYST_DEPLOYMENT_MODE_INFERRED" == "true" ]]; then
+    # Mode key absent everywhere (pre-migration bundle/repo) — fall back to
+    # the original roster-length heuristic rather than silently skipping.
+    rule="heuristic-fallback"
+    decision="$heuristic_verdict"
+  else
+    # Mode declared and RECOGNIZED (the FIX 3 check above has already ruled
+    # out the unrecognized case) — it decides, but "cluster" additionally
+    # requires roster_len > 1 (FIX 1): the Stage-0 roster guard.
+    rule="mode-declared"
+    if [[ "$CATALYST_DEPLOYMENT_MODE_RESOLVED" == "cluster" && "${roster_len:-0}" -gt 1 ]]; then
+      decision="wire"
+    elif [[ "$CATALYST_DEPLOYMENT_MODE_RESOLVED" == "cluster" ]]; then
+      decision="skip"
+      note="stage0-roster-guard: mode=cluster but roster_len=${roster_len:-0} (<=1) -- runtime dispatch fencing is roster-derived (execution-core/monitor.mjs multiHost=roster.length>1), so wiring here would double-dispatch; deferred: after activating this node in the committed roster, re-run catalyst-join.sh --no-resume with a FRESH join token (catalyst cluster join-token; the original is single-use) or a retained --bundle (until then doctor FAILs webhook-ingestion on this node once roster>1)"
+      # Post-merge Codex finding (#2914 P1): config-merge still completes on
+      # this branch, so nothing re-evaluates the decision when the roster
+      # later grows. Leave a durable breadcrumb in the progress marker for
+      # the activation flow / operator; the loud fleet-level signal is
+      # doctor's webhook-ingestion FAIL on the activated-but-unwired node.
+      marker_note_deferred_wiring "stage0-roster-guard (mode=cluster, roster_len=${roster_len:-0}): after roster activation re-run catalyst-join.sh --no-resume with a fresh join token (catalyst cluster join-token) or a retained --bundle"
+    else
+      decision="skip"
+    fi
+  fi
+  # A "wire" decision with no monitorWebhooks in the bundle has nothing to
+  # write — degrade to skip so the log line always matches the actual
+  # outcome (mirrors the heuristic's original implicit `monitor_wh != null`
+  # conjunct, now applied uniformly to both rules).
+  [[ "$decision" == "wire" && "$monitor_wh" == "null" ]] && decision="skip"
+
+  local note_field=""
+  [[ -n "$note" ]] && note_field=" note=${note}"
+
+  info "webhook-wiring gate (CTL-1617 PR5): decision=${decision} rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} source=${CATALYST_DEPLOYMENT_MODE_SOURCE} inferred=${CATALYST_DEPLOYMENT_MODE_INFERRED} | heuristic_would=${heuristic_verdict} roster_len=${roster_len:-0} monitorWebhooks=${monitor_wh_state}${note_field}"
+
+  if [[ "$decision" == "wire" ]]; then
     local tmp2
     tmp2="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
     # Deep-merge ($wh * existing): existing node-local values WIN (non-clobber),
@@ -636,9 +853,9 @@ merge_shared_config() {
         .catalyst //= {}
         | .catalyst.monitor = ($wh * (.catalyst.monitor // {}))
       ' "$cfg" > "$tmp2" && mv "$tmp2" "$cfg" || { rm -f "$tmp2"; return 1; }
-    info "webhook ingestion wired (multiHost roster=${roster_len})"
+    info "webhook ingestion wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
   else
-    info "webhook ingestion NOT wired (roster=${roster_len:-0}) — single-host double-dispatch guard"
+    info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
   fi
 }
 
@@ -755,7 +972,14 @@ do_doctor_gate() {
   # Gate strictly on [$? -eq 0] per the doctor contract. This replaces the old
   # default of check-setup.sh, a cwd-relative full-workstation check that exits
   # nonzero on a fresh node (the reason mini-2's join needed a manual marker poke).
-  if bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
+  # #2918 follow-up (Codex P1): thread the SAME Layer-1 the webhook-wiring
+  # gate consulted (provisioner-parity plugin-source checkout) into the doctor
+  # run — the deployment-mode resolver's own Layer-1 default is CWD-relative
+  # (the operator's invocation directory), so without this the doctor gate
+  # resolves an inferred default and keeps the webhook-ingestion FAIL on a
+  # declared non-cluster join that the wiring gate intentionally skipped.
+  local _doctor_l1="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/.catalyst/config.json"
+  if CATALYST_CONFIG_FILE="$_doctor_l1" bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
     info "Doctor gate passed (catalyst-doctor: 0 FAIL checks)."
     return 0
   else
