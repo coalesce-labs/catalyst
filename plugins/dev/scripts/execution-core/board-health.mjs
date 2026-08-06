@@ -944,8 +944,20 @@ function checkStrandedMidPipeline(b, t) {
   const nowMs = Number.isFinite(b?.now) ? b.now : Date.now();
   const limit = t?.strandedMidPipelineMs ?? DEFAULT_THRESHOLDS.strandedMidPipelineMs;
   // A live worker signal exempts the ticket (same semantics as checkUnownedInFlight).
+  // CTL-1644 (Codex P2 round 5): but only a FRESH live-status signal is proof of a
+  // live worker. `readWorkerSignals` keeps returning a dead worker's persisted
+  // `running`/`dispatched` status forever (no terminal signal was written), so
+  // `isLiveWorkerStatus` alone would exempt a long-dead worker. Gate on the same
+  // staleness threshold checkUnownedInFlight uses (`s.ageMs > limit`) so a signal
+  // that has sat "live" past the stranded window no longer masks the ticket.
+  // (The residual — a persisted worker-dir with no live bg job — stays a deliberate
+  // Phase-2 actuation proxy owned by the reaper; the real per-bg liveness probe is
+  // Phase 3's hasLiveBg, which fully closes the dead-worker gap. Treating a
+  // persisted dir as NOT-actuated in Phase 2 would risk restart-freshing a live
+  // worker mid-run — the more dangerous error — so that exemption is intentional.)
   const hasLiveSignal = new Set(
-    b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket) ?? [],
+    b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)
+      && !(Number.isFinite(s.ageMs) && s.ageMs > limit)).map((s) => s.ticket) ?? [],
   );
   const flagged = [];
   const classified = {};

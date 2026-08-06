@@ -2023,6 +2023,30 @@ describe("checkStrandedMidPipeline (CTL-1644)", () => {
     expect(r.flagged).toEqual([]);
   });
 
+  test("does NOT flag when a FRESH live-status signal exists (active worker)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 1 * HOUR }],
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("DOES flag when the only 'live' signal is STALE past threshold [Codex P2 round 5]", () => {
+    // A dead worker's persisted `running` signal (never wrote a terminal signal)
+    // must NOT mask the stranded ticket once it has sat live past the window.
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 72 * HOUR }],
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
   test("does NOT flag when a fresh recovery intent exists", () => {
     const r = evaluateInvariants(board({
       ticketsById: one(),
