@@ -148,6 +148,7 @@ import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
+import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
 
 // CTL-1623: register the github-token row's rearm hook at module load — BEFORE either
 // call site below (both live inside startDaemon(), invoked only later) can fire. Makes
@@ -817,6 +818,9 @@ export function startDaemon({
   // CTL-1090: cross-host liveness publisher. Injectable for tests. Single-host
   // installs get an inert no-op handle from startLivenessPublisher itself.
   startLivenessPublisher = realStartLivenessPublisher,
+  // CTL-1654: node-class guard seam. Injectable for tests (production uses the
+  // zero-import lib/node-class.mjs resolver). Defaults to the real resolver.
+  nodeClassResolver = _resolveNodeClass,
   // CTL-1274 + CTL-1393: cluster-repo auto-refresh. clusterSync runs once at boot
   // (pull + decrypt secrets + seed the change-detection marker); refreshClusterSecrets
   // runs on a cadence — it pulls AND, when the clone's HEAD moved with a secrets/
@@ -1170,11 +1174,37 @@ export function startDaemon({
     const linearBotUserIds = readLinearBotUserIds(configPath, layer2Path);
     const linearBotWriteId = readLinearBotWriteId(configPath, layer2Path); // CTL-781
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
+    // CTL-1654 (Codex P2 "gate the daemon before starting actuators"): resolve the
+    // node class BEFORE arming the actuators, and arm the monitor + scheduler ONLY on
+    // a worker node. Previously the node-class guard ran AFTER monitorFn()/schedulerFn()
+    // and only suppressed the heartbeat — so a mis-launched exec-core on a monitor/
+    // developer node (a direct `catalyst-execution-core start`, or an old launcher)
+    // still armed the dispatch + recovery actuators, and suppressing the heartbeat did
+    // not make it observation-only. cmd_start already refuses to start exec-core off a
+    // worker (the primary control); this is the defense-in-depth backstop that makes the
+    // daemon genuinely observe-only when that control is bypassed. The process stays UP
+    // (visibly refusing — WARN in logs + verify-node's exec-core-stopped catches it)
+    // rather than crash-looping under launchd.
+    const { class: _nodeClass } = nodeClassResolver();
+    const _isWorkerNode = _nodeClass === "worker";
+    if (!_isWorkerNode) {
+      log.warn(
+        { nodeClass: _nodeClass },
+        `execution-core launched on node.class=${_nodeClass} — observe-only: the ` +
+        `monitor + scheduler actuators are NOT armed and no heartbeat/liveness is ` +
+        `emitted (dispatch AND recovery are inert). cmd_start should not have started ` +
+        `exec-core here (CTL-1654).`
+      );
+    }
+
     // CTL-1365a/b: executor + dispatchFn + dispatchMode + commentWakeDispatch are
     // resolved ONCE above (before reconcileBoot) and threaded into all four dispatch
     // entry points. The monitor receives dispatchFn for its →Triage one-shot, and
     // the onComment callback routes comment-wakes through commentWakeDispatch (the
     // same executor) — no split-brain.
+    // CTL-1654: the actuator arming below (monitorFn + schedulerFn + auto-tuner) is
+    // gated on _isWorkerNode — see the observe-only backstop comment above.
+    if (_isWorkerNode) {
     monitorFn({
       orchDir,
       cache,
@@ -1257,6 +1287,7 @@ export function startDaemon({
     // before any auto-tune adjustments. configPath + layer2Path are threaded
     // so the tuner can re-read the merged concurrency on every sample.
     _stopAutoTuner = startAutoTunerFn({ configPath, layer2Path });
+    } // CTL-1654: end worker-only actuator gate (monitor + scheduler + auto-tuner)
 
     if (watchRegistry) {
       // Watch the execution-core dir for registry.json changes — the registry is
@@ -1331,12 +1362,22 @@ export function startDaemon({
       _ratelimitPoller = startRatelimitPoller();
     }
 
+    // CTL-1654: _nodeClass / _isWorkerNode were resolved above (before the actuators)
+    // so the same guard that skips arming the monitor + scheduler also gates the
+    // heartbeat + liveness membership signals here. A monitor/developer node must NOT
+    // emit node.heartbeat (the only dispatch-roster signal) — a node that never
+    // heartbeats is shed from computeDispatchSurvivingRoster automatically, so even if
+    // an actuator were reachable it would own no HRW slice. With CTL-1654's actuator
+    // gate above, dispatch AND recovery are now inert on a non-worker node directly,
+    // not merely emergently.
     // CTL-859: start the node-heartbeat emitter. Appends a node.heartbeat event
     // to the unified event log every HEARTBEAT_INTERVAL_MS so a future liveness
     // reader (readClusterHeartbeats) can detect a dead node by heartbeat
     // silence. ADDITIVE/dormant — pure observability, no behavior consumes it
     // yet. Inside the same try/catch so a throw triggers PID-file cleanup.
-    if (enableHeartbeat) {
+    // CTL-1654: gated on _isWorkerNode — a monitor/developer node must never
+    // heartbeat (the heartbeat IS the dispatch-roster membership signal).
+    if (enableHeartbeat && _isWorkerNode) {
       // CTL-1322: supply the live admission-state closure so each heartbeat carries
       // { accepting, holdReason, effectiveCapacity, activeWorkers } — computed from
       // the same gate source fns the scheduler enforces (orchDir + concurrency are
