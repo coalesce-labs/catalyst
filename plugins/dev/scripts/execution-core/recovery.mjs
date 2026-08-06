@@ -2900,7 +2900,7 @@ export function reclaimDeadWorkIfPossible(
   // recovery-reasoning.mjs's Pass 0r actuator) has no ordinal position, so
   // phaseIndex() throws PhaseFsmError for it. Previously this was unguarded —
   // every dead recovery-pass worker hit the throw on every tick, was
-  // swallowed by the CTL-702 per-worker isolation in scheduler.mjs, and could
+  // swallowed by the PROJ-702 per-worker isolation in scheduler.mjs, and could
   // never actually be reclaimed.
   //
   // PROJ-1657 Codex P2: the guard is scoped to RECOVERY_PASS_PHASE specifically,
@@ -2954,7 +2954,7 @@ export function reclaimDeadWorkIfPossible(
   //
   //     PROJ-1657 Codex P2 (round 2): before escalating, check whether the
   //     worker's own phase.<phase>.complete event was already seen — mirrors
-  //     the CTL-778 alive-branch guard above, but for the DEAD case, where
+  //     the PROJ-778 alive-branch guard above, but for the DEAD case, where
   //     there is no probe to re-check (a probe-less phase has none by
   //     definition). A recovery-pass worker that emitted its complete event
   //     and then crashed before its OWN signal-file update landed genuinely

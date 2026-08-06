@@ -4133,7 +4133,7 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     // entry and no ordinal position. Before this fix, `phaseIndex(phase)` ran
     // UNGUARDED (unlike the `dispatched` reduce four lines above, which already
     // had the isKnownPhase guard), so every dead recovery-pass worker threw
-    // PhaseFsmError on every tick — caught by scheduler.mjs's CTL-702 per-worker
+    // PhaseFsmError on every tick — caught by scheduler.mjs's PROJ-702 per-worker
     // isolation, but permanently unreclaimable as a result. A non-FSM phase
     // can't be "superseded" in the ordinal sense, so it must skip the guard and
     // fall through to the normal reclaim-eligible path — which, since no probe
@@ -4330,7 +4330,7 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
   });
 
   test("no-probe-for-phase returns 'reclaim-failed' when the complete-event-seen emit-complete repair fails (regression, Codex #3027 round 4 P2)", () => {
-    // The other completion-reconciliation branches (CTL-778 alive-probe-reclaim,
+    // The other completion-reconciliation branches (PROJ-778 alive-probe-reclaim,
     // and branch (B) of reclaimDeadWork) both return 'reclaim-failed' on a
     // non-zero emitComplete — this branch must match so scheduler.mjs doesn't
     // bucket a failed signal repair as a successful reclaim.
