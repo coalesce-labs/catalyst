@@ -357,6 +357,13 @@ active work:
   flip draft→ready (avoids `create-pr`'s "PR already exists" hang).
 - **Config**: `orchestration.draftPr.enabled` (default `true`) — set `false` for no early draft, so
   the PR is created only at the `pr` phase.
+- **Resume consumer (CTL-1640)**: the pushed commits on `origin/<ticket>` are the durable record a
+  new worktree resumes from. `create-worktree.sh` seeds a fresh branch from `origin/<ticket>` when
+  it exists (default-on; `--no-from-remote` opts out), so both normal dispatch and cross-host
+  reclaim (`defaultRebuildWorktree`) rebuild on the dead host's pushed work instead of orphaning it
+  under a fresh branch off base. Resolved straight from git (`origin/<ticket>`), not by reading
+  `.draftPr`. The operator-facing CLI contract (default-on, the `--no-from-remote` / `--skip-fetch`
+  opt-outs) is owned by and documented in `plugins/dev/skills/create-worktree/SKILL.md`.
 - **Deferred**: reading `.draftPr` draft-state as a secondary advancement signal (advancement
   currently driven by signal `status === "done"` only).
 
