@@ -5408,6 +5408,13 @@ export function schedulerTick(
             maxParallel,
             liveCount,
             freeSlots: computeFreeSlots(maxParallel, occupiedCount),
+            // CTL-1607 (Codex #2985 P2): the same new-work admission gate applied
+            // below (`livenessFresh && !draining`, line ~6576) — sampled here so the
+            // board-scan event's PUBLISHED slotFree collapses to 0 on a node that
+            // will not admit. Observational only; the un-gated freeSlots above still
+            // drives the dispatch-liveness invariant. Both seams are pure reads
+            // (livenessIsFresh is already called this tick at ~5703/~6560).
+            admissionGated: !livenessIsFresh() || isDraining(),
           },
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,

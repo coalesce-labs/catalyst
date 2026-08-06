@@ -4086,22 +4086,34 @@ describe("checkDaemonlessLocal (CTL-1355 — folds verify-node --json)", () => {
     expect(checks[0].status).toBe(STATUS.FAIL);
   });
 
-  it("FAILs (fail-closed, F2) when verify-node exits non-zero (captured child status)", () => {
+  // CTL-1662 (Codex P2): a non-zero exit / "fail" verdict alone is NOT unusable — it's the
+  // expected shape when a required row OUTSIDE `rows` failed (e.g. event-mirror-running,
+  // would-not-own-work). The named rows below are all individually PASS in the parsed
+  // output, so they must be preserved and reported — collapsing to one generic FAIL would
+  // hide exactly which row actually failed.
+  it("preserves individually-PASSing named rows even when exit_code is non-zero for an unrelated row", () => {
     const checks = checkDaemonlessLocal({
       runVerifyNode: () => ({ ...vnFixture(), exit_code: 2 }),
     });
-    expect(checks).toHaveLength(1);
-    expect(checks[0].name).toBe("verify-node");
-    expect(checks[0].status).toBe(STATUS.FAIL);
-    expect(checks[0].detail).toContain("exit 2");
+    expect(checks.map((c) => c.name)).toEqual(["broker-stopped", "exec-core-stopped", "plugins-fresh"]);
+    expect(checks.every((c) => c.status === STATUS.PASS)).toBe(true);
   });
 
-  it("FAILs (fail-closed, F2) when verify-node reports a fail verdict", () => {
+  it("preserves individually-PASSing named rows even when verdict is 'fail' for an unrelated row", () => {
     const checks = checkDaemonlessLocal({
       runVerifyNode: () => ({ ...vnFixture(), verdict: "fail" }),
     });
-    expect(checks).toHaveLength(1);
-    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks.map((c) => c.name)).toEqual(["broker-stopped", "exec-core-stopped", "plugins-fresh"]);
+    expect(checks.every((c) => c.status === STATUS.PASS)).toBe(true);
+  });
+
+  it("still names the SPECIFIC failed row (not a generic collapse) when exit is non-zero because that named row failed", () => {
+    const checks = checkDaemonlessLocal({
+      runVerifyNode: () => ({ ...vnFixture({ "broker-stopped": "FAIL" }), exit_code: 1, verdict: "fail" }),
+    });
+    expect(checks.find((c) => c.name === "broker-stopped").status).toBe(STATUS.FAIL);
+    expect(checks.find((c) => c.name === "exec-core-stopped").status).toBe(STATUS.PASS);
+    expect(checks.find((c) => c.name === "plugins-fresh").status).toBe(STATUS.PASS);
   });
 });
 
