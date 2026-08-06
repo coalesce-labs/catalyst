@@ -986,13 +986,17 @@ describe("registry validation (§6) — the rearm-hook honesty rules", () => {
     // the process-wide linearReminter singleton (see linear-remint.test.mjs's own
     // "rearm-hook wiring" suite for that integration, exercised with an injected fake
     // reminter — never the real singleton, to avoid a hermetic test triggering a genuine
-    // network mint). This file stays a zero-import leaf and never imports linear-remint.mjs,
-    // so from ITS isolated perspective (and this describe block's own beforeEach, which
-    // unconditionally clears every row's hook before each test) every re-armable row still
-    // degrades identically here — this test proves that degrade mechanism in isolation, not
-    // "no hook exists anywhere in the codebase" (which is no longer true for
-    // linear-orchestrator-actor). github-token and linear-api-token remain genuinely
-    // hookless everywhere in the codebase as of this PR.
+    // network mint). UPDATE (CTL-1623): github-token ALSO now has a real production hook —
+    // registered in execution-core/daemon.mjs at module scope
+    // (registerRearmHook("github-token", ...), wrapping rearmGithubTokenFromFile), so it
+    // joins linear-orchestrator-actor as no longer genuinely hookless anywhere in the
+    // codebase. This file stays a zero-import leaf and never imports daemon.mjs or
+    // linear-remint.mjs, so from ITS isolated perspective (and this describe block's own
+    // beforeEach, which unconditionally clears every row's hook before each test) every
+    // re-armable row still degrades identically here — this test proves that degrade
+    // mechanism in isolation, not "no hook exists anywhere in the codebase" (which is no
+    // longer true for linear-orchestrator-actor OR github-token). Only linear-api-token
+    // remains genuinely hookless everywhere in the codebase as of this PR.
     const reArmable = SECRET_REGISTRY.filter((r) => r.rotation.class === "re-armable");
     expect(reArmable.map((r) => r.id).sort()).toEqual(
       ["github-token", "linear-api-token", "linear-orchestrator-actor"].sort(),

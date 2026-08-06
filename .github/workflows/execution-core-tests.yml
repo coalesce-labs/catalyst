@@ -285,6 +285,23 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-execution-core-github-token.test.sh
 
+      - name: catalyst-secret-env A/B legacy-vs-folded parity test (CTL-1623)
+        # catalyst_project_github_token/_webhook_secret's FILE-READ tier now delegates to
+        # lib/catalyst-secret-contract.sh's catalyst_resolve_secret (the CTL-1616 registry
+        # engine) instead of hand-rolling its own file search. This suite freezes the
+        # pre-fold implementation as a test-local reference and asserts byte-identical
+        # results across the full fixture space (explicit overrides, CATALYST_CONFIG_DIR,
+        # CATALYST_LAYER2_CONFIG_FILE-derived dir, XDG dedupe, absent/whitespace-only files,
+        # trailing-EOL stripping, pipe-in-value, the full github-token precedence ladder),
+        # plus two FLAGGED, deliberately-divergent fail-closed cells (NUL-containing file,
+        # invalid-UTF-8 file — Codex post-merge round 1) where the folded engine now
+        # rejects a candidate the legacy reader would have silently mutated. Sibling suites
+        # secret-contract-parity.test.sh / catalyst-secret-contract.test.sh remain CI-dark
+        # (pre-existing family-wide gap, tracked separately) — this is the one directly
+        # exercising the CTL-1612 pair's own launcher-facing wrapper functions.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-secret-env-legacy-parity.test.sh
+
       - name: migrate-dual-harness test (CTL-1530)
         # Covers the dual-harness classification (dual-ok / codex-only /
         # claude-only-monolithic / no-harness), the skills-dir state machine
@@ -579,4 +596,5 @@ jobs:
             updater/updater.test.mjs \
             updater/updater-tracing.test.mjs \
             github-auth-preflight.test.mjs \
+            github-token-candidates-legacy-parity.test.mjs \
             cluster-sync.test.mjs

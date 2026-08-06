@@ -33,10 +33,10 @@
 // deterministically testable without real load, timers, network, or a checkout.
 // Mirrors the gc-liveness.mjs / autotune.mjs seam-injection convention.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf, not the heavy router
 
 // Throttle window: at most one pull per N seconds per checkout root. A merge
@@ -146,6 +146,57 @@ export function changedPackageDirs(root, diffOutput) {
     dirs.add(dir === "." ? root : resolve(root, dir));
   }
   return [...dirs];
+}
+
+// workspaceMemberNodeModules — pure helper: when `root` is a bun WORKSPACE root
+// (root package.json has `workspaces` and the root bun.lock is authoritative),
+// return each member's node_modules dir that exists and is not standalone-managed
+// (member has no bun.lock of its own). Exported for direct unit testing.
+//
+// WHY (CTL-1628 follow-up): the workspace conversion moved dep resolution to the
+// ROOT lockfile, but nodes migrated in place kept the node_modules the OLD
+// per-package flow had installed inside each member. Module resolution walks UP,
+// so that debris SHADOWS every root install forever: on the fleet this pinned the
+// running cloud-sync daemon to @catalyst-cloud/sdk 0.8.0 (no CTC-328 stale-frame
+// guard) while the root lock said 0.8.1 and every refresh "succeeded".
+//
+// Callers prune these dirs immediately BEFORE a root install — never on a bare
+// tick. That placement is the safety argument: bun legitimately creates nested
+// member node_modules for version conflicts, and no cheap signature separates
+// those from pre-workspace debris (verified: the fleet's stale trees carry no
+// .bun store either). Pruning only when an install follows makes a false
+// positive harmless — `bun install` recreates any nest it actually needs — and
+// costs nothing on ticks where no manifest changed.
+//
+// Glob workspace entries ("packages/*") are SKIPPED, not expanded: this repo
+// lists members literally, and silently expanding globs here would turn a new
+// pattern entry into a surprise rm -rf fan-out. A skipped glob is surfaced by
+// the caller's event detail, not swallowed.
+export function workspaceMemberNodeModules(root, { readFileFn = readFileSync, existsFn = existsSync } = {}) {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileFn(resolve(root, "package.json"), "utf8"));
+  } catch {
+    return [];
+  }
+  const entries = Array.isArray(manifest?.workspaces) ? manifest.workspaces : [];
+  if (entries.length === 0) return [];
+  if (!existsFn(resolve(root, "bun.lock"))) return []; // no authoritative root lock → not ours to prune
+  const out = [];
+  for (const entry of entries) {
+    if (typeof entry !== "string" || entry === "" || entry.includes("*")) continue;
+    const memberDir = resolve(root, entry);
+    if (!existsFn(join(memberDir, "package.json"))) continue;
+    if (existsFn(join(memberDir, "bun.lock"))) continue; // standalone-managed member — not workspace debris
+    const nm = join(memberDir, "node_modules");
+    if (existsFn(nm)) out.push(nm);
+  }
+  return out;
+}
+
+// defaultPruneFn — remove one member node_modules dir. Injectable for tests.
+function defaultPruneFn(dir) {
+  rmSync(dir, { recursive: true, force: true });
 }
 
 // defaultGitToplevelFn — map a pluginDirs entry (<checkout>/plugins/dev) to its
@@ -396,6 +447,10 @@ export function refreshPluginCheckout({
   now = Date.now(),
   gitFn = defaultGitFn,
   bunInstallFn = defaultBunInstallFn,
+  // CTL-1628 follow-up seams: stale-member-node_modules pruning ahead of a root
+  // install (see workspaceMemberNodeModules for why). Injectable for tests.
+  memberNodeModulesFn = workspaceMemberNodeModules,
+  pruneFn = defaultPruneFn,
   emitFn,
   loadedCommit = null,
   loadedCommitRoot = null,
@@ -535,10 +590,33 @@ export function refreshPluginCheckout({
   // triggers the monitor restart). Install failures are surfaced as WARN events
   // and never block the checkout-updated signal (reset already succeeded).
   const depsInstalled = [];
+  const staleNodeModulesPruned = [];
   if (oldSha) {
     let diffOut = "";
     try { diffOut = gitFn(root, ["diff", "--name-only", oldSha, newSha]); } catch { diffOut = ""; }
-    for (const pkgDir of changedPackageDirs(root, diffOut)) {
+    const pkgDirs = changedPackageDirs(root, diffOut);
+    // CTL-1628 follow-up: an install is about to run and the root lockfile is
+    // authoritative, so first clear any member node_modules that would SHADOW
+    // it (pre-workspace debris; see workspaceMemberNodeModules). Prune failures
+    // are non-fatal for the same reason install failures are — the reset
+    // already succeeded — but they surface as WARN, never silently.
+    if (pkgDirs.length > 0) {
+      for (const nm of memberNodeModulesFn(root)) {
+        try {
+          pruneFn(nm);
+          staleNodeModulesPruned.push(nm);
+        } catch (err) {
+          emitFn({
+            event: "plugin.checkout.node_modules_prune_failed",
+            orchestrator: null,
+            worker: null,
+            severity: "WARN",
+            detail: { checkout: root, node_modules_dir: nm, error: err?.message ?? String(err) },
+          });
+        }
+      }
+    }
+    for (const pkgDir of pkgDirs) {
       try {
         bunInstallFn(pkgDir);
         depsInstalled.push(pkgDir);
@@ -565,6 +643,7 @@ export function refreshPluginCheckout({
       loaded_commit: loadedCommit,
       restart_needed: restartNeeded,
       deps_installed: depsInstalled,
+      stale_node_modules_pruned: staleNodeModulesPruned,
     },
   });
   return { pulled: true, throttled: false, changed: true, failed: false, root, oldSha, newSha, restartNeeded };
