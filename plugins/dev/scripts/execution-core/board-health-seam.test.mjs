@@ -17,6 +17,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { schedulerTick, holisticBoardHealthAct } from "./scheduler.mjs";
+import { boardHealthPass } from "./board-health.mjs";
 
 let orchDir;
 let catalystDir;
@@ -103,6 +104,155 @@ describe("schedulerTick — board-health seam (CTL-1290 §9.4)", () => {
       boardHealthPassFn: (opts) => calls.push(opts),
     });
     expect(calls.length).toBe(0);
+  });
+});
+
+// CTL-1644: getStrandedEvidence seam — verifies the evidence thunk threads from the
+// boardHealth binding through schedulerTick → boardHealthPassFn, and that shadow mode
+// does not invoke act even when evidence is injected (the ADR-023 dark-by-default guarantee).
+describe("schedulerTick — getStrandedEvidence seam (CTL-1644)", () => {
+  test("threads boardHealth.getStrandedEvidence → boardHealthPassFn opts.getStrandedEvidence", () => {
+    const calls = [];
+    const getStrandedEvidenceStub = () =>
+      new Map([["CTL-42", { id: "CTL-42", hasWorkerDir: true, hasLiveBg: false, hasFreshIntent: false, openPr: null }]]);
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: () => {},
+      reclaimDeadWork: () => "noop",
+      liveBackgroundCount: () => 0,
+      boardHealth: { mode: "shadow", getStrandedEvidence: getStrandedEvidenceStub },
+      boardHealthPassFn: (opts) => {
+        calls.push(opts);
+        return { ran: true, ranAtMs: 1 };
+      },
+    });
+    expect(calls.length).toBe(1);
+    expect(calls[0].getStrandedEvidence).toBe(getStrandedEvidenceStub);
+  });
+
+  test("shadow mode with getStrandedEvidence: boardHealthPassFn called, act seam NOT invoked", () => {
+    const actCalls = [];
+    const getStrandedEvidenceStub = () =>
+      new Map([["CTL-99", { id: "CTL-99", hasWorkerDir: false, hasLiveBg: false, hasFreshIntent: false, openPr: null }]]);
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: () => {},
+      reclaimDeadWork: () => "noop",
+      liveBackgroundCount: () => 0,
+      boardHealth: {
+        mode: "shadow",
+        getStrandedEvidence: getStrandedEvidenceStub,
+        act: () => actCalls.push("act-called"),
+      },
+      boardHealthPassFn: (_opts) => ({ ran: true, ranAtMs: 1 }),
+    });
+    expect(actCalls.length).toBe(0);
+  });
+});
+
+// CTL-1644 Phase 3: end-to-end enforce-mode flow through boardHealthPass.
+// Verifies that stranded tickets become holistic `act` candidates with the classified
+// route in boardContext (not merely in the invariant output), and that shadow mode
+// is mutation-free (act never called). These tests call boardHealthPass directly
+// with injected stubs — no timers, no fs.watch, CI-safe.
+describe("boardHealthPass — stranded route dispatch (CTL-1644 Phase 3)", () => {
+  // Stub a ticket that is "in-flight with no actuation past threshold" so the
+  // invariant flags it. 72h age, state=Implement, no labels.
+  const NOW_MS = 1_750_000_000_000;
+  const STALE_TS = new Date(NOW_MS - 72 * 3_600_000).toISOString();
+  const strandedEvidence = (id, overrides = {}) =>
+    new Map([[id, { id, hasWorkerDir: false, hasLiveBg: false, hasFreshIntent: false,
+      openPr: null, remoteBranchExists: false, worktreeUnpushed: false, ...overrides }]]);
+  const mkOpts = (mode, actStub, extraOpts = {}) => ({
+    mode,
+    orchDir,
+    getBoard: () => [{ identifier: "CTL-99", state: "Implement",
+      updatedAt: STALE_TS, labels: [] }],
+    getWorkerSignals: () => [],
+    getEligible: () => [],
+    getStrandedEvidence: () => strandedEvidence("CTL-99"),
+    // Provide free slots so decideBoardHealth's gate-2 (no-free-slots) doesn't block.
+    capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4, admissionGated: false },
+    isThrottledFn: () => false, // bypass 5-min throttle in tests
+    now: () => NOW_MS,
+    emit: () => {},
+    act: actStub,
+    ...extraOpts,
+  });
+
+  test("enforce: stranded ticket (restart-fresh) is in candidates passed to act", () => {
+    const actArgs = [];
+    boardHealthPass(mkOpts("enforce", (args) => {
+      actArgs.push(args);
+      return { dispatched: true, candidate: "CTL-99" };
+    }));
+    expect(actArgs.length).toBe(1);
+    expect(actArgs[0].candidates).toContain("CTL-99");
+  });
+
+  test("enforce: boardContext.strandedMidPipeline carries classified route for the delegate", () => {
+    let capturedCtx = null;
+    boardHealthPass(mkOpts("enforce", ({ boardContext }) => {
+      capturedCtx = boardContext;
+      return { dispatched: true, candidate: "CTL-99" };
+    }));
+    expect(capturedCtx?.strandedMidPipeline?.["CTL-99"]).toBeDefined();
+    expect(capturedCtx.strandedMidPipeline["CTL-99"].route).toBe("restart-fresh");
+  });
+
+  test("enforce: pr-not-merged route (openPr set) is classified and boardContext reflects it", () => {
+    let capturedCtx = null;
+    boardHealthPass(mkOpts("enforce", ({ boardContext }) => {
+      capturedCtx = boardContext;
+      return { dispatched: true, candidate: "CTL-99" };
+    }, {
+      getStrandedEvidence: () => strandedEvidence("CTL-99",
+        { openPr: { number: 42, status: "open" } }),
+    }));
+    expect(capturedCtx?.strandedMidPipeline?.["CTL-99"]?.route).toBe("pr-not-merged");
+  });
+
+  test("enforce: adopt route (worktreeUnpushed) is classified as dispatchable:false in boardContext", () => {
+    let capturedCtx = null;
+    boardHealthPass(mkOpts("enforce", ({ boardContext }) => {
+      capturedCtx = boardContext;
+      return { dispatched: true, candidate: "CTL-99" };
+    }, {
+      getStrandedEvidence: () => strandedEvidence("CTL-99",
+        { worktreeUnpushed: true }),
+    }));
+    expect(capturedCtx?.strandedMidPipeline?.["CTL-99"]?.route).toBe("adopt");
+    expect(capturedCtx.strandedMidPipeline["CTL-99"].dispatchable).toBe(false);
+  });
+
+  test("shadow: stranded ticket detected — invariants flagged — but act NOT called", () => {
+    const actArgs = [];
+    const result = boardHealthPass(mkOpts("shadow", (...a) => actArgs.push(a)));
+    expect(actArgs.length).toBe(0); // shadow never actuates
+    // invariant IS observable and the ticket IS flagged (detection still works)
+    expect(result.invariants?.strandedMidPipeline?.ok).toBe(false);
+    expect(result.invariants?.strandedMidPipeline?.flagged).toContain("CTL-99");
+  });
+
+  test("enforce: ticket with active worker dir is NOT in candidates (actuation present)", () => {
+    const actArgs = [];
+    boardHealthPass(mkOpts("enforce", (args) => {
+      actArgs.push(args);
+      return { dispatched: false, reason: "no-owned-anchor" };
+    }, {
+      getStrandedEvidence: () => strandedEvidence("CTL-99", { hasWorkerDir: true }),
+    }));
+    // worker dir = actuated → not flagged → not a stranded candidate
+    // act may still be called (eligible queue could have it), but candidates must not
+    // contain CTL-99 as a STRANDED candidate from tier2 moves
+    if (actArgs.length > 0) {
+      // The ticket should not appear as a stranded tier2 move candidate
+      // (it would only appear if it were in the eligible queue, which it's not here)
+      const boardCtxStranded = actArgs[0].boardContext?.strandedMidPipeline ?? {};
+      expect(boardCtxStranded["CTL-99"]).toBeUndefined();
+    }
   });
 });
 

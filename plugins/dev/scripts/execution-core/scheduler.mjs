@@ -5430,6 +5430,10 @@ export function schedulerTick(
           // → empty-Map / empty-array defaults keep the new invariants
           // observable:false and the holistic failover unreachable (shadow-safe).
           getPrStatusMap: _boardHealth.getPrStatusMap,
+          // CTL-1644: thread the stranded-mid-pipeline evidence seam. Daemon-bound
+          // below; a bare tick passes none → empty-Map default keeps the new invariant
+          // observable:false (shadow-first, ADR-023).
+          getStrandedEvidence: _boardHealth.getStrandedEvidence,
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the
@@ -8082,6 +8086,59 @@ function runTick() {
             /* best-effort — empty PR map on open failure */
           }
           return getAllPrStatuses();
+        },
+        // CTL-1644: build per-ticket actuation + salvageability evidence for
+        // checkStrandedMidPipeline. Called inside assembleBoardState, protected
+        // by the 5-min scan throttle. Uses cheap local sources only:
+        //   - hasWorkerDir: orchDir/workers/<ticket>/ presence (primary actuation signal)
+        //   - hasFreshIntent: active recovery intent within the cooldown window
+        //   - openPr: prStatusMap lookup by the ticket descriptor's prNumber
+        // Phase 3 will add remoteBranchExists / worktreeUnpushed via the
+        // stall-janitor census. hasLiveBg is false for Phase 2 (worker-dir
+        // presence is the primary actuation signal; a worker-dir that exists but
+        // has no live bg job is still "actuated" until the reaper cleans it up).
+        getStrandedEvidence: () => {
+          const evidenceMap = new Map();
+          try { openBrokerStateDb(); } catch { /* best-effort */ }
+          let prMap = new Map();
+          let descriptors = [];
+          try { prMap = getAllPrStatuses(); } catch { /* best-effort */ }
+          try { descriptors = getAllTicketDescriptors({ includeRemoved: false }); } catch { /* best-effort */ }
+          for (const d of descriptors) {
+            const id = d.identifier ?? d.id;
+            if (!id) continue;
+            const hasWorkerDir = existsSync(join(runningOpts.orchDir, "workers", id));
+            let hasFreshIntent = false;
+            try {
+              hasFreshIntent = recoverySkipReason(id, { orchDir: runningOpts.orchDir }) !== null;
+            } catch { /* fail open — no intent treated as not protected */ }
+            let openPr = null;
+            const prNum = d.prNumber ?? d.pr_number ?? null;
+            if (prNum != null) {
+              const byRepo = prMap.get(prNum);
+              if (byRepo instanceof Map) {
+                let repo = null;
+                try {
+                  const team = teamOf(id);
+                  if (team) repo = ownerRepoFromRepoRoot(getProjectConfig(team)?.repoRoot ?? null);
+                } catch { /* best-effort — number-only fallback */ }
+                const entry = (repo && byRepo.get(repo))
+                  ?? byRepo.get("")
+                  ?? byRepo.values().next().value;
+                if (entry && String(entry.status ?? "").toLowerCase() === "open") {
+                  openPr = { number: prNum, status: "open" };
+                }
+              }
+            }
+            evidenceMap.set(id, {
+              id,
+              hasWorkerDir,
+              hasLiveBg: false, // Phase 3: wire real bg-liveness probe here
+              hasFreshIntent,
+              openPr,
+            });
+          }
+          return evidenceMap;
         },
         // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so
         // the phantom/orphaned-PR cohorts disambiguate a cross-repo #-collision by
