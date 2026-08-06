@@ -8105,7 +8105,15 @@ function runTick() {
           try { prMap = getAllPrStatuses(); } catch { /* best-effort */ }
           try { descriptors = getAllTicketDescriptors({ includeRemoved: false }); } catch { /* best-effort */ }
           for (const d of descriptors) {
-            const id = d.identifier ?? d.id;
+            // CTL-1644: broker rowToTicketDescriptor sets ONLY `.ticket` (e.g.
+            // "CTL-9") — never `.identifier`/`.id` — so key evidence identically
+            // to assembleBoardState's ticketsById (`d.identifier ?? d.ticket ??
+            // d.id`). Without the `.ticket` fallback every descriptor keyed
+            // undefined, the evidence Map came back empty on every real scan, and
+            // checkStrandedMidPipeline short-circuited to observable:false — the
+            // invariant never fired against production data (dark in shadow AND
+            // enforce). The join key must match ticketsById or evidence.get(id) misses.
+            const id = d.identifier ?? d.ticket ?? d.id;
             if (!id) continue;
             const hasWorkerDir = existsSync(join(runningOpts.orchDir, "workers", id));
             let hasFreshIntent = false;
