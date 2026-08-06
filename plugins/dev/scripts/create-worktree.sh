@@ -30,6 +30,11 @@ ORCHESTRATION_NAME=""
 REUSE_EXISTING=false
 SKIP_FETCH=false
 EXPECTED_BRANCH=""
+# CTL-1640: resume-from-remote is default-on. When no local branch exists and
+# origin has this ticket branch (pushed draft-PR commits, CTL-783), seed the
+# worktree from that remote tip instead of orphaning it under a fresh branch off
+# base. --no-from-remote opts out; --from-remote affirms the default.
+FROM_REMOTE=true
 
 while [[ $# -gt 0 ]]; do
 	case $1 in
@@ -38,6 +43,8 @@ while [[ $# -gt 0 ]]; do
 		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
 		--reuse-existing) REUSE_EXISTING=true; shift ;;
 		--skip-fetch) SKIP_FETCH=true; shift ;;
+		--from-remote) FROM_REMOTE=true; shift ;;
+		--no-from-remote) FROM_REMOTE=false; shift ;;
 		# CTL-615: when --reuse-existing returns an existing worktree dir,
 		# assert its HEAD is on this branch. Mismatch → exit 64 with a
 		# clear diagnostic. The daemon's revive path passes the ticket name
@@ -52,12 +59,17 @@ done
 # Get worktree name from positional args
 if [ ${#POSITIONAL[@]} -eq 0 ]; then
 	echo -e "${RED}Error: Worktree name is required${NC}"
-	echo "Usage: ./create-worktree.sh <worktree_name> [base_branch] [--worktree-dir <path>] [--hooks-json <json>]"
+	echo "Usage: ./create-worktree.sh <worktree_name> [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--no-from-remote]"
+	echo ""
+	echo "  --from-remote / --no-from-remote  Seed a new branch from origin/<worktree_name>"
+	echo "                                    when it exists (default: --from-remote); opt out"
+	echo "                                    to always root a fresh branch on the base tip."
 	echo ""
 	echo "Examples:"
 	echo "  ./create-worktree.sh ENG-123"
 	echo "  ./create-worktree.sh feature-auth main"
 	echo "  ./create-worktree.sh orch-1-ENG-123 main --worktree-dir ~/catalyst/my-app"
+	echo "  ./create-worktree.sh ENG-123 main --no-from-remote   # ignore origin/ENG-123, root on base"
 	exit 1
 fi
 
@@ -186,17 +198,75 @@ fi
 CREATED_BRANCH=false
 if git show-ref --verify --quiet "refs/heads/${WORKTREE_NAME}"; then
 	echo "📋 Using existing branch: ${WORKTREE_NAME}"
+	# CTL-1640: local branch wins (policy: no auto-merge), but surface a
+	# divergence from origin/<name> so a stale local branch atop pushed work is
+	# visible. Read the LOCALLY-CACHED remote-tracking ref (git rev-parse, no
+	# network) rather than a synchronous `git ls-remote` (Codex #3025 P2): the
+	# reuse path needs no remote data to add the worktree, and createWorktree()
+	# spawns this script without a timeout, so a live ls-remote against a slow or
+	# unreachable origin would block dispatch/reclaim until the transport times out
+	# — all for a cosmetic warning. Best-effort: if the remote-tracking ref is not
+	# present locally, we simply skip the warning.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ]; then
+		LOCAL_SHA="$(git rev-parse --verify --quiet "refs/heads/${WORKTREE_NAME}" 2>/dev/null || true)"
+		REMOTE_SHA="$(git rev-parse --verify --quiet "refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null || true)"
+		if [ -n "$REMOTE_SHA" ] && [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+			echo -e "${YELLOW}⚠️  local ${WORKTREE_NAME} (${LOCAL_SHA:0:8}) diverges from origin (${REMOTE_SHA:0:8}); keeping local, not merging (CTL-1640)${NC}" >&2
+		fi
+	fi
 	git worktree add "$WORKTREE_PATH" "$WORKTREE_NAME"
 else
 	echo "🆕 Creating new branch: ${WORKTREE_NAME}"
+	# CREATED_BRANCH=true is correct even when seeded from origin/<name> below:
+	# the local branch head then equals origin/<name>, so the rollback helpers'
+	# `git branch -D` can never lose unpushed work (every commit is on origin).
 	CREATED_BRANCH=true
 	START_POINT="$BASE_BRANCH"
-	if [ "$SKIP_FETCH" = false ]; then
+	SEEDED_FROM_REMOTE=false
+	# CTL-1640: resume-from-remote — if origin already has this ticket branch
+	# (e.g. a pushed draft PR's commits, CTL-783), seed the worktree from that
+	# remote tip instead of orphaning it under a fresh branch off base. The local
+	# branch already took precedence above; --skip-fetch (offline) and
+	# --no-from-remote opt out. This is the missing CTL-783 "resume consumer" —
+	# both normal dispatch and cross-host reclaim funnel through this script, so
+	# they both resume automatically with no .mjs change.
+	# CTL-1640 (Codex #3025 P1/P2): fetch with an EXPLICIT destination refspec so the
+	# remote-tracking ref is written even in a restricted-refspec (e.g. single-branch)
+	# clone, where a bare `git fetch origin <ticket>` returns success but lands the tip
+	# only in FETCH_HEAD — leaving START_POINT (refs/remotes/origin/<ticket>) nonexistent
+	# and failing the worktree add. A single fetch also collapses remote discovery and
+	# retrieval into ONE round-trip: no separate `git ls-remote` existence snapshot (which
+	# both added serial remote I/O and opened a split-window race where a concurrent push
+	# between the snapshot and the fetch could be missed), and a missing ticket ref simply
+	# makes the fetch exit non-zero so we fall through to seeding from base.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
+		&& git fetch --quiet origin \
+			"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
+		START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+		SEEDED_FROM_REMOTE=true
+		echo "🌱 Resuming from origin/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
+	fi
+	if [ "$SEEDED_FROM_REMOTE" = false ] && [ "$SKIP_FETCH" = false ]; then
 		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
 			START_POINT="refs/remotes/origin/${BASE_BRANCH}"
 			echo "🔄 Fetched origin/${BASE_BRANCH}; rooting on remote tip"
 		else
 			echo -e "${YELLOW}⚠️  Could not fetch origin/${BASE_BRANCH}; falling back to local ${BASE_BRANCH} (worker may branch off stale ref)${NC}" >&2
+		fi
+		# CTL-1640 (Codex #3025 P2): re-check origin/<ticket> immediately before creating
+		# the branch. A superseded worker's early-draft push (implement-plan-draft-pr-early,
+		# CTL-783) can land AFTER the negative ticket fetch above but before `git worktree
+		# add -b` — a TOCTOU window that would otherwise root the survivor on base and never
+		# resume the pushed commits (the local-branch-wins path then takes over on every later
+		# provisioning). This last-moment fetch narrows that window to the gap between here and
+		# the add. It does NOT fully close the race — the durable fix is a cluster-fence guard
+		# on the producer's early-draft push — but it converts the common case back to a resume.
+		if [ "$FROM_REMOTE" = true ] \
+			&& git fetch --quiet origin \
+				"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
+			START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+			SEEDED_FROM_REMOTE=true
+			echo "🌱 origin/${WORKTREE_NAME} appeared during provisioning; resuming from its pushed tip (CTL-1640)"
 		fi
 	fi
 	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$START_POINT"

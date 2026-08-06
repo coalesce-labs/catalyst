@@ -29,6 +29,7 @@ import {
   startPluginDriftCheck,
   handlePluginRefreshEvent,
   changedPackageDirs,
+  workspaceMemberNodeModules,
   PLUGIN_REFRESH_THROTTLE_MS,
   PLUGIN_DRIFT_CHECK_INTERVAL_MS,
   __clearThrottleForTest,
@@ -1411,5 +1412,171 @@ describe("refreshPluginCheckout — bunInstallFn seam (CTL-1223)", () => {
     expect(updEv).toBeDefined();
     expect(Array.isArray(updEv.detail.deps_installed)).toBe(true);
     expect(updEv.detail.deps_installed).toContain("/repo/plugins/dev/scripts/orch-monitor/ui");
+  });
+});
+
+// ─── workspaceMemberNodeModules + install-time pruning (CTL-1628 follow-up) ──
+//
+// The workspace conversion moved dep resolution to the ROOT lockfile, but nodes
+// migrated in place kept each member's pre-workspace node_modules. Module
+// resolution walks UP, so that debris SHADOWS every root install: on the fleet
+// this pinned the running cloud-sync daemon to @catalyst-cloud/sdk 0.8.0 (no
+// CTC-328 stale-frame guard) while the root lock said 0.8.1 and every refresh
+// "succeeded". The prune runs ONLY immediately before an install — bun
+// recreates any nested layout it legitimately needs, which is what makes a
+// false positive harmless — and never on a bare tick.
+
+function makeWorkspaceFs({
+  workspaces = ["plugins/dev/scripts/execution-core"],
+  rootLock = true,
+  members = {},
+} = {}) {
+  // members: { "<entry>": { pkg: true, lock: false, nodeModules: true } }
+  const files = new Set();
+  const contents = new Map();
+  contents.set("/co/package.json", JSON.stringify({ workspaces }));
+  files.add("/co/package.json");
+  if (rootLock) files.add("/co/bun.lock");
+  for (const [entry, m] of Object.entries(members)) {
+    if (m.pkg !== false) files.add(`/co/${entry}/package.json`);
+    if (m.lock) files.add(`/co/${entry}/bun.lock`);
+    if (m.nodeModules !== false) files.add(`/co/${entry}/node_modules`);
+  }
+  return {
+    readFileFn: (path) => {
+      const key = String(path);
+      if (!contents.has(key)) throw new Error(`ENOENT: ${key}`);
+      return contents.get(key);
+    },
+    existsFn: (path) => files.has(String(path)),
+  };
+}
+
+describe("workspaceMemberNodeModules", () => {
+  test("returns a member's node_modules when the member has no lockfile of its own", () => {
+    const fs = makeWorkspaceFs({
+      members: { "plugins/dev/scripts/execution-core": { nodeModules: true } },
+    });
+    expect(workspaceMemberNodeModules("/co", fs)).toEqual([
+      "/co/plugins/dev/scripts/execution-core/node_modules",
+    ]);
+  });
+
+  test("skips a member that manages itself (own bun.lock) — that is not workspace debris", () => {
+    const fs = makeWorkspaceFs({
+      members: { "plugins/dev/scripts/execution-core": { nodeModules: true, lock: true } },
+    });
+    expect(workspaceMemberNodeModules("/co", fs)).toEqual([]);
+  });
+
+  test("returns [] when the ROOT has no bun.lock — without an authoritative root lock, nothing is ours to prune", () => {
+    const fs = makeWorkspaceFs({
+      rootLock: false,
+      members: { "plugins/dev/scripts/execution-core": { nodeModules: true } },
+    });
+    expect(workspaceMemberNodeModules("/co", fs)).toEqual([]);
+  });
+
+  test("returns [] for a non-workspace root, and skips glob entries rather than expanding them", () => {
+    const noWs = makeWorkspaceFs({ workspaces: [] });
+    expect(workspaceMemberNodeModules("/co", noWs)).toEqual([]);
+
+    // A glob entry must NOT silently become an rm -rf fan-out.
+    const glob = makeWorkspaceFs({
+      workspaces: ["packages/*"],
+      members: { "packages/a": { nodeModules: true } },
+    });
+    expect(workspaceMemberNodeModules("/co", glob)).toEqual([]);
+  });
+
+  test("an unreadable root package.json yields [] rather than a throw — refresh must not die on it", () => {
+    expect(
+      workspaceMemberNodeModules("/co", {
+        readFileFn: () => {
+          throw new Error("EACCES");
+        },
+        existsFn: () => true,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("refreshPluginCheckout — stale node_modules pruning", () => {
+  beforeEach(() => {
+    __clearThrottleForTest();
+    __clearLagStateForTest();
+  });
+
+  // A gitFn whose diff reports the root lockfile changed → install will run at root.
+  function makeGitFnWithDiff(diffLines) {
+    const inner = makeGitFn({ before: "old111", after: "new222" });
+    const gitFn = (root, args) => {
+      if (args[0] === "diff") return diffLines.join("\n");
+      return inner(root, args);
+    };
+    gitFn.calls = inner.calls;
+    return gitFn;
+  }
+
+  test("prunes stale member node_modules BEFORE the install, and says so in the updated event", () => {
+    const emitted = [];
+    const order = [];
+    const res = refreshPluginCheckout({
+      root: "/co",
+      now: 0,
+      gitFn: makeGitFnWithDiff(["bun.lock"]),
+      memberNodeModulesFn: () => ["/co/plugins/dev/scripts/execution-core/node_modules"],
+      pruneFn: (dir) => order.push(`prune:${dir}`),
+      bunInstallFn: (dir) => order.push(`install:${dir}`),
+      emitFn: (e) => emitted.push(e),
+    });
+
+    expect(res.failed).toBe(false);
+    // ORDER is the point: pruning after the install would leave the shadow in place.
+    expect(order).toEqual([
+      "prune:/co/plugins/dev/scripts/execution-core/node_modules",
+      "install:/co",
+    ]);
+    const updated = emitted.find((e) => e.event === "plugin.checkout.updated");
+    expect(updated.detail.stale_node_modules_pruned).toEqual([
+      "/co/plugins/dev/scripts/execution-core/node_modules",
+    ]);
+    expect(updated.detail.deps_installed).toEqual(["/co"]);
+  });
+
+  test("does NOT prune on a pull with no manifest changes — never on a bare tick", () => {
+    const pruned = [];
+    refreshPluginCheckout({
+      root: "/co",
+      now: 0,
+      gitFn: makeGitFnWithDiff(["some/other/file.mjs"]),
+      memberNodeModulesFn: () => ["/co/plugins/dev/scripts/execution-core/node_modules"],
+      pruneFn: (dir) => pruned.push(dir),
+      bunInstallFn: () => {},
+      emitFn: () => {},
+    });
+    expect(pruned).toEqual([]);
+  });
+
+  test("a prune failure WARNs and the install still runs — same non-fatal contract as install failures", () => {
+    const emitted = [];
+    const installed = [];
+    refreshPluginCheckout({
+      root: "/co",
+      now: 0,
+      gitFn: makeGitFnWithDiff(["bun.lock"]),
+      memberNodeModulesFn: () => ["/co/x/node_modules"],
+      pruneFn: () => {
+        throw new Error("EPERM: operation not permitted");
+      },
+      bunInstallFn: (dir) => installed.push(dir),
+      emitFn: (e) => emitted.push(e),
+    });
+
+    const warn = emitted.find((e) => e.event === "plugin.checkout.node_modules_prune_failed");
+    expect(warn.severity).toBe("WARN");
+    expect(warn.detail.node_modules_dir).toBe("/co/x/node_modules");
+    expect(warn.detail.error).toContain("EPERM");
+    expect(installed).toEqual(["/co"]); // the checkout still converges as far as it can
   });
 });

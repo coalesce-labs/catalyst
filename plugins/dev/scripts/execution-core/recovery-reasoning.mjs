@@ -173,6 +173,21 @@ export function reasoningRecoveryPass(items, opts = {}) {
       continue;
     }
 
+    // PROJ-1657 Codex P1 (round 8): a probe-less phase already parked terminal
+    // via markEscalationCapTerminal (stalledReason "no-probe-for-phase" — a dead
+    // recovery-pass worker with no retry path) has no typed failure signature,
+    // so defaultClassifyTicket would fall through to its generic
+    // decision:"defer"/fix_class:"board-health" case. readDeferredBoardHealthIntents
+    // later picks that defer up as a holistic board-health candidate, and
+    // holisticBoardHealthAct can dispatch a brand-new recovery-pass generation
+    // for it — silently reversing the terminal hand-off to a human this branch
+    // just declared. Same skip shape as the linearTerminal guard above.
+    if (item.evidence?.signal?.stalledReason === "no-probe-for-phase") {
+      log(`recovery-reasoning: ${item.ticket} skipped (terminal no-probe-for-phase)`);
+      tickStats.terminalSkipped.push(item.ticket);
+      continue;
+    }
+
     // DIAGNOSE: reuse diagnostician evidence. If the caller didn't attach
     // logsOutput, capture it read-only now (claude logs + bg job state). This is
     // a pure collector — no env gate, no side effects (CTL-937 captureEvidence).
@@ -1251,6 +1266,15 @@ function promoteNumericAttrs(type, details) {
     // dashboards/alerts get a chartable dispatch-rate signal (the act object rides in
     // body.payload, which the OTel/Loki path does not make queryable).
     num("recovery.act_dispatched", details.actDispatched);
+    // CTL-1607: per-host slot census → chartable Loki metadata. Fleet-wide free
+    // capacity is sum(recovery.slot.free) across hosts (host identity via host_name
+    // metadata). Sum FREE directly — never slot.capacity - slot.in_use: on a
+    // draining/stale-liveness node slot.free is gate-collapsed to 0 while
+    // slot.in_use still reports actual occupancy, so capacity − in_use overstates
+    // admittable free (see the emit-site note in board-health.mjs).
+    num("recovery.slot.capacity", details.slotCapacity);
+    num("recovery.slot.in_use", details.slotInUse);
+    num("recovery.slot.free", details.slotFree);
     str("recovery.gate_decision", details.gateDecision);
     str("recovery.gate_reason", details.gateReason);
     str("recovery.mode", details.mode);

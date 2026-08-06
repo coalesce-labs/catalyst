@@ -19,11 +19,10 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test github-auth-preflight.test.mjs
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
 
 import { log as defaultLog } from "./config.mjs";
 import { emitGithubAuthUnusable } from "./dispatch-alert.mjs";
+import { secretFileCandidates, containsNul, isValidUtf8RoundTrip } from "../lib/secret-contract.mjs"; // CTL-1623: the github-token row's candidate chain, single-sourced from the registry
 
 // Bounded so a hung/unreachable api.github.com can never wedge daemon boot.
 export const GITHUB_PROBE_TIMEOUT_MS = 10_000;
@@ -72,36 +71,46 @@ export function defaultProbeGithubAuth(env = process.env) {
   }
 }
 
-// githubTokenFileCandidates — the resolution CHAIN, in priority order. Mirrors the
-// launcher's _project_shared_github_token exactly.
+// githubTokenFileCandidates — the resolution CHAIN, in priority order. CTL-1623: delegates
+// to the shared secret contract (lib/secret-contract.mjs's secretFileCandidates) instead of
+// hand-rolling a second copy of the chain — this function and
+// lib/catalyst-secret-env.sh's catalyst_project_github_token were the last CTL-1612 pair
+// still reading it by hand; the engine is now the single source for both.
 //
 // The writers disagree (Codex P1, round 2): cluster-sync materializes bare secrets into
 // dirname(getLayer2ConfigPath()), whose default is HARDCODED ~/.config/catalyst and is
 // NOT XDG-aware, while other tooling (setup-webhooks.sh:23, lib/linear-app-actor.sh:30)
 // IS. Reading only the XDG path would miss every rotation on an XDG host — strictly worse
 // than the hardcoded read. So prefer cluster-sync's own destination, then fall back to
-// the XDG location, and take the first readable non-empty file.
+// the XDG location, and take the first readable non-empty file. See
+// secretFileCandidates/explicitFileOverrideEnvName in lib/secret-contract.mjs for the exact
+// chain (explicit CATALYST_GITHUB_TOKEN_FILE override → CATALYST_CONFIG_DIR →
+// cluster-sync's own destination dir → XDG dir).
+//
+// ONE FLAGGED BEHAVIOR CHANGE (CTL-1623, HOME=""): the pre-fold chain used
+// `env?.HOME ?? homedir()`, which only substitutes on HOME being null/undefined — an
+// explicit empty-string HOME was used as-is (dirname("" + "/.config/...") stays relative to
+// "."). The engine's chain length-checks HOME (`typeof env?.HOME === "string" &&
+// env.HOME.length > 0`) and falls back to homedir() for an empty string too — the saner
+// behavior for a degenerate, presumably-unintentional HOME="". See
+// github-auth-preflight.test.mjs's "HOME=''" cell for the pinned before/after.
 export function githubTokenFileCandidates(env = process.env) {
-  if (env?.CATALYST_GITHUB_TOKEN_FILE) return [env.CATALYST_GITHUB_TOKEN_FILE];
-  // CTL-1612: honor CATALYST_CONFIG_DIR exactly as the launcher's
-  // catalyst_read_secret_file does. Without this the two disagree — the launcher arms from
-  // the configured directory and labels it "shared-file", then this re-arm (boot AND every
-  // timer tick) replaces both aliases from the DEFAULT directory. If that copy is stale the
-  // daemon silently reverts to 401s, which is the exact divergence the shared library was
-  // introduced to eliminate, recreated across the bash/JS boundary.
-  if (env?.CATALYST_CONFIG_DIR) return [join(env.CATALYST_CONFIG_DIR, "github-token")];
-  const home = env?.HOME ?? homedir();
-  const layer2 = env?.CATALYST_LAYER2_CONFIG_FILE ?? join(home, ".config", "catalyst", "config.json");
-  const out = [join(dirname(layer2), "github-token")];
-  const xdg = join(env?.XDG_CONFIG_HOME || join(home, ".config"), "catalyst", "github-token");
-  if (!out.includes(xdg)) out.push(xdg);
-  return out;
+  return secretFileCandidates("github-token", env);
 }
 
 // defaultGithubTokenFile — the highest-priority candidate (cluster-sync's destination).
 export function defaultGithubTokenFile(env = process.env) {
   return githubTokenFileCandidates(env)[0];
 }
+
+// containsNul / isValidUtf8RoundTrip are imported from lib/secret-contract.mjs (CTL-1623
+// Codex round 2) — the CANONICAL malformed-file validators the engine's own bare-file read
+// applies. Sharing one implementation (instead of the round-1 verbatim copies) means the
+// resolver and this hook can never drift on what counts as a representable credential
+// file: the bug Codex reproduced in round 1 was exactly a resolver-rejects/hook-installs
+// split, where readFileSync(p, "utf8") silently replaced invalid UTF-8 bytes with U+FFFD
+// and this hook installed the mangled token over a good inherited one at boot and on every
+// timer tick. See the candidate loop below for where the gates apply.
 
 // rearmGithubTokenFromFile — CTL-1612 (Codex P1). Re-read the shared credential from
 // disk and update this process's env if it has changed.
@@ -116,9 +125,18 @@ export function defaultGithubTokenFile(env = process.env) {
 //
 // Call AFTER clusterSync. Respects an explicit operator override (the launcher marks it
 // CATALYST_GITHUB_TOKEN_SOURCE=operator-override) and never throws.
+//
+// `readFile` READS RAW BYTES (a Buffer, matching plain `readFileSync(p)` with no encoding
+// argument) — CTL-1623 post-merge fix: the previous default decoded to "utf8" up front,
+// which is exactly what silently mangled an invalid-UTF-8 file (see the containsNul/
+// isValidUtf8RoundTrip comment above). The candidate loop below decodes+validates itself so
+// it can reject a candidate it cannot represent identically. Existing/injected test seams
+// that return a plain STRING (not a Buffer) still work unchanged — a string return is
+// treated as already-decoded text and wrapped in a Buffer for the round-trip check, which
+// trivially passes for any ordinary fixture literal.
 export function rearmGithubTokenFromFile({
   env = process.env,
-  readFile = (p) => readFileSync(p, "utf8"),
+  readFile = (p) => readFileSync(p),
   log = defaultLog,
 } = {}) {
   try {
@@ -134,6 +152,15 @@ export function rearmGithubTokenFromFile({
       } catch {
         continue; // not on this host — try the next candidate
       }
+      // PARITY GUARDS (CTL-1623 post-merge fix): reject a candidate this hook cannot
+      // represent identically to the engine's own bare-file read — an invalid-UTF-8 byte
+      // sequence or an embedded NUL — instead of silently installing a mutated value.
+      // Order matches lib/secret-contract.mjs's readFirstNonBlankFile: UTF-8 round-trip
+      // first, then NUL, both on the RAW bytes/decoded text, before the EOL strip.
+      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw ?? ""), "utf8");
+      const decoded = buf.toString("utf8");
+      if (!isValidUtf8RoundTrip(buf, decoded)) continue; // not on this host, effectively — try the next candidate
+      if (containsNul(decoded)) continue;
       found = true;
       // Strip ONLY trailing line terminators; preserve every other byte.
       // `.replace(/\s+/g,"")` corrupted internal whitespace, and a full `.trim()` corrupts
@@ -143,7 +170,7 @@ export function rearmGithubTokenFromFile({
       // file ending in `\n\n` must re-arm to the same bare token the launcher installed.
       // Mirrors _catalyst_strip_eol in lib/catalyst-secret-env.sh so the bash and JS
       // readers cannot disagree.
-      const candidate = String(raw ?? "").replace(/[\r\n]+$/, "");
+      const candidate = decoded.replace(/[\r\n]+$/, "");
       // Blank-check, not truthiness: a whitespace-only file must keep falling through to
       // the next candidate (a truthy "   " would break here and mask a valid fallback).
       if (candidate.trim()) {

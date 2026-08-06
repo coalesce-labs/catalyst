@@ -5,6 +5,7 @@ import { describe, it, expect, mock, afterAll } from "bun:test";
 import type { ReactNode, ReactElement } from "react";
 import type { NavSignal } from "@/lib/nav-signal";
 import type { ClusterSignal } from "@/lib/cluster-signal";
+import type { AccountSignal } from "@/hooks/account-signal-lib";
 import type { ServiceStatusView } from "@/components/observe/service-health-kit";
 import { severityDotColor } from "@/components/observe/service-health-kit";
 
@@ -31,6 +32,12 @@ let serviceHealthState: { services: ServiceStatusView[] | null; unavailable: boo
 
 let boardStatus: string = "connected";
 let boardWorkers: unknown[] = [];
+
+// CTL-1653: AppFooter now reads this node's Claude-account posture via
+// useAccountSignalContext(). Default null → the account indicator span is not
+// rendered (AppFooter guards on `account &&`), so the CTL-1172 assertions below
+// stay behavior-identical.
+let accountState: AccountSignal | null = null;
 
 function svc(partial: Partial<ServiceStatusView> & { id: string }): ServiceStatusView {
   return {
@@ -66,6 +73,15 @@ mock.module("@/hooks/use-cluster-signal", () => ({
   ClusterSignalContext: stubContext,
   useClusterSignalContext: () => clusterState,
   useClusterSignal: () => clusterState,
+}));
+
+// CTL-1653: stub the account-posture context hook so the direct-call (no React
+// dispatcher) tree-walk doesn't invoke the real useContext. Mirror the other
+// context-hook mocks; keep the pure account-signal-lib unmocked.
+mock.module("@/hooks/use-account-signal", () => ({
+  AccountSignalContext: stubContext,
+  useAccountSignalContext: () => accountState,
+  useAccountSignal: () => accountState,
 }));
 
 mock.module("@/hooks/use-service-health", () => ({

@@ -25,6 +25,18 @@
 [[ -n "${_CATALYST_SECRET_ENV_SH_LOADED:-}" ]] && return 0
 _CATALYST_SECRET_ENV_SH_LOADED=1
 
+# CTL-1623: the FILE-READ tier of catalyst_project_github_token/_webhook_secret below now
+# delegates to lib/catalyst-secret-contract.sh's catalyst_resolve_secret (the CTL-1616
+# registry/engine) instead of hand-rolling its own file-candidate search, so the github-token
+# and webhook-secret bare-file chains can never drift from the registry again — the exact
+# failure class CTL-1612 (this file) and CTL-1616 (the registry) both exist to close.
+# catalyst_read_secret_file itself is UNCHANGED below (other callers still use it directly);
+# only the two exported projection functions are re-pointed. Same sibling-lib sourcing
+# pattern as lib/linear-app-actor.sh / lib/linear-comment-post.sh.
+_CSE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${_CSE_LIB_DIR}/catalyst-secret-contract.sh"
+
 # _catalyst_strip_eol — remove ONLY the line terminator a text file ends with.
 #
 # Two failure modes had to be avoided here, and they pull in opposite directions:
@@ -160,9 +172,31 @@ catalyst_env_file_assigns() {
 #   Absent/empty/unreadable everywhere = TOTAL no-op; never exports "" (bash ${X:-default}
 #   and JS ?? both treat "" as SET, which would defeat gh's hosts.yml/keyring fallback).
 #   Never logs or echoes the value.
+#
+#   CTL-1623: the FILE-READ tier is now catalyst_resolve_secret's own bare-file chain
+#   (CATALYST_GITHUB_TOKEN_FILE override → CATALYST_CONFIG_DIR → cluster-sync's own
+#   destination dir → XDG dir — identical priority order to the pre-fold
+#   catalyst_read_secret_file call). This function's OWN inherited-alias precedence (the
+#   elif chain below) is untouched — the engine's own inherited-fallback branch is
+#   deliberately NOT trusted here (gated out by the source check) so those elif rungs keep
+#   deciding GH_TOKEN-vs-GITHUB_TOKEN precedence exactly as before.
 catalyst_project_github_token() {
-  local _tok
-  if _tok="$(catalyst_read_secret_file "github-token" "${CATALYST_GITHUB_TOKEN_FILE:-}" "${CATALYST_CONFIG_DIR:-}")"; then
+  local _tok _src
+  catalyst_resolve_secret "github-token" >/dev/null
+  _tok="$CATALYST_SECRET_LAST_VALUE"
+  _src="$CATALYST_SECRET_LAST_SOURCE"
+  # SECRET HYGIENE (CTL-1623): this launcher's env is inherited by every long-lived daemon
+  # and child it spawns. CATALYST_SECRET_LAST_VALUE is deliberately never exported by
+  # _csc_set_result (#2924/#2925 post-merge Codex P2 fixes) — unset it here too, defensively,
+  # so a plain (unexported) shell variable holding the raw credential does not linger in this
+  # launcher's shell past the point it is needed.
+  unset CATALYST_SECRET_LAST_VALUE
+  # Both "shared-file" (the default/config-dir candidates) and "operator-override" (the
+  # explicit CATALYST_GITHUB_TOKEN_FILE override) collapse to this wrapper's single
+  # "shared-file" breadcrumb — this function has never distinguished the two; only
+  # catalyst_reconcile_github_token_aliases (below) emits "operator-override", for a
+  # DIFFERENT override mechanism (a machine-local env file sourced after this runs).
+  if [[ -n "$_tok" && ( "$_src" == "shared-file" || "$_src" == "operator-override" ) ]]; then
     export GITHUB_TOKEN="$_tok" GH_TOKEN="$_tok"
     export CATALYST_GITHUB_TOKEN_SOURCE="shared-file"
   elif [[ -n "${GH_TOKEN:-}" ]]; then
@@ -228,11 +262,27 @@ catalyst_reconcile_github_token_aliases() {
 #   process.env ONLY (no file fallback, unlike the Linear per-team secrets) and captures it
 #   once at boot, so a monitor started without it runs with the GitHub webhook route
 #   silently DISABLED rather than degraded.
+#
+#   CTL-1623: same FILE-READ-tier fold as catalyst_project_github_token above — the file
+#   chain now runs through catalyst_resolve_secret's webhook-secret row (identical candidate
+#   priority to the pre-fold catalyst_read_secret_file call). The registry's webhook-secret
+#   row is "boot-only" rotation class, but that only affects ARM classification
+#   (catalyst_arm_secret) elsewhere — this function only ever RESOLVES, so it is unaffected.
+#   The leave-inherited-alone no-op is preserved exactly: gated on the same
+#   shared-file/operator-override source check as the github-token wrapper, so an
+#   inherited-only or absent resolution changes nothing here, matching the pre-fold
+#   function's silent no-op on that path byte for byte.
 catalyst_project_webhook_secret() {
-  local _val
-  if _val="$(catalyst_read_secret_file "webhook-secret" "${CATALYST_WEBHOOK_SECRET_FILE:-}" "${CATALYST_CONFIG_DIR:-}")"; then
+  local _val _src
+  catalyst_resolve_secret "webhook-secret" >/dev/null
+  _val="$CATALYST_SECRET_LAST_VALUE"
+  _src="$CATALYST_SECRET_LAST_SOURCE"
+  # SECRET HYGIENE (CTL-1623): see the identical unset in catalyst_project_github_token above.
+  unset CATALYST_SECRET_LAST_VALUE
+  if [[ -n "$_val" && ( "$_src" == "shared-file" || "$_src" == "operator-override" ) ]]; then
     export CATALYST_WEBHOOK_SECRET="$_val"
   fi
-  # Absent/empty → leave whatever was inherited. Never export "": webhook-config treats an
-  # empty secret as "route unconfigured", which disables verification instead of failing.
+  # Absent/empty/inherited-only → leave whatever was inherited. Never export "": webhook-config
+  # treats an empty secret as "route unconfigured", which disables verification instead of
+  # failing.
 }
