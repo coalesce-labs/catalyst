@@ -253,6 +253,25 @@ cmd_start() {
 	# the same block; fail-open — a failed mint leaves the existing LINEAR_API_TOKEN intact.
 	source "$SCRIPT_DIR/lib/linear-app-actor.sh"
 	linear_app_actor_auth "catalyst-execution-core"
+	# CATALYST_CONFIG_FILE pins the Layer-1 config path explicitly so the daemon's
+	# own config resolution (daemon.mjs main(): `process.env.CATALYST_CONFIG_FILE ||
+	# resolve(process.cwd(), ".catalyst", "config.json")`) never falls back to a
+	# cwd-relative lookup. Without this, the daemon inherits whatever directory the
+	# operator happened to be in when they ran `catalyst-execution-core start` /
+	# `catalyst-stack start` — if that directory has no `.catalyst/config.json`,
+	# every Layer-1-config-driven feature (executorByPhase routing, the reaper/
+	# worktree-refresh/stale-PR-rescue timers, reconcile config) silently reads
+	# empty defaults instead of the real config, with no error surfaced anywhere.
+	# Only set when the caller hasn't already pointed at a specific file, AND only
+	# when the CATALYST_DIR-relative candidate actually exists: a deployment that
+	# relocates CATALYST_DIR to a state-only root (e.g. /var/lib/catalyst) while
+	# starting the daemon from the real, correctly-configured repo cwd must still
+	# fall through to daemon.mjs's own cwd-relative resolution — forcing a
+	# nonexistent CATALYST_DIR-relative path here would silently shadow that
+	# working cwd fallback with empty defaults instead.
+	if [[ -z "${CATALYST_CONFIG_FILE:-}" && -f "$CATALYST_DIR/.catalyst/config.json" ]]; then
+		export CATALYST_CONFIG_FILE="$CATALYST_DIR/.catalyst/config.json"
+	fi
 	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
 	local server_pid=$!
 	disown "$server_pid" 2>/dev/null || true
