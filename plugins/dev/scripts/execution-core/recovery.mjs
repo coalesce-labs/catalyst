@@ -2493,9 +2493,21 @@ export function reclaimDeadWorkIfPossible(
       source: "scheduler",
       now: now(),
     });
+    // CTL-1643: track whether the cooldown was already written by the
+    // confirmed/unrecoverable/cap-reached gate below, so the two immediate-
+    // terminal branches further down (ask-cap reached, no-probe-for-phase)
+    // can still guarantee exactly one recordEscalationFn call even when the
+    // label write is transient/unconfirmed (e.g. a belief-owner deferral
+    // under CATALYST_INTENTS_ENFORCE=1) — those branches never get a second
+    // tick to retry, so unlike the "transient + under cap" no-op case above,
+    // they must not silently skip the cooldown record (regression: recovery
+    // .test.mjs "supersede guard tolerates an unknown phase on the SIGNAL
+    // ITSELF" expected exactly 1 recordEscalation call and got 0).
+    let cooldownRecorded = false;
     if (labelApplied || labelUnrecoverable) {
       // Confirmed or unrecoverable: write the 10-min cooldown (unchanged path).
       recordEscalationFn(orchDir, ticket, phase, reason, now());
+      cooldownRecorded = true;
     } else if (durableRec.labelAttempts >= LABEL_CONFIRM_CAP) {
       // Cap reached without confirmation: emit a loud operator-visible alert so the
       // escalation remains visible even without a Linear label, then write the cooldown
@@ -2509,6 +2521,7 @@ export function reclaimDeadWorkIfPossible(
         "ctl-1643: needs-human label unconfirmed after cap attempts — emitting loud alert and writing cooldown"
       );
       recordEscalationFn(orchDir, ticket, phase, reason, now());
+      cooldownRecorded = true;
     }
     // else: transient + under cap → NO cooldown written → next tick retries the label.
     // CTL-1442: this ask consumed the cap → go TERMINAL. Flip the phase signal
@@ -2517,6 +2530,13 @@ export function reclaimDeadWorkIfPossible(
     // re-evaluating the ticket and the operator sees ONE final, complete ask
     // instead of an endless every-10-min echo.
     if (capApplies && priorAsks + 1 >= escalationAskCap) {
+      if (!cooldownRecorded) {
+        // This ask is terminal — there is no next tick to retry the label on,
+        // so the cooldown must be recorded now even though the label write
+        // itself was transient/unconfirmed (matches pre-CTL-1643 behavior,
+        // which called recordEscalationFn unconditionally here).
+        recordEscalationFn(orchDir, ticket, phase, reason, now());
+      }
       markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
       log.warn(
         { ticket, phase, reason, asks: priorAsks + 1 },
@@ -2533,6 +2553,12 @@ export function reclaimDeadWorkIfPossible(
     // its prior non-terminal status would let listInFlightTickets keep
     // counting it as an occupied worker slot forever (Codex #3027 P1).
     if (reason === "no-probe-for-phase") {
+      if (!cooldownRecorded) {
+        // Same rationale as the ask-cap-terminal branch above: this is a
+        // first-and-only occurrence with no retry path, so the cooldown
+        // must be recorded now regardless of label-confirm outcome.
+        recordEscalationFn(orchDir, ticket, phase, reason, now());
+      }
       markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason: reason });
       log.warn(
         { ticket, phase, reason },
