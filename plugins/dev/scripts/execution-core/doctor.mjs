@@ -88,6 +88,7 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -4460,6 +4461,58 @@ export function checkPluginSourceFreshness(deps = {}) {
   return [classifyPluginSourceFreshness({ roots, healthByRoot, nodeClass })];
 }
 
+// checkStaleLock — CTL-1415: a stale `.git/index.lock` in the node's plugin-source
+// checkout silently freezes every plugin pull (a crashed git op leaves the lock;
+// each later `git reset --hard` then fails forever — the ~8.5h laptop freeze in
+// CTL-1401). doctor REPORTS the frozen state so the node isn't silently stuck on
+// stale plugins; the updater/broker pull path (broker/plugin-refresh.mjs) is what
+// auto-clears it. Age-gated via the SHARED lib/stale-lock.mjs classifier, so the
+// "safe age" can't drift from what the pull path clears, and a live git op (a
+// fresh lock) is reported as in-progress, never flagged.
+//
+// Codex P2 (#2530): a checkout provisioned via `setup-plugin-source.sh --path`
+// only persists the custom root through catalyst.orchestration.pluginDirs — it
+// does NOT guarantee CATALYST_PLUGIN_SOURCE is set in doctor's environment. The
+// old hardcoded ~/catalyst/plugin-source default could report "no stale lock"
+// while the ACTUAL configured checkout sat frozen. Resolve the same
+// resolvePluginCheckoutRoots() the adjacent freshness check and the real pull
+// path use (CTL-1421), so this check inspects the checkout(s) that are actually
+// live rather than an unconditional guess. An explicit `root` still wins (tests /
+// single-checkout callers); the historical env/default guess is the last-resort
+// fallback only when nothing resolves at all (no pluginDirs configured).
+export function checkStaleLock(deps = {}) {
+  const {
+    root,
+    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
+    now = Date.now(),
+    thresholdMs = STALE_LOCK_THRESHOLD_MS,
+    statFn,
+  } = deps;
+  const resolved = root ? [root] : resolveRootsFn();
+  const roots =
+    resolved.length > 0
+      ? resolved
+      : [process.env.CATALYST_PLUGIN_SOURCE || resolve(homedir(), "catalyst", "plugin-source")];
+
+  const statuses = roots.map((r) => ({ r, s: staleLockStatus({ root: r, now, thresholdMs, statFn }) }));
+  const stale = statuses.filter(({ s }) => s.present && s.stale);
+  if (stale.length > 0) {
+    const thMins = Math.round(thresholdMs / 60000);
+    const details = stale
+      .map(({ r, s }) => `${indexLockPath(r)} (~${Math.round(s.ageMs / 60000)}m old)`)
+      .join("; ");
+    return [mkCheck("stale-plugin-lock", STATUS.WARN,
+      `stale .git/index.lock (age ≥ ${thMins}m threshold) — plugin pulls are FROZEN until it clears; the updater/broker auto-clears it on its next pull (CTL-1415), or remove by hand: ${details}`)];
+  }
+  const inProgress = statuses.find(({ s }) => s.present && !s.stale);
+  if (inProgress) {
+    const secs = Math.round(inProgress.s.ageMs / 1000);
+    const thSecs = Math.round(thresholdMs / 1000);
+    return [mkCheck("stale-plugin-lock", STATUS.PASS, `a git operation is in progress in plugin-source (index.lock ${secs}s old < ${thSecs}s threshold) — not stale`)];
+  }
+  return [mkCheck("stale-plugin-lock", STATUS.PASS, `no stale git index.lock in plugin-source (${roots.join(", ")})`)];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -4523,6 +4576,8 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1421: assert the worker plugin path resolves to a healthy pristine plugin-source
   // (else workers silently serve stale marketplace-cache code). worker=FAIL, dev/monitor=WARN.
   const pluginSourceFreshThunk = () => checkPluginSourceFreshness({ nodeClass: nc.class });
+  // CTL-1415: a stale plugin-source .git/index.lock freezes pulls on ANY node class.
+  const staleLockThunk = () => checkStaleLock();
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
   const wontOwnThunk = () =>
@@ -4581,6 +4636,7 @@ export function checksForClass(nc, opts = {}) {
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (correct class agent set)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater (a developer runs no broker)
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a developer)
+      staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the updater's pulls
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
@@ -4612,6 +4668,7 @@ export function checksForClass(nc, opts = {}) {
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a monitor)
+      staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the updater's pulls
       replicaThunk,
       wontOwnThunk,
       () => [
@@ -4643,6 +4700,7 @@ export function checksForClass(nc, opts = {}) {
     agentsThunk, // CTL-1369 PR4: worker work-stack agent installed, no updater agent (correct class agent set)
     pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=broker (the worker's broker owns the pull)
     pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (FAIL — the CI/CD executor)
+    staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the broker's pulls
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
