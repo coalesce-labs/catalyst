@@ -15,6 +15,7 @@ import {
   getDrainIgnoredMarkerPath,
   getDrainedMarkerPath,
 } from "../config.mjs";
+import { readAdmissionState } from "../admission-state.mjs";
 
 let saved;
 let tmp;
@@ -119,6 +120,35 @@ describe("resolveDrainState", () => {
       disabled: true,
       draining: false,
     });
+  });
+});
+
+describe("readAdmissionState inherits the fix (CTL-1678)", () => {
+  test("flag present + CATALYST_DRAIN_DISABLED=1 → accepting:true, holdReason:null", () => {
+    setFlag(true);
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    // Use the REAL default isDraining (which now honors the override); stub only
+    // the liveness/worker seams so the assertion isolates the drain axis.
+    const state = readAdmissionState({
+      orchDir: tmp,
+      agentsSnapshotFn: () => ({ agents: [], isFresh: true }),
+      countWorkersFn: () => 0,
+      maxParallelFn: () => 2,
+    });
+    expect(state.accepting).toBe(true);
+    expect(state.holdReason).toBeNull();
+  });
+
+  test("flag present + env unset → accepting:false, holdReason:'drain' (unchanged)", () => {
+    setFlag(true);
+    const state = readAdmissionState({
+      orchDir: tmp,
+      agentsSnapshotFn: () => ({ agents: [], isFresh: true }),
+      countWorkersFn: () => 0,
+      maxParallelFn: () => 2,
+    });
+    expect(state.accepting).toBe(false);
+    expect(state.holdReason).toBe("drain");
   });
 });
 

@@ -101,6 +101,7 @@ import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
+import { getDrainFlagPath, getEventLogPath } from "./config.mjs"; // CTL-1678: drain-disabled override integration test
 
 let orchDir;
 let catalystDir;
@@ -12122,6 +12123,87 @@ describe("drained-sentinel emission (CTL-1095)", () => {
       emitDrained: emitDrainedMock,
     });
     expect(emitDrainedMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("drain-disabled override (CTL-1678)", () => {
+  const eligibleOne = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  let savedDisabled;
+  beforeEach(() => {
+    savedDisabled = process.env.CATALYST_DRAIN_DISABLED;
+    delete process.env.CATALYST_DRAIN_DISABLED;
+  });
+  afterEach(() => {
+    if (savedDisabled === undefined) delete process.env.CATALYST_DRAIN_DISABLED;
+    else process.env.CATALYST_DRAIN_DISABLED = savedDisabled;
+  });
+
+  test("admission PROCEEDS when flag present but CATALYST_DRAIN_DISABLED=1 (real isDraining seam)", () => {
+    // Write the physical drain flag AND set the override. Do NOT stub isDraining —
+    // let the real isDrainingDefault(orchDir) run so this proves the one seam reaches
+    // the admission gate end-to-end (contrast with "draining node zeroes freeSlots").
+    writeFileSync(getDrainFlagPath(orchDir), "");
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-dd-1"),
+      dispatch,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      verifyDispatched: verifyOk,
+      hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is drain override
+      emitDrainIgnored: () => ({ emitted: true }), // avoid a real ps snapshot in the unit tick
+    });
+    expect(dispatch.calls).toHaveLength(1);
+  });
+
+  test("tripwire seam is invoked once per tick", () => {
+    writeFileSync(getDrainFlagPath(orchDir), "");
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const emitDrainIgnored = mock(() => ({ emitted: true }));
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      emitDrainIgnored,
+    };
+    schedulerTick(orchDir, opts);
+    expect(emitDrainIgnored).toHaveBeenCalledTimes(1);
+    // Second tick still calls the seam each tick — once-per-episode dedup is the
+    // Phase 2 latch's concern, verified there.
+    schedulerTick(orchDir, opts);
+    expect(emitDrainIgnored).toHaveBeenCalledTimes(2);
+  });
+
+  test("no node.drain.ignored line written with default helper when flag absent / env unset", () => {
+    // No flag file, env unset, default (non-injected) emitDrainIgnored helper.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-dd-3"),
+      dispatch,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      verifyDispatched: verifyOk,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(1); // admission proceeds normally
+    const logPath = getEventLogPath();
+    const lines = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
+    expect(lines.includes("node.drain.ignored")).toBe(false);
   });
 });
 
