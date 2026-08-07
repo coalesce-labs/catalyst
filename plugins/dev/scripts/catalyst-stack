@@ -495,33 +495,36 @@ _coordination_lock_stale() {
 
 # start_coordination — serialize check-and-spawn so two overlapping starts (the
 # recurring LaunchAgent tick racing a manual `start`) can't both spawn a detached
-# publisher (Codex P1). The design is deliberately single-primitive — one mkdir
-# lock, no secondary mutex — because a nested reclaim mutex only RELOCATES the
-# stale-lock race up a level (each layer's own age-check + removal is itself a
-# TOCTOU). `mkdir` is the SOLE arbiter of ownership: ownership is ONLY ever a
-# successful `mkdir "$COORDINATION_LOCK"`, and every reclaim path `continue`s and
-# must win a fresh mkdir to proceed. A live holder records its PID in a sentinel
-# file inside the lock dir immediately after acquiring.
+# publisher (Codex P1). Single-primitive by design: one `mkdir` lock, and `mkdir`
+# is the SOLE arbiter of ownership — ownership is ONLY ever a successful
+# `mkdir "$COORDINATION_LOCK"`, and every reclaim path `continue`s and must win a
+# fresh mkdir to proceed. This is deliberately the PROVABLY-SAFE subset, not a
+# fuller stale-recovery, because a race-free takeover of a NON-EMPTY (already-held-
+# looking) lock is impossible with pure shell primitives — there is no atomic
+# compare-and-swap / flock on stock macOS, so every "inspect then remove/rename"
+# scheme is a TOCTOU: a second racer acts on the pathname, not the inode it
+# inspected, and can delete a peer's freshly-reacquired lock (the ABA that each
+# prior takeover attempt reintroduced one level down).
 #
-# Reclaim (lock held, mkdir failed) fires only past the age gate — old enough that
-# no live sub-minute check-and-spawn could still hold it — and then:
-#   * empty carcass (crashed before the sentinel write) → `rmdir` (refuses a
-#     non-empty dir, so it can never touch a sentinel-bearing lock);
-#   * sentinel present but its recorded owner PID is DEAD (crash/power-off AFTER the
-#     sentinel write — the case a pure rmdir scheme would wedge until manual
-#     deletion) → atomic-rename takeover: `mv` the carcass to a private name; only
-#     one racer's rename of that inode succeeds, so it can't be split-brained.
-# A sentinel whose owner is still ALIVE is a live peer → skip. Two reclaimers of the
-# same carcass converge on a single mkdir winner; the loser sees the winner's fresh
-# lock (young → age gate; or live owner) and skips. The tight residual (two starts
-# racing the SAME dead-owner takeover within the mkdir window) is additionally
-# backstopped by _start_coordination_locked's own `coordination_pid` idempotency
-# check, which refuses to spawn when a publisher is already running.
+# The two invariants that make double-spawn IMPOSSIBLE:
+#   1. A live holder writes a sentinel file into the lock dir immediately after
+#      acquiring, so a live lock is NON-EMPTY.
+#   2. Reclaim removes a stale lock with `rmdir`, which REFUSES a non-empty dir —
+#      and only past the age gate (older than any live sub-minute check-and-spawn).
+# So a reclaimer can ONLY ever remove an EMPTY, aged-out carcass (a crash before the
+# sentinel write); it can never remove a live OR a non-empty leaked lock, and mkdir
+# arbitrates a single winner among racers. A lock leaked by SIGKILL/power-loss AFTER
+# the sentinel write is non-empty and is NOT auto-reclaimed — force-removing it is
+# exactly the impossible race above, so we accept the bounded, operator-recoverable
+# wedge instead (matching `catalyst-state.sh`, which does no stale reclaim at all).
+# Impact is minimal: coordination-publish is off by default, the leak window is a
+# sub-second SIGKILL, and `_start_coordination_locked`'s `coordination_pid` check is
+# an independent belt-and-suspenders against a running publisher being duplicated.
 start_coordination() {
   local guard=0
   while true; do
     if mkdir "$COORDINATION_LOCK" 2>/dev/null; then
-      printf '%s' "$$" > "$COORDINATION_LOCK/owner"   # sentinel records the owner pid
+      : > "$COORDINATION_LOCK/owner"   # sentinel: a live lock is non-empty → rmdir-proof
       break
     fi
     guard=$((guard + 1))
@@ -529,27 +532,12 @@ start_coordination() {
       log "coordination-publish start already in progress — skipping this tick"
       return 0
     fi
-    if _coordination_lock_stale "$COORDINATION_LOCK"; then
-      local lock_owner; lock_owner="$(cat "$COORDINATION_LOCK/owner" 2>/dev/null || true)"
-      if [[ -z "$lock_owner" ]]; then
-        # Empty carcass (crashed before the sentinel write). rmdir refuses a
-        # non-empty dir, so this can never remove a sentinel-bearing lock.
-        if rmdir "$COORDINATION_LOCK" 2>/dev/null; then
-          log "coordination-publish: reclaimed an abandoned (empty) start lock"
-        fi
-        continue
-      fi
-      if ! pid_alive "$lock_owner"; then
-        # Sentinel present but its owner is confirmed dead — a crash-after-sentinel
-        # carcass. Atomic-rename takeover (single winner) so a stopped publisher
-        # doesn't stay wedged after reboot until manual deletion.
-        if mv "$COORDINATION_LOCK" "${COORDINATION_LOCK}.dead.$$" 2>/dev/null; then
-          rm -rf "${COORDINATION_LOCK}.dead.$$" 2>/dev/null || true
-          log "coordination-publish: reclaimed a dead-owner start lock (owner ${lock_owner})"
-        fi
-        continue
-      fi
-      # Owner alive → a live peer holding the lock past the age gate — skip.
+    # Reclaim ONLY an EMPTY, aged carcass. rmdir refuses a non-empty (sentinel-
+    # bearing) lock, so this can never remove a live lock; the age gate covers the
+    # microsecond mkdir→sentinel window. A live/leaked non-empty lock → skip.
+    if _coordination_lock_stale "$COORDINATION_LOCK" && rmdir "$COORDINATION_LOCK" 2>/dev/null; then
+      log "coordination-publish: reclaimed an abandoned (empty) start lock"
+      continue
     fi
     log "coordination-publish start already in progress — skipping this tick"
     return 0
@@ -1355,17 +1343,43 @@ _stack_agent_path() {
   printf '%s\n' "${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
+# _xml_escape <value> — escape the five XML predefined entities so an env value with
+# a metacharacter (e.g. a hub URL like https://h/p?x=1&y=2) can't emit a malformed
+# plist that launchd then refuses to load (Codex P2). `&` MUST be substituted first.
+_xml_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  s="${s//\"/&quot;}"
+  s="${s//\'/&apos;}"
+  printf '%s' "$s"
+}
+
 # render_stack_plist <cmd> <interval> [host_name] — emit the LaunchAgent plist XML to stdout.
 # Pure: no filesystem or launchctl side effects, so it is unit-testable and the
 # `--print` flag can show exactly what would be installed. host_name is optional;
 # when non-empty, CATALYST_HOST_NAME is pinned in EnvironmentVariables (CTL-1202).
+# All interpolated env VALUES pass through _xml_escape (Codex P2).
 render_stack_plist() {
   local cmd="$1" interval="$2" host_name="${3:-}"
   local host_env=""
   if [[ -n "$host_name" ]]; then
     host_env="
     <key>CATALYST_HOST_NAME</key>
-    <string>${host_name}</string>"
+    <string>$(_xml_escape "$host_name")</string>"
+  fi
+  # CTL-1494 (Codex P2): pin the operator's CATALYST_DIR so the keep-alive derives
+  # the publisher's pid/fingerprint/lock/checkpoint/mirror from the SAME root the
+  # operator used — else a nondefault-root publisher is found by command line, read
+  # with no fingerprint under the default root, and restarted against $HOME/catalyst,
+  # relocating coordination state (and likewise mis-starting after reboot). Captured
+  # at install time; omitted (default root) when unset.
+  local catdir_env=""
+  if [[ -n "${CATALYST_DIR:-}" ]]; then
+    catdir_env="
+    <key>CATALYST_DIR</key>
+    <string>$(_xml_escape "${CATALYST_DIR}")</string>"
   fi
   # CTL-1494 (Codex P2): pin the operator's Layer-2 config path into the agent env.
   # launchd hands the keep-alive an otherwise-minimal environment, so without this a
@@ -1378,7 +1392,7 @@ render_stack_plist() {
   if [[ -n "${CATALYST_LAYER2_CONFIG_FILE:-}" ]]; then
     layer2_env="
     <key>CATALYST_LAYER2_CONFIG_FILE</key>
-    <string>${CATALYST_LAYER2_CONFIG_FILE}</string>"
+    <string>$(_xml_escape "${CATALYST_LAYER2_CONFIG_FILE}")</string>"
   fi
   # CTL-1494 (Codex P1): pin the coordination env OVERRIDES the operator installed
   # with, so the scheduled keep-alive resolves the SAME mode the operator intended.
@@ -1390,12 +1404,12 @@ render_stack_plist() {
   if [[ -n "${CATALYST_COORDINATION_MODE:-}" ]]; then
     coord_env="${coord_env}
     <key>CATALYST_COORDINATION_MODE</key>
-    <string>${CATALYST_COORDINATION_MODE}</string>"
+    <string>$(_xml_escape "${CATALYST_COORDINATION_MODE}")</string>"
   fi
   if [[ -n "${CATALYST_COORDINATION_HUB_URL:-}" ]]; then
     coord_env="${coord_env}
     <key>CATALYST_COORDINATION_HUB_URL</key>
-    <string>${CATALYST_COORDINATION_HUB_URL}</string>"
+    <string>$(_xml_escape "${CATALYST_COORDINATION_HUB_URL}")</string>"
   fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1430,7 +1444,7 @@ render_stack_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>${HOME}</string>${host_env}${layer2_env}${coord_env}
+    <string>$(_xml_escape "${HOME}")</string>${host_env}${catdir_env}${layer2_env}${coord_env}
   </dict>
 
   <!--

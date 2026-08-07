@@ -179,40 +179,25 @@ if grep -qi 'reclaimed an abandoned (empty) start lock' <<<"$OUT_ST"; then pass 
 if grep -q 'RC=0' <<<"$OUT_ST"; then pass "stale-lock: proceeds after reclaim (rc 0)"; else failx "stale-lock: proceeds after reclaim (rc 0)" "$OUT_ST"; fi
 if grep -q 'LOCK_REMOVED' <<<"$OUT_ST"; then pass "stale-lock: releases the lock it acquired"; else failx "stale-lock: releases the lock it acquired" "$OUT_ST"; fi
 
-# --- live-owner lock: an OLD lock whose sentinel owner is still ALIVE is a live
-#     peer (never force-removed) ⇒ skip. Guards mkdir as the sole ownership arbiter
-#     so a reclaimer can't delete a live peer's lock and let both spawn (Codex P1). ---
-CDIR_LO="${SCRATCH}/catalyst-liveowner"; mkdir -p "$CDIR_LO"
-OUT_LO="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_LO" \
+# --- non-empty stale lock is NEVER force-removed (safety over liveness): even an
+#     OLD, non-empty carcass is skipped, not force-removed — because a race-free
+#     takeover of a non-empty lock is impossible in pure shell, so we never attempt
+#     it (double-spawn is impossible; the residual is a bounded, recoverable wedge,
+#     Codex P1). rmdir refuses the non-empty dir, so the lock stays put. ---
+CDIR_NE="${SCRATCH}/catalyst-nonempty"; mkdir -p "$CDIR_NE"
+OUT_NE="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_NE" \
   bash --noprofile --norc -c '
     source "'"${STACK}"'" 2>/dev/null || true
     mkdir -p "$COORDINATION_LOCK"
-    printf "%s" "$$" > "$COORDINATION_LOCK/owner"   # owner = THIS shell (alive)
-    touch -t 202001010000 "$COORDINATION_LOCK"      # OLD (age gate passes)
+    : > "$COORDINATION_LOCK/owner"                # non-empty (sentinel-bearing) carcass
+    touch -t 202001010000 "$COORDINATION_LOCK"   # OLD (age gate would pass)
     start_coordination; echo "RC=$?"
     [[ -d "$COORDINATION_LOCK" ]] && echo "LOCK_KEPT" || echo "LOCK_REMOVED"
     [[ -f "$COORDINATION_PID" ]] && echo "PIDFILE_PRESENT" || echo "PIDFILE_GONE"
   ' 2>&1)"
-if grep -q 'RC=0' <<<"$OUT_LO"; then pass "live-owner: returns 0 (skips)"; else failx "live-owner: returns 0" "$OUT_LO"; fi
-if grep -q 'LOCK_KEPT' <<<"$OUT_LO"; then pass "live-owner: never force-removes a live peer's lock"; else failx "live-owner: never force-removes a live peer's lock" "$OUT_LO"; fi
-if grep -q 'PIDFILE_GONE' <<<"$OUT_LO"; then pass "live-owner: spawns nothing"; else failx "live-owner: spawns nothing" "$OUT_LO"; fi
-
-# --- dead-owner lock: an OLD sentinel-bearing lock whose recorded owner is DEAD is a
-#     crash-after-sentinel carcass ⇒ reclaimed (atomic-rename takeover), not left
-#     wedged after reboot until manual deletion (Codex P1). ---
-CDIR_DO="${SCRATCH}/catalyst-deadowner"; mkdir -p "$CDIR_DO"
-OUT_DO="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_DO" \
-  bash --noprofile --norc -c '
-    source "'"${STACK}"'" 2>/dev/null || true
-    mkdir -p "$COORDINATION_LOCK"
-    printf "%s" "2147480000" > "$COORDINATION_LOCK/owner"   # a PID that is not alive
-    touch -t 202001010000 "$COORDINATION_LOCK"              # OLD
-    start_coordination; echo "RC=$?"
-    [[ -d "$COORDINATION_LOCK" ]] && echo "LOCK_KEPT" || echo "LOCK_REMOVED"
-  ' 2>&1)"
-if grep -qi 'reclaimed a dead-owner start lock' <<<"$OUT_DO"; then pass "dead-owner: reclaims a crash-after-sentinel carcass"; else failx "dead-owner: reclaims a crash-after-sentinel carcass" "$OUT_DO"; fi
-if grep -q 'RC=0' <<<"$OUT_DO"; then pass "dead-owner: proceeds after reclaim (rc 0)"; else failx "dead-owner: proceeds after reclaim (rc 0)" "$OUT_DO"; fi
-if grep -q 'LOCK_REMOVED' <<<"$OUT_DO"; then pass "dead-owner: releases the reclaimed lock"; else failx "dead-owner: releases the reclaimed lock" "$OUT_DO"; fi
+if grep -q 'RC=0' <<<"$OUT_NE"; then pass "nonempty-stale: returns 0 (skips)"; else failx "nonempty-stale: returns 0" "$OUT_NE"; fi
+if grep -q 'LOCK_KEPT' <<<"$OUT_NE"; then pass "nonempty-stale: never force-removes a non-empty lock (no ABA takeover)"; else failx "nonempty-stale: never force-removes a non-empty lock" "$OUT_NE"; fi
+if grep -q 'PIDFILE_GONE' <<<"$OUT_NE"; then pass "nonempty-stale: spawns nothing"; else failx "nonempty-stale: spawns nothing" "$OUT_NE"; fi
 
 # --- plist Layer-2 pinning (Codex P2): the stack LaunchAgent must carry the
 #     operator's CATALYST_LAYER2_CONFIG_FILE so the keep-alive resolves coordination
@@ -243,6 +228,29 @@ OUT_COU="$(bash --noprofile --norc -c 'unset CATALYST_COORDINATION_MODE CATALYST
 if grep -q 'CATALYST_COORDINATION_MODE\|CATALYST_COORDINATION_HUB_URL' <<<"$OUT_COU"; then
   failx "plist-coord: omits coordination keys when unset" "$OUT_COU"
 else pass "plist-coord: omits coordination keys when unset"; fi
+
+# --- plist CATALYST_DIR pinning (Codex P2): a nondefault root must ride into the
+#     agent env, else the keep-alive relocates coordination state to $HOME/catalyst. ---
+OUT_CD="$(CATALYST_DIR="/data/catalyst-root" \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q '<key>CATALYST_DIR</key>' <<<"$OUT_CD" && grep -q '<string>/data/catalyst-root</string>' <<<"$OUT_CD"; then
+  pass "plist-catdir: pins CATALYST_DIR when set"
+else failx "plist-catdir: pins CATALYST_DIR when set" "$OUT_CD"; fi
+
+# --- plist XML escaping (Codex P2): an env value with an XML metacharacter (e.g. a
+#     hub URL with &) must be escaped so the plist stays well-formed and loadable. ---
+OUT_XE="$(CATALYST_COORDINATION_HUB_URL='https://hub.example/p?x=1&y=2<z>"q"' \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q 'x=1&amp;y=2&lt;z&gt;&quot;q&quot;' <<<"$OUT_XE" && ! grep -q 'x=1&y=2' <<<"$OUT_XE"; then
+  pass "plist-xml-escape: escapes & < > \" in env values"
+else failx "plist-xml-escape: escapes XML metacharacters" "$OUT_XE"; fi
+# And the escaped plist must be well-formed per plutil (macOS only).
+if command -v plutil >/dev/null 2>&1; then
+  XE_FILE="${SCRATCH}/escaped.plist"; printf '%s' "$OUT_XE" > "$XE_FILE"
+  if plutil -lint "$XE_FILE" >/dev/null 2>&1; then pass "plist-xml-escape: escaped plist passes plutil -lint"; else failx "plist-xml-escape: escaped plist passes plutil -lint" "$(plutil -lint "$XE_FILE" 2>&1)"; fi
+else
+  pass "plist-xml-escape: plutil unavailable — lint skipped"
+fi
 
 echo ""
 echo "  ${PASSES} passed, ${FAILURES} failed"
