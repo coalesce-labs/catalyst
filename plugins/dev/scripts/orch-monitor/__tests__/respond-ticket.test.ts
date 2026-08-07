@@ -360,9 +360,9 @@ describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
     let projectionCalled = false;
     const out = await resolveHeldRun("CTL-845", {
       findLocal: () => ({ phase: "implement", signal: { status: "needs-input" } }),
-      findProjection: async () => {
+      findProjection: () => {
         projectionCalled = true;
-        return null;
+        return Promise.resolve(null);
       },
       readProjectionMode: () => "enforce",
     });
@@ -374,9 +374,9 @@ describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
     let projectionCalled = false;
     const out = await resolveHeldRun("CTL-845", {
       findLocal: () => null,
-      findProjection: async () => {
+      findProjection: () => {
         projectionCalled = true;
-        return { phase: "implement", signal: { status: "needs-input" } };
+        return Promise.resolve({ phase: "implement", signal: { status: "needs-input" } });
       },
       readProjectionMode: () => "off",
     });
@@ -388,7 +388,8 @@ describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
     const drifts: unknown[] = [];
     const out = await resolveHeldRun("CTL-845", {
       findLocal: () => null,
-      findProjection: async () => ({ phase: "implement", signal: { status: "needs-input" } }),
+      findProjection: () =>
+        Promise.resolve({ phase: "implement", signal: { status: "needs-input" } }),
       readProjectionMode: () => "shadow",
       emitDrift: (d: unknown) => drifts.push(d),
     });
@@ -399,10 +400,11 @@ describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
   it("enforce mode → local absent, projection held → returns the projected run", async () => {
     const out = await resolveHeldRun("CTL-845", {
       findLocal: () => null,
-      findProjection: async () => ({
-        phase: "implement",
-        signal: { ticket: "CTL-845", status: "needs-input", raw: { generation: 5 } },
-      }),
+      findProjection: () =>
+        Promise.resolve({
+          phase: "implement",
+          signal: { ticket: "CTL-845", status: "needs-input", raw: { generation: 5 } },
+        }),
       readProjectionMode: () => "enforce",
     });
     expect(out?.phase).toBe("implement");
@@ -412,10 +414,11 @@ describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
   it("enforce mode normalizes signal.raw.generation to the TOP-LEVEL generation field respondTicket reads", async () => {
     const out = await resolveHeldRun("CTL-845", {
       findLocal: () => null,
-      findProjection: async () => ({
-        phase: "implement",
-        signal: { ticket: "CTL-845", status: "needs-input", raw: { generation: 7 } },
-      }),
+      findProjection: () =>
+        Promise.resolve({
+          phase: "implement",
+          signal: { ticket: "CTL-845", status: "needs-input", raw: { generation: 7 } },
+        }),
       readProjectionMode: () => "enforce",
     });
     // The raw on-disk shape (and what runFenceCheck's caller reads) carries
@@ -428,7 +431,7 @@ describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
   it("enforce mode, local absent, no projection row either → null (nothing held anywhere)", async () => {
     const out = await resolveHeldRun("CTL-845", {
       findLocal: () => null,
-      findProjection: async () => null,
+      findProjection: () => Promise.resolve(null),
       readProjectionMode: () => "enforce",
     });
     expect(out).toBeNull();
@@ -443,10 +446,11 @@ describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
         findHeld: (ticket: string) =>
           resolveHeldRun(ticket, {
             findLocal: () => null, // this host has no local worker dir for CTL-2000
-            findProjection: async () => ({
-              phase: "implement",
-              signal: { ticket: "CTL-2000", status: "needs-input", raw: { generation: 2 } },
-            }),
+            findProjection: () =>
+              Promise.resolve({
+                phase: "implement",
+                signal: { ticket: "CTL-2000", status: "needs-input", raw: { generation: 2 } },
+              }),
             readProjectionMode: () => "enforce",
           }),
         fenceCheck: () => ({ ok: true, noop: true, stale: false }),
