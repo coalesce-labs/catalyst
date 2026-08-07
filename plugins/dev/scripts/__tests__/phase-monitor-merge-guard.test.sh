@@ -46,6 +46,40 @@ else
 fi
 
 echo ""
+echo "CTL-1680 Phase 2: merge SHA is confirmed before done"
+
+if [[ -f "$SKILL" ]]; then
+  assert_contains "$BODY" "PHASE_MERGE_SHA_RETRIES" \
+    "merge SHA retry uses PHASE_MERGE_SHA_RETRIES variable"
+  assert_contains "$BODY" "# CTL-1680: retry empty merge_commit_sha" \
+    "merge SHA retry has CTL-1680 comment marker"
+  assert_contains "$BODY" "sleep 2" \
+    "merge SHA retry loop sleeps (not a spin loop)"
+  assert_contains "$BODY" "merge_commit_sha still empty after" \
+    "merge SHA retry emits observable warning on exhaustion"
+else
+  fail "SKILL.md missing for Phase 2 checks: $SKILL"
+fi
+
+echo ""
+echo "CTL-1680 Phase 3: automated-reviewer arrival window"
+
+if [[ -f "$SKILL" ]]; then
+  assert_contains "$BODY" "PHASE_REVIEWER_ARRIVAL_WAIT_SEC" \
+    "reviewer-arrival gate uses PHASE_REVIEWER_ARRIVAL_WAIT_SEC variable"
+  assert_contains "$BODY" "# CTL-1680: reviewer-arrival window" \
+    "reviewer-arrival gate has CTL-1680 comment marker"
+  assert_contains "$BODY" "reviewer-arrival window elapsed; proceeding to merge" \
+    "reviewer-arrival gate is fail-open (elapsed path proceeds to merge)"
+  assert_contains "$BODY" "REVIEWED_HEAD" \
+    "reviewer-arrival gate keys on current HEAD SHA (not just PR-open time)"
+  assert_contains "$BODY" "Reviewed commit" \
+    "reviewer-arrival gate detects clean-pass comment (Reviewed commit shape)"
+else
+  fail "SKILL.md missing for Phase 3 checks: $SKILL"
+fi
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-monitor-merge-guard: ${PASSES} passed, ${FAILURES} failed"
 echo "─────────────────────────────────────────────"

@@ -168,12 +168,63 @@ if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
     fi
   fi
 fi
+# CTL-1680: reviewer-arrival window. mergeable_state == "clean" reflects only
+# CURRENTLY-POSTED reviews; an automated reviewer (Codex) that posts minutes after
+# PR-open never shows up in mergeable_state until it posts. Before merging a fresh
+# CLEAN PR, give an in-flight reviewer a bounded window to land its verdict.
+PHASE_REVIEWER_ARRIVAL_WAIT_SEC="${PHASE_REVIEWER_ARRIVAL_WAIT_SEC:-300}"
+# Reuse REVIEWED_HEAD from CTL-1051 stale-ref check above when available.
+REVIEWED_HEAD="${PR_HEAD_OID:-$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)}"
+HEAD_COMMITTED_AT="$(gh api "repos/${REPO}/commits/${REVIEWED_HEAD}" --jq '.commit.committer.date' 2>/dev/null || true)"
+# Automated-reviewer verdict present on this HEAD? Three shapes (AGENTS.md):
+#   (a) a review object from the codex bot, (b) a "no major issues"/"Reviewed commit" issue comment,
+#   (c) a 👍 reaction on the PR by the reviewer bot.
+REVIEWER_VERDICT_PRESENT=false
+# (a) reviews API
+if gh pr view "$PR_NUMBER" --json reviews \
+     --jq '.reviews[] | select(.author.login|test("codex";"i"))' 2>/dev/null | grep -q .; then
+  REVIEWER_VERDICT_PRESENT=true
+fi
+# (b) clean-pass issue comment ("no major issues" or "Reviewed commit")
+if [[ "$REVIEWER_VERDICT_PRESENT" != true ]] && \
+   gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+     --jq '.[] | select(.user.login|test("codex";"i")) | .body' 2>/dev/null \
+     | grep -qiE 'no (major )?issues|Reviewed commit'; then
+  REVIEWER_VERDICT_PRESENT=true
+fi
+# (c) 👍 reaction clean-pass
+if [[ "$REVIEWER_VERDICT_PRESENT" != true ]] && \
+   gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
+     -H "Accept: application/vnd.github.squirrel-girl-preview+json" \
+     --jq '.[] | select(.content=="+1") | select(.user.login|test("codex";"i"))' \
+     2>/dev/null | grep -q .; then
+  REVIEWER_VERDICT_PRESENT=true
+fi
+if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "$HEAD_COMMITTED_AT" ]]; then
+  HEAD_AGE_SEC=$(( $(date -u +%s) - $(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$HEAD_COMMITTED_AT" +%s 2>/dev/null || echo 0) ))
+  if [[ "${HEAD_AGE_SEC:-0}" -lt "$PHASE_REVIEWER_ARRIVAL_WAIT_SEC" ]]; then
+    echo "wake: reviewer-arrival window — pr#${PR_NUMBER} CLEAN but no automated-reviewer verdict on ${REVIEWED_HEAD:0:8} (age ${HEAD_AGE_SEC}s < ${PHASE_REVIEWER_ARRIVAL_WAIT_SEC}s); waiting"
+    continue  # re-enter the event-wait loop; a pr_review wake re-evaluates
+  fi
+  echo "phase-monitor-merge: reviewer-arrival window elapsed; proceeding to merge pr#${PR_NUMBER}" >&2
+fi
 gh pr merge "$PR_NUMBER" --squash --delete-branch
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
 [[ "$MERGED_OK" = "true" ]] || { echo "phase-monitor-merge: merge not confirmed via REST" >&2; exit 1; }
 
-MERGE_COMMIT_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty')
+# CTL-1680: retry empty merge_commit_sha — GitHub can return it empty for a few
+# seconds after a squash merge while it computes the SHA. Bounded + sleeps (no
+# GNU `timeout` dependency; portable to stock macOS).
+PHASE_MERGE_SHA_RETRIES="${PHASE_MERGE_SHA_RETRIES:-5}"
+MERGE_COMMIT_SHA=""
+for _i in $(seq 1 "$PHASE_MERGE_SHA_RETRIES"); do
+  MERGE_COMMIT_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty' 2>/dev/null || true)
+  [[ -n "$MERGE_COMMIT_SHA" ]] && break
+  sleep 2
+done
+[[ -z "$MERGE_COMMIT_SHA" ]] && \
+  echo "phase-monitor-merge: merge_commit_sha still empty after ${PHASE_MERGE_SHA_RETRIES} attempts for pr#${PR_NUMBER}" >&2
 MERGED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Record merge in signal file.
