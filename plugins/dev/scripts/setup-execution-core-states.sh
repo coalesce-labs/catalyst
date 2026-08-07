@@ -458,11 +458,21 @@ reconcile_parked_by_human_label() {
 	local labels_json existing_id
 	labels_json=$(echo "$resp" | jq -c '.data.issueLabels.nodes // []')
 	# Match the top-level (parent==null) standalone label by name. Already present
-	# ⇒ zero mutations (idempotent).
+	# ⇒ zero mutations (idempotent). isGroup != true is REQUIRED: a label GROUP of
+	# the same name also has parent==null, and adopting one would report success
+	# forever while never provisioning a label that can be applied to a ticket —
+	# leaving board-health parking silently unusable.
 	existing_id=$(echo "$labels_json" | jq -r --arg n "$label_name" \
-		'.[] | select(.name == $n and .parent == null) | .id // empty' | head -1)
+		'.[] | select(.name == $n and .parent == null and (.isGroup // false) != true) | .id // empty' | head -1)
 	if [[ -n $existing_id ]]; then
 		echo "reconcile_parked_by_human_label: label '${label_name}' already present (id: ${existing_id})"
+		return 0
+	fi
+	# A same-named GROUP is a name collision an operator must resolve — creating
+	# the plain label alongside it would fail on Linear's uniqueness constraint.
+	if echo "$labels_json" | jq -e --arg n "$label_name" \
+		'any(.[]; .name == $n and (.isGroup // false) == true)' >/dev/null 2>&1; then
+		echo "WARNING: reconcile_parked_by_human_label: a label GROUP named '${label_name}' already exists — board-health parking needs a PLAIN label of that name. Rename the group or delete it, then re-run." >&2
 		return 0
 	fi
 

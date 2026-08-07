@@ -494,9 +494,15 @@ else
 	# Reuses the ws_cs_all workspace-label snapshot fetched above; only asserts when
 	# that snapshot was populated this run (live query path).
 	if [[ -n ${ws_cs_all:-} ]]; then
+		# isGroup != true: a same-named label GROUP also has parent == null, and it
+		# cannot be applied to a ticket — accepting one would pass this check while
+		# board-health parking stays unusable.
 		if echo "$ws_cs_all" | jq -e \
-			'.[] | select(.name == "parked-by-human" and .parent == null)' >/dev/null 2>&1; then
+			'.[] | select(.name == "parked-by-human" and .parent == null and (.isGroup // false) != true)' >/dev/null 2>&1; then
 			pass "parked-by-human label (standalone)"
+		elif echo "$ws_cs_all" | jq -e \
+			'any(.[]; .name == "parked-by-human" and (.isGroup // false) == true)' >/dev/null 2>&1; then
+			warn "parked-by-human exists as a label GROUP, not an applicable label — board-health parking is nonfunctional; rename/delete the group and re-run plugins/dev/scripts/setup-execution-core-states.sh"
 		else
 			warn "parked-by-human label missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh"
 		fi
