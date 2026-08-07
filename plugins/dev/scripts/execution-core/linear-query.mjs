@@ -1397,13 +1397,14 @@ export function runEligibleQuery(
 // onSource(source, count) markers: "replica" (served) · "no-triage-status" (the
 // team configures none) · "no-replica" (tier off / no reader wired) ·
 // "replica-miss" (dead writer, mid-reseed, or a throw).
-export function runTriageStateQuery(query, { replica, onSource } = {}) {
+export function runTriageStateQuery(query, { replica, onSource, recordRead = recordDaemonRead } = {}) {
   if (!query?.triageStatus) {
     onSource?.("no-triage-status", 0);
     return [];
   }
   if (!replica?.triageState) {
     onSource?.("no-replica", 0);
+    recordRead("replica", "skipped", null, null, "triage_list");
     return [];
   }
   let local;
@@ -1414,11 +1415,11 @@ export function runTriageStateQuery(query, { replica, onSource } = {}) {
   }
   if (!local || !Array.isArray(local.nodes)) {
     onSource?.("replica-miss", 0);
-    recordDaemonRead("replica", "failed", null, null, "triage_list");
+    recordRead("replica", "failed", null, null, "triage_list");
     return [];
   }
   const tickets = local.nodes.map(normalizeTicket);
   onSource?.("replica", tickets.length);
-  recordDaemonRead("replica", "ok", null, null, "triage_list");
+  recordRead("replica", "ok", null, null, "triage_list");
   return tickets;
 }
