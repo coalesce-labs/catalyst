@@ -131,6 +131,29 @@ if grep -qi 'forcing SIGKILL' <<<"$OUT_S"; then pass "stop-grace: warns before f
 ELAPSED_S="$(grep -o 'ELAPSED=[0-9]*' <<<"$OUT_S" | cut -d= -f2)"
 if [[ -n "$ELAPSED_S" && "$ELAPSED_S" -ge 2 ]]; then pass "stop-grace: honors the ${ELAPSED_S}s graceful window (≥2s)"; else failx "stop-grace: honors the graceful window (≥2s)" "$OUT_S"; fi
 
+# --- stop serialization (Codex P1): stop takes the SAME start lock so it can't
+#     interleave with an in-flight start. When the lock is held (a start in flight),
+#     stop waits the bounded window, then still stops best-effort — and does NOT
+#     remove a lock it never acquired (must not clobber the in-flight start's lock). ---
+CDIR_SS="${SCRATCH}/catalyst-stopserial"; mkdir -p "$CDIR_SS"
+OUT_SS="$(CATALYST_DIR="$CDIR_SS" COORD_FAKE="$FAKE_PUB" COORDINATION_STOP_LOCK_WAIT_SECONDS=2 \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    COORDINATION_SCRIPT="$COORD_FAKE"
+    mkdir -p "$COORDINATION_LOCK"; : > "$COORDINATION_LOCK/owner"   # a peer start holds the lock (fresh)
+    bash "$COORDINATION_SCRIPT" & echo $! > "$COORDINATION_PID"
+    sleep 1
+    livepid="$(cat "$COORDINATION_PID")"
+    t0="$SECONDS"; stop_coordination; t1="$SECONDS"
+    if [[ -z "$livepid" ]]; then echo "NO_PID"; elif ps -p "$livepid" >/dev/null 2>&1; then echo "STILL_ALIVE"; kill -9 "$livepid" 2>/dev/null; else echo "STOPPED"; fi
+    [[ -d "$COORDINATION_LOCK" ]] && echo "PEERLOCK_KEPT" || echo "PEERLOCK_REMOVED"
+    echo "ELAPSED=$((t1 - t0))"
+  ' 2>&1)"
+if grep -q 'STOPPED' <<<"$OUT_SS"; then pass "stop-serialize: stops best-effort even when it cannot take the lock"; else failx "stop-serialize: stops best-effort even when it cannot take the lock" "$OUT_SS"; fi
+if grep -q 'PEERLOCK_KEPT' <<<"$OUT_SS"; then pass "stop-serialize: never clobbers a lock it did not acquire"; else failx "stop-serialize: never clobbers a lock it did not acquire" "$OUT_SS"; fi
+ELAPSED_SS="$(grep -o 'ELAPSED=[0-9]*' <<<"$OUT_SS" | cut -d= -f2)"
+if [[ -n "$ELAPSED_SS" && "$ELAPSED_SS" -ge 2 ]]; then pass "stop-serialize: waits the bounded window for the in-flight start (≥2s)"; else failx "stop-serialize: waits the bounded window (≥2s)" "$OUT_SS"; fi
+
 # --- PID-discovery fallback: PID file deleted, but a publisher is still live ⇒
 #     coordination_pid rediscovers it by command line (Codex P1: no orphan/dup).
 CDIR_D="${SCRATCH}/catalyst-discover"; mkdir -p "$CDIR_D"
@@ -236,6 +259,15 @@ OUT_CD="$(CATALYST_DIR="/data/catalyst-root" \
 if grep -q '<key>CATALYST_DIR</key>' <<<"$OUT_CD" && grep -q '<string>/data/catalyst-root</string>' <<<"$OUT_CD"; then
   pass "plist-catdir: pins CATALYST_DIR when set"
 else failx "plist-catdir: pins CATALYST_DIR when set" "$OUT_CD"; fi
+
+# --- plist CATALYST_EVENTS_DIR pinning (Codex P2): the publisher tails this dir, so
+#     a supported override must ride into the agent env or a post-reboot start tails
+#     the default $CATALYST_DIR/events and misses configured events. ---
+OUT_ED="$(CATALYST_EVENTS_DIR="/data/ev" \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q '<key>CATALYST_EVENTS_DIR</key>' <<<"$OUT_ED" && grep -q '<string>/data/ev</string>' <<<"$OUT_ED"; then
+  pass "plist-eventsdir: pins CATALYST_EVENTS_DIR when set"
+else failx "plist-eventsdir: pins CATALYST_EVENTS_DIR when set" "$OUT_ED"; fi
 
 # --- plist XML escaping (Codex P2): an env value with an XML metacharacter (e.g. a
 #     hub URL with &) must be escaped so the plist stays well-formed and loadable. ---

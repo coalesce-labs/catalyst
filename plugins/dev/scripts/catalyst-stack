@@ -520,31 +520,38 @@ _coordination_lock_stale() {
 # Impact is minimal: coordination-publish is off by default, the leak window is a
 # sub-second SIGKILL, and `_start_coordination_locked`'s `coordination_pid` check is
 # an independent belt-and-suspenders against a running publisher being duplicated.
-start_coordination() {
+# _coordination_lock_acquire — win the start lock. mkdir is the sole ownership
+# arbiter; reclaim ONLY an EMPTY, aged carcass (rmdir refuses a non-empty dir, so it
+# can never remove a live/leaked lock; the age gate covers the mkdir→sentinel
+# window). Returns 0 acquired, 1 if held by a live peer / non-empty leak. Shared by
+# start AND stop so the two lifecycle transitions serialize (Codex P1).
+_coordination_lock_acquire() {
   local guard=0
   while true; do
     if mkdir "$COORDINATION_LOCK" 2>/dev/null; then
       : > "$COORDINATION_LOCK/owner"   # sentinel: a live lock is non-empty → rmdir-proof
-      break
-    fi
-    guard=$((guard + 1))
-    if [[ "$guard" -gt 8 ]]; then
-      log "coordination-publish start already in progress — skipping this tick"
       return 0
     fi
-    # Reclaim ONLY an EMPTY, aged carcass. rmdir refuses a non-empty (sentinel-
-    # bearing) lock, so this can never remove a live lock; the age gate covers the
-    # microsecond mkdir→sentinel window. A live/leaked non-empty lock → skip.
+    guard=$((guard + 1))
+    [[ "$guard" -gt 8 ]] && return 1
     if _coordination_lock_stale "$COORDINATION_LOCK" && rmdir "$COORDINATION_LOCK" 2>/dev/null; then
       log "coordination-publish: reclaimed an abandoned (empty) start lock"
       continue
     fi
+    return 1
+  done
+}
+
+_coordination_lock_release() { rm -rf "$COORDINATION_LOCK" 2>/dev/null || true; }
+
+start_coordination() {
+  if ! _coordination_lock_acquire; then
     log "coordination-publish start already in progress — skipping this tick"
     return 0
-  done
+  fi
   local rc=0
   _start_coordination_locked || rc=$?
-  rm -rf "$COORDINATION_LOCK" 2>/dev/null || true   # release (contains the sentinel)
+  _coordination_lock_release
   return "$rc"
 }
 
@@ -578,7 +585,7 @@ _start_coordination_locked() {
   if [[ "$mode" == "off" ]]; then
     if pid_alive "$pid"; then
       log "coordination-publish mode=off but pid $pid still live (stale config) — stopping"
-      stop_coordination
+      _stop_coordination_unlocked   # we already hold the start lock
     else
       log "coordination-publish mode=off — inert, skipping"
     fi
@@ -595,7 +602,7 @@ _start_coordination_locked() {
       return 0
     fi
     log "coordination-publish config changed (${live_fp:-<unknown>} → $fp) — restarting (pid $pid)"
-    stop_coordination
+    _stop_coordination_unlocked   # we already hold the start lock
     pid=""
   fi
   # 2. MISSING-BINARY LOUD, NON-FATAL (shipper posture — return 1, never exit).
@@ -624,7 +631,26 @@ _start_coordination_locked() {
   fi
 }
 
+# stop_coordination — public stop. Serializes against an in-flight start by taking
+# the SAME start lock (Codex P1): otherwise a manual stop racing a scheduled start
+# (after start acquired the lock but before it wrote the PID file) sees no publisher,
+# returns, and the start then spawns a detached publisher AFTER the stop completed —
+# leaving mirroring/egress running despite a successful stop. Bounded wait for the
+# in-flight start to finish; if the lock can't be taken (still in-flight, or a
+# non-empty leak), fall through and stop best-effort anyway — stopping is always
+# safe. Internal callers that already hold the lock use _stop_coordination_unlocked.
 stop_coordination() {
+  local got=0 tries=0
+  while [[ "$tries" -lt "${COORDINATION_STOP_LOCK_WAIT_SECONDS:-15}" ]]; do
+    if _coordination_lock_acquire; then got=1; break; fi
+    tries=$((tries + 1)); sleep 1
+  done
+  _stop_coordination_unlocked
+  [[ "$got" == "1" ]] && _coordination_lock_release
+  return 0
+}
+
+_stop_coordination_unlocked() {
   local pid; pid="$(coordination_pid)"
   if pid_alive "$pid"; then
     log "stopping coordination-publish (pid $pid)"
@@ -1345,15 +1371,12 @@ _stack_agent_path() {
 
 # _xml_escape <value> — escape the five XML predefined entities so an env value with
 # a metacharacter (e.g. a hub URL like https://h/p?x=1&y=2) can't emit a malformed
-# plist that launchd then refuses to load (Codex P2). `&` MUST be substituted first.
+# plist that launchd then refuses to load (Codex P2). Uses sed, NOT bash `${//}`
+# substitution: under Bash 5's default `patsub_replacement`, an unescaped `&` in the
+# replacement expands to the matched text (so `<` would wrongly become `<lt;`). `&`
+# MUST be substituted first; in sed replacements a literal `&` is written `\&`.
 _xml_escape() {
-  local s="$1"
-  s="${s//&/&amp;}"
-  s="${s//</&lt;}"
-  s="${s//>/&gt;}"
-  s="${s//\"/&quot;}"
-  s="${s//\'/&apos;}"
-  printf '%s' "$s"
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
 }
 
 # render_stack_plist <cmd> <interval> [host_name] — emit the LaunchAgent plist XML to stdout.
@@ -1380,6 +1403,15 @@ render_stack_plist() {
     catdir_env="
     <key>CATALYST_DIR</key>
     <string>$(_xml_escape "${CATALYST_DIR}")</string>"
+  fi
+  # CTL-1494 (Codex P2): pin CATALYST_EVENTS_DIR too — the publisher tails this
+  # directory, so a supported override must ride into the scheduled env or a
+  # post-reboot/restart start tails $CATALYST_DIR/events and misses events written
+  # to the configured directory. Captured at install time; omitted when unset.
+  if [[ -n "${CATALYST_EVENTS_DIR:-}" ]]; then
+    catdir_env="${catdir_env}
+    <key>CATALYST_EVENTS_DIR</key>
+    <string>$(_xml_escape "${CATALYST_EVENTS_DIR}")</string>"
   fi
   # CTL-1494 (Codex P2): pin the operator's Layer-2 config path into the agent env.
   # launchd hands the keep-alive an otherwise-minimal environment, so without this a
