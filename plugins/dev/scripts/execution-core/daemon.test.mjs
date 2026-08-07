@@ -2444,6 +2444,73 @@ describe("handleCommentWake (CTL-549)", () => {
       );
       expect(dispatched).toEqual([]);
     });
+
+    // Phase-verify HIGH finding #2: findHeldFromProjection returns BOTH
+    // needs-input AND stalled — the dir-present per-signal loop treats "stalled"
+    // as a J3 unstick (clearStall, never dispatch), but the pre-fix enforce
+    // branch dispatch()ed every held status unconditionally. A cross-host
+    // stalled ticket must be stall-cleared, not blindly re-launched.
+    test("enforce → a STALLED projected run is stall-cleared, never dispatched", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      const cleared = [];
+      await handleCommentWake(
+        { ticket: "CTL-2", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => ({
+            phase: "implement",
+            signal: { ticket: "CTL-2", phase: "implement", status: "stalled", raw: {} },
+          }),
+          clearStall: ({ ticket, phase }) => {
+            cleared.push({ ticket, phase });
+            return true;
+          },
+        }
+      );
+      expect(dispatched).toEqual([]);
+      expect(cleared).toContainEqual({ ticket: "CTL-2", phase: "implement" });
+    });
+
+    // Phase-verify HIGH finding #3: the CLEAR-FIRST block removes the
+    // "needs-input" label out-of-band before this dir-absent branch runs, but
+    // the pre-fix enforce branch never emitted the CTL-764 finding-11
+    // needs-input→cleared worker.transition record (that emission previously
+    // lived only in the dir-present per-signal loop, which a cross-host wake
+    // never reaches) — leaving the durable ticket_state_transitions stream with
+    // a stale needs-input disposition and no cleared record.
+    test("enforce → a confirmed needs-input clear emits worker.transition(needs-input→cleared)", async () => {
+      const orch = tmpOrcDir(); // no worker dir → readdirSync throws → enforce branch
+      const transitions = [];
+      const dispatched = [];
+      await handleCommentWake(
+        { ticket: "CTL-3", body: "answer", authorId: "human-1" },
+        {
+          orchDir: orch,
+          botUserId: "bot-uuid",
+          isManagedTicket: () => true,
+          dispatch: (...a) => dispatched.push(a),
+          // needs-human removal (first call) reports absent; needs-input removal
+          // (second call, in the CLEAR-FIRST block) is the confirmed write.
+          removeLabel: async (ticket, label) =>
+            label === "needs-input" ? { removed: true, wrote: true } : { removed: false },
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => ({
+            phase: "implement",
+            signal: { ticket: "CTL-3", phase: "implement", status: "needs-input", raw: {} },
+          }),
+          appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+        }
+      );
+      expect(dispatched).toHaveLength(1); // needs-input still resumes, unlike stalled
+      const cleared = transitions.find(
+        (e) => e.ticket === "CTL-3" && e.fromDisposition === "needs-input"
+      );
+      expect(cleared).toMatchObject({ toDisposition: null, source: "comment-wake-clear" });
+    });
   });
 });
 

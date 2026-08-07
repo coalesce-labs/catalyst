@@ -539,6 +539,9 @@ jobs:
             merge-state.test.mjs \
             orphan-reaper-timer.test.mjs \
             proc-reaper.test.mjs \
+            projection-read-decision.test.mjs \
+            projection-reader.test.mjs \
+            projection-shadow-diff.test.mjs \
             ratelimit-event.test.mjs \
             ratelimit-poller.test.mjs \
             reap-intent.test.mjs \

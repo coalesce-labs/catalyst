@@ -647,6 +647,28 @@ export async function handleCommentWake(
     }
     // enforce: resume the held run reconstructed from the projection.
     const projSig = held.signal ?? {};
+    // parkedFrom is NOT cross-host-recoverable — it lives only in the local
+    // signal file, never in worker_state / the transition event. The projected
+    // `phase` is the honest best-effort (it equals parkedFrom in the common case,
+    // and is exactly what the dir-present path falls back to via `sig.phase`).
+    const parkedPhase = projSig.phase ?? held.phase;
+    // Phase-verify HIGH finding #2: findHeldFromProjection returns BOTH
+    // HELD_STATUSES ("needs-input" AND "stalled"), but the dir-present per-signal
+    // loop treats them very differently — "stalled" is a J3 unstick (clearStall +
+    // no dispatch), never a re-dispatch. Mirror that split here instead of
+    // dispatch()ing every held status: a cross-host stalled ticket must be
+    // stall-cleared, not blindly re-launched.
+    if (projSig.status === "stalled") {
+      try {
+        clearStall({ ticket, phase: parkedPhase });
+      } catch (err) {
+        log.warn(
+          { ticket, phase: parkedPhase, err: err?.message },
+          "handleCommentWake: clearStall threw — skipping (projection enforce)"
+        );
+      }
+      return;
+    }
     // CTL-1489: reconstruct the resume session from the projected bg_job_id so a
     // CTL-768 held-stopped worker recovered cross-host continues its PAUSED
     // conversation via `--resume` (the same resolveSession seam the dir-present
@@ -655,12 +677,30 @@ export async function handleCommentWake(
     // (a still-alive worker: no resume, matching the legacy path).
     const projBgJobId = projSig.raw?.bg_job_id ?? null;
     const resumeSession = projBgJobId ? resolveSession(projBgJobId) ?? undefined : undefined;
-    // parkedFrom is NOT cross-host-recoverable — it lives only in the local
-    // signal file, never in worker_state / the transition event. The projected
-    // `phase` is the honest best-effort (it equals parkedFrom in the common case,
-    // and is exactly what the dir-present path falls back to via `sig.phase`).
-    const parkedPhase = projSig.phase ?? held.phase;
     const handoffPath = projSig.raw?.handoffPath ?? undefined;
+    // Phase-verify HIGH finding #3: the CLEAR-FIRST block above already removed
+    // the "needs-input" label out-of-band (unconditionally, before this dir-absent
+    // branch runs) and left its write-confirmation in `needsInputWroteEarly` —
+    // but never emitted the CTL-764 finding-11 needs-input→cleared worker.transition
+    // record, because that emission previously lived only in the dir-present
+    // per-signal loop below, which this cross-host branch never reaches. Emit it
+    // here so the durable ticket_state_transitions stream doesn't keep a stale
+    // needs-input disposition with no cleared record. Gated on a CONFIRMED WRITE
+    // (mirrors the needs-human gate above) — only the writer host emits.
+    if (needsInputWroteEarly) {
+      try {
+        appendWorkerTransitionEvent({
+          ticket,
+          orchId: ticket,
+          fromDisposition: "needs-input",
+          toDisposition: null,
+          reason: "comment-wake",
+          source: "comment-wake-clear",
+        });
+      } catch {
+        /* observability only */
+      }
+    }
     // No local signal file exists here (the dir is absent), so the dir-present
     // path's stoppedForHold→stalled signal RESET is a no-op cross-host — the
     // re-dispatch provisions a fresh worktree + signal.
