@@ -553,10 +553,10 @@ do_github_auth() {
 # thoughts repo into ~/catalyst/hlt/<org>/thoughts, write a clean humanlayer.json
 # (deterministic repoMappings), verify auth. Orgs are derived data-driven from
 # the node's execution-core registry when present, else from the bundle's
-# layer1Identity.projectKey (the product/thoughts org — distinct from repoUrl,
-# which is wherever the catalyst plugin source itself lives) — never a
-# hardcoded list. MUST run before setup-catalyst, whose thoughts-init binds the
-# checkout to these repos + humanlayer.json.
+# thoughtsOrg (the product/thoughts org — distinct from repoUrl, which is
+# wherever the catalyst plugin source itself lives) — never a hardcoded list.
+# MUST run before setup-catalyst, whose thoughts-init binds the checkout to
+# these repos + humanlayer.json.
 do_provision_thoughts() {
   local pt="$PROVISION_THOUGHTS_SCRIPT"
   [[ -x "$pt" ]] || { fail "provision-thoughts.sh not found/executable at $pt"; return 1; }
@@ -566,13 +566,16 @@ do_provision_thoughts() {
   # lives where setup-plugin-source.sh put it (CATALYST_PLUGIN_SOURCE or the
   # $HOME default), not at a from-scratch ${CATALYST_DIR}/plugin-source guess.
   [[ -f "$registry" ]] || registry="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/plugins/dev/scripts/execution-core/registry.json"
-  # First-join fallback org: layer1Identity.projectKey IS the GitHub org that hosts
-  # the product/thoughts repos (join-bundle.mjs sets it from Layer-1 catalyst.projectKey).
-  # NOT repoUrl's org — repoUrl/pluginSourceUrl point at wherever the catalyst plugin
-  # source itself lives, which can be a different org/personal fork entirely (CTL-1214
-  # verify: conflating the two derived a bogus thoughts org on a forked install).
+  # First-join fallback org: bundle .thoughtsOrg IS the GitHub org that hosts
+  # the product/thoughts repos (join-bundle.mjs sets it from Layer-1
+  # catalyst.thoughts.profile). NOT .layer1Identity.projectKey — projectKey is
+  # the Layer-2 secrets-file key (see AGENTS.md "Configuration"), not a GitHub
+  # org, and using it as one derives a bogus/non-existent thoughts org whenever
+  # the two names differ (Codex #3080 P1). NOT repoUrl's org either —
+  # repoUrl/pluginSourceUrl point at wherever the catalyst plugin source itself
+  # lives, which can be a different org/personal fork entirely.
   local primary_org
-  primary_org="$(bundle_get '.layer1Identity.projectKey')"
+  primary_org="$(bundle_get '.thoughtsOrg')"
   if [[ -f "$registry" ]]; then
     args+=(--registry "$registry")
   else

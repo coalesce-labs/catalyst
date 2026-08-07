@@ -203,6 +203,13 @@ export function assembleJoinBundle() {
     },
     repoUrl,
     pluginSourceUrl: resolvePluginSourceUrl(l2) || repoUrl,
+    // The GitHub org that hosts the product/thoughts repos (Layer-1
+    // catalyst.thoughts.profile) — distinct from BOTH projectKey (the Layer-2
+    // secrets-file key, not a GitHub org) and repoUrl/pluginSourceUrl (wherever
+    // the catalyst plugin source itself lives, which can be a different
+    // org/personal fork entirely). null when the seed has no thoughts.profile
+    // set. Optional (existence-only) — an older seed degrades gracefully.
+    thoughtsOrg: l1?.catalyst?.thoughts?.profile ?? null,
     // CTL-1284: non-secret webhook wiring (smee channels + per-team webhookId
     // map). null when the seed has no monitor block. multiHost-gated by the
     // consumer; deliberately NOT in BUNDLE_REQUIRED_KEYS.

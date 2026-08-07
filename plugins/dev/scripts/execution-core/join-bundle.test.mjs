@@ -122,6 +122,28 @@ describe("assembleJoinBundle", () => {
     expect(b.otlpEndpointHint).toBeNull(); // not set in fixture
   });
 
+  test("thoughtsOrg is null when Layer-1 has no thoughts.profile (fixture default)", () => {
+    const b = assembleJoinBundle();
+    expect(b.thoughtsOrg).toBeNull();
+  });
+
+  // Codex #3080 P1: thoughtsOrg must read catalyst.thoughts.profile (the actual
+  // GitHub org hosting thoughts repos) — NOT layer1Identity.projectKey (the
+  // Layer-2 secrets-file key), which can legitimately differ from it.
+  test("thoughtsOrg reads Layer-1 catalyst.thoughts.profile, distinct from projectKey", () => {
+    writeLayer1({
+      catalyst: {
+        projectKey: "catalyst-workspace",
+        thoughts: { profile: "coalesce-labs" },
+        linear: { teamKey: "CTL", teamId: "team-uuid-1234", stateMap: {} },
+      },
+    });
+    const b = assembleJoinBundle();
+    expect(b.thoughtsOrg).toBe("coalesce-labs");
+    expect(b.layer1Identity.projectKey).toBe("catalyst-workspace");
+    expect(b.thoughtsOrg).not.toBe(b.layer1Identity.projectKey);
+  });
+
   test("botCreds carry accessToken for both bots, read from GLOBAL config", () => {
     const b = assembleJoinBundle();
     expect(b.botCreds.orchestrator.accessToken).toBe("lin_oauth_orch");

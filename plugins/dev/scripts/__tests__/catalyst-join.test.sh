@@ -628,6 +628,7 @@ MULTIHOST_WH_BUNDLE="${SCRATCH}/multihost-wh.json"
 cat > "$MULTIHOST_WH_BUNDLE" <<'BEOF'
 {
   "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "thoughtsOrg": "CTL",
   "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
   "hostsRoster": ["mini", "mini-2"],
   "livenessAnchorIssue": "CTL-1",
@@ -644,6 +645,7 @@ SINGLEHOST_WH_BUNDLE="${SCRATCH}/singlehost-wh.json"
 cat > "$SINGLEHOST_WH_BUNDLE" <<'BEOF'
 {
   "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "thoughtsOrg": "CTL",
   "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
   "hostsRoster": ["mini"],
   "livenessAnchorIssue": "CTL-1",
@@ -1007,9 +1009,11 @@ run "T2.9g resume after upstream layer1 fix re-pulls and wires (#2914 P2)" bash 
 # T2.10 / T2.11: (CTL-1293) provision-thoughts that CLONES OK but fails push-auth
 # is FATAL on a multiHost member (roster>1 owns work → must sync thoughts to
 # peers) but warn-and-proceed on a single-host / Stage-0 SHADOW node.
-# The primary clone path is keyed off layer1Identity.projectKey ("CTL" in both
+# The primary clone path is keyed off bundle .thoughtsOrg ("CTL" in both
 # MULTIHOST_WH_BUNDLE and SINGLEHOST_WH_BUNDLE below) — not a hardcoded org —
-# since do_provision_thoughts's fallback derives it from the bundle identity.
+# since do_provision_thoughts's fallback derives it from the bundle's
+# thoughts-org field (Codex #3080 P1: NOT layer1Identity.projectKey, which is
+# the Layer-2 secrets-file key, not a GitHub org).
 PT_CLONE_PUSHFAIL_STUB="${STUBS2}/stub-provision-thoughts-pushfail.sh"
 cat > "$PT_CLONE_PUSHFAIL_STUB" <<'EOF'
 #!/usr/bin/env bash
