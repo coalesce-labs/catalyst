@@ -214,11 +214,18 @@ export function defaultDrainPsSnapshot() {
  * actually OBSERVES the absent gap. A flag removed and re-created BETWEEN ticks (the
  * scheduler ticks ~every 30s) never presents an absent state to any tick, so the
  * stale marker would suppress the new episode forever. To distinguish episodes we
- * persist the flag's mtime IN the marker: when the marker exists but the live flag's
- * mtime differs from the latched one, that is a fresh flag (new episode) → re-emit.
- * A confirmed-equal mtime is the genuine latched steady state. If either mtime is
- * indeterminate (stat failed, or a legacy pre-mtime marker), we stay conservatively
- * latched so the once-per-episode guarantee is never weakened into per-tick spam.
+ * persist the flag's INODE in the marker: when the marker exists but the live flag's
+ * inode differs from the latched one, the flag was genuinely removed and re-created
+ * (a new file → a new episode) → re-emit. The inode — NOT the mtime — is the correct
+ * episode discriminator: `setDrain()` unconditionally REWRITES the existing flag in
+ * place (writeFileSync O_TRUNC), and a recurring external writer can overwrite the
+ * SAME continuously-present file; both bump the mtime WITHOUT starting a new episode,
+ * so an mtime-based re-arm would spam a fresh `node.drain.ignored` on every rewrite,
+ * violating the once-per-episode contract. An in-place rewrite keeps the inode, so we
+ * stay latched. If either inode is indeterminate (stat failed, or a legacy pre-inode
+ * marker), we stay conservatively latched so the guarantee is never weakened into
+ * per-tick spam (the rare cost: an OS that immediately reuses the freed inode number
+ * misses one episode's emission — under-emit, strictly safer than mtime's over-emit).
  * Best-effort throughout; never throws. Returns { emitted, latched? }.
  */
 export function maybeEmitDrainIgnored({
@@ -237,19 +244,28 @@ export function maybeEmitDrainIgnored({
     }
     return { emitted: false };
   }
+  let flagIno = null;
   let flagMtimeMs = null;
-  try { flagMtimeMs = statSync(flagPath).mtimeMs; } catch { /* best-effort */ }
+  try {
+    const st = statSync(flagPath);
+    flagIno = st.ino;
+    flagMtimeMs = st.mtimeMs;
+  } catch { /* best-effort */ }
   if (existsSync(marker)) {
-    let latchedMtimeMs = null;
-    try { latchedMtimeMs = JSON.parse(readFileSync(marker, "utf8"))?.flagMtimeMs ?? null; } catch { /* best-effort */ }
-    // Re-arm ONLY on a confirmed mtime change (a new flag file); otherwise stay latched.
+    let latchedIno = null;
+    try { latchedIno = JSON.parse(readFileSync(marker, "utf8"))?.flagIno ?? null; } catch { /* best-effort */ }
+    // Re-arm ONLY on a confirmed INODE change (the flag was removed and re-created — a
+    // genuinely new file); an in-place rewrite keeps the inode and stays the SAME
+    // episode. Indeterminate inode → stay conservatively latched.
     const changed =
-      latchedMtimeMs !== null && flagMtimeMs !== null && flagMtimeMs !== latchedMtimeMs;
+      latchedIno !== null && flagIno !== null && flagIno !== latchedIno;
     if (!changed) return { emitted: false, latched: true };
   }
   let ps = null;
   try { ps = psSnapshotFn?.() ?? null; } catch { ps = null; }
+  // The event payload keeps carrying flagMtimeMs (informational); the marker persists the
+  // inode as the episode discriminator (plus mtime for human debugging).
   emitDrainIgnoredEvent({ flagMtimeMs, ps, logPath, now });
-  try { writeFileSync(marker, JSON.stringify({ flagMtimeMs })); } catch { /* best-effort */ }
+  try { writeFileSync(marker, JSON.stringify({ flagIno, flagMtimeMs })); } catch { /* best-effort */ }
   return { emitted: true };
 }

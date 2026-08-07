@@ -6,13 +6,18 @@
 
 import { describe, test, expect } from "bun:test";
 import { checkDrainDisabled } from "../doctor.mjs";
+import { resolveDrainState as realResolveDrainState } from "../config.mjs";
 
-// Inject a resolveDrainState stub so no real flag file / orchDir is read.
+// Inject a resolveDrainState stub so no real flag file / orchDir is read, and an empty
+// readEnvFile so the check never touches the machine-local execution-core.env — keeping
+// these cases fully hermetic. The CTL-1678 Codex-P2 env-file overlay is covered by the
+// dedicated "durable override in execution-core.env" describe block below.
 function deps(env, drainState) {
   return {
     env,
     orchDir: "/tmp/nonexistent-orchdir",
     resolveDrainState: () => drainState,
+    readEnvFile: () => "",
   };
 }
 
@@ -54,5 +59,67 @@ describe("checkDrainDisabled", () => {
     );
     expect(rec.status).toBe("warn");
     expect(rec.detail).toMatch(/present.*ignor|ignor.*present/i);
+  });
+});
+
+// CTL-1678 (Codex P2): the durable override lives in the machine-local execution-core.env
+// the daemon launcher sources — `catalyst-doctor` never sources it, so checkDrainDisabled
+// must read that file itself and let it win over the ambient env, or it reports "honors
+// the drain flag" while the daemon ignores it.
+describe("checkDrainDisabled — durable override in execution-core.env", () => {
+  // Capturing resolver: records the effective env checkDrainDisabled resolves against, so
+  // we can assert the overlay precedence without any real flag-file/orchDir read.
+  function capturingDeps(env, envFileText) {
+    let seenEnv = null;
+    const d = {
+      env,
+      orchDir: "/tmp/nonexistent-orchdir",
+      readEnvFile: () => envFileText,
+      resolveDrainState: (_dir, { env: e } = {}) => {
+        seenEnv = e;
+        return {
+          flagPresent: false,
+          disabled: e?.CATALYST_DRAIN_DISABLED === "1",
+          draining: false,
+        };
+      },
+    };
+    return { deps: d, seen: () => seenEnv };
+  }
+
+  test("file sets CATALYST_DRAIN_DISABLED, ambient unset → resolver sees disabled", () => {
+    const { deps: d, seen } = capturingDeps({}, "export CATALYST_DRAIN_DISABLED=1\n");
+    const rec = checkDrainDisabled(d);
+    expect(seen().CATALYST_DRAIN_DISABLED).toBe("1");
+    expect(rec.status).not.toBe("fail");
+    expect(rec.detail).toContain("drain-disabled");
+  });
+
+  test("file wins over ambient (ambient=0, file=1 → resolver sees 1)", () => {
+    const { deps: d, seen } = capturingDeps(
+      { CATALYST_DRAIN_DISABLED: "0" },
+      "export CATALYST_DRAIN_DISABLED=1\n",
+    );
+    checkDrainDisabled(d);
+    expect(seen().CATALYST_DRAIN_DISABLED).toBe("1");
+  });
+
+  test("empty file preserves ambient (ambient=1, file empty → resolver sees 1)", () => {
+    const { deps: d, seen } = capturingDeps({ CATALYST_DRAIN_DISABLED: "1" }, "");
+    checkDrainDisabled(d);
+    expect(seen().CATALYST_DRAIN_DISABLED).toBe("1");
+  });
+
+  test("file boot-drain overlay reaches the REAL resolver (boot-drain neutralizes override)", () => {
+    // Real resolveDrainState: BOOT_DRAINED=1 is authoritative, so isDrainDisabled → false
+    // even with DRAIN_DISABLED=1. flag absent → INFO "honors the drain flag", never FAIL.
+    const rec = checkDrainDisabled({
+      env: {},
+      orchDir: "/tmp/nonexistent-orchdir-ctl1678",
+      resolveDrainState: realResolveDrainState,
+      readEnvFile: () => "export CATALYST_DRAIN_DISABLED=1\nexport CATALYST_BOOT_DRAINED=1\n",
+    });
+    expect(rec.status).not.toBe("fail");
+    expect(rec.detail).toContain("honors the drain flag");
   });
 });

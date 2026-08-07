@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test drain-event.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, appendFileSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, readFileSync, appendFileSync, writeFileSync, existsSync, rmSync, utimesSync, statSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import {
@@ -295,29 +295,39 @@ describe("maybeEmitDrainIgnored latch (CTL-1678)", () => {
     expect(evt.body.payload.ps).toBeNull();
   });
 
-  // CTL-1678 (Codex P2): a flag removed and re-created BETWEEN ticks never presents an
-  // absent state to any tick, so the stale marker would suppress the new episode. The
-  // marker now persists the flag mtime; a changed mtime re-arms even with no absent gap.
-  test("flag re-created between ticks (changed mtime, no absent gap) → re-emits", () => {
+  // CTL-1678 (Codex P2, round 2): a flag removed and re-created BETWEEN ticks never
+  // presents an absent state to any tick, so the stale marker would suppress the new
+  // episode. The marker persists the flag INODE; a genuinely new flag file (a different
+  // inode — removed then recreated) re-arms even with no observed absent gap. Driven
+  // deterministically via the marker (an FS may reuse a freed inode number, so we assert
+  // the "latched inode ≠ live inode" branch directly rather than depending on that).
+  test("marker inode differs from live flag (rm+recreate episode) → re-emits", () => {
     setFlag(true);
     maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
-    // Marker persists the first episode's mtime.
-    const latched = JSON.parse(readFileSync(getDrainIgnoredMarkerPath(tmp), "utf8"));
-    expect(Number.isFinite(latched.flagMtimeMs)).toBe(true);
-    // Recreate the flag with a DISTINCT mtime WITHOUT ever calling in the absent state.
-    setFlag(true);
-    const future = new Date(latched.flagMtimeMs + 60_000);
-    utimesSync(getDrainFlagPath(tmp), future, future);
+    const marker = JSON.parse(readFileSync(getDrainIgnoredMarkerPath(tmp), "utf8"));
+    expect(Number.isFinite(marker.flagIno)).toBe(true);
+    // Simulate a genuinely new flag file: the marker holds a DIFFERENT (prior-episode) inode.
+    const liveIno = statSync(getDrainFlagPath(tmp)).ino;
+    writeFileSync(getDrainIgnoredMarkerPath(tmp), JSON.stringify({ flagIno: liveIno + 1 }));
     const again = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
     expect(again.emitted).toBe(true);
     const lines = readFileSync(logPath, "utf8").trim().split("\n");
     expect(lines).toHaveLength(2);
   });
 
-  test("unchanged mtime → stays latched (once-per-episode preserved)", () => {
+  // CTL-1678 (Codex P2, round 2): the crux of finding #4 — an IN-PLACE rewrite (setDrain's
+  // writeFileSync O_TRUNC, or a recurring external writer overwriting the same file) keeps
+  // the inode and MUST stay latched, even though it bumps the mtime. An mtime discriminator
+  // would spam a fresh episode here.
+  test("in-place rewrite (same inode, bumped mtime) → stays latched (once-per-episode)", () => {
     setFlag(true);
     maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
-    // Same flag file, same mtime — the genuine steady state.
+    const inoBefore = statSync(getDrainFlagPath(tmp)).ino;
+    // Rewrite the SAME file in place (O_TRUNC) and bump its mtime — no rm, so inode stays.
+    writeFileSync(getDrainFlagPath(tmp), "");
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(getDrainFlagPath(tmp), future, future);
+    expect(statSync(getDrainFlagPath(tmp)).ino).toBe(inoBefore); // sanity: inode preserved
     const r2 = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
     expect(r2).toEqual({ emitted: false, latched: true });
     const lines = readFileSync(logPath, "utf8").trim().split("\n");

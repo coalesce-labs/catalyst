@@ -345,22 +345,48 @@ expect_eq "fallback: layer2 false node_class=monitor" "monitor" "$(printf '%s' "
 DRAIN_SCRATCH="$(mktemp -d)"
 mkdir -p "${DRAIN_SCRATCH}/execution-core"
 : > "${DRAIN_SCRATCH}/execution-core/drain"   # physical flag present
+# CTL-1678 (Codex P2): the probes now source the machine-local execution-core.env so the
+# durable override is visible. Point CATALYST_EXECUTION_CORE_ENV at controlled files:
+# an EMPTY one (sourcing is a no-op → the ambient/prefix vars decide) keeps the legacy
+# cases hermetic regardless of the host's real ~/.config/catalyst/execution-core.env; an
+# OVERRIDE one proves the file-sourced value reaches the probe.
+DRAIN_ENV_EMPTY="$(mktemp)"
+DRAIN_ENV_OVERRIDE="$(mktemp)"
+printf 'export CATALYST_DRAIN_DISABLED=1\n' > "$DRAIN_ENV_OVERRIDE"
 
 # flag present + override set → no (override wins)
 expect_eq "_vn_drained: flag present + DRAIN_DISABLED=1 → no" "no" \
-  "$( CATALYST_DIR="$DRAIN_SCRATCH" CATALYST_DRAIN_DISABLED=1 _vn_drained )"
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" CATALYST_DRAIN_DISABLED=1 _vn_drained )"
 # flag present + env unset → yes (unchanged legacy behavior)
 expect_eq "_vn_drained: flag present + env unset → yes" "yes" \
-  "$( CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drained' )"
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drained' )"
 # boot-drained + env unset → yes (unchanged)
 expect_eq "_vn_drained: boot-drained + env unset → yes" "yes" \
-  "$( CATALYST_DIR="${DRAIN_SCRATCH}/absent" CATALYST_BOOT_DRAINED=1 bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drained' )"
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="${DRAIN_SCRATCH}/absent" CATALYST_BOOT_DRAINED=1 bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drained' )"
+# Codex P2 (finding #3): boot-drain is AUTHORITATIVE — BOTH BOOT_DRAINED=1 and
+# DRAIN_DISABLED=1 present → drained=yes (matches config.mjs isDrainDisabled, which
+# returns false under boot-drain). The pre-fix Bash mirror returned `no` here.
+expect_eq "_vn_drained: boot-drained + DRAIN_DISABLED=1 → yes (boot wins)" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" CATALYST_BOOT_DRAINED=1 CATALYST_DRAIN_DISABLED=1 _vn_drained )"
+# Codex P2 (finding #2): the durable override lives ONLY in execution-core.env (ambient
+# unset) → the probe sources it and reports the neutralized flag as `no`.
+expect_eq "_vn_drained: flag present + override in env-file (ambient unset) → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drained' )"
 
-# _vn_drain_disabled: yes iff CATALYST_DRAIN_DISABLED == "1"
-expect_eq "_vn_drain_disabled: =1 → yes" "yes" "$( CATALYST_DRAIN_DISABLED=1 _vn_drain_disabled )"
-expect_eq "_vn_drain_disabled: =0 → no"  "no"  "$( CATALYST_DRAIN_DISABLED=0 _vn_drain_disabled )"
+# _vn_drain_disabled: yes iff CATALYST_DRAIN_DISABLED == "1" AND not boot-drained
+expect_eq "_vn_drain_disabled: =1 → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DRAIN_DISABLED=1 _vn_drain_disabled )"
+expect_eq "_vn_drain_disabled: =0 → no"  "no"  \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DRAIN_DISABLED=0 _vn_drain_disabled )"
 expect_eq "_vn_drain_disabled: unset → no" "no" \
-  "$( bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drain_disabled' )"
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drain_disabled' )"
+# Codex P2 (finding #3): boot-drain neutralizes the override → _vn_drain_disabled reports
+# `no` even with DRAIN_DISABLED=1 (mirrors config.mjs isDrainDisabled).
+expect_eq "_vn_drain_disabled: boot-drained + DRAIN_DISABLED=1 → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_BOOT_DRAINED=1 CATALYST_DRAIN_DISABLED=1 _vn_drain_disabled )"
+# Codex P2 (finding #2): override from the env-file (ambient unset) → yes.
+expect_eq "_vn_drain_disabled: override in env-file (ambient unset) → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
 
 # _vn_v_drain_disabled verdict helper (advisory PASS either way)
 expect_eq "_vn_v_drain_disabled: yes → PASS" "PASS" "$(status_of "$(_vn_v_drain_disabled yes)")"
@@ -371,6 +397,7 @@ case "$(_vn_v_drain_disabled yes)" in
 esac
 
 rm -rf "$DRAIN_SCRATCH"
+rm -f "$DRAIN_ENV_EMPTY" "$DRAIN_ENV_OVERRIDE"
 
 rm -rf "$SCRATCH"
 

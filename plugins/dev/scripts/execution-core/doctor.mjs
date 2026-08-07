@@ -3158,6 +3158,28 @@ async function defaultLinearGraphQLPost(query, token) {
   return res.json();
 }
 
+// parseEnvFileVar / overlayDaemonDrainEnv — CTL-1678 (Codex P2). Read a single
+// `[export ]KEY=val` assignment out of an env-file body (same shape parseEnvFileExecutor
+// matches for CATALYST_EXECUTOR) and overlay the two durable drain overrides onto an env
+// object. The daemon launcher `source`s execution-core.env AFTER inheriting the ambient
+// env, so a file assignment wins over an inherited one — the overlay reproduces that
+// precedence (file value replaces ambient only when the file actually sets the key).
+function parseEnvFileFlag(text, re) {
+  if (typeof text !== "string" || !text) return null;
+  const m = text.match(re);
+  return m ? m[1] : null;
+}
+function overlayDaemonDrainEnv(env, envFileText) {
+  // Literal per-key regexes (no dynamic RegExp) mirroring parseEnvFileExecutor. File
+  // value replaces ambient only when the file actually sets the key (matching `source`).
+  const out = { ...env };
+  const dd = parseEnvFileFlag(envFileText, /^\s*(?:export\s+)?CATALYST_DRAIN_DISABLED=["']?([^"'\s]+)/m);
+  if (dd !== null) out.CATALYST_DRAIN_DISABLED = dd;
+  const bd = parseEnvFileFlag(envFileText, /^\s*(?:export\s+)?CATALYST_BOOT_DRAINED=["']?([^"'\s]+)/m);
+  if (bd !== null) out.CATALYST_BOOT_DRAINED = bd;
+  return out;
+}
+
 // checkDrainDisabled — CTL-1678. Advisory report of the per-node drain override.
 // A worker with CATALYST_DRAIN_DISABLED=1 permanently ignores the drain flag; this
 // surfaces the third "draining-but-ignored" state so an operator scanning doctor
@@ -3170,8 +3192,25 @@ export function checkDrainDisabled(deps = {}) {
     env = process.env,
     orchDir = getExecutionCoreDir(),
     resolveDrainState: _resolve = resolveDrainState,
+    // CTL-1678 (Codex P2): the durable CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED
+    // overrides live in the machine-local execution-core.env that the daemon launcher
+    // sources at start — `catalyst-doctor` runs doctor.mjs WITHOUT sourcing it, so a
+    // naive process.env read reports "honors the drain flag" while the running daemon
+    // ignores it (contradictory operator health output). Overlay the file's values onto
+    // the ambient env (file wins, matching `source` semantics) so this check mirrors the
+    // daemon's EFFECTIVE env. Mirrors checkSdkDaemonEnv's env-file read for CATALYST_EXECUTOR.
+    // Injectable seam; default reads the real file, absent/unreadable → "".
+    execCoreEnvPath = defaultExecCoreEnvPath(),
+    readEnvFile = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return "";
+      }
+    },
   } = deps;
-  const { flagPresent, disabled } = _resolve(orchDir, { env });
+  const effectiveEnv = overlayDaemonDrainEnv(env, readEnvFile(execCoreEnvPath));
+  const { flagPresent, disabled } = _resolve(orchDir, { env: effectiveEnv });
   if (disabled && flagPresent) {
     return mkCheck(
       "drain-disabled",
