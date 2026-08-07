@@ -343,30 +343,46 @@ cmd_status() {
 	# CTL-1095: read drain state (shell out to drain.mjs --json for the inFlightCount).
 	# CTL-1678: source the machine-local override first so status reflects the drain
 	# state the running daemon actually honors, not the un-overridden default.
-	local drain_json draining in_flight_count
+	# CTL-1678 (Codex round-8): drain.mjs already returns the full three-state answer
+	# (flagPresent / disabled / draining). Parsing only `draining` threw away the one
+	# distinction an operator needs before starting maintenance — a node IGNORING an
+	# active drain is indistinguishable here from a node with no drain at all, on the
+	# most-used status surface. Carry `flagPresent`/`disabled` through to both outputs.
+	local drain_json draining in_flight_count flag_present drain_disabled
 	_source_daemon_env_for_read
 	drain_json=$(exec_runtime_module "drain" --json --status-read 2>/dev/null || echo '{"draining":false,"inFlightCount":0}')
 	draining=$(printf '%s' "$drain_json" | grep -o '"draining":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo false)
 	in_flight_count=$(printf '%s' "$drain_json" | grep -o '"inFlightCount":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo 0)
+	flag_present=$(printf '%s' "$drain_json" | grep -o '"flagPresent":[^,}]*' | cut -d: -f2 | tr -d ' ')
+	drain_disabled=$(printf '%s' "$drain_json" | grep -o '"disabled":[^,}]*' | cut -d: -f2 | tr -d ' ')
+	: "${flag_present:=false}" "${drain_disabled:=false}"
+	# The one line an operator must not miss: the flag is set and the node ignores it.
+	_status_drain_note() {
+		if [ "$draining" = "true" ]; then
+			echo "draining — ${in_flight_count} tickets to land"
+		elif [ "$drain_disabled" = "true" ] && [ "$flag_present" = "true" ]; then
+			echo "drain flag present but IGNORED (CATALYST_DRAIN_DISABLED=1) — this node still admits work"
+		elif [ "$drain_disabled" = "true" ]; then
+			echo "drain-disabled — this node ignores the drain flag (CATALYST_DRAIN_DISABLED=1)"
+		fi
+	}
 	local pid
 	if pid=$(read_pid); then
 		if [ "$want_json" -eq 1 ]; then
-			printf '{"running":true,"pid":%s,"draining":%s,"inFlightCount":%s}\n' "$pid" "$draining" "$in_flight_count"
+			printf '{"running":true,"pid":%s,"draining":%s,"inFlightCount":%s,"flagPresent":%s,"drainDisabled":%s}\n' \
+				"$pid" "$draining" "$in_flight_count" "$flag_present" "$drain_disabled"
 		else
 			echo "running (pid $pid)"
-			if [ "$draining" = "true" ]; then
-				echo "draining — ${in_flight_count} tickets to land"
-			fi
+			_status_drain_note
 		fi
 		return 0
 	fi
 	if [ "$want_json" -eq 1 ]; then
-		printf '{"running":false,"pid":null,"draining":%s,"inFlightCount":%s}\n' "$draining" "$in_flight_count"
+		printf '{"running":false,"pid":null,"draining":%s,"inFlightCount":%s,"flagPresent":%s,"drainDisabled":%s}\n' \
+			"$draining" "$in_flight_count" "$flag_present" "$drain_disabled"
 	else
 		echo "stopped"
-		if [ "$draining" = "true" ]; then
-			echo "draining — ${in_flight_count} tickets to land"
-		fi
+		_status_drain_note
 	fi
 }
 
