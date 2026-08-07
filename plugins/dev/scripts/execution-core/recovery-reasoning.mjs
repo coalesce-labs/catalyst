@@ -1297,6 +1297,16 @@ function promoteNumericAttrs(type, details) {
     // queryable proof the delegate is actually landing these, rather than merely
     // re-flagging them every scan.
     num("cohort_unowned_in_flight", details.invariants?.unownedInFlight?.failed);
+    // CTL-1644 (Codex P2 round 4): promote the stranded-mid-pipeline population
+    // counters. They were added to details as "chartable" scalars, but the
+    // forwarder ships only attributes and drops body.payload off-host, so an
+    // un-promoted detail is invisible to Loki/Grafana. cohort_stranded_mid_pipeline
+    // is the whole flagged population; cohort_stranded_held is the non-dispatchable
+    // (held) subset the anchor filter keeps out of tier2Moves/boardContext — in
+    // Phase 2 these are equal (every stranded ticket is unknown-salvage), and the
+    // gap between them (total − held) is the dispatchable set as Phase 3 lands.
+    num("cohort_stranded_mid_pipeline", details.strandedCount);
+    num("cohort_stranded_held", details.strandedHeldCount);
   }
   return a;
 }
