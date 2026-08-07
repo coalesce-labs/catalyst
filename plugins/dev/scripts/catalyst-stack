@@ -498,29 +498,30 @@ _coordination_lock_stale() {
 # publisher (Codex P1). The design is deliberately single-primitive — one mkdir
 # lock, no secondary mutex — because a nested reclaim mutex only RELOCATES the
 # stale-lock race up a level (each layer's own age-check + removal is itself a
-# TOCTOU). Two invariants make reclaim structurally unable to remove a live lock,
-# so `mkdir` stays the SOLE arbiter of ownership and double-spawn is impossible:
+# TOCTOU). `mkdir` is the SOLE arbiter of ownership: ownership is ONLY ever a
+# successful `mkdir "$COORDINATION_LOCK"`, and every reclaim path `continue`s and
+# must win a fresh mkdir to proceed. A live holder records its PID in a sentinel
+# file inside the lock dir immediately after acquiring.
 #
-#   1. Ownership is ONLY ever a successful `mkdir "$COORDINATION_LOCK"`. Every
-#      reclaim path `continue`s and must win a fresh mkdir to proceed.
-#   2. A live holder writes a sentinel file into the lock dir immediately after
-#      acquiring, and reclaim removes a stale lock with `rmdir` — which REFUSES a
-#      non-empty directory. So a live (sentinel-bearing) lock can never be removed
-#      by a reclaimer; the age gate additionally covers the microsecond
-#      mkdir→sentinel window (a fresh lock is age ~0, far under the threshold).
-#
-# Two reclaimers racing a genuinely-stale (empty, aged) lock both `rmdir` it
-# (idempotent) then both `mkdir` — mkdir arbitrates a single winner; the loser sees
-# the winner's fresh lock and skips. (A lock leaked by SIGKILL/power-loss AFTER the
-# sentinel write is non-empty, so rmdir won't auto-clear it — force-removing it
-# would reintroduce exactly the ABA double-spawn race, so we deliberately don't;
-# it's cleared out-of-band, and impact is bounded since coordination-publish is
-# off by default.)
+# Reclaim (lock held, mkdir failed) fires only past the age gate — old enough that
+# no live sub-minute check-and-spawn could still hold it — and then:
+#   * empty carcass (crashed before the sentinel write) → `rmdir` (refuses a
+#     non-empty dir, so it can never touch a sentinel-bearing lock);
+#   * sentinel present but its recorded owner PID is DEAD (crash/power-off AFTER the
+#     sentinel write — the case a pure rmdir scheme would wedge until manual
+#     deletion) → atomic-rename takeover: `mv` the carcass to a private name; only
+#     one racer's rename of that inode succeeds, so it can't be split-brained.
+# A sentinel whose owner is still ALIVE is a live peer → skip. Two reclaimers of the
+# same carcass converge on a single mkdir winner; the loser sees the winner's fresh
+# lock (young → age gate; or live owner) and skips. The tight residual (two starts
+# racing the SAME dead-owner takeover within the mkdir window) is additionally
+# backstopped by _start_coordination_locked's own `coordination_pid` idempotency
+# check, which refuses to spawn when a publisher is already running.
 start_coordination() {
   local guard=0
   while true; do
     if mkdir "$COORDINATION_LOCK" 2>/dev/null; then
-      : > "$COORDINATION_LOCK/owner"   # sentinel: a live lock is non-empty → rmdir-proof
+      printf '%s' "$$" > "$COORDINATION_LOCK/owner"   # sentinel records the owner pid
       break
     fi
     guard=$((guard + 1))
@@ -528,14 +529,27 @@ start_coordination() {
       log "coordination-publish start already in progress — skipping this tick"
       return 0
     fi
-    # Reclaim ONLY an abandoned lock — old enough that no live check-and-spawn could
-    # still hold it. rmdir refuses a non-empty (live, sentinel-bearing) lock, so
-    # this can never delete a live lock; the age gate covers the mkdir→sentinel
-    # window. A fresh peer lock fails both the age gate and (once its sentinel
-    # lands) the rmdir, so a live peer is simply skipped.
-    if _coordination_lock_stale "$COORDINATION_LOCK" && rmdir "$COORDINATION_LOCK" 2>/dev/null; then
-      log "coordination-publish: reclaimed an abandoned start lock"
-      continue
+    if _coordination_lock_stale "$COORDINATION_LOCK"; then
+      local lock_owner; lock_owner="$(cat "$COORDINATION_LOCK/owner" 2>/dev/null || true)"
+      if [[ -z "$lock_owner" ]]; then
+        # Empty carcass (crashed before the sentinel write). rmdir refuses a
+        # non-empty dir, so this can never remove a sentinel-bearing lock.
+        if rmdir "$COORDINATION_LOCK" 2>/dev/null; then
+          log "coordination-publish: reclaimed an abandoned (empty) start lock"
+        fi
+        continue
+      fi
+      if ! pid_alive "$lock_owner"; then
+        # Sentinel present but its owner is confirmed dead — a crash-after-sentinel
+        # carcass. Atomic-rename takeover (single winner) so a stopped publisher
+        # doesn't stay wedged after reboot until manual deletion.
+        if mv "$COORDINATION_LOCK" "${COORDINATION_LOCK}.dead.$$" 2>/dev/null; then
+          rm -rf "${COORDINATION_LOCK}.dead.$$" 2>/dev/null || true
+          log "coordination-publish: reclaimed a dead-owner start lock (owner ${lock_owner})"
+        fi
+        continue
+      fi
+      # Owner alive → a live peer holding the lock past the age gate — skip.
     fi
     log "coordination-publish start already in progress — skipping this tick"
     return 0
@@ -1366,6 +1380,23 @@ render_stack_plist() {
     <key>CATALYST_LAYER2_CONFIG_FILE</key>
     <string>${CATALYST_LAYER2_CONFIG_FILE}</string>"
   fi
+  # CTL-1494 (Codex P1): pin the coordination env OVERRIDES the operator installed
+  # with, so the scheduled keep-alive resolves the SAME mode the operator intended.
+  # Without this, installing with the CATALYST_COORDINATION_MODE=0 kill-switch (while
+  # Layer-2 still says enforce) would leave the tick job resolving `enforce` and
+  # re-launching the publisher with network egress — silently undoing the kill. Same
+  # for CATALYST_COORDINATION_HUB_URL. Captured at install time; omitted when unset.
+  local coord_env=""
+  if [[ -n "${CATALYST_COORDINATION_MODE:-}" ]]; then
+    coord_env="${coord_env}
+    <key>CATALYST_COORDINATION_MODE</key>
+    <string>${CATALYST_COORDINATION_MODE}</string>"
+  fi
+  if [[ -n "${CATALYST_COORDINATION_HUB_URL:-}" ]]; then
+    coord_env="${coord_env}
+    <key>CATALYST_COORDINATION_HUB_URL</key>
+    <string>${CATALYST_COORDINATION_HUB_URL}</string>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -1399,7 +1430,7 @@ render_stack_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>${HOME}</string>${host_env}${layer2_env}
+    <string>${HOME}</string>${host_env}${layer2_env}${coord_env}
   </dict>
 
   <!--
