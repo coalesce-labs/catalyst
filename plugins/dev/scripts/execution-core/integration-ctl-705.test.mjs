@@ -13,7 +13,12 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { schedulerTick, __resetForTests, writeWorkerPriority } from "./scheduler.mjs";
+import {
+  schedulerTick,
+  __resetForTests,
+  writeWorkerPriority,
+  nextStarvationState,
+} from "./scheduler.mjs";
 
 let orchDir;
 let catalystDir;
@@ -47,7 +52,10 @@ function seedWorker(ticket, phase, priority, startedAtMs, bgJobId, createdAt) {
     join(dir, `phase-${phase}.json`),
     JSON.stringify({ ticket, phase, status: "running", bg_job_id: bgJobId, startedAt })
   );
-  writeWorkerPriority(orchDir, ticket, { priority, createdAt: createdAt ?? "2026-05-01T00:00:00Z" });
+  writeWorkerPriority(orchDir, ticket, {
+    priority,
+    createdAt: createdAt ?? "2026-05-01T00:00:00Z",
+  });
 }
 
 function readSignal(ticket, phase) {
@@ -117,6 +125,60 @@ describe("CAT-36 new-work admission", () => {
       rmSync(testOrchDir, { recursive: true, force: true });
     }
   });
+
+  test("an untriaged queued ticket cannot trigger preemption", () => {
+    const T0 = 200_000;
+    seedWorker("CTL-LIVE", "research", 4, T0 - 90_000, "bg-live");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = makeKillStub();
+    const opts = {
+      readEligible: () => [
+        { identifier: "CTL-BLOCK", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+      ],
+      reclaimDeadWork: noopReclaim,
+      liveBackgroundCount: () => 1,
+      killBgJob: kill,
+      hasTriageArtifact: () => false,
+    };
+    schedulerTick(orchDir, { ...opts, now: () => T0 });
+    schedulerTick(orchDir, { ...opts, now: () => T0 + 35_000 });
+    expect(kill.calls).toHaveLength(0);
+    expect(readSignal("CTL-LIVE", "research")?.status).toBe("running");
+  });
+});
+
+describe("CAT-36 starvation warning cadence", () => {
+  const idle = {
+    didWork: false,
+    freeSlots: 1,
+    hasWaitingWork: true,
+    livenessFresh: true,
+    draining: false,
+  };
+
+  test("warns at the threshold and then only at the re-warn interval", () => {
+    let state = 0;
+    const warnings = [];
+    for (let tick = 1; tick <= 14; tick += 1) {
+      const result = nextStarvationState(state, idle);
+      state = result.streak;
+      if (result.warn) warnings.push(tick);
+    }
+    expect(warnings).toEqual([3, 13]);
+  });
+
+  test("resets after successful work", () => {
+    expect(nextStarvationState(2, { ...idle, didWork: true }).streak).toBe(0);
+  });
+
+  test("does not count an empty queue", () => {
+    expect(nextStarvationState(2, { ...idle, hasWaitingWork: false }).streak).toBe(0);
+  });
+
+  test("counts queued work blocked by stale liveness with a distinct reason", () => {
+    const result = nextStarvationState(2, { ...idle, freeSlots: 0, livenessFresh: false });
+    expect(result).toEqual({ streak: 3, warn: true, reason: "stale-liveness" });
+  });
 });
 
 describe("CTL-705 acceptance scenario — preemption + resume", () => {
@@ -133,7 +195,11 @@ describe("CTL-705 acceptance scenario — preemption + resume", () => {
       readEligible: () => [{ identifier: "CTL-9", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
       reclaimDeadWork: noopReclaim,
       hasTriageArtifact: () => true,
-      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => {} },
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => {},
+      },
     };
 
     // Tick 1 (T0): first observation — hysteresis window opens, no preemption
@@ -166,7 +232,9 @@ describe("CTL-705 acceptance scenario — preemption + resume", () => {
     const now2 = new Date();
     const ym = `${now2.getUTCFullYear()}-${String(now2.getUTCMonth() + 1).padStart(2, "0")}`;
     const eventLog = readFileSync(join(catalystDir, "events", `${ym}.jsonl`), "utf8")
-      .split("\n").filter(Boolean).map((l) => JSON.parse(l));
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
     const preemptEvent = eventLog.find(
       (e) => e.attributes?.["event.name"] === "phase.research.preempted.CTL-2"
     );
@@ -193,7 +261,9 @@ describe("CTL-705 acceptance scenario — preemption + resume", () => {
 
     // resumed-after-preemption event in log
     const eventLog3 = readFileSync(join(catalystDir, "events", `${ym}.jsonl`), "utf8")
-      .split("\n").filter(Boolean).map((l) => JSON.parse(l));
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
     const resumeEvent = eventLog3.find(
       (e) => e.attributes?.["event.name"] === "phase.research.resumed-after-preemption.CTL-2"
     );
@@ -232,7 +302,11 @@ describe("CTL-705 reclaim-guard scenario — real reclaimDeadWork, no stub", () 
     seedPreempted("CTL-Park", "research", "bg-park-dead", 4);
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
 
-    const writeStatus = { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => {} };
+    const writeStatus = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    };
 
     // Tick A — saturated (liveBackgroundCount=1). The resume sweep (1.5) sees 0
     // free slots and skips. With NO reclaim stub, the real reclaim sweep runs
