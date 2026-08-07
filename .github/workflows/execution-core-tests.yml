@@ -142,7 +142,16 @@ jobs:
 
   execution-core-unit-tests:
     needs: detect-changes
-    if: needs.detect-changes.outputs.relevant == 'true'
+    # Fail CLOSED: `needs.*.result` is only 'success' when `detect-changes` completed without
+    # error. If `dorny/paths-filter` (or the checkout before it) errors — API unavailable, token
+    # lacks permission, runner outage — `detect-changes` fails and its `relevant` output is unset,
+    # which would make a naive `needs.detect-changes.outputs.relevant == 'true'` check false and
+    # SKIP this required job. A skipped required check still posts a `skipped` conclusion, which
+    # satisfies branch protection — so a PR touching execution-core could merge without the suite
+    # ever running. Running whenever detect-changes did NOT succeed (result != 'success') treats
+    # an errored/cancelled detector as "assume relevant" and runs the suite; `!cancelled()` still
+    # keeps this job from running if the *workflow run itself* was cancelled.
+    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
