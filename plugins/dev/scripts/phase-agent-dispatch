@@ -90,6 +90,8 @@ source "${SCRIPT_DIR}/lib/ctl708-resolve.sh"
 ctl708_wire_resolver
 # shellcheck source=lib/phase-artifact-gate.sh
 source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
+# shellcheck source=lib/phase-signal-freshness.sh
+source "${SCRIPT_DIR}/lib/phase-signal-freshness.sh"
 
 # _removal_guard_ok <path> — the single fail-closed predicate the recreate
 # `git worktree remove --force` site gates on (CTL-1417). Returns 0 (safe to
@@ -551,6 +553,18 @@ EXISTING_GENERATION=""
 if [[ -f $SIGNAL_FILE ]]; then
 	EXISTING_STATUS=$(jq -r '.status // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
 	EXISTING_GENERATION=$(jq -r '.generation // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
+fi
+
+# CTL-1667: a post-PR signal left over from a previous pipeline run must NOT
+# short-circuit the current run — invalidate it so a fresh worker launches.
+# is_poststale_signal returns 0 (stale) only for the three phases that run after
+# the PR is opened (monitor-merge, monitor-deploy, teardown); all others are
+# always fresh (the predicate returns 1). Conservative: any ambiguity (missing
+# phase-pr.json, unresolvable timestamps) leaves EXISTING_STATUS unchanged so
+# the existing idempotency guard continues to protect against double-dispatch.
+if [[ -n "$EXISTING_STATUS" ]] \
+   && is_poststale_signal "$WORKER_DIR" "$PHASE"; then
+	EXISTING_STATUS=""   # fall through to the fresh-dispatch path (overwrite + launch)
 fi
 
 if [[ $EXISTING_STATUS == "dispatched" || $EXISTING_STATUS == "running" || $EXISTING_STATUS == "done" ]]; then

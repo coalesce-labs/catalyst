@@ -2334,6 +2334,61 @@ for FIELD in .env .prompt .settings .model .turnCap .sessionName .pluginDirs; do
 	assert_eq "$DRY_VAL" "$PL_VAL" "prelaunch ${FIELD} == dry-run ${FIELD} (pre-launch composition byte-identical)"
 done
 
+# ─── CTL-1667: stale post-PR signal invalidation ─────────────────────────────
+# Test 71: re-dispatch monitor-merge with a STALE done signal (old PR#) launches
+# a fresh worker instead of no-oping on the prior run's stale `done`.
+echo ""
+echo "Test 71 (CTL-1667): stale post-PR signal (old PR#) re-launches a fresh worker"
+fresh_env t71
+TS_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# previous run's leftover terminal signal: PR#100, 24h ago
+TS_YESTERDAY="$(date -u -v-86400S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '86400 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2000-01-01T00:00:00Z")"
+jq -n --arg ts "$TS_YESTERDAY" \
+  '{status:"done",updatedAt:$ts,pr:{number:100,mergedAt:$ts,ciStatus:"merged"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+# current run's PR opener: PR#200
+jq -n --arg ts "$TS_NOW" \
+  '{status:"done",updatedAt:$ts,pr:{number:200}}' \
+  > "${WORKER_DIR}/phase-pr.json"
+
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT71=$("$DISPATCH" --phase monitor-merge --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+IDEMPOTENT71=$(echo "$STDOUT71" | jq -r '.idempotent // false')
+LAUNCHED71="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED71="yes"
+assert_eq "false" "$IDEMPOTENT71" "71: stale monitor-merge is NOT idempotent (re-launches)"
+assert_eq "yes" "$LAUNCHED71" "71: fresh worker WAS launched for stale monitor-merge"
+
+# ─── Test 72: re-dispatch monitor-merge with FRESH done signal (same PR#, newer
+# ts) still no-ops (the CTL-736 single-flight guard must not be broken).
+echo ""
+echo "Test 72 (CTL-1667): fresh post-PR signal (same PR#, newer ts) still idempotent"
+fresh_env t72
+TS_BASE="$(date -u -v-3600S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '3600 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2000-01-01T00:00:00Z")"
+TS_NOW2="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# current run's PR opener — older than the monitor-merge signal
+jq -n --arg ts "$TS_BASE" \
+  '{status:"done",updatedAt:$ts,pr:{number:200}}' \
+  > "${WORKER_DIR}/phase-pr.json"
+# monitor-merge signal — newer than phase-pr AND same PR#
+jq -n --arg ts "$TS_NOW2" \
+  '{status:"done",updatedAt:$ts,pr:{number:200,mergedAt:$ts,ciStatus:"merged"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+# Claim file needed to match the generation the dispatcher computes (it reads
+# signal.generation for revive target). Write a gen-1 claim so the dispatcher
+# won't re-launch due to a missing claim (it would compute gen 2 as the target
+# and EXCL-create a new claim — which succeeds and spawns a worker). For the
+# "fresh stays idempotent" assertion we need the idempotency short-circuit (before
+# the claim) to fire, so the signal's generation and status must be non-stale.
+# The idempotency guard fires BEFORE the claim, so we just need a non-stale status.
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT72=$("$DISPATCH" --phase monitor-merge --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+IDEMPOTENT72=$(echo "$STDOUT72" | jq -r '.idempotent // false')
+LAUNCHED72="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED72="yes"
+assert_eq "true" "$IDEMPOTENT72" "72: fresh monitor-merge (same PR#, newer ts) stays idempotent"
+assert_eq "no" "$LAUNCHED72" "72: no worker launched for fresh monitor-merge"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
