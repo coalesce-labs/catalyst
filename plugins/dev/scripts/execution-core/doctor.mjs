@@ -43,6 +43,7 @@ import {
   NODE_CLASSES,
   isDraining,
   resolveDrainState, // CTL-1678: three-state drain resolver for checkDrainDisabled
+  readDaemonRuntimeEnv, // CTL-1678 (round-3 P1): live daemon's boot-time env snapshot
   getExecutionCoreDir,
   // CTL-1375: configured-repo discovery for the repo-icon token-scope advisory.
   getRegistryPath,
@@ -3208,8 +3209,22 @@ export function checkDrainDisabled(deps = {}) {
         return "";
       }
     },
+    // CTL-1678 (Codex round-3 P1): when a daemon is RUNNING, the file overlay below can
+    // still lie — the overrides are restart-only, so a file edited after daemon start
+    // describes the NEXT daemon, not this one. Prefer the live daemon's boot-time
+    // snapshot (pid-gated: a marker from a dead daemon is ignored); the overlay is the
+    // fallback for the stopped-daemon case, where next-start config is the honest answer.
+    readRuntimeEnv = readDaemonRuntimeEnv,
   } = deps;
-  const effectiveEnv = overlayDaemonDrainEnv(env, readEnvFile(execCoreEnvPath));
+  const runtime = readRuntimeEnv(orchDir);
+  const effectiveEnv = runtime
+    ? {
+        CATALYST_DRAIN_DISABLED: runtime.drainDisabled ? "1" : "0",
+        // drainDisabled is recorded post-precedence (boot-drain already folded in), so
+        // the synthetic env never re-triggers isDrainDisabled's boot-drain gate.
+        CATALYST_BOOT_DRAINED: "0",
+      }
+    : overlayDaemonDrainEnv(env, readEnvFile(execCoreEnvPath));
   const { flagPresent, disabled } = _resolve(orchDir, { env: effectiveEnv });
   if (disabled && flagPresent) {
     return mkCheck(

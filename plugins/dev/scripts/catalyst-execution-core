@@ -373,15 +373,16 @@ cmd_status() {
 # CTL-649 Phase 5: route a noun (sessions|worktrees|branches|tidy) to its mjs
 # module under execution-core/cli/. The audit CLI lives inside this same binary
 # — no new wrapper symlink, no new plist. resolve_runtime picks bun/node.
-# CTL-1678 (Codex P1): the durable CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED
-# overrides live in the machine-local execution-core.env that ONLY `cmd_start` sources
-# before launching the daemon. A read-only drain query (`drain --status-read`, `status`)
-# invoked afterwards runs in a fresh process that never sourced that file, so without
-# this it reports the pre-override state ("draining") while the running daemon actually
-# HONORS the override — an operator could then start maintenance on a node still admitting
-# work. Source the SAME file with the SAME plain-source semantics the daemon uses (no
-# `set -a`), so an `export`ed override is visible to the drain module exactly as the daemon
-# sees it. Best-effort; absent file = no-op.
+# CTL-1678 (Codex P1 + round-3 P1): the durable CATALYST_DRAIN_DISABLED /
+# CATALYST_BOOT_DRAINED overrides live in the machine-local execution-core.env that ONLY
+# `cmd_start` sources before launching the daemon; they are restart-only, so no read-time
+# view of the MUTABLE file can establish the running daemon's state. The truth is two-tier:
+# drain.mjs (readDrainStatus → resolveDrainStateForRead) prefers the LIVE daemon's
+# boot-time snapshot (daemon-runtime-env.json, pid-gated) and only falls back to its
+# process env when no daemon is running. This helper supplies that FALLBACK env: source
+# the same file with the same plain-source semantics the daemon uses (no `set -a`), so
+# for a stopped daemon the report matches what the next start would do — the truthful
+# answer in that state. Best-effort; absent file = no-op.
 _source_daemon_env_for_read() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090

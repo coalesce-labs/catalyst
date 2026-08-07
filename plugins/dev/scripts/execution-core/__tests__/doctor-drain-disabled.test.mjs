@@ -123,3 +123,51 @@ describe("checkDrainDisabled — durable override in execution-core.env", () => 
     expect(rec.detail).toContain("honors the drain flag");
   });
 });
+
+// CTL-1678 (Codex round-3 P1): a LIVE daemon's boot snapshot beats the env-file overlay.
+describe("checkDrainDisabled daemon-runtime preference (round-3 P1)", () => {
+  // A resolve stub that derives `disabled` from the env the check hands it, so these
+  // cases observe WHICH env tier (runtime marker vs file overlay) the check chose.
+  const envSensitiveResolve = (_dir, { env } = {}) => {
+    const disabled = env?.CATALYST_BOOT_DRAINED === "1" ? false : env?.CATALYST_DRAIN_DISABLED === "1";
+    return { flagPresent: true, disabled, draining: !disabled };
+  };
+
+  test("live marker with no override wins over a file that now says disabled", () => {
+    const rec = checkDrainDisabled({
+      env: {},
+      orchDir: "/tmp/nonexistent-orchdir",
+      resolveDrainState: envSensitiveResolve,
+      // File edited AFTER daemon start:
+      readEnvFile: () => "export CATALYST_DRAIN_DISABLED=1\n",
+      // ...but the running daemon captured no override at boot:
+      readRuntimeEnv: () => ({ pid: 4242, drainDisabled: false, bootDrained: false }),
+    });
+    // Honors the flag → the plain INFO branch, not the ignored/disabled branches.
+    expect(rec.detail).toContain("honors the drain flag");
+  });
+
+  test("live marker with the override reports ignored even when the file was cleared", () => {
+    const rec = checkDrainDisabled({
+      env: {},
+      orchDir: "/tmp/nonexistent-orchdir",
+      resolveDrainState: envSensitiveResolve,
+      readEnvFile: () => "",
+      readRuntimeEnv: () => ({ pid: 4242, drainDisabled: true, bootDrained: false }),
+    });
+    expect(rec.status).toBe("warn");
+    expect(rec.detail).toContain("IGNORED");
+  });
+
+  test("no live daemon → file overlay fallback still applies", () => {
+    const rec = checkDrainDisabled({
+      env: {},
+      orchDir: "/tmp/nonexistent-orchdir",
+      resolveDrainState: envSensitiveResolve,
+      readEnvFile: () => "export CATALYST_DRAIN_DISABLED=1\n",
+      readRuntimeEnv: () => null,
+    });
+    expect(rec.status).toBe("warn");
+    expect(rec.detail).toContain("IGNORED");
+  });
+});

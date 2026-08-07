@@ -6,22 +6,26 @@
 
 import { writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { getExecutionCoreDir, getDrainFlagPath, resolveDrainState } from "../config.mjs";
+import { getExecutionCoreDir, getDrainFlagPath, resolveDrainStateForRead } from "../config.mjs";
 import { listInFlightTickets } from "../scheduler.mjs";
 import { emitDrainChangedEvent } from "../drain-event.mjs";
 
 /**
  * readDrainStatus — pure read of current drain state + in-flight count.
- * CTL-1678: reads resolveDrainState so the three-state distinction
- * (flagPresent / disabled / draining) is surfaced additively.
+ * CTL-1678: reads resolveDrainStateForRead so the three-state distinction
+ * (flagPresent / disabled / draining) is surfaced additively — and (Codex round-3 P1)
+ * the disabled/draining answer comes from the LIVE daemon's boot-time env snapshot
+ * when one exists, falling back to this process's env (pre-sourced from
+ * execution-core.env by the bash wrappers) only when no daemon is running.
  * @param {string} [orchDir]
- * @returns {{ draining: boolean, flagPresent: boolean, disabled: boolean, inFlightCount: number }}
+ * @param {{ resolveState?: typeof resolveDrainStateForRead }} [deps]
+ * @returns {{ draining: boolean, flagPresent: boolean, disabled: boolean, inFlightCount: number, source: string }}
  */
-export function readDrainStatus(orchDir) {
+export function readDrainStatus(orchDir, { resolveState = resolveDrainStateForRead } = {}) {
   const dir = orchDir ?? getExecutionCoreDir();
-  const { draining, flagPresent, disabled } = resolveDrainState(dir);
+  const { draining, flagPresent, disabled, source } = resolveState(dir);
   const inFlightCount = listInFlightTickets(dir).size;
-  return { draining, flagPresent, disabled, inFlightCount };
+  return { draining, flagPresent, disabled, inFlightCount, source };
 }
 
 /**

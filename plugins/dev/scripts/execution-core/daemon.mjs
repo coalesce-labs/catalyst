@@ -32,6 +32,7 @@ import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
   applyBootDrainPolicy, // CTL-1321: boot accepting work by default
+  writeDaemonRuntimeEnv, // CTL-1678: boot-time env snapshot for read-only surfaces
   getRegistryPath,
   getEventLogPath,
   getJobsRoot, // CTL-1165 D3: job-dir GC root
@@ -901,6 +902,11 @@ export function startDaemon({
   // grouped with the writeBootMarker/clearProgressMarks prior-run resets and ahead of
   // schedulerFn, the sole consumer of the `!draining` new-work gate.
   const _bootDrain = applyBootDrainPolicy(orchDir);
+  // CTL-1678 (Codex round-3 P1): snapshot the drain-override env THIS process captured,
+  // keyed by our pid, so read-only surfaces (status / doctor / verify-node) can report
+  // the running daemon's effective state instead of re-reading the mutable env file
+  // (whose edits are restart-only and may describe a future daemon, not this one).
+  writeDaemonRuntimeEnv(orchDir);
   log.info(
     { drained: _bootDrain.drained },
     _bootDrain.drained

@@ -189,3 +189,90 @@ describe("getDrainIgnoredMarkerPath", () => {
     expect(getDrainIgnoredMarkerPath(tmp)).not.toBe(getDrainedMarkerPath(tmp));
   });
 });
+
+// CTL-1678 (Codex round-3 P1): the daemon-runtime env snapshot + read-side resolver.
+describe("writeDaemonRuntimeEnv / readDaemonRuntimeEnv", () => {
+  test("write records pid + post-precedence drainDisabled; read returns it while pid alive", async () => {
+    const { writeDaemonRuntimeEnv, readDaemonRuntimeEnv } = await import("../config.mjs");
+    const payload = writeDaemonRuntimeEnv(tmp, {
+      env: { CATALYST_DRAIN_DISABLED: "1" },
+      pid: 4242,
+      now: () => "2026-08-07T00:00:00.000Z",
+    });
+    expect(payload).toEqual({
+      pid: 4242,
+      startedAt: "2026-08-07T00:00:00.000Z",
+      drainDisabled: true,
+      bootDrained: false,
+    });
+    const read = readDaemonRuntimeEnv(tmp, { isPidAlive: () => true });
+    expect(read).toEqual(payload);
+  });
+
+  test("boot-drain precedence is folded at WRITE time (drainDisabled false under boot-drain)", async () => {
+    const { writeDaemonRuntimeEnv } = await import("../config.mjs");
+    const payload = writeDaemonRuntimeEnv(tmp, {
+      env: { CATALYST_DRAIN_DISABLED: "1", CATALYST_BOOT_DRAINED: "1" },
+      pid: 4242,
+    });
+    expect(payload.drainDisabled).toBe(false);
+    expect(payload.bootDrained).toBe(true);
+  });
+
+  test("dead recording pid → null (stale marker is ignored)", async () => {
+    const { writeDaemonRuntimeEnv, readDaemonRuntimeEnv } = await import("../config.mjs");
+    writeDaemonRuntimeEnv(tmp, { env: {}, pid: 4242 });
+    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => false })).toBeNull();
+  });
+
+  test("absent/corrupt marker → null", async () => {
+    const { readDaemonRuntimeEnv, getDaemonRuntimeEnvPath } = await import("../config.mjs");
+    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => true })).toBeNull();
+    writeFileSync(getDaemonRuntimeEnvPath(tmp), "not json");
+    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => true })).toBeNull();
+  });
+});
+
+describe("resolveDrainStateForRead", () => {
+  test("live marker wins over caller env (post-restart file edit cannot lie)", async () => {
+    const { resolveDrainStateForRead } = await import("../config.mjs");
+    setFlag(true);
+    // Caller env says disabled (file edited after daemon start); the RUNNING daemon
+    // captured no override — status must say draining.
+    const state = resolveDrainStateForRead(tmp, {
+      env: { CATALYST_DRAIN_DISABLED: "1" },
+      readRuntime: () => ({ pid: 4242, drainDisabled: false, bootDrained: false }),
+    });
+    expect(state).toMatchObject({ flagPresent: true, disabled: false, draining: true, source: "daemon-runtime", daemonPid: 4242 });
+  });
+
+  test("live marker drainDisabled → flag ignored regardless of caller env", async () => {
+    const { resolveDrainStateForRead } = await import("../config.mjs");
+    setFlag(true);
+    const state = resolveDrainStateForRead(tmp, {
+      env: {},
+      readRuntime: () => ({ pid: 4242, drainDisabled: true, bootDrained: false }),
+    });
+    expect(state).toMatchObject({ flagPresent: true, disabled: true, draining: false, source: "daemon-runtime" });
+  });
+
+  test("no live daemon → falls back to caller env (next-start view)", async () => {
+    const { resolveDrainStateForRead } = await import("../config.mjs");
+    setFlag(true);
+    const state = resolveDrainStateForRead(tmp, {
+      env: { CATALYST_DRAIN_DISABLED: "1" },
+      readRuntime: () => null,
+    });
+    expect(state).toMatchObject({ flagPresent: true, disabled: true, draining: false, source: "env" });
+  });
+
+  test("flag file presence is read LIVE even under a marker (sentinel stays dynamic)", async () => {
+    const { resolveDrainStateForRead } = await import("../config.mjs");
+    setFlag(false);
+    const state = resolveDrainStateForRead(tmp, {
+      env: {},
+      readRuntime: () => ({ pid: 4242, drainDisabled: false, bootDrained: false }),
+    });
+    expect(state).toMatchObject({ flagPresent: false, draining: false, source: "daemon-runtime" });
+  });
+});

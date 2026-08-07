@@ -3128,6 +3128,23 @@ _vn_source_daemon_env_for_read() {
   [[ -f "$_daemon_env" ]] && source "$_daemon_env"
   return 0 # fail-open: absent file is a no-op success, never a non-zero return
 }
+# _vn_daemon_runtime_env — CTL-1678 (Codex round-3 P1). The overrides are restart-only:
+# sourcing the mutable env file reports the NEXT daemon's config, not the running one's.
+# The daemon snapshots its effective override state (post boot-drain precedence) into
+# daemon-runtime-env.json at boot, keyed by its pid. When that pid is still alive, print
+# "<drainDisabled> <bootDrained>" (JSON booleans) and succeed; otherwise fail so callers
+# fall back to the env-file view (truthful for a stopped daemon). grep-parsed (flat
+# single-object JSON we write ourselves) — no jq dependency, matching the status idiom.
+_vn_daemon_runtime_env() {
+  local marker="${CATALYST_DIR:-$HOME/catalyst}/execution-core/daemon-runtime-env.json"
+  [[ -f "$marker" ]] || return 1
+  local pid dd bd
+  pid=$(grep -o '"pid":[0-9]*' "$marker" | head -1 | cut -d: -f2)
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+  dd=$(grep -o '"drainDisabled":[a-z]*' "$marker" | head -1 | cut -d: -f2)
+  bd=$(grep -o '"bootDrained":[a-z]*' "$marker" | head -1 | cut -d: -f2)
+  printf '%s %s' "${dd:-false}" "${bd:-false}"
+}
 # _vn_drain_disabled — CTL-1678: this node ignores the drain flag when
 # CATALYST_DRAIN_DISABLED=1 (a worker-only override; `=== "1"` opt-in). Boot-drain is
 # AUTHORITATIVE (mirrors config.mjs isDrainDisabled): a boot-drained node's override is
@@ -3135,6 +3152,14 @@ _vn_source_daemon_env_for_read() {
 # durable override is visible and the sourced vars do not leak into the caller's shell.
 _vn_drain_disabled() {
   (
+    # CTL-1678 (round-3 P1): a LIVE daemon's boot snapshot is authoritative — the env
+    # file may have been edited after daemon start and describes only the next restart.
+    local _rt
+    if _rt=$(_vn_daemon_runtime_env); then
+      # drainDisabled is recorded post-precedence (boot-drain already folded in).
+      if [[ "${_rt%% *}" == "true" ]]; then echo yes; else echo no; fi
+      return 0
+    fi
     _vn_source_daemon_env_for_read
     if [[ "${CATALYST_BOOT_DRAINED:-}" == "1" ]]; then
       echo no
@@ -3154,6 +3179,24 @@ _vn_drain_disabled() {
 # the daemon env in a subshell so the durable override is visible without leaking.
 _vn_drained() {
   (
+    # CTL-1678 (round-3 P1): prefer the LIVE daemon's boot snapshot for the ENV half;
+    # the flag file stays a live read in both branches (the sentinel is dynamic —
+    # only the env overrides are boot-frozen).
+    local _rt _dd _bd
+    if _rt=$(_vn_daemon_runtime_env); then
+      _dd="${_rt%% *}"
+      _bd="${_rt##* }"
+      if [[ "$_bd" == "true" ]]; then
+        echo yes
+      elif [[ "$_dd" == "true" ]]; then
+        echo no
+      elif [[ -f "${CATALYST_DIR:-$HOME/catalyst}/execution-core/drain" ]]; then
+        echo yes
+      else
+        echo no
+      fi
+      return 0
+    fi
     _vn_source_daemon_env_for_read
     if [[ "${CATALYST_BOOT_DRAINED:-}" == "1" ]]; then
       echo yes

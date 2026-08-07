@@ -130,3 +130,38 @@ describe("formatDrainStatus (CTL-1678)", () => {
     expect(line).not.toContain("IGNORED");
   });
 });
+
+// CTL-1678 (Codex round-3 P1): readDrainStatus prefers the LIVE daemon's boot snapshot.
+describe("readDrainStatus daemon-runtime preference (CTL-1678 round-3)", () => {
+  test("live marker (our own pid) beats a post-restart env edit", () => {
+    // Env claims disabled — as if execution-core.env was edited after daemon start —
+    // but the "running daemon" (this test process's pid, provably alive) captured no
+    // override at boot. The flag must therefore report as honored.
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    writeFileSync(join(tmp, "drain"), "");
+    writeFileSync(
+      join(tmp, "daemon-runtime-env.json"),
+      JSON.stringify({ pid: process.pid, startedAt: "x", drainDisabled: false, bootDrained: false })
+    );
+    const s = readDrainStatus(tmp);
+    expect(s.draining).toBe(true);
+    expect(s.disabled).toBe(false);
+    expect(s.source).toBe("daemon-runtime");
+  });
+
+  test("marker from a dead daemon is ignored → env fallback", () => {
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    writeFileSync(join(tmp, "drain"), "");
+    // Spawn-and-reap a child so we hold a real, provably-dead pid.
+    const { spawnSync } = require("node:child_process");
+    const dead = spawnSync("true").pid;
+    writeFileSync(
+      join(tmp, "daemon-runtime-env.json"),
+      JSON.stringify({ pid: dead, startedAt: "x", drainDisabled: false, bootDrained: false })
+    );
+    const s = readDrainStatus(tmp);
+    expect(s.disabled).toBe(true);
+    expect(s.draining).toBe(false);
+    expect(s.source).toBe("env");
+  });
+});

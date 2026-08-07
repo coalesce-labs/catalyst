@@ -396,6 +396,29 @@ case "$(_vn_v_drain_disabled yes)" in
   *) fail "_vn_v_drain_disabled: yes detail" "missing 'ignores the drain flag'" ;;
 esac
 
+# ── CTL-1678 (Codex round-3 P1): a LIVE daemon's boot snapshot beats the env file ──
+# The overrides are restart-only; when daemon-runtime-env.json exists and its pid is
+# alive, the probes must answer from it and ignore the (possibly newer) env file.
+RT_MARKER="${DRAIN_SCRATCH}/execution-core/daemon-runtime-env.json"
+# Live marker (this test shell's pid), no override captured at boot — the env file's
+# post-restart CATALYST_DRAIN_DISABLED=1 must NOT flip the answer.
+printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$$" > "$RT_MARKER"
+expect_eq "_vn_drained: live marker no-override beats env-file override → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drained' )"
+expect_eq "_vn_drain_disabled: live marker no-override beats env-file override → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
+# Live marker WITH the override, empty env file — the running daemon ignores the flag.
+printf '{"pid":%s,"startedAt":"x","drainDisabled":true,"bootDrained":false}\n' "$$" > "$RT_MARKER"
+expect_eq "_vn_drained: live marker override, flag present → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drained' )"
+expect_eq "_vn_drain_disabled: live marker override → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
+# Dead-pid marker → stale, fall back to the env file (which carries the override).
+_dead_pid="$(bash -c 'echo $$')"   # that shell has exited; its pid is dead
+printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$_dead_pid" > "$RT_MARKER"
+expect_eq "_vn_drain_disabled: dead-pid marker → env-file fallback → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
+
 rm -rf "$DRAIN_SCRATCH"
 rm -f "$DRAIN_ENV_EMPTY" "$DRAIN_ENV_OVERRIDE"
 
