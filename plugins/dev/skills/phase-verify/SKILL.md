@@ -205,6 +205,30 @@ on first failure — verification is exhaustive.
 For each gate, run via `Bash` for the CLI ones and the `Task` tool for the agent
 ones. Capture exit code + a one-line summary per gate.
 
+#### Concurrency: cap parallel gate execution (memory safety)
+
+Several gates shell out to the project's own test runner — Unit tests directly,
+and the `pr-test-analyzer` agent indirectly (it re-runs the suite with coverage
+instrumentation to compute diff coverage) — and each spawns a fresh test-runner
+process that can hold multiple GB of RSS on its own. Batching several of these
+as parallel tool calls in one turn compounds fast: 5+ concurrent test-spawning
+gates observed piling up on one host pushed free memory below the OOM-guard
+floor and got the whole verify phase killed before it produced a result, even
+though the test suite itself was clean and fast when run alone.
+
+- **Test-spawning gates run at most 2 concurrent.** Unit tests, Test coverage
+  (`pr-test-analyzer`), Security review (if it shells out to a scanner), and
+  Lint (if the project's linter is itself heavy) all count toward this cap. Do
+  not batch more than 2 of these into one turn's parallel tool calls — start a
+  third only after one of the first two returns.
+- **Type check and the reward-hacking scan are exempt.** `tsc --noEmit` and the
+  grep-based reward-hacking scan are sub-second and light (well under 500MB
+  observed) — run them alongside anything else without counting against the cap.
+- **Code review and silent-failure-hunter are read-only analysis agents** — they
+  read and reason over the diff, they don't re-invoke the test runner. Run them
+  concurrently with each other and with the lightweight gates, but not
+  alongside a second test-spawning gate.
+
 ### 3. Compute `regression_risk` (0–10)
 
 Aggregate signal:
