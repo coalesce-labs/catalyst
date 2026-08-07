@@ -1,5 +1,8 @@
 # Architecture
 
+For the local Linear writer, freshness gate, read tiers, configuration order, and health signals,
+see [Linear read replica](linear-replica.md).
+
 ## Three-Layer System
 
 1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/pm/`, `plugins/legacy/`, …) —
