@@ -42,6 +42,7 @@ import {
   checkPluginPullOwner,
   checkPluginSourceFreshness,
   classifyPluginSourceFreshness,
+  checkStaleLock,
   checksForClass,
   installChecksForClass,
   summarize,
@@ -4945,4 +4946,123 @@ describe("checksForClass — checkPluginSourceFreshness registration (CTL-1421)"
       expect(src({ recognized: true, class: cls })).toContain("checkPluginSourceFreshness");
     });
   }
+});
+
+// ─── checkStaleLock (CTL-1415) ───────────────────────────────────────────────
+//
+// A stale plugin-source .git/index.lock silently freezes plugin pulls. doctor
+// REPORTS it (WARN) — age-gated via the shared lib/stale-lock.mjs classifier, so
+// a live git op (fresh lock) reads as in-progress, not a problem.
+describe("checkStaleLock (CTL-1415)", () => {
+  const ROOT = "/co/plugin-source";
+  const LOCK = "/co/plugin-source/.git/index.lock";
+  const NOW = 1_750_000_000_000;
+  const statFor = (mtimeMs) => (path) => (path === LOCK && mtimeMs != null ? mtimeMs : null);
+
+  it("no lock → PASS", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, statFn: statFor(null) });
+    expect(c.name).toBe("stale-plugin-lock");
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("no stale git index.lock");
+  });
+
+  it("fresh lock (live git op) → PASS (in progress, not stale)", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 4_000) });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("git operation is in progress");
+  });
+
+  it("stale lock (older than threshold) → WARN with the frozen-pulls guidance", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 8.5 * 60 * 60 * 1000) });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain("FROZEN");
+    expect(c.detail).toContain(LOCK);
+  });
+
+  it("stale lock is a WARN, never a FAIL (never blocks doctor exit)", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 3_600_000) });
+    expect(c.status).not.toBe(STATUS.FAIL);
+  });
+});
+
+describe("checksForClass — checkStaleLock registration (CTL-1415)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`wires checkStaleLock into the ${cls} suite`, () => {
+      expect(src({ recognized: true, class: cls })).toContain("checkStaleLock()");
+    });
+  }
+});
+
+// Codex P2 (#2530): a checkout provisioned via `setup-plugin-source.sh --path`
+// only persists the custom root through pluginDirs config, not
+// CATALYST_PLUGIN_SOURCE — the old hardcoded ~/catalyst/plugin-source default
+// could report "no stale lock" while the ACTUAL configured checkout was frozen.
+// checkStaleLock must resolve the same configured root(s) the adjacent
+// freshness check and the real pull path use.
+describe("checkStaleLock — resolves configured pluginDirs roots (Codex P2, #2530)", () => {
+  const NOW = 1_750_000_000_000;
+
+  it("inspects a resolveRootsFn-provided custom root, not the hardcoded default", () => {
+    const CUSTOM = "/custom/plugin-source";
+    const LOCK = `${CUSTOM}/.git/index.lock`;
+    const [c] = checkStaleLock({
+      now: NOW,
+      thresholdMs: 600_000,
+      resolveRootsFn: () => [CUSTOM],
+      statFn: (path) => (path === LOCK ? NOW - 3_600_000 : null), // 1h stale
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain(LOCK);
+  });
+
+  it("no stale lock across multiple resolved roots → PASS listing all roots", () => {
+    const A = "/co/a";
+    const B = "/co/b";
+    const [c] = checkStaleLock({
+      now: NOW,
+      resolveRootsFn: () => [A, B],
+      statFn: () => null,
+    });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain(A);
+    expect(c.detail).toContain(B);
+  });
+
+  it("one of several resolved roots is stale → WARN naming that root", () => {
+    const A = "/co/a";
+    const B = "/co/b";
+    const staleLock = `${B}/.git/index.lock`;
+    const [c] = checkStaleLock({
+      now: NOW,
+      thresholdMs: 600_000,
+      resolveRootsFn: () => [A, B],
+      statFn: (path) => (path === staleLock ? NOW - 3_600_000 : null),
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain(staleLock);
+  });
+
+  it("an explicit root still overrides resolveRootsFn (single-checkout callers/tests)", () => {
+    const EXPLICIT = "/explicit/root";
+    const IGNORED = "/should/not/be/checked";
+    const [c] = checkStaleLock({
+      root: EXPLICIT,
+      now: NOW,
+      resolveRootsFn: () => [IGNORED],
+      statFn: () => null,
+    });
+    expect(c.detail).toContain(EXPLICIT);
+    expect(c.detail).not.toContain(IGNORED);
+  });
+
+  it("no pluginDirs configured (resolveRootsFn returns []) → falls back to the historical default", () => {
+    const [c] = checkStaleLock({
+      now: NOW,
+      resolveRootsFn: () => [],
+      statFn: () => null,
+    });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("plugin-source");
+  });
 });
