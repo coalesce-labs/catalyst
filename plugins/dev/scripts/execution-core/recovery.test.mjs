@@ -553,7 +553,13 @@ describe("recoverStartup", () => {
 
 // implementSignal — a bg-shaped phase-implement signal with the orchestrator +
 // session-id fields the reclaim path threads into emit-complete.
-function implementSignal({ ticket = "CTL-9", status = "running", bgJobId = "job-x", startedAt } = {}) {
+function implementSignal({
+  ticket = "CTL-9",
+  status = "running",
+  bgJobId = "job-x",
+  startedAt,
+  attempt,
+} = {}) {
   return {
     ticket,
     phase: "implement",
@@ -571,6 +577,9 @@ function implementSignal({ ticket = "CTL-9", status = "running", bgJobId = "job-
       // window. Absent by default so the existing absent-revive tests (which can't
       // prove worker freshness) keep their pre-CTL-735 revive behaviour.
       ...(startedAt !== undefined ? { startedAt } : {}),
+      // CTL-778 follow-up: only present when a test exercises the attempt-based
+      // stale-evidence discriminator. Absent by default, matching startedAt above.
+      ...(attempt !== undefined ? { attempt } : {}),
     },
   };
 }
@@ -5931,6 +5940,178 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
     });
     expect(r).toBe("reclaim-failed");
     expect(mirror.calls.length).toBe(0);
+  });
+
+  // CTL-778 P2 (bug fix): the reclaim call site must pass the CURRENT dispatch's
+  // own startedAt as sinceIso, so completeEventSeen can distinguish "this
+  // worker finished" from "some prior attempt finished, once, whenever." Without
+  // this wiring, a redispatched phase's brand-new worker gets reclaimed within
+  // seconds of spawning because a stale complete event from a PRIOR attempt
+  // still satisfies an attempt-unscoped check — the exact bug that made every
+  // resume/revive/retry of an already-once-completed phase unrecoverable.
+  test("CTL-778 P2: completeEventSeen is called with sinceIso = signal.raw.startedAt", () => {
+    const seenCalls = [];
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED, attempt: 2 });
+    reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      completeEventSeen: (args) => {
+        seenCalls.push(args);
+        return true;
+      },
+      emitComplete: recorder({ code: 0 }),
+      emitReapIntent: recorder(Promise.resolve()),
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(seenCalls).toHaveLength(1);
+    // CTL-778 follow-up: sinceAttempt rides alongside sinceIso now, sourced from
+    // the same signal.raw the wiring already reads startedAt from.
+    expect(seenCalls[0]).toMatchObject({
+      ticket: sig.ticket,
+      phase: "implement",
+      sinceIso: STARTED,
+      sinceAttempt: 2,
+    });
+  });
+
+  // CTL-778 P2: a complete event from a PRIOR attempt (older than this dispatch's
+  // own startedAt) must NOT trigger the reclaim — that's the stale-evidence bug.
+  // The comparison itself (latest-ts-wins, stale-rejected) is unit-tested against
+  // a real event log in event-scan.test.mjs's `latestCompleteEventTs` suite; this
+  // exercises the actual default completeEventSeen function in isolation (not
+  // through reclaimDeadWorkIfPossible, which has no path-injection seam to point
+  // the real default at a fixture log — the wiring test above already proves the
+  // sinceIso it would be compared against is correct).
+  test("CTL-778 P2: default completeEventSeen rejects a stale complete event, accepts a fresh one", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs, latestCompleteEventAttempt } = await import(
+      "./event-scan.mjs"
+    );
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-p2-"));
+    const path = join(dir, "events.jsonl");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: "2026-06-07T00:00:00Z", // before STARTED
+        attributes: { "event.name": "phase.implement.complete.CTL-9" },
+        body: {},
+      }) + "\n"
+    );
+    // Same shape as recovery.mjs's real default (recovery.mjs:2084-2098), built
+    // here against the temp path directly since hasCompleteEvent/latestCompleteEventTs
+    // both accept an explicit path override.
+    const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return true;
+    };
+    expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(false);
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: "2026-06-01T00:00:00Z" })
+    ).toBe(true);
+  });
+
+  // Codex review (PR #2851): a redispatch after a completed cycle can reuse
+  // attempt numbers (ordinary scheduler dispatches omit `attempt`, defaulting
+  // back to attempt 1) — the timestamp must reject an OLDER completion before
+  // attempt is ever consulted, or a stale attempt-1 completion from a PRIOR
+  // cycle satisfies a brand-new attempt-1 dispatch even though it predates
+  // the new signal's startedAt.
+  test("Codex PR#2851: an older completion with a REUSED attempt number is still rejected by timestamp", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs, latestCompleteEventAttempt } = await import(
+      "./event-scan.mjs"
+    );
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-reused-attempt-"));
+    const path = join(dir, "events.jsonl");
+    // Prior cycle's attempt-1 completion, well before the new dispatch's startedAt.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: "2026-06-01T00:00:00Z",
+        attributes: { "event.name": "phase.implement.complete.CTL-9", "phase.attempt": 1 },
+        body: {},
+      }) + "\n"
+    );
+    const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return true;
+    };
+    // New dispatch's own attempt also defaults to 1 (ordinary redispatch omits
+    // `attempt`) — eventAttempt(1) >= sinceAttempt(1) would wrongly read "seen"
+    // if attempt were compared before the timestamp.
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED, sinceAttempt: 1 })
+    ).toBe(false);
+  });
+
+  // CTL-778 follow-up (upstream review, PR #2851): the case sinceIso alone can't
+  // catch — a prior attempt's completion and a same-second redispatch's
+  // startedAt land in the SAME second, so `ts >= sinceIso` is true even though
+  // the event is stale. sinceAttempt (the current signal's own attempt number)
+  // is the precise discriminator; this proves it rejects the stale same-second
+  // event and accepts once the real attempt's own completion lands.
+  test("CTL-778 follow-up: sinceAttempt rejects a same-second stale complete event that sinceIso alone would accept", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs, latestCompleteEventAttempt } = await import(
+      "./event-scan.mjs"
+    );
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-followup-"));
+    const path = join(dir, "events.jsonl");
+    // Attempt 1's completion lands in the SAME second attempt 2 starts.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: STARTED,
+        attributes: { "event.name": "phase.implement.complete.CTL-9", "phase.attempt": 1 },
+        body: {},
+      }) + "\n"
+    );
+    const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return true;
+    };
+    // Without sinceAttempt, the same-second tie reads as "seen" — the bug.
+    expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(true);
+    // With sinceAttempt=2, attempt 1's completion no longer satisfies "this attempt finished".
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED, sinceAttempt: 2 })
+    ).toBe(false);
+    // Attempt 2's own completion (same second) now correctly satisfies it.
+    appendFileSync(
+      path,
+      JSON.stringify({
+        ts: STARTED,
+        attributes: { "event.name": "phase.implement.complete.CTL-9", "phase.attempt": 2 },
+        body: {},
+      }) + "\n"
+    );
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED, sinceAttempt: 2 })
+    ).toBe(true);
   });
 
   // Regression: the existing CTL-736 test (no completeEventSeen injected → seam defaults

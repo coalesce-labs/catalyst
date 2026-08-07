@@ -78,6 +78,23 @@ run_setup_hb() {
 
 echo "setup-plugin-source (CTL-992) tests"
 
+# ── 0. Syntax must be valid under macOS's stock /bin/bash (3.2), not just ────
+# whatever newer bash happens to be first in PATH. A heredoc embedded inside a
+# $(...) command substitution, containing an apostrophe in its body text (even
+# in a comment), confuses bash 3.2's quote-tracking across the nested
+# heredoc/substitution boundary — bash 4+/5 parses it fine, but a fresh macOS
+# node (whose `bash` is the stock 3.2 until Homebrew's is on PATH) fails with a
+# syntax error deep in the file, far from the actual apostrophe (PROJ-1214
+# verify: this exact class of bug silently broke node onboarding).
+if [[ -x /bin/bash ]]; then
+  t0() {
+    /bin/bash -n "$SETUP"
+  }
+  check "syntax is valid under macOS stock /bin/bash (3.2), not just PATH bash" t0
+else
+  echo "  SKIP: /bin/bash not present on this host"
+fi
+
 # ── 1. fresh clone → clones + registers pluginDirs in machine config ────────
 make_origin fresh
 MCFG1="${SCRATCH}/mcfg1.json"
