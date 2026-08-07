@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.48.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.47.0...catalyst-dev-v12.48.0) (2026-08-07)
+## [12.48.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.47.0...catalyst-dev-v12.48.0)
+
+Aug 07, 2026
+
+<!-- ai-enhanced -->
+
+### Escalation Visibility & Stalled-PR Detection
+
+The unstuck sweep now actually reaches the operator: stalled tickets get a `needs-human` label and a Linear comment instead of silently logging an event that nobody sees. A new periodic timer probes in-flight PRs for CI failures, review latency, and no-push signals, writing stall stamps that board-health reads to emit nudges — enable it with `orchestration.stalledPrSweep.enabled` in your config. This release also closes two fleet-wide triage bugs where host-local dispatch caps let ownership churn multiply real spawns across nodes, and the orch-monitor sidebar nav is restored for mobile viewports.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1381 auto-install new catalyst-* CLIs after updater pull ([#2847](https://github.com/coalesce-labs/catalyst/issues/2847)) ([215b85a](https://github.com/coalesce-labs/catalyst/commit/215b85afb10f601b3d0c9d4c285bb32d10e6e151))
 * **dev:** CTL-1608 board-health stalled-PR detection — review-latency + CI-health sweep ([#2908](https://github.com/coalesce-labs/catalyst/issues/2908)) ([e290fb0](https://github.com/coalesce-labs/catalyst/commit/e290fb02108e937aef5e0cbce21c10d7700f2ec9))
@@ -11,10 +20,6 @@
 * **dev:** CTL-1641 — wire unstuck-sweep escalation to reach the operator ([#3005](https://github.com/coalesce-labs/catalyst/issues/3005)) ([74f99c9](https://github.com/coalesce-labs/catalyst/commit/74f99c9b0edfb0a4bc059bbb25f866531e249bd3))
 * **dev:** CTL-708 opt-in bounded-LLM resolver for source conflicts ([#3051](https://github.com/coalesce-labs/catalyst/issues/3051)) ([21327cb](https://github.com/coalesce-labs/catalyst/commit/21327cbefb5fa185c0e2bed9ca2638b18ab4516f))
 * **dev:** dependabot-escalate — file a ticket for the two Dependabot signals no PR ever surfaces ([#3053](https://github.com/coalesce-labs/catalyst/issues/3053)) ([a41578b](https://github.com/coalesce-labs/catalyst/commit/a41578b2352e52ec550849487f630453cdd1da6f))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1649 — fleet-wide triage cap + exclude launch-failure tickets from board-health recovery ([#3030](https://github.com/coalesce-labs/catalyst/issues/3030)) ([50b5510](https://github.com/coalesce-labs/catalyst/commit/50b5510747850f4c39713c00bea58034e5f42fea))
 * **dev:** orch-monitor — mobile nav trigger + Linear reply-token identity walk ([#3054](https://github.com/coalesce-labs/catalyst/issues/3054)) ([d9ae8a7](https://github.com/coalesce-labs/catalyst/commit/d9ae8a76e8e7f84e058c926ac30dac66a52580fa))
 * **execution-core:** close test-hermeticity gaps that only fail on a live, configured host ([#3047](https://github.com/coalesce-labs/catalyst/issues/3047)) ([2858769](https://github.com/coalesce-labs/catalyst/commit/2858769af2a14fdee09c4671077e09c89602df55))
