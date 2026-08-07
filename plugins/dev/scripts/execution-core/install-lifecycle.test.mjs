@@ -280,6 +280,29 @@ describe("planPhases — per-class correctness (pure)", () => {
     const backupStep = plan.find((p) => p.phase === "backup").steps[0];
     expect(backupStep.argv).toEqual(["BACKUP", "backup", "--label", "install-developer"]);
   });
+  // Codex P1: previously `catalyst install`/`reinstall` only ran setup-plugin-source.sh
+  // with --no-interactive-wrapper (acquire — pre-backup, git-reconstructable work only),
+  // so the stateful cutover (shell-rc wrapper removal + marketplace retirement) never
+  // ran outside catalyst-join. write-config now also runs it in FULL mode (no flag),
+  // placed after backup() (both operations) so the mutated state is restorable.
+  test("install/reinstall run the FULL plugin-source cutover (no --no-interactive-wrapper) in write-config, after backup", () => {
+    for (const operation of ["install", "reinstall"]) {
+      const plan = planPhases({ operation, nodeClass: "worker", scripts: SCRIPTS });
+      const backupIdx = plan.findIndex((p) => p.phase === "backup");
+      const wcIdx = plan.findIndex((p) => p.phase === "write-config");
+      expect(backupIdx).toBeGreaterThanOrEqual(0);
+      expect(wcIdx).toBeGreaterThan(backupIdx);
+      const cutover = plan[wcIdx].steps.find((s) => s.label === "plugin-source-cutover");
+      expect(cutover).toBeDefined();
+      expect(cutover.argv).toEqual([SCRIPTS.pluginSrc]);
+      expect(cutover.argv).not.toContain("--no-interactive-wrapper");
+    }
+  });
+  test("acquire() (pre-backup) still runs setup-plugin-source.sh with --no-interactive-wrapper", () => {
+    const plan = planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS });
+    const acquireStep = plan.find((p) => p.phase === "acquire").steps.find((s) => s.label === "plugin-source");
+    expect(acquireStep.argv).toEqual([SCRIPTS.pluginSrc, "--no-interactive-wrapper"]);
+  });
   test("unknown operation throws", () => {
     expect(() => planPhases({ operation: "frobnicate", nodeClass: "worker", scripts: SCRIPTS })).toThrow(/unknown operation/);
   });

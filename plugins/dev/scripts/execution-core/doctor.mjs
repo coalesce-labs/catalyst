@@ -4638,16 +4638,25 @@ export function classifySkillsDirPlugins({
   }
 
   // (b) legacy marketplace load-path residue — any of these reintroduces the stale
-  //     version-keyed cache and/or precedence-blocks the in-place skills-dir copy
+  //     version-keyed cache and/or precedence-blocks the in-place skills-dir copy.
+  //     Covers EVERY plugin in the checkout's catalog (via expectedPlugins), not a
+  //     hardcoded catalyst-dev/-pm allowlist — Codex P1: the marketplace catalog has
+  //     ten plugins (catalyst-meta, catalyst-analytics, catalyst-debugging, …); a
+  //     two-name check would report clean while an untouched marketplace copy of one
+  //     of the other eight kept running stale code.
+  const marketplaceIds =
+    expectedPlugins.length > 0
+      ? expectedPlugins.map(({ name }) => `${name}@catalyst`)
+      : ["catalyst-dev@catalyst", "catalyst-pm@catalyst"];
   const ep = settings?.enabledPlugins || {};
-  for (const k of ["catalyst-dev@catalyst", "catalyst-pm@catalyst"]) {
+  for (const k of marketplaceIds) {
     if (k in ep) problems.push(`enabledPlugins still lists ${k} — clear it`);
   }
   if (settings?.extraKnownMarketplaces?.catalyst) {
     problems.push("the 'catalyst' marketplace is still registered (extraKnownMarketplaces) — remove it");
   }
   const installed = installedPlugins?.plugins || {};
-  for (const k of ["catalyst-dev@catalyst", "catalyst-pm@catalyst"]) {
+  for (const k of marketplaceIds) {
     if (installed[k]) {
       problems.push(`${k} is still installed from the marketplace — it precedence-BLOCKS the skills-dir copy; uninstall it`);
     }

@@ -5177,6 +5177,35 @@ describe("classifySkillsDirPlugins — decision core", () => {
     );
     expect(c.status).toBe(STATUS.WARN);
   });
+
+  // Codex P1: the marketplace catalog has ten plugins, not just catalyst-dev/-pm — a
+  // stale marketplace copy of any OTHER catalogued plugin (catalyst-meta here) must be
+  // caught too, derived from expectedPlugins rather than a hardcoded two-name allowlist.
+  it("a still-enabled marketplace copy of a THIRD checkout plugin (not dev/pm) → FAIL", () => {
+    const threePlugins = [...EXPECTED, { name: "catalyst-meta", dir: `${ROOT}/plugins/meta` }];
+    const c = classifySkillsDirPlugins(
+      clean({
+        expectedPlugins: threePlugins,
+        linkByName: { ...cleanLinks, "catalyst-meta": { kind: "symlink", target: `${ROOT}/plugins/meta` } },
+        settings: { enabledPlugins: { "catalyst-meta@catalyst": true } },
+      }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/enabledPlugins still lists catalyst-meta@catalyst/);
+  });
+
+  it("an installed marketplace copy of a THIRD checkout plugin (not dev/pm) → FAIL", () => {
+    const threePlugins = [...EXPECTED, { name: "catalyst-meta", dir: `${ROOT}/plugins/meta` }];
+    const c = classifySkillsDirPlugins(
+      clean({
+        expectedPlugins: threePlugins,
+        linkByName: { ...cleanLinks, "catalyst-meta": { kind: "symlink", target: `${ROOT}/plugins/meta` } },
+        installedPlugins: { plugins: { "catalyst-meta@catalyst": [{ scope: "user" }] } },
+      }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/catalyst-meta@catalyst is still installed from the marketplace/);
+  });
 });
 
 describe("checkSkillsDirPlugins — seams", () => {

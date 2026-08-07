@@ -218,23 +218,52 @@ remove_managed_claude_wrapper() {
 	done < <(rc_files_for_interactive_shell)
 }
 
+# catalog_plugin_names — every plugin manifest name in the checkout (same enumeration
+# create_skills_dir_symlinks uses), one per line. Used to build the full marketplace
+# residue list instead of a hand-maintained allowlist (Codex P1: the old two-name
+# `catalyst-dev`/`catalyst-pm` list left the other eight marketplace plugins —
+# catalyst-meta, catalyst-analytics, catalyst-debugging, etc. — undetected/uninstalled).
+catalog_plugin_names() {
+	local checkout="$1" base="${1}/plugins" d pname
+	[[ -d "$base" ]] || return 0
+	for d in "$base"/*/; do
+		[[ -f "${d}.claude-plugin/plugin.json" ]] || continue
+		pname="$(jq -r '.name // empty' "${d}.claude-plugin/plugin.json" 2>/dev/null || true)"
+		[[ -n "$pname" ]] && printf '%s\n' "$pname"
+	done
+}
+
 # retire_catalyst_marketplace — best-effort cutover away from the version-keyed
 # `catalyst` marketplace (the one stale load path). Clears user-scope
 # enabledPlugins entries (atomic jq), then best-effort uninstalls the marketplace
-# copies + removes the marketplace registration via the CLI. NON-FATAL by design:
-# a marketplace copy installed at PROJECT scope (anchored to some other repo) can
-# only be uninstalled with `--scope project` from that repo, which this generic
-# routine can't know — so any residue is left with a loud warning and the
-# checkSkillsDirPlugins doctor check flags it for a manual finish. On a fresh node
-# (no marketplace) every step is a clean no-op.
+# copies + removes the marketplace registration via the CLI. Covers EVERY plugin in
+# the marketplace catalog (via catalog_plugin_names), not just catalyst-dev/-pm.
+# NON-FATAL by design: a marketplace copy installed at PROJECT scope (anchored to
+# some other repo) can only be uninstalled with `--scope project` from that repo,
+# which this generic routine can't know — so any residue is left with a loud warning
+# and the checkSkillsDirPlugins doctor check flags it for a manual finish. On a fresh
+# node (no marketplace) every step is a clean no-op.
 retire_catalyst_marketplace() {
-	local settings="${HOME}/.claude/settings.json" tmp p
+	local checkout="$1" settings="${HOME}/.claude/settings.json" tmp p ids_json
+	local -a plugin_ids=()
+	while IFS= read -r p; do
+		[[ -n "$p" ]] && plugin_ids+=("${p}@catalyst")
+	done < <(catalog_plugin_names "$checkout")
+	if [[ ${#plugin_ids[@]} -eq 0 ]]; then
+		# No manifests discovered (e.g. an incomplete checkout) — fall back to the
+		# two plugins every node has always had, so retirement still runs.
+		plugin_ids=(catalyst-dev@catalyst catalyst-pm@catalyst)
+	fi
 	# 1. Clear user-scope enabledPlugins entries (atomic same-dir tmp + mv).
 	if [[ -f "$settings" ]] && command -v jq >/dev/null 2>&1; then
-		if jq -e '(.enabledPlugins // {}) | has("catalyst-dev@catalyst") or has("catalyst-pm@catalyst")' "$settings" >/dev/null 2>&1; then
+		ids_json="$(printf '%s\n' "${plugin_ids[@]}" | jq -R . | jq -s .)"
+		if jq -e --argjson ids "$ids_json" \
+			'(.enabledPlugins // {}) as $ep | $ids | any(. as $id | $ep | has($id))' "$settings" >/dev/null 2>&1; then
 			tmp="$(mktemp "$(dirname "$settings")/.settings.json.XXXXXX")" || tmp=""
 			if [[ -n "$tmp" ]]; then
-				if jq 'if .enabledPlugins then .enabledPlugins |= (del(.["catalyst-dev@catalyst"]) | del(.["catalyst-pm@catalyst"])) else . end' "$settings" >"$tmp"; then
+				if jq --argjson ids "$ids_json" \
+					'if .enabledPlugins then .enabledPlugins |= (reduce $ids[] as $id (.; del(.[$id]))) else . end' \
+					"$settings" >"$tmp"; then
 					mv "$tmp" "$settings" && echo "Cleared catalyst-*@catalyst from user-scope enabledPlugins."
 				else
 					rm -f "$tmp"
@@ -245,7 +274,7 @@ retire_catalyst_marketplace() {
 	fi
 	# 2. Best-effort uninstall + marketplace removal (CLI; warns on project-scope block).
 	if command -v claude >/dev/null 2>&1; then
-		for p in catalyst-dev@catalyst catalyst-pm@catalyst; do
+		for p in "${plugin_ids[@]}"; do
 			if claude plugin list 2>/dev/null | grep -qF "$p"; then
 				claude plugin uninstall "$p" -y >/dev/null 2>&1 \
 					&& echo "Uninstalled marketplace plugin ${p}." \
@@ -261,6 +290,23 @@ retire_catalyst_marketplace() {
 }
 
 CHECKOUT_PATH="${CHECKOUT_PATH:-$DEFAULT_PATH}"
+# Normalize to an absolute path BEFORE it's used as a symlink target (Codex P1):
+# `ln -s` writes the target string verbatim, so a relative `--path ./plugin-source`
+# would otherwise land in every ~/.claude/skills/<plugin> symlink as a path relative
+# to ~/.claude/skills, not to the caller's CWD — a dangling link. Tilde-expand
+# (`--path ~/foo` arrives unexpanded when quoted) then prefix a non-absolute path
+# with the CWD captured before any `cd` in this script (there is none above this
+# point, so $PWD is still the caller's).
+case "$CHECKOUT_PATH" in
+	"~"|"~/"*) CHECKOUT_PATH="${HOME}${CHECKOUT_PATH#\~}" ;;
+esac
+if [[ "$CHECKOUT_PATH" != /* ]]; then
+	CHECKOUT_PATH="${PWD}/${CHECKOUT_PATH}"
+fi
+# Collapse a leading "./" (from e.g. `--path ./plugin-source`) left over from the
+# prefix above — cosmetic only (the path above is already absolute and resolves
+# fine either way), but keeps the registered/printed/symlinked path clean.
+CHECKOUT_PATH="${CHECKOUT_PATH/\/.\//\/}"
 
 # Derive the repo URL from this repo's origin (https) when not supplied.
 if [[ -z "$REPO_URL" ]]; then
@@ -365,6 +411,6 @@ create_skills_dir_symlinks "$CHECKOUT_PATH" \
 if [[ $FULL_CUTOVER -eq 1 ]]; then
 	remove_managed_claude_wrapper \
 		|| echo "WARN: legacy interactive \`claude\` wrapper not fully removed (non-fatal)." >&2
-	retire_catalyst_marketplace \
+	retire_catalyst_marketplace "$CHECKOUT_PATH" \
 		|| echo "WARN: catalyst marketplace not fully retired (non-fatal) — doctor will flag residue." >&2
 fi

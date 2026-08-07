@@ -361,6 +361,27 @@ t15() {
 }
 check "full mode clears catalyst-*@catalyst from user-scope enabledPlugins" t15
 
+# ── 16. a RELATIVE --path is normalized to absolute before it's used as a
+#         symlink target (Codex P1: `ln -s` writes the target verbatim, so
+#         `--path ./co16` from CWD X would otherwise write
+#         ~/.claude/skills/<plugin> -> ./co16/plugins/<dir>, a path relative to
+#         ~/.claude/skills — dangling from anywhere else) ──────────────────────
+make_origin relpath
+MCFG16="${SCRATCH}/mcfg16.json"
+HOME16="${SCRATCH}/home16"; mkdir -p "$HOME16"
+RELROOT="${SCRATCH}/relroot16"; mkdir -p "$RELROOT"
+t16() {
+  ( cd "$RELROOT" && run_setup_hb "$HOME16" "/bin/zsh" "$MCFG16" "./co16" "$ORIGIN" ) >/dev/null 2>&1 || return 1
+  local reg link_target
+  reg="$(jq -r '.catalyst.orchestration.pluginDirs' "$MCFG16")"
+  [[ "$reg" == "${RELROOT}/co16/plugins/dev" ]] || return 1
+  link_target="$(readlink "${HOME16}/.claude/skills/catalyst-dev")"
+  [[ "$link_target" == "${RELROOT}/co16/plugins/dev" ]] || return 1
+  # the symlink resolves (not dangling) regardless of CWD
+  [[ -e "${HOME16}/.claude/skills/catalyst-dev/.claude-plugin/plugin.json" ]]
+}
+check "a relative --path is normalized to absolute before symlinking" t16
+
 echo ""
 TOTAL=$((PASSES + FAILURES))
 echo "setup-plugin-source: $PASSES/$TOTAL passed, $FAILURES failed"
