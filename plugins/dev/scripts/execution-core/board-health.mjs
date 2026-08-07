@@ -1702,6 +1702,11 @@ export function boardHealthPass({
   // checkStrandedMidPipeline. Empty-Map default (same shadow-first pattern as
   // getPrStatusMap) → invariant stays observable:false until Phase 2 wires it.
   getStrandedEvidence,
+  // CTL-1608: pre-fetched stalled-PR stamp map (workers/*/stalled-pr.json). Must be
+  // forwarded to assembleBoardState below — an undeclared property is silently
+  // dropped by the destructure, which would pin checkStalledPr to the empty-Map
+  // default and make `nudge-stalled-pr` unreachable even with the sweep enabled.
+  getStalledPrState,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
@@ -1727,6 +1732,7 @@ export function boardHealthPass({
     getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), mode, now,
     getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
+    getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);
