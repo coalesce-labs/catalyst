@@ -71,7 +71,10 @@ emit_stale_base_detected() {
 }
 
 # emit_auto_rebased — INFO: rebase succeeded (clean or additive auto-resolve).
-# --orch <id>  --ticket <key>  --phase <name>  --strategy <clean|additive|recreate>
+# --orch <id>  --ticket <key>  --phase <name>
+# --strategy <clean|additive|recreate|refetch-retry>
+#   refetch-retry (CTL-1505): a source conflict cleared after aborting and
+#   rebasing once more onto a freshly-fetched origin/<base>.
 emit_auto_rebased() {
   local orch="" ticket="" phase="" strategy="clean"
   while [[ $# -gt 0 ]]; do
@@ -144,6 +147,38 @@ emit_rebase_conflict_stalled() {
   _emit_rebase_event \
     --event-name "phase.${phase}.rebase-conflict-stalled.${ticket}" \
     --severity ERROR \
+    --orch "$orch" --ticket "$ticket" \
+    --payload-json "$payload"
+}
+
+# emit_ctl708_resolution — CTL-708: outcome of an attempted bounded-LLM
+# source-conflict resolution (lib/ctl708-resolve.sh). WARN on any non-resolved
+# outcome (declined/failed/markers-remained) since those fall through to the
+# existing terminal stall; INFO on resolved (the rebase proceeds).
+# --orch <id>  --ticket <key>  --phase <name>
+# --outcome <resolved|declined|failed|markers-remained>
+# --files <json-array>  --reason <string>
+emit_ctl708_resolution() {
+  local orch="" ticket="" phase="" outcome="" files="[]" reason=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --orch)    orch="$2";    shift 2 ;;
+      --ticket)  ticket="$2";  shift 2 ;;
+      --phase)   phase="$2";   shift 2 ;;
+      --outcome) outcome="$2"; shift 2 ;;
+      --files)   files="$2";   shift 2 ;;
+      --reason)  reason="$2";  shift 2 ;;
+      *)         shift ;;
+    esac
+  done
+  local severity="WARN"
+  [[ "$outcome" == "resolved" ]] && severity="INFO"
+  local payload
+  payload="$(jq -nc --arg o "$outcome" --argjson f "$files" --arg r "$reason" \
+    '{outcome: $o, files: $f, reason: $r}')" || payload="{}"
+  _emit_rebase_event \
+    --event-name "phase.${phase}.ctl708-resolution.${ticket}" \
+    --severity "$severity" \
     --orch "$orch" --ticket "$ticket" \
     --payload-json "$payload"
 }

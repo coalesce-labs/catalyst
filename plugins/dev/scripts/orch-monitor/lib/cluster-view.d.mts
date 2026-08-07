@@ -28,6 +28,8 @@ export interface ClusterNode {
 }
 
 export interface ClusterView {
+  /** CTL-1551: this monitor's own (alias-folded) host, or null when unknown. */
+  selfHost?: string | null;
   generatedAt: string;
   /** True when the roster is absent or length 1 — the exact identity no-op path. */
   singleHost: boolean;
@@ -80,6 +82,17 @@ export interface ClusterEntityDeps {
   admissionReader?:
     | ((host: string) => { accepting?: boolean; holdReason?: "drain" | "liveness-cold" | null } | null | undefined)
     | null;
+  /** CTL-1551: liveness live-window override (ms), forwarded to assembleClusterView —
+   * the server budgets it for the Loki peer transport's pipeline lag. */
+  intervalMs?: number;
+  /** CTL-1551: liveness offline-grace override (ms), forwarded to assembleClusterView. */
+  graceMs?: number;
+  /** CTL-1551: per-host live-window resolver — (host) => ms | undefined (undefined =
+   * shared/default window). Lets the server budget PEER transport lag without
+   * loosening the self host's window. */
+  intervalMsFor?: (host: string) => number | undefined;
+  /** CTL-1551: provider for this monitor's own (alias-folded) host; resolved per assemble. */
+  selfHostProvider?: (() => string | null) | null;
   /** Injected clock for tests. */
   now?: () => number;
 }

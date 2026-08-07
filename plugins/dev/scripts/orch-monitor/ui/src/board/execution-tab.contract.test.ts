@@ -15,8 +15,8 @@ describe("CTL-1102 Execution tab contract", () => {
     expect((TAB_VALUES as readonly string[]).includes("execution")).toBe(true);
   });
 
-  it("keeps the four prior tabs (no accidental drop on rename)", () => {
-    for (const t of ["lifecycle", "cost", "activity"]) {
+  it("keeps the prior tabs (no accidental drop on rename)", () => {
+    for (const t of ["lifecycle", "cost", "activity", "discussion"]) {
       expect((TAB_VALUES as readonly string[]).includes(t)).toBe(true);
     }
   });

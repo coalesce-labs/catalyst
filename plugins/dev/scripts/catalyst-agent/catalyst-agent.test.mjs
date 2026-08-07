@@ -6,11 +6,11 @@
 // Run: cd plugins/dev/scripts/catalyst-agent && bun test catalyst-agent.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runDomain, runOnce, main, defaultImporters } from "./catalyst-agent.mjs";
-import { readAgentConfig } from "./config.mjs";
+import { runDomain, runOnce, main, defaultImporters, writeHeartbeat } from "./catalyst-agent.mjs";
+import { readAgentConfig, getHeartbeatPath } from "./config.mjs";
 
 const ALL_ON = {
   usageEnabled: true,
@@ -149,7 +149,9 @@ describe("main — flag dispatch & exit codes", () => {
   test("--once dispatches to the (injected) runOnce and returns 0", async () => {
     let called = 0;
     const { write } = captureWrites();
-    const code = await main(["--once"], { write, runOnceImpl: async () => { called++; } });
+    // writeHeartbeatImpl stubbed so the test stays hermetic (CTL-1518: the real
+    // impl would write to ~/catalyst under CATALYST_DIR).
+    const code = await main(["--once"], { write, runOnceImpl: async () => { called++; }, writeHeartbeatImpl: () => {} });
     expect(code).toBe(0);
     expect(called).toBe(1);
   });
@@ -164,8 +166,38 @@ describe("main — flag dispatch & exit codes", () => {
         await new Promise((r) => setTimeout(r, 5));
         done = true;
       },
+      writeHeartbeatImpl: () => {},
     });
     expect(done).toBe(true);
+  });
+
+  // ── CTL-1518: the liveness breadcrumb refresh on the --once path ──
+  test("--once refreshes the breadcrumb AFTER the tick", async () => {
+    const order = [];
+    const { write } = captureWrites();
+    const code = await main(["--once"], {
+      write,
+      runOnceImpl: async () => { order.push("tick"); },
+      writeHeartbeatImpl: () => { order.push("heartbeat"); },
+    });
+    expect(code).toBe(0);
+    expect(order).toEqual(["tick", "heartbeat"]);
+  });
+
+  test("--once refreshes the breadcrumb in a finally even when the tick throws (throw still propagates)", async () => {
+    let wrote = 0;
+    const { write } = captureWrites();
+    // A transient tick throw must NOT stop the breadcrumb refresh — the process
+    // ran, so it is not dead — but the throw still propagates (unchanged --once
+    // error semantics).
+    await expect(
+      main(["--once"], {
+        write,
+        runOnceImpl: async () => { throw new Error("tick boom"); },
+        writeHeartbeatImpl: () => { wrote++; },
+      }),
+    ).rejects.toThrow("tick boom");
+    expect(wrote).toBe(1);
   });
 
   test("an unknown flag returns 2 and writes the error to stderr", async () => {
@@ -400,5 +432,47 @@ describe("defaultImporters — real sampler composition (event-log emit)", () =>
       // can await it (the load-bearing property for the OTLP drain).
       expect(mod.runOnce.constructor.name).toBe("AsyncFunction");
     }
+  });
+});
+
+// ─── writeHeartbeat — the CTL-1518 liveness breadcrumb ─────────────────────────
+
+describe("writeHeartbeat — liveness breadcrumb (CTL-1518)", () => {
+  test("writes {ts,host} atomically to the injected path, leaving no temp file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1518-hb-"));
+    const path = join(dir, "catalyst-agent.heartbeat");
+    writeHeartbeat({ path, now: 1234567890, host: "test-host" });
+    expect(existsSync(path)).toBe(true);
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    expect(parsed).toEqual({ ts: 1234567890, host: "test-host" });
+    // Atomic rename leaves no `*.tmp.<pid>` sibling behind.
+    expect(readdirSync(dir).filter((f) => f.includes(".tmp."))).toEqual([]);
+  });
+
+  test("resolves the default path from CATALYST_DIR (getHeartbeatPath parity)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1518-hb-env-"));
+    const saved = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      // The default path must equal getHeartbeatPath() under the same env — the
+      // exact path the responder resolves from its own CATALYST_DIR.
+      expect(getHeartbeatPath()).toBe(join(dir, "catalyst-agent.heartbeat"));
+      writeHeartbeat({ now: 42, host: "h" });
+      expect(JSON.parse(readFileSync(join(dir, "catalyst-agent.heartbeat"), "utf8"))).toEqual({ ts: 42, host: "h" });
+    } finally {
+      if (saved === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = saved;
+    }
+  });
+
+  test("is best-effort — an unwritable path is swallowed, never thrown", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1518-hb-fail-"));
+    const blocker = join(dir, "blocker");
+    writeFileSync(blocker, "x");
+    // Parent of the target is a FILE → mkdirSync throws ENOTDIR; writeHeartbeat
+    // must swallow it (a breadcrumb write can never crash a healthy tick).
+    const path = join(blocker, "sub", "catalyst-agent.heartbeat");
+    expect(() => writeHeartbeat({ path, now: 1, host: "h" })).not.toThrow();
+    expect(existsSync(path)).toBe(false);
   });
 });

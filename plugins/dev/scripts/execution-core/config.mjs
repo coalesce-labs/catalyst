@@ -15,6 +15,16 @@ import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync } from "no
 // risk the pino try/catch below guards against.
 import { schemaCompat } from "./config-schema.mjs";
 
+// CTL-1616 PR5: the canonical cloud-token NAME resolver is a zero-import leaf
+// (../lib/secret-contract.mjs) shared verbatim by execution-core (this module,
+// via resolveNodeCloudTokenEnv below) and health-responder.sh's bash fallback
+// (via lib/catalyst-secret-contract.sh's catalyst_secret_cloud_token_name) —
+// same precedent as CTL-1617's deployment-mode re-export just below.
+// CTL-1616 PR6: resolveLayer2Path is the registry's canonical Layer-2 path chain
+// (CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME > ~/.config),
+// consulted by getLayer2ConfigPath's dual-read shadow-diff below (design §8 PR6).
+import { resolveCloudTokenName, resolveLayer2Path } from "../lib/secret-contract.mjs";
+
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
 // `bun install` cannot resolve it — and any module graph that includes
@@ -61,6 +71,14 @@ try {
   );
 }
 export { log };
+
+// CTL-1617: the canonical deployment-mode resolver is a zero-import leaf
+// (../lib/deployment-mode.mjs) shared verbatim by execution-core (this
+// re-export) and orch-monitor (direct cross-directory import) — never
+// reimplemented here. See lib/deployment-mode.mjs's file header for the
+// naming rule ("deployment mode", never bare "mode") and the env-vs-file
+// asymmetry caveat.
+export { DEPLOYMENT_MODES, resolveDeploymentMode, getDeploymentMode } from "../lib/deployment-mode.mjs";
 
 // --- Paths ---
 // Re-resolved per call so tests can redirect by setting CATALYST_DIR;
@@ -137,6 +155,16 @@ export function getReconcileHealthDir() {
   return resolve(getExecutionCoreDir(), "reconcile-health");
 }
 
+// CTL-1503 — fleet-health durable-latch dir. Holds the edge-trigger latch marker
+// (fleet-health-latch.json) the probe persists on the healthy→degraded /
+// degraded→healthy edges and hydrates on start, so a daemon restart mid-episode
+// does not re-emit `degraded` with no prior `recovered`. CATALYST_DIR-scoped
+// (re-resolved per call) so tests isolate via CATALYST_DIR, mirroring
+// getReconcileHealthDir.
+export function getFleetHealthDir() {
+  return resolve(getExecutionCoreDir(), "fleet-health");
+}
+
 // The durable event-log tailer cursor — monitor.mjs persists its byte offset
 // here so a daemon restart resumes the fast path instead of re-seeding at EOF.
 export function getCursorPath() {
@@ -184,14 +212,49 @@ export function getEventLogPath() {
 // Linear-CAS claim, takeover/healing) have one source of truth. Nothing in the
 // dispatch/claim/eligible-query path consults these yet.
 
-// Layer-2 (machine-local) config path. Mirrors daemon.mjs main()'s resolution:
-// CATALYST_LAYER2_CONFIG_FILE || ~/.config/catalyst/config.json. Each host's
-// Layer-2 file differs, so this is the right home for a per-host name.
+// Layer-2 (machine-local) config path. Historically CATALYST_LAYER2_CONFIG_FILE ||
+// ~/.config/catalyst/config.json (daemon.mjs main()'s resolution) — homedir-only, ignoring
+// CATALYST_MACHINE_CONFIG and XDG_CONFIG_HOME. Each host's Layer-2 file differs, so this is
+// the right home for a per-host name.
+//
+// CTL-1616 PR6 (+#2929/#2930 follow-ups): OBSERVE-ONLY dual-read. This function RETURNS THE
+// LEGACY chain (CATALYST_LAYER2_CONFIG_FILE || homedir default) and only WARNS when the
+// registry's canonical resolveLayer2Path chain (… > CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME
+// > homedir) would disagree. It must NOT return the canonical path yet: this resolver feeds
+// WRITE destinations (cluster-sync secret materialization, cluster tune) whose READERS are
+// split across BOTH chains — catalyst-secret-env.sh and the scheduler's per-tick reload read
+// legacy, while the registry-based consumers folded in PR3-PR5 (the mint chain, cloud-token
+// name) read canonical. On a divergent (MACHINE_CONFIG/XDG-only) host there is NO consistent
+// half-migrated answer — doctor's layer2-path-divergence check FAILs that configuration as
+// unsupported-until-the-sweep, and CATALYST_LAYER2_CONFIG_FILE (tier 1 of BOTH chains) is the
+// operator pin that restores one file for everyone. The canonical cutover must land as ONE
+// sweep of every reader and writer — do not sequence it from an assumption that reads already
+// use the canonical path (they are split; see #2930's review).
+const _warnedLayer2PathDrift = new Set();
 export function getLayer2ConfigPath() {
-  return (
+  const legacyPath =
     process.env.CATALYST_LAYER2_CONFIG_FILE ||
-    resolve(homedir(), ".config", "catalyst", "config.json")
-  );
+    resolve(homedir(), ".config", "catalyst", "config.json");
+  const canonicalPath = resolveLayer2Path(process.env);
+  if (legacyPath !== canonicalPath) {
+    const msg =
+      `layer2 config path shadow-diff (CTL-1616 PR6): legacy chain resolved "${legacyPath}" ` +
+      `but the canonical chain resolved "${canonicalPath}" — KEEPING the legacy path (this ` +
+      `function feeds WRITE destinations — cluster-sync secret materialization, cluster tune — ` +
+      `while catalyst-secret-env.sh and the scheduler's per-tick reload still read the legacy ` +
+      `chain; switching writes before the reader sweep would strand rotations on ` +
+      `MACHINE_CONFIG/XDG hosts. Set CATALYST_LAYER2_CONFIG_FILE to pin explicitly; the ` +
+      `canonical cutover lands with the full reader/writer sweep)`;
+    if (!_warnedLayer2PathDrift.has(msg)) {
+      _warnedLayer2PathDrift.add(msg);
+      log.warn(msg);
+    }
+  }
+  // #2929 post-merge Codex P1: LEGACY wins until every reader/writer of this
+  // path is swept onto the canonical chain in one PR — a split (canonical
+  // writes, legacy reads) makes a rotation write fresh credentials where the
+  // next daemon launch never looks, exporting the stale/revoked value forever.
+  return legacyPath;
 }
 
 // The repo root that owns the committed cluster roster (.catalyst/hosts.json).
@@ -557,12 +620,54 @@ export function getExecutor(configPath) {
 
 // --- CTL-1457: per-phase executor routing + codex-exec runtime settings ---
 
-// readExecutorByPhaseLayer1 — pull catalyst.orchestration.executorByPhase (a
-// phase→executor map) out of a project's Layer-1 .catalyst/config.json. Returns
-// {} for a null/missing/unparseable file or an absent/non-object key so callers
-// fall back to the daemon executor. Never throws — mirrors
-// readFleetHealthConfigLayer1's ENOENT-tolerant shape.
-export function readExecutorByPhaseLayer1(configPath) {
+// readExecutorByPhaseLayer1 — resolve the executorByPhase (phase→executor) map.
+// Precedence: env CATALYST_EXECUTOR_BY_PHASE (a JSON map) OVER Layer-1
+// catalyst.orchestration.executorByPhase — mirroring resolveExecutor's
+// env-over-Layer-1 precedence. Returns {} for a null/missing/unparseable file or an
+// absent/non-object key so callers fall back to the daemon executor. Never throws —
+// mirrors readFleetHealthConfigLayer1's ENOENT-tolerant shape.
+//
+// CTL-1457 follow-up (Gap 1): the env override is the DURABLE, clobber-safe home for
+// a routing pin. On worker nodes the per-node Layer-1 .catalyst/config.json is
+// git-reset every few minutes, so a routing pin written to the file cannot persist;
+// CATALYST_EXECUTOR_BY_PHASE (set in the daemon launch env) survives that reset. When
+// set to a plain-object JSON map it REPLACES the file (env-over-Layer-1). When set but
+// malformed (invalid JSON, or JSON that is not a plain object) it WARN-logs actionably
+// and FALLS THROUGH to the Layer-1 file — a routing pin never silently vanishes AND a
+// typo never silently routes. Example: {"triage":"codex-exec"}.
+export function readExecutorByPhaseLayer1(configPath, env = process.env) {
+  const rawEnv = env?.CATALYST_EXECUTOR_BY_PHASE;
+  if (typeof rawEnv === "string" && rawEnv.trim() !== "") {
+    let parsedEnv;
+    let parseErr = null;
+    try {
+      parsedEnv = JSON.parse(rawEnv);
+    } catch (err) {
+      parseErr = err;
+    }
+    const isPlainObject =
+      !parseErr && parsedEnv && typeof parsedEnv === "object" && !Array.isArray(parsedEnv);
+    // Every route VALUE must be a string. A non-string (e.g. {"triage":false} /
+    // {"triage":null}) would make resolveExecutorForPhase treat that phase as unrouted
+    // AND hide a valid Layer-1 route — silently losing the durable pin this override adds.
+    const badPhase = isPlainObject
+      ? Object.entries(parsedEnv).find(([, v]) => typeof v !== "string")?.[0]
+      : undefined;
+    if (isPlainObject && badPhase === undefined) {
+      // A well-formed phase→executor string map → env REPLACES the Layer-1 file.
+      return parsedEnv;
+    }
+    // Any malformed shape (JSON parse error, non-object, or a non-string route value) →
+    // WARN + fall through to the Layer-1 file. Never throw, never silently route.
+    log.warn(
+      { value: rawEnv, err: parseErr?.message, badPhase },
+      parseErr
+        ? "CATALYST_EXECUTOR_BY_PHASE is set but is not valid JSON — ignoring the env override and falling back to the Layer-1 executorByPhase map"
+        : badPhase !== undefined
+          ? `CATALYST_EXECUTOR_BY_PHASE has a non-string value for phase "${badPhase}" — ignoring the env override and falling back to the Layer-1 executorByPhase map`
+          : "CATALYST_EXECUTOR_BY_PHASE is set but did not parse to a JSON object (a phase→executor map) — ignoring the env override and falling back to the Layer-1 executorByPhase map"
+    );
+  }
   if (!configPath) return {};
   try {
     const parsed = JSON.parse(readFileSync(configPath, "utf8"));
@@ -591,11 +696,11 @@ export function readExecutorByPhaseLayer1(configPath) {
 //     today (zero behavior change when executorByPhase is empty).
 // Returns { executor, source } — source is "executorByPhase" for a routed phase,
 // else resolveExecutor's source ("env" | "layer1" | "default"). The `env` bag is
-// accepted for signature symmetry with the other injected-env-bag readers; routing
-// itself is Layer-1-file-only today (there is no env override for the map).
+// threaded into readExecutorByPhaseLayer1 so the CTL-1457-followup env override
+// (CATALYST_EXECUTOR_BY_PHASE, env-over-Layer-1) is honored here too — a phase routed
+// via the durable env map resolves exactly as one routed via the Layer-1 file.
 export function resolveExecutorForPhase(phase, { configPath, env = process.env } = {}) {
-  void env; // reserved for signature symmetry; per-phase routing is Layer-1-file-only.
-  const map = readExecutorByPhaseLayer1(configPath);
+  const map = readExecutorByPhaseLayer1(configPath, env);
   const raw = phase != null ? map[phase] : undefined;
   if (typeof raw === "string" && raw.trim() !== "") {
     const normalized = raw.trim().toLowerCase();
@@ -872,6 +977,116 @@ export const HEARTBEAT_INTERVAL_MS =
 export const HEARTBEAT_GRACE_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
 
+// CTL-1529 — how far back the BOUNDED heartbeat tail read tries to reach.
+//
+// The heartbeat read used to materialize the whole monthly event log (883 MB on
+// mini, ~1.9 s per read, 3-4 reads per scheduler tick, one giant contiguous
+// buffer bun/mimalloc never returns to the OS). It is now a time-covering tail.
+// Two numbers govern it, and they are NOT the same thing:
+//
+//   HEARTBEAT_GRACE_MS       — the CORRECTNESS FLOOR. The tail must provably span
+//     at least this, or "absent from the tail" carries no information about
+//     liveness at all and the reader must refuse to answer (see
+//     scanLocalHeartbeats). Derived, never hardcoded — an operator raising
+//     EXECUTION_CORE_HEARTBEAT_GRACE_MS must not silently break the guarantee.
+//
+//   HEARTBEAT_TAIL_WINDOW_MS — the TARGET window (this constant). Everything above
+//     the floor is margin bought to preserve the whole-file read's
+//     PRESENT-BUT-STALE classification: a host whose heartbeats stopped hours ago
+//     must keep resolving as "seen, but stale" (⇒ proven dead ⇒ its work is
+//     reclaimed) rather than collapsing to "absent" (⇒ not proven dead ⇒ work
+//     strands forever). 12 h at the default grace (72 x 10 min) costs ~17 MB on
+//     mini's densest observed month — 2 % of the 64 MiB cap and 0.02x the
+//     whole-file read it replaces.
+//
+// Beyond this window a host absent from the tail is reported absent. That is not
+// a new horizon: the cross-host peer transport already answers over a 60-minute
+// Loki window (loki-liveness.mjs), and getEventLogPath() is current-month-only,
+// so the whole-file read already forgets everything at each UTC month rollover.
+//
+// ── the override is BOUNDED-PARSED, not `Number(env) || default` ────────────
+//
+// The first cut was `Math.max(GRACE, Number(env) || GRACE * 72)`, which accepted
+// three values that break the window in different directions. Measured on this
+// module at the default grace:
+//
+//   "999"  → 600000    a sub-grace value is silently clamped UP to exactly the
+//                      grace window. That is the DEGENERATE case: a tail that
+//                      spans only the grace window contains, BY DEFINITION, only
+//                      hosts that are still alive — every stale host is older
+//                      than now-grace and therefore outside it. So the
+//                      present-but-stale band is EMPTY, `covered:true` certifies
+//                      nothing about stale-vs-absent, and dead-host failover is
+//                      off with no event and no log line. Hence a MIN strictly
+//                      ABOVE the grace window, not merely at it.
+//   "-1"   → 600000    same silent clamp, from an obvious typo.
+//   "1e400"/"Infinity" → Infinity. scanEventsSince then walks to BOF every tick
+//                      — the whole-file read this ticket exists to remove,
+//                      reinstated by a config string.
+//   "abc"/"0" → 43200000, the default, but SILENTLY: `Number("abc") || d` and
+//                      `Number("0") || d` are indistinguishable from unset.
+//
+// MIN = 2 x HEARTBEAT_GRACE_MS — DERIVED, never hardcoded, so raising the grace
+//   raises the floor with it. Two grace windows is the smallest setting with a
+//   NON-EMPTY present-but-stale band (a host dead between 1x and 2x grace is
+//   still in the tail, hence still reclaimable). Anything smaller is the
+//   degenerate case above.
+// MAX = 31 days — the month-partitioned log's own horizon. getEventLogPath() is
+//   current-month-only, so no window beyond one month can ever be satisfied by
+//   more data: past this, `covered` can only come from reachedBof, i.e. from
+//   reading the entire file. A cap here keeps "read everything, every tick" out
+//   of the configuration space.
+//
+// Invalid ⇒ the DEFAULT, reported through `onInvalid` (the daemon logs it) —
+// never a silent clamp, because the failure it causes is invisible for hours.
+export const HEARTBEAT_TAIL_WINDOW_MIN_MS = HEARTBEAT_GRACE_MS * 2;
+export const HEARTBEAT_TAIL_WINDOW_MAX_MS = 31 * 24 * 60 * 60_000; // 31 days
+export const HEARTBEAT_TAIL_WINDOW_DEFAULT_MS = HEARTBEAT_GRACE_MS * 72; // 12 h at the default grace
+
+export function resolveHeartbeatTailWindowMs(
+  raw,
+  {
+    defaultMs = HEARTBEAT_TAIL_WINDOW_DEFAULT_MS,
+    min = HEARTBEAT_TAIL_WINDOW_MIN_MS,
+    max = HEARTBEAT_TAIL_WINDOW_MAX_MS,
+    onInvalid = null,
+  } = {},
+) {
+  // Unset / empty is the documented way to take the default — stay silent.
+  if (raw === undefined || raw === null) return defaultMs;
+  const str = String(raw).trim();
+  if (str === "") return defaultMs;
+
+  const n = Number(str);
+  let reason = null;
+  if (!Number.isFinite(n)) {
+    reason = "not a finite number"; // NaN ("abc"), Infinity, -Infinity, 1e400
+  } else {
+    const v = Math.floor(n);
+    if (v < min) reason = `below the ${min}ms minimum (must exceed HEARTBEAT_GRACE_MS to make stale-vs-absent decidable)`;
+    else if (v > max) reason = `above the ${max}ms maximum (the monthly log's own horizon)`;
+    else return v;
+  }
+  if (typeof onInvalid === "function") onInvalid({ raw: str, reason, defaultMs, min, max });
+  return defaultMs;
+}
+
+export const HEARTBEAT_TAIL_WINDOW_MS = resolveHeartbeatTailWindowMs(
+  process.env.EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS,
+  {
+    onInvalid: ({ raw, reason, defaultMs, min, max }) => {
+      try {
+        log.warn(
+          { raw, reason, min, max, usingMs: defaultMs },
+          "ctl-1529: EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS is invalid — ignoring it and using the default window",
+        );
+      } catch {
+        /* logger unavailable (bare import in a test) — the fallback still applies */
+      }
+    },
+  },
+);
+
 // resolveRestoreHoldMs — parse the CTL-1091 restore-hold override with the
 // documented fallback semantics. Valid: a finite value >= 0, INCLUDING an explicit
 // 0 (opt-out: disables the hold, admitting a restored host immediately). Invalid →
@@ -1087,11 +1302,21 @@ export function readMemorySamplerConfig() {
 // (catalyst.orchestration.fleetHealth in .catalyst/config.json) > code default.
 // `selfHealEnabled` DEFAULTS OFF — the first ship is a pure alert; nothing is
 // reaped until an operator opts in via EXECUTION_CORE_FLEET_SELF_HEAL.
+//
+// CTL-1503: the fleet.health.degraded event is now EDGE-TRIGGERED with a
+// HYSTERESIS BAND — degraded fires once on the healthy→degraded edge and a paired
+// fleet.health.recovered fires once on the degraded→healthy edge. The swap signal
+// carries a distinct lower `swapUsedMbClearThreshold`: the latch clears only once
+// swap drops strictly below the clear threshold, so a signal hovering in the band
+// [clear, trip) cannot re-flap. The absolute swap trip is raised above the
+// observed normal-swap ceiling (~11.5–24 GB on a 16 GB Mac) so it stops firing on
+// every tick. Both are per-host tunable via env / Layer-1.
 const FLEET_HEALTH_DEFAULTS = Object.freeze({
   enabled: true,
   intervalMs: 120_000,
   jobsThreshold: 500,
-  swapUsedMbThreshold: 4096,
+  swapUsedMbThreshold: 24576,
+  swapUsedMbClearThreshold: 16384,
   agentsThreshold: 12,
   procsThreshold: 40,
   selfHealEnabled: false,
@@ -1126,6 +1351,29 @@ function fleetHealthNumber(envVal, l1Val, def) {
 
 export function readFleetHealthConfig(configPath) {
   const l1 = readFleetHealthConfigLayer1(configPath);
+  // CTL-1503 (Codex P2): the swap CLEAR threshold must be STRICTLY below the TRIP
+  // threshold, or a steady swap value at the trip level is simultaneously `trip`
+  // (>=) and `clear` (<) — the latch emits recovery while the breach continues, then
+  // alternates degraded/recovered each tick. Resolve both, then clamp an invalid
+  // clear (>= trip) down to trip-1 with a loud warn so hysteresis is always a real band.
+  const swapTrip = fleetHealthNumber(
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
+    l1.swapUsedMbThreshold,
+    FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
+  );
+  let swapClear = fleetHealthNumber(
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD,
+    l1.swapUsedMbClearThreshold,
+    FLEET_HEALTH_DEFAULTS.swapUsedMbClearThreshold,
+  );
+  if (swapClear >= swapTrip) {
+    const clamped = Math.max(0, swapTrip - 1);
+    log.warn(
+      { swapClear, swapTrip, clamped },
+      "fleet-health: swapUsedMbClearThreshold >= swapUsedMbThreshold — clamping clear below trip to keep a real hysteresis band",
+    );
+    swapClear = clamped;
+  }
   return {
     // env=0 disables; otherwise Layer-1 enabled===false disables; else default-on.
     enabled:
@@ -1144,11 +1392,10 @@ export function readFleetHealthConfig(configPath) {
       l1.jobsThreshold,
       FLEET_HEALTH_DEFAULTS.jobsThreshold,
     ),
-    swapUsedMbThreshold: fleetHealthNumber(
-      process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
-      l1.swapUsedMbThreshold,
-      FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
-    ),
+    swapUsedMbThreshold: swapTrip,
+    // CTL-1503 — lower clear threshold for the swap hysteresis band; the latch
+    // releases only once swap drops strictly below this (clamped < trip above).
+    swapUsedMbClearThreshold: swapClear,
     agentsThreshold: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_AGENTS_THRESHOLD,
       l1.agentsThreshold,
@@ -1714,6 +1961,15 @@ export function getReplicaDbPath() {
   return process.env.CATALYST_REPLICA_DB || resolve(catalystDir(), "catalyst-replica.db");
 }
 
+// CTL-1508: path to the cloud-sync self-heal breadcrumb — dropped by the writer just
+// before a genuine-stall exit(1), cleared on the next boot's 'live'. Lives beside the
+// writer's log/DB under ~/catalyst so CTL-1509's external responder and doctor find it at
+// a stable path. Re-resolved per call (the catalystDir() idiom) so tests redirect via
+// CATALYST_DIR.
+export function getCloudSyncSelfHealPath() {
+  return resolve(catalystDir(), "cloud-sync.selfheal.json");
+}
+
 // --- Catalyst-Cloud token resolution (CTL-1394) ---
 // The supervised cloud-sync daemon reads its cloud token from a STANDARD env-var NAME —
 // `CATALYST_CLOUD_TOKEN` — on EVERY host (the same name cloud-token-env.mjs / CTL-1307
@@ -1724,33 +1980,37 @@ export function getReplicaDbPath() {
 // lets a host point at a differently-named var. NAME-ONLY: this never reads or returns the
 // secret VALUE (the writer reads process.env[name]; doctor checks presence by name), so the
 // result is safe to log.
-const DEFAULT_CLOUD_TOKEN_ENV = "CATALYST_CLOUD_TOKEN";
-
-// readLayer2CloudTokenEnv — the raw catalyst.cloud.tokenEnv string from the Layer-2
-// file, or undefined (absent/malformed/non-string). Never throws (parity with
-// readLayer2NodeClass). The per-host escape hatch — name your token var without a code change.
-function readLayer2CloudTokenEnv() {
-  try {
-    const v = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cloud?.tokenEnv;
-    return typeof v === "string" && v.length > 0 ? v : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-// resolveNodeCloudTokenEnv — resolve the env-var NAME that holds this host's cloud token:
-// env override → Layer-2 override → the standard `CATALYST_CLOUD_TOKEN`. Returns
-// { envVar, source } where source ∈ "env" | "layer2" | "default". Pure + NAME-only: it never
-// reads process.env[envVar] (the secret value), so it is safe to log the result. No host
-// names are hardcoded — the resolver is host-agnostic by design.
+//
+// CTL-1616 PR5 FOLD: this used to be a hand-rolled 3-tier ladder (env override → Layer-2
+// override read via the OLD non-injectable getLayer2ConfigPath() → the hardcoded default)
+// duplicated against health-responder.sh's bash fallback (design table: "CATALYST_CLOUD_TOKEN
+// name resolution — 2 copies, hand-duplicated precedence ladder"). It is now a THIN DELEGATE
+// onto the secret contract's single NAME resolver (lib/secret-contract.mjs
+// resolveCloudTokenName) — the SAME implementation health-responder.sh's bash fallback mirrors
+// via lib/catalyst-secret-contract.sh's catalyst_secret_cloud_token_name (§9 PR5 fixture
+// matrix: both readers must agree byte-for-byte on the resolved NAME for
+// {env-override,layer2,default} × {bun-path,bash-fallback}). RETURN SHAPE is byte-compatible
+// with every existing caller (doctor.mjs's checkCloudSync `tokenEnv = resolveNodeCloudTokenEnv()`
+// and checkCloudTokenEnv's shadow-diff, cloud-sync.mjs, health-responder.sh's bun probe): still
+// { envVar, source } with source ∈ "env" | "layer2" | "default".
+//
+// ONE INCIDENTAL BEHAVIOR NOTE (not a named design risk, flagged here for honesty): the OLD
+// readLayer2CloudTokenEnv() read the Layer-2 file via getLayer2ConfigPath() — homedir-only,
+// ignoring CATALYST_MACHINE_CONFIG / XDG_CONFIG_HOME — and, separately, ALWAYS consulted real
+// process.env for that file path regardless of the `env` param a caller passed in (a latent
+// injection gap; every existing test mutates process.env directly rather than passing a custom
+// `env`, so this was never observed). resolveCloudTokenName delegates to the registry's
+// resolveLayer2Path, which IS the canonical CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG
+// > XDG_CONFIG_HOME > ~/.config/catalyst chain (design §2) and DOES honor the injected `env`
+// param. On a host that sets CATALYST_MACHINE_CONFIG or XDG_CONFIG_HOME but not
+// CATALYST_LAYER2_CONFIG_FILE, the Layer-2 file this resolver now reads for the
+// catalyst.cloud.tokenEnv override can differ from before PR5 — every existing test only sets
+// CATALYST_LAYER2_CONFIG_FILE directly (the tier both chains check first), so no test's
+// behavior changes, but this is a REAL, if narrow, behavior change worth flagging alongside the
+// Groq fold below rather than letting the general Layer-2-path unification (design §9 PR6)
+// quietly absorb it here first.
 export function resolveNodeCloudTokenEnv({ env = process.env } = {}) {
-  const override = env.CATALYST_CLOUD_TOKEN_ENV;
-  if (typeof override === "string" && override.length > 0) {
-    return { envVar: override, source: "env" };
-  }
-  const l2 = readLayer2CloudTokenEnv();
-  if (l2) return { envVar: l2, source: "layer2" };
-  return { envVar: DEFAULT_CLOUD_TOKEN_ENV, source: "default" };
+  return resolveCloudTokenName(env);
 }
 
 export function readDelegateRunnerConfig(env = process.env) {

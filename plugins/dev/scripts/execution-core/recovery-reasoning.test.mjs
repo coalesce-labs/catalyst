@@ -27,6 +27,11 @@ import {
   recordVerdict,
   defaultSkipReason,
   escalateExhaustedIntents,
+  classifyPrNotMerged,
+  PR_NOT_MERGED_REASON,
+  defaultClearIntentCooldown,
+  defaultLatchHasNoClock,
+  restampNoClockEscalations,
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -973,6 +978,47 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.inv.phantomMergedPr.failed"]).toBe(2);
   });
 
+  test("recovery.board-scan promotes stranded-mid-pipeline population counters (CTL-1644 Codex R4)", () => {
+    const details = {
+      mode: "shadow",
+      invariantsFailed: 1,
+      gateDecision: "proceed",
+      gateReason: "1 invariant(s) flagged",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      strandedCount: 5,
+      strandedHeldCount: 5, // Phase-2: whole cohort is unknown-salvage (held)
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a.cohort_stranded_mid_pipeline).toBe(5);
+    expect(a.cohort_stranded_held).toBe(5);
+  });
+
+  // CTL-1607: per-host slot census promoted to chartable recovery.slot.* attributes.
+  test("recovery.board-scan promotes slot* scalars under recovery.slot.* names", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0,
+      gateDecision: "proceed", gateReason: "no wedge",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      invariants: {},
+      slotCapacity: 6, slotInUse: 4, slotFree: 2,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a["recovery.slot.capacity"]).toBe(6);
+    expect(a["recovery.slot.in_use"]).toBe(4);
+    expect(a["recovery.slot.free"]).toBe(2);
+  });
+
+  test("recovery.board-scan omits recovery.slot.* when slot scalars are null", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0, gateDecision: "proceed", gateReason: "r",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0, invariants: {},
+      slotCapacity: null, slotInUse: null, slotFree: null,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect("recovery.slot.capacity" in a).toBe(false);
+    expect("recovery.slot.free" in a).toBe(false);
+  });
+
   test("recovery.board-scan never promotes rosters/move arrays (cardinality)", () => {
     const details = {
       mode: "shadow",
@@ -1173,17 +1219,46 @@ describe("recovery-intent terminal TTL (CTL-1431)", () => {
     expect(defaultShouldSkipItem("CTL-1431-D", { orchDir, now: () => nowT })).toBe(true);
   });
 
-  test("(F3) escalated with NO timestamp stays terminal (clear-cooldown case, returns true)", () => {
+  test("(F3, CTL-1610-updated) a LEGACY hand-crafted timestamp-less escalation is still terminal (defaultSkipReason:2136 unchanged)", () => {
     const t0 = 1_000_000_000_000;
     defaultRecordIntent("CTL-1431-F3", { decision: "escalate" }, { orchDir, now: () => t0 });
-    // Delete both timestamps, mimicking defaultClearIntentCooldown (which keeps
-    // `escalated` as a deliberate terminal latch). Such an entry can't be aged out.
+    // clearIntentCooldown no longer strips escalated timestamps (see CTL-1610 test below);
+    // this simulates only a pre-fix on-disk artifact by editing the file directly.
     const p = pathJoin(orchDir, ".recovery-intents", "CTL-1431-F3.json");
     const data = JSON.parse(readFileSync(p, "utf8"));
     delete data.ts;
     delete data.lastTs;
     writeFileSync(p, JSON.stringify(data));
     expect(defaultShouldSkipItem("CTL-1431-F3", { orchDir, now: () => t0 + 1 })).toBe(true);
+  });
+
+  test("(CTL-1610) clearIntentCooldown on an escalated entry is a no-op and preserves BOTH timestamps", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-A", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1610-A.json");
+    const before = JSON.parse(readFileSync(p, "utf8"));
+    expect(before.escalated).toBe(true);
+    expect(typeof before.ts).toBe("number");
+    expect(typeof before.lastTs).toBe("number");
+
+    // A failed dispatch tries to reset the cooldown timer; on an escalated entry it must refuse.
+    expect(defaultClearIntentCooldown("CTL-1610-A", { orchDir })).toBe(false);
+
+    const after = JSON.parse(readFileSync(p, "utf8"));
+    expect(after.ts).toBe(before.ts);
+    expect(after.lastTs).toBe(before.lastTs);
+    // And the entry still ages out via the 7-day TTL rather than latching forever.
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    expect(defaultShouldSkipItem("CTL-1610-A", { orchDir, now: () => past })).toBe(false);
+  });
+
+  test("(CTL-1610) clearIntentCooldown STILL clears a non-escalated (cooldown/defer) entry", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-B", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    expect(defaultClearIntentCooldown("CTL-1610-B", { orchDir })).toBe(true);
+    const after = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-B.json"), "utf8"));
+    expect(after.lastTs).toBeUndefined();
+    expect(after.ts).toBeUndefined();
   });
 
   test("(F2) a fix recorded AFTER TTL expiry drops the escalated latch (no silent re-latch)", () => {
@@ -1210,6 +1285,87 @@ describe("recovery-intent terminal TTL (CTL-1431)", () => {
       { orchDir, now: () => within },
     );
     expect(entry.escalated).toBe(true);
+  });
+});
+
+// ─── CTL-1610 (Phase 2): defaultLatchHasNoClock ─────────────────────────────
+describe("defaultLatchHasNoClock (CTL-1610 Phase 2)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "latch-no-clock-"));
+  });
+  afterEach(() => {
+    try { rmSync(orchDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  test("(CTL-1610) defaultLatchHasNoClock: true iff escalated AND no numeric ts/lastTs", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1610-C", { decision: "escalate" }, { orchDir, now: () => t0 });
+    expect(defaultLatchHasNoClock("CTL-1610-C", { orchDir })).toBe(false); // clocked
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1610-C.json");
+    const d = JSON.parse(readFileSync(p, "utf8")); delete d.ts; delete d.lastTs; writeFileSync(p, JSON.stringify(d));
+    expect(defaultLatchHasNoClock("CTL-1610-C", { orchDir })).toBe(true);  // latched, no clock
+    // non-escalated entries are never a no-clock latch
+    defaultRecordIntent("CTL-1610-D", { decision: "dispatched" }, { orchDir, now: () => t0 });
+    expect(defaultLatchHasNoClock("CTL-1610-D", { orchDir })).toBe(false);
+    // absent ledger → false
+    expect(defaultLatchHasNoClock("CTL-1610-NONE", { orchDir })).toBe(false);
+  });
+});
+
+// ─── CTL-1610 (Phase 3): restampNoClockEscalations ─────────────────────────
+describe("restampNoClockEscalations (CTL-1610 Phase 3)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "restamp-"));
+  });
+  afterEach(() => {
+    try { rmSync(orchDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  test("(CTL-1610) restampNoClockEscalations re-stamps ONLY escalated+no-clock entries (idempotent)", () => {
+    const t0 = 1_000_000_000_000;
+    // (1) latched no-clock → gets re-stamped
+    defaultRecordIntent("CTL-1610-E", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const pe = pathJoin(orchDir, ".recovery-intents", "CTL-1610-E.json");
+    const de = JSON.parse(readFileSync(pe, "utf8")); delete de.ts; delete de.lastTs; writeFileSync(pe, JSON.stringify(de));
+    // (2) clocked escalation → untouched
+    defaultRecordIntent("CTL-1610-F", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // (3) non-escalated → untouched
+    defaultRecordIntent("CTL-1610-G", { decision: "dispatched" }, { orchDir, now: () => t0 });
+
+    const now = () => t0 + 5;
+    const changed = restampNoClockEscalations({ orchDir, now });
+    expect(changed).toEqual(["CTL-1610-E"]);
+    const after = JSON.parse(readFileSync(pe, "utf8"));
+    expect(after.escalated).toBe(true);
+    expect(after.ts).toBe(t0 + 5);
+    expect(after.lastTs).toBe(t0 + 5);
+    // idempotent: a second run finds nothing to do
+    expect(restampNoClockEscalations({ orchDir, now })).toEqual([]);
+  });
+
+  test("(CTL-1610 Codex P2) a per-file write failure does not abort the scan — remaining entries are healed", () => {
+    const t0 = 1_000_000_000_000;
+    // Three no-clock escalated entries; all seeded as timestamp-less latches.
+    for (const ticket of ["CTL-1610-H", "CTL-1610-I", "CTL-1610-J"]) {
+      defaultRecordIntent(ticket, { decision: "escalate" }, { orchDir, now: () => t0 });
+      const p = pathJoin(orchDir, ".recovery-intents", `${ticket}.json`);
+      const d = JSON.parse(readFileSync(p, "utf8")); delete d.ts; delete d.lastTs; writeFileSync(p, JSON.stringify(d));
+    }
+    // Overwrite H with invalid JSON — readFileSync succeeds but JSON.parse throws,
+    // simulating a mid-scan race (TOCTOU) or a corrupt file.
+    writeFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-H.json"), "NOT_JSON{{{");
+    // Overwrite J with a directory — readFileSync throws, also per-file isolated.
+    const pJ = pathJoin(orchDir, ".recovery-intents", "CTL-1610-J.json");
+    rmSync(pJ); mkdirSync(pJ);
+
+    const now = () => t0 + 5;
+    const changed = restampNoClockEscalations({ orchDir, now });
+    // I must be healed even though H (bad JSON) and J (directory) failed.
+    expect(changed).toContain("CTL-1610-I");
+    const afterI = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", "CTL-1610-I.json"), "utf8"));
+    expect(afterI.ts).toBe(t0 + 5);
   });
 });
 
@@ -1940,6 +2096,36 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
     expect(tick.processed).toBe(0);
   });
 
+  // PROJ-1657 Codex P1 (round 8): a probe-less phase already parked terminal
+  // (stalledReason "no-probe-for-phase") must not re-enter classification —
+  // that would let it default to decision:"defer"/fix_class:"board-health"
+  // and get picked up for a fresh recovery-pass dispatch, reversing the
+  // terminal hand-off to a human.
+  test("no-probe-for-phase terminal signal is skipped — no reclassification, lands in terminalSkipped[]", () => {
+    const posted = [];
+    const events = [];
+    reasoningRecoveryPass(
+      [
+        {
+          ticket: "PROJ-1000",
+          phase: "recovery-pass",
+          evidence: { signal: { stalledReason: "no-probe-for-phase" } },
+        },
+      ],
+      {
+        mode: "enforce",
+        postComment: (t, body) => posted.push({ t, body }),
+        emitEvent: (e) => events.push(e),
+        ...inert,
+      },
+    );
+    expect(posted.length).toBe(0);
+    const tick = events.find((e) => e.type === "recovery.tick").details;
+    expect(tick.terminalSkipped).toEqual(["PROJ-1000"]);
+    expect(tick.processed).toBe(0);
+    expect(events.some((e) => e.type === "recovery.decision" && e.ticket === "PROJ-1000")).toBe(false);
+  });
+
   test("emits a recovery.decision per classified item with the routing rule", () => {
     const events = [];
     reasoningRecoveryPass(
@@ -2162,5 +2348,367 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 })).toBe("escalated");
     // …and B1's terminal TTL ages it back into triage.
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 + RECOVERY_TERMINAL_INTENT_TTL_MS })).toBeNull();
+  });
+});
+
+// ─── CTL-1496: pr_not_merged classification ─────────────────────────────────
+
+describe("classifyPrNotMerged (CTL-1496)", () => {
+  const mkEvidence = () => ({
+    logsOutput: null,
+    signal: { failureReason: PR_NOT_MERGED_REASON },
+    failureReason: PR_NOT_MERGED_REASON,
+    ticket: "CTL-1",
+  });
+  const probeReturning = (o) => () => o;
+
+  test("failing check → bounded-llm fix, brief names the check", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 42,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).toContain("quality");
+  });
+
+  test("unresolved bot thread only → bounded-llm fix (review sub-mode)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 43,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [{ id: "T1", path: "a.ts", line: 3, body: "fix this" }],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).toContain("review");
+  });
+
+  test("human CHANGES_REQUESTED → escalate with PR number in reason, not opaque pr_not_merged", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 44,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H1", body: "redesign", path: "b.ts", line: 9 }],
+        hasChangesRequested: true,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+    expect(r.details.reason).toContain("44");
+    expect(r.details.reason).not.toBe("Failure reason: pr_not_merged");
+  });
+
+  test("no blockers / CLEAN → bounded-llm fix (finish the merge)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 45,
+        mergeStateStatus: "CLEAN",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+
+  test("BLOCKED with no actionable cause → escalate (awaiting required approval, not LLM-fixable)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 46,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no remediable cause");
+  });
+
+  test("DIRTY with no actionable cause → escalate 'no remediable cause' (fallthrough coverage)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 47,
+        mergeStateStatus: "DIRTY",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no remediable cause");
+  });
+
+  test("probe throws → defer (transient), NOT escalate", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: () => { throw new Error("gh down"); },
+    });
+    expect(r.decision).toBe("defer");
+  });
+
+  test("no PR found (prNumber null) → escalate with 'no open PR' reason", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({ prNumber: null }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no open PR");
+  });
+
+  test("generateRemediateBrief('pr-not-merged') mentions gh pr view, @codex review", () => {
+    const b = generateRemediateBrief("pr-not-merged");
+    expect(b).toContain("gh pr view");
+    expect(b).toContain("@codex review");
+  });
+
+  test("generateRemediateBrief('pr-not-merged', probe) embeds check names and thread paths", () => {
+    const probe = {
+      prNumber: 42,
+      mergeStateStatus: "BLOCKED",
+      failingChecks: [{ name: "quality-gate", detailsUrl: null }],
+      unresolvedBotThreads: [{ id: "T1", path: "src/foo.ts", line: 5, body: "fix this" }],
+    };
+    const b = generateRemediateBrief("pr-not-merged", probe);
+    expect(b).toContain("quality-gate");
+    expect(b).toContain("src/foo.ts");
+    expect(b).toContain("@codex review");
+  });
+
+  // REGRESSION GUARD: probe is never called for non-pr_not_merged reasons.
+  test("merge-conflict still bounded-llm without touching the probe", () => {
+    let called = false;
+    const r = defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "merge-conflict" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(called).toBe(false);
+  });
+
+  test("unknown failure without pr_not_merged — probe never called", () => {
+    let called = false;
+    defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "some-other-reason" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(called).toBe(false);
+  });
+
+  test("classifyPrNotMerged exported + produces same result as via defaultClassifyTicket", () => {
+    const probe = probeReturning({
+      prNumber: 50,
+      mergeStateStatus: "BLOCKED",
+      failingChecks: [{ name: "lint", detailsUrl: null }],
+      unresolvedBotThreads: [],
+      unresolvedHumanThreads: [],
+      hasChangesRequested: false,
+    });
+    const via1 = defaultClassifyTicket(mkEvidence(), { probePrBlock: probe });
+    const via2 = classifyPrNotMerged(mkEvidence(), { probePrBlock: probe });
+    expect(via1).toEqual(via2);
+  });
+
+  // ── CTL-1496 remediation (Codex re-review round 2) ──
+
+  // P2: a merely-open human discussion thread (reviewDecision NOT
+  // CHANGES_REQUESTED) must NOT short-circuit to a human-escalation latch when
+  // there is a fixable cause — it follows the actionable path.
+  test("open human thread w/o CHANGES_REQUESTED + failing check → fix (not escalate)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 51,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H9", body: "just a question", path: "x.ts", line: 2 }],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+  });
+
+  // P2: pending required checks (queued/in-progress) are not a failure and not
+  // stuck — defer instead of latching a "no remediable cause" escalation.
+  test("only pending checks, no other cause → defer (retry next tick)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 52,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        pendingChecks: [{ name: "e2e", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("defer");
+    expect(r.details.reason).toContain("e2e");
+  });
+
+  // P2: a failing check still wins over pending — fix, don't defer.
+  test("failing check alongside a pending check → fix (failing wins)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 53,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "unit", detailsUrl: null }],
+        pendingChecks: [{ name: "e2e", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+
+  // P1: the ticket's repo + worktreePath are threaded from the worker signal
+  // into the probe so it resolves the ticket's repository, not the daemon's.
+  test("threads repo + worktreePath from the worker signal into the probe", () => {
+    let seen = null;
+    classifyPrNotMerged(
+      {
+        failureReason: PR_NOT_MERGED_REASON,
+        ticket: "CTL-77",
+        signal: {
+          failureReason: PR_NOT_MERGED_REASON,
+          branchName: "ryan/ctl-77-x",
+          repo: "acme/widgets",
+          worktreePath: "/wt/CTL-77",
+        },
+      },
+      {
+        probePrBlock: (ticket, opts) => {
+          seen = { ticket, ...opts };
+          return { prNumber: 77, mergeStateStatus: "CLEAN", failingChecks: [], unresolvedBotThreads: [], unresolvedHumanThreads: [], hasChangesRequested: false };
+        },
+      },
+    );
+    expect(seen.ticket).toBe("CTL-77");
+    expect(seen.repo).toBe("acme/widgets");
+    expect(seen.worktreePath).toBe("/wt/CTL-77");
+    expect(seen.branch).toBe("ryan/ctl-77-x");
+  });
+});
+
+// ─── CTL-1496 Phase 4: reasoningRecoveryPass end-to-end (enforce + shadow) ──
+
+describe("reasoningRecoveryPass — pr_not_merged end-to-end (CTL-1496 Phase 4)", () => {
+  const mkPrNotMergedItem = () => ({
+    ticket: "CTL-PRNM",
+    evidence: {
+      failureReason: "pr_not_merged",
+      signal: { failureReason: "pr_not_merged" },
+      ticket: "CTL-PRNM",
+      logsOutput: null,
+      jobState: null,
+    },
+  });
+
+  test("enforce: pr_not_merged + failing check → dispatches recovery-pass (fix intent recorded)", () => {
+    const intents = [];
+    const events = [];
+    const items = [mkPrNotMergedItem()];
+    reasoningRecoveryPass(items, {
+      mode: "enforce",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "bounded-llm",
+        details: {
+          reason: "PR #42 failing quality",
+          brief: "…@codex review…",
+        },
+      }),
+      invokeRecoveryPass: (_ticket, _o) => ({
+        success: true,
+        dispatched: true,
+        details: {},
+      }),
+      recordIntent: (t, i) => intents.push({ t, i }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(intents.length).toBeGreaterThan(0);
+    const fixIntent = intents.find((i) => i.i.decision === "fix" || i.i.type === "recovery-pass");
+    expect(fixIntent).toBeDefined();
+    expect(events.some((e) => e.type === "recovery.fixed" || e.type === "recovery.decision")).toBe(true);
+  });
+
+  test("shadow: pr_not_merged + failing check → emits would-fix event, dispatches NOTHING", () => {
+    const events = [];
+    const items = [mkPrNotMergedItem()];
+    reasoningRecoveryPass(items, {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "bounded-llm",
+        details: { reason: "PR #42", brief: "…" },
+      }),
+      invokeRecoveryPass: () => {
+        throw new Error("must not dispatch in shadow mode");
+      },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(events.some((e) => String(e.type).includes("would"))).toBe(true);
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
+  });
+
+  test("shadow: human CHANGES_REQUESTED → emits would-escalate, dispatches NOTHING", () => {
+    const events = [];
+    reasoningRecoveryPass([mkPrNotMergedItem()], {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "escalate",
+        fix_class: "human",
+        details: { reason: "PR #44 blocked by human review — 'redesign' (b.ts:9)" },
+      }),
+      invokeRecoveryPass: () => { throw new Error("must not dispatch in shadow"); },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(events.some((e) => String(e.type).includes("would-escalate") || String(e.type).includes("would"))).toBe(true);
+  });
+
+  test("probe throws in enforce → defer outcome (no dispatch, no escalation latch)", () => {
+    const events = [];
+    const intents = [];
+    reasoningRecoveryPass([mkPrNotMergedItem()], {
+      mode: "enforce",
+      classifyTicket: () => ({
+        decision: "defer",
+        fix_class: "board-health",
+        details: { reason: "pr_not_merged: probe failed (gh down); retry next tick" },
+      }),
+      invokeRecoveryPass: () => { throw new Error("must not dispatch on defer"); },
+      recordIntent: (t, i) => intents.push({ t, i }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    const deferIntent = intents.find((i) => i.i.decision === "defer");
+    expect(deferIntent).toBeDefined();
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
+    expect(events.some((e) => e.type === "recovery.escalated")).toBe(false);
   });
 });

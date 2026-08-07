@@ -52,10 +52,14 @@ import {
   appendFileSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   symlinkSync,
+  unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { codexConfig, log } from "./config.mjs";
@@ -315,9 +319,39 @@ function resolveThoughtsRoot(worktreePath) {
   }
 }
 
+// resolveWorktreeGitDirs — the REAL git metadata paths for a linked worktree.
+// For a linked worktree (every ticket worktree under wt/<TICKET>), `git commit`
+// writes per-worktree state (HEAD, index, index.lock, COMMIT_EDITMSG) under
+// `--absolute-git-dir`, which lives OUTSIDE the worktree tree entirely (in the
+// main checkout's `.git/worktrees/<name>/`) — and updates the object database +
+// refs under `--git-common-dir` (the shared `.git`, also outside the worktree).
+// Neither was previously in the sandbox's writable_roots, so `git commit` inside
+// a codex-exec worktree was refused with a permission error on `index.lock`.
+// Mirrors resolveGitExcludePath's spawnSync-and-fall-through style. Returns
+// { gitDir, commonDir }, either null on any resolution failure — best-effort,
+// never throws.
+function resolveWorktreeGitDirs(worktreePath) {
+  const run = (args) => {
+    try {
+      const res = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+      if (res && res.status === 0 && typeof res.stdout === "string" && res.stdout.trim()) {
+        return res.stdout.trim();
+      }
+    } catch {
+      /* best-effort */
+    }
+    return null;
+  };
+  return {
+    gitDir: run(["rev-parse", "--absolute-git-dir"]),
+    commonDir: run(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+  };
+}
+
 // resolveWritableRoots — the de-duplicated, absolute writable-root set for the
 // `-c sandbox_workspace_write.writable_roots=[…]` override: the configured roots
-// ∪ {orchDir} ∪ {the resolved thoughts real-root of the worktree if present}.
+// ∪ {orchDir} ∪ {the resolved thoughts real-root of the worktree if present}
+// ∪ {the worktree's real git-dir and git-common-dir, for linked worktrees}.
 // Order-preserving; drops non-absolute / empty / duplicate entries.
 function resolveWritableRoots(cfg, { orchDir, worktreePath } = {}) {
   const out = [];
@@ -331,6 +365,9 @@ function resolveWritableRoots(cfg, { orchDir, worktreePath } = {}) {
   for (const r of cfg?.writableRoots ?? []) add(r);
   add(orchDir);
   add(resolveThoughtsRoot(worktreePath));
+  const { gitDir, commonDir } = resolveWorktreeGitDirs(worktreePath);
+  add(gitDir);
+  add(commonDir);
   return out;
 }
 
@@ -449,25 +486,30 @@ export function buildCodexEnv(spec, cfg) {
   return env;
 }
 
-// gitExcludeAgents — append `.agents/` to the worktree's git info/exclude so the
-// codex skills symlink never shows as an untracked file (D7 — net-new; no existing
-// pattern). Handles the worktree `.git` being a FILE pointing at the real gitdir
-// by asking git for the resolved path. Idempotent + best-effort — never throws.
-function gitExcludeAgents(worktreePath) {
-  const pattern = ".agents/";
-  let excludePath = null;
+// resolveGitExcludePath — the worktree's git info/exclude absolute path (via
+// `git rev-parse --git-path info/exclude`, falling back to manual `.git`
+// resolution — see resolveGitInfoExcludeFallback — for a `git`-less
+// environment). Handles the worktree `.git` being a FILE pointing at the real
+// gitdir (a linked worktree). null when neither resolves. Best-effort.
+function resolveGitExcludePath(worktreePath) {
   try {
     const res = spawnSync("git", ["-C", worktreePath, "rev-parse", "--git-path", "info/exclude"], {
       encoding: "utf8",
     });
     if (res && res.status === 0 && typeof res.stdout === "string" && res.stdout.trim()) {
       const rel = res.stdout.trim();
-      excludePath = isAbsolute(rel) ? rel : join(worktreePath, rel);
+      return isAbsolute(rel) ? rel : join(worktreePath, rel);
     }
   } catch {
     /* fall through to the manual resolver */
   }
-  if (!excludePath) excludePath = resolveGitInfoExcludeFallback(worktreePath);
+  return resolveGitInfoExcludeFallback(worktreePath);
+}
+
+// appendGitExcludeLine — append `pattern` as its own line to `excludePath`,
+// idempotently: a no-op when any of `equivalents` (defaults to just `pattern`
+// itself) is already present as a trimmed line. Best-effort — never throws.
+function appendGitExcludeLine(excludePath, pattern, equivalents = [pattern]) {
   if (!excludePath) return;
   try {
     let existing = "";
@@ -476,17 +518,225 @@ function gitExcludeAgents(worktreePath) {
     } catch {
       /* no exclude file yet */
     }
-    const present = existing
-      .split("\n")
-      .map((l) => l.trim())
-      .some((l) => l === pattern || l === ".agents" || l === "/.agents/" || l === "/.agents");
-    if (present) return;
+    const lines = existing.split("\n").map((l) => l.trim());
+    if (equivalents.some((eq) => lines.includes(eq))) return;
     mkdirSync(dirname(excludePath), { recursive: true });
     const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
     appendFileSync(excludePath, `${prefix}${pattern}\n`);
   } catch {
     /* best-effort */
   }
+}
+
+// gitExcludeAgents — append the BLANKET `.agents/` pattern to the worktree's git
+// info/exclude so the codex skills symlink never shows as an untracked file (D7).
+// Reserved for the case where WE created `.agents/skills` WHOLESALE (a fresh
+// top-level symlink, or the pre-existing-our-symlink idempotent no-op) — NEVER
+// for a project-owned real `.agents/skills` dir (CTL-1530 threads dLZ + dLh +
+// dLX): a real dir is never touched and never git-excluded at all now — see
+// registerDevPluginSkillsIntoCodexHome — so this function's blanket pattern would
+// otherwise silently untrack real, tracked project content sharing that
+// directory. Recognizes the historical equivalents already written by past runs
+// (`.agents`, `/.agents/`, `/.agents`) as already-present. Idempotent +
+// best-effort — never throws.
+function gitExcludeAgents(worktreePath) {
+  appendGitExcludeLine(resolveGitExcludePath(worktreePath), ".agents/", [
+    ".agents/",
+    ".agents",
+    "/.agents/",
+    "/.agents",
+  ]);
+}
+
+// ── Machine-local link-ownership registry (CTL-1530 thread pJD) ────────────────
+// A prior fix (thread dLa) tried to decide "is this stale-looking symlink OURS to
+// refresh?" from the TARGET'S SHAPE: absolute, outside the worktree/codexHome,
+// ending in `plugins/dev/skills[/<name>]`, and resolving under the current user's
+// home directory. Thread pJD found that heuristic is still wrong in principle, not
+// just in degree: a project can author a link that is home-rooted AND
+// suffix-matching on purpose — e.g. `.agents/skills -> ~/src/catalyst/plugins/dev/skills`
+// is a perfectly reasonable vendored-checkout convention — and the shape heuristic
+// cannot tell that apart from a link this runner actually created. No path shape
+// can distinguish intent, so ownership is no longer INFERRED from what a target
+// looks like; it is PROVEN. `<codexHome>/codex-exec-links.json` is a machine-local
+// registry recording the exact coordinate + target of every symlink this runner
+// has EVER created or refreshed, written through on every successful symlinkSync.
+// A link is RUNNER-OWNED-STALE only when the registry has an entry for that EXACT
+// coordinate whose recorded target equals the target CURRENTLY on disk (proof we
+// wrote what's actually there right now) — never from path shape alone. This
+// REPLACES the former `isRunnerOwnedSkillTarget` suffix/homedir heuristic entirely
+// (deleted); nothing else in this module infers ownership from a target's shape.
+//
+// Registry shape (machine-local JSON, best-effort — a registry read/write failure
+// never fails a dispatch):
+//   {
+//     "worktree": { "<realpath(worktreePath)>": { ".agents/skills": "<target we wrote>" } },
+//     "codexHome": { "<skill-entry-name>": "<target we wrote>" }
+//   }
+// Read/parse failures (absent, unreadable, corrupt JSON, non-object) are
+// FAIL-SAFE: treated as "we have no proof of ownership of anything", so every
+// existing on-disk link is left classified foreign — this runner only ever
+// refreshes/unlinks a link it can PROVE it wrote, never one merely shaped like
+// something it would write. A dispatch with no codexHome configured (registry
+// unavailable entirely) degrades the same way: nothing can be proven, so a
+// stale-looking link is always left foreign rather than repointed — a strictly
+// safer behavior than the old heuristic, never a regression in the unsafe
+// direction.
+const LINK_REGISTRY_FILENAME = "codex-exec-links.json";
+
+function resolveLinkRegistryPath(codexHome) {
+  return codexHome ? join(codexHome, LINK_REGISTRY_FILENAME) : null;
+}
+
+// readLinkRegistry — best-effort parse. null on ANY failure (absent, unreadable,
+// corrupt JSON, or a parsed non-object) — callers MUST treat null as "no proof of
+// ownership of anything", never as "empty but trustworthy".
+function readLinkRegistry(codexHome) {
+  const path = resolveLinkRegistryPath(codexHome);
+  if (!path) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// writeLinkRegistry — best-effort ATOMIC full-object overwrite (never merges;
+// callers pass the complete desired registry): write to a temp file in the SAME
+// directory, then renameSync it over the registry path (rename(2) atomically
+// replaces the destination on POSIX). This guarantees a concurrent reader NEVER
+// observes a partially-written file — readLinkRegistry always sees either the
+// OLD complete registry or the NEW complete one, never a truncated write
+// misread as corrupt (thread zc_). Never throws: a write failure only means a
+// FUTURE run can't prove ownership of what we're writing now, which degrades
+// safely (that future link is treated as foreign, never as "provably ours to
+// clobber"). A corrupt existing file is silently REPLACED by design — a write
+// here is establishing NEW proof, not verifying old proof, so discarding
+// unparseable history is safe.
+//
+// Concurrency note (thread zc_, deliberate — NOT a bug to fix later): this
+// module does NOT take a cross-process lock around the registry's
+// read-modify-write. The normal daemon and a detached delegate runner can both
+// dispatch through codex-exec against the SAME codexHome concurrently, each
+// read the same prior registry object, and then each independently overwrite
+// the whole file — the LATER write wins and the EARLIER write's new entries
+// are silently dropped (a lost update). This residual race is intentionally
+// left unlocked because it is fail-safe by construction: a lost entry means
+// the registry no longer holds PROOF for that link, so
+// isRegisteredWorktreeSkillsOwner / isRegisteredCodexHomeSkillOwner return
+// false for it, and the affected link is left FOREIGN — preserved and warned,
+// never wrongly repointed. The unsafe direction (proving ownership of
+// something a process did NOT actually write) is impossible from a lost
+// update; only the safe direction (temporarily losing proof of something a
+// process DID write, until its next successful registration) is reachable.
+// Cross-process locking would only close a gap whose failure mode is already
+// conservative — not worth the added complexity.
+function writeLinkRegistry(codexHome, registry) {
+  const path = resolveLinkRegistryPath(codexHome);
+  if (!path) return;
+  const tmp = `${path}.codex-tmp-${process.pid}`;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(registry, null, 2));
+    renameSync(tmp, path);
+  } catch {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup; also covers "never got far enough to create tmp" */
+    }
+  }
+}
+
+// atomicSymlink — replace `dest` with a fresh symlink to `target`, ATOMICALLY:
+// create the new link at a temp name in the SAME directory, then renameSync it
+// over `dest` (rename(2) atomically replaces an existing entry on POSIX). `dest`
+// is therefore always either the OLD link or the NEW link — an unlink-then-link
+// sequence has a window where `dest` is ABSENT, so any failure between the two
+// steps discards a still-usable old link (thread zdB); this has no such window.
+// On any failure, the temp file is cleaned up (best-effort) and the error is
+// RE-THROWN so the caller's existing catch/log path still fires — `dest` itself
+// is left completely untouched (still the OLD link) in every failure case.
+function atomicSymlink(target, dest) {
+  const tmp = `${dest}.codex-tmp-${process.pid}`;
+  try {
+    unlinkSync(tmp); // best-effort: clear a stale temp left by a crashed prior attempt
+  } catch {
+    /* absent — the common case */
+  }
+  symlinkSync(target, tmp);
+  try {
+    renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw err;
+  }
+}
+
+// registryWorktreeKey — the worktree coordinate used to key the "worktree" bucket:
+// its realpath (falls back to the raw path on a realpath failure — best-effort,
+// consistent with the rest of this module).
+function registryWorktreeKey(worktreePath) {
+  try {
+    return realpathSync(worktreePath);
+  } catch {
+    return worktreePath;
+  }
+}
+
+// recordWorktreeSkillsLink — write-through proof that WE just created or
+// refreshed `<worktreePath>/.agents/skills -> target`. Best-effort; never throws.
+function recordWorktreeSkillsLink(codexHome, worktreePath, target) {
+  if (!codexHome) return;
+  const registry = readLinkRegistry(codexHome) ?? {};
+  const bucket = registry.worktree && typeof registry.worktree === "object" ? registry.worktree : {};
+  const key = registryWorktreeKey(worktreePath);
+  const entry = bucket[key] && typeof bucket[key] === "object" ? bucket[key] : {};
+  bucket[key] = { ...entry, ".agents/skills": target };
+  registry.worktree = bucket;
+  writeLinkRegistry(codexHome, registry);
+}
+
+// isRegisteredWorktreeSkillsOwner — PROOF check for the top-level worktree link:
+// true only when the registry parses AND has an entry for this exact worktree
+// coordinate AND that entry's recorded target equals `currentTarget` (the target
+// actually on disk right now).
+function isRegisteredWorktreeSkillsOwner(codexHome, worktreePath, currentTarget) {
+  if (!codexHome || !currentTarget) return false;
+  const registry = readLinkRegistry(codexHome);
+  if (!registry) return false; // absent/corrupt/unreadable — no proof, fail-safe
+  const bucket = registry.worktree;
+  if (!bucket || typeof bucket !== "object") return false;
+  const entry = bucket[registryWorktreeKey(worktreePath)];
+  return !!entry && typeof entry === "object" && entry[".agents/skills"] === currentTarget;
+}
+
+// recordCodexHomeSkillLink / isRegisteredCodexHomeSkillOwner — the SAME proof
+// contract for a per-entry link registered under CODEX_HOME/skills/<name> (see
+// registerDevPluginSkillsIntoCodexHome). Flat-keyed by entry name — the registry
+// file itself already lives inside the ONE codexHome it describes, so no further
+// path-scoping is needed.
+function recordCodexHomeSkillLink(codexHome, name, target) {
+  if (!codexHome) return;
+  const registry = readLinkRegistry(codexHome) ?? {};
+  const bucket = registry.codexHome && typeof registry.codexHome === "object" ? registry.codexHome : {};
+  bucket[name] = target;
+  registry.codexHome = bucket;
+  writeLinkRegistry(codexHome, registry);
+}
+
+function isRegisteredCodexHomeSkillOwner(codexHome, name, currentTarget) {
+  if (!codexHome || !currentTarget) return false;
+  const registry = readLinkRegistry(codexHome);
+  if (!registry) return false;
+  const bucket = registry.codexHome;
+  if (!bucket || typeof bucket !== "object") return false;
+  return bucket[name] === currentTarget;
 }
 
 // resolveGitInfoExcludeFallback — manual info/exclude resolution when `git` is
@@ -512,6 +762,165 @@ function resolveGitInfoExcludeFallback(worktreePath) {
   return null;
 }
 
+// registerDevPluginSkillsIntoCodexHome — CTL-1530 (threads dLZ + dLh + dLX): when
+// `.agents/skills` is a REAL, project-owned directory (e.g. a dual-harness-migrated
+// project), the runner used to MERGE per-entry symlinks straight into that real
+// tree. Three findings against that design compound into "structurally broken",
+// not just buggy, so this REPLACES it entirely rather than patching it further:
+//
+//   - dLZ: `.git/info/exclude` is the repo's COMMON exclude file — it is shared by
+//     EVERY linked worktree of the same repo (`git rev-parse --git-path
+//     info/exclude` resolves there even from a ticket worktree). A pattern written
+//     for one ticket's dispatch persisted across every other worktree and outlived
+//     that ticket's teardown, so a later dispatch injecting a skill NAME could mask
+//     a REAL project skill of that same name in a completely different worktree
+//     with no `git status` entry to surface it.
+//   - dLh: narrowing the merge to `/^phase-/` (the prior fix for a different
+//     problem) broke codex's ability to run its OWN generated prompts: buildCodexPrompt
+//     only ever invokes `/catalyst-dev:phase-*` wrappers, but those wrappers
+//     THEMSELVES delegate to non-phase Catalyst skills — phase-plan -> create-plan,
+//     phase-research -> research-codebase, phase-implement -> implement-plan,
+//     phase-pr -> create-pr, phase-review -> review-comments, etc. Codex discovers
+//     slash commands through `.agents/skills`, so filtering to phase-* only
+//     silently broke every migrated pipeline phase that delegates.
+//   - dLX: the merged phase-* links (plus the exclude pattern they required) look,
+//     to `migrate-dual-harness.sh`'s trackability audit, like ambiguous project
+//     content — adding them to `DEST_PATHS` made the classifier return rc 4 on
+//     every subsequent run.
+//
+// The common root cause is touching a project-owned real `.agents/skills` AT ALL:
+// this runner is not the owner of that directory (or the repo's shared exclude
+// file) and has no business writing into either. So when the directory is real, we
+// now do NOT touch it and do NOT write any git exclude — instead we register the
+// FULL dev-plugin skills set (not just phase-*, closing dLh) as per-entry symlinks
+// under `<codexHome>/skills/`, the machine-local, out-of-repo directory this runner
+// already resolves for auth (codexConfig's `codexHome`). CODEX_HOME is entirely our
+// own territory (nothing else lives there), so unlike a worktree's `.agents/skills`
+// there is no risk of shadowing project content, and nothing here is ever
+// `git add`-able (closing dLX — there is simply nothing left for the migration
+// audit to see).
+//
+// Per entry: ABSENT in `<codexHome>/skills/` -> create our symlink and record it
+// in the link registry; present and OUR symlink pointing at the CURRENT source ->
+// idempotent no-op — NEVER writes the registry here (CTL-1530 thread zc0: an
+// existing link that happens to already point at `srcEntry` is not proof we
+// created it — a project-authored link could coincidentally match; only a
+// symlinkSync THIS runner just performed earns a registry entry, so a plain
+// path-match with no prior proof stays UNREGISTERED and therefore un-repointable
+// later); present and a symlink that the registry PROVES is ours but is STALE
+// (an earlier dispatch's link against an old checkout root — see
+// isRegisteredCodexHomeSkillOwner) -> atomically refresh to the current source
+// (thread zdB — see atomicSymlink) + update the registry; present and anything
+// else (an unrelated entry, a foreign symlink, an unproven "looks like ours"
+// link, or an unreadable link) -> leave it untouched, WARN per-entry, and skip —
+// CODEX_HOME/skills is machine/runner territory, but we still never clobber a
+// non-proven entry. Best-effort per entry — one bad entry (a readdir/symlink
+// failure) never aborts the rest.
+function registerDevPluginSkillsIntoCodexHome(codexHome, skillsSrc, { logger } = {}) {
+  if (!codexHome) {
+    try {
+      logger?.warn?.(
+        { skillsSrc },
+        "codex-exec: ensureCodexSkills found a real project-owned .agents/skills dir but no codexHome is configured — skipping machine-local skills registration",
+      );
+    } catch {
+      /* logging must never break a dispatch */
+    }
+    return;
+  }
+  const destDir = join(codexHome, "skills");
+  let entries = [];
+  try {
+    mkdirSync(destDir, { recursive: true });
+    entries = readdirSync(skillsSrc);
+  } catch (err) {
+    try {
+      logger?.warn?.(
+        { skillsSrc, destDir, err: err?.message },
+        "codex-exec: ensureCodexSkills could not prepare CODEX_HOME/skills or read the dev-plugin skills source dir — skipping registration",
+      );
+    } catch {
+      /* logging must never break a dispatch */
+    }
+    return;
+  }
+  for (const name of entries) {
+    const srcEntry = join(skillsSrc, name);
+    const destEntry = join(destDir, name);
+    let existingEntry = null;
+    try {
+      existingEntry = lstatSync(destEntry);
+    } catch {
+      /* absent — fall through to create our per-entry symlink */
+    }
+    if (existingEntry) {
+      if (existingEntry.isSymbolicLink()) {
+        let target = null;
+        try {
+          target = readlinkSync(destEntry);
+        } catch {
+          /* unreadable link — treat as foreign, never clobber */
+        }
+        if (target === srcEntry) {
+          // thread zc0: NOT registered here — a matching target alone is not
+          // proof we wrote it (see the function doc). The link is discoverable
+          // either way; only registering it would let a later refresh wrongly
+          // adopt it.
+          continue; // OUR-or-coincidental symlink already correct — idempotent no-op
+        }
+        if (isRegisteredCodexHomeSkillOwner(codexHome, name, target)) {
+          // RUNNER-OWNED-STALE, PROVEN by the registry (thread pJD): the checkout
+          // root moved since this link was created. Refreshing it never touches
+          // project content — CODEX_HOME/skills has none. ATOMIC (thread zdB —
+          // see atomicSymlink): `destEntry` is either the OLD link or the NEW
+          // one, never briefly absent, so a mid-refresh failure never discards a
+          // still-usable old link.
+          try {
+            atomicSymlink(srcEntry, destEntry);
+            recordCodexHomeSkillLink(codexHome, name, srcEntry);
+          } catch (err) {
+            try {
+              logger?.warn?.(
+                { destEntry, target, wanted: srcEntry, err: err?.message },
+                "codex-exec: CODEX_HOME/skills/<name> is a stale runner-owned symlink (old checkout root) but the atomic refresh to <wanted> failed — the ORIGINAL link is left in place, untouched",
+              );
+            } catch {
+              /* logging must never break a dispatch */
+            }
+          }
+          continue;
+        }
+      }
+      // Present and not ours, and not a PROVEN stale-but-owned link (a foreign
+      // symlink, an unrelated entry, a link that merely LOOKS like ours but has
+      // no registry proof, or an unreadable link) — leave it untouched, warn
+      // per-entry, skip.
+      try {
+        logger?.warn?.(
+          { destEntry, wanted: srcEntry },
+          "codex-exec: CODEX_HOME/skills/<name> already exists and is not our symlink — leaving it untouched (skipping this skill; codex may not discover it)",
+        );
+      } catch {
+        /* logging must never break a dispatch */
+      }
+      continue;
+    }
+    try {
+      symlinkSync(srcEntry, destEntry);
+      recordCodexHomeSkillLink(codexHome, name, srcEntry);
+    } catch (err) {
+      try {
+        logger?.warn?.(
+          { destEntry, err: err?.message },
+          "codex-exec: ensureCodexSkills failed to create a per-entry CODEX_HOME/skills symlink",
+        );
+      } catch {
+        /* logging must never break a dispatch */
+      }
+    }
+  }
+}
+
 // ensureCodexSkills — symlink <worktreePath>/.agents/skills to the pristine
 // dev-plugin skills dir so a Codex worker can discover the /catalyst-dev:phase-*
 // skills (Codex reads `.agents/skills`, not Claude plugins), and git-exclude
@@ -526,10 +935,29 @@ function resolveGitInfoExcludeFallback(worktreePath) {
 // ARBITRARY project worktrees, so a pre-existing `.agents/skills` may be the project's
 // or user's real Codex skills (a real dir) or a foreign symlink — the old unlink-first
 // setup deleted it (DATA LOSS). Only touch the link when SAFE:
-//   - ABSENT               → create our symlink;
-//   - OUR symlink (→ src)  → idempotent no-op;
-//   - real dir / FOREIGN symlink → leave it untouched, WARN LOUDLY, and skip.
-export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: logger = log } = {}) {
+//   - ABSENT                       → create our symlink (wholesale ownership),
+//     recording the write in the link registry (CTL-1530 thread pJD — see
+//     isRegisteredWorktreeSkillsOwner);
+//   - OUR-or-coincidental symlink (→ CURRENT src) → idempotent no-op, NEVER
+//     registered here (thread zc0): matching the current source is not proof
+//     WE wrote it — a project-authored link could coincidentally match, and
+//     "adopting" it into the registry would let a later pluginRoot change
+//     repoint a link this runner never created;
+//   - RUNNER-OWNED-STALE, PROVEN by the registry → atomically refresh (thread
+//     zdB — see atomicSymlink) to the current source; a link that merely LOOKS
+//     runner-shaped but has no registry proof is treated as FOREIGN (thread
+//     pJD closed the false positive this used to allow — see the registry doc
+//     comment above);
+//   - FOREIGN symlink              → leave it untouched, WARN LOUDLY, and skip;
+//   - real dir (project-owned)     → NEVER touched, NEVER git-excluded (CTL-1530
+//     threads dLZ + dLh + dLX — see registerDevPluginSkillsIntoCodexHome for why
+//     the prior per-entry MERGE approach was structurally broken, not just buggy).
+//     Instead the full dev-plugin skills set is registered machine-locally under
+//     `<codexHome>/skills/`, entirely outside the project worktree/repo.
+export function ensureCodexSkills(
+  worktreePath,
+  { pluginDirs, pluginRoot, codexHome, log: logger = log } = {},
+) {
   try {
     if (!worktreePath) return;
     const devRoot = pluginRoot ?? resolveDevPluginRoot(pluginDirs);
@@ -537,6 +965,26 @@ export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: l
     const skillsSrc = join(devRoot, "skills");
     const agentsDir = join(worktreePath, ".agents");
     const skillsLink = join(agentsDir, "skills");
+    // A symlinked `.agents` component is foreign (a project committing
+    // `.agents -> elsewhere` would have every write below land in the external
+    // target) — mirror the migrator's ancestor guard: warn + skip, touch nothing.
+    let agentsDirStat = null;
+    try {
+      agentsDirStat = lstatSync(agentsDir);
+    } catch {
+      /* absent — mkdir below creates it */
+    }
+    if (agentsDirStat?.isSymbolicLink()) {
+      try {
+        logger?.warn?.(
+          { worktreePath, agentsDir },
+          "codex-exec: .agents is itself a symlink — leaving it untouched (skipping codex skills setup; codex may not discover the phase skills)",
+        );
+      } catch {
+        /* logging must never break a dispatch */
+      }
+      return;
+    }
     mkdirSync(agentsDir, { recursive: true });
     // Probe the existing entry WITHOUT removing anything.
     let existing = null;
@@ -554,13 +1002,68 @@ export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: l
           /* unreadable link — treat as foreign, never clobber */
         }
         if (target === skillsSrc) {
-          // OUR symlink already in place — idempotent no-op (still ensure the exclude).
+          // OUR-or-coincidental symlink already in place, pointing at the
+          // CURRENT source — idempotent no-op (still ensure the blanket
+          // exclude — WE own this path wholesale either way). NOT registered
+          // here (thread zc0): a matching target alone is not proof we wrote
+          // it, so a project-authored link that happens to already point at
+          // skillsSrc is never adopted into the registry and can never later
+          // be repointed by the stale-refresh branch below.
           gitExcludeAgents(worktreePath);
           return;
         }
+        if (isRegisteredWorktreeSkillsOwner(codexHome, worktreePath, target)) {
+          // RUNNER-OWNED-STALE, PROVEN by the registry (CTL-1530 thread pJD):
+          // pluginDirs / codex.pluginRoot was reconfigured to a different
+          // checkout since this link was created, but the registry records
+          // that WE wrote the exact target currently on disk — so refreshing
+          // it does not violate the T7 never-delete contract (T7 protects
+          // PROJECT content; this is provably our own past creation, not
+          // inferred from what the path merely looks like). ATOMIC (thread
+          // zdB — see atomicSymlink): `skillsLink` is either the OLD link or
+          // the NEW one, never briefly absent, so a mid-refresh failure never
+          // discards a still-usable old link.
+          try {
+            atomicSymlink(skillsSrc, skillsLink);
+            recordWorktreeSkillsLink(codexHome, worktreePath, skillsSrc);
+            gitExcludeAgents(worktreePath);
+          } catch (err) {
+            try {
+              logger?.warn?.(
+                { worktreePath, skillsLink, target, wanted: skillsSrc, err: err?.message },
+                "codex-exec: .agents/skills is a stale runner-owned symlink (old checkout root) but the atomic refresh to <wanted> failed — the ORIGINAL link is left in place, untouched",
+              );
+            } catch {
+              /* logging must never break a dispatch */
+            }
+          }
+          return;
+        }
+        // A symlink pointing at something ELSE with no registry proof it's
+        // ours (a foreign link, or one that merely LOOKS runner-shaped —
+        // thread pJD) — this runner does NOT own it. Leave it exactly as-is
+        // and skip (best-effort, non-fatal).
+        try {
+          logger?.warn?.(
+            { worktreePath, skillsLink, wanted: skillsSrc },
+            "codex-exec: .agents/skills already exists and is not our symlink — leaving it untouched (skipping codex skills setup; codex may not discover the phase skills)",
+          );
+        } catch {
+          /* logging must never break a dispatch */
+        }
+        return;
       }
-      // A real directory OR a symlink pointing at something ELSE — this runner does
-      // NOT own it. Leave it exactly as-is and skip (best-effort, non-fatal).
+      if (existing.isDirectory()) {
+        // A REAL, project-owned skills directory (e.g. a dual-harness-migrated
+        // project). NEVER touched, NEVER git-excluded (T7 + CTL-1530 threads
+        // dLZ + dLh + dLX — see registerDevPluginSkillsIntoCodexHome's doc for
+        // why the prior in-tree per-entry merge was structurally broken).
+        // Instead register the full dev-plugin skills set machine-locally
+        // under CODEX_HOME/skills so codex can still discover them.
+        registerDevPluginSkillsIntoCodexHome(codexHome, skillsSrc, { logger });
+        return;
+      }
+      // Anything else (e.g. a plain file at .agents/skills) — not ours, leave it.
       try {
         logger?.warn?.(
           { worktreePath, skillsLink, wanted: skillsSrc },
@@ -572,6 +1075,7 @@ export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: l
       return;
     }
     symlinkSync(skillsSrc, skillsLink);
+    recordWorktreeSkillsLink(codexHome, worktreePath, skillsSrc);
     gitExcludeAgents(worktreePath);
   } catch (err) {
     try {
@@ -897,7 +1401,9 @@ export async function codexRunPhaseAgent(
   // Symlink .agents/skills + git-exclude .agents/ before spawn (best-effort).
   // CTL-1457 (T4): pass cfg.pluginRoot so the skills source honors the same
   // codex.pluginRoot override CLAUDE_PLUGIN_ROOT uses (falls back to spec.pluginDirs).
-  prepareWorktree(wt, { pluginDirs: spec.pluginDirs, pluginRoot: cfg.pluginRoot });
+  // CTL-1530: also pass cfg.codexHome — the real-project-dir path registers the
+  // dev-plugin skills there instead of touching the worktree's .agents/skills.
+  prepareWorktree(wt, { pluginDirs: spec.pluginDirs, pluginRoot: cfg.pluginRoot, codexHome: cfg.codexHome });
 
   // Register in the in-process worker registry (executor-tagged). Registered
   // BEFORE the semaphore so a parked worker still reads as live.

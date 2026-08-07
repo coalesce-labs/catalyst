@@ -2,8 +2,8 @@
 // escalation cool-down primitives (CTL-638). Run:
 //   cd plugins/dev/scripts/execution-core && bun test label-guard.test.mjs
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,7 +19,10 @@ import {
   inRemovalBackoff,
   beliefOwnsNeedsHuman,
   labelNeedsHumanUnlessBeliefOwner,
+  resolveAndApplyWorkerStatusLabel,
+  WORKER_STATUS_LABELS,
 } from "./label-guard.mjs";
+import { validateExplanation } from "./escalation-explanation.mjs";
 
 let orchDir;
 
@@ -892,5 +895,553 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
       log: { info: () => {} },
     });
     expect(wrote).toBe(true);
+  });
+});
+
+// ─── CTL-1605: terminal-aware worker-status chokepoint ───
+
+describe("resolveAndApplyWorkerStatusLabel", () => {
+  test("WORKER_STATUS_LABELS is the frozen group source-of-truth", () => {
+    expect(Object.isFrozen(WORKER_STATUS_LABELS)).toBe(true);
+    expect(new Set(WORKER_STATUS_LABELS)).toEqual(
+      new Set(["needs-human", "needs-input", "blocked", "queued", "waiting"])
+    );
+  });
+
+  test("terminal → clears every present label, evicts, no apply", () => {
+    const removed = [];
+    const evicted = [];
+    const applyDesired = mock(() => {});
+    const writeStatus = {
+      removeLabel: (t, l) => {
+        removed.push(l);
+        return { removed: true };
+      },
+      applyLabel: mock(() => {}),
+    };
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-9", {
+      desired: "blocked",
+      currentLabels: ["blocked", "needs-human"],
+      isTerminal: () => ({ terminal: true, reason: "linear-terminal", state: "Done" }),
+      writeStatus,
+      evictWorkerDir: (t) => {
+        evicted.push(t);
+        return true;
+      },
+      applyDesired,
+    });
+    expect(res).toMatchObject({ terminal: true, evicted: true });
+    expect(new Set(removed)).toEqual(new Set(["blocked", "needs-human"]));
+    expect(applyDesired).not.toHaveBeenCalled();
+    expect(evicted).toEqual(["CTL-9"]);
+    expect(writeStatus.applyLabel).not.toHaveBeenCalled();
+  });
+
+  test("non-terminal → invokes applyDesired, no clear, no evict", () => {
+    const applyDesired = mock(() => {});
+    const evict = mock(() => true);
+    const writeStatus = {
+      removeLabel: mock(() => ({ removed: true })),
+      applyLabel: mock(() => {}),
+    };
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-10", {
+      desired: "blocked",
+      currentLabels: [],
+      isTerminal: () => ({ terminal: false }),
+      writeStatus,
+      evictWorkerDir: evict,
+      applyDesired,
+    });
+    expect(res).toMatchObject({ terminal: false });
+    expect(applyDesired).toHaveBeenCalledTimes(1);
+    expect(evict).not.toHaveBeenCalled();
+    expect(writeStatus.removeLabel).not.toHaveBeenCalled();
+  });
+
+  test("terminal but no worker-status label present → evicts, zero removeLabel", () => {
+    const writeStatus = {
+      removeLabel: mock(() => ({ removed: true })),
+      applyLabel: mock(() => {}),
+    };
+    const evict = mock(() => true);
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-11", {
+      desired: null,
+      currentLabels: ["some-unrelated-label"],
+      isTerminal: () => ({ terminal: true, state: "Canceled" }),
+      writeStatus,
+      evictWorkerDir: evict,
+      applyDesired: mock(() => {}),
+    });
+    expect(res.terminal).toBe(true);
+    expect(writeStatus.removeLabel).not.toHaveBeenCalled();
+    expect(evict).toHaveBeenCalledTimes(1);
+  });
+
+  test("isTerminal throws → fail-safe NOT-terminal, applyDesired runs", () => {
+    const applyDesired = mock(() => {});
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-12", {
+      desired: "queued",
+      currentLabels: [],
+      isTerminal: () => {
+        throw new Error("linear 400");
+      },
+      writeStatus: { removeLabel: mock(() => ({ removed: true })), applyLabel: mock(() => {}) },
+      evictWorkerDir: mock(() => true),
+      applyDesired,
+    });
+    expect(res.terminal).toBe(false);
+    expect(applyDesired).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── CTL-1605 Codex thread (scheduler.mjs:5518) — onTerminalCleared now fires
+  // EXACTLY ONCE per call with the AGGREGATE outcome across every present
+  // worker-status label, never once per label. The old per-label firing let a
+  // single confirmed removal on a multi-label ticket report a clear even when a
+  // sibling label (e.g. the sticky needs-human) never confirmed removal. ───
+
+  test("terminal clear, all present labels confirm → onTerminalCleared fires ONCE with null", () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-13", {
+      desired: null,
+      currentLabels: ["queued", "needs-human"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: { removeLabel: () => ({ removed: true }), applyLabel: mock(() => {}) },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+    });
+    expect(cleared).toEqual([null]);
+  });
+
+  test("single label confirmed → onTerminalCleared fires ONCE with null (backward compat)", () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-13b", {
+      desired: null,
+      currentLabels: ["queued"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: { removeLabel: () => ({ removed: true }), applyLabel: mock(() => {}) },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+    });
+    expect(cleared).toEqual([null]);
+  });
+
+  test("async removeLabel resolving removed:true → onTerminalCleared fires once on resolve, not eagerly", async () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-14", {
+      desired: null,
+      currentLabels: ["blocked"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: () => Promise.resolve({ removed: true }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+    });
+    // NOT fired synchronously off the Promise object.
+    expect(cleared).toEqual([]);
+    // Extra hop vs the pre-fix version: the aggregate fire now runs off
+    // Promise.all(outcomes).then(...), one microtask hop past the per-label settle.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cleared).toEqual([null]);
+  });
+
+  test("async removeLabel resolving removed:false → onTerminalCleared fires once with the surviving label, never null", async () => {
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-15", {
+      desired: null,
+      currentLabels: ["blocked"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: () => Promise.resolve({ removed: false, reason: "rate-limited" }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cleared).toEqual(["blocked"]);
+  });
+
+  test("multi-label ticket, needs-human backoff-skipped + blocked confirmed → onTerminalCleared fires ONCE with \"needs-human\", never null", () => {
+    const workerDir = join(orchDir, "workers", "CTL-13c");
+    mkdirSync(workerDir, { recursive: true });
+    const now = 5_000_000;
+    const THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+    for (let i = 0; i < THRESHOLD; i++) {
+      recordRemovalFailure(orchDir, "CTL-13c", "needs-human", "auth-error", now);
+    }
+    const cleared = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-13c", {
+      desired: null,
+      // DISPOSITIONS precedence order is needs-human, needs-input, blocked, queued —
+      // "blocked" outranks "needs-human" numerically LOWER index wins (needs-human is
+      // index 0, the highest precedence), so with needs-human surviving it must win
+      // over blocked as the reported survivor regardless of iteration order.
+      currentLabels: ["blocked", "needs-human"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: (t, l) => (l === "blocked" ? { removed: true } : { removed: true }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: () => true,
+      onTerminalCleared: (arg) => cleared.push(arg),
+      applyDesired: mock(() => {}),
+      now: () => now,
+    });
+    // needs-human is in CTL-1078 backoff → its removal is skipped (unconfirmed);
+    // blocked confirms. Aggregate must report the surviving "needs-human", never null.
+    expect(cleared).toEqual(["needs-human"]);
+  });
+
+  // ─── CTL-1605 review finding (label-guard.mjs:519) — eviction gated on
+  // CONFIRMED removal of every present label, not merely on the removals being
+  // ISSUED. Retry-loss: STEP A / J3 / J4 all key their candidate sets off
+  // workers/<T>/ existing on disk — evicting on an unconfirmed/failed removal
+  // destroys the only retry record and strands the stale Linear label forever. ───
+
+  test("async removals ALL confirmed → evict is DEFERRED past the call (not synchronous) then fires once settled", async () => {
+    let resolveBlocked, resolveQueued;
+    const evicted = [];
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-16", {
+      desired: null,
+      currentLabels: ["blocked", "queued"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: (t, l) =>
+          l === "blocked"
+            ? new Promise((r) => { resolveBlocked = r; })
+            : new Promise((r) => { resolveQueued = r; }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: (t) => { evicted.push(t); return true; },
+      applyDesired: mock(() => {}),
+    });
+    // Not every present label settled synchronously → evict cannot be decided yet.
+    expect(res.evicted).toBe(false);
+    expect(evicted).toEqual([]);
+    resolveBlocked({ removed: true });
+    resolveQueued({ removed: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Only NOW — once every present label's removal is CONFIRMED — does eviction fire.
+    expect(evicted).toEqual(["CTL-16"]);
+  });
+
+  test("async removals where ONE fails (removed:false) → evict NEVER fires, even after all settle", async () => {
+    const evicted = [];
+    resolveAndApplyWorkerStatusLabel(orchDir, "CTL-17", {
+      desired: null,
+      currentLabels: ["blocked", "queued"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: (t, l) =>
+          l === "blocked"
+            ? Promise.resolve({ removed: true })
+            : Promise.resolve({ removed: false, reason: "rate-limited" }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: (t) => { evicted.push(t); return true; },
+      applyDesired: mock(() => {}),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // One label never confirmed removed → the worker dir stays (the only retry
+    // record for the still-attached label) instead of being evicted underneath it.
+    expect(evicted).toEqual([]);
+  });
+
+  test("sync removals where ONE fails (removed:false) → evict withheld synchronously (evicted:false)", () => {
+    const evicted = [];
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-18", {
+      desired: null,
+      currentLabels: ["blocked", "queued"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: (t, l) => (l === "blocked" ? { removed: true } : { removed: false, reason: "transient" }),
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: (t) => { evicted.push(t); return true; },
+      applyDesired: mock(() => {}),
+    });
+    expect(res.evicted).toBe(false);
+    expect(evicted).toEqual([]);
+  });
+
+  test("needs-human in CTL-1078 backoff (unconfirmed) → evict withheld even though the removal was never even attempted", () => {
+    const workerDir = join(orchDir, "workers", "CTL-19");
+    mkdirSync(workerDir, { recursive: true });
+    const now = 5_000_000;
+    // Drive clearStalledLabel's removal-failure counter to the backoff threshold.
+    const THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+    for (let i = 0; i < THRESHOLD; i++) {
+      recordRemovalFailure(orchDir, "CTL-19", "needs-human", "auth-error", now);
+    }
+    const evicted = [];
+    let removeLabelCalls = 0;
+    const res = resolveAndApplyWorkerStatusLabel(orchDir, "CTL-19", {
+      desired: null,
+      currentLabels: ["needs-human"],
+      isTerminal: () => ({ terminal: true, state: "Done" }),
+      writeStatus: {
+        removeLabel: () => { removeLabelCalls++; return { removed: true }; },
+        applyLabel: mock(() => {}),
+      },
+      evictWorkerDir: (t) => { evicted.push(t); return true; },
+      applyDesired: mock(() => {}),
+      now: () => now,
+    });
+    // Backoff short-circuits BEFORE removeLabel is ever called (CTL-1078 storm-break).
+    expect(removeLabelCalls).toBe(0);
+    // A backoff-skip is not a confirmed removal → evict must stay withheld.
+    expect(res.evicted).toBe(false);
+    expect(evicted).toEqual([]);
+  });
+});
+
+// ─── CTL-1609: explanation-required label chokepoint (Phase 1, Gap 2) ────────
+
+describe("labelNeedsHumanUnlessBeliefOwner — explanation threading (CTL-1609)", () => {
+  const RECOVERY_PASS_SIG = (orchDir, ticket) =>
+    join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+
+  function makeAppliedWS() {
+    return { applyLabel: () => ({ applied: true }) };
+  }
+  function makeRateLimitedWS() {
+    return { applyLabel: () => ({ applied: false, reason: "rate-limited" }) };
+  }
+
+  test("explanation coerced and written on confirmed apply", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E1");
+    mkdirSync(workerDir, { recursive: true });
+    const warns = [];
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E1", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "dispatch-failures",
+      log: { info: () => {}, warn: (obj) => warns.push(obj) },
+      explanation: {
+        problem: "dispatch failed 8×",
+        call_to_action: "authorize retry of CTL-E1 or cancel",
+      },
+    });
+    expect(wrote).toBe(true);
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E1"), "utf8"));
+    expect(sig.status).toBe("needs-human");
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(sig.explanation.call_to_action).toBe("authorize retry of CTL-E1 or cancel");
+    // No absent-warn because explanation was supplied
+    expect(warns.some((w) => w.event === "escalation.explanation-absent")).toBe(false);
+  });
+
+  test("no explanation supplied → degraded coerce + WARN logged, signal still written", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E2");
+    mkdirSync(workerDir, { recursive: true });
+    const warns = [];
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E2", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "terminal-sweep",
+      log: { info: () => {}, warn: (obj) => warns.push(obj) },
+      // no explanation
+    });
+    expect(wrote).toBe(true);
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E2"), "utf8"));
+    expect(sig.status).toBe("needs-human");
+    expect(sig.explanation).toBeTruthy();
+    expect(sig.explanation.degraded).toBe(true);
+    // call_to_action must pass the tautology gate
+    const { valid } = validateExplanation(sig.explanation);
+    expect(valid).toBe(true);
+    // WARN with event:"escalation.explanation-absent" and the site
+    const absentWarn = warns.find((w) => w.event === "escalation.explanation-absent");
+    expect(absentWarn).toBeTruthy();
+    expect(absentWarn.site).toBe("terminal-sweep");
+  });
+
+  test("label NOT applied (rate-limited) → no explanation signal written", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E3");
+    mkdirSync(workerDir, { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E3", makeRateLimitedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "dispatch-failures",
+      log: { info: () => {}, warn: () => {} },
+      explanation: { problem: "failed", call_to_action: "retry CTL-E3 or cancel" },
+    });
+    expect(wrote).toBe(false);
+    expect(existsSync(RECOVERY_PASS_SIG(orchDir, "CTL-E3"))).toBe(false);
+  });
+
+  test("belief-owner deferral (CATALYST_INTENTS_ENFORCE=1) writes nothing", () => {
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E4", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+      site: "terminal-sweep",
+      log: { info: () => {}, warn: () => {} },
+      explanation: { problem: "stuck", call_to_action: "retry CTL-E4 or close it" },
+    });
+    expect(wrote).toBe(false);
+    expect(existsSync(RECOVERY_PASS_SIG(orchDir, "CTL-E4"))).toBe(false);
+  });
+
+  test("invalid/garbage explanation never throws — coerced object still written", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E5");
+    mkdirSync(workerDir, { recursive: true });
+    expect(() =>
+      labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E5", makeAppliedWS(), {
+        env: { CATALYST_INTENTS_ENFORCE: "0" },
+        site: "dispatch-failures",
+        log: { info: () => {}, warn: () => {} },
+        explanation: { problem: 123 }, // garbage type
+      })
+    ).not.toThrow();
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E5"), "utf8"));
+    expect(sig.status).toBe("needs-human");
+    expect(sig.explanation).toBeTruthy();
+  });
+
+  test("no-overwrite guard: richer pre-existing explanation is preserved", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E6");
+    mkdirSync(workerDir, { recursive: true });
+    // Write a rich (non-degraded) explanation already on disk
+    const richSig = {
+      ticket: "CTL-E6",
+      status: "needs-human",
+      needsHumanSince: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      phase: "recovery-pass",
+      explanation: {
+        escalation_type: "authorization",
+        problem: "recovery attempts exhausted (rich signal)",
+        call_to_action: "authorize another recovery cycle for CTL-E6",
+        recommendation: "inspect the last recovery-pass session",
+        risk: "ticket rots silently without action",
+        why_asking: "risk-authority gate",
+        could_higher_tier_resolve: false,
+        authorize_label: "retry CTL-E6",
+      },
+    };
+    writeFileSync(
+      RECOVERY_PASS_SIG(orchDir, "CTL-E6"),
+      JSON.stringify(richSig)
+    );
+    // Now call the chokepoint with a thin explanation — should not overwrite
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E6", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "attempts-exhausted",
+      log: { info: () => {}, warn: () => {} },
+      explanation: { human_question: "see recovery-pass escalation brief" },
+    });
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E6"), "utf8"));
+    // Rich explanation preserved — call_to_action unchanged
+    expect(sig.explanation.call_to_action).toBe("authorize another recovery cycle for CTL-E6");
+    expect(sig.explanation.degraded).toBeUndefined();
+  });
+
+  test("no-overwrite guard: degraded prior IS overwritten by richer explanation", () => {
+    const workerDir = join(orchDir, "workers", "CTL-E7");
+    mkdirSync(workerDir, { recursive: true });
+    // Write a degraded signal (the prior call had no explanation)
+    const degradedSig = {
+      ticket: "CTL-E7",
+      status: "needs-human",
+      needsHumanSince: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      phase: "recovery-pass",
+      explanation: { escalation_type: "authorization", degraded: true },
+    };
+    writeFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E7"), JSON.stringify(degradedSig));
+    // Call chokepoint with a richer, non-degraded explanation — SHOULD overwrite
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E7", makeAppliedWS(), {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "dispatch-failures",
+      log: { info: () => {}, warn: () => {} },
+      explanation: {
+        problem: "richer replacement for CTL-E7",
+        call_to_action: "resolve the dispatch failure for CTL-E7",
+      },
+    });
+    const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E7"), "utf8"));
+    // Guard allowed the overwrite — new problem/call_to_action from the second call are present.
+    // coerceExplanation always sets degraded:true, so the written signal is still degraded,
+    // but the content is the richer one (proving the guard did NOT block the write).
+    expect(sig.explanation.problem).toBe("richer replacement for CTL-E7");
+    expect(sig.explanation.call_to_action).toBe("resolve the dispatch failure for CTL-E7");
+  });
+});
+
+// ─── CTL-1609 (Codex P1): live recovery-pass worker guard ─────────────────────
+//
+// phase-recovery-pass.json is not only an explanation carrier — it is the
+// recovery-pass worker's own status record, and `dispatched`/`running` is exactly
+// what the liveness probes read (delegate-queue's recoveryPassWorkerLive, the SDK
+// occupancy accounting). Stamping `needs-human` over a live worker makes it
+// invisible: it stops deduping a re-enqueue (double-dispatch) and drops out of
+// capacity accounting. Reachable in normal operation — a sibling phase can fail
+// while the recovery-pass worker is still running.
+describe("labelNeedsHumanUnlessBeliefOwner — live recovery-pass worker guard (CTL-1609)", () => {
+  const SIG = (ticket) => join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+
+  function seedSignal(ticket, status) {
+    const workerDir = join(orchDir, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      SIG(ticket),
+      JSON.stringify({ ticket, status, phase: "recovery-pass", bg_job_id: "job-live-1" })
+    );
+  }
+
+  function applyWith(ticket) {
+    return labelNeedsHumanUnlessBeliefOwner(
+      orchDir,
+      ticket,
+      { applyLabel: () => ({ applied: true }) },
+      {
+        env: { CATALYST_INTENTS_ENFORCE: "0" },
+        site: "terminal-sweep",
+        log: { info: () => {}, warn: () => {} },
+        explanation: { problem: "sibling phase failed", call_to_action: "review" },
+      }
+    );
+  }
+
+  for (const status of ["dispatched", "running"]) {
+    test(`does NOT overwrite a live '${status}' recovery-pass signal`, () => {
+      seedSignal(`CTL-LW-${status}`, status);
+      const wrote = applyWith(`CTL-LW-${status}`);
+
+      // The label itself still applies — only the signal-file mutation is skipped.
+      expect(wrote).toBe(true);
+      const sig = JSON.parse(readFileSync(SIG(`CTL-LW-${status}`), "utf8"));
+      expect(sig.status).toBe(status); // live worker's record preserved verbatim
+      expect(sig.bg_job_id).toBe("job-live-1");
+      expect(sig.explanation).toBeUndefined();
+    });
+  }
+
+  test("still writes when the prior signal is a terminal/non-live status", () => {
+    seedSignal("CTL-LW-done", "done");
+    const wrote = applyWith("CTL-LW-done");
+
+    expect(wrote).toBe(true);
+    const sig = JSON.parse(readFileSync(SIG("CTL-LW-done"), "utf8"));
+    expect(sig.status).toBe("needs-human");
+    expect(sig.explanation.call_to_action).toBe("review");
+  });
+
+  test("still writes when there is no prior signal at all", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-LW-none"), { recursive: true });
+    const wrote = applyWith("CTL-LW-none");
+
+    expect(wrote).toBe(true);
+    expect(JSON.parse(readFileSync(SIG("CTL-LW-none"), "utf8")).status).toBe("needs-human");
   });
 });

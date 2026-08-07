@@ -47,6 +47,29 @@
   <key>RunAtLoad</key>
   <false/>
 
+  <!--
+    CTL-1531 — the vector-1 WIDENED (any-command) branch's rollout knob, shipped
+    IN THE TEMPLATE so the setting actually persists.
+
+    It lives here rather than only in orphan-sweep.sh's in-script default because
+    install-orphan-sweep.sh unconditionally REGENERATES and replaces this plist on
+    every routine `catalyst-stack install-services` run. A rollout flip that is
+    hand-edited into the installed plist would be silently reverted by the next
+    install — a knob a routine reinstall resets is worse than no knob.
+
+    The installer therefore resolves the value, in order:
+      1. an explicit SWEEP_PROC_WIDEN in the installing environment
+      2. .catalyst/config.json → catalyst.sweep.procWiden
+      3. the value ALREADY PRESENT in the installed plist   ← preserves a hand-flip
+      4. "shadow" (ADR-023 dark-by-default)
+    Anything not in off|shadow|enforce falls back to shadow.
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SWEEP_PROC_WIDEN</key>
+    <string>REPLACE_SWEEP_PROC_WIDEN</string>
+  </dict>
+
   <key>StandardOutPath</key>
   <string>REPLACE_HOME/catalyst/orphan-sweep.log</string>
 

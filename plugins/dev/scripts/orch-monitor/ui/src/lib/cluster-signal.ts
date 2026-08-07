@@ -29,8 +29,13 @@ export interface ClusterSignalNode {
   maxParallel?: number;
   inFlightCount?: number;
   freeSlots?: number;
-  /** CTL-1092: in-flight ticket ids from the heartbeat (for remote slot labels). */
+  /** CTL-1581: the ACTIVE (running/dispatched) ticket ids — remote slot-occupancy
+   *  labels. Populated from the heartbeat's active_tickets attribute. */
   tickets?: string[];
+  /** CTL-1581: running/dispatched subset — the slot-OCCUPANCY count. inFlightCount
+   *  also counts parked (needs-human) dirs, which hold no slot; consumers prefer
+   *  this and fall back to inFlightCount on old-daemon peers. */
+  activeCount?: number;
   /** CTL-1322: local node's new-work admission from its heartbeat. ABSENT ⇒ unknown
    *  (render "live"); a remote peer always omits it. `accepting:false` ⇒ holding. */
   accepting?: boolean;
@@ -41,6 +46,8 @@ export interface ClusterSignalNode {
 export interface ClusterSignal {
   /** True ⇒ exactly one node — footer shows one dot, the node filter is absent. */
   singleHost: boolean;
+  /** CTL-1551: this monitor's own host; absent on pre-CTL-1551 frames. */
+  selfHost?: string;
   /** One entry per REAL roster host (the synthetic unassigned bucket is dropped server-side). */
   nodes: ClusterSignalNode[];
   /** The source snapshot's generatedAt (passthrough for dedupe/debug). */

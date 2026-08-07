@@ -129,6 +129,12 @@ _default_otel_from_user_settings() {
 	done
 }
 
+# CTL-1612: the shared-credential projection lives in lib/catalyst-secret-env.sh so the
+# execution-core launcher, the monitor launcher and the in-process re-arm all resolve the
+# SAME file by the SAME chain. The first cut hand-wrote that chain in four places and they
+# immediately diverged (only one honored CATALYST_CONFIG_DIR) — every review finding across
+# three rounds landed in the duplicated logic, not in the design. One copy, sourced.
+
 # CTL-846: is host:port accepting TCP connections? bash /dev/tcp first, nc fallback.
 # Used to gate mitmproxy proxy vars so a down proxy degrades to direct mode instead of
 # breaking every daemon/worker API call with "connection refused".
@@ -157,6 +163,15 @@ cmd_start() {
 	local neutral_otel
 	neutral_otel="$(_neutralize_otel_attrs "${OTEL_RESOURCE_ATTRIBUTES-}")"
 	export OTEL_RESOURCE_ATTRIBUTES="$neutral_otel"
+	# CTL-1612: arm the shared GitHub credential from the SOPS-managed file BEFORE the
+	# machine-local env is sourced, so the precedence is
+	#   ambient inherited  <  shared SOPS file  <  execution-core.env (explicit operator override).
+	# Ordering does the work here: no conditional can distinguish "inherited from a stale parent"
+	# from "deliberately set by the operator", but running first and letting execution-core.env
+	# source afterwards gives both the fix and the escape hatch.
+	# shellcheck disable=SC1090
+	source "$SCRIPT_DIR/lib/catalyst-secret-env.sh"
+	catalyst_project_github_token
 	# Machine-local daemon env: source ~/.config/catalyst/execution-core.env if present
 	# so per-machine settings survive restarts — e.g. routing the daemon's Linear/gh
 	# (Node fetch/undici) traffic through the local mitmproxy audit. Node's native
@@ -165,6 +180,13 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1612 (Codex P2): the operator override just won — re-point the OTHER alias at it,
+	# or `gh` (which reads GH_TOKEN first) would keep using the value we projected and
+	# silently ignore the override. The env file is passed so the reconcile can detect an
+	# ASSIGNMENT rather than a value change: pinning the same value the shared file already
+	# had is still an explicit override, and marking it as one is what stops the in-process
+	# re-arm from later overwriting the operator's machine-local pin.
+	catalyst_reconcile_github_token_aliases "$_daemon_env"
 	# CTL-1404: after the machine-local env wins, fill any unset OTLP telemetry keys from
 	# ~/.claude/settings.json so the SDK-path child `claude` CLI can export claude_code_* metrics
 	# (token/cost/session). No-op when the keys are already set or settings.json/jq are absent.
@@ -227,24 +249,28 @@ cmd_start() {
 	fi
 	# CTL-785: authenticate the daemon's Linear calls as the Catalyst Orchestrator app-actor
 	# (its own 5000/hr OAuth bucket — isolated from the personal token it would otherwise pin).
-	# Mint a fresh client_credentials token from the creds in the global config. --noproxy keeps
-	# the mint off the audit MITM (curl can't trust its CA); a failed mint leaves the existing
-	# LINEAR_API_TOKEN intact so the daemon still starts. No-op when no orchestrator app is set up.
-	local _g="${HOME}/.config/catalyst/config.json" _ocid _ocsec _otok
-	_ocid=$(jq -r '.catalyst.linear.bot.orchestrator.clientId // empty' "$_g" 2>/dev/null)
-	_ocsec=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "$_g" 2>/dev/null)
-	if [[ -n "$_ocid" && -n "$_ocsec" ]]; then
-		_otok=$(curl -s --noproxy '*' -X POST https://api.linear.app/oauth/token \
-			-d grant_type=client_credentials -d "client_id=$_ocid" -d "client_secret=$_ocsec" \
-			-d 'scope=read,write,comments:create,app:assignable,app:mentionable' \
-			-d 'actor=app' 2>/dev/null | jq -r '.access_token // empty' 2>/dev/null)
-		if [[ -n "$_otok" ]]; then
-			export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
-			echo "catalyst-execution-core: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2
-		else
-			echo "catalyst-execution-core: WARNING orchestrator token mint failed — daemon using existing LINEAR_API_TOKEN" >&2
-		fi
-		unset _ocid _ocsec _otok
+	# Mint + export live in lib/linear-app-actor.sh (CTL-1577) so the broker start path shares
+	# the same block; fail-open — a failed mint leaves the existing LINEAR_API_TOKEN intact.
+	source "$SCRIPT_DIR/lib/linear-app-actor.sh"
+	linear_app_actor_auth "catalyst-execution-core"
+	# CATALYST_CONFIG_FILE pins the Layer-1 config path explicitly so the daemon's
+	# own config resolution (daemon.mjs main(): `process.env.CATALYST_CONFIG_FILE ||
+	# resolve(process.cwd(), ".catalyst", "config.json")`) never falls back to a
+	# cwd-relative lookup. Without this, the daemon inherits whatever directory the
+	# operator happened to be in when they ran `catalyst-execution-core start` /
+	# `catalyst-stack start` — if that directory has no `.catalyst/config.json`,
+	# every Layer-1-config-driven feature (executorByPhase routing, the reaper/
+	# worktree-refresh/stale-PR-rescue timers, reconcile config) silently reads
+	# empty defaults instead of the real config, with no error surfaced anywhere.
+	# Only set when the caller hasn't already pointed at a specific file, AND only
+	# when the CATALYST_DIR-relative candidate actually exists: a deployment that
+	# relocates CATALYST_DIR to a state-only root (e.g. /var/lib/catalyst) while
+	# starting the daemon from the real, correctly-configured repo cwd must still
+	# fall through to daemon.mjs's own cwd-relative resolution — forcing a
+	# nonexistent CATALYST_DIR-relative path here would silently shadow that
+	# working cwd fallback with empty defaults instead.
+	if [[ -z "${CATALYST_CONFIG_FILE:-}" && -f "$CATALYST_DIR/.catalyst/config.json" ]]; then
+		export CATALYST_CONFIG_FILE="$CATALYST_DIR/.catalyst/config.json"
 	fi
 	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
 	local server_pid=$!

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://catalyst.coalesce-labs.com/schemas/catalyst-config.schema.json",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/catalyst-config.schema.json",
   "title": "Catalyst Project Config",
   "description": "Schema for .catalyst/config.json — the Layer-1 project config committed to the repository. Contains team-wide settings safe to share. Secrets and host-specific overrides belong in the Layer-2 machine config (~/.config/catalyst/config.json).",
   "type": "object",
@@ -396,7 +396,19 @@
                       "type": "string",
                       "enum": ["off", "shadow", "enforce"],
                       "default": "shadow",
-                      "description": "off disables the reaper; shadow (the default) logs procOrphans.would-reap for each eligible orphan but kills nothing; enforce SIGTERMs then (after grace, if still alive) SIGKILLs. Ships in shadow so the allowlist + live-tree correlation can be audited on real hosts before any enforce flip."
+                      "description": "off disables the reaper; shadow (the default) logs procOrphans.would-reap for each eligible orphan but kills nothing; enforce SIGTERMs then (after grace, if still alive) SIGKILLs. Ships in shadow so the allowlist + live-tree correlation can be audited on real hosts before any enforce flip. Does NOT arm the CTL-1531 widened any-command class — that has its own widenMode knob."
+                    },
+                    "widenMode": {
+                      "type": "string",
+                      "enum": ["off", "shadow", "enforce"],
+                      "default": "shadow",
+                      "description": "CTL-1531: INDEPENDENT rollout mode for the WIDENED (any-command) orphan class, deliberately NOT derived from `mode`. off removes the widened admission entirely (a byte-identical revert of the feature); shadow (the default) classifies and reports widened candidates via procOrphans.would-reap but never signals them, even when mode is already enforce; enforce lets a widened candidate follow `mode`, so BOTH knobs must be open before an arbitrary PPID-1 command is signalled. An unrecognized value degrades to shadow, never to enforce. Exists because a host already carrying mode:'enforce' — granted for the narrow node/bun class after ITS shadow bake — must not inherit authority over the widened class on deploy (ADR-023: dark by default, one knob per actuator). Mirrors orphan-sweep.sh's SWEEP_PROC_WIDEN."
+                    },
+                    "widenMaxKills": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "default": 5,
+                      "description": "CTL-1531: per-run cap on CONFIRMED terminations from the WIDENED class (0 = uncapped). Delivered signals carry a second ceiling of widenMaxKills x 2, since a candidate is worth at most SIGTERM + SIGKILL. The widened class's authorizing evidence ('this cwd no longer exists') is correlated across a whole host — one renamed or unmounted worktreeRoot makes every process beneath it qualify at once — so a run that wants to kill more than a handful is a root-level event that wants a human. A non-numeric value degrades to the default 5, never to uncapped. Mirrors orphan-sweep.sh's SWEEP_PROC_WIDEN_MAX_KILLS."
                     },
                     "graceMs": {
                       "type": "number",
@@ -446,8 +458,13 @@
                 },
                 "swapUsedMbThreshold": {
                   "type": "number",
-                  "default": 4096,
-                  "description": "Emit when macOS swap-used MB reaches this value. Env EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD overrides."
+                  "default": 24576,
+                  "description": "macOS swap-used MB at or above which the swap signal TRIPS (edge-triggered since CTL-1503). Raised above the observed normal-swap ceiling of a 16 GB Mac so it stops firing every tick. Env EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD overrides."
+                },
+                "swapUsedMbClearThreshold": {
+                  "type": "number",
+                  "default": 16384,
+                  "description": "CTL-1503 hysteresis band: the latched swap degradation CLEARS (fires fleet.health.recovered once) only when swap drops strictly below this LOWER threshold, so a value hovering in the band [clear, trip) cannot re-flap. Clamped below swapUsedMbThreshold if misconfigured. Env EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD overrides."
                 },
                 "agentsThreshold": {
                   "type": "number",
@@ -545,6 +562,19 @@
             }
           }
         },
+        "deployment": {
+          "type": "object",
+          "description": "Fleet-topology declaration (CTL-1617). Unlike orchestration.dispatchMode (node-scoped, relocated to Layer-2 by CTL-1214), deployment mode is genuinely fleet-scoped, so it is a first-class Layer-1 field. A per-host Layer-2 catalyst.deployment.mode value wins over this when present (the exception hatch — e.g. a laptop dev-clone of a cluster-declared repo overriding to single-host).",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["single-host", "cluster", "cloud"],
+              "default": "single-host",
+              "description": "Declares this fleet's deployment topology. 'single-host' (default) — a lone node, no cluster substrate expected. 'cluster' — a coordinated multi-host fleet; roster/HRW/liveness are graded by catalyst doctor. 'cloud' — a managed-container node; the smee webhook tunnel must NOT be live and secrets are platform-delivered. Resolution precedence: env CATALYST_DEPLOYMENT_MODE > Layer-2 catalyst.deployment.mode > this Layer-1 value > constant default 'single-host'. An unset key or an unrecognized value both degrade to 'single-host' (the safest direction) — see lib/deployment-mode.mjs for the full validity ladder."
+            }
+          }
+        },
         "feedback": {
           "type": "object",
           "deprecated": true,
@@ -567,6 +597,19 @@
                 "type": "string"
               },
               "examples": [["auto-filed", "agent-feedback"]]
+            }
+          }
+        },
+        "responder": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Daemon-health responder tuning (CTL-1509) — consumed at INSTALL time by install-health-responder.sh (repo .catalyst/config.json walk-up), which bakes the value into the LaunchAgent's StartInterval. Node-scoped machine tuning in spirit (like sweep.*), permitted here so a repo can pin the sweep cadence; re-run 'catalyst-stack adopt-cloud-sync' (or install-services) after changing it.",
+          "properties": {
+            "intervalSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 900,
+              "description": "How often the health-responder launchd sweep runs (seconds; the installer clamps to 60-900, default 180)."
             }
           }
         },
@@ -596,6 +639,12 @@
               "minimum": 0,
               "default": 20,
               "description": "Maximum number of worktrees removed per sweep run."
+            },
+            "procWiden": {
+              "type": "string",
+              "enum": ["off", "shadow", "enforce"],
+              "default": "shadow",
+              "description": "CTL-1531: rollout mode for orphan-sweep.sh vector 1's WIDENED (any-command) branch — the daemon-side sibling of orchestration.orphanReaper.procReaper.widenMode. Read by install-orphan-sweep.sh and BAKED INTO the LaunchAgent's EnvironmentVariables as SWEEP_PROC_WIDEN, so the setting survives the plist regeneration that every routine `catalyst-stack install-services` performs. Resolution order: an explicit SWEEP_PROC_WIDEN env var at install time > this key > the value already present in the installed plist > shadow."
             }
           }
         },

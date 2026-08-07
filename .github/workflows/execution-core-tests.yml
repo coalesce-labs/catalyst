@@ -34,6 +34,16 @@ on:
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
       # only the broker must run this suite too (Codex P2).
       - "plugins/dev/scripts/broker/**"
+      # CTL-1529 round 3: event-log-read-guard.test.mjs scans the WHOLE
+      # plugins/dev/scripts tree for whole-file event-log reads (round 2 scanned an
+      # enumerated 4 of 16 directories and the header overstated it). The trigger
+      # must match the scan, or a new whole-log read lands in an untriggered
+      # directory and the guard never runs — which is how otel-forward/lib/dlq.ts's
+      # three unbounded reads sat unnoticed in a long-lived daemon.
+      - "plugins/dev/scripts/**"
+      # NOTE: the glob above SUBSUMES every plugins/dev/scripts path listed below.
+      # They are retained as documentation of WHICH STEP each path feeds, not as
+      # triggers — do not read the list as the trigger set.
       # CTL-1369: the catalyst-install launcher, the `catalyst` router, and the CLI
       # registration (install-cli.sh / check-setup.sh) are the production entry path to
       # `catalyst install|uninstall|reinstall`; changing them must run the smoke test below.
@@ -41,14 +51,37 @@ on:
       - "plugins/dev/scripts/catalyst"
       - "plugins/dev/scripts/catalyst-linear"
       - "plugins/dev/scripts/catalyst-stack"
+      # CTL-1531: orphan-sweep-plist.test.sh VALIDATES this template, so a PR that
+      # edits only the plist must run this workflow or the test never sees it.
+      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
+      # CTL-1531: orphan-sweep.sh is a DESTRUCTIVE, kill-processes script whose
+      # only guard is __tests__/orphan-sweep.test.sh (run below). Before CTL-1531
+      # it appeared in no workflow at all, so a change to its kill gates could
+      # merge entirely unverified.
+      - "plugins/dev/scripts/orphan-sweep.sh"
+      # CTL-1531 round 3: the installer resolves the SWEEP_PROC_WIDEN value baked
+      # into the LaunchAgent (shadow vs enforce for the widened process killer),
+      # and the template is where that key lives — both are guarded by
+      # install-orphan-sweep{,-guard}.test.sh below.
+      - "plugins/dev/scripts/install-orphan-sweep.sh"
+      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/__tests__/**"
       # CTL-1387: the CLI-reference generator + the page it drives are guarded by
       # cli-reference-drift.test.sh below; a change to either must run this suite.
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
+      # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
+      # either must run migrate-dual-harness.test.sh below.
+      - "plugins/dev/scripts/migrate-dual-harness.sh"
+      - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
+      # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
+      # every member package's install (incl. execution-core, broker, otel-forward).
+      - "package.json"
+      - "bun.lock"
+      - "turbo.json"
   push:
     branches: [main]
     paths:
@@ -57,18 +90,50 @@ on:
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
       # only the broker must run this suite too (Codex P2).
       - "plugins/dev/scripts/broker/**"
+      # CTL-1529 round 3: event-log-read-guard.test.mjs scans the WHOLE
+      # plugins/dev/scripts tree for whole-file event-log reads (round 2 scanned an
+      # enumerated 4 of 16 directories and the header overstated it). The trigger
+      # must match the scan, or a new whole-log read lands in an untriggered
+      # directory and the guard never runs — which is how otel-forward/lib/dlq.ts's
+      # three unbounded reads sat unnoticed in a long-lived daemon.
+      - "plugins/dev/scripts/**"
+      # NOTE: the glob above SUBSUMES every plugins/dev/scripts path listed below.
+      # They are retained as documentation of WHICH STEP each path feeds, not as
+      # triggers — do not read the list as the trigger set.
       # CTL-1369: launcher / router / CLI-registration entry path (see PR-trigger note above).
       - "plugins/dev/scripts/catalyst-install"
       - "plugins/dev/scripts/catalyst"
       - "plugins/dev/scripts/catalyst-linear"
       - "plugins/dev/scripts/catalyst-stack"
+      # CTL-1531: orphan-sweep-plist.test.sh VALIDATES this template, so a PR that
+      # edits only the plist must run this workflow or the test never sees it.
+      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
+      # CTL-1531: orphan-sweep.sh is a DESTRUCTIVE, kill-processes script whose
+      # only guard is __tests__/orphan-sweep.test.sh (run below). Before CTL-1531
+      # it appeared in no workflow at all, so a change to its kill gates could
+      # merge entirely unverified.
+      - "plugins/dev/scripts/orphan-sweep.sh"
+      # CTL-1531 round 3: the installer resolves the SWEEP_PROC_WIDEN value baked
+      # into the LaunchAgent (shadow vs enforce for the widened process killer),
+      # and the template is where that key lives — both are guarded by
+      # install-orphan-sweep{,-guard}.test.sh below.
+      - "plugins/dev/scripts/install-orphan-sweep.sh"
+      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/__tests__/**"
       # CTL-1387: see the pull_request note above.
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
+      # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
+      # either must run migrate-dual-harness.test.sh below.
+      - "plugins/dev/scripts/migrate-dual-harness.sh"
+      - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
+      # CTL-1628: see the pull_request note above.
+      - "package.json"
+      - "bun.lock"
+      - "turbo.json"
 
 jobs:
   execution-core-unit-tests:
@@ -85,17 +150,11 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install
-
-      - name: Install broker dependencies (CTL-1473)
-        # The stable-unit-tests step runs ../broker/plugin-refresh.test.mjs, which
-        # imports broker/router.mjs -> broker/config.mjs. Unlike execution-core/config.mjs
-        # (pino-optional via a try/catch console shim), broker/config.mjs does a hard
-        # top-level `import pino from "pino"`. Node/bun resolves that from broker/'s
-        # location upward, so the job-default `bun install` in execution-core/ never
-        # satisfies it. Install broker/ deps so pino resolves for the broker import chain.
-        working-directory: plugins/dev/scripts/broker
-        run: bun install
+        # CTL-1628: a single root bun workspace/lockfile now covers execution-core,
+        # broker, and otel-forward (among others) — install at the repo root so
+        # bun resolves the one root bun.lock instead of a per-package copy.
+        working-directory: .
+        run: bun install --frozen-lockfile
 
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
@@ -194,6 +253,194 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/orphan-sweep.test.sh
 
+      - name: gh-pr-comment helper test (CTL-1496)
+        # Covers PR_NUMBER numeric validation + the idempotent existing-comment
+        # guard (skip on match, fail-closed on fetch failure).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/gh-pr-comment.test.sh
+
+      - name: recovery-pass pr_not_merged remediation test (CTL-1496)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/recovery-pass-pr-not-merged.test.sh
+
+      - name: review-comments headless resolution test (CTL-1496)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/review-comments-headless.test.sh
+
+      - name: monitor launcher / dist-redirect test (incl. CTL-1612 webhook-secret projection)
+        # Previously ungated in CI (run-tests.sh globs it locally, but the CI job uses an
+        # explicit allowlist). Now covers the cmd_start CATALYST_WEBHOOK_SECRET projection
+        # that brings the stack launch path to parity with the launchd wrapper.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-monitor-dist-redirect.test.sh
+
+      - name: liveness-anchor cross-stack parity test (CTL-1612 round 6/7)
+        # Pins catalyst-monitor.sh's resolve_liveness_anchor_issue() (a bash mirror of
+        # execution-core/config.mjs's getLivenessAnchorIssue(), duplicated deliberately —
+        # see the round-6/7 report for the runtime-dependency tradeoff) against the
+        # canonical getter via the __tests__/secret-contract-parity.test.sh three-way-
+        # assertion pattern, PLUS a jq-less fixture (round 7) exercising the grep/sed
+        # fallback rung a jq-absent host takes. Needs jq AND node, both preinstalled on
+        # ubuntu-latest runners (mirrors the deployment-mode-parity step above).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/liveness-anchor-parity.test.sh
+
+      - name: linear-app-actor scoped-credential unit tests (CTL-1612 rounds 4-6)
+        # The only direct regression coverage for lib/linear-app-actor.sh's scoped
+        # mode: inherited-alias clearing (round 4), personal lin_api_* key preservation
+        # incl. whitespace-trimmed classification (rounds 5/6), and the inherited-token
+        # fallback when the monitor's own mint fails or finds no creds (round 6). Lives
+        # under lib/__tests__/ rather than __tests__/, so — unlike every other suite in
+        # this allowlist — it also needed a dedicated step (round 7): the local
+        # run-tests.sh aggregate runner didn't glob that directory either until this
+        # same round wired both in together.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/linear-app-actor.test.sh
+
+      - name: daemon shared-GitHub-credential projection test (CTL-1612)
+        # Covers _project_shared_github_token: the shared SOPS file WINS over a stale
+        # inherited GITHUB_TOKEN/GH_TOKEN (the 2026-08-02 fleet outage), an
+        # empty/whitespace/absent file is a total no-op that never exports "", and the
+        # GITHUB_TOKEN-only case reconciles GH_TOKEN so a stale one cannot outrank it.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-execution-core-github-token.test.sh
+
+      - name: catalyst-secret-env A/B legacy-vs-folded parity test (CTL-1623)
+        # catalyst_project_github_token/_webhook_secret's FILE-READ tier now delegates to
+        # lib/catalyst-secret-contract.sh's catalyst_resolve_secret (the CTL-1616 registry
+        # engine) instead of hand-rolling its own file search. This suite freezes the
+        # pre-fold implementation as a test-local reference and asserts byte-identical
+        # results across the full fixture space (explicit overrides, CATALYST_CONFIG_DIR,
+        # CATALYST_LAYER2_CONFIG_FILE-derived dir, XDG dedupe, absent/whitespace-only files,
+        # trailing-EOL stripping, pipe-in-value, the full github-token precedence ladder),
+        # plus two FLAGGED, deliberately-divergent fail-closed cells (NUL-containing file,
+        # invalid-UTF-8 file — Codex post-merge round 1) where the folded engine now
+        # rejects a candidate the legacy reader would have silently mutated. Sibling suites
+        # secret-contract-parity.test.sh / catalyst-secret-contract.test.sh remain CI-dark
+        # (pre-existing family-wide gap, tracked separately) — this is the one directly
+        # exercising the CTL-1612 pair's own launcher-facing wrapper functions.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-secret-env-legacy-parity.test.sh
+
+      - name: migrate-dual-harness test (CTL-1530)
+        # Covers the dual-harness classification (dual-ok / codex-only /
+        # claude-only-monolithic / no-harness), the skills-dir state machine
+        # (.claude/skills symlink vs .agents/skills), and the dry-run /
+        # --fix / exit-code contract.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/migrate-dual-harness.test.sh
+
+      - name: catalyst-runtime-root Bash resolver unit tests (CTL-1628 Phase A2)
+        # Pins lib/catalyst-runtime-root.sh's catalyst_dev_scripts (probe order,
+        # sentinel, sort -V newest-wins, LOUD miss), catalyst_plugin_root (Q3
+        # ancestor walk), and catalyst_runtime_layout classification. Was
+        # previously unwired (no allowlist entry) so this contract had no CI guard.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-runtime-root.test.sh
+
+      - name: catalyst-runtime-root mjs resolver unit tests (bun, CTL-1628 Phase A2)
+        # The .mjs twin of the suite above. Own step (not the "Run stable unit
+        # tests" allowlist below) because that step's working-directory is
+        # execution-core/ and this lib is a deliberately zero-import leaf
+        # outside that tree (mirrors the deployment-mode step's own rationale).
+        working-directory: plugins/dev/scripts/lib
+        run: bun test catalyst-runtime-root.test.mjs
+
+      - name: deployment-mode resolver unit tests (bun, CTL-1617)
+        # Codex remediation: neither of the three deployment-mode suites was
+        # named anywhere in this workflow (nor any other), so required CI
+        # stayed green without ever exercising lib/deployment-mode.mjs, its
+        # Bash mirror, or their cross-stack agreement. This is the JS-side
+        # unit suite (resolveDeploymentMode/getDeploymentMode's validity
+        # ladder, the injected-env isolation contract). Its own step because
+        # lib/deployment-mode.mjs is a deliberately ZERO-IMPORT leaf outside
+        # the execution-core/ tree the "Run stable unit tests" step below is
+        # scoped to.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test deployment-mode.test.mjs
+
+      - name: deployment-mode Bash resolver unit test (CTL-1617)
+        # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
+        # see the bun step above for why this suite was previously ungated.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-deployment-mode.test.sh
+
+      - name: deployment-mode cross-stack parity test (CTL-1617)
+        # The fixture-matrix parity test asserting bash == node == the
+        # design-spec-computed expected value at every cell (168 fixture
+        # cells x 2 assertions, plus the dedicated divergence-pinning probes
+        # for the NUL-byte, NBSP-padding, malformed-trailing-content, and
+        # lone-surrogate hostile inputs). Needs jq, preinstalled on
+        # ubuntu-latest runners.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/deployment-mode-parity.test.sh
+
+      - name: Broker worker-state projection test (CTL-1529)
+        # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
+        # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),
+        # and `grep worker-state-projection .github/workflows/` used to return NOTHING —
+        # so two of this PR's fixes shipped behind a test CI never ran. It cannot join
+        # the `bun test` list below: that job's working-directory is execution-core, and
+        # this suite needs the BROKER package's own node_modules (pino) to import
+        # ./index.mjs. Hence its own step.
+        # CTL-1628: the root workspace install above already covers broker's deps
+        # (bun resolves the workspace root's node_modules from this cwd), so no
+        # per-package install here anymore.
+        working-directory: plugins/dev/scripts/broker
+        run: bun test worker-state-projection.test.mjs
+
+      - name: otel-forward tests (CTL-1529 round 3)
+        # otel-forward had NO CI coverage at all before this
+        # (`grep otel-forward .github/workflows/` returned nothing), and it is a
+        # long-lived daemon whose entire job is reading the event log. This round
+        # bounded lib/dlq.ts's dlqDepth — a whole-file read + whole-file split on a
+        # repeating timer, over a DLQ that grows precisely during an OTLP outage.
+        # The whole suite runs: measured 120 pass / 0 fail on this branch and
+        # 117 / 0 at the merge base, so there is no pre-existing red to import.
+        # (An earlier revision of this step was scoped to dlq.test.ts and justified
+        # that with "5 failures, pre-existing" in lib/destinations/* — that was
+        # false, and it would have told future readers not to widen.)
+        # CTL-1628: the root workspace install above already covers otel-forward's
+        # deps, so no per-package install here anymore.
+        working-directory: plugins/dev/scripts/otel-forward
+        run: bun test
+
+      - name: orphan-sweep kill-gate test (CTL-1531)
+        # orphan-sweep.sh KILLS PROCESSES and removes worktrees, and had ZERO CI
+        # coverage before CTL-1531. The suite is fully hermetic — ps, lsof, pgrep
+        # and kill are all mocked into a scratch $PATH, $HOME is redirected to a
+        # temp dir, and no real process is ever enumerated or signalled.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/orphan-sweep.test.sh
+
+      - name: orphan-sweep LaunchAgent plist test (CTL-1531)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/orphan-sweep-plist.test.sh
+
+      - name: orphan-sweep installer test (CTL-1531)
+        # The installer resolves the SWEEP_PROC_WIDEN rollout value that ends up
+        # in the LaunchAgent's EnvironmentVariables — i.e. whether the widened
+        # process killer runs in shadow or enforce on every host. Its 7 I13
+        # assertions guard the precedence chain (env → .catalyst/config.json →
+        # the value already installed → shadow) and, crucially, that a routine
+        # `catalyst-stack install-services` does NOT silently revert an operator's
+        # flip. Hermetic: launchctl/uname mocked, $HOME redirected to a temp dir,
+        # and the baked program path is a purpose-built scratch dir handed in via
+        # CATALYST_FORCE_BAKE_DIR — nothing is ever loaded into real launchd.
+        working-directory: plugins/dev/scripts
+        # NOTE: the runner is ubuntu and the installer is a macOS LaunchAgent, so
+        # this suite SKIPS here (loudly, rc=0) and its 38 assertions only execute
+        # on a developer Mac. Wiring it in still catches a syntax/gate break; it
+        # is NOT full CI coverage. A macos-latest job would close that.
+        run: bash __tests__/install-orphan-sweep.test.sh
+
+      - name: orphan-sweep installer ephemeral-path guard test (CTL-1306)
+        # The CTL-1306 guard the suite above deliberately routes around: baking a
+        # linked-worktree / temp program path into the LaunchAgent silently
+        # exit-127'd the reaper fleet-wide. Runs the REAL refusal paths.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/install-orphan-sweep-guard.test.sh
+
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
         # timing / sandbox incompatibility:
@@ -281,6 +528,8 @@ jobs:
             event-cursor.test.mjs \
             event-scan.test.mjs \
             event-tail.test.mjs \
+            event-log-window.test.mjs \
+            event-log-read-guard.test.mjs \
             fence-guard.test.mjs \
             fence-guard-integration.test.mjs \
             terminal-done-cooldown.test.mjs \
@@ -318,6 +567,7 @@ jobs:
             reconcile-health-event.test.mjs \
             recovery.test.mjs \
             registry.test.mjs \
+            replica-read.test.mjs \
             scan.test.mjs \
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \
@@ -335,7 +585,6 @@ jobs:
             test-setup.test.mjs \
             transcript-tail.test.mjs \
             triage-transition-event.test.mjs \
-            record-worker-transition.test.mjs \
             worker-disposition.test.mjs \
             worker-transition-event.test.mjs \
             turn-zero-gate.test.mjs \
@@ -347,11 +596,14 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
+            unstuck-escalate-seam.test.mjs \
+            unstuck-sweep.test.mjs \
             lib/catalyst-resource.test.mjs \
             lib/node-class-parity.test.mjs \
             lib/install-telemetry.test.mjs \
@@ -366,4 +618,6 @@ jobs:
             updater/updater.test.mjs \
             updater/updater-tracing.test.mjs \
             service-manifest.test.mjs \
-            ../broker/plugin-refresh.test.mjs
+            github-auth-preflight.test.mjs \
+            github-token-candidates-legacy-parity.test.mjs \
+            cluster-sync.test.mjs

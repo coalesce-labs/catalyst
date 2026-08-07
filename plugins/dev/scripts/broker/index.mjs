@@ -110,18 +110,32 @@ export {
   clearOrchestratorStatusMap,
   __setBrokerStartedAtForTest,
   __resetBrokerStartedAtForTest,
-  __resetDegradedEmittedForTest,
   __setHeartbeatForTest,
   __resetBrokerLivenessForTest,
 } from "./state.mjs";
+// CTL-1523: broker-degraded detector. The barrel rule for this module is
+// DRIVER + EVENT NAMES + RESET SEAM only — the pure classifiers/counters
+// (classifyBrokerDegraded, classifyBrokerDegradedClear, nextBrokerDegradedSustained,
+// nextBrokerDegradedLatch) and the path/inspection helpers stay module-private and
+// are imported directly from ./broker-degraded.mjs by their unit tests. That keeps
+// the public surface of a detector that is dormant by default minimal and internally
+// consistent (the previous 3-of-4 split exported some classifiers and not others).
+// The legacy barrel name (__resetDegradedEmittedForTest, once state.mjs's one-shot
+// guard) is preserved as an ALIAS over the new seam so callers keep working against
+// ONE chokepoint.
+export {
+  __resetBrokerDegradedLatchForTest,
+  __resetBrokerDegradedLatchForTest as __resetDegradedEmittedForTest,
+  checkBrokerDegraded,
+  BROKER_DEGRADED_EVENT,
+  BROKER_RECOVERED_EVENT,
+} from "./broker-degraded.mjs";
 export {
   saveInterests,
   loadPersistedInterests,
   getBrokerStateFilePath,
   buildBrokerState,
   writeBrokerStateFile,
-  getProjectedWorkerStatePath,
-  writeProjectedWorkerState,
   reduceWorkerStateEvent,
   projectWorkerStateEvent,
   replayWorkerStateProjection,
@@ -157,7 +171,6 @@ export {
   runWatchdogTick,
   startDriftCheckWatcher,
   processEvent,
-  handleWorkerStateChanged,
   seedLastSeenByService, // CTL-1122
 } from "./router.mjs";
 export { loadExistingRegistrations, getLastByteOffset } from "./tailer.mjs";

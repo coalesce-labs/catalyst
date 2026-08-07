@@ -703,6 +703,7 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
     const clock = fakeClock();
     const spy = makeSpawnSpy();
     let openedLogPath = null;
+    let closedFd = null;
     startDelegateRunnerTimer({
       enabled: true,
       intervalMs: 15000,
@@ -715,6 +716,12 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
       openLogFd: (p) => {
         openedLogPath = p;
         return 77; // a fake fd
+      },
+      // CTL-1519: inject the closer so the real closeSync(77) is NEVER called on
+      // an unrelated live descriptor — and assert the fd handed to the child is
+      // the exact one closed afterward.
+      closeLogFd: (fd) => {
+        closedFd = fd;
       },
     });
     clock.advance(15000);
@@ -729,6 +736,8 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
     // the log target is under <orchDir>/logs/delegate-runner.log
     expect(openedLogPath).toContain(join(orchDir, "logs"));
     expect(openedLogPath).toContain("delegate-runner.log");
+    // CTL-1519: the parent's copy of that exact fd is closed post-spawn.
+    expect(closedFd).toBe(77);
   });
 
   test("DETACHED INVARIANT — the spawn fn is the injectable async spawn, NEVER spawnSync", () => {
@@ -747,6 +756,9 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
       clock,
       isRunnerRunning: () => false,
       openLogFd: () => 5,
+      // CTL-1519: inject the closer so the default closeSync(5) never touches a
+      // real (possibly bun-internal) descriptor in the test process.
+      closeLogFd: () => {},
     });
     clock.advance(15000);
     // Exactly one async spawn; no third positional that smells synchronous.
@@ -836,6 +848,78 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
       openLogFd: () => 5,
     });
     expect(unrefed).toBe(true);
+  });
+
+  // CTL-1519: the parent's log fd is closed on EVERY kick, so open/close stay
+  // balanced and the daemon's live fd count is bounded (not growing with uptime).
+  // This is the guard that goes RED on the pre-fix code (nothing closed) and
+  // GREEN after — it directly encodes the fd-leak-regression contract that the
+  // live lsof on mini-2 exposed (1319 handles to one delegate-runner.log).
+  test("CTL-1519 — closes the parent log fd every kick; open/close balanced across N ticks (no fd leak)", () => {
+    const clock = fakeClock();
+    const opened = [];
+    const closed = [];
+    let nextFd = 100;
+    // spawn spy that ALSO pins ordering: closeLogFd must NOT have fired yet at
+    // the moment spawn() is invoked (the parent must close strictly AFTER the
+    // detached child has inherited its dup — else the child logs to a dead fd).
+    const spawn = () => {
+      expect(closed).toHaveLength(opened.length - 1); // this kick's fd not closed yet
+      return { unref() {}, pid: 1234 };
+    };
+    startDelegateRunnerTimer({
+      enabled: true,
+      intervalMs: 15000,
+      orchDir,
+      entryPath: "/fake/entry.mjs",
+      spawn,
+      clock,
+      isRunnerRunning: () => false,
+      openLogFd: () => {
+        const fd = nextFd++;
+        opened.push(fd);
+        return fd;
+      },
+      closeLogFd: (fd) => {
+        closed.push(fd);
+      },
+    });
+    const N = 50;
+    clock.advance(15000 * N);
+
+    expect(opened).toHaveLength(N);
+    // every opened fd is closed, in open order → net live parent fds after N ticks = 0.
+    expect(closed).toEqual(opened);
+    expect(opened.filter((fd) => !closed.includes(fd))).toHaveLength(0);
+  });
+
+  // CTL-1519: the close lives in a `finally`, so the just-opened fd is released
+  // even when spawn() itself throws (EAGAIN/EMFILE) — the very error path where
+  // leaking it would compound descriptor exhaustion. The throw stays swallowed
+  // by the callback's outer guard (no kick ever escalates out of the timer).
+  test("CTL-1519 — closes the log fd even when spawn throws (finally); no leak on the error path", () => {
+    const clock = fakeClock();
+    const closed = [];
+    expect(() => {
+      startDelegateRunnerTimer({
+        enabled: true,
+        intervalMs: 15000,
+        orchDir,
+        entryPath: "/fake/entry.mjs",
+        spawn: () => {
+          throw new Error("EAGAIN");
+        },
+        clock,
+        isRunnerRunning: () => false,
+        openLogFd: () => 9,
+        closeLogFd: (fd) => {
+          closed.push(fd);
+        },
+      });
+      clock.advance(15000);
+    }).not.toThrow();
+    // the fd opened for the failed spawn is still released in the finally.
+    expect(closed).toEqual([9]);
   });
 });
 

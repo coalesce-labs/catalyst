@@ -68,6 +68,8 @@ const noLivenessReader = () => ({});
  * @param {number} [args.now] epoch ms (injected for tests)
  * @param {number} [args.intervalMs] liveness interval threshold
  * @param {number} [args.graceMs] liveness grace window
+ * @param {Function} [args.intervalMsFor] CTL-1551: per-host live-window resolver (host) => ms | undefined
+ * @param {string|null} [args.selfHost] CTL-1551: this monitor's own (alias-folded) host — carried on the view so the UI never guesses local identity
  * @returns {import("./cluster-view.d.mts").ClusterView}
  */
 export function assembleClusterView({
@@ -80,6 +82,8 @@ export function assembleClusterView({
   now = Date.now(),
   intervalMs,
   graceMs,
+  intervalMsFor,
+  selfHost = null,
   // CTL-1095: injectable drain reader. Default → no drain info (fail-open:
   // draining:false). Production wires it from the local isDraining + inFlightCount.
   drainReader = null,
@@ -128,7 +132,7 @@ export function assembleClusterView({
   const heartbeatHosts = lastSeen && typeof lastSeen === "object" ? Object.keys(lastSeen) : [];
   const allHosts = [...new Set([...roster, ...heartbeatHosts])];
   const rosterSet = new Set(roster);
-  const liveness = overlayClusterLiveness(allHosts, lastSeen, { now, intervalMs, graceMs }).filter(
+  const liveness = overlayClusterLiveness(allHosts, lastSeen, { now, intervalMs, graceMs, intervalMsFor }).filter(
     (n) => rosterSet.has(n.host) || n.status !== "offline",
   );
   const displayHosts = liveness.map((n) => n.host);
@@ -170,7 +174,20 @@ export function assembleClusterView({
       if (!c) return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
       const mp = c.maxParallel ?? 0;
       const ifc = c.inFlightCount ?? 0;
-      return { maxParallel: mp, inFlightCount: ifc, freeSlots: Math.max(0, mp - ifc) };
+      // CTL-1581: freeSlots derives from OCCUPANCY when known — a host owning
+      // parked work has inFlightCount > activeCount, and mp − ifc would report
+      // contradictory capacity (activeCount: 0 with freeSlots: 3 on a 4-slot
+      // node) to /api/cluster consumers that trust the projection as-is.
+      const occ = typeof c.activeCount === "number" ? c.activeCount : ifc;
+      return {
+        maxParallel: mp,
+        inFlightCount: ifc,
+        freeSlots: Math.max(0, mp - occ),
+        // Slot-occupancy subset — conditional so an old-daemon peer
+        // contributes no field (consumers fall back to inFlightCount).
+        ...(typeof c.activeCount === "number" ? { activeCount: c.activeCount } : {}),
+        ...(Array.isArray(c.activeTickets) ? { activeTickets: c.activeTickets } : {}),
+      };
     } catch {
       return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
     }
@@ -199,12 +216,17 @@ export function assembleClusterView({
   // the multi-host branch (a single-node fleet attributes everything to its host).
   const makeTicket = (t, host) => ({ ...t, ownerHost: host });
 
+  // CTL-1551: normalized once — carried on BOTH return shapes so the UI never
+  // infers local identity from node status.
+  const foldedSelfHost = typeof selfHost === "string" && selfHost.length > 0 ? selfHost : null;
+
   if (singleHost) {
     const host = displayHosts[0] ?? null;
     const node = livenessByHost.get(host) ?? { host, status: host ? "offline" : null, lastSeen: null };
     return {
       generatedAt: board?.generatedAt ?? new Date(now).toISOString(),
       singleHost: true,
+      selfHost: foldedSelfHost,
       // Identity no-op: ALL board tickets, in board order, attributed to the one
       // host (preserves the flat board's ticket identity + ordering exactly).
       nodes: [
@@ -251,6 +273,7 @@ export function assembleClusterView({
   return {
     generatedAt: board?.generatedAt ?? new Date(now).toISOString(),
     singleHost: false,
+    selfHost: foldedSelfHost,
     nodes,
   };
 }
@@ -313,6 +336,17 @@ export function createClusterEntity({
   // CTL-1322: injectable admission reader; forwarded verbatim to assembleClusterView.
   // (host) -> { accepting, holdReason, … } | null. Default null = feature off.
   admissionReader = null,
+  // CTL-1551: liveness thresholds, forwarded verbatim to assembleClusterView.
+  // intervalMsFor is the PER-HOST resolver — the server budgets peer transport
+  // lag (beat cadence + background poll + sync-cache TTL) without loosening the
+  // SELF host's window (its heartbeats come straight from the local log).
+  // undefined = the node-liveness defaults.
+  intervalMs = undefined,
+  graceMs = undefined,
+  intervalMsFor = undefined,
+  // CTL-1551: provider for this monitor's own (alias-folded) host name; resolved
+  // per assemble (execution-core deps load lazily). null = unknown.
+  selfHostProvider = null,
   now = () => Date.now(),
 } = {}) {
   // Memoize the lazy execution-core import so repeated assembles don't re-import.
@@ -372,6 +406,18 @@ export function createClusterEntity({
         aliases,
         drainReader,
         admissionReader,
+        // CTL-1551: forwarded, not defaulted here — same accepted-but-dropped
+        // trap as the three readers above.
+        intervalMs,
+        graceMs,
+        intervalMsFor,
+        selfHost: (() => {
+          try {
+            return typeof selfHostProvider === "function" ? (selfHostProvider() ?? null) : null;
+          } catch {
+            return null; // identity resolution is best-effort — never break the view
+          }
+        })(),
       });
     },
   };

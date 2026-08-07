@@ -176,6 +176,15 @@ function resolveTranscriptTail(
 
   let content: string;
   try {
+    // EVENT-LOG-FULL-READ-OK(CTL-1529): a Claude SESSION TRANSCRIPT
+    // (~/.claude/projects/**/<session>.jsonl), not the monthly event log — the
+    // guard's dataflow matches on the shared `.jsonl` shape. Left unbounded
+    // deliberately: the scan below walks backwards for the last `assistant`
+    // text block, and that block sits an UNBOUNDED distance from EOF (a long
+    // tool-call run appends thousands of non-assistant records after it), so a
+    // fixed-size tail would intermittently report "no question raised" — the
+    // exact false-negative the inbox exists to catch. Bounding this needs a
+    // backwards CHUNKED scan (read chunk, search, extend), not a byte cap.
     content = readFileSync(transcriptPath, "utf8");
   } catch {
     return none;

@@ -33,11 +33,12 @@
 // deterministically testable without real load, timers, network, or a checkout.
 // Mirrors the gc-liveness.mjs / autotune.mjs seam-injection convention.
 
-import { readFileSync, unlinkSync, statSync } from "node:fs";
+import { readFileSync, existsSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf, not the heavy router
+import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 
 // Throttle window: at most one pull per N seconds per checkout root. A merge
 // often arrives as both a github.pr.merged AND a github.push to main within the
@@ -109,6 +110,76 @@ function defaultGitFn(root, args) {
   }).trim();
 }
 
+// defaultRmFn — remove a path, tolerating a concurrent removal (force). Used only
+// to clear a stale git index.lock (CTL-1415); seam-injected for tests.
+function defaultRmFn(path) {
+  rmSync(path, { force: true });
+}
+
+/**
+ * clearStaleIndexLock — CTL-1415: age-gated removal of a crashed-op leftover
+ * `.git/index.lock` before a pull, so a stale lock can't silently freeze the
+ * checkout's `git reset --hard` for hours (the ~8.5h laptop freeze in CTL-1401).
+ *
+ * Removes ONLY when staleLockStatus reports the lock is older than the safe
+ * threshold, so an in-flight git op's lock is never disturbed. On removal, emits
+ * plugin.checkout.stale_lock_cleared (WARN — clearing means a git op had crashed,
+ * worth a signal). NEVER throws: a removal failure emits
+ * plugin.checkout.stale_lock_clear_failed (WARN) and the caller proceeds to the
+ * git op anyway (which then fails loudly via refresh_failed rather than this
+ * masking it).
+ *
+ * Codex P1 (#2530): two overlapping cleanup attempts could both classify the SAME
+ * old lock as stale; the first removes it and starts git (creating a fresh
+ * index.lock), then the second — still acting on its earlier classification —
+ * would unlink that brand-new live lock, defeating git's mutual exclusion. Right
+ * before removing, we re-run staleLockStatus and bail (no-op) if the lock is no
+ * longer present-and-stale at that instant — this narrows the race window to the
+ * single re-check rather than the whole caller's prior work, and a second
+ * concurrent attempt that loses the race simply leaves the winner's fresh lock
+ * alone instead of destroying it.
+ *
+ * @returns {{present, ageMs, stale, cleared:boolean, error?:string}}
+ */
+export function clearStaleIndexLock({
+  root,
+  now = Date.now(),
+  emitFn,
+  statFn,
+  rmFn = defaultRmFn,
+  thresholdMs = STALE_LOCK_THRESHOLD_MS,
+}) {
+  const status = staleLockStatus({ root, now, thresholdMs, statFn });
+  if (!status.present || !status.stale) return { ...status, cleared: false };
+  // Re-verify immediately before removing (see Codex P1 note above). Reuses the
+  // same `now` as the classification above — what matters is a fresh statFn
+  // read of the lock's mtime, not wall-clock drift between the two calls (this
+  // whole function runs synchronously), and reusing `now` keeps the recheck
+  // seam-injectable/deterministic for tests instead of reaching for a real clock.
+  const recheck = staleLockStatus({ root, now, thresholdMs, statFn });
+  if (!recheck.present || !recheck.stale) return { ...status, cleared: false };
+  try {
+    rmFn(indexLockPath(root));
+    emitFn?.({
+      event: "plugin.checkout.stale_lock_cleared",
+      orchestrator: null,
+      worker: null,
+      severity: "WARN",
+      detail: { checkout: root, lock_age_ms: status.ageMs, threshold_ms: thresholdMs },
+    });
+    return { ...status, cleared: true };
+  } catch (err) {
+    emitFn?.({
+      event: "plugin.checkout.stale_lock_clear_failed",
+      orchestrator: null,
+      worker: null,
+      severity: "WARN",
+      detail: { checkout: root, lock_age_ms: status.ageMs, error: err?.message ?? String(err) },
+    });
+    return { ...status, cleared: false, error: err?.message ?? String(err) };
+  }
+}
+
 // Dep install can take longer than a git op (lockfile resolution); generous ceiling.
 const BUN_INSTALL_TIMEOUT_MS =
   Number(process.env.CATALYST_PLUGIN_REFRESH_BUN_TIMEOUT_MS) || 180_000;
@@ -134,38 +205,6 @@ function defaultBunInstallFn(pkgDir) {
 // Files whose change means deps may need (re)installing in their containing dir.
 const DEP_MANIFEST_RE = /(^|\/)(package\.json|bun\.lock)$/;
 
-// LOCK_SETTLE_MS — CTL-1473 remediate: a .git/index.lock younger than this may
-// belong to a git op still in flight on the checkout; a genuine SIGKILL leftover
-// is from a PRIOR throttled refresh cycle (PLUGIN_REFRESH_THROTTLE_MS = 60s) and
-// is therefore always older. 5s is comfortably under the throttle and above any
-// same-cycle race, so it heals real leftovers without stomping a live op.
-export const PLUGIN_REFRESH_LOCK_SETTLE_MS =
-  Number(process.env.CATALYST_PLUGIN_REFRESH_LOCK_SETTLE_MS) || 5_000;
-
-// defaultRemoveLockFn — CTL-1473: remove a stale .git/index.lock so the next
-// reset --hard can succeed. The lock file is created by git ops that were
-// forcibly killed (SIGKILL on timeout). Only called after we confirm the error
-// message mentions the lock.
-//
-// CTL-1473 remediate: the prior implementation unlinked unconditionally. The
-// checkout is disposable and single-writer (broker, throttled per-root), so a
-// concurrent git op is unlikely — but removing a lock a live op still holds
-// would corrupt it. So we age-gate: an mtime younger than LOCK_SETTLE_MS is
-// treated as possibly-in-flight and left in place (the caller then reports
-// refresh_failed and the next cycle heals it once it has settled); a missing
-// lock is a no-op. This mirrors checkStaleGitLock's age-based staleness.
-export function defaultRemoveLockFn(root) {
-  const lockPath = `${root}/.git/index.lock`;
-  let ageMs;
-  try {
-    ageMs = Date.now() - statSync(lockPath).mtimeMs;
-  } catch {
-    return; // lock already gone — nothing to remove
-  }
-  if (ageMs < PLUGIN_REFRESH_LOCK_SETTLE_MS) return; // fresh — may be in flight
-  unlinkSync(lockPath);
-}
-
 // changedPackageDirs — pure helper: map a `git diff --name-only` output to
 // unique absolute package dirs that need `bun install`. Exported for direct
 // unit testing (no I/O — path/dedup logic only).
@@ -178,6 +217,57 @@ export function changedPackageDirs(root, diffOutput) {
     dirs.add(dir === "." ? root : resolve(root, dir));
   }
   return [...dirs];
+}
+
+// workspaceMemberNodeModules — pure helper: when `root` is a bun WORKSPACE root
+// (root package.json has `workspaces` and the root bun.lock is authoritative),
+// return each member's node_modules dir that exists and is not standalone-managed
+// (member has no bun.lock of its own). Exported for direct unit testing.
+//
+// WHY (CTL-1628 follow-up): the workspace conversion moved dep resolution to the
+// ROOT lockfile, but nodes migrated in place kept the node_modules the OLD
+// per-package flow had installed inside each member. Module resolution walks UP,
+// so that debris SHADOWS every root install forever: on the fleet this pinned the
+// running cloud-sync daemon to @catalyst-cloud/sdk 0.8.0 (no CTC-328 stale-frame
+// guard) while the root lock said 0.8.1 and every refresh "succeeded".
+//
+// Callers prune these dirs immediately BEFORE a root install — never on a bare
+// tick. That placement is the safety argument: bun legitimately creates nested
+// member node_modules for version conflicts, and no cheap signature separates
+// those from pre-workspace debris (verified: the fleet's stale trees carry no
+// .bun store either). Pruning only when an install follows makes a false
+// positive harmless — `bun install` recreates any nest it actually needs — and
+// costs nothing on ticks where no manifest changed.
+//
+// Glob workspace entries ("packages/*") are SKIPPED, not expanded: this repo
+// lists members literally, and silently expanding globs here would turn a new
+// pattern entry into a surprise rm -rf fan-out. A skipped glob is surfaced by
+// the caller's event detail, not swallowed.
+export function workspaceMemberNodeModules(root, { readFileFn = readFileSync, existsFn = existsSync } = {}) {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileFn(resolve(root, "package.json"), "utf8"));
+  } catch {
+    return [];
+  }
+  const entries = Array.isArray(manifest?.workspaces) ? manifest.workspaces : [];
+  if (entries.length === 0) return [];
+  if (!existsFn(resolve(root, "bun.lock"))) return []; // no authoritative root lock → not ours to prune
+  const out = [];
+  for (const entry of entries) {
+    if (typeof entry !== "string" || entry === "" || entry.includes("*")) continue;
+    const memberDir = resolve(root, entry);
+    if (!existsFn(join(memberDir, "package.json"))) continue;
+    if (existsFn(join(memberDir, "bun.lock"))) continue; // standalone-managed member — not workspace debris
+    const nm = join(memberDir, "node_modules");
+    if (existsFn(nm)) out.push(nm);
+  }
+  return out;
+}
+
+// defaultPruneFn — remove one member node_modules dir. Injectable for tests.
+function defaultPruneFn(dir) {
+  rmSync(dir, { recursive: true, force: true });
 }
 
 // defaultGitToplevelFn — map a pluginDirs entry (<checkout>/plugins/dev) to its
@@ -428,10 +518,10 @@ export function refreshPluginCheckout({
   now = Date.now(),
   gitFn = defaultGitFn,
   bunInstallFn = defaultBunInstallFn,
-  // CTL-1473: injectable seam for removing a stale .git/index.lock. Tests inject
-  // a spy; production defaults to defaultRemoveLockFn (unlinkSync). Only called
-  // when the fetch/reset error message mentions "index.lock".
-  removeLockFn = defaultRemoveLockFn,
+  // CTL-1628 follow-up seams: stale-member-node_modules pruning ahead of a root
+  // install (see workspaceMemberNodeModules for why). Injectable for tests.
+  memberNodeModulesFn = workspaceMemberNodeModules,
+  pruneFn = defaultPruneFn,
   emitFn,
   loadedCommit = null,
   loadedCommitRoot = null,
@@ -443,6 +533,10 @@ export function refreshPluginCheckout({
   // ALWAYS returns changed:false so decideStackReload (stack-reload.mjs) stays a no-op
   // (a behind checkout the broker never pulled must not trigger a stack restart loop).
   pull = true,
+  // CTL-1415: seams for the pre-pull stale-index.lock age-gate. Undefined statFn
+  // falls through to staleLockStatus's real statSync default in production.
+  statFn = undefined,
+  rmFn = defaultRmFn,
 }) {
   if (!root) return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
 
@@ -500,104 +594,47 @@ export function refreshPluginCheckout({
     oldSha = null;
   }
 
+  // CTL-1415: clear a stale (crashed-op) index.lock BEFORE the reset --hard it
+  // would otherwise block on forever. Age-gated, so a live git op is untouched;
+  // never throws, so a clear failure surfaces as its own WARN and we still
+  // attempt the pull (which then fails loudly rather than being masked).
+  clearStaleIndexLock({ root, now, emitFn, statFn, rmFn });
+
   try {
     gitFn(root, ["fetch", "--no-tags", "origin", "main"]);
     gitFn(root, ["reset", "--hard", "origin/main"]);
   } catch (err) {
-    // CTL-1473: stale .git/index.lock self-heal. A prior git op killed with SIGKILL
-    // (e.g. a timed-out GIT_TIMEOUT_MS fetch) can leave index.lock behind; the next
-    // reset --hard then fails with "Unable to create … index.lock: File exists". Remove
-    // the lock and retry the reset once. Only the reset is retried — fetch already
-    // succeeded (or we'd have thrown earlier), so index.lock is always a reset artifact.
-    const errMsg = err?.message ?? String(err);
-    if (errMsg.includes("index.lock")) {
-      let lockRemoved = false;
-      try {
-        removeLockFn(root);
-        lockRemoved = true;
-      } catch {
-        // lock file already gone — that's fine; retry regardless
-        lockRemoved = true;
-      }
-      if (lockRemoved) {
-        try {
-          gitFn(root, ["reset", "--hard", "origin/main"]);
-          emitFn({
-            event: "plugin.checkout.git_lock_healed",
-            orchestrator: null,
-            worker: null,
-            severity: "INFO",
-            detail: { checkout: root, old_sha: oldSha },
-          });
-          // fall through to the newSha read + updated emit below
-        } catch (retryErr) {
-          // retry also failed — fall through to normal refresh_failed handling
-          emitFn({
-            event: "plugin.checkout.refresh_failed",
-            orchestrator: null,
-            worker: null,
-            severity: "WARN",
-            detail: {
-              checkout: root,
-              old_sha: oldSha,
-              error: retryErr?.message ?? String(retryErr),
-            },
-          });
-          const priorR = _failuresByRoot.get(root) ?? { count: 0, since: now };
-          const nextR = { count: priorR.count + 1, since: priorR.count === 0 ? now : priorR.since };
-          _failuresByRoot.set(root, nextR);
-          if (nextR.count >= CHECKOUT_LAG_FAILURE_THRESHOLD && !_lagEmittedByRoot.has(root)) {
-            _lagEmittedByRoot.add(root);
-            emitFn({
-              event: "plugin.checkout.lag",
-              orchestrator: null,
-              worker: null,
-              severity: "ERROR",
-              detail: {
-                checkout: root,
-                old_sha: oldSha,
-                consecutive_failures: nextR.count,
-                behind_since: nextR.since,
-                error: retryErr?.message ?? String(retryErr),
-              },
-            });
-          }
-          return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
-        }
-      }
-    } else {
+    emitFn({
+      event: "plugin.checkout.refresh_failed",
+      orchestrator: null,
+      worker: null,
+      severity: "WARN",
+      detail: {
+        checkout: root,
+        old_sha: oldSha,
+        error: err?.message ?? String(err),
+      },
+    });
+    const prior = _failuresByRoot.get(root) ?? { count: 0, since: now };
+    const next = { count: prior.count + 1, since: prior.count === 0 ? now : prior.since };
+    _failuresByRoot.set(root, next);
+    if (next.count >= CHECKOUT_LAG_FAILURE_THRESHOLD && !_lagEmittedByRoot.has(root)) {
+      _lagEmittedByRoot.add(root);
       emitFn({
-        event: "plugin.checkout.refresh_failed",
+        event: "plugin.checkout.lag",
         orchestrator: null,
         worker: null,
-        severity: "WARN",
+        severity: "ERROR",
         detail: {
           checkout: root,
           old_sha: oldSha,
-          error: errMsg,
+          consecutive_failures: next.count,
+          behind_since: next.since,
+          error: err?.message ?? String(err),
         },
       });
-      const prior = _failuresByRoot.get(root) ?? { count: 0, since: now };
-      const next = { count: prior.count + 1, since: prior.count === 0 ? now : prior.since };
-      _failuresByRoot.set(root, next);
-      if (next.count >= CHECKOUT_LAG_FAILURE_THRESHOLD && !_lagEmittedByRoot.has(root)) {
-        _lagEmittedByRoot.add(root);
-        emitFn({
-          event: "plugin.checkout.lag",
-          orchestrator: null,
-          worker: null,
-          severity: "ERROR",
-          detail: {
-            checkout: root,
-            old_sha: oldSha,
-            consecutive_failures: next.count,
-            behind_since: next.since,
-            error: errMsg,
-          },
-        });
-      }
-      return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
     }
+    return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
   }
 
   let newSha = null;
@@ -634,10 +671,33 @@ export function refreshPluginCheckout({
   // triggers the monitor restart). Install failures are surfaced as WARN events
   // and never block the checkout-updated signal (reset already succeeded).
   const depsInstalled = [];
+  const staleNodeModulesPruned = [];
   if (oldSha) {
     let diffOut = "";
     try { diffOut = gitFn(root, ["diff", "--name-only", oldSha, newSha]); } catch { diffOut = ""; }
-    for (const pkgDir of changedPackageDirs(root, diffOut)) {
+    const pkgDirs = changedPackageDirs(root, diffOut);
+    // CTL-1628 follow-up: an install is about to run and the root lockfile is
+    // authoritative, so first clear any member node_modules that would SHADOW
+    // it (pre-workspace debris; see workspaceMemberNodeModules). Prune failures
+    // are non-fatal for the same reason install failures are — the reset
+    // already succeeded — but they surface as WARN, never silently.
+    if (pkgDirs.length > 0) {
+      for (const nm of memberNodeModulesFn(root)) {
+        try {
+          pruneFn(nm);
+          staleNodeModulesPruned.push(nm);
+        } catch (err) {
+          emitFn({
+            event: "plugin.checkout.node_modules_prune_failed",
+            orchestrator: null,
+            worker: null,
+            severity: "WARN",
+            detail: { checkout: root, node_modules_dir: nm, error: err?.message ?? String(err) },
+          });
+        }
+      }
+    }
+    for (const pkgDir of pkgDirs) {
       try {
         bunInstallFn(pkgDir);
         depsInstalled.push(pkgDir);
@@ -664,6 +724,7 @@ export function refreshPluginCheckout({
       loaded_commit: loadedCommit,
       restart_needed: restartNeeded,
       deps_installed: depsInstalled,
+      stale_node_modules_pruned: staleNodeModulesPruned,
     },
   });
   return { pulled: true, throttled: false, changed: true, failed: false, root, oldSha, newSha, restartNeeded };

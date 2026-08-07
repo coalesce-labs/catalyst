@@ -173,3 +173,94 @@ describe("readClusterLivenessFromLoki (CTL-1420 #17) — fail-open", () => {
     expect(out.mini.in_flight_tickets).toEqual([]);
   });
 });
+
+// ── CTL-1551: capacity fields (max_parallel / in_flight_count) ──
+// Loki only surfaces a structured-metadata field when the query references it, so
+// capacity rides a third best-effort query (C) merged onto A — mirroring tickets (B).
+describe("capacity enrichment (CTL-1551)", () => {
+  const capStream = (host, tsNs, { mp, ifc, asLabels } = {}) => {
+    const meta = {};
+    if (mp !== undefined) meta.catalyst_node_max_parallel = mp;
+    if (ifc !== undefined) meta.catalyst_node_in_flight_count = ifc;
+    const s = { host_name: host, event_name: "node.heartbeat" };
+    if (asLabels) Object.assign(s, meta);
+    return { stream: s, values: [asLabels ? [tsNs, "node.heartbeat"] : [tsNs, "node.heartbeat", meta]] };
+  };
+
+  test("parse: capacity from structured metadata (numbers arrive as Loki strings)", () => {
+    const out = parseLokiLivenessResponse({
+      data: { result: [capStream("mini", "1783451090000000000", { mp: "3", ifc: "2" })] },
+    });
+    expect(out.mini.max_parallel).toBe(3);
+    expect(out.mini.in_flight_count).toBe(2);
+  });
+
+  test("parse: host from per-entry structured metadata when absent from stream labels (CTL-1551)", () => {
+    const out = parseLokiLivenessResponse({
+      data: {
+        result: [
+          {
+            stream: { event_name: "node.heartbeat" }, // no host_name label
+            values: [["1783451090000000000", "node.heartbeat", { host_name: "mini-2" }]],
+          },
+        ],
+      },
+    });
+    expect(out["mini-2"]).toBeDefined();
+    expect(out["mini-2"].last_seen).toBe("2026-07-07T19:04:50.000Z");
+  });
+
+  test("parse: capacity from the promoted-stream-label shape", () => {
+    const out = parseLokiLivenessResponse({
+      data: { result: [capStream("mini-2", "1783451090000000000", { mp: "4", ifc: "0", asLabels: true })] },
+    });
+    expect(out["mini-2"].max_parallel).toBe(4);
+    expect(out["mini-2"].in_flight_count).toBe(0);
+  });
+
+  test("parse: absent/invalid capacity → null, never 0 or NaN", () => {
+    const out = parseLokiLivenessResponse({
+      data: {
+        result: [
+          capStream("a", "1783451090000000000", {}),
+          capStream("b", "1783451090000000000", { mp: "garbage", ifc: "-1" }),
+          capStream("c", "1783451090000000000", { mp: "0" }),
+        ],
+      },
+    });
+    expect(out.a.max_parallel).toBeNull();
+    expect(out.a.in_flight_count).toBeNull();
+    expect(out.b.max_parallel).toBeNull();
+    expect(out.b.in_flight_count).toBeNull();
+    expect(out.c.max_parallel).toBeNull();
+  });
+
+  test("three-query: capacity from C merged onto A's liveness map", async () => {
+    const fetcher = async (url) => {
+      if (url.includes("max_parallel"))
+        return ok([capStream("mini", "1783451090000000000", { mp: "3", ifc: "1" })]);
+      if (url.includes("in_flight_tickets")) return ok([]);
+      return ok([
+        stream("mini", [{ tsNs: "1783451090000000000" }]),
+        stream("mini-2", [{ tsNs: "1783451092000000000" }]),
+      ]);
+    };
+    const out = await readClusterLivenessFromLoki({ lokiUrl: "http://loki:3100", fetcher, nowMs: 1783451100000 });
+    expect(out.mini.max_parallel).toBe(3);
+    expect(out.mini.in_flight_count).toBe(1);
+    expect(out["mini-2"].max_parallel).toBeNull(); // no capacity published → no-data, not 0
+  });
+
+  test("capacity-enrichment (query C) failure does NOT break liveness or tickets", async () => {
+    const fetcher = async (url) => {
+      if (url.includes("max_parallel")) throw new Error("loki blip on C");
+      if (url.includes("in_flight_tickets"))
+        return ok([stream("mini", [{ tsNs: "1783451090000000000", metaTickets: "CTL-7" }])]);
+      return ok([stream("mini", [{ tsNs: "1783451090000000000" }])]);
+    };
+    const out = await readClusterLivenessFromLoki({ lokiUrl: "http://loki:3100", fetcher });
+    expect(out.mini.last_seen).toBeDefined();
+    expect(out.mini.in_flight_tickets).toEqual(["CTL-7"]);
+    expect(out.mini.max_parallel).toBeNull();
+  });
+});

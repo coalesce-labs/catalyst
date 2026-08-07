@@ -103,16 +103,42 @@ else
 	warnings+=("  Run: bash plugins/dev/scripts/setup-webhooks.sh")
 fi
 
-# 3. Check CLAUDE.md has Catalyst snippet
+# 3. Check CLAUDE.md has Catalyst snippet — a thin `@AGENTS.md` bridge (the
+#    CTL-1530 dual-harness layout) deliberately does NOT repeat the phrase
+#    itself; it lives in the imported AGENTS.md instead. Follow a whole-line
+#    `@AGENTS.md` bridge to AGENTS.md before concluding the snippet is
+#    missing, so a correctly migrated bridge repo isn't told to re-add it to
+#    the wrong file. Only warn when BOTH the bridge target and CLAUDE.md
+#    itself lack the phrase.
+# Resolve the snippet template from the INSTALLED plugin, not the consumer
+# repo's cwd — downstream projects don't vendor plugins/dev/templates/.
+SNIPPET_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../templates/CLAUDE_SNIPPET.md"
 if [[ -f "CLAUDE.md" ]]; then
-	if ! grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+	# Bridge detection FIRST: on a real @AGENTS.md bridge the canonical file is
+	# AGENTS.md, so the snippet must be validated THERE regardless of whether a
+	# stray duplicate still sits in CLAUDE.md (Codex reads only AGENTS.md — a
+	# CLAUDE.md-only copy would leave it without the workflow while checkup
+	# reads green). The -E trailing [[:space:]]* tolerates CRLF/whitespace,
+	# matching the migrator's normalized detection.
+	if grep -qE '^@AGENTS\.md[[:space:]]*$' CLAUDE.md 2>/dev/null && [[ -f "AGENTS.md" ]]; then
+		if ! grep -q "Catalyst Development Workflow" AGENTS.md 2>/dev/null; then
+			warnings+=("CLAUDE.md is a thin @AGENTS.md bridge, but the imported AGENTS.md is missing the Catalyst workflow snippet")
+			warnings+=("  Add the snippet from: ${SNIPPET_TEMPLATE}")
+			warnings+=("  Or run: cat \"${SNIPPET_TEMPLATE}\" >> AGENTS.md")
+			if grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+				warnings+=("  (a copy exists in CLAUDE.md — move it into AGENTS.md so both agents see it)")
+			fi
+		fi
+	elif grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+		: # monolithic CLAUDE.md with the snippet present directly
+	else
 		warnings+=("CLAUDE.md is missing the Catalyst workflow snippet")
-		warnings+=("  Add the snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
-		warnings+=("  Or run: cat plugins/dev/templates/CLAUDE_SNIPPET.md >> CLAUDE.md")
+		warnings+=("  Add the snippet from: ${SNIPPET_TEMPLATE}")
+		warnings+=("  Or run: cat \"${SNIPPET_TEMPLATE}\" >> CLAUDE.md")
 	fi
 else
 	warnings+=("No CLAUDE.md found — agents will lack project-level workflow context")
-	warnings+=("  Create one and add the Catalyst snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
+	warnings+=("  Create one and add the Catalyst snippet from: ${SNIPPET_TEMPLATE}")
 fi
 
 # 4. Check config.json exists and has required fields
@@ -597,6 +623,46 @@ if [[ ( -f AGENTS.md || -f CLAUDE.md ) && -x "$SEEDER" ]]; then
 	else
 		warnings+=("Could not verify the agent house-rules block (ensure-agent-house-rules.sh returned ${hr_rc} — an ambiguous/duplicate block, or a setup issue). Inspect: bash ${SEEDER}")
 	fi
+fi
+
+# 10. Dual-harness layout — Claude Code AND Codex both load instructions + skills (CTL-1530).
+#     migrate-dual-harness.sh classifies the repo against the target layout (AGENTS.md canonical
+#     + thin `@AGENTS.md` CLAUDE.md bridge + a `.agents/skills` dir with a `.claude/skills`
+#     symlink onto it) and reports exactly what's needed to converge a single-harness repo
+#     (Claude-only monolithic CLAUDE.md, or Codex-only AGENTS.md-with-no-bridge). Delegate
+#     detection to the script's own dry-run rather than re-implementing its classification here
+#     (same rationale as §9's seeder delegation) — warn, never fatal. Guarded like §9: skip a
+#     repo with no agent doc and no skills dir at all (nothing to converge).
+DUAL_HARNESS_SCRIPT="${SCRIPT_DIR}/migrate-dual-harness.sh"
+if [[ ( -e AGENTS.md || -L AGENTS.md || -e CLAUDE.md || -L CLAUDE.md || -e .claude/skills || -L .claude/skills || -e .agents/skills || -L .agents/skills ) && -x "$DUAL_HARNESS_SCRIPT" ]]; then
+	dh_rc=0
+	bash "$DUAL_HARNESS_SCRIPT" --repo "$PWD" --quiet >/dev/null 2>&1 || dh_rc=$?
+	case $dh_rc in
+	0)
+		# rc 0 also covers "no-harness once skills are clean" (migrate-dual-harness.sh's
+		# documented behavior when neither doc exists) — printing the green dual-harness
+		# line in that case would be a false green: the docs pair is still missing
+		# entirely. Only claim the dual-harness layout is OK when at least one doc exists.
+		if [[ ! -f AGENTS.md && ! -f CLAUDE.md ]]; then
+			warnings+=("Dual-harness skills wiring is current but the AGENTS.md/CLAUDE.md docs pair is missing — Fix: bash ${SEEDER} --repo . --fix, then re-run checkup")
+		else
+			echo -e "${GREEN}✓ dual-harness layout OK${NC} — AGENTS.md/CLAUDE.md bridge and skills wiring are current."
+		fi
+		;;
+	10)
+		if [[ ! -f AGENTS.md && ! -f CLAUDE.md ]]; then
+			warnings+=("Repo has no AGENTS.md/CLAUDE.md docs pair AND needs skills wiring (dual-harness dry-run rc=10) — Fix in order: bash ${SEEDER} --repo . --fix (creates the docs pair), then bash ${DUAL_HARNESS_SCRIPT} --repo . --fix (wires .agents/skills + .claude/skills), then re-run this checkup")
+		else
+			warnings+=("Repo is single-harness (missing @AGENTS.md bridge, skills wiring, or the AGENTS.md skills pointer) — Fix: bash ${DUAL_HARNESS_SCRIPT} --repo . --fix")
+		fi
+		;;
+	11)
+		warnings+=("CLAUDE.md is monolithic and needs the intelligent AGENTS.md/CLAUDE.md split — run the catalyst-foundry:migrate-dual-harness skill")
+		;;
+	*)
+		warnings+=("Dual-harness layout is ambiguous (migrate-dual-harness.sh returned ${dh_rc}) — inspect: bash ${DUAL_HARNESS_SCRIPT} --repo .")
+		;;
+	esac
 fi
 
 # Report errors (fatal)

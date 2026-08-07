@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import {
   mkdtempSync,
   mkdirSync,
@@ -6,16 +6,30 @@ import {
   appendFileSync,
   rmSync,
 } from "node:fs";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   readBacklog,
   tailEventLog,
   readTunnelEventStats,
+  scanFileLines,
+  readTailUtf8,
   fullReadMetrics,
   recordFullRead,
 } from "../lib/event-log-reader";
 import { createEventRing } from "../lib/event-ring";
+
+// bytesRequested — total `length` argument across readSync calls. The spy's
+// call tuple resolves to the 3-arg `readSync(fd, buffer, opts)` overload under
+// TS, so index positionally through `unknown[]` rather than fighting the
+// overload set (CTL-1529).
+function bytesRequested(calls: readonly unknown[][]): number {
+  return calls.reduce<number>(
+    (sum, c) => sum + (typeof c[3] === "number" ? c[3] : 0),
+    0,
+  );
+}
 
 let workdir: string;
 
@@ -573,5 +587,231 @@ describe("full-read counters (CTL-1232)", () => {
     } finally {
       ring.stop();
     }
+  });
+});
+
+// CTL-1515: the ring-underflow fallbacks must scan the current-month log in
+// bounded CHUNKS (openSync/readSync) — never a single whole-file readFileSync
+// (a ~1.7 GB contiguous transient bun/mimalloc never returns). These tests are
+// a REINTRODUCTION GUARD: they count node:fs readSync/readFileSync so a revert
+// to readFileSync fails CI. Spying the shared `fs` namespace is observed inside
+// event-log-reader.ts even though it destructures its fs imports (Bun's node:fs
+// is a singleton). NOTE: Bun's `mockRestore()` clears the recorded calls, so
+// every count/assertion is captured into a plain variable BEFORE the spy is
+// restored in `finally`.
+describe("scanFileLines (CTL-1515)", () => {
+  it("chunks a file larger than chunkBytes (>1 readSync, no readFileSync) and stitches a multibyte char split across a chunk boundary", () => {
+    const dir = eventsDir();
+    const file = join(dir, "scan.jsonl");
+    // Deterministic byte layout so a chunk boundary provably bisects a 4-byte
+    // emoji. "ab🚀cd" = 61 62 | F0 9F 9A 80 | 63 64 (🚀 occupies bytes 2..5).
+    // With chunkBytes = 4 the first boundary at byte 4 falls INSIDE 🚀
+    // (bytes 2,3 in chunk 1; bytes 4,5 in chunk 2) → the StringDecoder must
+    // carry the partial sequence across the read.
+    const lines = ["ab🚀cd", "second-é-line", "third"];
+    const text = lines.join("\n") + "\n";
+    writeFileSync(file, text);
+    expect(Buffer.byteLength("🚀")).toBe(4); // 4-byte sequence, straddles byte 4
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    // Assert INSIDE the try: Bun's mockRestore() clears the recorded calls, so
+    // counts must be read while the spy is live. finally still restores the spy
+    // even if an assertion throws.
+    try {
+      const got: string[] = [];
+      const bytes = scanFileLines(file, (l) => got.push(l), 4);
+      // (a) chunked: many readSync calls for a file far larger than the 4-byte chunk
+      expect(readSyncSpy.mock.calls.length).toBeGreaterThan(1);
+      // (b) NEVER a whole-file readFileSync
+      expect(readFileSyncSpy.mock.calls.length).toBe(0);
+      // Returns bytes scanned = file byte length
+      expect(bytes).toBe(Buffer.byteLength(text));
+      // Parity: same lines as split (scanFileLines omits the trailing empty of a
+      // newline-terminated file, hence the .filter(l => l.length > 0)).
+      expect(got).toEqual(text.split("\n").filter((l) => l.length > 0));
+      // The multibyte line survived byte-exact (no dropped/corrupted char).
+      expect(got[0]).toBe("ab🚀cd");
+      expect(got[1]).toBe("second-é-line");
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+  });
+
+  it("emits a final line that lacks a trailing newline", () => {
+    const dir = eventsDir();
+    const file = join(dir, "no-trailing-nl.jsonl");
+    writeFileSync(file, "one\ntwo\nthree"); // no trailing "\n"
+    const got: string[] = [];
+    scanFileLines(file, (l) => got.push(l), 3);
+    expect(got).toEqual(["one", "two", "three"]);
+  });
+});
+
+describe("readBacklog / readTunnelEventStats fallback: chunked scan, never readFileSync (CTL-1515)", () => {
+  it("readBacklog empty-predicate fallback (no ring) uses readSync, never readFileSync", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    const lines = Array.from({ length: 8 }, (_, i) => makeLine(`evt-${i}`));
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    try {
+      const r = await readBacklog({
+        catalystDir: workdir,
+        predicate: "",
+        limit: 3,
+        ring: null,
+        now: () => now,
+      });
+      // Behavioral parity with the old readFileSync path: last 3 non-empty lines.
+      expect(r.length).toBe(3);
+      expect(JSON.parse(r[0]).event).toBe("evt-5");
+      expect(JSON.parse(r[2]).event).toBe("evt-7");
+      // Reintroduction guard: chunked scan ran, no whole-file read.
+      expect(readSyncSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(readFileSyncSpy.mock.calls.length).toBe(0);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+  });
+
+  it("readBacklog predicate fallback (no ring) uses readSync, never readFileSync", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    const lines = [
+      makeLine("github.pr.merged", { i: 0 }),
+      makeLine("linear.issue.created"),
+      makeLine("github.pr.opened", { i: 1 }),
+    ];
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    try {
+      const r = await readBacklog({
+        catalystDir: workdir,
+        predicate: '.event | startswith("github.")',
+        limit: 100,
+        ring: null,
+        now: () => now,
+      });
+      expect(r.length).toBe(2);
+      expect(r.every((l) => (JSON.parse(l) as { event: string }).event.startsWith("github."))).toBe(true);
+      expect(readSyncSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(readFileSyncSpy.mock.calls.length).toBe(0);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+  });
+
+  it("predicate fallback returns only the last `limit` matches for a broad predicate — bounded + waits for jq (CTL-1515)", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    // 50 matching records; a broad predicate matches them all. The rolling buffer
+    // must retain only the last `limit`, and stream.end() must wait for jq to emit
+    // every match so the newest ones aren't cut off by a fixed-delay flush.
+    const lines = Array.from({ length: 50 }, (_, i) => makeLine("github.pr.opened", { i }));
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+    const r = await readBacklog({
+      catalystDir: workdir,
+      predicate: '.event | startswith("github.")',
+      limit: 5,
+      ring: null,
+      now: () => now,
+    });
+    expect(r.length).toBe(5); // bounded to `limit`, not all 50
+    // the newest 5 (i = 45..49), proving end() waited for jq's full output
+    expect(r.map((l) => (JSON.parse(l) as { i: number }).i)).toEqual([45, 46, 47, 48, 49]);
+  });
+
+  it("readTunnelEventStats file fallback (no ring) uses readSync, never readFileSync — counts unchanged", () => {
+    eventsDir();
+    const lines = [
+      makeGithubLine("org/a", "2026-05-04T10:00:00Z"),
+      makeGithubLine("org/a", "2026-05-04T10:30:00Z"),
+      makeGithubLine("org/b", "2026-05-04T11:00:00Z"),
+    ];
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    try {
+      const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
+      // Byte-identical counts to the old split-based path.
+      expect(r.eventCount24h).toBe(3);
+      expect(r.eventCount24hByRepo).toEqual({ "org/a": 2, "org/b": 1 });
+      // Reintroduction guard.
+      expect(readSyncSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(readFileSyncSpy.mock.calls.length).toBe(0);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+  });
+});
+
+// ── CTL-1529: readTailUtf8 — the bounded replacement for "read it all, then
+// slice the tail off". Two live sites shipped that shape; the worst of them ran
+// against the 344 MB monthly event log on every service-health poll while its
+// own comment claimed "Cap at 512KB to bound the read".
+describe("readTailUtf8 (CTL-1529)", () => {
+  const LINE = "y".repeat(99) + "\n"; // exactly 100 bytes per line
+
+  function writeLines(name: string, n: number): string {
+    const path = join(workdir, name);
+    writeFileSync(path, LINE.repeat(n));
+    return path;
+  }
+
+  it("returns the whole file when it is smaller than the cap (byte-identical to a full read)", () => {
+    const path = writeLines("small.jsonl", 10);
+    expect(readTailUtf8(path, 64 * 1024)).toBe(LINE.repeat(10));
+  });
+
+  it("returns only the tail when the file exceeds the cap, and READS only that much", () => {
+    const path = writeLines("big.jsonl", 100_000); // 10 MB
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    let out: string;
+    try {
+      out = readTailUtf8(path, 10_000); // 10 KB cap
+      const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
+      expect(requested).toBeLessThanOrEqual(10_000);
+      expect(readFileSyncSpy.mock.calls.filter((c) => c[0] === path)).toEqual([]);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+    // The cap lands exactly on a line boundary, so the fragment rule drops one
+    // whole line: 10_000 / 100 = 100 lines requested, 99 complete ones returned.
+    expect(out.length).toBe(9_900);
+    expect(out).toBe(LINE.repeat(99));
+  });
+
+  it("DROPS the leading fragment so a cut record cannot parse into a bogus event", () => {
+    const path = join(workdir, "frag.jsonl");
+    writeFileSync(
+      path,
+      JSON.stringify({ ts: "2026-07-01T00:00:00Z", keep: false }) + "\n" +
+        JSON.stringify({ ts: "2026-07-02T00:00:00Z", keep: true }) + "\n",
+    );
+    // A cap that starts mid-way through the FIRST record.
+    const out = readTailUtf8(path, 40);
+    expect(out.includes("keep\":false")).toBe(false);
+    for (const line of out.split("\n").filter((l) => l.length > 0)) {
+      expect(() => JSON.parse(line) as unknown).not.toThrow();
+    }
+  });
+
+  it("a missing or empty file is \"\" and never throws", () => {
+    expect(readTailUtf8(join(workdir, "nope.jsonl"), 1024)).toBe("");
+    const empty = join(workdir, "empty.jsonl");
+    writeFileSync(empty, "");
+    expect(readTailUtf8(empty, 1024)).toBe("");
   });
 });

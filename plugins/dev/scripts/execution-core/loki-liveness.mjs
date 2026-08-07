@@ -63,22 +63,43 @@ export function parseLokiLivenessResponse(body) {
   const newestMs = {};
   for (const stream of results) {
     const labels = (stream && stream.stream) || {};
-    const host = labels.host_name;
-    if (typeof host !== "string" || host.length === 0) continue;
     const values = Array.isArray(stream.values) ? stream.values : [];
     for (const v of values) {
       const tsMs = nsToMs(v && v[0]);
       if (!Number.isFinite(tsMs)) continue;
+      // CTL-1551: host resolves label-first (the deployed topology — Loki merges
+      // structured metadata into the response's stream object, verified live),
+      // with a per-entry structured-metadata fallback for a topology that keeps
+      // host_name entry-scoped instead.
+      const meta = (v && v[2]) || null;
+      const host = labels.host_name ?? (meta && meta.host_name);
+      if (typeof host !== "string" || host.length === 0) continue;
       if (host in newestMs && tsMs <= newestMs[host]) continue; // not strictly newer → skip
       newestMs[host] = tsMs;
-      const meta = (v && v[2]) || null;
       const rawTickets =
         (meta && meta.catalyst_node_in_flight_tickets) ??
         labels.catalyst_node_in_flight_tickets ??
         "";
+      // CTL-1551: capacity fields — same meta-or-label defensiveness as tickets.
+      // Loki serializes numeric attributes as strings; parse, reject non-finite.
+      const rawMp = (meta && meta.catalyst_node_max_parallel) ?? labels.catalyst_node_max_parallel;
+      const rawIfc = (meta && meta.catalyst_node_in_flight_count) ?? labels.catalyst_node_in_flight_count;
+      const mp = Number(rawMp);
+      const ifc = Number(rawIfc);
+      // CTL-1581: the slot-OCCUPANCY subset (running/dispatched). null (not [])
+      // when the attribute is absent — an old-daemon heartbeat must read as
+      // "unknown", never as "zero active".
+      const rawActive =
+        (meta && meta.catalyst_node_active_tickets) ?? labels.catalyst_node_active_tickets;
+      const rawAc = (meta && meta.catalyst_node_active_count) ?? labels.catalyst_node_active_count;
+      const ac = Number(rawAc);
       out[host] = {
         last_seen: new Date(tsMs).toISOString(),
         in_flight_tickets: parseInFlight(rawTickets),
+        max_parallel: Number.isInteger(mp) && mp > 0 ? mp : null,
+        in_flight_count: Number.isInteger(ifc) && ifc >= 0 ? ifc : null,
+        active_tickets: rawActive != null ? parseInFlight(rawActive) : null,
+        active_count: Number.isInteger(ac) && ac >= 0 ? ac : null,
       };
     }
   }
@@ -147,6 +168,59 @@ export async function readClusterLivenessFromLoki({
       }
     } catch (err) {
       logger?.warn?.({ err: err?.message }, "loki-liveness: tickets enrichment failed (ownership → local fallback)");
+    }
+    // CTL-1551 (query C, best-effort): capacity enrichment. Loki only surfaces a
+    // structured-metadata field when the query REFERENCES it (same reason query B
+    // exists), so a third filtered query forces catalyst_node_max_parallel into
+    // the response and its newest values are merged onto A. Failure leaves
+    // capacity null — the monitor renders "no data" zeros, liveness unaffected.
+    try {
+      // Reference BOTH capacity fields so Loki surfaces them regardless of
+      // whether the topology promotes them into the response stream object —
+      // every mp-bearing heartbeat line also carries the count, so the AND
+      // filter matches the same lines.
+      const cBody = await queryLokiStreams(
+        mkUrl(`${sel} | catalyst_node_max_parallel=~\`.+\` | catalyst_node_in_flight_count=~\`.+\``),
+        timeoutMs,
+        fetcher,
+      );
+      const capEnriched = cBody ? parseLokiLivenessResponse(cBody) : {};
+      for (const [host, rec] of Object.entries(capEnriched)) {
+        if (!out[host]) continue;
+        if (rec.max_parallel != null) out[host].max_parallel = rec.max_parallel;
+        if (rec.in_flight_count != null) out[host].in_flight_count = rec.in_flight_count;
+      }
+    } catch (err) {
+      logger?.warn?.({ err: err?.message }, "loki-liveness: capacity enrichment failed (capacity → no-data)");
+    }
+    // CTL-1581 (query D, best-effort): slot-occupancy enrichment. Same
+    // reference-to-surface rule as B/C. active_count matches `.+` on every
+    // new-daemon line (a number string, "0" included); active_tickets matches
+    // `.*` because an idle host's list is legitimately EMPTY — a `.+` filter
+    // would hide the "0 active" truth and leave stale occupancy on screen.
+    // Old-daemon lines match neither → fields stay null (unknown, never fake 0).
+    try {
+      const dBody = await queryLokiStreams(
+        mkUrl(`${sel} | catalyst_node_active_count=~\`.+\` | catalyst_node_active_tickets=~\`.*\``),
+        timeoutMs,
+        fetcher,
+      );
+      const activeEnriched = dBody ? parseLokiLivenessResponse(dBody) : {};
+      for (const [host, rec] of Object.entries(activeEnriched)) {
+        if (!out[host]) continue;
+        // Only merge occupancy from a line AT LEAST as new as A's liveness line:
+        // on a rollback (or a brief old+new dual-publish), A's newest can be an
+        // old-daemon line while D's newest attribute-bearing line is older —
+        // merging that would pin STALE occupancy onto fresher liveness. Skipped
+        // → fields stay null → consumers fall back to inFlightCount honestly.
+        const aMs = Date.parse(out[host].last_seen);
+        const dMs = Date.parse(rec.last_seen);
+        if (!(Number.isFinite(dMs) && Number.isFinite(aMs) && dMs >= aMs)) continue;
+        if (rec.active_count != null) out[host].active_count = rec.active_count;
+        if (Array.isArray(rec.active_tickets)) out[host].active_tickets = rec.active_tickets;
+      }
+    } catch (err) {
+      logger?.warn?.({ err: err?.message }, "loki-liveness: active enrichment failed (occupancy → unknown)");
     }
     return out;
   } catch (err) {

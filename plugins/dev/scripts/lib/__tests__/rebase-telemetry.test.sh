@@ -4,6 +4,18 @@
 
 set -uo pipefail
 
+# CTL-1612 round 12 (Codex P2 follow-up): this suite asserts on JSONL fields
+# via `jq` throughout. It was previously only reachable through run-tests.sh's
+# scripts/__tests__ glob (never discovered directly), so a jq-less host never
+# hit it; round 9 wired lib/__tests__/*.test.sh into a direct glob, which now
+# runs this suite unconditionally and hard-fails with jq-not-found errors
+# instead of a proper skip. "SKIP:" (column 0) is the marker run-tests.sh's
+# `grep -q '^SKIP:'` recognizes as a clean skip rather than PASS or FAIL.
+if ! command -v jq >/dev/null 2>&1; then
+	echo "SKIP: rebase-telemetry tests require jq (not on PATH)"
+	exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TELEMETRY_LIB="${LIB_DIR}/rebase-telemetry.sh"
@@ -125,6 +137,29 @@ assert_eq "phase.research.rebase-conflict-stalled.CTL-100" \
   "$(jq -r '.attributes["event.name"]' <<<"$LINE")" "thoughts stalled event name"
 assert_eq "thoughts_symlink_broken" \
   "$(jq -r '.body.payload.reason' <<<"$LINE")" "thoughts stalled reason"
+
+# ── 8. emit_ctl708_resolution ────────────────────────────────────────────────
+echo "8. emit_ctl708_resolution resolved → INFO"
+emit_ctl708_resolution \
+  --orch "" --ticket CTL-708 --phase implement \
+  --outcome resolved --files '["a.ts"]' --reason ""
+LINE="$(last_event_line)"
+assert_eq "phase.implement.ctl708-resolution.CTL-708" \
+  "$(jq -r '.attributes["event.name"]' <<<"$LINE")" "ctl708-resolution event name"
+assert_eq "INFO" \
+  "$(jq -r '.severityText' <<<"$LINE")" "resolved severity is INFO"
+assert_eq "resolved" \
+  "$(jq -r '.body.payload.outcome' <<<"$LINE")" "resolved outcome payload"
+
+echo "9. emit_ctl708_resolution declined → WARN"
+emit_ctl708_resolution \
+  --orch "" --ticket CTL-708 --phase implement \
+  --outcome declined --files '[]' --reason "file_count 8 exceeds max_files=6"
+LINE="$(last_event_line)"
+assert_eq "WARN" \
+  "$(jq -r '.severityText' <<<"$LINE")" "declined severity is WARN"
+assert_eq "file_count 8 exceeds max_files=6" \
+  "$(jq -r '.body.payload.reason' <<<"$LINE")" "declined reason payload"
 
 echo
 echo "results: $PASSES passed, $FAILURES failed"

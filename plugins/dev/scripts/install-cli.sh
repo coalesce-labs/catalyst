@@ -226,6 +226,73 @@ ensure_alloy() {
   return 0
 }
 
+# Minimum agent-browser version that honors AGENT_BROWSER_IDLE_TIMEOUT_MS — the
+# idle-daemon-shutdown knob workers set so a leaked headed "Chrome for Testing"
+# can't re-render the auto-refresh SPA and peg a core (CTL-1500). 0.9.1 IGNORES
+# the env var; 0.27.x+ honors it (verified: `agent-browser --help` lists it).
+# Keep in sync with check-setup.sh and doctor.mjs (AGENT_BROWSER_MIN_VERSION).
+AGENT_BROWSER_MIN_VERSION="0.27.0"
+
+# _ab_version_ge <have> <min> — true iff semver <have> >= <min> (sort -V; the
+# repo's established version-ordering idiom, e.g. catalyst-stack:490).
+_ab_version_ge() {
+  [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
+}
+
+# ensure_agent_browser — install/upgrade agent-browser to >= AGENT_BROWSER_MIN_VERSION
+# and provision its Chrome-for-Testing browser (CTL-1500). agent-browser is a
+# homebrew-core formula (`brew install agent-browser` — no tap); after install/
+# upgrade `agent-browser install` downloads Chrome for Testing (idempotent).
+#
+# DETECT-DON'T-CLOBBER: an existing install (npm OR brew) that already satisfies
+# the floor is LEFT ALONE; brew is only used when the binary is ABSENT or too old.
+# IDEMPOTENT + WARN+CONTINUE (never returns non-zero): a headless box without brew
+# must not make install-cli exit non-zero over the optional browser-testing dep —
+# the orphan-sweep vector-5 reaper and the dispatch idle-timeout are the backstops.
+# Mirrors ensure_alloy's contract exactly.
+ensure_agent_browser() {
+  local have=""
+  if command -v agent-browser >/dev/null 2>&1; then
+    have="$(agent-browser --version 2>/dev/null | head -n1 | awk '{print $NF}')"
+    if [[ -n "$have" ]] && _ab_version_ge "$have" "$AGENT_BROWSER_MIN_VERSION"; then
+      # Satisfies the floor (brew OR npm) — don't clobber; just ensure the
+      # Chrome-for-Testing browser is present.
+      agent-browser install >/dev/null 2>&1 \
+        || echo "  warning: 'agent-browser install' (Chrome for Testing) failed — browser tests may not run until it completes" >&2
+      echo "  agent-browser ${have} present (>= ${AGENT_BROWSER_MIN_VERSION})"
+      return 0
+    fi
+    echo "  agent-browser ${have:-unknown} is older than ${AGENT_BROWSER_MIN_VERSION} (idle-timeout unsupported) — upgrading…"
+  fi
+
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "  warning: agent-browser missing/old and brew unavailable — install manually (brew install agent-browser OR npm i -g 'agent-browser@>=${AGENT_BROWSER_MIN_VERSION}'), then 'agent-browser install'" >&2
+    return 0
+  fi
+
+  echo "  Installing/upgrading agent-browser via brew (homebrew-core, CTL-1500)…"
+  if [[ -n "$have" ]]; then
+    brew upgrade agent-browser >/dev/null 2>&1 || brew install agent-browser >/dev/null 2>&1 || true
+  else
+    brew install agent-browser >/dev/null 2>&1 || true
+  fi
+  hash -r 2>/dev/null || true
+
+  if command -v agent-browser >/dev/null 2>&1; then
+    have="$(agent-browser --version 2>/dev/null | head -n1 | awk '{print $NF}')"
+    if [[ -n "$have" ]] && _ab_version_ge "$have" "$AGENT_BROWSER_MIN_VERSION"; then
+      echo "  Installed agent-browser ${have} ($(command -v agent-browser))"
+      agent-browser install >/dev/null 2>&1 \
+        || echo "  warning: 'agent-browser install' (Chrome for Testing) failed — browser tests may not run until it completes" >&2
+    else
+      echo "  warning: agent-browser is ${have:-still absent} after brew (< ${AGENT_BROWSER_MIN_VERSION}) — idle-timeout unsupported" >&2
+    fi
+  else
+    echo "  warning: agent-browser install via brew failed — browser tests will not run until it is installed" >&2
+  fi
+  return 0
+}
+
 if [[ "$mode" = "uninstall" ]]; then
   if [[ -d "$BIN_DIR" ]]; then
     for entry in "${CLI_ENTRIES[@]}"; do
@@ -517,6 +584,11 @@ detect_stale_aliases
 # exit non-zero, since the shipper is optional infra and catalyst-stack's
 # start_shipper degrades loudly-but-gracefully when alloy is absent.
 ensure_alloy || true
+
+# Provision agent-browser + its Chrome-for-Testing browser (CTL-1500). Same
+# warn+continue contract as ensure_alloy — optional browser-testing infra must
+# never make install-cli exit non-zero.
+ensure_agent_browser || true
 
 # PATH bootstrap — if BIN_DIR is not on PATH, append an export line to the
 # user's shell rc file. Idempotent: a marker comment guards against duplicate

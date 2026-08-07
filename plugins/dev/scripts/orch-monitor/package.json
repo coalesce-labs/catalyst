@@ -17,6 +17,7 @@
     "gen:icons": "bun run bin/gen-phosphor-icons.ts"
   },
   "dependencies": {
+    "@catalyst-cloud/read-model": "^0.1.1",
     "ink": "^5.2.1",
     "react": "^18.3.1",
     "smee-client": "^5.0.0",
@@ -30,8 +31,8 @@
     "eslint": "^9",
     "eslint-plugin-security": "^4.0.0",
     "globals": "^17.5.0",
-    "knip": "^6.4.1",
+    "knip": "6.4.1",
     "typescript": "^6.0.2",
-    "typescript-eslint": "^8.58.2"
+    "typescript-eslint": "8.58.2"
   }
 }

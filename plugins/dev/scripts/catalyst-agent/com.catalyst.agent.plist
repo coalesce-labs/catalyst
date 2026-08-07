@@ -38,6 +38,13 @@
          event-log path; empty disables metric emission. -->
     <key>CATALYST_AGENT_METRICS_ENDPOINT</key>
     <string>REPLACE_WITH_METRICS_ENDPOINT</string>
+    <!-- CTL-1518: the CATALYST_DIR the agent resolves its heartbeat breadcrumb
+         under. Persisted so a node installed with a nondefault CATALYST_DIR writes
+         the breadcrumb to the SAME dir the health-responder (installed with the
+         same override) probes — otherwise the responder would false-kickstart a
+         healthy sampler and eventually escalate. -->
+    <key>CATALYST_DIR</key>
+    <string>REPLACE_WITH_CATALYST_DIR</string>
   </dict>
 
   <key>RunAtLoad</key>

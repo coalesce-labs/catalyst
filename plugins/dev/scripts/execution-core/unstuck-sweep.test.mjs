@@ -26,6 +26,11 @@ describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
     expect(r).toEqual({ category: "skip", action: "skip" });
   });
 
+  test("no-probe-for-phase stalls are SKIPPED — already terminally escalated by PROJ-1657 (no re-ask loop, Codex #3027 round 4 P2)", () => {
+    const r = classifyStalledTicket({ reason: "no-probe-for-phase" });
+    expect(r).toEqual({ category: "skip", action: "skip" });
+  });
+
   test("rebase_refused_dirty_tree → dirty-tree/clear-noise-and-retry", () => {
     const r = classifyStalledTicket({ reason: "rebase_refused_dirty_tree" });
     expect(r.category).toBe("dirty-tree");
@@ -217,22 +222,63 @@ describe("runUnstuckSweepPass — action driver (CTL-1064)", () => {
     expect(emitted).toContain("unstuck.cleared.noise");
   });
 
-  test("mode:'enforce' + escalate category → calls escalate seam + postComment + emits unstuck.escalated", () => {
+  test("mode:'enforce' + escalate → escalate seam is called with (candidate, decision); driver no longer calls postComment on the escalate path (CTL-1641)", () => {
     const escalateCalled = [];
     const commentCalled = [];
     const emitted = [];
-    runUnstuckSweepPass({
+    const report = runUnstuckSweepPass({
       mode: "enforce",
       collectCandidates: () => [makeCandidate({
         evidence: { reason: "remediate-cycle-cap-exhausted", ticket: "CTL-TEST", phase: "implement", liveSessionInWorktree: false, linearTerminal: false },
       })],
-      escalate: (c) => { escalateCalled.push(c.ticket); },
-      emit: (type) => { emitted.push(type); },
+      escalate: (c, d) => { escalateCalled.push({ ticket: c.ticket, cat: d.category }); return { labelApplied: true, commentPosted: true, errors: [] }; },
       postComment: (t) => { commentCalled.push(t); },
+      emit: (type) => { emitted.push(type); },
     });
-    expect(escalateCalled).toContain("CTL-TEST");
+    expect(escalateCalled[0].ticket).toBe("CTL-TEST");
+    expect(commentCalled).toHaveLength(0);           // escalate seam owns the comment now
     expect(emitted).toContain("unstuck.escalated");
-    expect(commentCalled).toContain("CTL-TEST");
+    expect(report.escalated).toHaveLength(1);
+    expect(report.escalateFailures).toEqual([]);
+  });
+
+  test("escalate seam that RETURNS errors[] → each error recorded in report.escalateFailures (loud, not swallowed) (CTL-1641)", () => {
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [makeCandidate({
+        ticket: "CTL-ERR",
+        phase: "pr",
+        evidence: { reason: "unknown", ticket: "CTL-ERR", phase: "pr", liveSessionInWorktree: false, linearTerminal: false },
+      })],
+      escalate: () => ({ labelApplied: true, commentPosted: false, errors: [{ sideEffect: "comment", err: "linear 500" }] }),
+      emit: () => {},
+    });
+    expect(report.escalated).toHaveLength(1);         // still counted as escalated (label landed)
+    expect(report.escalateFailures).toHaveLength(1);
+    expect(report.escalateFailures[0]).toMatchObject({ ticket: "CTL-ERR", phase: "pr", sideEffect: "comment" });
+  });
+
+  test("escalate seam that THROWS → recorded in report.escalateFailures; the pass continues; the event still fires (CTL-1641)", () => {
+    const emitted = [];
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [
+        makeCandidate({ ticket: "T1", evidence: { reason: "unknown", ticket: "T1", phase: "pr", liveSessionInWorktree: false, linearTerminal: false } }),
+        makeCandidate({ ticket: "T2", evidence: { reason: "unknown", ticket: "T2", phase: "pr", liveSessionInWorktree: false, linearTerminal: false } }),
+      ],
+      escalate: (c) => { if (c.ticket === "T1") throw new Error("seam blew up"); return { labelApplied: true, commentPosted: true, errors: [] }; },
+      emit: (type) => { emitted.push(type); },
+    });
+    expect(report.escalateFailures.some(f => f.ticket === "T1" && f.sideEffect === "escalate-seam")).toBe(true);
+    expect(report.escalated.some(e => e.ticket === "T2")).toBe(true);        // T2 unaffected
+    expect(emitted.filter(t => t === "unstuck.escalated")).toHaveLength(2);  // event fires for both
+  });
+
+  test("report always initializes escalateFailures (empty on the happy path and in off/shadow) (CTL-1641)", () => {
+    const off = runUnstuckSweepPass({ mode: "off", collectCandidates: () => [] });
+    const shadow = runUnstuckSweepPass({ mode: "shadow", collectCandidates: () => [makeCandidate()], emit: () => {} });
+    expect(off.escalateFailures).toEqual([]);
+    expect(shadow.escalateFailures).toEqual([]);
   });
 
   test("mode:'enforce' + skip (live session) → no act, no emit, no intent", () => {
@@ -340,15 +386,15 @@ describe("defaultCollectUnstuckCandidates — shared census builder (CTL-1064)",
   }
 
   test("reads stalledReason from status:stalled phase signals", () => {
-    makeWorker("CTL-STALLED");
+    makeWorker("CTL-2001");
     const candidates = defaultCollectUnstuckCandidates({ orchDir });
     expect(candidates).toHaveLength(1);
-    expect(candidates[0].ticket).toBe("CTL-STALLED");
+    expect(candidates[0].ticket).toBe("CTL-2001");
     expect(candidates[0].evidence.reason).toBe("rebase_refused_dirty_tree");
   });
 
   test("reads failureReason from status:failed + failureReason:orphan-sweep-stale", () => {
-    makeWorker("CTL-ORPHAN", {
+    makeWorker("CTL-2002", {
       status: "failed",
       failureReason: "orphan-sweep-stale",
       stalledReason: undefined,
@@ -359,52 +405,63 @@ describe("defaultCollectUnstuckCandidates — shared census builder (CTL-1064)",
   });
 
   test("skips running/done signals and tickets with wrong status", () => {
-    makeWorker("CTL-RUNNING", { status: "running" });
-    makeWorker("CTL-DONE", { status: "done" });
+    makeWorker("CTL-2003", { status: "running" });
+    makeWorker("CTL-2004", { status: "done" });
     const candidates = defaultCollectUnstuckCandidates({ orchDir });
     expect(candidates).toHaveLength(0);
   });
 
   test("liveSessionInWorktree set from agentsSnapshot", () => {
-    makeWorker("CTL-LIVE");
+    makeWorker("CTL-2005");
     const candidates = defaultCollectUnstuckCandidates({
       orchDir,
-      agentsSnapshot: [{ cwd: "/some/worktree/CTL-LIVE" }],
-      resolveWorktreePath: () => "/some/worktree/CTL-LIVE",
+      agentsSnapshot: [{ cwd: "/some/worktree/CTL-2005" }],
+      resolveWorktreePath: () => "/some/worktree/CTL-2005",
     });
     expect(candidates[0].evidence.liveSessionInWorktree).toBe(true);
   });
 
   test("linearTerminal set from injected isLinearTerminal seam", () => {
-    makeWorker("CTL-TERMINAL");
+    makeWorker("CTL-2006");
     const candidates = defaultCollectUnstuckCandidates({
       orchDir,
-      isLinearTerminal: (t) => t === "CTL-TERMINAL",
+      isLinearTerminal: (t) => t === "CTL-2006",
     });
     expect(candidates[0].evidence.linearTerminal).toBe(true);
   });
 
   test("worktreePath from resolveWorktreePath seam (null when absent)", () => {
-    makeWorker("CTL-NOPATH");
+    makeWorker("CTL-2007");
     const candidates = defaultCollectUnstuckCandidates({ orchDir });
     expect(candidates[0].evidence.worktreePath).toBeNull();
   });
 
+  test("census skips non-ticket dir names (CTL-1504)", () => {
+    makeWorker("CTL-1", { stalledReason: "rebase_refused_dirty_tree" });
+    makeWorker(".catalyst", { stalledReason: "rebase_refused_dirty_tree" });
+    const seen = [];
+    const isLinearTerminal = (t) => { seen.push(t); return false; };
+    const out = defaultCollectUnstuckCandidates({ orchDir, isLinearTerminal, resolveWorktreePath: () => "/wt/x" });
+    expect(seen).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).toContain("CTL-1");
+  });
+
   test("a throwing probe for one ticket does not abort enumeration of others", () => {
-    const d1 = join(orchDir, "workers", "CTL-OK");
+    const d1 = join(orchDir, "workers", "CTL-2008");
     mkdirSync(d1, { recursive: true });
     writeFileSync(
       join(d1, "phase-implement.json"),
-      JSON.stringify({ ticket: "CTL-OK", phase: "implement", status: "stalled", stalledReason: "rebase_refused_dirty_tree" }),
+      JSON.stringify({ ticket: "CTL-2008", phase: "implement", status: "stalled", stalledReason: "rebase_refused_dirty_tree" }),
     );
     // malformed json for second ticket
-    const d2 = join(orchDir, "workers", "CTL-BAD");
+    const d2 = join(orchDir, "workers", "CTL-2009");
     mkdirSync(d2, { recursive: true });
     writeFileSync(join(d2, "phase-implement.json"), "{ not json");
 
     const candidates = defaultCollectUnstuckCandidates({ orchDir });
-    // CTL-OK still found despite CTL-BAD being malformed
-    expect(candidates.some(c => c.ticket === "CTL-OK")).toBe(true);
+    // CTL-2008 still found despite CTL-2009 being malformed
+    expect(candidates.some(c => c.ticket === "CTL-2008")).toBe(true);
   });
 });
 

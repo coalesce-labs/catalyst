@@ -25,7 +25,7 @@
 // Exit code: number of FAIL-level checks (0 = all clear).
 
 import { readFileSync, statSync, existsSync, realpathSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -57,9 +57,22 @@ import {
   // change-detection marker the daemon's auto-refresh writes.
   getClusterRepoDir,
   getClusterSyncStatePath,
+  // CTL-1617: the one declared deployment-mode answer (single-host/cluster/
+  // cloud), re-exported from the zero-import lib leaf so doctor never grows
+  // a second copy of the resolution ladder.
+  DEPLOYMENT_MODES,
+  resolveDeploymentMode,
 } from "./config.mjs";
+import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
+// CTL-1616 PR2: the shared secret-contract engine, imported DIRECTLY from the
+// zero-import lib leaf (node:fs/os/path only) — same pattern cluster-sync.mjs
+// already uses (`../lib/secret-contract.mjs`), NOT re-exported through
+// config.mjs, so doctor stays safe under bare Node. SHADOW ONLY in this PR: the
+// contract is consulted and compared, never used to decide a grade (see
+// checkSecretContract + buildContractShadowCheck below).
+import { resolveSecret, resolveLayer2Path } from "../lib/secret-contract.mjs";
 // CTL-1481: the canonical worker-ownership label names — imported (not
 // re-hardcoded) so the doctor can never drift from what the stamper writes.
 // From the zero-import names leaf, NOT worker-label.mjs: doctor runs under
@@ -76,6 +89,7 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
+import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -114,6 +128,137 @@ function readLinearBotUserIds(l1Path, l2Path) {
 export const STATUS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" };
 
 export const mkCheck = (name, status, detail) => ({ name, status, detail });
+
+// ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
+//
+// safeResolveSecretContract — B1: every remaining shadow call site below
+// (checkWebhookIngestion's webhook-secret leg, checkCloudTokenEnv's cloud-token
+// name comparisons, checkSecretContract's own observations) plus the 3 sites
+// PR3 cut over to a LIVE answer (checkPeerUniqueness/checkBotCredentials/
+// checkWorkerLabels via resolveLinearTokenLive) routes its call into the
+// injected resolveSecretContract/resolveSecretFn dependency through here
+// instead of calling it directly. runDoctor's
+// `Promise.all(fns.map(...))` has no per-check isolation (out of scope to add
+// one here — see doctor.test.mjs's B1 tests), so an uncaught throw from ANY
+// check fn crashes the whole suite with zero report output. This wrapper
+// itself never throws: `{ ok: true, value }` on success, `{ ok: false, error }`
+// on throw.
+// resolveDeploymentModeForShadow — the deployment-mode answer threaded into
+// every shadow resolver call (#2916 Codex P2): without it, resolveSecret's
+// cloud guard (deploymentMode.mode === "cloud" && inferred === false) can
+// never activate, so a declared-cloud node's shadow would follow the
+// non-cloud file/config ladder and mask exactly the provider divergence the
+// shadow exists to detect. Throw-safe by the same B1 discipline: a throwing
+// mode resolver degrades to undefined (= the engine's non-cloud path), never
+// a crash.
+function resolveDeploymentModeForShadow(env = process.env) {
+  try {
+    // #2916 round-3 (Codex P2): resolve from the SAME env the secrets resolve
+    // from — a caller-injected env must drive both halves of the shadow, or a
+    // fixture env declaring cloud would resolve secrets under the HOST's mode.
+    return resolveDeploymentMode({ env });
+  } catch {
+    return undefined;
+  }
+}
+
+function safeResolveSecretContract(resolveFn, secretId, opts) {
+  try {
+    return { ok: true, value: resolveFn(secretId, opts) };
+  } catch (err) {
+    return { ok: false, error: err };
+  }
+}
+
+// shadowThrowCheck — the one throw-row shape every shadow call site shares
+// (comparison-based and direct-read alike): LOUD STATUS.INFO, names the
+// secret, quotes the resolver's error, and says explicitly the grade is
+// unaffected — never silenced, never a grade change.
+// shadowErrString — coercion-safe rendering of a caught throw (#2916 round-3
+// Codex P3): a resolver may legally throw a Symbol or a null-prototype object,
+// and interpolating those into a template literal itself throws — which would
+// defeat the very throw-isolation this path exists for.
+function shadowErrString(err) {
+  try {
+    const m = err?.message;
+    if (typeof m === "string" && m) return m;
+    return String(err);
+  } catch {
+    // Even the fallback can throw (a revoked Proxy throws on ANY operation,
+    // including Object.prototype.toString.call) — end at a literal.
+    try {
+      return Object.prototype.toString.call(err);
+    } catch {
+      return "[unrenderable thrown value]";
+    }
+  }
+}
+
+function shadowThrowCheck(checkName, secretId, err) {
+  return mkCheck(
+    `${checkName}-secret-contract-shadow`,
+    STATUS.INFO,
+    `SHADOW RESOLVER THREW secret="${secretId}": ${shadowErrString(err)} — shadow disabled for this check, grade unaffected`,
+  );
+}
+
+// buildContractShadowCheck — the ONE shared helper every injected-shadow call
+// site below uses to build its (0 or 1) shadow-disagreement entry. Design §7/§9
+// discipline: PR2 is a shadow pass — the contract is CONSULTED AND COMPARED but
+// decides NOTHING. Every entry this returns is STATUS.INFO, and summarize()
+// never counts INFO toward pass/warn/fail (doctor.mjs:1728-1736), so no call
+// site that uses this helper can move doctor's exit code (the FAIL count) or
+// its pass/warn/fail summary line.
+//
+// Returns null (no entry, no output) when the hand-rolled and contract answers
+// AGREE — a clean cycle is silent. Returns a loud INFO check naming the secret
+// id, the hand-rolled verdict, and the contract's {source, provider} answer
+// when they DISAGREE — "escalated loudly, never silently reconciled" (house
+// rule): disagreement is surfaced as its own visible check row, never merged
+// into / swallowed by the primary check's own PASS/WARN/FAIL message. The
+// resolver call itself is isolated via safeResolveSecretContract (B1) — a
+// throwing resolver surfaces as a shadowThrowCheck INFO row instead of
+// propagating up through the caller.
+function buildContractShadowCheck({ checkName, secretId, handRolled, resolveSecretContract, env = process.env, deploymentMode = resolveDeploymentModeForShadow(env) }) {
+  const resolution = safeResolveSecretContract(resolveSecretContract, secretId, { env, deploymentMode });
+  if (!resolution.ok) return shadowThrowCheck(checkName, secretId, resolution.error);
+  const contractResolved = resolution.value;
+  const contractPresent = contractResolved?.value != null;
+  if (Boolean(handRolled) === contractPresent) return null;
+  return mkCheck(
+    `${checkName}-secret-contract-shadow`,
+    STATUS.INFO,
+    `SHADOW DISAGREEMENT secret="${secretId}": hand-rolled=${handRolled ? "present" : "absent"} vs ` +
+      `contract={value:${contractPresent ? "present" : "absent"}, source:${contractResolved?.source ?? "none"}, ` +
+      `provider:${contractResolved?.provider ?? "none"}} — never changes this check's grade or exit code`,
+  );
+}
+
+// resolveLinearTokenLive — CTL-1616 PR3 cutover (design §7/§9): the shared
+// accessor checkPeerUniqueness/checkBotCredentials/checkWorkerLabels now use
+// to get the LIVE linear-api-token answer from the contract engine — these 3
+// sites no longer hand-roll their own `LINEAR_API_TOKEN ?? LINEAR_API_KEY`
+// env ladder (that read is GONE), and the PR2 shadow-comparison each of them
+// carried (buildContractShadowCheck against secretId "linear-api-token") is
+// retired with it: there is no longer a second, independently-computed
+// hand-rolled answer to compare the contract against, so the disagreement
+// row these sites used to emit cannot exist anymore. resolveSecret's own
+// contract promises "never throws", but this wraps via
+// safeResolveSecretContract anyway — matching this file's existing
+// defensive convention for every other secret-contract call site — so an
+// injected test double (or a future registry bug) that DOES throw degrades
+// to "no token" (the same WARN/INFO path a genuinely absent token already
+// takes) rather than crashing the whole doctor run. Threads the shared
+// resolveDeploymentModeForShadow() default so the cloud guard activates on a
+// declared-cloud node exactly like every other secret-contract call site in
+// this file (checkCloudTokenEnv, checkSecretContract).
+function resolveLinearTokenLive(resolveSecretContract, deploymentMode = resolveDeploymentModeForShadow()) {
+  const r = safeResolveSecretContract(resolveSecretContract, "linear-api-token", {
+    env: process.env,
+    deploymentMode,
+  });
+  return r.ok ? (r.value?.value ?? null) : null;
+}
 
 // ─── Internal path helpers ───────────────────────────────────────────────────
 
@@ -326,10 +471,11 @@ export async function checkPeerUniqueness(deps = {}) {
   const {
     getHostName: _getHostName = getHostName,
     getLivenessAnchorIssue: _getLivenessAnchorIssue = getLivenessAnchorIssue,
-    hasLinearToken = () =>
-      Boolean(
-        process.env.LINEAR_API_TOKEN?.length || process.env.LINEAR_API_KEY?.length,
-      ),
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
+    resolveSecretContract = resolveSecret,
+    hasLinearToken = () => resolveLinearTokenLive(resolveSecretContract) != null,
     readPeerHeartbeats: _readPeerHeartbeats = readPeerHeartbeats,
   } = deps;
 
@@ -411,8 +557,11 @@ const LINEAR_GQL = "https://api.linear.app/graphql";
 export async function checkBotCredentials(deps = {}) {
   const {
     readLinearBotUserIds: _readLinearBotUserIds = readLinearBotUserIds,
-    linearToken = () =>
-      process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "",
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
+    resolveSecretContract = resolveSecret,
+    linearToken = () => resolveLinearTokenLive(resolveSecretContract) ?? "",
     fetch: _fetch = globalThis.fetch,
     expectedBotUserId = null,
   } = deps;
@@ -922,12 +1071,61 @@ function defaultSecretFileNonEmpty(dir, name) {
   }
 }
 
+// Reads the configurable GitHub webhook-secret env-var NAME from Layer-1
+// (.catalyst/config.json → catalyst.monitor.github.webhookSecretEnv), matching
+// webhook-config.ts:412. Defaults to CATALYST_WEBHOOK_SECRET. CTL-1618.
+// Resolve the Layer-1 path via resolveDoctorLayer1Path() (not layer1Path()) so
+// this reader honors the CATALYST_CONFIG_FILE / CATALYST_CONFIG_PATH pointers the
+// daemon/deploy sets and falls back to ${cwd}/.catalyst/config.json — the SAME
+// Layer-1 the running monitor resolves, so the env name matches at runtime
+// (Codex P1: a plugin-repo read diverges from the active project config).
+function defaultGithubSecretEnvName() {
+  try {
+    const obj = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const name = obj?.catalyst?.monitor?.github?.webhookSecretEnv;
+    return typeof name === "string" && name.length > 0 ? name : "CATALYST_WEBHOOK_SECRET";
+  } catch {
+    return "CATALYST_WEBHOOK_SECRET";
+  }
+}
+
+// Reads the configurable Linear webhook-secret env-var NAME from Layer-1
+// (.catalyst/config.json → catalyst.monitor.linear.webhookSecretEnv), matching
+// webhook-config.ts:264-269. Null when unset (no per-key env override). CTL-1618.
+// Uses resolveDoctorLayer1Path() (not layer1Path()) for the same monitor-parity
+// reason as defaultGithubSecretEnvName above (Codex P1).
+function defaultLinearSecretEnvName() {
+  try {
+    const obj = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const name = obj?.catalyst?.monitor?.linear?.webhookSecretEnv;
+    return typeof name === "string" && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 export function checkWebhookIngestion(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
     monitor = defaultReadMonitor(),
     configDir = defaultWebhookConfigDir(),
     secretFileNonEmpty = defaultSecretFileNonEmpty,
+    githubSecretEnvName = defaultGithubSecretEnvName(), // CTL-1618
+    linearSecretEnvName = defaultLinearSecretEnvName(), // CTL-1618
+    // CTL-1616 PR2: shadow-only contract resolver for the github "webhook-secret"
+    // row — consulted and COMPARED against `ghSecret` below (see the comment at
+    // its use site), never used to decide this check's grade. Surfaces exactly
+    // the divergence design §7 names: defaultWebhookConfigDir() hardcodes
+    // ~/.config/catalyst, ignoring CATALYST_CONFIG_DIR / CATALYST_LAYER2_CONFIG_FILE
+    // / XDG overrides that secretFileCandidates (and so resolveSecret) honors.
+    resolveSecretContract = resolveSecret,
+    // CTL-1617 mode-alignment (#2913 Codex P1): the join's webhook-wiring gate
+    // now skips wiring when a RECOGNIZED non-cluster mode is declared — so a
+    // multiHost-roster node with no route is CONSISTENT config on such a node,
+    // not a failure. Injectable for tests; a throwing resolver degrades to
+    // undefined = the pre-alignment FAIL behavior (grading must fail closed,
+    // unlike the INFO-only shadow's throw handling).
+    resolveDeploymentModeFn = resolveDeploymentMode,
   } = deps;
 
   const roster = resolveRoster();
@@ -943,12 +1141,40 @@ export function checkWebhookIngestion(deps = {}) {
 
   const m = monitor ?? {};
 
-  // GitHub route: smee channel + a github HMAC secret (file or env).
+  // GitHub route: smee channel + a github HMAC secret resolved the way the
+  // running monitor reads it (webhook-config.ts:412,429). The env-var NAME is
+  // configurable (Layer-1 webhookSecretEnv, default CATALYST_WEBHOOK_SECRET);
+  // the CTL-1612 projection lifts the on-disk `webhook-secret` file into the
+  // DEFAULT name only, so the file is a valid proxy solely for the default. CTL-1618.
   const ghSmee = typeof m.github?.smeeChannel === "string" ? m.github.smeeChannel : "";
-  const ghSecret =
-    secretFileNonEmpty(configDir, "webhook-secret") ||
-    (process.env.CATALYST_WEBHOOK_SECRET ?? "").length > 0;
+  // Resolve the env secret with the SAME `??` chain as the runtime
+  // (webhook-config.ts:429): `process.env[name] ?? CATALYST_SMEE_SECRET ?? ""`.
+  // `??` (not `||`) matters — an env var explicitly set to "" is NOT nullish, so
+  // it short-circuits and the legacy CATALYST_SMEE_SECRET fallback is NOT reached,
+  // exactly as the monitor computes it. A prior `||`-of-length chain would let an
+  // empty primary fall through to a set SMEE secret and falsely report the route
+  // wired when the runtime disables it (secret.length === 0). CTL-1618.
+  const ghEnvSecret =
+    (process.env[githubSecretEnvName] ?? process.env.CATALYST_SMEE_SECRET ?? "").length > 0;
+  const ghFileSecret =
+    githubSecretEnvName === "CATALYST_WEBHOOK_SECRET" &&
+    secretFileNonEmpty(configDir, "webhook-secret");
+  const ghSecret = ghEnvSecret || ghFileSecret;
   const githubWired = ghSmee.length > 0 && ghSecret;
+
+  // CTL-1616 PR2: shadow comparison for the github webhook-secret leg only —
+  // the linear-webhook-secret family has no single scalar contract value (it's
+  // a PREDICATE, design §2/§3), so it is not shadow-compared here. Computed
+  // once; appended to every multiHost return below (the single-host early
+  // return above never reaches here — this check doesn't grade secrets in
+  // that mode, so there's nothing to shadow).
+  const webhookShadowCheck = buildContractShadowCheck({
+    checkName: "webhook-ingestion",
+    secretId: "webhook-secret",
+    handRolled: ghSecret,
+    resolveSecretContract,
+  });
+  const webhookShadow = webhookShadowCheck ? [webhookShadowCheck] : [];
 
   // Linear route: smee channel + ≥1 keyed webhookId whose HMAC secret resolves.
   const linear =
@@ -961,22 +1187,92 @@ export function checkWebhookIngestion(deps = {}) {
       typeof e.webhookId === "string" && e.webhookId.length > 0
     );
   });
+  // Linear per-key secret resolved as webhook-config.ts:157-171 does: file →
+  // per-key env (linearWebhookSecretEnv) → global CATALYST_LINEAR_WEBHOOK_SECRET.
+  // The env leg uses the runtime's exact `??` chain, so an empty-string per-key
+  // env var short-circuits (does NOT fall through to the global) — matching
+  // resolveSecret, which returns "" and drops the key. CTL-1618.
   const keySecretWired = (k) =>
     secretFileNonEmpty(
       configDir,
       k === "workspace" ? "linear-webhook-secret" : `linear-webhook-secret-${k}`,
-    ) || (process.env.CATALYST_LINEAR_WEBHOOK_SECRET ?? "").length > 0;
+    ) ||
+    (
+      (linearSecretEnvName !== null ? process.env[linearSecretEnvName] : undefined) ??
+      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
+      ""
+    ).length > 0;
   const wiredKeys = webhookKeys.filter(keySecretWired);
   const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
   const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
 
   if (!githubWired && !linearWired) {
+    // Mode-alignment: a DECLARED (recognized, not inferred) non-cluster mode
+    // means the join gate intentionally skipped wiring — no-route is the
+    // correct state, and the mode/roster mismatch itself is graded by the
+    // deployment-mode checks, not here. Everything else — declared cluster,
+    // inferred/absent mode, or an unresolvable mode — keeps the FAIL: on a
+    // declared-cluster node this FAIL is the intentional loud signal for a
+    // missed activation step 2b (docs/cluster-onboarding.md), and a
+    // pre-migration node must keep its original guarantee.
+    let declaredMode;
+    try {
+      declaredMode = resolveDeploymentModeFn();
+    } catch {
+      declaredMode = undefined;
+    }
+    if (
+      declaredMode &&
+      declaredMode.inferred === false &&
+      declaredMode.recognized === true &&
+      declaredMode.mode !== "cluster"
+    ) {
+      // #2918 follow-up (Codex P2 x2):
+      // (a) The aligned grant applies only to a FULLY-ABSENT route — a
+      //     dangling Linear webhookId without its HMAC secret is config
+      //     residue and must keep the half-wired FAIL even here (this
+      //     branch previously returned before the dangling check below).
+      if (danglingKeys.length > 0) {
+        return [
+          mkCheck(
+            "webhook-ingestion",
+            STATUS.FAIL,
+            `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>) — declared mode "${declaredMode.mode}" does not excuse config residue`,
+          ),
+          ...webhookShadow,
+        ];
+      }
+      // (b) Declared CLOUD is a WARN, not a PASS: cloud suppresses the smee
+      //     tunnels but its replacement ingestion (the cloud SDK event
+      //     connection) does not exist yet — an otherwise-green doctor must
+      //     not certify a node with zero event ingestion. Flips to PASS only
+      //     when a real cloud ingestion check exists to stand in its place.
+      if (declaredMode.mode === "cloud") {
+        return [
+          mkCheck(
+            "webhook-ingestion",
+            STATUS.WARN,
+            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired, but cloud replacement ingestion is NOT yet implemented: this node currently has no event ingestion at all`,
+          ),
+          ...webhookShadow,
+        ];
+      }
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.PASS,
+          `declared deployment mode "${declaredMode.mode}" (source=${declaredMode.source}) — webhook ingestion intentionally not wired despite multiHost roster; the mode/roster mismatch is graded by the deployment-mode checks`,
+        ),
+        ...webhookShadow,
+      ];
+    }
     return [
       mkCheck(
         "webhook-ingestion",
         STATUS.FAIL,
         `multiHost member but NO webhook route enabled — github(smee=${ghSmee ? "set" : "unset"},secret=${ghSecret ? "set" : "unset"}) linear(smee=${linSmee ? "set" : "unset"},wiredKeys=${wiredKeys.length}); monitor-merge/comment-wakes will degrade to polling`,
       ),
+      ...webhookShadow,
     ];
   }
   if (danglingKeys.length > 0) {
@@ -986,6 +1282,7 @@ export function checkWebhookIngestion(deps = {}) {
         STATUS.FAIL,
         `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>)`,
       ),
+      ...webhookShadow,
     ];
   }
   return [
@@ -994,6 +1291,7 @@ export function checkWebhookIngestion(deps = {}) {
       STATUS.PASS,
       `webhook ingestion wired (github=${githubWired}, linear=${linearWired}, linear keys=${wiredKeys.length})`,
     ),
+    ...webhookShadow,
   ];
 }
 
@@ -1322,27 +1620,54 @@ function monthlyLogPath(eventsDir, date) {
 // Scans every supplied monthly log path (current + prior month near a boundary).
 // All reads are injectable + fail-open (a missing/unreadable log → no degrade
 // observed, never throws). Returns a single Check.
-function scanRecentBgFallback({ paths, readEventLog, now, recentWindowMs }) {
+// CTL-1529: `scan` replaces the old whole-file `readEventLog(p) -> string` seam.
+// The default is a bounded, TIME-covering tail — a natural fit here because this
+// check already has a window (`recentWindowMs`, 24h) and a `cutoff`. The old
+// default read the current AND prior monthly log in full (up to ~1.7 GB of string
+// near a month boundary on mini) and, on a node runtime, threw ERR_STRING_TOO_LONG
+// straight into the `catch` below — which reports "no degrades observed" and
+// returns PASS. That made a fail-CLOSED node-activation gate fail OPEN on the very
+// signal it calls authoritative. Bounding the read removes that failure mode.
+// checkSdkDaemonEnv still accepts the legacy string seam for existing tests.
+//
+// CTL-1529 (Codex P1): the `scan` seam RETURNS ITS COVERAGE VERDICT and this
+// function honors it. Bounding the read fixed the ERR_STRING_TOO_LONG fail-open
+// but introduced a quieter one in its place: when more than the byte cap of
+// events falls inside the 24h lookback, scanEventsSince reports `covered:false`
+// and every bg-fallback event beyond the truncated tail is invisible — so the
+// AUTHORITATIVE self-report check would answer PASS from data it never read. On
+// macOS the process-env probe deliberately defers to this signal (`ps eww` cannot
+// read another process's env), so an unhealthy node would read healthy end to end.
+//
+// A health check that reports PASS on incomplete data is worse than one that
+// errors, so an uncovered window can never produce PASS. It resolves to WARN —
+// the severity this file already uses for every "can't verify" state (no pid-file,
+// stale pid, reused pid) — with the truncation named explicitly in the detail.
+// PASS now means what it says: the whole window was read and it was clean.
+function scanRecentBgFallback({ paths, scan, now, recentWindowMs }) {
   const cutoff = now() - recentWindowMs;
   const hours = Math.round(recentWindowMs / 3_600_000);
   let recent = 0;
   let latestTs = null;
+  const truncated = [];
   for (const p of paths) {
-    let body = "";
+    const events = [];
+    let res;
     try {
-      body = readEventLog(p);
+      res = scan({ path: p, sinceMs: cutoff, onEvent: (e) => events.push(e) });
     } catch {
-      body = ""; // absent/unreadable → treat as "no degrades observed" (fail-open)
+      // absent/unreadable → treat as "no degrades observed" (fail-open)
     }
-    for (const line of body.split("\n")) {
-      const s = line.trim();
-      if (!s) continue;
-      let evt;
-      try {
-        evt = JSON.parse(s);
-      } catch {
-        continue; // tolerate partial/corrupt lines
-      }
+    // ONLY an explicit `covered:false` means "the window was truncated". A seam
+    // that returns nothing (a bespoke test scanner) is treated as covered, which
+    // is what it was before this verdict existed; the production default and the
+    // legacy string wrapper both return a real verdict.
+    if (res && res.covered === false) {
+      truncated.push(
+        `${p} (scanned ${res.windowBytes ?? "?"}B of ${res.size ?? "?"}B; oldest record ${res.oldestTs ?? "none"})`,
+      );
+    }
+    for (const evt of events) {
       if (evt?.attributes?.["event.name"] !== "execution-core.executor.bg-fallback") continue;
       const t = Date.parse(evt?.ts ?? evt?.observedTs ?? "");
       if (Number.isNaN(t)) continue;
@@ -1352,13 +1677,30 @@ function scanRecentBgFallback({ paths, readEventLog, now, recentWindowMs }) {
       }
     }
   }
+  // A degrade that IS visible is reported even from a truncated window — the
+  // truncation can only have hidden more of them, never invented this one.
   if (recent > 0) {
     return mkCheck(
       "sdk-bg-fallback",
       STATUS.WARN,
       `executor=sdk but ${recent} execution-core.executor.bg-fallback event(s) in the last ${hours}h — ` +
         `the daemon silently degraded sdk→bg at boot (most recent ${new Date(latestTs).toISOString()}); ` +
-        `fix the daemon's auth env (CLAUDE_CODE_OAUTH_TOKEN, no ANTHROPIC_API_KEY) and restart`,
+        `fix the daemon's auth env (CLAUDE_CODE_OAUTH_TOKEN, no ANTHROPIC_API_KEY) and restart` +
+        (truncated.length
+          ? ` [count is a LOWER BOUND — the bounded event-log tail did not span the full ${hours}h: ${truncated.join("; ")}]`
+          : ""),
+    );
+  }
+  if (truncated.length) {
+    return mkCheck(
+      "sdk-bg-fallback",
+      STATUS.WARN,
+      `UNKNOWN, not clean: the bounded event-log tail could not span the full ${hours}h lookback, so ` +
+        `execution-core.executor.bg-fallback events older than the truncation point were never read — ` +
+        `${truncated.join("; ")}. This check is the authoritative sdk→bg self-report (the process-env ` +
+        `probe defers to it on macOS), so it reports UNKNOWN rather than PASS on incomplete data. ` +
+        `Rotate/shrink the monthly event log, or confirm sdk auth directly on the daemon ` +
+        `(CLAUDE_CODE_OAUTH_TOKEN set, no ANTHROPIC_API_KEY)`,
     );
   }
   return mkCheck(
@@ -1428,7 +1770,18 @@ export function checkSdkDaemonEnv(deps = {}) {
     platform = process.platform,
     // Recent sdk→bg silent-degrade scan over the unified event log (current + prior month).
     eventsDir = dirname(getEventLogPath()),
-    readEventLog = (p) => readFileSync(p, "utf8"),
+    // CTL-1529: legacy whole-string seam, kept ONLY for existing tests that inject
+    // a synthetic log body. Undefined in production, where the bounded `scanEventLog`
+    // default below is used instead.
+    readEventLog = undefined,
+    // CTL-1529: the bounded event-log scan seam (see scanRecentBgFallback).
+    scanEventLog = undefined,
+    // CTL-1529: tuning passed through to the PRODUCTION bounded scan
+    // (maxBytes/chunkSize/initialWindow). Exists so a test can drive the real
+    // default seam into cap exhaustion against a small fixture and assert the
+    // coverage verdict survives the trip back out — the discard this Codex P1
+    // fix is about. Empty in production.
+    eventLogScanOpts = {},
     now = () => Date.now(),
     recentWindowMs = 24 * 60 * 60 * 1000, // 24h
   } = deps;
@@ -1561,7 +1914,44 @@ export function checkSdkDaemonEnv(deps = {}) {
   const paths = [monthlyLogPath(eventsDir, new Date(now()))];
   const prev = monthlyLogPath(eventsDir, new Date(now() - recentWindowMs));
   if (prev !== paths[0]) paths.push(prev);
-  checks.push(scanRecentBgFallback({ paths, readEventLog, now, recentWindowMs }));
+  // CTL-1529: resolve the scan seam. Explicit scanEventLog > legacy string seam
+  // (tests) > the bounded time-covering tail (production).
+  //
+  // EVERY seam returns a COVERAGE VERDICT `{ covered, windowBytes, size, oldestTs }`
+  // (Codex P1). scanRecentBgFallback refuses to answer PASS when `covered` is false,
+  // so the verdict must not be dropped on the way out of the seam — that discard is
+  // exactly the defect: `covered` was computed correctly and then thrown away, and
+  // the check reported PASS over events it had never read.
+  const scan =
+    scanEventLog ??
+    (readEventLog
+      ? ({ path, onEvent }) => {
+          for (const line of String(readEventLog(path) ?? "").split("\n")) {
+            const s = line.trim();
+            if (!s) continue;
+            try {
+              onEvent(JSON.parse(s));
+            } catch {
+              /* tolerate partial/corrupt lines */
+            }
+          }
+          // The legacy seam hands back the WHOLE file body, so its window is the
+          // whole file by construction — always covered.
+          return { covered: true, reachedBof: true, oldestTs: null, windowBytes: 0, size: 0 };
+        }
+      : ({ path, sinceMs, onEvent }) =>
+          // maxBytes is the DEFAULT_TAIL_MAX_BYTES 64 MiB cap: ~34 MB/day on the
+          // fleet's busiest host, so a 24h lookback normally fits with ~2x headroom
+          // and `covered` comes back true. When a burst blows past it the verdict
+          // says so and the check degrades to WARN/UNKNOWN instead of PASS.
+          scanEventsSince({
+            path,
+            targetSinceMs: sinceMs,
+            lineFilter: (line) => line.includes("execution-core.executor.bg-fallback"),
+            onEvent,
+            ...eventLogScanOpts,
+          }));
+  checks.push(scanRecentBgFallback({ paths, scan, now, recentWindowMs }));
 
   return checks;
 }
@@ -1705,7 +2095,7 @@ export function checkReaper(deps = {}) {
   }
 
   const m = xml.match(/<string>([^<]*orphan-sweep\.sh)<\/string>/);
-  const baked = m ? m[1] : null;
+  const baked = m ? decodePlistString(m[1]) : null;
   if (!baked) {
     checks.push(mkCheck(
       "reaper-installed", STATUS.WARN,
@@ -1745,6 +2135,422 @@ export function checkReaper(deps = {}) {
     // lastExit === 0 (clean) or null (loaded but never run yet)
     checks.push(mkCheck("reaper-health", STATUS.PASS, `reaper installed and healthy (${baked})`));
   }
+  return checks;
+}
+
+// defaultResponderState — load state + last exit of the health-responder
+// LaunchAgent. Same launchctl contract as defaultReaperState: `launchctl list
+// <label>` exits 0 and prints a dict containing `"LastExitStatus" = N;` only
+// when launchd has the job loaded; non-zero means never bootstrapped.
+function defaultResponderState() {
+  try {
+    const r = spawnSync("launchctl", ["list", "ai.coalesce.catalyst-health-responder"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0 || !r.stdout) return { loaded: false, lastExit: null };
+    const m = r.stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
+    return { loaded: true, lastExit: m ? parseInt(m[1], 10) : null };
+  } catch {
+    return { loaded: false, lastExit: null };
+  }
+}
+
+// defaultResponderLogMtimeMs — mtime (ms) of the responder heartbeat log, or
+// null when missing/unreadable/EMPTY. catalystDir, when given, is the value
+// baked into the installed plist (Codex P2 round 2: the caller's own
+// process.env.CATALYST_DIR is a transient invocation detail — a doctor run
+// without that env set would check the wrong path on a nondefault-CATALYST_DIR
+// node even though the plist correctly persists it, CTL-1510 item 1). A
+// zero-byte log is treated the SAME as missing (Codex P2 round 2): the
+// log-shipper pre-create fix (item 7) touches a placeholder file with a fresh
+// mtime for any tailed log that doesn't yet exist, and that placeholder must
+// not read as "a sweep just dispatched" when no sweep ever has.
+// Generous upper bound on how long a SINGLE sweep can legitimately run before
+// its heartbeat — used only to distinguish "a sweep is currently in
+// progress" from "a sweep died leaving stale diagnostics forever" (Codex P2
+// round 5). Doctor has no visibility into the responder's own bounded-
+// subprocess timeout env overrides (RESPONDER_LIST_TIMEOUT_SECS,
+// RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS, RESPONDER_KICKSTART_TIMEOUT_SECS,
+// RESPONDER_KICKSTART_WAIT_SECS) — unlike StartInterval, they aren't baked
+// into the plist, so this can't be truly DERIVED from the installed config
+// without a larger design change (persisting them there too). Widened to 5
+// minutes (round 6, Codex P2: 120s was tight enough that a legitimately
+// configured — if unusual — combination of those overrides could exceed it
+// and false-WARN on a still-running sweep) — comfortably covers any
+// realistic override combination while staying far below the staleAfterMs
+// dispatch-warning threshold (>=900s), so it can never mask a truly wedged
+// responder.
+const RESPONDER_IN_PROGRESS_GRACE_MS = 300_000;
+
+// Tolerance for the future-timestamp rejection below — see its call sites.
+const CLOCK_SKEW_TOLERANCE_MS = 2_000;
+
+function defaultResponderLogMtimeMs(catalystDir, nowMsFn = () => Date.now()) {
+  try {
+    const dir = catalystDir || process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
+    const p = resolve(dir, "health-responder.log");
+    const st = statSync(p);
+    if (st.size === 0) return null;
+    // Require the log's LAST line to be a completed `heartbeat status=`
+    // record (Codex P2 round 4, tightening round 3's content-only check): an
+    // append-only log can already hold an OLD heartbeat when a LATER sweep
+    // writes a diagnostic and dies before reaching heartbeat() — a bare
+    // substring match anywhere in the file still finds that old heartbeat,
+    // so mtime (bumped by the diagnostic write) would report "fresh" even
+    // though no sweep has completed since.
+    const lines = readFileSync(p, "utf8").split("\n").filter((l) => l.trim().length > 0);
+    const last = lines[lines.length - 1];
+    if (last && /\bheartbeat status=/.test(last)) return st.mtimeMs;
+    // The trailing line isn't a completed heartbeat — EITHER a sweep is
+    // currently mid-run (wrote a diagnostic, heartbeat still pending — the
+    // NORMAL shape while it's inside the launchctl-timeout/kickstart/settle
+    // path) OR a sweep died leaving that diagnostic as a permanent tail
+    // (Codex P2 round 5: requiring the last line to ALWAYS be a heartbeat
+    // false-WARNs on every in-progress sweep). Distinguish by the RECENCY of
+    // that write: within the generous in-progress grace window, trust it as
+    // "still running, not stale" — outside it, nothing has completed since,
+    // genuinely stale.
+    if (nowMsFn() - st.mtimeMs <= RESPONDER_IN_PROGRESS_GRACE_MS) return st.mtimeMs;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// decodePlistString — undo the XML entity encoding a plist <string> carries
+// (CTL-1510 item 3 writes `&amp;` for `&` in baked paths; Codex P2: passing
+// the still-encoded string to existsSync makes doctor report a working agent's
+// path as missing forever). &amp; is decoded LAST so `&amp;lt;` round-trips.
+function decodePlistString(s) {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+// checkHealthResponder (CTL-1509) — the periodic cloud-sync health responder
+// (health-responder.sh, the bounded-kickstart sweep) must be installed, LOADED
+// by launchd, its baked program path must still exist, and the installed script
+// must carry the RESPONDER_ENABLED kill-switch (a pre-CTL-1509 stale install
+// would silently do nothing). Mirrors checkReaper EXACTLY — every non-healthy
+// condition is a WARN, never a FAIL: catalyst-doctor's exit code is the count
+// of FAILs and gates the catalyst-join activation gate (do_doctor_gate runs
+// BEFORE install-services, which is exactly what would reinstall a stale
+// plist). A FAILing responder check would therefore BLOCK a node from
+// self-healing via join.
+// Severities:
+//   • plist absent             → WARN  (responder not installed; a dead writer stays dead)
+//   • no baked path in plist    → WARN  (malformed plist)
+//   • baked path missing        → WARN  (the CTL-1306 silent-death signature; reinstall)
+//   • kill-switch marker absent → WARN  (stale installed script; reinstall)
+//   • plist present, not loaded  → WARN  (launchd never bootstrapped it)
+//   • last exit 127             → WARN  (program path unresolved; reinstall)
+//   • other non-zero exit       → WARN  (check the log)
+//   • loaded + exit 0 or null   → PASS  (null = never run yet)
+export function checkHealthResponder(deps = {}) {
+  const {
+    plistPath = resolve(
+      homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-health-responder.plist",
+    ),
+    readFile = (p) => readFileSync(p, "utf8"),
+    fileExists = (p) => existsSync(p),
+    responderState = defaultResponderState,
+    // CTL-1510 item 6: mtime of the responder heartbeat log (every sweep —
+    // healthy or not — appends exactly one line, so a fresh mtime IS proof of
+    // dispatch). null = missing/unreadable.
+    logMtimeMs = defaultResponderLogMtimeMs,
+    // Install timestamp proxy for the never-ran-at-all case (Codex P2): the
+    // plist's own mtime. null = unreadable (stay quiet).
+    plistMtimeMs = () => { try { return statSync(plistPath).mtimeMs; } catch { return null; } },
+    nowMs = () => Date.now(),
+  } = deps;
+  const checks = [];
+
+  let xml;
+  try {
+    xml = readFile(plistPath);
+  } catch {
+    checks.push(mkCheck(
+      "responder-installed", STATUS.WARN,
+      "cloud-sync health responder not installed — a dead/wedged replica writer won't be auto-kickstarted; run 'catalyst-stack adopt-cloud-sync' (class-independent; workers also get it via install-services)",
+    ));
+    return checks;
+  }
+
+  const m = xml.match(/<string>([^<]*health-responder\.sh)<\/string>/);
+  const baked = m ? decodePlistString(m[1]) : null;
+  if (!baked) {
+    checks.push(mkCheck(
+      "responder-installed", STATUS.WARN,
+      `responder plist present but no health-responder.sh program path found in ${plistPath}`,
+    ));
+    return checks;
+  }
+
+  if (!fileExists(baked)) {
+    checks.push(mkCheck(
+      "responder-path", STATUS.WARN,
+      `responder points at a path that no longer exists (CTL-1306 silent-death signature): ${baked} — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  // The kill-switch marker doubles as a stale-install detector: the installed
+  // (baked) script — the one launchd actually runs — must be the CTL-1509
+  // shape. Same pattern as defaultReaperHasAbVector's CTL-1500 cross-check.
+  let script = null;
+  try {
+    script = readFile(baked);
+  } catch {
+    script = null;
+  }
+  if (script === null || !/RESPONDER_ENABLED/.test(script)) {
+    checks.push(mkCheck(
+      "responder-killswitch", STATUS.WARN,
+      `installed health-responder.sh (${baked}) is unreadable or lacks the RESPONDER_ENABLED kill-switch marker — stale install; reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  const { loaded, lastExit } = responderState();
+  if (!loaded) {
+    checks.push(mkCheck(
+      "responder-loaded", STATUS.WARN,
+      "responder plist present but not loaded by launchd — run 'catalyst-stack install-services'",
+    ));
+    return checks;
+  }
+
+  if (lastExit === 127) {
+    checks.push(mkCheck(
+      "responder-health", STATUS.WARN,
+      "responder last exited 127 (program path unresolved) — reinstall from the pristine clone",
+    ));
+    return checks;
+  }
+  if (typeof lastExit === "number" && lastExit !== 0) {
+    checks.push(mkCheck(
+      "responder-health", STATUS.WARN,
+      `responder last exited ${lastExit} — check ~/catalyst/health-responder.log`,
+    ));
+    return checks;
+  }
+
+  // Dispatch staleness (CTL-1510 item 6): "loaded + clean exit" is NOT proof
+  // the schedule is alive — a fleet host was observed with launchd holding the
+  // job loaded, LastExitStatus 0, and NO automatic spawns for hours
+  // (StartInterval pended; even RunAtLoad stopped firing after a reload).
+  // Every sweep appends a heartbeat line, so a log mtime older than 3×
+  // StartInterval means NEITHER launchd NOR the cron backstop is dispatching.
+  // A MISSING log gets the same treatment against the plist's install mtime
+  // (Codex P2): on a host where nothing pre-creates the log (dev/monitor
+  // classes have no Alloy), a never-dispatched job would otherwise read as
+  // never-run-yet and PASS forever. Within the window, missing = legitimately
+  // fresh install (RunAtLoad normally writes within seconds).
+  const im = xml.match(/<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/);
+  const intervalSecs = im ? parseInt(im[1], 10) : 180;
+  // Resolve CATALYST_DIR from the INSTALLED plist, not the caller's own
+  // process.env (Codex P2 round 2): a doctor invocation without that env set
+  // would otherwise check the default ~/catalyst path even on a node whose
+  // plist correctly persists a nondefault CATALYST_DIR (item 1), and either
+  // false-WARN on an actively-dispatching responder or false-PASS by reading
+  // an unrelated default-dir log.
+  const cdirMatch = xml.match(/<key>CATALYST_DIR<\/key>\s*<string>([^<]*)<\/string>/);
+  const plistCatalystDir = cdirMatch ? decodePlistString(cdirMatch[1]) : null;
+  const mtime = logMtimeMs(plistCatalystDir, nowMs);
+  const staleAfterMs = Math.max(3 * intervalSecs, 900) * 1000;
+  if (typeof mtime === "number") {
+    const age = nowMs() - mtime;
+    // A SUBSTANTIALLY negative age (the log's mtime is in the future — a
+    // backward clock step, or a log/state dir restored from a newer
+    // snapshot, Codex P2 round 6) must never read as freshness evidence:
+    // mirrors the bash-side sweep lock's own future-timestamp clamp (round
+    // 5) — favor a WARN over silently trusting a clock read that can't be
+    // verified. CLOCK_SKEW_TOLERANCE_MS absorbs ordinary write-then-stat
+    // jitter (filesystem mtime can round UP to whole-second granularity on
+    // some CI/container filesystems, putting a just-written file's mtime a
+    // few ms ahead of the very next Date.now() read — caught live on a
+    // Linux CI runner) without opening the door to a genuine clock-skew
+    // scenario, which in practice is minutes to years, not milliseconds.
+    if (age < -CLOCK_SKEW_TOLERANCE_MS) {
+      checks.push(mkCheck(
+        "responder-dispatch", STATUS.WARN,
+        "responder heartbeat log has a timestamp in the future — cannot trust it as freshness evidence (clock skew or a restored snapshot); investigate the host clock and this log's mtime",
+      ));
+      return checks;
+    }
+    if (age > staleAfterMs) {
+      const ageMin = Math.round(age / 60_000);
+      checks.push(mkCheck(
+        "responder-dispatch", STATUS.WARN,
+        `responder heartbeat log is ${ageMin} min old (interval ${intervalSecs}s) — no scheduler is dispatching the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
+      ));
+      return checks;
+    }
+  }
+  if (mtime === null) {
+    const pMtime = plistMtimeMs();
+    if (typeof pMtime === "number") {
+      const page = nowMs() - pMtime;
+      if (page < -CLOCK_SKEW_TOLERANCE_MS) {
+        checks.push(mkCheck(
+          "responder-dispatch", STATUS.WARN,
+          "responder plist install timestamp is in the future — cannot trust it as freshness evidence (clock skew or a restored snapshot); investigate the host clock and this plist's mtime",
+        ));
+        return checks;
+      }
+      if (page > staleAfterMs) {
+        const ageMin = Math.round(page / 60_000);
+        checks.push(mkCheck(
+          "responder-dispatch", STATUS.WARN,
+          `responder has never emitted a heartbeat (no log) ${ageMin} min after install — no scheduler ever dispatched the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
+        ));
+        return checks;
+      }
+    }
+  }
+
+  // lastExit === 0 (clean) or null (loaded but never run yet), heartbeat fresh
+  checks.push(mkCheck("responder-health", STATUS.PASS, `health responder installed and healthy (${baked})`));
+  return checks;
+}
+
+// ─── Phase 5f: agent-browser worker browser tool (CTL-1500) ──────────────────
+// Phase workers run browser tests (screenshots, live-UI verification) via the
+// `agent-browser` CLI (catalyst-dev:agent-browser skill). Hosts drifted badly:
+// mini ran 0.9.1 (IGNORES the idle-timeout knob), laptop 0.27.2, mini-2 had it
+// NOT INSTALLED. AGENT_BROWSER_IDLE_TIMEOUT_MS auto-shuts-down the per-session
+// daemon (the fix for the headed-Chrome core leak); honored only by >= 0.27.0.
+// Every non-healthy condition is WARN/INFO, never FAIL — same rationale as
+// checkReaper: doctor's exit code is the catalyst-join activation gate, and a
+// missing browser tool must not block owning/dispatching or self-healing.
+
+// Floor at which AGENT_BROWSER_IDLE_TIMEOUT_MS is honored (older builds ignore
+// it). Keep in sync with the bash floor in install-cli.sh / check-setup.sh.
+export const AGENT_BROWSER_MIN_VERSION = "0.27.0";
+
+// parseSemver — "agent-browser 0.32.4" | "0.32.4" → [0,32,4] (or null).
+export function parseSemver(s) {
+  const m = String(s ?? "").match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+// versionGte — dotted `a` >= `b`? Unparseable a → false.
+export function versionGte(a, b) {
+  const va = parseSemver(a), vb = parseSemver(b);
+  if (!va || !vb) return false;
+  for (let i = 0; i < 3; i++) {
+    if (va[i] > vb[i]) return true;
+    if (va[i] < vb[i]) return false;
+  }
+  return true;
+}
+
+function defaultAbVersion() {
+  const r = spawnSync("agent-browser", ["--version"], { encoding: "utf8", timeout: 10_000 });
+  if (r.error || r.status !== 0 || !r.stdout) return null; // ENOENT → error set / status null
+  return r.stdout.trim(); // "agent-browser 0.32.4"
+}
+
+// Fast + network-free: --quick skips the live launch, --offline skips CDN probes.
+function defaultAbDoctor() {
+  const r = spawnSync("agent-browser", ["doctor", "--quick", "--offline", "--json"],
+    { encoding: "utf8", timeout: 20_000 });
+  if (r.error || !r.stdout) return null;
+  try { return JSON.parse(r.stdout); } catch { return null; }
+}
+
+// phase-agent-dispatch (one dir up from execution-core/) bakes
+// AGENT_BROWSER_IDLE_TIMEOUT_MS into the dispatched worker env block (CTL-1500).
+function defaultDispatchWiresIdleTimeout() {
+  try {
+    const p = resolve(dirname(fileURLToPath(import.meta.url)), "..", "phase-agent-dispatch");
+    return /AGENT_BROWSER_IDLE_TIMEOUT_MS/.test(readFileSync(p, "utf8"));
+  } catch { return false; }
+}
+
+// Does the INSTALLED orphan-sweep.sh (the one launchd runs) carry the CTL-1500
+// vector-5 agent-browser reaper? Resolve its baked path from the same plist
+// checkReaper reads, grep for the SWEEP_AB_ENABLED / _ab_browser_roots marker.
+// null = reaper LaunchAgent not installed at all (checkReaper covers that).
+function defaultReaperHasAbVector() {
+  try {
+    const plist = resolve(homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-orphan-sweep.plist");
+    const m = readFileSync(plist, "utf8").match(/<string>([^<]*orphan-sweep\.sh)<\/string>/);
+    if (!m) return null;
+    return /SWEEP_AB_ENABLED|_ab_browser_roots/.test(readFileSync(decodePlistString(m[1]), "utf8"));
+  } catch { return null; }
+}
+
+// checkAgentBrowser — CTL-1500. present + >= min + idle-timeout wired + doctor
+// green + CTL-1500 reaper present. All advisory (WARN/INFO/PASS) — never FAILs.
+export function checkAgentBrowser(deps = {}) {
+  const {
+    abVersion = defaultAbVersion,
+    abDoctor = defaultAbDoctor,
+    dispatchWiresIdleTimeout = defaultDispatchWiresIdleTimeout,
+    reaperHasAbVector = defaultReaperHasAbVector,
+    minVersion = AGENT_BROWSER_MIN_VERSION,
+  } = deps;
+  const checks = [];
+
+  // (a) present on PATH
+  const raw = abVersion();
+  if (!raw) {
+    checks.push(mkCheck("agent-browser-installed", STATUS.WARN,
+      "agent-browser not found on PATH — worker browser tests (screenshots / live-UI " +
+        "verification) unavailable; `brew install agent-browser` then `agent-browser install`"));
+    return checks;
+  }
+  const version = (parseSemver(raw) ?? []).join(".") || raw;
+  checks.push(mkCheck("agent-browser-installed", STATUS.PASS, `agent-browser present (${raw})`));
+
+  // (b) version >= min (older builds silently IGNORE AGENT_BROWSER_IDLE_TIMEOUT_MS)
+  checks.push(versionGte(raw, minVersion)
+    ? mkCheck("agent-browser-version", STATUS.PASS,
+        `agent-browser ${version} >= ${minVersion} (honors AGENT_BROWSER_IDLE_TIMEOUT_MS)`)
+    : mkCheck("agent-browser-version", STATUS.WARN,
+        `agent-browser ${version} is below the ${minVersion} floor — it IGNORES ` +
+          `AGENT_BROWSER_IDLE_TIMEOUT_MS (the daemon idle-shutdown that stops the ` +
+          `headed-Chrome core leak); \`brew upgrade agent-browser\``));
+
+  // (c) idle-timeout wired into dispatched workers
+  checks.push(dispatchWiresIdleTimeout()
+    ? mkCheck("agent-browser-idle-timeout", STATUS.PASS,
+        "AGENT_BROWSER_IDLE_TIMEOUT_MS is wired into dispatched workers (phase-agent-dispatch)")
+    : mkCheck("agent-browser-idle-timeout", STATUS.WARN,
+        "phase-agent-dispatch does not inject AGENT_BROWSER_IDLE_TIMEOUT_MS — a leaked " +
+          "agent-browser daemon will not self-shutdown (CTL-1500 wiring missing)"));
+
+  // (d) optional: agent-browser's own doctor (fast, offline)
+  const d = abDoctor();
+  if (d && typeof d === "object") {
+    const s = d.summary ?? {};
+    checks.push(d.success
+      ? mkCheck("agent-browser-doctor", STATUS.PASS,
+          `agent-browser doctor: pass (${s.pass ?? "?"} pass, ${s.warn ?? 0} warn, ${s.fail ?? 0} fail)`)
+      : mkCheck("agent-browser-doctor", STATUS.WARN,
+          `agent-browser doctor reports ${s.fail ?? "?"} failing check(s) — run \`agent-browser doctor\``));
+  } else {
+    checks.push(mkCheck("agent-browser-doctor", STATUS.INFO,
+      "agent-browser doctor probe unavailable (older build without `doctor`, or probe failed)"));
+  }
+
+  // (e) CTL-1500 reaper present in the INSTALLED orphan-sweep.sh (checkReaper covers the LaunchAgent)
+  const hasVector = reaperHasAbVector();
+  checks.push(hasVector === true
+    ? mkCheck("agent-browser-reaper", STATUS.PASS,
+        "orphan-sweep.sh carries the CTL-1500 agent-browser leaked-browser reaper (vector 5)")
+    : hasVector === false
+      ? mkCheck("agent-browser-reaper", STATUS.WARN,
+          "installed orphan-sweep.sh predates CTL-1500 (no agent-browser vector-5 reaper) — " +
+            "reinstall from the pristine clone (`catalyst-stack install-services`)")
+      : mkCheck("agent-browser-reaper", STATUS.INFO,
+          "orphan-sweep reaper not installed — see the reaper-* checks"));
+
   return checks;
 }
 
@@ -1906,105 +2712,188 @@ export function checkLogShipper(deps = {}) {
   return checks;
 }
 
-// STALE_LOCK_MS — age threshold beyond which a .git/index.lock is considered stale.
-// 15 minutes: a legitimate git operation that holds the lock for 15+ minutes is stuck.
-const STALE_LOCK_MS = 15 * 60 * 1_000;
 
-// checkStaleGitLock — CTL-1473: detect a stale .git/index.lock in each plugin-source
-// checkout root. A lock older than STALE_LOCK_MS is a FAIL (silently blocked the
-// updater for days in the laptop audit). The updater self-heals by removing +
-// retrying (Phase 4); doctor independently surfaces it as a FAIL so operators catch
-// it on any node, not just when the updater is running.
+// checkCloudTokenEnv — CTL-1307. ADVISORY for the cluster-shared-token distribution
+// checks below (the `cloud-token` row's original CTL-1307 scope): CATALYST_CLOUD_TOKEN
+// is an OPTIONAL extension for a cluster node — a node stays fully local-only without
+// it, so its absence must NEVER block activation there. WARN only on DRIFT: the token
+// has been decrypted from the catalyst-cluster repo (cluster-cloud.json) but is not yet
+// projected into the machine-level env (cluster.env + ~/.zshenv guard).
 //
-// CTL-1473 remediate: the prior implementation downgraded FAIL→INFO whenever a
-// live git holder was detected via a system-wide `pgrep -x git`. That check
-// matched ANY git process on the host, so on a busy worker (concurrent
-// fetches/rebases) a genuinely stale 15m+ lock was masked whenever an unrelated
-// git ran — the exact failure mode this check was added to catch. The holder
-// downgrade also contradicted this module's own threshold rationale: a git
-// operation that has held index.lock for 15+ minutes is, by definition, stuck.
-// So the age threshold alone determines staleness; there is no holder downgrade.
-// All deps are injectable for unit testing; defaults use existsSync/statSync.
-export function checkStaleGitLock(deps = {}) {
-  const {
-    lockExists = (p) => existsSync(p),
-    lockAgeMs = (p) => {
-      // CTL-1473 remediate (round-3): on stat failure return null (unknown age),
-      // NOT 0. The prior `return 0` degraded a present-but-unstattable lock
-      // (permission / TOCTOU race) to age=0, which reported INFO "active git
-      // operation" and masked the failure. The null sentinel surfaces as WARN
-      // (see the age === null branch below) — unknown is not benign.
-      try { return Date.now() - statSync(p).mtimeMs; } catch { return null; }
-    },
-    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
-    preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
-  } = deps;
-
-  const roots = resolveRootsFn();
-  const checks = [];
-  const sev = (s) => (preinstall && s === STATUS.FAIL ? STATUS.WARN : s);
-
-  for (const root of roots) {
-    const lockPath = resolve(root, ".git", "index.lock");
-    if (!lockExists(lockPath)) {
-      checks.push(mkCheck("stale-git-lock", STATUS.PASS, `no stale .git/index.lock in ${root}`));
-      continue;
-    }
-    const age = lockAgeMs(lockPath);
-    if (age === null) {
-      // CTL-1473 remediate (round-3): the lock exists (lockExists true) but its
-      // age could not be determined (stat failed). Unknown age is NOT benign —
-      // WARN rather than the prior return-0 → INFO "active git operation" mask.
-      checks.push(mkCheck(
-        "stale-git-lock",
-        STATUS.WARN,
-        `${lockPath} exists but its age could not be determined (stat failed — permission or TOCTOU race) — inspect manually: ls -l ${lockPath}`,
-      ));
-      continue;
-    }
-    if (age < STALE_LOCK_MS) {
-      checks.push(mkCheck(
-        "stale-git-lock",
-        STATUS.INFO,
-        `${lockPath} exists but is only ${Math.round(age / 60_000)}m old — may be an active git operation`,
-      ));
-      continue;
-    }
-    checks.push(mkCheck(
-      "stale-git-lock",
-      sev(STATUS.FAIL),
-      `stale .git/index.lock in ${root} (age: ${Math.round(age / 60_000)}m) — plugin updates were silently blocked; the updater will self-heal on its next tick, or remove manually: rm ${lockPath}`,
-    ));
-  }
-
-  if (checks.length === 0) {
-    // CTL-1473 remediate: empty roots is unverifiable, not healthy — mirror
-    // checkLogShipper's WARN-when-unverifiable. resolvePluginCheckoutRoots()
-    // also returns [] when the Layer-2 config is unreadable/unparseable (the
-    // error is swallowed in plugin-refresh __readConfig), so reporting PASS
-    // here would mask a broken config as a clean bill of health.
-    checks.push(mkCheck(
-      "stale-git-lock",
-      STATUS.WARN,
-      "no plugin-source checkouts resolved — cannot verify .git/index.lock health (config unreadable, or this node has no checkout)",
-    ));
-  }
-  return checks;
+// CTL-1616 PR6 (design §5/§7) ADDS ONE FAIL: when the ACTIVE deployment mode is
+// DECLARED cloud (not cluster's optional extension — the actual managed-platform mode),
+// a missing/unresolvable bootstrap credential IS the one FAIL doctor cannot route
+// around — see the `cloud-token-bootstrap` check below. That escalation is gated
+// entirely on deployment mode and contributes ZERO checks for every other mode, so this
+// function's original ADVISORY/never-FAIL contract is UNCHANGED for single-host,
+// cluster, and inferred nodes — i.e. every live host today. All reads are injectable +
+// fail-open.
+// _isDeclaredCloud — the one gate PR6's escalation and the local-only wording
+// share: a genuinely DECLARED cloud mode (recognized, not inferred).
+function _isDeclaredCloud(dm) {
+  return Boolean(dm && dm.mode === "cloud" && dm.inferred === false && dm.recognized !== false);
 }
 
-// checkCloudTokenEnv — CTL-1307. ADVISORY ONLY (never FAIL): the cluster-shared
-// CATALYST_CLOUD_TOKEN is an OPTIONAL extension — a node stays fully local-only
-// without it, so its absence must NEVER block activation. WARN only on DRIFT: the
-// token has been decrypted from the catalyst-cluster repo (cluster-cloud.json)
-// but is not yet projected into the machine-level env (cluster.env + ~/.zshenv
-// guard). All reads are injectable + fail-open.
 export function checkCloudTokenEnv(deps = {}) {
   const {
     configDir = process.env.CATALYST_CONFIG_DIR || resolve(homedir(), ".config", "catalyst"),
     zshenvPath = process.env.CATALYST_ZSHENV_FILE || resolve(homedir(), ".zshenv"),
     readFile = (p) => readFileSync(p, "utf8"),
+    // CTL-1616 PR2: shadow-only contract resolver — this check's hand-rolled
+    // logic hardcodes the env-var NAME "CATALYST_CLOUD_TOKEN" everywhere above
+    // (the `export CATALYST_CLOUD_TOKEN=` string match, the ~/.zshenv guard);
+    // the contract resolves a possibly-CUSTOM name via the same 3-tier ladder
+    // as resolveNodeCloudTokenEnv (env override → Layer-2 catalyst.cloud.tokenEnv
+    // → default). Consulted and COMPARED below, never used to decide this
+    // check's grade — stays INFO-only (design §7).
+    resolveSecretContract = resolveSecret,
+    // #2916 round-3 (Codex P2): the OTHER hand-rolled cloud-token name path —
+    // checkCloudSync's replica-token presence check resolves its env-var name
+    // via resolveNodeCloudTokenEnv(), which can diverge from the contract
+    // (e.g. a CATALYST_MACHINE_CONFIG pointer vs the home Layer-2). Shadowed
+    // here alongside the literal-name comparison so a clean shadow cycle
+    // cannot mask that divergence.
+    resolveReplicaTokenEnv = resolveNodeCloudTokenEnv,
+    // CTL-1616 PR6 (design §5/§7): the §7 FAIL escalation's deployment-mode
+    // input — injectable, same convention as every other secret-contract call
+    // site in this file. Default is throw-safe (resolveDeploymentModeForShadow
+    // catches internally and degrades to undefined), so an unset/throwing
+    // resolver fails OPEN to today's INFO-only behavior (the escalation below
+    // is gated on this being genuinely {mode:"cloud", inferred:false, ...} —
+    // undefined never satisfies that gate).
+    // NOTE (#2929 post-merge Codex P2): the default must apply only when the
+    // caller OMITTED the key — a destructure default also fires on an
+    // explicitly-supplied `deploymentMode: undefined`, silently re-resolving
+    // the HOST's mode and making injected-state tests host-dependent. Hence
+    // the `in`-guarded assignment below instead of a destructure default.
+    deploymentMode: _deploymentModeDep,
   } = deps;
+  const deploymentMode =
+    "deploymentMode" in deps ? _deploymentModeDep : resolveDeploymentModeForShadow();
   const checks = [];
+
+  // CTL-1616 PR6 §7 FAIL ESCALATION (design §5): "the one FAIL doctor cannot
+  // route around." Computed ONCE here (same convention as cloudShadowChecks
+  // just below) and appended at EVERY return point so it fires regardless of
+  // which cluster-cloud.json/cluster.env/zshenv branch this check's existing
+  // hand-rolled logic lands in — those branches answer "is CATALYST_CLOUD_TOKEN
+  // projected from the cluster-sync distribution path", an ORTHOGONAL question
+  // to "is this node's deployment mode declared cloud and did the bootstrap
+  // credential resolve" (design §4's bootstrapFor:"cloud" row IS this same
+  // secret, just consulted through the shared engine rather than the
+  // cluster-sync file trio).
+  //
+  // GATE: fires ONLY when the ACTIVE deployment mode is DECLARED cloud —
+  // recognized (not a typo'd/degraded value) AND not inferred (an operator
+  // explicitly set it, matching checkDeploymentModeConsistency's tunnel-
+  // consistency gate at ~line 3445 and the engine's own cloud guard in
+  // lib/secret-contract.mjs's resolveSecret). Structurally inert (contributes
+  // ZERO checks, hence zero grade change) for every other deployment mode —
+  // single-host, cluster, inferred, or an unrecognized explicit value — so
+  // this is provably a no-op on both live minis (cluster) and the laptop
+  // (single-host). `recognized !== false` mirrors the engine's own
+  // belt-and-suspenders extension (design §12 Q3) rather than requiring
+  // recognized===true, so a deploymentMode object that omits the field
+  // (legacy callers, most fixtures elsewhere in this file) still gates
+  // correctly on inferred alone.
+  const cloudBootstrapEscalationChecks = [];
+  const dm = deploymentMode;
+  if (_isDeclaredCloud(dm)) {
+    const bootstrapResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
+      env: process.env,
+      deploymentMode: dm,
+    });
+    if (!bootstrapResolution.ok) {
+      cloudBootstrapEscalationChecks.push(
+        shadowThrowCheck("cloud-token-bootstrap", "cloud-token", bootstrapResolution.error),
+      );
+    } else {
+      const bootstrapResolved = bootstrapResolution.value;
+      const envVar = typeof bootstrapResolved?.envVar === "string" ? bootstrapResolved.envVar : "CATALYST_CLOUD_TOKEN";
+      if (bootstrapResolved?.value == null) {
+        cloudBootstrapEscalationChecks.push(
+          mkCheck(
+            "cloud-token-bootstrap",
+            STATUS.FAIL,
+            `deployment mode is declared "cloud" but the bootstrap credential (env var ` +
+              `"${envVar}") did not resolve — per the §4 cloud guard's bootstrap short-circuit, ` +
+              `EVERY other cloud-mode secret resolution returns null until this is set (a ` +
+              `half-provisioned managed container); set ${envVar} in the platform environment`,
+          ),
+        );
+      } else {
+        cloudBootstrapEscalationChecks.push(
+          mkCheck(
+            "cloud-token-bootstrap",
+            STATUS.PASS,
+            `deployment mode is declared "cloud" and the bootstrap credential resolved ` +
+              `(env var "${envVar}", source=${bootstrapResolved.envVarSource ?? bootstrapResolved.source})`,
+          ),
+        );
+      }
+    }
+  }
+
+  // CTL-1616 PR2 (B1): computed ONCE here, but pushed at each return point
+  // below so the shadow row is always APPENDED AFTER the primary rows (the
+  // same convention as checkBotCredentials — checks[0] must stay the primary
+  // graded row). This is the one bespoke shadow site (a name-comparison, not
+  // a presence-comparison), so it does its own safeResolveSecretContract
+  // wrap rather than going through buildContractShadowCheck — a throwing
+  // resolver surfaces as a shadowThrowCheck INFO row instead of crashing
+  // this check.
+  const cloudShadowChecks = [];
+  const contractResolution = safeResolveSecretContract(resolveSecretContract, "cloud-token", {
+    env: process.env,
+    // #2930 round-2 (Codex P2): reuse the SAME resolved deploymentMode the
+    // bootstrap gate and the local-only wording use — an independent
+    // re-resolve here made an explicitly-injected mode (incl. undefined)
+    // evaluate the shadow under the HOST's mode.
+    deploymentMode,
+  });
+  if (!contractResolution.ok) {
+    cloudShadowChecks.push(shadowThrowCheck("cloud-token", "cloud-token", contractResolution.error));
+  } else {
+    const contractResolved = contractResolution.value;
+    if (typeof contractResolved?.envVar === "string" && contractResolved.envVar !== "CATALYST_CLOUD_TOKEN") {
+      cloudShadowChecks.push(
+        mkCheck(
+          "cloud-token-secret-contract-shadow",
+          STATUS.INFO,
+          `SHADOW DISAGREEMENT secret="cloud-token": hand-rolled hardcodes env-var name ` +
+            `"CATALYST_CLOUD_TOKEN" but the contract resolves "${contractResolved.envVar}" ` +
+            `(source=${contractResolved.envVarSource ?? "unknown"}) — never changes this check's grade or exit code`,
+        ),
+      );
+    }
+    // Second comparison (#2916 round-3): contract name vs checkCloudSync's
+    // replica-token name path. Throw-safe like every shadow call.
+    // resolveNodeCloudTokenEnv returns { envVar, source } (config.mjs) — read
+    // .envVar, never treat the result as a bare string (#2916 round-4: the
+    // string-typed guard made this comparison unreachable in production).
+    let replicaName = null;
+    try {
+      const replicaResolved = resolveReplicaTokenEnv();
+      replicaName = typeof replicaResolved?.envVar === "string" ? replicaResolved.envVar : null;
+    } catch (err) {
+      cloudShadowChecks.push(shadowThrowCheck("cloud-token-replica-name", "cloud-token", err));
+    }
+    if (
+      typeof contractResolved?.envVar === "string" &&
+      typeof replicaName === "string" &&
+      replicaName !== contractResolved.envVar
+    ) {
+      cloudShadowChecks.push(
+        mkCheck(
+          "cloud-token-secret-contract-shadow",
+          STATUS.INFO,
+          `SHADOW DISAGREEMENT secret="cloud-token": replica-token resolver (resolveNodeCloudTokenEnv) ` +
+            `resolves env-var name "${replicaName}" but the contract resolves "${contractResolved.envVar}" ` +
+            `(source=${contractResolved.envVarSource ?? "unknown"}) — never changes this check's grade or exit code`,
+        ),
+      );
+    }
+  }
 
   let token = "";
   try {
@@ -2020,9 +2909,12 @@ export function checkCloudTokenEnv(deps = {}) {
       mkCheck(
         "cloud-token",
         STATUS.INFO,
-        "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
+        _isDeclaredCloud(deploymentMode)
+          ? "no cluster-sync cloud token file — expected on a declared-cloud node (the platform environment is the token source; see cloud-token-bootstrap)"
+          : "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
       ),
     );
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2042,6 +2934,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cloud token decrypted but NOT projected to ~/.config/catalyst/cluster.env — run 'catalyst-stack sync-cloud-env'",
       ),
     );
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
   if (!clusterEnv.includes(expected)) {
@@ -2052,6 +2945,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cluster.env CATALYST_CLOUD_TOKEN is STALE vs cluster-cloud.json — run 'catalyst-stack sync-cloud-env' and restart cloud daemons",
       ),
     );
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2069,6 +2963,7 @@ export function checkCloudTokenEnv(deps = {}) {
         "cluster.env present but ~/.zshenv lacks the source-guard — shells (and shell-launched cloud daemons) won't inherit CATALYST_CLOUD_TOKEN",
       ),
     );
+    checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
     return checks;
   }
 
@@ -2079,6 +2974,7 @@ export function checkCloudTokenEnv(deps = {}) {
       "cluster cloud token projected to machine-level env (cluster.env + ~/.zshenv guard)",
     ),
   );
+  checks.push(...cloudShadowChecks, ...cloudBootstrapEscalationChecks);
   return checks;
 }
 
@@ -2434,7 +3330,11 @@ async function defaultLinearGraphQLPost(query, token) {
 export async function checkWorkerLabels(deps = {}) {
   const {
     getRoster = getClusterHosts,
-    linearToken = () => process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "",
+    // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
+    // answer now — see resolveLinearTokenLive's docstring for why the PR2
+    // shadow comparison this call site carried is retired, not merely muted.
+    resolveSecretContract = resolveSecret,
+    linearToken = () => resolveLinearTokenLive(resolveSecretContract) ?? "",
     post = defaultLinearGraphQLPost,
   } = deps;
 
@@ -2447,6 +3347,7 @@ export async function checkWorkerLabels(deps = {}) {
   }
 
   const token = linearToken();
+
   if (!token) {
     return [
       mkCheck("worker-labels", STATUS.INFO, "no LINEAR_API_TOKEN / LINEAR_API_KEY — skipping worker-label check"),
@@ -2766,6 +3667,350 @@ export function checkNodeClass(deps = {}) {
   ];
 }
 
+// ─── CTL-1617: deployment-mode consistency grading ───────────────────────────
+
+// checkLayer2PathDivergence — CTL-1616 PR6 follow-up (#2930 round-2 Codex P1).
+// On a host that sets CATALYST_MACHINE_CONFIG or XDG_CONFIG_HOME without
+// CATALYST_LAYER2_CONFIG_FILE, the fleet's Layer-2 readers/writers are SPLIT:
+// legacy readers (catalyst-secret-env.sh, the scheduler's per-tick reload) and
+// the write destinations fed by getLayer2ConfigPath use the legacy home chain,
+// while the registry-based consumers folded in PR3-PR5 (the OAuth mint chain,
+// cloud-token name) use the canonical resolveLayer2Path chain. A credential
+// rotation on such a host writes fresh material where half the readers never
+// look — so the configuration is UNSUPPORTED until the canonical cutover sweep,
+// and this check FAILs it loudly with the real remedy:
+// CATALYST_LAYER2_CONFIG_FILE is tier 1 of BOTH chains, pinning every reader
+// and writer to one file. On every non-divergent host (all live fleet hosts)
+// this check is a silent PASS-less no-op (zero rows).
+export function checkLayer2PathDivergence(deps = {}) {
+  const {
+    env = process.env,
+    legacyPathFn = () =>
+      env.CATALYST_LAYER2_CONFIG_FILE || resolve(homedir(), ".config", "catalyst", "config.json"),
+    canonicalPathFn = () => resolveLayer2Path(env),
+  } = deps;
+  let legacyRaw;
+  let canonicalRaw;
+  try {
+    legacyRaw = legacyPathFn();
+    canonicalRaw = canonicalPathFn();
+  } catch {
+    return []; // fail-open: a throwing resolver must not invent a divergence
+  }
+  // #2938 round-2 (Codex P2): a RELATIVE configured path must never be
+  // cwd-normalized into agreement — resolveLayer2Path preserves the relative
+  // string and canonical consumers read it against THEIR cwd, so a supervised
+  // service with a different cwd reads a different (or missing) file. Reject
+  // it outright instead of comparing.
+  if (!isAbsolute(legacyRaw) || !isAbsolute(canonicalRaw)) {
+    return [
+      mkCheck(
+        "layer2-path-divergence",
+        STATUS.FAIL,
+        `Layer-2 config path is RELATIVE ("${!isAbsolute(legacyRaw) ? legacyRaw : canonicalRaw}") — ` +
+          `each consumer resolves it against its own working directory, so different services read ` +
+          `different files; set an ABSOLUTE CATALYST_LAYER2_CONFIG_FILE (tier 1 of BOTH chains — ` +
+          `an absolute CATALYST_MACHINE_CONFIG pointing anywhere other than the legacy default ` +
+          `path still diverges from the legacy chain and fails the split-brain gate)`,
+      ),
+    ];
+  }
+  // #2931 round-2 (Codex P2): NORMALIZE (absolute-only — cwd-independent)
+  // before comparing, so an equivalent absolute spelling (e.g.
+  // "$HOME/.config/catalyst/../catalyst/config.json") is not a false FAIL.
+  const legacyPath = resolve(legacyRaw);
+  const canonicalPath = resolve(canonicalRaw);
+  if (legacyPath === canonicalPath) return [];
+  return [
+    mkCheck(
+      "layer2-path-divergence",
+      STATUS.FAIL,
+      `Layer-2 config path is SPLIT-BRAIN on this host: legacy chain resolves "${legacyPath}" ` +
+        `(read by catalyst-secret-env.sh + the scheduler reload; fed by cluster-sync writes) but ` +
+        `the registry's canonical chain resolves "${canonicalPath}" (read by the OAuth mint chain ` +
+        `and cloud-token name resolution) — a credential rotation would land where half the ` +
+        `readers never look. This CATALYST_MACHINE_CONFIG/XDG_CONFIG_HOME-divergent layout is ` +
+        `unsupported until the canonical reader/writer sweep; set CATALYST_LAYER2_CONFIG_FILE ` +
+        `(tier 1 of BOTH chains) in the environment of EVERY supervised service AND interactive ` +
+        `shell — no single env file covers them all today (execution-core sources ` +
+        `execution-core.env, the monitor's start path sources lib/catalyst-secret-env.sh, shells ` +
+        `have their own profile), so the pin must reach each service's own environment source; a ` +
+        `pin visible only to this doctor run would pass the check while running services still split`,
+    ),
+  ];
+}
+
+// checkDeploymentModeConsistency — grade catalyst.deployment.mode (CTL-1617
+// design §7, all four sub-checks). Every
+// message says "deployment mode" fully qualified: this codebase already has
+// three unrelated "mode" concepts (catalyst.orchestration.dispatchMode, the
+// executor-derived dispatch-mode telemetry, readLinearReplica().mode), so
+// bare "mode" in a doctor line is ambiguous.
+//
+//   1. deployment-mode — always emitted. Explicit+recognized → PASS (value +
+//      source). Explicit+UNRECOGNIZED (the resolver already degraded it to
+//      "single-host") → INFO deferring to deployment-mode-recognized below,
+//      which owns that FAIL — this check's own branches are declared-vs-
+//      inferred, not valid-vs-invalid, so it never duplicates check 2's FAIL.
+//      Inferred (unset everywhere) → WARN with the declare-it message
+//      (mirrors the host-name-source WARN-when-implicit pattern verbatim,
+//      ~line 184 above); escalates to FAIL when `strict:true` (the install-
+//      verification profile — an installer that was supposed to persist the
+//      value and didn't is the CTL-1355 install-correctness pattern, same as
+//      checkNodeClass's strict branch above). NOT wired into any strict
+//      profile by this PR — see the checksForClass wiring note below.
+//   2. deployment-mode-recognized — FAIL when `recognized: false` (explicit
+//      typo, already degraded to single-host by the resolver). Same severity
+//      class as checkNodeClass's typo path.
+//   3. deployment-mode-roster-consistency — GATED on `inferred: false` (a
+//      day-one inferred default on a live multi-host cluster must produce
+//      only check 1's declare-it WARN, not a second warning here). Reuses
+//      the same resolveClusterHosts() resolver checkHostIdentity already
+//      calls (no new probe — a cheap, pure, file-backed read, not a network
+//      call). Declared single-host + a multi-host roster resolved, OR
+//      declared cluster/cloud + no authoritative roster (source=single-host)
+//      → WARN. WARN, never FAIL: a transient cluster-repo git-fetch hiccup,
+//      or the declare-then-join migration window, must not flip a healthy
+//      node's doctor red.
+//   4. deployment-mode-tunnel-consistency — GATED on `dm.mode === "cloud"`.
+//      Structurally provably inert for single-host/cluster/inferred: the
+//      resolver's constant default is always "single-host" (§4 of the
+//      design — nothing ever infers "cloud"), so `mode === "cloud"` can only
+//      be true via an EXPLICIT, RECOGNIZED value — this one gate covers both
+//      "only fires in cloud mode" and "only fires when explicit" from the
+//      design in one condition, with no separate `inferred`/`recognized`
+//      check needed. Probes the LOCAL monitor's
+//      `GET /api/status/webhook-tunnel` (port-resolution spike, CTL-1617 §11
+//      Q2: `MONITOR_PORT` env or 7400 — the exact pattern already live in
+//      checkMonitorProductionBuild (defined later in this file); deliberately NOT
+//      checkReadReplicaReachable's baseUrl, which targets a REMOTE
+//      read-replica by design and FAILs on localhost on purpose).
+//      `connected: true` → WARN: a live smee tunnel on a declared-cloud node
+//      is contrary-to-mode (the cloud SDK connection is the expected event
+//      source). Unreachable monitor / any probe failure → INFO "could not
+//      verify" — NEVER FAIL; a down local monitor must not contaminate this
+//      check (same advisory posture as checkMonitorProductionBuild's
+//      INFO-skip).
+//
+// Injected deps (all have real defaults):
+//   deploymentMode      — the resolveDeploymentMode() result object
+//                          ({mode,source,inferred,recognized,raw})
+//   resolveRoster       — () => { hosts, source, multiHost }
+//   strict              — bool, default false (see check 1 above)
+//   webhookTunnelBaseUrl — check 4 only: local monitor base URL, default
+//                          `http://localhost:${MONITOR_PORT || 7400}`
+//   fetch               — check 4 only: default globalThis.fetch
+export async function checkDeploymentModeConsistency(deps = {}) {
+  const {
+    deploymentMode: dm = resolveDeploymentMode(),
+    resolveRoster = resolveClusterHosts,
+    strict = false,
+    webhookTunnelBaseUrl = `http://localhost:${process.env.MONITOR_PORT || 7400}`,
+    fetch: _fetch = globalThis.fetch,
+  } = deps;
+
+  const checks = [];
+
+  // 1. deployment-mode — always emitted.
+  if (!dm.recognized) {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        STATUS.INFO,
+        `deployment mode "${dm.raw}" is not recognized — see deployment-mode-recognized below`,
+      ),
+    );
+  } else if (dm.inferred) {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        strict ? STATUS.FAIL : STATUS.WARN,
+        `deployment mode not declared — treating this node as "${dm.mode}"; set ` +
+          `catalyst.deployment.mode (Layer-1 for the fleet default, Layer-2 for this ` +
+          `host) or CATALYST_DEPLOYMENT_MODE`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "deployment-mode",
+        STATUS.PASS,
+        `deployment mode="${dm.mode}" (explicit, source=${dm.source})`,
+      ),
+    );
+  }
+
+  // 2. deployment-mode-recognized — FAIL on an explicit typo.
+  if (!dm.recognized) {
+    checks.push(
+      mkCheck(
+        "deployment-mode-recognized",
+        STATUS.FAIL,
+        `deployment mode "${dm.raw}" is not one of [${DEPLOYMENT_MODES.join(", ")}] — ` +
+          `treating this node as "${dm.mode}" (safest); correct or unset the value ` +
+          `(source=${dm.source})`,
+      ),
+    );
+  }
+
+  // 3. deployment-mode-roster-consistency — gated on inferred:false.
+  if (!dm.inferred) {
+    const roster = resolveRoster() ?? {};
+    const rosterSource = roster.source ?? "unknown";
+    // "declared" vs "resolved": when the explicit value was a typo the resolver
+    // DEGRADED it to single-host — the operator declared the typo, not the mode
+    // this check is grading. Say "resolved (degraded from an unrecognized
+    // value)" in that case so this WARN cannot contradict check 2's FAIL.
+    const declaredPhrase = dm.recognized
+      ? "declared deployment mode"
+      : "resolved deployment mode (degraded from an unrecognized value)";
+    if (dm.mode === "single-host" && roster.multiHost) {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.WARN,
+          `${declaredPhrase} "single-host" but a multi-host roster resolved ` +
+            `(source=${rosterSource}) — HRW dispatch/recovery gates still partition across it`,
+        ),
+      );
+    } else if ((dm.mode === "cluster" || dm.mode === "cloud") && rosterSource === "single-host") {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.WARN,
+          `${declaredPhrase} "${dm.mode}" but no authoritative roster resolved ` +
+            `(source=single-host) — this node effectively runs single-host`,
+        ),
+      );
+    } else {
+      checks.push(
+        mkCheck(
+          "deployment-mode-roster-consistency",
+          STATUS.PASS,
+          `${declaredPhrase} "${dm.mode}" is consistent with the resolved roster ` +
+            `(source=${rosterSource}, multiHost=${Boolean(roster.multiHost)})`,
+        ),
+      );
+    }
+  }
+
+  // 4. deployment-mode-tunnel-consistency — gated on mode==="cloud" only (see
+  // the doc comment above: structurally provably inert otherwise, since the
+  // resolver never infers "cloud").
+  if (dm.mode === "cloud") {
+    const base = (typeof webhookTunnelBaseUrl === "string" ? webhookTunnelBaseUrl : "").replace(
+      /\/+$/,
+      "",
+    );
+    try {
+      const res = await _fetch(base + "/api/status/webhook-tunnel", {
+        method: "GET",
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!(res?.ok ?? false)) {
+        checks.push(
+          mkCheck(
+            "deployment-mode-tunnel-consistency",
+            STATUS.INFO,
+            `could not verify webhook-tunnel state for deployment mode "cloud" — ` +
+              `${base}/api/status/webhook-tunnel returned HTTP ${res?.status ?? "?"}`,
+          ),
+        );
+      } else {
+        const body = await res.json();
+        if (body?.connected === true) {
+          checks.push(
+            mkCheck(
+              "deployment-mode-tunnel-consistency",
+              STATUS.WARN,
+              `smee webhook tunnel is live on a node with declared deployment mode ` +
+                `"cloud" — expected event ingestion is the cloud SDK connection, not the ` +
+                `smee tunnel`,
+            ),
+          );
+        } else {
+          checks.push(
+            mkCheck(
+              "deployment-mode-tunnel-consistency",
+              STATUS.PASS,
+              `no smee webhook tunnel is live on this declared-cloud node — consistent ` +
+                `with deployment mode "cloud"`,
+            ),
+          );
+        }
+      }
+    } catch (err) {
+      checks.push(
+        mkCheck(
+          "deployment-mode-tunnel-consistency",
+          STATUS.INFO,
+          `could not verify webhook-tunnel state for deployment mode "cloud" — local ` +
+            `monitor at ${base} could not be verified (unreachable or malformed response: ${err?.message ?? err})`,
+        ),
+      );
+    }
+  }
+
+  return checks;
+}
+
+// ─── CTL-1616 PR2/PR3: secret-contract observability ─────────────────────────
+//
+// checkSecretContract — INFO-ONLY OBSERVATION (design §7/§9), UNCHANGED by the
+// PR3 cutover below. Resolves a handful of SECRET_REGISTRY rows through the
+// shared lib/secret-contract.mjs engine and reports them as INFO-level
+// observations: presence for `linear-api-token` and `groq-api-key` — NEW
+// coverage design §7 asked for ("plus new Linear/Groq presence checks"), since
+// no existing doctor check resolved either through the contract pre-CTL-1616.
+//
+// PR3 (design §9) cuts checkPeerUniqueness/checkBotCredentials/checkWorkerLabels
+// over to the contract as their LIVE answer for linear-api-token — see
+// resolveLinearTokenLive above — which retires the PR2 shadow-comparison those
+// 3 call sites used to run against their own hand-rolled reads (there is no
+// hand-rolled answer left there to compare against). checkSecretContract
+// itself stays exactly what it was in PR2: an INFO-only observation, not a
+// graded check — grading `source` against the active deployment mode's
+// expected provider (PASS/WARN/FAIL) is explicitly NOT part of this cutover
+// and remains open work for a later PR. checkWebhookIngestion's
+// webhook-secret shadow and checkCloudTokenEnv's cloud-token shadow are also
+// UNCHANGED — those secrets cut over in their own later migration PRs (design
+// §8/§9 PR4-PR6), not this one.
+//
+// Every emitted check is STATUS.INFO — summarize() never counts INFO toward
+// pass/warn/fail (doctor.mjs:1728-1736 — see summarize()), so this check
+// cannot move doctor's exit code (the FAIL count) or its pass/warn/fail
+// summary line.
+//
+// Fleet-topology-independent (does not consult resolveRoster) — wired into
+// checksForClass's shared prelude for EVERY class, exactly like
+// checkDeploymentModeConsistency (CTL-1617) just above it.
+export function checkSecretContract(deps = {}) {
+  const { env = process.env, deploymentMode = resolveDeploymentModeForShadow(env), resolveSecretFn = resolveSecret } = deps;
+  const checks = [];
+  for (const id of ["linear-api-token", "groq-api-key"]) {
+    // CTL-1616 PR2 (B1): isolated via safeResolveSecretContract — a throwing
+    // resolver surfaces as a shadowThrowCheck INFO row for this id instead of
+    // crashing the whole doctor run (there is no per-check isolation in
+    // runDoctor's Promise.all).
+    const resolution = safeResolveSecretContract(resolveSecretFn, id, { env, deploymentMode });
+    if (!resolution.ok) {
+      checks.push(shadowThrowCheck(`secret-contract-${id}`, id, resolution.error));
+      continue;
+    }
+    const resolved = resolution.value;
+    checks.push(
+      mkCheck(
+        `secret-contract-${id}`,
+        STATUS.INFO,
+        resolved?.value != null
+          ? `secret contract resolves "${id}" (source=${resolved.source}, provider=${resolved.provider})`
+          : `secret contract has no resolution for "${id}" (source=${resolved?.source ?? "none"})`,
+      ),
+    );
+  }
+  return checks;
+}
+
 // ─── Developer/monitor: read-replica REACHABILITY (CTL-1346 + CTL-1355) ───────
 
 // defaultReadReplicaBaseUrl — mirror catalyst-stack _vn_read_replica_base /
@@ -3060,21 +4305,21 @@ export function checkDaemonlessLocal(deps = {}) {
     ];
   }
 
-  // A parsed-but-unusable verify-node result cannot certify daemonless+fresh.
+  // A parsed-but-UNUSABLE verify-node result (empty/unparseable output, jq unavailable)
+  // cannot certify daemonless+fresh at all — that's the generic short-circuit below. A
+  // non-zero exit / "fail" verdict ALONE is NOT unusable: it's the expected shape whenever
+  // ANY required row failed (including one outside `rows`), and the per-row loop below
+  // already fails closed on a missing/unmappable named row. Short-circuiting on exit/verdict
+  // only hid WHICH row failed — e.g. a dead event-mirror reported as a generic "verify-node
+  // unavailable" FAIL instead of naming "event-mirror-running" (CTL-1662 Codex P2).
   const checks = Array.isArray(result?.checks) ? result.checks : [];
-  const exit = typeof result?.exit_code === "number" ? result.exit_code : null;
-  if (
-    checks.length === 0 ||
-    result?.jq === false ||
-    (exit !== null && exit !== 0) ||
-    result?.verdict === "fail"
-  ) {
+  if (checks.length === 0 || result?.jq === false) {
     return [
       mkCheck(
         "verify-node",
         STATUS.FAIL,
         `could not verify daemonless local state — verify-node unavailable/failed ` +
-          `(exit ${exit ?? "?"}, verdict ${result?.verdict ?? "?"}, jq ${result?.jq ?? "?"}, ` +
+          `(exit ${result?.exit_code ?? "?"}, verdict ${result?.verdict ?? "?"}, jq ${result?.jq ?? "?"}, ` +
           `checks ${checks.length}); cannot certify the developer is daemonless + fresh`,
       ),
     ];
@@ -3376,6 +4621,58 @@ export function checkPluginSourceFreshness(deps = {}) {
   return [classifyPluginSourceFreshness({ roots, healthByRoot, nodeClass })];
 }
 
+// checkStaleLock — CTL-1415: a stale `.git/index.lock` in the node's plugin-source
+// checkout silently freezes every plugin pull (a crashed git op leaves the lock;
+// each later `git reset --hard` then fails forever — the ~8.5h laptop freeze in
+// CTL-1401). doctor REPORTS the frozen state so the node isn't silently stuck on
+// stale plugins; the updater/broker pull path (broker/plugin-refresh.mjs) is what
+// auto-clears it. Age-gated via the SHARED lib/stale-lock.mjs classifier, so the
+// "safe age" can't drift from what the pull path clears, and a live git op (a
+// fresh lock) is reported as in-progress, never flagged.
+//
+// Codex P2 (#2530): a checkout provisioned via `setup-plugin-source.sh --path`
+// only persists the custom root through catalyst.orchestration.pluginDirs — it
+// does NOT guarantee CATALYST_PLUGIN_SOURCE is set in doctor's environment. The
+// old hardcoded ~/catalyst/plugin-source default could report "no stale lock"
+// while the ACTUAL configured checkout sat frozen. Resolve the same
+// resolvePluginCheckoutRoots() the adjacent freshness check and the real pull
+// path use (CTL-1421), so this check inspects the checkout(s) that are actually
+// live rather than an unconditional guess. An explicit `root` still wins (tests /
+// single-checkout callers); the historical env/default guess is the last-resort
+// fallback only when nothing resolves at all (no pluginDirs configured).
+export function checkStaleLock(deps = {}) {
+  const {
+    root,
+    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
+    now = Date.now(),
+    thresholdMs = STALE_LOCK_THRESHOLD_MS,
+    statFn,
+  } = deps;
+  const resolved = root ? [root] : resolveRootsFn();
+  const roots =
+    resolved.length > 0
+      ? resolved
+      : [process.env.CATALYST_PLUGIN_SOURCE || resolve(homedir(), "catalyst", "plugin-source")];
+
+  const statuses = roots.map((r) => ({ r, s: staleLockStatus({ root: r, now, thresholdMs, statFn }) }));
+  const stale = statuses.filter(({ s }) => s.present && s.stale);
+  if (stale.length > 0) {
+    const thMins = Math.round(thresholdMs / 60000);
+    const details = stale
+      .map(({ r, s }) => `${indexLockPath(r)} (~${Math.round(s.ageMs / 60000)}m old)`)
+      .join("; ");
+    return [mkCheck("stale-plugin-lock", STATUS.WARN,
+      `stale .git/index.lock (age ≥ ${thMins}m threshold) — plugin pulls are FROZEN until it clears; the updater/broker auto-clears it on its next pull (CTL-1415), or remove by hand: ${details}`)];
+  }
+  const inProgress = statuses.find(({ s }) => s.present && !s.stale);
+  if (inProgress) {
+    const secs = Math.round(inProgress.s.ageMs / 1000);
+    const thSecs = Math.round(thresholdMs / 1000);
+    return [mkCheck("stale-plugin-lock", STATUS.PASS, `a git operation is in progress in plugin-source (index.lock ${secs}s old < ${thSecs}s threshold) — not stale`)];
+  }
+  return [mkCheck("stale-plugin-lock", STATUS.PASS, `no stale git index.lock in plugin-source (${roots.join(", ")})`)];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -3411,6 +4708,23 @@ export function checksForClass(nc, opts = {}) {
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
+  // CTL-1617: deployment-mode consistency — a fleet-topology fact independent
+  // of node class, so it runs for every class (unlike nodeClassCheck it is
+  // never the class-selection short-circuit below). strict:false always here
+  // — this PR wires only the non-strict activation rubric (land-dormant,
+  // CTL-1523 convention); the strict install-profile escalation branch exists
+  // in checkDeploymentModeConsistency but is not wired into any profile yet.
+  const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
+  // #2930 round-2: split-brain Layer-2 path layout is unsupported until the
+  // canonical sweep — zero rows on every non-divergent host.
+  const layer2PathDivergenceCheck = () => checkLayer2PathDivergence();
+  // CTL-1616 PR2: secret-contract shadow pass — like deploymentModeCheck, a
+  // fleet-topology-independent fact (does not consult resolveRoster), so it
+  // runs for every class. SHADOW ONLY: every check it (and the injected
+  // resolvers inside checkWebhookIngestion/checkBotCredentials/
+  // checkPeerUniqueness/checkCloudTokenEnv/checkWorkerLabels) emits is
+  // STATUS.INFO — zero grade change (design §7/§9). PR3 flips this to graded.
+  const secretContractCheck = () => checkSecretContract();
 
   // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
   if (!nc.recognized) {
@@ -3425,6 +4739,8 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1421: assert the worker plugin path resolves to a healthy pristine plugin-source
   // (else workers silently serve stale marketplace-cache code). worker=FAIL, dev/monitor=WARN.
   const pluginSourceFreshThunk = () => checkPluginSourceFreshness({ nodeClass: nc.class });
+  // CTL-1415: a stale plugin-source .git/index.lock freezes pulls on ANY node class.
+  const staleLockThunk = () => checkStaleLock();
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
   const wontOwnThunk = () =>
@@ -3467,18 +4783,28 @@ export function checksForClass(nc, opts = {}) {
     // worker-member Claude settings that don't apply to it.
     return [
       nodeClassCheck,
+      deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
+      secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
       () => checkHrwPartition(), // would-own count (visibility)
-      () => checkDaemonlessLocal({ nodeClass: nc.class, runVerifyNode }), // broker/exec-core down + plugins fresh
+      () =>
+        checkDaemonlessLocal({
+          nodeClass: nc.class,
+          runVerifyNode,
+          rows: ["broker-stopped", "exec-core-stopped", "plugins-fresh", "event-mirror-running"], // CTL-1662: without this row a dead event-mirror is invisible to doctor
+        }), // broker/exec-core down + plugins fresh + event-mirror alive
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (correct class agent set)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater (a developer runs no broker)
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a developer)
+      staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the updater's pulls
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
-      () => checkStaleGitLock({ preinstall }), // CTL-1473: stale .git/index.lock blocks plugin updates
+      () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
+      () => checkAgentBrowser(), // CTL-1500: developers run the mini live-test browser loop too (advisory)
       () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
@@ -3497,11 +4823,15 @@ export function checksForClass(nc, opts = {}) {
     // the FAIL is removed when the monitor rubric lands (CTL-1355 F3).
     return [
       nodeClassCheck,
+      deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
+      secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a monitor)
+      staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the updater's pulls
       replicaThunk,
       wontOwnThunk,
       () => [
@@ -3520,6 +4850,9 @@ export function checksForClass(nc, opts = {}) {
   // unchanged, with the node-class check prepended (INFO/PASS — never FAILs here).
   return [
     nodeClassCheck,
+    deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
+    secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
@@ -3530,12 +4863,14 @@ export function checksForClass(nc, opts = {}) {
     agentsThunk, // CTL-1369 PR4: worker work-stack agent installed, no updater agent (correct class agent set)
     pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=broker (the worker's broker owns the pull)
     pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (FAIL — the CI/CD executor)
+    staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the broker's pulls
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
     () => checkLogShipper({ shipsLogs: shipsLogs("worker"), preinstall }), // CTL-1473: log-shipper present + canonical config path
-    () => checkStaleGitLock({ preinstall }), // CTL-1473: stale .git/index.lock blocks plugin updates (FAIL)
+    () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
+    () => checkAgentBrowser(), // CTL-1500: worker browser tool present + >= min + idle-timeout wired + reaper (advisory, never FAIL)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)

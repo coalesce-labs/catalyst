@@ -14,9 +14,12 @@
 
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
-  readFileSync,
+  openSync,
+  readSync,
   renameSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -36,23 +39,98 @@ export interface CanonicalEventWriterOpts {
 }
 
 /**
+ * CTL-1529: how many bytes the first-line probe reads before giving up.
+ *
+ * The rotation check needs exactly ONE line, but the file it inspects is the
+ * MONTHLY EVENT LOG — 344 MB on the busiest host. `readFileSync(filePath,
+ * "utf8")` materialized all of it to look at the first ~1 KB, once per writer
+ * instance; `server.ts` constructs three writers, each with its own `rotated`
+ * Set, so a single monitor process paid that three times at startup.
+ *
+ * 64 KiB is ~20x the largest canonical envelope observed (a phase event with an
+ * embedded brief). The probe DOUBLES up to `PROBE_MAX_BYTES` if the first
+ * newline is further out than that, so a pathologically long first line is
+ * still classified correctly rather than mis-parsed.
+ */
+const PROBE_INITIAL_BYTES = 64 * 1024;
+const PROBE_MAX_BYTES = 1024 * 1024;
+const NEWLINE = 0x0a;
+
+/**
+ * firstNonEmptyLine — CTL-1529. The first "\n"-delimited non-empty line of
+ * `filePath`, read with a bounded `readSync` prefix instead of a whole-file
+ * read. Mirrors the semantics of the `content.split("\n").find(l => l.length >
+ * 0)` it replaces: leading empty lines are skipped, and a final line without a
+ * trailing newline still counts.
+ *
+ * `undecided:true` means the probe hit `PROBE_MAX_BYTES` without finding a line
+ * terminator — the caller MUST NOT treat that as legacy, because "I could not
+ * read enough" and "this is a legacy envelope" have opposite consequences (the
+ * latter RENAMES the live log out from under every reader).
+ */
+function firstNonEmptyLine(filePath: string): {
+  line: string | null;
+  undecided: boolean;
+} {
+  let fd: number;
+  try {
+    fd = openSync(filePath, "r");
+  } catch {
+    return { line: null, undecided: false };
+  }
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return { line: null, undecided: false };
+    let probe = Math.min(PROBE_INITIAL_BYTES, size);
+    for (;;) {
+      const buf = Buffer.allocUnsafe(probe);
+      let got = 0;
+      while (got < probe) {
+        const n = readSync(fd, buf, got, probe - got, got);
+        if (n <= 0) break;
+        got += n;
+      }
+      let start = 0;
+      for (let i = 0; i < got; i++) {
+        if (buf[i] !== NEWLINE) continue;
+        if (i > start) return { line: buf.toString("utf8", start, i), undecided: false };
+        start = i + 1; // an empty line — skip it, exactly as `.find(l => l.length > 0)` did
+      }
+      if (got >= size) {
+        // The probe holds the WHOLE file and no terminator followed the first
+        // non-empty run: that run is the final unterminated line.
+        return { line: got > start ? buf.toString("utf8", start, got) : null, undecided: false };
+      }
+      if (probe >= PROBE_MAX_BYTES) return { line: null, undecided: true };
+      probe = Math.min(probe * 2, PROBE_MAX_BYTES, size);
+    }
+  } catch {
+    return { line: null, undecided: false };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Detect whether the existing line is a canonical envelope by looking for
  * the `attributes` field. Legacy v1 (bash) and v2 (webhook) envelopes both
  * lack `attributes`, so this single check distinguishes them from
  * canonical lines without parsing the full schema.
  */
-function isLegacyFirstLine(filePath: string): boolean {
+function isLegacyFirstLine(filePath: string, logger?: EventWriterLogger): boolean {
   if (!existsSync(filePath)) return false;
-  let content: string;
-  try {
-    content = readFileSync(filePath, "utf8");
-  } catch {
+  const { line, undecided } = firstNonEmptyLine(filePath);
+  if (undecided) {
+    // Fail SAFE: an undecidable probe must never trigger a rename of the live
+    // log. Loud, because the only way to reach here is a >1 MiB first line.
+    logger?.warn?.(
+      `[event-writer] first-line probe exceeded ${PROBE_MAX_BYTES}B for ${filePath} — skipping legacy rotation`,
+    );
     return false;
   }
-  const firstLine = content.split("\n").find((l) => l.length > 0);
-  if (!firstLine) return false;
+  if (line === null) return false;
   try {
-    const parsed: unknown = JSON.parse(firstLine);
+    const parsed: unknown = JSON.parse(line);
     if (typeof parsed !== "object" || parsed === null) return true;
     return !("attributes" in parsed);
   } catch {
@@ -82,7 +160,7 @@ export class CanonicalEventWriter {
   private maybeRotateLegacy(filePath: string): void {
     if (this.rotated.has(filePath)) return;
     this.rotated.add(filePath);
-    if (!isLegacyFirstLine(filePath)) return;
+    if (!isLegacyFirstLine(filePath, this.logger)) return;
     const legacyPath = `${filePath}.legacy`;
     try {
       renameSync(filePath, legacyPath);

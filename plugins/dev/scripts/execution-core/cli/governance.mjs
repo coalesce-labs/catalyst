@@ -1,27 +1,43 @@
 // cli/governance.mjs — CTL-1062. Operator-facing readout of which governance
 // modes the local daemon is actually running, sourced from the latest
 // node.heartbeat the daemon wrote (heartbeat carries the snapshot, CTL-1062 Phase 2).
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { getEventLogPath, getHostName } from "../config.mjs";
+import { getEventLogPath, getHostName, HEARTBEAT_TAIL_WINDOW_MS } from "../config.mjs";
+// CTL-1529: bounded tail instead of readFileSync(logPath,"utf8") of the whole
+// monthly log (883 MB on mini ⇒ ~1.9 s and a ~1.7 GB transient just to answer
+// "what modes is the daemon running?", and on a node runtime an outright
+// ERR_STRING_TOO_LONG that this function's `catch` turned into the misleading
+// "No heartbeat found — is the daemon running?"). event-tail.mjs is a leaf module
+// (no execution-core deps), so importing it keeps this CLI out of the heavy
+// recovery.mjs import graph.
+import { scanEventsSince } from "../event-tail.mjs";
 
 const HEARTBEAT_EVENT = "node.heartbeat";
 
-export function readLatestGovernance({ logPath = getEventLogPath(), host = getHostName() } = {}) {
-  let raw;
-  try { raw = readFileSync(logPath, "utf8"); }
-  catch { return { found: false, host }; }
+export function readLatestGovernance({
+  logPath = getEventLogPath(),
+  host = getHostName(),
+  nowMs = Date.now(),
+  windowMs = HEARTBEAT_TAIL_WINDOW_MS,
+} = {}) {
   let best = null;
-  for (const line of raw.split("\n")) {
-    if (!line || !line.includes(HEARTBEAT_EVENT)) continue;
-    let evt; try { evt = JSON.parse(line); } catch { continue; }
-    if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
-    const h = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
-    if (h !== host) continue;
-    const ts = evt?.ts;
-    const gov = evt?.body?.payload?.governance;
-    if (typeof ts !== "string" || !gov) continue;
-    if (!best || ts > best.ts) best = { ts, governance: gov };
+  try {
+    scanEventsSince({
+      path: logPath,
+      targetSinceMs: nowMs - windowMs,
+      lineFilter: (line) => line.includes(HEARTBEAT_EVENT),
+      onEvent: (evt) => {
+        if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) return;
+        const h = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+        if (h !== host) return;
+        const ts = evt?.ts;
+        const gov = evt?.body?.payload?.governance;
+        if (typeof ts !== "string" || !gov) return;
+        if (!best || ts > best.ts) best = { ts, governance: gov };
+      },
+    });
+  } catch {
+    return { found: false, host };
   }
   return best ? { found: true, host, ts: best.ts, governance: best.governance } : { found: false, host };
 }

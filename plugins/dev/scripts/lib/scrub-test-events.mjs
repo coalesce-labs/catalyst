@@ -37,6 +37,17 @@ function isSentinelLine(line) {
  * @returns {{ sentinelCount: number, realCount: number, applied: boolean }}
  */
 export async function scrubFile(filePath, { apply = false } = {}) {
+  // EVENT-LOG-FULL-READ-OK(CTL-1529): this IS a whole-file read of the monthly
+  // event log, and it stays one. TRADEOFF: scrubFile is a one-shot offline
+  // remediation CLI (CTL-1086) that an operator runs by hand — never a daemon,
+  // never on a timer, never inside a scheduler tick — so neither of the two
+  // costs that motivated CTL-1529 applies: there is no event loop to block, and
+  // the giant transient dies with the process seconds later instead of sticking
+  // as a long-lived daemon's RSS high-water mark. Its contract is a full
+  // rewrite (every non-sentinel line, byte-preserved, atomically renamed over
+  // the original), so a bounded reader would have to be a streaming
+  // read-and-rewrite; that is worth doing only if this ever moves into a
+  // long-lived process, which it must not.
   const content = readFileSync(filePath, "utf8");
   const allLines = content.split("\n");
   // Preserve trailing newline behavior: remove the last empty element if file ended with \n

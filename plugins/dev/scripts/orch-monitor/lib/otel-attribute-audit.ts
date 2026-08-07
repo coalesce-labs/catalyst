@@ -79,6 +79,12 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "linear.team.key",         emitter: "ts", source: "canonical-event.ts:87", classification: "legitimately-custom" },
   { key: "linear.actor.id",         emitter: "ts", source: "canonical-event.ts:88", classification: "legitimately-custom" },
 
+  // CTL-1532: provider webhook delivery id (x-github-delivery / linear-delivery),
+  // verbatim. No OTel semconv covers a provider idempotency key. Load-bearing as
+  // the join key between the smee-produced event log and the catalyst-cloud
+  // /events/stream feed, which carries the same value.
+  { key: "webhook.delivery.id",     emitter: "ts", source: "canonical-event.ts:100", classification: "legitimately-custom", note: "CTL-1532" },
+
   // §4f: Deployment semconv
   { key: "deployment.environment", emitter: "ts", source: "canonical-event.ts:91", classification: "rename-to", targetName: "deployment.environment.name", remediationCluster: "E", where: "emit" },
   { key: "deployment.id",          emitter: "ts", source: "canonical-event.ts:92", classification: "conforming", note: "type should be string per OTel semconv; currently number" },

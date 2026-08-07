@@ -19,6 +19,10 @@ import {
   buildBoardContext,
   buildBoardScanEvent,
   boardHealthPass,
+  // CTL-1524 (C4b): lazy deadHosts resolution (array OR thunk)
+  resolveDeadHosts,
+  // CTL-1644: pure revival-route classifier
+  classifyRevivalRoute,
 } from "./board-health.mjs";
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
 // exercises the production body.payload.details nesting + attribute promotion.
@@ -67,6 +71,8 @@ function mkBoard(o = {}) {
     // phantom/orphaned-PR cohorts stay observable:false, exactly like an unwired
     // board. `mkPrStatusMap` below builds the nested shape from flat rows.
     prStatusMap: o.prStatusMap ?? new Map(),
+    // CTL-1608: pre-fetched stalled-PR state map (timer-stamped durations).
+    stalledPrMap: o.stalledPrMap ?? new Map(),
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -80,6 +86,9 @@ function mkBoard(o = {}) {
     // CTL-1432 (B2/B3): deferred board-health anchor candidates + sanctioned latch allowlist.
     deferredBoardHealth: o.deferredBoardHealth ?? [],
     sanctionedNeedsHuman: o.sanctionedNeedsHuman ?? [],
+    // CTL-1644: per-ticket evidence map for the stranded-mid-pipeline check.
+    // Empty Map default ⇒ checkStrandedMidPipeline stays observable:false (shadow-first).
+    strandedEvidence: o.strandedEvidence ?? new Map(),
     now: o.now ?? NOW,
   };
 }
@@ -247,7 +256,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
 
 // ─── CTL-1157 off-gate: off = truly dark (no cohort code, no PR SELECT) ──────
 describe("CTL-1157 off-gate — cohort invariants + PR SELECT are dark in off", () => {
-  const COHORT_KEYS = ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile"];
+  const COHORT_KEYS = ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile", "stalledPr"];
 
   test("evaluateInvariants(mode:off) omits ALL four cohort invariants (legacy set only)", () => {
     const r = evaluateInvariants(mkBoard(), { mode: "off" });
@@ -789,6 +798,78 @@ describe("buildBoardScanEvent", () => {
     expect(ev.details.flagged).toContain("CTL-1");
     expect(Array.isArray(ev.details.tier1Moves)).toBe(true);
   });
+
+  // CTL-1607: per-host slot census threaded onto the board-scan event.
+  test("threads board.capacity into details.slot* scalars", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 3, freeSlots: 1 } });
+    const decision = decideBoardHealth(invs, board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision, board });
+    expect(ev.details.slotCapacity).toBe(4);
+    expect(ev.details.slotInUse).toBe(3); // capacity − free = 4 − 1
+    expect(ev.details.slotFree).toBe(1);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #1): in_use is derived from capacity − freeSlots, so it
+  // reflects the FULL occupancy basis (liveCount + queued delegates + SDK inflight)
+  // the scheduler admits against — NOT the raw bg liveCount. Here occupancy is 4
+  // (freeSlots 0) while only 1 bg job is live: in_use must be 4, not 1.
+  test("slotInUse reflects occupancy (capacity − free), not bare liveCount", () => {
+    const invs = allGreen();
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 1, freeSlots: 0 } });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
+    expect(ev.details.slotInUse).toBe(4);
+    expect(ev.details.slotFree).toBe(0);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #2): a draining / stale-liveness node admits no new
+  // work, so its PUBLISHED slotFree collapses to 0 — while slotInUse still reports
+  // actual occupancy (capacity − rawFree = 2), not a collapsed value.
+  test("admissionGated collapses slotFree to 0 (in_use still real occupancy)", () => {
+    const invs = allGreen();
+    const board = mkBoard({
+      capacity: { maxParallel: 4, liveCount: 1, freeSlots: 2, admissionGated: true },
+    });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
+    expect(ev.details.slotFree).toBe(0);
+    expect(ev.details.slotInUse).toBe(2);
+  });
+
+  // CTL-1607 (Codex #2985 P2 #3): a board-health delegate dispatched THIS scan
+  // reserves a slot the scheduler charges right after the pass returns, so free is
+  // debited (2 → 1) and in_use credited ((4−2)+1 = 3) here.
+  test("dispatched delegate debits slotFree and credits slotInUse", () => {
+    const invs = allGreen();
+    const board = mkBoard({ capacity: { maxParallel: 4, liveCount: 2, freeSlots: 2 } });
+    const ev = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+      act: { dispatched: true, anchor: "CTL-1" },
+    });
+    expect(ev.details.slotFree).toBe(1);
+    expect(ev.details.slotInUse).toBe(3);
+  });
+
+  test("no board arg → slot* scalars default to null (back-compat)", () => {
+    const invs = allGreen();
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision });
+    expect(ev.details.slotCapacity).toBeNull();
+    expect(ev.details.slotInUse).toBeNull();
+    expect(ev.details.slotFree).toBeNull();
+  });
 });
 
 // ─── buildBoardContext — the whole-board brief the delegate gets injected ────
@@ -804,7 +885,7 @@ describe("buildBoardContext", () => {
     const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-OLD"]) };
     const ctx = buildBoardContext(board, invs);
 
-    expect(ctx.schema).toBe("recovery-board-context/v2");
+    expect(ctx.schema).toBe("recovery-board-context/v3");
     expect(ctx.slots).toEqual({ capacity: 4, inUse: 2, free: 2 });
     expect(ctx.eligibleQueue.depth).toBe(2);
     expect(ctx.eligibleQueue.topTickets).toEqual(["CTL-1", "CTL-2"]);
@@ -973,7 +1054,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     // falls back to the top eligible ticket.
     expect(acted[0].anchor).toBe("CTL-1");
     // the delegate gets the WHOLE-board context, not a per-item brief.
-    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v2");
+    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v3");
     expect(acted[0].decision.gate.decision).toBe("proceed");
     // the act result is threaded back into the pass result (observability).
     expect(r.act).toEqual({ dispatched: true, attempts: 1 });
@@ -1155,7 +1236,7 @@ describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
   test("no act param → default shadow outcome; actDispatched 0", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
     const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decisionFor(invs) });
-    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow", skippedReasonNoClock: false });
     expect(ev.details.actDispatched).toBe(0);
   });
 
@@ -1167,7 +1248,7 @@ describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
       decision: decisionFor(invs),
       act: { dispatched: true, anchor: "CTL-7", skippedReason: null },
     });
-    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null });
+    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null, skippedReasonNoClock: false });
     expect(ev.details.actDispatched).toBe(1);
     expect(ev.reason).toContain("dispatched CTL-7");
   });
@@ -1251,7 +1332,7 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
     boardHealthPass(
       flaggedDeps({ mode: "shadow", emit: (e) => emits.push(e), act: () => { throw new Error("shadow must not act"); } }),
     );
-    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow", skippedReasonNoClock: false });
   });
 
   test("Codex round-2: enforce with NO act seam → skippedReason:no-actuator (a miswired-actuator wedge)", () => {
@@ -1320,7 +1401,7 @@ describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 
     });
     expect(board.ring.boardScans[0]).toEqual({
       tsMs: Date.parse("2026-06-20T11:59:00Z"),
-      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null,
+      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null, skippedReasonNoClock: false,
     });
   });
 });
@@ -1430,3 +1511,1044 @@ describe("buildRecoveryEnvelope — recovery.act_dispatched promotion (CTL-1435)
     expect(env.attributes["recovery.act_dispatched"]).toBe(0);
   });
 });
+
+// ─── CTL-1524 (C4b) — deadHosts is resolved LAZILY, past the throttle ─────────
+// The scheduler used to evaluate `_boardHealth.deadHosts(roster)` EAGERLY at the
+// call site, so boardHealthPass's 5-minute internal throttle could never protect it:
+// the whole-log heartbeat read behind it was paid on every tick, ~59 of every 60 of
+// which the throttle then discarded. The seam now accepts a THUNK (and still an
+// array), and boardHealthPass calls it only once it has decided to proceed.
+describe("boardHealthPass — CTL-1524 C4b lazy deadHosts", () => {
+  test("THROTTLED pass → the thunk is NEVER invoked", () => {
+    let calls = 0;
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "shadow",
+        lastRunMs: NOW, // just ran
+        intervalMs: 5 * MIN, // → throttled
+        deadHosts: () => {
+          calls++;
+          return ["mini-2"];
+        },
+      })
+    );
+    expect(r).toEqual({ ran: false, reason: "throttled" });
+    expect(calls).toBe(0); // the expensive read was not paid on a discarded tick
+  });
+
+  test("mode:off → the thunk is NEVER invoked either (strict no-op)", () => {
+    let calls = 0;
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "off",
+        deadHosts: () => {
+          calls++;
+          return ["mini-2"];
+        },
+      })
+    );
+    expect(r).toEqual({ ran: false, reason: "off" });
+    expect(calls).toBe(0);
+  });
+
+  test("PROCEEDING pass → the thunk is invoked EXACTLY ONCE", () => {
+    let calls = 0;
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "shadow",
+        deadHosts: () => {
+          calls++;
+          return ["mini-2"];
+        },
+      })
+    );
+    expect(r.ran).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  test("BACKWARD COMPATIBLE: a plain ARRAY still works exactly as before", () => {
+    const emits = [];
+    const r = boardHealthPass(
+      flaggedDeps({ mode: "shadow", deadHosts: ["mini-2"], emit: (e) => emits.push(e) })
+    );
+    expect(r.ran).toBe(true);
+    expect(emits.length).toBe(1); // the pass ran to completion on an array seam
+  });
+
+  test("a thunk and the equivalent array produce the SAME board state", () => {
+    const fromArray = assembleBoardState({ roster: ["mini", "mini-2"], deadHosts: ["mini-2"] });
+    const fromThunk = assembleBoardState({ roster: ["mini", "mini-2"], deadHosts: () => ["mini-2"] });
+    expect(fromThunk.deadHosts).toEqual(fromArray.deadHosts);
+    expect(fromThunk.deadHosts).toEqual(["mini-2"]);
+  });
+});
+
+describe("resolveDeadHosts (CTL-1524 C4b)", () => {
+  test("passes an array through untouched", () => {
+    expect(resolveDeadHosts(["a", "b"])).toEqual(["a", "b"]);
+    expect(resolveDeadHosts([])).toEqual([]);
+  });
+
+  test("invokes a thunk exactly once and returns its array", () => {
+    let calls = 0;
+    const out = resolveDeadHosts(() => {
+      calls++;
+      return ["dead-1"];
+    });
+    expect(calls).toBe(1);
+    expect(out).toEqual(["dead-1"]);
+  });
+
+  test("NEVER throws: a throwing thunk degrades to an empty dead set", () => {
+    expect(
+      resolveDeadHosts(() => {
+        throw new Error("heartbeat read blew up");
+      })
+    ).toEqual([]);
+  });
+
+  test("non-array inputs / non-array thunk returns degrade to []", () => {
+    expect(resolveDeadHosts(undefined)).toEqual([]);
+    expect(resolveDeadHosts(null)).toEqual([]);
+    expect(resolveDeadHosts("mini-2")).toEqual([]);
+    expect(resolveDeadHosts(() => null)).toEqual([]);
+    expect(resolveDeadHosts(() => "nope")).toEqual([]);
+  });
+});
+
+// ─── CTL-1475: unowned in-flight ────────────────────────────────────────────
+// The blind spot every other invariant misses by construction. A ticket whose
+// Linear state CLAIMS a worker is on it, with no worker and no PR to back that
+// claim, was invisible: admission only pulls Todo, the recovery census scans
+// worker dirs, and every other cohort keys on an artifact these tickets lack.
+describe("checkUnownedInFlight (CTL-1475)", () => {
+  const HOUR = 3_600_000;
+  const NOW = Date.parse("2026-07-27T00:00:00.000Z");
+  const at = (hoursAgo) => new Date(NOW - hoursAgo * HOUR).toISOString();
+  const board = (o = {}) =>
+    mkBoard({ now: NOW, mode: "enforce", ...o });
+  const one = (over = {}) =>
+    new Map([["CTL-9", { id: "CTL-9", state: "Implement", updatedAt: at(72), ...over }]]);
+
+  test("flags a ticket whose state claims in-flight with no worker and no PR", () => {
+    const r = evaluateInvariants(board({ ticketsById: one() })).unownedInFlight;
+    expect(r.observable).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
+  test("does NOT flag when a LIVE worker signal owns it", () => {
+    const r = evaluateInvariants(
+      board({ ticketsById: one(), signals: [{ ticket: "CTL-9", status: "running" }] })
+    ).unownedInFlight;
+    expect(r.ok).toBe(true);
+    expect(r.flagged).toEqual([]);
+  });
+
+  // REGRESSION (Codex P2): counting ANY signal — live or terminal — as ownership made
+  // this invariant blind itself. The recovery pass that THIS cohort dispatches writes
+  // `phase-recovery-pass.json` with status `complete`; under the old predicate that
+  // artifact exempted the ticket forever, so a ticket got exactly one sweep and then
+  // went permanently invisible even while still stuck. Mutation-checked: reverting
+  // `hasLiveSignal` to "any signal" turns each case below RED.
+  test("DOES flag a ticket whose only signal is TERMINAL — a completed artifact is not ownership", () => {
+    for (const status of ["complete", "failed", "stalled", "aborted", "turn-cap-exhausted"]) {
+      const r = evaluateInvariants(
+        board({ ticketsById: one(), signals: [{ ticket: "CTL-9", status }] })
+      ).unownedInFlight;
+      expect(r.ok).toBe(false);
+      expect(r.flagged).toEqual(["CTL-9"]);
+    }
+  });
+
+  test("DOES flag after its own recovery pass completed — the cohort must stay re-flaggable", () => {
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        signals: [{ ticket: "CTL-9", phase: "recovery-pass", status: "complete" }],
+      })
+    ).unownedInFlight;
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
+  test("does NOT flag a ticket with a confirmed-open PR — a PR IS ownership", () => {
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one({ pr_number: 42 }),
+        prStatusMap: mkPrStatusMap([{ prNumber: 42, status: "open", repo: "r" }]),
+      })
+    ).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  // REGRESSION (Codex P2): the old check was `prNumber != null && prMap.size > 0`, so a
+  // ticket carrying a HISTORICAL PR number was exempted by the mere existence of any
+  // unrelated row in the global map. A closed/merged PR is not ownership — that is the
+  // stuck shape this cohort exists to catch.
+  test("DOES flag a ticket whose linked PR is closed or merged, not open", () => {
+    for (const status of ["closed", "merged"]) {
+      const r = evaluateInvariants(
+        board({
+          ticketsById: one({ pr_number: 42 }),
+          prStatusMap: mkPrStatusMap([{ prNumber: 42, status, repo: "r" }]),
+        })
+      ).unownedInFlight;
+      expect(r.flagged).toEqual(["CTL-9"]);
+    }
+  });
+
+  test("DOES flag when the PR map holds only an UNRELATED number", () => {
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one({ pr_number: 42 }),
+        prStatusMap: mkPrStatusMap([{ prNumber: 999, status: "open", repo: "r" }]),
+      })
+    ).unownedInFlight;
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
+  test("does NOT flag a FRESH ticket (a worker between phases must never trip this)", () => {
+    const r = evaluateInvariants(board({ ticketsById: one({ updatedAt: at(2) }) })).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  test("does NOT flag a terminal ticket", () => {
+    const r = evaluateInvariants(board({ ticketsById: one({ state: "Done" }) })).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  test("does NOT flag Todo/Backlog — those are not a claim of ownership", () => {
+    for (const state of ["Todo", "Backlog"]) {
+      const r = evaluateInvariants(board({ ticketsById: one({ state }) })).unownedInFlight;
+      expect(r.ok).toBe(true);
+    }
+  });
+
+  // REGRESSION (Codex P2): the state matcher was written against THIS fleet's config,
+  // where `reviewing` maps onto "Validate" — so the shipped template's
+  // `stateMap.reviewing = "Review"` never appeared in our data and the gap was
+  // invisible locally. Every configured in-flight phase name must be covered.
+  test("covers every in-flight state in the shipped template stateMap", () => {
+    for (const state of ["Research", "Plan", "Implement", "Validate", "Review", "Remediate", "PR"]) {
+      const r = evaluateInvariants(board({ ticketsById: one({ state }) })).unownedInFlight;
+      expect(r.flagged).toEqual(["CTL-9"]);
+    }
+  });
+
+  // Triage is the ADMISSION boundary (eligibleQuery = {status:"Todo", triageStatus:"Triage"}),
+  // not a claim that a worker is on the ticket. Flagging it would race new-work pull and
+  // dispatch recovery for tickets that are merely queued.
+  test("does NOT flag Triage — that is the admission boundary, not an ownership claim", () => {
+    const r = evaluateInvariants(board({ ticketsById: one({ state: "Triage" }) })).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  test("FAILS SAFE on an unreadable timestamp — unknown age is never staleness", () => {
+    const r = evaluateInvariants(
+      board({ ticketsById: one({ updatedAt: "not-a-date" }) })
+    ).unownedInFlight;
+    expect(r.ok).toBe(true);
+    expect(r.unobservableAges).toBe(1);
+  });
+
+  // REGRESSION: the replica stores updated_at as an epoch-ms INTEGER, not an ISO
+  // string, and Date.parse(number) is NaN. With parse-only, all 13 live in-flight
+  // tickets read as "age unknown" and the invariant reported a permanently clean
+  // board — blind on the exact population it exists to catch. Caught by running it
+  // against real data, not by any unit test, which is why this one exists.
+  test("accepts an epoch-ms NUMBER timestamp (the shape the replica actually stores)", () => {
+    const ms = NOW - 72 * HOUR;
+    const r = evaluateInvariants(board({ ticketsById: one({ updatedAt: ms }) })).unownedInFlight;
+    expect(r.ok).toBe(false);
+    expect(r.flagged).toEqual(["CTL-9"]);
+    expect(r.unobservableAges).toBe(0);
+  });
+
+  test("accepts a numeric STRING timestamp too", () => {
+    const r = evaluateInvariants(
+      board({ ticketsById: one({ updatedAt: String(NOW - 72 * HOUR) }) })
+    ).unownedInFlight;
+    expect(r.ok).toBe(false);
+  });
+
+  test("a FRESH epoch-ms timestamp is still spared (the number path honours the age gate)", () => {
+    const r = evaluateInvariants(
+      board({ ticketsById: one({ updatedAt: NOW - 2 * HOUR }) })
+    ).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  test("is not observable with no ticket descriptors", () => {
+    const r = evaluateInvariants(board({ ticketsById: new Map() })).unownedInFlight;
+    expect(r.observable).toBe(false);
+    expect(r.ok).toBe(true);
+  });
+
+  test("proposes an ANCHORABLE tier2 move so the delegate actually sweeps it up", () => {
+    // tier3 is "escalate-only, never anchorable" — a tier3 proposal would be
+    // detected, reported, and then left as stuck as before. That is precisely how
+    // this cohort sat untouched for 13 days. It must be anchorable.
+    const inv = evaluateInvariants(board({ ticketsById: one() }));
+    const moves = proposeMoves(inv, { sanctionedNeedsHuman: [] });
+    const m = moves.tier2.find((x) => x.move === "recover-unowned-in-flight");
+    expect(m).toBeTruthy();
+    expect(m.ticket).toBe("CTL-9");
+    expect(moves.tier3.some((x) => x.ticket === "CTL-9")).toBe(false);
+  });
+
+  test("an operator-sanctioned ticket is not re-proposed", () => {
+    const inv = evaluateInvariants(board({ ticketsById: one() }));
+    const moves = proposeMoves(inv, { sanctionedNeedsHuman: ["CTL-9"] });
+    expect(moves.tier2.some((x) => x.move === "recover-unowned-in-flight")).toBe(false);
+  });
+
+  test("mode:off omits the invariant entirely (the off set stays byte-identical)", () => {
+    const off = evaluateInvariants(board({ ticketsById: one(), mode: "off" }));
+    expect(off.unownedInFlight).toBeUndefined();
+  });
+
+  // REGRESSION (Codex P2): the delegate's mandate here is HOLISTIC — one ticket is the
+  // dispatch anchor, but the worker must sweep the whole cohort. The recovery-pass skill
+  // CONSUMES this brief instead of re-running the board scan, so a cohort missing from
+  // the context is one the worker cannot enumerate: it would fix the single anchor and
+  // leave the rest exactly as stuck. Mutation-checked: drop the field → RED.
+  test("buildBoardContext surfaces the WHOLE cohort, not just the anchor", () => {
+    const many = new Map(
+      ["CTL-9", "CTL-10", "CTL-11"].map((id) => [
+        id,
+        { id, state: "Implement", updatedAt: at(72) },
+      ]),
+    );
+    const b = board({ ticketsById: many });
+    const ctx = buildBoardContext(b, evaluateInvariants(b));
+    expect(ctx.unownedInFlight).toEqual(["CTL-9", "CTL-10", "CTL-11"]);
+  });
+
+  test("buildBoardContext defaults the cohort to [] when green (shadow-safe)", () => {
+    const b = board({ ticketsById: one({ updatedAt: at(2) }) });
+    expect(buildBoardContext(b, evaluateInvariants(b)).unownedInFlight).toEqual([]);
+  });
+});
+
+// ─── CTL-1610 (Phase 2): skippedReasonNoClock threading ─────────────────────
+describe("checkActuationLiveness — skippedReasonNoClock (CTL-1610)", () => {
+  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, skippedReason: "all-candidates-cooldown", skippedReasonNoClock: false, ...o });
+
+  test("(CTL-1610) all-candidates-exhausted with skippedReasonNoClock:true across the window → flags (wedge)", () => {
+    const boardScans = Array.from({ length: 6 }, () =>
+      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(true);
+    expect(r.actuationLiveness.ok).toBe(false);
+  });
+
+  test("(CTL-1610) all-candidates-exhausted with a valid clock (skippedReasonNoClock:false) stays BENIGN (not flagged)", () => {
+    const boardScans = Array.from({ length: 6 }, () =>
+      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: false }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("(CTL-1610) a dispatched scan within a no-clock-latch window still clears the wedge", () => {
+    const boardScans = [
+      ...Array.from({ length: 5 }, () => mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true })),
+      mkScan({ dispatched: true, skippedReason: null }),
+    ];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+});
+
+describe("buildBoardScanEvent — act.skippedReasonNoClock round-trip (CTL-1610)", () => {
+  test("(CTL-1610) buildBoardScanEvent carries act.skippedReasonNoClock", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const ev = buildBoardScanEvent({ mode: "enforce", invariants: invs, decision,
+      act: { dispatched: false, anchor: null, skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true } });
+    expect(ev.details.act.skippedReasonNoClock).toBe(true);
+  });
+});
+
+// ─── CTL-1610 (Phase 3): boardHealthPass maps actResult.latchedNoClock →
+//     the emitted scan's skippedReasonNoClock (the glue seam between
+//     holisticBoardHealthAct's return and checkActuationLiveness). Added by
+//     phase-verify to close the one line (board-health.mjs:1496) that neither
+//     the holisticBoardHealthAct nor the buildBoardScanEvent test exercised. ──
+describe("boardHealthPass — latchedNoClock → scan.skippedReasonNoClock (CTL-1610)", () => {
+  test("(CTL-1610) an exhausted act with latchedNoClock:true emits skippedReasonNoClock:true", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: true }),
+      }),
+    );
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("all-candidates-exhausted");
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(true);
+  });
+
+  test("(CTL-1610) a well-formed exhausted act (latchedNoClock:false) stays skippedReasonNoClock:false", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: false }),
+      }),
+    );
+    expect(emits[0].details.act.skippedReason).toBe("all-candidates-exhausted");
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
+  });
+
+  test("(CTL-1610) a dispatched act forces skippedReasonNoClock:false regardless of latch signal", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: true, candidate: "CTL-1", latchedNoClock: true }),
+      }),
+    );
+    expect(emits[0].details.act.dispatched).toBe(true);
+    expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
+  });
+});
+
+// ─── CTL-1644: classifyRevivalRoute — pure route classification ──────────────
+describe("classifyRevivalRoute (CTL-1644)", () => {
+  test("open PR present ⇒ pr-not-merged (highest precedence)", () => {
+    const c = classifyRevivalRoute({ openPr: { number: 42, status: "open" } });
+    expect(c.route).toBe("pr-not-merged");
+    expect(c.dispatchable).toBe(true);
+  });
+
+  test("remote branch exists, no local unpushed worktree ⇒ resume-from-remote", () => {
+    const c = classifyRevivalRoute({ remoteBranchExists: true, worktreeUnpushed: false });
+    expect(c.route).toBe("resume-from-remote");
+    expect(c.dispatchable).toBe(true);
+  });
+
+  test("remote branch exists but local salvage UNCHECKED ⇒ held, NOT resume-from-remote [Codex P2 round 3]", () => {
+    // worktreeUnpushed omitted (local probe failed/skipped): !undefined would have
+    // wrongly picked resume-from-remote and discarded possible unpushed local work.
+    const c = classifyRevivalRoute({ remoteBranchExists: true });
+    expect(c.route).toBe("unknown-salvage");
+    expect(c.dispatchable).toBe(false);
+  });
+
+  test("local worktree with unpushed commits ⇒ adopt (stubbed dispatchable:false, CTL-1642)", () => {
+    const c = classifyRevivalRoute({ worktreeUnpushed: true });
+    expect(c.route).toBe("adopt");
+    expect(c.dispatchable).toBe(false);
+  });
+
+  test("salvage UNCHECKED (fields absent) ⇒ unknown-salvage (held, not restart-fresh) [Codex P1]", () => {
+    // Phase-2 evidence omits remoteBranchExists/worktreeUnpushed → we must NOT
+    // restart-fresh (destructive) on unchecked evidence; hold as non-dispatchable.
+    const c = classifyRevivalRoute({});
+    expect(c.route).toBe("unknown-salvage");
+    expect(c.dispatchable).toBe(false);
+  });
+
+  test("salvage CHECKED and absent (fields present & false) ⇒ restart-fresh", () => {
+    const c = classifyRevivalRoute({
+      openPr: null, remoteBranchExists: false, worktreeUnpushed: false,
+      hasWorkerDir: false, hasLiveBg: false, hasFreshIntent: false,
+    });
+    expect(c.route).toBe("restart-fresh");
+  });
+
+  test("open PR takes precedence over remote branch", () => {
+    const c = classifyRevivalRoute({ openPr: { number: 7 }, remoteBranchExists: true, worktreeUnpushed: true });
+    expect(c.route).toBe("pr-not-merged");
+  });
+});
+
+// ─── CTL-1644: checkStrandedMidPipeline invariant ───────────────────────────
+describe("checkStrandedMidPipeline (CTL-1644)", () => {
+  const HOUR = 3_600_000;
+  const NOW_SMP = Date.parse("2026-08-06T00:00:00.000Z");
+  const at = (hoursAgo) => new Date(NOW_SMP - hoursAgo * HOUR).toISOString();
+  // Board builder: mode:enforce so the cohort gate is open; now fixed.
+  const board = (o = {}) => mkBoard({ now: NOW_SMP, mode: "enforce", ...o });
+  // One stale in-flight ticket in Implement, 72h stale (well past 24h threshold).
+  const one = (over = {}) =>
+    new Map([["CTL-9", { id: "CTL-9", state: "Implement", updatedAt: at(72), ...over }]]);
+  // Evidence stub helper: array of rows → Map<id, evidence>
+  const ev = (rows) => new Map(rows.map((r) => [r.id, r]));
+  // Full "nothing salvageable" evidence row for CTL-9.
+  const noActuation = { id: "CTL-9", hasWorkerDir: false, hasLiveBg: false,
+    hasFreshIntent: false, openPr: null, remoteBranchExists: false, worktreeUnpushed: false };
+
+  test("observable:false when no evidence seam provided (empty Map → shadow-first wiring)", () => {
+    // strandedEvidence defaults to new Map() in mkBoard → size 0 → not observable.
+    const r = evaluateInvariants(board({ ticketsById: one() })).strandedMidPipeline;
+    expect(r.observable).toBe(false);
+    expect(r.ok).toBe(true);
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("flags an HRW-owned in-flight ticket with NO actuation past threshold, and classifies it", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.observable).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.flagged).toEqual(["CTL-9"]);
+    expect(r.classified["CTL-9"].route).toBe("restart-fresh");
+  });
+
+  test("does NOT flag when a worker dir exists (actuation present)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ id: "CTL-9", hasWorkerDir: true }]),
+    })).strandedMidPipeline;
+    expect(r.ok).toBe(true);
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag when a live bg worker exists", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ id: "CTL-9", hasLiveBg: true }]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag when a FRESH live-status signal exists (active worker)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 1 * HOUR }],
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("DOES flag when the only 'live' signal is STALE past threshold [Codex P2 round 5]", () => {
+    // A dead worker's persisted `running` signal (never wrote a terminal signal)
+    // must NOT mask the stranded ticket once it has sat live past the window.
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 72 * HOUR }],
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
+  test("does NOT flag when a fresh recovery intent exists", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ id: "CTL-9", hasFreshIntent: true }]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag a foreign-owned ticket (HRW belongs to another host)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "studio",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag a needs-human LABELLED ticket (parked contract, label not status)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one({ labels: [{ name: "needs-human" }] }),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag before the age threshold (1h stale, threshold is 24h)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one({ updatedAt: at(1) }),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag a terminal ticket (Done)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one({ state: "Done" }),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag Todo/Backlog (not an ownership claim)", () => {
+    for (const state of ["Todo", "Backlog"]) {
+      const r = evaluateInvariants(board({
+        ticketsById: one({ state }),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([noActuation]),
+      })).strandedMidPipeline;
+      expect(r.flagged).toEqual([]);
+    }
+  });
+
+  test("FAILS SAFE on an unreadable timestamp — unknown age is never staleness", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one({ updatedAt: "not-a-date" }),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.ok).toBe(true);
+    expect(r.unobservableAges).toBe(1);
+  });
+
+  test("routes to pr-not-merged when an open PR exists in evidence", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ ...noActuation, openPr: { number: 42, status: "open" } }]),
+    })).strandedMidPipeline;
+    expect(r.classified["CTL-9"].route).toBe("pr-not-merged");
+  });
+
+  test("routes to resume-from-remote when remote branch exists but no worktree", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([{ ...noActuation, remoteBranchExists: true }]),
+    })).strandedMidPipeline;
+    expect(r.classified["CTL-9"].route).toBe("resume-from-remote");
+  });
+
+  test("mode:off omits the invariant entirely (the off set stays byte-identical)", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(),
+      mode: "off",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    }));
+    expect(r.strandedMidPipeline).toBeUndefined();
+  });
+
+  test("proposes route-stranded-mid-pipeline in tier2 so the delegate sweeps it", () => {
+    const b = board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    });
+    const moves = proposeMoves(evaluateInvariants(b), { sanctionedNeedsHuman: [] });
+    const m = moves.tier2.find((x) => x.move === "route-stranded-mid-pipeline");
+    expect(m).toBeTruthy();
+    expect(m.ticket).toBe("CTL-9");
+    // must be tier2 (anchorable), never tier3
+    expect(moves.tier3.some((x) => x.ticket === "CTL-9")).toBe(false);
+  });
+
+  test("a classified ticket is suppressed from recover-unowned-in-flight (de-dup)", () => {
+    // CTL-9 triggers BOTH checkStrandedMidPipeline (owned+classified) AND
+    // checkUnownedInFlight. Only the classified route move must appear.
+    const b = board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    });
+    const moves = proposeMoves(evaluateInvariants(b), { sanctionedNeedsHuman: [] });
+    const ctlNineMoves = moves.tier2.filter((m) => m.ticket === "CTL-9");
+    expect(ctlNineMoves.some((m) => m.move === "recover-unowned-in-flight")).toBe(false);
+    expect(ctlNineMoves.some((m) => m.move === "route-stranded-mid-pipeline")).toBe(true);
+  });
+
+  test("buildBoardContext surfaces strandedMidPipeline classified routes", () => {
+    const b = board({
+      ticketsById: one(),
+      self: "mini",
+      ownerForTicket: () => "mini",
+      strandedEvidence: ev([noActuation]),
+    });
+    const ctx = buildBoardContext(b, evaluateInvariants(b));
+    expect(ctx.strandedMidPipeline).toBeDefined();
+    expect(ctx.strandedMidPipeline["CTL-9"]).toBeDefined();
+    expect(ctx.strandedMidPipeline["CTL-9"].route).toBe("restart-fresh");
+  });
+
+  test("buildBoardContext defaults strandedMidPipeline to {} when green (shadow-safe)", () => {
+    const b = board({ ticketsById: one({ updatedAt: at(2) }) });
+    const ctx = buildBoardContext(b, evaluateInvariants(b));
+    expect(ctx.strandedMidPipeline).toEqual({});
+  });
+});
+
+// ─── CTL-1644: getStrandedEvidence off-gate ──────────────────────────────────
+describe("CTL-1644 off-gate — getStrandedEvidence never invoked in off mode", () => {
+  test("assembleBoardState(mode:off) NEVER invokes getStrandedEvidence", () => {
+    let called = 0;
+    const b = assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      getStrandedEvidence: () => { called += 1; return new Map([["CTL-9", {}]]); },
+      mode: "off",
+      now: () => NOW,
+    });
+    expect(called).toBe(0);
+    expect(b.strandedEvidence.size).toBe(0);
+  });
+
+  test("assembleBoardState(mode:shadow) DOES invoke getStrandedEvidence", () => {
+    let called = 0;
+    assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      getStrandedEvidence: () => { called += 1; return new Map(); },
+      mode: "shadow",
+      now: () => NOW,
+    });
+    expect(called).toBe(1);
+  });
+});
+
+// ─── CTL-1608 checkStalledPr — review-latency / CI-health / no-push ──────────
+function mkStalledPrMap(rows = []) {
+  const map = new Map();
+  for (const r of rows) map.set(r.ticket, { state: "OPEN", ...r });
+  return map;
+}
+
+describe("CTL-1608 checkStalledPr — review/CI/no-push staleness, liveness-independent", () => {
+  const DAY = 24 * HOUR;
+  const openPrTicket = (id) => new Map([[id, { identifier: id, linear_state: "In Review", pr_number: 1 }]]);
+
+  test("empty map → observable:false (shadow-first seam)", () => {
+    const r = evaluateInvariants(mkBoard({ stalledPrMap: new Map() }), { mode: "shadow" });
+    expect(r.stalledPr.observable).toBe(false);
+    expect(r.stalledPr.ok).toBe(true);
+  });
+
+  test("CI failing past threshold → flagged", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-CI"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).toContain("CTL-CI");
+    expect(r.stalledPr.ok).toBe(false);
+  });
+
+  test("review requested past threshold → flagged", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-RV"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-RV", prNumber: 1, reviewRequestedAt: new Date(NOW - 5 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).toContain("CTL-RV");
+  });
+
+  test("no push past threshold → flagged", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-NP"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-NP", prNumber: 1, lastPushAt: new Date(NOW - 8 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).toContain("CTL-NP");
+  });
+
+  test("flags EVEN WITH a live worker (independent of worker liveness — the ticket's whole point)", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-LIVE"),
+      signals: [{ ticket: "CTL-LIVE", phase: "monitor-merge", status: "running" }],
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-LIVE", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).toContain("CTL-LIVE"); // orphanedOpenPr would EXCLUDE this
+  });
+
+  test("fresh stall (under threshold) → not flagged", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-FRESH"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-FRESH", prNumber: 1, ciFirstFailedAt: new Date(NOW - 1 * HOUR).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).not.toContain("CTL-FRESH");
+    expect(r.stalledPr.ok).toBe(true);
+  });
+
+  test("null stamps → not flagged (CI green / review arrived / recently pushed)", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-OK"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-OK", prNumber: 1, ciFirstFailedAt: null, reviewRequestedAt: null, lastPushAt: null },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).not.toContain("CTL-OK");
+  });
+
+  test("terminal Linear state → skipped (no recovery anchor on finished work)", () => {
+    const r = evaluateInvariants(mkBoard({
+      ticketsById: new Map([["CTL-DONE", { identifier: "CTL-DONE", linear_state: "Done", pr_number: 1 }]]),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-DONE", prNumber: 1, ciFirstFailedAt: new Date(NOW - 9 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    expect(r.stalledPr.flagged).not.toContain("CTL-DONE");
+  });
+
+  test("proposeMoves → tier1 nudge-stalled-pr for a flagged ticket", () => {
+    const invs = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-CI"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    const moves = proposeMoves(invs, mkBoard());
+    expect(moves.tier1.find((m) => m.ticket === "CTL-CI" && m.move === "nudge-stalled-pr")).toBeTruthy();
+  });
+
+  test("sanctioned latch suppresses the stalled-pr move (stays visible in the invariant)", () => {
+    const invs = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-CI"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    const moves = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-CI"] }));
+    expect(moves.tier1.find((m) => m.ticket === "CTL-CI")).toBeFalsy();
+    expect(invs.stalledPr.flagged).toContain("CTL-CI"); // suppression is in proposeMoves ONLY
+  });
+
+  test("buildBoardContext surfaces stalledPrs additively", () => {
+    const invs = evaluateInvariants(mkBoard({
+      ticketsById: openPrTicket("CTL-CI"),
+      stalledPrMap: mkStalledPrMap([
+        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+      ]),
+    }), { mode: "shadow" });
+    const ctx = buildBoardContext(mkBoard(), invs);
+    expect(ctx.stalledPrs).toContain("CTL-CI");
+  });
+});
+// ─── CTL-1649: triageLaunchFailureOnlyTickets + selectAnchorCandidates exclusion ─
+
+describe("assembleBoardState — attentionReason on signals (CTL-1649)", () => {
+  test("attentionReason from s.raw?.attentionReason is carried on the normalised signal", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-1", phase: "triage", status: "stalled", raw: { attentionReason: "sdk-overloaded-exhausted" } },
+      ],
+    });
+    expect(board.signals[0].attentionReason).toBe("sdk-overloaded-exhausted");
+  });
+
+  test("attentionReason from s.attentionReason (flat) is carried when raw is absent", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-2", phase: "triage", status: "stalled", attentionReason: "sdk-launch-failed" },
+      ],
+    });
+    expect(board.signals[0].attentionReason).toBe("sdk-launch-failed");
+  });
+
+  test("attentionReason is null when absent on both raw and flat", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [{ ticket: "CTL-3", phase: "triage", status: "stalled" }],
+    });
+    expect(board.signals[0].attentionReason).toBeNull();
+  });
+
+  test("existing fields (ticket, phase, status, failureReason) are byte-identical (no regression)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-4", phase: "implement", status: "running", raw: { failureReason: "timeout" } },
+      ],
+    });
+    const s = board.signals[0];
+    expect(s.ticket).toBe("CTL-4");
+    expect(s.phase).toBe("implement");
+    expect(s.status).toBe("running");
+    expect(s.failureReason).toBe("timeout");
+  });
+});
+
+describe("assembleBoardState — triageLaunchFailureOnlyTickets (CTL-1649)", () => {
+  const launchFailSig = (ticket, overrides = {}) => ({
+    ticket,
+    phase: "triage",
+    status: "stalled",
+    attentionReason: "sdk-overloaded-exhausted",
+    ...overrides,
+  });
+
+  test("Scenario 1: triage launch-failure ticket with no artifact → IN the set (hasTriageArtifact returns false)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [launchFailSig("CTL-1")],
+      hasTriageArtifact: () => false,
+    });
+    expect(board.triageLaunchFailureOnlyTickets instanceof Set).toBe(true);
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(true);
+  });
+
+  test("Scenario 2: same ticket but hasTriageArtifact returns true → NOT in the set (real triage completed)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [launchFailSig("CTL-1")],
+      hasTriageArtifact: () => true,
+    });
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(false);
+  });
+
+  test("Scenario: triage stall without attentionReason → NOT in the set (non-launch triage stall stays actionable)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [{ ticket: "CTL-1", phase: "triage", status: "stalled" }],
+      hasTriageArtifact: () => false,
+    });
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(false);
+  });
+
+  test("Scenario 3: triage launch-failure AND a separate implement stall → NOT in the set (real post-triage work)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        launchFailSig("CTL-1"),
+        { ticket: "CTL-1", phase: "implement", status: "stalled" },
+      ],
+      hasTriageArtifact: () => false,
+    });
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(false);
+  });
+
+  test("with default hasTriageArtifact seam (unbound), set is always empty (shadow-safe)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [launchFailSig("CTL-1")],
+      // hasTriageArtifact defaults to () => true
+    });
+    expect(board.triageLaunchFailureOnlyTickets.size).toBe(0);
+  });
+
+  test("a ticket in the set with needs_human status variant is also excluded", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [{
+        ticket: "CTL-1", phase: "triage", status: "needs_human",
+        attentionReason: "sdk-launch-failed",
+      }],
+      hasTriageArtifact: () => false,
+    });
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(true);
+  });
+});
+
+describe("selectAnchorCandidates — CTL-1649 triage-launch-failure exclusion", () => {
+  const launchFailBoard = (ticket, extraSignals = []) =>
+    assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket, phase: "triage", status: "stalled", attentionReason: "sdk-overloaded" },
+        ...extraSignals,
+      ],
+      hasTriageArtifact: () => false,
+    });
+
+  test("Acceptance 2: a tier-1 holistic-triage move for a launch-failure-only ticket is ABSENT from candidates", () => {
+    const board = launchFailBoard("CTL-1");
+    const moves = { tier1: [{ ticket: "CTL-1" }], tier2: [], tier3: [] };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).not.toContain("CTL-1");
+  });
+
+  test("Acceptance 3: a ticket with triage artifact (completed triage) + stalled implement → STILL a candidate", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-2", phase: "triage", status: "stalled", attentionReason: "sdk-overloaded" },
+        { ticket: "CTL-2", phase: "implement", status: "stalled" },
+      ],
+      hasTriageArtifact: () => false, // no artifact, but the other-stuck signal removes it from exclusion
+    });
+    const moves = { tier1: [{ ticket: "CTL-2" }], tier2: [], tier3: [] };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).toContain("CTL-2");
+  });
+
+  test("with empty exclusion set (unbound seam), output is byte-identical to today", () => {
+    // Use assembleBoardState with default seam → triageLaunchFailureOnlyTickets is empty
+    const board = assembleBoardState({
+      getWorkerSignals: () => [{ ticket: "CTL-3", phase: "triage", status: "stalled", attentionReason: "sdk" }],
+      // default hasTriageArtifact → () => true → exclusion set empty
+    });
+    const moves = { tier1: [{ ticket: "CTL-3" }], tier2: [], tier3: [] };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).toContain("CTL-3"); // NOT excluded — byte-identical to pre-CTL-1649
+  });
+
+  test("exclusion applies across all source lists (tier1, tier2, eligible, deferred)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-EXCL", phase: "triage", status: "stalled", attentionReason: "sdk" },
+      ],
+      hasTriageArtifact: () => false,
+      eligible: [{ identifier: "CTL-EXCL" }],
+      getDeferredBoardHealthTickets: () => ["CTL-EXCL"],
+    });
+    const moves = {
+      tier1: [{ ticket: "CTL-EXCL" }],
+      tier2: [{ ticket: "CTL-EXCL" }],
+      tier3: [],
+    };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).not.toContain("CTL-EXCL");
+  });
+});
+
+describe("boardHealthPass enforce — launch-failure exclusion prevents recovery-pass dispatch (CTL-1649)", () => {
+  test("when the sole flagged ticket is a launch-failure-only ticket, act is NOT invoked", () => {
+    let actInvoked = false;
+    boardHealthPass({
+      mode: "enforce",
+      lastRunMs: 0,
+      intervalMs: 0,
+      now: () => NOW,
+      emit: () => {},
+      act: (ctx) => {
+        // selectAnchorCandidates should return [] (the ticket is excluded),
+        // so act's candidates array is empty and it returns no-owned-anchor.
+        actInvoked = ctx.candidates && ctx.candidates.length > 0;
+        return { dispatched: false, anchor: null, skippedReason: "no-owned-anchor" };
+      },
+      getWorkerSignals: () => [
+        { ticket: "CTL-EXCL", phase: "triage", status: "stalled", attentionReason: "sdk-overloaded" },
+      ],
+      hasTriageArtifact: () => false,
+      // The invariant must fire so the gate proceeds
+      capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
+      eligible: [{ identifier: "CTL-EXCL", state: "Todo" }],
+    });
+    expect(actInvoked).toBe(false);
+  });
+});
+

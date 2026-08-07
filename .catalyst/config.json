@@ -58,6 +58,9 @@
         ]
       }
     },
+    "deployment": {
+      "mode": "cluster"
+    },
     "orchestration": {
       "dispatchMode": "phase-agents",
       "worktreeRefresh": {

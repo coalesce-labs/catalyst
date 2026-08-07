@@ -18,6 +18,15 @@ import {
 } from "./heartbeat-event.mjs";
 import { readClusterHeartbeats } from "./recovery.mjs";
 
+// Mirrors getHostName()'s fallback: strip everything after the FIRST dot, not
+// just a trailing ".local" — a naive `.replace(/\.local$/, "")` diverges on any
+// real multi-label FQDN that isn't ".local" (e.g. a live fleet host's
+// "aldebaran.hagale.net").
+function firstDnsLabel(raw) {
+  const dot = raw.indexOf(".");
+  return dot === -1 ? raw : raw.slice(0, dot);
+}
+
 const HOST_ENVS = ["CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE"];
 let savedEnv = {};
 
@@ -67,13 +76,28 @@ describe("buildHeartbeatEnvelope (CTL-859)", () => {
 
   test("host.name defaults to os.hostname() minus .local", () => {
     const env = buildHeartbeatEnvelope();
-    const expected = hostname().replace(/\.local$/, "");
+    const expected = firstDnsLabel(hostname());
     expect(env.body.payload["host.name"]).toBe(expected);
   });
 
   test("ts is a no-millisecond ISO string by default", () => {
     const env = buildHeartbeatEnvelope();
     expect(env.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
+  // ── CTL-1551: max_parallel as a Loki-reachable attribute ──
+  test("carries catalyst.node.max_parallel when maxParallelFn supplies a positive int", () => {
+    const env = buildHeartbeatEnvelope({ maxParallelFn: () => 3 });
+    expect(env.attributes["catalyst.node.max_parallel"]).toBe(3);
+  });
+
+  test("omits catalyst.node.max_parallel when unknown — never a fake 0", () => {
+    for (const bad of [null, 0, -1, 2.5, "3", NaN, undefined]) {
+      const env = buildHeartbeatEnvelope({ maxParallelFn: () => bad });
+      expect("catalyst.node.max_parallel" in env.attributes).toBe(false);
+    }
+    const noFn = buildHeartbeatEnvelope();
+    expect("catalyst.node.max_parallel" in noFn.attributes).toBe(false);
   });
 });
 
@@ -176,6 +200,14 @@ describe("startHeartbeat (CTL-859)", () => {
 });
 
 describe("readClusterHeartbeats (CTL-859)", () => {
+  // These tests only exercise LOCAL log parsing, so every call passes an explicit
+  // roster: [] — readClusterHeartbeats defaults roster to the real getClusterHosts()
+  // and, for a roster.length > 1, merges in a real cross-host peer read
+  // (defaultReadPeers). On a live, configured multi-host Catalyst node (any actual
+  // fleet host) that default silently turns this "unit" test into a real network
+  // read that merges genuine peer heartbeat data into the result — flaky/incorrect
+  // depending on what the real daemon happened to have written moments earlier.
+  // roster: [] triggers CTL-1090's single-host exact no-op, making these hermetic.
   let tmp;
   let logPath;
 
@@ -189,7 +221,7 @@ describe("readClusterHeartbeats (CTL-859)", () => {
   });
 
   test("returns {} when the event log is absent", () => {
-    expect(readClusterHeartbeats({ logPath: join(tmp, "nope.jsonl") })).toEqual({});
+    expect(readClusterHeartbeats({ logPath: join(tmp, "nope.jsonl"), roster: [] })).toEqual({});
   });
 
   test("returns the latest ts per host", () => {
@@ -203,7 +235,7 @@ describe("readClusterHeartbeats (CTL-859)", () => {
     appendFileSync(logPath, hb("mini", "2026-06-08T00:00:00Z"));
     appendFileSync(logPath, hb("mini", "2026-06-08T00:01:00Z"));
     appendFileSync(logPath, hb("mac-studio", "2026-06-08T00:00:30Z"));
-    const seen = readClusterHeartbeats({ logPath });
+    const seen = readClusterHeartbeats({ logPath, roster: [] });
     expect(seen).toEqual({
       mini: "2026-06-08T00:01:00Z",
       "mac-studio": "2026-06-08T00:00:30Z",
@@ -229,7 +261,7 @@ describe("readClusterHeartbeats (CTL-859)", () => {
         body: { payload: { "host.name": "mini", epoch: 1 } },
       }) + "\n",
     );
-    expect(readClusterHeartbeats({ logPath })).toEqual({
+    expect(readClusterHeartbeats({ logPath, roster: [] })).toEqual({
       mini: "2026-06-08T00:02:00Z",
     });
   });
@@ -237,7 +269,7 @@ describe("readClusterHeartbeats (CTL-859)", () => {
   test("round-trips an emitHeartbeatEvent-produced line", async () => {
     process.env.CATALYST_HOST_NAME = "mini";
     await emitHeartbeatEvent({ logPath });
-    const seen = readClusterHeartbeats({ logPath });
+    const seen = readClusterHeartbeats({ logPath, roster: [] });
     expect(Object.keys(seen)).toEqual(["mini"]);
     expect(typeof seen.mini).toBe("string");
   });
@@ -403,5 +435,57 @@ describe("emitHeartbeatEvent forwards governanceFn + admissionFn (CTL-1322 seam 
     expect(line.body.payload.governance.beliefsShadow).toBe(true);
     expect(line.body.payload.admission.holdReason).toBe("liveness-cold");
     expect(line.body.payload.admission.accepting).toBe(false);
+  });
+});
+
+describe("heartbeat active-tickets attributes (CTL-1581)", () => {
+  test("carries the injected ACTIVE tickets as a comma-joined attribute + count", () => {
+    const env = buildHeartbeatEnvelope({
+      inFlightTicketsFn: () => ["PROJ-1", "PROJ-2", "PROJ-3"],
+      activeTicketsFn: () => ["PROJ-2"],
+    });
+    expect(env.attributes["catalyst.node.active_tickets"]).toBe("PROJ-2");
+    expect(env.attributes["catalyst.node.active_count"]).toBe(1);
+    // ownership signal unchanged alongside
+    expect(env.attributes["catalyst.node.in_flight_count"]).toBe(3);
+  });
+
+  test("defaults to empty + 0 with no fn; non-array fails safe", () => {
+    const env = buildHeartbeatEnvelope();
+    expect(env.attributes["catalyst.node.active_tickets"]).toBe("");
+    expect(env.attributes["catalyst.node.active_count"]).toBe(0);
+    const bad = buildHeartbeatEnvelope({ activeTicketsFn: () => "nope" });
+    expect(bad.attributes["catalyst.node.active_count"]).toBe(0);
+  });
+});
+
+describe("localActiveTickets (CTL-1581 — slot-occupancy subset)", () => {
+  test("counts running/dispatched signals; parked needs-human holds no slot", async () => {
+    const { mkdtempSync: mkd, mkdirSync, writeFileSync: wf, rmSync: rms } = await import("node:fs");
+    const { tmpdir: td } = await import("node:os");
+    const { join: j } = await import("node:path");
+    const dir = mkd(j(td(), "active-tickets-"));
+    const w = (ticket, status, phase = "implement") => {
+      mkdirSync(j(dir, "workers", ticket), { recursive: true });
+      wf(
+        j(dir, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status, host: { name: "mini" } })
+      );
+    };
+    w("PROJ-1", "running");
+    w("PROJ-2", "needs-human");
+    w("PROJ-3", "dispatched");
+    w("PROJ-4", "done");
+    // needs-input holds its slot (job still counted against maxParallel)…
+    w("PROJ-5", "needs-input");
+    // …but a triage worker never occupies (intake — the deck's carve-out).
+    w("PROJ-6", "running", "triage");
+    const { localActiveTickets, localInFlightTickets } = await import("./cluster-heartbeat-publisher.mjs");
+    expect(localActiveTickets("mini", { orchDir: dir }).sort()).toEqual(["PROJ-1", "PROJ-3", "PROJ-5"]);
+    // ownership keeps counting the parked dir AND triage
+    expect(localInFlightTickets("mini", { orchDir: dir }).sort()).toEqual([
+      "PROJ-1", "PROJ-2", "PROJ-3", "PROJ-5", "PROJ-6",
+    ]);
+    rms(dir, { recursive: true, force: true });
   });
 });

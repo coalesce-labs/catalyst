@@ -12,11 +12,12 @@
 import {
   existsSync,
   statSync,
-  readFileSync,
+  fstatSync,
   openSync,
   readSync,
   closeSync,
 } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { join } from "node:path";
 import { createFilterStream } from "./event-filter";
 import type { EventRing } from "./event-ring";
@@ -55,6 +56,168 @@ function monthlyPath(catalystDir: string, d: Date): string {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   return join(catalystDir, "events", `${y}-${m}.jsonl`);
+}
+
+/**
+ * CTL-1515: chunk size for {@link scanFileLines}. The bounded forward scan's
+ * peak transient is one chunk, replacing the whole-file `readFileSync` that
+ * allocated a single ~1.7 GB contiguous string bun/mimalloc never returns to
+ * the OS.
+ */
+const SCAN_CHUNK_BYTES = 1 << 20; // 1 MiB
+
+/**
+ * CTL-1515: bounded forward line scan. Reads `path` in `chunkBytes`-sized
+ * chunks via `openSync`/`readSync` (peak transient = one chunk) and invokes
+ * `onLine` once per `\n`-delimited line, in file order. This is the bounded
+ * replacement for the ring-underflow `readFileSync` fallbacks in
+ * {@link readBacklog} and {@link readTunnelEventStats}: a whole-file read of the
+ * current-month log allocated one giant contiguous buffer that Bun/mimalloc
+ * rarely returns to the OS.
+ *
+ * A `node:string_decoder` {@link StringDecoder} carries the partial line across
+ * chunk edges, so a multibyte UTF-8 sequence split on a chunk boundary is
+ * decoded byte-exact (never dropped or mojibake'd). The trailing empty segment
+ * of a newline-terminated file is NOT emitted; a final line lacking a trailing
+ * newline IS emitted. The fd is always closed (try/finally). Returns the total
+ * number of bytes read.
+ */
+export function scanFileLines(
+  path: string,
+  onLine: (line: string) => void,
+  chunkBytes: number = SCAN_CHUNK_BYTES,
+): number {
+  const decoder = new StringDecoder("utf8");
+  const buf = Buffer.allocUnsafe(chunkBytes);
+  const fd = openSync(path, "r");
+  // Snapshot the EOF at open so a file being appended to (a busy producer) can't
+  // keep extending this scan indefinitely — read exactly the bytes present now
+  // (Codex P2 on #2730).
+  const snapshotSize = fstatSync(fd).size;
+  let totalBytes = 0;
+  let pending = "";
+  try {
+    let bytesRead = 0;
+    // `null` position → sequential reads advancing the fd's own cursor; the
+    // peak transient is one chunk (vs a whole-file readFileSync string).
+    while (totalBytes < snapshotSize && (bytesRead = readSync(fd, buf, 0, Math.min(chunkBytes, snapshotSize - totalBytes), null)) > 0) {
+      totalBytes += bytesRead;
+      pending += decoder.write(buf.subarray(0, bytesRead));
+      let nl = pending.indexOf("\n");
+      while (nl !== -1) {
+        onLine(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+      }
+    }
+    // Flush any bytes the decoder was holding, then emit a final unterminated
+    // line (a file ending in "\n" leaves `pending` empty → nothing emitted).
+    pending += decoder.end();
+    if (pending.length > 0) onLine(pending);
+  } finally {
+    closeSync(fd);
+  }
+  return totalBytes;
+}
+
+/**
+ * scanFileLinesAsync — CTL-1515. The async twin of {@link scanFileLines}: same
+ * bounded openSync/readSync chunk scan and StringDecoder line-carry, but it
+ * `await`s `onLine` per line so a consumer can apply backpressure (e.g. await a
+ * jq stdin `drain()`) and keep the whole scan memory-bounded. Kept separate from
+ * the sync `scanFileLines` because `readTunnelEventStats` needs the synchronous
+ * form. Returns the number of bytes scanned; the fd is always closed.
+ */
+export async function scanFileLinesAsync(
+  path: string,
+  onLine: (line: string) => Promise<void> | void,
+  chunkBytes: number = SCAN_CHUNK_BYTES,
+): Promise<number> {
+  const decoder = new StringDecoder("utf8");
+  const buf = Buffer.allocUnsafe(chunkBytes);
+  const fd = openSync(path, "r");
+  // Snapshot the EOF at open so a file being appended to (a busy producer) can't
+  // keep extending this scan indefinitely — read exactly the bytes present now
+  // (Codex P2 on #2730).
+  const snapshotSize = fstatSync(fd).size;
+  let totalBytes = 0;
+  let pending = "";
+  try {
+    let bytesRead = 0;
+    while (totalBytes < snapshotSize && (bytesRead = readSync(fd, buf, 0, Math.min(chunkBytes, snapshotSize - totalBytes), null)) > 0) {
+      totalBytes += bytesRead;
+      pending += decoder.write(buf.subarray(0, bytesRead));
+      let nl = pending.indexOf("\n");
+      while (nl !== -1) {
+        await onLine(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+      }
+    }
+    pending += decoder.end();
+    if (pending.length > 0) await onLine(pending);
+  } finally {
+    closeSync(fd);
+  }
+  return totalBytes;
+}
+
+/**
+ * readTailUtf8 — CTL-1529. Read AT MOST `maxBytes` from the END of `path` and
+ * return it as UTF-8 text.
+ *
+ * This exists because "read the whole file, then `.slice()` the tail" is a
+ * whole-file read wearing a bounded read's comment. Two live sites shipped that
+ * shape against files that grow without bound:
+ *
+ *   • `service-health-monitor.ts` — `readFileSync(<monthly event log>, "utf8")`
+ *     followed by `text.slice(size - 512 KiB)`. The comment said "Cap at 512KB
+ *     to bound the read"; the code materialized all 344 MB first (and the guard
+ *     could not see it, because the argument was a bare `path` variable).
+ *   • `stream-reader.ts` — same shape, 32 KiB, against a per-session stream log.
+ *
+ * The read starts at `max(0, size - maxBytes)`. When that offset is > 0 the
+ * first line is a FRAGMENT (the window cut mid-record), so it is dropped —
+ * every caller splits on "\n" and JSON.parses, and a truncated line's suffix
+ * can otherwise parse into a bogus record (the same discipline as
+ * `probeOldestTs`'s `skipFirstLine` in execution-core/event-tail.mjs). A file
+ * smaller than `maxBytes` is returned in full, byte-identical to the
+ * `readFileSync` it replaces.
+ *
+ * A `StringDecoder` is NOT needed: the whole window is decoded in one pass. The
+ * window's LEADING bytes may split a multibyte sequence, but those bytes belong
+ * to the dropped fragment line. Peak transient is `min(size, maxBytes)`.
+ * Missing/unreadable file ⇒ "" (never throws); the fd is always closed.
+ */
+export function readTailUtf8(path: string, maxBytes: number): string {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return "";
+  }
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return "";
+    const cap = Math.max(1, Math.floor(maxBytes));
+    const from = Math.max(0, size - cap);
+    const want = size - from;
+    const buf = Buffer.allocUnsafe(want);
+    let got = 0;
+    while (got < want) {
+      const n = readSync(fd, buf, got, want - got, from + got);
+      if (n <= 0) break;
+      got += n;
+    }
+    const text = buf.toString("utf8", 0, got);
+    if (from === 0) return text;
+    const nl = text.indexOf("\n");
+    return nl === -1 ? "" : text.slice(nl + 1);
+  } catch {
+    return "";
+  } finally {
+    closeSync(fd);
+  }
 }
 
 const BACKOFF_BASE_MS = 200;
@@ -115,27 +278,55 @@ export async function readBacklog(opts: ReadBacklogOpts): Promise<string[]> {
   const path = monthlyPath(opts.catalystDir, now());
   if (!existsSync(path)) return [];
 
-  // Current monthly files are ~17MB at end-of-month; reading the whole file is
-  // fast enough. If files grow significantly we can switch to chunked reads
-  // from the end of the file.
+  // CTL-1515: ring-underflow fallback. Instead of a single whole-file
+  // `readFileSync` (a ~1.7 GB contiguous transient bun/mimalloc never returns),
+  // scan the current-month log in bounded chunks and feed each line to the same
+  // filter path — output is byte-for-byte identical to the old read+split, but
+  // the peak transient is one chunk.
   const _t0 = performance.now();
-  const text = readFileSync(path, "utf8");
-  recordFullRead("readBacklog", text.length, performance.now() - _t0);
-  const allLines = text.split("\n").filter((l) => l.length > 0);
 
   if (!opts.predicate.trim()) {
-    return allLines.slice(-opts.limit);
+    // Empty predicate: rolling last-`limit` non-empty lines (matches the old
+    // `allLines.slice(-limit)`, no JSON validation).
+    const rolling: string[] = [];
+    const bytes = scanFileLines(path, (l) => {
+      if (l.length === 0) return;
+      rolling.push(l);
+      if (rolling.length > opts.limit) rolling.shift();
+    });
+    recordFullRead("readBacklog", bytes, performance.now() - _t0);
+    return rolling;
   }
 
   const stream = createFilterStream(opts.predicate);
+  // Rolling last-`limit` buffer: a broad predicate on a huge log retains only the
+  // most recent `limit` matches, never the whole file — otherwise the memory the
+  // bounded scan saved just moves into this array (Codex P1 on #2730).
   const matches: string[] = [];
-  stream.onMatch((l) => matches.push(l));
-  for (const l of allLines) stream.write(l);
-  // Flushing the jq subprocess is a wait-on-stdout. For a 50k-line file we
-  // need a few flush cycles to ensure all output drains.
-  await stream.flush();
-  await stream.flush();
-  stream.close();
+  stream.onMatch((l) => {
+    matches.push(l);
+    if (matches.length > opts.limit) matches.shift();
+  });
+  try {
+    // scanFileLinesAsync feeds each line to jq and awaits `drain()` whenever jq's
+    // stdin is backpressured — so a slow/stalled jq cannot let the whole ~1.7 GB
+    // log queue into stdin (that would defeat the bounded-transient goal). Same
+    // feed the old `for (const l of allLines)` loop produced; empty/invalid-JSON
+    // lines are dropped inside the stream (as `.filter(l => l.length > 0)` + jq did).
+    const bytes = await scanFileLinesAsync(path, async (l) => {
+      if (!stream.write(l)) await stream.drain();
+    });
+    recordFullRead("readBacklog", bytes, performance.now() - _t0);
+    // Wait for jq to emit EVERY match (it exits when stdin ends) before we return —
+    // the old fixed 50ms double-flush could expire while jq still had pending
+    // input/output on a large log, returning stale early matches (Codex P1 on #2730).
+    await stream.end();
+  } finally {
+    // Always reap the jq child + its pipes, even if the scan throws mid-stream
+    // (e.g. the file disappears between existsSync and openSync) — otherwise the
+    // SSE caller catches the error and leaves an orphaned subprocess (CTL-1515).
+    stream.close();
+  }
   return matches.slice(-opts.limit);
 }
 
@@ -291,7 +482,11 @@ export function readTunnelEventStats(
     return acc;
   }
 
-  // File fallback (no ring, or ring underflows the 24h window).
+  // File fallback (no ring, or ring underflows the 24h window). CTL-1515:
+  // bounded chunked scan instead of a whole-file `readFileSync` (a ~1.7 GB
+  // contiguous transient bun/mimalloc never returns). Counts are byte-identical
+  // to the old read + `split("\n")` — `accumulateGithubStat` already no-ops on
+  // blank lines.
   const _t0 = performance.now();
   let _fallbackBytes = 0;
   const currentPath = monthlyPath(catalystDir, nowDate);
@@ -300,15 +495,12 @@ export function readTunnelEventStats(
 
   for (const filePath of paths) {
     if (!existsSync(filePath)) continue;
-    let text: string;
     try {
-      text = readFileSync(filePath, "utf8");
+      _fallbackBytes += scanFileLines(filePath, (line) => {
+        accumulateGithubStat(line, cutoffIso, acc);
+      });
     } catch {
       continue;
-    }
-    _fallbackBytes += text.length;
-    for (const line of text.split("\n")) {
-      accumulateGithubStat(line, cutoffIso, acc);
     }
   }
   recordFullRead("tunnelStats", _fallbackBytes, performance.now() - _t0);

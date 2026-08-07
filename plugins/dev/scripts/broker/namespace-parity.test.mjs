@@ -30,7 +30,10 @@ import {
   DRAIN_CHANGED_EVENT,
   DRAINED_EVENT,
 } from "../execution-core/drain-event.mjs";
-import { FLEET_HEALTH_DEGRADED } from "../execution-core/fleet-health-event.mjs";
+import {
+  FLEET_HEALTH_DEGRADED,
+  FLEET_HEALTH_RECOVERED,
+} from "../execution-core/fleet-health-event.mjs";
 import {
   RATELIMIT_EVENT_SAMPLED,
 } from "../execution-core/ratelimit-event.mjs";
@@ -49,12 +52,17 @@ const INLINE_EVENT_NAMES = [
   "node.boot",                        // boot-event.mjs:32
   "monitor.reconcile.failing.team",   // reconcile-health-event.mjs:66 (team is param; prefix is safe)
   "monitor.reconcile.recovered.team", // reconcile-health-event.mjs:66
+  "monitor.reconcile.eligible_persist_failure.team", // reconcile-health-event.mjs (CTL-1628 persist-write escalation)
   "phase.triage.linear-transition.CTL-1", // triage-transition-event.mjs:53
   "linear.state.write.CTL-1",         // linear-state-write-event.mjs:77
   "agent.waiting_on_user",            // wait-event.mjs:buildWaitEnvelope
   "agent.resumed",                    // wait-event.mjs:buildWaitEnvelope
   "fence.claimed.CTL-1",              // CTL-863 fence-event.mjs (exec-core-owned, projected-not-re-emitted)
   "fence.released.CTL-1",             // CTL-863 fence-event.mjs
+  "escalation.explanation-absent",    // CTL-1609 label-guard.mjs (warn when explanation omitted)
+  "delegate.would-route",             // CTL-1609 delegate-first.mjs (shadow mode — would enqueue)
+  "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
+  "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
 ];
 
 // Build the flat list of all static exec-core event names.
@@ -63,6 +71,7 @@ const EXEC_CORE_EVENT_NAMES = [
   DRAIN_CHANGED_EVENT,
   DRAINED_EVENT,
   FLEET_HEALTH_DEGRADED,
+  FLEET_HEALTH_RECOVERED, // CTL-1503 — degraded→healthy edge event
   RATELIMIT_EVENT_SAMPLED,
   MEMORY_EVENT_SAMPLED,
   MEMORY_EVENT_WARN,

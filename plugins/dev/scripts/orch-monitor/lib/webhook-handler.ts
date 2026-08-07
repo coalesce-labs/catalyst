@@ -671,6 +671,10 @@ export function createWebhookHandler(
         cachedPrNumber !== undefined ? { cachedPrNumber } : undefined,
       );
       if (envelope !== null) {
+        // CTL-1532: stamp the provider's own delivery id so the event log can be
+        // joined against the catalyst-cloud feed, which carries the same value.
+        // Already validated non-empty above (missing header -> 400).
+        envelope.attributes["webhook.delivery.id"] = deliveryId;
         if (deps.resolveOrchestrator) {
           const attribInput = attributionInputFor(event);
           if (attribInput !== null) {

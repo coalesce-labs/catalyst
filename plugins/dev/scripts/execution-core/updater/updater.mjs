@@ -40,6 +40,7 @@
 //     host.name, host.id) as every other catalyst signal; service.name=catalyst.updater.
 
 import { appendFileSync, mkdirSync, statSync, readSync, openSync, closeSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, createHash } from "node:crypto";
@@ -54,11 +55,30 @@ import {
 import { getEventLogPath, getNodeClass, getHostName, HEARTBEAT_INTERVAL_MS } from "../config.mjs";
 import { hostName, hostId } from "../lib/host-identity.mjs";
 import { logDaemonHeartbeat } from "../../lib/daemon-heartbeat.mjs";
+import { emitProcessMemoryMetric } from "../../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { initTracing, shutdownTracing, emitUpdaterRefreshSpan } from "../tracing.mjs";
 
 export const UPDATER_SERVICE_NAME = "catalyst.updater";
 export const UPDATER_HEARTBEAT_EVENT = "node.updater.heartbeat";
 export const UPDATER_NO_PLUGIN_DIRS_EVENT = "updater.no-plugin-dirs";
+export const UPDATER_CLI_INSTALL_FAILED_EVENT = "plugin.checkout.cli_install_failed";
+
+// install-cli on a provisioned node is sub-second; ceiling gives headroom for a
+// first-time alloy/agent-browser fetch on a fresh checkout.
+const INSTALL_CLI_TIMEOUT_MS =
+  Number(process.env.CATALYST_INSTALL_CLI_TIMEOUT_MS) || 120_000;
+
+// Re-run install-cli.sh for a freshly-pulled checkout so newly-added CLI_ENTRIES land as
+// symlinks. Self-locating + idempotent; throws on non-zero exit (caller fails open).
+function defaultInstallCliFn({ root, env = process.env }) {
+  const script = resolve(root, "plugins", "dev", "scripts", "install-cli.sh");
+  execFileSync("bash", [script], {
+    encoding: "utf8",
+    timeout: INSTALL_CLI_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+    env: { ...env, GIT_TERMINAL_PROMPT: "0" },
+  });
+}
 
 // 90s default (env-overridable), a NAMED constant distinct from the broker's 300s
 // PLUGIN_DRIFT_CHECK_INTERVAL_MS: on daemonless dev nodes the poll is the SOLE freshness
@@ -234,6 +254,7 @@ export function runRefreshOnce({
   repoConfigPath,
   refreshAllFn = refreshAllPluginCheckouts,
   resolveRootsFn = resolvePluginCheckoutRoots,
+  installCliFn = defaultInstallCliFn,
   state = {},
 } = {}) {
   const host = hostNameVal ?? getHostName();
@@ -273,6 +294,23 @@ export function runRefreshOnce({
   const changed = results.filter((r) => r?.changed).length;
   const failed = results.filter((r) => r?.failed).length;
   const checkouts = results.map((r) => ({ root: r?.root ?? null, headSha: r?.newSha ?? r?.oldSha ?? null }));
+
+  for (const r of results) {
+    if (!r?.changed || !r?.root) continue;
+    try {
+      installCliFn({ root: r.root, env });
+    } catch (err) {
+      try {
+        emitFn?.({
+          event: UPDATER_CLI_INSTALL_FAILED_EVENT,
+          orchestrator: null,
+          worker: null,
+          severity: "WARN",
+          detail: { checkout: r.root, error: err?.message ?? String(err) },
+        });
+      } catch { /* best-effort */ }
+    }
+  }
 
   const { traceId, spanId } = deriveRefreshTraceContext({ host, reason, epoch: t0 });
 
@@ -418,6 +456,7 @@ export function startUpdater({
   emitFn,
   refreshAllFn = refreshAllPluginCheckouts,
   resolveRootsFn = resolvePluginCheckoutRoots,
+  installCliFn = defaultInstallCliFn,
   getLogPathFn = getEventLogPath,
   repoConfigPath = defaultRepoConfigPath(env),
   repoFullName,
@@ -452,6 +491,7 @@ export function startUpdater({
       repoConfigPath,
       refreshAllFn,
       resolveRootsFn,
+      installCliFn,
       state,
     });
     // Clear a STALE checkout list when pluginDirs now resolve to zero (config removed /
@@ -463,6 +503,8 @@ export function startUpdater({
 
   const heartbeat = () => {
     logDaemonHeartbeat(log, "updater"); // CTL-1280 .log liveness marker
+    // CTL-1517: per-process RSS/heap OTel gauge on the same tick (fire-and-forget).
+    emitProcessMemoryMetric({ serviceName: UPDATER_SERVICE_NAME, log }).catch(() => {});
     try {
       const line = `${JSON.stringify(buildUpdaterHeartbeatEnvelope({ nowFn, nodeClass, hostNameVal, checkouts: lastCheckouts }))}\n`;
       const logPath = getLogPathFn();

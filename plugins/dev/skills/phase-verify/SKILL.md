@@ -1,7 +1,7 @@
 ---
 name: phase-verify
 description: |
-  Phase agent for the verify step of the 9-phase orchestrator pipeline (CTL-450).
+  Phase agent for the verify step of the 10-phase orchestrator pipeline (CTL-450).
   NEW skill — has no canonical wrapper. Runs read-only adversarial verification
   against the implement-phase diff: tsc, tests, lint, security scan, reward-hacking
   scan, code review, test coverage, silent-failure hunt. Writes
@@ -40,6 +40,20 @@ You are a **read-only verifier**. The only files you may create or edit are:
 Editing application code from this phase is a contract violation. If verification
 surfaces a bug that requires code changes, you **record the finding** and let
 [[phase-review]] (which IS allowed to write remediation commits) act on it.
+
+## CRITICAL CONSTRAINT: never hand-run a test's own git-fixture setup against your cwd
+
+Your `cwd` is the ticket's real worktree, on the real branch you can push. Some tests
+in this repo build their own throwaway git repo to exercise git-touching behavior
+(e.g. a test that runs `git init` + `git config user.email/name` + `git commit` inside
+an isolated `mkdtemp` sandbox). If you manually re-run that recipe yourself — to
+reproduce or double-check something the test covers — **never point it at `.` or any
+path under your own cwd.** Doing so configures a throwaway identity and wipes/commits
+the real ticket branch, and it can reach the real remote (postmortem, 2026-07-30:
+exactly this happened, and the resulting commit was pushed to a real GitHub branch
+before a human caught it). If you need to hand-verify such a script,
+build your own `mkdtemp` sandbox first and run every command with an explicit `cwd`
+inside it — never in place.
 
 ## Prelude
 

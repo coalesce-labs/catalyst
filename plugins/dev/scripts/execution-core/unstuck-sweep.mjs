@@ -17,6 +17,7 @@ import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { log, getEventLogPath } from "./config.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "./unstuck-sweep-event-types.mjs";
+import { isTicketKey } from "./ticket-key.mjs";
 
 export { UNSTUCK_SWEEP_EVENT_TYPES };
 
@@ -92,6 +93,11 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   // terminal sweep + alert) and is waiting on an operator approval — the
   // unstuck sweep must stay quiet, not re-escalate it every interval.
   "boot-resume-gate-expired":         { category: "skip",           action: "skip" },
+  // PROJ-1657 Codex P2 (round 4): a probe-less phase (recovery-pass today) is
+  // parked terminal on its FIRST occurrence via markEscalationCapTerminal —
+  // same "already fully escalated" shape as escalation-ask-cap above — so the
+  // unstuck sweep must stay quiet here too, not re-escalate every interval.
+  "no-probe-for-phase":               { category: "skip",           action: "skip" },
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.
@@ -132,6 +138,7 @@ export function defaultCollectUnstuckCandidates({
   for (const d of workerDirs) {
     if (!d.isDirectory()) continue;
     const ticket = d.name;
+    if (!isTicketKey(ticket)) continue; // CTL-1504: never probe a non-ticket dir name
     try {
       const workerDir = join(orchDir, "workers", ticket);
       let signalFiles;
@@ -325,6 +332,7 @@ export function runUnstuckSweepPass({
     wouldAct: [],
     escalated: [],
     wouldEscalate: [],
+    escalateFailures: [],   // CTL-1641: per-side-effect escalate failures (loud, not swallowed)
     skipped: [],
     failed: [],
   };
@@ -390,12 +398,30 @@ export function runUnstuckSweepPass({
       }
 
       // enforce — escalate path: no intent gate (genuine decisions always surface).
+      // CTL-1641: the escalate seam owns the operator-visible side effects (needs-human
+      // label FIRST, then the authored Linear comment). It returns
+      // { labelApplied, commentPosted, errors:[{sideEffect,err}] }; a THROW or any
+      // returned error is recorded in report.escalateFailures so a failed side effect
+      // surfaces in the sweep summary instead of being swallowed (Acceptance §2).
       if (decision.action === "escalate") {
-        try { escalate(c, decision); } catch (err) {
-          logger.warn({ ticket: c.ticket, err: err?.message }, "unstuck-sweep: escalate seam threw (CTL-1064)");
+        try {
+          const eres = escalate(c, decision) ?? {};
+          if (Array.isArray(eres.errors)) {
+            for (const e of eres.errors) {
+              report.escalateFailures.push({
+                ticket: c.ticket, phase: c.phase, category: decision.category,
+                sideEffect: e?.sideEffect ?? "unknown", err: e?.err ?? null,
+              });
+            }
+          }
+        } catch (err) {
+          logger.warn({ ticket: c.ticket, err: err?.message }, "unstuck-sweep: escalate seam threw (CTL-1641)");
+          report.escalateFailures.push({
+            ticket: c.ticket, phase: c.phase, category: decision.category,
+            sideEffect: "escalate-seam", err: err?.message ?? String(err),
+          });
         }
         fire(UNSTUCK_EVENT.escalated, { ticket: c.ticket, phase: c.phase, category: decision.category }, c.ticket);
-        try { postComment(c.ticket, decision.category ?? "unknown", c.phase); } catch { /* best-effort */ }
         report.escalated.push({ ticket: c.ticket, phase: c.phase, category: decision.category });
         continue;
       }

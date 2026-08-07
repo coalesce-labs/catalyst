@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
+import { scanEventsChunked } from "../execution-core/event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { resolve, dirname } from "node:path";
 import {
   log,
@@ -194,8 +195,23 @@ export function buildBrokerState({ probe } = {}) {
     // CTL-447: enumerate the deterministic interest types this broker supports
     // so `catalyst-broker status --json` can advertise them to clients.
     supportedInterestTypes: [...DETERMINISTIC_INTEREST_TYPES],
-    // CTL-352: liveness fields so the HUD pill and operators can detect a
-    // silently-dead broker (interests.size === 0 with stale lastWakeAt).
+    // CTL-352: liveness fields for the HUD pill and operators.
+    // CTL-1523: the heuristic this comment used to advertise — "interests.size === 0
+    // with stale lastWakeAt ⇒ silently-dead broker" — is FALSE under execution-core
+    // dispatch, where nothing registers interests at all: an empty table with no wakes
+    // is the CORRECT steady state, not a death signal, and acting on it produced 104
+    // false broker.daemon.degraded emissions in one month. (On a legacy-wave host,
+    // which DOES register interests via orchestrate-register-interests.sh, an empty
+    // table is genuinely anomalous.) See broker-degraded.mjs for the full reasoning —
+    // that detector is now opt-in and dormant by default.
+    //
+    // No in-process field can report a DEAD broker: these values are produced by the
+    // broker itself, so they simply stop being written. CTL-1122 ingestion-recency
+    // (catalyst.ingestion.stale / catalyst.alert.raised(system_down)) detects an
+    // ingestion STALL while the broker is alive; proving the process itself is gone
+    // takes an EXTERNAL absence check (Loki `absent_over_time` on
+    // `broker.daemon.heartbeat` / the broker `.log` stream).
+    // These fields remain useful as raw operator readouts — just not as a verdict.
     interestCount: interests.size,
     lastWakeAt: getLastWakeAt(),
     lastRegisterAt: getLastRegisterAt(),
@@ -270,53 +286,6 @@ export function writeBrokerStateFile(state, { path } = {}) {
 // per-event calls (dozens/sec at peak) are cheap.
 export function persistBrokerState({ probe } = {}) {
   writeBrokerStateFile(buildBrokerState({ probe }));
-}
-
-// CTL-483: worker state projection (Phase 1 — shadow path).
-//
-// During the dual-write migration period, scripts that mutate
-// `workers/<TICKET>.json` ALSO emit a `worker.state_changed` event carrying
-// the full new state. The broker projects that state to
-// `<canonical>.projected` so the direct write is never racing with the
-// projection. A separate verification CLI (orchestrate-shadow-diff) compares
-// canonical vs projected to confirm byte-for-byte agreement before Phase 2
-// cuts over to broker-as-sole-writer at the canonical path.
-//
-// CTL-529: the worker.state_changed event handler (handleWorkerStateChanged)
-// lives in router.mjs with the other event handlers; it calls the path +
-// writer helpers below through the existing router → projection import edge.
-
-export function getProjectedWorkerStatePath(orchestratorId, ticket) {
-  const runsDir =
-    process.env.CATALYST_RUNS_DIR ?? `${process.env.CATALYST_DIR ?? `${homedir()}/catalyst`}/runs`;
-  return resolve(runsDir, orchestratorId, "workers", `${ticket}.json.projected`);
-}
-
-export function writeProjectedWorkerState(target, state, meta = {}) {
-  try {
-    mkdirSync(dirname(target), { recursive: true });
-    const tmp = `${target}.tmp`;
-    const payload = {
-      ...state,
-      _projected: {
-        writer: meta.writer ?? "unknown",
-        ts: meta.ts ?? new Date().toISOString(),
-      },
-    };
-    try {
-      writeFileSync(tmp, JSON.stringify(payload, null, 2));
-      renameSync(tmp, target);
-    } catch (err) {
-      try {
-        unlinkSync(tmp);
-      } catch {
-        /* tmp already gone */
-      }
-      throw err;
-    }
-  } catch (err) {
-    log.warn({ err: err.message, path: target }, "failed to write projected worker state");
-  }
 }
 
 // ─── CTL-532: event-sourced worker-state projection (ADR-018 Phase 3) ─────────
@@ -549,38 +518,38 @@ export function projectWorkerStateEvent(event) {
 // replayWorkerStateProjection — startup replay: fold the whole current-month
 // event log into worker_state. Idempotent so it is correct whether the broker
 // just started cold, restarted after a crash, or has been running live.
-// TODO(CTL-532-followup): replayWorkerStateProjection and
-// loadExistingRegistrations both readFileSync the (large) current-month log at
-// startup — share a single startup file read.
+//
+// CTL-1529: this one legitimately wants the WHOLE month (it is a fold, not a
+// tail), so it is bounded in MEMORY rather than in coverage: scanEventsChunked
+// reads 1 MiB at a time and folds each complete line, instead of materializing an
+// 883 MB contiguous string plus a ~1.4M-element split array. Coverage is
+// byte-identical to the readFileSync it replaces; only the peak transient changes.
+// Malformed-line tolerance and the missing-file no-op are preserved by the
+// primitive (a missing file is a silent no-op returning fromOffset).
 export function replayWorkerStateProjection() {
   try {
     const logPath = getEventLogPath();
-    let raw;
-    try {
-      raw = readFileSync(logPath, "utf8");
-    } catch {
-      // No log file yet (fresh install) — nothing to replay.
-      return;
-    }
     let eventsFolded = 0;
     let lastEventId = null;
     let lastEventTs = null;
-    for (const line of raw.split("\n")) {
-      if (!line) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        continue; // skip malformed lines
-      }
-      projectWorkerStateEvent(event);
-      eventsFolded++;
-      const ts = event?.ts ?? event?.observedTs ?? null;
-      if (ts && (!lastEventTs || ts >= lastEventTs)) {
-        lastEventTs = ts;
-        lastEventId = event?.id ?? lastEventId;
-      }
-    }
+    scanEventsChunked({
+      path: logPath,
+      fromOffset: 0,
+      // CTL-1529 (Codex P2): one-shot replay to EOF — fold the final record even
+      // when the log ends without a trailing newline (a crash-truncated log is
+      // exactly the case this boot replay exists for, and that record is the
+      // NEWEST worker-state transition).
+      emitTrailingLine: true,
+      onEvent: (event) => {
+        projectWorkerStateEvent(event);
+        eventsFolded++;
+        const ts = event?.ts ?? event?.observedTs ?? null;
+        if (ts && (!lastEventTs || ts >= lastEventTs)) {
+          lastEventTs = ts;
+          lastEventId = event?.id ?? lastEventId;
+        }
+      },
+    });
     setProjectionMeta({ lastEventId, lastEventTs, eventsFolded });
     log.info({ eventsFolded, logPath }, "replayed worker-state projection");
   } catch (err) {

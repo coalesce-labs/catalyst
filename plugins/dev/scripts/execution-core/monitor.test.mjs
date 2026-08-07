@@ -38,6 +38,7 @@ import {
   getReconcileHealth,
   readReconcileHealthMarkers,
   recordReconcileFailure,
+  recordReconcileSuccess,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
 import {
@@ -45,6 +46,9 @@ import {
   ALERT_RAISED,
   ALERT_CLEARED,
   ALERT_KIND_FLEET_FROZEN_ADMISSION,
+  FLEET_FREEZE_CAUSE_ALL_POLL,
+  FLEET_FREEZE_CAUSE_ALL_PERSIST,
+  FLEET_FREEZE_CAUSE_MIXED,
 } from "./fleet-freeze-alert.mjs"; // CTL-1420
 
 let catalystDir;
@@ -201,7 +205,7 @@ describe("reconcileProject", () => {
     expect(exec.calls).toBe(0);
   });
 
-  test("does not crash the daemon when the projection write fails", () => {
+  test("does not crash the daemon when the projection write fails, and surfaces a health event (CTL-1628)", () => {
     enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1")] });
     // Make the projection path a non-empty directory so renameSync fails,
@@ -211,8 +215,124 @@ describe("reconcileProject", () => {
     const projDir = join(catalystDir, "execution-core", "eligible", "ENG.json");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, "sentinel"), "x");
-    expect(() => reconcileProject("ENG", { exec })).not.toThrow();
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+    expect(() => reconcileProject("ENG", { exec, appendHealthEvent })).not.toThrow();
     rmSync(projDir, { recursive: true, force: true });
+    // CTL-1628: the persist-write failure — previously only a buried
+    // log.error ("monitoring green, scheduler stale") — must now also be
+    // visible on the unified event log via the health-event mechanism.
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ team: "ENG", action: "eligible_persist_failure" });
+    expect(events[0].reason).toBeTruthy();
+  });
+
+  // CTL-1628 (design-gap fix): before this fix, recordReconcileSuccess ran
+  // BEFORE the persist try/catch, so a *persistent* persist fault (unlike a
+  // one-off) kept reconcile-health permanently green — checkFleetFreeze would
+  // never see it. Persist failures now also drive the same N-consecutive
+  // escalation/alert-latch tracker as poll failures.
+  test("N consecutive persist failures escalate monitor.reconcile.failing, exactly once (CTL-1628)", () => {
+    enroll("ENG", { status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    // Same disk-fault simulation as the single-failure test above: block the
+    // projection path so every setProjectEligible call throws.
+    const projDir = join(catalystDir, "execution-core", "eligible", "ENG.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    // Two persist failures under the default threshold (3): both surface the
+    // unconditional eligible_persist_failure event, neither crosses the
+    // escalation threshold yet.
+    expect(events.filter((e) => e.action === "eligible_persist_failure")).toHaveLength(2);
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(0);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(2);
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+
+    // Third consecutive persist failure crosses the threshold → exactly one
+    // "failing" escalation, in addition to the unconditional persist event.
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    expect(events.filter((e) => e.action === "eligible_persist_failure")).toHaveLength(3);
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(1);
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(3);
+
+    // A subsequent successful persist recovers — the alert clears and a
+    // "recovered" event fires, same as a recovering poll.
+    rmSync(projDir, { recursive: true, force: true });
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    const recovered = events.filter((e) => e.action === "recovered");
+    expect(recovered).toHaveLength(1);
+    // CTL-1628 r2: the streak that just cleared was persist-origin (every
+    // failure in it was the disk write throwing, never the poll) — the
+    // recovery event must name that stage, not hard-code the poll.
+    expect(recovered[0].reason).toBe("eligible-persist-succeeded");
+    const health = getReconcileHealth("ENG");
+    expect(health.alerting).toBe(false);
+    expect(health.consecutiveFailures).toBe(0);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
+  });
+
+  // CTL-1628 r2 (Codex #2960 follow-up): recordReconcileSuccess used to
+  // hard-code reason:"reconcile-poll-succeeded" on every recovery event,
+  // regardless of which stage (poll vs persist) had actually been failing —
+  // a persist-origin streak recovering would misattribute itself to the poll
+  // stage in Loki. Both streak origins are exercised here side by side.
+  test("recovery event names the stage that actually recovered — persist-origin vs poll-origin (CTL-1628 r2)", () => {
+    enroll("ENG", { status: "Todo" });
+    const goodExec = execReturning({ ENG: [node("ENG-1")] });
+    const throwingExec = () => ({ code: 1, stdout: "", stderr: "removed-state: Ready" });
+
+    // Poll-origin streak: the eligibleQuery itself throws — never the persist.
+    const pollEvents = [];
+    const pollAppend = (e) => pollEvents.push(e);
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent: pollAppend });
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    reconcileProject("ENG", { exec: goodExec, appendHealthEvent: pollAppend });
+    const pollRecovered = pollEvents.filter((e) => e.action === "recovered");
+    expect(pollRecovered).toHaveLength(1);
+    expect(pollRecovered[0].reason).toBe("reconcile-poll-succeeded");
+
+    // Persist-origin streak on a fresh team: the poll always succeeds, only
+    // the disk write throws.
+    enroll("PLAT", { status: "Todo" });
+    const persistEvents = [];
+    const persistAppend = (e) => persistEvents.push(e);
+    const projDir = join(catalystDir, "execution-core", "eligible", "PLAT.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    for (let i = 0; i < 3; i++) reconcileProject("PLAT", { exec: goodExec, appendHealthEvent: persistAppend });
+    expect(getReconcileHealth("PLAT").alerting).toBe(true);
+    rmSync(projDir, { recursive: true, force: true });
+    reconcileProject("PLAT", { exec: goodExec, appendHealthEvent: persistAppend });
+    const persistRecovered = persistEvents.filter((e) => e.action === "recovered");
+    expect(persistRecovered).toHaveLength(1);
+    expect(persistRecovered[0].reason).toBe("eligible-persist-succeeded");
+  });
+
+  test("a single transient persist failure under the threshold does not alert or affect checkFleetFreeze inputs (CTL-1628)", () => {
+    enroll("ENG", { status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    const projDir = join(catalystDir, "execution-core", "eligible", "ENG.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    reconcileProject("ENG", { exec, appendHealthEvent });
+    rmSync(projDir, { recursive: true, force: true });
+    reconcileProject("ENG", { exec, appendHealthEvent });
+
+    // Recovered before crossing the alert threshold — no "failing"/"recovered"
+    // pair, mirroring the equivalent poll-failure test above.
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(0);
+    expect(events.filter((e) => e.action === "recovered")).toHaveLength(0);
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(0);
   });
 });
 
@@ -368,7 +488,12 @@ describe("reconcileProject — CTL-867 reconcile-health escalation", () => {
     expect(health.alerting).toBe(false);
     expect(health.lastSuccessTs).toBeTruthy();
     expect(events).toHaveLength(2);
-    expect(events[1]).toMatchObject({ team: "ENG", action: "recovered" });
+    // CTL-1628 r2: a poll-origin streak's recovery reason is unchanged.
+    expect(events[1]).toMatchObject({
+      team: "ENG",
+      action: "recovered",
+      reason: "reconcile-poll-succeeded",
+    });
     // The successful poll also rebuilt the eligible set (no longer frozen stale).
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
   });
@@ -465,6 +590,43 @@ describe("reconcileProject — CTL-867 reconcile-health escalation", () => {
     expect(inMem.consecutiveFailures).toBe(4);
     expect(inMem.lastSuccessTs).toBe(staleSuccessTs);
     expect(inMem.alerting).toBe(true);
+  });
+
+  // CTL-1628 r3 (Codex #2960 round 3): the round-2 fix stamped
+  // lastFailureOrigin only in memory, so a daemon restart mid persist-origin
+  // streak lost it — the recovery event would fall back to "poll" even though
+  // the poll never failed. lastFailureOrigin is now ALSO in the persisted
+  // marker (writeHealthMarker) and rehydrated (hydrateEntry), so a restart
+  // mid-streak still attributes the eventual recovery correctly.
+  test("a daemon restart mid persist-origin streak still recovers with the persist-origin reason (CTL-1628 r3)", () => {
+    enroll("ENG", { status: "Ready" });
+    const appendHealthEvent = () => {};
+
+    // Drive an alerting persist-origin streak, then simulate a restart —
+    // exactly like the poll-origin restart test above, but for "persist".
+    for (let i = 0; i < 3; i++) {
+      recordReconcileFailure("ENG", `eligible-persist-failed: EACCES`, {
+        appendEvent: appendHealthEvent,
+        origin: "persist",
+      });
+    }
+    const beforeRestart = readReconcileHealthMarkers().ENG;
+    expect(beforeRestart.alerting).toBe(true);
+    expect(beforeRestart.lastFailureOrigin).toBe("persist");
+
+    // Simulate a daemon RESTART: in-memory map cleared, disk marker survives.
+    __resetReconcileHealthForTests();
+    expect(getReconcileHealth("ENG")).toBeNull();
+
+    // The very next tick recovers — no recordReconcileFailure call happens
+    // first, so recordReconcileSuccess must derive the origin from the
+    // rehydrated marker, not an empty in-memory default.
+    const events = [];
+    recordReconcileSuccess("ENG", { appendEvent: (e) => events.push(e) });
+
+    const recovered = events.filter((e) => e.action === "recovered");
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].reason).toBe("eligible-persist-succeeded");
   });
 });
 
@@ -938,6 +1100,11 @@ describe("lifecycle", () => {
     expect(alerts[0].attributes["event.name"]).toBe(ALERT_RAISED);
     expect(alerts[0].attributes["event.label"]).toBe(ALERT_KIND_FLEET_FROZEN_ADMISSION);
     expect(alerts[0].body.payload.teams.sort()).toEqual(["ENG", "PLAT"]);
+    // CTL-1628 r3: every team's failure here originated at the eligibleQuery
+    // poll (throwingExec throws before any persist is attempted) — the
+    // documented replica+linearis double-outage story, so cause is all-poll.
+    expect(alerts[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
+    expect(alerts[0].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_POLL);
 
     // A further all-failing pass does NOT re-fire (latched).
     reconcileAll({ exec: throwingExec, fleetFreezeAppend });
@@ -953,6 +1120,61 @@ describe("lifecycle", () => {
     expect(getReconcileHealth("ENG").alerting).toBe(false);
     expect(alerts).toHaveLength(2);
     expect(alerts[1].attributes["event.name"]).toBe(ALERT_CLEARED);
+  });
+
+  // CTL-1628 r3 (Codex #2960 round 3): before this fix, a fleet freeze caused
+  // entirely by a local eligible-set disk fault (every poll succeeds, every
+  // persist throws — e.g. EACCES on the shared eligible dir) was reported
+  // with the SAME hard-coded "replica or linearis" reason as a genuine
+  // double outage, sending an operator to chase the wrong subsystem.
+  test("reconcileAll attributes an all-persist-origin freeze to the disk fault, not the replica/linearis story", () => {
+    __resetFleetFreezeLatch();
+    enroll("ENG", { status: "Todo" });
+    enroll("PLAT", { status: "Todo" });
+    const goodExec = execReturning({ ENG: [node("ENG-1")], PLAT: [node("PLAT-1")] });
+    // Block BOTH teams' projection paths so every persist throws while the
+    // poll always succeeds.
+    for (const team of ["ENG", "PLAT"]) {
+      const projDir = join(catalystDir, "execution-core", "eligible", `${team}.json`);
+      mkdirSync(projDir, { recursive: true });
+      writeFileSync(join(projDir, "sentinel"), "x");
+    }
+    const alerts = [];
+    const fleetFreezeAppend = (line) => alerts.push(JSON.parse(line));
+
+    for (let i = 0; i < 3; i++) reconcileAll({ exec: goodExec, fleetFreezeAppend });
+
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(getReconcileHealth("PLAT").alerting).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    expect(alerts[0].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_ALL_PERSIST);
+    expect(alerts[0].body.payload.reason).toMatch(/local filesystem fault/);
+    expect(alerts[0].body.payload.reason).not.toMatch(/replica or linearis/);
+  });
+
+  test("reconcileAll attributes a MIXED-origin freeze (one team poll-failing, one persist-failing) as mixed", () => {
+    __resetFleetFreezeLatch();
+    enroll("ENG", { status: "Ready" }); // will poll-fail
+    enroll("PLAT", { status: "Todo" }); // will persist-fail
+    const projDir = join(catalystDir, "execution-core", "eligible", "PLAT.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    const mixedExec = (_cmd, args) => {
+      const team = args[args.indexOf("--team") + 1];
+      if (team === "PLAT") return { code: 0, stdout: JSON.stringify({ nodes: [node("PLAT-1")] }), stderr: "" };
+      return { code: 1, stdout: "", stderr: "removed-state: Ready" };
+    };
+    const alerts = [];
+    const fleetFreezeAppend = (line) => alerts.push(JSON.parse(line));
+
+    for (let i = 0; i < 3; i++) reconcileAll({ exec: mixedExec, fleetFreezeAppend });
+
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(getReconcileHealth("PLAT").alerting).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].body.payload.cause).toBe(FLEET_FREEZE_CAUSE_MIXED);
+    expect(alerts[0].attributes["alert.cause"]).toBe(FLEET_FREEZE_CAUSE_MIXED);
   });
 
   test("stopMonitor clears pending debounce timers (a queued reconcile never fires)", async () => {
@@ -1305,6 +1527,337 @@ describe("sweepMissingTriage (CTL-711)", () => {
       phase: "triage",
     });
     stopMonitor();
+  });
+});
+
+// --- CTL-1589: level-triggered triage sweep (eligible ∪ Triage-state) --------
+//
+// Triage admission used to be EDGE-triggered only: the →Triage webhook was the
+// sole path that ever noticed a Triage ticket, and the retry sweep iterated a
+// Todo-only eligible set. So a ticket already SITTING in Triage — whose one-shot
+// dispatch was consumed and whose worker dir later vanished — could never be
+// re-noticed (live: ADV-1374, ADV-1376, CTL-1381, OTL-5). The sweep now unions
+// the eligible set with the team's Triage-state board.
+
+describe("sweepMissingTriage — Triage-state union (CTL-1589)", () => {
+  const triageNode = (identifier, priority = 2) => ({
+    identifier,
+    state: "Triage",
+    priority,
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  // A runTriageState stub standing in for the replica-backed read, recording the
+  // queries it was handed.
+  const triageReturning = (tickets) => {
+    const fn = (query) => {
+      fn.queries.push(query);
+      return tickets;
+    };
+    fn.queries = [];
+    return fn;
+  };
+
+  const baseOpts = (realOrchDir, dispatch) => ({
+    orchDir: realOrchDir,
+    dispatch,
+    applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+    appendEvent: () => {},
+    readMaxParallelFn: () => 6,
+    liveBackgroundCount: () => 0,
+    // CTL-1589: never let the revalidation shell a real linearis read from a
+    // unit test. Default = live-confirms Triage (the happy path); tests that
+    // exercise stale/unreadable semantics override it.
+    fetchLiveState: () => "Triage",
+  });
+
+  test("dispatches a ticket that exists ONLY in the Triage state (never in the eligible set)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] }); // eligible set is EMPTY — the pre-fix blind spot
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-1374")]),
+    });
+    expect(dispatch).toHaveBeenCalledWith({
+      orchDir: realOrchDir,
+      ticket: "ENG-1374",
+      phase: "triage",
+    });
+  });
+
+  test("sweeps the UNION and dedupes a ticket present in both sources", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      // ENG-2 appears in BOTH sources; ENG-3 only in Triage.
+      runTriageState: triageReturning([triageNode("ENG-2"), triageNode("ENG-3")]),
+    });
+    // Stranded-first (Codex R1) for Triage-ONLY rows; a dual-present ticket
+    // keeps its ELIGIBLE copy (Codex R5: the live-confirmed source, no
+    // revalidation) so ENG-2 dispatches from the eligible half.
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-3", "ENG-1", "ENG-2"]);
+  });
+
+  test("a dual-present ticket with a STALE Triage row still dispatches via its eligible copy (Codex R5)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-DUAL")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    // The stale row would fail revalidation (live=Todo) — but the eligible copy
+    // must win the dedup and dispatch without ever consulting the live read.
+    const fetchLiveState = mock(() => "Todo");
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([triageNode("ENG-DUAL")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-DUAL"]);
+    expect(fetchLiveState).not.toHaveBeenCalled();
+  });
+
+  test("stranded Triage tickets walk before the eligible half (starvation guard)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-TODO")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-STRANDED")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-STRANDED", "ENG-TODO"]);
+  });
+
+  test("a stale Triage row (live state already advanced) is skipped at launch", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Research"); // replica row lies; Linear says advanced
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([triageNode("ENG-STALE")]),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(fetchLiveState).toHaveBeenCalledTimes(1);
+  });
+
+  test("eligible-half candidates never pay the live revalidation read", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Todo");
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-1"]);
+    expect(fetchLiveState).not.toHaveBeenCalled();
+  });
+
+  test("a Triage row confirmed live in Triage dispatches; an unreadable live state HOLDS (fail-closed, Codex R4)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState: () => "Triage",
+      runTriageState: triageReturning([triageNode("ENG-CONFIRMED")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-CONFIRMED"]);
+    // Unreadable → HOLD this sweep (a blind proceed could double-launch and the
+    // later status write could drag an advanced ticket back to Triage).
+    const dispatch2 = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch2),
+      fetchLiveState: () => null,
+      runTriageState: triageReturning([triageNode("ENG-UNREADABLE")]),
+    });
+    expect(dispatch2).not.toHaveBeenCalled();
+  });
+
+  test("a stale Triage row is skipped BEFORE the cross-host claim (fence untouched, Codex R4)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimCalls = [];
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      hosts: ["mini", "mini-2"],
+      hostName: "mini",
+      survivingRosterOverride: ["mini", "mini-2"],
+      claimDispatch: (arg) => {
+        claimCalls.push(arg);
+        return { won: true, generation: 7 };
+      },
+      fetchLiveState: () => "Research",
+      runTriageState: triageReturning([triageNode("ENG-3000")]),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The skip must never bump the fence generation out from under a live
+    // later-phase worker — the claim is only taken when a launch will follow.
+    expect(claimCalls).toHaveLength(0);
+  });
+
+  test("an in-flight Triage-board candidate is skipped without a live read or budget spend (Codex R4)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dir = join(realOrchDir, "workers", "ENG-RUN");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "running" }));
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Triage");
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState,
+      runTriageState: triageReturning([triageNode("ENG-RUN")]),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(fetchLiveState).not.toHaveBeenCalled();
+  });
+
+  test("a negative revalidation verdict is cached — no repeat bare read per sweep (Codex R6)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchLiveState = mock(() => "Research");
+    const opts = { ...baseOpts(realOrchDir, dispatch), fetchLiveState };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-STUCK")]) });
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-STUCK")]) });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The second sweep is answered by the negative marker — one read total.
+    expect(fetchLiveState).toHaveBeenCalledTimes(1);
+  });
+
+  test("a replica row updated AFTER a cached negative invalidates the marker (Codex R7)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    let liveNow = "Research"; // first sweep: genuinely advanced → negative cached
+    const fetchLiveState = mock(() => liveNow);
+    const opts = { ...baseOpts(realOrchDir, dispatch), fetchLiveState };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([triageNode("ENG-BACK")]) });
+    expect(dispatch).not.toHaveBeenCalled();
+    // The ticket re-enters Triage: the replica row is now NEWER than the verdict.
+    liveNow = "Triage";
+    const reentered = { ...triageNode("ENG-BACK"), updatedAt: new Date(Date.now() + 1000).toISOString() };
+    sweepMissingTriage({ ...opts, runTriageState: triageReturning([reentered]) });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-BACK"]);
+    expect(fetchLiveState).toHaveBeenCalledTimes(2);
+  });
+
+  test("a recently-touched Triage row is still swept (no updated_at dwell gate — Codex R3)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    // Generic updated_at is last-modified — a stranded ticket touched by label
+    // churn must not be starved by an age gate; the live revalidation is the guard.
+    const touched = { ...triageNode("ENG-TOUCHED"), updatedAt: new Date(Date.now() - 60_000).toISOString() };
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      fetchLiveState: () => "Triage",
+      runTriageState: triageReturning([touched]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-TOUCHED"]);
+  });
+
+  test("a Triage-state ticket that already has triage.json is still skipped (idempotence holds across both sources)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    writeTriageArtifact(realOrchDir, "ENG-1374"); // already triaged
+    const exec = execReturning({ ENG: [] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, dispatch),
+      runTriageState: triageReturning([triageNode("ENG-1374"), triageNode("ENG-1376")]),
+    });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-1376"]);
+  });
+
+  test("the resolved query (team + triageStatus) is handed to the Triage-state read", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Needs Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [] }) });
+    const runTriageState = triageReturning([]);
+    sweepMissingTriage({ ...baseOpts(realOrchDir, mock(() => ({ code: 0 }))), runTriageState });
+    expect(runTriageState.queries).toHaveLength(1);
+    expect(runTriageState.queries[0]).toMatchObject({ team: "ENG", triageStatus: "Needs Triage" });
+  });
+
+  test("an empty Triage board changes nothing — the eligible half sweeps as before", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({ ...baseOpts(realOrchDir, dispatch), runTriageState: triageReturning([]) });
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  test("a THROWING Triage-state read degrades to the eligible set — the sweep never aborts", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    expect(() =>
+      sweepMissingTriage({
+        ...baseOpts(realOrchDir, dispatch),
+        runTriageState: () => {
+          throw new Error("replica exploded");
+        },
+      })
+    ).not.toThrow();
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  // The read itself answers a null triageStatus with [] (see runTriageStateQuery);
+  // what matters here is that the sweep does no extra work and stays eligible-only.
+  test("triageStatus explicitly null → no extra dispatches (eligible set only)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: null });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    // The REAL read (no stub) with no replica wired — proves the default seam
+    // makes no Linear call and yields nothing.
+    sweepMissingTriage(baseOpts(realOrchDir, dispatch));
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-9"]);
+  });
+
+  test("Triage-state tickets are NOT added to the eligible projection (scheduler pull is untouched)", () => {
+    enroll("ENG", { status: "Todo", triageStatus: "Triage" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+    sweepMissingTriage({
+      ...baseOpts(realOrchDir, mock(() => ({ code: 0 }))),
+      runTriageState: triageReturning([triageNode("ENG-1374")]),
+    });
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
   });
 });
 

@@ -1,6 +1,13 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { readClusterProjects, type TeamEntry } from "./cluster-roster";
+// CTL-1616 PR4: the linear-worker-actor registry row is the single declared source of the
+// NEW/OLD config-json dotted paths loadLinearAgentConfig reads — imported directly
+// cross-directory (zero-import leaf, node:fs/os/path only) rather than re-derived by hand
+// here, so a future registry change can't silently drift out of parity with this reader.
+// Precedent for this exact direct cross-directory `.mjs` + `.d.mts` import shape:
+// server.ts's `getDeploymentMode` import from "../lib/deployment-mode.mjs".
+import { getSecretRow } from "../../lib/secret-contract.mjs";
 
 export interface WebhookCliConfig {
   smeeChannel: string;
@@ -283,6 +290,26 @@ function readGithubSection(filePath: string): FileExtract | null {
   };
 }
 
+// CTL-1616 PR4: the dotted config-json paths below are single-sourced from the shared secret
+// contract's linear-worker-actor registry row — precedence PARITY with the row's own
+// resolution order (NEW global bot.worker tier, then its per-team-legacy tier), so a future
+// registry change can't silently drift out of sync with this reader. This does NOT fold onto
+// resolveSecret's own return shape: this function's distinct return shape (creds +
+// webhookSecret + botUserId, vs. resolveSecret's canonicalized {clientId,clientSecret} JSON
+// string) is preserved, and this reader still does NOT consult the row's credentialEnvPair
+// tier or its global-legacy tier — it stays the narrower 2-tier reader it has always been
+// (CTL-550); folding it onto the full resolveSecret behavior is out of this PR's scope. The
+// `?? ` literal fallbacks below are defensive only — the row/fields always exist in the
+// current registry; they guard this reader against ever crashing on a future refactor.
+const WORKER_ACTOR_ROW = getSecretRow("linear-worker-actor");
+const NEW_GLOBAL_AGENT_PATH: string[] = (
+  WORKER_ACTOR_ROW?.configJsonPath ?? "catalyst.linear.bot.worker"
+).split(".");
+const OLD_PER_TEAM_AGENT_PATH: string[] = (
+  WORKER_ACTOR_ROW?.legacyConfigTiers?.find((t) => t.scope === "per-team-legacy")?.configJsonPath ??
+  "catalyst.linear.agent"
+).split(".");
+
 /**
  * Load the Linear app-actor (worker) credentials. Reads from two locations with
  * the NEW global path taking precedence over the OLD per-team path:
@@ -327,7 +354,7 @@ export function loadLinearAgentConfig(
   const globalConfigPath = join(homeConfigDir, "config.json");
   try {
     const globalParsed: unknown = JSON.parse(readFileSync(globalConfigPath, "utf8"));
-    const result = extractCreds(globalParsed, ["catalyst", "linear", "bot", "worker"]);
+    const result = extractCreds(globalParsed, NEW_GLOBAL_AGENT_PATH);
     if (result !== null) return result;
   } catch { /* absent / malformed — fall through */ }
 
@@ -336,7 +363,7 @@ export function loadLinearAgentConfig(
   const perTeamConfigPath = join(homeConfigDir, `config-${projectKey}.json`);
   try {
     const perTeamParsed: unknown = JSON.parse(readFileSync(perTeamConfigPath, "utf8"));
-    return extractCreds(perTeamParsed, ["catalyst", "linear", "agent"]);
+    return extractCreds(perTeamParsed, OLD_PER_TEAM_AGENT_PATH);
   } catch {
     return null;
   }
@@ -363,6 +390,42 @@ export function loadLinearAgentConfig(
  *
  * Returns `null` if either the channel or secret cannot be resolved.
  */
+/** Linear app-actor user ids: worker + orchestrator botUserIds from the Layer-2
+ *  global config.json, plus the Layer-1 back-compat
+ *  `catalyst.monitor.linear.botUserId`. Exported SEPARATELY from
+ *  loadWebhookConfig because these ids also classify agent comments on read
+ *  surfaces (the discussion timeline) — a monitor with no webhook transport
+ *  configured must still recognize its app actors, and loadWebhookConfig's
+ *  no-transport early-return would otherwise discard them (CTL-1574 review). */
+export function loadLinearBotUserIds(
+  homeConfigDir: string,
+  projectConfigPath: string,
+): ReadonlySet<string> {
+  const linearBotUserIds = new Set<string>();
+  // NEW: Layer-2 global config.json carries worker + orchestrator botUserIds.
+  try {
+    const globalParsed: unknown = JSON.parse(readFileSync(join(homeConfigDir, "config.json"), "utf8"));
+    if (isRecord(globalParsed) && isRecord(globalParsed.catalyst)) {
+      const bot = globalParsed.catalyst.linear;
+      if (isRecord(bot) && isRecord(bot.bot)) {
+        const botSection = bot.bot;
+        if (isRecord(botSection.worker) && typeof botSection.worker.botUserId === "string") {
+          const id = botSection.worker.botUserId;
+          if (id.length > 0) linearBotUserIds.add(id);
+        }
+        if (isRecord(botSection.orchestrator) && typeof botSection.orchestrator.botUserId === "string") {
+          const id = botSection.orchestrator.botUserId;
+          if (id.length > 0) linearBotUserIds.add(id);
+        }
+      }
+    }
+  } catch { /* absent / malformed — continue to Layer-1 fallback */ }
+  // OLD Layer-1 back-compat: catalyst.monitor.linear.botUserId.
+  const layer1BotUserId = readGithubSection(projectConfigPath)?.linearBotUserId ?? "";
+  if (layer1BotUserId.length > 0) linearBotUserIds.add(layer1BotUserId);
+  return linearBotUserIds;
+}
+
 export function loadWebhookConfig(
   homeConfigDir: string,
   projectConfigPath: string,
@@ -430,29 +493,7 @@ export function loadWebhookConfig(
       : (fileLinearSmeeChannel ?? "");
 
   // Collect all known Linear bot user UUIDs for loop prevention. CTL-263.
-  // NEW: Layer-2 global config.json carries worker + orchestrator botUserIds.
-  // OLD: Layer-1 project config carries catalyst.monitor.linear.botUserId (back-compat).
-  const linearBotUserIds = new Set<string>();
-  try {
-    const globalParsed: unknown = JSON.parse(readFileSync(join(homeConfigDir, "config.json"), "utf8"));
-    if (isRecord(globalParsed) && isRecord(globalParsed.catalyst)) {
-      const bot = globalParsed.catalyst.linear;
-      if (isRecord(bot) && isRecord(bot.bot)) {
-        const botSection = bot.bot;
-        if (isRecord(botSection.worker) && typeof botSection.worker.botUserId === "string") {
-          const id = botSection.worker.botUserId;
-          if (id.length > 0) linearBotUserIds.add(id);
-        }
-        if (isRecord(botSection.orchestrator) && typeof botSection.orchestrator.botUserId === "string") {
-          const id = botSection.orchestrator.botUserId;
-          if (id.length > 0) linearBotUserIds.add(id);
-        }
-      }
-    }
-  } catch { /* absent / malformed — continue to Layer-1 fallback */ }
-  // OLD Layer-1 back-compat: catalyst.monitor.linear.botUserId.
-  const layer1BotUserId = projectExtract?.linearBotUserId ?? "";
-  if (layer1BotUserId.length > 0) linearBotUserIds.add(layer1BotUserId);
+  const linearBotUserIds = loadLinearBotUserIds(homeConfigDir, projectConfigPath);
 
   // Linear team→repo roster. CTL-1214 Phase 2: resolved through the shared
   // readClusterProjects() — cluster.json.projects[] first, Layer-1

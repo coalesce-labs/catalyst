@@ -118,4 +118,47 @@ describe("createPushBridge", () => {
     await bridge.onBoard({ tickets: [], daemon: "healthy", anomaly: false });
     expect(sendCalls).toHaveLength(0);
   });
+
+  // CTL-1522: end-to-end proof that a transient daemon-freshness blip sends
+  // nothing. On mini this exact shape (a ~46s excursion past the 90s window)
+  // happened ~150x/day and pushed a degraded AND a recovered every time.
+  it("does NOT send on a sub-hold daemon blip (CTL-1522 hold)", async () => {
+    const store = makeStore([SUB_A]);
+    let clock = 1_000_000;
+    const projector = createNotificationProjector({
+      now: () => clock,
+      daemonNotifyHoldMs: 180_000,
+    });
+    const bridge = createPushBridge({ store, projector, send });
+    const at = async (deltaMs: number, daemon: "healthy" | "degraded") => {
+      clock += deltaMs;
+      await bridge.onBoard({ tickets: [], daemon, anomaly: false });
+    };
+    await at(0, "healthy");
+    await at(90_000, "degraded");
+    await at(46_000, "healthy");
+    await at(600_000, "healthy");
+    expect(sendCalls).toHaveLength(0);
+  });
+
+  // The paired guarantee: a SUSTAINED outage still reaches the phone.
+  it("DOES send once when the daemon stays degraded past the hold (CTL-1522)", async () => {
+    const store = makeStore([SUB_A]);
+    let clock = 1_000_000;
+    const projector = createNotificationProjector({
+      now: () => clock,
+      daemonNotifyHoldMs: 180_000,
+    });
+    const bridge = createPushBridge({ store, projector, send });
+    const at = async (deltaMs: number, daemon: "healthy" | "degraded") => {
+      clock += deltaMs;
+      await bridge.onBoard({ tickets: [], daemon, anomaly: false });
+    };
+    await at(0, "healthy");
+    await at(1, "degraded");
+    await at(180_000, "degraded");
+    await at(1, "degraded");
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].n.title).toBe("Catalyst — daemon degraded");
+  });
 });

@@ -9,12 +9,13 @@
 // node's `/api/ec-worker-stream/<sessionId>` behind the scenes.
 //
 // SINGLE-HOST IDENTITY NO-OP (the load-bearing operator constraint):
-//   When the roster is absent or length 1 (hosts.json absent → getClusterHosts
-//   returns [getHostName()]), this is an EXACT identity no-op — `resolveTailRoute`
-//   returns { mode: "local" } with ZERO added latency, no owner-host resolution,
-//   no remote hop, no fetch. The server then tails the local transcript exactly as
-//   the non-cluster BFF5 path does. The N>1 fan-in branch is exercised ONLY once a
-//   real multi-host roster exists.
+//   When the roster is absent or length 1 (the catalyst-cluster repo's
+//   cluster.json is absent/unreadable → readClusterRoster returns []), this is
+//   an EXACT identity no-op — `resolveTailRoute` returns { mode: "local" } with
+//   ZERO added latency, no owner-host resolution, no remote hop, no fetch. The
+//   server then tails the local transcript exactly as the non-cluster BFF5 path
+//   does. The N>1 fan-in branch is exercised ONLY once a real multi-host roster
+//   exists.
 //
 // NEVER a shared/merged log: this module multiplexes N per-host SSE STREAMS keyed
 // by host.name. It never reads a shared or merged event log — the only thing it
@@ -27,32 +28,46 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { schemaCompat } from "../../execution-core/config-schema.mjs";
 
 /**
- * readClusterRoster — the committed cluster roster from
- * <repoRoot>/.catalyst/hosts.json (a JSON array of host names). Mirrors
- * execution-core/config.mjs::getClusterHosts AND lib/stop-worker.mjs's tolerance:
- * an absent / unreadable / malformed / non-array / empty-array roster collapses to
- * the SINGLE-HOST default of []. Kept LOCAL (not imported from config.mjs) so the
- * orch-monitor package stays self-contained and PR-order-independent — the
- * externalities (the env var + the file read) are injectable. Never throws.
+ * readClusterRoster — the cluster roster from the catalyst-cluster
+ * control-plane repo's cluster.json (`<clusterRepoDir>/cluster.json`.roster,
+ * a JSON array of host names). CTL-1274 retired the per-repo
+ * `.catalyst/hosts.json` roster file — this reader MUST NEVER touch it.
+ * Mirrors execution-core/config.mjs's `readClusterRepoRoster` exactly: same
+ * CATALYST_CLUSTER_DIR / CATALYST_DIR env resolution (CATALYST_CLUSTER_DIR
+ * overrides; default `<CATALYST_DIR or ~/catalyst>/catalyst-cluster`), same
+ * schemaCompat gate (a cluster.json whose schemaVersion is newer than this
+ * stack supports is ignored — degrade, don't trust blindly — imported from
+ * the dep-free execution-core/config-schema.mjs sibling leaf so the policy
+ * can't drift between the two readers), same blank-filtering. Kept LOCAL
+ * (not importing execution-core/config.mjs itself, which pulls in the pino
+ * logger and other daemon deps) so the orch-monitor package stays
+ * self-contained and PR-order-independent — the externalities (the env vars
+ * + the file read) are injectable. Never throws.
  *
  * @param {{ env?: NodeJS.ProcessEnv, read?: typeof readFileSync }} [deps]
- * @returns {string[]} the roster host names, or [] when single-host/absent
+ * @returns {string[]} the roster host names, or [] when single-host/absent/too-new
  */
 export function readClusterRoster({ env = process.env, read = readFileSync } = {}) {
-  const cfgFile = env.CATALYST_CONFIG_FILE;
-  // <repoRoot>/.catalyst/config.json → <repoRoot>/.catalyst (else cwd/.catalyst)
-  const catalystDir = cfgFile ? resolve(cfgFile, "..") : resolve(process.cwd(), ".catalyst");
+  const catalystDir = env.CATALYST_DIR ?? resolve(homedir(), "catalyst");
+  const clusterDir = env.CATALYST_CLUSTER_DIR || resolve(catalystDir, "catalyst-cluster");
   try {
-    const raw = read(resolve(catalystDir, "hosts.json"), "utf8");
+    const raw = read(resolve(clusterDir, "cluster.json"), "utf8");
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      const hosts = parsed.filter((h) => typeof h === "string" && h.length > 0);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      schemaCompat(parsed.schemaVersion) !== "too-new" &&
+      Array.isArray(parsed.roster)
+    ) {
+      const hosts = parsed.roster.filter((h) => typeof h === "string" && h.length > 0);
       if (hosts.length > 0) return hosts;
     }
   } catch {
-    /* absent/malformed roster → single-host default */
+    /* absent/malformed/unreadable cluster repo → single-host default */
   }
   return [];
 }

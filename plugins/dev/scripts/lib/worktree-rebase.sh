@@ -275,10 +275,16 @@ _stall_and_return() {
 # Like rebase_onto_base but, on a conflict, categorizes the conflicted files
 # and either auto-resolves (tests/noise only) or returns a typed sentinel.
 #
+# CTL-1505: a source conflict is judged against a base that may already be stale,
+# so before the terminal rc=2 park it aborts, RE-FETCHES origin/<base>, and
+# retries the rebase ONCE (bounded) — a fresh base often clears a transient
+# conflict; a clean retry returns 0 (strategy=refetch-retry).
+#
 # Return codes:
-#   0 — clean or additively auto-resolved
+#   0 — clean, additively auto-resolved, or cleared by the CTL-1505 re-fetch retry
 #   1 — fetch / other pre-rebase failure (proceed un-rebased)
-#   2 — terminal source conflict (CTL-708 unavailable) or continue failed
+#   2 — terminal source conflict (persists after the re-fetch retry; CTL-708
+#       arbitrary-conflict auto-merge still unavailable) or continue failed
 #   3 — thoughts/** conflict (symlink safety)
 rebase_onto_base_classified() {
   local base="$1" marker
@@ -343,9 +349,41 @@ rebase_onto_base_classified() {
     return
   fi
 
-  # Source files → try CTL-708; stub always returns unavailable → stall.
+  # Source files → try CTL-708; stub always returns unavailable.
   if [[ $sc -gt 0 ]]; then
     if ! ctl708_escalate "${RT_SOURCE[@]+"${RT_SOURCE[@]}"}"; then
+      # CTL-1505: the conflict above was judged ONCE against origin/<base> as
+      # fetched at the top of this function, which can already be stale — main
+      # frequently moves between dispatch and this point, so a "source conflict"
+      # is often TRANSIENT (the live CTL-1504 failure rebased cleanly minutes
+      # later, on a base that had since advanced). Before parking, abort this
+      # attempt, RE-FETCH origin/<base>, and retry the rebase EXACTLY ONCE. A
+      # fresh base that no longer conflicts → proceed as a normal (clean) rebase.
+      # Bounded: one retry, no loop, no recursion. Anything still conflicting —
+      # or a transient re-fetch failure — falls through to the unchanged terminal
+      # stall below. `git rebase --abort` drops the first attempt so the retry
+      # starts from the same clean, noise-stashed pre-rebase state.
+      git rebase --abort 2>/dev/null || true
+      if git fetch --quiet origin "$base" 2>/dev/null &&
+        git rebase --quiet "origin/${base}" 2>/dev/null; then
+        noise_stash_pop "$marker"
+        emit_auto_rebased \
+          --orch     "${ORCH_ID:-}" \
+          --ticket   "${TICKET:-}" \
+          --phase    "${PHASE:-}" \
+          --strategy refetch-retry 2>/dev/null || true
+        return 0
+      fi
+      # Retry did not clear it → a real, persistent source conflict (or the
+      # re-fetch failed). Park with the SAME routing-recognized reason: the
+      # downstream recovery machinery keys EXACTLY on this string
+      # (STALL_CATEGORY_MAP → force-push-if-clean, catB-force-with-lease, the
+      # source-conflict act seam), with no normalizer — renaming it here would
+      # silently route the park to unknown/escalate. _stall_and_return aborts any
+      # rebase the retry left mid-flight and pops the noise stash, restoring
+      # HEAD + the working tree either way, and persists+emits the typed reason
+      # (REBASE_LAST_STALL_REASON + rebase-conflict-stalled) so the park is
+      # observable, not silent.
       _stall_and_return "$marker" source_conflict_ctl708_unavailable 2
       return
     fi
@@ -382,16 +420,75 @@ rebase_onto_base_classified() {
     return
   fi
 
-  if git rebase --continue 2>/dev/null; then
-    noise_stash_pop "$marker"
-    emit_auto_rebased \
-      --orch     "${ORCH_ID:-}" \
-      --ticket   "${TICKET:-}" \
-      --phase    "${PHASE:-}" \
-      --strategy additive 2>/dev/null || true
-    return 0
-  fi
+  # CTL-708 P2: a multi-commit branch can conflict in more than one rebased
+  # commit. A single `git rebase --continue` only replays the NEXT commit —
+  # if that exposes another conflict, git stops again mid-rebase instead of
+  # failing outright. Loop bounded by CATALYST_CTL708_CONTINUE_MAX so each
+  # subsequent stop is reclassified and, for a new source conflict, re-routed
+  # through ctl708_escalate rather than being mis-reported as
+  # `continue_failed` — which bypasses the source-conflict-keyed downstream
+  # routing described above.
+  local continue_max="${CATALYST_CTL708_CONTINUE_MAX:-20}" continue_i=0
+  while (( continue_i < continue_max )); do
+    continue_i=$(( continue_i + 1 ))
 
-  # --continue itself conflicted; stall.
+    if git rebase --continue 2>/dev/null; then
+      noise_stash_pop "$marker"
+      emit_auto_rebased \
+        --orch     "${ORCH_ID:-}" \
+        --ticket   "${TICKET:-}" \
+        --phase    "${PHASE:-}" \
+        --strategy additive 2>/dev/null || true
+      return 0
+    fi
+
+    # --continue failed. If no rebase is in progress anymore, git refused
+    # for a reason unrelated to a fresh conflict — report as before.
+    if ! rebase_in_progress; then
+      _stall_and_return "$marker" continue_failed 2
+      return
+    fi
+
+    # Still mid-rebase — the next replayed commit produced a new conflict.
+    # Reclassify at this stop and route it exactly as the first conflict was
+    # routed above.
+    classify_conflicted_files
+    tc="${#RT_TEST[@]}"
+    nc="${#RT_NOISE[@]}"
+    sc="${#RT_SOURCE[@]}"
+    thc="${#RT_THOUGHTS[@]}"
+    emit_rebase_conflict_categorized \
+      --orch          "${ORCH_ID:-}" \
+      --ticket        "${TICKET:-}" \
+      --phase         "${PHASE:-}" \
+      --test-count    "$tc" \
+      --noise-count   "$nc" \
+      --source-count  "$sc" \
+      --thoughts-count "$thc" 2>/dev/null || true
+
+    if [[ $thc -gt 0 ]]; then
+      _stall_and_return "$marker" thoughts_symlink_broken 3
+      return
+    fi
+
+    if [[ $sc -gt 0 ]]; then
+      if ! ctl708_escalate "${RT_SOURCE[@]+"${RT_SOURCE[@]}"}"; then
+        _stall_and_return "$marker" source_conflict_ctl708_unavailable 2
+        return
+      fi
+    fi
+
+    if [[ $nc -gt 0 ]]; then
+      git checkout --ours   -- "${RT_NOISE[@]}" 2>/dev/null
+      git add               -- "${RT_NOISE[@]}" 2>/dev/null
+    fi
+    if [[ $tc -gt 0 ]]; then
+      git checkout --theirs -- "${RT_TEST[@]}"  2>/dev/null
+      git add               -- "${RT_TEST[@]}"  2>/dev/null
+    fi
+  done
+
+  # Exhausted the bounded retry loop without a clean continue — park the
+  # same way an unresolved single-stop conflict would.
   _stall_and_return "$marker" continue_failed 2
 }

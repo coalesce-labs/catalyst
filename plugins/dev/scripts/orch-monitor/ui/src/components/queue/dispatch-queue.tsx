@@ -23,7 +23,7 @@ import {
 } from "../../board/queue-grouping";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { BoardQueueItem } from "../../board/types";
-import { ordinal, fmtAge, fmtCountdown } from "./queue-model";
+import { ordinal, fmtAge, fmtCountdown, partitionHumanHeld } from "./queue-model";
 import { QueueRowShell } from "./queue-row";
 
 const DISPATCH_BG = "rgba(65,189,125,0.05)";
@@ -41,7 +41,8 @@ function DispatchRow({
   onOpenTicket,
 }: {
   q: BoardQueueItem;
-  globalRank: number;
+  /** null in the held tail — a held row has no dispatch position. */
+  globalRank: number | null;
   dispatchable: boolean;
   isFirstDispatch: boolean;
   multiHost: boolean;
@@ -75,7 +76,7 @@ function DispatchRow({
               flex: "0 0 auto",
             }}
           >
-            {ordinal(globalRank)}
+            {globalRank == null ? "•" : ordinal(globalRank)}
           </span>
         }
         repo={q.repo}
@@ -87,6 +88,11 @@ function DispatchRow({
         onClick={onOpenTicket ? () => onOpenTicket(q.id) : undefined}
         meta={
           <>
+            {q.humanHold && (
+              <span style={{ fontFamily: C.mono, fontSize: 11, color: C.yellow, lineHeight: "18px" }}>
+                {q.humanHold}
+              </span>
+            )}
             <ScopeChip scope={q.scope} estimate={q.estimate} estimateDisplay={q.estimateDisplay} />
             {q.dispatchCooldown && (
               <span style={{ fontFamily: C.mono, fontSize: 11, color: C.fgMuted, lineHeight: "18px" }}>
@@ -130,15 +136,34 @@ export function DispatchQueue({
   const multiHost = queueHostMode(queue) === "multi";
   const [groupByNode, setGroupByNode] = useState(false);
   const grouped = multiHost && groupByNode;
-  const coolingCount = queue.filter((q) => q.dispatchCooldown).length;
+
+  // CTL-1588: a human-held ticket is eligible-but-not-dispatchable — the
+  // admission gate holds it until the operator acts. Partition it OUT of the
+  // rank/tint math (it must never read as an imminent dispatch) and render it
+  // in the dim held tail below.
+  const { dispatchQueue, heldQueue } = partitionHumanHeld(queue);
+  const coolingCount = dispatchQueue.filter((q) => q.dispatchCooldown).length;
 
   // dispatches-next affordance: the top min(freeSlots, queue.length) rows tint.
-  const dispatchCount = Math.min(Math.max(0, freeSlots), queue.length);
+  const dispatchCount = Math.min(Math.max(0, freeSlots), dispatchQueue.length);
 
-  // GLOBAL rank: position within the full queue (1-based), keyed by id so grouped
-  // sections preserve the same number the flat list would show.
+  // GLOBAL rank: position within the dispatchable queue (1-based), keyed by id so
+  // grouped sections preserve the same number the flat list would show.
   const globalRankById = new Map<string, number>();
-  queue.forEach((q, i) => globalRankById.set(q.id, i + 1));
+  dispatchQueue.forEach((q, i) => globalRankById.set(q.id, i + 1));
+
+  const renderHeldRow = (q: BoardQueueItem, indexInList: number) => (
+    <DispatchRow
+      key={q.id}
+      q={q}
+      globalRank={null}
+      dispatchable={false}
+      isFirstDispatch={false}
+      multiHost={multiHost}
+      withTopHairline={indexInList > 0}
+      onOpenTicket={onOpenTicket}
+    />
+  );
 
   const renderRow = (q: BoardQueueItem, indexInList: number) => {
     const globalRank = globalRankById.get(q.id) ?? indexInList + 1;
@@ -162,7 +187,7 @@ export function DispatchQueue({
     <section>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: C.fg }}>Dispatching next</span>
-        <span style={{ fontSize: 13, fontWeight: 400, color: C.fgDim }}>· {queue.length} waiting{coolingCount > 0 ? ` · ${coolingCount} cooling down` : ""}</span>
+        <span style={{ fontSize: 13, fontWeight: 400, color: C.fgDim }}>· {dispatchQueue.length} waiting{coolingCount > 0 ? ` · ${coolingCount} cooling down` : ""}{heldQueue.length > 0 ? ` · ${heldQueue.length} held` : ""}</span>
         <span style={{ flex: 1 }} />
         {multiHost && (
           <ToggleGroup
@@ -182,11 +207,11 @@ export function DispatchQueue({
         )}
       </div>
 
-      {queue.length === 0 ? (
+      {dispatchQueue.length === 0 && heldQueue.length === 0 ? (
         <EmptyState freeSlots={freeSlots} />
       ) : grouped ? (
         <div>
-          {groupQueueByHost(queue).map((g: QueueHostGroup) => (
+          {groupQueueByHost(dispatchQueue).map((g: QueueHostGroup) => (
             <Fragment key={g.host?.id ?? g.label}>
               <div style={{ padding: "6px 8px", background: C.s1, borderRadius: 6 }}>
                 <span style={{ fontSize: 12, fontWeight: 600, color: C.fg }}>{g.label}</span>
@@ -201,8 +226,36 @@ export function DispatchQueue({
       ) : (
         <div>
           <AnimatePresence initial={false}>
-            {queue.map((q, i) => renderRow(q, i))}
+            {dispatchQueue.map((q, i) => renderRow(q, i))}
           </AnimatePresence>
+        </div>
+      )}
+
+      {/* CTL-1588: held tail — eligible tickets the admission gate is holding for
+          the operator. Dim, un-ranked, never tinted as an imminent dispatch.
+          Honors the same By-node grouping as the dispatchable list above. */}
+      {heldQueue.length > 0 && (
+        <div data-dispatch-held-section style={{ marginTop: 10 }}>
+          <div style={{ padding: "6px 8px", background: C.s1, borderRadius: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: C.fgMuted }}>Held — awaiting you</span>
+            <span style={{ fontSize: 12, color: C.fgDim }}> · {heldQueue.length}</span>
+          </div>
+          {grouped ? (
+            groupQueueByHost(heldQueue).map((g: QueueHostGroup) => (
+              <Fragment key={`held-${g.host?.id ?? g.label}`}>
+                <div style={{ padding: "4px 8px" }}>
+                  <span style={{ fontSize: 12, color: C.fgDim }}>{g.label} · {g.items.length} held</span>
+                </div>
+                <AnimatePresence initial={false}>
+                  {g.items.map((q, i) => renderHeldRow(q, i))}
+                </AnimatePresence>
+              </Fragment>
+            ))
+          ) : (
+            <AnimatePresence initial={false}>
+              {heldQueue.map((q, i) => renderHeldRow(q, i))}
+            </AnimatePresence>
+          )}
         </div>
       )}
     </section>

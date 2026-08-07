@@ -399,6 +399,12 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
     if (deps.eventLog && event.kind !== "ignored") {
       const envelope = buildLinearEventLogEnvelope(event, undefined, teamsMap);
       if (envelope !== null) {
+        // CTL-1532: stamp the provider's own delivery id so the event log can be
+        // joined against the catalyst-cloud feed, which carries the same value.
+        // Already validated non-empty above (missing header -> 400). Verified
+        // event-scoped, not per-subscription: the same `linear-delivery` reaches
+        // both the workspace webhook (-> smee) and the cloud OAuth app.
+        envelope.attributes["webhook.delivery.id"] = deliveryId;
         try {
           await deps.eventLog.append(envelope);
         } catch (err) {

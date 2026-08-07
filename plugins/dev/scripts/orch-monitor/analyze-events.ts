@@ -14,7 +14,7 @@
  * on stderr, not aborted.
  */
 
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   normalize,
@@ -23,6 +23,7 @@ import {
   ciFunnel,
   type NormalizedEvent,
 } from "./lib/event-analysis";
+import { scanFileLines } from "./lib/event-log-reader";
 
 const QUESTIONS = ["phase-time", "stalls", "ci-funnel", "all"] as const;
 type Question = (typeof QUESTIONS)[number];
@@ -79,17 +80,23 @@ function loadEvents(paths: string[]): {
       process.stderr.write(`warn: input file not found: ${path}\n`);
       continue;
     }
-    const text = readFileSync(path, "utf8");
-    const lines = text.split("\n").filter((l) => l.length > 0);
-    for (const line of lines) {
+    // CTL-1529: bounded chunk scan instead of `readFileSync(path, "utf8")` +
+    // `split("\n")`. This is an OFFLINE CLI, not a daemon, so the event-loop
+    // stall does not matter — but it defaults to EVERY monthly log in
+    // ~/catalyst/events (`defaultInputs()`), and the whole-file form allocated
+    // both a ~344 MB string AND the ~478 K-element array split off it, per
+    // file, before a single event was normalized. scanFileLines' peak transient
+    // is one 1 MiB chunk regardless of input size.
+    scanFileLines(path, (line) => {
+      if (line.length === 0) return;
       totalLines += 1;
       const e = normalize(line);
       if (e === null) {
         skippedLines += 1;
-        continue;
+        return;
       }
       events.push(e);
-    }
+    });
   }
   return { events, stats: { totalLines, skippedLines } };
 }

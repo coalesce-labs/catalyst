@@ -149,13 +149,14 @@ fi
 
 # Developer with the broker UP → FAIL (developer running worker daemons).
 DEVBROKER_OUT="$(
-  _vn_resolve()           { printf 'developer\tenv\tfalse\ttrue\t-\tno\tno\tcluster-repo\tlaptop'; }
-  _vn_broker_running()    { echo yes; }
-  _vn_exec_core_running() { echo no; }
-  _vn_monitor_running()   { echo no; }
-  _vn_read_replica_base() { echo 'http://mini:7400'; }
-  _vn_updater_ec()        { echo 0; }
-  _vn_drained()           { echo no; }
+  _vn_resolve()             { printf 'developer\tenv\tfalse\ttrue\t-\tno\tno\tcluster-repo\tlaptop'; }
+  _vn_broker_running()      { echo yes; }
+  _vn_exec_core_running()   { echo no; }
+  _vn_monitor_running()     { echo no; }
+  _vn_event_mirror_running(){ echo yes; }
+  _vn_read_replica_base()   { echo 'http://mini:7400'; }
+  _vn_updater_ec()          { echo 0; }
+  _vn_drained()             { echo no; }
   cmd_verify_node --json 2>/dev/null
 )"; DEVBROKER_EC=$?
 expect_eq "cmd: developer+broker exits non-zero" "1" "$DEVBROKER_EC"
@@ -164,20 +165,41 @@ expect_eq "cmd: developer+broker node_class"     "developer" "$(printf '%s' "$DE
 expect_eq "cmd: developer+broker broker-stopped FAIL" "FAIL" \
   "$(printf '%s' "$DEVBROKER_OUT" | jq -r '.checks[] | select(.name=="broker-stopped") | .status')"
 
-# Healthy developer (daemonless, out-of-roster, remote read-source, updater green) → PASS.
+# Healthy developer (daemonless, out-of-roster, remote read-source, updater green,
+# event-mirror alive) → PASS.
 HEALTHYDEV_OUT="$(
-  _vn_resolve()           { printf 'developer\tlayer2\tfalse\ttrue\t-\tno\tno\tcluster-repo\tlaptop'; }
-  _vn_broker_running()    { echo no; }
-  _vn_exec_core_running() { echo no; }
-  _vn_monitor_running()   { echo no; }
-  _vn_read_replica_base() { echo 'http://mini:7400'; }
-  _vn_updater_ec()        { echo 0; }
-  _vn_drained()           { echo no; }
+  _vn_resolve()             { printf 'developer\tlayer2\tfalse\ttrue\t-\tno\tno\tcluster-repo\tlaptop'; }
+  _vn_broker_running()      { echo no; }
+  _vn_exec_core_running()   { echo no; }
+  _vn_monitor_running()     { echo no; }
+  _vn_event_mirror_running(){ echo yes; }
+  _vn_read_replica_base()   { echo 'http://mini:7400'; }
+  _vn_updater_ec()          { echo 0; }
+  _vn_drained()             { echo no; }
   cmd_verify_node --json 2>/dev/null
 )"; HEALTHYDEV_EC=$?
 expect_eq "cmd: healthy developer exits zero" "0" "$HEALTHYDEV_EC"
 expect_eq "cmd: healthy developer verdict=pass" "pass" "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.verdict')"
 expect_eq "cmd: healthy developer 0 required failures" "0" "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.required_failures')"
+expect_eq "cmd: healthy developer event-mirror-running PASS" "PASS" \
+  "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.checks[] | select(.name=="event-mirror-running") | .status')"
+
+# CTL-1662: developer with event-mirror DEAD → FAIL (the doctor blind spot this closes).
+DEVNOMIRROR_OUT="$(
+  _vn_resolve()             { printf 'developer\tlayer2\tfalse\ttrue\t-\tno\tno\tcluster-repo\tlaptop'; }
+  _vn_broker_running()      { echo no; }
+  _vn_exec_core_running()   { echo no; }
+  _vn_monitor_running()     { echo no; }
+  _vn_event_mirror_running(){ echo no; }
+  _vn_read_replica_base()   { echo 'http://mini:7400'; }
+  _vn_updater_ec()          { echo 0; }
+  _vn_drained()             { echo no; }
+  cmd_verify_node --json 2>/dev/null
+)"; DEVNOMIRROR_EC=$?
+expect_eq "cmd: developer+dead-mirror exits non-zero" "1" "$DEVNOMIRROR_EC"
+expect_eq "cmd: developer+dead-mirror verdict=fail"   "fail" "$(printf '%s' "$DEVNOMIRROR_OUT" | jq -r '.verdict')"
+expect_eq "cmd: developer+dead-mirror event-mirror-running FAIL" "FAIL" \
+  "$(printf '%s' "$DEVNOMIRROR_OUT" | jq -r '.checks[] | select(.name=="event-mirror-running") | .status')"
 
 # Worker missing a daemon (execution-core DOWN) → FAIL.
 WORKERMISS_OUT="$(

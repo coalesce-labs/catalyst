@@ -104,7 +104,44 @@ TICKET="${CATALYST_TICKET:-}"   # set when router-dispatched; empty for the swee
 CHANNEL="orch-${ORCH_ID}"
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
-[[ -n "$PLUGIN_ROOT" ]] || PLUGIN_ROOT="$(dirname "$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo .)")")")"
+if [[ -z "$PLUGIN_ROOT" ]]; then
+  # CTL-1628 Phase A2 post-merge fix: this used to fall back to
+  # `dirname(dirname(dirname($BASH_SOURCE/$0)))`, which in a bash command
+  # block (not a sourced script file) resolves to something bogus like "/" —
+  # a bad PLUGIN_ROOT here means `[[ -x "$YIELD_CHECK" ]]` below (in
+  # router-dispatched mode) just evaluates false and the CTL-615
+  # duplicate-worker yield gate is skipped WITHOUT any warning, the exact
+  # silent-skip exposure the A2 fix targeted in _phase-agent-template.
+  # Resolve properly via lib/catalyst-runtime-root.sh's catalyst_dev_scripts
+  # (cwd sibling → marketplace clone → versioned cache), and make a genuine
+  # miss LOUD instead of silently proceeding with a broken PLUGIN_ROOT.
+  RUNTIME_ROOT_LIB=""
+  if [[ -f "./plugins/dev/scripts/lib/catalyst-runtime-root.sh" ]]; then
+    RUNTIME_ROOT_LIB="./plugins/dev/scripts/lib/catalyst-runtime-root.sh"
+  else
+    __rr_mkt="$( ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/dev/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 || true )"
+    if [[ -n "$__rr_mkt" && -f "$__rr_mkt" ]]; then
+      RUNTIME_ROOT_LIB="$__rr_mkt"
+    else
+      __rr_cache="$( ls -d "$HOME"/.claude/plugins/cache/*/catalyst-dev/*/scripts/lib/catalyst-runtime-root.sh 2>/dev/null | sort -V | tail -1 || true )"
+      [[ -n "$__rr_cache" && -f "$__rr_cache" ]] && RUNTIME_ROOT_LIB="$__rr_cache"
+      unset __rr_cache
+    fi
+    unset __rr_mkt
+  fi
+  DEV_SCRIPTS=""
+  if [[ -n "$RUNTIME_ROOT_LIB" ]]; then
+    # shellcheck disable=SC1090
+    . "$RUNTIME_ROOT_LIB"
+    catalyst_dev_scripts >/dev/null 2>&1 || true
+    DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
+  fi
+  if [[ -z "$DEV_SCRIPTS" ]]; then
+    echo "recovery-pass: FATAL — CLAUDE_PLUGIN_ROOT unset and catalyst_dev_scripts probe missed too; refusing to silently skip the CTL-615 yield gate with a guessed PLUGIN_ROOT" >&2
+    exit 1
+  fi
+  PLUGIN_ROOT="$(dirname "$DEV_SCRIPTS")"
+fi
 EXEC_CORE="${PLUGIN_ROOT}/scripts/execution-core"
 
 # ── Mode + the app-actor coordination-comment shim (CTL-1176) ────────────────
@@ -298,9 +335,9 @@ a CONTEXT item — that node owns it, and acting would cause cross-host
 double-action. Reconstruct + fix only the YOURS items; read CONTEXT items for
 context. At N=1 every item is YOURS.
 
-**The pipeline model.** Catalyst ships work through a 9-phase pipeline — triage →
+**The pipeline model.** Catalyst ships work through a 10-phase pipeline — triage →
 research → plan → implement → verify → review → pr → monitor-merge →
-monitor-deploy. Each phase runs as one short-lived `claude --bg` worker. A worker
+monitor-deploy → teardown. Each phase runs as one short-lived `claude --bg` worker. A worker
 writes its state to a signal file at `${ORCH_DIR}/workers/<ticket>/phase-*.json`
 (`status`, `failureReason`, `bg_job_id`). A ticket is "stuck" when a phase signal
 sits at `needs-human`/`failed`/`stalled`, or its worker died with the signal frozen.
@@ -579,6 +616,67 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 > NOT escalations (you remediate these in PR-2 yourself): a stale/BEHIND open PR (rebase + merge it), a
 > red-CI open PR with a deterministic fix (fix it, push, re-check), an abandoned/superseded open PR
 > (close it). Mechanically-resolvable ⇒ FIX; genuine-judgment ⇒ escalate.
+
+### PR-not-merged remediation playbook (CTL-1496)
+
+When the recovery-pass brief category is `pr-not-merged` (set by the Phase-2 classifier when
+`phase-teardown` failed with `failureReason: "pr_not_merged"`), follow this sub-playbook before
+the general Rubric Two logic. The brief already embeds the concrete blockers from the classify-time
+probe; re-probe live state at act-time to get the current picture:
+
+```bash
+# Re-probe live PR state (read-only; same seam as classifier)
+gh pr view --json number,state,mergeStateStatus,mergeable,statusCheckRollup
+```
+
+**Step 1 — CI branch** (failing required checks): for each failing check named in the brief:
+1. `gh run view --log-failed` to read the failure log.
+2. Fix the root cause in code (bounded by the existing attempts cap — see Rubric Two).
+3. `git add … && git commit && git push` to re-trigger CI.
+4. Re-probe after CI completes; if CLEAN, proceed to Step 3 (merge).
+
+**Step 2 — Review branch** (unresolved bot-review threads): apply `/catalyst-dev:review-comments`'s
+round-aware severity policy inline — do NOT invoke that skill via a nested slash command; slash
+commands cannot nest inside a running skill or a `claude --bg` worker (see "/goal condition"
+above), and this worker's allowed tools don't include `Skill`. Do the equivalent yourself:
+1. For each unresolved bot thread, read its priority tag (P0/P1/P2/P3) and determine the reviewing
+   bot's round: how many times that bot login has submitted a review on this PR. An actionable bot
+   finding with **no priority tag at all** (a non-Codex scanner/linter — `create-pr`/`merge-pr`
+   already anticipate other bot reviewers) is classified conservatively into the P0/P1 path below,
+   not left unhandled — an untagged finding must never be the reason recovery gets stuck.
+2. Classify disagreement/judgment-call findings first, regardless of priority tag — a P2 tag does
+   not make a finding non-judgmental. Those go to step 6 (escalate), not steps 3-4.
+3. P0/P1 (any round) and untagged bot findings: read the thread body, address the finding in code,
+   commit, **push** (`git push` — the remote PR must actually change before its blocker is
+   resolved, otherwise the unfixed remote SHA can be merged and the step-5 "did HEAD move" check
+   below has nothing to detect), then resolve the thread via the `resolveReviewThread` GraphQL
+   mutation (reuse `orchestrate-resolve-fixed-threads`'s mutation).
+4. P2/P3, bot-authored only (never a human reviewer's comment — see review-comments' "Deferring
+   low-priority findings after round one"): round 1 is a judgment call, same fix-or-defer choice as
+   step 3 vs. below. Round 2+ always defers: file a follow-up ticket, reply linking it, resolve the
+   thread. If ticket filing fails, fall back to fixing it inline rather than leaving the thread
+   stuck on an optional dependency.
+5. Only if step 3 or 4 actually pushed a code change (HEAD moved on the remote), post `@codex
+   review` via `plugins/dev/scripts/lib/gh-pr-comment.sh <PR> "@codex review" --idempotent` to re-trigger the
+   automated reviewer, then wait bounded (`catalyst-events wait-for`) for re-review. A pass that
+   only deferred findings (no push) must NOT re-trigger — reviewing the same unchanged SHA again
+   can resurface the same findings as fresh threads and file duplicate follow-up tickets.
+6. Escalate ONLY a finding that is a genuine judgment call (human `CHANGES_REQUESTED` or a design
+   decision you cannot resolve) — write the finding to `.review-escalations.jsonl` and use it as
+   the curated escalation brief (PR + thread linked, never the opaque `pr_not_merged` string).
+
+**Step 3 — Merge** (when the probe returns `mergeStateStatus: "CLEAN"`):
+- Run `gh pr view <n> --json mergeable,mergeStateStatus` to confirm.
+- Run the cluster fence guard: `"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase recovery-pass --ticket <T>`.
+- Merge: `gh pr merge <n> --squash --delete-branch`. **NEVER `--admin` or force-merge past a
+  failing or pending check** — this is the load-bearing safety property (Rubric Two invariant).
+
+**Step 4 — Escalate** only when:
+- A human reviewer (not a bot) left `CHANGES_REQUESTED` → escalate with the reviewer's SPECIFIC
+  ask (file, line, and body), PR number linked. Never "Failure reason: pr_not_merged".
+- CI persistently red after 3 honest attempts at a genuine design incompatibility → decision
+  escalate naming the failing check and the incompatibility.
+- The PR was not found (no open PR for the ticket) → escalate with the specific reason.
 
 ### RUBRIC TWO — Finish-the-PR vs. escalate
 

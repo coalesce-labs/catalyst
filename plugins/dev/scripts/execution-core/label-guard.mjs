@@ -16,9 +16,11 @@
 //     dispatch cool-down rationale in scheduler.mjs::dispatchCooldownPath and
 //     memory project_scheduler_marker_under_workers_excludes_ticket).
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { log } from "./config.mjs";
+import { coerceExplanation } from "./escalation-explanation.mjs";
+import { DISPOSITIONS } from "./worker-disposition.mjs";
 
 // ─── labelOnce — moved from scheduler.mjs (CTL-585, then CTL-638 re-home) ───
 //
@@ -42,7 +44,7 @@ import { log } from "./config.mjs";
 // when the transient-failure path keeps re-attempting the write.
 // labelMarkerBase — shared path prefix for the once-marker files used by
 // labelOnce and clearStalledLabel (single source of truth for the marker path).
-function labelMarkerBase(orchDir, ticket, label) {
+export function labelMarkerBase(orchDir, ticket, label) {
   return join(orchDir, "workers", ticket, `.linear-label-${label}`);
 }
 
@@ -146,16 +148,37 @@ export function labelOnce(
 // After REMOVAL_ESCALATION_THRESHOLD consecutive failures, activates a back-off
 // window (inRemovalBackoff) that short-circuits before calling removeLabel — the
 // storm-break. Escalates once with a log.error on the threshold trip.
+//
+// CTL-1605: accepts optional `onSettled(confirmed)` — fired EXACTLY ONCE per call
+// with the CONFIRMED removal outcome, on every exit path (backoff-skip, sync
+// success/failure, async resolve, async reject, sync throw). Unlike `onRemoved`
+// (which only fires on a confirmed removal, for marker/transition bookkeeping),
+// `onSettled` always fires so a caller can aggregate "did this removal land"
+// across several labels without inferring absence-of-call as failure — see
+// resolveAndApplyWorkerStatusLabel's eviction gate below. Never throws.
 export function clearStalledLabel(
   orchDir,
   ticket,
   label,
   writeStatus,
-  { onRemoved = null, now = () => Date.now() } = {}
+  { onRemoved = null, onSettled = null, now = () => Date.now() } = {}
 ) {
   const base = labelMarkerBase(orchDir, ticket, label);
+  const settle = (confirmed) => {
+    if (typeof onSettled === "function") {
+      try {
+        onSettled(confirmed);
+      } catch (err) {
+        log.warn(
+          { ticket, label, err: err?.message },
+          "clearStalledLabel: onSettled threw — continuing"
+        );
+      }
+    }
+  };
   // CTL-1078: guard at entry — if we're in backoff, skip the doomed removeLabel.
   if (inRemovalBackoff(orchDir, ticket, label, now())) {
+    settle(false); // backoff-skip is NOT a confirmed removal
     return;
   }
   try {
@@ -188,6 +211,7 @@ export function clearStalledLabel(
             );
           }
         }
+        settle(true);
       } else if (r?.removed === false) {
         // CTL-1078: record failure and escalate once at threshold.
         const { count } = recordRemovalFailure(orchDir, ticket, label, r.reason, now());
@@ -197,22 +221,27 @@ export function clearStalledLabel(
             "clearStalledLabel: removal failed threshold times — entering back-off (CTL-1078)"
           );
         }
+        settle(false);
+      } else {
+        settle(false);
       }
     };
     if (res && typeof res.then === "function") {
       res
         .then(finalize)
-        .catch((err) =>
+        .catch((err) => {
           log.warn(
             { ticket, label, err: err?.message },
             "clearStalledLabel: removeLabel rejected — continuing"
-          )
-        );
+          );
+          settle(false);
+        });
     } else {
       finalize(res);
     }
   } catch (err) {
     log.warn({ ticket, label, err: err.message }, "clearStalledLabel: threw — continuing tick");
+    settle(false);
   }
 }
 
@@ -344,6 +373,95 @@ export function inEscalationCooldown(orchDir, ticket, phase, now) {
   return now - escalatedAt < ESCALATION_COOLDOWN_MS;
 }
 
+// ─── CTL-1609: explanation signal writer ─────────────────────────────────────
+//
+// Writes a board-readable `phase-recovery-pass.json` carrying `.explanation` so
+// the operator inbox renders a "What's needed now" card instead of a bare
+// "escalated — needs human". Shape mirrors writeEscalationSignal in
+// recovery-reasoning.mjs (the proven write pattern). Colocated here (not
+// imported from recovery-reasoning) to avoid pulling scheduler-adjacent
+// internals into this leaf module.
+//
+// No-overwrite guard: if the existing signal already carries a non-degraded
+// `.explanation` (e.g., from escalateExhaustedIntents's prior writeSignal call
+// on the `attempts-exhausted` site), the coerced thin explanation must NOT
+// clobber it. `degraded:true` means the earlier writer also fell back → the
+// new coerce may be equivalent or richer, so we overwrite; absent `degraded`
+// (a proper typed-union object) means a human-readable curated signal → keep.
+// The recovery-pass statuses that mean a worker is in flight and owns
+// phase-recovery-pass.json. Must stay in sync with delegate-queue.mjs's
+// recoveryPassWorkerLive (the enqueue-time dedup probe) — those are the reads
+// that go blind if this file's status is overwritten.
+const LIVE_RECOVERY_PASS_STATUSES = new Set(["dispatched", "running"]);
+
+function writeExplanationSignal(orchDir, ticket, explanation, { log: logArg = null } = {}) {
+  if (!orchDir || !ticket || !explanation) return;
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+    let prior = {};
+    try {
+      prior = JSON.parse(readFileSync(p, "utf8")) ?? {};
+    } catch {
+      prior = {};
+    }
+    // LIVE-WORKER guard (CTL-1609, Codex P1). `phase-recovery-pass.json` is not
+    // only an explanation carrier — it is the recovery-pass worker's own status
+    // record, and `dispatched`/`running` is exactly what the liveness probes read
+    // (delegate-queue's recoveryPassWorkerLive, the SDK occupancy accounting).
+    // Stamping `status:"needs-human"` over a live worker makes that worker
+    // invisible: it stops deduping a re-enqueue (double-dispatch) and drops out of
+    // capacity accounting. A ticket can legitimately be in both states at once —
+    // a sibling phase failed while its recovery-pass worker is still running — so
+    // this is reachable in normal operation, not a corner case.
+    //
+    // Preserve the live record verbatim rather than merging: the worker itself
+    // writes this file, so a concurrent partial update from here could interleave.
+    // The label still applies (this function is called AFTER the confirmed label
+    // write); only the signal-file mutation is skipped.
+    if (LIVE_RECOVERY_PASS_STATUSES.has(prior.status)) {
+      try {
+        (logArg ?? log).warn(
+          { ticket, priorStatus: prior.status },
+          "label-guard: live recovery-pass worker — preserving its signal, explanation not written"
+        );
+      } catch {
+        /* logging must never block the label path */
+      }
+      return;
+    }
+    // No-overwrite guard for the `attempts-exhausted` site (and any future site
+    // that pre-writes a rich curated explanation before the label apply).
+    if (prior.explanation && prior.explanation.degraded !== true) return;
+    const nowIso = new Date().toISOString();
+    const signal = {
+      ...prior,
+      ticket,
+      status: "needs-human",
+      needsHumanSince:
+        typeof prior.needsHumanSince === "string" && prior.needsHumanSince !== ""
+          ? prior.needsHumanSince
+          : nowIso,
+      updatedAt: nowIso,
+      phase: "recovery-pass",
+      explanation,
+    };
+    mkdirSync(dirname(p), { recursive: true });
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(signal, null, 2));
+    renameSync(tmp, p);
+  } catch (err) {
+    try {
+      const logger = logArg ?? log;
+      logger.warn(
+        { ticket, err: err?.message },
+        "label-guard: explanation signal write failed — continuing"
+      );
+    } catch {
+      /* logging must never block the label path */
+    }
+  }
+}
+
 // ─── CTL-1241: belief-ownership deferral guard ────────────────────────────────
 //
 // When CATALYST_INTENTS_ENFORCE=1, the belief engine's executeEscalations
@@ -373,9 +491,12 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 //   ticket      — ticket identifier
 //   writeStatus — { applyLabel } as passed to labelOnce
 //   opts        — {
-//     env   : Record<string,string>  (process.env in production)
-//     site  : string                 (short site-id for the deferral log)
-//     log   : { info }              (the module's log instance)
+//     env         : Record<string,string>  (process.env in production)
+//     site        : string                 (short site-id for the deferral log)
+//     log         : { info, warn }        (the module's log instance)
+//     explanation : object | undefined    (CTL-1609 Gap 2 — structured escalation
+//                   explanation; coerced via coerceExplanation if partial/absent)
+//     onOutcome   : ({deferred,applied,ran,reason}) => void  (optional, CTL-1641)
 //   }
 //
 // CTL-764 finding 8 + finding C: returns whether the needs-human label was CONFIRMED
@@ -385,16 +506,34 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 // `true` ONLY when applyLabel reported applied:true. Callers gate their worker.transition
 // emission on this so neither a no-op re-application nor a failed attempt records a fresh
 // escalation. Existing callers ignore the return, so this stays backward-compatible.
+//
+// CTL-1641 (Codex #3005 P2): the boolean return CONFLATES three `false` cases —
+// belief-owner deferral, a marker-guarded no-op (label already handled this lifetime),
+// and a GENUINE non-confirming write (applyLabel ran but returned applied:false). A
+// caller that must count a failed escalation (unstuck-escalate-seam) cannot tell them
+// apart from the boolean alone. The optional `onOutcome` callback reports the richer
+// signal WITHOUT changing the return type: `deferred` (belief owner), `ran` (applyLabel
+// actually executed — false on a marker no-op), `applied`, and `reason`. A genuine
+// failure is exactly `!deferred && ran && !applied`.
 export function labelNeedsHumanUnlessBeliefOwner(
   orchDir,
   ticket,
   writeStatus,
-  { env = process.env, site = "unknown", log: logArg = null } = {}
+  {
+    env = process.env,
+    site = "unknown",
+    log: logArg = null,
+    explanation = undefined,
+    onOutcome = null,
+  } = {}
 ) {
   if (beliefOwnsNeedsHuman(env)) {
     // Defer to executeEscalations — R12 belief owner. Record, do not page.
     const logger = logArg ?? log;
     logger.info({ ticket, site }, "needs-human deferred to belief owner (CTL-1241)");
+    if (typeof onOutcome === "function") {
+      onOutcome({ deferred: true, applied: false, ran: false, reason: null });
+    }
     return false;
   }
   // Enforcement OFF (default): call labelOnce exactly as before. CTL-764 finding C:
@@ -403,12 +542,214 @@ export function labelNeedsHumanUnlessBeliefOwner(
   // landed). Capture applyLabel's applied result via onApplyResult; a marker-guarded no-op
   // (labelOnce early-returns, onApplyResult never fires) correctly stays false.
   let applied = false;
+  let ran = false;
+  let reason = null;
   labelOnce(orchDir, ticket, "needs-human", writeStatus, {
     onApplyResult: (r) => {
+      ran = true;
       applied = r.applied === true;
+      reason = r.reason ?? null;
     },
   });
+  // CTL-1609 Gap 2: on a confirmed apply, coerce the explanation and persist it to
+  // the board-readable phase-recovery-pass.json so the operator inbox renders a real
+  // "What's needed now" card. Gated on `applied` (CTL-764 finding C) so a failed or
+  // marker-guarded no-op never manufactures a spurious explanation signal.
+  if (applied) {
+    // Use the injected log's warn if available; fall back to the module-level log
+    // so existing callers that only inject { info } don't break (warn is new).
+    const warnFn =
+      typeof logArg?.warn === "function" ? logArg.warn.bind(logArg) : log.warn.bind(log);
+    if (explanation === undefined || explanation === null) {
+      warnFn(
+        { ticket, site, event: "escalation.explanation-absent" },
+        "label-guard: needs-human applied without an explanation — coercing (CTL-1609)"
+      );
+    }
+    const coerced = coerceExplanation(explanation ?? {}, { ticket, canExecute: false });
+    writeExplanationSignal(orchDir, ticket, coerced, { log: logArg });
+  }
+  if (typeof onOutcome === "function") {
+    onOutcome({ deferred: false, applied, ran, reason });
+  }
   return applied;
+}
+
+// ─── CTL-1605: the worker-status label group (Axis 2) — single source of truth. ───
+// Membership DERIVES from worker-disposition.mjs's canonical DISPOSITIONS (its
+// header contract: "Import constants and functions from this module; never
+// instantiate them elsewhere"), plus the legacy "waiting" so a terminal ticket
+// still wearing it is drained too. worker-disposition.mjs is a pure leaf, so
+// this import creates no cycle.
+export const WORKER_STATUS_LABELS = Object.freeze([...DISPOSITIONS, "waiting"]);
+
+// resolveAndApplyWorkerStatusLabel — the ONE terminal-aware chokepoint every
+// worker-status apply site routes through (CTL-1605). It reads live Linear Status
+// via the injected `isTerminal` probe (isTicketTerminalOrMerged in production —
+// fail-safe NOT-terminal, never throws). If the ticket is terminal it removes every
+// worker-status label present on the ticket and calls the injected `evictWorkerDir`
+// seam (guarded, live-session-safe — Phase 3), then returns { terminal:true } WITHOUT
+// applying `desired`. Otherwise it invokes the caller's existing `applyDesired`
+// closure (labelOnce / convergeHeldLabel / clearStalledLabel) unchanged and returns
+// { terminal:false }. All effects are seams → pure/leaf, fully unit-testable.
+//
+// `needs-human` is cleared through clearStalledLabel (re-arms markers + CTL-1078
+// backoff); the held labels through writeStatus.removeLabel. `onTerminalCleared(arg)`
+// fires EXACTLY ONCE per call — after every present label's removal has settled,
+// the same aggregation point that gates eviction (CTL-1605 Codex thread,
+// scheduler.mjs:5518) — not once per label. A per-label firing let a single
+// confirmed removal on a multi-label ticket (e.g. "blocked") report a clear even
+// when a sibling label (e.g. the sticky "needs-human") was backoff-skipped or
+// failed to confirm, falsely telling the caller the ticket's disposition was
+// clear while a worker-status label was still live on Linear. `arg` is `null`
+// when every present label confirmed removed, or the highest-precedence
+// surviving label (DISPOSITIONS order; legacy "waiting" ranks last, since it
+// carries no precedence of its own) otherwise.
+export function resolveAndApplyWorkerStatusLabel(
+  orchDir,
+  ticket,
+  {
+    desired = null,
+    currentLabels = [],
+    isTerminal,
+    writeStatus,
+    evictWorkerDir = null,
+    applyDesired = null,
+    onTerminalCleared = null,
+    now = () => Date.now(),
+  } = {}
+) {
+  // `desired` is a caller intent marker (which label WOULD be applied on the
+  // non-terminal path); the apply itself is owned by the caller's applyDesired
+  // closure, so we only read it for clarity — it is intentionally not used here.
+  void desired;
+  let verdict = { terminal: false };
+  try {
+    if (typeof isTerminal === "function") verdict = isTerminal(ticket) ?? { terminal: false };
+  } catch (err) {
+    // Fail-safe NOT-terminal — a throw must never manufacture a terminal verdict
+    // (mirrors isTicketTerminalOrMerged). Caller proceeds with its normal apply.
+    log.warn(
+      { ticket, err: err?.message },
+      "resolveAndApplyWorkerStatusLabel: isTerminal threw — treating NOT-terminal"
+    );
+    verdict = { terminal: false };
+  }
+
+  if (!verdict?.terminal) {
+    if (typeof applyDesired === "function") applyDesired();
+    return { terminal: false };
+  }
+
+  // Terminal: refuse the write. Clear every worker-status label present, then evict
+  // — but ONLY once every present label's removal is CONFIRMED (CTL-1605 finding:
+  // evicting on the mere ISSUING of async removals destroys the only retry record,
+  // since STEP A / J3 / J4 all key their candidate sets off workers/<T>/ existing on
+  // disk). Each present label contributes a {settled, confirmed} outcome, tracked
+  // synchronously when the underlying write resolves synchronously (the common sync
+  // test-stub / already-settled-promise-free case) and asynchronously otherwise.
+  const present = new Set(currentLabels ?? []);
+  const outcomes = []; // [{ label, settled: boolean, confirmed: boolean, promise: Promise<boolean> }]
+  const evictOnce = () => {
+    if (typeof evictWorkerDir !== "function") return false;
+    try {
+      return evictWorkerDir(ticket) === true;
+    } catch (err) {
+      log.warn(
+        { ticket, err: err?.message },
+        "resolveAndApplyWorkerStatusLabel: evict threw — continuing"
+      );
+      return false;
+    }
+  };
+  // rankOf / fireTerminalCleared — the single aggregation point for
+  // onTerminalCleared (see the header comment above). Only called once every
+  // present label's outcome has settled, and only when at least one label was
+  // present (mirrors the old per-label loop's zero-iteration no-op on a clean
+  // terminal ticket — nothing to report, nothing fires).
+  const rankOf = (label) => {
+    const idx = DISPOSITIONS.indexOf(label);
+    return idx === -1 ? DISPOSITIONS.length : idx; // legacy "waiting" ranks last
+  };
+  const fireTerminalCleared = () => {
+    if (outcomes.length === 0) return;
+    if (typeof onTerminalCleared !== "function") return;
+    const survivors = outcomes.filter((o) => !o.confirmed).map((o) => o.label);
+    const arg =
+      survivors.length === 0
+        ? null
+        : survivors.reduce((best, label) => (rankOf(label) < rankOf(best) ? label : best));
+    onTerminalCleared(arg);
+  };
+  for (const label of WORKER_STATUS_LABELS) {
+    if (!present.has(label)) continue; // steady-state zero-write on a clean terminal ticket
+    const outcome = { label, settled: false, confirmed: false, promise: null };
+    outcomes.push(outcome);
+    let resolveOutcome;
+    outcome.promise = new Promise((resolve) => {
+      resolveOutcome = resolve;
+    });
+    const settle = (confirmed) => {
+      outcome.settled = true;
+      outcome.confirmed = confirmed;
+      resolveOutcome(confirmed);
+    };
+    if (label === "needs-human") {
+      clearStalledLabel(orchDir, ticket, label, writeStatus, { onSettled: settle, now });
+    } else {
+      try {
+        const res = writeStatus?.removeLabel?.(ticket, label);
+        // undefined (sync test stub) → success; else require removed !== false.
+        const finalize = (r) => {
+          const confirmed = r == null || r?.removed !== false;
+          settle(confirmed);
+        };
+        if (res && typeof res.then === "function") {
+          res
+            .then(finalize)
+            .catch((err) => {
+              log.warn(
+                { ticket, label, err: err?.message },
+                "resolveAndApplyWorkerStatusLabel: removeLabel rejected — continuing"
+              );
+              settle(false);
+            });
+        } else {
+          finalize(res);
+        }
+      } catch (err) {
+        log.warn(
+          { ticket, label, err: err?.message },
+          "resolveAndApplyWorkerStatusLabel: removeLabel threw — continuing"
+        );
+        settle(false);
+      }
+    }
+  }
+
+  // Every outcome settled synchronously (the sync test-stub / no-present-labels
+  // case) → evict (or not) and fire the aggregate callback in THIS tick,
+  // preserving the prior synchronous contract. Any outcome still pending (a
+  // real async removeLabel) → defer BOTH to the aggregated resolution; the
+  // worker dir stays put — and thus retryable by STEP A / J3 / J4 — until every
+  // present label has settled.
+  const allSettled = outcomes.every((o) => o.settled);
+  let evicted = false;
+  if (allSettled) {
+    if (outcomes.every((o) => o.confirmed)) evicted = evictOnce();
+    fireTerminalCleared();
+  } else {
+    Promise.all(outcomes.map((o) => o.promise)).then((results) => {
+      if (results.every(Boolean)) evictOnce();
+      fireTerminalCleared();
+    });
+  }
+  return {
+    terminal: true,
+    reason: verdict.reason ?? "linear-terminal",
+    state: verdict.state ?? null,
+    evicted,
+  };
 }
 
 export function recordEscalation(orchDir, ticket, phase, reason, now) {
