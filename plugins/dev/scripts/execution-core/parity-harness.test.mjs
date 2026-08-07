@@ -180,10 +180,16 @@ describe("envelopeSource / deliveryIdOf / seqOf", () => {
 
   test("seqOf is strict: absent vs invalid vs valid are three different answers", () => {
     expect(seqOf(envelope({ seq: 101 }), "catalyst.cloud.event.seq")).toEqual({ ok: true, seq: 101 });
-    expect(seqOf(envelope({ seq: "101" }), "catalyst.cloud.event.seq")).toEqual({ ok: true, seq: 101 });
     expect(seqOf(envelope({}), "catalyst.cloud.event.seq").ok).toBeNull();
     expect(seqOf(envelope({ seq: "banana" }), "catalyst.cloud.event.seq").ok).toBe(false);
     expect(seqOf(envelope({ seq: 1.5 }), "catalyst.cloud.event.seq").ok).toBe(false);
+    // A NUMERIC-LOOKING STRING is invalid evidence, not something to repair. The consumer
+    // stamps a number; a string means the producer or transport changed shape, and
+    // coercing it through parseIntStrict hid exactly that (rule 6, applied to the reader).
+    expect(seqOf(envelope({ seq: "101" }), "catalyst.cloud.event.seq")).toEqual({ ok: false, raw: "101" });
+    // An explicitly-null value is PRESENT-but-invalid; only a missing key is "absent".
+    expect(seqOf({ attributes: { "catalyst.cloud.event.seq": null } }, "catalyst.cloud.event.seq"))
+      .toEqual({ ok: false, raw: null });
   });
 });
 
@@ -617,13 +623,17 @@ describe("evaluate — three-way exit contract", () => {
     expect(r.blockers.some((b) => b.id === "COVERAGE_REQUIRED")).toBe(true);
   });
 
-  test("a known-gap loss (CTC-297) is warned against its ticket, not silently ignored", () => {
+  test("a known-gap loss (CTC-297) is tracked against its ticket, not silently ignored", () => {
     // interior ts on purpose: both sides keep the same min/max, so the (separate) overlap
     // gate stays quiet and the known-gap classifier is what is under test.
     const live = [clean, line(envelope({ id: "rx-1", name: "linear.reaction.created", ts: "2026-07-26T22:12:30.000Z" }))].join("\n");
     const r = run(live, cleanShadow, { edgeMarginMs: 0 });
     const kg = r.checks.find((c) => c.id === "KNOWN_GAP_LOSSES");
-    expect(kg.status).toBe("warn");
+    // `info`, not `warn`: the row names an OPEN ticket, so warn held the whole harness red
+    // for the life of that ticket — which is how a signal gets trained out of. It is still
+    // printed every run, with its ticket. An UNCENSUSED loss has no such downgrade.
+    expect(kg.status).toBe("info");
+    expect(kg.evidence.tickets).toContain("CTC-297");
     expect(r.checks.find((c) => c.id === "MISSING_FROM_SHADOW").status).toBe("pass");
   });
 
@@ -990,12 +1000,13 @@ describe("warn is NON-GREEN; only info leaves the verdict alone", () => {
     expect(r.exitCode).toBe(EXIT_PROBLEM);
   });
 
-  test("a known-gap loss is reported AND non-green (it is still a real gap)", () => {
+  test("a known-gap loss is reported but does NOT hold the verdict red for the ticket's life", () => {
     const live = [ev("a", "2026-07-26T22:11:00.000Z"), ev("rx", "2026-07-26T22:12:00.000Z", null, "linear.reaction.created"), ev("c", "2026-07-26T22:13:00.000Z", null, "linear.comment.created")].join("\n");
     const shadow = [ev("a", "2026-07-26T22:11:00.000Z", 1), ev("c", "2026-07-26T22:13:00.000Z", 2, "linear.comment.created")].join("\n");
     const r = runW(live, shadow);
-    expect(r.checks.find((c) => c.id === "KNOWN_GAP_LOSSES").status).toBe("warn");
-    expect(r.exitCode).toBe(EXIT_PROBLEM);
+    expect(r.checks.find((c) => c.id === "KNOWN_GAP_LOSSES").status).toBe("info");
+    // The gap is still visible in the report; --strict-known-gaps is the escalation.
+    expect(r.checks.find((c) => c.id === "KNOWN_GAP_LOSSES").detail).toContain("TRACKED");
   });
 
   test("a live-side duplicate delivery is `info` — a provider redelivery contributes no warn", () => {
@@ -1051,5 +1062,73 @@ describe("a question that was not answered is never a green row", () => {
     const shadow = [ev("a", "2026-07-26T22:11:00.000Z", 1), ev("c", "2026-07-26T22:13:00.000Z", 2, "linear.comment.created")].join("\n");
     const r = runW(live, shadow, { sources: ["github"] });
     expect(r.notAsserted.some((n) => n.id === "MATCHED_NONZERO_linear")).toBe(true);
+  });
+});
+
+// ==========================================================================
+// CTL-1534 round 2 — defects the draft PR shipped with.
+// ==========================================================================
+
+describe("M — a PARTIAL edge exclusion is an unanswered question, not a clean pass", () => {
+  const W = {
+    fromMs: Date.parse("2026-07-26T22:00:00.000Z"), fromIso: "2026-07-26T22:00:00.000Z",
+    toMs: Date.parse("2026-07-26T23:00:00.000Z"), toIso: "2026-07-26T23:00:00.000Z",
+    edgeMarginMs: 120_000,
+  };
+  const run = (liveText, shadowText, over = {}) => {
+    const o = opts({ ...W, ...over });
+    return evaluate({ live: ingestText("live", liveText, o), shadow: ingestText("shadow", shadowText, o), opts: o, generatedAt: "1970-01-01T00:00:00.000Z" });
+  };
+  // Matched pairs at BOTH ends keep the window-overlap gate quiet (it fires on a >margin
+  // skew between the sides' ts bounds); the one-sided rows below are the actual subject.
+  const headLive = line(envelope({ id: "head", ts: "2026-07-26T22:05:00.000Z" }));
+  const headShadow = line(envelope({ id: "head", ts: "2026-07-26T22:05:00.000Z", seq: 1 }));
+  const tailLive = line(envelope({ id: "tail", ts: "2026-07-26T22:59:00.000Z" }));
+  const tailShadow = line(envelope({ id: "tail", ts: "2026-07-26T22:59:00.000Z", seq: 9 }));
+  const edgeOnly = line(envelope({ id: "edge-1", ts: "2026-07-26T22:59:30.000Z" }));
+  const interiorOnly = line(envelope({ id: "int-1", ts: "2026-07-26T22:35:00.000Z" }));
+
+  test("some-excluded-some-examined enumerates the waived candidates instead of hiding them", () => {
+    const r = run([headLive, interiorOnly, tailLive, edgeOnly].join("\n"), [headShadow, tailShadow].join("\n"));
+    // the interior candidate IS answered — and it is a real loss
+    expect(r.checks.find((c) => c.id === "MISSING_FROM_SHADOW").status).toBe("fail");
+    // ...and the edge-excluded one is named as NOT answered, rather than folded into the row
+    expect(r.notAsserted.some((n) => n.id === "MISSING_FROM_SHADOW_EDGE_EXCLUDED")).toBe(true);
+  });
+
+  test("when EVERY candidate is edge-excluded the all-or-nothing not_run row still fires", () => {
+    const r = run([headLive, tailLive, edgeOnly].join("\n"), [headShadow, tailShadow].join("\n"));
+    expect(r.checks.find((c) => c.id === "MISSING_FROM_SHADOW").status).toBe("not_run");
+  });
+
+  test("shadow-only edge exclusions get the same treatment", () => {
+    const r = run(
+      [headLive, tailLive].join("\n"),
+      [headShadow, tailShadow,
+        line(envelope({ id: "sh-int", ts: "2026-07-26T22:36:00.000Z", seq: 5 })),
+        line(envelope({ id: "sh-edge", ts: "2026-07-26T22:59:30.000Z", seq: 10 }))].join("\n"),
+    );
+    expect(r.notAsserted.some((n) => n.id === "SHADOW_ONLY_EDGE_EXCLUDED")).toBe(true);
+  });
+
+  test("with --edge-margin 0 nothing is waived and no unanswered row is emitted", () => {
+    const r = run([headLive, interiorOnly, tailLive, edgeOnly].join("\n"), [headShadow, tailShadow].join("\n"), { edgeMarginMs: 0 });
+    expect(r.notAsserted.some((n) => n.id.endsWith("_EDGE_EXCLUDED"))).toBe(false);
+  });
+});
+
+describe("L — seqOf never repairs the evidence it reads", () => {
+  test("a string seq becomes SEQ_ATTR_INVALID, not a silently-parsed integer", () => {
+    const W = {
+      fromMs: Date.parse("2026-07-26T22:00:00.000Z"), fromIso: "2026-07-26T22:00:00.000Z",
+      toMs: Date.parse("2026-07-26T23:00:00.000Z"), toIso: "2026-07-26T23:00:00.000Z",
+      edgeMarginMs: 0,
+    };
+    const o = opts(W);
+    const live = [line(envelope({ id: "a", ts: "2026-07-26T22:11:00.000Z" })), line(envelope({ id: "b", ts: "2026-07-26T22:12:00.000Z" }))].join("\n");
+    const shadow = [line(envelope({ id: "a", ts: "2026-07-26T22:11:00.000Z", seq: 1 })), line(envelope({ id: "b", ts: "2026-07-26T22:12:00.000Z", seq: "2" }))].join("\n");
+    const r = evaluate({ live: ingestText("live", live, o), shadow: ingestText("shadow", shadow, o), opts: o, generatedAt: "1970-01-01T00:00:00.000Z" });
+    expect(r.blockers.some((b) => b.id === "SEQ_ATTR_INVALID")).toBe(true);
+    expect(r.exitCode).toBe(EXIT_CANNOT_EVALUATE);
   });
 });

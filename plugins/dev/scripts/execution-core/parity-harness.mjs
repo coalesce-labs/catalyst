@@ -343,15 +343,21 @@ export function repoOf(obj) {
   return typeof v === "string" && v.length > 0 ? v : "(none)";
 }
 
-/** Read the cloud seq the consumer stamped on a shadow envelope. Strict: integers only. */
+/**
+ * Read the cloud seq the consumer stamped on a shadow envelope. Strict: integer NUMBERS only.
+ *
+ * A STRING seq used to be coerced through parseIntStrict. That is rule 6 ("never normalise
+ * the evidence") violated by the tool that enforces it: cloud-event-consumer's mapCloudEvent
+ * rejects anything but a safe-integer number before stamping, so a string here means the
+ * producer or the transport changed shape underneath us. Repairing it hides that; it is
+ * invalid evidence, and SEQ_ATTR_INVALID exists to say so.
+ */
 export function seqOf(obj, seqAttr) {
-  const v = obj?.attributes?.[seqAttr];
+  const attrs = obj?.attributes;
+  if (typeof attrs !== "object" || attrs === null || !Object.hasOwn(attrs, seqAttr)) return { ok: null }; // absent
+  const v = attrs[seqAttr];
   if (typeof v === "number") return Number.isSafeInteger(v) ? { ok: true, seq: v } : { ok: false, raw: v };
-  if (typeof v === "string") {
-    const p = parseIntStrict(v);
-    return p.ok ? { ok: true, seq: p.value } : { ok: false, raw: v };
-  }
-  return { ok: null }; // absent
+  return { ok: false, raw: v };
 }
 
 // ── JSONL ingestion ─────────────────────────────────────────────────────────────────────
@@ -1029,6 +1035,17 @@ export function evaluate({ live, shadow, opts, generatedAt = new Date().toISOStr
           `${unexplainedLoss.length} interior live delivery/deliveries never reached the shadow log`,
           { deliveries: capList(unexplainedLoss.map(fmtEntry), opts.maxList), byRepo: tally(unexplainedLoss, (e) => repoOf(e.obj)), byType: tally(unexplainedLoss, (e) => eventNameOf(e.obj)) })
   );
+  // The not_run row above is ALL-OR-NOTHING: it only fires when EVERY candidate was
+  // edge-excluded. A PARTIAL exclusion — 9 waived, 1 examined — printed a bare `pass`,
+  // which is indistinguishable from having examined all 10 (rule 10). The excluded ones
+  // are an unanswered question and are enumerated as one, exactly like a `--sources`
+  // exclusion; `--edge-margin 0` is what answers them.
+  if (!allLiveOnlyEdgeExcluded && liveOnlyEdge.length > 0) {
+    notAsserted.push({
+      id: "MISSING_FROM_SHADOW_EDGE_EXCLUDED",
+      reason: `${liveOnlyEdge.length} of ${liveOnly.length} live-only delivery/deliveries sat within --edge-margin ${opts.edgeMarginMs / 1000}s of a window boundary and were NOT examined. The detector answered only for the ${liveOnlyInterior.length} interior candidate(s) — a partial exclusion is not a full answer. Re-run with --edge-margin 0, or move --from/--to so they are interior.`,
+    });
+  }
 
   // Emitted at zero too: a filed gap that stopped appearing is a result worth seeing, and an
   // omitted row is indistinguishable from nobody looking.
@@ -1036,10 +1053,18 @@ export function evaluate({ live, shadow, opts, generatedAt = new Date().toISOStr
     knownGapDeficit.length === 0
       ? check("KNOWN_GAP_LOSSES", "pass", "live-only deliveries attributable to a FILED cloud-side gap",
           `0 in window (censused known gaps: ${DEFAULT_TYPE_CENSUS.filter((c) => c.expectation === "known-gap").map((c) => `${c.prefix}* [${c.ticket}]`).join(", ") || "none"})`)
-      : check("KNOWN_GAP_LOSSES", opts.strictKnownGaps ? "fail" : "warn",
+      // `info` by default, NOT `warn`. Every delivery counted here matched a census row
+      // that already names an open ticket, so `warn` (non-green, exit 1) made the harness
+      // permanently red for as long as that ticket stays open — which manufactures exactly
+      // the pressure to stop reading the verdict that this tool exists to resist. The
+      // distinction the exit code must preserve is NEW/uninvestigated vs KNOWN/filed: a
+      // loss that is NOT censused is already counted as unexplained by MISSING_FROM_SHADOW
+      // and FAILS there. This row keeps the tracked ones visible, with their ticket, every
+      // run; --strict-known-gaps escalates it to a hard fail for the phase-5 close-out.
+      : check("KNOWN_GAP_LOSSES", opts.strictKnownGaps ? "fail" : "info",
           "live-only deliveries attributable to a FILED cloud-side gap",
-          `${knownGapDeficit.length} delivery/deliveries match a known-gap census row (e.g. linear.reaction.* / CTC-297). Tracked, not new — but still a real gap that must close before phase 5.`,
-          { deliveries: capList(knownGapDeficit.map(fmtEntry), opts.maxList), byType: tally(knownGapDeficit, (e) => eventNameOf(e.obj)) })
+          `${knownGapDeficit.length} delivery/deliveries match a known-gap census row (e.g. linear.reaction.* / CTC-297) — TRACKED and still monitored, not new. Uncensused losses are NOT counted here; they fail MISSING_FROM_SHADOW. Pass --strict-known-gaps to make a filed gap block (required before phase 5).`,
+          { deliveries: capList(knownGapDeficit.map(fmtEntry), opts.maxList), byType: tally(knownGapDeficit, (e) => eventNameOf(e.obj)), tickets: [...new Set(knownGapDeficit.map((e) => censusExpectationFor(eventNameOf(e.obj)).ticket ?? "(untagged)"))] })
   );
 
   // Shadow-only is the EXPECTED direction (the cloud is a superset: more types, more repos).
@@ -1069,6 +1094,12 @@ export function evaluate({ live, shadow, opts, generatedAt = new Date().toISOStr
           `${shadowOnlyOverlapping.length} shadow-only delivery/deliveries of a type the LIVE side also carries — that is a smee-side drop (the 14h32m GitHub tunnel outage had exactly this shape), not the cloud superset. ${shadowOnlySuperset.length} further shadow-only deliveries are expected superset.`,
           { overlapping: capList(shadowOnlyOverlapping.map(fmtEntry), opts.maxList), byType: tally(shadowOnlyOverlapping, (e) => eventNameOf(e.obj)), supersetByType: tally(shadowOnlySuperset, (e) => eventNameOf(e.obj)) })
   );
+  if (!allShadowOnlyEdgeExcluded && shadowOnlyEdge.length > 0) {
+    notAsserted.push({
+      id: "SHADOW_ONLY_EDGE_EXCLUDED",
+      reason: `${shadowOnlyEdge.length} of ${shadowOnly.length} shadow-only delivery/deliveries sat within --edge-margin ${opts.edgeMarginMs / 1000}s of a window boundary and were NOT examined. The detector answered only for the ${shadowOnlyInterior.length} interior candidate(s). Re-run with --edge-margin 0, or move --from/--to so they are interior.`,
+    });
+  }
 
   // Invariant 6: the consumer dedups on delivery_id. A duplicate on the shadow side is a
   // dedup failure. A duplicate on the live side is a provider redelivery — reported, not failed.
@@ -1405,7 +1436,12 @@ FEED ORDERING
 
 STRICTNESS
   --strict-shadow-only   overlapping-type shadow-only deliveries FAIL (default: warn)
-  --strict-known-gaps    filed cloud-side gaps (CTC-297) FAIL (default: warn)
+  --strict-known-gaps    filed cloud-side gaps (CTC-297) FAIL. Default is "info": a gap
+                         that is already censused AND ticketed is tracked, printed every
+                         run with its ticket, and does NOT move the verdict — a row that
+                         is permanently red for the life of a ticket trains people to
+                         ignore it. An UNCENSUSED loss is never counted here; it fails
+                         MISSING_FROM_SHADOW. Pass this before the phase-5 close-out.
   --strict-attrs         locally-enriched attribute presence diffs FAIL
   --allow-version-span   waive the deploy-boundary gate (a window crossing a deploy lies)
   --allow-partial-overlap  waive the "sides cover different intervals" gate
@@ -1686,6 +1722,47 @@ export function selfTest() {
     shadowText: [f.g(1, "gh-1", 101), f.g(2, "gh-2", 102), f.l(3, "li-1", 103), f.l(4, "li-2", 104),
       JSON.stringify({ ts: f.T(5), attributes: { "event.name": "catalyst.cloud_feed.unmappable_payload", "webhook.delivery.id": "gh-3" }, reason: "payloadOmitted", payloadBytes: 12 })].join("\n"),
     expect: { exitCode: EXIT_CANNOT_EVALUATE, detector: "UNCORROBORATED_ELISION" },
+  }));
+
+  // 22. A STRING seq is INVALID EVIDENCE, not something to coerce (rule 6, applied to the
+  //     harness's own reader). The consumer stamps a number; a string means the producer
+  //     changed shape, and parseIntStrict-ing it hid that.
+  cases.push(runCase("a string seq value is rejected, never coerced", {
+    liveText: f.live,
+    shadowText: [f.g(1, "gh-1", 101), f.g(2, "gh-2", "102"), f.l(3, "li-1", 103), f.l(4, "li-2", 104), f.g(5, "gh-3", 105)].join("\n"),
+    expect: { exitCode: EXIT_CANNOT_EVALUATE, detector: "SEQ_ATTR_INVALID" },
+  }));
+
+  // 23. A PARTIAL edge exclusion is not a full answer. The not_run row only fires when
+  //     EVERY candidate is edge-excluded, so 1-of-2 waived printed a bare `pass`.
+  // (the matched `gh-anchor` pair at 22:59 keeps the window-overlap gate quiet; the two
+  //  live-only rows are the actual subject — one interior, one inside the trailing margin)
+  const edgeAnchor = (seq) => env({ name: "github.pr.opened", id: "gh-anchor", ts: "2026-07-26T22:59:00.000Z", seq, attrs: { "vcs.repository.name": "coalesce-labs/catalyst" } });
+  const partialEdge = runCase("a PARTIAL edge exclusion is enumerated, not folded into the pass", {
+    liveText: [f.live, edgeAnchor(null),
+      env({ name: "github.pr.opened", id: "gh-interior", ts: f.T(20), attrs: { "vcs.repository.name": "coalesce-labs/catalyst" } }),
+      env({ name: "github.pr.opened", id: "gh-edge", ts: "2026-07-26T22:59:30.000Z", attrs: { "vcs.repository.name": "coalesce-labs/catalyst" } })].join("\n"),
+    shadowText: [f.shadow, edgeAnchor(106)].join("\n"),
+    expect: { exitCode: EXIT_PROBLEM, detector: "MISSING_FROM_SHADOW" },
+  });
+  partialEdge.ok =
+    partialEdge.ok &&
+    partialEdge.report.notAsserted.some((n) => n.id === "MISSING_FROM_SHADOW_EDGE_EXCLUDED");
+  cases.push(partialEdge);
+
+  // 24. A FILED, censused gap is `info` — tracked and printed with its ticket, but it does
+  //     NOT hold the verdict red for the life of the ticket (which trains people to stop
+  //     reading it). --strict-known-gaps is the escalation, and it must still bite.
+  const knownGapShadow = [f.g(1, "gh-1", 101), f.g(2, "gh-2", 102), f.l(3, "li-1", 103), f.l(4, "li-2", 104), f.g(5, "gh-3", 105)].join("\n");
+  const knownGapLive = [f.live, env({ name: "linear.reaction.created", id: "rx-1", ts: f.T(3), attrs: {} })].join("\n");
+  cases.push(runCase("a filed, censused gap is tracked info — not a permanently red verdict", {
+    liveText: knownGapLive, shadowText: knownGapShadow,
+    expect: { exitCode: EXIT_HEALTHY, detector: null },
+  }));
+  cases.push(runCase("--strict-known-gaps still escalates a filed gap to a hard fail", {
+    liveText: knownGapLive, shadowText: knownGapShadow,
+    opts: { strictKnownGaps: true },
+    expect: { exitCode: EXIT_PROBLEM, detector: "KNOWN_GAP_LOSSES" },
   }));
 
   // 14. BAD INPUT — never coerced. `--from banana` must be rejected, not NaN'd into "scan

@@ -25,8 +25,10 @@ import {
   SEQ_ATTR,
   SHADOW_DIR_NAME,
   VALUE_FLAGS,
+  classifyDecline,
   classifyLine,
   classifyProviderType,
+  computeMissingRanges,
   createShadowAppender,
   ghEvent,
   isPayloadOmitted,
@@ -38,6 +40,7 @@ import {
   parseEnvFile,
   parseSinceArg,
   readCloudToken,
+  readLinearBotUserIds,
   readState,
   resolveShadowDir,
   runOnce,
@@ -106,8 +109,11 @@ async function runMain(argv, responses, extra = {}) {
   const code = await main(argv, {
     catalystDir: dir,
     tokenOverride: TOKEN,
-    linearTeams: [],
-    botUserIds: new Set(),
+    // A REALISTIC config, not an empty one. Since the M1 fix an empty roster / empty bot
+    // set is a declared degradation that exits 2, so a suite that injected `[]` would be
+    // testing the degraded path in every single case.
+    linearTeams: [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }],
+    botUserIds: new Set(["bot-user-0"]),
     fetchImpl: async (url) => {
       requested.push(url);
       const next = queue.shift();
@@ -1392,5 +1398,318 @@ describe("CTL-1534 M10 — shadow dir cannot resolve onto the live event log", (
     const f = shadowFilePath(root, new Date(Date.UTC(2026, 6, 1)));
     expect(basename(f)).toBe("shadow-2026-07.jsonl");
     expect(basename(f)).not.toBe("2026-07.jsonl");
+  });
+});
+
+// ==========================================================================
+// CTL-1534 round 2 — the ten known defects the draft PR shipped with.
+// Each block names the false green it closes, and each assertion fails on the
+// code as it stood before the fix.
+// ==========================================================================
+
+describe("H — a hole ANYWHERE in the page pins the cursor, not just a late start", () => {
+  test("computeMissingRanges derives holes from the received SET, in any wire order", () => {
+    expect(computeMissingRanges(0, [1, 2, 3])).toEqual([]);
+    // an inversion delivers the whole range: NO hole
+    expect(computeMissingRanges(0, [2, 1, 3])).toEqual([]);
+    expect(computeMissingRanges(0, [9, 10])).toEqual([{ from: 1, to: 8 }]);
+    expect(computeMissingRanges(0, [1, 4])).toEqual([{ from: 2, to: 3 }]);
+    expect(computeMissingRanges(0, [1, 4, 8])).toEqual([{ from: 2, to: 3 }, { from: 5, to: 7 }]);
+    expect(computeMissingRanges(100, [101, 103])).toEqual([{ from: 102, to: 102 }]);
+  });
+
+  test("an INTERIOR-page gap writes a durable marker and refuses to advance the cursor", async () => {
+    const app = memAppender();
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 4, lines: [ghEvent(1, "d1"), ghEvent(4, "d4")] }),
+      token: "", since: 0, appender: app, seen: new Set(), log: collectLogs(),
+    });
+    expect(r.status).toBe(EXIT_PROBLEM);
+    // the pre-fix code advanced to lastSeq (4), burning seqs 2..3 forever
+    expect(r.cursorAdvancedTo).toBeNull();
+    expect(r.holes).toEqual([{ from: 2, to: 3 }]);
+    const gaps = app.records.filter((x) => x.attributes?.["event.name"] === MARKER_FEED_GAP);
+    expect(gaps.length).toBe(1);
+    expect(gaps[0].reason).toBe("coverage-interior-gap");
+    expect(gaps[0].body.missingRanges).toEqual([{ from: 2, to: 3 }]);
+  });
+
+  test("the interior-gap cursor pin survives a restart (the state file never moves)", async () => {
+    const first = await runMain(["--once", "--since", "0"], [
+      res({ head: 4, lines: [ghEvent(1, "d1"), ghEvent(4, "d4")] }),
+    ]);
+    expect(first.code).toBe(EXIT_PROBLEM);
+    expect(JSON.parse(readFileSync(statePath(dir), "utf8")).cursor).toBe(0);
+  });
+
+  test("multiple holes in one page are ALL recorded, not just the first", async () => {
+    const app = memAppender();
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 8, lines: [ghEvent(1, "d1"), ghEvent(4, "d4"), ghEvent(8, "d8")] }),
+      token: "", since: 0, appender: app, seen: new Set(), log: collectLogs(),
+    });
+    expect(r.holes).toEqual([{ from: 2, to: 3 }, { from: 5, to: 7 }]);
+    expect(r.cursorAdvancedTo).toBeNull();
+  });
+});
+
+describe("M — a wire-order inversion is an ordering fault, never a proven hole", () => {
+  test("2,1,3 fails integrity, passes coverage, writes NO gap marker and advances", async () => {
+    const app = memAppender();
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 3, lines: [ghEvent(2, "d2"), ghEvent(1, "d1"), ghEvent(3, "d3")] }),
+      token: "", since: 0, appender: app, seen: new Set(), log: collectLogs(),
+    });
+    expect(r.integrity.ok).toBe(false);
+    // pre-fix: firstSeq(2) !== since+1(1) claimed a hole at 1..1 that WAS delivered
+    expect(r.coverage.ok).toBe(true);
+    expect(r.holes).toEqual([]);
+    expect(r.cursorAdvancedTo).not.toBeNull();
+    expect(app.records.some((x) => x.attributes?.["event.name"] === MARKER_FEED_GAP)).toBe(false);
+  });
+
+  test("a genuinely late start is still a proven hole even when the page is inverted", async () => {
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 4, lines: [ghEvent(4, "d4"), ghEvent(3, "d3")] }),
+      token: "", since: 0, appender: memAppender(), seen: new Set(), log: collectLogs(),
+    });
+    expect(r.holes).toEqual([{ from: 1, to: 2 }]);
+    expect(r.cursorAdvancedTo).toBeNull();
+  });
+});
+
+describe("H — markers anchor their ts on receivedAt, not the wall clock", () => {
+  const RECEIVED = "2026-07-26T22:11:00.000Z";
+
+  test("a gap marker is placed in the window the events it describes belong to", async () => {
+    const app = memAppender();
+    await runOnce({
+      fetchImpl: async () => res({ head: 10, lines: [ghEvent(9, "d9", { receivedAt: RECEIVED })] }),
+      token: "", since: 0, appender: app, seen: new Set(), log: collectLogs(),
+    });
+    const gap = app.records.find((x) => x.attributes?.["event.name"] === MARKER_FEED_GAP);
+    expect(gap.ts).toBe(RECEIVED);
+    expect(gap.tsSource).toBe("receivedAt");
+    // the wall clock is kept, separately — the two are never conflated
+    expect(typeof gap.emittedAt).toBe("string");
+    expect(gap.emittedAt).not.toBe(gap.ts);
+  });
+
+  test("an elision marker is anchored on its own delivery's receivedAt", async () => {
+    const app = memAppender();
+    await runOnce({
+      fetchImpl: async () =>
+        res({
+          head: 1,
+          lines: [{
+            accountId: "t", seq: 1, deliveryId: "big-1", source: "linear", eventType: "Comment",
+            action: "create", receivedAt: RECEIVED, payload: null, payloadOmitted: true, payloadBytes: 120000,
+          }],
+        }),
+      token: "", since: 0, appender: app, seen: new Set(), log: collectLogs(),
+    });
+    const marker = app.records.find((x) => x.attributes?.["event.name"] === MARKER_UNMAPPABLE);
+    expect(marker.ts).toBe(RECEIVED);
+    expect(marker.tsSource).toBe("receivedAt");
+  });
+
+  test("with no usable receivedAt anchor the fallback is DECLARED, not disguised", async () => {
+    const app = memAppender();
+    await runOnce({
+      fetchImpl: async () => res({ status: 409, body: { error: "cursor_underflow", resync: true } }),
+      token: "", since: 5, appender: app, seen: new Set(), log: collectLogs(),
+    });
+    const gap = app.records.find((x) => x.attributes?.["event.name"] === MARKER_FEED_GAP);
+    expect(gap.tsSource).toBe("wall-clock");
+  });
+
+  test("a marker anchored on receivedAt lands INSIDE the harness window; a wall-clock one does not", async () => {
+    const { ingestText, parseArgs } = await import("./parity-harness.mjs");
+    const app = memAppender();
+    await runOnce({
+      fetchImpl: async () => res({ head: 10, lines: [ghEvent(9, "d9", { receivedAt: RECEIVED })] }),
+      token: "", since: 0, appender: app, seen: new Set(), log: collectLogs(),
+    });
+    // a window drawn around the TRAFFIC, which is how an operator picks --from/--to
+    const o = {
+      ...parseArgs([]).opts,
+      edgeMarginMs: 0,
+      fromMs: Date.parse("2026-07-26T22:00:00.000Z"), fromIso: "2026-07-26T22:00:00.000Z",
+      toMs: Date.parse("2026-07-26T23:00:00.000Z"), toIso: "2026-07-26T23:00:00.000Z",
+    };
+    const text = app.records.map((r) => JSON.stringify(r)).join("\n");
+    const acc = ingestText("shadow", text, o);
+    const gapMarkers = acc.markers.filter((m) => m.kind === "gap");
+    expect(gapMarkers.length).toBe(1);
+    expect(gapMarkers[0].inWindow).toBe(true);
+  });
+});
+
+describe("M11 — a dedup-only pass evaluated nothing and must not exit 0", () => {
+  test("every record already in the ring is exit 2, not a healthy confirmation", async () => {
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 2, lines: [ghEvent(1, "d1"), ghEvent(2, "d2")] }),
+      token: "", since: 0, appender: memAppender(), seen: new Set(["d1", "d2"]), log: collectLogs(),
+    });
+    expect(r.status).toBe(EXIT_UNEVALUATED);
+    expect(r.dedupOnly).toBe(true);
+    expect(r.appended).toBe(0);
+    expect(r.deduped).toBe(2);
+  });
+
+  test("a partly-deduped pass DID append something and stays healthy", async () => {
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 2, lines: [ghEvent(1, "d1"), ghEvent(2, "d2")] }),
+      token: "", since: 0, appender: memAppender(), seen: new Set(["d1"]), log: collectLogs(),
+    });
+    expect(r.status).toBe(EXIT_HEALTHY);
+    expect(r.dedupOnly).toBe(false);
+  });
+
+  test("an empty window at head is still healthy — nothing to dedup is not the same shape", async () => {
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 7, lines: [] }),
+      token: "", since: 7, appender: memAppender(), seen: new Set(), log: collectLogs(),
+    });
+    expect(r.status).toBe(EXIT_HEALTHY);
+    expect(r.dedupOnly).toBe(false);
+  });
+
+  test("a dedup-only pass that ALSO proved a hole keeps the stronger, evaluated verdict", async () => {
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 10, lines: [ghEvent(9, "d9"), ghEvent(10, "d10")] }),
+      token: "", since: 0, appender: memAppender(), seen: new Set(["d9", "d10"]), log: collectLogs(),
+    });
+    expect(r.status).toBe(EXIT_PROBLEM);
+    expect(r.dedupOnly).toBe(false);
+  });
+});
+
+describe("H10 — a PARTIAL mapper regression is visible, not only a total one", () => {
+  test("classifyDecline separates schema drift from a routine unhandled action", () => {
+    expect(classifyDecline("Comment: unknown action foo")).toBe("routine");
+    expect(classifyDecline("unhandled type: Widget")).toBe("routine");
+    expect(classifyDecline("unhandled event: widget")).toBe("routine");
+    expect(classifyDecline("issue_comment: not a PR comment")).toBe("routine");
+    expect(classifyDecline("Comment: missing data")).toBe("structural");
+    expect(classifyDecline("payload is not an object")).toBe("structural");
+    expect(classifyDecline("builder returned null")).toBe("structural");
+  });
+
+  test("one Comment maps and one is structurally declined — the type is still a problem", async () => {
+    const r = await runOnce({
+      fetchImpl: async () =>
+        res({
+          head: 2,
+          lines: [
+            linearEvent(1, "c1"),
+            { ...linearEvent(2, "c2"), payload: { type: "Comment", action: "create" } },
+          ],
+        }),
+      token: "", since: 0, appender: memAppender(), seen: new Set(), log: collectLogs(),
+    });
+    // pre-fix: appendedByType["linear:Comment"] === 1 skipped the check entirely
+    expect(r.appended).toBe(1);
+    expect(r.status).toBe(EXIT_PROBLEM);
+    expect(r.structuralDeclines["linear:Comment"]).toBe(1);
+    expect(r.problems.join(" ")).toContain("PARTIAL");
+  });
+
+  test("a routine unhandled ACTION on a mappable type is coverage data, not a regression", async () => {
+    const r = await runOnce({
+      fetchImpl: async () =>
+        res({
+          head: 2,
+          lines: [
+            linearEvent(1, "c1"),
+            { ...linearEvent(2, "c2"), payload: { type: "Comment", action: "restore", data: { id: "x" } }, action: "restore" },
+          ],
+        }),
+      token: "", since: 0, appender: memAppender(), seen: new Set(), log: collectLogs(),
+    });
+    expect(r.appended).toBe(1);
+    expect(r.structuralDeclines["linear:Comment"]).toBeUndefined();
+    expect(r.status).toBe(EXIT_HEALTHY);
+  });
+});
+
+describe("M — a failed durable marker write is exit 2, not an escaped throw", () => {
+  test("runOnce folds the write failure into the report instead of rejecting", async () => {
+    const r = await runOnce({
+      fetchImpl: async () => res({ status: 409, body: { error: "cursor_underflow", resync: true } }),
+      token: "", since: 5,
+      appender: { dir: "<broken>", write: () => { throw new Error("ENOSPC"); } },
+      seen: new Set(), log: collectLogs(),
+    });
+    expect(r.status).toBe(EXIT_UNEVALUATED);
+    expect(r.markersWritten).toBe(0);
+    expect(r.unevaluated.join(" ")).toContain("durable marker write FAILED");
+  });
+
+  test("a coverage-hole marker that cannot be written is exit 2, never a bare problem", async () => {
+    const r = await runOnce({
+      fetchImpl: async () => res({ head: 10, lines: [ghEvent(9, "d9"), ghEvent(10, "d10")] }),
+      token: "", since: 0,
+      appender: {
+        dir: "<half-broken>",
+        write: (rec) => {
+          if (rec?.attributes?.["event.name"] === MARKER_FEED_GAP) throw new Error("EACCES");
+        },
+      },
+      seen: new Set(), log: collectLogs(),
+    });
+    // the hole is real (exit 1) AND its durable record is missing (exit 2); 2 dominates
+    expect(r.status).toBe(EXIT_UNEVALUATED);
+    expect(r.unevaluated.join(" ")).toContain("durable marker write FAILED");
+  });
+});
+
+describe("M1 — a degraded config is exit 2, never a silently-accepted empty set", () => {
+  test("an EMPTY team roster refuses to run", async () => {
+    const { code, stderr } = await runMain(["--once", "--since", "0"], [res({ head: 1, lines: [ghEvent(1, "d1")] })], {
+      linearTeams: [],
+    });
+    expect(code).toBe(EXIT_UNEVALUATED);
+    expect(stderr).toContain("degraded config");
+    expect(stderr).toContain("roster is EMPTY");
+  });
+
+  test("an EMPTY bot-actor set refuses to run", async () => {
+    const { code, stderr } = await runMain(["--once", "--since", "0"], [res({ head: 1, lines: [ghEvent(1, "d1")] })], {
+      botUserIds: new Set(),
+    });
+    expect(code).toBe(EXIT_UNEVALUATED);
+    expect(stderr).toContain("bot actor id set is EMPTY");
+  });
+
+  test("--allow-empty-config makes the degradation DECLARED rather than inferred from silence", async () => {
+    const { code, stderr } = await runMain(
+      ["--once", "--since", "0", "--allow-empty-config"],
+      [res({ head: 1, lines: [ghEvent(1, "d1")] })],
+      { linearTeams: [], botUserIds: new Set() },
+    );
+    expect(code).toBe(EXIT_HEALTHY);
+    expect(stderr).toContain("waived by --allow-empty-config");
+  });
+
+  test("readLinearBotUserIds rejects a config file that exists but is not JSON", () => {
+    expect(() =>
+      readLinearBotUserIds({
+        env: {},
+        layer2Path: "/nope/layer2.json",
+        layer1Path: "/nope/layer1.json",
+        readFile: (p) => (p === "/nope/layer2.json" ? "{not json" : (() => { throw new Error("ENOENT"); })()),
+      }),
+    ).toThrow(/not parseable JSON/);
+  });
+
+  test("readLinearBotUserIds treats a genuinely ABSENT file as absent, not an error", () => {
+    const ids = readLinearBotUserIds({
+      env: {},
+      layer2Path: "/nope/layer2.json",
+      layer1Path: "/nope/layer1.json",
+      readFile: () => { throw new Error("ENOENT"); },
+    });
+    expect(ids.size).toBe(0);
   });
 });
