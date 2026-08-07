@@ -551,9 +551,10 @@ do_github_auth() {
 
 # Provision the HumanLayer thoughts system (PATH-B #6): clone each served org's
 # thoughts repo into ~/catalyst/hlt/<org>/thoughts, write a clean humanlayer.json
-# (global fallback → coalesce-labs, deterministic repoMappings), verify auth.
-# Orgs are derived data-driven from the node's execution-core registry when
-# present, else from the bundle's repoUrl org (coalesce-labs primary) — never a
+# (deterministic repoMappings), verify auth. Orgs are derived data-driven from
+# the node's execution-core registry when present, else from the bundle's
+# layer1Identity.projectKey (the product/thoughts org — distinct from repoUrl,
+# which is wherever the catalyst plugin source itself lives) — never a
 # hardcoded list. MUST run before setup-catalyst, whose thoughts-init binds the
 # checkout to these repos + humanlayer.json.
 do_provision_thoughts() {
@@ -565,16 +566,17 @@ do_provision_thoughts() {
   # lives where setup-plugin-source.sh put it (CATALYST_PLUGIN_SOURCE or the
   # $HOME default), not at a from-scratch ${CATALYST_DIR}/plugin-source guess.
   [[ -f "$registry" ]] || registry="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/plugins/dev/scripts/execution-core/registry.json"
+  # First-join fallback org: layer1Identity.projectKey IS the GitHub org that hosts
+  # the product/thoughts repos (join-bundle.mjs sets it from Layer-1 catalyst.projectKey).
+  # NOT repoUrl's org — repoUrl/pluginSourceUrl point at wherever the catalyst plugin
+  # source itself lives, which can be a different org/personal fork entirely (CTL-1214
+  # verify: conflating the two derived a bogus thoughts org on a forked install).
+  local primary_org
+  primary_org="$(bundle_get '.layer1Identity.projectKey')"
   if [[ -f "$registry" ]]; then
     args+=(--registry "$registry")
   else
-    # First-join fallback: registry isn't written yet, so derive the primary org
-    # from the bundle's repoUrl. repoUrl is "<org>/<repo>" (join-bundle.mjs); also
-    # tolerate a full https URL. (A bare `${url%%/*}` would yield "https:".)
-    local repo_url org
-    repo_url="$(bundle_get '.repoUrl')"
-    org="$(sed -nE 's#^(https?://[^/]+/)?([^/]+)/.*#\2#p' <<<"$repo_url")"
-    [[ -n "$org" ]] && args+=(--orgs "$org")
+    [[ -n "$primary_org" ]] && args+=(--orgs "$primary_org")
   fi
   if bash "$pt" "${args[@]}"; then
     return 0
@@ -583,7 +585,7 @@ do_provision_thoughts() {
   # clone. If the primary thoughts repo is present AND has a usable HEAD (a real
   # read-OK clone, not a partial/interrupted one), severity depends on whether
   # this node will own work.
-  local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/coalesce-labs/thoughts"
+  local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/${primary_org:-coalesce-labs}/thoughts"
   if [[ -d "$primary/.git" ]] && git -C "$primary" rev-parse --verify -q HEAD >/dev/null 2>&1; then
     # CTL-1293: a multiHost MEMBER (roster>1) WILL own HRW work, and a worker
     # that can't push thoughts strands its research/learnings/handoffs (peers

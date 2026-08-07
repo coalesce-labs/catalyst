@@ -1007,11 +1007,14 @@ run "T2.9g resume after upstream layer1 fix re-pulls and wires (#2914 P2)" bash 
 # T2.10 / T2.11: (CTL-1293) provision-thoughts that CLONES OK but fails push-auth
 # is FATAL on a multiHost member (roster>1 owns work → must sync thoughts to
 # peers) but warn-and-proceed on a single-host / Stage-0 SHADOW node.
+# The primary clone path is keyed off layer1Identity.projectKey ("CTL" in both
+# MULTIHOST_WH_BUNDLE and SINGLEHOST_WH_BUNDLE below) — not a hardcoded org —
+# since do_provision_thoughts's fallback derives it from the bundle identity.
 PT_CLONE_PUSHFAIL_STUB="${STUBS2}/stub-provision-thoughts-pushfail.sh"
 cat > "$PT_CLONE_PUSHFAIL_STUB" <<'EOF'
 #!/usr/bin/env bash
 # Simulate the read-only strand: primary clone present + valid HEAD, exit non-zero.
-prim="${CATALYST_DIR}/hlt/coalesce-labs/thoughts"
+prim="${CATALYST_DIR}/hlt/CTL/thoughts"
 mkdir -p "$prim"
 git -C "$prim" init -q
 git -C "$prim" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init

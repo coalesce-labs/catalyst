@@ -3,7 +3,7 @@
 #
 # Purpose (CTL-1214 / bug #6): make the thoughts system a PROVISIONED, VERIFIED part of a node so a
 # fresh box (or server-side install) gets the right per-org thoughts repos, a clean humanlayer.json
-# (no groundworkapp global fallback, deterministic repoMappings for headless bg agents), and working
+# (a correct global fallback, deterministic repoMappings for headless bg agents), and working
 # bidirectional sync — BEFORE the node is added to the roster (the sync-gate activates at roster>1).
 #
 # DESIGN: thoughts/shared/plans/2026-06-16-cluster-hlt-thoughts-model.md
@@ -20,6 +20,11 @@
 #   HLT_ROOT          default ${CATALYST_DIR:-$HOME/catalyst}/hlt
 #   HL_CONFIG         default $HOME/.config/humanlayer/humanlayer.json
 #   CATALYST_REGISTRY default $HOME/catalyst/registry.json  (or execution-core/registry.json)
+#   CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG
+#                     the global-fallback/defaultProfile org when neither --orgs
+#                     nor a readable --registry is supplied. No default — a
+#                     from-scratch standalone invocation with none of --orgs,
+#                     --registry, or this set is a hard error (see below).
 #
 set -uo pipefail
 
@@ -27,21 +32,15 @@ info() { echo "[provision-thoughts] $*"; }
 warn() { echo "[provision-thoughts] WARN: $*" >&2; }
 fail() { echo "[provision-thoughts] ERROR: $*" >&2; }
 
-# ── Canonical org → {profile, thoughts remote} catalog ────────────────────────
-# Standardized on GitHub ORG names (Q-DIRNAME: rightsite-cloud, not groundworkapp).
-# profile name is the HumanLayer profile key; remote is the HTTPS git URL (node auth = gh + HTTPS).
-org_profile() { case "$1" in
-  coalesce-labs)   echo "coalesce-labs" ;;
-  rightsite-cloud) echo "adva" ;;
-  ryanrozich)      echo "ryanrozich" ;;
-  *)               echo "$1" ;;  # default: profile == org
-esac; }
+# ── Org → {profile, thoughts remote} ──────────────────────────────────────────
+# profile name is the HumanLayer profile key (always == org — this fork has one
+# real product/thoughts org, so there is no per-org catalog to maintain); remote
+# is the HTTPS git URL (node auth = gh + HTTPS).
+org_profile() { echo "$1"; }
 org_remote() { echo "https://github.com/$1/thoughts.git"; }
 
 # Map a registry repoRoot path → its GitHub org (…github/<org>/<repo>). Empty if unrecognized.
 repo_root_org() { sed -nE 's|.*/github/([^/]+)/[^/]+/?.*|\1|p' <<<"$1" | head -1; }
-# Adva code repo lives under groundworkapp/ locally but its THOUGHTS repo is rightsite-cloud.
-normalize_org() { case "$1" in groundworkapp) echo "rightsite-cloud" ;; *) echo "$1" ;; esac; }
 
 # ── Defaults / args ───────────────────────────────────────────────────────────
 NODE_USER="${USER:-$(whoami)}"
@@ -50,9 +49,15 @@ HL_CONFIG="${HL_CONFIG:-$HOME/.config/humanlayer/humanlayer.json}"
 REGISTRY="${CATALYST_REGISTRY:-}"
 ORGS_CSV=""
 DRY_RUN=0; NO_CLONE=0; VERIFY_ONLY=0
-PRIMARY_ORG="coalesce-labs"   # global fallback + defaultProfile target (CTL-1246: this clean-config
-                              # invariant — never a groundworkapp global fallback — is locked by
-                              # __tests__/provision-thoughts-invariant.test.sh; keep it coalesce-labs)
+# Optional override for the global fallback + defaultProfile target. Deliberately
+# NOT hardcoded to any specific org here — this script is shared across forks/
+# deployments with different product/thoughts orgs, and baking one in was the
+# CTL-1214 verify bug in the first place (a stale upstream org default that
+# doesn't exist for a downstream fork). Normal operation always supplies
+# --orgs/--registry (catalyst-join.sh derives --orgs from the join bundle's
+# layer1Identity.projectKey); this override only matters for a from-scratch
+# standalone invocation with neither.
+PRIMARY_ORG="${CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG:-}"
 
 while [[ $# -gt 0 ]]; do case "$1" in
   --node-user) NODE_USER="$2"; shift 2 ;;
@@ -78,7 +83,7 @@ elif [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
   info "Deriving orgs from registry: $REGISTRY"
   while IFS= read -r root; do
     [[ -z "$root" ]] && continue
-    o="$(normalize_org "$(repo_root_org "$root")")"
+    o="$(repo_root_org "$root")"
     [[ -n "$o" ]] && ORGS+=("$o")
   done < <(jq -r '(.projects // [])[].repoRoot // empty' "$REGISTRY" 2>/dev/null)
   # de-dupe — guard the empty-array expansion: under `set -u`, macOS system bash
@@ -87,17 +92,31 @@ elif [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
   if ((${#ORGS[@]})); then
     IFS=$'\n' ORGS=($(printf '%s\n' "${ORGS[@]}" | awk '!seen[$0]++')); unset IFS
   fi
-else
+elif [[ -n "$PRIMARY_ORG" ]]; then
   warn "no --orgs and no readable --registry; defaulting to primary only ($PRIMARY_ORG)"
   ORGS=("$PRIMARY_ORG")
+else
+  fail "no org specified — pass --orgs, --registry, or set CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG"
+  exit 1
 fi
-# Ensure the primary org is always present (and ORGS is never empty before the
-# expansions below — bash 3.2 + set -u safety).
+# ORGS may still be empty here (a --registry whose repoRoots matched no
+# /github/<org>/ path, and no CSV/override). Fall back to the override if one
+# was given; otherwise this is a genuine "don't know which org" error — do NOT
+# silently guess. (bash 3.2 + set -u safety: the empty-array expansions below
+# are never reached in the failure case.)
 if ((${#ORGS[@]} == 0)); then
-  ORGS=("$PRIMARY_ORG")
-elif [[ " ${ORGS[*]} " != *" $PRIMARY_ORG "* ]]; then
+  if [[ -n "$PRIMARY_ORG" ]]; then
+    ORGS=("$PRIMARY_ORG")
+  else
+    fail "registry yielded no recognized org and no CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG override is set"
+    exit 1
+  fi
+elif [[ -n "$PRIMARY_ORG" ]] && [[ " ${ORGS[*]} " != *" $PRIMARY_ORG "* ]]; then
   ORGS=("$PRIMARY_ORG" "${ORGS[@]}")
 fi
+# No override given: the primary/global-fallback org is simply whichever org
+# came out first (from --orgs order, or registry derivation order).
+PRIMARY_ORG="${PRIMARY_ORG:-${ORGS[0]}}"
 info "Node org set: ${ORGS[*]}"
 info "HLT root: $HLT_ROOT   config: $HL_CONFIG   user: $NODE_USER"
 [[ "$DRY_RUN" -eq 1 ]] && info "DRY-RUN: will not clone or write config"
@@ -128,7 +147,7 @@ write_config() {
     while IFS=$'\t' read -r root team; do
       [[ -z "$root" ]] && continue
       local o p sub d
-      o="$(normalize_org "$(repo_root_org "$root")")"; p="$(org_profile "$o")"
+      o="$(repo_root_org "$root")"; p="$(org_profile "$o")"
       # Default the thoughts subdir name to the repoRoot basename, ALWAYS — must be
       # set unconditionally before any branch: bash preserves a same-named `local`
       # across loop iterations, so leaving `sub` unset in the no-config branch would
