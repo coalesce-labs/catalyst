@@ -952,6 +952,32 @@ export function readCurrentRunPrNumber(orchDir, ticket) {
   }
 }
 
+// readCurrentRunPrRepo — return the current run's repo slug (`owner/name`) from
+// phase-pr.json, or null when unresolvable (CTL-1667 review fix). Prefers an
+// explicit `.pr.repo`; otherwise derives it from the `.pr.url` GitHub PR link.
+//
+// Why this exists: the production `makePrView` adapter derives the repo slug
+// from the ticket's WORKTREE `origin` remote when the passed PR object carries
+// no `.repo`. But by the time the terminalDoneOnce Done-recovery gate runs, a
+// normal teardown has already removed that worktree, so the worktree-derived
+// slug resolves empty → prView returns an UNKNOWN view → the gate can never
+// confirm the merge. Preserving the repo identity that phase-pr.json already
+// stored lets prView run `gh -R <slug>` without the (removed) worktree.
+export function readCurrentRunPrRepo(orchDir, ticket) {
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-pr.json");
+    const pr = JSON.parse(readFileSync(p, "utf8"))?.pr;
+    if (!pr) return null;
+    if (typeof pr.repo === "string" && pr.repo) return pr.repo;
+    const m =
+      typeof pr.url === "string" &&
+      pr.url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
 // CTL-1660 P1 (Codex #3081): entries are inserted in ASCENDING mtime order (oldest
 // dispatch first, most-recently-touched signal last), not raw readdirSync order
@@ -3086,6 +3112,48 @@ function isEscalationProbeCooldownFresh(orchDir, ticket, nowMs) {
   return isCooldownMarkerFresh(escalationProbeCooldownPath(orchDir, ticket), nowMs);
 }
 
+// CTL-1667 (review fix): the terminalDoneOnce current-PR-merged gate makes a
+// synchronous `gh` PR-view call. On the REFUSAL path — the current PR is still
+// OPEN, or the merge is unverifiable (prView threw / GitHub is down) — a
+// retained `teardown: done` dir would otherwise re-run that `gh` call on EVERY
+// scheduler tick (~2x/sec) until the PR merges, an unbounded poll that burns the
+// shared GitHub-API quota and blocks the scheduler on network I/O. AGENTS.md
+// ("Working the Loop") requires waiting on the event log with only a BOUNDED
+// poll as fallback. This cooldown is that bound: after a refusal we stamp a
+// per-dir marker and skip the `gh` probe for a window. A genuine merge still
+// converges — the marker expires and the next post-cooldown tick re-checks,
+// sees MERGED, and writes Done. Marker lives in the worker dir (reaped with it),
+// mirroring .fence-suppressed / .terminal-done.applied.
+const TERMINAL_PR_CHECK_COOLDOWN_MS = (() => {
+  const v = Number(process.env.CATALYST_TERMINAL_PR_CHECK_COOLDOWN_MS);
+  return Number.isFinite(v) && v > 0 ? v : 5 * 60_000;
+})();
+
+function terminalPrCheckMarkerPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".terminal-pr-check-suppressed");
+}
+
+// stampTerminalPrCheckSuppress — record that the current-PR-merged gate refused
+// Done this tick. Best-effort: a failed write just means we re-probe next tick.
+function stampTerminalPrCheckSuppress(orchDir, ticket, nowMs) {
+  stampCooldownMarker(terminalPrCheckMarkerPath(orchDir, ticket), nowMs);
+}
+
+// isTerminalPrCheckSuppressFresh — true when the gate refused within the cooldown
+// window, so the caller should skip the `gh` PR-view this tick. A missing,
+// unparseable, or expired marker returns false (re-probe), so a PR that merges
+// converges to Done after at most one cooldown window.
+function isTerminalPrCheckSuppressFresh(orchDir, ticket, nowMs) {
+  try {
+    const { ts } = JSON.parse(
+      readFileSync(terminalPrCheckMarkerPath(orchDir, ticket), "utf8")
+    );
+    return Number.isFinite(ts) && nowMs - ts < TERMINAL_PR_CHECK_COOLDOWN_MS;
+  } catch {
+    return false;
+  }
+}
+
 // terminalDoneOnce — write the terminal `Done` Linear state for a ticket at
 // most once for the run's lifetime (CTL-597). The terminal sweep revisits every
 // started worker dir each tick, and applyTerminalDone → linear-transition.sh
@@ -3156,18 +3224,40 @@ export function terminalDoneOnce(
   // Fail-closed: an unverifiable merge (prView throws or missing prAdapter while a
   // PR number IS resolvable) refuses Done rather than assuming success.
   // Reuses the same merged definition as reconcileTerminalBackstop:3126.
+  //
+  // CTL-1667 (review fixes):
+  //   • Repo identity — pass the repo slug from phase-pr.json so `makePrView`
+  //     resolves `gh -R <slug>` directly instead of falling back to the ticket's
+  //     WORKTREE origin, which a normal teardown has already removed (a
+  //     `{number}`-only lookup would resolve UNKNOWN → the gate could never
+  //     confirm the merge or run its documented Done recovery).
+  //   • Bounded poll — every refusal (PR still OPEN, prView throws, or missing
+  //     prAdapter) stamps a per-dir cooldown so the synchronous `gh` probe is
+  //     skipped for a window instead of re-running on every ~2x/sec tick (the
+  //     AGENTS.md "bounded poll as fallback" contract). The merge still converges
+  //     to Done once the cooldown expires and the next tick sees MERGED.
   {
     const currentPrNum = readCurrentRunPrNumber(orchDir, ticket);
     if (currentPrNum != null) {
-      if (!prAdapter || typeof prAdapter.prView !== "function") return null; // can't verify → fail-closed
+      if (isTerminalPrCheckSuppressFresh(orchDir, ticket, now())) return null; // bounded: within cooldown, skip the gh probe
+      if (!prAdapter || typeof prAdapter.prView !== "function") {
+        stampTerminalPrCheckSuppress(orchDir, ticket, now());
+        return null; // can't verify → fail-closed (bounded)
+      }
+      const repo = readCurrentRunPrRepo(orchDir, ticket);
+      const prRef = repo ? { number: currentPrNum, repo } : { number: currentPrNum };
       let merged = false;
       try {
-        const view = prAdapter.prView(ticket, { number: currentPrNum });
+        const view = prAdapter.prView(ticket, prRef);
         merged = !!(view && (view.state === "MERGED" || view.mergedAt != null));
       } catch {
-        return null; // unverifiable merge → fail-closed, refuse Done
+        stampTerminalPrCheckSuppress(orchDir, ticket, now());
+        return null; // unverifiable merge → fail-closed, refuse Done (bounded)
       }
-      if (!merged) return null; // current PR still open → do NOT write Done
+      if (!merged) {
+        stampTerminalPrCheckSuppress(orchDir, ticket, now());
+        return null; // current PR still open → do NOT write Done (bounded)
+      }
     }
   }
   // CTL-1157 (ALARM-NOT-BLOCK — THE REVERSAL): the terminal sweep writes Done

@@ -13522,4 +13522,64 @@ describe("CTL-1667: terminalDoneOnce current-PR-merged gate", () => {
     mkdirSync(join(orchDir, "workers", "CTL-74b"), { recursive: true });
     expect(readCurrentRunPrNumber(orchDir, "CTL-74b")).toBeNull();
   });
+
+  // Review fix (Codex P2): the merge check must carry repo identity, because a
+  // normal teardown removed the worktree makePrView would otherwise resolve the
+  // slug from. The gate reads `.pr.url` from phase-pr.json and passes its slug
+  // to prView so `gh -R <slug>` works without the worktree.
+  test("CTL-1667: terminalDoneOnce threads the repo slug (from phase-pr.json url) to prView", () => {
+    writeSignalRaw("CTL-75", "pr", {
+      ticket: "CTL-75",
+      phase: "pr",
+      status: "done",
+      pr: { number: 750, url: "https://github.com/coalesce-labs/catalyst/pull/750" },
+    });
+    writeSignal("CTL-75", "teardown", "done");
+    const seen = [];
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: {
+        prView: (_t, pr) => {
+          seen.push(pr);
+          return { state: "MERGED", mergedAt: "2026-08-07T00:00:00Z" };
+        },
+      },
+    });
+    expect(seen[0]).toEqual({ number: 750, repo: "coalesce-labs/catalyst" });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-75" }));
+  });
+
+  // Review fix (Codex P1): the OPEN-PR refusal path must NOT re-run the gh
+  // prView on every tick. After the first refusal a per-dir cooldown is stamped,
+  // so the second tick within the window skips the probe entirely (bounded poll).
+  test("CTL-1667: terminalDoneOnce bounds the poll — OPEN PR is not re-probed within the cooldown", () => {
+    writePrSignals("CTL-76", 760);
+    let calls = 0;
+    const dones = [];
+    const openAdapter = {
+      prView: () => {
+        calls += 1;
+        return { state: "OPEN", mergedAt: null };
+      },
+    };
+    // Tick 1: probes GitHub, sees OPEN, refuses Done, stamps the cooldown.
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: openAdapter,
+    });
+    // Tick 2 (immediately after, within cooldown): must skip the gh probe.
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: openAdapter,
+    });
+    expect(calls).toBe(1); // second tick suppressed — no unbounded poll
+    expect(dones).toEqual([]); // still refused (PR never merged)
+  });
 });
