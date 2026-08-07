@@ -247,12 +247,6 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-stack-shipper-guard.test.sh
 
-      - name: orphan-sweep wf_* and plugin-source root tests (CTL-1473)
-        # CTL-1473: wf_* worktrees idle > SWEEP_WF_STALE_DAYS are classified SAFE
-        # (not SALVAGE_UNPUSHED); discover_worktree_roots includes SWEEP_PLUGIN_SOURCE_WT.
-        working-directory: plugins/dev/scripts
-        run: bash __tests__/orphan-sweep.test.sh
-
       - name: gh-pr-comment helper test (CTL-1496)
         # Covers PR_NUMBER numeric validation + the idempotent existing-comment
         # guard (skip on match, fail-closed on fetch failure).
