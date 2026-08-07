@@ -550,6 +550,7 @@ jobs:
             abort-worker.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
+            dispatch-readiness.test.mjs \
             autotune-writeback.test.mjs \
             board-health.test.mjs \
             board-health-seam.test.mjs \
@@ -607,6 +608,7 @@ jobs:
             hrw.test.mjs \
             integration-ctl-701.test.mjs \
             integration-ctl-705.test.mjs \
+            scheduler-created-at.test.mjs \
             integration-ctl-1240.test.mjs \
             integration.test.mjs \
             job-dir-gc.test.mjs \

@@ -94,6 +94,7 @@ describe("CTL-705 acceptance scenario — preemption + resume", () => {
     const baseOpts = {
       readEligible: () => [{ identifier: "CTL-9", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
       reclaimDeadWork: noopReclaim,
+      hasTriageArtifact: () => true,
       writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => {} },
     };
 
@@ -246,6 +247,7 @@ describe("CTL-705 guard scenario — monitor-deploy not preemptable", () => {
 
     const baseOpts = {
       readEligible: () => [{ identifier: "CTL-9", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+      hasTriageArtifact: () => true,
       reclaimDeadWork: noopReclaim,
       liveBackgroundCount: () => 1, // saturated
       now: () => T0 + 35_000, // past hysteresis
