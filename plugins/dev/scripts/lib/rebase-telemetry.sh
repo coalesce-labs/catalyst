@@ -95,6 +95,13 @@ emit_auto_rebased() {
     --payload-json "$payload"
 }
 
+emit_dispatch_cwd_corrected() {
+  local phase="$1" ticket="$2" orch="$3" from="$4" to="$5" source="$6" payload
+  payload="$(jq -nc --arg f "$from" --arg t "$to" --arg s "$source" '{from:$f,to:$t,source:$s}')" || payload="{}"
+  _emit_rebase_event --event-name "phase.${phase}.dispatch-cwd-corrected.${ticket}" \
+    --severity WARN --orch "$orch" --ticket "$ticket" --payload-json "$payload"
+}
+
 # emit_rebase_conflict_categorized — WARN: conflicted files categorized by type.
 # --orch <id>  --ticket <key>  --phase <name>
 # --test-count <n>  --noise-count <n>  --source-count <n>  --thoughts-count <n>
