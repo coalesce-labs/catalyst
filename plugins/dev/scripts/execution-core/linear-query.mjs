@@ -76,6 +76,7 @@ const BATCH_QUERY = `query CtlBatchTickets($ids: [ID!]) {
     nodes {
       identifier
       priority
+      createdAt
       state { name }
       parent { identifier }
       labels(first: 50) { nodes { name } }
@@ -518,6 +519,7 @@ function normalizeRelations(node) {
     relations: node?.relations ?? { nodes: [] },
     inverseRelations: node?.inverseRelations ?? { nodes: [] },
     priority: typeof node?.priority === "number" ? node.priority : null,
+    createdAt: node?.createdAt ?? null,
     labels: node?.labels?.nodes?.map((n) => n.name) ?? [],
   };
 }
