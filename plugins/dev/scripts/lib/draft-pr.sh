@@ -19,6 +19,9 @@
 #   3 — draft_pr_push_verify: push rejected for missing 'workflow' OAuth scope and no
 #       CATALYST_WORKFLOW_GITHUB_TOKEN fallback. Callers translate this into a MANUAL
 #       explanation.call_to_action escalation. (CTL-1119/CTL-1130)
+#   4 — draft_pr_push / draft_pr_push_verify: the pre-push safety gate refused the
+#       push (placeholder-identity commit or anomalous tree-wide deletion). Callers
+#       translate this into a push_safety_gate_blocked escalation.
 
 _draft_pr_warn() {
   printf 'draft-pr: %s\n' "$*" >&2
@@ -26,6 +29,112 @@ _draft_pr_warn() {
 
 # Reserved return code for a workflow-scope push rejection (CTL-1119).
 _DRAFT_PR_WORKFLOW_SCOPE_RC=3
+
+# Reserved return code for the pre-push safety gate refusing a push (postmortem,
+# 2026-07-30): a verify-phase agent, reproducing a bug covered by a test that
+# builds its own throwaway git repo to exercise git-touching behavior, re-ran
+# that test's own git-fixture recipe (config a placeholder identity, wipe the
+# tree, commit as "fixture") directly against its real cwd instead of the
+# test's isolated mkdtemp sandbox, and pushed the result to a real branch.
+_DRAFT_PR_SAFETY_GATE_RC=4
+
+# _draft_pr_pending_range — the commit range about to be pushed: unpushed
+# local commits ahead of the upstream tracking branch, or ahead of
+# origin/<default-base> when there is no upstream yet (first push of a new
+# branch). Falls back to just HEAD when neither resolves.
+_draft_pr_pending_range() {
+  if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+    printf '@{u}..HEAD\n'
+    return 0
+  fi
+  local base
+  base="$(_draft_pr_default_base)"
+  if git rev-parse "origin/${base}" >/dev/null 2>&1; then
+    printf 'origin/%s..HEAD\n' "$base"
+    return 0
+  fi
+  # Neither an upstream nor a resolvable origin/<base> exists (e.g. `gh` lookup
+  # failed and the repo's default branch isn't "main"). Plain `HEAD` here would
+  # make `git diff HEAD` compare the committed tree against the working tree —
+  # empty right after a commit, so a destructive wipe that was just committed
+  # would go undetected. Diff against the empty-tree object instead, so the
+  # range's diff represents every committed change about to be pushed.
+  printf '%s..HEAD\n' "$(git hash-object -t tree /dev/null)"
+}
+
+# _draft_pr_placeholder_authors RANGE — echoes any author/committer email in
+# RANGE matching a known test-fixture placeholder pattern (RFC 2606 reserved
+# domains: example.com/.org/.net/.invalid). A real commit — human or
+# Catalyst's own bot identity — never carries one of these; seeing one means
+# fixture/test code ran against the real tree instead of an isolated sandbox.
+_draft_pr_placeholder_authors() {
+  local range="$1"
+  # The entire .invalid TLD is RFC 2606 reserved (not just example.invalid) —
+  # fixture code is free to use any <anything>.invalid address (e.g. t@t.invalid,
+  # codex-run-phase-agent.test.mjs), so match the whole TLD rather than one label.
+  git log --format='%ae%n%ce' "$range" -- 2>/dev/null \
+    | grep -iE '@example\.(com|org|net)$|\.invalid$' \
+    | sort -u
+}
+
+# _draft_pr_blast_radius_hit RANGE — returns 0 (hit) iff RANGE deletes an
+# anomalous slice of the tracked tree with no offsetting additions: at least
+# DRAFT_PR_BLAST_RADIUS_MIN_FILES files deleted (default 20), zero insertions,
+# and deleted files exceed DRAFT_PR_BLAST_RADIUS_FRACTION (default 0.3) of the
+# tree tracked at the range's base. Thresholds are env-overridable for tests.
+_draft_pr_blast_radius_hit() {
+  local range="$1"
+  local min_files="${DRAFT_PR_BLAST_RADIUS_MIN_FILES:-20}"
+  local fraction="${DRAFT_PR_BLAST_RADIUS_FRACTION:-0.3}"
+
+  local base="${range%%..*}"
+  [[ "$base" == "$range" ]] && base="HEAD^"  # single-ref range (e.g. plain "HEAD")
+
+  local base_tracked
+  base_tracked="$(git ls-tree -r --name-only "$base" 2>/dev/null | wc -l | tr -d ' ')"
+  [[ -z "$base_tracked" || "$base_tracked" -eq 0 ]] && return 1
+
+  local shortstat deletions insertions deleted_files
+  shortstat="$(git diff --shortstat "$range" -- 2>/dev/null || true)"
+  deletions="$(printf '%s' "$shortstat" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || true)"
+  insertions="$(printf '%s' "$shortstat" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || true)"
+  [[ -z "$deletions" ]] && deletions=0
+  [[ -z "$insertions" ]] && insertions=0
+  deleted_files="$(git diff --diff-filter=D --name-only "$range" -- 2>/dev/null | wc -l | tr -d ' ')"
+
+  [[ "$deleted_files" -lt "$min_files" ]] && return 1
+  [[ "$insertions" -gt 0 ]] && return 1
+
+  awk -v d="$deleted_files" -v b="$base_tracked" -v f="$fraction" \
+    'BEGIN { exit !(d / b > f) }'
+}
+
+# _draft_pr_safety_gate — refuses to push when the outgoing commit range looks
+# like test-fixture code ran against the real tree instead of an isolated
+# sandbox (see the postmortem note on _DRAFT_PR_SAFETY_GATE_RC above). Two
+# independent checks, either one blocks:
+#   1. placeholder author/committer email (RFC 2606 reserved domain)
+#   2. anomalous single-range deletion with no offsetting additions
+# Fail-closed: returns $_DRAFT_PR_SAFETY_GATE_RC on either hit; details go to
+# stderr via _draft_pr_warn for the worker log. Never mutates anything.
+_draft_pr_safety_gate() {
+  local range
+  range="$(_draft_pr_pending_range)"
+
+  local placeholders
+  placeholders="$(_draft_pr_placeholder_authors "$range")"
+  if [[ -n "$placeholders" ]]; then
+    _draft_pr_warn "safety gate: placeholder author/committer in ${range}: $(printf '%s' "$placeholders" | tr '\n' ' ')"
+    return "$_DRAFT_PR_SAFETY_GATE_RC"
+  fi
+
+  if _draft_pr_blast_radius_hit "$range"; then
+    _draft_pr_warn "safety gate: anomalous deletion in ${range} (no offsetting additions)"
+    return "$_DRAFT_PR_SAFETY_GATE_RC"
+  fi
+
+  return 0
+}
 
 # _draft_pr_is_workflow_scope_error FILE — returns 0 iff FILE contains the
 # GitHub workflow-scope OAuth rejection message. Matches the stable prefix
@@ -89,6 +198,7 @@ _draft_pr_default_base() {
 # by rebase-prompt.md / phase-review).
 draft_pr_push() {
   command -v git >/dev/null 2>&1 || { _draft_pr_warn "git unavailable"; return 1; }
+  _draft_pr_safety_gate || return "$_DRAFT_PR_SAFETY_GATE_RC"
   local errf
   errf="$(mktemp -t draft-pr-push-XXXXXX 2>/dev/null || echo "/tmp/draft-pr-push-$$")"
   if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
@@ -228,6 +338,7 @@ draft_pr_promote() {
 # Echoes the verified SHA on success; nothing on failure.
 draft_pr_push_verify() {
   command -v git >/dev/null 2>&1 || { _draft_pr_warn "git unavailable"; return 1; }
+  _draft_pr_safety_gate || return "$_DRAFT_PR_SAFETY_GATE_RC"
   local branch local_sha remote_sha errf
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   [[ -z "$branch" || "$branch" == "HEAD" ]] && { _draft_pr_warn "detached HEAD; cannot push-verify"; return 1; }
