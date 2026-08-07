@@ -389,6 +389,46 @@ it as a recovery item. Previously the classifier blindly escalated it to a human
 The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
 `recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
 
+### Delegate-first escalation + explanation chokepoint (CTL-1609)
+
+Two gaps closed at the point where the scheduler labels a ticket `needs-human`:
+
+**Gap 1 — Delegate-first routing seam.** Every `needs-human` producer (six sites in
+`scheduler.mjs` / `monitor.mjs` / `stale-pr-rescue-timer.mjs`, not including `attempts-exhausted`
+which is post-delegate by definition) now routes through `routeStuckTicketToDelegate`
+(`execution-core/delegate-first.mjs`) instead of calling `labelNeedsHumanUnlessBeliefOwner`
+directly. Ordered fallback: **(1) auto-fix [deferred]** → **(2) delegate runner** → **(3) human**.
+
+- **`CATALYST_DELEGATE_FIRST=off`** (default): byte-identical to the direct call — no behavior
+  change until the flag is lit.
+- **`CATALYST_DELEGATE_FIRST=shadow`**: logs a `delegate.would-route` event per eligible ticket
+  but still labels `needs-human`. Safe dry-run.
+- **`CATALYST_DELEGATE_FIRST=enforce`**: calls `enqueueDelegateIntent`; if the queue accepts
+  (`enqueued`, `already-pending`, or `worker-live`) emits `delegate.routed` and returns without
+  labelling. Queue-full / write-failed / no-orch-dir → emit `delegate.route-fallback` and fall
+  back to labelling. Side effects (`recordTransition`, `cache.invalidate`) are gated on
+  `result.labelled === true` so routed tickets never record a spurious `needs-human` transition.
+
+**Gap 2 — Explanation-required chokepoint.** `labelNeedsHumanUnlessBeliefOwner`
+(`execution-core/label-guard.mjs`) now accepts an optional `explanation` object. After a
+confirmed label application:
+
+- If `explanation` is absent → emits `escalation.explanation-absent` warn and coerces a degraded
+  fallback via `coerceExplanation` (type `authorization`, `degraded: true`).
+- Writes the coerced or caller-supplied explanation to
+  `workers/<TICKET>/phase-recovery-pass.json` via `writeExplanationSignal` (atomic tmp+rename).
+  A **no-overwrite guard** protects the rich curated signal written by `escalateExhaustedIntents`
+  before it calls the label function — `prior.explanation && prior.explanation.degraded !== true`
+  prevents the thin hint from clobbering it.
+- All six wired sites supply a `problem` + `call_to_action` structured explanation so the operator
+  inbox can render a real "What's needed now" card instead of a bare label.
+- The `attempts-exhausted` site passes a thin hint; `escalateExhaustedIntents` writes the full
+  curated explanation first via a direct `writeExplanationSignal` call, and the no-overwrite guard
+  ensures the chokepoint's coercion cannot overwrite it.
+
+New event names (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`,
+`delegate.would-route`, `delegate.routed`, `delegate.route-fallback`.
+
 ### Runaway-loop guards (CTL-671)
 
 `schedulerTick` is hardened against runaway dispatch/reclaim loops on phantom/non-resolving tickets

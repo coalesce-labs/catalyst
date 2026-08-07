@@ -3466,3 +3466,57 @@ describe("CTL-764 Phase 4 — handleCommentWake clears durable needs-input label
     expect(needsInputRemovals).toHaveLength(0);
   });
 });
+
+// ─── CTL-1608 — stalled-PR timer gated on stalledPrSweep.enabled ─────────────
+describe("CTL-1608 — stalled-PR sweep timer start", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    enableReaper: false,
+    enableHeartbeat: false,
+    enableWaitWatcher: false,
+    enableMemorySampler: false,
+    enableFleetHealth: false,
+    enableRatelimitPoller: false,
+    readAllEligible: () => [],
+  });
+
+  test("stalledPrSweep.enabled:true → startStalledPrTimer called with enabled:true", () => {
+    const calls = [];
+    startDaemon({
+      ...baseOpts(),
+      stalledPrSweepConfig: { enabled: true, intervalSeconds: 900 },
+      startStalledPrTimer: (opts) => { calls.push(opts); return { stop: () => {} }; },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].enabled).toBe(true);
+    expect(calls[0].intervalSeconds).toBe(900);
+  });
+
+  test("stalledPrSweep.enabled:false → startStalledPrTimer NOT called", () => {
+    const calls = [];
+    startDaemon({
+      ...baseOpts(),
+      stalledPrSweepConfig: { enabled: false },
+      startStalledPrTimer: (opts) => { calls.push(opts); return { stop: () => {} }; },
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("stalledPrSweep absent (default-off) → startStalledPrTimer NOT called", () => {
+    const calls = [];
+    startDaemon({
+      ...baseOpts(),
+      // no stalledPrSweepConfig → defaults to {}
+      startStalledPrTimer: (opts) => { calls.push(opts); return { stop: () => {} }; },
+    });
+    expect(calls).toHaveLength(0);
+  });
+});

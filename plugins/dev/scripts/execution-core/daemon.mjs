@@ -103,6 +103,7 @@ import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree
 // event loop). Gated by readDelegateRunnerConfig; Phase A ships it inert.
 import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
 import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
+import { startStalledPrTimer as realStartStalledPrTimer, readStalledPrSweepConfig, DEFAULTS as STALLED_DEFAULTS } from "./stalled-pr-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
 import { startOrphanPrSweepTimer, readOrphanPrSweepConfig } from "./orphan-pr-sweep-timer.mjs";
 import { DEFAULTS as ORPHAN_DEFAULTS } from "./orphan-pr-sweep.mjs";
@@ -180,6 +181,8 @@ let _stalePrRescueTimer = null;
 let _orphanPrSweepTimer = null;
 // CTL-1371: periodic PR→Linear state reconcile timer.
 let _linearReconcileTimer = null;
+// CTL-1608: periodic stalled-PR detection sweep timer.
+let _stalledPrTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
@@ -793,6 +796,10 @@ export function startDaemon({
   orphanPrSweepConfig = null,
   // CTL-1371: PR→Linear state reconcile timer config (catalyst.orchestration.reconcile).
   linearReconcileConfig = null,
+  // CTL-1608: stalled-PR detection sweep timer config (catalyst.orchestration.stalledPrSweep).
+  stalledPrSweepConfig = null,
+  // CTL-1608: injectable seam for the stalled-PR timer (tests spy on it).
+  startStalledPrTimer: startStalledPrTimerFn = realStartStalledPrTimer,
   // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
@@ -1474,6 +1481,21 @@ export function startDaemon({
       _clusterSyncTimer.unref?.();
     }
 
+    // CTL-1608: start the periodic stalled-PR detection sweep (review/CI/no-push),
+    // independent of worker liveness. Read-only gh probing → safe in all modes;
+    // board-health owns actuation. Default-off until validated on the live board.
+    {
+      const stalledCfg = stalledPrSweepConfig ?? {};
+      if (stalledCfg.enabled === true) {
+        _stalledPrTimer = startStalledPrTimerFn({
+          enabled: true,
+          intervalSeconds: stalledCfg.intervalSeconds ?? STALLED_DEFAULTS.intervalSeconds,
+          orchDir,
+          config: stalledCfg,
+        });
+      }
+    }
+
   } catch (err) {
     stopDaemon();
     throw err;
@@ -1844,6 +1866,12 @@ function startReaperAndTimer({
       intervalSeconds: rescueCfg.intervalSeconds ?? RESCUE_DEFAULTS.intervalSeconds,
       orchDir,
       config: rescueCfg,
+      // CTL-1609 (Codex P1): the delegate ceiling for this timer's escalation
+      // enqueues. Resolved lazily per escalation (not captured at boot) so an
+      // autotuned maxParallel is honored without a daemon restart. Injected here
+      // because the daemon already owns concurrency — importing readMaxParallel
+      // inside the timer would pull scheduler.mjs's bun:sqlite graph into it.
+      maxParallel: () => readMaxParallel(orchDir),
     });
   }
 
@@ -1876,6 +1904,7 @@ function startReaperAndTimer({
       config: reconcileCfg,
     });
   }
+
 }
 
 // parseEventTailChunk — pure, deterministic split of a freshly-read byte chunk
@@ -2069,6 +2098,14 @@ export function stopDaemon() {
     }
     _linearReconcileTimer = null;
   }
+  if (_stalledPrTimer) {
+    try {
+      _stalledPrTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _stalledPrTimer = null;
+  }
   _reaper = null;
   // CTL-650: stop the wait-state watcher.
   if (_waitWatcher) {
@@ -2189,6 +2226,8 @@ function main() {
   const stalePrRescueConfig = readStalePrRescueConfig(configPath);
   // CTL-1175: read the orphan-PR sweep config from the same config file.
   const orphanPrSweepConfig = readOrphanPrSweepConfig(configPath);
+  // CTL-1608: read the stalled-PR sweep config from the same config file.
+  const stalledPrSweepConfig = readStalledPrSweepConfig(configPath);
   // CTL-665 / CTL-678: resolve the executionCore concurrency knobs once here
   // and thread them into startDaemon → scheduler + boot-resume. The
   // machine-canonical Layer-2 file (~/.config/catalyst/config.json) wins
@@ -2226,10 +2265,11 @@ function main() {
       stalePrRescueConfig,
       orphanPrSweepConfig,
       linearReconcileConfig,
+      stalledPrSweepConfig,
       concurrency,
       configPath,
       layer2Path,
-    }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175 + CTL-1371
+    }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175 + CTL-1371 + CTL-1608
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

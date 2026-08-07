@@ -49,7 +49,7 @@ import {
 // (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
 // the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
-import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
+import { claimDispatchSync, readTriageAttemptCountSync, bumpTriageAttemptCountSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
   runEligibleQuery,
@@ -76,7 +76,7 @@ import {
   applyLabel, // CTL-1441: needs-human at the triage re-dispatch cap
   removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
-import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1441
+import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import {
@@ -779,7 +779,21 @@ function dispatchTriage(
     // CTL-1441: needs-human application at the re-dispatch cap. Injectable so
     // tests never spawn a real linearis write; default = the label-guard path.
     labelNeedsHuman = (dir, t) =>
-      labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, { site: "triage-redispatch-cap" }),
+      routeStuckTicketToDelegate(dir, t, {
+        site: "triage-redispatch-cap",
+        reason: "triage-redispatch-cap",
+        boardContext: { cap: TRIAGE_DISPATCH_CAP },
+        applyLabel: { applyLabel },
+        explanation: {
+          problem: `${t} hit the triage re-dispatch cap (${TRIAGE_DISPATCH_CAP})`,
+          call_to_action: `triage ${t} manually or re-scope it`,
+        },
+        // CTL-1609 (Codex P1): supply the configured ceiling so
+        // enqueueDelegateIntent can reach `queue-full` → human instead of
+        // defaulting to Infinity. Lazy: the state.json read is paid only on the
+        // enforce path that actually enqueues.
+        deps: { orchDir: dir, maxParallel: () => readMaxParallel(dir) },
+      }),
     // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
     // ticket's LIVE state must still equal this workflow-state name at launch.
     // null/undefined (the webhook path, eligible-half candidates) skips the check.
@@ -789,6 +803,11 @@ function dispatchTriage(
     // updated AFTER a cached negative verdict invalidates the marker — the
     // ticket may have legitimately re-entered Triage.
     candidateUpdatedAt = null,
+    // CTL-1649: fleet-wide triage attempt count seams (multiHost-gated).
+    // Defaults to the sync implementations (TTL-cached in cluster-claim-sync.mjs).
+    // Single-host paths never call these.
+    readFenceTriageAttempt = readTriageAttemptCountSync,
+    bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
   }
 ) {
   if (!orchDir) {
@@ -850,7 +869,9 @@ function dispatchTriage(
   // markers are the idempotence guard (a transient Linear failure leaves none);
   // cappedAt in the counter record gates only the duplicate WARN. Re-arm by
   // deleting orchDir/.triage-dispatch-counts/<ticket>.json.
-  if (readTriageDispatchCount(orchDir, identifier) >= TRIAGE_DISPATCH_CAP) {
+  // CTL-1649: use fleet-wide count (max of host-local and fence) so an ownership
+  // churn cannot restart the counter at 0 on the new owner.
+  if (fleetTriageDispatchCount(orchDir, identifier, { multiHost, readFenceCount: readFenceTriageAttempt }) >= TRIAGE_DISPATCH_CAP) {
     // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
     // naturally absent until it finishes. Defer the park while in flight.
     if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
@@ -1041,6 +1062,15 @@ function dispatchTriage(
   const statusAtLaunch = readTriageSignalStatus(orchDir, identifier);
   if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
     bumpTriageDispatchCount(orchDir, identifier);
+    // CTL-1649: mirror the host-local bump on the fence attachment so the fleet-wide
+    // count stays in lockstep. Fail-open — a fence write failure never blocks launch.
+    if (multiHost) {
+      try {
+        bumpFenceTriageAttempt({ ticket: identifier });
+      } catch {
+        /* fail-open */
+      }
+    }
   }
   // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
   // plain object (passthrough → byte-identical). sdk returns a Promise whose
@@ -1219,6 +1249,37 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
   if (prior.cappedAt) return false; // already parked once
   writeTriageDispatchRecord(orchDir, ticket, { ...prior, cappedAt: now(), cap: TRIAGE_DISPATCH_CAP });
   return true;
+}
+
+// fleetTriageDispatchCount — the CTL-1649 fleet-wide dispatch count for a ticket.
+//
+// On single-host (multiHost:false), returns the host-local count unchanged —
+// no fence read, no new subprocess, byte-identical to the pre-CTL-1649 path.
+//
+// On multi-host, reads the fence's triage_attempt_count via the injected
+// readFenceCount seam and returns max(host-local, fence). A null from the fence
+// read (fence-absent or spawn failure) is the fail-open signal — fall back to
+// host-local so a temporary Linear outage never falsely parks a ticket.
+//
+// The seam default (readTriageAttemptCountSync) is TTL-cached in
+// cluster-claim-sync.mjs (CATALYST_TRIAGE_ATTEMPT_CACHE_MS, 30s default) to
+// bound the Linear read rate — mirrors fenceCheckSyncCached's design.
+//
+// Exported for unit coverage.
+export function fleetTriageDispatchCount(
+  orchDir,
+  identifier,
+  { multiHost = false, readFenceCount = readTriageAttemptCountSync } = {},
+) {
+  const hostLocal = readTriageDispatchCount(orchDir, identifier);
+  if (!multiHost) return hostLocal;
+  try {
+    const { count } = readFenceCount({ ticket: identifier });
+    if (count === null) return hostLocal; // fence-absent or failure — fail-open
+    return Math.max(hostLocal, count);
+  } catch {
+    return hostLocal; // fail-open on any unexpected throw
+  }
 }
 
 // triageStateTickets — the CTL-1589 half of the sweep's ticket source: the

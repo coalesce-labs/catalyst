@@ -12,6 +12,9 @@ import {
   resolveIssueIdSync,
   resolveIssueIdSyncCached,
   clearIssueIdCache,
+  readTriageAttemptCountSync,
+  bumpTriageAttemptCountSync,
+  clearTriageAttemptCacheSync,
 } from "./cluster-claim-sync.mjs";
 
 describe("claimDispatchSync — argv + parsing", () => {
@@ -419,5 +422,169 @@ describe("claimDispatchSync — pre-resolved issueId is threaded into the claim 
       { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-claim.mjs" },
     );
     expect(claimArgs).toEqual(["/x/cluster-claim.mjs", "claim", "CTL-9", "mini", "triage"]);
+  });
+});
+
+// ─── CTL-1649: readTriageAttemptCountSync ────────────────────────────────────
+
+describe("readTriageAttemptCountSync — argv + parsing (CTL-1649)", () => {
+  beforeEach(() => {
+    clearTriageAttemptCacheSync();
+  });
+
+  it("builds the right argv: node <cli> read-triage-attempt <ticket>", () => {
+    let captured;
+    const spawn = (bin, args) => {
+      captured = { bin, args };
+      return { status: 0, stdout: JSON.stringify({ count: 2 }) + "\n" };
+    };
+    readTriageAttemptCountSync(
+      { ticket: "CTL-1649" },
+      { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-claim.mjs", env: { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "0" } },
+    );
+    expect(captured.bin).toBe("/usr/bin/node");
+    expect(captured.args).toEqual(["/x/cluster-claim.mjs", "read-triage-attempt", "CTL-1649"]);
+  });
+
+  it("parses { count } from exit-0 stdout", () => {
+    const spawn = () => ({ status: 0, stdout: JSON.stringify({ count: 3 }) + "\n" });
+    const result = readTriageAttemptCountSync(
+      { ticket: "CTL-1649" },
+      { spawn, env: { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "0" } },
+    );
+    expect(result).toEqual({ count: 3 });
+  });
+
+  it("count:0 is a valid determinate result (fence exists, no bumps yet)", () => {
+    const spawn = () => ({ status: 0, stdout: JSON.stringify({ count: 0 }) + "\n" });
+    expect(readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env: { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "0" } }))
+      .toEqual({ count: 0 });
+  });
+
+  it("count:null is passed through (fence-absent — fail-open)", () => {
+    const spawn = () => ({ status: 0, stdout: JSON.stringify({ count: null }) + "\n" });
+    expect(readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env: { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "0" } }))
+      .toEqual({ count: null });
+  });
+
+  it("non-zero exit → { count: null } (fail-open)", () => {
+    const spawn = () => ({ status: 1, stdout: "" });
+    expect(readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env: { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "0" } }))
+      .toEqual({ count: null });
+  });
+
+  it("spawn error → { count: null } (never propagates)", () => {
+    const spawn = () => { throw new Error("EACCES"); };
+    expect(readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env: { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "0" } }))
+      .toEqual({ count: null });
+  });
+
+  it("two reads within TTL → ONE spawn call (cache hit)", () => {
+    let calls = 0;
+    const spawn = () => { calls++; return { status: 0, stdout: JSON.stringify({ count: 2 }) + "\n" }; };
+    let now = 1_000_000;
+    const env = { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "30000" };
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    now += 5_000; // within TTL
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    expect(calls).toBe(1);
+  });
+
+  it("two reads beyond TTL → TWO spawn calls (cache expired)", () => {
+    let calls = 0;
+    const spawn = () => { calls++; return { status: 0, stdout: JSON.stringify({ count: 2 }) + "\n" }; };
+    let now = 1_000_000;
+    const env = { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "30000" };
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    now += 31_000; // beyond TTL
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    expect(calls).toBe(2);
+  });
+
+  it("TTL=0 disables the cache (every call spawns)", () => {
+    let calls = 0;
+    const spawn = () => { calls++; return { status: 0, stdout: JSON.stringify({ count: 1 }) + "\n" }; };
+    const env = { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "0" };
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env });
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env });
+    expect(calls).toBe(2);
+  });
+
+  it("null result (fence-absent) is NOT cached (retries on the next call)", () => {
+    let calls = 0;
+    const spawn = () => { calls++; return { status: 0, stdout: JSON.stringify({ count: null }) + "\n" }; };
+    const env = { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "30000" };
+    let now = 1_000_000;
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    now += 1_000;
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    expect(calls).toBe(2);
+  });
+});
+
+describe("bumpTriageAttemptCountSync — argv + parsing (CTL-1649)", () => {
+  beforeEach(() => {
+    clearTriageAttemptCacheSync();
+  });
+
+  it("builds the right argv: node <cli> bump-triage-attempt <ticket>", () => {
+    let captured;
+    const spawn = (bin, args) => {
+      captured = { bin, args };
+      return { status: 0, stdout: JSON.stringify({ count: 1 }) + "\n" };
+    };
+    bumpTriageAttemptCountSync(
+      { ticket: "CTL-1649" },
+      { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-claim.mjs" },
+    );
+    expect(captured.bin).toBe("/usr/bin/node");
+    expect(captured.args).toEqual(["/x/cluster-claim.mjs", "bump-triage-attempt", "CTL-1649"]);
+  });
+
+  it("returns parsed { count } on success", () => {
+    const spawn = () => ({ status: 0, stdout: JSON.stringify({ count: 3 }) + "\n" });
+    expect(bumpTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn })).toEqual({ count: 3 });
+  });
+
+  it("non-zero exit → { count: null } (best-effort, never throws)", () => {
+    const spawn = () => ({ status: 1, stdout: "" });
+    expect(bumpTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn })).toEqual({ count: null });
+  });
+
+  it("spawn throws → { count: null } (never propagates)", () => {
+    const spawn = () => { throw new Error("ETIMEDOUT"); };
+    expect(bumpTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn })).toEqual({ count: null });
+  });
+
+  it("invalidates the cache for that ticket after a bump (next read goes live)", () => {
+    let spawnCalls = 0;
+    const spawn = () => {
+      spawnCalls++;
+      return { status: 0, stdout: JSON.stringify({ count: spawnCalls }) + "\n" };
+    };
+    const env = { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "30000" };
+    let now = 1_000_000;
+    // Populate cache with count=1
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    expect(spawnCalls).toBe(1);
+    // Bump invalidates cache
+    bumpTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env });
+    expect(spawnCalls).toBe(2); // bump spawned
+    // Next read goes live (cache was invalidated)
+    now += 1_000;
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    expect(spawnCalls).toBe(3); // fresh spawn after invalidation
+  });
+
+  it("clearTriageAttemptCacheSync resets the module-scope cache", () => {
+    let calls = 0;
+    const spawn = () => { calls++; return { status: 0, stdout: JSON.stringify({ count: 1 }) + "\n" }; };
+    const env = { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "30000" };
+    let now = 1_000_000;
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    clearTriageAttemptCacheSync();
+    now += 1_000;
+    readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
+    expect(calls).toBe(2);
   });
 });
