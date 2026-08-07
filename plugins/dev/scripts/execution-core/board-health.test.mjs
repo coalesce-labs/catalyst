@@ -2358,3 +2358,197 @@ describe("CTL-1608 checkStalledPr — review/CI/no-push staleness, liveness-inde
     expect(ctx.stalledPrs).toContain("CTL-CI");
   });
 });
+// ─── CTL-1649: triageLaunchFailureOnlyTickets + selectAnchorCandidates exclusion ─
+
+describe("assembleBoardState — attentionReason on signals (CTL-1649)", () => {
+  test("attentionReason from s.raw?.attentionReason is carried on the normalised signal", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-1", phase: "triage", status: "stalled", raw: { attentionReason: "sdk-overloaded-exhausted" } },
+      ],
+    });
+    expect(board.signals[0].attentionReason).toBe("sdk-overloaded-exhausted");
+  });
+
+  test("attentionReason from s.attentionReason (flat) is carried when raw is absent", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-2", phase: "triage", status: "stalled", attentionReason: "sdk-launch-failed" },
+      ],
+    });
+    expect(board.signals[0].attentionReason).toBe("sdk-launch-failed");
+  });
+
+  test("attentionReason is null when absent on both raw and flat", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [{ ticket: "CTL-3", phase: "triage", status: "stalled" }],
+    });
+    expect(board.signals[0].attentionReason).toBeNull();
+  });
+
+  test("existing fields (ticket, phase, status, failureReason) are byte-identical (no regression)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-4", phase: "implement", status: "running", raw: { failureReason: "timeout" } },
+      ],
+    });
+    const s = board.signals[0];
+    expect(s.ticket).toBe("CTL-4");
+    expect(s.phase).toBe("implement");
+    expect(s.status).toBe("running");
+    expect(s.failureReason).toBe("timeout");
+  });
+});
+
+describe("assembleBoardState — triageLaunchFailureOnlyTickets (CTL-1649)", () => {
+  const launchFailSig = (ticket, overrides = {}) => ({
+    ticket,
+    phase: "triage",
+    status: "stalled",
+    attentionReason: "sdk-overloaded-exhausted",
+    ...overrides,
+  });
+
+  test("Scenario 1: triage launch-failure ticket with no artifact → IN the set (hasTriageArtifact returns false)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [launchFailSig("CTL-1")],
+      hasTriageArtifact: () => false,
+    });
+    expect(board.triageLaunchFailureOnlyTickets instanceof Set).toBe(true);
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(true);
+  });
+
+  test("Scenario 2: same ticket but hasTriageArtifact returns true → NOT in the set (real triage completed)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [launchFailSig("CTL-1")],
+      hasTriageArtifact: () => true,
+    });
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(false);
+  });
+
+  test("Scenario: triage stall without attentionReason → NOT in the set (non-launch triage stall stays actionable)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [{ ticket: "CTL-1", phase: "triage", status: "stalled" }],
+      hasTriageArtifact: () => false,
+    });
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(false);
+  });
+
+  test("Scenario 3: triage launch-failure AND a separate implement stall → NOT in the set (real post-triage work)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        launchFailSig("CTL-1"),
+        { ticket: "CTL-1", phase: "implement", status: "stalled" },
+      ],
+      hasTriageArtifact: () => false,
+    });
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(false);
+  });
+
+  test("with default hasTriageArtifact seam (unbound), set is always empty (shadow-safe)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [launchFailSig("CTL-1")],
+      // hasTriageArtifact defaults to () => true
+    });
+    expect(board.triageLaunchFailureOnlyTickets.size).toBe(0);
+  });
+
+  test("a ticket in the set with needs_human status variant is also excluded", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [{
+        ticket: "CTL-1", phase: "triage", status: "needs_human",
+        attentionReason: "sdk-launch-failed",
+      }],
+      hasTriageArtifact: () => false,
+    });
+    expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(true);
+  });
+});
+
+describe("selectAnchorCandidates — CTL-1649 triage-launch-failure exclusion", () => {
+  const launchFailBoard = (ticket, extraSignals = []) =>
+    assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket, phase: "triage", status: "stalled", attentionReason: "sdk-overloaded" },
+        ...extraSignals,
+      ],
+      hasTriageArtifact: () => false,
+    });
+
+  test("Acceptance 2: a tier-1 holistic-triage move for a launch-failure-only ticket is ABSENT from candidates", () => {
+    const board = launchFailBoard("CTL-1");
+    const moves = { tier1: [{ ticket: "CTL-1" }], tier2: [], tier3: [] };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).not.toContain("CTL-1");
+  });
+
+  test("Acceptance 3: a ticket with triage artifact (completed triage) + stalled implement → STILL a candidate", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-2", phase: "triage", status: "stalled", attentionReason: "sdk-overloaded" },
+        { ticket: "CTL-2", phase: "implement", status: "stalled" },
+      ],
+      hasTriageArtifact: () => false, // no artifact, but the other-stuck signal removes it from exclusion
+    });
+    const moves = { tier1: [{ ticket: "CTL-2" }], tier2: [], tier3: [] };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).toContain("CTL-2");
+  });
+
+  test("with empty exclusion set (unbound seam), output is byte-identical to today", () => {
+    // Use assembleBoardState with default seam → triageLaunchFailureOnlyTickets is empty
+    const board = assembleBoardState({
+      getWorkerSignals: () => [{ ticket: "CTL-3", phase: "triage", status: "stalled", attentionReason: "sdk" }],
+      // default hasTriageArtifact → () => true → exclusion set empty
+    });
+    const moves = { tier1: [{ ticket: "CTL-3" }], tier2: [], tier3: [] };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).toContain("CTL-3"); // NOT excluded — byte-identical to pre-CTL-1649
+  });
+
+  test("exclusion applies across all source lists (tier1, tier2, eligible, deferred)", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        { ticket: "CTL-EXCL", phase: "triage", status: "stalled", attentionReason: "sdk" },
+      ],
+      hasTriageArtifact: () => false,
+      eligible: [{ identifier: "CTL-EXCL" }],
+      getDeferredBoardHealthTickets: () => ["CTL-EXCL"],
+    });
+    const moves = {
+      tier1: [{ ticket: "CTL-EXCL" }],
+      tier2: [{ ticket: "CTL-EXCL" }],
+      tier3: [],
+    };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).not.toContain("CTL-EXCL");
+  });
+});
+
+describe("boardHealthPass enforce — launch-failure exclusion prevents recovery-pass dispatch (CTL-1649)", () => {
+  test("when the sole flagged ticket is a launch-failure-only ticket, act is NOT invoked", () => {
+    let actInvoked = false;
+    boardHealthPass({
+      mode: "enforce",
+      lastRunMs: 0,
+      intervalMs: 0,
+      now: () => NOW,
+      emit: () => {},
+      act: (ctx) => {
+        // selectAnchorCandidates should return [] (the ticket is excluded),
+        // so act's candidates array is empty and it returns no-owned-anchor.
+        actInvoked = ctx.candidates && ctx.candidates.length > 0;
+        return { dispatched: false, anchor: null, skippedReason: "no-owned-anchor" };
+      },
+      getWorkerSignals: () => [
+        { ticket: "CTL-EXCL", phase: "triage", status: "stalled", attentionReason: "sdk-overloaded" },
+      ],
+      hasTriageArtifact: () => false,
+      // The invariant must fire so the gate proceeds
+      capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
+      eligible: [{ identifier: "CTL-EXCL", state: "Todo" }],
+    });
+    expect(actInvoked).toBe(false);
+  });
+});
+

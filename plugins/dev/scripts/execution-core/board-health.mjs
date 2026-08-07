@@ -419,6 +419,11 @@ export function assembleBoardState({
   // observable:false (shadow-first seam: wiring lands before the timer populates).
   getStalledPrState = () => new Map(),
   now = () => Date.now(),
+  // CTL-1649: does a triage.json artifact exist for a given ticket? Injected so
+  // board-health.mjs stays fs-free (no fs import). Default () => true is
+  // inert/shadow-safe: !present is always false → nothing is excluded until the
+  // daemon binds the real fs check. See selectAnchorCandidates.
+  hasTriageArtifact = () => true,
 } = {}) {
   const nowMs = now();
   const safe = (fn, fallback) => {
@@ -451,6 +456,9 @@ export function assembleBoardState({
       // injected brief carries it per-ticket (consumed by the stuck-PR cohort
       // brief) without re-reading each signal file.
       failureReason: s.raw?.failureReason ?? s.failureReason ?? null,
+      // CTL-1649: preserve attentionReason so selectAnchorCandidates can exclude
+      // tickets whose ONLY non-clean signal is a triage launch failure.
+      attentionReason: s.raw?.attentionReason ?? s.attentionReason ?? null,
     };
   });
 
@@ -462,6 +470,42 @@ export function assembleBoardState({
     state: e.state ?? e.linear_state ?? null,
     updatedAt: e.updatedAt ?? e.updated_at ?? null,
   }));
+
+  // CTL-1649: compute the set of tickets whose ONLY non-clean signal is a triage
+  // launch failure. These are excluded from selectAnchorCandidates (the actuation
+  // gate) so the monitor's triage retry path retains sole ownership of the worktree.
+  //
+  // A ticket is in the set iff:
+  //   - it has ≥1 triage launch-failure signal: phase=="triage", status∈NEEDS_HUMAN_STATUSES,
+  //     attentionReason truthy, and no triage.json artifact (hasTriageArtifact seam returns false)
+  //   - it has 0 other non-clean signals for OTHER phases/statuses
+  //
+  // With the default hasTriageArtifact seam (() => true), !present is always false
+  // → isLaunchFailure is always false → the set is always empty → inert (shadow-safe,
+  // the daemon activates it by binding the real fs check).
+  const isLaunchFailureSignal = (s) =>
+    s.phase === "triage" &&
+    NEEDS_HUMAN_STATUSES.has((s.status ?? "").toLowerCase()) &&
+    !!s.attentionReason &&
+    !hasTriageArtifact(s.ticket);
+
+  const isOtherStuckSignal = (s) =>
+    NEEDS_HUMAN_STATUSES.has((s.status ?? "").toLowerCase()) && !isLaunchFailureSignal(s);
+
+  const triageLaunchFailureOnlyTickets = new Set();
+  // Group signals by ticket to check for the "only launch-failure signals" predicate.
+  const signalsByTicket = new Map();
+  for (const s of signals) {
+    if (!s.ticket) continue;
+    const arr = signalsByTicket.get(s.ticket);
+    if (arr) arr.push(s);
+    else signalsByTicket.set(s.ticket, [s]);
+  }
+  for (const [ticket, sigs] of signalsByTicket) {
+    if (sigs.some(isLaunchFailureSignal) && !sigs.some(isOtherStuckSignal)) {
+      triageLaunchFailureOnlyTickets.add(ticket);
+    }
+  }
 
   return Object.freeze({
     ticketsById,
@@ -510,6 +554,12 @@ export function assembleBoardState({
     // shadow/enforce invoke getStrandedEvidence() once per proceeding scan.
     strandedEvidence: mode === "off" ? new Map() : safe(() => getStrandedEvidence(), new Map()),
     now: nowMs,
+    // CTL-1649: tickets whose ONLY non-clean signal is a triage launch failure.
+    // selectAnchorCandidates excludes these from anchor candidates so the monitor's
+    // triage retry path retains sole ownership of the worktree. With the default
+    // hasTriageArtifact seam this is always an empty Set (shadow-safe, inert until
+    // the daemon binds the real fs check at the scheduler call site).
+    triageLaunchFailureOnlyTickets,
   });
 }
 
@@ -1462,10 +1512,19 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
       return true; // fail-open: a broken HRW read must not block self-owned actuation
     }
   };
+  // CTL-1649: tickets whose ONLY non-clean signal is a triage launch failure are
+  // excluded from anchor candidates — the monitor's triage retry path owns that
+  // worktree and must not be raced by a holistic recovery-pass.
+  // A ticket with a completed triage artifact and a stuck post-triage phase is
+  // NOT in this set and remains anchor-eligible. With the default board shape
+  // (no hasTriageArtifact seam bound), the set is empty and this is a no-op.
+  const excluded = board?.triageLaunchFailureOnlyTickets instanceof Set
+    ? board.triageLaunchFailureOnlyTickets
+    : new Set();
   const out = [];
   const seen = new Set();
   const add = (t) => {
-    if (t && !seen.has(t)) {
+    if (t && !excluded.has(t) && !seen.has(t)) {
       seen.add(t);
       out.push(t);
     }
@@ -1715,6 +1774,8 @@ export function boardHealthPass({
   act = undefined, // ONLY reachable in enforce; the daemon injects it (CTL-1300), shadow/off never do
   now = () => Date.now(),
   log = () => {},
+  // CTL-1649: triage artifact presence seam (daemon-bound); default inert (→ empty exclusion set).
+  hasTriageArtifact = undefined,
 } = {}) {
   if (mode === "off") return { ran: false, reason: "off" }; // strict no-op
   const nowMs = now();
@@ -1733,6 +1794,8 @@ export function boardHealthPass({
     getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
+    // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
+    ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);

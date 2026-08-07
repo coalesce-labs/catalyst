@@ -5535,6 +5535,10 @@ export function schedulerTick(
           act: _boardHealth.act,
           log: (o, m) => log.warn?.(o, m),
           now,
+          // CTL-1649: bind the real triage artifact check so selectAnchorCandidates
+          // can exclude tickets whose only non-clean signal is a triage launch failure.
+          // existsSync/join are already imported in scheduler.mjs.
+          hasTriageArtifact: (ticket) => existsSync(join(orchDir, "workers", ticket, "triage.json")),
         });
         if (_bhResult?.ran) _boardHealthLastRunMs = _bhResult.ranAtMs;
         // CTL-1157 (Codex round-5): a successful board-health ENFORCE dispatch enqueued
