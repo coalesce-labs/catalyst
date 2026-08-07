@@ -207,9 +207,10 @@ export function emitGithubAuthUnusable({ tokenSource = null, reason = null, appe
   });
 }
 
-// CAT-29: a daemon that cannot resolve its board/runtime dependencies is kept
-// alive for observability, but quarantined from new work. Emit the concrete
-// missing tools and the effective PATH once so the failure is actionable.
+// CAT-29: a daemon that cannot resolve its board/runtime dependencies stays
+// alive and reports non-accepting state for observability. The shell launcher
+// and worker dispatch gate enforce required-tool availability; this alert emits
+// the concrete missing tools and effective PATH once for diagnosis.
 export function emitBootDependencyUnusable({ missing = [], pathStr = null, reason = null, append, now, throttleMs } = {}) {
   return emitThrottled({
     eventName: ALERT_BOOT_DEPENDENCY_UNUSABLE,

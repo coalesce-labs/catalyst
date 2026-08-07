@@ -1375,11 +1375,11 @@ _stack_host_name() {
 # those CLIs under ~/.local; the launchd daemon shells out to them every tick
 # (reconcile → linearis, liveness snapshot → claude, linearis runtime → node),
 # so omitting these dirs makes every spawn exit-127 and the node strands
-# silently (frozen eligible set, freeSlots=0). Mirrors the proven join-shell
-# PATH order (catalyst-join.sh:719). The shared leaf retains only directories
-# that exist, so dead prefixes cannot camouflage a missing tool location.
+# silently (frozen eligible set, freeSlots=0). Persistent launchd definitions
+# intentionally omit the interactive installer's inherited PATH: only canonical
+# directories that exist at install time are written to the plist.
 _stack_agent_path() {
-  catalyst_agent_path "$PATH"
+  catalyst_agent_path ""
 }
 
 # _xml_escape <value> — escape the five XML predefined entities so an env value with
