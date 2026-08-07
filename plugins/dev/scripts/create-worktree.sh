@@ -22,6 +22,60 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# catalyst_git_exclude_worktree_artifacts <worktree_path> — keep Catalyst's own
+# worktree-local runtime bookkeeping out of every project's git status, without
+# ever touching that project's TRACKED .gitignore. Mirrors the existing pattern
+# already used for .agents/ (codex-run-phase-agent.mjs's gitExcludeAgents +
+# resolveGitExcludePath): writes to this worktree's LOCAL, uncommitted,
+# worktree-scoped `core.excludesFile` (via `git config --worktree`), so it
+# applies only here — never leaks into the project's history, never leaks
+# into sibling worktrees or the main checkout, and needs no per-project PR.
+#
+# Before this, every onboarded project had to carry its own .gitignore entries
+# for these paths — miss one and `git status` shows Catalyst's own noise as
+# dirty, which is exactly what stalled a real ticket's verify phase (rebase
+# refused a "dirty" tree that was only dirty because of thoughts/ and
+# .catalyst/.workflow-context.json). Idempotent + best-effort: failures here
+# must never abort worktree creation.
+catalyst_git_exclude_worktree_artifacts() {
+	local worktree_path="$1" abs_git_dir exclude_path pattern
+	# CTL-1662 (Codex review, PR #2851): plain `git rev-parse --git-path
+	# info/exclude` resolves to the COMMON git directory even for a linked
+	# worktree — `info/` is on git's shared-files list, so the naive path
+	# would hide these patterns in the main checkout and every sibling
+	# worktree, not just this one. `core.excludesFile` IS scopable per
+	# worktree via `git config --worktree` (gated by
+	# extensions.worktreeConfig), so point it at THIS worktree's own private
+	# info/exclude under its private git dir instead of relying on the
+	# shared one.
+	abs_git_dir=$(git -C "$worktree_path" rev-parse --absolute-git-dir 2>/dev/null) || return 0
+	exclude_path="${abs_git_dir}/info/exclude"
+	mkdir -p "$(dirname "$exclude_path")" 2>/dev/null || return 0
+	git -C "$worktree_path" config extensions.worktreeConfig true 2>/dev/null || return 0
+	git -C "$worktree_path" config --worktree core.excludesFile "$exclude_path" 2>/dev/null || return 0
+	# Best-effort past this point (docstring above): shared Git metadata can be
+	# read-only or otherwise unwritable, and under `set -e` an unguarded write
+	# failure here would abort worktree creation after the `git worktree add`
+	# already succeeded. Every write is explicitly guarded so a failure just
+	# returns (no exclusions applied) instead of propagating.
+	if [ ! -f "$exclude_path" ]; then
+		: >"$exclude_path" 2>/dev/null || return 0
+	fi
+	for pattern in \
+		"thoughts/" \
+		".catalyst/.workflow-context.json" \
+		".catalyst/.workflow-context.json.bak" \
+		".catalyst/worktree-provenance.json" \
+		".needs-cleanup" \
+		".orphaned_at" \
+		".trunk"; do
+		if ! grep -qxF "$pattern" "$exclude_path" 2>/dev/null; then
+			printf '%s\n' "$pattern" >>"$exclude_path" 2>/dev/null || return 0
+		fi
+	done
+	return 0
+}
+
 # Parse flags (collect positional args separately)
 POSITIONAL=()
 OVERRIDE_WORKTREE_DIR=""
@@ -180,6 +234,12 @@ if [ -d "$WORKTREE_PATH" ]; then
 				echo -e "${GREEN}  ✅ thoughts/shared repaired${NC}"
 			fi
 		fi
+		# CTL-1662 (Codex review, PR #2851): execution-core always supplies
+		# --reuse-existing (execution-core/worktree.mjs), so a worktree that
+		# predates the artifact-exclusion upgrade would otherwise never receive
+		# it — it exits here, before the creation-path call below. Best-effort;
+		# never blocks a successful reuse.
+		catalyst_git_exclude_worktree_artifacts "$WORKTREE_PATH"
 		echo -e "${GREEN}♻️  Reusing existing worktree: $WORKTREE_PATH${NC}"
 		echo "WORKTREE_PATH=${WORKTREE_PATH}"
 		exit 0
@@ -410,6 +470,13 @@ if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 		echo "📋 Orchestration context set: ${ORCHESTRATION_NAME}"
 	fi
 fi
+
+# Keep Catalyst's own worktree-local runtime artifacts (thoughts/,
+# .catalyst/.workflow-context.json, etc.) out of `git status` for every
+# project, unconditionally — via this worktree's local git exclude, never the
+# project's tracked .gitignore. Runs regardless of executor (bg/sdk/codex-exec)
+# and regardless of whether thoughts-init below even runs.
+catalyst_git_exclude_worktree_artifacts "$WORKTREE_PATH"
 
 # Generate .envrc for OTEL context (source_up inherits parent profiles)
 # Note: direnv allow runs AFTER setup hooks to avoid re-blocking if hooks modify .envrc

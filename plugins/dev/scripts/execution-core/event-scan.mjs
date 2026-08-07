@@ -127,6 +127,7 @@ function refreshIndex(path) {
           orchId: ev?.attributes?.["catalyst.orchestration"],
           ts: ev?.ts,
           label: ev?.attributes?.["event.label"],
+          attempt: ev?.attributes?.["phase.attempt"],
         });
         // CTL-778: index complete events by their full name for hasCompleteEvent.
         if (COMPLETE_NAME_RE.test(name)) {
@@ -242,6 +243,68 @@ export function hasCompleteEvent({ ticket, phase, path = getEventLogPath() } = {
   const entry = refreshIndex(path);
   const name = `phase.${phase}.complete.${ticket}`;
   return entry.completes?.has(name) ?? false;
+}
+
+// CTL-778 P2: the ISO `ts` of the MOST RECENT phase.<phase>.complete.<ticket>
+// envelope, or null if none exists. hasCompleteEvent only answers "ever" —
+// unscoped to any particular dispatch attempt, so a phase that completed once
+// and is later redispatched (revive, retry, operator resume) has its brand-new
+// worker misread as "already done" by the CTL-778 alive-but-idle reclaim, which
+// checks hasCompleteEvent with no attempt/generation scoping at all. Callers
+// that need "did THIS dispatch's worker complete" (not "did any worker, ever")
+// should compare this against the current signal's startedAt instead of calling
+// hasCompleteEvent directly. Reuses entry.events (already retains ts per event
+// for every complete/revive/remediate envelope — see refreshIndex) so this adds
+// no extra indexing cost. String comparison on `ts` is valid because every
+// envelope's timestamp is the same fixed-width ISO-8601 UTC shape (buildEventEnvelope
+// et al never emit fractional-second-less or offset-suffixed variants), so
+// lexicographic order matches chronological order without a Date.parse per event.
+export function latestCompleteEventTs({ ticket, phase, path = getEventLogPath() } = {}) {
+  if (!ticket || !phase) return null;
+  const entry = refreshIndex(path);
+  const name = `phase.${phase}.complete.${ticket}`;
+  let latest = null;
+  for (const ev of entry.events) {
+    if (ev.name !== name || typeof ev.ts !== "string") continue;
+    if (latest === null || ev.ts > latest) latest = ev.ts;
+  }
+  return latest;
+}
+
+// latestCompleteEventAttempt — the `phase.attempt` (CTL-761) the MOST RECENT
+// phase.<phase>.complete.<ticket> envelope carried, or null if none exists /
+// the field is absent. Companion to latestCompleteEventTs, computed over the
+// SAME "latest by ts" event so the two never disagree about which envelope is
+// "the" latest one.
+//
+// Why this exists: envelope timestamps are second-precision ISO-8601
+// (buildEventEnvelope), so a prior attempt's completion and a same-second
+// redispatch's startedAt compare as EQUAL under `ts >= sinceIso` — the CTL-778
+// stale-evidence reclaim guard (recovery.mjs completeEventSeen) would then
+// misread the stale completion as evidence for the brand-new attempt. Every
+// signal file already carries its own `attempt`/`generation` (CTL-736), so a
+// caller with the CURRENT signal's attempt in hand can compare attempt numbers
+// instead of (or alongside) the coarser timestamp, closing that window exactly.
+export function latestCompleteEventAttempt({ ticket, phase, path = getEventLogPath() } = {}) {
+  if (!ticket || !phase) return null;
+  const entry = refreshIndex(path);
+  const name = `phase.${phase}.complete.${ticket}`;
+  let latestTs = null;
+  let latestAttempt = null;
+  for (const ev of entry.events) {
+    if (ev.name !== name || typeof ev.ts !== "string") continue;
+    // >= (not >): events append in real write order, so on a same-second tie
+    // (second-precision ts) the LATER-appended event is the more recent one in
+    // actual wall-clock time even though its ts string doesn't show it — the
+    // exact case this function exists to disambiguate. latestCompleteEventTs's
+    // own returned ts is unaffected by this direction (both tied events share
+    // the same ts string); only which event's attempt wins the tie changes.
+    if (latestTs === null || ev.ts >= latestTs) {
+      latestTs = ev.ts;
+      latestAttempt = typeof ev.attempt === "number" ? ev.attempt : null;
+    }
+  }
+  return latestAttempt;
 }
 
 // __resetEventScanIndexForTest — clear the per-path index so a suite starts from
