@@ -20,7 +20,7 @@
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { workerStateRowToSignal, isHeldStatus } from "../../execution-core/projection-signal-map.mjs";
+import { workerStateRowToSignal, resolveHeldDisposition } from "../../execution-core/projection-signal-map.mjs";
 
 // CTL-1372: computed specifier — see the header note. DO NOT inline to a literal.
 const BROKER_STATE_MODULE = ["..", "..", "broker", "broker-state.mjs"].join("/");
@@ -78,13 +78,15 @@ export async function findHeldRunFromProjection(ticket, dbPath = defaultBrokerDb
     openBrokerStateDb(dbPath);
     for (const row of getAllWorkerStates()) {
       if (row.ticket !== ticket) continue;
-      if (!isHeldStatus(row.status)) continue;
+      // Codex P1: fetch `latest` BEFORE the held-gate — see the daemon-side
+      // twin (execution-core/projection-reader.mjs) for the full rationale.
       let latest = null;
       try {
         latest = getLatestTicketStateTransition(ticket);
       } catch {
         latest = null;
       }
+      if (!resolveHeldDisposition(row, latest)) continue;
       return { phase: row.phase ?? null, signal: workerStateRowToSignal(row, latest) };
     }
     return null;

@@ -137,4 +137,54 @@ describe("findHeldRunFromProjection", () => {
     const held = findHeldRunFromProjection("CTL-6");
     expect(held.signal.raw.artifact).toBe("thoughts/plan-6.md");
   });
+
+  // Codex P1 (round 2): the PRODUCTION-REALISTIC shape. worker_state.status is
+  // never actually "needs-input" (no phase.*.park event exists — see
+  // projection-signal-map.mjs's resolveHeldDisposition doc comment); a real
+  // park is only durably visible via the scheduler's worker.transition →
+  // ticket_state_transitions.to_disposition. Before this fix,
+  // findHeldRunFromProjection gated on isHeldStatus(row.status) alone and
+  // would have returned null here even though the ticket IS genuinely parked.
+  test("finds a held run from the durable DISPOSITION transition even when worker_state.status never became needs-input", () => {
+    upsertWorkerState({
+      orchestrator: "CTL-7",
+      ticket: "CTL-7",
+      phase: "implement",
+      status: "phase-complete", // the stale value a real park producer leaves behind
+      eventTs: "2026-07-22T00:00:00Z",
+      eventId: "w7",
+    });
+    recordTicketStateTransition({
+      eventId: "t7",
+      orchestrator: "CTL-7",
+      ticket: "CTL-7",
+      toStage: "implement",
+      fromDisposition: "queued",
+      toDisposition: "needs-input",
+      ts: "2026-07-22T00:00:01Z",
+    });
+    const held = findHeldRunFromProjection("CTL-7");
+    expect(held).not.toBe(null);
+    expect(held.phase).toBe("implement");
+  });
+
+  test("does NOT treat a needs-human disposition as held here (deferred to CTL-1690 — see projection-signal-map.mjs)", () => {
+    upsertWorkerState({
+      orchestrator: "CTL-8",
+      ticket: "CTL-8",
+      phase: "implement",
+      status: "phase-complete",
+      eventTs: "2026-07-22T00:00:00Z",
+      eventId: "w8",
+    });
+    recordTicketStateTransition({
+      eventId: "t8",
+      orchestrator: "CTL-8",
+      ticket: "CTL-8",
+      toStage: "implement",
+      toDisposition: "needs-human",
+      ts: "2026-07-22T00:00:01Z",
+    });
+    expect(findHeldRunFromProjection("CTL-8")).toBe(null);
+  });
 });

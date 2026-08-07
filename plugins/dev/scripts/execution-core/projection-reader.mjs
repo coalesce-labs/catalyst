@@ -16,7 +16,7 @@ import {
   getAllWorkerStates,
   getLatestTicketStateTransition,
 } from "../broker/broker-state.mjs";
-import { workerStateRowToSignal, isHeldStatus } from "./projection-signal-map.mjs";
+import { workerStateRowToSignal, resolveHeldDisposition } from "./projection-signal-map.mjs";
 
 // readWorkerSignalsFromProjection — reconstruct one WorkerSignal per durable
 // worker_state row. `orchDir` is accepted for call-site parity with
@@ -58,13 +58,17 @@ export function findHeldRunFromProjection(ticket) {
   }
   for (const row of rows) {
     if (row.ticket !== ticket) continue;
-    if (!isHeldStatus(row.status)) continue;
+    // Codex P1: fetch `latest` BEFORE the held-gate, not after — a normal
+    // park never sets row.status (see resolveHeldDisposition's doc comment),
+    // so the durable disposition transition is the only signal that can gate
+    // this true for the common needs-input case.
     let latest = null;
     try {
       latest = getLatestTicketStateTransition(ticket);
     } catch {
       latest = null;
     }
+    if (!resolveHeldDisposition(row, latest)) continue;
     const signal = workerStateRowToSignal(row, latest);
     return { phase: row.phase ?? null, signal };
   }

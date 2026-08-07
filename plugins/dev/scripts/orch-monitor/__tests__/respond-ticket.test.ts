@@ -352,11 +352,13 @@ describe("findHeldRun — locate the parked needs-input run", () => {
 });
 
 // CTL-1489 (closes CTL-1475): resolveHeldRun is the default `findHeld`
-// respondTicket calls — local-disk first, durable-projection fallback (off/
-// shadow/enforce) only when the local dir is absent, mirroring
-// execution-core/daemon.mjs's handleCommentWake gate.
+// respondTicket calls — local-disk first. off/shadow: a local held run
+// short-circuits outright (shadow only observes drift when local is absent).
+// enforce: a local held run is corroborated against the durable projection by
+// generation (Codex P1 round 2) before it wins, mirroring
+// execution-core/daemon.mjs's handleCommentWake gate for the local-absent path.
 describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
-  it("a LOCAL held run short-circuits — the projection is never consulted", async () => {
+  it("off mode: a LOCAL held run short-circuits — the projection is never consulted", async () => {
     let projectionCalled = false;
     const out = await resolveHeldRun("CTL-845", {
       findLocal: () => ({ phase: "implement", signal: { status: "needs-input" } }),
@@ -364,10 +366,59 @@ describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
         projectionCalled = true;
         return Promise.resolve(null);
       },
-      readProjectionMode: () => "enforce",
+      readProjectionMode: () => "off",
     });
     expect(out?.phase).toBe("implement");
     expect(projectionCalled).toBe(false);
+  });
+
+  it("shadow mode: a LOCAL held run short-circuits — the projection is never consulted", async () => {
+    let projectionCalled = false;
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input" } }),
+      findProjection: () => {
+        projectionCalled = true;
+        return Promise.resolve(null);
+      },
+      readProjectionMode: () => "shadow",
+    });
+    expect(out?.phase).toBe("implement");
+    expect(projectionCalled).toBe(false);
+  });
+
+  it("enforce mode: a LOCAL held run with no durable projection row still wins (fresh park, not yet folded)", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input", generation: 3 } }),
+      findProjection: () => Promise.resolve(null),
+      readProjectionMode: () => "enforce",
+    });
+    expect(out?.phase).toBe("implement");
+  });
+
+  it("enforce mode: a LOCAL held run wins when the durable projection's generation has NOT advanced past it", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input", generation: 3 } }),
+      findProjection: () =>
+        Promise.resolve({
+          phase: "implement",
+          signal: { status: "needs-input", raw: { generation: 3 } },
+        }),
+      readProjectionMode: () => "enforce",
+    });
+    expect(out?.phase).toBe("implement");
+  });
+
+  it("enforce mode: a LOCAL held run is rejected as stale when the durable projection's generation has advanced strictly past it (Codex P1 round 2)", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input", generation: 3 } }),
+      findProjection: () =>
+        Promise.resolve({
+          phase: "monitor-merge",
+          signal: { status: "dispatched", raw: { generation: 5 } },
+        }),
+      readProjectionMode: () => "enforce",
+    });
+    expect(out).toBeNull();
   });
 
   it("off mode → local absent → null (today's 404), projection never consulted", async () => {

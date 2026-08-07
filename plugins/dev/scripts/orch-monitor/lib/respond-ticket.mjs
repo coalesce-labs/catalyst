@@ -252,17 +252,24 @@ export function findHeldRun(
 // ── cross-host held-run resolution (CTL-1489, closes CTL-1475) ──────────────
 // resolveHeldRun — the default `findHeld` collaborator `respondTicket` calls.
 // Tries the LOCAL disk read first (byte-identical to pre-CTL-1489 behavior,
-// and free — no DB open on the hot path); only when the local dir is absent
-// does it consult the off/shadow/enforce durable-projection fallback, mirroring
-// execution-core/daemon.mjs's handleCommentWake gate exactly. off → today's
-// null (404 not_held); shadow → null + a drift observation (never changes the
-// decision); enforce → the projected held run, normalized to the shape
-// respondTicket expects (`signal.generation` at the TOP level — the raw
-// on-disk shape — not nested under `signal.raw.generation` the way
-// workerStateRowToSignal returns it; getting this wrong would silently starve
-// runFenceCheck's generation read, which fails CLOSED on a null generation in
-// a multi-host deployment — an over-conservative 409, never an unsafe bypass,
-// but still worth getting right).
+// and free — no DB open on the hot path). off/shadow: local wins outright
+// (shadow only observes drift when local is absent, exactly like pre-existing
+// behavior). enforce: when local is present, it is corroborated against the
+// durable projection by generation (Codex P1 round 2 — a stale local claim
+// left behind on a host after the ticket was reclaimed and resumed elsewhere
+// must not win just because it returned first; see the in-function comment
+// for the strict-generation-advance rule that avoids regressing the common
+// same-host case). When local is ABSENT, the off/shadow/enforce
+// durable-projection fallback below mirrors execution-core/daemon.mjs's
+// handleCommentWake gate exactly. off → today's null (404 not_held); shadow →
+// null + a drift observation (never changes the decision); enforce → the
+// projected held run, normalized to the shape respondTicket expects
+// (`signal.generation` at the TOP level — the raw on-disk shape — not nested
+// under `signal.raw.generation` the way workerStateRowToSignal returns it;
+// getting this wrong would silently starve runFenceCheck's generation read,
+// which fails CLOSED on a null generation in a multi-host deployment — an
+// over-conservative 409, never an unsafe bypass, but still worth getting
+// right).
 export async function resolveHeldRun(
   ticket,
   {
@@ -273,12 +280,50 @@ export async function resolveHeldRun(
   } = {},
 ) {
   const local = findLocal(ticket);
-  if (local) return local;
   let mode;
   try {
     mode = readProjectionMode();
   } catch {
     mode = "off";
+  }
+  if (local) {
+    if (mode !== "enforce") return local; // off/shadow: unchanged, local wins
+    // Codex P1 (round 2): enforce mode must not blindly trust a stale local
+    // claim (e.g. this host's worker dir wasn't cleaned up after the ticket
+    // was already reclaimed and resumed on ANOTHER host) — "this return
+    // occurs before the rollout mode or projection is read, so enforce can
+    // answer and resume the stale local run; an unchanged generation can
+    // still pass the fence." Corroborate against the durable projection, but
+    // ONLY override local when it reports a run that has moved STRICTLY past
+    // local's own known generation — a directly comparable, monotonic signal
+    // (the same one runFenceCheck already fences on). An absent projection
+    // row, or one that hasn't caught up past local's generation yet, safely
+    // defaults to trusting local — so a ticket that parked on THIS host a
+    // moment ago (before the durable fold has run) is never wrongly reported
+    // as not held, which a naive "projection has no opinion → not held" rule
+    // would regress for the common single-host case.
+    let projected;
+    try {
+      projected = await findProjection(ticket);
+    } catch {
+      projected = null;
+    }
+    const localGeneration =
+      typeof local.signal?.generation === "number" ? local.signal.generation : null;
+    const projectedGeneration =
+      typeof projected?.signal?.raw?.generation === "number"
+        ? projected.signal.raw.generation
+        : typeof projected?.signal?.generation === "number"
+          ? projected.signal.generation
+          : null;
+    if (
+      localGeneration != null &&
+      projectedGeneration != null &&
+      projectedGeneration > localGeneration
+    ) {
+      return null; // durable state has advanced strictly past local — local is stale
+    }
+    return local;
   }
   if (mode === "off") return null;
   let projected;

@@ -10,6 +10,7 @@ import {
   openBrokerStateDb,
   closeBrokerStateDb,
   upsertWorkerState,
+  recordTicketStateTransition,
 } from "../../broker/broker-state.mjs";
 import {
   readWorkerSignalsFromProjection,
@@ -82,6 +83,26 @@ describe("orch-monitor findHeldRunFromProjection", () => {
     seed({ ticket: "CTL-5", status: "running" });
     closeBrokerStateDb();
     expect(await findHeldRunFromProjection("CTL-5", dbPath)).toBe(null);
+  });
+
+  // Codex P1 (round 2): mirrors the daemon-side twin's production-realistic
+  // regression test — see execution-core/projection-reader.test.mjs for the
+  // full rationale (no phase.*.park event exists; the durable disposition
+  // transition is the only thing that ever captures a real park).
+  test("finds a held run from the durable DISPOSITION transition even when worker_state.status never became needs-input", async () => {
+    seed({ ticket: "CTL-7", phase: "implement", status: "phase-complete" });
+    recordTicketStateTransition({
+      eventId: "t7",
+      orchestrator: "CTL-1",
+      ticket: "CTL-7",
+      toStage: "implement",
+      toDisposition: "needs-input",
+      ts: "2026-07-22T00:00:01Z",
+    });
+    closeBrokerStateDb();
+    const held = await findHeldRunFromProjection("CTL-7", dbPath);
+    expect(held).not.toBe(null);
+    expect(held.phase).toBe("implement");
   });
 });
 
