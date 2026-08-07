@@ -81,6 +81,8 @@ function mkBoard(o = {}) {
       ...(o.ring ?? {}),
     },
     ownerForTicket: o.ownerForTicket ?? null,
+    // CAT-23: daemon-computed, heartbeat-derived dead-host set (CTL-1157).
+    deadHosts: o.deadHosts ?? [],
     // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite lookup.
     repoForTicket: o.repoForTicket ?? null,
     // CTL-1432 (B2/B3): deferred board-health anchor candidates + sanctioned latch allowlist.
@@ -237,6 +239,37 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
       mkBoard({ ticketsById, roster: ["mini", "mini-2"], ownerForTicket: () => "mini-2", reconcileMarkers: {} }),
     );
     expect(noSignal.strandedNode.observable).toBe(false);
+  });
+
+  test("strandedNode (CAT-23): rostered host owns work + heartbeat-dead → flag (observable), even with zero reconcile signal", () => {
+    const ticketsById = new Map([["CTL-A", { identifier: "CTL-A" }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        roster: ["mini", "sophon"],
+        ownerForTicket: () => "sophon",
+        reconcileMarkers: {},
+        deadHosts: ["sophon"],
+      }),
+    );
+    expect(r.strandedNode.ok).toBe(false);
+    expect(r.strandedNode.observable).toBe(true);
+    expect(r.strandedNode.flagged).toEqual(["sophon"]);
+  });
+
+  test("strandedNode (CAT-23): team-keyed reconcileMarkers never match a hostname — a team name equal to a host name in deadHosts does not double-count, and an unrelated dead host that owns nothing is not flagged", () => {
+    const ticketsById = new Map([["CTL-A", { identifier: "CTL-A" }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        roster: ["mini", "vega"],
+        ownerForTicket: () => "mini", // mini owns the only ticket; vega owns nothing
+        reconcileMarkers: { PAN: { consecutiveFailures: 5 } }, // team-keyed, real-shape
+        deadHosts: ["vega"], // dead, but owns no share → must not be flagged
+      }),
+    );
+    expect(r.strandedNode.ok).toBe(true);
+    expect(r.strandedNode.flagged).toEqual([]);
   });
 
   test("a throwing invariant fails OPEN ({ok:true,error}) and never aborts the scan", () => {

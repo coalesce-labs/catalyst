@@ -743,8 +743,21 @@ function checkRateLimitHeadroom(b) {
 }
 
 // #6 — stranded node (mini-2 class): a rostered host that HRW-owns a share of
-// the board but whose team reconcile is failing. Cross-host PEER liveness needs
-// the heartbeat/Loki path → only the local-marker form ships now.
+// the board but is either failing its team reconcile or provably dead by
+// heartbeat.
+//
+// CAT-23: markers/failing (reconcileMarkers / ring.reconcileFailing) are keyed
+// by Linear TEAM name (reconcile-health.mjs tracks per-team eligible-query
+// polling — see its header), never by hostname, so markers[host]/failing.has
+// (host) below can never match a real roster host in production; they only
+// fire for a caller that happens to hand this function host-keyed data (as
+// this file's own unit tests do). This was a known, documented gap ("Cross-host
+// PEER liveness needs the heartbeat/Loki path → only the local-marker form
+// ships now") — the daemon-computed, heartbeat-derived `deadHosts` set
+// (CTL-1157, computeSurvivingRoster, already threaded onto the board state for
+// the dead/stranded escalation move below) closes it: a roster host that owns
+// work and is in `deadHosts` is a confirmed stranded node, independent of
+// whether any team's reconcile happens to be failing too.
 function checkStrandedNode(b) {
   if (!b.ownerForTicket || b.roster.length === 0) {
     return invariant(true, 0, false, [], "no roster/HRW → stranded-node not observable");
@@ -758,26 +771,33 @@ function checkStrandedNode(b) {
   }
   const failing = b.ring?.reconcileFailing ?? new Set();
   const markers = b.reconcileMarkers ?? {};
+  const deadHosts = new Set(b.deadHosts ?? []);
   const flagged = [];
   for (const host of b.roster) {
     const share = ownedByHost.get(host) ?? 0;
     if (share <= 0) continue;
     const markerFail = (markers[host]?.consecutiveFailures ?? 0) > 0;
     const ringFail = failing.has(host);
-    if (markerFail || ringFail) flagged.push(host);
+    const heartbeatDead = deadHosts.has(host);
+    if (markerFail || ringFail || heartbeatDead) flagged.push(host);
   }
-  // observable only if we have SOME reconcile signal to judge against.
-  const haveSignal = Object.keys(markers).length > 0 || failing.size > 0;
+  // observable if we have SOME reconcile OR heartbeat signal to judge against.
+  // deadHosts.size > 0 is unambiguous (a confirmed dead host); an EMPTY
+  // deadHosts set stays neutral here rather than forcing observable:true,
+  // since [] is also assembleBoardState's default when nothing ever wired
+  // real heartbeat data in (no way to tell "computed, healthy" from "absent"
+  // from this function's side of that boundary).
+  const haveSignal = Object.keys(markers).length > 0 || failing.size > 0 || deadHosts.size > 0;
   return invariant(
     flagged.length === 0,
     flagged.length,
     haveSignal,
     flagged,
     flagged.length
-      ? `node(s) stranded (own work, reconcile failing): ${flagged.join(", ")}`
+      ? `node(s) stranded (own work, reconcile failing or heartbeat-dead): ${flagged.join(", ")}`
       : haveSignal
         ? "all rostered nodes participating"
-        : "no reconcile-health signal → peer liveness not observable",
+        : "no reconcile-health or liveness signal → peer liveness not observable",
   );
 }
 
