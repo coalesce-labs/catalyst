@@ -314,6 +314,13 @@ function resolveDevPluginRoot(pluginDirs) {
 // could plant under thoughts/ with an arbitrary name (e.g. `thoughts/root`).
 const PROVISIONED_THOUGHTS_ENTRIES = new Set(["shared", "global"]);
 
+// THOUGHTS_GLOBAL_DIR_NAME — the exact subdirectory name `thoughts/global`
+// must resolve to under a config-validated THOUGHTS_REPO anchor. Hardcoded
+// to match lib/provision-thoughts.sh's write_config, which itself always
+// writes `globalDir: "global"` (a literal, not derived from anything) —
+// the same constant the local entry name `global` already encodes.
+const THOUGHTS_GLOBAL_DIR_NAME = "global";
+
 // isSaneThoughtsTarget — the resolved target of a thoughts/ symlink must not
 // be the filesystem root or a bare top-level directory (`/`, `/etc`, `/Users`,
 // …). Every legitimate thoughts-repo target nests at least one level below a
@@ -432,9 +439,23 @@ function resolveThoughtsRoots(worktreePath) {
     return [];
   }
   // Legacy/simple shape: `thoughts` itself is a symlink straight to the target.
+  // 2026-08-07 hardening, round 3 (round-4 review, same PR): this branch used
+  // to return early on the bare structural floor ONLY, skipping the
+  // configured-directory validation entirely — a `thoughts -> /home/alice`
+  // symlink (2 segments) passed the same way the real-directory shape's
+  // `shared`/`global` used to before round 2's fix. Apply the SAME
+  // CONFIGURED/UNCONFIGURED regime choice used below for `shared`.
   if (stat.isSymbolicLink()) {
     try {
       const real = realpathSync(thoughtsPath);
+      const directory = resolveConfiguredThoughtsDirectory(worktreePath);
+      if (directory) {
+        // CONFIGURED regime — same `/repos/<directory>/` segment contract as
+        // resolveConfiguredThoughtsAnchor, applied directly (no `global`
+        // sibling to anchor here, so no separate anchor derivation needed).
+        return real.includes(`/repos/${directory}/`) ? [real] : [];
+      }
+      // UNCONFIGURED regime — structural floor only (fail-open).
       return isSaneThoughtsTarget(real) ? [real] : [];
     } catch {
       return [];
@@ -498,10 +519,19 @@ function resolveThoughtsRoots(worktreePath) {
         }
         // else: declared directory present but `shared`'s target doesn't
         // contain the expected segment — reject outright, `anchor` stays null.
-      } else if (anchor && (real === anchor || real.startsWith(`${anchor}/`))) {
+      } else if (anchor && real === join(anchor, THOUGHTS_GLOBAL_DIR_NAME)) {
         out.push(real);
-        // else: no validated anchor (shared missing/mismatched), or global
-        // doesn't nest under it — reject outright.
+        // 2026-08-07 hardening, round 3 (round-4 review, same PR): "nested
+        // under the anchor" (real===anchor || startsWith(anchor+"/")) was too
+        // permissive — it accepted `global` re-pointed at the anchor ITSELF
+        // (granting the whole THOUGHTS_REPO, every project under repos/) or
+        // any other descendant. worktree-thoughts-init.sh:57-77 provisions
+        // `global` as the EXACT `<THOUGHTS_REPO>/<globalDir>` target (and
+        // lib/provision-thoughts.sh's write_config hardcodes globalDir to
+        // the literal "global" — see THOUGHTS_GLOBAL_DIR_NAME), so require
+        // that exact path, not merely "somewhere under the anchor". Any
+        // other case — no validated anchor (shared missing/mismatched), or
+        // global doesn't match exactly — is rejected outright.
       }
     } catch {
       // Broken symlink / permission error on this one entry — skip it, keep
