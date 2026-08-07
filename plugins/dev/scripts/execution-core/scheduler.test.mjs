@@ -7203,6 +7203,7 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 2, // saturated
       reclaimDeadWork: noopReclaim,
+      hasTriageArtifact: () => true,
     };
     // Tick 1: hysteresis window opens, no preemption yet.
     schedulerTick(orchDir, { ...tickOpts, now: () => T0, killBgJob: makeKillStub() });
@@ -7236,6 +7237,23 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 1, // slot free
       reclaimDeadWork: noopReclaim,
+      now: () => NOW,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(0);
+  });
+
+  test("no preemption when the top-ranked queued ticket is untriaged", () => {
+    const NOW = 100_000;
+    seedWorker("CTL-1", "research", 4, NOW - 90_000, "bg-ctl1");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => [makePrioEligible("CTL-9", 1)],
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: noopReclaim,
+      hasTriageArtifact: () => false,
       now: () => NOW,
       killBgJob: kill,
     });
@@ -7341,6 +7359,7 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 1,
       reclaimDeadWork: noopReclaim,
+      hasTriageArtifact: () => true,
     };
     // __resetForTests clears hysteresis from the first tick (mtime-guarded tick above).
     __resetForTests();
@@ -7368,6 +7387,7 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 1,
       reclaimDeadWork: noopReclaim,
+      hasTriageArtifact: () => true,
       now: () => T0,
       killBgJob: kill1,
     });
@@ -7380,6 +7400,7 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 1,
       reclaimDeadWork: noopReclaim,
+      hasTriageArtifact: () => true,
       now: () => T0 + 35_000,
       killBgJob: kill2,
       appendPreemptedEvent: makePreemptStub(),
