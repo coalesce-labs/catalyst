@@ -2389,6 +2389,46 @@ LAUNCHED72="no"
 assert_eq "true" "$IDEMPOTENT72" "72: fresh monitor-merge (same PR#, newer ts) stays idempotent"
 assert_eq "no" "$LAUNCHED72" "72: no worker launched for fresh monitor-merge"
 
+# ─── Test 73 (CTL-1667, Codex P1 #3061): poststale signal WITHOUT a numeric
+# .generation + a leftover <phase>.claim.<gen> must still re-launch — not wedge as
+# claim-lost. This is the production shape Test 71 missed: the monitor-deploy
+# result branches rewrite the signal with no generation field, and the prior
+# run's claim file is still on disk. The revive target computes to gen 1 and
+# collides with that leftover claim; the reaper must recognize the poststale
+# tombstone (even though the signal generation is non-numeric) and free the orphan
+# claim so a fresh worker launches. TARGET stays deterministic (never high-water),
+# so CTL-736 single-flight is preserved.
+echo ""
+echo "Test 73 (CTL-1667): poststale signal w/o generation + leftover claim re-launches"
+fresh_env t73
+TS_NOW73="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TS_OLD73="$(date -u -v-86400S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '86400 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '2000-01-01T00:00:00Z')"
+# monitor-deploy's required prior artifact (the phase-artifact gate runs BEFORE
+# the poststale/claim logic and would otherwise refuse the dispatch outright).
+jq -n '{status:"done",pr:{number:200,mergedAt:"2026-08-01T00:00:00Z",ciStatus:"merged"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+# Prior run's leftover monitor-deploy signal: NO generation, NO .pr, OLD ts (the
+# exact shape a completed monitor-deploy result branch leaves behind).
+jq -n --arg ts "$TS_OLD73" \
+  '{status:"done",updatedAt:$ts,deploy_state:"skipped",completed_at:$ts}' \
+  > "${WORKER_DIR}/phase-monitor-deploy.json"
+# Current run's PR opener — newer than the stale signal → poststale by timestamp.
+jq -n --arg ts "$TS_NOW73" \
+  '{status:"done",updatedAt:$ts,pr:{number:200}}' \
+  > "${WORKER_DIR}/phase-pr.json"
+# Leftover claim from the prior run at the recomputed generation (1). Aged past the
+# 2-minute reaper grace so it is eligible for the atomic orphan reap.
+printf '%s\n' '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}' > "${WORKER_DIR}/monitor-deploy.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/monitor-deploy.claim.1"
+
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT73=$("$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+STATUS73=$(echo "$STDOUT73" | jq -r '.status // ""')
+LAUNCHED73="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED73="yes"
+assert_not_contains "$STATUS73" "claim-lost" "73: poststale w/o generation is NOT claim-lost (reaper frees orphan claim)"
+assert_eq "yes" "$LAUNCHED73" "73: fresh worker WAS launched despite leftover claim"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"

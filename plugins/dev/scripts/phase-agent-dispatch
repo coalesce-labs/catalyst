@@ -577,9 +577,11 @@ fi
 # {dispatched,running,done}: it skips the idempotency short-circuit below and,
 # being non-empty, takes the `EXISTING_GENERATION + 1` branch — the same rail a
 # stalled/failed revive already rides.
+POSTSTALE_SIGNAL=0
 if [[ -n "$EXISTING_STATUS" ]] \
    && is_poststale_signal "$WORKER_DIR" "$PHASE"; then
 	EXISTING_STATUS="poststale"   # revive path: overwrite + launch at generation+1
+	POSTSTALE_SIGNAL=1            # prior-run tombstone → its leftover claim is reapable (CTL-1667, Codex P1 #3061)
 fi
 
 if [[ $EXISTING_STATUS == "dispatched" || $EXISTING_STATUS == "running" || $EXISTING_STATUS == "done" ]]; then
@@ -704,6 +706,23 @@ if [[ $DRY_RUN -eq 0 ]]; then
 			else
 				CUR_SIG_GEN=$(jq -r '.generation // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
 				if [[ $CUR_SIG_GEN =~ ^[0-9]+$ ]] && ((CUR_SIG_GEN < TARGET_GENERATION)); then
+					SIG_IS_STALE=1
+				elif [[ ${POSTSTALE_SIGNAL:-0} -eq 1 ]]; then
+					# CTL-1667 (Codex P1, #3061): a poststale post-PR signal is a
+					# prior-run tombstone — is_poststale_signal already proved it
+					# (different PR# or older than the current run's phase-pr.json).
+					# Its result-branch rewrite often DROPS a numeric .generation
+					# (phase-monitor-deploy/-merge compose the file with `jq -nc`
+					# and no generation field), so CUR_SIG_GEN is empty and the
+					# numeric `< TARGET` test above cannot recognize it. Without
+					# this, the leftover <phase>.claim.<gen> from the prior run
+					# wedges every re-dispatch as claim-lost and the fresh post-PR
+					# worker never launches. Mark it stale so the age-guarded ATOMIC
+					# reaper below frees the orphan claim. TARGET_GENERATION stays
+					# deterministic (never the claim-file high-water mark), so the
+					# CTL-736 single-flight invariant holds: concurrent racers all
+					# compute the same target and exactly one wins the O_EXCL
+					# re-create; the losers bow out claim-lost as before.
 					SIG_IS_STALE=1
 				fi
 			fi

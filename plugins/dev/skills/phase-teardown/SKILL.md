@@ -122,12 +122,17 @@ PR_FILE="$WORKER_DIR/phase-pr.json"
 CUR_PR="$(jq -r '.pr.number // empty' "$PR_FILE" 2>/dev/null)"
 MERGE_PR="$(jq -r '.pr.number // empty' "$MERGE_FILE" 2>/dev/null)"
 
-# Resolve the PR number to verify: prefer the current run's phase-pr.json;
-# fall back to the merge signal only when phase-pr.json is absent.
-VERIFY_PR="${CUR_PR:-$MERGE_PR}"
+# Fail CLOSED when the current run's PR artifact is unavailable. phase-pr.json is
+# the ONLY signal that identifies THIS run's PR, and teardown DISPATCH requires
+# only phase-monitor-deploy.json — so a retained signal set from a PRIOR run (a
+# stale phase-monitor-merge.json whose PR GitHub still reports merged) could
+# otherwise reach this gate and mark the ticket Done + destroy the current
+# worktree WITHOUT ever identifying the current run's PR. Do NOT fall back to the
+# merge signal's PR number; require phase-pr.json (Codex P1, #3061).
+VERIFY_PR="$CUR_PR"
 if [[ -z "$VERIFY_PR" ]]; then
   "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
-    --reason "pr_not_merged:no_pr_number" \
+    --reason "pr_not_merged:phase_pr_artifact_missing" \
     ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
     || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
   exit 1
