@@ -35,6 +35,9 @@ EOF
 	chmod +x "$FAKE"
 	export EXECUTION_CORE_DAEMON_SCRIPT="$FAKE"
 	export EXECUTION_CORE_RUNTIME="bash" # run the fake under bash, not bun
+	# This lifecycle suite supplies a fake daemon and does not exercise CAT-29's
+	# dependency gate; the dedicated preflight suite covers that contract.
+	export CATALYST_SKIP_DEP_PREFLIGHT=1
 }
 
 teardown() {
@@ -42,7 +45,7 @@ teardown() {
 	pkill -f "fake-daemon.sh" 2>/dev/null || true
 	rm -rf "$SCRATCH"
 	unset CATALYST_DIR EXECUTION_CORE_DAEMON_SCRIPT EXECUTION_CORE_RUNTIME \
-	      DAEMON_ENV_DUMP CATALYST_EXECUTION_CORE_ENV
+	      DAEMON_ENV_DUMP CATALYST_EXECUTION_CORE_ENV CATALYST_SKIP_DEP_PREFLIGHT
 }
 
 # Return a localhost TCP port with no current listener (best-effort).

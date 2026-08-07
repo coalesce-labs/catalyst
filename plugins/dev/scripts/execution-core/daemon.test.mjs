@@ -33,6 +33,7 @@ import {
   readLinearBotUserIds,
   readLinearBotWriteId,
   _isBotId,
+  writeBootFacts,
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
 import { defaultDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
@@ -43,6 +44,28 @@ import {
   inHoldStopCooldown,
   clearHoldStopCooldown,
 } from "./scheduler.mjs";
+
+describe("CAT-29 boot facts", () => {
+  test("atomically publishes the running PATH and dependency verdict", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cat29-boot-facts-"));
+    try {
+      const file = writeBootFacts(
+        dir,
+        { ok: false, missing: ["linearis"] },
+        { pid: 4242, startedAt: "2026-08-07T20:00:00Z", path: "/usr/bin:/bin" },
+      );
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+        pid: 4242,
+        startedAt: "2026-08-07T20:00:00Z",
+        path: "/usr/bin:/bin",
+        preflight: { ok: false, missing: ["linearis"], degraded: true },
+      });
+      expect(existsSync(`${file}.tmp`)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
 let catalystDir;
