@@ -72,22 +72,38 @@ own_thoughts_artifact_dir_for_phase() {
 # Finds thoughts artifacts in <dir> that belong to <ticket>.
 # Accepts both the tail form (…-ctl-1081.md) and the slug form (…-ctl-1081-<slug>.md).
 # The word-boundary guard (-${lc}. and -${lc}-) rejects cross-ticket lookalikes
-# (e.g. ctl-10812 does NOT satisfy a ctl-1081 gate). nocaseglob absorbs the
-# uppercase-ticket convention (CTL-1081 writer, ctl-1081 glob) in one step.
-# Bash-3.2 safe: uses tr for lowercasing, no mapfile.
+# (e.g. ctl-10812 does NOT satisfy a ctl-1081 gate). Case-insensitive matching
+# absorbs the uppercase-ticket convention (CTL-1081 writer, ctl-1081 glob) in
+# one step.
+#
+# Deliberately shell-agnostic (no `shopt`, no bash array-glob): this file's
+# shebang says bash, but in practice callers have sourced it under an
+# interactive zsh session rather than invoking via `bash -c` as intended.
+# `shopt` is not a zsh builtin, so `shopt -s nullglob nocaseglob` silently
+# failed under zsh (non-fatal, execution continued) and the SUBSEQUENT glob ran
+# under zsh's own default (non-nullglob, error-on-no-match) semantics instead
+# of bash's — producing an empty match with no error surfaced, which this
+# function's callers read as "prior artifact missing" even when it existed.
+# Confirmed root cause behind at least one false plan-phase stall (see
+# CAT-39's friction log) — real research/plan docs existed on disk, but the
+# gate reported them missing. `find -iname` performs the identical
+# slug-tolerant, boundary-safe, case-insensitive match without depending on
+# either shell's array/glob-option extensions, so sourcing this file under
+# bash OR zsh now behaves identically. Bash-3.2 safe: uses tr for lowercasing,
+# no mapfile.
 match_thoughts_artifact() {
 	local dir="$1" ticket="$2" lc
+
+	# Missing dir → no match, no error (mirrors the prior nullglob behavior).
+	[[ -d "$dir" ]] || return 1
+
 	lc="$(printf '%s' "$ticket" | tr '[:upper:]' '[:lower:]')"
 
-	# nullglob: missing dir → empty array, no error.
-	# nocaseglob: absorbs uppercase ticket names in one pass.
-	shopt -s nullglob nocaseglob
-	# shellcheck disable=SC2206
-	local matches=( "${dir}"/*-"${lc}".md "${dir}"/*-"${lc}"-*.md )
-	shopt -u nullglob nocaseglob
+	local matches
+	matches="$(find "$dir" -maxdepth 1 -type f \( -iname "*-${lc}.md" -o -iname "*-${lc}-*.md" \) 2>/dev/null)"
 
-	if [[ ${#matches[@]} -gt 0 ]]; then
-		printf '%s\n' "${matches[@]}"
+	if [[ -n "$matches" ]]; then
+		printf '%s\n' "$matches"
 		return 0
 	fi
 	return 1
