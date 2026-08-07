@@ -29,6 +29,8 @@ import {
   escalateExhaustedIntents,
   classifyPrNotMerged,
   PR_NOT_MERGED_REASON,
+  MONITOR_DEPLOY_EMPTY_SHA_PREFIX,
+  isPrMergeUnconfirmedReason,
   defaultClearIntentCooldown,
   defaultLatchHasNoClock,
   restampNoClockEscalations,
@@ -2715,5 +2717,132 @@ describe("reasoningRecoveryPass — pr_not_merged end-to-end (CTL-1496 Phase 4)"
     expect(deferIntent).toBeDefined();
     expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
     expect(events.some((e) => e.type === "recovery.escalated")).toBe(false);
+  });
+});
+
+// ─── CTL-1680: monitor-deploy empty-mergeCommitSha signature → probe ────────
+
+describe("CTL-1680: monitor-deploy empty-SHA routes to PR-state probe", () => {
+  // The three exact failure strings emitted by phase-monitor-deploy's empty-SHA gate.
+  const EMPTY_SHA_REASONS = [
+    "phase-monitor-merge.json has empty .pr.mergeCommitSha and no PR number available for gh REST fallback",
+    "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh repo view returned empty",
+    "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#290",
+  ];
+
+  const probeReturning = (o) => () => o;
+
+  const openGreenBotEvidence = (failureReason) => ({
+    logsOutput: null,
+    signal: { failureReason, ticket: "CTC-350", worktreePath: "/wt/CTC-350" },
+    failureReason,
+    ticket: "CTC-350",
+  });
+
+  // 1. The canonical incident case: REST-fallback-empty string → probe → fix
+  test("REST-fallback-empty reason → routes to probe → bounded-llm fix", () => {
+    const reason = EMPTY_SHA_REASONS[2];
+    const r = defaultClassifyTicket(openGreenBotEvidence(reason), {
+      probePrBlock: probeReturning({
+        prNumber: 290,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [{ id: "T1", path: "a.ts", line: 3, body: "fix this" }],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+  });
+
+  // 2. All three monitor-deploy failure strings route to the probe
+  test.each(EMPTY_SHA_REASONS)("reason '%s' → routes to probe → fix", (reason) => {
+    let called = false;
+    defaultClassifyTicket(openGreenBotEvidence(reason), {
+      probePrBlock: (ticket, opts) => {
+        called = true;
+        return {
+          prNumber: 290,
+          mergeStateStatus: "CLEAN",
+          failingChecks: [],
+          unresolvedBotThreads: [],
+          unresolvedHumanThreads: [],
+          hasChangesRequested: false,
+        };
+      },
+    });
+    expect(called).toBe(true);
+  });
+
+  // 3. Probe is called for the empty-SHA reasons (probe invocation assertion)
+  test("probe is invoked for the empty-SHA reason", () => {
+    let called = false;
+    defaultClassifyTicket(openGreenBotEvidence(EMPTY_SHA_REASONS[0]), {
+      probePrBlock: () => { called = true; return { prNumber: 1, mergeStateStatus: "CLEAN", failingChecks: [], unresolvedBotThreads: [], unresolvedHumanThreads: [], hasChangesRequested: false }; },
+    });
+    expect(called).toBe(true);
+  });
+
+  // 4. REGRESSION GUARD: a reason containing "merge" but not the empty-SHA prefix never calls the probe
+  test("REGRESSION: reason containing 'merge' but not empty-SHA prefix — probe never called", () => {
+    let called = false;
+    defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "merge-conflict" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(called).toBe(false);
+  });
+
+  // 4b. Existing regression guards still pass unchanged
+  test("REGRESSION: unknown failure — probe never called (existing guard)", () => {
+    let called = false;
+    defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "some-other-reason" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(called).toBe(false);
+  });
+
+  // 5. Human CHANGES_REQUESTED via new route → escalate, PR number in reason
+  test("empty-SHA reason + human CHANGES_REQUESTED → escalate with PR number", () => {
+    const r = defaultClassifyTicket(openGreenBotEvidence(EMPTY_SHA_REASONS[2]), {
+      probePrBlock: probeReturning({
+        prNumber: 290,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H1", body: "redesign the API", path: "b.ts", line: 9 }],
+        hasChangesRequested: true,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+    expect(r.details.reason).toContain("290");
+  });
+
+  // isPrMergeUnconfirmedReason predicate unit tests
+  test("isPrMergeUnconfirmedReason: true for pr_not_merged", () => {
+    expect(isPrMergeUnconfirmedReason(PR_NOT_MERGED_REASON)).toBe(true);
+  });
+
+  test("isPrMergeUnconfirmedReason: true for empty-SHA prefixed reasons", () => {
+    for (const r of EMPTY_SHA_REASONS) {
+      expect(isPrMergeUnconfirmedReason(r)).toBe(true);
+    }
+  });
+
+  test("isPrMergeUnconfirmedReason: false for unrelated reasons", () => {
+    expect(isPrMergeUnconfirmedReason("merge-conflict")).toBe(false);
+    expect(isPrMergeUnconfirmedReason("some-other-reason")).toBe(false);
+    expect(isPrMergeUnconfirmedReason(undefined)).toBe(false);
+    expect(isPrMergeUnconfirmedReason(null)).toBe(false);
+  });
+
+  // MONITOR_DEPLOY_EMPTY_SHA_PREFIX is exported and matches the prefix
+  test("MONITOR_DEPLOY_EMPTY_SHA_PREFIX exported and matches the incident strings", () => {
+    for (const r of EMPTY_SHA_REASONS) {
+      expect(r.startsWith(MONITOR_DEPLOY_EMPTY_SHA_PREFIX)).toBe(true);
+    }
   });
 });

@@ -502,6 +502,18 @@ export function reasoningRecoveryPass(items, opts = {}) {
 // CTL-1496: the failureReason value emitted by phase-teardown's pr_not_merged gate.
 export const PR_NOT_MERGED_REASON = "pr_not_merged";
 
+// CTL-1680: phase-monitor-deploy's empty-mergeCommitSha false-done guard emits bespoke prose
+// reasons (not teardown's literal "pr_not_merged"). They all share this recognizable prefix.
+// Recognize them so the same live PR-state probe runs, instead of falling through to defer/escalate.
+export const MONITOR_DEPLOY_EMPTY_SHA_PREFIX =
+  "phase-monitor-merge.json has empty .pr.mergeCommitSha";
+export function isPrMergeUnconfirmedReason(reason) {
+  return (
+    reason === PR_NOT_MERGED_REASON ||
+    (typeof reason === "string" && reason.startsWith(MONITOR_DEPLOY_EMPTY_SHA_PREFIX))
+  );
+}
+
 // CTL-1496: classify a pr_not_merged recovery item by probing live PR state.
 // All GitHub calls are behind the injectable probePrBlock seam so this function
 // stays pure and unit-testable with a fake probe.
@@ -633,10 +645,12 @@ export function defaultClassifyTicket(evidence, opts = {}) {
   // Extract evidence fields
   const { logsOutput, jobState, signal, beliefState, failureReason } = evidence;
 
-  // CTL-1496: pr_not_merged gets a live PR-state probe before any generic rules.
-  // Only fires for this specific failureReason; all other paths are untouched.
+  // CTL-1496 / CTL-1680: route to the live PR-state probe for any "merge not confirmed" failure.
+  // Covers teardown's literal "pr_not_merged" (CTL-1496) AND phase-monitor-deploy's bespoke
+  // empty-mergeCommitSha prose reasons (CTL-1680), which share a recognizable prefix.
+  // All other failure reasons are intentionally untouched — the probe is bounded to this family.
   const effectiveFailureReason = failureReason ?? signal?.failureReason;
-  if (effectiveFailureReason === PR_NOT_MERGED_REASON) {
+  if (isPrMergeUnconfirmedReason(effectiveFailureReason)) {
     return classifyPrNotMerged(evidence, { probePrBlock: probePrBlock ?? defaultProbePrBlock, log });
   }
 
