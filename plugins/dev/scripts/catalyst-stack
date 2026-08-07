@@ -209,6 +209,11 @@ COORDINATION_STOP_GRACE_SECONDS="${COORDINATION_STOP_GRACE_SECONDS:-30}"
 # catalyst-state.sh; flock is absent on stock macOS). Serializes check-and-spawn so
 # two overlapping starts can't both pass the pid check and both spawn (Codex P1).
 COORDINATION_LOCK="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.start.lock"
+# Reclaim mutex: serializes the stale-lock takeover DECISION so two overlapping
+# starts can't both age-check the same stale lock and both remove+reacquire it —
+# an ownership-safe atomic takeover (Codex P1). Held only across the age-check +
+# removal (sub-second), never across the spawn.
+COORDINATION_RECLAIM_LOCK="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.reclaim.lock"
 
 # CTL-1348: the standalone catalyst-updater daemon (the 5th launchd agent). Installed
 # ONLY by the explicit 'catalyst-stack adopt-updater' cutover — NOT by install-services,
@@ -485,17 +490,33 @@ coordination_resolve() {
 # tick racing a manual start — the loser skips the tick (the winner establishes the
 # single publisher) rather than queueing a redundant spawn.
 start_coordination() {
-  local tries=0
+  local guard=0
   while ! mkdir "$COORDINATION_LOCK" 2>/dev/null; do
-    # Reclaim a stale lock from a crashed start (mtime older than the threshold —
-    # comfortably above the <1min a real check-and-spawn takes, even with a 30s
-    # stop-grace on a config-change restart), so a crash can't wedge startup.
-    if [[ "$tries" -lt 3 && -n "$(find "$COORDINATION_LOCK" -maxdepth 0 -mmin +"${COORDINATION_LOCK_STALE_MIN:-5}" 2>/dev/null)" ]]; then
-      log "coordination-publish: reclaiming stale start lock"
-      rmdir "$COORDINATION_LOCK" 2>/dev/null || true
-      tries=$((tries + 1)); continue
+    guard=$((guard + 1))
+    if [[ "$guard" -gt 5 ]]; then
+      log "coordination-publish start already in progress — skipping this tick"
+      return 0
     fi
-    # Held by a concurrent, live start — it will establish the publisher.
+    # Lock held. Decide UNDER a dedicated reclaim mutex whether this is a crashed
+    # start (reclaim it) or a live peer (skip). Serializing the DECISION is what
+    # makes the takeover ownership-safe: two overlapping starts can no longer both
+    # age-check the same stale dir and both remove-then-reacquire it (Codex P1). A
+    # bare rmdir/mv can't fix this — a peer that already reclaimed leaves a FRESH
+    # live lock at the same path, so an unconditional removal would delete it. While
+    # the main lock dir exists nobody can mkdir it, so removing it here — after
+    # re-confirming staleness under the mutex — can never delete a live lock.
+    if mkdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null; then
+      if [[ -n "$(find "$COORDINATION_LOCK" -maxdepth 0 -mmin +"${COORDINATION_LOCK_STALE_MIN:-5}" 2>/dev/null)" ]]; then
+        log "coordination-publish: reclaiming stale start lock"
+        rmdir "$COORDINATION_LOCK" 2>/dev/null || true
+        rmdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null || true
+        continue    # stale cleared — contend for a fresh mkdir
+      fi
+      rmdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null || true
+    fi
+    # A live peer holds the lock, or another start owns the in-flight reclaim
+    # decision — either way it will establish the single publisher; skip this tick
+    # rather than pile a redundant spawn on.
     log "coordination-publish start already in progress — skipping this tick"
     return 0
   done

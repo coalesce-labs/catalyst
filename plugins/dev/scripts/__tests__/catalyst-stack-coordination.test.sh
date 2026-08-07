@@ -174,6 +174,26 @@ if grep -qi 'reclaiming stale start lock' <<<"$OUT_ST"; then pass "stale-lock: r
 if grep -q 'RC=0' <<<"$OUT_ST"; then pass "stale-lock: proceeds after reclaim (rc 0)"; else failx "stale-lock: proceeds after reclaim (rc 0)" "$OUT_ST"; fi
 if grep -q 'LOCK_REMOVED' <<<"$OUT_ST"; then pass "stale-lock: releases the lock it acquired"; else failx "stale-lock: releases the lock it acquired" "$OUT_ST"; fi
 
+# --- ownership-safe reclaim: a stale main lock IS present, but a peer holds the
+#     reclaim mutex ⇒ this start must SKIP (not remove the stale lock out from under
+#     the peer that's reclaiming it) — proves the takeover decision is serialized so
+#     two starts can't both reclaim+reacquire and double-spawn (Codex P1). ---
+CDIR_A="${SCRATCH}/catalyst-atomicreclaim"; mkdir -p "$CDIR_A"
+OUT_A="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_A" \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    mkdir -p "$COORDINATION_LOCK"
+    touch -t 202001010000 "$COORDINATION_LOCK"   # stale main lock…
+    mkdir -p "$COORDINATION_RECLAIM_LOCK"        # …but a peer owns the reclaim decision
+    start_coordination; echo "RC=$?"
+    [[ -d "$COORDINATION_LOCK" ]] && echo "MAINLOCK_KEPT" || echo "MAINLOCK_REMOVED"
+    [[ -f "$COORDINATION_PID" ]] && echo "PIDFILE_PRESENT" || echo "PIDFILE_GONE"
+  ' 2>&1)"
+if grep -q 'RC=0' <<<"$OUT_A"; then pass "atomic-reclaim: reclaim-mutex held ⇒ returns 0 (skips)"; else failx "atomic-reclaim: reclaim-mutex held ⇒ returns 0" "$OUT_A"; fi
+if grep -qi 'already in progress' <<<"$OUT_A"; then pass "atomic-reclaim: does not race the peer's reclaim"; else failx "atomic-reclaim: does not race the peer's reclaim" "$OUT_A"; fi
+if grep -q 'MAINLOCK_KEPT' <<<"$OUT_A"; then pass "atomic-reclaim: leaves the stale lock for its owner (no double-remove)"; else failx "atomic-reclaim: leaves the stale lock for its owner" "$OUT_A"; fi
+if grep -q 'PIDFILE_GONE' <<<"$OUT_A"; then pass "atomic-reclaim: spawns nothing"; else failx "atomic-reclaim: spawns nothing" "$OUT_A"; fi
+
 echo ""
 echo "  ${PASSES} passed, ${FAILURES} failed"
 [[ "$FAILURES" -eq 0 ]]
