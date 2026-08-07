@@ -306,17 +306,209 @@ function resolveDevPluginRoot(pluginDirs) {
   return pluginDirs.find((p) => typeof p === "string" && p.length > 0);
 }
 
-// resolveThoughtsRoot — the REAL path the worktree's `thoughts/` symlink points
-// to (it points OUTSIDE the workspace — see the protocol doc). Added to the
-// writable roots so codex can write research/plan artifacts under thoughts/.
-// null when there is no thoughts symlink (best-effort — never throws).
-function resolveThoughtsRoot(worktreePath) {
+// PROVISIONED_THOUGHTS_ENTRIES — the only immediate `thoughts/` entry names
+// lib/provision-thoughts.sh ever creates as symlinks (see its `globalDir:
+// "global"` / shared-dir provisioning). resolveThoughtsRoots enumerates ONLY
+// these — never every symlink an attacker (or a prior compromised codex turn,
+// which already has write access to its OWN worktree, including thoughts/)
+// could plant under thoughts/ with an arbitrary name (e.g. `thoughts/root`).
+const PROVISIONED_THOUGHTS_ENTRIES = new Set(["shared", "global"]);
+
+// isSaneThoughtsTarget — the resolved target of a thoughts/ symlink must not
+// be the filesystem root or a bare top-level directory (`/`, `/etc`, `/Users`,
+// …). Every legitimate thoughts-repo target nests at least one level below a
+// real checkout (e.g. `/Users/x/thoughts/repos/proj/shared`,
+// `/home/x/thoughts-repo/global`) — a resolved depth of 0–1 is exactly the
+// shape a malicious `thoughts/shared -> /` (or `-> /etc`) symlink produces,
+// and is the concrete cross-run sandbox-escape vector this guards against:
+// codex's own worktree writes are already sandboxed to the worktree, so
+// planting such a symlink costs an attacker nothing, but a FUTURE dispatch's
+// resolveWritableRoots would otherwise hand that resolved path (up to `/`
+// itself) real filesystem write access.
+//
+// 2026-08-07 P1 follow-up (Codex round-3, PR #3082): a bare segment-count
+// floor alone is NOT sufficient — `thoughts/shared -> /home/alice` (or any
+// other 2+-segment path an attacker chooses) still passes a `>= 2` (or even
+// a raised `>= 3`) check while granting write access to an arbitrary,
+// unrelated directory. The real, structural defense is
+// resolveConfiguredThoughtsAnchor below: validate the resolved target
+// against the WORKTREE'S OWN configured thoughts repository (the same
+// `.catalyst/config.json` → `catalyst.thoughts.directory` source of truth
+// lib/assert-thoughts-project.sh already uses for exactly this purpose), not
+// a shape heuristic. isSaneThoughtsTarget is kept ONLY as a last-resort
+// structural floor for the legacy direct-symlink shape and as a fallback
+// when a worktree genuinely has no thoughts config to validate against
+// (fail-open, mirroring assert-thoughts-project.sh's own precedent) — it is
+// no longer the primary guard for the common `shared`/`global` shape.
+function isSaneThoughtsTarget(p) {
+  if (typeof p !== "string" || !isAbsolute(p)) return false;
+  const segments = p.split("/").filter(Boolean);
+  return segments.length >= 2;
+}
+
+// resolveConfiguredThoughtsDirectory — reads the SAME field
+// lib/assert-thoughts-project.sh validates thoughts/shared against:
+// `.catalyst/config.json` → `catalyst.thoughts.directory`, from the worktree
+// root. Returns null (not an empty string) when the file is missing,
+// unparsable, or the field is absent — the caller treats null as "no
+// authoritative anchor available" and falls back to the structural check,
+// same fail-open precedent as assert-thoughts-project.sh.
+function resolveConfiguredThoughtsDirectory(worktreePath) {
   if (!worktreePath) return null;
   try {
-    return realpathSync(join(worktreePath, "thoughts"));
+    const cfg = JSON.parse(readFileSync(join(worktreePath, ".catalyst", "config.json"), "utf8"));
+    const dir = cfg?.catalyst?.thoughts?.directory;
+    return typeof dir === "string" && dir.length > 0 ? dir : null;
   } catch {
     return null;
   }
+}
+
+// resolveConfiguredThoughtsAnchor — validates a resolved `thoughts/shared`
+// target against the worktree's configured thoughts directory, requiring the
+// SAME `/repos/<directory>/` segment lib/assert-thoughts-project.sh requires
+// (the two checks are independent implementations of the identical contract
+// on purpose — one shell, one JS — not a shared function call). On a match,
+// derives and returns the THOUGHTS_REPO root (everything before that
+// segment) so the sibling `thoughts/global` target — always
+// `<THOUGHTS_REPO>/<globalDir>` per lib/provision-thoughts.sh /
+// worktree-thoughts-init.sh — can be validated as nested under that SAME,
+// now-trusted root rather than trusted independently. Returns null when
+// there is no configured directory to check (fail-open — caller falls back
+// to isSaneThoughtsTarget) OR when a configured directory is present but the
+// resolved target does NOT contain the expected segment (fail-CLOSED — a
+// declared, non-matching directory is a genuine mismatch, not an absence,
+// and the caller must reject the target outright rather than fall back).
+function resolveConfiguredThoughtsAnchor(worktreePath, resolvedSharedTarget) {
+  const directory = resolveConfiguredThoughtsDirectory(worktreePath);
+  if (!directory) return { anchor: null, mismatch: false };
+  const expectedSegment = `/repos/${directory}/`;
+  const idx = resolvedSharedTarget.indexOf(expectedSegment);
+  if (idx === -1) return { anchor: null, mismatch: true };
+  return { anchor: resolvedSharedTarget.slice(0, idx), mismatch: false };
+}
+
+// resolveThoughtsRoots — the REAL path(s) any symlink under the worktree's
+// `thoughts/` points to (they point OUTSIDE the workspace — see the protocol
+// doc). Added to the writable roots so codex can write research/plan artifacts
+// under thoughts/. Best-effort throughout: a missing thoughts/ dir, an
+// unreadable directory, or a broken/dangling symlink is skipped rather than
+// thrown — never lets a sandbox-roots computation crash a dispatch.
+//
+// 2026-08-03 fix: the ACTUAL on-disk convention (lib/provision-thoughts.sh) is
+// NOT "thoughts is a symlink" — it's "thoughts is a REAL directory whose
+// immediate entries (`global`, `shared`) are themselves symlinks pointing
+// outside the worktree." The prior version only ever `realpathSync`'d the
+// `thoughts` directory itself; since `thoughts` isn't a symlink in that shape,
+// that just returned the unchanged worktree-local path and never added the
+// actual external target at all. Confirmed live: this silently broke every
+// research/plan artifact write for codex-exec-routed phases (4+ real tickets,
+// each failing with a "thoughts/shared symlink target outside writable roots"
+// sandbox denial) — the bug had existed since codex-exec's original CTL-1457
+// build (2026-07-14) with zero test coverage on this function, only surfacing
+// once research/plan started getting routed through codex-exec.
+//
+// 2026-08-07 hardening (round-2 review, PR #3082): both shapes below are now
+// gated by isSaneThoughtsTarget — see its comment for the sandbox-escape
+// scenario this closes.
+//
+// 2026-08-07 hardening, round 2 (round-3 review, same PR): a bare structural
+// floor alone was insufficient (any attacker-chosen 2+-segment path still
+// passed). The real-directory shape below now validates `shared`/`global`
+// against the worktree's CONFIGURED thoughts directory when one is declared
+// — see resolveConfiguredThoughtsAnchor's doc comment — falling back to the
+// structural floor only when no thoughts directory is configured at all.
+//
+// Handles BOTH shapes: `thoughts` itself being a symlink (the legacy/simple
+// case this function originally assumed), and `thoughts` being a real
+// directory whose entries are symlinks (the actual, far more common shape).
+function resolveThoughtsRoots(worktreePath) {
+  if (!worktreePath) return [];
+  const thoughtsPath = join(worktreePath, "thoughts");
+  let stat;
+  try {
+    stat = lstatSync(thoughtsPath);
+  } catch {
+    return [];
+  }
+  // Legacy/simple shape: `thoughts` itself is a symlink straight to the target.
+  if (stat.isSymbolicLink()) {
+    try {
+      const real = realpathSync(thoughtsPath);
+      return isSaneThoughtsTarget(real) ? [real] : [];
+    } catch {
+      return [];
+    }
+  }
+  if (!stat.isDirectory()) return [];
+  // Real-directory shape: resolve ONLY the provisioned entries (`global`,
+  // `shared` — see PROVISIONED_THOUGHTS_ENTRIES) that are themselves symlinks,
+  // to their real target. A real (non-symlink) entry, e.g. thoughts/searchable,
+  // is left alone — it's already inside the worktree and needs no additional
+  // writable root. Any OTHER symlinked entry (unprovisioned name) is skipped
+  // outright, never resolved.
+  //
+  // `shared` is resolved FIRST (fixed iteration order below, not readdir
+  // order) so its config-validated target can anchor `global`'s validation —
+  // see resolveConfiguredThoughtsAnchor's doc comment.
+  //
+  // Two DISTINCT validation regimes, chosen ONCE by whether this worktree
+  // declares a thoughts directory at all (`configuredDirectory`, read once
+  // up front — not re-derived per entry):
+  //   - CONFIGURED (the common case for every catalyst-managed worktree):
+  //     `shared` must match the declared `/repos/<directory>/` segment or is
+  //     rejected outright (fail-CLOSED — a declared, non-matching directory
+  //     is a genuine mismatch). `global` must nest under THAT validated
+  //     anchor or is likewise rejected outright — no structural fallback for
+  //     either entry once a directory is declared, since a fixed segment
+  //     count alone is exactly the insufficient guard Codex's round-3 finding
+  //     flagged (an attacker-chosen 2+-segment target still passes a bare
+  //     length check).
+  //   - UNCONFIGURED (no `.catalyst/config.json` thoughts directory at all):
+  //     nothing to validate against — fall back to the structural floor
+  //     (isSaneThoughtsTarget) independently for each entry, the same
+  //     fail-open precedent lib/assert-thoughts-project.sh already sets for
+  //     an unconfigured project.
+  const out = [];
+  let entries;
+  try {
+    entries = new Set(readdirSync(thoughtsPath));
+  } catch {
+    return [];
+  }
+  const configuredDirectory = resolveConfiguredThoughtsDirectory(worktreePath);
+  let anchor = null; // THOUGHTS_REPO root, once `shared` validates against config
+  for (const entry of ["shared", "global"]) {
+    if (!entries.has(entry) || !PROVISIONED_THOUGHTS_ENTRIES.has(entry)) continue;
+    const entryPath = join(thoughtsPath, entry);
+    try {
+      if (!lstatSync(entryPath).isSymbolicLink()) continue;
+      const real = realpathSync(entryPath);
+      if (!configuredDirectory) {
+        // UNCONFIGURED regime — structural floor only, no anchor tracking.
+        if (isSaneThoughtsTarget(real)) out.push(real);
+        continue;
+      }
+      // CONFIGURED regime — anchor-only, no structural fallback.
+      if (entry === "shared") {
+        const { anchor: derived } = resolveConfiguredThoughtsAnchor(worktreePath, real);
+        if (derived) {
+          anchor = derived;
+          out.push(real);
+        }
+        // else: declared directory present but `shared`'s target doesn't
+        // contain the expected segment — reject outright, `anchor` stays null.
+      } else if (anchor && (real === anchor || real.startsWith(`${anchor}/`))) {
+        out.push(real);
+        // else: no validated anchor (shared missing/mismatched), or global
+        // doesn't nest under it — reject outright.
+      }
+    } catch {
+      // Broken symlink / permission error on this one entry — skip it, keep
+      // going; never let one bad entry drop the rest of the census.
+    }
+  }
+  return out;
 }
 
 // resolveWorktreeGitDirs — the REAL git metadata paths for a linked worktree.
@@ -350,7 +542,7 @@ function resolveWorktreeGitDirs(worktreePath) {
 
 // resolveWritableRoots — the de-duplicated, absolute writable-root set for the
 // `-c sandbox_workspace_write.writable_roots=[…]` override: the configured roots
-// ∪ {orchDir} ∪ {the resolved thoughts real-root of the worktree if present}
+// ∪ {orchDir} ∪ {every resolved thoughts real-root of the worktree}
 // ∪ {the worktree's real git-dir and git-common-dir, for linked worktrees}.
 // Order-preserving; drops non-absolute / empty / duplicate entries.
 function resolveWritableRoots(cfg, { orchDir, worktreePath } = {}) {
@@ -364,7 +556,7 @@ function resolveWritableRoots(cfg, { orchDir, worktreePath } = {}) {
   };
   for (const r of cfg?.writableRoots ?? []) add(r);
   add(orchDir);
-  add(resolveThoughtsRoot(worktreePath));
+  for (const r of resolveThoughtsRoots(worktreePath)) add(r);
   const { gitDir, commonDir } = resolveWorktreeGitDirs(worktreePath);
   add(gitDir);
   add(commonDir);
