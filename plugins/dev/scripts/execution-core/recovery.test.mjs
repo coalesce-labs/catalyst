@@ -44,11 +44,14 @@ import {
   defaultAppendBootResumePhaseRegressionEvent,
   // CTL-1044
   defaultAppendOperatorEvent,
+  // 2026-08-03
+  detectSessionRateLimitHit,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
 import { existsSync, appendFileSync, chmodSync } from "node:fs";
-import { recordEscalation } from "./label-guard.mjs"; // CTL-1442: seed reason-change scenarios
+import { recordEscalation, LABEL_CONFIRM_CAP } from "./label-guard.mjs"; // CTL-1442: seed reason-change scenarios; CTL-1643: cap
+import { readDurableEscalations } from "./durable-escalation.mjs"; // CTL-1643: durable store reader
 import { defaultClearStall } from "./scheduler.mjs"; // CTL-1442: operator re-arm resets the ask budget
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 
@@ -553,7 +556,13 @@ describe("recoverStartup", () => {
 
 // implementSignal — a bg-shaped phase-implement signal with the orchestrator +
 // session-id fields the reclaim path threads into emit-complete.
-function implementSignal({ ticket = "CTL-9", status = "running", bgJobId = "job-x", startedAt } = {}) {
+function implementSignal({
+  ticket = "CTL-9",
+  status = "running",
+  bgJobId = "job-x",
+  startedAt,
+  attempt,
+} = {}) {
   return {
     ticket,
     phase: "implement",
@@ -571,6 +580,9 @@ function implementSignal({ ticket = "CTL-9", status = "running", bgJobId = "job-
       // window. Absent by default so the existing absent-revive tests (which can't
       // prove worker freshness) keep their pre-CTL-735 revive behaviour.
       ...(startedAt !== undefined ? { startedAt } : {}),
+      // CTL-778 follow-up: only present when a test exercises the attempt-based
+      // stale-evidence discriminator. Absent by default, matching startedAt above.
+      ...(attempt !== undefined ? { attempt } : {}),
     },
   };
 }
@@ -2435,6 +2447,92 @@ describe("reclaimDeadWorkIfPossible — CTL-736 progress gate", () => {
     expect(writeProgressMark.calls.length).toBe(0); // no new high-water on a stop
   });
 
+  // 2026-08-03 fix: confirmed live across 11 real tickets — every no-progress
+  // escalation's human-facing text/observed field read "escalated after 0
+  // attempt(s)" regardless of how many REAL ask/retry cycles actually ran,
+  // because escalateOnce's finalAttemptCount param historically received the
+  // CTL-736 progress QUANTITY (always 0 here — that's what triggers the STOP
+  // branch), not an attempt count, while the `attempts` array was correctly
+  // built from the real ask history. This is the 3rd-cycle case (2 prior asks
+  // on record, this ask trips the ask-cap): the count must now read 3
+  // everywhere, matching `attempts.length`.
+  test("no-progress escalation on its 3rd real cycle reports final_attempt_count:3 (not 0), matching the real ask history", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2, // no forward progress → no-progress STOP
+      appendEscalatedEvent,
+      readEscalationRecordFn: () => ({ reason: "no-progress", askCount: 2, asks: [111, 222] }),
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const call = appendEscalatedEvent.calls[0][0];
+    expect(call.reason).toBe("no-progress");
+    // The bug: this used to always be 0 (the progress quantity), never the
+    // real ask count — even when `attempts` (below) correctly showed 3.
+    expect(call.final_attempt_count).toBe(3);
+    const explanation = call.extras.explanation;
+    expect(explanation.problem).toBe("implement escalated after 3 attempt(s): no-progress");
+    expect(explanation.risk).toBe("continued retries risk wasting budget; 3 attempt(s) already made");
+    expect(explanation.observed.final_attempt_count).toBe(3);
+    expect(explanation.why_asking).toBe("no forward progress after 3 attempt(s) — stop-and-escalate");
+    // The real ask history: 2 prior + this one = 3, exactly matching the count above.
+    expect(explanation.attempts).toEqual([111, 222, 1_000_000]);
+  });
+
+  // 2026-08-03 fix: confirmed live across 11 real tickets on 2 hosts — every
+  // one's dead session transcript showed nothing but the Claude harness's own
+  // "You've hit your session limit" reply on every attempt (zero real tool
+  // use), yet the escalation read as generic "no forward progress," which
+  // reads as "the WORK is stuck" when the true story is "the ACCOUNT is
+  // rate-limited." This does NOT change the STOP/escalate decision or the
+  // ask-cap — only enriches the explanation once that decision is made.
+  test("a no-progress STOP whose dead session hit an account rate limit gets an accurate call_to_action + observed.likely_cause", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2, // no forward progress → no-progress STOP
+      appendEscalatedEvent,
+      detectRateLimit: (bgJobId) => {
+        expect(bgJobId).toBe("job-x"); // the seam receives the dead worker's OWN bg_job_id
+        return true;
+      },
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const explanation = appendEscalatedEvent.calls[0][0].extras.explanation;
+    expect(explanation.observed.likely_cause).toBe("account-rate-limited");
+    expect(explanation.call_to_action).toMatch(/usage\/rate limit/);
+    expect(explanation.call_to_action).toMatch(/wait for the usage window to reset/);
+    // The underlying reason/cap machinery is UNCHANGED — still "no-progress".
+    expect(appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
+  });
+
+  test("a no-progress STOP whose dead session shows NO rate-limit signature keeps the original generic explanation", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2,
+      appendEscalatedEvent,
+      detectRateLimit: () => false,
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const explanation = appendEscalatedEvent.calls[0][0].extras.explanation;
+    expect(explanation.observed.likely_cause).toBeUndefined();
+    expect(explanation.call_to_action).toBe("authorize CTL-9 implement to retry or change approach?");
+  });
+
+  test("a throwing detectRateLimit seam degrades to the generic explanation, never breaks the STOP", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2,
+      appendEscalatedEvent,
+      detectRateLimit: () => { throw new Error("boom"); },
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const explanation = appendEscalatedEvent.calls[0][0].extras.explanation;
+    expect(explanation.observed.likely_cause).toBeUndefined();
+  });
+
   test("first death with no prior mark (readProgressMark -1) always gets one revive — even at zero progress", () => {
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
@@ -4125,6 +4223,239 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
       });
     }).not.toThrow();
   });
+
+  test("supersede guard tolerates an unknown phase on the SIGNAL ITSELF, not just in listTicketPhases history (regression)", () => {
+    // Non-FSM dispatches (e.g. recovery-reasoning.mjs's Pass 0r recovery-pass
+    // actuator) reuse this same workers/<ticket>/phase-<name>.json signal-file
+    // machinery with phase:"recovery-pass" — a name with no PHASE_LINEAR_KEY
+    // entry and no ordinal position. Before this fix, `phaseIndex(phase)` ran
+    // UNGUARDED (unlike the `dispatched` reduce four lines above, which already
+    // had the isKnownPhase guard), so every dead recovery-pass worker threw
+    // PhaseFsmError on every tick — caught by scheduler.mjs's PROJ-702 per-worker
+    // isolation, but permanently unreclaimable as a result. A non-FSM phase
+    // can't be "superseded" in the ordinal sense, so it must skip the guard and
+    // fall through to the normal reclaim-eligible path — which, since no probe
+    // is registered for a non-pipeline phase, resolves to a one-time terminal
+    // write ('escalation-cap-terminal', stalledReason: no-probe-for-phase)
+    // rather than an uncaught throw, so listInFlightTickets stops counting the
+    // dead worker as an occupied slot forever (Codex #3027 P1).
+    //
+    // Uses a real temp orchDir (not the describe block's shared "/orch"
+    // string) because this path genuinely writes the signal file to disk —
+    // reusing "/orch" would write outside any test's control (Codex #3027 P2
+    // on the ORIGINAL version of this test).
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-recovery-pass-"));
+    try {
+      const escalate = recorder(undefined);
+      const applyLabel = recorder(undefined);
+      const recordEscalation = recorder(undefined);
+      const recoveryPassSig = {
+        ticket: "PROJ-503",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: {
+          ticket: "PROJ-503",
+          phase: "recovery-pass",
+          orchestrator: "PROJ-503",
+          status: "running",
+          bg_job_id: "job-old",
+        },
+      };
+      let r;
+      expect(() => {
+        r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+          statJob: () => null, // dead bg job
+          listTicketPhases: () => ["triage", "research", "plan", "implement"],
+          appendEscalatedEvent: escalate,
+          applyStalledLabel: applyLabel,
+          inEscalationCooldownFn: () => false,
+          recordEscalationFn: recordEscalation,
+          breaker: { isOpen: () => false },
+        });
+      }).not.toThrow();
+      expect(r).toBe("escalation-cap-terminal");
+      expect(escalate.calls.length).toBe(1);
+      expect(applyLabel.calls.length).toBe(1);
+      expect(recordEscalation.calls.length).toBe(1);
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-503", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase terminalizes locally even while the Linear breaker is OPEN (regression, Codex #3027 round 2 P1)", () => {
+    // The terminal write is purely local (tmp+rename to the signal file) — it
+    // must not wait for the breaker to close. Before this fix, escalateOnce
+    // returned "rate-limited-deferred" without ever reaching the terminal
+    // write for this reason (only a spent no-progress cap triggered the
+    // local repair), so a dead recovery-pass worker observed during a Linear
+    // outage stayed at "running" — the exact slot-leak this whole ticket
+    // exists to close — for the entire duration of the outage.
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-breaker-open-"));
+    try {
+      const escalate = recorder(undefined);
+      const recoveryPassSig = {
+        ticket: "PROJ-504",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: { ticket: "PROJ-504", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+      };
+      const r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+        statJob: () => null,
+        listTicketPhases: () => [],
+        appendEscalatedEvent: escalate, // must NOT be called — breaker open defers the Linear-facing event
+        applyStalledLabel: recorder(undefined),
+        breaker: { isOpen: () => true },
+      });
+      expect(r).toBe("rate-limited-deferred");
+      expect(escalate.calls.length).toBe(0); // the Linear-facing escalation is still deferred
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-504", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase terminalizes locally even while an escalation cooldown is ACTIVE (regression, Codex #3027 round 2 P1)", () => {
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-cooldown-"));
+    try {
+      const recoveryPassSig = {
+        ticket: "PROJ-505",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: { ticket: "PROJ-505", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+      };
+      const r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+        statJob: () => null,
+        listTicketPhases: () => [],
+        appendEscalatedEvent: recorder(undefined),
+        applyStalledLabel: recorder(undefined),
+        breaker: { isOpen: () => false },
+        inEscalationCooldownFn: () => true, // a prior ask already fired within the window
+      });
+      expect(r).toBe("escalation-suppressed");
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-505", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase reconciles to done when the worker's own complete event was already seen (regression, Codex #3027 round 2 P2)", () => {
+    // A recovery-pass worker that emitted phase.recovery-pass.complete and then
+    // crashed before its OWN signal-file update landed genuinely finished its
+    // work. Escalating it to needs-human/stalled would falsely park a ticket
+    // whose recovery pass already succeeded — completeEventSeen must be
+    // checked before treating a probe-less dead signal as unverifiable.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    // Codex #3027 round 3 P2: this signal carries bg_job_id "job-old", so the
+    // reconcile branch's emitReapIntent call must be stubbed — without this
+    // seam the test invokes the PRODUCTION reap-intent producer, which
+    // synchronously appends a real "phase.reclaim.reap-requested" record to
+    // the live ~/catalyst/events/YYYY-MM.jsonl on whatever machine runs the
+    // suite, polluting the unified event log with a fake PROJ-506 request.
+    const reapIntent = recorder(Promise.resolve());
+    const recoveryPassSig = {
+      ticket: "PROJ-506",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-506", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      emitReapIntent: reapIntent,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+    expect(escalate.calls.length).toBe(0); // reconciled to done, never escalated
+    expect(reapIntent.calls[0][0]).toBe("phase.reclaim.reap-requested");
+  });
+
+  test("no-probe-for-phase skips an already-parked needs-human signal instead of re-escalating (regression, Codex #3027 round 4 P2)", () => {
+    // recovery-emit.mjs's `escalated` subcommand already parked this signal
+    // needs-human with a worker-authored decision brief before the worker
+    // died (crashed before its phase-completion event landed). Re-escalating
+    // with a generic no-probe-for-phase brief would discard that curated
+    // explanation — mirrors the pre-existing needs-input guard.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const recoveryPassSig = {
+      ticket: "PROJ-507",
+      phase: "recovery-pass",
+      status: "needs-human",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-507", phase: "recovery-pass", status: "needs-human", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => false,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("noop");
+    expect(escalate.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+  });
+
+  test("no-probe-for-phase returns 'reclaim-failed' when the complete-event-seen emit-complete repair fails (regression, Codex #3027 round 4 P2)", () => {
+    // The other completion-reconciliation branches (PROJ-778 alive-probe-reclaim,
+    // and branch (B) of reclaimDeadWork) both return 'reclaim-failed' on a
+    // non-zero emitComplete — this branch must match so scheduler.mjs doesn't
+    // bucket a failed signal repair as a successful reclaim.
+    const emit = recorder({ code: 1, stderr: "boom" });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const reapIntent = recorder(Promise.resolve());
+    const recoveryPassSig = {
+      ticket: "PROJ-508",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-508", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      emitReapIntent: reapIntent,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(emit.calls.length).toBe(1);
+  });
 });
 
 describe("readBootSince — CTL-655 boot-time window reader", () => {
@@ -4274,6 +4605,143 @@ describe("resolvePhaseSessionId", () => {
     mkdirSync(join(jobsDir, "nolink"), { recursive: true });
     writeFileSync(join(jobsDir, "nolink", "state.json"), JSON.stringify({ state: "stopped" }));
     expect(resolvePhaseSessionId("nolink", { jobsDir })).toBeNull();
+  });
+});
+
+// 2026-08-03: detectSessionRateLimitHit — see recovery.mjs's own header comment
+// for the full incident (11 real tickets, 2 hosts, escalated as generic
+// "no-progress" when every dead session's transcript showed nothing but the
+// Claude harness's own rate-limit reply).
+describe("detectSessionRateLimitHit", () => {
+  function assistantLine(text) {
+    return JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  }
+
+  test("no bgJobId → false, resolveSession never called", () => {
+    const resolveSession = () => { throw new Error("must not be called"); };
+    expect(detectSessionRateLimitHit(null, { resolveSession })).toBe(false);
+    expect(detectSessionRateLimitHit(undefined, { resolveSession })).toBe(false);
+  });
+
+  test("resolveSession returns null (no resolvable session) → false", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", { resolveSession: () => null, findTranscriptFn: () => "/should-not-be-used" }),
+    ).toBe(false);
+  });
+
+  test("findTranscript returns null (no transcript on disk) → false", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => null,
+        readTranscriptFn: () => { throw new Error("must not read — no transcript path"); },
+      }),
+    ).toBe(false);
+  });
+
+  test("a transcript whose tail shows the literal session-limit reply → true", () => {
+    const lines = [
+      JSON.stringify({ type: "system", subtype: "init" }),
+      assistantLine("You've hit your session limit · resets 10:50pm (America/Chicago)"),
+    ].join("\n");
+    const result = detectSessionRateLimitHit("job-x", {
+      resolveSession: () => "uuid-1",
+      findTranscriptFn: () => "/fake/transcript.jsonl",
+      readTranscriptFn: () => lines,
+    });
+    expect(result).toBe(true);
+  });
+
+  test("the 'usage limit' phrasing variant also matches", () => {
+    const lines = assistantLine("You've hit your usage limit · resets tomorrow");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+      }),
+    ).toBe(true);
+  });
+
+  test("a transcript with real research content (no rate-limit phrase) → false", () => {
+    const lines = [
+      assistantLine("I'll start by reading the coordinator module..."),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: {} }] } }),
+    ].join("\n");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+      }),
+    ).toBe(false);
+  });
+
+  test("the phrase appears only OUTSIDE the tail window → false (tail-only scan, not full-file)", () => {
+    const earlyHit = assistantLine("You've hit your session limit · resets soon");
+    const filler = Array.from({ length: 30 }, () => assistantLine("real work happening here")).join("\n");
+    const lines = [earlyHit, filler].join("\n");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+        tailLines: 5,
+      }),
+    ).toBe(false);
+  });
+
+  test("malformed JSON lines interspersed do not prevent finding the real match", () => {
+    const lines = [
+      "{not valid json",
+      assistantLine("You've hit your session limit · resets later"),
+      "another { broken line",
+    ].join("\n");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+      }),
+    ).toBe(true);
+  });
+
+  test("resolveSession throwing degrades to false, never throws", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", { resolveSession: () => { throw new Error("boom"); } }),
+    ).toBe(false);
+  });
+
+  test("findTranscript throwing degrades to false, never throws", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => { throw new Error("boom"); },
+      }),
+    ).toBe(false);
+  });
+
+  test("readFileSync throwing (unreadable transcript) degrades to false, never throws", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => { throw new Error("EACCES"); },
+      }),
+    ).toBe(false);
+  });
+
+  test("a non-assistant entry (e.g. user/system) mentioning the phrase in passing is ignored", () => {
+    const lines = [
+      JSON.stringify({ type: "user", message: { content: "did you hit your session limit earlier?" } }),
+    ].join("\n");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -5700,6 +6168,178 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
     expect(mirror.calls.length).toBe(0);
   });
 
+  // CTL-778 P2 (bug fix): the reclaim call site must pass the CURRENT dispatch's
+  // own startedAt as sinceIso, so completeEventSeen can distinguish "this
+  // worker finished" from "some prior attempt finished, once, whenever." Without
+  // this wiring, a redispatched phase's brand-new worker gets reclaimed within
+  // seconds of spawning because a stale complete event from a PRIOR attempt
+  // still satisfies an attempt-unscoped check — the exact bug that made every
+  // resume/revive/retry of an already-once-completed phase unrecoverable.
+  test("CTL-778 P2: completeEventSeen is called with sinceIso = signal.raw.startedAt", () => {
+    const seenCalls = [];
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED, attempt: 2 });
+    reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      completeEventSeen: (args) => {
+        seenCalls.push(args);
+        return true;
+      },
+      emitComplete: recorder({ code: 0 }),
+      emitReapIntent: recorder(Promise.resolve()),
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(seenCalls).toHaveLength(1);
+    // CTL-778 follow-up: sinceAttempt rides alongside sinceIso now, sourced from
+    // the same signal.raw the wiring already reads startedAt from.
+    expect(seenCalls[0]).toMatchObject({
+      ticket: sig.ticket,
+      phase: "implement",
+      sinceIso: STARTED,
+      sinceAttempt: 2,
+    });
+  });
+
+  // CTL-778 P2: a complete event from a PRIOR attempt (older than this dispatch's
+  // own startedAt) must NOT trigger the reclaim — that's the stale-evidence bug.
+  // The comparison itself (latest-ts-wins, stale-rejected) is unit-tested against
+  // a real event log in event-scan.test.mjs's `latestCompleteEventTs` suite; this
+  // exercises the actual default completeEventSeen function in isolation (not
+  // through reclaimDeadWorkIfPossible, which has no path-injection seam to point
+  // the real default at a fixture log — the wiring test above already proves the
+  // sinceIso it would be compared against is correct).
+  test("CTL-778 P2: default completeEventSeen rejects a stale complete event, accepts a fresh one", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs, latestCompleteEventAttempt } = await import(
+      "./event-scan.mjs"
+    );
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-p2-"));
+    const path = join(dir, "events.jsonl");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: "2026-06-07T00:00:00Z", // before STARTED
+        attributes: { "event.name": "phase.implement.complete.CTL-9" },
+        body: {},
+      }) + "\n"
+    );
+    // Same shape as recovery.mjs's real default (recovery.mjs:2084-2098), built
+    // here against the temp path directly since hasCompleteEvent/latestCompleteEventTs
+    // both accept an explicit path override.
+    const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return true;
+    };
+    expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(false);
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: "2026-06-01T00:00:00Z" })
+    ).toBe(true);
+  });
+
+  // Codex review (PR #2851): a redispatch after a completed cycle can reuse
+  // attempt numbers (ordinary scheduler dispatches omit `attempt`, defaulting
+  // back to attempt 1) — the timestamp must reject an OLDER completion before
+  // attempt is ever consulted, or a stale attempt-1 completion from a PRIOR
+  // cycle satisfies a brand-new attempt-1 dispatch even though it predates
+  // the new signal's startedAt.
+  test("Codex PR#2851: an older completion with a REUSED attempt number is still rejected by timestamp", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs, latestCompleteEventAttempt } = await import(
+      "./event-scan.mjs"
+    );
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-reused-attempt-"));
+    const path = join(dir, "events.jsonl");
+    // Prior cycle's attempt-1 completion, well before the new dispatch's startedAt.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: "2026-06-01T00:00:00Z",
+        attributes: { "event.name": "phase.implement.complete.CTL-9", "phase.attempt": 1 },
+        body: {},
+      }) + "\n"
+    );
+    const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return true;
+    };
+    // New dispatch's own attempt also defaults to 1 (ordinary redispatch omits
+    // `attempt`) — eventAttempt(1) >= sinceAttempt(1) would wrongly read "seen"
+    // if attempt were compared before the timestamp.
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED, sinceAttempt: 1 })
+    ).toBe(false);
+  });
+
+  // CTL-778 follow-up (upstream review, PR #2851): the case sinceIso alone can't
+  // catch — a prior attempt's completion and a same-second redispatch's
+  // startedAt land in the SAME second, so `ts >= sinceIso` is true even though
+  // the event is stale. sinceAttempt (the current signal's own attempt number)
+  // is the precise discriminator; this proves it rejects the stale same-second
+  // event and accepts once the real attempt's own completion lands.
+  test("CTL-778 follow-up: sinceAttempt rejects a same-second stale complete event that sinceIso alone would accept", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs, latestCompleteEventAttempt } = await import(
+      "./event-scan.mjs"
+    );
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-followup-"));
+    const path = join(dir, "events.jsonl");
+    // Attempt 1's completion lands in the SAME second attempt 2 starts.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: STARTED,
+        attributes: { "event.name": "phase.implement.complete.CTL-9", "phase.attempt": 1 },
+        body: {},
+      }) + "\n"
+    );
+    const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return true;
+    };
+    // Without sinceAttempt, the same-second tie reads as "seen" — the bug.
+    expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(true);
+    // With sinceAttempt=2, attempt 1's completion no longer satisfies "this attempt finished".
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED, sinceAttempt: 2 })
+    ).toBe(false);
+    // Attempt 2's own completion (same second) now correctly satisfies it.
+    appendFileSync(
+      path,
+      JSON.stringify({
+        ts: STARTED,
+        attributes: { "event.name": "phase.implement.complete.CTL-9", "phase.attempt": 2 },
+        body: {},
+      }) + "\n"
+    );
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED, sinceAttempt: 2 })
+    ).toBe(true);
+  });
+
   // Regression: the existing CTL-736 test (no completeEventSeen injected → seam defaults
   // to a fn that returns false from an empty/absent log) must still pass unchanged.
   test("CTL-736 regression: alive worker without complete event is still alive-suppressed, probe never called", () => {
@@ -5827,5 +6467,153 @@ describe("buildEventEnvelope — CTL-1488 caused_by + event.stream_class parity"
   test("stamps attributes['event.stream_class'] = 'coordination' for every phase.* envelope", () => {
     const line = buildEventEnvelope({ phase: "verify", ticket: "CTL-1", action: "escalated", reason: "x" });
     expect(JSON.parse(line).attributes["event.stream_class"]).toBe("coordination");
+  });
+});
+
+// --- CTL-1643: escalateOnce verified-or-loud label application ---------------
+// Tests that escalateOnce gates the 10-min cooldown on a confirmed or
+// unrecoverable label write — not on a transient 429 — and persists a durable
+// escalation record that survives worker-dir GC.
+//
+// Drives reclaimDeadWorkIfPossible on the "no-progress-stopped" path
+// (dead worker, probe NOT done, zero progress, no escalation cooldown).
+// Uses the module-level orchDir real tmpdir (same beforeEach/afterEach).
+describe("CTL-1643: escalateOnce verified-or-loud label application", () => {
+  const ticket = "CTL-9";
+
+  // Minimal seam set that reaches escalateOnce via the no-progress-stopped path.
+  // All seams that would touch the real filesystem are injected so the tests are
+  // hermetic. recordEscalationFn is always injected to avoid writing real cooldowns.
+  function escSeams(extra = {}) {
+    return {
+      repoRoot: "/repo",
+      statJob: () => null,                          // dead-gone
+      probes: { implement: () => false },           // work NOT done
+      progressMark: () => 0,
+      readProgressMark: () => 0,
+      writeProgressMark: recorder(undefined),
+      appendEvent: recorder(undefined),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      applyStalledLabel: recorder(false),           // default: transient
+      recordEscalationFn: recorder(undefined),      // track cooldown writes
+      inEscalationCooldownFn: () => false,          // no existing cooldown
+      emitComplete: recorder({ code: 0 }),
+      reviveDispatch: recorder({ code: 0 }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      countDistinctRevivingTickets: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      resolveSession: () => null,
+      postReclaimMirror: recorder(undefined),
+      listTicketPhases: () => ["implement"],
+      emitReapIntent: () => Promise.resolve(),
+      readBootSince: () => undefined,
+      readEscalationRecordFn: () => null,           // no prior asks
+      escalationAskCap: 100,                        // isolate from ask-cap effects
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      ...extra,
+    };
+  }
+
+  test("transient 429 (applyStalledLabel returns false, no markers) → cooldown NOT written", () => {
+    const recordEscalation = recorder(undefined);
+    const result = reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+      recordEscalationFn: recordEscalation,
+    }));
+    expect(result).toBe("no-progress-stopped");
+    expect(recordEscalation.calls.length).toBe(0);
+  });
+
+  test("transient 429 → durable record written with labelConfirmed:false, labelAttempts:1", () => {
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+    }));
+    const recs = readDurableEscalations(orchDir);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].ticket).toBe(ticket);
+    expect(recs[0].labelConfirmed).toBe(false);
+    expect(recs[0].labelAttempts).toBe(1);
+  });
+
+  test("confirmed label (applyStalledLabel returns true) → cooldown written", () => {
+    const recordEscalation = recorder(undefined);
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(true),
+      recordEscalationFn: recordEscalation,
+    }));
+    expect(recordEscalation.calls.length).toBe(1);
+  });
+
+  test("confirmed label → durable record written with labelConfirmed:true", () => {
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(true),
+    }));
+    const recs = readDurableEscalations(orchDir);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].labelConfirmed).toBe(true);
+  });
+
+  test(".skipped marker (unrecoverable) → cooldown written even if applyStalledLabel returns false", () => {
+    // Write the unrecoverable marker that labelOnce leaves when the label is missing/conflicting.
+    mkdirSync(join(orchDir, "workers", ticket), { recursive: true });
+    writeFileSync(join(orchDir, "workers", ticket, ".linear-label-needs-human.skipped"), "");
+    const recordEscalation = recorder(undefined);
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+      recordEscalationFn: recordEscalation,
+    }));
+    expect(recordEscalation.calls.length).toBe(1);
+  });
+
+  test("cap reached after LABEL_CONFIRM_CAP transient ticks → cooldown written + loud event", () => {
+    const recordEscalation = recorder(undefined);
+    const appendEvent = recorder(undefined);
+    for (let i = 0; i < LABEL_CONFIRM_CAP; i++) {
+      reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+        applyStalledLabel: recorder(false),
+        recordEscalationFn: recordEscalation,
+        appendEvent,
+      }));
+    }
+    // Cooldown written exactly once — on the cap-reaching tick.
+    expect(recordEscalation.calls.length).toBe(1);
+    // A distinct escalation.label-unconfirmed.<ticket> event was emitted.
+    const loudEvents = appendEvent.calls.filter(
+      (c) => c[0]?.["event.name"] === `escalation.label-unconfirmed.${ticket}`,
+    );
+    expect(loudEvents.length).toBe(1);
+  });
+
+  test("appendEscalatedEvent fires AT MOST ONCE across N transient ticks (same-episode gate)", () => {
+    const appendEscalated = recorder(undefined);
+    // First tick: no prior labelAttempts → fires.
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+      appendEscalatedEvent: appendEscalated,
+    }));
+    expect(appendEscalated.calls.length).toBe(1);
+    // Second tick: cooldown not written (transient), labelAttempts:1 in the
+    // durable record + no cooldown file → same-episode gate suppresses the event.
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+      appendEscalatedEvent: appendEscalated,
+    }));
+    expect(appendEscalated.calls.length).toBe(1); // still 1, not 2
+  });
+
+  test("regression: confirmed-first-try path is byte-for-byte unchanged (event once, cooldown once)", () => {
+    const appendEscalated = recorder(undefined);
+    const recordEscalation = recorder(undefined);
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(true),
+      appendEscalatedEvent: appendEscalated,
+      recordEscalationFn: recordEscalation,
+    }));
+    expect(appendEscalated.calls.length).toBe(1);
+    expect(recordEscalation.calls.length).toBe(1);
   });
 });

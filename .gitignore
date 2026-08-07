@@ -69,6 +69,10 @@ website/.astro/
 # Plugin-local tooling (orch-monitor)
 plugins/dev/scripts/orch-monitor/node_modules/
 
+# Plugin-local tooling (event-mirror, CTL-1654)
+plugins/dev/scripts/event-mirror/node_modules/
+plugins/dev/scripts/event-mirror/bun.lock
+
 # Serena (code-understanding MCP): version project.yml + memories/, ignore per-machine cache/overrides
 .serena/cache/
 .serena/project.local.yml

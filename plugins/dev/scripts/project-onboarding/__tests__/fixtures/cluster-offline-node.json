@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1",
+  "vcsRepo": "coalesce-labs/catalyst",
+  "projectKey": "PROJ",
+  "team": { "intent": "existing", "key": "PROJ" },
+  "deploymentMode": "cluster",
+  "controller": { "id": "laptop", "nodeClass": "developer" },
+  "targetPolicy": {
+    "targets": [
+      { "id": "mini-1", "nodeClass": "worker", "online": true },
+      { "id": "mini-2", "nodeClass": "worker", "online": false }
+    ],
+    "includeController": false,
+    "executionNodeClasses": ["worker"]
+  }
+}

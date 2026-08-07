@@ -3410,4 +3410,95 @@ describe("CTL-764 Phase 4 — handleCommentWake clears durable needs-input label
     const needsInputRemovals = removed.filter((r) => r.label === "needs-input");
     expect(needsInputRemovals).toHaveLength(0);
   });
+
+  // CTL-1643: a confirmed needs-human clear also removes the durable escalation
+  // record so the board durable-escalation card disappears when the operator responds.
+  test("CTL-1643: confirmed needs-human clear removes the durable escalation record", async () => {
+    const { recordDurableEscalation, readDurableEscalations } = await import(
+      "./durable-escalation.mjs"
+    );
+    const orch = tmpOrcDir();
+    // Seed a durable escalation record for the ticket.
+    recordDurableEscalation({
+      orchDir: orch,
+      ticket: "CTL-1",
+      phase: "implement",
+      reason: "stuck > 24h",
+      labelConfirmed: false,
+      commentPosted: true,
+      source: "scheduler",
+      now: Date.now(),
+    });
+    expect(readDurableEscalations(orch)).toHaveLength(1);
+
+    // humanProvenance = Boolean(authorId) && Boolean(botUserId) — both must be set
+    // for the needs-human clear path to run. isManagedTicket must also return true.
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer from human", authorId: "human-user" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        botUserId: "bot-user-id",
+        isManagedTicket: () => true,
+        forgetIntent: () => true,
+      }
+    );
+    // The durable record must be gone after the confirmed clear.
+    expect(readDurableEscalations(orch)).toHaveLength(0);
+  });
+});
+
+// ─── CTL-1608 — stalled-PR timer gated on stalledPrSweep.enabled ─────────────
+describe("CTL-1608 — stalled-PR sweep timer start", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    enableReaper: false,
+    enableHeartbeat: false,
+    enableWaitWatcher: false,
+    enableMemorySampler: false,
+    enableFleetHealth: false,
+    enableRatelimitPoller: false,
+    readAllEligible: () => [],
+  });
+
+  test("stalledPrSweep.enabled:true → startStalledPrTimer called with enabled:true", () => {
+    const calls = [];
+    startDaemon({
+      ...baseOpts(),
+      stalledPrSweepConfig: { enabled: true, intervalSeconds: 900 },
+      startStalledPrTimer: (opts) => { calls.push(opts); return { stop: () => {} }; },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].enabled).toBe(true);
+    expect(calls[0].intervalSeconds).toBe(900);
+  });
+
+  test("stalledPrSweep.enabled:false → startStalledPrTimer NOT called", () => {
+    const calls = [];
+    startDaemon({
+      ...baseOpts(),
+      stalledPrSweepConfig: { enabled: false },
+      startStalledPrTimer: (opts) => { calls.push(opts); return { stop: () => {} }; },
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("stalledPrSweep absent (default-off) → startStalledPrTimer NOT called", () => {
+    const calls = [];
+    startDaemon({
+      ...baseOpts(),
+      // no stalledPrSweepConfig → defaults to {}
+      startStalledPrTimer: (opts) => { calls.push(opts); return { stop: () => {} }; },
+    });
+    expect(calls).toHaveLength(0);
+  });
 });

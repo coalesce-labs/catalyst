@@ -37,6 +37,8 @@ import { ALL_NODES, NodeScopeContext, type NodeScope } from "@/lib/node-scope";
 // one EventSource each instead of opening independent duplicate connections.
 import { useNavSignal, NavSignalContext } from "@/hooks/use-nav-signal";
 import { useClusterSignal, ClusterSignalContext } from "@/hooks/use-cluster-signal";
+import { useAccountSignal, AccountSignalContext } from "@/hooks/use-account-signal";
+import { AccountBanner } from "@/components/account-banner";
 // CTL-1100: lift useBeliefs into AppShell so no surface opens a second EventSource.
 import { useBeliefs, BeliefsContext } from "@/hooks/use-beliefs";
 // CTL-1172: lift /api/health/services poll to AppShell so footer + FleetOps share one fetch.
@@ -79,6 +81,7 @@ import {
 import {
   SidebarInset,
   SidebarProvider,
+  SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppFooter } from "@/components/app-footer";
@@ -162,6 +165,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // these hooks independently, reducing persistent EventSources from 6 → 4.
   const navSignal = useNavSignal();
   const clusterSignal = useClusterSignal();
+  // CTL-1653: single subscription point for this node's Claude-account posture.
+  // AppFooter + AccountBanner consume AccountSignalContext (one EventSource).
+  const accountSignal = useAccountSignal();
   // CTL-1100: single belief stream subscription — surfaces use useBeliefsContext().
   const beliefsState = useBeliefs();
   // CTL-1172: single /api/health/services poll — footer + FleetOps read ServiceHealthContext.
@@ -386,6 +392,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <BeliefsContext.Provider value={beliefsState}>
     <NavSignalContext.Provider value={navSignal}>
     <ClusterSignalContext.Provider value={clusterSignal}>
+    <AccountSignalContext.Provider value={accountSignal}>
       <NodeScopeContext.Provider value={nodeScopeCtx}>
       {/* Controlled provider → Cmd/Ctrl+B still fires through onOpenChange, so
           `[` and Cmd/Ctrl+B both work with no vendoring. h-screen, edge-to-edge:
@@ -399,11 +406,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <SidebarInset className="min-h-0 overflow-hidden">
           {/* ── Thin top strip: the SINGLE header — breadcrumb + page actions ──
               CTL-1003 §A1: the sidebar collapse icon and the search button are
-              gone (`[` / Cmd-B still toggle, ⌘K / `/` still open the palette —
-              only the visible buttons are removed). The breadcrumb is the sole
-              left affordance; a detail page portals its prev/next chevrons into
-              the right-aligned HeaderActionsSlot. */}
+              gone on DESKTOP (`[` / Cmd-B still toggle, ⌘K / `/` still open the
+              palette — only the visible buttons are removed there). Below the
+              `md` breakpoint, though, the sidebar renders as an off-canvas Sheet
+              (components/ui/sidebar.tsx) with no keyboard available (iOS Safari)
+              and no other tap target to open it (the edge SidebarRail drag-handle
+              is itself `sm:flex`-gated, i.e. also desktop-only) — so the trigger
+              button is restored here, but ONLY for narrow viewports (`md:hidden`),
+              leaving the deliberate keyboard-only desktop chrome unchanged. */}
           <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
+            <SidebarTrigger className="text-muted-foreground md:hidden" />
             <Breadcrumb>
               <BreadcrumbList>
                 {crumbs.map((crumb, i) => {
@@ -450,6 +462,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 portals its prev/next chevrons here via <HeaderActions>. */}
             <HeaderActionsSlot />
           </header>
+
+          {/* CTL-1653: the LOUD account-exhausted banner. Quiet (null) unless the
+              active Claude account's binding window is `rejected`; names the reset
+              time + a sibling with headroom, and clears itself when the SSE next
+              reports `ok`. */}
+          <AccountBanner className="mx-3 mt-2" />
 
           {/* CTL-989: the matched ROUTE renders into the layout's content slot
               (children === the router <Outlet/>). Settings is now the /settings
@@ -565,6 +583,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </CommandList>
       </CommandDialog>
       </NodeScopeContext.Provider>
+    </AccountSignalContext.Provider>
     </ClusterSignalContext.Provider>
     </NavSignalContext.Provider>
     </BeliefsContext.Provider>

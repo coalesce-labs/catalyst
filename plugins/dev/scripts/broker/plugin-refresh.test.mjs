@@ -25,10 +25,12 @@ import {
   isThisRepoMergeEvent,
   isDaemonLocalMergeSignal,
   refreshPluginCheckout,
+  clearStaleIndexLock,
   refreshAllPluginCheckouts,
   startPluginDriftCheck,
   handlePluginRefreshEvent,
   changedPackageDirs,
+  workspaceMemberNodeModules,
   PLUGIN_REFRESH_THROTTLE_MS,
   PLUGIN_DRIFT_CHECK_INTERVAL_MS,
   __clearThrottleForTest,
@@ -1411,5 +1413,342 @@ describe("refreshPluginCheckout — bunInstallFn seam (CTL-1223)", () => {
     expect(updEv).toBeDefined();
     expect(Array.isArray(updEv.detail.deps_installed)).toBe(true);
     expect(updEv.detail.deps_installed).toContain("/repo/plugins/dev/scripts/orch-monitor/ui");
+  });
+});
+
+// ─── workspaceMemberNodeModules + install-time pruning (CTL-1628 follow-up) ──
+//
+// The workspace conversion moved dep resolution to the ROOT lockfile, but nodes
+// migrated in place kept each member's pre-workspace node_modules. Module
+// resolution walks UP, so that debris SHADOWS every root install: on the fleet
+// this pinned the running cloud-sync daemon to @catalyst-cloud/sdk 0.8.0 (no
+// CTC-328 stale-frame guard) while the root lock said 0.8.1 and every refresh
+// "succeeded". The prune runs ONLY immediately before an install — bun
+// recreates any nested layout it legitimately needs, which is what makes a
+// false positive harmless — and never on a bare tick.
+
+function makeWorkspaceFs({
+  workspaces = ["plugins/dev/scripts/execution-core"],
+  rootLock = true,
+  members = {},
+} = {}) {
+  // members: { "<entry>": { pkg: true, lock: false, nodeModules: true } }
+  const files = new Set();
+  const contents = new Map();
+  contents.set("/co/package.json", JSON.stringify({ workspaces }));
+  files.add("/co/package.json");
+  if (rootLock) files.add("/co/bun.lock");
+  for (const [entry, m] of Object.entries(members)) {
+    if (m.pkg !== false) files.add(`/co/${entry}/package.json`);
+    if (m.lock) files.add(`/co/${entry}/bun.lock`);
+    if (m.nodeModules !== false) files.add(`/co/${entry}/node_modules`);
+  }
+  return {
+    readFileFn: (path) => {
+      const key = String(path);
+      if (!contents.has(key)) throw new Error(`ENOENT: ${key}`);
+      return contents.get(key);
+    },
+    existsFn: (path) => files.has(String(path)),
+  };
+}
+
+describe("workspaceMemberNodeModules", () => {
+  test("returns a member's node_modules when the member has no lockfile of its own", () => {
+    const fs = makeWorkspaceFs({
+      members: { "plugins/dev/scripts/execution-core": { nodeModules: true } },
+    });
+    expect(workspaceMemberNodeModules("/co", fs)).toEqual([
+      "/co/plugins/dev/scripts/execution-core/node_modules",
+    ]);
+  });
+
+  test("skips a member that manages itself (own bun.lock) — that is not workspace debris", () => {
+    const fs = makeWorkspaceFs({
+      members: { "plugins/dev/scripts/execution-core": { nodeModules: true, lock: true } },
+    });
+    expect(workspaceMemberNodeModules("/co", fs)).toEqual([]);
+  });
+
+  test("returns [] when the ROOT has no bun.lock — without an authoritative root lock, nothing is ours to prune", () => {
+    const fs = makeWorkspaceFs({
+      rootLock: false,
+      members: { "plugins/dev/scripts/execution-core": { nodeModules: true } },
+    });
+    expect(workspaceMemberNodeModules("/co", fs)).toEqual([]);
+  });
+
+  test("returns [] for a non-workspace root, and skips glob entries rather than expanding them", () => {
+    const noWs = makeWorkspaceFs({ workspaces: [] });
+    expect(workspaceMemberNodeModules("/co", noWs)).toEqual([]);
+
+    // A glob entry must NOT silently become an rm -rf fan-out.
+    const glob = makeWorkspaceFs({
+      workspaces: ["packages/*"],
+      members: { "packages/a": { nodeModules: true } },
+    });
+    expect(workspaceMemberNodeModules("/co", glob)).toEqual([]);
+  });
+
+  test("an unreadable root package.json yields [] rather than a throw — refresh must not die on it", () => {
+    expect(
+      workspaceMemberNodeModules("/co", {
+        readFileFn: () => {
+          throw new Error("EACCES");
+        },
+        existsFn: () => true,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("refreshPluginCheckout — stale node_modules pruning", () => {
+  beforeEach(() => {
+    __clearThrottleForTest();
+    __clearLagStateForTest();
+  });
+
+  // A gitFn whose diff reports the root lockfile changed → install will run at root.
+  function makeGitFnWithDiff(diffLines) {
+    const inner = makeGitFn({ before: "old111", after: "new222" });
+    const gitFn = (root, args) => {
+      if (args[0] === "diff") return diffLines.join("\n");
+      return inner(root, args);
+    };
+    gitFn.calls = inner.calls;
+    return gitFn;
+  }
+
+  test("prunes stale member node_modules BEFORE the install, and says so in the updated event", () => {
+    const emitted = [];
+    const order = [];
+    const res = refreshPluginCheckout({
+      root: "/co",
+      now: 0,
+      gitFn: makeGitFnWithDiff(["bun.lock"]),
+      memberNodeModulesFn: () => ["/co/plugins/dev/scripts/execution-core/node_modules"],
+      pruneFn: (dir) => order.push(`prune:${dir}`),
+      bunInstallFn: (dir) => order.push(`install:${dir}`),
+      emitFn: (e) => emitted.push(e),
+    });
+
+    expect(res.failed).toBe(false);
+    // ORDER is the point: pruning after the install would leave the shadow in place.
+    expect(order).toEqual([
+      "prune:/co/plugins/dev/scripts/execution-core/node_modules",
+      "install:/co",
+    ]);
+    const updated = emitted.find((e) => e.event === "plugin.checkout.updated");
+    expect(updated.detail.stale_node_modules_pruned).toEqual([
+      "/co/plugins/dev/scripts/execution-core/node_modules",
+    ]);
+    expect(updated.detail.deps_installed).toEqual(["/co"]);
+  });
+
+  test("does NOT prune on a pull with no manifest changes — never on a bare tick", () => {
+    const pruned = [];
+    refreshPluginCheckout({
+      root: "/co",
+      now: 0,
+      gitFn: makeGitFnWithDiff(["some/other/file.mjs"]),
+      memberNodeModulesFn: () => ["/co/plugins/dev/scripts/execution-core/node_modules"],
+      pruneFn: (dir) => pruned.push(dir),
+      bunInstallFn: () => {},
+      emitFn: () => {},
+    });
+    expect(pruned).toEqual([]);
+  });
+
+  test("a prune failure WARNs and the install still runs — same non-fatal contract as install failures", () => {
+    const emitted = [];
+    const installed = [];
+    refreshPluginCheckout({
+      root: "/co",
+      now: 0,
+      gitFn: makeGitFnWithDiff(["bun.lock"]),
+      memberNodeModulesFn: () => ["/co/x/node_modules"],
+      pruneFn: () => {
+        throw new Error("EPERM: operation not permitted");
+      },
+      bunInstallFn: (dir) => installed.push(dir),
+      emitFn: (e) => emitted.push(e),
+    });
+
+    const warn = emitted.find((e) => e.event === "plugin.checkout.node_modules_prune_failed");
+    expect(warn.severity).toBe("WARN");
+    expect(warn.detail.node_modules_dir).toBe("/co/x/node_modules");
+    expect(warn.detail.error).toContain("EPERM");
+    expect(installed).toEqual(["/co"]); // the checkout still converges as far as it can
+  });
+});
+
+// ─── clearStaleIndexLock (CTL-1415) ──────────────────────────────────────────
+//
+// A crashed git op leaves .git/index.lock behind and every later reset --hard
+// then fails forever (the ~8.5h laptop freeze in CTL-1401). The pull path
+// age-gate clears ONLY a lock older than the safe threshold (a live op is never
+// disturbed), emits a WARN when it clears, and never throws.
+
+const LOCK_NOW = 1_750_000_000_000;
+const LOCK_ROOT = "/co/plugin-source";
+const LOCK_PATH = "/co/plugin-source/.git/index.lock";
+
+// statFn seam: returns a fixed mtime for the lock path, null (absent) otherwise.
+function makeLockStatFn(mtimeMs) {
+  return (path) => (path === LOCK_PATH && mtimeMs != null ? mtimeMs : null);
+}
+
+describe("clearStaleIndexLock", () => {
+  test("no lock → no removal, no event", () => {
+    const emitted = [];
+    const removed = [];
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(null),
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.present).toBe(false);
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+  });
+
+  test("fresh lock (live git op) → NOT removed, no event", () => {
+    const emitted = [];
+    const removed = [];
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 5_000), // 5s old
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.present).toBe(true);
+    expect(res.stale).toBe(false);
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+  });
+
+  test("stale lock → removed + plugin.checkout.stale_lock_cleared (WARN)", () => {
+    const emitted = [];
+    const removed = [];
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 8.5 * 60 * 60 * 1000), // 8.5h old
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.cleared).toBe(true);
+    expect(removed).toEqual([LOCK_PATH]);
+    const ev = emitted.find((e) => e.event === "plugin.checkout.stale_lock_cleared");
+    expect(ev).toBeDefined();
+    expect(ev.severity).toBe("WARN");
+    expect(ev.detail.checkout).toBe(LOCK_ROOT);
+    expect(ev.detail.lock_age_ms).toBeGreaterThanOrEqual(600_000);
+    expect(ev.detail.threshold_ms).toBe(600_000);
+  });
+
+  test("removal failure → stale_lock_clear_failed (WARN), never throws", () => {
+    const emitted = [];
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 3_600_000), // 1h old → stale
+      rmFn: () => { throw new Error("EACCES"); },
+    });
+    expect(res.cleared).toBe(false);
+    expect(res.error).toContain("EACCES");
+    const ev = emitted.find((e) => e.event === "plugin.checkout.stale_lock_clear_failed");
+    expect(ev).toBeDefined();
+    expect(ev.severity).toBe("WARN");
+  });
+
+  // Codex P1 (#2530): a concurrent cleanup attempt could classify the SAME old
+  // lock as stale, then lose a race to a different attempt that already cleared
+  // it and started a new git op (a fresh index.lock). The re-check right before
+  // removal must see that the lock is no longer present-and-stale and bail out
+  // — never unlinking a lock a live git op now holds.
+  test("re-check race: lock no longer stale by removal time → NOT removed, no event", () => {
+    const emitted = [];
+    const removed = [];
+    let calls = 0;
+    // First staleLockStatus call (classification) sees the old stale lock;
+    // second call (the pre-removal re-check) sees a brand-new fresh lock —
+    // simulating another process having cleared+restarted git in between.
+    const statFn = (path) => {
+      calls += 1;
+      if (path !== LOCK_PATH) return null;
+      return calls === 1 ? LOCK_NOW - 3_600_000 : LOCK_NOW; // 1h stale, then 0s fresh
+    };
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn,
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+    expect(calls).toBeGreaterThanOrEqual(2); // both the classification and the re-check ran
+  });
+
+  test("re-check race: lock disappears entirely by removal time (already cleared) → NOT removed, no event", () => {
+    const emitted = [];
+    const removed = [];
+    let calls = 0;
+    const statFn = (path) => {
+      calls += 1;
+      if (path !== LOCK_PATH) return null;
+      return calls === 1 ? LOCK_NOW - 3_600_000 : null; // stale, then gone
+    };
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn,
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+  });
+});
+
+describe("refreshPluginCheckout — stale-lock pre-pull clear (CTL-1415)", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  test("clears a stale lock before fetch/reset, then pulls", () => {
+    const emitted = [];
+    const removed = [];
+    const gitFn = makeGitFn({ before: "old111", after: "new222" });
+    const res = refreshPluginCheckout({
+      root: LOCK_ROOT, now: LOCK_NOW, gitFn,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 3_600_000), // 1h stale
+      rmFn: (p) => removed.push(p),
+      bunInstallFn: () => {},
+    });
+    // Lock cleared, and the pull proceeded to a real reset + updated event.
+    expect(removed).toEqual([LOCK_PATH]);
+    expect(emitted.some((e) => e.event === "plugin.checkout.stale_lock_cleared")).toBe(true);
+    expect(gitFn.calls.some((c) => c.args[0] === "reset")).toBe(true);
+    expect(res.pulled).toBe(true);
+    expect(res.changed).toBe(true);
+  });
+
+  test("does NOT touch a fresh lock (live op), still attempts the pull", () => {
+    const emitted = [];
+    const removed = [];
+    const gitFn = makeGitFn({ before: "old111", after: "new222" });
+    refreshPluginCheckout({
+      root: LOCK_ROOT, now: LOCK_NOW, gitFn,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 3_000), // 3s fresh
+      rmFn: (p) => removed.push(p),
+      bunInstallFn: () => {},
+    });
+    expect(removed).toEqual([]);
+    expect(emitted.some((e) => e.event === "plugin.checkout.stale_lock_cleared")).toBe(false);
+    expect(gitFn.calls.some((c) => c.args[0] === "fetch")).toBe(true);
   });
 });

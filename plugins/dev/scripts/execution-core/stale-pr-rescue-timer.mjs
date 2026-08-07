@@ -20,7 +20,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jobLifecycle } from "./recovery.mjs";
-import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
+import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
 import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
@@ -311,11 +311,23 @@ function defaultDispatchRescue(ticket, opts) {
 // linearWrite defaults to the real linear-write module at the
 // startStalePrRescueTimer boundary; a null here means a caller explicitly
 // opted out, which leaves the ticket invisible to humans — say so loudly.
+//
+// CTL-1609 (Codex P1) — RETURNS a verified outcome so the caller can decide
+// whether the escalation is durable enough to latch `rescue.json.escalatedAt`:
+//   { confirmed, routed, reason }
+// `confirmed: true` ONLY when a needs-human label actually landed. A delegate
+// route is a HANDOFF, not a confirmed human escalation — the delegate can still
+// fail, and `escalatedAt` permanently skips the ticket in decideRescue, so
+// latching on a route would silently strand the PR. Fence-suppressed and
+// no-transport paths return confirmed:false too.
 export function defaultEscalate(
   ticket,
   detail,
-  { orchDir, linearWrite, multiHost = false, gateway = undefined, self = undefined, env = process.env } = {}
+  { orchDir, linearWrite, multiHost = false, gateway = undefined, self = undefined, env = process.env, maxParallel = undefined } = {}
 ) {
+  let routed = false;
+  let labelled = false;
+  let outcomeReason = "no-transport";
   if (linearWrite) {
     // This is an ESCALATION write (needs-human), so it fails OPEN on a MISSING
     // generation (proceedOnMissingGeneration): a zombie-guard that can't read a
@@ -323,12 +335,28 @@ export function defaultEscalate(
     // human escalation. A genuine supersession (readable generation, fresh
     // foreign owner / authoritative read says not-current) still suppresses.
     if (fenceGuard({ ticket, orchDir, multiHost, gateway, self }, { proceedOnMissingGeneration: true })) {
-      labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, linearWrite, {
-        env,
+      const r = routeStuckTicketToDelegate(orchDir, ticket, {
         site: "stale-pr-rescue",
+        reason: detail?.reason ?? "unresolvable-conflict",
+        boardContext: { prNumber: detail?.prNumber },
+        applyLabel: linearWrite,
+        env,
         log,
+        explanation: {
+          problem: `stale PR for ${ticket} could not be rescued: ${detail?.reason ?? "unresolvable conflict"}`,
+          call_to_action: `resolve the PR conflict for ${ticket} or close the PR`,
+        },
+        // CTL-1609 (Codex P1): supply the configured ceiling so the enqueue can
+        // reach `queue-full` → human instead of resolving to Infinity. Injected
+        // from the daemon (which already owns concurrency) rather than importing
+        // the scheduler here, which would pull its bun:sqlite graph into this timer.
+        deps: { orchDir, ...(maxParallel === undefined ? {} : { maxParallel }) },
       });
+      routed = r.routed === true;
+      labelled = r.labelled === true;
+      outcomeReason = r.reason ?? (labelled ? "labelled" : "not-labelled");
     } else {
+      outcomeReason = "fence-suppressed";
       log.warn(
         { ticket },
         "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)"
@@ -341,6 +369,59 @@ export function defaultEscalate(
     );
   }
   log.warn({ ticket, ...detail }, "stale-pr-rescue: escalating to needs-human");
+  return { confirmed: labelled, routed, reason: outcomeReason };
+}
+
+// recordEscalationOutcome — CTL-1609 (Codex P1): the verified-or-loud latch.
+//
+// `rescue.json.escalatedAt` is a PERMANENT skip — decideRescue returns
+// `already_escalated` for every later tick once it is set. Writing it
+// optimistically (before the escalation is confirmed) is therefore the difference
+// between "a human was told" and "this PR is silently stuck forever".
+//
+// Only a CONFIRMED needs-human label counts. A delegate route does not: the
+// runner can still fail the intent, and nothing downstream clears escalatedAt or
+// re-applies the label, so latching there reintroduces exactly the silent-drop
+// this guard exists to prevent. Unconfirmed outcomes leave the state retryable
+// (next tick re-evaluates) AND emit a loud event so the gap is observable rather
+// than invisible.
+//
+// Returns true when the escalation was latched (caller should emit the normal
+// `phase.rescue.escalated.<ticket>` event), false when it stayed retryable.
+function recordEscalationOutcome(orchDir, ticket, rescueState, outcome, nowMs, emit, reason) {
+  // Only a seam that actually speaks the outcome contract can withhold the latch.
+  // A custom `escalate` injection predating it returns undefined — or something
+  // incidental like `array.push(...)`'s new length — and must keep the prior
+  // latch-always behavior rather than silently retrying forever. In production
+  // `escalate` defaults to defaultEscalate, which always returns the contract, so
+  // the strict path is the one that actually runs.
+  const hasContract =
+    outcome != null && typeof outcome === "object" && "confirmed" in outcome;
+  const confirmed = !hasContract || outcome.confirmed === true;
+  if (confirmed) {
+    writeRescueState(orchDir, ticket, {
+      ...rescueState,
+      escalatedAt: new Date(nowMs).toISOString(),
+      escalateReason: reason,
+    });
+    return true;
+  }
+  writeRescueState(orchDir, ticket, {
+    ...rescueState,
+    lastEscalationAttemptAt: new Date(nowMs).toISOString(),
+    lastEscalationFailure: outcome.reason ?? "unconfirmed",
+  });
+  log.error(
+    { ticket, reason, outcome: outcome.reason ?? "unconfirmed", routed: outcome.routed === true },
+    "stale-pr-rescue: escalation NOT confirmed — leaving retryable (escalatedAt withheld)"
+  );
+  emit(`phase.rescue.escalation-unconfirmed.${ticket}`, {
+    ticket,
+    reason,
+    outcome: outcome.reason ?? "unconfirmed",
+    routed: outcome.routed === true,
+  });
+  return false;
 }
 
 // defaultEmit — append a bare event envelope to the event log.
@@ -375,6 +456,12 @@ export function startStalePrRescueTimer({
   // "not injected" → resolve fresh each tick; a test may still pass an explicit
   // boolean to pin it. Matches the per-tick `getClusterHosts()` in scheduler/monitor.
   multiHost = undefined,
+  // CTL-1609 (Codex P1): the configured delegate ceiling, threaded to
+  // enqueueDelegateIntent so `queue-full` → human stays reachable instead of
+  // resolving to Infinity. A number or a () => number. Injected by the daemon
+  // (which already owns concurrency); importing readMaxParallel here would pull
+  // scheduler.mjs's bun:sqlite graph into this timer. undefined → prior behavior.
+  maxParallel = undefined,
   // injectable seams
   jobLifecycle: jobLifecycleFn = jobLifecycle,
   prView = defaultPrView,
@@ -434,6 +521,7 @@ async function runTick({
   cfg,
   linearWrite,
   multiHost,
+  maxParallel,
   jobLifecycleFn,
   prView,
   compareBehind,
@@ -462,6 +550,7 @@ async function runTick({
         cfg,
         linearWrite,
         multiHost,
+        maxParallel,
         nowMs,
         jobLifecycleFn,
         prView,
@@ -485,6 +574,7 @@ async function processTicket({
   cfg,
   linearWrite,
   multiHost,
+  maxParallel,
   nowMs,
   jobLifecycleFn,
   prView,
@@ -542,16 +632,19 @@ async function processTicket({
         return;
       }
     }
-    escalate(
+    const stalledOutcome = escalate(
       ticket,
       { reason: "rescue_worker_stalled", ...rescueState },
-      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost }
+      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost, maxParallel }
     );
-    writeRescueState(orchDir, ticket, {
-      ...rescueState,
-      escalatedAt: new Date(nowMs).toISOString(),
-    });
-    emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: "rescue_worker_stalled" });
+    // CTL-1609 (Codex P1): latch escalatedAt ONLY on a confirmed label write.
+    // decideRescue skips forever once escalatedAt exists, so latching on an
+    // unconfirmed escalation (delegate route that may still fail, fence
+    // suppression, missing transport) would leave the PR neither retried nor
+    // surfaced. Unconfirmed → stay retryable AND say so loudly.
+    if (recordEscalationOutcome(orchDir, ticket, rescueState, stalledOutcome, nowMs, emit, "rescue_worker_stalled")) {
+      emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: "rescue_worker_stalled" });
+    }
     return;
   }
 
@@ -668,18 +761,19 @@ async function processTicket({
     }
 
     case "escalate": {
-      escalate(ticket, decision.detail ?? {}, {
+      const outcome = escalate(ticket, decision.detail ?? {}, {
         orchDir,
         orchId: effectiveOrchId,
         linearWrite,
         multiHost,
+        maxParallel,
       });
-      writeRescueState(orchDir, ticket, {
-        ...rescueState,
-        escalatedAt: new Date(nowMs).toISOString(),
-        escalateReason: decision.reason,
-      });
-      emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: decision.reason });
+      // CTL-1609 (Codex P1): see recordEscalationOutcome — escalatedAt is a
+      // permanent skip in decideRescue, so it is written only when the needs-human
+      // label is confirmed applied.
+      if (recordEscalationOutcome(orchDir, ticket, rescueState, outcome, nowMs, emit, decision.reason)) {
+        emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: decision.reason });
+      }
       return;
     }
   }

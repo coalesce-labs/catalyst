@@ -29,6 +29,7 @@ import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync,
 import { dirname, basename, join } from "node:path";
 import {
   getEventLogPath,
+  getCoordinationMirrorPath, // CTL-1655: coordination-mirror comment tail
   RECONCILE_INTERVAL_MS,
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
@@ -48,7 +49,7 @@ import {
 // (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
 // the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
-import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
+import { claimDispatchSync, readTriageAttemptCountSync, bumpTriageAttemptCountSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
   runEligibleQuery,
@@ -75,7 +76,7 @@ import {
   applyLabel, // CTL-1441: needs-human at the triage re-dispatch cap
   removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
-import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1441
+import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import {
@@ -778,7 +779,21 @@ function dispatchTriage(
     // CTL-1441: needs-human application at the re-dispatch cap. Injectable so
     // tests never spawn a real linearis write; default = the label-guard path.
     labelNeedsHuman = (dir, t) =>
-      labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, { site: "triage-redispatch-cap" }),
+      routeStuckTicketToDelegate(dir, t, {
+        site: "triage-redispatch-cap",
+        reason: "triage-redispatch-cap",
+        boardContext: { cap: TRIAGE_DISPATCH_CAP },
+        applyLabel: { applyLabel },
+        explanation: {
+          problem: `${t} hit the triage re-dispatch cap (${TRIAGE_DISPATCH_CAP})`,
+          call_to_action: `triage ${t} manually or re-scope it`,
+        },
+        // CTL-1609 (Codex P1): supply the configured ceiling so
+        // enqueueDelegateIntent can reach `queue-full` → human instead of
+        // defaulting to Infinity. Lazy: the state.json read is paid only on the
+        // enforce path that actually enqueues.
+        deps: { orchDir: dir, maxParallel: () => readMaxParallel(dir) },
+      }),
     // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
     // ticket's LIVE state must still equal this workflow-state name at launch.
     // null/undefined (the webhook path, eligible-half candidates) skips the check.
@@ -788,6 +803,11 @@ function dispatchTriage(
     // updated AFTER a cached negative verdict invalidates the marker — the
     // ticket may have legitimately re-entered Triage.
     candidateUpdatedAt = null,
+    // CTL-1649: fleet-wide triage attempt count seams (multiHost-gated).
+    // Defaults to the sync implementations (TTL-cached in cluster-claim-sync.mjs).
+    // Single-host paths never call these.
+    readFenceTriageAttempt = readTriageAttemptCountSync,
+    bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
   }
 ) {
   if (!orchDir) {
@@ -849,7 +869,9 @@ function dispatchTriage(
   // markers are the idempotence guard (a transient Linear failure leaves none);
   // cappedAt in the counter record gates only the duplicate WARN. Re-arm by
   // deleting orchDir/.triage-dispatch-counts/<ticket>.json.
-  if (readTriageDispatchCount(orchDir, identifier) >= TRIAGE_DISPATCH_CAP) {
+  // CTL-1649: use fleet-wide count (max of host-local and fence) so an ownership
+  // churn cannot restart the counter at 0 on the new owner.
+  if (fleetTriageDispatchCount(orchDir, identifier, { multiHost, readFenceCount: readFenceTriageAttempt }) >= TRIAGE_DISPATCH_CAP) {
     // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
     // naturally absent until it finishes. Defer the park while in flight.
     if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
@@ -1040,6 +1062,15 @@ function dispatchTriage(
   const statusAtLaunch = readTriageSignalStatus(orchDir, identifier);
   if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
     bumpTriageDispatchCount(orchDir, identifier);
+    // CTL-1649: mirror the host-local bump on the fence attachment so the fleet-wide
+    // count stays in lockstep. Fail-open — a fence write failure never blocks launch.
+    if (multiHost) {
+      try {
+        bumpFenceTriageAttempt({ ticket: identifier });
+      } catch {
+        /* fail-open */
+      }
+    }
   }
   // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
   // plain object (passthrough → byte-identical). sdk returns a Promise whose
@@ -1218,6 +1249,37 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
   if (prior.cappedAt) return false; // already parked once
   writeTriageDispatchRecord(orchDir, ticket, { ...prior, cappedAt: now(), cap: TRIAGE_DISPATCH_CAP });
   return true;
+}
+
+// fleetTriageDispatchCount — the CTL-1649 fleet-wide dispatch count for a ticket.
+//
+// On single-host (multiHost:false), returns the host-local count unchanged —
+// no fence read, no new subprocess, byte-identical to the pre-CTL-1649 path.
+//
+// On multi-host, reads the fence's triage_attempt_count via the injected
+// readFenceCount seam and returns max(host-local, fence). A null from the fence
+// read (fence-absent or spawn failure) is the fail-open signal — fall back to
+// host-local so a temporary Linear outage never falsely parks a ticket.
+//
+// The seam default (readTriageAttemptCountSync) is TTL-cached in
+// cluster-claim-sync.mjs (CATALYST_TRIAGE_ATTEMPT_CACHE_MS, 30s default) to
+// bound the Linear read rate — mirrors fenceCheckSyncCached's design.
+//
+// Exported for unit coverage.
+export function fleetTriageDispatchCount(
+  orchDir,
+  identifier,
+  { multiHost = false, readFenceCount = readTriageAttemptCountSync } = {},
+) {
+  const hostLocal = readTriageDispatchCount(orchDir, identifier);
+  if (!multiHost) return hostLocal;
+  try {
+    const { count } = readFenceCount({ ticket: identifier });
+    if (count === null) return hostLocal; // fence-absent or failure — fail-open
+    return Math.max(hostLocal, count);
+  } catch {
+    return hostLocal; // fail-open on any unexpected throw
+  }
 }
 
 // triageStateTickets — the CTL-1589 half of the sweep's ticket source: the
@@ -1441,7 +1503,53 @@ let reconcileTimer = null;
 // CTL triage-entry fix (Phase 0): the poll timer that drains the event log when
 // fs.watch fails to fire (the common case for cross-process appends on macOS).
 let tailerPollTimer = null;
+// CTL-1655: sibling poll timer draining the coordination mirror. The mirror is a
+// cross-process append (written by coordination-publish), so fs.watch alone is
+// unreliable — the same rationale that requires tailerPollTimer above. There is no
+// reconcile backstop for the coordination tail, so without this poll a missed
+// fs.watch event silently drops a cross-host comment wake until restart.
+let coordinationPollTimer = null;
 let tailerOpts = {};
+
+// CTL-1655: bounded commentId-keyed dedup (Phase 1).
+// Shared between the local event-log tail (readNewEvents) and the
+// coordination-mirror tail (readNewCoordinationComments) so whichever sees
+// a given comment first wins and the other skips — preventing duplicate
+// dispatch regardless of which tail ingests the comment on a given host.
+const COMMENT_DEDUP_CAP = 2000; // named constant for documentation + tests
+const commentDedupMap = new Map(); // insertion-ordered → evict oldest on overflow
+
+// commentKeyOf — derive the dedup key for a raw event. Prefers
+// body.payload.commentId (stable across local/echo duplicates), falls back
+// to the envelope id. Returns undefined for a row that has neither (caller
+// skips insertion but does NOT treat as "already seen").
+export function commentKeyOf(event) {
+  const payloadKey = event?.body?.payload?.commentId ?? event?.detail?.commentId;
+  if (payloadKey != null && payloadKey !== "") return String(payloadKey);
+  const envelopeKey = event?.id;
+  if (envelopeKey != null && envelopeKey !== "") return String(envelopeKey);
+  return undefined;
+}
+
+// markAndCheckCommentSeen — returns true if key is already in the dedup set;
+// otherwise inserts it (evicting the oldest entry when at cap) and returns false.
+// A null/undefined key is treated as never-seen and is NOT inserted.
+export function markAndCheckCommentSeen(key) {
+  if (key == null) return false;
+  if (commentDedupMap.has(key)) return true;
+  if (commentDedupMap.size >= COMMENT_DEDUP_CAP) {
+    // Map preserves insertion order — first key is the oldest.
+    commentDedupMap.delete(commentDedupMap.keys().next().value);
+  }
+  commentDedupMap.set(key, true);
+  return false;
+}
+
+// CTL-1655: coordination-mirror cursor (Phase 2).
+let coordinationCursor = 0;
+let coordinationLogPath = "";
+let coordinationLeftoverBuf = "";
+let coordinationWatcher = null; // Phase 3 — fs.watch handle for the mirror file
 
 // fileSizeOrZero — current byte size of a file, or 0 when it does not exist
 // (the poll-only state). Shared by both tailer seeders.
@@ -1555,10 +1663,106 @@ export function readNewEvents({ foldOnly = false } = {}) {
         event,
         foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts
       ); // CTL-681 + CTL-749
+      // CTL-1655: consult the shared cross-source dedup before routing so the
+      // two tails don't double-dispatch the same comment. Per plan §Phase 2
+      // ("whichever tail sees a given comment first wins and the other skips"),
+      // HONOR the result here: if the coordination-mirror tail already processed
+      // this comment (it won the race on the originating host, where the comment
+      // lands in BOTH the local event log and the hub-echoed coordination.jsonl),
+      // skip the redundant handleCommentCreatedEvent — otherwise Phase B
+      // dispatch fires twice for one Linear comment (the CTL-1653 pathology).
+      // foldOnly drains do NOT insert — replayed events must not permanently
+      // poison the dedup set and block their own future live delivery.
+      const eventName681 = event?.attributes?.["event.name"] ?? event?.event;
+      if (eventName681 === "linear.comment.created" && !foldOnly) {
+        if (markAndCheckCommentSeen(commentKeyOf(event))) continue;
+      }
       handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
     }
   } catch {
     // log file not yet created or a transient read error — best-effort
+  }
+}
+
+// readNewCoordinationComments — CTL-1655 Phase 2. Drain bytes appended to
+// the coordination mirror (coordination.jsonl) since the last call, parse
+// each JSONL line, and route ONLY linear.comment.created rows through the
+// shared dedup → handleCommentCreatedEvent path.
+//
+// Design constraints (each guarded by a test):
+//   1. Comment-only filter: only linear.comment.created rows reach onComment.
+//   2. Cross-source dedup: the shared markAndCheckCommentSeen gate prevents a
+//      comment seen by both the local tail and this tail from dispatching twice.
+//   3. Safe degradation: absent/empty mirror file → no-op, no throw.
+//   4. foldOnly boot drain: withholds onComment (no dispatch of replayed comments).
+//   5. Single-host no-op: skips entirely when the cluster has only one host.
+//
+// Exported so tests can drive it deterministically without wiring startTailing.
+export function readNewCoordinationComments({ foldOnly = false } = {}) {
+  // Constraint 5: single-host no-op.
+  if (getClusterHosts().length <= 1) return;
+
+  const mirrorPath = getCoordinationMirrorPath();
+  // Reset cursor on path change (analogous to readNewEvents month-rollover guard).
+  if (mirrorPath !== coordinationLogPath) {
+    coordinationLogPath = mirrorPath;
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(mirrorPath);
+    return;
+  }
+
+  try {
+    const fd = openSync(mirrorPath, "r");
+    const { size } = fstatSync(fd);
+    if (size <= coordinationCursor) {
+      closeSync(fd);
+      return;
+    }
+    const newByteCount = size - coordinationCursor;
+    const buf = Buffer.alloc(newByteCount);
+    readSync(fd, buf, 0, newByteCount, coordinationCursor);
+    closeSync(fd);
+    coordinationCursor = size;
+
+    const text = coordinationLeftoverBuf + buf.toString("utf8");
+    const lines = text.split("\n");
+    coordinationLeftoverBuf = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue; // skip malformed line, keep tailing (constraint 3)
+      }
+      // Constraint 1: comment-only filter.
+      const evName = event?.attributes?.["event.name"] ?? event?.event;
+      if (evName !== "linear.comment.created") continue;
+
+      // Constraint 2: cross-source dedup. foldOnly drains do NOT insert (boot
+      // drain must not permanently poison the dedup set for future live delivery).
+      if (!foldOnly) {
+        const key = commentKeyOf(event);
+        if (markAndCheckCommentSeen(key)) continue; // already processed locally
+      }
+
+      // Constraint 4: foldOnly → withhold onComment.
+      if (foldOnly) continue;
+
+      // Emit observability breadcrumb so operators can confirm the mirror tail fired.
+      // Name satisfies CTL-1142 namespace contract (not filter.* / broker.daemon.* /
+      // phase.<KNOWN_PHASE>.*). The dedup above ensures at-most-once per comment.
+      const ticket = event?.attributes?.["linear.issue.identifier"] ??
+        event?.body?.payload?.ticket ?? event?.detail?.ticket;
+      if (ticket) {
+        log.info({ ticket }, `comment.wake.cross-host.${ticket}`);
+      }
+
+      handleCommentCreatedEvent(event, tailerOpts);
+    }
+  } catch {
+    // mirror file absent or transient read error — safe degradation (constraint 3)
   }
 }
 
@@ -1573,6 +1777,18 @@ export function startTailing() {
     if (filename !== null && filename !== basename(getEventLogPath())) return;
     readNewEvents();
   });
+  // CTL-1655 Phase 3: watch the coordination mirror dir too (multi-host only).
+  if (getClusterHosts().length > 1) {
+    const mirrorPath = getCoordinationMirrorPath();
+    const mirrorDir = dirname(mirrorPath);
+    const mirrorFile = basename(mirrorPath);
+    mkdirSync(mirrorDir, { recursive: true });
+    coordinationWatcher = watch(mirrorDir, (eventType, filename) => {
+      if (eventType !== "change") return;
+      if (filename !== null && filename !== mirrorFile) return;
+      readNewCoordinationComments();
+    });
+  }
   return watcher;
 }
 
@@ -1672,8 +1888,18 @@ export function startMonitor({
     // path below. reconcileAll (above) is the authoritative eligible rebuild and
     // sweepMissingTriage (above) the intended boot triage backstop.
     readNewEvents({ foldOnly: true });
+    // CTL-1655 Phase 3: seed the coordination cursor and boot-drain foldOnly so
+    // historical mirror comments don't dispatch on restart (constraint 4).
+    coordinationLogPath = getCoordinationMirrorPath();
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(coordinationLogPath);
+    readNewCoordinationComments({ foldOnly: true });
   } else {
     seedTailerAtEof();
+    // Seed the coordination cursor at EOF so we don't replay old mirror events.
+    coordinationLogPath = getCoordinationMirrorPath();
+    coordinationLeftoverBuf = "";
+    coordinationCursor = fileSizeOrZero(coordinationLogPath);
   }
   startTailing();
   // CTL triage-entry fix (Phase 0): poll-drain the event log. fs.watch
@@ -1683,6 +1909,19 @@ export function startMonitor({
   // is cheap (readNewEvents reads only bytes past the durable cursor).
   if (tailerPollMs > 0) {
     tailerPollTimer = setInterval(() => readNewEvents(), tailerPollMs);
+    // CTL-1655: poll the coordination mirror on the same cadence so a missed
+    // fs.watch (the common case for cross-process appends on macOS) does not
+    // silently drop cross-host comment wakes. The poll is cheap (reads only
+    // bytes past coordinationCursor) and readNewCoordinationComments re-reads
+    // the roster per call, self-no-op'ing while single-host. Arm it
+    // UNCONDITIONALLY (not gated on the boot-time host count): a daemon that
+    // boots single-host and later has a peer added must still start draining the
+    // mirror without a restart — the startTailing watcher gate is startup-only,
+    // so this poll is the sole path that re-arms on a live roster expansion.
+    coordinationPollTimer = setInterval(
+      () => readNewCoordinationComments(),
+      tailerPollMs
+    );
   }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
@@ -1716,6 +1955,13 @@ export function stopMonitor() {
   }
   watcher?.close();
   watcher = null;
+  // CTL-1655: clear the coordination mirror poll timer and close its watcher.
+  if (coordinationPollTimer) {
+    clearInterval(coordinationPollTimer);
+    coordinationPollTimer = null;
+  }
+  coordinationWatcher?.close();
+  coordinationWatcher = null;
 }
 
 // __tailerOffset — the tailer's current byte offset. Test-only, for
@@ -1739,4 +1985,15 @@ export function __resetForTests() {
   resetLivenessCache();
   __resetReconcileHealthForTests(); // CTL-867: clear per-team reconcile-health map
   _injectedEligibleReplica = null; // CTL-1397: drop the daemon-injected board-list replica reader
+  // CTL-1655: reset coordination and dedup state.
+  coordinationCursor = 0;
+  coordinationLogPath = "";
+  coordinationLeftoverBuf = "";
+  commentDedupMap.clear();
+}
+
+// __resetCommentDedupForTests — clear the comment dedup set. Exported so
+// tests that drive readNewCoordinationComments directly can isolate dedup state.
+export function __resetCommentDedupForTests() {
+  commentDedupMap.clear();
 }

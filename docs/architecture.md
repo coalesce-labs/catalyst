@@ -153,7 +153,9 @@ via Layer-2.
   node's declared mode — deployment-mode dispatch for those consumers stays **planned**, not
   shipped (see the Secret Contract section below).
 - **Orthogonal axes, never merged**: deployment mode (fleet topology) × `catalyst.node.class`
-  (per-machine role) × `orchestration.dispatchMode` (process substrate within a node).
+  (per-machine role: `worker` runs the full execution layer; `monitor`/`developer` run observation
+  substrate only — broker + monitor + event-mirror, no heartbeat/dispatch/recovery) ×
+  `orchestration.dispatchMode` (process substrate within a node).
 - Design + migration plan: `thoughts/shared/research/2026-08-02-ctl-1617-deployment-mode-design.md`.
 
 ## Secret Contract (CTL-1616)
@@ -357,6 +359,13 @@ active work:
   flip draft→ready (avoids `create-pr`'s "PR already exists" hang).
 - **Config**: `orchestration.draftPr.enabled` (default `true`) — set `false` for no early draft, so
   the PR is created only at the `pr` phase.
+- **Resume consumer (CTL-1640)**: the pushed commits on `origin/<ticket>` are the durable record a
+  new worktree resumes from. `create-worktree.sh` seeds a fresh branch from `origin/<ticket>` when
+  it exists (default-on; `--no-from-remote` opts out), so both normal dispatch and cross-host
+  reclaim (`defaultRebuildWorktree`) rebuild on the dead host's pushed work instead of orphaning it
+  under a fresh branch off base. Resolved straight from git (`origin/<ticket>`), not by reading
+  `.draftPr`. The operator-facing CLI contract (default-on, the `--no-from-remote` / `--skip-fetch`
+  opt-outs) is owned by and documented in `plugins/dev/skills/create-worktree/SKILL.md`.
 - **Deferred**: reading `.draftPr` draft-state as a secondary advancement signal (advancement
   currently driven by signal `status === "done"` only).
 
@@ -379,6 +388,46 @@ it as a recovery item. Previously the classifier blindly escalated it to a human
 
 The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
 `recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
+
+### Delegate-first escalation + explanation chokepoint (CTL-1609)
+
+Two gaps closed at the point where the scheduler labels a ticket `needs-human`:
+
+**Gap 1 — Delegate-first routing seam.** Every `needs-human` producer (six sites in
+`scheduler.mjs` / `monitor.mjs` / `stale-pr-rescue-timer.mjs`, not including `attempts-exhausted`
+which is post-delegate by definition) now routes through `routeStuckTicketToDelegate`
+(`execution-core/delegate-first.mjs`) instead of calling `labelNeedsHumanUnlessBeliefOwner`
+directly. Ordered fallback: **(1) auto-fix [deferred]** → **(2) delegate runner** → **(3) human**.
+
+- **`CATALYST_DELEGATE_FIRST=off`** (default): byte-identical to the direct call — no behavior
+  change until the flag is lit.
+- **`CATALYST_DELEGATE_FIRST=shadow`**: logs a `delegate.would-route` event per eligible ticket
+  but still labels `needs-human`. Safe dry-run.
+- **`CATALYST_DELEGATE_FIRST=enforce`**: calls `enqueueDelegateIntent`; if the queue accepts
+  (`enqueued`, `already-pending`, or `worker-live`) emits `delegate.routed` and returns without
+  labelling. Queue-full / write-failed / no-orch-dir → emit `delegate.route-fallback` and fall
+  back to labelling. Side effects (`recordTransition`, `cache.invalidate`) are gated on
+  `result.labelled === true` so routed tickets never record a spurious `needs-human` transition.
+
+**Gap 2 — Explanation-required chokepoint.** `labelNeedsHumanUnlessBeliefOwner`
+(`execution-core/label-guard.mjs`) now accepts an optional `explanation` object. After a
+confirmed label application:
+
+- If `explanation` is absent → emits `escalation.explanation-absent` warn and coerces a degraded
+  fallback via `coerceExplanation` (type `authorization`, `degraded: true`).
+- Writes the coerced or caller-supplied explanation to
+  `workers/<TICKET>/phase-recovery-pass.json` via `writeExplanationSignal` (atomic tmp+rename).
+  A **no-overwrite guard** protects the rich curated signal written by `escalateExhaustedIntents`
+  before it calls the label function — `prior.explanation && prior.explanation.degraded !== true`
+  prevents the thin hint from clobbering it.
+- All six wired sites supply a `problem` + `call_to_action` structured explanation so the operator
+  inbox can render a real "What's needed now" card instead of a bare label.
+- The `attempts-exhausted` site passes a thin hint; `escalateExhaustedIntents` writes the full
+  curated explanation first via a direct `writeExplanationSignal` call, and the no-overwrite guard
+  ensures the chokepoint's coercion cannot overwrite it.
+
+New event names (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`,
+`delegate.would-route`, `delegate.routed`, `delegate.route-fallback`.
 
 ### Runaway-loop guards (CTL-671)
 
@@ -512,6 +561,10 @@ flowchart LR
     OM[orch-monitor<br/>web dashboard]
     CE[catalyst-events tail<br/>raw stream]
   end
+  subgraph ObservationNodes["Observation nodes (monitor/developer)"]
+    EM[event-mirror daemon<br/>ssh-tail fan-in] -- "ssh tail -c +N<br/>per-host byte cursor" --> REMOTE_EL[worker host<br/>events/YYYY-MM.jsonl]
+    EM --> EL
+  end
   SJ --> HUD
   PSF -.not yet scanned.-> HUD
   BI --> HUD
@@ -528,6 +581,15 @@ Writers (phase-agent workers, `phase-agent-dispatch`, broker daemon, webhook rec
 `fs.watch` byte-cursor driving `claude stop`/`git worktree remove`/`git branch -D`], `catalyst-hud`,
 orch-monitor) consume that log plus per-run state and broker registry without coordinating. The
 broker and the reaper are each both reader and writer of the same file.
+
+**Event-mirror (CTL-1654) — observation-node fleet feed.** On `monitor`/`developer` nodes,
+`catalyst-stack start` launches the event-mirror daemon (`event-mirror/index.ts` supervised by
+launchd KeepAlive). It fans each worker host's `~/catalyst/events/YYYY-MM.jsonl` into the local
+copy via `ssh tail -c +N`, advancing a per-host byte cursor and deduplicating by event id (in-memory
+ring, scoped to the current month's file). The append is idempotent: events already in the local
+file are never double-written. `catalyst-events tail`/`wait-for` on the observation node then
+resolve fleet events locally with no polling loop. The fan-in is transport-abstracted (injectable
+`fetchFn`) so a future cloud-changefeed transport drops in without touching the dedup core.
 
 ### Linear app-actor self-echo guard (`botUserId`)
 
