@@ -496,6 +496,7 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 //     log         : { info, warn }        (the module's log instance)
 //     explanation : object | undefined    (CTL-1609 Gap 2 — structured escalation
 //                   explanation; coerced via coerceExplanation if partial/absent)
+//     onOutcome   : ({deferred,applied,ran,reason}) => void  (optional, CTL-1641)
 //   }
 //
 // CTL-764 finding 8 + finding C: returns whether the needs-human label was CONFIRMED
@@ -505,16 +506,34 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 // `true` ONLY when applyLabel reported applied:true. Callers gate their worker.transition
 // emission on this so neither a no-op re-application nor a failed attempt records a fresh
 // escalation. Existing callers ignore the return, so this stays backward-compatible.
+//
+// CTL-1641 (Codex #3005 P2): the boolean return CONFLATES three `false` cases —
+// belief-owner deferral, a marker-guarded no-op (label already handled this lifetime),
+// and a GENUINE non-confirming write (applyLabel ran but returned applied:false). A
+// caller that must count a failed escalation (unstuck-escalate-seam) cannot tell them
+// apart from the boolean alone. The optional `onOutcome` callback reports the richer
+// signal WITHOUT changing the return type: `deferred` (belief owner), `ran` (applyLabel
+// actually executed — false on a marker no-op), `applied`, and `reason`. A genuine
+// failure is exactly `!deferred && ran && !applied`.
 export function labelNeedsHumanUnlessBeliefOwner(
   orchDir,
   ticket,
   writeStatus,
-  { env = process.env, site = "unknown", log: logArg = null, explanation = undefined } = {}
+  {
+    env = process.env,
+    site = "unknown",
+    log: logArg = null,
+    explanation = undefined,
+    onOutcome = null,
+  } = {}
 ) {
   if (beliefOwnsNeedsHuman(env)) {
     // Defer to executeEscalations — R12 belief owner. Record, do not page.
     const logger = logArg ?? log;
     logger.info({ ticket, site }, "needs-human deferred to belief owner (CTL-1241)");
+    if (typeof onOutcome === "function") {
+      onOutcome({ deferred: true, applied: false, ran: false, reason: null });
+    }
     return false;
   }
   // Enforcement OFF (default): call labelOnce exactly as before. CTL-764 finding C:
@@ -523,9 +542,13 @@ export function labelNeedsHumanUnlessBeliefOwner(
   // landed). Capture applyLabel's applied result via onApplyResult; a marker-guarded no-op
   // (labelOnce early-returns, onApplyResult never fires) correctly stays false.
   let applied = false;
+  let ran = false;
+  let reason = null;
   labelOnce(orchDir, ticket, "needs-human", writeStatus, {
     onApplyResult: (r) => {
+      ran = true;
       applied = r.applied === true;
+      reason = r.reason ?? null;
     },
   });
   // CTL-1609 Gap 2: on a confirmed apply, coerce the explanation and persist it to
@@ -545,6 +568,9 @@ export function labelNeedsHumanUnlessBeliefOwner(
     }
     const coerced = coerceExplanation(explanation ?? {}, { ticket, canExecute: false });
     writeExplanationSignal(orchDir, ticket, coerced, { log: logArg });
+  }
+  if (typeof onOutcome === "function") {
+    onOutcome({ deferred: false, applied, ran, reason });
   }
   return applied;
 }
