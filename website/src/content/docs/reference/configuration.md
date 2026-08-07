@@ -462,6 +462,42 @@ not per-repo:
   until the value is corrected — so a typo can never make a node pick up work.
 - A missing or malformed Layer-2 file never throws; it falls through to the `worker` default.
 
+### Drain override (`CATALYST_DRAIN_DISABLED`, CTL-1678)
+
+`CATALYST_DRAIN_DISABLED=1` is a **worker-only, per-node** override that makes the node
+**permanently ignore the drain flag**. It exists because an unattributed recurring writer (CTL-1675)
+keeps silently setting the drain sentinel fleet-wide, halting all new-work admission; this env lets a
+worker neutralize that flag durably without a code change.
+
+- **Where to set it:** in the durable **Layer-2** `~/.config/catalyst/execution-core.env` (it is
+  `source`d into the daemon's environment at launch), then `catalyst-stack restart`.
+- **Opt-in semantics:** strict `=== "1"` (matching `CATALYST_BOOT_DRAINED`). Any other value —
+  unset, `0`, `true`, empty — leaves the node honoring the flag. **Unset (the fleet default) is a
+  byte-for-byte no-op**; nothing changes until it is set.
+- **What it does:** it makes `isDraining()` return `false` at the single admission chokepoint, so
+  **every** new-work consumer (the scheduler dispatch gate, the monitor triage-dispatch gate, and the
+  admission-state reporter) admits work again through one seam. The physical `drain` file is left in
+  place — the override neutralizes it, it does not delete it.
+- **Tripwire (attribution):** whenever the flag is present but ignored, the daemon emits a
+  once-per-episode **`node.drain.ignored`** event carrying the flag's mtime and a truncated `ps`
+  snapshot, to keep gathering evidence for CTL-1675. It re-arms once the flag is removed and
+  re-created.
+- **The third state is visible:** `catalyst-execution-core drain --status-read` prints
+  `drain flag present but IGNORED (CATALYST_DRAIN_DISABLED=1)` (and warns on stderr when you toggle
+  the flag on a drain-disabled node), `catalyst doctor` reports an advisory `drain-disabled` check
+  (WARN when the flag is present-and-ignored, PASS/INFO otherwise — never a FAIL), and
+  `catalyst-stack verify-node` shows a `drain-disabled` line on the worker profile.
+- **Does not touch boot-drain.** `CATALYST_BOOT_DRAINED` and the boot-drain policy are deliberately
+  independent and unchanged, so a `developer`/`monitor` node keeps booting drained (this override is
+  **worker-only**).
+
+```bash
+# In ~/.config/catalyst/execution-core.env on a WORKER node (e.g. mini, mini-2):
+CATALYST_DRAIN_DISABLED=1
+# then:
+catalyst-stack restart
+```
+
 ### Read-replica endpoint (`catalyst.readReplica.baseUrl`, CTL-1346)
 
 > **Scope — board UI display only.** `catalyst.readReplica.baseUrl` governs the terminal HUD's board
