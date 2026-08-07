@@ -81,6 +81,26 @@ function makeRealDispatch() {
 
 const noopReclaim = () => "noop";
 
+describe("CAT-36 new-work admission", () => {
+  test("an untriaged top-ranked ticket does not consume the only free slot", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = makeRealDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [
+        { identifier: "CTL-BLOCK", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+        { identifier: "CTL-READY", priority: 2, createdAt: "2026-05-02T00:00:00Z" },
+      ],
+      reclaimDeadWork: noopReclaim,
+      liveBackgroundCount: () => 0,
+      dispatch,
+      hasTriageArtifact: (_dir, ticket) => ticket === "CTL-READY",
+      listStartedTickets: () => new Set(),
+      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => {} },
+    });
+    expect(dispatch.calls.map((call) => call.ticket)).toEqual(["CTL-READY"]);
+  });
+});
+
 describe("CTL-705 acceptance scenario — preemption + resume", () => {
   test("Tick 1+2+3: Urgent queued + 2 Low in-flight → CTL-2 preempted (tick 2), resumed (tick 3)", () => {
     const T0 = 200_000;
