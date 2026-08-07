@@ -111,6 +111,7 @@ import {
 // recovery evidence attachment (revives the structurally-dead R12 branch).
 import { collectBeliefsTick, getBeliefsDb, getEscalateHumanBelief } from "./beliefs/collector.mjs";
 import { buildRecoveryItems } from "./recovery-evidence.mjs";
+import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator re-arm
 // CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
 import {
   isIntentEffective,
@@ -3373,6 +3374,10 @@ export function defaultClearStall(orchDir, writeStatus) {
     } catch {
       /* best-effort */
     }
+    // 5. CTL-1643: clear the durable escalation record so the next same-episode
+    //    gate starts fresh. Without this, the labelAttempts > 0 guard in
+    //    escalateOnce suppresses the re-escalation event after the operator re-arms.
+    forgetDurableEscalation(orchDir, ticket);
     return true;
   };
 }
