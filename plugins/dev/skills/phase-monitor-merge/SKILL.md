@@ -182,52 +182,87 @@ PHASE_REVIEWER_ARRIVAL_WAIT_SEC="${PHASE_REVIEWER_ARRIVAL_WAIT_SEC:-300}"
 # so reusing it would age/scope the OLD commit after a reconcile re-push. REST
 # `.head.sha` is authoritative and reflects the just-pushed head.
 REVIEWED_HEAD="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
-HEAD_COMMITTED_AT="$(gh api "repos/${REPO}/commits/${REVIEWED_HEAD}" --jq '.commit.committer.date' 2>/dev/null || true)"
+GH_OWNER="${REPO%/*}"; GH_NAME="${REPO#*/}"
+# CTL-1680 (Codex #3079 re-review P1): anchor the window to when this head became
+# REVIEWABLE ON THE PR (its push time), NOT when the commit was authored. A commit
+# created during a long verify phase can predate PR exposure by hours; anchoring to
+# the author/committer date would make HEAD_AGE_SEC already exceed the window and
+# merge with zero reviewer window. GraphQL `pushedDate` is the push time; fall back
+# to `committedDate`, then to the REST committer date.
+HEAD_EXPOSED_AT="$(gh api graphql -f query='
+  query($owner:String!,$name:String!,$pr:Int!){
+    repository(owner:$owner,name:$name){ pullRequest(number:$pr){
+      commits(last:1){ nodes { commit { oid pushedDate committedDate } } } } } }' \
+  -f owner="$GH_OWNER" -f name="$GH_NAME" -F pr="$PR_NUMBER" \
+  --jq '.data.repository.pullRequest.commits.nodes[0].commit | (.pushedDate // .committedDate) // empty' 2>/dev/null || true)"
+[[ -n "$HEAD_EXPOSED_AT" ]] || HEAD_EXPOSED_AT="$(gh api "repos/${REPO}/commits/${REVIEWED_HEAD}" --jq '.commit.committer.date' 2>/dev/null || true)"
 # CTL-1680 (Codex #3079 P1 portability): HEAD age via jq `fromdateiso8601`, NOT the
 # BSD/macOS-only `date -j` timestamp parser. On a Linux worker the BSD form fails,
 # falls to `echo 0`, HEAD_AGE_SEC becomes ~the current epoch, the window check is
 # always false, and every fresh CLEAN PR merges immediately with no reviewer window.
 # jq is a hard dependency of this skill and its parse is portable (needs the trailing
-# Z, which the commit date carries) — same approach the End-block mirror already uses.
+# Z, which the timestamp carries) — same approach the End-block mirror already uses.
 HEAD_AGE_SEC=""
-if [[ -n "$HEAD_COMMITTED_AT" ]]; then
-  HEAD_AGE_SEC="$(jq -n --arg a "$HEAD_COMMITTED_AT" '(now - ($a|fromdateiso8601)) | floor' 2>/dev/null || echo "")"
+if [[ -n "$HEAD_EXPOSED_AT" ]]; then
+  HEAD_AGE_SEC="$(jq -n --arg a "$HEAD_EXPOSED_AT" '(now - ($a|fromdateiso8601)) | floor' 2>/dev/null || echo "")"
 fi
-# Automated-reviewer verdict present ON THIS HEAD? (Codex #3079 P1) Every check is
+# Automated-reviewer CLEAN-PASS present ON THIS HEAD? (Codex #3079 P1) Every check is
 # scoped to REVIEWED_HEAD — a PR-wide match would let a STALE-head verdict (from
 # before a fix-up/rebase/force-push) suppress the window and merge the new commit
-# unreviewed, exactly the re-review-required case AGENTS.md calls out. Three shapes:
-#   (a) a review object whose commit_id IS this head,
-#   (b) a "no major issues"/"Reviewed commit" issue comment naming this head's short
-#       SHA (or posted at/after this head was committed),
-#   (c) a 👍 reaction posted at/after this head was committed (reactions carry no
+# unreviewed. And it must be a genuine CLEAN PASS, not a bare review object: Codex
+# posts a review whether or not it has findings, so mere review presence is NOT a
+# verdict (Codex #3079 re-review P1) — the "no major issues"/👍 signal is. Note the
+# findings-review body ALSO contains "Reviewed commit", so that phrase is NOT a
+# clean-pass discriminator; only "no (major) issues"/"didn't find" is. Three shapes:
+#   (a) a REVIEW on this head whose body is a clean pass (commit_id-scoped),
+#   (b) a clean-pass issue comment on this head (embedded short SHA or timestamp),
+#   (c) a 👍 reaction posted at/after this head was exposed (reactions carry no
 #       commit, so head-scoping is temporal).
+CLEAN_PASS_RE='no (major )?issues|did ?n.?.?t find|did not find'
 REVIEWER_VERDICT_PRESENT=false
-# (a) reviews API — commit_id is exact head scoping (REST carries it; `gh pr view
-#     --json reviews` does not).
+# (a) clean-pass REVIEW, commit_id-scoped (REST carries commit_id; `gh pr view
+#     --json reviews` does not). A review WITH findings does not match CLEAN_PASS_RE.
 if gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" 2>/dev/null \
-   | jq -e --arg h "$REVIEWED_HEAD" \
-       'any(.[]; (.user.login|test("codex";"i")) and (.commit_id == $h))' >/dev/null 2>&1; then
+   | jq -e --arg h "$REVIEWED_HEAD" --arg re "$CLEAN_PASS_RE" \
+       'any(.[]; (.user.login|test("codex";"i")) and (.commit_id == $h) and (.body|test($re;"i")))' >/dev/null 2>&1; then
   REVIEWER_VERDICT_PRESENT=true
 fi
 # (b) clean-pass issue comment, scoped to this head by embedded short SHA or timestamp.
 if [[ "$REVIEWER_VERDICT_PRESENT" != true ]] && \
    gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
-   | jq -e --arg h "$REVIEWED_HEAD" --arg at "$HEAD_COMMITTED_AT" \
+   | jq -e --arg h "$REVIEWED_HEAD" --arg at "$HEAD_EXPOSED_AT" --arg re "$CLEAN_PASS_RE" \
        'any(.[];
           (.user.login|test("codex";"i"))
-          and (.body|test("no (major )?issues|Reviewed commit";"i"))
+          and (.body|test($re;"i"))
           and ( ((($h|length) >= 10) and (.body|test($h[0:10])))
                 or (($at != "") and (.created_at >= $at)) ))' >/dev/null 2>&1; then
   REVIEWER_VERDICT_PRESENT=true
 fi
-# (c) 👍 reaction clean-pass posted at/after this head.
-if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "$HEAD_COMMITTED_AT" ]] && \
+# (c) 👍 reaction clean-pass posted at/after this head was exposed.
+if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "$HEAD_EXPOSED_AT" ]] && \
    gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
      -H "Accept: application/vnd.github.squirrel-girl-preview+json" 2>/dev/null \
-   | jq -e --arg at "$HEAD_COMMITTED_AT" \
+   | jq -e --arg at "$HEAD_EXPOSED_AT" \
        'any(.[]; (.content=="+1") and (.user.login|test("codex";"i")) and (.created_at >= $at))' >/dev/null 2>&1; then
   REVIEWER_VERDICT_PRESENT=true
+fi
+# CTL-1680 (Codex #3079 re-review P1): unresolved automated-review findings MUST block
+# the merge even when they do NOT flip mergeable_state to "blocked" — a bot is not a
+# required reviewer in every repo, and "require conversation resolution" is not
+# universally on. This enforces the AGENTS.md absolute rule (every review thread
+# resolved before merge) independent of mergeable_state, so a Codex review WITH open
+# findings can never be merged past — regardless of the arrival window (fail-CLOSED).
+UNRESOLVED_BOT_THREADS="$(gh api graphql -f query='
+  query($owner:String!,$name:String!,$pr:Int!){
+    repository(owner:$owner,name:$name){ pullRequest(number:$pr){
+      reviewThreads(first:100){ nodes { isResolved comments(first:1){ nodes { author{login} } } } } } } }' \
+  -f owner="$GH_OWNER" -f name="$GH_NAME" -F pr="$PR_NUMBER" \
+  --jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+          | select(.isResolved==false)
+          | select((.comments.nodes[0].author.login // "")|test("codex|bot";"i"))] | length' 2>/dev/null || echo 0)"
+if [[ "${UNRESOLVED_BOT_THREADS:-0}" =~ ^[0-9]+$ && "${UNRESOLVED_BOT_THREADS:-0}" -gt 0 ]]; then
+  echo "wake: pr#${PR_NUMBER} has ${UNRESOLVED_BOT_THREADS} unresolved automated-review thread(s); NOT merging until resolved (blocked-path: /catalyst-dev:review-comments)"
+  continue  # re-enter the loop; open bot findings must be addressed + resolved first
 fi
 if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "${HEAD_AGE_SEC:-}" ]]; then
   if [[ "$HEAD_AGE_SEC" -lt "$PHASE_REVIEWER_ARRIVAL_WAIT_SEC" ]]; then

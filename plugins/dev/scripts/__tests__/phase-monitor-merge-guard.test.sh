@@ -100,6 +100,17 @@ if [[ -f "$SKILL" ]]; then
   # P2: the re-wait is bounded by the remaining reviewer window.
   assert_contains "$BODY" "MERGE_WAKE_TIMEOUT_SEC" \
     "reviewer-arrival re-wait is bounded by the remaining window"
+  # re-review P1: window anchored to head EXPOSURE (pushedDate), not commit author date.
+  assert_contains "$BODY" "pushedDate" \
+    "reviewer-arrival window anchored to head exposure (pushedDate), not commit date"
+  assert_contains "$BODY" "HEAD_EXPOSED_AT" \
+    "reviewer-arrival age uses HEAD_EXPOSED_AT"
+  # re-review P1: a bare review object is NOT a clean pass — require clean-pass phrasing.
+  assert_contains "$BODY" "CLEAN_PASS_RE" \
+    "reviewer verdict requires a clean-pass signal, not a bare review object"
+  # re-review P1: unresolved bot threads block the merge (fail-CLOSED), independent of mergeable_state.
+  assert_contains "$BODY" "UNRESOLVED_BOT_THREADS" \
+    "unresolved automated-review threads block the merge regardless of mergeable_state"
 else
   fail "SKILL.md missing for remediation checks: $SKILL"
 fi
