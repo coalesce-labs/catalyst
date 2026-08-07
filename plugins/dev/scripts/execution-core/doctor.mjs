@@ -3083,10 +3083,10 @@ export function checkCloudSync(deps = {}) {
   // measures "time since last mirrored change", NOT writer liveness. The feed-independent
   // liveness signal is the writer-lock HEARTBEAT (<db>.writer.lock), rewritten ~every 5s.
   // Gate liveness on the lock heartbeat; report the data-age as info only, never as "down".
+  let size = 0;
   if (!dbPresent) {
     checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
   } else {
-    let size = 0;
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
     try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; } catch { /* unreadable → handled below */ }
     try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) dataNewest = Math.max(dataNewest, w.mtimeMs); } catch { /* no -wal sidecar */ }
@@ -3113,6 +3113,17 @@ export function checkCloudSync(deps = {}) {
     }
   }
 
+  // CAT-35: distinguish a never-seeded/no-schema file from ordinary staleness.
+  if (dbPresent) {
+    checks.push(
+      size === 0
+        ? mkCheck("replica-schema", STATUS.WARN, "replica db is 0 bytes — no schema, never seeded; the writer has never authenticated")
+        : size < sizeFloorBytes
+          ? mkCheck("replica-schema", STATUS.WARN, `replica db is ${size}B (< ${sizeFloorBytes}B floor) — seed incomplete`)
+          : mkCheck("replica-schema", STATUS.PASS, `replica db ${Math.round(size / 1024)}KiB — schema seeded`),
+    );
+  }
+
   // (c) token presence — by NAME only, NEVER the value.
   const tokenVal = env[tokenEnv.envVar];
   const tokenSet = typeof tokenVal === "string" && tokenVal.length > 0;
@@ -3133,6 +3144,18 @@ export function checkCloudSync(deps = {}) {
     checks.push(mkCheck("replica-read-flag", STATUS.WARN, "writer running + replica present but CATALYST_LINEAR_REPLICA=off — flip it on to read from the replica"));
   } else {
     checks.push(mkCheck("replica-read-flag", STATUS.INFO, "replica read tier off (CATALYST_LINEAR_REPLICA unset/off)"));
+  }
+
+  const tokenMissing = !tokenSet;
+  const flagOff = mode !== "on";
+  if (tokenMissing && flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier INERT end-to-end: token ${tokenEnv.envVar} unset AND CATALYST_LINEAR_REPLICA off. Both must be fixed, token FIRST`));
+  } else if (tokenMissing || flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier partially configured (${tokenMissing ? `token ${tokenEnv.envVar} unset` : "CATALYST_LINEAR_REPLICA off"}) — reads still fall back`));
+  } else {
+    checks.push(mkCheck("replica-tier", STATUS.PASS, "replica tier fully configured (token set + read flag on)"));
   }
 
   return checks;

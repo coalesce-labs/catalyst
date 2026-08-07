@@ -77,6 +77,24 @@ describe("checkCloudSync", () => {
     expect(m["replica-fresh"].detail).toMatch(/tiny|seed/i);
   });
 
+  test("0-byte replica reports never-seeded schema", () => {
+    const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 0, mtimeMs: NOW }) })));
+    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].detail).toMatch(/never seeded|no schema|0 bytes/i);
+  });
+
+  test("seeded-but-stale replica passes schema check", () => {
+    const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 4_000_000, mtimeMs: NOW - 86_400_000 }) })));
+    expect(m["replica-schema"].status).toBe("pass");
+  });
+
+  test("tier-inert summary names token and read flag gaps", () => {
+    const m = byName(checkCloudSync(deps({ mode: "off", env: {}, statFile: () => ({ size: 0, mtimeMs: NOW }) })));
+    expect(m["replica-tier"].status).toBe("warn");
+    expect(m["replica-tier"].detail).toMatch(/token/i);
+    expect(m["replica-tier"].detail).toMatch(/CATALYST_LINEAR_REPLICA/);
+  });
+
   test("all mtimes old incl the writer-lock (heartbeat stopped) → replica-fresh WARN (likely down)", () => {
     const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 64_000_000, mtimeMs: NOW - 600_000 }) })));
     expect(m["replica-fresh"].status).toBe("warn");
