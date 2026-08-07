@@ -18,6 +18,15 @@ import {
 } from "./heartbeat-event.mjs";
 import { readClusterHeartbeats } from "./recovery.mjs";
 
+// Mirrors getHostName()'s fallback: strip everything after the FIRST dot, not
+// just a trailing ".local" — a naive `.replace(/\.local$/, "")` diverges on any
+// real multi-label FQDN that isn't ".local" (e.g. a live fleet host's
+// "aldebaran.hagale.net").
+function firstDnsLabel(raw) {
+  const dot = raw.indexOf(".");
+  return dot === -1 ? raw : raw.slice(0, dot);
+}
+
 const HOST_ENVS = ["CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE"];
 let savedEnv = {};
 
@@ -67,7 +76,7 @@ describe("buildHeartbeatEnvelope (CTL-859)", () => {
 
   test("host.name defaults to os.hostname() minus .local", () => {
     const env = buildHeartbeatEnvelope();
-    const expected = hostname().replace(/\.local$/, "");
+    const expected = firstDnsLabel(hostname());
     expect(env.body.payload["host.name"]).toBe(expected);
   });
 
@@ -191,6 +200,14 @@ describe("startHeartbeat (CTL-859)", () => {
 });
 
 describe("readClusterHeartbeats (CTL-859)", () => {
+  // These tests only exercise LOCAL log parsing, so every call passes an explicit
+  // roster: [] — readClusterHeartbeats defaults roster to the real getClusterHosts()
+  // and, for a roster.length > 1, merges in a real cross-host peer read
+  // (defaultReadPeers). On a live, configured multi-host Catalyst node (any actual
+  // fleet host) that default silently turns this "unit" test into a real network
+  // read that merges genuine peer heartbeat data into the result — flaky/incorrect
+  // depending on what the real daemon happened to have written moments earlier.
+  // roster: [] triggers CTL-1090's single-host exact no-op, making these hermetic.
   let tmp;
   let logPath;
 
@@ -204,7 +221,7 @@ describe("readClusterHeartbeats (CTL-859)", () => {
   });
 
   test("returns {} when the event log is absent", () => {
-    expect(readClusterHeartbeats({ logPath: join(tmp, "nope.jsonl") })).toEqual({});
+    expect(readClusterHeartbeats({ logPath: join(tmp, "nope.jsonl"), roster: [] })).toEqual({});
   });
 
   test("returns the latest ts per host", () => {
@@ -218,7 +235,7 @@ describe("readClusterHeartbeats (CTL-859)", () => {
     appendFileSync(logPath, hb("mini", "2026-06-08T00:00:00Z"));
     appendFileSync(logPath, hb("mini", "2026-06-08T00:01:00Z"));
     appendFileSync(logPath, hb("mac-studio", "2026-06-08T00:00:30Z"));
-    const seen = readClusterHeartbeats({ logPath });
+    const seen = readClusterHeartbeats({ logPath, roster: [] });
     expect(seen).toEqual({
       mini: "2026-06-08T00:01:00Z",
       "mac-studio": "2026-06-08T00:00:30Z",
@@ -244,7 +261,7 @@ describe("readClusterHeartbeats (CTL-859)", () => {
         body: { payload: { "host.name": "mini", epoch: 1 } },
       }) + "\n",
     );
-    expect(readClusterHeartbeats({ logPath })).toEqual({
+    expect(readClusterHeartbeats({ logPath, roster: [] })).toEqual({
       mini: "2026-06-08T00:02:00Z",
     });
   });
@@ -252,7 +269,7 @@ describe("readClusterHeartbeats (CTL-859)", () => {
   test("round-trips an emitHeartbeatEvent-produced line", async () => {
     process.env.CATALYST_HOST_NAME = "mini";
     await emitHeartbeatEvent({ logPath });
-    const seen = readClusterHeartbeats({ logPath });
+    const seen = readClusterHeartbeats({ logPath, roster: [] });
     expect(Object.keys(seen)).toEqual(["mini"]);
     expect(typeof seen.mini).toBe("string");
   });

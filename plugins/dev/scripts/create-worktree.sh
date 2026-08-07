@@ -22,6 +22,60 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# catalyst_git_exclude_worktree_artifacts <worktree_path> — keep Catalyst's own
+# worktree-local runtime bookkeeping out of every project's git status, without
+# ever touching that project's TRACKED .gitignore. Mirrors the existing pattern
+# already used for .agents/ (codex-run-phase-agent.mjs's gitExcludeAgents +
+# resolveGitExcludePath): writes to this worktree's LOCAL, uncommitted,
+# worktree-scoped `core.excludesFile` (via `git config --worktree`), so it
+# applies only here — never leaks into the project's history, never leaks
+# into sibling worktrees or the main checkout, and needs no per-project PR.
+#
+# Before this, every onboarded project had to carry its own .gitignore entries
+# for these paths — miss one and `git status` shows Catalyst's own noise as
+# dirty, which is exactly what stalled a real ticket's verify phase (rebase
+# refused a "dirty" tree that was only dirty because of thoughts/ and
+# .catalyst/.workflow-context.json). Idempotent + best-effort: failures here
+# must never abort worktree creation.
+catalyst_git_exclude_worktree_artifacts() {
+	local worktree_path="$1" abs_git_dir exclude_path pattern
+	# CTL-1662 (Codex review, PR #2851): plain `git rev-parse --git-path
+	# info/exclude` resolves to the COMMON git directory even for a linked
+	# worktree — `info/` is on git's shared-files list, so the naive path
+	# would hide these patterns in the main checkout and every sibling
+	# worktree, not just this one. `core.excludesFile` IS scopable per
+	# worktree via `git config --worktree` (gated by
+	# extensions.worktreeConfig), so point it at THIS worktree's own private
+	# info/exclude under its private git dir instead of relying on the
+	# shared one.
+	abs_git_dir=$(git -C "$worktree_path" rev-parse --absolute-git-dir 2>/dev/null) || return 0
+	exclude_path="${abs_git_dir}/info/exclude"
+	mkdir -p "$(dirname "$exclude_path")" 2>/dev/null || return 0
+	git -C "$worktree_path" config extensions.worktreeConfig true 2>/dev/null || return 0
+	git -C "$worktree_path" config --worktree core.excludesFile "$exclude_path" 2>/dev/null || return 0
+	# Best-effort past this point (docstring above): shared Git metadata can be
+	# read-only or otherwise unwritable, and under `set -e` an unguarded write
+	# failure here would abort worktree creation after the `git worktree add`
+	# already succeeded. Every write is explicitly guarded so a failure just
+	# returns (no exclusions applied) instead of propagating.
+	if [ ! -f "$exclude_path" ]; then
+		: >"$exclude_path" 2>/dev/null || return 0
+	fi
+	for pattern in \
+		"thoughts/" \
+		".catalyst/.workflow-context.json" \
+		".catalyst/.workflow-context.json.bak" \
+		".catalyst/worktree-provenance.json" \
+		".needs-cleanup" \
+		".orphaned_at" \
+		".trunk"; do
+		if ! grep -qxF "$pattern" "$exclude_path" 2>/dev/null; then
+			printf '%s\n' "$pattern" >>"$exclude_path" 2>/dev/null || return 0
+		fi
+	done
+	return 0
+}
+
 # Parse flags (collect positional args separately)
 POSITIONAL=()
 OVERRIDE_WORKTREE_DIR=""
@@ -30,6 +84,11 @@ ORCHESTRATION_NAME=""
 REUSE_EXISTING=false
 SKIP_FETCH=false
 EXPECTED_BRANCH=""
+# CTL-1640: resume-from-remote is default-on. When no local branch exists and
+# origin has this ticket branch (pushed draft-PR commits, CTL-783), seed the
+# worktree from that remote tip instead of orphaning it under a fresh branch off
+# base. --no-from-remote opts out; --from-remote affirms the default.
+FROM_REMOTE=true
 
 while [[ $# -gt 0 ]]; do
 	case $1 in
@@ -38,6 +97,8 @@ while [[ $# -gt 0 ]]; do
 		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
 		--reuse-existing) REUSE_EXISTING=true; shift ;;
 		--skip-fetch) SKIP_FETCH=true; shift ;;
+		--from-remote) FROM_REMOTE=true; shift ;;
+		--no-from-remote) FROM_REMOTE=false; shift ;;
 		# CTL-615: when --reuse-existing returns an existing worktree dir,
 		# assert its HEAD is on this branch. Mismatch → exit 64 with a
 		# clear diagnostic. The daemon's revive path passes the ticket name
@@ -52,12 +113,17 @@ done
 # Get worktree name from positional args
 if [ ${#POSITIONAL[@]} -eq 0 ]; then
 	echo -e "${RED}Error: Worktree name is required${NC}"
-	echo "Usage: ./create-worktree.sh <worktree_name> [base_branch] [--worktree-dir <path>] [--hooks-json <json>]"
+	echo "Usage: ./create-worktree.sh <worktree_name> [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--no-from-remote]"
+	echo ""
+	echo "  --from-remote / --no-from-remote  Seed a new branch from origin/<worktree_name>"
+	echo "                                    when it exists (default: --from-remote); opt out"
+	echo "                                    to always root a fresh branch on the base tip."
 	echo ""
 	echo "Examples:"
 	echo "  ./create-worktree.sh ENG-123"
 	echo "  ./create-worktree.sh feature-auth main"
 	echo "  ./create-worktree.sh orch-1-ENG-123 main --worktree-dir ~/catalyst/my-app"
+	echo "  ./create-worktree.sh ENG-123 main --no-from-remote   # ignore origin/ENG-123, root on base"
 	exit 1
 fi
 
@@ -168,6 +234,12 @@ if [ -d "$WORKTREE_PATH" ]; then
 				echo -e "${GREEN}  ✅ thoughts/shared repaired${NC}"
 			fi
 		fi
+		# CTL-1662 (Codex review, PR #2851): execution-core always supplies
+		# --reuse-existing (execution-core/worktree.mjs), so a worktree that
+		# predates the artifact-exclusion upgrade would otherwise never receive
+		# it — it exits here, before the creation-path call below. Best-effort;
+		# never blocks a successful reuse.
+		catalyst_git_exclude_worktree_artifacts "$WORKTREE_PATH"
 		echo -e "${GREEN}♻️  Reusing existing worktree: $WORKTREE_PATH${NC}"
 		echo "WORKTREE_PATH=${WORKTREE_PATH}"
 		exit 0
@@ -186,17 +258,75 @@ fi
 CREATED_BRANCH=false
 if git show-ref --verify --quiet "refs/heads/${WORKTREE_NAME}"; then
 	echo "📋 Using existing branch: ${WORKTREE_NAME}"
+	# CTL-1640: local branch wins (policy: no auto-merge), but surface a
+	# divergence from origin/<name> so a stale local branch atop pushed work is
+	# visible. Read the LOCALLY-CACHED remote-tracking ref (git rev-parse, no
+	# network) rather than a synchronous `git ls-remote` (Codex #3025 P2): the
+	# reuse path needs no remote data to add the worktree, and createWorktree()
+	# spawns this script without a timeout, so a live ls-remote against a slow or
+	# unreachable origin would block dispatch/reclaim until the transport times out
+	# — all for a cosmetic warning. Best-effort: if the remote-tracking ref is not
+	# present locally, we simply skip the warning.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ]; then
+		LOCAL_SHA="$(git rev-parse --verify --quiet "refs/heads/${WORKTREE_NAME}" 2>/dev/null || true)"
+		REMOTE_SHA="$(git rev-parse --verify --quiet "refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null || true)"
+		if [ -n "$REMOTE_SHA" ] && [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+			echo -e "${YELLOW}⚠️  local ${WORKTREE_NAME} (${LOCAL_SHA:0:8}) diverges from origin (${REMOTE_SHA:0:8}); keeping local, not merging (CTL-1640)${NC}" >&2
+		fi
+	fi
 	git worktree add "$WORKTREE_PATH" "$WORKTREE_NAME"
 else
 	echo "🆕 Creating new branch: ${WORKTREE_NAME}"
+	# CREATED_BRANCH=true is correct even when seeded from origin/<name> below:
+	# the local branch head then equals origin/<name>, so the rollback helpers'
+	# `git branch -D` can never lose unpushed work (every commit is on origin).
 	CREATED_BRANCH=true
 	START_POINT="$BASE_BRANCH"
-	if [ "$SKIP_FETCH" = false ]; then
+	SEEDED_FROM_REMOTE=false
+	# CTL-1640: resume-from-remote — if origin already has this ticket branch
+	# (e.g. a pushed draft PR's commits, CTL-783), seed the worktree from that
+	# remote tip instead of orphaning it under a fresh branch off base. The local
+	# branch already took precedence above; --skip-fetch (offline) and
+	# --no-from-remote opt out. This is the missing CTL-783 "resume consumer" —
+	# both normal dispatch and cross-host reclaim funnel through this script, so
+	# they both resume automatically with no .mjs change.
+	# CTL-1640 (Codex #3025 P1/P2): fetch with an EXPLICIT destination refspec so the
+	# remote-tracking ref is written even in a restricted-refspec (e.g. single-branch)
+	# clone, where a bare `git fetch origin <ticket>` returns success but lands the tip
+	# only in FETCH_HEAD — leaving START_POINT (refs/remotes/origin/<ticket>) nonexistent
+	# and failing the worktree add. A single fetch also collapses remote discovery and
+	# retrieval into ONE round-trip: no separate `git ls-remote` existence snapshot (which
+	# both added serial remote I/O and opened a split-window race where a concurrent push
+	# between the snapshot and the fetch could be missed), and a missing ticket ref simply
+	# makes the fetch exit non-zero so we fall through to seeding from base.
+	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
+		&& git fetch --quiet origin \
+			"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
+		START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+		SEEDED_FROM_REMOTE=true
+		echo "🌱 Resuming from origin/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
+	fi
+	if [ "$SEEDED_FROM_REMOTE" = false ] && [ "$SKIP_FETCH" = false ]; then
 		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
 			START_POINT="refs/remotes/origin/${BASE_BRANCH}"
 			echo "🔄 Fetched origin/${BASE_BRANCH}; rooting on remote tip"
 		else
 			echo -e "${YELLOW}⚠️  Could not fetch origin/${BASE_BRANCH}; falling back to local ${BASE_BRANCH} (worker may branch off stale ref)${NC}" >&2
+		fi
+		# CTL-1640 (Codex #3025 P2): re-check origin/<ticket> immediately before creating
+		# the branch. A superseded worker's early-draft push (implement-plan-draft-pr-early,
+		# CTL-783) can land AFTER the negative ticket fetch above but before `git worktree
+		# add -b` — a TOCTOU window that would otherwise root the survivor on base and never
+		# resume the pushed commits (the local-branch-wins path then takes over on every later
+		# provisioning). This last-moment fetch narrows that window to the gap between here and
+		# the add. It does NOT fully close the race — the durable fix is a cluster-fence guard
+		# on the producer's early-draft push — but it converts the common case back to a resume.
+		if [ "$FROM_REMOTE" = true ] \
+			&& git fetch --quiet origin \
+				"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
+			START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+			SEEDED_FROM_REMOTE=true
+			echo "🌱 origin/${WORKTREE_NAME} appeared during provisioning; resuming from its pushed tip (CTL-1640)"
 		fi
 	fi
 	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$START_POINT"
@@ -340,6 +470,13 @@ if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 		echo "📋 Orchestration context set: ${ORCHESTRATION_NAME}"
 	fi
 fi
+
+# Keep Catalyst's own worktree-local runtime artifacts (thoughts/,
+# .catalyst/.workflow-context.json, etc.) out of `git status` for every
+# project, unconditionally — via this worktree's local git exclude, never the
+# project's tracked .gitignore. Runs regardless of executor (bg/sdk/codex-exec)
+# and regardless of whether thoughts-init below even runs.
+catalyst_git_exclude_worktree_artifacts "$WORKTREE_PATH"
 
 # Generate .envrc for OTEL context (source_up inherits parent profiles)
 # Note: direnv allow runs AFTER setup hooks to avoid re-blocking if hooks modify .envrc

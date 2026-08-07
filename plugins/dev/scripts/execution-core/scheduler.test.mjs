@@ -10680,6 +10680,32 @@ describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass
     // covered exactly once — mac-studio handles CTL-B.
     expect(escalate.tickets).toEqual([T_STUDIO]);
   });
+
+  test("Pass 0u enforce: escalate seam returning errors[] is surfaced, not swallowed (CTL-1641)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const escalateWithError = () => ({
+      labelApplied: true,
+      commentPosted: false,
+      errors: [{ sideEffect: "comment", err: "boom" }],
+    });
+    const res = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      hosts: ["solo"],
+      hostName: "solo",
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 9_000_000,
+      unstuckSweep: {
+        ...unstuckOpts(escalateWithError),
+        collectCandidates: () => [
+          { ticket: T_MINI, phase: "pr", evidence: { reason: "unknown", ticket: T_MINI, phase: "pr" } },
+        ],
+      },
+    });
+    // Tick must not throw; the ticket is still recorded as escalated (label landed)
+    expect(res.unstuckEscalated?.some(e => e.ticket === T_MINI)).toBe(true);
+  });
 });
 
 // ── CTL-1191: Pass 0r reasoning — terminal-state filter (PR #2163 verify flag) ──
@@ -11758,6 +11784,40 @@ describe("CTL-1068: convergeStartedHeldLabels (unit)", () => {
       }
     );
     expect(rearms).toBe(1);
+  });
+
+  // CTL-1571: end-to-end regression for the bug convergeStartedHeldLabels was
+  // built to fix (CTL-1068) but couldn't, because the ONLY writer of the
+  // "queued"/"blocked" labels — convergeHeldLabel, in the pre-pickup admission
+  // loop — never left the once-marker this retraction sweep gates on. Reproduces
+  // the live-fleet incident directly: two real pilot tickets (CQD-1, PAN-1) sat
+  // for hours wearing a stale "queued" label after being admitted, because a
+  // transient clear-on-pickup failure at admission time was never retried (the
+  // ticket had already left the pre-pickup pool by the next tick).
+  test("CTL-1571: a label convergeHeldLabel applied is retractable by convergeStartedHeldLabels once the ticket starts", () => {
+    seedWorker("CTL-1571");
+    // Step 1 — admission tick applies "queued" (convergeHeldLabel, as the A.7
+    // admission loop does for a triaged-but-not-yet-admitted ticket). Before this
+    // fix, this call left the label in Linear but NO local trace of it.
+    const applyWs = { applyLabel: () => ({ applied: true, reason: null }), removeLabel: () => ({ removed: true }) };
+    const writes = convergeHeldLabel("CTL-1571", [], "queued", applyWs, { orchDir });
+    expect(writes).toBe(1);
+    expect(existsSync(markerPath("CTL-1571", "queued", "applied"))).toBe(true);
+
+    // Step 2 — the ticket is later picked up (dispatched) but the clear-on-pickup
+    // write that same admission tick would have issued never happened (simulated
+    // here by simply not calling convergeHeldLabel again with desired=null — the
+    // real-world failure mode is a transient removeLabel error, which the ticket's
+    // departure from the pre-pickup pool then makes unretriable). The label is
+    // still on Linear.
+    const { removed, ws: startedWs } = removeSpy();
+    convergeStartedHeldLabels(orchDir, "CTL-1571", startedWs, { multiHost: false });
+
+    // Before CTL-1571: removed would be [] (no marker → the loop `continue`s,
+    // exactly like the "steady-state: no held marker" test above) and the label
+    // would stay stuck on Linear indefinitely — the live bug.
+    expect(removed).toEqual([{ ticket: "CTL-1571", label: "queued" }]);
+    expect(existsSync(markerPath("CTL-1571", "queued", "applied"))).toBe(false);
   });
 });
 

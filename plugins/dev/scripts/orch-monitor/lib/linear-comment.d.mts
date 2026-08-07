@@ -41,6 +41,15 @@ export type PostCommentResult =
   | { status: "not_found"; ticket: string; message: string }
   | { status: "error"; message: string };
 
+/** Every configured personal-token candidate, in priority order, deduplicated,
+ *  empty/falsy entries dropped. `postOperatorComment` identity-checks each in
+ *  turn instead of trusting the first non-empty string. */
+export function linearTokenCandidates(
+  env?: Record<string, string | undefined>,
+  opts?: { projectConfig?: unknown },
+): string[];
+
+/** The single highest-priority candidate (`linearTokenCandidates(...)[0]`). */
 export function resolveLinearToken(
   env?: Record<string, string | undefined>,
   opts?: { projectConfig?: unknown },

@@ -139,16 +139,20 @@ const READ_ATTACHMENTS_QUERY = `query ReadFence($id: String!) {
 // parseClaimMetadata — normalise an attachment's metadata into the flat claim
 // record callers consume. `catalyst_generation` is coerced to a Number; a
 // missing/unparseable generation becomes null so isFenceCurrent never reads a
-// stale string as a match. Exported for unit coverage.
+// stale string as a match. `triage_attempt_count` is coerced similarly but
+// defaults to 0 (not null) — a count fails open to 0 so the cap gate
+// under-counts rather than falsely parks. Exported for unit coverage.
 export function parseClaimMetadata(metadata) {
   const m = metadata ?? {};
   const genRaw = m.catalyst_generation;
   const generation = Number(genRaw);
+  const attemptCount = Number(m.triage_attempt_count);
   return {
     owner_host: m.owner_host ?? null,
     generation: Number.isFinite(generation) ? generation : null,
     phase: m.phase ?? null,
     claimed_at: m.claimed_at ?? null,
+    triage_attempt_count: Number.isFinite(attemptCount) && attemptCount >= 0 ? attemptCount : 0,
   };
 }
 
@@ -192,19 +196,22 @@ const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreate
 // the original resolveIssueId(ticket) call, so behavior is unchanged when omitted.
 export async function writeClaim(
   ticket,
-  { owner_host, generation, phase },
-  { post = defaultPost, issueId: issueIdOverride = null } = {},
+  { owner_host, generation, phase, triage_attempt_count = 0 },
+  { post = defaultPost, issueId: issueIdOverride = null, preserveClaimedAt = null } = {},
 ) {
   const issueId = issueIdOverride || (await resolveIssueId(ticket, { post }));
   if (!issueId) {
     throw new Error(`cluster-claim: no issue found for identifier ${ticket}`);
   }
-  const claimed_at = new Date().toISOString();
+  // preserveClaimedAt allows a count-only bump to avoid resetting the CTL-1297
+  // staleness clock — a mere triage_attempt_count increment is not a takeover.
+  const claimed_at = preserveClaimedAt ?? new Date().toISOString();
   const metadata = {
     owner_host,
     catalyst_generation: generation,
     phase,
     claimed_at,
+    triage_attempt_count,
   };
   const data = await post(WRITE_ATTACHMENT_MUTATION, {
     input: {
@@ -218,6 +225,39 @@ export async function writeClaim(
     throw new Error(`cluster-claim: attachmentCreate returned success=false for ${ticket}`);
   }
   return parseClaimMetadata(metadata);
+}
+
+// ─── triage attempt count ────────────────────────────────────────────────────
+
+// readTriageAttemptCount — the fleet-wide triage attempt count from the fence
+// attachment. Returns the count (≥0) when a fence exists, or null when no
+// catalyst://fence/ attachment is found (fence-absent → caller fails open to
+// host-local counting). A zero count is a valid result (fence exists but no
+// attempts have been bumped yet, e.g. immediately after a fresh claim).
+export async function readTriageAttemptCount(ticket, { post = defaultPost } = {}) {
+  const c = await readClaim(ticket, { post });
+  return c ? (c.triage_attempt_count ?? 0) : null;
+}
+
+// bumpTriageAttemptCount — increment the fleet-wide triage attempt count on the
+// fence attachment. Preserves owner_host, catalyst_generation, phase, and
+// claimed_at (does NOT bump the generation — this is not a takeover). Returns
+// the new count on success, or null when no fence exists (best-effort no-op).
+export async function bumpTriageAttemptCount(ticket, { post = defaultPost, issueId = null } = {}) {
+  const current = await readClaim(ticket, { post });
+  if (!current) return null; // no fence — no-op, fail-open
+  const newCount = (current.triage_attempt_count ?? 0) + 1;
+  await writeClaim(
+    ticket,
+    {
+      owner_host: current.owner_host,
+      generation: current.generation,
+      phase: current.phase,
+      triage_attempt_count: newCount,
+    },
+    { post, issueId, preserveClaimedAt: current.claimed_at },
+  );
+  return newCount;
 }
 
 // ─── soft-CAS claim ──────────────────────────────────────────────────────────
@@ -333,10 +373,22 @@ export async function runCli(argv, { post = defaultPost } = {}) {
       process.stdout.write(JSON.stringify({ issueId }) + "\n");
       return 0;
     }
+    case "read-triage-attempt": {
+      const [ticket] = rest;
+      const count = await readTriageAttemptCount(ticket, { post });
+      process.stdout.write(JSON.stringify({ count }) + "\n");
+      return 0;
+    }
+    case "bump-triage-attempt": {
+      const [ticket] = rest;
+      const count = await bumpTriageAttemptCount(ticket, { post });
+      process.stdout.write(JSON.stringify({ count }) + "\n");
+      return 0;
+    }
     default:
       process.stderr.write(
         `cluster-claim.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket>>\n",
+          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket> | read-triage-attempt <ticket> | bump-triage-attempt <ticket>>\n",
       );
       return 1;
   }
