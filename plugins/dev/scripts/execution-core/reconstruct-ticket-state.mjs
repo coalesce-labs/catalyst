@@ -11,6 +11,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import { PHASES, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
 import { createWorktree } from "./worktree.mjs";
 import { defaultCheckOpenPrs } from "./open-pr-gate.mjs";
@@ -90,6 +91,17 @@ export function defaultArchiveDir(ticket) {
   return join(process.env.CATALYST_DIR ?? `${homedir()}/catalyst`, "archives", ticket);
 }
 
+// ARCHIVE_TERMINAL_MARKER — phase-teardown's proof-of-completion file, written
+// into the archive dir strictly LAST (phase-teardown/SKILL.md's
+// phase-teardown-emit fence, after archiving, worktree/branch removal, the
+// Linear mirror, AND the terminal event emit have all already run). The
+// archive-first `cp -R` itself happens much earlier (CTL-791), so a worker
+// that crashes right after that copy — before worktree removal or the final
+// emit — leaves a populated but INCOMPLETE archive dir. Checking for mere
+// non-emptiness cannot tell that crash apart from a genuine finish; this
+// marker's presence is the only thing that can (Codex round-2, PR #2697).
+const ARCHIVE_TERMINAL_MARKER = ".teardown-complete";
+
 // defaultCheckArchive — fail-open lookup for a ticket that has already been
 // fully archived. Two independent sources, either one is sufficient:
 //
@@ -102,59 +114,110 @@ export function defaultArchiveDir(ticket) {
 //       down, so without (a) this check always returns null post-teardown
 //       and reconstruction falls back to the thoughts-artifact walk, finds
 //       monitor-deploy as the last artifact, and rebuilds a worktree to
-//       resume teardown on an already-done ticket.
+//       resume teardown on an already-done ticket. Terminal is asserted only
+//       by ARCHIVE_TERMINAL_MARKER's presence, not the dir's non-emptiness —
+//       see that constant's comment for why.
 //   (b) The archived_workers SQLite index (ADR-011 / migration
 //       003_archives.sql), populated by the orchestrator-level
 //       `catalyst-archive.ts sweep` run at the end of the legacy
 //       /catalyst-legacy:orchestrate pipeline (Phase 7) — a distinct
 //       completion path that never writes the filesystem dir (a).
 //
-// `Database` (bun:sqlite) is imported dynamically and only inside the (b)
-// branch so this file stays loadable under plain Node per its own advertised
-// `node reconstruct-ticket-state.mjs` CLI usage (top-of-file comment): a
-// static `import ... from "bun:sqlite"` fails Node at module-load time,
-// before argument parsing or reconstruction ever runs. Under bun the dynamic
-// import resolves normally; under Node it rejects and is swallowed by the
-// same fail-open contract that already covers an absent DB, a
-// pre-archive-migration schema, or lock contention — reconstruction proceeds
-// via check (a) or the other sources instead.
-export async function defaultCheckArchive(
-  ticket,
-  {
-    archiveDir = defaultArchiveDir(ticket),
-    dbPath = defaultCatalystDbPath(),
-    readdirFn = readdirSync,
-  } = {},
-) {
-  try {
-    const files = readdirFn(archiveDir);
-    if (files && files.length > 0) {
-      return { terminal: true, completedPhases: PHASES.slice() };
-    }
-  } catch {
-    // no filesystem archive dir for this ticket — fall through to (b)
-  }
-
+// (b) is read through TWO engines, tried in order, so the advertised
+// `node reconstruct-ticket-state.mjs` CLI usage (top-of-file comment) gets a
+// real answer under bare Node, not a silent no-op: bun:sqlite (imported
+// dynamically so a static import can't fail Node at module-load time, before
+// argument parsing ever runs) is tried first when available, then the
+// `sqlite3` CLI (AGENTS.md → Dependencies lists it as an optional but
+// expected tool) via a read-only query as a Node-safe fallback. Either
+// engine failing (missing binary, absent DB, pre-archive-migration schema,
+// lock contention) is swallowed — reconstruction proceeds via check (a) or
+// the other sources instead.
+function queryArchivedWorkersViaBun(dbPath, ticket, DatabaseCtor) {
   let db;
   try {
-    const { Database } = await import("bun:sqlite");
-    db = new Database(dbPath, { readonly: true });
+    db = new DatabaseCtor(dbPath, { readonly: true });
     db.run("PRAGMA busy_timeout = 250");
-    const row = db
+    return db
       .query(
         "SELECT final_status FROM archived_workers WHERE ticket = ? ORDER BY archived_at DESC LIMIT 1",
       )
       .get(ticket);
-    if (!row) return null;
-    return { terminal: true, completedPhases: PHASES.slice() };
-  } catch {
-    return null;
   } finally {
     try {
       db?.close();
     } catch {
       // already closed
     }
+  }
+}
+
+export function queryArchivedWorkersViaCli(dbPath, ticket, { execFileFn = execFileSync } = {}) {
+  // sqlite3's CLI has no bind-parameter syntax over argv, so the value is
+  // inlined into the SQL text with SQL-string escaping (double any embedded
+  // single quote) rather than shell escaping — execFileFn (execFileSync, no
+  // shell) already removes the shell-injection surface; this only prevents
+  // breaking out of the SQL string literal.
+  const escaped = String(ticket).replace(/'/g, "''");
+  const sql =
+    `SELECT final_status FROM archived_workers WHERE ticket = '${escaped}' ` +
+    "ORDER BY archived_at DESC LIMIT 1;";
+  // `.timeout` (a dot-command) sets the busy timeout WITHOUT emitting its own
+  // row under -json — unlike `PRAGMA busy_timeout=250` (as a -cmd), which
+  // would print its own `[{"timeout":250}]` JSON array ahead of the SELECT's
+  // output and break single-JSON.parse on the combined stdout.
+  const out = execFileFn(
+    "sqlite3",
+    ["-readonly", "-json", "-cmd", ".timeout 250", dbPath, sql],
+    { encoding: "utf8" },
+  );
+  const trimmed = out.trim();
+  // Zero matching rows → sqlite3 -json prints nothing at all for that
+  // statement (not `[]`), so an empty stdout means "no row", not an error.
+  if (!trimmed) return undefined;
+  const rows = JSON.parse(trimmed);
+  return rows[0];
+}
+
+export async function defaultCheckArchive(
+  ticket,
+  {
+    archiveDir = defaultArchiveDir(ticket),
+    dbPath = defaultCatalystDbPath(),
+    readdirFn = readdirSync,
+    execFileFn = execFileSync,
+    // importBunSqlite — injectable so tests can simulate "running under
+    // plain Node" (where `import("bun:sqlite")` rejects) without actually
+    // spawning a node subprocess for every case; defaults to the real
+    // dynamic import.
+    importBunSqlite = () => import("bun:sqlite"),
+  } = {},
+) {
+  try {
+    const files = readdirFn(archiveDir);
+    if (files && files.includes(ARCHIVE_TERMINAL_MARKER)) {
+      return { terminal: true, completedPhases: PHASES.slice() };
+    }
+  } catch {
+    // no filesystem archive dir for this ticket — fall through to (b)
+  }
+
+  try {
+    const { Database } = await importBunSqlite();
+    const row = queryArchivedWorkersViaBun(dbPath, ticket, Database);
+    if (row) return { terminal: true, completedPhases: PHASES.slice() };
+    return null;
+  } catch {
+    // bun:sqlite unavailable (plain Node) or the query itself failed —
+    // fall through to the CLI engine below rather than giving up.
+  }
+
+  try {
+    const row = queryArchivedWorkersViaCli(dbPath, ticket, { execFileFn });
+    if (row) return { terminal: true, completedPhases: PHASES.slice() };
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -180,8 +243,13 @@ function defaultBuildWorktree(ticket, { repoRoot, orchDir }) {
 //
 // Composition order:
 //   1. Archive check → terminal short-circuit
-//   2. Projection (signal files) → completedPhases + nextPhase (best-effort first)
-//   3. Thoughts-artifact walk → fallback when projection is empty
+//   2. Projection (signal files) AND 3. thoughts-artifact walk are BOTH
+//      always computed, then reconciled to whichever source confirms the
+//      FURTHER phase (Codex P1, PR #2697 round 2: a host that retains only a
+//      shallow local projection — e.g. a synced-in triage signal — must not
+//      regress a deeper phase confirmed by durable thoughts artifacts that
+//      landed from elsewhere, such as when a ticket moves between hosts and
+//      later returns). Neither source is treated as a fallback-only branch.
 //   4. Open-PR union
 //   5. Worktree rebuild (non-terminal only)
 export async function reconstructTicketState(
@@ -207,30 +275,53 @@ export async function reconstructTicketState(
     };
   }
 
-  // 2 + 3. Determine completedPhases and nextPhase.
-  let completedPhases = [];
-  let nextPhase = NEW_WORK_ENTRY_PHASE;
-
+  // 2. Projection (signal files) — source A. projLastIdx is the PHASES index
+  // of the furthest phase it confirms, or -1 when it has nothing usable
+  // (no data, or a last-phase name that doesn't resolve in PHASES).
   const projection = getProjection ? await getProjection(orchDir, ticket) : null;
+  let projCompletedPhases = [];
+  let projLastIdx = -1;
   if (projection?.completedPhases?.length > 0) {
-    // Projection wins — use signal-file-derived data as the best-effort source.
-    completedPhases = projection.completedPhases;
-    const last = completedPhases[completedPhases.length - 1];
+    const last = projection.completedPhases[projection.completedPhases.length - 1];
     const lastIdx = PHASES.indexOf(last);
-    nextPhase = lastIdx >= 0 ? (PHASES[lastIdx + 1] ?? null) : NEW_WORK_ENTRY_PHASE;
-  } else {
-    // Thoughts-artifact walk — reverse-walk PHASES; first hit = last completed.
-    for (let i = PHASES.length - 1; i >= 0; i--) {
-      const phase = PHASES[i];
-      const relDir = THOUGHTS_DIRS[phase];
-      if (!relDir) continue;
-      const absDir = join(repoRoot, relDir);
-      if (hasThoughtsArtifact(absDir, ticket)) {
-        nextPhase = PHASES[i + 1] ?? null;
-        completedPhases = PHASES.slice(0, i + 1).filter((p) => THOUGHTS_DIRS[p]);
-        break;
-      }
+    if (lastIdx >= 0) {
+      projCompletedPhases = projection.completedPhases;
+      projLastIdx = lastIdx;
     }
+  }
+
+  // 3. Thoughts-artifact walk — source B, ALWAYS computed (not gated on
+  // whether the projection had data). Reverse-walk PHASES; first hit = last
+  // completed.
+  let thoughtsCompletedPhases = [];
+  let thoughtsLastIdx = -1;
+  for (let i = PHASES.length - 1; i >= 0; i--) {
+    const phase = PHASES[i];
+    const relDir = THOUGHTS_DIRS[phase];
+    if (!relDir) continue;
+    const absDir = join(repoRoot, relDir);
+    if (hasThoughtsArtifact(absDir, ticket)) {
+      thoughtsLastIdx = i;
+      thoughtsCompletedPhases = PHASES.slice(0, i + 1).filter((p) => THOUGHTS_DIRS[p]);
+      break;
+    }
+  }
+
+  // Reconcile — whichever source confirms the FURTHER phase wins outright
+  // (never a merge of the two completedPhases lists: PHASES is a strict
+  // linear order, so the deeper source's list is already a superset of
+  // everything the shallower source could have confirmed).
+  let completedPhases;
+  let nextPhase;
+  if (projLastIdx >= thoughtsLastIdx && projLastIdx >= 0) {
+    completedPhases = projCompletedPhases;
+    nextPhase = PHASES[projLastIdx + 1] ?? null;
+  } else if (thoughtsLastIdx >= 0) {
+    completedPhases = thoughtsCompletedPhases;
+    nextPhase = PHASES[thoughtsLastIdx + 1] ?? null;
+  } else {
+    completedPhases = [];
+    nextPhase = NEW_WORK_ENTRY_PHASE;
   }
 
   // 4. Open-PR union — fail-open; a gh/network failure must not block reconstruction.

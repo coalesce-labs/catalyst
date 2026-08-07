@@ -72,6 +72,33 @@ else
   fail "T4: draft_pr_ensure is MISSING from the post-Green fence block"
 fi
 
+# ──────────────────────────────────────────────────────────────────────────────
+# T5 (Codex P1, PR #2697 round 2): a commit of the Green result happens
+# BEFORE draft_pr_push is invoked — otherwise draft_pr_push (a pure `git
+# push`, it commits nothing itself) only re-pushes whatever HEAD already had,
+# and a mid-phase kill after Green still loses the just-written code, which
+# defeats the entire "durable off-disk record" purpose CTL-783/CTL-1490 push
+# early for. `git commit` (or `git -c core.hooksPath=/dev/null commit`) must
+# appear, once, strictly before the `draft_pr_push` call.
+# ──────────────────────────────────────────────────────────────────────────────
+echo "T5: a git commit happens before draft_pr_push is invoked"
+# Match actual CALL sites, not prose mentions (this file's own explanatory
+# comments name both "git commit" and "draft_pr_push" ahead of their real
+# invocations) — anchor on the invocation syntax each is actually written
+# with in this file.
+COMMIT_LINE="$(grep -n 'commit -m ' "$SKILL_MD" | head -1 | cut -d: -f1)"
+PUSH_LINE="$(grep -n 'draft_pr_push ||' "$SKILL_MD" | head -1 | cut -d: -f1)"
+
+if [[ -z "$COMMIT_LINE" ]]; then
+  fail "T5: no 'git commit' invocation found anywhere in SKILL.md"
+elif [[ -z "$PUSH_LINE" ]]; then
+  fail "T5: draft_pr_push not found in SKILL.md"
+elif [[ "$COMMIT_LINE" -lt "$PUSH_LINE" ]]; then
+  pass "T5: commit at line ${COMMIT_LINE} is before draft_pr_push at line ${PUSH_LINE}"
+else
+  fail "T5: commit at line ${COMMIT_LINE} is NOT before draft_pr_push at line ${PUSH_LINE} — the Green result is still pushed uncommitted"
+fi
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "implement-plan-draft-pr-timing: ${PASSES} passed, ${FAILURES} failed"

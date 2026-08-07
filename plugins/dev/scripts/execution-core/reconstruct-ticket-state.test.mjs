@@ -143,6 +143,50 @@ describe("reconstructTicketState", () => {
     expect(result.completedPhases).toContain("plan");
     expect(result.nextPhase).toBe("implement");
   });
+
+  // Codex P1 (PR #2697, round 2): "Reconcile partial projections with later
+  // durable artifacts" — a shallow local projection (e.g. a synced-in triage
+  // signal from a host that only just picked the ticket up) must not
+  // suppress a DEEPER phase already confirmed by durable thoughts artifacts
+  // (e.g. review landed from a different host earlier). The furthest-along
+  // source must win, not "projection whenever it's non-empty."
+  test("T7: shallow projection + deeper thoughts artifacts → the deeper thoughts result wins", async () => {
+    for (const phase of ["triage", "research", "plan", "verify", "review"]) {
+      writeThoughtsDoc(phase, "CTL-9007");
+    }
+    const result = await reconstructTicketState("CTL-9007", {
+      repoRoot: tempDir,
+      checkArchive: () => null,
+      // Projection only confirms triage — shallower than the thoughts walk's
+      // review-deep evidence.
+      getProjection: () => ({ completedPhases: ["triage"] }),
+      checkOpenPrs: noPrs,
+      buildWorktree: noWorktree,
+    });
+    expect(result.nextPhase).toBe("pr");
+    expect(result.completedPhases).toContain("review");
+    expect(result.completedPhases).not.toContain("pr");
+  });
+
+  // Inverse of T7: projection is DEEPER than the thoughts walk (e.g. a host
+  // with a live signal file for a phase whose thoughts doc hasn't synced
+  // yet) — projection must still win here, exactly as T6 already covers for
+  // the "thoughts walk finds nothing at all" case; this covers "thoughts
+  // walk finds something, but shallower."
+  test("T8: deeper projection + shallower thoughts artifacts → the deeper projection result wins", async () => {
+    writeThoughtsDoc("triage", "CTL-9008");
+    const result = await reconstructTicketState("CTL-9008", {
+      repoRoot: tempDir,
+      checkArchive: () => null,
+      getProjection: () => ({
+        completedPhases: ["triage", "research", "plan", "implement", "verify", "review"],
+      }),
+      checkOpenPrs: noPrs,
+      buildWorktree: noWorktree,
+    });
+    expect(result.nextPhase).toBe("pr");
+    expect(result.completedPhases).toContain("review");
+  });
 });
 
 describe("defaultCheckArchive", () => {
@@ -161,16 +205,36 @@ describe("defaultCheckArchive", () => {
   // Codex P1 (PR #2697, round 2): phase-teardown archives execution-core
   // workers by copying the worker dir to ~/catalyst/archives/<TICKET>/
   // (filesystem only) — it never inserts into archived_workers. A ticket
-  // whose only durable record is that filesystem copy must still resolve
-  // terminal here.
-  test("filesystem archive dir with files → terminal", async () => {
+  // whose only durable record is that filesystem copy (PLUS the
+  // .teardown-complete terminal marker written last by phase-teardown) must
+  // still resolve terminal here.
+  test("filesystem archive dir with files + .teardown-complete marker → terminal", async () => {
     const archiveDir = defaultArchiveDir("CTL-9101");
     mkdirSync(archiveDir, { recursive: true });
     writeFileSync(join(archiveDir, "phase-teardown.json"), "{}");
+    writeFileSync(join(archiveDir, ".teardown-complete"), "");
 
     const result = await defaultCheckArchive("CTL-9101");
     expect(result?.terminal).toBe(true);
     expect(result?.completedPhases?.length).toBeGreaterThan(0);
+  });
+
+  // Codex P1 (PR #2697, round 2): "Require terminal evidence in the
+  // filesystem archive" — the archive-first `cp -R` happens well BEFORE
+  // worktree/branch removal and the final emit in phase-teardown. A worker
+  // that crashes right after that copy leaves a populated-but-incomplete
+  // archive dir; mere non-emptiness must NOT be read as terminal.
+  test("filesystem archive dir populated but WITHOUT the marker (crash-after-archive) → not terminal", async () => {
+    const archiveDir = defaultArchiveDir("CTL-9105");
+    mkdirSync(archiveDir, { recursive: true });
+    writeFileSync(join(archiveDir, "phase-teardown.json"), "{}");
+    writeFileSync(join(archiveDir, "phase-monitor-deploy.json"), "{}");
+    // deliberately no .teardown-complete
+
+    const result = await defaultCheckArchive("CTL-9105", {
+      dbPath: join(tempDir, "does-not-exist.db"),
+    });
+    expect(result).toBeNull();
   });
 
   test("filesystem archive dir empty (mkdir with no files) → not terminal", async () => {
@@ -184,6 +248,81 @@ describe("defaultCheckArchive", () => {
       dbPath: join(tempDir, "does-not-exist.db"),
     });
     expect(result).toBeNull();
+  });
+
+  // Codex P1 (PR #2697, round 2): the legacy-orchestrate archived_workers DB
+  // path (b) — still exercised via bun:sqlite here since these tests run
+  // under `bun test`; the Node-under-bare-`node` path is proven separately
+  // below via an actual subprocess (that's the runtime the finding is about).
+  test("archived_workers DB row, no filesystem archive dir → terminal (bun:sqlite path)", async () => {
+    const { Database } = await import("bun:sqlite");
+    const dbPath = join(tempDir, "catalyst.db");
+    const db = new Database(dbPath);
+    db.run(
+      "CREATE TABLE archived_workers (ticket TEXT, final_status TEXT, archived_at TEXT)",
+    );
+    db.run(
+      "INSERT INTO archived_workers (ticket, final_status, archived_at) VALUES (?, ?, ?)",
+      ["CTL-9106", "done", "2026-08-01T00:00:00Z"],
+    );
+    db.close();
+
+    const result = await defaultCheckArchive("CTL-9106", { dbPath });
+    expect(result?.terminal).toBe(true);
+  });
+
+  // Codex P1 (PR #2697, round 2): "Make the archive database lookup work
+  // under Node" — simulate the bare-Node runtime (bun:sqlite import
+  // rejects) via the importBunSqlite seam and prove defaultCheckArchive
+  // still resolves the row, via the sqlite3-CLI fallback engine, using a DB
+  // file created independently through the real sqlite3 binary (not
+  // bun:sqlite) so this doesn't just round-trip the same in-process writer.
+  test("bun:sqlite import rejects (simulated Node) → falls through to sqlite3 CLI engine → terminal", async () => {
+    const dbPath = join(tempDir, "cli-catalyst.db");
+    execFileSync("sqlite3", [
+      dbPath,
+      "CREATE TABLE archived_workers (ticket TEXT, final_status TEXT, archived_at TEXT); " +
+        "INSERT INTO archived_workers VALUES ('CTL-9107', 'done', '2026-08-01T00:00:00Z');",
+    ]);
+
+    const result = await defaultCheckArchive("CTL-9107", {
+      dbPath,
+      importBunSqlite: () => {
+        throw new Error("ERR_UNSUPPORTED_ESM_URL_SCHEME (simulated plain Node)");
+      },
+    });
+    expect(result?.terminal).toBe(true);
+  });
+
+  test("bun:sqlite import rejects (simulated Node), ticket absent from DB → null", async () => {
+    const dbPath = join(tempDir, "cli-catalyst-empty.db");
+    execFileSync("sqlite3", [
+      dbPath,
+      "CREATE TABLE archived_workers (ticket TEXT, final_status TEXT, archived_at TEXT);",
+    ]);
+
+    const result = await defaultCheckArchive("CTL-9108-not-present", {
+      dbPath,
+      importBunSqlite: () => {
+        throw new Error("ERR_UNSUPPORTED_ESM_URL_SCHEME (simulated plain Node)");
+      },
+    });
+    expect(result).toBeNull();
+  });
+
+  // Direct unit coverage for the CLI query helper itself, including the
+  // SQL-string-escaping seam (a ticket value containing a single quote must
+  // not break out of the inlined SQL literal).
+  test("queryArchivedWorkersViaCli escapes embedded single quotes in the ticket value", async () => {
+    const { queryArchivedWorkersViaCli } = await import("./reconstruct-ticket-state.mjs");
+    const dbPath = join(tempDir, "cli-escape.db");
+    execFileSync("sqlite3", [
+      dbPath,
+      "CREATE TABLE archived_workers (ticket TEXT, final_status TEXT, archived_at TEXT); " +
+        "INSERT INTO archived_workers VALUES ('CTL-''WEIRD', 'done', '2026-08-01T00:00:00Z');",
+    ]);
+    const row = queryArchivedWorkersViaCli(dbPath, "CTL-'WEIRD");
+    expect(row?.final_status).toBe("done");
   });
 });
 

@@ -491,6 +491,24 @@ fi
 "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status complete \
   ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
   || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
+
+# CTL-1490 (Codex round-2, PR #2697): drop a terminal-completion marker into
+# the archive dir, written LAST — after every prior step in this script
+# (archive-first cp -R, worktree/branch removal, Linear mirror, the emit
+# above) has already run. reconstruct-ticket-state.mjs's defaultCheckArchive
+# treats ONLY this marker's presence as terminal evidence, not the archive
+# dir's mere non-emptiness: the cp -R above happens BEFORE this point, so a
+# worker that crashes right after archiving (worktree/branch removal and this
+# emit never ran) would leave a populated-but-incomplete archive dir. Without
+# a marker written strictly after every other step, reconstruction cannot
+# tell that crash apart from a genuine finish and would wrongly refuse to
+# resume/redispatch teardown. Best-effort — a failed touch here just means a
+# future reconstruction falls through to the thoughts-artifact walk instead
+# of the fast archive-terminal path, same as before this marker existed.
+if [[ "${ARCHIVE_OK:-false}" == "true" ]]; then
+  : > "${ARCHIVE_DIR}/.teardown-complete" 2>/dev/null \
+    || echo "phase-teardown: could not write .teardown-complete marker (non-fatal)" >&2
+fi
 exit 0
 ```
 
