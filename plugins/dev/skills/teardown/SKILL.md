@@ -96,8 +96,11 @@ Use `--force` to bypass the preconditions (you own the consequences).
 6. **Delete**
 
    - **Salvage first (CTL-1639).** Before removing each worktree, snapshot any unpushed work so a
-     mistaken removal is recoverable: source `plugins/dev/scripts/lib/worktree-salvage.sh` and run
-     `salvage_worktree <path> <ticket> --site interactive-teardown`. It writes any unpushed commits
+     mistaken removal is recoverable: source `${CLAUDE_PLUGIN_ROOT}/scripts/lib/worktree-salvage.sh`
+     (NOT a `plugins/dev/scripts/...` path relative to cwd — this skill runs in an arbitrary consumer
+     repo whose cwd has no `plugins/` tree at all; the skill itself is distributed under
+     `CLAUDE_PLUGIN_ROOT`) and run `salvage_worktree <path> <ticket> --site interactive-teardown`.
+     It writes any unpushed commits
      (`git bundle`) + uncommitted diff (`.patch`) + untracked files (`.tar`) to
      `~/catalyst/salvage/` and is best-effort/fail-open (always returns 0), so it never blocks the
      removal — it just guarantees the only copy is never lost.

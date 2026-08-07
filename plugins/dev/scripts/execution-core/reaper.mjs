@@ -599,6 +599,42 @@ export class Reaper {
     } catch {
       /* fail-open */
     }
+    // CTL-1639 Codex round-2 P1: salvage can spend seconds or reach its
+    // 120s timeout, widening the interval between the sole safety
+    // assessment above and the removal below. A worker or operator can
+    // enter the worktree during that window; reassess BOTH the presweep
+    // (live sessions) and the CTL-791 evidence gate immediately after the
+    // await, from the fresh post-salvage state, rather than acting on the
+    // now-stale pre-salvage verdict. Mirrors the dispatcher's L3 fix
+    // (`_removal_guard_ok` re-asserted right before `git worktree remove
+    // --force`, phase-agent-dispatch).
+    const stillLiveAfterSalvage = await this._handleWorktreePresweep({
+      worktree_path: event.worktree_path,
+    });
+    if (stillLiveAfterSalvage > 0) {
+      await this.emit("pr.merged.cleanup-failed", {
+        ticket: event.ticket,
+        worktreePath: event.worktree_path,
+        branch: event.branch,
+        reason: "sessions-still-live-post-salvage",
+      });
+      return;
+    }
+    const verdictAfterSalvage = await this.assessWorktreeRemoval(event);
+    if (!verdictAfterSalvage.safe) {
+      deferWorktreeCleanup(
+        event.worktree_path,
+        { ticket: event.ticket, branch: event.branch, reasons: verdictAfterSalvage.reasons || [] },
+        { emit: (t, f) => this.emit(t, f) },
+      );
+      await this.emit("pr.merged.cleanup-failed", {
+        ticket: event.ticket,
+        worktreePath: event.worktree_path,
+        branch: event.branch,
+        reason: `unsafe-post-salvage:${(verdictAfterSalvage.reasons || []).join(",")}`,
+      });
+      return;
+    }
     const arch = this.archiveWorktree(event.worktree_path, { ticket: event.ticket });
     if (!arch.ok) {
       deferWorktreeCleanup(
@@ -1145,7 +1181,17 @@ function defaultSalvageWorktree({ worktreePath, ticket, branch, orchId, reason }
           reason || "reaper-pr-merged",
           ...(orchId ? ["--orch", orchId] : []),
         ],
-        { stdio: ["ignore", "ignore", "pipe"] },
+        {
+          stdio: ["ignore", "ignore", "pipe"],
+          // CTL-1639 Codex round-2 P1: `detached: true` (POSIX) makes this bash
+          // child the leader of its OWN process group instead of joining the
+          // reaper's. On timeout that lets us signal the WHOLE group (bash plus
+          // whatever `git bundle`/`git diff`/`tar` it's currently running in the
+          // foreground), not just the bash leader — a bare `child.kill()` only
+          // kills bash and leaves a foreground descendant to survive/reparent
+          // and keep reading/writing a worktree the reaper is about to remove.
+          detached: true,
+        },
       );
       let stderr = "";
       let settled = false;
@@ -1156,10 +1202,18 @@ function defaultSalvageWorktree({ worktreePath, ticket, branch, orchId, reason }
         resolve(result);
       };
       const timer = setTimeout(() => {
+        // SIGKILL can't be caught/ignored, so signaling the group is sufficient
+        // to guarantee every member (bash + its foreground descendant) is gone —
+        // no need to block resolution on waiting for the "close" event.
         try {
-          child.kill("SIGKILL");
+          if (child.pid) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
         } catch {
-          /* ignore */
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
         }
         done({ ok: false, error: `salvage timed out after ${SALVAGE_TIMEOUT_MS}ms` });
       }, SALVAGE_TIMEOUT_MS);

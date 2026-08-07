@@ -420,6 +420,17 @@ elif [[ "$KEEP_WT" != "true" ]]; then
         # blocks the removal below).
         command -v salvage_worktree >/dev/null 2>&1 && \
           salvage_worktree "$WORKTREE_PATH" "$TICKET" --orch "$ORCH_ID" --site "phase-teardown" || true
+        # CTL-1639 Codex round-2 P1: salvage can take a moment on a large tree,
+        # widening the interval since the presweep/guard check above. Repeat
+        # the safety check immediately before `git worktree remove` instead of
+        # acting on the now-stale pre-salvage result (mirrors the dispatcher's
+        # L3 fix — `_removal_guard_ok` re-checked right after salvage,
+        # phase-agent-dispatch).
+        if ! "$PRESWEEP_BIN" "$WORKTREE_PATH"; then
+          echo "phase-teardown: presweep failed for $WORKTREE_PATH post-salvage; auto-teardown skipped" >&2
+        elif command -v assert_worktree_removal_safe >/dev/null 2>&1 && ! assert_worktree_removal_safe "$WORKTREE_PATH"; then
+          echo "phase-teardown: guard refused removal of $WORKTREE_PATH post-salvage (live handle/self); auto-teardown skipped" >&2
+        else
         # Capture the real `git worktree remove` stderr so a failed teardown
         # reports the actual cause (dirty tree, locked, submodule, etc.) rather
         # than guessing. The merge is NEVER rolled back — we only warn + skip.
@@ -432,6 +443,7 @@ elif [[ "$KEEP_WT" != "true" ]]; then
           echo "phase-teardown: auto-teardown complete (worktree + branch removed)"
         else
           echo "phase-teardown: git worktree remove failed; auto-teardown skipped (merge left intact): ${WT_RM_ERR}" >&2
+        fi
         fi
       fi
     fi

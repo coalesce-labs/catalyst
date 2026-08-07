@@ -31,10 +31,41 @@ fail() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; }
 # first_line PATTERN FILE — 1-based line number of the first grep -nE match, or "".
 first_line() { grep -nE "$2" "$1" 2>/dev/null | head -1 | cut -d: -f1; }
 
+# assert_sources_lib <file> <label> — Codex round-2 P2: a bare substring match
+# on "lib/worktree-salvage.sh" stays green even after the actual EXECUTABLE
+# `source` statement is deleted, as long as an unrelated occurrence of the
+# filename survives elsewhere in the file — dispatcher/orphan-sweep both carry
+# a `# shellcheck source=lib/worktree-salvage.sh` comment, and phase-teardown
+# assigns the path to `WT_SALVAGE_LIB` on one line and sources `$WT_SALVAGE_LIB`
+# (no literal filename at all) on another. Require a REAL `source`/`.` command
+# whose argument resolves to the salvage-lib path — either the literal path
+# right there in the source line, or a $VAR that some assignment in the file
+# sets to that literal path.
 assert_sources_lib() {
   local file="$1" label="$2"
-  if grep -qE 'lib/worktree-salvage\.sh' "$file"; then pass "$label sources worktree-salvage.sh"
-  else fail "$label does NOT source worktree-salvage.sh"; fi
+  local src_lines
+  src_lines="$(grep -nE '(^|&&[[:space:]]*|;[[:space:]]*)(source|\.)[[:space:]]+"?\$?\{?[A-Za-z_][A-Za-z0-9_]*\}?"?' "$file" 2>/dev/null || true)"
+  if [[ -z "$src_lines" ]]; then
+    fail "$label does NOT contain any source statement"
+    return
+  fi
+  local line lineno arg var
+  while IFS= read -r line; do
+    lineno="${line%%:*}"
+    arg="${line#*:}"
+    arg="$(printf '%s' "$arg" | sed -E 's/^.*(source|\.)[[:space:]]+//')"
+    # Case (a): the literal salvage-lib path is right there in the source line.
+    if printf '%s' "$arg" | grep -qE 'lib/worktree-salvage\.sh'; then
+      pass "$label sources worktree-salvage.sh (literal, L${lineno})"; return
+    fi
+    # Case (b): the argument is a $VAR/${VAR} — confirm some assignment in the
+    # file actually set that exact variable to the salvage-lib path.
+    var="$(printf '%s' "$arg" | sed -E 's/^"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?.*$/\1/')"
+    if [[ -n "$var" ]] && grep -qE "${var}=.*lib/worktree-salvage\.sh" "$file"; then
+      pass "$label sources worktree-salvage.sh (via \$${var}, L${lineno})"; return
+    fi
+  done <<<"$src_lines"
+  fail "$label does NOT source worktree-salvage.sh (a source statement exists but none resolve to the salvage lib)"
 }
 
 # assert_salvage_before <file> <salvage-pattern> <destroy-pattern> <label>

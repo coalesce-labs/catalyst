@@ -820,6 +820,80 @@ describe("Reaper._handlePrMergedCleanup — CTL-1639 salvage-before-destroy", ()
     });
     expect(seen).toEqual(["pr.merged.cleanup-requested", "stall-janitor-J1"]);
   });
+
+  it("R-S6 (Codex round-2 P1): re-verifies the CTL-791 verdict AFTER salvage — a live handle that appears DURING salvage defers cleanup instead of removing", async () => {
+    const trace = [];
+    let assessCalls = 0;
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      // First call (pre-salvage) says safe; the SECOND call (post-salvage) says
+      // unsafe — simulating a worker/operator entering the worktree DURING the
+      // salvage window. Removal must NOT proceed on the stale first verdict.
+      assessWorktreeRemoval: async () => {
+        assessCalls += 1;
+        return assessCalls === 1
+          ? { safe: true, reasons: [] }
+          : { safe: false, reasons: ["live-handle-appeared-during-salvage"] };
+      },
+      salvageWorktree: () => { trace.push("salvage"); return { ok: true }; },
+      archiveWorktree: () => { trace.push("archive"); return { ok: true }; },
+      gitWorktreeRemove: () => { trace.push("wt"); return Promise.resolve({ ok: true }); },
+      gitBranchDelete: () => Promise.resolve({ ok: true }),
+      emit: (evt) => { trace.push(`emit:${evt}`); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+    });
+    expect(assessCalls).toBe(2);
+    expect(trace).toContain("salvage");
+    expect(trace).not.toContain("archive");
+    expect(trace).not.toContain("wt");
+    expect(trace).toContain("emit:pr.merged.cleanup-failed");
+  });
+
+  it("R-S7 (Codex round-2 P1): re-runs the presweep AFTER salvage — a session that entered the worktree during salvage defers cleanup", async () => {
+    const trace = [];
+    let presweepCalls = 0;
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      // First presweep (pre-salvage) sees no sessions; the daemon's own
+      // `agents()` seam is called again by the post-salvage presweep, so make
+      // the SECOND call return a live, non-idle session under the worktree.
+      agents: () => {
+        presweepCalls += 1;
+        if (presweepCalls === 1) return Promise.resolve([]);
+        return Promise.resolve([
+          // 8-hex-char short session id (a REAL well-formed id — a malformed
+          // one throws in shortIdFromSessionId and gets silently `continue`d
+          // past, which would defeat this test).
+          { sessionId: "abcdef12", cwd: "/wt/CTL-1/sub", status: "active" },
+        ]);
+      },
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }),
+      salvageWorktree: () => { trace.push("salvage"); return { ok: true }; },
+      archiveWorktree: () => { trace.push("archive"); return { ok: true }; },
+      gitWorktreeRemove: () => { trace.push("wt"); return Promise.resolve({ ok: true }); },
+      gitBranchDelete: () => Promise.resolve({ ok: true }),
+      emit: (evt) => { trace.push(`emit:${evt}`); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+    });
+    expect(presweepCalls).toBe(2);
+    expect(trace).toContain("salvage");
+    expect(trace).not.toContain("archive");
+    expect(trace).not.toContain("wt");
+    expect(trace).toContain("emit:pr.merged.cleanup-failed");
+  });
 });
 
 // CTL-1218 Part A — defaultAssessWorktreeRemoval must thread an injected orchDirs
@@ -1182,6 +1256,13 @@ describe("Reaper.handle orphans.reap-requested routing (CTL-1004)", () => {
       gitWorktreeRemove: (p) => { trace.push(["wt", p]); return Promise.resolve({ ok: true }); },
       gitBranchDelete: (b, force) => { trace.push(["br", b, force]); return Promise.resolve({ ok: true }); },
       emit: (evt) => { trace.push(["emit", evt]); return Promise.resolve(); },
+      // CTL-1639 (Codex P2, round 2): this describe block sits outside the
+      // sandboxed-env `describe("Reaper._handlePrMergedCleanup", ...)` above.
+      // `assessWorktreeRemoval` returns safe:true, so without this override the
+      // real default salvage seam would shell out to lib/worktree-salvage.sh
+      // against the fake /wt/CTL-100 path and append a false
+      // worktree.salvage.failed record to the developer's REAL ~/catalyst/events.
+      salvageWorktree: () => Promise.resolve({ ok: true }),
       log: silentLog(),
     });
     r.scanOrphans = async () => { scanned = true; };

@@ -271,6 +271,107 @@ CATALYST_SALVAGE_DIR="${RO_DIR}/salvage" salvage_worktree "$WT" TEST-17 --site t
 assert_eq "worktree.salvage.failed" "$(jq -r '.attributes["event.name"]' <<<"$(last_event_line)")" "T17 unpushed + unwritable dir → failed (not skipped)"
 chmod 700 "$RO_DIR" 2>/dev/null || true
 
+# ── T18 diff.external + color.ui=always neutralized (Codex P1) ──────────────
+echo "T18 diff.external + forced color neutralized"
+reset_events; clean_salvage
+WT="$(make_repo "${SCRATCH}/t18" --dirty)"
+( cd "$WT"
+  git config diff.external "sh -c 'exit 7'"   # would abort `git diff` if honored
+  git config color.ui always                  # would inject ANSI escapes if honored
+)
+salvage_worktree "$WT" TEST-18 --site t18
+PATCH="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-18-*.patch 2>/dev/null | head -1)"
+assert_true  "[[ -s '$PATCH' ]]" "T18 patch written despite diff.external + forced color"
+assert_false "grep -q \"$(printf '\\033')\\[\" '$PATCH'" "T18 patch carries no ANSI color escapes"
+assert_eq "worktree.salvage.created" "$(jq -r '.attributes["event.name"]' <<<"$(last_event_line)")" "T18 created (external-diff didn't abort the diff)"
+
+# ── T19 textconv neutralized — real bytes, not the converted text (Codex P1) ─
+echo "T19 textconv neutralized"
+reset_events; clean_salvage
+WT="$(make_repo "${SCRATCH}/t19")"
+( cd "$WT"
+  printf '\x00\x01ORIG' > conv.bin; git add conv.bin; git commit --quiet -m "add conv.bin"
+  git push --quiet origin HEAD:refs/heads/main 2>/dev/null || true
+  printf '[diff "hexdump"]\n\ttextconv = "od -An -tx1"\n' >> .git/config
+  echo "conv.bin diff=hexdump" > .gitattributes
+  printf '\x00\x01\x02CHANGED' > conv.bin
+)
+salvage_worktree "$WT" TEST-19 --site t19
+PATCH="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-19-*.patch 2>/dev/null | head -1)"
+assert_true "[[ -s '$PATCH' ]]" "T19 patch written"
+assert_true "grep -q 'GIT binary patch\\|Binary files' '$PATCH'" "T19 patch reflects real (binary) bytes, not od-hexdump text"
+
+# ── T20 dirty submodule content archived recursively (Codex P1) ─────────────
+echo "T20 dirty submodule content archived"
+reset_events; clean_salvage
+SUBORIGIN="${SCRATCH}/t20-sub/sub-origin.git"
+git init --quiet --bare "$SUBORIGIN"
+SUBSCRATCH="${SCRATCH}/t20-sub/sub-seed"
+git clone --quiet "$SUBORIGIN" "$SUBSCRATCH" 2>/dev/null
+( cd "$SUBSCRATCH"; printf 'sub-base\n' > sub.txt; git add sub.txt; git commit --quiet -m sub-base; git push --quiet origin HEAD:refs/heads/main )
+WT="$(make_repo "${SCRATCH}/t20")"
+( cd "$WT"
+  git -c protocol.file.allow=always submodule --quiet add "$SUBORIGIN" subdir 2>/dev/null
+  git commit --quiet -m "add submodule"
+  printf 'sub-dirty-edit\n' >> subdir/sub.txt   # uncommitted edit INSIDE the submodule
+  printf 'sub-untracked\n' > subdir/scratch.txt  # untracked file INSIDE the submodule
+)
+salvage_worktree "$WT" TEST-20 --site t20
+SM_PATCH="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-20-*.submodule-subdir.patch 2>/dev/null | head -1)"
+SM_TAR="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-20-*.submodule-subdir-untracked.tar 2>/dev/null | head -1)"
+assert_true "[[ -s '$SM_PATCH' ]]" "T20 submodule's own uncommitted diff archived"
+assert_true "grep -q 'sub-dirty-edit' '$SM_PATCH'" "T20 submodule patch carries the actual edit bytes"
+assert_true "[[ -f '$SM_TAR' ]]" "T20 submodule's own untracked file archived"
+assert_true "tar -tf '$SM_TAR' 2>/dev/null | grep -q 'scratch.txt'" "T20 submodule tar lists the untracked file"
+LINE="$(last_event_line)"
+assert_eq "worktree.salvage.created" "$(jq -r '.attributes["event.name"]' <<<"$LINE")" "T20 created event"
+assert_true "[[ $(jq -r '.body.payload.submodules_saved' <<<"$LINE") -gt 0 ]]" "T20 submodules_saved>0"
+
+# ── T21 assume-unchanged edit still detected (Codex P1) ─────────────────────
+echo "T21 assume-unchanged edit detected"
+reset_events; clean_salvage
+WT="$(make_repo "${SCRATCH}/t21")"
+( cd "$WT"
+  git update-index --assume-unchanged base.txt
+  printf 'assume-unchanged-edit\n' >> base.txt
+)
+assert_true "git -C '$WT' diff --quiet HEAD" "T21 sanity: plain git diff is blind to the assume-unchanged edit"
+salvage_worktree "$WT" TEST-21 --site t21
+PATCH="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-21-*.patch 2>/dev/null | head -1)"
+assert_true "[[ -s '$PATCH' ]]" "T21 patch written for the assume-unchanged edit"
+assert_true "grep -q 'assume-unchanged-edit' '$PATCH'" "T21 patch carries the actual edit bytes"
+assert_eq "worktree.salvage.created" "$(jq -r '.attributes["event.name"]' <<<"$(last_event_line)")" "T21 created (not skipped)"
+
+# ── T22 salvage_raw_directory — non-git directory archived before rm -rf ────
+# (orphan-sweep's ORPHAN_GITFILE case: a stale/missing .git pointer, not a
+# usable git worktree, so salvage_worktree (git-based) can't inspect it at all.)
+echo "T22 salvage_raw_directory"
+reset_events; clean_salvage
+RAWDIR="${SCRATCH}/t22-raw"; mkdir -p "$RAWDIR/nested"
+printf 'orphan-content\n' > "${RAWDIR}/file.txt"
+printf 'nested-content\n' > "${RAWDIR}/nested/inner.txt"
+salvage_raw_directory "$RAWDIR" TEST-22 --site t22
+RAWTAR="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-22-*-raw.tar 2>/dev/null | head -1)"
+assert_true "[[ -f '$RAWTAR' ]]" "T22 raw tar written"
+assert_true "tar -tf '$RAWTAR' 2>/dev/null | grep -q 'file.txt'" "T22 tar lists top-level file"
+assert_true "tar -tf '$RAWTAR' 2>/dev/null | grep -q 'nested/inner.txt'" "T22 tar lists nested file"
+LINE="$(last_event_line)"
+assert_eq "worktree.salvage.created" "$(jq -r '.attributes["event.name"]' <<<"$LINE")" "T22 created event"
+assert_eq "TEST-22" "$(jq -r '.body.payload.ticket' <<<"$LINE")" "T22 payload.ticket"
+
+echo "T23 salvage_raw_directory — empty dir is a clean skip, not a failure"
+reset_events; clean_salvage
+EMPTYDIR="${SCRATCH}/t23-empty"; mkdir -p "$EMPTYDIR"
+salvage_raw_directory "$EMPTYDIR" TEST-23 --site t23
+assert_false "ls '${CATALYST_SALVAGE_DIR}'/TEST-23-* >/dev/null 2>&1" "T23 no artifact for an empty dir"
+assert_eq "worktree.salvage.skipped" "$(jq -r '.attributes["event.name"]' <<<"$(last_event_line)")" "T23 skipped event"
+
+echo "T24 salvage_raw_directory — missing path returns 0, emits failed"
+reset_events; clean_salvage
+salvage_raw_directory "${SCRATCH}/does-not-exist-raw" TEST-24 --site t24
+assert_eq "0" "$?" "T24 returned 0 on missing path"
+assert_eq "worktree.salvage.failed" "$(jq -r '.attributes["event.name"]' <<<"$(last_event_line)")" "T24 failed event"
+
 # ── Sentinel-guard: sourcing twice is a no-op ───────────────────────────────
 echo "Extra: idempotent source"
 source "$SALVAGE_LIB"

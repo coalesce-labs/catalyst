@@ -21,6 +21,68 @@ _wsv_salvage_dir() {
   printf '%s' "${CATALYST_SALVAGE_DIR:-${CATALYST_DIR:-$HOME/catalyst}/salvage}"
 }
 
+# _wsv_diff <wt> <diff-args...> — every recovery-patch `git diff` invocation
+# routes through here (Codex P1 x2): `--no-ext-diff` neutralizes a repo/global
+# `diff.external`/`GIT_EXTERNAL_DIFF` config that would otherwise shell out to
+# an arbitrary helper (or fail outright — an empty/broken external-diff command
+# aborts the whole `git diff` with a nonzero exit) instead of writing an
+# applyable patch; `-c color.ui=false` stops `color.ui=always`/`diff=always`
+# from writing ANSI escapes into the patch (the nonempty-file check would still
+# pass and salvage would report success while `git apply` can't restore the
+# change); `--no-textconv` stops a `.gitattributes` textconv driver from
+# emitting a one-way converted text hunk that `git apply` also can't apply back
+# to the real (binary) bytes. Unlike `diff.external`, `--no-ext-diff`/
+# `--no-textconv`/`-c color.ui=false` are command-line-level overrides that
+# always win over repo/global/env config, so no env-var unset is needed here.
+_wsv_diff() {
+  local wt="$1"; shift
+  git -c color.ui=false -C "$wt" diff --no-ext-diff --no-textconv "$@"
+}
+
+# _wsv_salvage_submodule <wt> <rel-path> <stem> — best-effort; writes
+# <stem>.submodule-<sanitized-path>.{patch,index.patch,-untracked.tar} for
+# ONE submodule's own working tree (the submodule is itself a git worktree,
+# so its own uncommitted diff/untracked files are invisible from the
+# superproject's diff, which records only an opaque "Subproject commit
+# <sha>-dirty" marker). Returns 0 iff at least one artifact was written.
+_wsv_salvage_submodule() {
+  local wt="$1" rel="$2" stem="$3"
+  local sm_dir="${wt}/${rel}"
+  git -C "$sm_dir" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  local safe_name; safe_name="$(printf '%s' "$rel" | tr '/ ' '__')"
+  local base="${stem}.submodule-${safe_name}"
+  local saved=0
+
+  if ! _wsv_diff "$sm_dir" --quiet HEAD 2>/dev/null; then
+    local tmp="${base}.patch.tmp.$$"
+    if _wsv_diff "$sm_dir" --binary HEAD >"$tmp" 2>/dev/null && [[ -s "$tmp" ]] && mv -f "$tmp" "${base}.patch" 2>/dev/null; then
+      saved=1
+    else
+      rm -f "$tmp" 2>/dev/null || true
+    fi
+  fi
+  if ! _wsv_diff "$sm_dir" --cached --quiet HEAD 2>/dev/null; then
+    local tmpi="${base}.index.patch.tmp.$$"
+    if _wsv_diff "$sm_dir" --cached --binary HEAD >"$tmpi" 2>/dev/null && [[ -s "$tmpi" ]] && mv -f "$tmpi" "${base}.index.patch" 2>/dev/null; then
+      saved=1
+    else
+      rm -f "$tmpi" 2>/dev/null || true
+    fi
+  fi
+  local sm_untracked
+  sm_untracked="$(git -C "$sm_dir" ls-files --others --exclude-standard 2>/dev/null || true)"
+  if [[ -n "$sm_untracked" ]]; then
+    local tmpt="${base}-untracked.tar.tmp.$$"
+    if ( cd "$sm_dir" && git ls-files --others --exclude-standard -z 2>/dev/null \
+           | tar --null -cf "$tmpt" --files-from=- 2>/dev/null ) && mv -f "$tmpt" "${base}-untracked.tar" 2>/dev/null; then
+      saved=1
+    else
+      rm -f "$tmpt" 2>/dev/null || true
+    fi
+  fi
+  [[ "$saved" -eq 1 ]]
+}
+
 # salvage_worktree <wt> <ticket> [--base <ref>] [--reason <str>] [--orch <id>] [--site <str>]
 # ALWAYS returns 0. Emits exactly one worktree.salvage.{created,skipped,failed}.
 salvage_worktree() {
@@ -88,6 +150,18 @@ salvage_worktree() {
     fi
   fi
 
+  # (a2) `git update-index --assume-unchanged` marks a tracked file so plain
+  #      status/diff treat it as clean even after a local edit — the removal
+  #      classifiers rely on that same status/diff, so such a worktree can be
+  #      classified SAFE and force-removed while it holds unique local bytes.
+  #      Clear the bit before diffing so (b) below actually sees the edit; the
+  #      worktree is doomed either way, so mutating its index has no downside.
+  local au_files
+  au_files="$(git -C "$wt" ls-files -v 2>/dev/null | awk '/^h /{ $1=""; sub(/^ /,""); print }')"
+  if [[ -n "$au_files" ]]; then
+    ( cd "$wt" && printf '%s\n' "$au_files" | xargs -I{} git update-index --no-assume-unchanged -- {} ) 2>/dev/null || true
+  fi
+
   # (b) Tracked uncommitted work → patch(es). Two DISTINCT deltas must each be
   #     captured or force-removal discards them:
   #       - working-tree-vs-HEAD (`git diff HEAD`): staged + unstaged combined.
@@ -96,9 +170,11 @@ salvage_worktree() {
   #         working file back to its HEAD content (staged work then invisible).
   #     `--binary` so a changed tracked BINARY file's bytes are in the patch (plain
   #     `git diff` writes only a "Binary files ... differ" marker that can't restore).
-  if ! git -C "$wt" diff --quiet HEAD 2>/dev/null; then
+  #     Routed through `_wsv_diff` so a repo/global `diff.external`/color config or a
+  #     `.gitattributes` textconv driver can't substitute non-applyable output.
+  if ! _wsv_diff "$wt" --quiet HEAD 2>/dev/null; then
     local tmp_p="${patch}.tmp.$$"
-    if git -C "$wt" diff --binary HEAD >"$tmp_p" 2>/dev/null && [[ -s "$tmp_p" ]] && mv -f "$tmp_p" "$patch" 2>/dev/null; then
+    if _wsv_diff "$wt" --binary HEAD >"$tmp_p" 2>/dev/null && [[ -s "$tmp_p" ]] && mv -f "$tmp_p" "$patch" 2>/dev/null; then
       saved_patch="$patch"
       files_changed="$(git -C "$wt" diff --name-only HEAD 2>/dev/null | grep -c . || echo 0)"
     else
@@ -108,9 +184,9 @@ salvage_worktree() {
   fi
   # Index-only delta: snapshot the staged content separately whenever it differs
   # from HEAD, regardless of what the working tree shows.
-  if ! git -C "$wt" diff --cached --quiet HEAD 2>/dev/null; then
+  if ! _wsv_diff "$wt" --cached --quiet HEAD 2>/dev/null; then
     local tmp_ip="${idxpatch}.tmp.$$"
-    if git -C "$wt" diff --cached --binary HEAD >"$tmp_ip" 2>/dev/null && [[ -s "$tmp_ip" ]] && mv -f "$tmp_ip" "$idxpatch" 2>/dev/null; then
+    if _wsv_diff "$wt" --cached --binary HEAD >"$tmp_ip" 2>/dev/null && [[ -s "$tmp_ip" ]] && mv -f "$tmp_ip" "$idxpatch" 2>/dev/null; then
       saved_idxpatch="$idxpatch"
     else
       rm -f "$tmp_ip" 2>/dev/null || true
@@ -132,21 +208,100 @@ salvage_worktree() {
     fi
   fi
 
+  # (d) Dirty/uninitialized submodule state → recurse into each submodule (any
+  #     depth via `--recursive`) and archive ITS OWN uncommitted diff +
+  #     untracked files. The top-level diff above only records an opaque
+  #     "Subproject commit <sha>-dirty" marker with none of the changed bytes,
+  #     and (c) above (top-level `ls-files --others`) never descends into a
+  #     submodule's own working tree at all.
+  local submodules_saved=0
+  local sm_status_lines
+  sm_status_lines="$(git -C "$wt" submodule status --recursive 2>/dev/null || true)"
+  if [[ -n "$sm_status_lines" ]]; then
+    local sm_line sm_status sm_path
+    while IFS= read -r sm_line; do
+      [[ -z "$sm_line" ]] && continue
+      sm_status="${sm_line:0:1}"
+      # '-' = not initialized — no checked-out working tree under it to salvage.
+      [[ "$sm_status" == "-" ]] && continue
+      sm_path="$(printf '%s' "${sm_line:1}" | awk '{print $2}')"
+      [[ -z "$sm_path" || ! -d "${wt}/${sm_path}" ]] && continue
+      _wsv_salvage_submodule "$wt" "$sm_path" "$stem" && submodules_saved=$((submodules_saved + 1))
+    done <<<"$sm_status_lines"
+  fi
+
   local payload
   payload="$(jq -nc \
     --arg b "$saved_bundle" --arg p "$saved_patch" --arg ip "$saved_idxpatch" --arg u "$saved_untar" \
     --arg r "$reason" --arg s "$site" --arg t "$ticket" \
     --argjson cs "${commits_saved:-0}" --argjson fc "${files_changed:-0}" --argjson uc "${untracked_count:-0}" \
+    --argjson sms "${submodules_saved:-0}" \
     '{ticket:$t,site:$s,reason:$r,bundle:$b,patch:$p,index_patch:$ip,untracked_tar:$u,
-      commits_saved:$cs,files_changed:$fc,untracked_count:$uc}')" || payload="{}"
+      commits_saved:$cs,files_changed:$fc,untracked_count:$uc,submodules_saved:$sms}')" || payload="{}"
 
   if [[ -n "$err" ]]; then
     emit_salvage_failed --ticket "$ticket" --orch "$orch" \
       --payload-json "$(printf '%s' "$payload" | jq -c --arg e "$err" '. + {error:$e}')"
-  elif [[ -n "$saved_bundle" || -n "$saved_patch" || -n "$saved_idxpatch" || -n "$saved_untar" ]]; then
+  elif [[ -n "$saved_bundle" || -n "$saved_patch" || -n "$saved_idxpatch" || -n "$saved_untar" || "$submodules_saved" -gt 0 ]]; then
     emit_salvage_created --ticket "$ticket" --orch "$orch" --payload-json "$payload"
   else
     emit_salvage_skipped --ticket "$ticket" --orch "$orch" --payload-json "$payload"
+  fi
+  return 0
+}
+
+# salvage_raw_directory <dir> <ticket> [--reason <str>] [--orch <id>] [--site <str>]
+# For a directory that is NOT a valid git worktree (e.g. orphan-sweep's
+# ORPHAN_GITFILE case — a stale/missing `.git` file pointer) `salvage_worktree`
+# can't inspect it with git at all, but a stale/missing gitdir pointer does not
+# imply the remaining working files carry no unique local edits. Archives the
+# whole directory to a plain tar (no git involved) before the caller `rm -rf`s
+# it. Best-effort/fail-open — ALWAYS returns 0, same contract as salvage_worktree.
+salvage_raw_directory() {
+  local target="${1:-}" ticket="${2:-}"; shift 2 2>/dev/null || true
+  local reason="" orch="" site=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --reason) reason="$2"; shift 2 ;;
+      --orch)   orch="$2";   shift 2 ;;
+      --site)   site="$2";   shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  if [[ -z "$target" || ! -d "$target" ]]; then
+    emit_salvage_failed --ticket "$ticket" --orch "$orch" \
+      --payload-json "$(jq -nc --arg s "$site" --arg r "$reason" '{site:$s,reason:$r,error:"not-a-directory"}')"
+    return 0
+  fi
+
+  local dir ts uniq stem tarfile
+  dir="$(_wsv_salvage_dir)"; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    emit_salvage_failed --ticket "$ticket" --orch "$orch" \
+      --payload-json "$(jq -nc --arg s "$site" '{site:$s,error:"mkdir-failed"}')"
+    return 0
+  fi
+  uniq="$$-${RANDOM:-0}"
+  stem="${dir}/${ticket}-${ts}-${uniq}"
+  tarfile="${stem}-raw.tar"
+
+  # Nothing to archive at all — an empty directory is not an error.
+  if [[ -z "$(ls -A "$target" 2>/dev/null)" ]]; then
+    emit_salvage_skipped --ticket "$ticket" --orch "$orch" \
+      --payload-json "$(jq -nc --arg s "$site" --arg r "$reason" --arg t "$ticket" '{ticket:$t,site:$s,reason:$r,raw_tar:""}')"
+    return 0
+  fi
+
+  local tmp_t="${tarfile}.tmp.$$"
+  if ( cd "$target" && tar -cf "$tmp_t" . 2>/dev/null ) && mv -f "$tmp_t" "$tarfile" 2>/dev/null; then
+    emit_salvage_created --ticket "$ticket" --orch "$orch" \
+      --payload-json "$(jq -nc --arg s "$site" --arg r "$reason" --arg t "$ticket" --arg rt "$tarfile" \
+        '{ticket:$t,site:$s,reason:$r,raw_tar:$rt}')"
+  else
+    rm -f "$tmp_t" 2>/dev/null || true
+    emit_salvage_failed --ticket "$ticket" --orch "$orch" \
+      --payload-json "$(jq -nc --arg s "$site" --arg r "$reason" --arg t "$ticket" '{ticket:$t,site:$s,reason:$r,error:"raw-tar-failed"}')"
   fi
   return 0
 }
