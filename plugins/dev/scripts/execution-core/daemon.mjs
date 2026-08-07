@@ -195,7 +195,7 @@ export function writeBootFacts(
       preflight: {
         ok: preflight?.ok === true,
         missing: Array.isArray(preflight?.missing) ? preflight.missing : [],
-        degraded: preflight?.ok !== true,
+        degraded: preflight?.ok !== true || preflight?.degraded === true,
       },
     }),
   );

@@ -65,6 +65,24 @@ describe("CAT-29 boot facts", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("preserves an indeterminate dependency probe as degraded", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cat29-boot-facts-degraded-"));
+    try {
+      const file = writeBootFacts(
+        dir,
+        { ok: true, missing: [], degraded: true },
+        { pid: 4243, startedAt: "2026-08-07T20:01:00Z", path: "/usr/bin:/bin" },
+      );
+      expect(JSON.parse(readFileSync(file, "utf8")).preflight).toEqual({
+        ok: true,
+        missing: [],
+        degraded: true,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.

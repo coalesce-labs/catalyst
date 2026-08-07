@@ -44,10 +44,12 @@ TWICE="$(catalyst_agent_path "$RESULT")"
 [[ "$TWICE" == "$RESULT" ]] && pass "is idempotent" || fail "is idempotent" "$TWICE"
 case "$RESULT" in :* | *: | *::* ) fail "emits no empty segments" "$RESULT" ;; *) pass "emits no empty segments" ;; esac
 
-# Both source-safe launchers must expose the exact same derivation.
-STACK_PATH="$(HOME="$HOME" PATH="$ORIGINAL_PATH" bash -c 'source "$1"; _stack_agent_path' _ "$SCRIPTS_DIR/catalyst-stack")"
-CORE_PATH="$(HOME="$HOME" PATH="$ORIGINAL_PATH" bash -c 'source "$1"; catalyst_agent_path "$PATH"' _ "$SCRIPTS_DIR/catalyst-execution-core")"
-[[ "$STACK_PATH" == "$CORE_PATH" ]] && pass "launcher and plist PATH derivations have parity" || fail "launcher and plist PATH derivations have parity" "stack=$STACK_PATH core=$CORE_PATH"
+# Persistent launchd PATHs contain only canonical existing directories; an
+# interactive caller's project/venv directories must never be baked into them.
+STACK_PATH="$(HOME="$HOME" PATH="$SCRATCH/extra:$ORIGINAL_PATH" bash -c 'source "$1"; _stack_agent_path' _ "$SCRIPTS_DIR/catalyst-stack")"
+EXPECTED_STACK_PATH="$(catalyst_agent_path "")"
+[[ "$STACK_PATH" == "$EXPECTED_STACK_PATH" ]] && pass "plist PATH contains only canonical directories" || fail "plist PATH contains only canonical directories" "stack=$STACK_PATH expected=$EXPECTED_STACK_PATH"
+if ! contains_segment "$STACK_PATH" "$SCRATCH/extra"; then pass "plist PATH excludes caller directories"; else fail "plist PATH excludes caller directories" "$STACK_PATH"; fi
 
 echo "$PASSES passed, $FAILURES failed"
 [[ "$FAILURES" -eq 0 ]]
