@@ -1084,6 +1084,34 @@ describe("defaultGcTerminalSignals (CTL-1242 J4 integration)", () => {
     const gc = defaultGcTerminalSignals(orchDir);
     expect(() => gc({ ticket: "CTL-1242-GONE" })).not.toThrow();
   });
+
+  // CTL-1643: J4 GC also removes the durable escalation record so the board
+  // does not surface a "ghost" needs-human card after the worker dir is gone.
+  test("CTL-1643: also removes .escalations/<T>.json when present", async () => {
+    const { recordDurableEscalation, readDurableEscalations } = await import(
+      "./durable-escalation.mjs"
+    );
+    const workerDir = join(orchDir, "workers", "CTL-1643-J4");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-implement.json"), JSON.stringify({ status: "failed" }));
+    recordDurableEscalation({
+      orchDir,
+      ticket: "CTL-1643-J4",
+      phase: "implement",
+      reason: "stuck > 24h",
+      labelConfirmed: false,
+      commentPosted: true,
+      source: "scheduler",
+      now: Date.now(),
+    });
+    expect(readDurableEscalations(orchDir)).toHaveLength(1);
+
+    const gc = defaultGcTerminalSignals(orchDir);
+    gc({ ticket: "CTL-1643-J4" });
+
+    expect(existsSync(workerDir)).toBe(false);
+    expect(readDurableEscalations(orchDir)).toHaveLength(0);
+  });
 });
 
 describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {

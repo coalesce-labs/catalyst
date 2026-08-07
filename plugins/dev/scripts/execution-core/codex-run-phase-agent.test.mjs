@@ -16,7 +16,9 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -453,6 +455,402 @@ describe("buildCodexArgs", () => {
 
     Bun.spawnSync(["git", "worktree", "remove", "--force", wt], { cwd: main });
     rmSync(main, { recursive: true, force: true });
+  });
+});
+
+// ── buildCodexArgs: thoughts/ symlink resolution into writable_roots ─────────
+//
+// The REAL on-disk convention (lib/provision-thoughts.sh) is NOT "thoughts is a
+// symlink" — it's "thoughts is a real directory whose immediate entries (global,
+// shared) are themselves symlinks pointing OUTSIDE the worktree." A prior version
+// of resolveThoughtsRoot only ever `realpathSync`'d the `thoughts` directory
+// itself, which — since `thoughts` isn't a symlink in this shape — just returned
+// the unchanged worktree-local path and never added the actual external target
+// at all. Confirmed live 2026-08-03: this silently broke every research/plan
+// artifact write for codex-exec-routed phases across 4+ real tickets
+// (COP-3/COP-5/CQD-5/CQD-7), each failing with a "thoughts/shared symlink target
+// outside writable roots" sandbox denial.
+describe("buildCodexArgs — thoughts/ symlink resolution into writable_roots", () => {
+  function extractWritableRoots(args) {
+    const idx = args.indexOf("-c");
+    for (let i = idx; i < args.length; i += 2) {
+      const flag = args[i + 1];
+      if (typeof flag === "string" && flag.startsWith("sandbox_workspace_write.writable_roots=")) {
+        return JSON.parse(flag.slice("sandbox_workspace_write.writable_roots=".length));
+      }
+    }
+    throw new Error("writable_roots flag not found in args");
+  }
+
+  function makeWorktreeWithThoughts(build) {
+    // realpathSync the temp root immediately: macOS's /tmp (and /var) are
+    // themselves symlinks into /private/..., so anything resolveThoughtsRoots
+    // resolves via realpathSync comes back CANONICALIZED — comparing against
+    // an un-canonicalized `root` would spuriously fail on macOS specifically.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "codex-thoughts-")));
+    const worktreePath = join(root, "wt", "CTL-100");
+    mkdirSync(worktreePath, { recursive: true });
+    const external = join(root, "external-thoughts-repo");
+    mkdirSync(external, { recursive: true });
+    build({ root, worktreePath, external });
+    return { root, worktreePath, external };
+  }
+
+  test("REAL on-disk shape: thoughts/ is a real dir; its shared + global entries are symlinks — both real targets land in writable_roots", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ root, worktreePath, external }) => {
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      const sharedTarget = join(external, "repos", "coppa", "shared");
+      const globalTarget = join(external, "global");
+      mkdirSync(sharedTarget, { recursive: true });
+      mkdirSync(globalTarget, { recursive: true });
+      symlinkSync(sharedTarget, join(thoughtsDir, "shared"));
+      symlinkSync(globalTarget, join(thoughtsDir, "global"));
+      // A REAL (non-symlink) subdirectory alongside the symlinks — must be ignored.
+      mkdirSync(join(thoughtsDir, "searchable"), { recursive: true });
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo", "repos", "coppa", "shared"));
+      expect(roots).toContain(join(root, "external-thoughts-repo", "global"));
+      // The worktree-local thoughts/ path itself is not a useful ADDITIONAL root
+      // (it's already inside the worktree) and must not be added redundantly.
+      expect(roots).not.toContain(join(worktreePath, "thoughts"));
+      expect(roots).not.toContain(join(worktreePath, "thoughts", "searchable"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("LEGACY shape preserved: thoughts itself IS a direct symlink — still resolves to its target", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      symlinkSync(external, join(worktreePath, "thoughts"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("thoughts/ has no symlinked entries at all (real subdirs only) — adds nothing, does not throw", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      mkdirSync(join(worktreePath, "thoughts", "searchable"), { recursive: true });
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("no thoughts/ directory at all under the worktree — adds nothing, does not throw", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(() => {});
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a BROKEN symlink inside thoughts/ (dangling target) is skipped, not thrown", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      symlinkSync(join(external, "does-not-exist"), join(thoughtsDir, "shared"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      // Must not throw despite the dangling symlink.
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // 2026-08-07 hardening (round-2 review, PR #3082): a prior codex turn already
+  // has write access to its OWN worktree (including thoughts/), so it can plant
+  // an arbitrary symlink there for free. These tests prove that planted symlink
+  // can't turn into a FUTURE dispatch's filesystem-wide writable_roots grant.
+
+  test("an UNPROVISIONED symlink name under thoughts/ (e.g. thoughts/root -> /) is never resolved into writable_roots", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      // Not "shared" or "global" — an attacker/compromised-turn-planted name.
+      symlinkSync("/", join(thoughtsDir, "root"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+      expect(roots).not.toContain("/");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a PROVISIONED entry (thoughts/shared) resolving to a dangerously shallow target (/) is excluded, not granted", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      symlinkSync("/", join(thoughtsDir, "shared"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+      expect(roots).not.toContain("/");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("LEGACY shape: thoughts itself symlinked straight to / is excluded, not granted", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      symlinkSync("/", join(worktreePath, "thoughts"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+      expect(roots).not.toContain("/");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // 2026-08-07 P1 follow-up (Codex round-3, PR #3082): a bare segment-count
+  // floor alone is insufficient — an attacker-chosen target with 2+ segments
+  // (e.g. `/home/alice`) still passes a length-only check while granting
+  // write access to an unrelated directory. Once a worktree declares
+  // `.catalyst/config.json` → `catalyst.thoughts.directory`, resolution must
+  // be validated against THAT configured repository, not shape alone.
+  function writeThoughtsDirectoryConfig(worktreePath, directory) {
+    mkdirSync(join(worktreePath, ".catalyst"), { recursive: true });
+    writeFileSync(
+      join(worktreePath, ".catalyst", "config.json"),
+      JSON.stringify({ catalyst: { thoughts: { directory } } }),
+    );
+  }
+
+  test("SECURITY (configured regime): thoughts/shared -> /home/alice (2 segments, matches the OLD floor) is rejected once a thoughts directory is configured and doesn't match", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "coppa");
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      // Attacker-chosen, unrelated, but structurally "sane" (2-segment) target.
+      symlinkSync("/private", join(thoughtsDir, "shared"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+      expect(roots).not.toContain("/private");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("configured regime: a MATCHING thoughts/shared (…/repos/<directory>/shared) is accepted, and thoughts/global is validated against the SAME derived anchor", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "coppa");
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      const sharedTarget = join(external, "repos", "coppa", "shared");
+      const globalTarget = join(external, "global");
+      mkdirSync(sharedTarget, { recursive: true });
+      mkdirSync(globalTarget, { recursive: true });
+      symlinkSync(sharedTarget, join(thoughtsDir, "shared"));
+      symlinkSync(globalTarget, join(thoughtsDir, "global"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo", "repos", "coppa", "shared"));
+      expect(roots).toContain(join(root, "external-thoughts-repo", "global"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("configured regime: thoughts/global pointed OUTSIDE the validated shared anchor (a sibling repo, not nested under THOUGHTS_REPO) is rejected even though shared itself is legitimate", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ root, worktreePath, external }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "coppa");
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      const sharedTarget = join(external, "repos", "coppa", "shared");
+      mkdirSync(sharedTarget, { recursive: true });
+      symlinkSync(sharedTarget, join(thoughtsDir, "shared"));
+      // `global` re-pointed at a structurally-sane directory that is NOT
+      // nested under the shared-derived THOUGHTS_REPO anchor (`external`) —
+      // a sibling directory under `root` instead.
+      const rogueGlobal = join(root, "unrelated-sibling-dir");
+      mkdirSync(rogueGlobal, { recursive: true });
+      symlinkSync(rogueGlobal, join(thoughtsDir, "global"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo", "repos", "coppa", "shared"));
+      expect(roots).not.toContain(join(root, "unrelated-sibling-dir"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("configured regime: a DECLARED-but-mismatched directory rejects shared outright even though it resolves elsewhere on-disk", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "wrong-project");
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      const sharedTarget = join(external, "repos", "coppa", "shared");
+      mkdirSync(sharedTarget, { recursive: true });
+      symlinkSync(sharedTarget, join(thoughtsDir, "shared"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // 2026-08-07 P1 follow-up round 2 (Codex round-4, PR #3082): the LEGACY
+  // direct-symlink shape (`thoughts` itself is a symlink) returned before the
+  // configured-directory check entirely, so it still accepted an
+  // attacker-chosen 2-segment target (e.g. `thoughts -> /home/alice`) even in
+  // a worktree with a declared thoughts directory.
+  test("SECURITY (configured regime, LEGACY shape): thoughts -> /home/alice is rejected once a thoughts directory is configured, even though it passes the old bare structural floor", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "coppa");
+      symlinkSync("/private", join(worktreePath, "thoughts"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+      expect(roots).not.toContain("/private");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("configured regime, LEGACY shape: a target matching the declared directory's /repos/<dir>/ segment is accepted", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "coppa");
+      const legacyTarget = join(external, "repos", "coppa", "shared");
+      mkdirSync(legacyTarget, { recursive: true });
+      symlinkSync(legacyTarget, join(worktreePath, "thoughts"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo", "repos", "coppa", "shared"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // 2026-08-07 P1 follow-up round 2 (Codex round-4, PR #3082): "nested under
+  // the anchor" was too permissive — `thoughts/global` re-pointed at the
+  // anchor ITSELF (the whole THOUGHTS_REPO, every project under repos/) used
+  // to pass. `global` must resolve to the EXACT `<THOUGHTS_REPO>/global`
+  // target lib/provision-thoughts.sh / worktree-thoughts-init.sh provision,
+  // not merely something under that root.
+  test("SECURITY (configured regime): thoughts/global re-pointed at the THOUGHTS_REPO anchor itself (not the exact global/ subdir) is rejected", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "coppa");
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      const sharedTarget = join(external, "repos", "coppa", "shared");
+      mkdirSync(sharedTarget, { recursive: true });
+      symlinkSync(sharedTarget, join(thoughtsDir, "shared"));
+      // `global` re-pointed at the anchor root ITSELF — grants the whole
+      // THOUGHTS_REPO (every project under repos/), not just global/.
+      symlinkSync(external, join(thoughtsDir, "global"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo", "repos", "coppa", "shared"));
+      expect(roots).not.toContain(join(root, "external-thoughts-repo"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("SECURITY (configured regime): thoughts/global pointed at a DESCENDANT of the anchor (not the exact global/ subdir) is rejected", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "coppa");
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      const sharedTarget = join(external, "repos", "coppa", "shared");
+      mkdirSync(sharedTarget, { recursive: true });
+      symlinkSync(sharedTarget, join(thoughtsDir, "shared"));
+      // `global` re-pointed at ANOTHER project's shared dir under the SAME
+      // anchor — nested under THOUGHTS_REPO, but not the exact global/ path.
+      const otherProjectShared = join(external, "repos", "other-project", "shared");
+      mkdirSync(otherProjectShared, { recursive: true });
+      symlinkSync(otherProjectShared, join(thoughtsDir, "global"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo", "repos", "coppa", "shared"));
+      expect(roots).not.toContain(
+        join(root, "external-thoughts-repo", "repos", "other-project", "shared"),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("configured regime: thoughts/global resolving to the EXACT <anchor>/global target is accepted", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath, external }) => {
+      writeThoughtsDirectoryConfig(worktreePath, "coppa");
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      const sharedTarget = join(external, "repos", "coppa", "shared");
+      const globalTarget = join(external, "global");
+      mkdirSync(sharedTarget, { recursive: true });
+      mkdirSync(globalTarget, { recursive: true });
+      symlinkSync(sharedTarget, join(thoughtsDir, "shared"));
+      symlinkSync(globalTarget, join(thoughtsDir, "global"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toContain(join(root, "external-thoughts-repo", "global"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
