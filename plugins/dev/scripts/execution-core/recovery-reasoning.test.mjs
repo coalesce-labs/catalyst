@@ -2469,12 +2469,14 @@ describe("classifyPrNotMerged (CTL-1496)", () => {
     expect(r.decision).toBe("defer");
   });
 
-  test("no PR found (prNumber null) → escalate with 'no open PR' reason", () => {
+  test("no PR found (prNumber null) → escalate with 'no PR found' reason", () => {
     const r = defaultClassifyTicket(mkEvidence(), {
       probePrBlock: probeReturning({ prNumber: null }),
     });
     expect(r.decision).toBe("escalate");
-    expect(r.details.reason).toContain("no open PR");
+    // CTL-1680: the probe now queries `--state all` (not just open), so the
+    // escalation text no longer claims "open" specifically.
+    expect(r.details.reason).toContain("no PR found");
   });
 
   test("generateRemediateBrief('pr-not-merged') mentions gh pr view, @codex review", () => {
@@ -2844,5 +2846,65 @@ describe("CTL-1680: monitor-deploy empty-SHA routes to PR-state probe", () => {
     for (const r of EMPTY_SHA_REASONS) {
       expect(r.startsWith(MONITOR_DEPLOY_EMPTY_SHA_PREFIX)).toBe(true);
     }
+  });
+
+  // ─── CTL-1680 (Codex #3079 P1): an ALREADY-MERGED PR recovers, never escalates ──
+  // The empty-SHA family fires on a PR that actually merged (monitor-merge confirmed
+  // REST .merged but recorded an empty SHA). With `--state all` the probe resolves it
+  // as MERGED; classifyPrNotMerged must recover the SHA (fix), not escalate a merged
+  // PR to a human. Prior `--state open` probe returned null → false "no PR" escalate.
+  test("empty-SHA reason + MERGED probe → fix (recover SHA), not escalate", () => {
+    const r = defaultClassifyTicket(openGreenBotEvidence(EMPTY_SHA_REASONS[2]), {
+      probePrBlock: probeReturning({
+        prNumber: 290,
+        state: "MERGED",
+        mergeCommitSha: "abc1234def5678",
+        mergeStateStatus: null,
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.reason).toContain("290");
+    expect(r.details.reason.toLowerCase()).toContain("merged");
+    // the recovered SHA (short form) is surfaced for the recovery-pass brief
+    expect(r.details.reason).toContain("abc1234def");
+    expect(r.details.brief).toContain("mergeCommitSha");
+  });
+
+  // A MERGED PR whose SHA the probe could not surface still recovers (no escalate).
+  test("MERGED probe with null mergeCommitSha → fix, brief instructs SHA recovery", () => {
+    const r = defaultClassifyTicket(openGreenBotEvidence(EMPTY_SHA_REASONS[0]), {
+      probePrBlock: probeReturning({
+        prNumber: 291,
+        state: "MERGED",
+        mergeCommitSha: null,
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.details.brief).toContain("already MERGED");
+    expect(r.details.brief).toContain("merge_commit_sha");
+  });
+
+  // generateRemediateBrief gains a merged-SHA-missing category.
+  test("generateRemediateBrief('pr-merge-sha-missing') tells recovery to re-record the SHA, not re-merge", () => {
+    const b = generateRemediateBrief("pr-merge-sha-missing", {
+      prNumber: 290,
+      state: "MERGED",
+      mergeCommitSha: "deadbeefcafe",
+    });
+    expect(b).toContain("290");
+    expect(b).toContain("deadbeefcafe");
+    expect(b).toContain("phase-monitor-merge.json");
+    expect(b.toLowerCase()).toContain("do not re-merge");
   });
 });

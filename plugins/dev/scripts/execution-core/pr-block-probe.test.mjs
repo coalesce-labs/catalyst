@@ -51,6 +51,40 @@ describe("defaultProbePrBlock — PR resolution contract (CTL-1496)", () => {
     expect(resolveCall).not.toMatch(/^pr view/);
   });
 
+  // CTL-1680 (Codex #3079 P1): the PR is resolved with `--state all`, NOT
+  // `--state open`, so a PR that already merged (empty-mergeCommitSha recovery
+  // family) is still found instead of yielding a false "no open PR" escalation.
+  test("resolves with --state all (finds a merged PR) and surfaces mergeCommitSha", () => {
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args.join(" "));
+      const key = args.join(" ");
+      if (key.startsWith("pr list"))
+        return JSON.stringify([
+          {
+            number: 290,
+            state: "MERGED",
+            mergeStateStatus: null,
+            mergeable: null,
+            statusCheckRollup: [],
+            mergeCommit: { oid: "abc1234def5678" },
+          },
+        ]);
+      if (key.includes("api graphql")) return JSON.stringify(EMPTY_THREADS);
+      if (key.includes("pr view 290 --json reviews")) return JSON.stringify({ reviews: [] });
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-99", { gh, repo: "o/r", branch: "ryan/ctl-99-slug" });
+    expect(r.prNumber).toBe(290);
+    expect(r.state).toBe("MERGED");
+    expect(r.mergeCommitSha).toBe("abc1234def5678");
+    const resolveCall = calls.find((c) => c.startsWith("pr list"));
+    expect(resolveCall).toContain("--state all");
+    expect(resolveCall).not.toContain("--state open");
+    // mergeCommit must be requested so the SHA can be recovered.
+    expect(resolveCall).toContain("mergeCommit");
+  });
+
   test("resolves by --head <branch> when the branch is threaded", () => {
     const calls = [];
     const gh = (args) => {

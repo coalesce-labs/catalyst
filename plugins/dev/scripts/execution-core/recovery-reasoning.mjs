@@ -552,7 +552,30 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
     return {
       decision: "escalate",
       fix_class: "human",
-      details: { reason: `pr_not_merged: no open PR found for ${ticket}` },
+      details: { reason: `pr_not_merged: no PR found for ${ticket}` },
+    };
+  }
+
+  // CTL-1680: the empty-mergeCommitSha family (isPrMergeUnconfirmedReason) can fire
+  // on a PR that ACTUALLY merged — monitor-merge confirmed REST `.merged==true` but
+  // recorded an empty SHA, so monitor-deploy's guard tripped. With `--state all` the
+  // probe now resolves that PR as MERGED. The correct recovery is to re-record the
+  // merge SHA and resume monitor-deploy — NOT to escalate a successfully-merged PR to
+  // a human (Codex #3079 P1: the prior `--state open` probe missed it → false
+  // "no open PR" escalate). A merged PR has no failing/pending checks or open threads,
+  // so without this branch it would fall through to the generic terminal escalate.
+  if (probe.state === "MERGED") {
+    const sha = probe.mergeCommitSha;
+    return {
+      decision: "fix",
+      fix_class: "bounded-llm",
+      details: {
+        reason:
+          `PR #${probe.prNumber} is already MERGED` +
+          (sha ? ` (${sha.slice(0, 10)})` : "") +
+          ` but the merge SHA was not recorded; recover it and resume monitor-deploy`,
+        brief: generateRemediateBrief("pr-merge-sha-missing", probe),
+      },
     };
   }
 
@@ -901,6 +924,24 @@ export function generateRemediateBrief(category, probe = null) {
       "Never --admin or force-merge past a failing or pending check. " +
         "Escalate ONLY a finding that genuinely requires a human decision, " +
         "with the PR number and thread linked.",
+    ]
+      .filter(Boolean)
+      .join(" "),
+    // CTL-1680: the PR merged but monitor-merge recorded an empty merge SHA, so
+    // monitor-deploy's empty-SHA guard false-failed. No code fix is needed — the work
+    // shipped; recover the SHA and let the pipeline proceed.
+    "pr-merge-sha-missing": [
+      probe
+        ? `PR #${probe.prNumber} is already MERGED` +
+          (probe.mergeCommitSha ? ` (merge commit ${probe.mergeCommitSha}).` : ".")
+        : "The PR for this ticket is already merged.",
+      "Do NOT re-merge or reopen it. Read the true merge commit SHA from " +
+        "`gh api repos/{owner}/{repo}/pulls/<n> --jq .merge_commit_sha`, " +
+        "write it into `.pr.mergeCommitSha` (and `.pr.mergedAt`, `.pr.ciStatus=merged`) " +
+        "in the ticket's phase-monitor-merge.json signal file, then re-dispatch " +
+        "monitor-deploy so the pipeline resumes from the recorded SHA.",
+      "Escalate ONLY if the PR is NOT actually merged on the base branch " +
+        "(verify with `gh pr view <n> --json merged,mergedAt`).",
     ]
       .filter(Boolean)
       .join(" "),

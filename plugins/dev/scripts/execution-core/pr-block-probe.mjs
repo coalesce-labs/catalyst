@@ -100,6 +100,7 @@ function emptyProbe() {
   return {
     prNumber: null,
     state: null,
+    mergeCommitSha: null,
     mergeStateStatus: null,
     mergeable: null,
     failingChecks: [],
@@ -114,8 +115,11 @@ function emptyProbe() {
 // aggregate GitHub verdict (latest review per required reviewer) — used instead
 // of scanning the raw reviews history so a PR that was CHANGES_REQUESTED then
 // re-APPROVED is not false-flagged by a stale entry (CTL-1496 verify finding).
+// CTL-1680: `mergeCommit` (an object with `.oid`) lets the classifier recover the
+// merge SHA when a PR resolves as MERGED — the empty-mergeCommitSha family fires on
+// PRs that actually merged but whose SHA monitor-merge failed to record.
 const PR_VIEW_FIELDS =
-  "number,state,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision";
+  "number,state,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,mergeCommit";
 
 // Resolve the ticket's PR EXPLICITLY — never by the daemon's current branch.
 // classifyPrNotMerged runs inside the daemon process (daemon cwd), so a bare
@@ -137,8 +141,17 @@ function resolveTicketPr(gh, ticket, branch, owner, name) {
     "list",
     ...repoArgs,
     ...selector,
+    // CTL-1680: `all`, NOT `open`. The empty-mergeCommitSha family
+    // (isPrMergeUnconfirmedReason) can fire on a PR that ACTUALLY merged —
+    // monitor-merge confirmed REST `.merged==true` but recorded an empty SHA — in
+    // which case the PR is CLOSED/MERGED. `open` returned nothing for it, so the
+    // classifier escalated a successfully-merged PR to a human instead of
+    // recovering the SHA (Codex #3079 P1). `all` (limit 1, most-recent-first) still
+    // returns the OPEN PR for the teardown `pr_not_merged` case unchanged and
+    // additionally surfaces the merged PR; the classifier's MERGED branch then
+    // recovers rather than escalates.
     "--state",
-    "open",
+    "all",
     "--json",
     PR_VIEW_FIELDS,
     "--limit",
@@ -258,6 +271,8 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch, worktre
   return {
     prNumber: view.number,
     state: view.state,
+    // CTL-1680: recovered merge SHA for a PR that resolved as MERGED; null for open PRs.
+    mergeCommitSha: view.mergeCommit?.oid ?? null,
     mergeStateStatus: view.mergeStateStatus,
     mergeable: view.mergeable,
     failingChecks,

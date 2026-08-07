@@ -20,6 +20,12 @@ assert_contains() {
   else fail "$label — '$substr' not found"; fi
 }
 
+assert_not_contains() {
+  local body="$1" substr="$2" label="$3"
+  if [[ "$body" != *"$substr"* ]]; then pass "$label"
+  else fail "$label — forbidden '$substr' present"; fi
+}
+
 echo "CTL-1051: phase-monitor-merge pre-merge stale-ref guard"
 
 if [[ -f "$SKILL" ]]; then
@@ -77,6 +83,25 @@ if [[ -f "$SKILL" ]]; then
     "reviewer-arrival gate detects clean-pass comment (Reviewed commit shape)"
 else
   fail "SKILL.md missing for Phase 3 checks: $SKILL"
+fi
+
+echo ""
+echo "CTL-1680 remediation (Codex #3079): head-scoped, portable, bounded"
+
+if [[ -f "$SKILL" ]]; then
+  # P1: HEAD age must be parsed portably (jq), NOT with BSD/macOS-only `date -j`.
+  assert_contains "$BODY" "fromdateiso8601" \
+    "reviewer-arrival HEAD age uses portable jq fromdateiso8601"
+  assert_not_contains "$BODY" 'date -u -j -f' \
+    "reviewer-arrival gate does NOT use BSD-only date -j (Linux fail-open bug)"
+  # P1: the reviews verdict check is scoped to the current head via commit_id.
+  assert_contains "$BODY" 'commit_id == $h' \
+    "reviews verdict is scoped to REVIEWED_HEAD commit_id (no stale-head pass)"
+  # P2: the re-wait is bounded by the remaining reviewer window.
+  assert_contains "$BODY" "MERGE_WAKE_TIMEOUT_SEC" \
+    "reviewer-arrival re-wait is bounded by the remaining window"
+else
+  fail "SKILL.md missing for remediation checks: $SKILL"
 fi
 
 echo ""

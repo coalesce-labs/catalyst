@@ -122,7 +122,10 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    (check_suite/workflow_run — see [[event-schema]]). When the broker daemon is up, register a
    `pr_lifecycle` interest via `agent.checkin.claimed_pr` and wait on
    `filter.wake.${CATALYST_SESSION_ID}` instead (the single-wake path — see [[monitor-events]]
-   Pattern 3).
+   Pattern 3). **CTL-1680:** when the reviewer-arrival window (Merge step) sets
+   `MERGE_WAKE_TIMEOUT_SEC`, the next wait MUST cap its `--timeout` at that many seconds so the loop
+   re-evaluates the window deadline even if no PR-lifecycle event arrives — otherwise the general
+   wait can block far past the window (600s broker / 180+7200s raw) and delay an already-earned merge.
 
 2. **REST is authoritative.** Every loop iteration calls `gh api repos/${REPO}/pulls/${PR_NUMBER}`
    and reads `.merged` + `.mergeable_state`. Never use `gh pr view --json mergeable` (GraphQL is
@@ -173,38 +176,70 @@ fi
 # PR-open never shows up in mergeable_state until it posts. Before merging a fresh
 # CLEAN PR, give an in-flight reviewer a bounded window to land its verdict.
 PHASE_REVIEWER_ARRIVAL_WAIT_SEC="${PHASE_REVIEWER_ARRIVAL_WAIT_SEC:-300}"
-# Reuse REVIEWED_HEAD from CTL-1051 stale-ref check above when available.
-REVIEWED_HEAD="${PR_HEAD_OID:-$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)}"
+# CTL-1680 (Codex #3079 P2): resolve REVIEWED_HEAD FRESH from REST, never from the
+# CTL-1051 PR_HEAD_OID above — that variable holds the PRE-push remote SHA (the
+# stale-ref reconcile redirected draft_pr_push_verify's verified SHA to /dev/null),
+# so reusing it would age/scope the OLD commit after a reconcile re-push. REST
+# `.head.sha` is authoritative and reflects the just-pushed head.
+REVIEWED_HEAD="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
 HEAD_COMMITTED_AT="$(gh api "repos/${REPO}/commits/${REVIEWED_HEAD}" --jq '.commit.committer.date' 2>/dev/null || true)"
-# Automated-reviewer verdict present on this HEAD? Three shapes (AGENTS.md):
-#   (a) a review object from the codex bot, (b) a "no major issues"/"Reviewed commit" issue comment,
-#   (c) a 👍 reaction on the PR by the reviewer bot.
+# CTL-1680 (Codex #3079 P1 portability): HEAD age via jq `fromdateiso8601`, NOT the
+# BSD/macOS-only `date -j` timestamp parser. On a Linux worker the BSD form fails,
+# falls to `echo 0`, HEAD_AGE_SEC becomes ~the current epoch, the window check is
+# always false, and every fresh CLEAN PR merges immediately with no reviewer window.
+# jq is a hard dependency of this skill and its parse is portable (needs the trailing
+# Z, which the commit date carries) — same approach the End-block mirror already uses.
+HEAD_AGE_SEC=""
+if [[ -n "$HEAD_COMMITTED_AT" ]]; then
+  HEAD_AGE_SEC="$(jq -n --arg a "$HEAD_COMMITTED_AT" '(now - ($a|fromdateiso8601)) | floor' 2>/dev/null || echo "")"
+fi
+# Automated-reviewer verdict present ON THIS HEAD? (Codex #3079 P1) Every check is
+# scoped to REVIEWED_HEAD — a PR-wide match would let a STALE-head verdict (from
+# before a fix-up/rebase/force-push) suppress the window and merge the new commit
+# unreviewed, exactly the re-review-required case AGENTS.md calls out. Three shapes:
+#   (a) a review object whose commit_id IS this head,
+#   (b) a "no major issues"/"Reviewed commit" issue comment naming this head's short
+#       SHA (or posted at/after this head was committed),
+#   (c) a 👍 reaction posted at/after this head was committed (reactions carry no
+#       commit, so head-scoping is temporal).
 REVIEWER_VERDICT_PRESENT=false
-# (a) reviews API
-if gh pr view "$PR_NUMBER" --json reviews \
-     --jq '.reviews[] | select(.author.login|test("codex";"i"))' 2>/dev/null | grep -q .; then
+# (a) reviews API — commit_id is exact head scoping (REST carries it; `gh pr view
+#     --json reviews` does not).
+if gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" 2>/dev/null \
+   | jq -e --arg h "$REVIEWED_HEAD" \
+       'any(.[]; (.user.login|test("codex";"i")) and (.commit_id == $h))' >/dev/null 2>&1; then
   REVIEWER_VERDICT_PRESENT=true
 fi
-# (b) clean-pass issue comment ("no major issues" or "Reviewed commit")
+# (b) clean-pass issue comment, scoped to this head by embedded short SHA or timestamp.
 if [[ "$REVIEWER_VERDICT_PRESENT" != true ]] && \
-   gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-     --jq '.[] | select(.user.login|test("codex";"i")) | .body' 2>/dev/null \
-     | grep -qiE 'no (major )?issues|Reviewed commit'; then
+   gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+   | jq -e --arg h "$REVIEWED_HEAD" --arg at "$HEAD_COMMITTED_AT" \
+       'any(.[];
+          (.user.login|test("codex";"i"))
+          and (.body|test("no (major )?issues|Reviewed commit";"i"))
+          and ( ((($h|length) >= 10) and (.body|test($h[0:10])))
+                or (($at != "") and (.created_at >= $at)) ))' >/dev/null 2>&1; then
   REVIEWER_VERDICT_PRESENT=true
 fi
-# (c) 👍 reaction clean-pass
-if [[ "$REVIEWER_VERDICT_PRESENT" != true ]] && \
+# (c) 👍 reaction clean-pass posted at/after this head.
+if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "$HEAD_COMMITTED_AT" ]] && \
    gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
-     -H "Accept: application/vnd.github.squirrel-girl-preview+json" \
-     --jq '.[] | select(.content=="+1") | select(.user.login|test("codex";"i"))' \
-     2>/dev/null | grep -q .; then
+     -H "Accept: application/vnd.github.squirrel-girl-preview+json" 2>/dev/null \
+   | jq -e --arg at "$HEAD_COMMITTED_AT" \
+       'any(.[]; (.content=="+1") and (.user.login|test("codex";"i")) and (.created_at >= $at))' >/dev/null 2>&1; then
   REVIEWER_VERDICT_PRESENT=true
 fi
-if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "$HEAD_COMMITTED_AT" ]]; then
-  HEAD_AGE_SEC=$(( $(date -u +%s) - $(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$HEAD_COMMITTED_AT" +%s 2>/dev/null || echo 0) ))
-  if [[ "${HEAD_AGE_SEC:-0}" -lt "$PHASE_REVIEWER_ARRIVAL_WAIT_SEC" ]]; then
-    echo "wake: reviewer-arrival window — pr#${PR_NUMBER} CLEAN but no automated-reviewer verdict on ${REVIEWED_HEAD:0:8} (age ${HEAD_AGE_SEC}s < ${PHASE_REVIEWER_ARRIVAL_WAIT_SEC}s); waiting"
-    continue  # re-enter the event-wait loop; a pr_review wake re-evaluates
+if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "${HEAD_AGE_SEC:-}" ]]; then
+  if [[ "$HEAD_AGE_SEC" -lt "$PHASE_REVIEWER_ARRIVAL_WAIT_SEC" ]]; then
+    # CTL-1680 (Codex #3079 P2): BOUND the re-wait by the time left in the window, so
+    # we re-evaluate when the window elapses even if NO further PR-lifecycle event
+    # wakes us (the general listen-loop wait can otherwise block 600s on the broker
+    # path or 180+7200s on the raw path — far past a 300s window). Export the remaining
+    # seconds; the reused wait-for MUST cap its --timeout at MERGE_WAKE_TIMEOUT_SEC.
+    MERGE_WAKE_TIMEOUT_SEC=$(( PHASE_REVIEWER_ARRIVAL_WAIT_SEC - HEAD_AGE_SEC ))
+    export MERGE_WAKE_TIMEOUT_SEC
+    echo "wake: reviewer-arrival window — pr#${PR_NUMBER} CLEAN but no automated-reviewer verdict on ${REVIEWED_HEAD:0:8} (age ${HEAD_AGE_SEC}s < ${PHASE_REVIEWER_ARRIVAL_WAIT_SEC}s); waiting up to ${MERGE_WAKE_TIMEOUT_SEC}s"
+    continue  # re-enter the event-wait loop (timeout-bounded by MERGE_WAKE_TIMEOUT_SEC); a pr_review wake or the deadline re-evaluates
   fi
   echo "phase-monitor-merge: reviewer-arrival window elapsed; proceeding to merge pr#${PR_NUMBER}" >&2
 fi
