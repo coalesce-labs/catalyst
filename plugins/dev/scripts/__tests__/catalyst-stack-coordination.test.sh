@@ -269,6 +269,18 @@ if grep -q '<key>CATALYST_EVENTS_DIR</key>' <<<"$OUT_ED" && grep -q '<string>/da
   pass "plist-eventsdir: pins CATALYST_EVENTS_DIR when set"
 else failx "plist-eventsdir: pins CATALYST_EVENTS_DIR when set" "$OUT_ED"; fi
 
+# --- plist Loki/OTel endpoint pinning (Codex P2): the enforce-mode publisher derives
+#     its interim Loki-tail inbound source from these; dropping them silently stops
+#     cross-host merges after reboot/restart. ---
+OUT_LK="$(CATALYST_LOKI_QUERY_URL="http://loki:3100" OTEL_EXPORTER_OTLP_ENDPOINT="http://otel:4317" \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q '<key>CATALYST_LOKI_QUERY_URL</key>' <<<"$OUT_LK" && grep -q '<string>http://loki:3100</string>' <<<"$OUT_LK"; then
+  pass "plist-loki: pins CATALYST_LOKI_QUERY_URL when set"
+else failx "plist-loki: pins CATALYST_LOKI_QUERY_URL when set" "$OUT_LK"; fi
+if grep -q '<key>OTEL_EXPORTER_OTLP_ENDPOINT</key>' <<<"$OUT_LK" && grep -q '<string>http://otel:4317</string>' <<<"$OUT_LK"; then
+  pass "plist-loki: pins OTEL_EXPORTER_OTLP_ENDPOINT when set"
+else failx "plist-loki: pins OTEL_EXPORTER_OTLP_ENDPOINT when set" "$OUT_LK"; fi
+
 # --- plist XML escaping (Codex P2): an env value with an XML metacharacter (e.g. a
 #     hub URL with &) must be escaped so the plist stays well-formed and loadable. ---
 OUT_XE="$(CATALYST_COORDINATION_HUB_URL='https://hub.example/p?x=1&y=2<z>"q"' \
