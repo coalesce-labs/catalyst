@@ -92,6 +92,8 @@ import {
   HELD_LABEL_NEEDS_INPUT,
   // CTL-1524 (C4a): hoisted dead-host computation (one surviving-roster read)
   computeDeadHosts,
+  // CTL-1667: current-run PR reader (for terminalDoneOnce gate tests)
+  readCurrentRunPrNumber,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
@@ -13432,5 +13434,92 @@ describe("CTL-1605 review: STEP A terminal-stale live label refresh", () => {
     // SAME tick, even though its TTL has not elapsed — a later hydrate must
     // re-read fresh rather than serve the pre-write (unlabeled) descriptor.
     expect(cache.getRelations("CTL-32")).toBeUndefined();
+  });
+});
+
+// ─── CTL-1667: terminalDoneOnce current-PR-merged gate ───────────────────────
+// The gate inside terminalDoneOnce requires the current run's phase-pr.json
+// PR number to be MERGED on GitHub before writing Done.  Mirrors the existing
+// reconcileTerminalBackstop GATE 2 (`prAdapter.prView`), but applied by the
+// PRIMARY Done writer on every terminal sweep hit.
+describe("CTL-1667: terminalDoneOnce current-PR-merged gate", () => {
+  // Dispatch stub at module scope (fakeDispatch is module-level).
+  const ctl1667Dispatch = fakeDispatch();
+
+  // Helper: write phase-pr.json + a teardown "done" signal for a ticket.
+  function writePrSignals(ticket, prNumber) {
+    writeSignalRaw(ticket, "pr", { ticket, phase: "pr", status: "done", pr: { number: prNumber } });
+    writeSignal(ticket, "teardown", "done");
+  }
+
+  // Helper: minimal writeStatus stub that captures applyTerminalDone calls.
+  function makeWriteStatus(dones) {
+    return {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: (a) => dones.push(a),
+      applyLabel: () => {},
+    };
+  }
+
+  test("CTL-1667: terminalDoneOnce does NOT write Done when current PR is OPEN", () => {
+    writePrSignals("CTL-70", 700);
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: { prView: () => ({ state: "OPEN", mergedAt: null }) },
+    });
+    expect(dones).toEqual([]); // Done refused — current PR is OPEN
+  });
+
+  test("CTL-1667: terminalDoneOnce writes Done when current PR is MERGED", () => {
+    writePrSignals("CTL-71", 710);
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "2026-08-07T00:00:00Z" }) },
+    });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-71" }));
+  });
+
+  test("CTL-1667: no phase-pr.json and no PR number → legacy behavior (Done allowed)", () => {
+    // No phase-pr.json written: only teardown signal.
+    writeSignal("CTL-72", "teardown", "done");
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      // prAdapter provided — but readCurrentRunPrNumber returns null (no phase-pr.json),
+      // so the gate is skipped and Done is allowed (preserves legacy / no-PR-opener behavior).
+      prAdapter: { prView: () => ({ state: "OPEN", mergedAt: null }) },
+    });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-72" }));
+  });
+
+  test("CTL-1667: prView throws → fail-closed, do NOT write Done", () => {
+    writePrSignals("CTL-73", 730);
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: { prView: () => { throw new Error("gh down"); } },
+    });
+    expect(dones).toEqual([]); // conservative: no Done on unverifiable merge
+  });
+
+  test("CTL-1667: readCurrentRunPrNumber returns the PR number from phase-pr.json", () => {
+    writeSignalRaw("CTL-74", "pr", { ticket: "CTL-74", phase: "pr", status: "done", pr: { number: 999 } });
+    expect(readCurrentRunPrNumber(orchDir, "CTL-74")).toBe(999);
+  });
+
+  test("CTL-1667: readCurrentRunPrNumber returns null when phase-pr.json absent", () => {
+    // CTL-74b has no phase-pr.json — just ensure the dir exists
+    mkdirSync(join(orchDir, "workers", "CTL-74b"), { recursive: true });
+    expect(readCurrentRunPrNumber(orchDir, "CTL-74b")).toBeNull();
   });
 });

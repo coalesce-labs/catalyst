@@ -941,6 +941,17 @@ export const PREEMPTED_STATUS = "preempted";
 // Cleared on stopScheduler/__resetForTests (see daemon module state section).
 const rankedAboveSince = new Map();
 
+// readCurrentRunPrNumber — return the current run's PR number from phase-pr.json,
+// or null if the file is absent or malformed (CTL-1667).
+export function readCurrentRunPrNumber(orchDir, ticket) {
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-pr.json");
+    return JSON.parse(readFileSync(p, "utf8"))?.pr?.number ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
 // CTL-1660 P1 (Codex #3081): entries are inserted in ASCENDING mtime order (oldest
 // dispatch first, most-recently-touched signal last), not raw readdirSync order
@@ -3108,6 +3119,10 @@ export function terminalDoneOnce(
     // CTL-1157 A1: injectable fence decision (deterministic in tests). Production
     // uses the real fenceGuard, which reads the cross-host claim generation.
     fence = fenceGuard,
+    // CTL-1667: injectable prAdapter for the current-PR-merged gate. The same
+    // prAdapter already threaded to reconcileTerminalBackstop; schedulerTick
+    // passes it through to both callers from the same opts object.
+    prAdapter = undefined,
   } = {}
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
@@ -3133,6 +3148,27 @@ export function terminalDoneOnce(
     // stalled/failed branch uses immediately before its needs-human write.
     stampFenceSuppress(orchDir, ticket, now());
     return null;
+  }
+  // CTL-1667 — GATE: the current run's PR must be MERGED before Done.
+  // Mirrors reconcileTerminalBackstop GATE 2 (`prAdapter.prView`). Engages only
+  // when a current PR number is resolvable from phase-pr.json; when it is absent
+  // the gate is skipped and today's behavior (no-PR tickets complete) is preserved.
+  // Fail-closed: an unverifiable merge (prView throws or missing prAdapter while a
+  // PR number IS resolvable) refuses Done rather than assuming success.
+  // Reuses the same merged definition as reconcileTerminalBackstop:3126.
+  {
+    const currentPrNum = readCurrentRunPrNumber(orchDir, ticket);
+    if (currentPrNum != null) {
+      if (!prAdapter || typeof prAdapter.prView !== "function") return null; // can't verify → fail-closed
+      let merged = false;
+      try {
+        const view = prAdapter.prView(ticket, { number: currentPrNum });
+        merged = !!(view && (view.state === "MERGED" || view.mergedAt != null));
+      } catch {
+        return null; // unverifiable merge → fail-closed, refuse Done
+      }
+      if (!merged) return null; // current PR still open → do NOT write Done
+    }
   }
   // CTL-1157 (ALARM-NOT-BLOCK — THE REVERSAL): the terminal sweep writes Done
   // DIRECTLY (no agent to reason). The earlier behavior REFUSED the write when an
@@ -7289,6 +7325,7 @@ export function schedulerTick(
         checkOpenPrs,
         emitDoneWithOpenPr,
         emitDoneApplied,
+        prAdapter, // CTL-1667: thread through for the current-PR-merged gate
       });
       // CTL-764 finding 7: emit the terminal Done stage transition on a REAL Done
       // write — independent of the needs-human clear below (a normally-completed
