@@ -111,6 +111,7 @@ import {
 // recovery evidence attachment (revives the structurally-dead R12 branch).
 import { collectBeliefsTick, getBeliefsDb, getEscalateHumanBelief } from "./beliefs/collector.mjs";
 import { buildRecoveryItems } from "./recovery-evidence.mjs";
+import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator re-arm
 // CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
 import {
   isIntentEffective,
@@ -302,6 +303,10 @@ import {
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
 // flip enforce on — the mode gate stays at its safe 'off' default (ADR-023).
 import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
+// CTL-1641: the production escalate seam (needs-human label + authored Linear
+// comment). Wired into the runTick unstuckSweep literal; fires ONLY in enforce
+// mode on candidates the escalate branch reaches. Does NOT flip enforce on.
+import { buildUnstuckEscalateSeam } from "./unstuck-escalate-seam.mjs";
 import {
   readUnstuckSweepConfig,
   readRecoveryPassConfig,
@@ -3369,6 +3374,10 @@ export function defaultClearStall(orchDir, writeStatus) {
     } catch {
       /* best-effort */
     }
+    // 5. CTL-1643: clear the durable escalation record so the next same-episode
+    //    gate starts fresh. Without this, the labelAttempts > 0 guard in
+    //    escalateOnce suppresses the re-escalation event after the operator re-arms.
+    forgetDurableEscalation(orchDir, ticket);
     return true;
   };
 }
@@ -4895,7 +4904,8 @@ export function schedulerTick(
           ureport.acted.length ||
           ureport.wouldAct.length ||
           ureport.escalated.length ||
-          ureport.wouldEscalate.length
+          ureport.wouldEscalate.length ||
+          ureport.escalateFailures.length          // CTL-1641
         ) {
           log.info(
             {
@@ -4904,6 +4914,7 @@ export function schedulerTick(
               wouldAct: ureport.wouldAct.length,
               escalated: ureport.escalated.length,
               wouldEscalate: ureport.wouldEscalate.length,
+              escalateFailures: ureport.escalateFailures.length,   // CTL-1641
               skipped: ureport.skipped.length,
               failed: ureport.failed.length,
             },
@@ -8130,6 +8141,39 @@ function runTick() {
             },
             // runGit / fs primitives / emitPhaseComplete fall back to real defaults
             // inside unstuck-act-seams.mjs (git, node:fs, phase-agent-emit-complete).
+          }),
+        // CTL-1641: wire the production escalate seam. Fires ONLY on the enforce
+        // branch (the driver calls escalate solely when decision.action === "escalate");
+        // the mode gate (readUnstuckSweepConfig, default 'off') is UNTOUCHED, so
+        // production stays inert until an operator opts in. Operators can override via
+        // runningOpts.unstuckEscalate. The census is already HRW-gated by
+        // ownsForRecovery at the schedulerTick call site, so no second fenceGuard here.
+        escalate:
+          runningOpts.unstuckEscalate ??
+          buildUnstuckEscalateSeam({
+            orchDir: runningOpts.orchDir,
+            writeStatus: runningOpts.writeStatus ?? linearWrite,
+            env: process.env,
+            resolveWorktreePath: (ticket) => {
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+              }
+              return null;
+            },
+            queryPR: (ticket) => {
+              const adapter = runningOpts.prAdapter;
+              if (!adapter || typeof adapter.prView !== "function") return null;
+              let pr = null;
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket) { pr = sig.raw?.pr ?? sig.pr ?? null; if (pr?.number) break; }
+              }
+              if (!pr?.number) return null;
+              try {
+                const view = adapter.prView(ticket, pr);
+                if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
+                return view?.state ?? null;
+              } catch { return null; }
+            },
           }),
         // emit: the dedicated unstuck unified-log emitter (NOT emitReapIntent,
         // whose closed vocabulary throws on unstuck.* — CTL-1064). Explicit here

@@ -287,6 +287,16 @@ clean-pass result may arrive as a reaction or a plain comment rather than a stru
 object, so detect it via reactions/comments, not only the reviews API. A re-review after a fix
 push may need to be requested explicitly rather than firing automatically.
 
+**Deferring lower-priority findings after round one.** Fix every P0/P1 finding immediately, on
+every review round — that severity is never deferred. On a PR's *first* round of review-driven
+fixes, use judgment on P2-and-lower findings: fix the ones that are real, cheap, and clearly
+correct; defer the rest. On any later round (a re-review after a remediation push), P2-and-lower is
+always deferred, no exceptions — even a trivial one-liner goes to a follow-up ticket, not an inline
+fix: file the ticket, reply on the thread linking it, and resolve the thread. This still satisfies
+"every review thread resolved" above — deferral resolves the thread via that reply, it does not
+leave it open. The point is to stop chasing progressively finer findings across many review↔fix
+rounds; see `catalyst-dev:review-comments` for the mechanism.
+
 ## Reference Docs
 
 Read these on demand:
