@@ -424,6 +424,23 @@ echo "$_dead_pid" > "$RT_PIDFILE"
 expect_eq "_vn_drain_disabled: dead-pid marker → env-file fallback → yes" "yes" \
   "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
 
+# Round-6 P2: the marker's RECORDED pidFile is honored even when the caller did not
+# inherit EXECUTION_CORE_PID_FILE — otherwise a relocated-pid-file host rejects every
+# valid snapshot and silently falls back to the mutable env file.
+RT_RELOCATED="${DRAIN_SCRATCH}/relocated.pid"
+echo "$$" > "$RT_RELOCATED"
+printf '{"pid":%s,"pidFile":"%s","startedAt":"x","drainDisabled":true,"bootDrained":false}\n' "$$" "$RT_RELOCATED" > "$RT_MARKER"
+rm -f "$RT_PIDFILE"   # the DEFAULT path does not exist; only the recorded one does
+expect_eq "_vn_drain_disabled: recorded pidFile honored without env inheritance" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED EXECUTION_CORE_PID_FILE; source "'"$STACK"'"; _vn_drain_disabled' )"
+expect_eq "_vn_drained: recorded pidFile honored, flag present but ignored" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED EXECUTION_CORE_PID_FILE; source "'"$STACK"'"; _vn_drained' )"
+# "pidFile":null (daemon started without --pid-file) falls through to the env/default chain.
+echo "$$" > "$RT_PIDFILE"
+printf '{"pid":%s,"pidFile":null,"startedAt":"x","drainDisabled":true,"bootDrained":false}\n' "$$" > "$RT_MARKER"
+expect_eq "_vn_drain_disabled: pidFile:null falls back to the default path" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED EXECUTION_CORE_PID_FILE; source "'"$STACK"'"; _vn_drain_disabled' )"
+
 # Round-4 P2: alive pid, but daemon.pid names a DIFFERENT daemon → marker untrusted,
 # fall back to the env file (which carries the override).
 printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$$" > "$RT_MARKER"

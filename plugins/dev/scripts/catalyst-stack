@@ -3144,10 +3144,18 @@ _vn_daemon_runtime_env() {
   local ec_dir="${CATALYST_DIR:-$HOME/catalyst}/execution-core"
   local marker="${ec_dir}/daemon-runtime-env.json"
   [[ -f "$marker" ]] || return 1
-  local pid dd bd of_record
+  local pid dd bd of_record pid_path recorded
   pid=$(grep -o '"pid":[0-9]*' "$marker" | head -1 | cut -d: -f2)
   [[ -n "$pid" ]] || return 1
-  of_record=$(tr -d '[:space:]' <"${EXECUTION_CORE_PID_FILE:-${ec_dir}/daemon.pid}" 2>/dev/null)
+  # Round-6 P2: prefer the pid-file path the daemon RECORDED, matching config.mjs
+  # readDaemonRuntimeEnv. A standalone verify-node does not inherit the daemon's
+  # EXECUTION_CORE_PID_FILE, so re-deriving the path would reject a valid live
+  # snapshot on a relocated-pid-file host and fall back to the mutable env file —
+  # the exact failure this mechanism exists to prevent. `"pidFile":null` (daemon
+  # started without --pid-file) yields no match and falls through to the env chain.
+  recorded=$(grep -o '"pidFile":"[^"]*"' "$marker" | head -1 | cut -d'"' -f4)
+  pid_path="${recorded:-${EXECUTION_CORE_PID_FILE:-${ec_dir}/daemon.pid}}"
+  of_record=$(tr -d '[:space:]' <"$pid_path" 2>/dev/null)
   [[ "$of_record" == "$pid" ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   dd=$(grep -o '"drainDisabled":[a-z]*' "$marker" | head -1 | cut -d: -f2)
