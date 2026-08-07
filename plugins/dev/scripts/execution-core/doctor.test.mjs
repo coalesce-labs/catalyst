@@ -646,6 +646,30 @@ describe("checkDaemonToolPath", () => {
     // smoke-probes linearis + claude (node is resolution-only)
     expect(probed).toEqual(["linearis", "claude"]);
   });
+
+  it("CAT-29 prefers the running daemon PATH and reports plist disagreement", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: "/opt/homebrew/bin:/usr/bin",
+      runningFacts: { pid: 42, path: "/usr/bin" },
+      resolveInPath: (cmd, path) => path.includes("homebrew") || cmd !== "linearis",
+      smokeProbe: () => 0,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("running daemon");
+    expect(checks[0].detail).toContain("disagrees");
+    expect(checks[0].detail).toContain("linearis");
+  });
+
+  it("CAT-29 falls back to the plist when running boot facts are absent", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      runningFacts: null,
+      resolveInPath: () => true,
+      smokeProbe: () => 0,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("launchd");
+  });
 });
 
 // ─── Phase 5c: checkWebhookIngestion (CTL-1284) ──────────────────────────────

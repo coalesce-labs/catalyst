@@ -25,7 +25,7 @@
 // Exit code: number of FAIL-level checks (0 = all clear).
 
 import { readFileSync, statSync, existsSync } from "node:fs";
-import { resolve, dirname, isAbsolute } from "node:path";
+import { resolve, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -955,6 +955,20 @@ function defaultDaemonPath() {
   }
 }
 
+// CAT-29: prefer facts published by the live daemon. A correct installed plist
+// cannot certify a daemon that was started earlier from a broken interactive
+// environment. Stale facts are ignored by verifying that their PID is alive.
+function defaultRunningDaemonFacts() {
+  try {
+    const facts = JSON.parse(readFileSync(join(getExecutionCoreDir(), "boot-facts.json"), "utf8"));
+    if (!Number.isInteger(facts?.pid) || typeof facts?.path !== "string") return null;
+    process.kill(facts.pid, 0);
+    return facts;
+  } catch {
+    return null;
+  }
+}
+
 // defaultResolveInPath — does `cmd` resolve to an executable under `pathStr`?
 // Uses `command -v` with positional args (no shell injection).
 function defaultResolveInPath(cmd, pathStr) {
@@ -981,30 +995,35 @@ function defaultSmokeProbe(cmd, args, pathStr) {
 // checkDaemonToolPath — assert the daemon's launchd PATH can resolve and run the
 // CLIs it shells out to. Injectable deps for unit testing.
 export function checkDaemonToolPath(deps = {}) {
+  const plistPath = deps.daemonPath !== undefined ? deps.daemonPath : defaultDaemonPath();
+  const runningFacts = deps.runningFacts !== undefined ? deps.runningFacts : defaultRunningDaemonFacts();
   const {
-    daemonPath = defaultDaemonPath(),
     resolveInPath = defaultResolveInPath,
     smokeProbe = defaultSmokeProbe,
     tools = ["linearis", "node", "claude"],
   } = deps;
+  const daemonPath = runningFacts?.path ?? plistPath;
 
   if (!daemonPath) {
     return [
       mkCheck(
         "daemon-tool-path",
         STATUS.WARN,
-        "no installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
+        "no running daemon boot facts or installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
       ),
     ];
   }
 
   const missing = tools.filter((t) => !resolveInPath(t, daemonPath));
   if (missing.length > 0) {
+    const source = runningFacts ? "running daemon" : "daemon launchd";
+    const disagreement =
+      runningFacts && plistPath && missing.every((tool) => resolveInPath(tool, plistPath));
     return [
       mkCheck(
         "daemon-tool-path",
         STATUS.FAIL,
-        `daemon launchd PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0). PATH=${daemonPath}`,
+        `${source} PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0).${disagreement ? " Running daemon PATH disagrees with the installed plist." : ""} PATH=${daemonPath}`,
       ),
     ];
   }
@@ -1033,7 +1052,7 @@ export function checkDaemonToolPath(deps = {}) {
     mkCheck(
       "daemon-tool-path",
       STATUS.PASS,
-      `daemon launchd PATH resolves linearis/node/claude and they run (no exit-127)`,
+      `${runningFacts ? "running daemon" : "daemon launchd"} PATH resolves linearis/node/claude and they run (no exit-127)`,
     ),
   ];
 }

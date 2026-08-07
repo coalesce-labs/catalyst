@@ -91,6 +91,12 @@ ctl708_wire_resolver
 # shellcheck source=lib/phase-artifact-gate.sh
 source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 
+# CAT-29: workers must not inherit a daemon's stale/broken PATH verbatim. The
+# shared leaf is the repository's single ordered, existence-tested derivation.
+# shellcheck source=lib/catalyst-agent-path.sh
+source "${SCRIPT_DIR}/lib/catalyst-agent-path.sh"
+export PATH="$(catalyst_agent_path "$PATH")"
+
 # _removal_guard_ok <path> — the single fail-closed predicate the recreate
 # `git worktree remove --force` site gates on (CTL-1417). Returns 0 (safe to
 # force-remove) ONLY when the guard function loaded AND cleared the path.
@@ -779,6 +785,19 @@ mark_launch_failed() {
 	fi
 }
 
+# Refuse before starting a worker that cannot perform its first real operation.
+# Use the existing launch-failure seam so the signal and canonical failure event
+# remain identical to every other pre-launch refusal.
+_missing_worker_tools=()
+for _required_tool in node linearis; do
+	command -v "$_required_tool" >/dev/null 2>&1 || _missing_worker_tools+=("$_required_tool")
+done
+if ((${#_missing_worker_tools[@]} > 0)); then
+	_missing_worker_tools_csv="$(IFS=,; echo "${_missing_worker_tools[*]}")"
+	mark_launch_failed "required-tool-unresolvable:${_missing_worker_tools_csv}"
+	die "required worker tool(s) unresolvable after PATH hardening: ${_missing_worker_tools_csv}"
+fi
+
 # ─── CTL-587: test-kill injection hook ─────────────────────────────────────
 #
 # `CATALYST_TEST_KILL_PHASE=<phase>:<mode>` lets the CTL-587 integration tests
@@ -891,6 +910,7 @@ compose_worker_settings_json() {
 		--arg enable_telemetry "$enable_telemetry" \
 		--arg metrics_exporter "$metrics_exporter" \
 		--arg logs_exporter "$logs_exporter" \
+		--arg worker_path "$PATH" \
 		--arg otlp_endpoint "$otlp_endpoint" \
 		--arg otlp_protocol "$otlp_protocol" \
 		--arg otel_attrs "$OTEL_RES_ATTRS" \
@@ -910,6 +930,7 @@ compose_worker_settings_json() {
            "CLAUDE_CODE_ENABLE_TELEMETRY": $enable_telemetry,
            "OTEL_METRICS_EXPORTER": $metrics_exporter,
            "OTEL_LOGS_EXPORTER": $logs_exporter,
+           "PATH": $worker_path,
            "AGENT_BROWSER_IDLE_TIMEOUT_MS": $ab_idle_timeout_ms
          }
          + (if $otlp_endpoint == "" then {} else { "OTEL_EXPORTER_OTLP_ENDPOINT": $otlp_endpoint } end)

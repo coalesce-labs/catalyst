@@ -1143,6 +1143,12 @@ export const RECONCILE_INTERVAL_MS =
 export const RECONCILE_FAILURE_ALERT_THRESHOLD =
   Number(process.env.EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD) || 3;
 
+// CAT-29: time-based total-blindness tripwire. This complements the count-based
+// threshold above, whose 10-minute polling cadence can otherwise delay an alarm
+// for 20–30 minutes during a from-boot outage.
+export const RECONCILE_BLIND_ALERT_MS =
+  Number(process.env.EXECUTION_CORE_RECONCILE_BLIND_ALERT_MS) || 5 * 60_000;
+
 // Debounce window: state_changed events that enter the eligible state coalesce
 // into one reconcile poll per affected project per burst.
 export const EVENT_DEBOUNCE_MS =

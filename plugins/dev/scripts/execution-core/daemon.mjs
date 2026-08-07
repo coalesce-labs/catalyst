@@ -136,6 +136,8 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
+import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
+import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
@@ -167,6 +169,33 @@ let _debounceTimer = null;
 let _stopMonitor = null;
 let _stopScheduler = null;
 let _pidFile = null;
+
+// CAT-29: publish the exact environment the running process booted with so
+// catalyst doctor can inspect reality instead of certifying only the installed
+// plist. Atomic replacement prevents readers observing a partial JSON body.
+export function writeBootFacts(
+  orchDir,
+  preflight,
+  { pid = process.pid, startedAt = new Date().toISOString(), path = process.env.PATH ?? "" } = {},
+) {
+  const file = join(orchDir, "boot-facts.json");
+  const tmp = `${file}.tmp`;
+  writeFileSync(
+    tmp,
+    JSON.stringify({
+      pid,
+      startedAt,
+      path,
+      preflight: {
+        ok: preflight?.ok === true,
+        missing: Array.isArray(preflight?.missing) ? preflight.missing : [],
+        degraded: preflight?.ok !== true,
+      },
+    }),
+  );
+  renameSync(tmp, file);
+  return file;
+}
 // CTL-649: reap-intent reconciler + periodic orphan-sweep timer.
 let _reaper = null;
 let _orphanTimer = null;
@@ -873,6 +902,7 @@ export function startDaemon({
   // CTL-1612: injectable GitHub-credential boot preflight. Tests inject a fake; in
   // production it probes `gh` for real. Advisory — never throws, never blocks boot.
   githubAuthPreflight = resolveGithubBootAuth,
+  bootDependencyPreflight = resolveBootDependencies,
   // CTL-862: injectable seams for the ownership boot-log. Tests inject a fixed
   // roster and eligible list; production resolves them from the real modules.
   readAllEligible = readAllEligibleTickets,
@@ -885,6 +915,7 @@ export function startDaemon({
   bootResolve = undefined,
 } = {}) {
   const orchDir = getExecutionCoreDir();
+  let bootDependencyState = { ok: true, missing: [], holdReason: null };
   ensureState(orchDir);
   // CTL-862: write the resolved config path back into the env so downstream
   // callers (getClusterHosts → getCatalystRepoDir) resolve the right repo
@@ -1161,6 +1192,8 @@ export function startDaemon({
     // never delay crash recovery. Advisory only: never throws, never blocks boot, and
     // alerts solely on a definitive 401.
     githubAuthPreflight({ env: process.env, log });
+    bootDependencyState = bootDependencyPreflight({ env: process.env, log });
+    writeBootFacts(orchDir, bootDependencyState);
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
@@ -1394,7 +1427,21 @@ export function startDaemon({
       // the same gate source fns the scheduler enforces (orchDir + concurrency are
       // both in scope here). Fail-open: readAdmissionState never throws.
       _heartbeat = startHeartbeat({
-        admissionFn: () => readAdmissionState({ orchDir, concurrency }),
+        admissionFn: () => bootDependencyState.ok
+          ? readAdmissionState({ orchDir, concurrency })
+          : { accepting: false, holdReason: BOOT_DEPENDENCY_HOLD_REASON },
+        boardReachableFn: () => {
+          if (!bootDependencyState.ok) {
+            return { reachable: false, blindTeams: listProjectsFn().length };
+          }
+          const projects = listProjectsFn();
+          const blindTeams = projects.filter((p) => {
+            const team = typeof p === "string" ? p : (p.team ?? p.key);
+            const state = team ? getReconcileHealth(team) : null;
+            return state?.consecutiveFailures > 0;
+          }).length;
+          return { reachable: projects.length === 0 || blindTeams < projects.length, blindTeams };
+        },
         // CTL-1420 (#17): carry this host's in-flight tickets on every node.heartbeat
         // so a peer can read liveness + ownership from Loki (retiring the Linear
         // heartbeat attachment). Same local signal-scan source the publisher uses.
