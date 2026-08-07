@@ -452,7 +452,11 @@ export function writeLayer2MaxParallel(layer2Path, next, {
     if (!existing.catalyst.orchestration.executionCore) existing.catalyst.orchestration.executionCore = {};
     existing.catalyst.orchestration.executionCore.maxParallel = next;
     const tmp = `${layer2Path}.tmp.${process.pid}`;
-    writeFile(tmp, JSON.stringify(existing, null, 2));
+    // mode: 0o600 — Layer-2 can carry secrets (doctor's layer2-perms check requires
+    // 600). Without this the tmp file is created at the default 0o666&~umask (644),
+    // and POSIX rename() replaces the destination's permission bits along with its
+    // content, silently reverting any prior chmod 600 on every autotune write.
+    writeFile(tmp, JSON.stringify(existing, null, 2), { mode: 0o600 });
     rename(tmp, layer2Path);
     return true;
   } catch (err) {
