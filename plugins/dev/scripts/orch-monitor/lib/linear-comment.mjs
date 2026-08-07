@@ -44,14 +44,16 @@
 // success payload while silently not applying — the GraphQL path is the one that
 // demonstrably works for mutations. Reads stay on the replica (linear-thread.mjs).
 
-// CTL-1616 PR3: fold the env-alias leg of resolveLinearToken's chain onto the
-// shared secret-contract engine (design §8 PR3 table — this file was the one
-// outlier using `||` where the other 8 hand-rolled copies used `??`). Only the
-// env-alias LEG folds here: the Layer-2 `linear.apiToken` personal-token
-// fallback below is this file's own distinct chain (a different secret from
-// the registry's `linear-api-token` row's config-json shape) and is out of
-// scope for this PR.
-import { resolveSecret } from "../../lib/secret-contract.mjs";
+// CTL-1616 PR3 folded the env-alias leg of the OLD single-value
+// resolveLinearToken onto the shared secret-contract engine's resolveSecret().
+// #19 (below) supersedes that here: this file's `linearTokenCandidates` needs
+// LINEAR_API_TOKEN and LINEAR_API_KEY as two INDEPENDENT candidates (walking
+// each one's identity, since they can legitimately hold different
+// credentials), and resolveSecret's alias ladder collapses them to one value
+// — so this file reads the two env vars directly instead of importing
+// resolveSecret. Any future site here that only needs a single canonical
+// value (not a multi-candidate identity walk) should still prefer
+// resolveSecret("linear-api-token", ...) over a hand-rolled `??` ladder.
 
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 
@@ -60,7 +62,8 @@ const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const REQUEST_TIMEOUT_MS = 15_000;
 
 /**
- * Resolve the Linear credential to post the reply with.
+ * Every place a personal Linear token might be configured, in priority order,
+ * deduplicated, empty/falsy entries dropped.
  *
  * ── why this cannot be env-only ──────────────────────────────────────────────
  * An env-only resolver makes this feature INERT on the normal persistent launch
@@ -71,27 +74,53 @@ const REQUEST_TIMEOUT_MS = 15_000;
  * though Linear is fully configured — the same class of silent no-op the
  * authorship gate exists to prevent, arriving through a different door.
  *
- * Order: env (`LINEAR_API_TOKEN`, then the `LINEAR_API_KEY` alias) → Layer-2
- * `linear.apiToken`.
+ * ── why the FIRST non-empty candidate is not good enough either (2026-08-02) ──
+ * `LINEAR_API_TOKEN`/`LINEAR_API_KEY` are not exclusively a personal-token slot:
+ * `lib/linear-app-actor.sh` exports the APP-ACTOR's own OAuth token into these
+ * exact two names for any daemon (broker/execution-core/monitor) that needs bot
+ * credentials for its normal automated reads/writes — a monitor process that also
+ * sources that script (as fixed for the CAT-1 liveness dashboard) will ALWAYS
+ * have a non-empty `LINEAR_API_TOKEN`, but it is the bot's, not a human's. The
+ * old "first non-empty string wins" resolver stopped right there and never even
+ * looked at Layer-2 config, so a correctly-configured personal `linear.apiToken`
+ * was permanently unreachable on such a host — not a missing-config problem, an
+ * unreachable-config one. `postOperatorComment` below now walks EVERY candidate
+ * this function returns and identity-checks each one, so a bot-shaped env value
+ * no longer shadows a genuine personal token sitting in config.
  *
- * ── the one credential we must NEVER fall back to ────────────────────────────
+ * Order: env `LINEAR_API_TOKEN` → env `LINEAR_API_KEY` → Layer-2 `linear.apiToken`
+ * → Layer-2 `catalyst.linear.apiToken` (BOTH config shapes are accepted —
+ * `linear.apiToken` is what the reference schema documents
+ * (website/.../reference/configuration.md) and what real installs carry, while
+ * the nested `catalyst.linear.apiToken` shows up in some setups; reading only one
+ * shape means a validly-configured host can still resolve nothing).
+ *
+ * ── the one credential we must NEVER include ─────────────────────────────────
  * The same Layer-2 file also carries `catalyst.linear.agent.accessToken` — an
  * APP-ACTOR OAuth token. Reaching for it would post the reply as the app, which
  * CTL-1567's provenance gate ignores, making the reply silently do nothing. It is
- * deliberately NOT in the chain. (The authorship gate below would catch it anyway;
- * this is the belt to that braces.)
+ * deliberately NOT in this list. (The authorship gate would catch it anyway if it
+ * somehow got resolved to a human-looking viewer; this is the belt to that brace.)
  */
-export function resolveLinearToken(env = process.env, { projectConfig = null } = {}) {
-  // CTL-1616 PR3: was `env.LINEAR_API_TOKEN || env.LINEAR_API_KEY || null` —
-  // folded onto resolveSecret's env-alias resolver (same alias precedence,
-  // same `env` injected here for tests). Precise semantics, unchanged from
-  // the old `||` ladder: an EMPTY-STRING token falls through to
-  // LINEAR_API_KEY (falsy before, non-empty-check now); a WHITESPACE-ONLY
-  // token wins the env leg in BOTH versions (truthy before, non-empty now),
-  // then fails the `.trim()` check below and falls to the Layer-2 personal
-  // token — SKIPPING LINEAR_API_KEY, exactly as it always did.
-  const fromEnv = resolveSecret("linear-api-token", { env }).value;
-  if (typeof fromEnv === "string" && fromEnv.trim() !== "") return fromEnv.trim();
+export function linearTokenCandidates(env = process.env, { projectConfig = null } = {}) {
+  const candidates = [];
+  const add = (v) => {
+    if (typeof v !== "string") return;
+    const trimmed = v.trim();
+    if (trimmed !== "" && !candidates.includes(trimmed)) candidates.push(trimmed);
+  };
+  // CTL-1616 PR3 folded the OLD single-value `resolveLinearToken` onto
+  // resolveSecret's env-alias resolver (TOKEN-before-KEY precedence, one
+  // value out). That collapse is right for a caller that wants "the one
+  // token", but WRONG here: this function's entire purpose (#19) is walking
+  // every DISTINCT raw candidate's identity, because LINEAR_API_TOKEN and
+  // LINEAR_API_KEY can legitimately hold two different credentials (e.g. a
+  // bot token in one, a human's in the other) — resolveSecret would silently
+  // discard whichever alias it doesn't pick, defeating the multi-candidate
+  // walk. So the two env aliases stay independent entries here; resolveSecret
+  // is still the right call for any site that only needs a single value.
+  add(env.LINEAR_API_TOKEN);
+  add(env.LINEAR_API_KEY);
   // Layer-2 personal token — the launchd path's only source. BOTH shapes are
   // accepted: `linear.apiToken` is what the reference schema documents
   // (website/.../reference/configuration.md) and what real installs carry, while
@@ -99,13 +128,19 @@ export function resolveLinearToken(env = process.env, { projectConfig = null } =
   // one shape means a validly-configured host resolves nothing and every reply
   // returns `no_token` — the failure this whole fallback exists to prevent, so it
   // is not worth being narrow about.
-  for (const candidate of [
-    projectConfig?.linear?.apiToken,
-    projectConfig?.catalyst?.linear?.apiToken,
-  ]) {
-    if (typeof candidate === "string" && candidate.trim() !== "") return candidate.trim();
-  }
-  return null;
+  add(projectConfig?.linear?.apiToken);
+  add(projectConfig?.catalyst?.linear?.apiToken);
+  return candidates;
+}
+
+/**
+ * The single highest-priority Linear credential. Kept for any caller that only
+ * ever wants "the one token" (e.g. `resolveIssueId` doesn't care about identity);
+ * `postOperatorComment` uses `linearTokenCandidates` directly instead, since it
+ * must try every candidate's IDENTITY, not just take the first non-empty string.
+ */
+export function resolveLinearToken(env = process.env, opts = {}) {
+  return linearTokenCandidates(env, opts)[0] ?? null;
 }
 
 /**
@@ -267,63 +302,10 @@ const COMMENT_CREATE = `
   }
 `;
 
-/**
- * Post a comment to a Linear ticket as the operator.
- *
- * Discriminated result — the route maps each to an HTTP status, and EVERY
- * non-`posted` outcome must restore the inbox row (§4):
- *
- *   { status: "posted", commentId, author }   → the comment is live and
- *                                               human-authored; CTL-1567 will
- *                                               clear `needs-human` within seconds.
- *   { status: "no_token" }                    → no Linear credential in this env.
- *   { status: "bot_identity", author }        → REFUSED before posting: the token
- *                                               is an app actor, so the comment
- *                                               could not have resolved the ask.
- *   { status: "empty_body" }                  → nothing to say; not a Linear call.
- *   { status: "not_found", ticket }           → no such issue.
- *   { status: "error", message }              → transport / API / mutation failure.
- *
- * All collaborators are injected so every branch is unit-tested with no network.
- */
-export async function postOperatorComment(
-  { ticket, body },
-  {
-    fetchImpl = fetch,
-    env = process.env,
-    config = null,
-    projectConfig = null,
-    resolveIdentity = resolveAuthorIdentity,
-    resolveIssue = resolveIssueId,
-  } = {},
-) {
-  // Emptiness is validated on the TRIMMED value, but the body posted below is the
-  // operator's verbatim text — see the postBody note.
-  if (typeof body !== "string" || body.trim() === "") return { status: "empty_body" };
-
-  const token = resolveLinearToken(env, { projectConfig });
-  if (token == null) return { status: "no_token" };
-
-  // ── the authorship gate ────────────────────────────────────────────────────
-  // Resolve identity BEFORE mutating. A bot token is refused with nothing posted,
-  // so the operator is told the truth instead of being shown a phantom success.
-  const identity = await resolveIdentity(
-    { token, botUserIds: knownBotUserIds({ config, projectConfig }) },
-    { fetchImpl },
-  );
-  if (!identity.ok) {
-    return { status: "error", message: `could not verify comment authorship: ${identity.error}` };
-  }
-  if (identity.isBot) {
-    return {
-      status: "bot_identity",
-      author: { id: identity.id, name: identity.name },
-      message:
-        "refused: this monitor's Linear token is an app actor, and CTL-1567 ignores " +
-        "app-actor comments — the reply would not have cleared needs-human.",
-    };
-  }
-
+/** The issue-lookup + commentCreate tail, run only once a candidate token has
+ *  resolved to a genuine human identity. Split out so postOperatorComment's
+ *  candidate loop doesn't duplicate it per-candidate. */
+async function createComment({ token, ticket, body, identity, fetchImpl, resolveIssue }) {
   const issue = await resolveIssue({ token, ticket }, { fetchImpl });
   if (!issue.ok) {
     // Only a CONFIRMED miss is `not_found`. An HTTP 500 during the lookup is a
@@ -361,5 +343,98 @@ export async function postOperatorComment(
       id: typeof user?.id === "string" ? user.id : identity.id,
       name: typeof user?.name === "string" ? user.name : identity.name,
     },
+  };
+}
+
+/**
+ * Post a comment to a Linear ticket as the operator.
+ *
+ * Discriminated result — the route maps each to an HTTP status, and EVERY
+ * non-`posted` outcome must restore the inbox row (§4):
+ *
+ *   { status: "posted", commentId, author }   → the comment is live and
+ *                                               human-authored; CTL-1567 will
+ *                                               clear `needs-human` within seconds.
+ *   { status: "no_token" }                    → no Linear credential anywhere.
+ *   { status: "bot_identity", author }        → REFUSED before posting: every
+ *                                               configured token is an app actor,
+ *                                               so the comment could not have
+ *                                               resolved the ask.
+ *   { status: "empty_body" }                  → nothing to say; not a Linear call.
+ *   { status: "not_found", ticket }           → no such issue.
+ *   { status: "error", message }              → transport / API / mutation failure.
+ *
+ * ── multi-candidate identity walk (2026-08-02 fix) ───────────────────────────
+ * `linearTokenCandidates` may return several tokens (env AND config both set —
+ * e.g. env holds the app-actor's OAuth token per `linear-app-actor.sh`, config
+ * holds the operator's real personal key). Each is identity-checked IN ORDER;
+ * the first one that resolves to a genuine human posts the comment. A candidate
+ * that resolves to a bot is not a hard failure — it just means "try the next
+ * one" — so a personal token in Layer-2 config is no longer permanently
+ * shadowed by a bot token that happens to occupy the higher-priority env slot.
+ * Only when EVERY candidate is exhausted (all bot, or none configured at all)
+ * does this return a failure — `bot_identity` if at least one candidate
+ * resolved (as a bot), `no_token` if there were no candidates to try at all.
+ *
+ * All collaborators are injected so every branch is unit-tested with no network.
+ */
+export async function postOperatorComment(
+  { ticket, body },
+  {
+    fetchImpl = fetch,
+    env = process.env,
+    config = null,
+    projectConfig = null,
+    resolveIdentity = resolveAuthorIdentity,
+    resolveIssue = resolveIssueId,
+  } = {},
+) {
+  // Emptiness is validated on the TRIMMED value, but the body posted below is the
+  // operator's verbatim text — see the postBody note.
+  if (typeof body !== "string" || body.trim() === "") return { status: "empty_body" };
+
+  const candidates = linearTokenCandidates(env, { projectConfig });
+  if (candidates.length === 0) return { status: "no_token" };
+
+  const botUserIds = knownBotUserIds({ config, projectConfig });
+  let lastBotIdentity = null;
+  let lastVerifyError = null;
+
+  // ── the authorship gate ────────────────────────────────────────────────────
+  // Resolve identity BEFORE mutating, for EVERY candidate in priority order. A
+  // candidate that resolves to a bot is skipped (not refused) so a later, human
+  // candidate still gets a chance — only exhausting the whole list is a refusal.
+  for (const token of candidates) {
+    const identity = await resolveIdentity({ token, botUserIds }, { fetchImpl });
+    if (!identity.ok) {
+      lastVerifyError = identity.error;
+      continue;
+    }
+    if (identity.isBot) {
+      lastBotIdentity = identity;
+      continue;
+    }
+    // Found a genuine human — post with THIS token/identity, not the first
+    // candidate that happened to be non-empty.
+    return await createComment({ token, ticket, body, identity, fetchImpl, resolveIssue });
+  }
+
+  if (lastBotIdentity) {
+    return {
+      status: "bot_identity",
+      author: { id: lastBotIdentity.id, name: lastBotIdentity.name },
+      message:
+        candidates.length > 1
+          ? `refused: all ${candidates.length} configured Linear tokens resolve to an app ` +
+            "actor, and CTL-1567 ignores app-actor comments — the reply would not have " +
+            "cleared needs-human."
+          : "refused: this monitor's Linear token is an app actor, and CTL-1567 ignores " +
+            "app-actor comments — the reply would not have cleared needs-human.",
+    };
+  }
+  // No candidate ever resolved to a bot — every one errored (network/auth/etc).
+  return {
+    status: "error",
+    message: `could not verify comment authorship: ${lastVerifyError ?? "unknown error"}`,
   };
 }

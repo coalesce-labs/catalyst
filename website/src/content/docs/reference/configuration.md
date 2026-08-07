@@ -363,11 +363,30 @@ Never commit this. One file per project, linked by `projectKey`. It holds API ke
 
 | Integration | Required fields               | Used by                   |
 | ----------- | ----------------------------- | ------------------------- |
-| Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm |
+| Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm, orch-monitor inbox reply |
 | Sentry      | `org`, `project`, `authToken` | catalyst-debugging        |
 | PostHog     | `apiKey`, `projectId`         | catalyst-analytics        |
 
 Only set up the integrations you use — the setup script asks about each one.
+
+### `linear.apiToken` must be a PERSONAL token, not the app-actor's
+
+The orch-monitor Inbox's reply/unblock feature
+([`lib/linear-comment.mjs`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/orch-monitor/lib/linear-comment.mjs))
+posts comments as **you**, not as the Catalyst app — a Linear provenance gate (CTL-1567) deliberately
+ignores app-authored comments, so a reply posted as the bot would silently do nothing. It resolves a
+candidate token from, in priority order: env `LINEAR_API_TOKEN` → env `LINEAR_API_KEY` → this file's
+`linear.apiToken` → the nested `catalyst.linear.apiToken` — and identity-checks EACH candidate, using
+the first one that resolves to a real human (skipping, not failing on, any that resolve to an app
+actor).
+
+This matters because `LINEAR_API_TOKEN`/`LINEAR_API_KEY` are not exclusively a personal-token slot:
+`lib/linear-app-actor.sh` exports the app-actor's own OAuth token into those same two env vars for any
+daemon that needs bot credentials (broker/execution-core/monitor heartbeats). If your monitor process
+sources that script, its env will always carry a non-empty (but bot) token — the identity walk exists
+precisely so your real `linear.apiToken` here still gets tried and used instead of being permanently
+shadowed. Generate a personal key at Linear → Settings → API → Personal API keys (`lin_api_...`, not
+an OAuth `lin_oauth_...` value) and put it here.
 
 ## Cluster machine-level cloud token (`CATALYST_CLOUD_TOKEN`, CTL-1307)
 
