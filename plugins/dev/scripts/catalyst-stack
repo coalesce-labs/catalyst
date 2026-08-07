@@ -209,11 +209,6 @@ COORDINATION_STOP_GRACE_SECONDS="${COORDINATION_STOP_GRACE_SECONDS:-30}"
 # catalyst-state.sh; flock is absent on stock macOS). Serializes check-and-spawn so
 # two overlapping starts can't both pass the pid check and both spawn (Codex P1).
 COORDINATION_LOCK="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.start.lock"
-# Reclaim mutex: serializes the stale-lock takeover DECISION so two overlapping
-# starts can't both age-check the same stale lock and both remove+reacquire it —
-# an ownership-safe atomic takeover (Codex P1). Held only across the age-check +
-# removal (sub-second), never across the spawn.
-COORDINATION_RECLAIM_LOCK="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.reclaim.lock"
 
 # CTL-1348: the standalone catalyst-updater daemon (the 5th launchd agent). Installed
 # ONLY by the explicit 'catalyst-stack adopt-updater' cutover — NOT by install-services,
@@ -490,51 +485,56 @@ coordination_resolve() {
 # tick racing a manual start — the loser skips the tick (the winner establishes the
 # single publisher) rather than queueing a redundant spawn.
 # _coordination_lock_stale — true if the lock dir at $1 is older than the stale
-# threshold (mtime, via portable `find -mmin`). Both the main lock and the reclaim
-# mutex are held only briefly (the main across a sub-minute check-and-spawn incl. a
-# 30s stop-grace; the reclaim across a sub-second age-check + rmdir), so anything
-# past the threshold is an abandoned lock from a crashed start / powered-off host.
+# threshold (mtime, via portable `find -mmin`). The lock is held only briefly (a
+# sub-minute check-and-spawn, incl. a 30s stop-grace on a config-change restart),
+# so anything past the threshold is an abandoned lock from a crashed start /
+# powered-off host — never a live hold.
 _coordination_lock_stale() {
   [[ -n "$(find "$1" -maxdepth 0 -mmin +"${COORDINATION_LOCK_STALE_MIN:-5}" 2>/dev/null)" ]]
 }
 
+# start_coordination — serialize check-and-spawn so two overlapping starts (the
+# recurring LaunchAgent tick racing a manual `start`) can't both spawn a detached
+# publisher (Codex P1). The design is deliberately single-primitive — one mkdir
+# lock, no secondary mutex — because a nested reclaim mutex only RELOCATES the
+# stale-lock race up a level (each layer's own age-check + removal is itself a
+# TOCTOU). Two invariants make reclaim structurally unable to remove a live lock,
+# so `mkdir` stays the SOLE arbiter of ownership and double-spawn is impossible:
+#
+#   1. Ownership is ONLY ever a successful `mkdir "$COORDINATION_LOCK"`. Every
+#      reclaim path `continue`s and must win a fresh mkdir to proceed.
+#   2. A live holder writes a sentinel file into the lock dir immediately after
+#      acquiring, and reclaim removes a stale lock with `rmdir` — which REFUSES a
+#      non-empty directory. So a live (sentinel-bearing) lock can never be removed
+#      by a reclaimer; the age gate additionally covers the microsecond
+#      mkdir→sentinel window (a fresh lock is age ~0, far under the threshold).
+#
+# Two reclaimers racing a genuinely-stale (empty, aged) lock both `rmdir` it
+# (idempotent) then both `mkdir` — mkdir arbitrates a single winner; the loser sees
+# the winner's fresh lock and skips. (A lock leaked by SIGKILL/power-loss AFTER the
+# sentinel write is non-empty, so rmdir won't auto-clear it — force-removing it
+# would reintroduce exactly the ABA double-spawn race, so we deliberately don't;
+# it's cleared out-of-band, and impact is bounded since coordination-publish is
+# off by default.)
 start_coordination() {
   local guard=0
-  while ! mkdir "$COORDINATION_LOCK" 2>/dev/null; do
+  while true; do
+    if mkdir "$COORDINATION_LOCK" 2>/dev/null; then
+      : > "$COORDINATION_LOCK/owner"   # sentinel: a live lock is non-empty → rmdir-proof
+      break
+    fi
     guard=$((guard + 1))
     if [[ "$guard" -gt 8 ]]; then
       log "coordination-publish start already in progress — skipping this tick"
       return 0
     fi
-    # Lock held. Decide UNDER a dedicated reclaim mutex whether this is a crashed
-    # start (reclaim it) or a live peer (skip). Serializing the DECISION is what
-    # makes the takeover ownership-safe: two overlapping starts can no longer both
-    # age-check the same stale dir and both remove-then-reacquire it (Codex P1). A
-    # bare rmdir/mv can't fix this — a peer that already reclaimed leaves a FRESH
-    # live lock at the same path, so an unconditional removal would delete it. While
-    # the main lock dir exists nobody can mkdir it, so removing it here — after
-    # re-confirming staleness under the mutex — can never delete a live lock.
-    if mkdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null; then
-      if _coordination_lock_stale "$COORDINATION_LOCK"; then
-        log "coordination-publish: reclaiming stale start lock"
-        rmdir "$COORDINATION_LOCK" 2>/dev/null || true
-        rmdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null || true
-        continue    # stale cleared — contend for a fresh mkdir
-      fi
-      # Main lock is live (a peer's in-flight start) — leave it, skip this tick.
-      rmdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null || true
-      log "coordination-publish start already in progress — skipping this tick"
-      return 0
-    fi
-    # Couldn't take the reclaim mutex. If IT is stale, a start was killed / the host
-    # powered off after acquiring it but before releasing — recover it too, else it
-    # would wedge every future tick (Codex P2). Removing an abandoned reclaim mutex
-    # is benign even under a race (it guards only the decision, not the spawn — the
-    # eventual re-mkdir has a single winner). If it's fresh, a live peer owns the
-    # in-flight reclaim decision: skip.
-    if _coordination_lock_stale "$COORDINATION_RECLAIM_LOCK"; then
-      log "coordination-publish: reclaiming abandoned reclaim mutex"
-      rmdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null || true
+    # Reclaim ONLY an abandoned lock — old enough that no live check-and-spawn could
+    # still hold it. rmdir refuses a non-empty (live, sentinel-bearing) lock, so
+    # this can never delete a live lock; the age gate covers the mkdir→sentinel
+    # window. A fresh peer lock fails both the age gate and (once its sentinel
+    # lands) the rmdir, so a live peer is simply skipped.
+    if _coordination_lock_stale "$COORDINATION_LOCK" && rmdir "$COORDINATION_LOCK" 2>/dev/null; then
+      log "coordination-publish: reclaimed an abandoned start lock"
       continue
     fi
     log "coordination-publish start already in progress — skipping this tick"
@@ -542,19 +542,28 @@ start_coordination() {
   done
   local rc=0
   _start_coordination_locked || rc=$?
-  rmdir "$COORDINATION_LOCK" 2>/dev/null || true
+  rm -rf "$COORDINATION_LOCK" 2>/dev/null || true   # release (contains the sentinel)
   return "$rc"
 }
 
 _start_coordination_locked() {
   # Resolve mode + hubUrl exactly as the daemon would, in ONE bun import, and
-  # fingerprint them. The daemon reads its config only at startup, so this
-  # fingerprint is how a keep-alive tick notices a config change and reconciles.
-  local resolved mode hub fp
+  # fingerprint them PLUS the checkout identity. The daemon reads its config only
+  # at startup AND runs from a fixed plugin checkout, so this fingerprint is how a
+  # keep-alive tick notices a change and reconciles by restarting: a config change
+  # (mode/hubUrl) OR a plugin-checkout advance. The checkout HEAD SHA is what makes
+  # a `git pull`-style refresh redeploy the publisher — otherwise the long-lived
+  # bun process keeps executing the OLD checkout's modules until a manual restart
+  # (Codex P1: restart the publisher after checkout updates; the broker's immediate
+  # hot-reload path covers monitor/exec-core but not this CLI-less daemon, so it
+  # rides the keep-alive tick instead). Fail-safe: a non-git checkout just omits the
+  # SHA and the fingerprint stays mode|hub.
+  local resolved mode hub fp checkout_id
   resolved="$(coordination_resolve)"
   mode="${resolved%%$'\t'*}"
   hub="${resolved#*$'\t'}"
-  fp="${mode}|${hub}"
+  checkout_id="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+  fp="${mode}|${hub}|${checkout_id}"
 
   local pid; pid="$(coordination_pid)"
 
@@ -1344,6 +1353,19 @@ render_stack_plist() {
     <key>CATALYST_HOST_NAME</key>
     <string>${host_name}</string>"
   fi
+  # CTL-1494 (Codex P2): pin the operator's Layer-2 config path into the agent env.
+  # launchd hands the keep-alive an otherwise-minimal environment, so without this a
+  # host configured via a nondefault CATALYST_LAYER2_CONFIG_FILE would resolve
+  # coordination (and every other Layer-2 read) from the DEFAULT file on each tick —
+  # so a publisher an operator started interactively in shadow/enforce would be seen
+  # as `off` and reconcile-stopped, and would never start after reboot. Captured at
+  # install time from the invoking environment; omitted (default path) when unset.
+  local layer2_env=""
+  if [[ -n "${CATALYST_LAYER2_CONFIG_FILE:-}" ]]; then
+    layer2_env="
+    <key>CATALYST_LAYER2_CONFIG_FILE</key>
+    <string>${CATALYST_LAYER2_CONFIG_FILE}</string>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -1377,7 +1399,7 @@ render_stack_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>${HOME}</string>${host_env}
+    <string>${HOME}</string>${host_env}${layer2_env}
   </dict>
 
   <!--

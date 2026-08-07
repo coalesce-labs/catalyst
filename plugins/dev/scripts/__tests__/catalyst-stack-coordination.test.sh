@@ -175,47 +175,43 @@ OUT_ST="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_ST" \
     start_coordination; echo "RC=$?"
     [[ -d "$COORDINATION_LOCK" ]] && echo "LOCK_KEPT" || echo "LOCK_REMOVED"
   ' 2>&1)"
-if grep -qi 'reclaiming stale start lock' <<<"$OUT_ST"; then pass "stale-lock: reclaims a crashed start lock"; else failx "stale-lock: reclaims a crashed start lock" "$OUT_ST"; fi
+if grep -qi 'reclaimed an abandoned start lock' <<<"$OUT_ST"; then pass "stale-lock: reclaims an empty crashed start lock"; else failx "stale-lock: reclaims an empty crashed start lock" "$OUT_ST"; fi
 if grep -q 'RC=0' <<<"$OUT_ST"; then pass "stale-lock: proceeds after reclaim (rc 0)"; else failx "stale-lock: proceeds after reclaim (rc 0)" "$OUT_ST"; fi
 if grep -q 'LOCK_REMOVED' <<<"$OUT_ST"; then pass "stale-lock: releases the lock it acquired"; else failx "stale-lock: releases the lock it acquired" "$OUT_ST"; fi
 
-# --- ownership-safe reclaim: a stale main lock IS present, but a peer holds the
-#     reclaim mutex ⇒ this start must SKIP (not remove the stale lock out from under
-#     the peer that's reclaiming it) — proves the takeover decision is serialized so
-#     two starts can't both reclaim+reacquire and double-spawn (Codex P1). ---
-CDIR_A="${SCRATCH}/catalyst-atomicreclaim"; mkdir -p "$CDIR_A"
-OUT_A="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_A" \
+# --- sentinel safety (THE double-spawn-prevention invariant): a NON-EMPTY stale
+#     lock (a live holder's sentinel-bearing lock, or a crash-after-sentinel leak)
+#     is NEVER force-removed, even when older than the threshold — rmdir refuses a
+#     non-empty dir. This is what makes mkdir the sole arbiter of ownership, so a
+#     reclaimer can never delete a live peer's lock and let both spawn (Codex P1). ---
+CDIR_SN="${SCRATCH}/catalyst-sentinel"; mkdir -p "$CDIR_SN"
+OUT_SN="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_SN" \
   bash --noprofile --norc -c '
     source "'"${STACK}"'" 2>/dev/null || true
     mkdir -p "$COORDINATION_LOCK"
-    touch -t 202001010000 "$COORDINATION_LOCK"   # stale main lock…
-    mkdir -p "$COORDINATION_RECLAIM_LOCK"        # …but a peer owns the reclaim decision
+    : > "$COORDINATION_LOCK/owner"                # sentinel present (live-lock shape)
+    touch -t 202001010000 "$COORDINATION_LOCK"   # …and OLD (age gate would pass)
     start_coordination; echo "RC=$?"
-    [[ -d "$COORDINATION_LOCK" ]] && echo "MAINLOCK_KEPT" || echo "MAINLOCK_REMOVED"
+    [[ -d "$COORDINATION_LOCK" ]] && echo "LOCK_KEPT" || echo "LOCK_REMOVED"
     [[ -f "$COORDINATION_PID" ]] && echo "PIDFILE_PRESENT" || echo "PIDFILE_GONE"
   ' 2>&1)"
-if grep -q 'RC=0' <<<"$OUT_A"; then pass "atomic-reclaim: reclaim-mutex held ⇒ returns 0 (skips)"; else failx "atomic-reclaim: reclaim-mutex held ⇒ returns 0" "$OUT_A"; fi
-if grep -qi 'already in progress' <<<"$OUT_A"; then pass "atomic-reclaim: does not race the peer's reclaim"; else failx "atomic-reclaim: does not race the peer's reclaim" "$OUT_A"; fi
-if grep -q 'MAINLOCK_KEPT' <<<"$OUT_A"; then pass "atomic-reclaim: leaves the stale lock for its owner (no double-remove)"; else failx "atomic-reclaim: leaves the stale lock for its owner" "$OUT_A"; fi
-if grep -q 'PIDFILE_GONE' <<<"$OUT_A"; then pass "atomic-reclaim: spawns nothing"; else failx "atomic-reclaim: spawns nothing" "$OUT_A"; fi
+if grep -q 'RC=0' <<<"$OUT_SN"; then pass "sentinel-safety: non-empty stale lock ⇒ returns 0 (skips)"; else failx "sentinel-safety: non-empty stale lock ⇒ returns 0" "$OUT_SN"; fi
+if grep -q 'LOCK_KEPT' <<<"$OUT_SN"; then pass "sentinel-safety: never force-removes a sentinel-bearing lock"; else failx "sentinel-safety: never force-removes a sentinel-bearing lock" "$OUT_SN"; fi
+if grep -q 'PIDFILE_GONE' <<<"$OUT_SN"; then pass "sentinel-safety: spawns nothing (no double-spawn path)"; else failx "sentinel-safety: spawns nothing" "$OUT_SN"; fi
 
-# --- abandoned reclaim mutex recovery: a crash/power-off can leave the reclaim
-#     mutex behind; a STALE reclaim mutex must be recovered, not read as a live peer
-#     forever (Codex P2). Stale main lock + stale reclaim mutex ⇒ recover both,
-#     proceed (off-stub ⇒ inert), leaving no locks behind. ---
-CDIR_M="${SCRATCH}/catalyst-abandonedmutex"; mkdir -p "$CDIR_M"
-OUT_M="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_M" \
-  bash --noprofile --norc -c '
-    source "'"${STACK}"'" 2>/dev/null || true
-    mkdir -p "$COORDINATION_LOCK" "$COORDINATION_RECLAIM_LOCK"
-    touch -t 202001010000 "$COORDINATION_LOCK" "$COORDINATION_RECLAIM_LOCK"   # both abandoned
-    start_coordination; echo "RC=$?"
-    [[ -d "$COORDINATION_RECLAIM_LOCK" ]] && echo "MUTEX_KEPT" || echo "MUTEX_RECOVERED"
-    [[ -d "$COORDINATION_LOCK" ]] && echo "MAINLOCK_KEPT" || echo "MAINLOCK_CLEARED"
-  ' 2>&1)"
-if grep -qi 'reclaiming abandoned reclaim mutex' <<<"$OUT_M"; then pass "abandoned-mutex: recovers a stale reclaim mutex"; else failx "abandoned-mutex: recovers a stale reclaim mutex" "$OUT_M"; fi
-if grep -q 'RC=0' <<<"$OUT_M"; then pass "abandoned-mutex: proceeds after recovery (rc 0)"; else failx "abandoned-mutex: proceeds after recovery (rc 0)" "$OUT_M"; fi
-if grep -q 'MUTEX_RECOVERED' <<<"$OUT_M"; then pass "abandoned-mutex: leaves no reclaim mutex behind"; else failx "abandoned-mutex: leaves no reclaim mutex behind" "$OUT_M"; fi
+# --- plist Layer-2 pinning (Codex P2): the stack LaunchAgent must carry the
+#     operator's CATALYST_LAYER2_CONFIG_FILE so the keep-alive resolves coordination
+#     from the SAME config the operator used — else a shadow/enforce publisher is
+#     seen as `off` on the tick and reconcile-stopped. render_stack_plist is pure. ---
+OUT_P2="$(CATALYST_LAYER2_CONFIG_FILE="/custom/layer2.json" \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q '<key>CATALYST_LAYER2_CONFIG_FILE</key>' <<<"$OUT_P2" && grep -q '<string>/custom/layer2.json</string>' <<<"$OUT_P2"; then
+  pass "plist-layer2: pins CATALYST_LAYER2_CONFIG_FILE when set"
+else failx "plist-layer2: pins CATALYST_LAYER2_CONFIG_FILE when set" "$OUT_P2"; fi
+OUT_P2U="$(bash --noprofile --norc -c 'unset CATALYST_LAYER2_CONFIG_FILE; source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q 'CATALYST_LAYER2_CONFIG_FILE' <<<"$OUT_P2U"; then
+  failx "plist-layer2: omits the key when unset" "$OUT_P2U"
+else pass "plist-layer2: omits the key when unset (default path)"; fi
 
 echo ""
 echo "  ${PASSES} passed, ${FAILURES} failed"
