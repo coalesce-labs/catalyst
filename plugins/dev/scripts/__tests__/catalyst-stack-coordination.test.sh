@@ -143,6 +143,37 @@ OUT_D="$(CATALYST_DIR="$CDIR_D" COORD_FAKE="$FAKE_PUB" \
 REAL_D="$(grep -o 'REAL=\[[0-9]*\]' <<<"$OUT_D" | grep -o '[0-9]*')"
 if [[ -n "$REAL_D" ]] && grep -q "FOUND=\[${REAL_D}\]" <<<"$OUT_D"; then pass "pid-discovery: rediscovers the publisher after PID-file loss"; else failx "pid-discovery: rediscovers the publisher after PID-file loss" "$OUT_D"; fi
 
+# --- start serialization: a held (fresh) start lock ⇒ this invocation SKIPS the
+#     tick without spawning (Codex P1: overlapping starts must not both spawn). ---
+CDIR_L="${SCRATCH}/catalyst-lockheld"; mkdir -p "$CDIR_L"
+OUT_L="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_L" \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    mkdir -p "$COORDINATION_LOCK"      # simulate a concurrent start holding the lock
+    start_coordination; echo "RC=$?"
+    [[ -d "$COORDINATION_LOCK" ]] && echo "LOCK_KEPT" || echo "LOCK_REMOVED"
+    [[ -f "$COORDINATION_PID" ]] && echo "PIDFILE_PRESENT" || echo "PIDFILE_GONE"
+  ' 2>&1)"
+if grep -q 'RC=0' <<<"$OUT_L"; then pass "start-lock: held lock ⇒ returns 0 (skips tick)"; else failx "start-lock: held lock ⇒ returns 0" "$OUT_L"; fi
+if grep -qi 'already in progress' <<<"$OUT_L"; then pass "start-lock: logs the skip breadcrumb"; else failx "start-lock: logs the skip breadcrumb" "$OUT_L"; fi
+if grep -q 'LOCK_KEPT' <<<"$OUT_L"; then pass "start-lock: does NOT steal a live peer's lock"; else failx "start-lock: does NOT steal a live peer's lock" "$OUT_L"; fi
+if grep -q 'PIDFILE_GONE' <<<"$OUT_L"; then pass "start-lock: spawns nothing while lock is held"; else failx "start-lock: spawns nothing while lock is held" "$OUT_L"; fi
+
+# --- stale-lock reclaim: a lock older than the threshold (a crashed start) is
+#     reclaimed so startup can't wedge forever; the off-stub then no-ops cleanly. ---
+CDIR_ST="${SCRATCH}/catalyst-lockstale"; mkdir -p "$CDIR_ST"
+OUT_ST="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_ST" \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    mkdir -p "$COORDINATION_LOCK"
+    touch -t 202001010000 "$COORDINATION_LOCK"   # back-date well past the stale threshold
+    start_coordination; echo "RC=$?"
+    [[ -d "$COORDINATION_LOCK" ]] && echo "LOCK_KEPT" || echo "LOCK_REMOVED"
+  ' 2>&1)"
+if grep -qi 'reclaiming stale start lock' <<<"$OUT_ST"; then pass "stale-lock: reclaims a crashed start lock"; else failx "stale-lock: reclaims a crashed start lock" "$OUT_ST"; fi
+if grep -q 'RC=0' <<<"$OUT_ST"; then pass "stale-lock: proceeds after reclaim (rc 0)"; else failx "stale-lock: proceeds after reclaim (rc 0)" "$OUT_ST"; fi
+if grep -q 'LOCK_REMOVED' <<<"$OUT_ST"; then pass "stale-lock: releases the lock it acquired"; else failx "stale-lock: releases the lock it acquired" "$OUT_ST"; fi
+
 echo ""
 echo "  ${PASSES} passed, ${FAILURES} failed"
 [[ "$FAILURES" -eq 0 ]]

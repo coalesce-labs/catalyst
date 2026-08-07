@@ -205,6 +205,10 @@ COORDINATION_FP="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.fingerprin
 # drains through the hub with 5s request timeouts + retries, so one second is not
 # enough (Codex P1: let the shutdown flush finish before forcing termination).
 COORDINATION_STOP_GRACE_SECONDS="${COORDINATION_STOP_GRACE_SECONDS:-30}"
+# Atomic start lock (a directory — mkdir is the repo's portable lock idiom, see
+# catalyst-state.sh; flock is absent on stock macOS). Serializes check-and-spawn so
+# two overlapping starts can't both pass the pid check and both spawn (Codex P1).
+COORDINATION_LOCK="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.start.lock"
 
 # CTL-1348: the standalone catalyst-updater daemon (the 5th launchd agent). Installed
 # ONLY by the explicit 'catalyst-stack adopt-updater' cutover — NOT by install-services,
@@ -472,7 +476,36 @@ coordination_resolve() {
   printf 'off\t'
 }
 
+# start_coordination — serialize the whole check-and-spawn under an atomic mkdir
+# lock so two overlapping invocations (the recurring stack LaunchAgent tick + a
+# manual or second `catalyst-stack start`) can't both pass the pid check and both
+# spawn a detached publisher — a TOCTOU the pid-rediscovery fallback alone can't
+# close, since it selects one match and doesn't serialize check-and-spawn (Codex
+# P1). The lock is held only across check-and-spawn, so contention is a keep-alive
+# tick racing a manual start — the loser skips the tick (the winner establishes the
+# single publisher) rather than queueing a redundant spawn.
 start_coordination() {
+  local tries=0
+  while ! mkdir "$COORDINATION_LOCK" 2>/dev/null; do
+    # Reclaim a stale lock from a crashed start (mtime older than the threshold —
+    # comfortably above the <1min a real check-and-spawn takes, even with a 30s
+    # stop-grace on a config-change restart), so a crash can't wedge startup.
+    if [[ "$tries" -lt 3 && -n "$(find "$COORDINATION_LOCK" -maxdepth 0 -mmin +"${COORDINATION_LOCK_STALE_MIN:-5}" 2>/dev/null)" ]]; then
+      log "coordination-publish: reclaiming stale start lock"
+      rmdir "$COORDINATION_LOCK" 2>/dev/null || true
+      tries=$((tries + 1)); continue
+    fi
+    # Held by a concurrent, live start — it will establish the publisher.
+    log "coordination-publish start already in progress — skipping this tick"
+    return 0
+  done
+  local rc=0
+  _start_coordination_locked || rc=$?
+  rmdir "$COORDINATION_LOCK" 2>/dev/null || true
+  return "$rc"
+}
+
+_start_coordination_locked() {
   # Resolve mode + hubUrl exactly as the daemon would, in ONE bun import, and
   # fingerprint them. The daemon reads its config only at startup, so this
   # fingerprint is how a keep-alive tick notices a config change and reconciles.
