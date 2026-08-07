@@ -201,6 +201,7 @@ describe("writeDaemonRuntimeEnv / readDaemonRuntimeEnv", () => {
     });
     expect(payload).toEqual({
       pid: 4242,
+      pidFile: null,
       startedAt: "2026-08-07T00:00:00.000Z",
       drainDisabled: true,
       bootDrained: false,
@@ -304,5 +305,43 @@ describe("readDaemonRuntimeEnv pid identity (round-4 P2)", () => {
     // Mismatched pid file → untrusted again.
     writeFileSync(getDaemonPidPath(tmp), "999999\n");
     expect(readDaemonRuntimeEnv(tmp)).toBeNull();
+  });
+});
+
+// CTL-1678 (Codex round-5 P2): EXECUTION_CORE_PID_FILE can relocate the pid file.
+describe("getDaemonPidPath / relocated pid file (round-5 P2)", () => {
+  test("explicit path (recorded by the daemon) wins over env and default", async () => {
+    const { getDaemonPidPath } = await import("../config.mjs");
+    expect(getDaemonPidPath(tmp, { env: { EXECUTION_CORE_PID_FILE: "/env/p.pid" }, explicit: "/exact/p.pid" }))
+      .toBe("/exact/p.pid");
+  });
+
+  test("env override beats the default when no explicit path was recorded", async () => {
+    const { getDaemonPidPath } = await import("../config.mjs");
+    expect(getDaemonPidPath(tmp, { env: { EXECUTION_CORE_PID_FILE: "/env/p.pid" } })).toBe("/env/p.pid");
+    expect(getDaemonPidPath(tmp, { env: {} })).toBe(join(tmp, "daemon.pid"));
+  });
+
+  test("a relocated pid file still validates the marker (the round-5 regression)", async () => {
+    const { writeDaemonRuntimeEnv, readDaemonRuntimeEnv } = await import("../config.mjs");
+    const relocated = join(tmp, "elsewhere.pid");
+    writeFileSync(relocated, `${process.pid}\n`);
+    // Daemon records the relocated path it actually wrote…
+    writeDaemonRuntimeEnv(tmp, {
+      env: { CATALYST_DRAIN_DISABLED: "1" },
+      pid: process.pid,
+      pidFile: relocated,
+    });
+    // …so the reader validates against it, NOT the <orchDir>/daemon.pid guess
+    // (which does not exist here — the pre-fix code rejected every such snapshot).
+    expect(readDaemonRuntimeEnv(tmp, { env: {} })?.drainDisabled).toBe(true);
+  });
+
+  test("no recorded path → the env chain still finds a relocated pid file", async () => {
+    const { writeDaemonRuntimeEnv, readDaemonRuntimeEnv } = await import("../config.mjs");
+    const relocated = join(tmp, "envchain.pid");
+    writeFileSync(relocated, `${process.pid}\n`);
+    writeDaemonRuntimeEnv(tmp, { env: {}, pid: process.pid }); // pidFile omitted
+    expect(readDaemonRuntimeEnv(tmp, { env: { EXECUTION_CORE_PID_FILE: relocated } })).not.toBeNull();
   });
 });

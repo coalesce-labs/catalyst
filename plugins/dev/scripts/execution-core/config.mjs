@@ -154,9 +154,20 @@ export function getDaemonRuntimeEnvPath(orchDir) {
 // Fail-open (best-effort, mirrors writeBootMarker): a transient fs error must not
 // abort daemon boot. drainDisabled is recorded POST-precedence (isDrainDisabled folds
 // the boot-drain-is-authoritative rule), so readers consume it without re-deriving.
-export function writeDaemonRuntimeEnv(orchDir, { env = process.env, pid = process.pid, now = () => new Date().toISOString() } = {}) {
+export function writeDaemonRuntimeEnv(
+  orchDir,
+  { env = process.env, pid = process.pid, pidFile = null, now = () => new Date().toISOString() } = {}
+) {
   const payload = {
     pid,
+    // CTL-1678 (Codex round-5 P2): record the pid-file path the daemon ACTUALLY
+    // wrote, so a reader never has to re-derive it. EXECUTION_CORE_PID_FILE can
+    // relocate it (catalyst-execution-core, stack-reload.mjs), and a reader that
+    // guessed <orchDir>/daemon.pid would reject every snapshot on such a host —
+    // silently degrading this whole mechanism back to the mutable-file read it
+    // exists to replace. Null on a daemon started without --pid-file; readers then
+    // fall back to the same env-var chain the launcher uses.
+    pidFile,
     startedAt: now(),
     drainDisabled: isDrainDisabled(env),
     bootDrained: env?.CATALYST_BOOT_DRAINED === "1",
@@ -191,13 +202,17 @@ function defaultIsPidAlive(pid) {
 // the live contents of the launcher's daemon.pid (the same file `read_pid` gates
 // `status` on). Both conditions are required; either one failing means "no live
 // daemon" and callers fall back to the env/file view.
-export function getDaemonPidPath(orchDir) {
-  return join(orchDir, "daemon.pid");
+// The launcher's pid-file path chain, mirrored exactly (catalyst-execution-core:24
+// `PID_FILE="${EXECUTION_CORE_PID_FILE:-$EC_DIR/daemon.pid}"`). `explicit` is the path
+// the daemon recorded in its own marker, which beats re-deriving when present.
+export function getDaemonPidPath(orchDir, { env = process.env, explicit = null } = {}) {
+  if (explicit) return explicit;
+  return env?.EXECUTION_CORE_PID_FILE || join(orchDir, "daemon.pid");
 }
 
-function defaultReadDaemonPid(orchDir) {
+function defaultReadDaemonPid(orchDir, opts) {
   try {
-    const n = Number.parseInt(readFileSync(getDaemonPidPath(orchDir), "utf8").trim(), 10);
+    const n = Number.parseInt(readFileSync(getDaemonPidPath(orchDir, opts), "utf8").trim(), 10);
     return Number.isFinite(n) ? n : null;
   } catch {
     return null;
@@ -206,12 +221,13 @@ function defaultReadDaemonPid(orchDir) {
 
 export function readDaemonRuntimeEnv(
   orchDir,
-  { isPidAlive = defaultIsPidAlive, readDaemonPid = defaultReadDaemonPid } = {}
+  { isPidAlive = defaultIsPidAlive, readDaemonPid = defaultReadDaemonPid, env = process.env } = {}
 ) {
   try {
     const raw = JSON.parse(readFileSync(getDaemonRuntimeEnvPath(orchDir), "utf8"));
     if (!raw || typeof raw.pid !== "number") return null;
-    if (readDaemonPid(orchDir) !== raw.pid) return null; // not the daemon of record
+    // Prefer the path the daemon recorded; fall back to the launcher's env chain.
+    if (readDaemonPid(orchDir, { env, explicit: raw.pidFile ?? null }) !== raw.pid) return null;
     if (!isPidAlive(raw.pid)) return null;
     return raw;
   } catch {
