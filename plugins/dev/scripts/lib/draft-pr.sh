@@ -53,7 +53,13 @@ _draft_pr_pending_range() {
     printf 'origin/%s..HEAD\n' "$base"
     return 0
   fi
-  printf 'HEAD\n'
+  # Neither an upstream nor a resolvable origin/<base> exists (e.g. `gh` lookup
+  # failed and the repo's default branch isn't "main"). Plain `HEAD` here would
+  # make `git diff HEAD` compare the committed tree against the working tree —
+  # empty right after a commit, so a destructive wipe that was just committed
+  # would go undetected. Diff against the empty-tree object instead, so the
+  # range's diff represents every committed change about to be pushed.
+  printf '%s..HEAD\n' "$(git hash-object -t tree /dev/null)"
 }
 
 # _draft_pr_placeholder_authors RANGE — echoes any author/committer email in
@@ -63,8 +69,11 @@ _draft_pr_pending_range() {
 # fixture/test code ran against the real tree instead of an isolated sandbox.
 _draft_pr_placeholder_authors() {
   local range="$1"
+  # The entire .invalid TLD is RFC 2606 reserved (not just example.invalid) —
+  # fixture code is free to use any <anything>.invalid address (e.g. t@t.invalid,
+  # codex-run-phase-agent.test.mjs), so match the whole TLD rather than one label.
   git log --format='%ae%n%ce' "$range" -- 2>/dev/null \
-    | grep -iE '@example\.(com|org|net|invalid)$' \
+    | grep -iE '@example\.(com|org|net)$|\.invalid$' \
     | sort -u
 }
 

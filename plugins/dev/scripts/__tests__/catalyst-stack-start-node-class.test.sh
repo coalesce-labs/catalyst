@@ -50,7 +50,7 @@ INVOCATIONS="${SCRATCH}/invocations"
 # Stub every service command to record which ones were called.
 make_stubs() {
   rm -f "$INVOCATIONS"
-  for svc in start_monitor start_broker start_daemon start_forward start_shipper start_event_mirror; do
+  for svc in start_monitor start_broker start_daemon start_forward start_shipper start_event_mirror start_coordination; do
     echo "recorded: ${svc}" >> "${SCRATCH}/stub_src_${svc}"
   done
 }
@@ -79,6 +79,7 @@ start_daemon()        { echo start_daemon >> "\${INVOCATIONS_FILE}"; }
 start_forward()       { echo start_forward >> "\${INVOCATIONS_FILE}"; }
 start_shipper()       { echo start_shipper >> "\${INVOCATIONS_FILE}"; return 0; }
 start_event_mirror()  { echo start_event_mirror >> "\${INVOCATIONS_FILE}"; return 0; }
+start_coordination()  { echo start_coordination >> "\${INVOCATIONS_FILE}"; return 0; }
 # Suppress the trailing cmd_status call.
 cmd_status()          { :; }
 _cloud_token_env_run() { :; }
@@ -113,6 +114,7 @@ check "monitor: start_forward called" assert_called start_forward
 check "monitor: start_daemon NOT called" assert_not_called start_daemon
 check "monitor: start_shipper NOT called" assert_not_called start_shipper
 check "monitor: start_event_mirror called" assert_called start_event_mirror
+check "monitor: start_coordination called" assert_called start_coordination
 
 echo ""
 
@@ -126,6 +128,7 @@ check "worker: start_forward called" assert_called start_forward
 check "worker: start_daemon called" assert_called start_daemon
 check "worker: start_shipper called" assert_called start_shipper
 check "worker: start_event_mirror NOT called" assert_not_called start_event_mirror
+check "worker: start_coordination called" assert_called start_coordination
 
 echo ""
 
@@ -139,6 +142,7 @@ check "developer: start_forward NOT called" assert_not_called start_forward
 check "developer: start_daemon NOT called" assert_not_called start_daemon
 check "developer: start_shipper NOT called" assert_not_called start_shipper
 check "developer: start_event_mirror called" assert_called start_event_mirror
+check "developer: start_coordination NOT called" assert_not_called start_coordination
 
 echo ""
 echo "=== Phase 2: _resolve_node_class fail-closed on invalid config (Codex P2 F5) ==="
@@ -215,6 +219,20 @@ if grep -q 'CATALYST_EVENT_MIRROR_HOSTS' <<<"$PLIST_BARE"; then
   FAILURES=$((FAILURES + 1)); echo "  FAIL: plist injected CATALYST_EVENT_MIRROR_HOSTS when unset"
 else
   PASSES=$((PASSES + 1)); echo "  PASS: plist omits override keys when unset"
+fi
+
+echo ""
+echo "=== Phase 4: event-mirror plist survives reboot (CTL-1662) ==="
+echo ""
+
+# RunAtLoad must be true: a developer/monitor node typically never installs the
+# STACK_AGENT (install-services), only adopt-updater — so the dedicated event-mirror
+# agent must self-start at login like the updater/cloud-sync/log-shipper agents do,
+# not rely solely on start_event_mirror's one-time kickstart.
+if grep -A1 '<key>RunAtLoad</key>' <<<"$PLIST_BARE" | grep -q '<true/>'; then
+  PASSES=$((PASSES + 1)); echo "  PASS: event-mirror plist has RunAtLoad=true (survives reboot/login)"
+else
+  FAILURES=$((FAILURES + 1)); echo "  FAIL: event-mirror plist RunAtLoad is not true — will not self-start after reboot"
 fi
 
 echo ""

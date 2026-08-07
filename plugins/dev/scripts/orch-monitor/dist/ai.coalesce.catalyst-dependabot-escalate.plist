@@ -8,17 +8,20 @@
 
   Instructions:
     Run: bash plugins/dev/scripts/install-dependabot-escalate.sh
-    (or it is called automatically by 'catalyst-stack install-services')
+    (called automatically by 'catalyst-stack install-services' / 'uninstall-services')
 
   Manual steps (if needed):
     1. Copy to ~/Library/LaunchAgents/ai.coalesce.catalyst-dependabot-escalate.plist
     2. Replace REPLACE_WITH_ABSOLUTE with the absolute path to the scripts dir
        (e.g. /Users/you/catalyst/plugin-source/plugins/dev/scripts)
-    3. Replace REPLACE_START_INTERVAL with the interval in seconds (e.g. 3600)
-    4. Replace REPLACE_PATH with a PATH string that includes jq/gh/linearis/node
-    5. Load:
+    3. Replace REPLACE_HOME with your absolute home directory (e.g. /Users/you)
+    4. Replace REPLACE_START_INTERVAL with the interval in seconds (e.g. 3600)
+    5. Replace REPLACE_PATH with a PATH string that includes jq/gh/linearis/node
+    6. Replace REPLACE_CONFIG with the absolute path to your repo/team config
+       (e.g. /Users/you/.config/catalyst/dependabot-escalate-repos.json)
+    7. Load:
          launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.coalesce.catalyst-dependabot-escalate.plist
-    6. Verify:
+    8. Verify:
          launchctl list | grep dependabot-escalate
          tail -f ~/catalyst/dependabot-escalate.log
 
@@ -47,11 +50,18 @@
   <false/>
 
   <!-- launchd's default PATH omits /opt/homebrew/bin — without it gh/jq/node
-       (and linearis, which lives under /opt/homebrew/bin) can't be resolved. -->
+       (and linearis, which lives under /opt/homebrew/bin) can't be resolved.
+       DEPENDABOT_ESCALATE_CONFIG is baked in at install time (resolved from
+       the installer's own env or the default path) because launchd does NOT
+       inherit the installer's shell environment — a custom config path set
+       only for the install invocation would otherwise silently revert to
+       the default on every scheduled run. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>REPLACE_PATH</string>
+    <key>DEPENDABOT_ESCALATE_CONFIG</key>
+    <string>REPLACE_CONFIG</string>
   </dict>
 
   <key>StandardOutPath</key>

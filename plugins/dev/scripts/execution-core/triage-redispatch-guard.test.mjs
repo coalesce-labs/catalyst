@@ -16,6 +16,7 @@ import {
   readTriageSignalStatus,
   readTriageDispatchCount,
   bumpTriageDispatchCount,
+  fleetTriageDispatchCount,
 } from "./monitor.mjs";
 
 let orchDir;
@@ -96,5 +97,74 @@ describe("triage dispatch counter (CTL-1441 guard b)", () => {
     bumpTriageDispatchCount(orchDir, "CTL-12");
     expect(readTriageDispatchCount(orchDir, "CTL-12")).toBe(1);
     expect(readTriageDispatchCount(orchDir, "CTL-13")).toBe(0);
+  });
+});
+
+// ─── CTL-1649: fleetTriageDispatchCount ──────────────────────────────────────
+
+describe("fleetTriageDispatchCount — fleet-wide cap (CTL-1649)", () => {
+  test("multiHost:false returns host-local count verbatim (fence seam never called)", () => {
+    bumpTriageDispatchCount(orchDir, "CTL-1649"); // host-local = 1
+    let fenceCalled = false;
+    const count = fleetTriageDispatchCount(orchDir, "CTL-1649", {
+      multiHost: false,
+      readFenceCount: () => { fenceCalled = true; return { count: 99 }; },
+    });
+    expect(count).toBe(1);
+    expect(fenceCalled).toBe(false);
+  });
+
+  test("multiHost:true with fence count > host-local → returns fence count (cross-host churn scenario)", () => {
+    // Simulate: new owner has host-local count=0, fence carries count=3 from prior owner.
+    // Fleet count = max(0, 3) = 3 → cap is reached.
+    const count = fleetTriageDispatchCount(orchDir, "CTL-1649", {
+      multiHost: true,
+      readFenceCount: () => ({ count: 3 }),
+    });
+    expect(count).toBe(3);
+    expect(count).toBeGreaterThanOrEqual(TRIAGE_DISPATCH_CAP); // regression guard: would park
+  });
+
+  test("multiHost:true with fence count < host-local → returns host-local (normal same-owner case)", () => {
+    bumpTriageDispatchCount(orchDir, "CTL-1649");
+    bumpTriageDispatchCount(orchDir, "CTL-1649"); // host-local = 2
+    const count = fleetTriageDispatchCount(orchDir, "CTL-1649", {
+      multiHost: true,
+      readFenceCount: () => ({ count: 1 }), // fence behind host-local
+    });
+    expect(count).toBe(2);
+  });
+
+  test("multiHost:true with fence returning null (fail-open) → returns host-local", () => {
+    bumpTriageDispatchCount(orchDir, "CTL-1649"); // host-local = 1
+    const count = fleetTriageDispatchCount(orchDir, "CTL-1649", {
+      multiHost: true,
+      readFenceCount: () => ({ count: null }),
+    });
+    expect(count).toBe(1);
+  });
+
+  test("multiHost:true with fence seam throwing (fail-open) → returns host-local", () => {
+    bumpTriageDispatchCount(orchDir, "CTL-1649"); // host-local = 1
+    const count = fleetTriageDispatchCount(orchDir, "CTL-1649", {
+      multiHost: true,
+      readFenceCount: () => { throw new Error("network"); },
+    });
+    expect(count).toBe(1);
+  });
+
+  // ─── REGRESSION: cross-host double-spend (CTL-1649, the headline bug) ────
+  // On a two-host ownership churn, the new owner starts with host-local count=0.
+  // Before CTL-1649 the cap gate read host-local only → saw 0 → dispatched even
+  // though the fleet had already consumed all 3 allowed attempts. With the fix,
+  // fleetTriageDispatchCount reads the fence (count=3) and returns 3 → parks.
+  test("regression — cross-host churn: host-local 0 but fence 3 → cap fires, no dispatch", () => {
+    // host-local is 0 (new owner, fresh orchDir)
+    expect(readTriageDispatchCount(orchDir, "CTL-1649")).toBe(0);
+    const fleetCount = fleetTriageDispatchCount(orchDir, "CTL-1649", {
+      multiHost: true,
+      readFenceCount: () => ({ count: TRIAGE_DISPATCH_CAP }),
+    });
+    expect(fleetCount).toBeGreaterThanOrEqual(TRIAGE_DISPATCH_CAP);
   });
 });

@@ -4222,6 +4222,239 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
       });
     }).not.toThrow();
   });
+
+  test("supersede guard tolerates an unknown phase on the SIGNAL ITSELF, not just in listTicketPhases history (regression)", () => {
+    // Non-FSM dispatches (e.g. recovery-reasoning.mjs's Pass 0r recovery-pass
+    // actuator) reuse this same workers/<ticket>/phase-<name>.json signal-file
+    // machinery with phase:"recovery-pass" — a name with no PHASE_LINEAR_KEY
+    // entry and no ordinal position. Before this fix, `phaseIndex(phase)` ran
+    // UNGUARDED (unlike the `dispatched` reduce four lines above, which already
+    // had the isKnownPhase guard), so every dead recovery-pass worker threw
+    // PhaseFsmError on every tick — caught by scheduler.mjs's PROJ-702 per-worker
+    // isolation, but permanently unreclaimable as a result. A non-FSM phase
+    // can't be "superseded" in the ordinal sense, so it must skip the guard and
+    // fall through to the normal reclaim-eligible path — which, since no probe
+    // is registered for a non-pipeline phase, resolves to a one-time terminal
+    // write ('escalation-cap-terminal', stalledReason: no-probe-for-phase)
+    // rather than an uncaught throw, so listInFlightTickets stops counting the
+    // dead worker as an occupied slot forever (Codex #3027 P1).
+    //
+    // Uses a real temp orchDir (not the describe block's shared "/orch"
+    // string) because this path genuinely writes the signal file to disk —
+    // reusing "/orch" would write outside any test's control (Codex #3027 P2
+    // on the ORIGINAL version of this test).
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-recovery-pass-"));
+    try {
+      const escalate = recorder(undefined);
+      const applyLabel = recorder(undefined);
+      const recordEscalation = recorder(undefined);
+      const recoveryPassSig = {
+        ticket: "PROJ-503",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: {
+          ticket: "PROJ-503",
+          phase: "recovery-pass",
+          orchestrator: "PROJ-503",
+          status: "running",
+          bg_job_id: "job-old",
+        },
+      };
+      let r;
+      expect(() => {
+        r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+          statJob: () => null, // dead bg job
+          listTicketPhases: () => ["triage", "research", "plan", "implement"],
+          appendEscalatedEvent: escalate,
+          applyStalledLabel: applyLabel,
+          inEscalationCooldownFn: () => false,
+          recordEscalationFn: recordEscalation,
+          breaker: { isOpen: () => false },
+        });
+      }).not.toThrow();
+      expect(r).toBe("escalation-cap-terminal");
+      expect(escalate.calls.length).toBe(1);
+      expect(applyLabel.calls.length).toBe(1);
+      expect(recordEscalation.calls.length).toBe(1);
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-503", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase terminalizes locally even while the Linear breaker is OPEN (regression, Codex #3027 round 2 P1)", () => {
+    // The terminal write is purely local (tmp+rename to the signal file) — it
+    // must not wait for the breaker to close. Before this fix, escalateOnce
+    // returned "rate-limited-deferred" without ever reaching the terminal
+    // write for this reason (only a spent no-progress cap triggered the
+    // local repair), so a dead recovery-pass worker observed during a Linear
+    // outage stayed at "running" — the exact slot-leak this whole ticket
+    // exists to close — for the entire duration of the outage.
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-breaker-open-"));
+    try {
+      const escalate = recorder(undefined);
+      const recoveryPassSig = {
+        ticket: "PROJ-504",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: { ticket: "PROJ-504", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+      };
+      const r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+        statJob: () => null,
+        listTicketPhases: () => [],
+        appendEscalatedEvent: escalate, // must NOT be called — breaker open defers the Linear-facing event
+        applyStalledLabel: recorder(undefined),
+        breaker: { isOpen: () => true },
+      });
+      expect(r).toBe("rate-limited-deferred");
+      expect(escalate.calls.length).toBe(0); // the Linear-facing escalation is still deferred
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-504", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase terminalizes locally even while an escalation cooldown is ACTIVE (regression, Codex #3027 round 2 P1)", () => {
+    const testOrchDir = mkdtempSync(join(tmpdir(), "proj1657-cooldown-"));
+    try {
+      const recoveryPassSig = {
+        ticket: "PROJ-505",
+        phase: "recovery-pass",
+        status: "running",
+        liveness: { kind: "bg", value: "job-old" },
+        raw: { ticket: "PROJ-505", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+      };
+      const r = reclaimDeadWorkIfPossible(testOrchDir, recoveryPassSig, {
+        statJob: () => null,
+        listTicketPhases: () => [],
+        appendEscalatedEvent: recorder(undefined),
+        applyStalledLabel: recorder(undefined),
+        breaker: { isOpen: () => false },
+        inEscalationCooldownFn: () => true, // a prior ask already fired within the window
+      });
+      expect(r).toBe("escalation-suppressed");
+
+      const written = JSON.parse(
+        readFileSync(join(testOrchDir, "workers", "PROJ-505", "phase-recovery-pass.json"), "utf8"),
+      );
+      expect(written.status).toBe("stalled");
+      expect(written.stalledReason).toBe("no-probe-for-phase");
+    } finally {
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-probe-for-phase reconciles to done when the worker's own complete event was already seen (regression, Codex #3027 round 2 P2)", () => {
+    // A recovery-pass worker that emitted phase.recovery-pass.complete and then
+    // crashed before its OWN signal-file update landed genuinely finished its
+    // work. Escalating it to needs-human/stalled would falsely park a ticket
+    // whose recovery pass already succeeded — completeEventSeen must be
+    // checked before treating a probe-less dead signal as unverifiable.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    // Codex #3027 round 3 P2: this signal carries bg_job_id "job-old", so the
+    // reconcile branch's emitReapIntent call must be stubbed — without this
+    // seam the test invokes the PRODUCTION reap-intent producer, which
+    // synchronously appends a real "phase.reclaim.reap-requested" record to
+    // the live ~/catalyst/events/YYYY-MM.jsonl on whatever machine runs the
+    // suite, polluting the unified event log with a fake PROJ-506 request.
+    const reapIntent = recorder(Promise.resolve());
+    const recoveryPassSig = {
+      ticket: "PROJ-506",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-506", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      emitReapIntent: reapIntent,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+    expect(escalate.calls.length).toBe(0); // reconciled to done, never escalated
+    expect(reapIntent.calls[0][0]).toBe("phase.reclaim.reap-requested");
+  });
+
+  test("no-probe-for-phase skips an already-parked needs-human signal instead of re-escalating (regression, Codex #3027 round 4 P2)", () => {
+    // recovery-emit.mjs's `escalated` subcommand already parked this signal
+    // needs-human with a worker-authored decision brief before the worker
+    // died (crashed before its phase-completion event landed). Re-escalating
+    // with a generic no-probe-for-phase brief would discard that curated
+    // explanation — mirrors the pre-existing needs-input guard.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const recoveryPassSig = {
+      ticket: "PROJ-507",
+      phase: "recovery-pass",
+      status: "needs-human",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-507", phase: "recovery-pass", status: "needs-human", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => false,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("noop");
+    expect(escalate.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+  });
+
+  test("no-probe-for-phase returns 'reclaim-failed' when the complete-event-seen emit-complete repair fails (regression, Codex #3027 round 4 P2)", () => {
+    // The other completion-reconciliation branches (PROJ-778 alive-probe-reclaim,
+    // and branch (B) of reclaimDeadWork) both return 'reclaim-failed' on a
+    // non-zero emitComplete — this branch must match so scheduler.mjs doesn't
+    // bucket a failed signal repair as a successful reclaim.
+    const emit = recorder({ code: 1, stderr: "boom" });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const reapIntent = recorder(Promise.resolve());
+    const recoveryPassSig = {
+      ticket: "PROJ-508",
+      phase: "recovery-pass",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "PROJ-508", phase: "recovery-pass", status: "running", bg_job_id: "job-old" },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      emitReapIntent: reapIntent,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(emit.calls.length).toBe(1);
+  });
 });
 
 describe("readBootSince — CTL-655 boot-time window reader", () => {
@@ -5991,23 +6224,66 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
         body: {},
       }) + "\n"
     );
-    // Same shape as recovery.mjs's real default (recovery.mjs:2062-2072), built
+    // Same shape as recovery.mjs's real default (recovery.mjs:2084-2098), built
     // here against the temp path directly since hasCompleteEvent/latestCompleteEventTs
     // both accept an explicit path override.
     const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
       if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
       const ts = latestCompleteEventTs({ ticket, phase, path });
       if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
       if (typeof sinceAttempt === "number") {
         const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
         if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
       }
-      return ts >= sinceIso;
+      return true;
     };
     expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(false);
     expect(
       completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: "2026-06-01T00:00:00Z" })
     ).toBe(true);
+  });
+
+  // Codex review (PR #2851): a redispatch after a completed cycle can reuse
+  // attempt numbers (ordinary scheduler dispatches omit `attempt`, defaulting
+  // back to attempt 1) — the timestamp must reject an OLDER completion before
+  // attempt is ever consulted, or a stale attempt-1 completion from a PRIOR
+  // cycle satisfies a brand-new attempt-1 dispatch even though it predates
+  // the new signal's startedAt.
+  test("Codex PR#2851: an older completion with a REUSED attempt number is still rejected by timestamp", async () => {
+    const { hasCompleteEvent, latestCompleteEventTs, latestCompleteEventAttempt } = await import(
+      "./event-scan.mjs"
+    );
+    const dir = mkdtempSync(join(tmpdir(), "ctl778-reused-attempt-"));
+    const path = join(dir, "events.jsonl");
+    // Prior cycle's attempt-1 completion, well before the new dispatch's startedAt.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ts: "2026-06-01T00:00:00Z",
+        attributes: { "event.name": "phase.implement.complete.CTL-9", "phase.attempt": 1 },
+        body: {},
+      }) + "\n"
+    );
+    const completeEventSeen = ({ ticket, phase, sinceIso, sinceAttempt }) => {
+      if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
+      const ts = latestCompleteEventTs({ ticket, phase, path });
+      if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      if (typeof sinceAttempt === "number") {
+        const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
+        if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
+      }
+      return true;
+    };
+    // New dispatch's own attempt also defaults to 1 (ordinary redispatch omits
+    // `attempt`) — eventAttempt(1) >= sinceAttempt(1) would wrongly read "seen"
+    // if attempt were compared before the timestamp.
+    expect(
+      completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED, sinceAttempt: 1 })
+    ).toBe(false);
   });
 
   // CTL-778 follow-up (upstream review, PR #2851): the case sinceIso alone can't
@@ -6035,11 +6311,13 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
       if (!sinceIso) return hasCompleteEvent({ ticket, phase, path });
       const ts = latestCompleteEventTs({ ticket, phase, path });
       if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
       if (typeof sinceAttempt === "number") {
         const eventAttempt = latestCompleteEventAttempt({ ticket, phase, path });
         if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
       }
-      return ts >= sinceIso;
+      return true;
     };
     // Without sinceAttempt, the same-second tie reads as "seen" — the bug.
     expect(completeEventSeen({ ticket: "CTL-9", phase: "implement", sinceIso: STARTED })).toBe(true);

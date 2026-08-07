@@ -26,9 +26,10 @@ NC='\033[0m'
 # worktree-local runtime bookkeeping out of every project's git status, without
 # ever touching that project's TRACKED .gitignore. Mirrors the existing pattern
 # already used for .agents/ (codex-run-phase-agent.mjs's gitExcludeAgents +
-# resolveGitExcludePath): writes to this worktree's LOCAL, uncommitted
-# `git rev-parse --git-path info/exclude`, so it applies only here, never
-# leaks into the project's history, and needs no per-project PR.
+# resolveGitExcludePath): writes to this worktree's LOCAL, uncommitted,
+# worktree-scoped `core.excludesFile` (via `git config --worktree`), so it
+# applies only here — never leaks into the project's history, never leaks
+# into sibling worktrees or the main checkout, and needs no per-project PR.
 #
 # Before this, every onboarded project had to carry its own .gitignore entries
 # for these paths — miss one and `git status` shows Catalyst's own noise as
@@ -37,11 +38,29 @@ NC='\033[0m'
 # .catalyst/.workflow-context.json). Idempotent + best-effort: failures here
 # must never abort worktree creation.
 catalyst_git_exclude_worktree_artifacts() {
-	local worktree_path="$1" exclude_path pattern
-	exclude_path=$(git -C "$worktree_path" rev-parse --git-path info/exclude 2>/dev/null) || return 0
-	[[ "$exclude_path" = /* ]] || exclude_path="${worktree_path}/${exclude_path}"
+	local worktree_path="$1" abs_git_dir exclude_path pattern
+	# CTL-1662 (Codex review, PR #2851): plain `git rev-parse --git-path
+	# info/exclude` resolves to the COMMON git directory even for a linked
+	# worktree — `info/` is on git's shared-files list, so the naive path
+	# would hide these patterns in the main checkout and every sibling
+	# worktree, not just this one. `core.excludesFile` IS scopable per
+	# worktree via `git config --worktree` (gated by
+	# extensions.worktreeConfig), so point it at THIS worktree's own private
+	# info/exclude under its private git dir instead of relying on the
+	# shared one.
+	abs_git_dir=$(git -C "$worktree_path" rev-parse --absolute-git-dir 2>/dev/null) || return 0
+	exclude_path="${abs_git_dir}/info/exclude"
 	mkdir -p "$(dirname "$exclude_path")" 2>/dev/null || return 0
-	[ -f "$exclude_path" ] || : >"$exclude_path"
+	git -C "$worktree_path" config extensions.worktreeConfig true 2>/dev/null || return 0
+	git -C "$worktree_path" config --worktree core.excludesFile "$exclude_path" 2>/dev/null || return 0
+	# Best-effort past this point (docstring above): shared Git metadata can be
+	# read-only or otherwise unwritable, and under `set -e` an unguarded write
+	# failure here would abort worktree creation after the `git worktree add`
+	# already succeeded. Every write is explicitly guarded so a failure just
+	# returns (no exclusions applied) instead of propagating.
+	if [ ! -f "$exclude_path" ]; then
+		: >"$exclude_path" 2>/dev/null || return 0
+	fi
 	for pattern in \
 		"thoughts/" \
 		".catalyst/.workflow-context.json" \
@@ -50,8 +69,11 @@ catalyst_git_exclude_worktree_artifacts() {
 		".needs-cleanup" \
 		".orphaned_at" \
 		".trunk"; do
-		grep -qxF "$pattern" "$exclude_path" 2>/dev/null || printf '%s\n' "$pattern" >>"$exclude_path"
+		if ! grep -qxF "$pattern" "$exclude_path" 2>/dev/null; then
+			printf '%s\n' "$pattern" >>"$exclude_path" 2>/dev/null || return 0
+		fi
 	done
+	return 0
 }
 
 # Parse flags (collect positional args separately)
@@ -212,6 +234,12 @@ if [ -d "$WORKTREE_PATH" ]; then
 				echo -e "${GREEN}  ✅ thoughts/shared repaired${NC}"
 			fi
 		fi
+		# CTL-1662 (Codex review, PR #2851): execution-core always supplies
+		# --reuse-existing (execution-core/worktree.mjs), so a worktree that
+		# predates the artifact-exclusion upgrade would otherwise never receive
+		# it — it exits here, before the creation-path call below. Best-effort;
+		# never blocks a successful reuse.
+		catalyst_git_exclude_worktree_artifacts "$WORKTREE_PATH"
 		echo -e "${GREEN}♻️  Reusing existing worktree: $WORKTREE_PATH${NC}"
 		echo "WORKTREE_PATH=${WORKTREE_PATH}"
 		exit 0

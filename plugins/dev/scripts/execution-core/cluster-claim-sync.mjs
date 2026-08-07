@@ -294,3 +294,112 @@ export function fenceCheckSyncCached({ ticket, generation }, { now = Date.now, e
   }
   return result;
 }
+
+// ─── in-process TTL cache around the triage attempt count read (CTL-1649) ────
+//
+// The triage re-dispatch cap gate (monitor.mjs dispatchTriage) calls
+// readTriageAttemptCountSync before EVERY triage sweep sweep for each
+// multi-host candidate. Each call spawns a FRESH `node cluster-claim.mjs
+// read-triage-attempt <ticket>` subprocess that issues a Linear attachment
+// read. A TTL cache mirrors fenceCheckSyncCached's design: keyed by ticket
+// (not ticket+generation — the count is the answer, not a generation check),
+// TTL 30s default (CATALYST_TRIAGE_ATTEMPT_CACHE_MS). Bumps always invalidate
+// the cache entry so a fresh count is visible on the very next cap-gate read.
+//
+// Only a determinate numeric count (>= 0) is cached. A null (fence-absent or
+// spawn failure) is never cached — null is the fail-open signal, and latching
+// it would suppress all future reads for the TTL duration.
+const TRIAGE_ATTEMPT_CACHE_MS_DEFAULT = 30_000;
+const triageAttemptCache = new Map();
+
+// clearTriageAttemptCacheSync — test-only reset of the module-scope cache.
+export function clearTriageAttemptCacheSync() {
+  triageAttemptCache.clear();
+}
+
+function resolveTriageAttemptCacheMs(env) {
+  const raw = Number(env?.CATALYST_TRIAGE_ATTEMPT_CACHE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : TRIAGE_ATTEMPT_CACHE_MS_DEFAULT;
+}
+
+// readTriageAttemptCountSync — spawn `node cluster-claim.mjs read-triage-attempt
+// <ticket>` and return `{ count }`. `count` is the fleet-wide triage attempt
+// count (>= 0) when a fence exists, or null when no fence is found (fence-absent
+// → caller fails open to host-local counting). Also null on any spawn failure.
+// A TTL cache (keyed by ticket) coalesces repeated reads within the same sweep
+// cycle. `now` is injectable for tests.
+export function readTriageAttemptCountSync(
+  { ticket },
+  {
+    spawn = spawnSync,
+    nodeBin = process.execPath,
+    cli = CLUSTER_CLAIM_CLI,
+    env = process.env,
+    timeout = CLAIM_TIMEOUT_MS,
+    now = Date.now,
+  } = {},
+) {
+  const ttlMs = resolveTriageAttemptCacheMs(env);
+  if (ttlMs > 0) {
+    const cached = triageAttemptCache.get(ticket);
+    if (cached && now() - cached.ts < ttlMs) {
+      return { count: cached.count };
+    }
+  }
+  try {
+    const res = spawn(nodeBin, [cli, "read-triage-attempt", ticket], {
+      encoding: "utf8",
+      env,
+      timeout,
+    });
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") {
+      return { count: null };
+    }
+    const line = res.stdout.trim().split("\n").filter(Boolean).pop();
+    const parsed = JSON.parse(line);
+    const count = typeof parsed?.count === "number" ? parsed.count : null;
+    if (ttlMs > 0 && count !== null) {
+      triageAttemptCache.set(ticket, { count, ts: now() });
+    }
+    return { count };
+  } catch {
+    return { count: null };
+  }
+}
+
+// bumpTriageAttemptCountSync — spawn `node cluster-claim.mjs bump-triage-attempt
+// <ticket>`. Always invalidates the TTL cache for that ticket (a bump means the
+// stored count is now stale — the next read must go live). Returns `{ count }`
+// where `count` is the new fleet-wide count on success, or null on any failure
+// (best-effort — never throws).
+export function bumpTriageAttemptCountSync(
+  { ticket },
+  {
+    spawn = spawnSync,
+    nodeBin = process.execPath,
+    cli = CLUSTER_CLAIM_CLI,
+    env = process.env,
+    timeout = CLAIM_TIMEOUT_MS,
+  } = {},
+) {
+  // Invalidate before the spawn: even if the write fails, the caller
+  // (bumpTriageDispatchCount in monitor.mjs) is about to act on the count
+  // having changed — stale cached reads post-bump are always wrong.
+  triageAttemptCache.delete(ticket);
+  try {
+    const res = spawn(nodeBin, [cli, "bump-triage-attempt", ticket], {
+      encoding: "utf8",
+      env,
+      timeout,
+    });
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") {
+      return { count: null };
+    }
+    const line = res.stdout.trim().split("\n").filter(Boolean).pop();
+    const parsed = JSON.parse(line);
+    const count = typeof parsed?.count === "number" ? parsed.count : null;
+    return { count };
+  } catch {
+    return { count: null };
+  }
+}

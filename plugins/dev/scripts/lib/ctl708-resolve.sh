@@ -68,15 +68,24 @@ conflict markers (<<<<<<< HEAD / ======= / >>>>>>>). For each one:
 3. If they genuinely conflict, pick the resolution most consistent with
    correctness and the apparent intent of each side. Prefer preserving
    functionality from both over silently dropping one side's work.
-4. Edit the file in place so NO conflict markers remain anywhere in it.
-5. If you cannot resolve a file with reasonable confidence, leave that
+4. EXCEPTION — do not auto-resolve a public-API conflict. If the conflicting
+   hunk is another ticket's already-merged, load-bearing public contract (an
+   exported function signature, a public type, a CLI flag, a config schema —
+   not a local implementation detail), that is a decision for a human, not
+   you. Leave that file's markers exactly as they are, the same as rule 6
+   below, so the caller falls through to its terminal-stall path instead of
+   continuing the rebase automatically.
+5. Edit the file in place so NO conflict markers remain anywhere in it,
+   except under rule 4 above.
+6. If you cannot resolve a file with reasonable confidence, leave that
    file's markers exactly as they are — a human will review it. Do not
    guess. Partial progress (some files resolved, one left with markers)
    is fine and expected in that case.
 
 Do not run `git add`, `git rebase --continue`, or any git command that
 changes repository state beyond editing the listed files' contents — the
-caller handles staging and continuation.
+caller handles staging and continuation. Do not create, delete, rename, or
+edit any file that is not in the "Files with conflicts" list below.
 
 Files with conflicts:
 PROMPT_HEAD
@@ -111,13 +120,28 @@ _ctl708_llm_resolve() {
     return 1
   fi
 
-  local marker_lines=0 f
+  local marker_lines=0 region_lines=0 f count
   for f in "${files[@]}"; do
     if [[ ! -f "$f" ]]; then
       return 1
     fi
-    marker_lines=$(( marker_lines + $(grep -cE '^(<<<<<<<|=======|>>>>>>>)' "$f" 2>/dev/null || echo 0) ))
+    # CTL-708 P1: `grep -cE ... || echo 0` double-prints "0" on a no-match
+    # exit (grep -c already prints "0" and exits 1), poisoning the arithmetic
+    # below with a two-line operand. Capture the count on its own and let the
+    # (harmless, no-match) nonzero grep exit fall through unchecked.
+    count="$(grep -cE '^(<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)' "$f" 2>/dev/null)"
+    marker_lines=$(( marker_lines + ${count:-0} ))
+    # CTL-708 P2: marker-line count alone is ~3 lines per conflict regardless
+    # of payload size, so it can't bound one huge conflict. Also measure the
+    # actual conflicted region — every line from <<<<<<< through >>>>>>>,
+    # inclusive, across all hunks in the file — and bound on the larger of
+    # the two totals below so a single oversized hunk still trips the limit.
+    count="$(awk '/^<<<<<<</{c=1} c{n++} /^>>>>>>>/{c=0} END{print n+0}' "$f" 2>/dev/null)"
+    region_lines=$(( region_lines + ${count:-0} ))
   done
+  if [[ $region_lines -gt $marker_lines ]]; then
+    marker_lines=$region_lines
+  fi
   if [[ $marker_lines -gt $max_marker_lines ]]; then
     emit_ctl708_resolution --orch "$orch" --ticket "$ticket" --phase "$phase" \
       --outcome declined --files "$files_json" \
@@ -133,6 +157,13 @@ _ctl708_llm_resolve() {
     return 1
   fi
 
+  # CTL-708 P1: snapshot working-tree state before invoking the resolver so
+  # its scope can be verified afterward — the resolver runs with
+  # --dangerously-skip-permissions, so the prompt's "only touch the listed
+  # files" instruction is prose, not enforcement.
+  local pre_status
+  pre_status="$(git status --porcelain 2>/dev/null)"
+
   local prompt out rc
   prompt="$(_ctl708_build_prompt "${files[@]}")"
   if command -v timeout >/dev/null 2>&1; then
@@ -140,9 +171,26 @@ _ctl708_llm_resolve() {
       "$claude_bin" -p --dangerously-skip-permissions --max-turns "$turn_cap" 2>&1)
     rc=$?
   else
-    out=$(printf '%s' "$prompt" | \
-      "$claude_bin" -p --dangerously-skip-permissions --max-turns "$turn_cap" 2>&1)
+    # No GNU `timeout` on this host — notably stock macOS, the fleet's
+    # primary launchd environment, ships neither `timeout` nor `gtimeout`.
+    # Enforce CATALYST_CTL708_TIMEOUT_S ourselves: run the resolver in the
+    # background, capture its output to a scratch file, and a watchdog kills
+    # it if it outlives the deadline (AGENTS.md "Working the Loop" pattern —
+    # the watchdog sleeps, it never spins).
+    local out_file
+    out_file="$(mktemp -t ctl708-resolve-out-XXXXXX)"
+    printf '%s' "$prompt" | \
+      "$claude_bin" -p --dangerously-skip-permissions --max-turns "$turn_cap" \
+      >"$out_file" 2>&1 &
+    local resolver_pid=$!
+    ( sleep "$timeout_s"; kill "$resolver_pid" 2>/dev/null ) &
+    local watchdog_pid=$!
+    wait "$resolver_pid"
     rc=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+    out="$(cat "$out_file" 2>/dev/null)"
+    rm -f "$out_file"
   fi
 
   if [[ $rc -ne 0 ]]; then
@@ -152,14 +200,40 @@ _ctl708_llm_resolve() {
   fi
 
   for f in "${files[@]}"; do
-    if grep -qE '^(<<<<<<<|=======|>>>>>>>)' "$f" 2>/dev/null; then
+    if grep -qE '^(<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)' "$f" 2>/dev/null; then
       emit_ctl708_resolution --orch "$orch" --ticket "$ticket" --phase "$phase" \
         --outcome markers-remained --files "$files_json" --reason "$f" 2>/dev/null || true
       return 1
     fi
   done
 
-  git add -- "${files[@]}" 2>/dev/null
+  # CTL-708 P1: refuse to stage anything the resolver touched outside the
+  # files we handed it — an errant tool call, or instructions embedded in
+  # repository content the resolver read, could otherwise stage an unrelated
+  # change that `git rebase --continue` folds into the rebased commit.
+  local post_status changed_path known wf
+  post_status="$(git status --porcelain 2>/dev/null)"
+  while IFS= read -r changed_path; do
+    [[ -z "$changed_path" ]] && continue
+    changed_path="${changed_path:3}"
+    changed_path="${changed_path#* -> }"
+    known=0
+    for wf in "${files[@]}"; do
+      [[ "$changed_path" == "$wf" ]] && { known=1; break; }
+    done
+    if [[ $known -eq 0 ]]; then
+      emit_ctl708_resolution --orch "$orch" --ticket "$ticket" --phase "$phase" \
+        --outcome declined --files "$files_json" \
+        --reason "unexpected_change:${changed_path}" 2>/dev/null || true
+      return 1
+    fi
+  done < <(comm -13 <(printf '%s\n' "$pre_status" | sort) <(printf '%s\n' "$post_status" | sort))
+
+  if ! git add -- "${files[@]}" 2>/dev/null; then
+    emit_ctl708_resolution --orch "$orch" --ticket "$ticket" --phase "$phase" \
+      --outcome failed --files "$files_json" --reason "git_add_failed" 2>/dev/null || true
+    return 1
+  fi
   emit_ctl708_resolution --orch "$orch" --ticket "$ticket" --phase "$phase" \
     --outcome resolved --files "$files_json" --reason "" 2>/dev/null || true
   return 0
