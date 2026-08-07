@@ -74,8 +74,11 @@ echo "Test 1: fresh worktree's local git exclude carries every Catalyst runtime-
 build_scratch
 run_create wt-exclude
 assert_eq "0" "$EXIT" "exits 0"
-EXCLUDE_FILE="$(git -C "$WT_PATH" rev-parse --git-path info/exclude 2>/dev/null)"
-[[ $EXCLUDE_FILE == /* ]] || EXCLUDE_FILE="$WT_PATH/$EXCLUDE_FILE"
+# CTL-1662: exclusions are worktree-scoped via `core.excludesFile` pointed at
+# this worktree's own private git dir (`--absolute-git-dir`), not the shared
+# `--git-path info/exclude` (which resolves to the COMMON git dir for a
+# linked worktree and would leak the patterns into every sibling).
+EXCLUDE_FILE="$(git -C "$WT_PATH" rev-parse --absolute-git-dir 2>/dev/null)/info/exclude"
 EXCLUDE_CONTENT="$(cat "$EXCLUDE_FILE" 2>/dev/null || true)"
 for pattern in "thoughts/" ".catalyst/.workflow-context.json" ".catalyst/.workflow-context.json.bak" \
 	".catalyst/worktree-provenance.json" ".needs-cleanup" ".orphaned_at" ".trunk"; do
@@ -106,10 +109,39 @@ assert_eq "0" "$EXIT" "exits 0"
 # against the same worktree to exercise idempotency in isolation.
 FUNC_SRC="$(sed -n '/^catalyst_git_exclude_worktree_artifacts()/,/^}/p' "$CREATE_WT")"
 bash -c "$FUNC_SRC"$'\n'"catalyst_git_exclude_worktree_artifacts \"\$1\"" -- "$WT_PATH"
-EXCLUDE_FILE="$(git -C "$WT_PATH" rev-parse --git-path info/exclude 2>/dev/null)"
-[[ $EXCLUDE_FILE == /* ]] || EXCLUDE_FILE="$WT_PATH/$EXCLUDE_FILE"
+EXCLUDE_FILE="$(git -C "$WT_PATH" rev-parse --absolute-git-dir 2>/dev/null)/info/exclude"
 AFTER_COUNT="$(grep -cxF 'thoughts/' "$EXCLUDE_FILE" 2>/dev/null || echo 0)"
 assert_eq "1" "$AFTER_COUNT" "'thoughts/' still appears exactly once after a second call"
+rm -rf "$SCRATCH"
+
+echo ""
+echo "Test 4: exclusions are scoped to the target worktree — a sibling worktree and the"
+echo "        original SRC checkout must NOT have the patterns leaked into their status"
+build_scratch
+run_create wt-scoped
+assert_eq "0" "$EXIT" "exits 0"
+mkdir -p "$WT_PATH/thoughts"
+touch "$WT_PATH/thoughts/leak-check.md"
+mkdir -p "$SRC/thoughts"
+touch "$SRC/thoughts/leak-check.md"
+SRC_PORCELAIN="$(git -C "$SRC" status --porcelain 2>/dev/null | grep -E 'thoughts/' || true)"
+assert_contains "thoughts/" "$SRC_PORCELAIN" "original SRC checkout still sees thoughts/ as untracked (not excluded there)"
+rm -rf "$SCRATCH"
+
+echo ""
+echo "Test 5: --reuse-existing on a worktree created before this exclude upgrade still gets it"
+build_scratch
+run_create wt-reuse
+assert_eq "0" "$EXIT" "first create exits 0"
+# Simulate a pre-upgrade worktree: blow away the worktree-scoped exclude file
+# and its core.excludesFile config, then reuse — the reuse path must re-seed it.
+EXCLUDE_FILE="$(git -C "$WT_PATH" rev-parse --absolute-git-dir 2>/dev/null)/info/exclude"
+rm -f "$EXCLUDE_FILE"
+git -C "$WT_PATH" config --worktree --unset core.excludesFile 2>/dev/null || true
+run_create wt-reuse --reuse-existing
+assert_eq "0" "$EXIT" "reuse exits 0"
+REUSE_EXCLUDE_CONTENT="$(cat "$EXCLUDE_FILE" 2>/dev/null || true)"
+assert_contains "thoughts/" "$REUSE_EXCLUDE_CONTENT" "reuse path re-seeded 'thoughts/' into the exclude file"
 rm -rf "$SCRATCH"
 
 echo ""

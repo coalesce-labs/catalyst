@@ -185,6 +185,31 @@ SHIPPER_STORAGE="${CATALYST_DIR:-$HOME/catalyst}/alloy-data"
 SHIPPER_CONFIG="${SCRIPT_DIR}/log-shipper/config.alloy"
 SHIPPER_LAUNCHER="${SCRIPT_DIR}/log-shipper/launch.sh"
 
+# CTL-1494: the coordination-publish daemon (CTL-1488 Phase 3). A raw bun `.ts`
+# with no CLI wrapper, so — like the log-shipper above — catalyst-stack owns its
+# pid/log inline via the self-managed nohup-child idiom. These paths are distinct
+# from the daemon's own mirror (~/catalyst/coordination.jsonl), checkpoint
+# (coordination-publish.checkpoint.json), and DLQ (coordination-publish-dlq.jsonl)
+# — no clobber. The daemon self-exits when the resolved mode is `off` (ADR-023),
+# which coordination_mode() short-circuits so we never spawn a bun that immediately
+# dies (and never false-alarm the post-launch liveness re-check on that self-exit).
+COORDINATION_PID="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.pid"
+COORDINATION_LOG="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.log"
+COORDINATION_SCRIPT="${SCRIPT_DIR}/coordination-publish/index.ts"
+# Resolved-config fingerprint (mode|hubUrl) captured at launch. The daemon reads
+# its config ONLY at startup, so a later keep-alive tick compares this against the
+# freshly-resolved config and bounces the process when they diverge (Codex P1:
+# reconcile a running publisher when its mode/hub changes).
+COORDINATION_FP="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.fingerprint"
+# Bounded graceful-shutdown window (seconds) before SIGKILL. Enforce-mode flush
+# drains through the hub with 5s request timeouts + retries, so one second is not
+# enough (Codex P1: let the shutdown flush finish before forcing termination).
+COORDINATION_STOP_GRACE_SECONDS="${COORDINATION_STOP_GRACE_SECONDS:-30}"
+# Atomic start lock (a directory — mkdir is the repo's portable lock idiom, see
+# catalyst-state.sh; flock is absent on stock macOS). Serializes check-and-spawn so
+# two overlapping starts can't both pass the pid check and both spawn (Codex P1).
+COORDINATION_LOCK="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.start.lock"
+
 # CTL-1348: the standalone catalyst-updater daemon (the 5th launchd agent). Installed
 # ONLY by the explicit 'catalyst-stack adopt-updater' cutover — NOT by install-services,
 # which is re-run routinely and would silently cut nodes over. UPDATER_LOG matches the
@@ -383,6 +408,282 @@ stop_shipper() {
   rm -f "$SHIPPER_PID"
 }
 
+# ─── coordination-publish (CTL-1494 / CTL-1488) ──────────────────────────────
+# Lifecycle primitives for the coordination-publish daemon, mirroring the
+# shipper_* nohup-child template. The daemon is inert-by-default (ADR-023: mode
+# `off` → process.exit(0)); coordination_mode() resolves the SAME mode the daemon
+# would, so start_coordination short-circuits cleanly on `off` instead of spawning
+# a bun that immediately self-exits.
+
+# coordination_mode — resolve just the coordination mode, IDENTICALLY to the
+# daemon's own readCoordinationConfig(). Thin wrapper over coordination_resolve()
+# (defined below) so mode + hubUrl always come from one resolution path.
+coordination_mode() {
+  local resolved; resolved="$(coordination_resolve)"
+  printf '%s' "${resolved%%$'\t'*}"
+}
+
+# coordination_pid — print the live coordination-publish pid, or nothing.
+# Prefers the pid recorded in COORDINATION_PID; both branches validate the pid is
+# alive AND is actually the coordination-publish process (guards pid reuse),
+# mirroring shipper_pid.
+#
+# Codex P1 (bounded supervisor): the nohup child reparents to init and outlives
+# this command, so its only handle is the PID file. If that file is deleted,
+# emptied, or overwritten, a naive lookup would (a) let `start` spawn a DUPLICATE
+# publisher and (b) leave `stop` unable to reach the original — an unbounded
+# orphan making network egress in enforce mode. So when the PID file can't resolve
+# a live publisher, fall back to discovering it by command line. That keeps `start`
+# idempotent and `stop` reachable regardless of PID-file state.
+coordination_pid() {
+  local pid
+  if [[ -f "$COORDINATION_PID" ]]; then
+    pid="$(cat "$COORDINATION_PID" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && pid_alive "$pid" \
+       && ps -p "$pid" -o command= 2>/dev/null | grep -q 'coordination-publish'; then
+      printf '%s\n' "$pid"; return 0
+    fi
+  fi
+  # Fallback: PID file missing/stale but a publisher may still be running. Discover
+  # by the entrypoint path, then re-confirm via the command grep (guards a match on
+  # this script or an unrelated process). head -1 picks the oldest match.
+  pid="$(pgrep -f "$COORDINATION_SCRIPT" 2>/dev/null | head -1 || true)"
+  if [[ -n "$pid" ]] && pid_alive "$pid" \
+     && ps -p "$pid" -o command= 2>/dev/null | grep -q 'coordination-publish'; then
+    printf '%s\n' "$pid"; return 0
+  fi
+  return 0
+}
+
+# coordination_resolve — print "<mode>\t<hubUrl>" resolved IDENTICALLY to the
+# daemon's own readCoordinationConfig() (env kill-switch/override > Layer-2 >
+# default off), via one bun import. Fail-CLOSED to "off\t" on any bun/import
+# failure — a bun-less host cannot run the bun daemon anyway, so inert is correct.
+coordination_resolve() {
+  local cfgmjs="${SCRIPT_DIR}/execution-core/config.mjs"
+  if command -v bun >/dev/null 2>&1 && [[ -f "$cfgmjs" ]]; then
+    local out
+    if out="$(CFG_MJS="$cfgmjs" bun -e '
+        const m = await import(process.env.CFG_MJS);
+        try {
+          const c = m.readCoordinationConfig();
+          process.stdout.write(String(c.mode || "off") + "\t" + String(c.hubUrl || ""));
+        } catch { process.stdout.write("off\t"); }
+      ' 2>/dev/null)" && [[ -n "$out" ]]; then
+      printf '%s' "$out"; return 0
+    fi
+  fi
+  printf 'off\t'
+}
+
+# start_coordination — serialize the whole check-and-spawn under an atomic mkdir
+# lock so two overlapping invocations (the recurring stack LaunchAgent tick + a
+# manual or second `catalyst-stack start`) can't both pass the pid check and both
+# spawn a detached publisher — a TOCTOU the pid-rediscovery fallback alone can't
+# close, since it selects one match and doesn't serialize check-and-spawn (Codex
+# P1). The lock is held only across check-and-spawn, so contention is a keep-alive
+# tick racing a manual start — the loser skips the tick (the winner establishes the
+# single publisher) rather than queueing a redundant spawn.
+# _coordination_lock_stale — true if the lock dir at $1 is older than the stale
+# threshold (mtime, via portable `find -mmin`). The lock is held only briefly (a
+# sub-minute check-and-spawn, incl. a 30s stop-grace on a config-change restart),
+# so anything past the threshold is an abandoned lock from a crashed start /
+# powered-off host — never a live hold.
+_coordination_lock_stale() {
+  [[ -n "$(find "$1" -maxdepth 0 -mmin +"${COORDINATION_LOCK_STALE_MIN:-5}" 2>/dev/null)" ]]
+}
+
+# start_coordination — serialize check-and-spawn so two overlapping starts (the
+# recurring LaunchAgent tick racing a manual `start`) can't both spawn a detached
+# publisher (Codex P1). Single-primitive by design: one `mkdir` lock, and `mkdir`
+# is the SOLE arbiter of ownership — ownership is ONLY ever a successful
+# `mkdir "$COORDINATION_LOCK"`, and every reclaim path `continue`s and must win a
+# fresh mkdir to proceed. This is deliberately the PROVABLY-SAFE subset, not a
+# fuller stale-recovery, because a race-free takeover of a NON-EMPTY (already-held-
+# looking) lock is impossible with pure shell primitives — there is no atomic
+# compare-and-swap / flock on stock macOS, so every "inspect then remove/rename"
+# scheme is a TOCTOU: a second racer acts on the pathname, not the inode it
+# inspected, and can delete a peer's freshly-reacquired lock (the ABA that each
+# prior takeover attempt reintroduced one level down).
+#
+# The two invariants that make double-spawn IMPOSSIBLE:
+#   1. A live holder writes a sentinel file into the lock dir immediately after
+#      acquiring, so a live lock is NON-EMPTY.
+#   2. Reclaim removes a stale lock with `rmdir`, which REFUSES a non-empty dir —
+#      and only past the age gate (older than any live sub-minute check-and-spawn).
+# So a reclaimer can ONLY ever remove an EMPTY, aged-out carcass (a crash before the
+# sentinel write); it can never remove a live OR a non-empty leaked lock, and mkdir
+# arbitrates a single winner among racers. A lock leaked by SIGKILL/power-loss AFTER
+# the sentinel write is non-empty and is NOT auto-reclaimed — force-removing it is
+# exactly the impossible race above, so we accept the bounded, operator-recoverable
+# wedge instead (matching `catalyst-state.sh`, which does no stale reclaim at all).
+# Impact is minimal: coordination-publish is off by default, the leak window is a
+# sub-second SIGKILL, and `_start_coordination_locked`'s `coordination_pid` check is
+# an independent belt-and-suspenders against a running publisher being duplicated.
+# _coordination_lock_acquire — win the start lock. mkdir is the sole ownership
+# arbiter; reclaim ONLY an EMPTY, aged carcass (rmdir refuses a non-empty dir, so it
+# can never remove a live/leaked lock; the age gate covers the mkdir→sentinel
+# window). Returns 0 acquired, 1 if held by a live peer / non-empty leak. Shared by
+# start AND stop so the two lifecycle transitions serialize (Codex P1).
+_coordination_lock_acquire() {
+  local guard=0
+  while true; do
+    if mkdir "$COORDINATION_LOCK" 2>/dev/null; then
+      : > "$COORDINATION_LOCK/owner"   # sentinel: a live lock is non-empty → rmdir-proof
+      return 0
+    fi
+    guard=$((guard + 1))
+    [[ "$guard" -gt 8 ]] && return 1
+    if _coordination_lock_stale "$COORDINATION_LOCK" && rmdir "$COORDINATION_LOCK" 2>/dev/null; then
+      log "coordination-publish: reclaimed an abandoned (empty) start lock"
+      continue
+    fi
+    return 1
+  done
+}
+
+_coordination_lock_release() { rm -rf "$COORDINATION_LOCK" 2>/dev/null || true; }
+
+start_coordination() {
+  if ! _coordination_lock_acquire; then
+    log "coordination-publish start already in progress — skipping this tick"
+    return 0
+  fi
+  local rc=0
+  _start_coordination_locked || rc=$?
+  _coordination_lock_release
+  return "$rc"
+}
+
+_start_coordination_locked() {
+  # Resolve mode + hubUrl exactly as the daemon would, in ONE bun import, and
+  # fingerprint them PLUS the checkout identity. The daemon reads its config only
+  # at startup AND runs from a fixed plugin checkout, so this fingerprint is how a
+  # keep-alive tick notices a change and reconciles by restarting: a config change
+  # (mode/hubUrl) OR a plugin-checkout advance. The checkout HEAD SHA is what makes
+  # a `git pull`-style refresh redeploy the publisher — otherwise the long-lived
+  # bun process keeps executing the OLD checkout's modules until a manual restart
+  # (Codex P1: restart the publisher after checkout updates; the broker's immediate
+  # hot-reload path covers monitor/exec-core but not this CLI-less daemon, so it
+  # rides the keep-alive tick instead). Fail-safe: a non-git checkout just omits the
+  # SHA and the fingerprint stays mode|hub.
+  # The fingerprint captures everything the LONG-LIVED daemon reads only at startup:
+  # resolved config (mode/hubUrl), the plugin checkout (so a refresh redeploys), the
+  # state/events roots it derives its paths from (CATALYST_DIR/CATALYST_EVENTS_DIR),
+  # and the enforce-mode interim inbound source (CATALYST_LOKI_QUERY_URL /
+  # OTEL_EXPORTER_OTLP_ENDPOINT) — Codex P2: a reinstall that changes any of these
+  # must bounce the publisher, else it keeps using the old value. Any change → restart.
+  local resolved mode hub fp checkout_id
+  resolved="$(coordination_resolve)"
+  mode="${resolved%%$'\t'*}"
+  hub="${resolved#*$'\t'}"
+  checkout_id="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+
+  local pid; pid="$(coordination_pid)"
+
+  # 0. MODE GATE — off (default) is inert (ADR-023). But if a publisher is STILL
+  #    running from a prior shadow/enforce config (operator flipped Layer-2 to off,
+  #    or CATALYST_COORDINATION_MODE=0 kill-switch), it keeps mirroring and — in
+  #    enforce — making network requests until stopped, since it can't re-read
+  #    config in place. Reconcile by stopping it, THEN short-circuit (Codex P1).
+  #    Also covers the bun-less host (coordination_resolve → off): nothing to stop.
+  if [[ "$mode" == "off" ]]; then
+    if pid_alive "$pid"; then
+      log "coordination-publish mode=off but pid $pid still live (stale config) — stopping"
+      _stop_coordination_unlocked   # we already hold the start lock
+    else
+      log "coordination-publish mode=off — inert, skipping"
+    fi
+    return 0
+  fi
+  # 1. IDEMPOTENT — never double-start a live daemon (re-run every 600s keep-alive
+  #    tick), BUT bounce it when the resolved config changed since launch: the
+  #    daemon can't hot-reload mode/hubUrl, so a change requires a restart to take
+  #    effect (Codex P1: reconcile the running publisher when config changes).
+  if pid_alive "$pid"; then
+    local live_fp; live_fp="$(cat "$COORDINATION_FP" 2>/dev/null || true)"
+    if [[ "$live_fp" == "$fp" ]]; then
+      log "coordination-publish already running (pid $pid, mode $mode)"
+      return 0
+    fi
+    log "coordination-publish config changed (${live_fp:-<unknown>} → $fp) — restarting (pid $pid)"
+    _stop_coordination_unlocked   # we already hold the start lock
+    pid=""
+  fi
+  # 2. MISSING-BINARY LOUD, NON-FATAL (shipper posture — return 1, never exit).
+  if ! command -v bun >/dev/null 2>&1; then
+    warn "bun not found — coordination-publish NOT started (mode=$mode)"
+    return 1
+  fi
+  # 3. Entrypoint presence guard.
+  if [[ ! -f "$COORDINATION_SCRIPT" ]]; then
+    warn "coordination-publish entrypoint missing at $COORDINATION_SCRIPT — skipping"
+    return 1
+  fi
+  # 4. Launch detached (the daemon reads CATALYST_DIR/EVENTS_DIR + config from env/Layer-2).
+  log "starting coordination-publish (mode: $mode, log: $COORDINATION_LOG)"
+  nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
+  echo $! > "$COORDINATION_PID"
+  printf '%s' "$fp" > "$COORDINATION_FP"   # record the config this pid was launched with
+  disown $! 2>/dev/null || true
+  sleep 1
+  pid="$(coordination_pid)"
+  if pid_alive "$pid"; then
+    log "  → coordination-publish started (pid $pid)"
+  else
+    warn "coordination-publish failed to start — see $COORDINATION_LOG"
+    return 1
+  fi
+}
+
+# stop_coordination — public stop. Serializes against an in-flight start by taking
+# the SAME start lock (Codex P1): otherwise a manual stop racing a scheduled start
+# (after start acquired the lock but before it wrote the PID file) sees no publisher,
+# returns, and the start then spawns a detached publisher AFTER the stop completed —
+# leaving mirroring/egress running despite a successful stop. The wait bound MUST
+# exceed the start's own worst-case critical section — a config-change restart holds
+# the lock across the up-to-COORDINATION_STOP_GRACE_SECONDS graceful stop plus the
+# launch — or stop could expire and race it (Codex P1); default = grace + 20s margin.
+# If the lock still can't be taken (a truly stuck start, or a non-empty leak), fall
+# through and stop best-effort anyway — stopping is always safe. Internal callers
+# that already hold the lock use _stop_coordination_unlocked.
+stop_coordination() {
+  local got=0 tries=0
+  local wait_bound="${COORDINATION_STOP_LOCK_WAIT_SECONDS:-$((COORDINATION_STOP_GRACE_SECONDS + 20))}"
+  while [[ "$tries" -lt "$wait_bound" ]]; do
+    if _coordination_lock_acquire; then got=1; break; fi
+    tries=$((tries + 1)); sleep 1
+  done
+  _stop_coordination_unlocked
+  [[ "$got" == "1" ]] && _coordination_lock_release
+  return 0
+}
+
+_stop_coordination_unlocked() {
+  local pid; pid="$(coordination_pid)"
+  if pid_alive "$pid"; then
+    log "stopping coordination-publish (pid $pid)"
+    kill "$pid" 2>/dev/null            # daemon traps SIGTERM → graceful flush + checkpoint
+    # Codex P1: give the graceful flush a bounded window to finish before forcing.
+    # An enforce-mode publisher drains through the hub (5s request timeouts +
+    # retries), so a 1s deadline would SIGKILL mid-flush and drop coordination rows
+    # that mirror-dedup then never rebuilds. Poll (sleep, don't spin) up to the
+    # grace bound; only then force. No `timeout(1)` dep — stock macOS lacks it.
+    local waited=0
+    while pid_alive "$pid" && [[ "$waited" -lt "$COORDINATION_STOP_GRACE_SECONDS" ]]; do
+      sleep 1; waited=$((waited + 1))
+    done
+    if pid_alive "$pid"; then
+      warn "coordination-publish pid $pid still alive after ${COORDINATION_STOP_GRACE_SECONDS}s — forcing SIGKILL"
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  else
+    log "coordination-publish not running"
+  fi
+  rm -f "$COORDINATION_PID" "$COORDINATION_FP"
+}
+
 start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
 stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
 # _broker_running — true only when a broker is actually UP. Matches the "running (pid N)"
@@ -443,8 +744,13 @@ start_event_mirror() {
     warn "launchctl bootstrap failed for $EVENT_MIRROR_AGENT_PLIST — event-mirror not started"
     return 1
   fi
-  # RunAtLoad=false: kick explicitly so the service is live immediately after bootstrap.
-  launchctl kickstart -k "gui/$(id -u)/${EVENT_MIRROR_AGENT_LABEL}" >/dev/null 2>&1 || true
+  # CTL-1662 (Codex P2): RunAtLoad=true already starts the job the instant it's bootstrapped
+  # — verified live (bootout + bootstrap-only, no kickstart, self-starts). A follow-up
+  # `kickstart -k` here is not just redundant, it's the exact "settling hold" race this repo's
+  # own health-responder contract warns about elsewhere (docs/health-responder.md): forcing a
+  # restart on a job that's already mid-first-tick can kill it before its cursor is persisted,
+  # then the replacement reloads the stale cursor with an empty in-memory dedup set and
+  # re-appends fleet events already written. Let RunAtLoad do the starting; don't kick it.
   log "  → event-mirror LaunchAgent started (log: $EVENT_MIRROR_LOG)"
 }
 stop_event_mirror() {
@@ -459,10 +765,17 @@ stop_event_mirror() {
   rm -f "$EVENT_MIRROR_AGENT_PLIST"
   log "  → event-mirror stopped and uninstalled"
 }
-# _vn_event_mirror_running — "yes" when a bun process is running event-mirror/index.ts.
-# launch.sh always resolves the canonical path before exec'ing bun, so pgrep-by-path is stable.
+# _vn_event_mirror_running — "yes" when THIS user's event-mirror LaunchAgent has a live PID.
+# CTL-1662 (Codex P2): a bare `pgrep -f event-mirror/index.ts` is unscoped — on a shared
+# multi-user Mac another account's mirror process would falsely satisfy this developer's
+# required check even though the current developer's own LaunchAgent is absent or dead.
+# `launchctl list` only ever sees the CALLER's own per-user launchd domain, so checking the
+# specific EVENT_MIRROR_AGENT_LABEL there is both user-scoped and launcher-scoped (not just
+# any process that happens to match the path).
 _vn_event_mirror_running() {
-  if pgrep -f "event-mirror/index.ts" >/dev/null 2>&1; then echo yes; else echo no; fi
+  local pid
+  pid="$(launchctl list 2>/dev/null | awk -v label="$EVENT_MIRROR_AGENT_LABEL" '$3 == label {print $1; exit}')"
+  if [[ "$pid" =~ ^[0-9]+$ ]]; then echo yes; else echo no; fi
 }
 
 # ─── Hotpatch (CTL-940: one-checkout nodes) ─────────────────────────────────
@@ -768,6 +1081,14 @@ cmd_start() {
   if [[ "$node_class" != "developer" ]]; then
     start_forward
   fi
+  # CTL-1494: coordination-publish follows the reporting substrate (worker + monitor,
+  # gated != developer, same as start_forward). Non-fatal — a broken/absent publisher
+  # must never block the stack (CTL-988 non-load-bearing). When the mode resolves to
+  # `off` (the default) start_coordination is a clean no-op, so this is byte-identical
+  # inert on an unconfigured node.
+  if [[ "$node_class" != "developer" ]]; then
+    start_coordination || warn "continuing without coordination-publish (coordination mirror won't be written)"
+  fi
   # CTL-1263: the log-shipper comes up LAST — it only tails the daemons' .log
   # files, so it should start after the daemons it observes. start_shipper is
   # idempotent + non-fatal (warns loudly on a missing binary, returns 1).
@@ -801,6 +1122,9 @@ cmd_stop() {
   stop_shipper
   # CTL-1654: stop event-mirror on observation nodes; idempotent no-op on workers.
   stop_event_mirror
+  # CTL-1494: coordination-publish started after forward/before shipper, so stop it
+  # here (after the shipper/event-mirror, before stop_daemon/stop_forward).
+  stop_coordination
   stop_daemon
   stop_forward
   stop_monitor
@@ -840,6 +1164,16 @@ cmd_status() {
   echo -n "  monitor          "; catalyst-monitor status 2>&1 | head -1
   echo -n "  execution-core   "; catalyst-execution-core status 2>&1 | head -1
   echo -n "  otel-forward     "; catalyst-monitor forward-status 2>&1 | head -1
+  # CTL-1494: coordination-publish. off (the default / bun-less host) reports
+  # "off (inert)"; otherwise report running+pid+mode or stopped+mode.
+  local cmode; cmode="$(coordination_mode)"
+  if [[ "$cmode" == "off" ]]; then
+    echo "  coordination     off (inert)"
+  else
+    local cp; cp="$(coordination_pid)"
+    if pid_alive "$cp"; then echo "  coordination     running  pid=$cp  mode=$cmode"
+    else echo "  coordination     stopped  mode=$cmode"; fi
+  fi
   # CTL-1285: when the dedicated KeepAlive agent owns Alloy it writes no pidfile,
   # so detect it by plist + a live `alloy run` matching our config. Falling back to
   # the pidfile-only check would mis-report a launchd-managed shipper as "stopped".
@@ -1045,17 +1379,96 @@ _stack_agent_path() {
   printf '%s\n' "${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
+# _xml_escape <value> — escape the five XML predefined entities so an env value with
+# a metacharacter (e.g. a hub URL like https://h/p?x=1&y=2) can't emit a malformed
+# plist that launchd then refuses to load (Codex P2). Uses sed, NOT bash `${//}`
+# substitution: under Bash 5's default `patsub_replacement`, an unescaped `&` in the
+# replacement expands to the matched text (so `<` would wrongly become `<lt;`). `&`
+# MUST be substituted first; in sed replacements a literal `&` is written `\&`.
+_xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
 # render_stack_plist <cmd> <interval> [host_name] — emit the LaunchAgent plist XML to stdout.
 # Pure: no filesystem or launchctl side effects, so it is unit-testable and the
 # `--print` flag can show exactly what would be installed. host_name is optional;
 # when non-empty, CATALYST_HOST_NAME is pinned in EnvironmentVariables (CTL-1202).
+# All interpolated env VALUES pass through _xml_escape (Codex P2).
 render_stack_plist() {
   local cmd="$1" interval="$2" host_name="${3:-}"
   local host_env=""
   if [[ -n "$host_name" ]]; then
     host_env="
     <key>CATALYST_HOST_NAME</key>
-    <string>${host_name}</string>"
+    <string>$(_xml_escape "$host_name")</string>"
+  fi
+  # CTL-1494 (Codex P2): pin the operator's CATALYST_DIR so the keep-alive derives
+  # the publisher's pid/fingerprint/lock/checkpoint/mirror from the SAME root the
+  # operator used — else a nondefault-root publisher is found by command line, read
+  # with no fingerprint under the default root, and restarted against $HOME/catalyst,
+  # relocating coordination state (and likewise mis-starting after reboot). Captured
+  # at install time; omitted (default root) when unset.
+  local catdir_env=""
+  if [[ -n "${CATALYST_DIR:-}" ]]; then
+    catdir_env="
+    <key>CATALYST_DIR</key>
+    <string>$(_xml_escape "${CATALYST_DIR}")</string>"
+  fi
+  # CTL-1494 (Codex P2): pin CATALYST_EVENTS_DIR too — the publisher tails this
+  # directory, so a supported override must ride into the scheduled env or a
+  # post-reboot/restart start tails $CATALYST_DIR/events and misses events written
+  # to the configured directory. Captured at install time; omitted when unset.
+  if [[ -n "${CATALYST_EVENTS_DIR:-}" ]]; then
+    catdir_env="${catdir_env}
+    <key>CATALYST_EVENTS_DIR</key>
+    <string>$(_xml_escape "${CATALYST_EVENTS_DIR}")</string>"
+  fi
+  # CTL-1494 (Codex P2): pin the operator's Layer-2 config path into the agent env.
+  # launchd hands the keep-alive an otherwise-minimal environment, so without this a
+  # host configured via a nondefault CATALYST_LAYER2_CONFIG_FILE would resolve
+  # coordination (and every other Layer-2 read) from the DEFAULT file on each tick —
+  # so a publisher an operator started interactively in shadow/enforce would be seen
+  # as `off` and reconcile-stopped, and would never start after reboot. Captured at
+  # install time from the invoking environment; omitted (default path) when unset.
+  local layer2_env=""
+  if [[ -n "${CATALYST_LAYER2_CONFIG_FILE:-}" ]]; then
+    layer2_env="
+    <key>CATALYST_LAYER2_CONFIG_FILE</key>
+    <string>$(_xml_escape "${CATALYST_LAYER2_CONFIG_FILE}")</string>"
+  fi
+  # CTL-1494 (Codex P1): pin the coordination env OVERRIDES the operator installed
+  # with, so the scheduled keep-alive resolves the SAME mode the operator intended.
+  # Without this, installing with the CATALYST_COORDINATION_MODE=0 kill-switch (while
+  # Layer-2 still says enforce) would leave the tick job resolving `enforce` and
+  # re-launching the publisher with network egress — silently undoing the kill. Same
+  # for CATALYST_COORDINATION_HUB_URL. Captured at install time; omitted when unset.
+  local coord_env=""
+  if [[ -n "${CATALYST_COORDINATION_MODE:-}" ]]; then
+    coord_env="${coord_env}
+    <key>CATALYST_COORDINATION_MODE</key>
+    <string>$(_xml_escape "${CATALYST_COORDINATION_MODE}")</string>"
+  fi
+  if [[ -n "${CATALYST_COORDINATION_HUB_URL:-}" ]]; then
+    coord_env="${coord_env}
+    <key>CATALYST_COORDINATION_HUB_URL</key>
+    <string>$(_xml_escape "${CATALYST_COORDINATION_HUB_URL}")</string>"
+  fi
+  # CTL-1494 (Codex P2): pin the enforce-mode interim inbound-source inputs. With no
+  # hub URL, the publisher derives its Loki-tail source from CATALYST_LOKI_QUERY_URL
+  # (or the OTEL_EXPORTER_OTLP_ENDPOINT it falls back to); dropping them makes
+  # getLokiQueryUrl() return null after reboot/restart, so no inbound timer is created
+  # and cross-host coordination rows silently stop merging while status still says
+  # enforce. Captured at install time; omitted when unset.
+  local otel_env=""
+  if [[ -n "${CATALYST_LOKI_QUERY_URL:-}" ]]; then
+    otel_env="${otel_env}
+    <key>CATALYST_LOKI_QUERY_URL</key>
+    <string>$(_xml_escape "${CATALYST_LOKI_QUERY_URL}")</string>"
+  fi
+  if [[ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]]; then
+    otel_env="${otel_env}
+    <key>OTEL_EXPORTER_OTLP_ENDPOINT</key>
+    <string>$(_xml_escape "${OTEL_EXPORTER_OTLP_ENDPOINT}")</string>"
   fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1090,7 +1503,7 @@ render_stack_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>${HOME}</string>${host_env}
+    <string>$(_xml_escape "${HOME}")</string>${host_env}${catdir_env}${layer2_env}${coord_env}${otel_env}
   </dict>
 
   <!--
@@ -1311,8 +1724,15 @@ PLIST
 
 # render_event_mirror_plist <launcher> — emit the event-mirror LaunchAgent plist XML to stdout
 # (CTL-1654). Pure: no filesystem or launchctl side effects, so it is unit-testable.
-# KeepAlive=true so launchd restarts on crash. RunAtLoad=false: start_event_mirror
-# kickstarts explicitly after bootstrap so the service is live immediately.
+# KeepAlive=true so launchd restarts on crash. RunAtLoad=true so it self-starts at
+# every login AND the instant it's bootstrapped (CTL-1662) — this node's class may
+# never install the STACK_AGENT (developer/monitor nodes typically only run
+# adopt-updater, not install-services), so the dedicated per-daemon agent must be
+# self-sufficient, matching the updater/cloud-sync/log-shipper agents' own
+# convention. start_event_mirror does NOT additionally kickstart after bootstrap —
+# RunAtLoad already starts it immediately, and a redundant `kickstart -k` risks the
+# same settling-window race the health-responder contract warns about elsewhere
+# (docs/health-responder.md).
 render_event_mirror_plist() {
   local launcher="$1"
   # CTL-1654 (Codex P2 "pass mirror host overrides into launchd"): capture the roster
@@ -1355,7 +1775,7 @@ render_event_mirror_plist() {
   </array>
 
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 
   <key>KeepAlive</key>
   <true/>
@@ -1406,6 +1826,7 @@ cmd_install_services() {
     render_shipper_plist "$shipper_launcher" "$host_name"
     [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]] && bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --print-only 2>/dev/null || true
     [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]] && bash "${SCRIPT_DIR}/install-health-responder.sh" --print-only 2>/dev/null || true
+    [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]] && bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" --print-only 2>/dev/null || true
     return 0
   fi
 
@@ -1478,6 +1899,24 @@ cmd_install_services() {
     warn "install-health-responder.sh not found next to catalyst-stack — health responder not installed"
   fi
 
+  # CTL-1662 (Codex P1): dependabot-escalate sweep. Delegated to
+  # install-dependabot-escalate.sh, which bakes the canonical pristine-clone
+  # path (never an ephemeral worktree — the CTL-1306 rule) and is idempotent.
+  # The LaunchAgent installs unconditionally, even before a repo/team config
+  # exists — dependabot-escalate.sh itself refuses to run a no-op sweep and
+  # logs a clear "no repo/team config" error each interval until one is
+  # created, same self-explaining-failure shape as a missing PATH tool.
+  # Non-fatal — a hiccup here must not block the core stack services.
+  if [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]]; then
+    if bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" 2>&1 | sed 's/^/  /'; then
+      log "loaded ai.coalesce.catalyst-dependabot-escalate — hourly Dependabot failure/major-update sweep"
+    else
+      warn "dependabot-escalate install skipped/failed (continuing) — install it manually once a repo/team config exists"
+    fi
+  else
+    warn "install-dependabot-escalate.sh not found next to catalyst-stack — dependabot-escalate sweep not installed"
+  fi
+
   # CTL-1407: per-account rate-limit usage sampler (5th agent). Until now com.catalyst.agent
   # was only ever hand-installed (mini-2 alone), so the dashboard's Per-Account Rate-Limit
   # Scoreboard read No-data across the rest of the WORKER fleet. Provision it here so `catalyst-stack
@@ -1531,6 +1970,10 @@ cmd_uninstall_services() {
   # CTL-1509: cloud-sync health responder (delegated; idempotent, safe if not installed).
   if [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]]; then
     bash "${SCRIPT_DIR}/install-health-responder.sh" --uninstall 2>&1 | sed 's/^/  /' || true
+  fi
+  # CTL-1662: dependabot-escalate sweep (delegated; idempotent, safe if not installed).
+  if [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]]; then
+    bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" --uninstall 2>&1 | sed 's/^/  /' || true
   fi
   if [[ -f "$SHIPPER_AGENT_PLIST" ]]; then
     launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
@@ -2855,6 +3298,7 @@ _vn_run_developer() {
   _vn_emit "exec-core-stopped"  T1 true "$(_vn_v_daemon_down execution-core "$(_vn_exec_core_running)")"
   _vn_emit "plugins-fresh"      T1 true "$(_vn_v_updater "$(_vn_updater_ec)")"
   _vn_emit "read-replica"       T1 true "$(_vn_v_read_replica developer "$(_vn_read_replica_base)")"
+  _vn_emit "event-mirror-running" T1 true "$(_vn_v_daemon_up event-mirror "$(_vn_event_mirror_running)")"
   _vn_emit "would-not-own-work" T1 true "$(_vn_v_dev_no_work "$in_roster" "$multi_host" "$drained" "$roster_src")"
 }
 

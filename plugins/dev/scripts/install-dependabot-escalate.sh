@@ -32,6 +32,14 @@ unset _SRC
 DEST="${HOME}/Library/LaunchAgents/ai.coalesce.catalyst-dependabot-escalate.plist"
 LABEL="ai.coalesce.catalyst-dependabot-escalate"
 
+# The config path the sweep will read at run time — same override/default
+# resolution as dependabot-escalate.sh itself, resolved HERE (at install
+# time) and baked into the plist's EnvironmentVariables (Codex P2): launchd
+# does not inherit the installer's shell environment, so an operator who set
+# DEPENDABOT_ESCALATE_CONFIG only for this install invocation would otherwise
+# have every scheduled run silently fall back to the default path.
+DEPENDABOT_ESCALATE_CONFIG_RESOLVED="${DEPENDABOT_ESCALATE_CONFIG:-${HOME}/.config/catalyst/dependabot-escalate-repos.json}"
+
 UNINSTALL=0
 PRINT_ONLY=0
 
@@ -54,6 +62,40 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# _pristine_scripts_dir: the scripts dir of the registered pristine clone, or
+# "". Same resolution as install-health-responder.sh's helper of the same
+# name (Codex P1) — a cache/marketplace checkout is neither a temp dir nor a
+# linked worktree, so the ephemeral guard below alone accepts it; baking that
+# path means the installed plist points at a location that disappears on the
+# next plugin upgrade, silently exit-127ing the sweep every interval. Prefer
+# the canonical pluginDirs-registered pristine clone; SCRIPT_DIR is only the
+# fallback.
+_pristine_scripts_dir() {
+  local pd=""
+  if [[ -r "${SCRIPT_DIR}/lib/plugin-dirs.sh" ]]; then
+    # shellcheck source=/dev/null
+    . "${SCRIPT_DIR}/lib/plugin-dirs.sh" 2>/dev/null || true
+    if command -v resolve_plugin_dirs >/dev/null 2>&1; then
+      # resolve_plugin_dirs POPULATES RESOLVED_PLUGIN_DIRS (no stdout) — call
+      # it in THIS shell, not a $(subshell), or the precedence walk is lost.
+      resolve_plugin_dirs "$SCRIPT_DIR" 2>/dev/null || true
+      pd="${RESOLVED_PLUGIN_DIRS%%:*}"
+    fi
+  fi
+  if [[ -z "$pd" ]]; then
+    local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+    [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1 || return 0
+    pd="$(jq -r '.catalyst.orchestration.pluginDirs | if type=="array" then .[0] elif type=="string" then . else empty end' "$cfg" 2>/dev/null || true)"
+  fi
+  # pluginDirs points at <clone>/plugins/dev; dependabot-escalate.sh lives
+  # under scripts/.
+  [[ -n "$pd" && -f "${pd}/scripts/dependabot-escalate.sh" ]] && echo "${pd}/scripts"
+  # Fail open, same as install-health-responder.sh: under `set -e`, a false
+  # `[[ ... ]]` test would make this function return 1 and abort the caller's
+  # BAKE_DIR="$(_pristine_scripts_dir)" before the SCRIPT_DIR fallback runs.
+  return 0
+}
 
 # Same ephemeral-path refusal as install-health-responder.sh (CTL-1306
 # lesson): a linked git worktree or temp dir can be deleted out from under
@@ -108,6 +150,7 @@ _substitute() {
     -e "s|REPLACE_HOME|$(_escape_repl "$HOME")|g" \
     -e "s|REPLACE_START_INTERVAL|${interval}|g" \
     -e "s|REPLACE_PATH|$(_escape_repl "$(_agent_path)")|g" \
+    -e "s|REPLACE_CONFIG|$(_escape_repl "$DEPENDABOT_ESCALATE_CONFIG_RESOLVED")|g" \
     "$TEMPLATE"
 }
 
@@ -124,12 +167,14 @@ if [[ "$(_os)" != "Darwin" && "$PRINT_ONLY" -ne 1 ]]; then
   exit 0
 fi
 
-BAKE_DIR="${CATALYST_FORCE_BAKE_DIR:-$SCRIPT_DIR}"
+BAKE_DIR="${CATALYST_FORCE_BAKE_DIR:-$(_pristine_scripts_dir)}"
+[[ -z "$BAKE_DIR" ]] && BAKE_DIR="$SCRIPT_DIR"
 if _is_ephemeral_dir "$BAKE_DIR"; then
   echo "install-dependabot-escalate.sh: refusing to install from an ephemeral path:" >&2
   echo "  $BAKE_DIR" >&2
   echo "  A linked worktree / temp dir can be deleted, which silently kills the sweep." >&2
-  echo "  Run from the pristine clone (e.g. ~/catalyst/plugin-source/plugins/dev/scripts)." >&2
+  echo "  Run from the pristine clone (e.g. ~/catalyst/plugin-source/plugins/dev/scripts)," >&2
+  echo "  or register catalyst.orchestration.pluginDirs in ~/.config/catalyst/config.json." >&2
   exit 1
 fi
 

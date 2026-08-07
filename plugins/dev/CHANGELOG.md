@@ -1,5 +1,51 @@
 # Changelog
 
+## [12.48.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.47.0...catalyst-dev-v12.48.0)
+
+Aug 07, 2026
+
+<!-- ai-enhanced -->
+
+### Escalation Visibility & Stalled-PR Detection
+
+The unstuck sweep now actually reaches the operator: stalled tickets get a `needs-human` label and a Linear comment instead of silently logging an event that nobody sees. A new periodic timer probes in-flight PRs for CI failures, review latency, and no-push signals, writing stall stamps that board-health reads to emit nudges — enable it with `orchestration.stalledPrSweep.enabled` in your config. This release also closes two fleet-wide triage bugs where host-local dispatch caps let ownership churn multiply real spawns across nodes, and the orch-monitor sidebar nav is restored for mobile viewports.
+
+
+
+### PRs
+
+* **dev:** CTL-1381 auto-install new catalyst-* CLIs after updater pull ([#2847](https://github.com/coalesce-labs/catalyst/issues/2847)) ([215b85a](https://github.com/coalesce-labs/catalyst/commit/215b85afb10f601b3d0c9d4c285bb32d10e6e151))
+* **dev:** CTL-1608 board-health stalled-PR detection — review-latency + CI-health sweep ([#2908](https://github.com/coalesce-labs/catalyst/issues/2908)) ([e290fb0](https://github.com/coalesce-labs/catalyst/commit/e290fb02108e937aef5e0cbce21c10d7700f2ec9))
+* **dev:** CTL-1609 delegate-first escalation + explanation-required chokepoint ([#2909](https://github.com/coalesce-labs/catalyst/issues/2909)) ([e8643b4](https://github.com/coalesce-labs/catalyst/commit/e8643b4ee9587500a909f9c88a3f2aabf4e1f349))
+* **dev:** CTL-1641 — wire unstuck-sweep escalation to reach the operator ([#3005](https://github.com/coalesce-labs/catalyst/issues/3005)) ([74f99c9](https://github.com/coalesce-labs/catalyst/commit/74f99c9b0edfb0a4bc059bbb25f866531e249bd3))
+* **dev:** CTL-708 opt-in bounded-LLM resolver for source conflicts ([#3051](https://github.com/coalesce-labs/catalyst/issues/3051)) ([21327cb](https://github.com/coalesce-labs/catalyst/commit/21327cbefb5fa185c0e2bed9ca2638b18ab4516f))
+* **dev:** dependabot-escalate — file a ticket for the two Dependabot signals no PR ever surfaces ([#3053](https://github.com/coalesce-labs/catalyst/issues/3053)) ([a41578b](https://github.com/coalesce-labs/catalyst/commit/a41578b2352e52ec550849487f630453cdd1da6f))
+* **dev:** CTL-1649 — fleet-wide triage cap + exclude launch-failure tickets from board-health recovery ([#3030](https://github.com/coalesce-labs/catalyst/issues/3030)) ([50b5510](https://github.com/coalesce-labs/catalyst/commit/50b5510747850f4c39713c00bea58034e5f42fea))
+* **dev:** orch-monitor — mobile nav trigger + Linear reply-token identity walk ([#3054](https://github.com/coalesce-labs/catalyst/issues/3054)) ([d9ae8a7](https://github.com/coalesce-labs/catalyst/commit/d9ae8a76e8e7f84e058c926ac30dac66a52580fa))
+* **execution-core:** close test-hermeticity gaps that only fail on a live, configured host ([#3047](https://github.com/coalesce-labs/catalyst/issues/3047)) ([2858769](https://github.com/coalesce-labs/catalyst/commit/2858769af2a14fdee09c4671077e09c89602df55))
+
+## [12.47.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.46.0...catalyst-dev-v12.47.0)
+
+Aug 06, 2026
+
+<!-- ai-enhanced -->
+
+### Stranded Ticket Recovery & Monitoring Node Substrate
+
+The board-health delegate now detects mid-pipeline tickets that have gone dark — no worker, no live job, no recent recovery intent — and routes each one to the appropriate revival path (open PR remediation, remote branch resume, or fresh restart). Separately, monitor and developer nodes now run a proper event-mirror substrate instead of the execution core, so observation-only machines no longer accidentally join the dispatch roster; `catalyst doctor` and `verify-node` both surface a dead mirror as a real failure rather than silently passing. Several correctness fixes ship alongside: stranded-ticket evidence was previously never populated due to a map key mismatch, recovery-pass reclaim was silently failing on non-FSM phases, and queued/blocked labels now clear reliably once a ticket starts running.
+
+
+
+### PRs
+
+* **dev:** CTL-1644 board-health delegate detects stranded mid-pipeline tickets and routes each to revival or escalation ([#3043](https://github.com/coalesce-labs/catalyst/issues/3043)) ([e807fd5](https://github.com/coalesce-labs/catalyst/commit/e807fd5222181953cadd50a05d428bbde293a1e9))
+* **dev:** CTL-1654 interactive nodes carry event/monitoring substrate without execution layer ([#3016](https://github.com/coalesce-labs/catalyst/issues/3016)) ([42a623c](https://github.com/coalesce-labs/catalyst/commit/42a623cf26e57b18e6c66b89f558c3c8501e5520))
+* **dev:** address upstream review findings on PR [#2851](https://github.com/coalesce-labs/catalyst/issues/2851) ([#3052](https://github.com/coalesce-labs/catalyst/issues/3052)) ([6414e01](https://github.com/coalesce-labs/catalyst/commit/6414e01cae512c9007c0e2425facdee892fd433e))
+* **dev:** CTL-1571 make queued/blocked labels retractable once a ticket starts ([#3045](https://github.com/coalesce-labs/catalyst/issues/3045)) ([aa5fe53](https://github.com/coalesce-labs/catalyst/commit/aa5fe53b15b663383727831e34bbae786d3b10e7))
+* **dev:** CTL-1657 guard reclaim supersede-check against non-FSM phases ([#3027](https://github.com/coalesce-labs/catalyst/issues/3027)) ([58a3849](https://github.com/coalesce-labs/catalyst/commit/58a3849f3c837856ffdb26e6b9956295d643899f))
+* **dev:** CTL-1662 event-mirror survives reboot + doctor catches it dead ([#3038](https://github.com/coalesce-labs/catalyst/issues/3038)) ([89a0e0b](https://github.com/coalesce-labs/catalyst/commit/89a0e0b5f166fc92bc898bbe8f5ba12191ec9419))
+* **dev:** fix bash 3.2 syntax error in setup-plugin-source.sh ([#3049](https://github.com/coalesce-labs/catalyst/issues/3049)) ([6dc6e22](https://github.com/coalesce-labs/catalyst/commit/6dc6e225f8ba26b98ee3e94bc4f0b39bd3db5792))
+
 ## [12.46.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.45.0...catalyst-dev-v12.46.0)
 
 Aug 06, 2026

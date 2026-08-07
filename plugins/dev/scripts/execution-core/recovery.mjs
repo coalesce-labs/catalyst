@@ -88,6 +88,13 @@ function peerLivenessConfigured(anchorIssue) {
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
+// PROJ-1657: the one non-FSM phase this module knows is legitimately dispatched
+// through the same workers/<ticket>/phase-<name>.json signal-file machinery
+// (recovery-reasoning.mjs's Pass 0r recovery-pass actuator). Anything else
+// unrecognized by isKnownPhase is treated as genuinely unknown data (a typo or
+// a corrupt signal), not a supported dispatch-reuse type — see the reclaim
+// supersede-guard below.
+import { RECOVERY_PASS_PHASE } from "./recovery-reasoning.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
@@ -1985,14 +1992,19 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 // killBgJob, countReviveEvents, writeReviveMarker) + the CTL-638 cool-down +
 // CTL-679 breaker. All have real defaults for prod; tests override every one.
 // markEscalationCapTerminal — CTL-1442. Flip a phase signal to a TERMINAL
-// stalled state after the escalation ask-cap is consumed, persisting the
-// curated CTL-1130 explanation on the signal so the monitor's Needs-You inbox
-// (board-data deriveExplanation, newest-signal-first) renders the final brief.
-// A terminal signal drops the ticket from the reclaim sweep's working set, so
-// the every-cool-down re-ask loop (audit RC4) ends here. Read-modify-write,
-// atomic tmp+rename (mirrors defaultReviveDispatch's signal reset). Never
-// throws — a failed flip falls back to the escalateOnce ask-cap early-return.
-function markEscalationCapTerminal({ orchDir, ticket, phase, explanation }) {
+// stalled state, persisting the curated CTL-1130 explanation on the signal so
+// the monitor's Needs-You inbox (board-data deriveExplanation, newest-signal-
+// first) renders the final brief. A terminal signal drops the ticket from the
+// reclaim sweep's working set — originally so the every-cool-down re-ask loop
+// (audit RC4) ends once the escalation ask-cap is consumed (the default
+// `stalledReason`); PROJ-1657 reuses the same terminal-write for the
+// no-probe-for-phase escalation (a probe-less phase — e.g. a dead
+// recovery-pass worker — has no retry path at all, so it must go terminal on
+// the FIRST occurrence, not after a cap of asks) via an explicit
+// `stalledReason` override. Read-modify-write, atomic tmp+rename (mirrors
+// defaultReviveDispatch's signal reset). Never throws — a failed flip falls
+// back to escalateOnce's early-return.
+function markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason = "escalation-ask-cap" }) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   try {
     mkdirSync(dirname(signalPath), { recursive: true });
@@ -2013,7 +2025,7 @@ function markEscalationCapTerminal({ orchDir, ticket, phase, explanation }) {
     if (!sig.ticket) sig.ticket = ticket;
     if (!sig.phase) sig.phase = phase;
     sig.status = "stalled";
-    sig.stalledReason = "escalation-ask-cap";
+    sig.stalledReason = stalledReason;
     sig.explanation = explanation;
     if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
     sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -2170,15 +2182,26 @@ export function reclaimDeadWorkIfPossible(
     // complete event carry an attempt number, compare THOSE instead of the
     // coarser timestamp. Optional and fail-open — omit it (or an event with no
     // recorded attempt) and behavior is byte-identical to the timestamp-only path.
+    // Codex review (PR #2851): the timestamp must reject an OLDER completion
+    // first — attempts are only a disambiguator within the same second-precision
+    // timestamp window, never a substitute for the timestamp check. An ordinary
+    // scheduler redispatch omits `attempt`, so the dispatcher defaults back to
+    // attempt 1; comparing eventAttempt >= sinceAttempt before ts made a stale
+    // attempt-1 completion from a PRIOR cycle satisfy a brand-new attempt-1
+    // dispatch even though its timestamp predates the new signal's startedAt.
     completeEventSeen = ({ ticket: t, phase: p, sinceIso, sinceAttempt } = {}) => {
       if (!sinceIso) return hasCompleteEvent({ ticket: t, phase: p });
       const ts = latestCompleteEventTs({ ticket: t, phase: p });
       if (typeof ts !== "string") return false;
+      if (ts > sinceIso) return true;
+      if (ts < sinceIso) return false;
+      // ts === sinceIso: second-precision tie — attempt is the precise
+      // discriminator when both sides carry one.
       if (typeof sinceAttempt === "number") {
         const eventAttempt = latestCompleteEventAttempt({ ticket: t, phase: p });
         if (typeof eventAttempt === "number") return eventAttempt >= sinceAttempt;
       }
-      return ts >= sinceIso;
+      return true;
     },
     // CTL-658 — resume-session resolver. Maps the dead worker's bg_job_id to a
     // `claude --resume`-compatible UUID (or null) so the revive can continue the
@@ -2428,6 +2451,13 @@ export function reclaimDeadWorkIfPossible(
     // cycling through the ask-cap, so their caller-supplied finalAttemptCount
     // already carries real, correct meaning and must not be overridden.
     const effectiveAttemptCount = capApplies ? priorAsks + 1 : finalAttemptCount;
+    // CTL-1657 Codex P1 (round 2): a probe-less phase (recovery-pass today)
+    // must terminalize on its FIRST occurrence, same as a spent no-progress
+    // cap — there is no retry budget to wait out. Fold it into the same
+    // "must terminalize locally, regardless of breaker/cooldown state" gate
+    // as capSpent, since markEscalationCapTerminal is purely a local
+    // tmp+rename write with no Linear/event I/O of its own.
+    const mustTerminalizeLocally = capSpent || reason === "no-probe-for-phase";
     const reassertTerminalIfLost = () => {
       let already = null;
       try {
@@ -2438,19 +2468,25 @@ export function reclaimDeadWorkIfPossible(
         /* absent/malformed → re-assert below */
       }
       if (already === "stalled") return;
-      markEscalationCapTerminal({ orchDir, ticket, phase, explanation: buildEscExplanation() });
+      markEscalationCapTerminal({
+        orchDir,
+        ticket,
+        phase,
+        explanation: buildEscExplanation(),
+        stalledReason: capSpent ? "escalation-ask-cap" : reason,
+      });
       log.warn(
         { ticket, phase, reason, priorAsks },
         "ctl-1442: ask-cap spent but the signal was not terminal — re-asserted the stalled flip"
       );
     };
     if (breaker.isOpen(now())) {
-      if (capSpent) reassertTerminalIfLost(); // local-only repair — no Linear I/O
+      if (mustTerminalizeLocally) reassertTerminalIfLost(); // local-only repair — no Linear I/O
       log.warn({ ticket, phase, reason }, "ctl-679: escalation deferred — Linear breaker open");
       return "rate-limited-deferred";
     }
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
-      if (capSpent) reassertTerminalIfLost();
+      if (mustTerminalizeLocally) reassertTerminalIfLost();
       return "escalation-suppressed";
     }
     // CTL-1130: build a typed-union explanation classified by the three gates.
@@ -2548,6 +2584,22 @@ export function reclaimDeadWorkIfPossible(
       log.warn(
         { ticket, phase, reason, asks: priorAsks + 1 },
         "ctl-1442: escalation ask-cap reached — parked terminal (stalled + needs-human + brief); re-arm by deleting the .escalation-cooldowns marker AND the stalled phase signal (or reply on the ticket — the stall janitor clears both)"
+      );
+      return "escalation-cap-terminal";
+    }
+    // PROJ-1657: a probe-less phase (e.g. a dead recovery-pass worker, which
+    // reuses this signal-file machinery but has no registered work-done probe
+    // to retry against) has no retry path at all — there is nothing a second
+    // attempt could do differently. Unlike the "no-progress" cap above (which
+    // legitimately retries up to escalationAskCap times before going
+    // terminal), go terminal on this FIRST occurrence: leaving the signal at
+    // its prior non-terminal status would let listInFlightTickets keep
+    // counting it as an occupied worker slot forever (Codex #3027 P1).
+    if (reason === "no-probe-for-phase") {
+      markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason: reason });
+      log.warn(
+        { ticket, phase, reason },
+        "proj-1657: no-probe-for-phase escalation — parked terminal immediately (no retry path exists for a probe-less phase)"
       );
       return "escalation-cap-terminal";
     }
@@ -3009,7 +3061,33 @@ export function reclaimDeadWorkIfPossible(
     const i = phaseIndex(p);
     return i > max ? i : max;
   }, -1);
-  if (phaseIndex(phase) < latestIdx) {
+  // The signal's OWN phase needs an analogous guard before phaseIndex(phase):
+  // "recovery-pass" (the one non-FSM phase this module knows is legitimately
+  // dispatched through this same signal-file machinery, via
+  // recovery-reasoning.mjs's Pass 0r actuator) has no ordinal position, so
+  // phaseIndex() throws PhaseFsmError for it. Previously this was unguarded —
+  // every dead recovery-pass worker hit the throw on every tick, was
+  // swallowed by the PROJ-702 per-worker isolation in scheduler.mjs, and could
+  // never actually be reclaimed.
+  //
+  // PROJ-1657 Codex P2: the guard is scoped to RECOVERY_PASS_PHASE specifically,
+  // NOT a blanket "any unknown phase" — signal-reader.mjs accepts arbitrary
+  // phase-*.json files with an unvalidated raw.phase, so a genuinely unknown
+  // string (a typo, a corrupt signal, a future dispatch type not yet added
+  // here) must keep the PRE-fix behavior of doing nothing, not silently reach
+  // the no-probe-for-phase escalation below and mutate Linear/event state for
+  // data this function doesn't understand.
+  if (!isKnownPhase(phase) && phase !== RECOVERY_PASS_PHASE) {
+    log.warn(
+      { ticket, phase },
+      "recovery: unrecognized phase on a reclaim-eligible signal — no-op (not superseded, not escalated)"
+    );
+    return "unknown-phase-noop";
+  }
+  // A non-FSM phase (recovery-pass) can't be "superseded" in the ordinal
+  // sense — isKnownPhase(phase) is false for it, so this comparison is
+  // skipped and it falls through to the reclaim-eligible path below.
+  if (isKnownPhase(phase) && phaseIndex(phase) < latestIdx) {
     // CTL-649: emit a reap-intent so the daemon reaper can stop the lingering
     // bg worker. Fire-and-forget — the periodic orphan reaper picks up anything
     // the reconciler missed.
@@ -3040,7 +3118,66 @@ export function reclaimDeadWorkIfPossible(
   //     CTL-662: a `busy` worker on a probe-less phase no longer reaches here —
   //     the status trigger above suppresses it first, so this branch only
   //     escalates a genuinely reclaim-eligible (absent/idle-confirmed) worker.
+  //
+  //     PROJ-1657 Codex P2 (round 2): before escalating, check whether the
+  //     worker's own phase.<phase>.complete event was already seen — mirrors
+  //     the PROJ-778 alive-branch guard above, but for the DEAD case, where
+  //     there is no probe to re-check (a probe-less phase has none by
+  //     definition). A recovery-pass worker that emitted its complete event
+  //     and then crashed before its OWN signal-file update landed genuinely
+  //     finished; reconciling it to `done` (not escalating it to `stalled`)
+  //     avoids a false needs-human park on work that already succeeded.
   if (!hasProbe(phase)) {
+    // PROJ-1657 Codex P2 (round 4): recovery-emit.mjs's `escalated` subcommand
+    // already parks this signal `needs-human` with a worker-authored decision
+    // brief (mergeExplanationIntoSignal) when the recovery-pass worker itself
+    // decided it couldn't resolve the ticket — the worker then died before its
+    // phase-completion event landed. Mirrors the needs-input guard at the top
+    // of reclaimDeadWork: an already-parked signal is a resolved outcome, not
+    // an unverifiable dead worker, so it must not be overwritten with a
+    // generic no-probe-for-phase escalation that discards the curated brief.
+    if (signal?.status === "needs-human") {
+      log.debug(
+        { ticket, phase },
+        "recovery: no-probe branch skipping already-parked needs-human signal (worker-authored decision preserved)"
+      );
+      return "noop";
+    }
+    if (completeEventSeen({ ticket, phase })) {
+      if (prevBgJobId) {
+        emitReapIntent("phase.reclaim.reap-requested", {
+          ticket,
+          phase,
+          bgJobId: prevBgJobId,
+          worktreePath: signal.raw?.worktreePath,
+          reason: "proj-1657-no-probe-complete-event-reconcile",
+        }).catch(() => {});
+      }
+      appendEvent({
+        phase,
+        ticket,
+        orchId,
+        orchDir,
+        death_signal: lifecycle,
+        prev_state_json_mtime: prevStateJsonMtime,
+        probe_passed: null,
+        probe_checked: null,
+        completion_origin: "inferred-from-complete-event",
+        reclaimed_bg_job_id: prevBgJobId,
+        stopped_bg_job_ids: [],
+        title: `phase ${phase} reclaimed (no probe, but complete event seen)`,
+        body: `Daemon reclaimed dead ${phase} worker for ${ticket}: no work-done probe registered for this phase, but its own phase.${phase}.complete event was already emitted before the signal-file update landed. bg_job_id=${prevBgJobId ?? "?"}.`,
+      });
+      const r = emitComplete({ orchDir, signal });
+      if (r.code !== 0) {
+        log.warn(
+          { ticket, phase, code: r.code, stderr: r.stderr },
+          "recovery: no-probe complete-event reconcile — emit-complete failed; will retry next tick"
+        );
+        return "reclaim-failed";
+      }
+      return "reclaimed";
+    }
     return escalateOnce("no-probe-for-phase", 0);
   }
 

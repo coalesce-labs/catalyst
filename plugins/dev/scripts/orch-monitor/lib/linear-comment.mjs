@@ -44,6 +44,17 @@
 // success payload while silently not applying — the GraphQL path is the one that
 // demonstrably works for mutations. Reads stay on the replica (linear-thread.mjs).
 
+// CTL-1616 PR3 folded the env-alias leg of the OLD single-value
+// resolveLinearToken onto the shared secret-contract engine's resolveSecret().
+// #19 (below) supersedes that here: this file's `linearTokenCandidates` needs
+// LINEAR_API_TOKEN and LINEAR_API_KEY as two INDEPENDENT candidates (walking
+// each one's identity, since they can legitimately hold different
+// credentials), and resolveSecret's alias ladder collapses them to one value
+// — so this file reads the two env vars directly instead of importing
+// resolveSecret. Any future site here that only needs a single canonical
+// value (not a multi-candidate identity walk) should still prefer
+// resolveSecret("linear-api-token", ...) over a hand-rolled `??` ladder.
+
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 
 /** Wall-clock budget for a single Linear mutation. The operator is waiting on this
@@ -98,8 +109,25 @@ export function linearTokenCandidates(env = process.env, { projectConfig = null 
     const trimmed = v.trim();
     if (trimmed !== "" && !candidates.includes(trimmed)) candidates.push(trimmed);
   };
+  // CTL-1616 PR3 folded the OLD single-value `resolveLinearToken` onto
+  // resolveSecret's env-alias resolver (TOKEN-before-KEY precedence, one
+  // value out). That collapse is right for a caller that wants "the one
+  // token", but WRONG here: this function's entire purpose (#19) is walking
+  // every DISTINCT raw candidate's identity, because LINEAR_API_TOKEN and
+  // LINEAR_API_KEY can legitimately hold two different credentials (e.g. a
+  // bot token in one, a human's in the other) — resolveSecret would silently
+  // discard whichever alias it doesn't pick, defeating the multi-candidate
+  // walk. So the two env aliases stay independent entries here; resolveSecret
+  // is still the right call for any site that only needs a single value.
   add(env.LINEAR_API_TOKEN);
   add(env.LINEAR_API_KEY);
+  // Layer-2 personal token — the launchd path's only source. BOTH shapes are
+  // accepted: `linear.apiToken` is what the reference schema documents
+  // (website/.../reference/configuration.md) and what real installs carry, while
+  // the nested `catalyst.linear.apiToken` shows up in some setups. Reading only
+  // one shape means a validly-configured host resolves nothing and every reply
+  // returns `no_token` — the failure this whole fallback exists to prevent, so it
+  // is not worth being narrow about.
   add(projectConfig?.linear?.apiToken);
   add(projectConfig?.catalyst?.linear?.apiToken);
   return candidates;

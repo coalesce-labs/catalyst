@@ -26,6 +26,11 @@ describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
     expect(r).toEqual({ category: "skip", action: "skip" });
   });
 
+  test("no-probe-for-phase stalls are SKIPPED — already terminally escalated by PROJ-1657 (no re-ask loop, Codex #3027 round 4 P2)", () => {
+    const r = classifyStalledTicket({ reason: "no-probe-for-phase" });
+    expect(r).toEqual({ category: "skip", action: "skip" });
+  });
+
   test("rebase_refused_dirty_tree → dirty-tree/clear-noise-and-retry", () => {
     const r = classifyStalledTicket({ reason: "rebase_refused_dirty_tree" });
     expect(r.category).toBe("dirty-tree");
@@ -274,22 +279,63 @@ describe("runUnstuckSweepPass — action driver (CTL-1064)", () => {
     expect(emitted).toContain("unstuck.cleared.noise");
   });
 
-  test("mode:'enforce' + escalate category → calls escalate seam + postComment + emits unstuck.escalated", () => {
+  test("mode:'enforce' + escalate → escalate seam is called with (candidate, decision); driver no longer calls postComment on the escalate path (CTL-1641)", () => {
     const escalateCalled = [];
     const commentCalled = [];
     const emitted = [];
-    runUnstuckSweepPass({
+    const report = runUnstuckSweepPass({
       mode: "enforce",
       collectCandidates: () => [makeCandidate({
         evidence: { reason: "remediate-cycle-cap-exhausted", ticket: "CTL-TEST", phase: "implement", liveSessionInWorktree: false, linearTerminal: false },
       })],
-      escalate: (c) => { escalateCalled.push(c.ticket); },
-      emit: (type) => { emitted.push(type); },
+      escalate: (c, d) => { escalateCalled.push({ ticket: c.ticket, cat: d.category }); return { labelApplied: true, commentPosted: true, errors: [] }; },
       postComment: (t) => { commentCalled.push(t); },
+      emit: (type) => { emitted.push(type); },
     });
-    expect(escalateCalled).toContain("CTL-TEST");
+    expect(escalateCalled[0].ticket).toBe("CTL-TEST");
+    expect(commentCalled).toHaveLength(0);           // escalate seam owns the comment now
     expect(emitted).toContain("unstuck.escalated");
-    expect(commentCalled).toContain("CTL-TEST");
+    expect(report.escalated).toHaveLength(1);
+    expect(report.escalateFailures).toEqual([]);
+  });
+
+  test("escalate seam that RETURNS errors[] → each error recorded in report.escalateFailures (loud, not swallowed) (CTL-1641)", () => {
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [makeCandidate({
+        ticket: "CTL-ERR",
+        phase: "pr",
+        evidence: { reason: "unknown", ticket: "CTL-ERR", phase: "pr", liveSessionInWorktree: false, linearTerminal: false },
+      })],
+      escalate: () => ({ labelApplied: true, commentPosted: false, errors: [{ sideEffect: "comment", err: "linear 500" }] }),
+      emit: () => {},
+    });
+    expect(report.escalated).toHaveLength(1);         // still counted as escalated (label landed)
+    expect(report.escalateFailures).toHaveLength(1);
+    expect(report.escalateFailures[0]).toMatchObject({ ticket: "CTL-ERR", phase: "pr", sideEffect: "comment" });
+  });
+
+  test("escalate seam that THROWS → recorded in report.escalateFailures; the pass continues; the event still fires (CTL-1641)", () => {
+    const emitted = [];
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [
+        makeCandidate({ ticket: "T1", evidence: { reason: "unknown", ticket: "T1", phase: "pr", liveSessionInWorktree: false, linearTerminal: false } }),
+        makeCandidate({ ticket: "T2", evidence: { reason: "unknown", ticket: "T2", phase: "pr", liveSessionInWorktree: false, linearTerminal: false } }),
+      ],
+      escalate: (c) => { if (c.ticket === "T1") throw new Error("seam blew up"); return { labelApplied: true, commentPosted: true, errors: [] }; },
+      emit: (type) => { emitted.push(type); },
+    });
+    expect(report.escalateFailures.some(f => f.ticket === "T1" && f.sideEffect === "escalate-seam")).toBe(true);
+    expect(report.escalated.some(e => e.ticket === "T2")).toBe(true);        // T2 unaffected
+    expect(emitted.filter(t => t === "unstuck.escalated")).toHaveLength(2);  // event fires for both
+  });
+
+  test("report always initializes escalateFailures (empty on the happy path and in off/shadow) (CTL-1641)", () => {
+    const off = runUnstuckSweepPass({ mode: "off", collectCandidates: () => [] });
+    const shadow = runUnstuckSweepPass({ mode: "shadow", collectCandidates: () => [makeCandidate()], emit: () => {} });
+    expect(off.escalateFailures).toEqual([]);
+    expect(shadow.escalateFailures).toEqual([]);
   });
 
   test("mode:'enforce' + skip (live session) → no act, no emit, no intent", () => {
