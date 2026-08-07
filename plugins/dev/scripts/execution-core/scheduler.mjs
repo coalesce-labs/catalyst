@@ -2897,27 +2897,56 @@ function fenceSuppressMarkerPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".fence-suppressed");
 }
 
-// stampFenceSuppress — record that we suppressed a fence-guarded write for this dir.
+// The escalation-side cooldown is a SEPARATE marker from `.fence-suppressed`, and
+// deliberately so. `.fence-suppressed` means "a fence-guarded write was SUPPRESSED
+// here", and terminalDoneOnce reads it as a reason to skip its own probe. The
+// escalation site below arms a cooldown after a write it PERFORMED (a
+// generation-less needs-human escalation that fenceGuard let through) purely to
+// bound the per-tick probe burn — nothing about that outcome should stop a
+// genuinely-completed pipeline's terminal Done from landing. Sharing one marker did
+// exactly that: a recovery that finished teardown during the 15-minute window sat
+// non-terminal until the marker expired.
+function escalationProbeCooldownPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".escalation-probe-cooldown");
+}
+
 // Best-effort: a failed write just means we re-probe next tick (no worse than before).
-function stampFenceSuppress(orchDir, ticket, nowMs) {
+function stampCooldownMarker(path, nowMs) {
   try {
-    writeFileSync(fenceSuppressMarkerPath(orchDir, ticket), JSON.stringify({ ts: nowMs }));
+    writeFileSync(path, JSON.stringify({ ts: nowMs }));
   } catch {
     /* best-effort — re-probe next tick */
   }
 }
 
-// isFenceSuppressFresh — true when a suppression was stamped within the cooldown
-// window, so the caller should skip this dir's probe+write this tick. A missing or
-// unparseable marker, or an expired one, returns false (re-probe), so a fence that
-// becomes current again self-heals after at most one cooldown window.
-function isFenceSuppressFresh(orchDir, ticket, nowMs) {
+// A missing or unparseable marker, or an expired one, returns false (re-probe), so a
+// fence that becomes current again self-heals after at most one cooldown window.
+function isCooldownMarkerFresh(path, nowMs) {
   try {
-    const { ts } = JSON.parse(readFileSync(fenceSuppressMarkerPath(orchDir, ticket), "utf8"));
+    const { ts } = JSON.parse(readFileSync(path, "utf8"));
     return Number.isFinite(ts) && nowMs - ts < FENCE_SUPPRESS_COOLDOWN_MS;
   } catch {
     return false;
   }
+}
+
+// stampFenceSuppress — record that we suppressed a fence-guarded write for this dir.
+function stampFenceSuppress(orchDir, ticket, nowMs) {
+  stampCooldownMarker(fenceSuppressMarkerPath(orchDir, ticket), nowMs);
+}
+
+// isFenceSuppressFresh — true when a suppression was stamped within the cooldown
+// window, so the caller should skip this dir's probe+write this tick.
+function isFenceSuppressFresh(orchDir, ticket, nowMs) {
+  return isCooldownMarkerFresh(fenceSuppressMarkerPath(orchDir, ticket), nowMs);
+}
+
+function stampEscalationProbeCooldown(orchDir, ticket, nowMs) {
+  stampCooldownMarker(escalationProbeCooldownPath(orchDir, ticket), nowMs);
+}
+
+function isEscalationProbeCooldownFresh(orchDir, ticket, nowMs) {
+  return isCooldownMarkerFresh(escalationProbeCooldownPath(orchDir, ticket), nowMs);
 }
 
 // terminalDoneOnce — write the terminal `Done` Linear state for a ticket at
@@ -6579,6 +6608,16 @@ export function schedulerTick(
     for (const anomaly of eligibleGraph.anomalies) {
       for (const member of anomaly.members) {
         if (eligibleIds.has(member)) {
+          // HRW ownership gate. This sweep runs over `eligible` — the RAW,
+          // un-owned pool — and above the ready-filter that applies ownership to
+          // dispatch, so without this gate EVERY host in the cluster escalates
+          // EVERY cycle member. An unstarted eligible ticket has no worker dir and
+          // no claim generation, so fenceGuard's escalation fail-open passes on all
+          // of them, and labelOnce's marker is host-local: N hosts → N Linear label
+          // writes and N worker.transition events for one ticket. Same dispatch
+          // roster the ready-filter below uses, so exactly one host acts.
+          // STRICT no-op at N=1.
+          if (multiHost && !ownedBy(member, _dispatchRoster(), self)) continue;
           log.warn(
             { member, members: anomaly.members },
             "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human"
@@ -7172,7 +7211,10 @@ export function schedulerTick(
       // fence itself is still checked at the original site (immediately before the
       // write, below) — NOT reordered — so a takeover mid-probe is still caught and no
       // fence-check runs before we've proven a write is needed.
-      if (isFenceSuppressFresh(orchDir, ticket, now())) {
+      if (
+        isFenceSuppressFresh(orchDir, ticket, now()) ||
+        isEscalationProbeCooldownFresh(orchDir, ticket, now())
+      ) {
         // Still surface the orphan once for the dashboard (the probe/write is what we
         // skip, not the visibility signal).
         emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
@@ -7223,12 +7265,14 @@ export function schedulerTick(
               {
                 proceedOnMissingGeneration: true,
                 // CTL-1329: a missing generation stays missing next tick regardless
-                // of whether THIS tick's escalation write succeeded, so arm the same
-                // cooldown the fail-closed suppression branch below arms — otherwise
-                // proceeding here (instead of suppressing) reintroduces the unbounded
-                // per-tick terminal-probe burn CTL-1329 fixed, just on the write path
-                // instead of the read path.
-                onMissingGeneration: () => stampFenceSuppress(orchDir, ticket, now()),
+                // of whether THIS tick's escalation write succeeded, so arm a cooldown
+                // — otherwise proceeding here (instead of suppressing) reintroduces the
+                // unbounded per-tick terminal-probe burn CTL-1329 fixed, just on the
+                // write path instead of the read path. It is the escalation-side marker,
+                // NOT `.fence-suppressed`: terminalDoneOnce reads the latter, so arming
+                // that one here would hold a genuinely-completed pipeline non-terminal
+                // for a whole cooldown window when recovery finishes teardown.
+                onMissingGeneration: () => stampEscalationProbeCooldown(orchDir, ticket, now()),
               }
             )
           ) {
