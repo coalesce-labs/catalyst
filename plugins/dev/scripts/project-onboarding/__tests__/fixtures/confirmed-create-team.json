@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1",
+  "vcsRepo": "coalesce-labs/new-project",
+  "projectKey": "NEW",
+  "team": { "intent": "create", "key": "NEW", "confirmed": true },
+  "deploymentMode": "single-host",
+  "controller": { "id": "mini-1", "nodeClass": "worker" },
+  "targetPolicy": {
+    "targets": [{ "id": "mini-1", "nodeClass": "worker", "online": true }],
+    "includeController": true,
+    "executionNodeClasses": ["worker"]
+  }
+}
