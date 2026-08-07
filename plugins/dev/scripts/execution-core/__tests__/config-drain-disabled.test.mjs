@@ -205,7 +205,7 @@ describe("writeDaemonRuntimeEnv / readDaemonRuntimeEnv", () => {
       drainDisabled: true,
       bootDrained: false,
     });
-    const read = readDaemonRuntimeEnv(tmp, { isPidAlive: () => true });
+    const read = readDaemonRuntimeEnv(tmp, { isPidAlive: () => true, readDaemonPid: () => 4242 });
     expect(read).toEqual(payload);
   });
 
@@ -222,14 +222,14 @@ describe("writeDaemonRuntimeEnv / readDaemonRuntimeEnv", () => {
   test("dead recording pid → null (stale marker is ignored)", async () => {
     const { writeDaemonRuntimeEnv, readDaemonRuntimeEnv } = await import("../config.mjs");
     writeDaemonRuntimeEnv(tmp, { env: {}, pid: 4242 });
-    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => false })).toBeNull();
+    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => false, readDaemonPid: () => 4242 })).toBeNull();
   });
 
   test("absent/corrupt marker → null", async () => {
     const { readDaemonRuntimeEnv, getDaemonRuntimeEnvPath } = await import("../config.mjs");
-    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => true })).toBeNull();
+    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => true, readDaemonPid: () => 4242 })).toBeNull();
     writeFileSync(getDaemonRuntimeEnvPath(tmp), "not json");
-    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => true })).toBeNull();
+    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => true, readDaemonPid: () => 4242 })).toBeNull();
   });
 });
 
@@ -274,5 +274,35 @@ describe("resolveDrainStateForRead", () => {
       readRuntime: () => ({ pid: 4242, drainDisabled: false, bootDrained: false }),
     });
     expect(state).toMatchObject({ flagPresent: false, draining: false, source: "daemon-runtime" });
+  });
+});
+
+// CTL-1678 (Codex round-4 P2): liveness is not identity — a recycled pid must not
+// re-certify a crashed daemon's marker.
+describe("readDaemonRuntimeEnv pid identity (round-4 P2)", () => {
+  test("alive pid that is NOT the daemon of record → null (pid reuse after a crash)", async () => {
+    const { writeDaemonRuntimeEnv, readDaemonRuntimeEnv } = await import("../config.mjs");
+    writeDaemonRuntimeEnv(tmp, { env: { CATALYST_DRAIN_DISABLED: "1" }, pid: 4242 });
+    // The pid is alive — but daemon.pid now names a different (restarted) daemon.
+    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => true, readDaemonPid: () => 9999 })).toBeNull();
+  });
+
+  test("absent/unreadable daemon.pid → null (no daemon of record)", async () => {
+    const { writeDaemonRuntimeEnv, readDaemonRuntimeEnv } = await import("../config.mjs");
+    writeDaemonRuntimeEnv(tmp, { env: {}, pid: 4242 });
+    expect(readDaemonRuntimeEnv(tmp, { isPidAlive: () => true, readDaemonPid: () => null })).toBeNull();
+  });
+
+  test("real daemon.pid file is read from orchDir and gates the marker", async () => {
+    const { writeDaemonRuntimeEnv, readDaemonRuntimeEnv, getDaemonPidPath } = await import("../config.mjs");
+    writeDaemonRuntimeEnv(tmp, { env: { CATALYST_DRAIN_DISABLED: "1" }, pid: process.pid });
+    // No pid file yet → untrusted.
+    expect(readDaemonRuntimeEnv(tmp)).toBeNull();
+    // Matching pid file (+ our own provably-live pid) → trusted.
+    writeFileSync(getDaemonPidPath(tmp), `${process.pid}\n`);
+    expect(readDaemonRuntimeEnv(tmp)?.drainDisabled).toBe(true);
+    // Mismatched pid file → untrusted again.
+    writeFileSync(getDaemonPidPath(tmp), "999999\n");
+    expect(readDaemonRuntimeEnv(tmp)).toBeNull();
   });
 });

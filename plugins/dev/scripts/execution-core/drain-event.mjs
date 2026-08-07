@@ -189,10 +189,21 @@ export function emitDrainIgnoredEvent({
  * defaultDrainPsSnapshot — CTL-1678. Cheap sync `ps` snapshot for the tripwire
  * payload. Fires at most once per episode (latched by maybeEmitDrainIgnored), so
  * a synchronous ps is acceptable. Best-effort, truncated, never throws.
+ *
+ * CTL-1678 (Codex round-4 P1): the format is `comm=`, NOT `command=`. `command`
+ * includes full argv, and any host process carrying a credential in its arguments
+ * (the repo's own `curl -H "Authorization: …"` invocations, a token passed as a
+ * flag) would be embedded verbatim in node.drain.ignored — an event that ships off
+ * this machine into Loki, where it persists. Truncating to 40 lines bounds the size,
+ * not the secret. `comm` is the executable path with NO arguments on both BSD/macOS
+ * and Linux, so no argv text is ever collected and there is nothing to redact — a
+ * structural fix rather than a heuristic scrub (a redaction regex is exactly the
+ * thing that leaks the token it fails to match). Attribution keeps what it actually
+ * needs: pid, ppid, start time, and which binary is running.
  */
 export function defaultDrainPsSnapshot() {
   try {
-    const out = spawnSync("ps", ["-axo", "pid=,ppid=,lstart=,command="], {
+    const out = spawnSync("ps", ["-axo", "pid=,ppid=,lstart=,comm="], {
       encoding: "utf8",
       maxBuffer: 4 * 1024 * 1024,
     });

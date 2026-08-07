@@ -182,10 +182,37 @@ function defaultIsPidAlive(pid) {
 
 // Returns the marker ONLY when the daemon that wrote it is still alive; a marker
 // left by a crashed/stopped daemon is stale by definition and yields null.
-export function readDaemonRuntimeEnv(orchDir, { isPidAlive = defaultIsPidAlive } = {}) {
+//
+// CTL-1678 (Codex round-4 P2): liveness alone is NOT identity. A crashed daemon
+// leaves its marker behind, and once the OS recycles that pid onto an unrelated
+// process, a bare `kill -0` probe would re-certify the dead daemon's snapshot as
+// authoritative — turning the fix for the mutable-file problem into a subtler
+// version of it. So the pid must ALSO still be the daemon of record: it has to match
+// the live contents of the launcher's daemon.pid (the same file `read_pid` gates
+// `status` on). Both conditions are required; either one failing means "no live
+// daemon" and callers fall back to the env/file view.
+export function getDaemonPidPath(orchDir) {
+  return join(orchDir, "daemon.pid");
+}
+
+function defaultReadDaemonPid(orchDir) {
+  try {
+    const n = Number.parseInt(readFileSync(getDaemonPidPath(orchDir), "utf8").trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readDaemonRuntimeEnv(
+  orchDir,
+  { isPidAlive = defaultIsPidAlive, readDaemonPid = defaultReadDaemonPid } = {}
+) {
   try {
     const raw = JSON.parse(readFileSync(getDaemonRuntimeEnvPath(orchDir), "utf8"));
-    if (!raw || typeof raw.pid !== "number" || !isPidAlive(raw.pid)) return null;
+    if (!raw || typeof raw.pid !== "number") return null;
+    if (readDaemonPid(orchDir) !== raw.pid) return null; // not the daemon of record
+    if (!isPidAlive(raw.pid)) return null;
     return raw;
   } catch {
     return null;

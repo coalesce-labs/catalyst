@@ -400,6 +400,10 @@ esac
 # The overrides are restart-only; when daemon-runtime-env.json exists and its pid is
 # alive, the probes must answer from it and ignore the (possibly newer) env file.
 RT_MARKER="${DRAIN_SCRATCH}/execution-core/daemon-runtime-env.json"
+# Round-4 P2: the marker is trusted only when its pid is ALSO the live daemon of record
+# (daemon.pid), so a recycled pid cannot re-certify a crashed daemon's snapshot.
+RT_PIDFILE="${DRAIN_SCRATCH}/execution-core/daemon.pid"
+echo "$$" > "$RT_PIDFILE"
 # Live marker (this test shell's pid), no override captured at boot — the env file's
 # post-restart CATALYST_DRAIN_DISABLED=1 must NOT flip the answer.
 printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$$" > "$RT_MARKER"
@@ -416,8 +420,16 @@ expect_eq "_vn_drain_disabled: live marker override → yes" "yes" \
 # Dead-pid marker → stale, fall back to the env file (which carries the override).
 _dead_pid="$(bash -c 'echo $$')"   # that shell has exited; its pid is dead
 printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$_dead_pid" > "$RT_MARKER"
+echo "$_dead_pid" > "$RT_PIDFILE"
 expect_eq "_vn_drain_disabled: dead-pid marker → env-file fallback → yes" "yes" \
   "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
+
+# Round-4 P2: alive pid, but daemon.pid names a DIFFERENT daemon → marker untrusted,
+# fall back to the env file (which carries the override).
+printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$$" > "$RT_MARKER"
+echo "999999" > "$RT_PIDFILE"
+expect_eq "_vn_drain_disabled: pid-not-of-record → env-file fallback → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED EXECUTION_CORE_PID_FILE; source "'"$STACK"'"; _vn_drain_disabled' )"
 
 rm -rf "$DRAIN_SCRATCH"
 rm -f "$DRAIN_ENV_EMPTY" "$DRAIN_ENV_OVERRIDE"

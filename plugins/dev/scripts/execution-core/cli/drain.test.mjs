@@ -143,6 +143,8 @@ describe("readDrainStatus daemon-runtime preference (CTL-1678 round-3)", () => {
       join(tmp, "daemon-runtime-env.json"),
       JSON.stringify({ pid: process.pid, startedAt: "x", drainDisabled: false, bootDrained: false })
     );
+    // Round-4 P2: the marker is trusted only when its pid is ALSO the daemon of record.
+    writeFileSync(join(tmp, "daemon.pid"), `${process.pid}\n`);
     const s = readDrainStatus(tmp);
     expect(s.draining).toBe(true);
     expect(s.disabled).toBe(false);
@@ -159,6 +161,7 @@ describe("readDrainStatus daemon-runtime preference (CTL-1678 round-3)", () => {
       join(tmp, "daemon-runtime-env.json"),
       JSON.stringify({ pid: dead, startedAt: "x", drainDisabled: false, bootDrained: false })
     );
+    writeFileSync(join(tmp, "daemon.pid"), `${dead}\n`);
     const s = readDrainStatus(tmp);
     expect(s.disabled).toBe(true);
     expect(s.draining).toBe(false);

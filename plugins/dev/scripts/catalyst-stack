@@ -3131,16 +3131,25 @@ _vn_source_daemon_env_for_read() {
 # _vn_daemon_runtime_env — CTL-1678 (Codex round-3 P1). The overrides are restart-only:
 # sourcing the mutable env file reports the NEXT daemon's config, not the running one's.
 # The daemon snapshots its effective override state (post boot-drain precedence) into
-# daemon-runtime-env.json at boot, keyed by its pid. When that pid is still alive, print
-# "<drainDisabled> <bootDrained>" (JSON booleans) and succeed; otherwise fail so callers
-# fall back to the env-file view (truthful for a stopped daemon). grep-parsed (flat
-# single-object JSON we write ourselves) — no jq dependency, matching the status idiom.
+# daemon-runtime-env.json at boot, keyed by its pid. When that pid is still the daemon of
+# record AND alive, print "<drainDisabled> <bootDrained>" (JSON booleans) and succeed;
+# otherwise fail so callers fall back to the env-file view (truthful for a stopped
+# daemon). grep-parsed (flat single-object JSON we write ourselves) — no jq dependency,
+# matching the status idiom.
+#
+# Codex round-4 P2: liveness alone is not identity — a crashed daemon's marker plus a
+# recycled pid would falsely re-certify a dead snapshot, so the pid must also equal the
+# live daemon.pid. Mirrors config.mjs readDaemonRuntimeEnv's two-condition gate.
 _vn_daemon_runtime_env() {
-  local marker="${CATALYST_DIR:-$HOME/catalyst}/execution-core/daemon-runtime-env.json"
+  local ec_dir="${CATALYST_DIR:-$HOME/catalyst}/execution-core"
+  local marker="${ec_dir}/daemon-runtime-env.json"
   [[ -f "$marker" ]] || return 1
-  local pid dd bd
+  local pid dd bd of_record
   pid=$(grep -o '"pid":[0-9]*' "$marker" | head -1 | cut -d: -f2)
-  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+  [[ -n "$pid" ]] || return 1
+  of_record=$(tr -d '[:space:]' <"${EXECUTION_CORE_PID_FILE:-${ec_dir}/daemon.pid}" 2>/dev/null)
+  [[ "$of_record" == "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
   dd=$(grep -o '"drainDisabled":[a-z]*' "$marker" | head -1 | cut -d: -f2)
   bd=$(grep -o '"bootDrained":[a-z]*' "$marker" | head -1 | cut -d: -f2)
   printf '%s %s' "${dd:-false}" "${bd:-false}"
