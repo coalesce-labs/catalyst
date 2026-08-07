@@ -1185,8 +1185,19 @@ hub is wired, an interim Loki-tail transport).
 It ships behind the same **off→shadow→enforce** rollout discipline as the recovery family, but —
 unlike the board-health delegate — its floor is **`off`**, not `shadow`: coordination adds an
 always-on publisher process and, in enforce, network egress, so the safe default is fully inert until
-an operator promotes it. This is **groundwork** — the publisher is not launched by the standard stack
-yet; enforce + hub wiring lands in a later phase.
+an operator promotes it.
+
+The publisher is launched by `catalyst-stack` — after `otel-forward`, on **worker + monitor** nodes
+(gated `catalyst.node.class != developer`, following the reporting substrate) — as a self-managed
+nohup child ([`catalyst-stack`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-stack)
+`start_coordination`). Because the daemon self-exits when the resolved mode is `off` (the default),
+`catalyst-stack` short-circuits before spawning it, so launching it unconditionally is safe and an
+unconfigured node is byte-identical to before: no publisher process, no PID file, no mirror. When the
+mode is `shadow`/`enforce`, the daemon comes up idempotently (a re-run of `catalyst-stack start` — or
+the keep-alive tick — never double-starts it); `catalyst-stack status` reports a `coordination` line
+(`off (inert)`, or `running … mode=<mode>`). A missing `bun` is non-fatal (a bun-less host resolves to
+`off` and never blocks the rest of the stack). **Enforce and the hub transport stay operator-gated** —
+this wiring only makes `shadow`/`enforce` take effect where they were previously dark.
 
 Mode resolves from the env var (a single operator knob) over Layer-2 over the default. The `0`
 kill-switch and any unset/garbage value both resolve to `off`.

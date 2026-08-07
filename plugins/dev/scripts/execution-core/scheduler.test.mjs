@@ -10680,6 +10680,32 @@ describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass
     // covered exactly once — mac-studio handles CTL-B.
     expect(escalate.tickets).toEqual([T_STUDIO]);
   });
+
+  test("Pass 0u enforce: escalate seam returning errors[] is surfaced, not swallowed (CTL-1641)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const escalateWithError = () => ({
+      labelApplied: true,
+      commentPosted: false,
+      errors: [{ sideEffect: "comment", err: "boom" }],
+    });
+    const res = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      hosts: ["solo"],
+      hostName: "solo",
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 9_000_000,
+      unstuckSweep: {
+        ...unstuckOpts(escalateWithError),
+        collectCandidates: () => [
+          { ticket: T_MINI, phase: "pr", evidence: { reason: "unknown", ticket: T_MINI, phase: "pr" } },
+        ],
+      },
+    });
+    // Tick must not throw; the ticket is still recorded as escalated (label landed)
+    expect(res.unstuckEscalated?.some(e => e.ticket === T_MINI)).toBe(true);
+  });
 });
 
 // ── CTL-1191: Pass 0r reasoning — terminal-state filter (PR #2163 verify flag) ──

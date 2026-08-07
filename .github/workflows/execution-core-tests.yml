@@ -582,6 +582,8 @@ jobs:
             triage-redispatch-guard.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
+            unstuck-escalate-seam.test.mjs \
+            unstuck-sweep.test.mjs \
             lib/catalyst-resource.test.mjs \
             lib/node-class-parity.test.mjs \
             lib/install-telemetry.test.mjs \
