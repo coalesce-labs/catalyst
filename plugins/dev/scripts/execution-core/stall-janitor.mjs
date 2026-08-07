@@ -38,6 +38,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { log } from "./config.mjs";
+import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on J4 terminal GC
 import { parseWorktreeForBranch } from "./worktree.mjs";
 import { cleanPorcelain } from "./worktree-safety.mjs";
 // CTL-1005 J3: prior-phase artifact completeness reuses the SAME work-done probes
@@ -899,6 +900,10 @@ export function defaultGcTerminalSignals(orchDir) {
   return ({ ticket }) => {
     try {
       rmSync(join(orchDir, "workers", ticket), { recursive: true, force: true });
+      // CTL-1643: also remove the durable escalation record so the board does not
+      // surface a ghost needs-human card after the worker dir is GC'd. Fail-open
+      // (forgetDurableEscalation never throws).
+      forgetDurableEscalation(orchDir, ticket);
       return true;
     } catch (err) {
       log.warn({ ticket, err: err?.message }, "stall-janitor: J4 gc rmSync failed — skipping (CTL-1242)");

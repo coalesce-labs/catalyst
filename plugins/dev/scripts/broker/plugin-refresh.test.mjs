@@ -25,6 +25,7 @@ import {
   isThisRepoMergeEvent,
   isDaemonLocalMergeSignal,
   refreshPluginCheckout,
+  clearStaleIndexLock,
   refreshAllPluginCheckouts,
   startPluginDriftCheck,
   handlePluginRefreshEvent,
@@ -1578,5 +1579,176 @@ describe("refreshPluginCheckout — stale node_modules pruning", () => {
     expect(warn.detail.node_modules_dir).toBe("/co/x/node_modules");
     expect(warn.detail.error).toContain("EPERM");
     expect(installed).toEqual(["/co"]); // the checkout still converges as far as it can
+  });
+});
+
+// ─── clearStaleIndexLock (CTL-1415) ──────────────────────────────────────────
+//
+// A crashed git op leaves .git/index.lock behind and every later reset --hard
+// then fails forever (the ~8.5h laptop freeze in CTL-1401). The pull path
+// age-gate clears ONLY a lock older than the safe threshold (a live op is never
+// disturbed), emits a WARN when it clears, and never throws.
+
+const LOCK_NOW = 1_750_000_000_000;
+const LOCK_ROOT = "/co/plugin-source";
+const LOCK_PATH = "/co/plugin-source/.git/index.lock";
+
+// statFn seam: returns a fixed mtime for the lock path, null (absent) otherwise.
+function makeLockStatFn(mtimeMs) {
+  return (path) => (path === LOCK_PATH && mtimeMs != null ? mtimeMs : null);
+}
+
+describe("clearStaleIndexLock", () => {
+  test("no lock → no removal, no event", () => {
+    const emitted = [];
+    const removed = [];
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(null),
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.present).toBe(false);
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+  });
+
+  test("fresh lock (live git op) → NOT removed, no event", () => {
+    const emitted = [];
+    const removed = [];
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 5_000), // 5s old
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.present).toBe(true);
+    expect(res.stale).toBe(false);
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+  });
+
+  test("stale lock → removed + plugin.checkout.stale_lock_cleared (WARN)", () => {
+    const emitted = [];
+    const removed = [];
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 8.5 * 60 * 60 * 1000), // 8.5h old
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.cleared).toBe(true);
+    expect(removed).toEqual([LOCK_PATH]);
+    const ev = emitted.find((e) => e.event === "plugin.checkout.stale_lock_cleared");
+    expect(ev).toBeDefined();
+    expect(ev.severity).toBe("WARN");
+    expect(ev.detail.checkout).toBe(LOCK_ROOT);
+    expect(ev.detail.lock_age_ms).toBeGreaterThanOrEqual(600_000);
+    expect(ev.detail.threshold_ms).toBe(600_000);
+  });
+
+  test("removal failure → stale_lock_clear_failed (WARN), never throws", () => {
+    const emitted = [];
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 3_600_000), // 1h old → stale
+      rmFn: () => { throw new Error("EACCES"); },
+    });
+    expect(res.cleared).toBe(false);
+    expect(res.error).toContain("EACCES");
+    const ev = emitted.find((e) => e.event === "plugin.checkout.stale_lock_clear_failed");
+    expect(ev).toBeDefined();
+    expect(ev.severity).toBe("WARN");
+  });
+
+  // Codex P1 (#2530): a concurrent cleanup attempt could classify the SAME old
+  // lock as stale, then lose a race to a different attempt that already cleared
+  // it and started a new git op (a fresh index.lock). The re-check right before
+  // removal must see that the lock is no longer present-and-stale and bail out
+  // — never unlinking a lock a live git op now holds.
+  test("re-check race: lock no longer stale by removal time → NOT removed, no event", () => {
+    const emitted = [];
+    const removed = [];
+    let calls = 0;
+    // First staleLockStatus call (classification) sees the old stale lock;
+    // second call (the pre-removal re-check) sees a brand-new fresh lock —
+    // simulating another process having cleared+restarted git in between.
+    const statFn = (path) => {
+      calls += 1;
+      if (path !== LOCK_PATH) return null;
+      return calls === 1 ? LOCK_NOW - 3_600_000 : LOCK_NOW; // 1h stale, then 0s fresh
+    };
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn,
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+    expect(calls).toBeGreaterThanOrEqual(2); // both the classification and the re-check ran
+  });
+
+  test("re-check race: lock disappears entirely by removal time (already cleared) → NOT removed, no event", () => {
+    const emitted = [];
+    const removed = [];
+    let calls = 0;
+    const statFn = (path) => {
+      calls += 1;
+      if (path !== LOCK_PATH) return null;
+      return calls === 1 ? LOCK_NOW - 3_600_000 : null; // stale, then gone
+    };
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn,
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+  });
+});
+
+describe("refreshPluginCheckout — stale-lock pre-pull clear (CTL-1415)", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  test("clears a stale lock before fetch/reset, then pulls", () => {
+    const emitted = [];
+    const removed = [];
+    const gitFn = makeGitFn({ before: "old111", after: "new222" });
+    const res = refreshPluginCheckout({
+      root: LOCK_ROOT, now: LOCK_NOW, gitFn,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 3_600_000), // 1h stale
+      rmFn: (p) => removed.push(p),
+      bunInstallFn: () => {},
+    });
+    // Lock cleared, and the pull proceeded to a real reset + updated event.
+    expect(removed).toEqual([LOCK_PATH]);
+    expect(emitted.some((e) => e.event === "plugin.checkout.stale_lock_cleared")).toBe(true);
+    expect(gitFn.calls.some((c) => c.args[0] === "reset")).toBe(true);
+    expect(res.pulled).toBe(true);
+    expect(res.changed).toBe(true);
+  });
+
+  test("does NOT touch a fresh lock (live op), still attempts the pull", () => {
+    const emitted = [];
+    const removed = [];
+    const gitFn = makeGitFn({ before: "old111", after: "new222" });
+    refreshPluginCheckout({
+      root: LOCK_ROOT, now: LOCK_NOW, gitFn,
+      emitFn: (e) => emitted.push(e),
+      statFn: makeLockStatFn(LOCK_NOW - 3_000), // 3s fresh
+      rmFn: (p) => removed.push(p),
+      bunInstallFn: () => {},
+    });
+    expect(removed).toEqual([]);
+    expect(emitted.some((e) => e.event === "plugin.checkout.stale_lock_cleared")).toBe(false);
+    expect(gitFn.calls.some((c) => c.args[0] === "fetch")).toBe(true);
   });
 });

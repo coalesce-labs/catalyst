@@ -138,6 +138,8 @@ import {
   recordEscalation as defaultRecordEscalation,
   readEscalationRecord as defaultReadEscalationRecord, // CTL-1442: ask-cap gate
   ESCALATION_ASK_CAP, // CTL-1442
+  LABEL_CONFIRM_CAP, // CTL-1643: transient-retry cap before loud alert
+  labelMarkerBase, // CTL-1643: inspect .applied/.skipped markers without re-calling labelOnce
   labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
 import {
@@ -146,6 +148,10 @@ import {
   latestCompleteEventTs,
   latestCompleteEventAttempt,
 } from "./event-scan.mjs";
+import {
+  recordDurableEscalation,
+  readDurableEscalations,
+} from "./durable-escalation.mjs"; // CTL-1643: GC-surviving escalation store
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
 const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", import.meta.url));
@@ -156,6 +162,97 @@ const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", 
 import { resolvePhaseSessionId } from "./session-resolve.mjs";
 export { resolvePhaseSessionId };
 import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
+
+// detectSessionRateLimitHit — best-effort: did the dead worker's OWN session
+// immediately hit a Claude account usage/session limit, rather than genuinely
+// failing to make progress on the ticket's actual work?
+//
+// Confirmed live 2026-08-03: 11 tickets across 2 hosts all escalated as
+// generic "no-progress" after 3 real retry cycles, each ~10 min apart — but
+// every one of their dead sessions' transcripts consisted of nothing but the
+// harness's own canned reply ("You've hit your session limit · resets
+// <time>") with ZERO tool use, for EVERY attempt. The CTL-736 progress gate
+// correctly measured zero forward progress (nothing was ever attempted), and
+// the 3-strikes ask-cap correctly escalated — the STOP/escalate MACHINERY was
+// never wrong. What was wrong is the human-facing explanation: "no forward
+// progress" reads as "the WORK is stuck," when the true story is "the
+// ACCOUNT was rate-limited," which took real session-transcript archaeology
+// to uncover and cost real operator time. This function lets the no-progress
+// escalation's `extras` carry that distinction so the NEXT occurrence is
+// immediately diagnosable from the Linear comment alone.
+//
+// Deliberately does NOT change the STOP/escalate/ask-cap decision or timing —
+// only enriches the explanation once that decision has already been made
+// (see the no-progress call site). Best-effort throughout: a missing
+// bg_job_id, an unresolvable session, a missing/unreadable transcript, or a
+// malformed line never throws — it just means "we couldn't tell," not "it
+// didn't happen."
+export function detectSessionRateLimitHit(
+  bgJobId,
+  {
+    resolveSession = resolvePhaseSessionId,
+    // Both seams below are named distinctly (no `key: alias = outerName`
+    // destructuring-default shape) so the event-log-read-guard's module-
+    // global, name-keyed heuristic has no ambiguous `key = value` line to
+    // misread as a taint-relevant assignment — see the CTL-1442 allowlist
+    // entry in event-log-read-guard.test.mjs for the reads this file's
+    // scanner already flags for unrelated reasons.
+    findTranscriptFn = findTranscript,
+    projectsDir = defaultProjectsDir(),
+    readTranscriptFn = readFileSync,
+    // Only the tail of the transcript is inspected — a genuine rate-limit hit
+    // ends the session immediately, so the tell-tale text is at or near the
+    // end even for a longer-lived worker that hit the limit mid-run.
+    tailLines = 20,
+  } = {},
+) {
+  if (!bgJobId) return false;
+  let sessionId;
+  try {
+    sessionId = resolveSession(bgJobId);
+  } catch {
+    return false;
+  }
+  if (!sessionId) return false;
+  let transcriptPath;
+  try {
+    transcriptPath = findTranscriptFn(sessionId, projectsDir);
+  } catch {
+    return false;
+  }
+  if (!transcriptPath) return false;
+  let lines;
+  try {
+    // EVENT-LOG-FULL-READ-OK(CTL-1442): NOT the shared event log — one dead
+    // worker's own session transcript, bounded by that single run's turn
+    // count, checked once per no-progress STOP (a cold, rare path).
+    lines = readTranscriptFn(transcriptPath, "utf8").split("\n").filter((l) => l.trim() !== "");
+  } catch {
+    return false;
+  }
+  const start = Math.max(0, lines.length - tailLines);
+  for (let i = lines.length - 1; i >= start; i--) {
+    let entry;
+    try {
+      entry = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    if (entry?.type !== "assistant") continue;
+    const content = entry?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const c of content) {
+      if (
+        c?.type === "text" &&
+        typeof c.text === "string" &&
+        /hit your (session|usage) limit/i.test(c.text)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime,
@@ -1575,6 +1672,8 @@ export function readBootSince(orchDir) {
 // refreshes), this is THIS exec-core instance's own start time — written
 // atomically by writeBootMarker at startDaemon line 1, before detectColdStart
 // runs. Any --bg worker whose state.json mtime predates it is provably dead.
+// EVENT-LOG-FULL-READ-OK(CTL-1442): daemon-boot.json is a single small JSON
+// object ({bootedAt}), never a JSONL log.
 export function readExecCoreBootEpoch(orchDir, { read = (p) => readFileSync(p, "utf8") } = {}) {
   if (!orchDir) return 0;
   try {
@@ -1655,6 +1754,8 @@ export function clearProgressMarks(orchDir, { rm = rmSync } = {}) {
 //   linux:  /proc/stat line "btime <n>" (absolute boot epoch seconds; stable,
 //           unlike /proc/uptime which drifts with clock adjustments).
 // Injectable platform/spawn/readFile for deterministic tests. Never throws.
+// EVENT-LOG-FULL-READ-OK(CTL-1442): the linux branch reads /proc/stat, a
+// kernel pseudo-file, never a JSONL log.
 export function readBootEpoch({
   platform = process.platform,
   spawn = spawnSync,
@@ -1958,6 +2059,12 @@ export function reclaimDeadWorkIfPossible(
     appendEvent = defaultAppendReclaimEvent,
     appendReviveEvent = defaultAppendReviveEvent,
     appendEscalatedEvent = defaultAppendEscalatedEvent,
+    // 2026-08-03: best-effort session-transcript check so a no-progress
+    // escalation caused by the WORKER hitting a Claude account rate limit is
+    // labeled accurately rather than as a generic "no forward progress" —
+    // see detectSessionRateLimitHit's own header for the full rationale.
+    // Never changes the STOP/escalate decision itself, only its explanation.
+    detectRateLimit = detectSessionRateLimitHit,
     appendReviveSuppressedEvent = defaultAppendReviveSuppressedEvent,
     reviveDispatch = defaultReviveDispatch,
     applyStalledLabel = defaultApplyStalledLabel,
@@ -2342,6 +2449,31 @@ export function reclaimDeadWorkIfPossible(
     // as capSpent, since markEscalationCapTerminal is purely a local
     // tmp+rename write with no Linear/event I/O of its own.
     const mustTerminalizeLocally = capSpent || reason === "no-probe-for-phase";
+    // 2026-08-03 fix (confirmed live across 11 real tickets): for "no-progress",
+    // the caller passes the CTL-736 progress QUANTITY (commits-ahead / doc-size)
+    // as `finalAttemptCount` — not an attempt count. Since the escalate-vs-
+    // continue decision is made by the caller BEFORE this call, keyed on that
+    // quantity being <= the prior value, it is almost always 0 — so every
+    // no-progress escalation's human-facing text read "escalated after 0
+    // attempt(s)" regardless of how many real ask/retry cycles actually ran.
+    // The `attempts` array below is correctly built from the REAL ask history
+    // (priorAsks, +1 for the current ask) — use that same real count for every
+    // display/audit field too, but ONLY for this reason: the other three
+    // reasons (busy-ceiling-exceeded, no-probe-for-phase,
+    // wedged-never-started-exhausted) escalate on a single call rather than
+    // cycling through the ask-cap, so their caller-supplied finalAttemptCount
+    // already carries real, correct meaning and must not be overridden.
+    const effectiveAttemptCount = capApplies ? priorAsks + 1 : finalAttemptCount;
+    // Codex P2 (round 1, PR #3082): reassertTerminalIfLost is a REPAIR — it
+    // re-writes a lost/malformed stalled signal without recording a new ask
+    // (no appendEscalatedEvent/recordEscalationFn call on this path). When the
+    // repair is triggered by a spent cap, the "+1" in effectiveAttemptCount
+    // wrongly counts THIS repair as a new attempt, inflating a 3-ask cap into
+    // a persisted "4 attempt(s)". Use the recorded priorAsks (no +1) for a
+    // capSpent repair; the no-probe-for-phase repair path (capSpent === false)
+    // already carries the correct caller-supplied finalAttemptCount via
+    // effectiveAttemptCount, so it is left untouched.
+    const repairAttemptCount = capSpent ? priorAsks : effectiveAttemptCount;
     const reassertTerminalIfLost = () => {
       let already = null;
       try {
@@ -2356,7 +2488,7 @@ export function reclaimDeadWorkIfPossible(
         orchDir,
         ticket,
         phase,
-        explanation: buildEscExplanation(),
+        explanation: buildEscExplanation(repairAttemptCount),
         stalledReason: capSpent ? "escalation-ask-cap" : reason,
       });
       log.warn(
@@ -2378,15 +2510,19 @@ export function reclaimDeadWorkIfPossible(
     // all other reasons → AUTHORIZATION (agent can retry with authority).
     // CTL-1442: wrapped as a (pure) builder so the spent-cap re-assert can
     // produce a fresh brief lazily without duplicating the CTL-1130 logic.
-    function buildEscExplanation() {
+    // Codex P2 (round 1, PR #3082): accepts an explicit `attemptCount`
+    // (defaulting to effectiveAttemptCount, the genuine-new-ask value) so a
+    // capSpent REPAIR call can pass the recorded priorAsks instead — see
+    // repairAttemptCount above.
+    function buildEscExplanation(attemptCount = effectiveAttemptCount) {
     const escType = reasonToType(reason);
-    const whyField = reasonToWhyField(reason, finalAttemptCount);
+    const whyField = reasonToWhyField(reason, attemptCount);
     let explanation;
     const explanationFields =
       escType === "manual"
         ? {
             escalation_type: "manual",
-            problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+            problem: `${phase} escalated after ${attemptCount} attempt(s): ${reason}`,
             call_to_action:
               extras?.call_to_action ??
               `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
@@ -2395,20 +2531,20 @@ export function reclaimDeadWorkIfPossible(
             instructions: extras?.instructions ?? ["check CATALYST_WORKFLOW_GITHUB_TOKEN"],
             remediation_then_retry: `re-run ${ticket} ${phase} after granting the capability`,
             why_not_auto: whyField.value,
-            observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+            observed: { final_attempt_count: attemptCount, ...(extras?.observed ?? {}) },
             attempts: extras?.attempts ?? [],
           }
         : {
             escalation_type: "authorization",
-            problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+            problem: `${phase} escalated after ${attemptCount} attempt(s): ${reason}`,
             call_to_action:
               extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
             recommendation: `retry ${ticket} ${phase} after investigating ${reason}`,
-            risk: `continued retries risk wasting budget; ${finalAttemptCount} attempt(s) already made`,
+            risk: `continued retries risk wasting budget; ${attemptCount} attempt(s) already made`,
             why_asking: whyField.value,
             could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
             authorize_label: `retry ${ticket} ${phase}`,
-            observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+            observed: { final_attempt_count: attemptCount, ...(extras?.observed ?? {}) },
             // CTL-1442: truthful ask history — this call site historically passed
             // no extras, so the payload showed attempts:[] forever while asking
             // "authorize retry?" every window (audit RC4). Scoped to the SAME
@@ -2448,22 +2584,89 @@ export function reclaimDeadWorkIfPossible(
     }
     const explanation = buildEscExplanation();
     const enrichedExtras = { ...(extras ?? {}), explanation };
-    appendEscalatedEvent({
-      phase,
+    // CTL-1643: gate the event so it fires at most once per EPISODE. An episode
+    // ends when the 10-min cooldown is written (confirmed, unrecoverable, or cap).
+    // During a transient episode (no cooldown file ever written) we detect a
+    // prior fire via labelAttempts > 0 in the durable record. When the cooldown
+    // file exists — even if it has expired (new episode) — the gate is open so
+    // the fresh episode fires fresh. Phase is part of the key: a different-phase
+    // escalation on the same ticket is always a fresh fire.
+    const existingEscRec = readDurableEscalations(orchDir).find((r) => r.ticket === ticket);
+    const existingCooldownRec = readEscalationRecordFn(orchDir, ticket, phase);
+    const commentAlreadyPosted = !existingCooldownRec
+      && existingEscRec?.phase === phase
+      && (existingEscRec?.labelAttempts ?? 0) > 0;
+    if (!commentAlreadyPosted) {
+      appendEscalatedEvent({
+        phase,
+        ticket,
+        orchId,
+        reason,
+        final_attempt_count: effectiveAttemptCount,
+        extras: enrichedExtras,
+      });
+    }
+    // CTL-1643: capture the label-apply outcome (previously discarded). Gate the
+    // 10-min cooldown on confirmed-or-unrecoverable so a transient 429 leaves the
+    // retry window open. The .applied/.skipped markers written by labelOnce let us
+    // classify the outcome without repeating the API call.
+    const labelConfirmed = applyStalledLabel({ orchDir, ticket });
+    const markerBase = labelMarkerBase(orchDir, ticket, "needs-human");
+    const labelApplied = labelConfirmed || existsSync(`${markerBase}.applied`);
+    const labelUnrecoverable = existsSync(`${markerBase}.skipped`);
+    const durableRec = recordDurableEscalation({
+      orchDir,
       ticket,
-      orchId,
+      phase,
       reason,
-      final_attempt_count: finalAttemptCount,
-      extras: enrichedExtras,
+      labelConfirmed: labelApplied,
+      source: "scheduler",
+      now: now(),
     });
-    applyStalledLabel({ orchDir, ticket });
-    recordEscalationFn(orchDir, ticket, phase, reason, now());
+    // CTL-1643: track whether the cooldown was already written by the
+    // confirmed/unrecoverable/cap-reached gate below, so the two immediate-
+    // terminal branches further down (ask-cap reached, no-probe-for-phase)
+    // can still guarantee exactly one recordEscalationFn call even when the
+    // label write is transient/unconfirmed (e.g. a belief-owner deferral
+    // under CATALYST_INTENTS_ENFORCE=1) — those branches never get a second
+    // tick to retry, so unlike the "transient + under cap" no-op case above,
+    // they must not silently skip the cooldown record (regression: recovery
+    // .test.mjs "supersede guard tolerates an unknown phase on the SIGNAL
+    // ITSELF" expected exactly 1 recordEscalation call and got 0).
+    let cooldownRecorded = false;
+    if (labelApplied || labelUnrecoverable) {
+      // Confirmed or unrecoverable: write the 10-min cooldown (unchanged path).
+      recordEscalationFn(orchDir, ticket, phase, reason, now());
+      cooldownRecorded = true;
+    } else if (durableRec.labelAttempts >= LABEL_CONFIRM_CAP) {
+      // Cap reached without confirmation: emit a loud operator-visible alert so the
+      // escalation remains visible even without a Linear label, then write the cooldown
+      // to stop hammering the API. The durable record keeps the card on the board.
+      appendEvent({
+        "event.name": `escalation.label-unconfirmed.${ticket}`,
+        payload: { ticket, phase, reason, labelAttempts: durableRec.labelAttempts },
+      });
+      log.warn(
+        { ticket, phase, reason, labelAttempts: durableRec.labelAttempts },
+        "ctl-1643: needs-human label unconfirmed after cap attempts — emitting loud alert and writing cooldown"
+      );
+      recordEscalationFn(orchDir, ticket, phase, reason, now());
+      cooldownRecorded = true;
+    }
+    // else: transient + under cap → NO cooldown written → next tick retries the label.
     // CTL-1442: this ask consumed the cap → go TERMINAL. Flip the phase signal
     // to stalled with the curated explanation persisted on it (deriveExplanation
     // renders it in the monitor's Needs-You inbox), so the reclaim sweep stops
     // re-evaluating the ticket and the operator sees ONE final, complete ask
     // instead of an endless every-10-min echo.
     if (capApplies && priorAsks + 1 >= escalationAskCap) {
+      if (!cooldownRecorded) {
+        // This ask is terminal — there is no next tick to retry the label on,
+        // so the cooldown must be recorded now even though the label write
+        // itself was transient/unconfirmed (matches pre-CTL-1643 behavior,
+        // which called recordEscalationFn unconditionally here).
+        recordEscalationFn(orchDir, ticket, phase, reason, now());
+      }
       markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
       log.warn(
         { ticket, phase, reason, asks: priorAsks + 1 },
@@ -2480,6 +2683,12 @@ export function reclaimDeadWorkIfPossible(
     // its prior non-terminal status would let listInFlightTickets keep
     // counting it as an occupied worker slot forever (Codex #3027 P1).
     if (reason === "no-probe-for-phase") {
+      if (!cooldownRecorded) {
+        // Same rationale as the ask-cap-terminal branch above: this is a
+        // first-and-only occurrence with no retry path, so the cooldown
+        // must be recorded now regardless of label-confirm outcome.
+        recordEscalationFn(orchDir, ticket, phase, reason, now());
+      }
       markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason: reason });
       log.warn(
         { ticket, phase, reason },
@@ -3237,14 +3446,41 @@ export function reclaimDeadWorkIfPossible(
       }).catch(() => {});
       intentAwareKill({ bgJobId: prevBgJobId });
     }
+    // 2026-08-03: best-effort check on the DEAD worker's own transcript —
+    // never changes this STOP/escalate decision, only enriches the human-
+    // facing explanation when the true cause was an account rate limit
+    // rather than the work itself stalling. See detectSessionRateLimitHit.
+    let rateLimited = false;
+    try {
+      rateLimited = detectRateLimit(prevBgJobId);
+    } catch {
+      rateLimited = false;
+    }
     log.warn(
-      { ticket, phase, prevBgJobId, currentProgress, lastProgress },
+      { ticket, phase, prevBgJobId, currentProgress, lastProgress, rateLimited },
       "ctl-736: no forward progress since last attempt — stopping, not respawning"
     );
     // needs-human (cool-down + breaker guarded). When the Linear breaker is open
     // the escalation defers — surface that so the scheduler does not record a
     // clean stop (the worker is killed, but the label retries next tick).
-    const esc = escalateOnce("no-progress", currentProgress);
+    const esc = escalateOnce(
+      "no-progress",
+      currentProgress,
+      rateLimited
+        ? {
+            // Codex P2 (round 1, PR #3082): detectRateLimit only inspects the
+            // ONE latest dead session (prevBgJobId) — earlier attempts may
+            // have done real work or failed for unrelated reasons, so this
+            // must describe the detected attempt only, not claim "every".
+            call_to_action:
+              `${ticket} ${phase}'s latest dead attempt looks like it hit a Claude account ` +
+              "usage/rate limit (its dead session transcript shows the harness's own " +
+              "rate-limit reply, not real work) — wait for the usage window to reset and " +
+              "reply to retry, or reroute this phase to a different executor?",
+            observed: { likely_cause: "account-rate-limited" },
+          }
+        : undefined,
+    );
     return esc === "rate-limited-deferred" ? "rate-limited-deferred" : "no-progress-stopped";
   }
   // Forward progress was made → record the new high-water mark and revive below.
