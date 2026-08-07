@@ -99,7 +99,10 @@ OUT_R="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_R" COORD_FAKE="$FAKE_PUB
     livepid="$(cat "$COORDINATION_PID")"
     start_coordination; echo "RC=$?"
     sleep 1
-    if kill -0 "$livepid" 2>/dev/null; then echo "PROC_ALIVE"; kill -9 "$livepid" 2>/dev/null; else echo "PROC_DEAD"; fi
+    # Fail CLOSED (AGENTS.md): PROC_DEAD only on a POSITIVE confirmation the pid is
+    # gone — an empty/uncapturable pid must NOT read as "dead" (that would let a
+    # shutdown regression pass silently).
+    if [[ -z "$livepid" ]]; then echo "NO_PID"; elif ps -p "$livepid" >/dev/null 2>&1; then echo "PROC_ALIVE"; kill -9 "$livepid" 2>/dev/null; else echo "PROC_DEAD"; fi
     [[ -f "$COORDINATION_PID" ]] && echo "PIDFILE_PRESENT" || echo "PIDFILE_GONE"
   ' 2>&1)"
 if grep -q 'RC=0' <<<"$OUT_R"; then pass "reconcile-off: returns 0"; else failx "reconcile-off: returns 0" "$OUT_R"; fi
@@ -118,7 +121,9 @@ OUT_S="$(CATALYST_DIR="$CDIR_S" COORD_FAKE="$FAKE_PUB" COORDINATION_STOP_GRACE_S
     sleep 1
     livepid="$(cat "$COORDINATION_PID")"
     t0="$SECONDS"; stop_coordination; t1="$SECONDS"
-    if kill -0 "$livepid" 2>/dev/null; then echo "STILL_ALIVE"; kill -9 "$livepid" 2>/dev/null; else echo "KILLED"; fi
+    # Fail CLOSED (AGENTS.md): KILLED only when we POSITIVELY confirm the pid is
+    # gone. An empty/uncapturable pid → NO_PID (asserts fail), never a false KILLED.
+    if [[ -z "$livepid" ]]; then echo "NO_PID"; elif ps -p "$livepid" >/dev/null 2>&1; then echo "STILL_ALIVE"; kill -9 "$livepid" 2>/dev/null; else echo "KILLED"; fi
     echo "ELAPSED=$((t1 - t0))"
   ' 2>&1)"
 if grep -q 'KILLED' <<<"$OUT_S"; then pass "stop-grace: SIGKILLs a SIGTERM-ignoring publisher"; else failx "stop-grace: SIGKILLs a SIGTERM-ignoring publisher" "$OUT_S"; fi
@@ -193,6 +198,24 @@ if grep -q 'RC=0' <<<"$OUT_A"; then pass "atomic-reclaim: reclaim-mutex held ⇒
 if grep -qi 'already in progress' <<<"$OUT_A"; then pass "atomic-reclaim: does not race the peer's reclaim"; else failx "atomic-reclaim: does not race the peer's reclaim" "$OUT_A"; fi
 if grep -q 'MAINLOCK_KEPT' <<<"$OUT_A"; then pass "atomic-reclaim: leaves the stale lock for its owner (no double-remove)"; else failx "atomic-reclaim: leaves the stale lock for its owner" "$OUT_A"; fi
 if grep -q 'PIDFILE_GONE' <<<"$OUT_A"; then pass "atomic-reclaim: spawns nothing"; else failx "atomic-reclaim: spawns nothing" "$OUT_A"; fi
+
+# --- abandoned reclaim mutex recovery: a crash/power-off can leave the reclaim
+#     mutex behind; a STALE reclaim mutex must be recovered, not read as a live peer
+#     forever (Codex P2). Stale main lock + stale reclaim mutex ⇒ recover both,
+#     proceed (off-stub ⇒ inert), leaving no locks behind. ---
+CDIR_M="${SCRATCH}/catalyst-abandonedmutex"; mkdir -p "$CDIR_M"
+OUT_M="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_M" \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    mkdir -p "$COORDINATION_LOCK" "$COORDINATION_RECLAIM_LOCK"
+    touch -t 202001010000 "$COORDINATION_LOCK" "$COORDINATION_RECLAIM_LOCK"   # both abandoned
+    start_coordination; echo "RC=$?"
+    [[ -d "$COORDINATION_RECLAIM_LOCK" ]] && echo "MUTEX_KEPT" || echo "MUTEX_RECOVERED"
+    [[ -d "$COORDINATION_LOCK" ]] && echo "MAINLOCK_KEPT" || echo "MAINLOCK_CLEARED"
+  ' 2>&1)"
+if grep -qi 'reclaiming abandoned reclaim mutex' <<<"$OUT_M"; then pass "abandoned-mutex: recovers a stale reclaim mutex"; else failx "abandoned-mutex: recovers a stale reclaim mutex" "$OUT_M"; fi
+if grep -q 'RC=0' <<<"$OUT_M"; then pass "abandoned-mutex: proceeds after recovery (rc 0)"; else failx "abandoned-mutex: proceeds after recovery (rc 0)" "$OUT_M"; fi
+if grep -q 'MUTEX_RECOVERED' <<<"$OUT_M"; then pass "abandoned-mutex: leaves no reclaim mutex behind"; else failx "abandoned-mutex: leaves no reclaim mutex behind" "$OUT_M"; fi
 
 echo ""
 echo "  ${PASSES} passed, ${FAILURES} failed"

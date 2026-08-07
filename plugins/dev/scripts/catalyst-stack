@@ -489,11 +489,20 @@ coordination_resolve() {
 # P1). The lock is held only across check-and-spawn, so contention is a keep-alive
 # tick racing a manual start — the loser skips the tick (the winner establishes the
 # single publisher) rather than queueing a redundant spawn.
+# _coordination_lock_stale — true if the lock dir at $1 is older than the stale
+# threshold (mtime, via portable `find -mmin`). Both the main lock and the reclaim
+# mutex are held only briefly (the main across a sub-minute check-and-spawn incl. a
+# 30s stop-grace; the reclaim across a sub-second age-check + rmdir), so anything
+# past the threshold is an abandoned lock from a crashed start / powered-off host.
+_coordination_lock_stale() {
+  [[ -n "$(find "$1" -maxdepth 0 -mmin +"${COORDINATION_LOCK_STALE_MIN:-5}" 2>/dev/null)" ]]
+}
+
 start_coordination() {
   local guard=0
   while ! mkdir "$COORDINATION_LOCK" 2>/dev/null; do
     guard=$((guard + 1))
-    if [[ "$guard" -gt 5 ]]; then
+    if [[ "$guard" -gt 8 ]]; then
       log "coordination-publish start already in progress — skipping this tick"
       return 0
     fi
@@ -506,17 +515,28 @@ start_coordination() {
     # the main lock dir exists nobody can mkdir it, so removing it here — after
     # re-confirming staleness under the mutex — can never delete a live lock.
     if mkdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null; then
-      if [[ -n "$(find "$COORDINATION_LOCK" -maxdepth 0 -mmin +"${COORDINATION_LOCK_STALE_MIN:-5}" 2>/dev/null)" ]]; then
+      if _coordination_lock_stale "$COORDINATION_LOCK"; then
         log "coordination-publish: reclaiming stale start lock"
         rmdir "$COORDINATION_LOCK" 2>/dev/null || true
         rmdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null || true
         continue    # stale cleared — contend for a fresh mkdir
       fi
+      # Main lock is live (a peer's in-flight start) — leave it, skip this tick.
       rmdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null || true
+      log "coordination-publish start already in progress — skipping this tick"
+      return 0
     fi
-    # A live peer holds the lock, or another start owns the in-flight reclaim
-    # decision — either way it will establish the single publisher; skip this tick
-    # rather than pile a redundant spawn on.
+    # Couldn't take the reclaim mutex. If IT is stale, a start was killed / the host
+    # powered off after acquiring it but before releasing — recover it too, else it
+    # would wedge every future tick (Codex P2). Removing an abandoned reclaim mutex
+    # is benign even under a race (it guards only the decision, not the spawn — the
+    # eventual re-mkdir has a single winner). If it's fresh, a live peer owns the
+    # in-flight reclaim decision: skip.
+    if _coordination_lock_stale "$COORDINATION_RECLAIM_LOCK"; then
+      log "coordination-publish: reclaiming abandoned reclaim mutex"
+      rmdir "$COORDINATION_RECLAIM_LOCK" 2>/dev/null || true
+      continue
+    fi
     log "coordination-publish start already in progress — skipping this tick"
     return 0
   done
