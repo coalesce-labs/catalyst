@@ -53,6 +53,11 @@ import { dirname, join } from "node:path";
 import { readClusterHostCount, runFenceCheck } from "./stop-worker.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
 import { nodeClass } from "./canonical-event-shared.ts";
+// CTL-1489 (closes CTL-1475): the vite-safe projection reader — see the
+// off/shadow/enforce fallback wired into resolveHeldRun below.
+import { findHeldRunFromProjection as projectionFindHeldRun } from "./projection-reader.mjs";
+import { readProjectionReadConfig } from "../../execution-core/config.mjs";
+import { emitProjectionDrift } from "../../execution-core/projection-read-decision.mjs";
 
 // The execution-core worker tree root — ~/catalyst/execution-core/workers/<T>/.
 // Byte-identical to ticket-runs.mjs::DEFAULT_WORKERS_DIR and board-data.mjs's
@@ -244,6 +249,60 @@ export function findHeldRun(
   return null;
 }
 
+// ── cross-host held-run resolution (CTL-1489, closes CTL-1475) ──────────────
+// resolveHeldRun — the default `findHeld` collaborator `respondTicket` calls.
+// Tries the LOCAL disk read first (byte-identical to pre-CTL-1489 behavior,
+// and free — no DB open on the hot path); only when the local dir is absent
+// does it consult the off/shadow/enforce durable-projection fallback, mirroring
+// execution-core/daemon.mjs's handleCommentWake gate exactly. off → today's
+// null (404 not_held); shadow → null + a drift observation (never changes the
+// decision); enforce → the projected held run, normalized to the shape
+// respondTicket expects (`signal.generation` at the TOP level — the raw
+// on-disk shape — not nested under `signal.raw.generation` the way
+// workerStateRowToSignal returns it; getting this wrong would silently starve
+// runFenceCheck's generation read, which fails CLOSED on a null generation in
+// a multi-host deployment — an over-conservative 409, never an unsafe bypass,
+// but still worth getting right).
+export async function resolveHeldRun(
+  ticket,
+  {
+    findLocal = findHeldRun,
+    findProjection = projectionFindHeldRun,
+    readProjectionMode = () => readProjectionReadConfig().mode,
+    emitDrift = emitProjectionDrift,
+  } = {},
+) {
+  const local = findLocal(ticket);
+  if (local) return local;
+  let mode;
+  try {
+    mode = readProjectionMode();
+  } catch {
+    mode = "off";
+  }
+  if (mode === "off") return null;
+  let projected;
+  try {
+    projected = await findProjection(ticket);
+  } catch {
+    projected = null;
+  }
+  if (!projected) return null;
+  if (mode === "shadow") {
+    try {
+      emitDrift({ ticket, source: "respond-ticket" });
+    } catch {
+      /* drift emit is best-effort */
+    }
+    return null; // shadow observes but never acts
+  }
+  // enforce: normalize signal.raw.generation → signal.generation (top level)
+  // so runFenceCheck reads the SAME field the local-disk shape carries there.
+  const { phase, signal } = projected;
+  const generation = signal?.raw?.generation ?? signal?.generation ?? null;
+  return { phase, signal: { ...signal, generation } };
+}
+
 // ── orchestration: the endpoint body ─────────────────────────────────────────
 // respondTicket — drive the full BFF12 contract for
 // `POST /api/ticket/<ticket>/respond`. Outcome is a discriminated result the route
@@ -267,10 +326,14 @@ export function findHeldRun(
 // confirm is the typed-confirm token (the operator types the ticket id back), the
 // same gate BFF8 uses; mismatch is a hard 400 BEFORE any mutation. All
 // collaborators are injectable so tests cover every branch deterministically.
-export function respondTicket(
+export async function respondTicket(
   { ticket, response, confirm },
   {
-    findHeld = findHeldRun,
+    // CTL-1489: defaults to the cross-host-aware resolver (local-disk first,
+    // durable-projection fallback per the off/shadow/enforce rollout mode).
+    // `await` on a sync test double's return value is a no-op pass-through —
+    // every existing sync `findHeld` fake keeps working unmodified.
+    findHeld = resolveHeldRun,
     fenceCheck = runFenceCheck,
     record = recordResponse,
     clearMarker = clearNeedsHumanMarker,
@@ -279,7 +342,7 @@ export function respondTicket(
 ) {
   // Read first — the held run is BOTH the existence check and the source of the
   // generation we fence-check + the phase we record/resume. 404 when nothing held.
-  const held = findHeld(ticket);
+  const held = await findHeld(ticket);
   if (!held) {
     return { status: "not_held" };
   }

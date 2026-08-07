@@ -956,13 +956,45 @@ export function upsertWorkerState({
               AND excluded.status IS NOT NULL
          THEN excluded.status ELSE worker_state.status END,
        pr_number    = COALESCE(excluded.pr_number, worker_state.pr_number),
-       -- CTL-1489: sticky path columns — a later null-path event never erases
-       -- a previously-captured path (same idiom as pr_number above).
-       worktree_path = COALESCE(excluded.worktree_path, worker_state.worktree_path),
-       bg_job_id     = COALESCE(excluded.bg_job_id, worker_state.bg_job_id),
-       generation    = COALESCE(excluded.generation, worker_state.generation),
-       handoff_path  = COALESCE(excluded.handoff_path, worker_state.handoff_path),
-       artifact_path = COALESCE(excluded.artifact_path, worker_state.artifact_path),
+       -- Codex P1: sticky path columns need BOTH properties phase/status
+       -- already have — a later null-path event never erases a previously
+       -- captured path (the COALESCE half), AND an older/duplicate
+       -- out-of-order delivery can never clobber a newer path with stale
+       -- data (the watermark-gate half, same CASE condition as phase/status
+       -- above). A plain COALESCE (pre-fix) had only the first property: a
+       -- late-arriving OLDER event with a non-null path would win outright
+       -- regardless of last_event_ts, since dedup by event_id in sink 5
+       -- doesn't protect this row (the projection driver always upserts).
+       worktree_path = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.worktree_path IS NOT NULL
+         THEN excluded.worktree_path ELSE worker_state.worktree_path END,
+       bg_job_id = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.bg_job_id IS NOT NULL
+         THEN excluded.bg_job_id ELSE worker_state.bg_job_id END,
+       generation = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.generation IS NOT NULL
+         THEN excluded.generation ELSE worker_state.generation END,
+       handoff_path = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.handoff_path IS NOT NULL
+         THEN excluded.handoff_path ELSE worker_state.handoff_path END,
+       artifact_path = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.artifact_path IS NOT NULL
+         THEN excluded.artifact_path ELSE worker_state.artifact_path END,
        revive_count = MAX(excluded.revive_count, worker_state.revive_count),
        last_event_id = CASE
          WHEN excluded.last_event_ts IS NOT NULL

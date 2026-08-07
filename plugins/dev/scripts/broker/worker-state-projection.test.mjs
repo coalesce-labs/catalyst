@@ -149,6 +149,78 @@ describe("worker_state store helpers (CTL-532)", () => {
     expect(row.status).toBe("done");
   });
 
+  // Codex P1 (CTL-1489 round 2): the widened sticky-path columns
+  // (worktree_path/bg_job_id/generation/handoff_path/artifact_path) need BOTH
+  // COALESCE-against-null AND the phase/status watermark gate — a plain
+  // COALESCE let an out-of-order OLDER duplicate delivery clobber a newer
+  // path with stale data, since sink-5 dedup-by-event_id doesn't protect this
+  // row (the projection driver always upserts it).
+  test("widened path columns are watermark-gated: an OLDER out-of-order event does NOT clobber a newer path", () => {
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-1",
+      worktreePath: "/wt/v2",
+      bgJobId: "bg-v2",
+      generation: 2,
+      handoffPath: "/h/v2.md",
+      artifact: "thoughts/v2.md",
+      eventId: "e2",
+      eventTs: "2026-05-21T02:00:00.000Z",
+    });
+    // A stale, out-of-order redelivery of an OLDER event arrives after the
+    // newer one (e.g. a replayed/duplicate webhook) — its non-null path
+    // values must NOT win.
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-1",
+      worktreePath: "/wt/v1-stale",
+      bgJobId: "bg-v1-stale",
+      generation: 1,
+      handoffPath: "/h/v1-stale.md",
+      artifact: "thoughts/v1-stale.md",
+      eventId: "e1",
+      eventTs: "2026-05-21T01:00:00.000Z",
+    });
+    const row = getWorkerState("orch-1", "CTL-1");
+    expect(row.worktree_path).toBe("/wt/v2");
+    expect(row.bg_job_id).toBe("bg-v2");
+    expect(row.generation).toBe(2);
+    expect(row.handoff_path).toBe("/h/v2.md");
+    expect(row.artifact_path).toBe("thoughts/v2.md");
+    // last_event_ts must not regress either — same watermark, same gate.
+    expect(row.last_event_ts).toBe("2026-05-21T02:00:00.000Z");
+  });
+
+  test("widened path columns are still COALESCE-sticky: a NEWER event with null paths keeps the old values", () => {
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-1",
+      worktreePath: "/wt/v1",
+      bgJobId: "bg-v1",
+      generation: 1,
+      handoffPath: "/h/v1.md",
+      artifact: "thoughts/v1.md",
+      eventId: "e1",
+      eventTs: "2026-05-21T01:00:00.000Z",
+    });
+    // A genuinely newer event with no path fields (e.g. a plain phase.complete)
+    // must not erase the previously-captured paths.
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-1",
+      status: "done",
+      eventId: "e2",
+      eventTs: "2026-05-21T02:00:00.000Z",
+    });
+    const row = getWorkerState("orch-1", "CTL-1");
+    expect(row.worktree_path).toBe("/wt/v1");
+    expect(row.bg_job_id).toBe("bg-v1");
+    expect(row.generation).toBe(1);
+    expect(row.handoff_path).toBe("/h/v1.md");
+    expect(row.artifact_path).toBe("thoughts/v1.md");
+    expect(row.status).toBe("done");
+  });
+
   test("revive_count never regresses: MAX semantics", () => {
     upsertWorkerState({
       orchestrator: "orch-1",

@@ -2511,6 +2511,57 @@ describe("handleCommentWake (CTL-549)", () => {
       );
       expect(cleared).toMatchObject({ toDisposition: null, source: "comment-wake-clear" });
     });
+
+    // Codex P1: every host in a multi-host cluster receives the same webhook
+    // comment and hits this exact dir-absent branch — an unfenced dispatch
+    // would let N hosts race to actuate the same human reply. Only the
+    // ticket's HRW owner (isProjectionResumeOwner) may act.
+    test("enforce → a NON-owning host defers (no dispatch, no clearStall) even with a held projection row", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      const cleared = [];
+      await handleCommentWake(
+        { ticket: "CTL-4", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => ({
+            phase: "implement",
+            signal: { ticket: "CTL-4", phase: "implement", status: "needs-input", raw: {} },
+          }),
+          clearStall: ({ ticket, phase }) => {
+            cleared.push({ ticket, phase });
+            return true;
+          },
+          isProjectionResumeOwner: () => false, // this host does NOT own CTL-4
+        }
+      );
+      expect(dispatched).toEqual([]);
+      expect(cleared).toEqual([]);
+    });
+
+    test("enforce → the OWNING host still dispatches (default isProjectionResumeOwner fail-opens true)", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      await handleCommentWake(
+        { ticket: "CTL-5", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => ({
+            phase: "implement",
+            signal: { ticket: "CTL-5", phase: "implement", status: "needs-input", raw: {} },
+          }),
+          // isProjectionResumeOwner not supplied — must default to "owns everything"
+          // so single-host installs and every other test above keep working unwired.
+        }
+      );
+      expect(dispatched).toHaveLength(1);
+    });
   });
 });
 

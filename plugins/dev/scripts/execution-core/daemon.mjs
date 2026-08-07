@@ -441,6 +441,11 @@ export async function handleCommentWake(
     readProjectionMode = () => readProjectionReadConfig().mode,
     findHeldFromProjection = findHeldRunFromProjection,
     emitDrift = emitProjectionDrift,
+    // Codex P1: HRW single-owner fencing for the projection-enforce actuation
+    // path (dispatch/clearStall) — see the call site below. Defaults to
+    // fail-open (every host "owns" everything) so single-host installs and
+    // every existing test keep today's behavior with zero wiring.
+    isProjectionResumeOwner = () => true,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -644,6 +649,24 @@ export async function handleCommentWake(
         /* drift emit is best-effort */
       }
       return; // shadow observes but never acts
+    }
+    // Codex P1 (daemon.mjs): EVERY host in a multi-host cluster receives the
+    // same Linear webhook comment and, on a non-serving host, hits this exact
+    // dir-absent branch reading the same global projected held row — an
+    // unfenced dispatch/clearStall here would let N hosts race to actuate the
+    // SAME human reply. Apply the same HRW ownership gate scheduler actuation
+    // uses (hrw.mjs `ownedBy`) before mutating anything: only the ticket's
+    // owning host may act; every other host silently no-ops (the owning host's
+    // own comment-wake — same webhook, same event — is the one that acts).
+    // Fail-open (default `() => true`) for single-host/tests where every host
+    // trivially owns everything, matching the dir-present path's unfenced
+    // behavior (that path only ever runs on the SERVING host by construction).
+    if (!isProjectionResumeOwner(ticket)) {
+      log.info(
+        { ticket },
+        "handleCommentWake: not this host's HRW-owned ticket — projection resume deferred to the owning host"
+      );
+      return;
     }
     // enforce: resume the held run reconstructed from the projection.
     const projSig = held.signal ?? {};
@@ -1333,6 +1356,13 @@ export function startDaemon({
           removeLabel: defaultRemoveLabel,
           botUserId: linearBotUserIds,
           clearStall: defaultClearStall(orchDir, linearWrite),
+          // Codex P1 (CTL-1489): every host receives the same webhook comment;
+          // gate the projection-enforce actuation path (dispatch/clearStall on
+          // a ticket with no local worker dir) to this ticket's HRW owner only
+          // — bootRoster/_ident.name are the same roster+identity the CTL-862
+          // boot announcement above already resolved. Trivially true (every
+          // ticket "owned") on a single-host roster.
+          isProjectionResumeOwner: (ticket) => ownedBy(ticket, bootRoster, _ident.name),
         }); // CTL-549 + CTL-756 + CTL-1365b: re-dispatch parked tickets through the resolved executor; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
