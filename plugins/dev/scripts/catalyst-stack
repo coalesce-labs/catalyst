@@ -1425,6 +1425,7 @@ cmd_install_services() {
     render_shipper_plist "$shipper_launcher" "$host_name"
     [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]] && bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --print-only 2>/dev/null || true
     [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]] && bash "${SCRIPT_DIR}/install-health-responder.sh" --print-only 2>/dev/null || true
+    [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]] && bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" --print-only 2>/dev/null || true
     return 0
   fi
 
@@ -1497,6 +1498,24 @@ cmd_install_services() {
     warn "install-health-responder.sh not found next to catalyst-stack — health responder not installed"
   fi
 
+  # CTL-1662 (Codex P1): dependabot-escalate sweep. Delegated to
+  # install-dependabot-escalate.sh, which bakes the canonical pristine-clone
+  # path (never an ephemeral worktree — the CTL-1306 rule) and is idempotent.
+  # The LaunchAgent installs unconditionally, even before a repo/team config
+  # exists — dependabot-escalate.sh itself refuses to run a no-op sweep and
+  # logs a clear "no repo/team config" error each interval until one is
+  # created, same self-explaining-failure shape as a missing PATH tool.
+  # Non-fatal — a hiccup here must not block the core stack services.
+  if [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]]; then
+    if bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" 2>&1 | sed 's/^/  /'; then
+      log "loaded ai.coalesce.catalyst-dependabot-escalate — hourly Dependabot failure/major-update sweep"
+    else
+      warn "dependabot-escalate install skipped/failed (continuing) — install it manually once a repo/team config exists"
+    fi
+  else
+    warn "install-dependabot-escalate.sh not found next to catalyst-stack — dependabot-escalate sweep not installed"
+  fi
+
   # CTL-1407: per-account rate-limit usage sampler (5th agent). Until now com.catalyst.agent
   # was only ever hand-installed (mini-2 alone), so the dashboard's Per-Account Rate-Limit
   # Scoreboard read No-data across the rest of the WORKER fleet. Provision it here so `catalyst-stack
@@ -1550,6 +1569,10 @@ cmd_uninstall_services() {
   # CTL-1509: cloud-sync health responder (delegated; idempotent, safe if not installed).
   if [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]]; then
     bash "${SCRIPT_DIR}/install-health-responder.sh" --uninstall 2>&1 | sed 's/^/  /' || true
+  fi
+  # CTL-1662: dependabot-escalate sweep (delegated; idempotent, safe if not installed).
+  if [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]]; then
+    bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" --uninstall 2>&1 | sed 's/^/  /' || true
   fi
   if [[ -f "$SHIPPER_AGENT_PLIST" ]]; then
     launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
