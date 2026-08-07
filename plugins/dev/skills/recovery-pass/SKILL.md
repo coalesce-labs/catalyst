@@ -868,8 +868,10 @@ then declare Done autonomously via `declare --by recovery-pass`, which now just 
 > Bringing the branch to green is the job; overriding the gate never is.
 
 - **A stalled phase that died mid-flight** → re-dispatch it
-  (`phase-agent-dispatch --phase <phase> --ticket <T> --orch-dir <ORCH_DIR>`),
+  (`phase-agent-dispatch --phase <phase> --ticket <T> --orch-dir <ORCH_DIR> --worktree ~/catalyst/wt/<project>/<T>`),
   or re-arm its signal (failed→pending) and wake the scheduler.
+  CAT-31 makes dispatch resolve the ticket worktree itself, but pass `--worktree`
+  when it is known so multi-ticket sweeps state the target unambiguously.
 - **bun install / cannot find package** → `bun install` in the affected package,
   retry.
 - **TypeScript / lint error** → fix it (`/catalyst-dev:validate-type-safety`
