@@ -5,7 +5,13 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reconstructTicketState } from "./reconstruct-ticket-state.mjs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import {
+  reconstructTicketState,
+  defaultCheckArchive,
+  defaultArchiveDir,
+} from "./reconstruct-ticket-state.mjs";
 
 let tempDir;
 
@@ -136,5 +142,71 @@ describe("reconstructTicketState", () => {
     });
     expect(result.completedPhases).toContain("plan");
     expect(result.nextPhase).toBe("implement");
+  });
+});
+
+describe("defaultCheckArchive", () => {
+  let prevCatalystDir;
+
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = tempDir;
+  });
+
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+  });
+
+  // Codex P1 (PR #2697, round 2): phase-teardown archives execution-core
+  // workers by copying the worker dir to ~/catalyst/archives/<TICKET>/
+  // (filesystem only) — it never inserts into archived_workers. A ticket
+  // whose only durable record is that filesystem copy must still resolve
+  // terminal here.
+  test("filesystem archive dir with files → terminal", async () => {
+    const archiveDir = defaultArchiveDir("CTL-9101");
+    mkdirSync(archiveDir, { recursive: true });
+    writeFileSync(join(archiveDir, "phase-teardown.json"), "{}");
+
+    const result = await defaultCheckArchive("CTL-9101");
+    expect(result?.terminal).toBe(true);
+    expect(result?.completedPhases?.length).toBeGreaterThan(0);
+  });
+
+  test("filesystem archive dir empty (mkdir with no files) → not terminal", async () => {
+    mkdirSync(defaultArchiveDir("CTL-9102"), { recursive: true });
+    const result = await defaultCheckArchive("CTL-9102");
+    expect(result).toBeNull();
+  });
+
+  test("no filesystem archive dir and no DB row → null (fail-open)", async () => {
+    const result = await defaultCheckArchive("CTL-9103", {
+      dbPath: join(tempDir, "does-not-exist.db"),
+    });
+    expect(result).toBeNull();
+  });
+});
+
+// Codex P1 (PR #2697, round 2): the file advertises `node
+// reconstruct-ticket-state.mjs ...` at the top of the file, but a static
+// `import ... from "bun:sqlite"` made plain Node fail during module load
+// (ERR_UNSUPPORTED_ESM_URL_SCHEME) before argument parsing ever ran. Prove
+// the advertised command actually works under the bare `node` binary, not
+// just under `bun`.
+describe("Node-loadable CLI contract", () => {
+  test("`node reconstruct-ticket-state.mjs --ticket ... --json` runs to completion", () => {
+    const scriptPath = fileURLToPath(new URL("./reconstruct-ticket-state.mjs", import.meta.url));
+    const out = execFileSync(
+      process.execPath,
+      [scriptPath, "--ticket", "CTL-9104-node-loadable-check", "--json"],
+      {
+        cwd: tempDir,
+        env: { ...process.env, CATALYST_DIR: tempDir },
+        encoding: "utf8",
+      },
+    );
+    const parsed = JSON.parse(out.trim());
+    expect(parsed).toHaveProperty("nextPhase");
+    expect(parsed).toHaveProperty("completedPhases");
   });
 });

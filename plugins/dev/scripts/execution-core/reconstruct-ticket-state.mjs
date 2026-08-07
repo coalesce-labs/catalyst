@@ -11,7 +11,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Database } from "bun:sqlite";
 import { PHASES, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
 import { createWorktree } from "./worktree.mjs";
 import { defaultCheckOpenPrs } from "./open-pr-gate.mjs";
@@ -81,18 +80,64 @@ function defaultCatalystDbPath() {
   return resolve(process.env.CATALYST_DIR ?? `${homedir()}/catalyst`, "catalyst.db");
 }
 
-// defaultCheckArchive — fail-open lookup against the archived_workers index
-// (ADR-011 / migration 003_archives.sql). A ticket with an archived_workers
-// row has already been through phase-teardown's post-SUMMARY.md archive
-// sweep and is unconditionally terminal — without this, reconstruction falls
-// back to the thoughts-artifact walk, finds monitor-deploy as the last
-// artifact, and rebuilds a worktree to resume teardown on an already-done
-// ticket. Mirrors gateway-read.mjs's readonly-open / fail-open-on-any-error
-// contract: an absent DB, a pre-archive-migration schema, or lock contention
-// must never throw — reconstruction proceeds via the other sources instead.
-function defaultCheckArchive(ticket, { dbPath = defaultCatalystDbPath() } = {}) {
+// defaultArchiveDir — filesystem archive root for a ticket, mirroring
+// phase-teardown's ARCHIVE_DIR="${HOME}/catalyst/archives/${TICKET}"
+// (phase-teardown/SKILL.md, archive-first step, CTL-791). The bash writer
+// always resolves under literal $HOME; the JS reader additionally honors
+// CATALYST_DIR (same override defaultCatalystDbPath already uses) so tests
+// can redirect without touching $HOME.
+export function defaultArchiveDir(ticket) {
+  return join(process.env.CATALYST_DIR ?? `${homedir()}/catalyst`, "archives", ticket);
+}
+
+// defaultCheckArchive — fail-open lookup for a ticket that has already been
+// fully archived. Two independent sources, either one is sufficient:
+//
+//   (a) The filesystem archive dir phase-teardown writes for EVERY
+//       execution-core-dispatched ticket (`cp -R` of the worker dir to
+//       ~/catalyst/archives/<TICKET>/, unconditional archive-first step —
+//       phase-teardown/SKILL.md:345-362). This is the ONLY durable record
+//       for that path: a normally completed execution-core ticket's local
+//       workers/<TICKET>/ signals are removed once its worktree is torn
+//       down, so without (a) this check always returns null post-teardown
+//       and reconstruction falls back to the thoughts-artifact walk, finds
+//       monitor-deploy as the last artifact, and rebuilds a worktree to
+//       resume teardown on an already-done ticket.
+//   (b) The archived_workers SQLite index (ADR-011 / migration
+//       003_archives.sql), populated by the orchestrator-level
+//       `catalyst-archive.ts sweep` run at the end of the legacy
+//       /catalyst-legacy:orchestrate pipeline (Phase 7) — a distinct
+//       completion path that never writes the filesystem dir (a).
+//
+// `Database` (bun:sqlite) is imported dynamically and only inside the (b)
+// branch so this file stays loadable under plain Node per its own advertised
+// `node reconstruct-ticket-state.mjs` CLI usage (top-of-file comment): a
+// static `import ... from "bun:sqlite"` fails Node at module-load time,
+// before argument parsing or reconstruction ever runs. Under bun the dynamic
+// import resolves normally; under Node it rejects and is swallowed by the
+// same fail-open contract that already covers an absent DB, a
+// pre-archive-migration schema, or lock contention — reconstruction proceeds
+// via check (a) or the other sources instead.
+export async function defaultCheckArchive(
+  ticket,
+  {
+    archiveDir = defaultArchiveDir(ticket),
+    dbPath = defaultCatalystDbPath(),
+    readdirFn = readdirSync,
+  } = {},
+) {
+  try {
+    const files = readdirFn(archiveDir);
+    if (files && files.length > 0) {
+      return { terminal: true, completedPhases: PHASES.slice() };
+    }
+  } catch {
+    // no filesystem archive dir for this ticket — fall through to (b)
+  }
+
   let db;
   try {
+    const { Database } = await import("bun:sqlite");
     db = new Database(dbPath, { readonly: true });
     db.run("PRAGMA busy_timeout = 250");
     const row = db
