@@ -940,6 +940,14 @@ export const PREEMPTED_STATUS = "preempted";
 const rankedAboveSince = new Map();
 
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
+// CTL-1660 P1 (Codex #3081): entries are inserted in ASCENDING mtime order (oldest
+// dispatch first, most-recently-touched signal last), not raw readdirSync order
+// (filesystem-dependent, not chronological). isTicketInFlight's supersede guard
+// relies on this — see latestKnownPhaseIndex below — to determine which phase was
+// ACTUALLY dispatched most recently rather than assuming higher pipeline-ordinal
+// always means more recent (false whenever an earlier phase is deliberately
+// re-dispatched after a later phase already left a signal, e.g. re-running
+// `implement` after `review` requested changes).
 export function readPhaseSignals(orchDir, ticket) {
   const dir = join(orchDir, "workers", ticket);
   const signals = {};
@@ -949,16 +957,28 @@ export function readPhaseSignals(orchDir, ticket) {
   } catch {
     return signals; // no worker dir yet
   }
+  const entries = [];
   for (const f of files) {
     const m = /^phase-(.+)\.json$/.exec(f);
     if (!m) continue;
     if (m[1].includes("-yield-")) continue; // CTL-702: skip yield tombstones
+    const path = join(dir, f);
+    let status;
     try {
-      signals[m[1]] = JSON.parse(readFileSync(join(dir, f), "utf8"))?.status ?? null;
+      status = JSON.parse(readFileSync(path, "utf8"))?.status ?? null;
     } catch {
-      // unreadable / malformed signal — skip; treated as absent
+      continue; // unreadable / malformed signal — skip; treated as absent
     }
+    let mtimeMs;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      mtimeMs = 0; // vanished between readdir and stat — sorts first, harmless
+    }
+    entries.push({ phase: m[1], status, mtimeMs });
   }
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const e of entries) signals[e.phase] = e.status;
   return signals;
 }
 
@@ -983,12 +1003,30 @@ export function readPhaseSignals(orchDir, ticket) {
 // (recovery.mjs) so the two "has this ticket moved past this signal" checks
 // agree: a KNOWN phase whose phaseIndex is behind the ticket's latest-
 // dispatched KNOWN phase is superseded and its status no longer counts.
+//
+// CTL-1660 P1 (Codex #3081): "latest-dispatched" is determined by DISPATCH
+// RECENCY, not raw pipeline-ordinal position. Picking the max phaseIndex across
+// every known phase ever seen breaks when a phase is deliberately re-dispatched
+// OUT OF ORDER going BACKWARD (e.g. recovery-pass or an operator re-runs
+// `implement` after `review` already completed and left a `done` signal):
+// implement's ordinal is lower than review's, so a pure ordinal-max would keep
+// treating implement as "superseded" and silently ignore its outcome — even a
+// fresh `failed` — while the stale `review: done` signal (higher ordinal, but
+// OLDER in wall-clock time) looks like the current state. `phases` here is
+// `Object.keys(signals)`, and readPhaseSignals inserts entries in ascending-
+// mtime order, so the LAST known phase encountered in iteration order is the
+// one whose signal file was most recently written — i.e. the true latest
+// dispatch — regardless of its ordinal position. Pure callers that hand-build a
+// plain {phase: status} object (tests, other in-process producers) get the same
+// answer as before as long as they list phases in dispatch order, which every
+// existing caller already does.
 function latestKnownPhaseIndex(phases) {
-  return phases.reduce((max, p) => {
-    if (!isKnownPhase(p)) return max; // unknown/non-pipeline signal — ignore for ordering
-    const i = phaseIndex(p);
-    return i > max ? i : max;
-  }, -1);
+  let idx = -1;
+  for (const p of phases) {
+    if (!isKnownPhase(p)) continue; // unknown/non-pipeline signal — ignore for ordering
+    idx = phaseIndex(p); // last known phase in iteration order wins (dispatch recency)
+  }
+  return idx;
 }
 
 export function isTicketInFlight(signals) {
