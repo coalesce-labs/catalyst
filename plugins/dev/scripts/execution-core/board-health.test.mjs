@@ -2426,14 +2426,21 @@ describe("CTL-1608 checkStalledPr — review/CI/no-push staleness, liveness-inde
     expect(moves.tier1.find((m) => m.ticket === "CTL-CI" && m.move === "nudge-stalled-pr")).toBeTruthy();
   });
 
-  test("sanctioned latch suppresses the stalled-pr move (stays visible in the invariant)", () => {
+  test("parked-by-human label suppresses the stalled-pr move (stays visible in the invariant)", () => {
+    // CTL-1552: suppression is label-only (the env-var sanctionedNeedsHuman latch
+    // this test used before Phase 3 no longer exists) — a parked ticket carries
+    // BOTH the open-PR shape checkStalledPr needs AND the parked-by-human label
+    // makeSuppressed reads.
+    const parkedOpenPr = new Map([
+      ["CTL-CI", { identifier: "CTL-CI", linear_state: "In Review", pr_number: 1, labels: [{ name: "parked-by-human" }] }],
+    ]);
     const invs = evaluateInvariants(mkBoard({
       ticketsById: openPrTicket("CTL-CI"),
       stalledPrMap: mkStalledPrMap([
         { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
       ]),
     }), { mode: "shadow" });
-    const moves = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-CI"] }));
+    const moves = proposeMoves(invs, mkBoard({ ticketsById: parkedOpenPr }));
     expect(moves.tier1.find((m) => m.ticket === "CTL-CI")).toBeFalsy();
     expect(invs.stalledPr.flagged).toContain("CTL-CI"); // suppression is in proposeMoves ONLY
   });
