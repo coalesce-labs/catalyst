@@ -20,6 +20,7 @@ let catalystDir;
 let prevCatalystDir;
 
 beforeEach(() => {
+  __resetForTests();
   prevCatalystDir = process.env.CATALYST_DIR;
   catalystDir = mkdtempSync(join(tmpdir(), "ctl705-int-"));
   if (!catalystDir.startsWith(tmpdir())) {

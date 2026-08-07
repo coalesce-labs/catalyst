@@ -839,6 +839,8 @@ export function writeWorkerPriority(orchDir, ticket, { priority, createdAt }) {
   }
 }
 
+// Resolves a waiting ticket's creation time and backfills priority.json with
+// both the caller's effective priority and the resolved creation timestamp.
 export function resolveWaitingCreatedAt(
   orchDir,
   ticket,
@@ -6693,6 +6695,8 @@ export function schedulerTick(
     if (computeFreeSlots(maxParallel, occupiedCount) <= 0) {
       // Build the global ranking to find topQueued and potential victim.
       const ranking = buildGlobalRanking(orchDir, eligible);
+      // Preempt only for a candidate that can consume the freed slot now;
+      // otherwise an untriaged ticket would park useful work for no gain.
       const topQueued = ranking.find(
         (d) =>
           !d.inFlight &&
@@ -8277,6 +8281,7 @@ const lastHeldEmitState = new Map();
 const lastHoldLogged = new Map();
 const STARVATION_WARN_STREAK = 3;
 const STARVATION_REWARN_EVERY = 10;
+// A scheduler process owns one orchDir, so one process-wide streak is sufficient.
 let starvationStreak = 0;
 // CTL-764 Phase 5: last-emitted disposition per ticket for the worker.transition
 // only-on-change guard. Mirrors lastHeldEmitState but covers the full disposition set
