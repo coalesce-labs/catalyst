@@ -59,6 +59,21 @@ describe("isDrainDisabled", () => {
     expect(isDrainDisabled({ CATALYST_DRAIN_DISABLED: "0" })).toBe(false);
     expect(isDrainDisabled({})).toBe(false);
   });
+
+  // CTL-1678 (Codex P1): boot-drain is authoritative — the worker-only override
+  // must be inert on a node explicitly booted drained (CATALYST_BOOT_DRAINED=1).
+  test("CATALYST_BOOT_DRAINED=1 makes the override inert (boot-drain wins)", () => {
+    expect(
+      isDrainDisabled({ CATALYST_DRAIN_DISABLED: "1", CATALYST_BOOT_DRAINED: "1" }),
+    ).toBe(false);
+  });
+
+  test("CATALYST_BOOT_DRAINED off (0/absent) → override still applies", () => {
+    expect(
+      isDrainDisabled({ CATALYST_DRAIN_DISABLED: "1", CATALYST_BOOT_DRAINED: "0" }),
+    ).toBe(true);
+    expect(isDrainDisabled({ CATALYST_DRAIN_DISABLED: "1" })).toBe(true);
+  });
 });
 
 describe("isDraining override", () => {
@@ -119,6 +134,21 @@ describe("resolveDrainState", () => {
       flagPresent: false,
       disabled: true,
       draining: false,
+    });
+  });
+
+  // CTL-1678 (Codex P1): a boot-drained node keeps draining even with the override
+  // also set — the override is inert (disabled:false) so boot-drain stays authoritative.
+  test("flag present + override + CATALYST_BOOT_DRAINED=1 → still draining", () => {
+    setFlag(true);
+    expect(
+      resolveDrainState(tmp, {
+        env: { CATALYST_DRAIN_DISABLED: "1", CATALYST_BOOT_DRAINED: "1" },
+      }),
+    ).toEqual({
+      flagPresent: true,
+      disabled: false,
+      draining: true,
     });
   });
 });

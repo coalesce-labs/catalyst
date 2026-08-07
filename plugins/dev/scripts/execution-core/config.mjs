@@ -100,7 +100,19 @@ export function getDrainFlagPath(orchDir) {
 // durable Layer-2 execution-core.env to PERMANENTLY ignore the drain flag (an
 // unattributed writer keeps halting the fleet — CTL-1675). `=== "1"` opt-in, matching
 // applyBootDrainPolicy's CATALYST_BOOT_DRAINED idiom. `env` is an injectable seam.
+//
+// CTL-1678 (Codex P1): boot-drain is AUTHORITATIVE over this worker-only override.
+// A node booted deliberately drained (CATALYST_BOOT_DRAINED=1 — the developer/monitor
+// idiom, whose sentinel applyBootDrainPolicy re-sets on every boot) must STAY drained
+// even if CATALYST_DRAIN_DISABLED=1 is also present: the override neutralizes an
+// OPERATIONAL drain sentinel, never the boot-drain policy, which the config contract
+// documents as "deliberately independent and unchanged". Both env vars persist for the
+// daemon's lifetime, so gating here keeps the override inert on a boot-drained node
+// across every runtime tick — and propagates to every consumer (isDraining,
+// resolveDrainState, and the maybeEmitDrainIgnored tripwire, which must NOT fire
+// "ignored" on a node that is legitimately boot-draining).
 export function isDrainDisabled(env = process.env) {
+  if (env?.CATALYST_BOOT_DRAINED === "1") return false;
   return env?.CATALYST_DRAIN_DISABLED === "1";
 }
 

@@ -493,7 +493,10 @@ worker neutralize that flag durably without a code change.
 
 ```bash
 # In ~/.config/catalyst/execution-core.env on a WORKER node (e.g. mini, mini-2):
-CATALYST_DRAIN_DISABLED=1
+# MUST be `export`ed — this file is sourced (not `set -a`) before the daemon is
+# launched, and bash does not pass a bare (unexported) assignment to the child
+# process, so a non-exported value would leave the daemon still drained.
+export CATALYST_DRAIN_DISABLED=1
 # then:
 catalyst-stack restart
 ```

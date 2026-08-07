@@ -12,7 +12,7 @@
 // All are best-effort: a write failure returns false and logs a warning;
 // callers never branch on the return value for correctness.
 
-import { mkdirSync, appendFileSync, existsSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, statSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -209,6 +209,16 @@ export function defaultDrainPsSnapshot() {
  * emit exactly one node.drain.ignored event (with the flag mtime + a `ps` snapshot)
  * and write the drain.ignored marker to dedup subsequent ticks. When the flag is
  * absent or the override is off, clear any stale marker so a re-created flag re-arms.
+ *
+ * CTL-1678 (Codex P2): the "flag absent → clear marker" re-arm only fires if a tick
+ * actually OBSERVES the absent gap. A flag removed and re-created BETWEEN ticks (the
+ * scheduler ticks ~every 30s) never presents an absent state to any tick, so the
+ * stale marker would suppress the new episode forever. To distinguish episodes we
+ * persist the flag's mtime IN the marker: when the marker exists but the live flag's
+ * mtime differs from the latched one, that is a fresh flag (new episode) → re-emit.
+ * A confirmed-equal mtime is the genuine latched steady state. If either mtime is
+ * indeterminate (stat failed, or a legacy pre-mtime marker), we stay conservatively
+ * latched so the once-per-episode guarantee is never weakened into per-tick spam.
  * Best-effort throughout; never throws. Returns { emitted, latched? }.
  */
 export function maybeEmitDrainIgnored({
@@ -227,12 +237,19 @@ export function maybeEmitDrainIgnored({
     }
     return { emitted: false };
   }
-  if (existsSync(marker)) return { emitted: false, latched: true };
   let flagMtimeMs = null;
   try { flagMtimeMs = statSync(flagPath).mtimeMs; } catch { /* best-effort */ }
+  if (existsSync(marker)) {
+    let latchedMtimeMs = null;
+    try { latchedMtimeMs = JSON.parse(readFileSync(marker, "utf8"))?.flagMtimeMs ?? null; } catch { /* best-effort */ }
+    // Re-arm ONLY on a confirmed mtime change (a new flag file); otherwise stay latched.
+    const changed =
+      latchedMtimeMs !== null && flagMtimeMs !== null && flagMtimeMs !== latchedMtimeMs;
+    if (!changed) return { emitted: false, latched: true };
+  }
   let ps = null;
   try { ps = psSnapshotFn?.() ?? null; } catch { ps = null; }
   emitDrainIgnoredEvent({ flagMtimeMs, ps, logPath, now });
-  try { writeFileSync(marker, ""); } catch { /* best-effort */ }
+  try { writeFileSync(marker, JSON.stringify({ flagMtimeMs })); } catch { /* best-effort */ }
   return { emitted: true };
 }

@@ -341,7 +341,10 @@ cmd_status() {
 		[ "$arg" = "--json" ] && want_json=1
 	done
 	# CTL-1095: read drain state (shell out to drain.mjs --json for the inFlightCount).
+	# CTL-1678: source the machine-local override first so status reflects the drain
+	# state the running daemon actually honors, not the un-overridden default.
 	local drain_json draining in_flight_count
+	_source_daemon_env_for_read
 	drain_json=$(exec_runtime_module "drain" --json --status-read 2>/dev/null || echo '{"draining":false,"inFlightCount":0}')
 	draining=$(printf '%s' "$drain_json" | grep -o '"draining":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo false)
 	in_flight_count=$(printf '%s' "$drain_json" | grep -o '"inFlightCount":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo 0)
@@ -370,6 +373,22 @@ cmd_status() {
 # CTL-649 Phase 5: route a noun (sessions|worktrees|branches|tidy) to its mjs
 # module under execution-core/cli/. The audit CLI lives inside this same binary
 # — no new wrapper symlink, no new plist. resolve_runtime picks bun/node.
+# CTL-1678 (Codex P1): the durable CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED
+# overrides live in the machine-local execution-core.env that ONLY `cmd_start` sources
+# before launching the daemon. A read-only drain query (`drain --status-read`, `status`)
+# invoked afterwards runs in a fresh process that never sourced that file, so without
+# this it reports the pre-override state ("draining") while the running daemon actually
+# HONORS the override — an operator could then start maintenance on a node still admitting
+# work. Source the SAME file with the SAME plain-source semantics the daemon uses (no
+# `set -a`), so an `export`ed override is visible to the drain module exactly as the daemon
+# sees it. Best-effort; absent file = no-op.
+_source_daemon_env_for_read() {
+	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
+	# shellcheck disable=SC1090
+	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	return 0 # fail-open: absent file is a no-op success, never a non-zero return
+}
+
 exec_runtime_module() {
 	local module="$1"
 	shift
@@ -532,6 +551,9 @@ if ! (return 0 2>/dev/null); then
 	# CTL-1095: drain mode toggle.
 	drain)
 		shift
+		# CTL-1678: pick up the machine-local CATALYST_DRAIN_DISABLED override so the
+		# CLI reports (and warns about) the state the daemon honors, not stale state.
+		_source_daemon_env_for_read
 		exec_runtime_module "drain" "$@"
 		;;
 	# CTL-1084: governance-env-exports emits eval-safe export lines for the four

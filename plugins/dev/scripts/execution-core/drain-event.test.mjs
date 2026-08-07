@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test drain-event.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, appendFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, appendFileSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import {
@@ -293,5 +293,43 @@ describe("maybeEmitDrainIgnored latch (CTL-1678)", () => {
     expect(r.emitted).toBe(true);
     const evt = JSON.parse(readFileSync(logPath, "utf8").trim());
     expect(evt.body.payload.ps).toBeNull();
+  });
+
+  // CTL-1678 (Codex P2): a flag removed and re-created BETWEEN ticks never presents an
+  // absent state to any tick, so the stale marker would suppress the new episode. The
+  // marker now persists the flag mtime; a changed mtime re-arms even with no absent gap.
+  test("flag re-created between ticks (changed mtime, no absent gap) → re-emits", () => {
+    setFlag(true);
+    maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    // Marker persists the first episode's mtime.
+    const latched = JSON.parse(readFileSync(getDrainIgnoredMarkerPath(tmp), "utf8"));
+    expect(Number.isFinite(latched.flagMtimeMs)).toBe(true);
+    // Recreate the flag with a DISTINCT mtime WITHOUT ever calling in the absent state.
+    setFlag(true);
+    const future = new Date(latched.flagMtimeMs + 60_000);
+    utimesSync(getDrainFlagPath(tmp), future, future);
+    const again = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(again.emitted).toBe(true);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(2);
+  });
+
+  test("unchanged mtime → stays latched (once-per-episode preserved)", () => {
+    setFlag(true);
+    maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    // Same flag file, same mtime — the genuine steady state.
+    const r2 = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(r2).toEqual({ emitted: false, latched: true });
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+  });
+
+  test("legacy empty marker (no mtime) → conservatively latched, never per-tick spam", () => {
+    setFlag(true);
+    // Simulate a pre-CTL-1678-fix marker with no persisted mtime.
+    writeFileSync(getDrainIgnoredMarkerPath(tmp), "");
+    const r = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(r).toEqual({ emitted: false, latched: true });
+    expect(existsSync(logPath)).toBe(false);
   });
 });
