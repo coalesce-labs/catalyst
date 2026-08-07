@@ -122,15 +122,33 @@ describe("assembleJoinBundle", () => {
     expect(b.otlpEndpointHint).toBeNull(); // not set in fixture
   });
 
-  test("thoughtsOrg is null when Layer-1 has no thoughts.profile (fixture default)", () => {
+  test("thoughtsOrg is null when Layer-1 has no thoughts config (fixture default)", () => {
     const b = assembleJoinBundle();
     expect(b.thoughtsOrg).toBeNull();
+    expect(b.thoughtsOrgSource).toBeNull();
   });
 
-  // Codex #3080 P1: thoughtsOrg must read catalyst.thoughts.profile (the actual
-  // GitHub org hosting thoughts repos) — NOT layer1Identity.projectKey (the
-  // Layer-2 secrets-file key), which can legitimately differ from it.
-  test("thoughtsOrg reads Layer-1 catalyst.thoughts.profile, distinct from projectKey", () => {
+  // Codex #3080 P1: thoughtsOrg is a GitHub OWNER. Its authoritative source is
+  // catalyst.thoughts.org — not layer1Identity.projectKey (the Layer-2
+  // secrets-file key) and not thoughts.profile (a HumanLayer alias). All three
+  // legitimately differ, so the fixture makes all three distinct.
+  test("thoughtsOrg reads catalyst.thoughts.org, distinct from projectKey and profile", () => {
+    writeLayer1({
+      catalyst: {
+        projectKey: "adva",
+        thoughts: { org: "rightsite-cloud", profile: "adva-alias" },
+        linear: { teamKey: "ADV", teamId: "team-uuid-1234", stateMap: {} },
+      },
+    });
+    const b = assembleJoinBundle();
+    expect(b.thoughtsOrg).toBe("rightsite-cloud");
+    expect(b.thoughtsOrgSource).toBe("thoughts.org");
+    expect(b.thoughtsOrg).not.toBe(b.layer1Identity.projectKey);
+  });
+
+  // A seed predating catalyst.thoughts.org still joins: profile stands in, and
+  // thoughtsOrgSource tells the consumer to warn rather than trust it.
+  test("thoughtsOrg falls back to thoughts.profile, flagged via thoughtsOrgSource", () => {
     writeLayer1({
       catalyst: {
         projectKey: "catalyst-workspace",
@@ -140,8 +158,7 @@ describe("assembleJoinBundle", () => {
     });
     const b = assembleJoinBundle();
     expect(b.thoughtsOrg).toBe("coalesce-labs");
-    expect(b.layer1Identity.projectKey).toBe("catalyst-workspace");
-    expect(b.thoughtsOrg).not.toBe(b.layer1Identity.projectKey);
+    expect(b.thoughtsOrgSource).toBe("thoughts.profile");
   });
 
   test("botCreds carry accessToken for both bots, read from GLOBAL config", () => {

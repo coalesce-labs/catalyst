@@ -566,30 +566,57 @@ do_provision_thoughts() {
   # lives where setup-plugin-source.sh put it (CATALYST_PLUGIN_SOURCE or the
   # $HOME default), not at a from-scratch ${CATALYST_DIR}/plugin-source guess.
   [[ -f "$registry" ]] || registry="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/plugins/dev/scripts/execution-core/registry.json"
-  # First-join fallback org: bundle .thoughtsOrg IS the GitHub org that hosts
-  # the product/thoughts repos (join-bundle.mjs sets it from Layer-1
-  # catalyst.thoughts.profile). NOT .layer1Identity.projectKey — projectKey is
-  # the Layer-2 secrets-file key (see AGENTS.md "Configuration"), not a GitHub
-  # org, and using it as one derives a bogus/non-existent thoughts org whenever
-  # the two names differ (Codex #3080 P1). NOT repoUrl's org either —
-  # repoUrl/pluginSourceUrl point at wherever the catalyst plugin source itself
-  # lives, which can be a different org/personal fork entirely.
-  local primary_org
+  # The seed's primary thoughts org: bundle .thoughtsOrg IS the GitHub org that
+  # hosts the thoughts repo (join-bundle.mjs sets it from Layer-1
+  # catalyst.thoughts.org, falling back to .profile). NOT
+  # .layer1Identity.projectKey — projectKey is the Layer-2 secrets-file key (see
+  # AGENTS.md "Configuration"), not a GitHub org (Codex #3080 P1). NOT repoUrl's
+  # org either — repoUrl/pluginSourceUrl point at wherever the catalyst plugin
+  # source itself lives, which can be a different org/personal fork entirely.
+  local primary_org primary_org_source
   primary_org="$(bundle_get '.thoughtsOrg')"
+  primary_org_source="$(bundle_get '.thoughtsOrgSource')"
+  if [[ "$primary_org_source" == "thoughts.profile" ]]; then
+    warn "join bundle carries no catalyst.thoughts.org — using catalyst.thoughts.profile ('$primary_org') as the GitHub org."
+    warn "profile is a HumanLayer alias and need not equal the owner; set catalyst.thoughts.org in the seed's .catalyst/config.json."
+  elif [[ -z "$primary_org" ]]; then
+    # An older bundle, or a Layer-1 with thoughts persistence disabled. Never
+    # abort the join over it: fall through with no primary declared and let
+    # provision-thoughts derive the org set from the registry (Codex #3080 P1).
+    warn "join bundle carries neither catalyst.thoughts.org nor .profile — no primary thoughts org declared."
+  fi
   if [[ -f "$registry" ]]; then
     args+=(--registry "$registry")
+    # Forward the declared primary ALONGSIDE --registry. Without it the
+    # registry's first project silently becomes the global thoughtsRepo /
+    # defaultProfile — registry order is not a primary-org declaration
+    # (Codex #3080 P1).
+    [[ -n "$primary_org" ]] && args+=(--primary-org "$primary_org")
+  elif [[ -n "$primary_org" ]]; then
+    args+=(--orgs "$primary_org")
   else
-    [[ -n "$primary_org" ]] && args+=(--orgs "$primary_org")
-  fi
-  if bash "$pt" "${args[@]}"; then
+    # No registry AND no declared org: provision-thoughts has nothing to act on
+    # and would hard-exit. Thoughts persistence is optional, so skip the stage
+    # rather than failing the join.
+    warn "provision-thoughts: no registry and no thoughts org — skipping thoughts provisioning."
+    warn "Set catalyst.thoughts.org on the seed and re-run to enable thoughts persistence on this node."
     return 0
   fi
+  local pt_out pt_rc=0
+  pt_out="$(bash "$pt" "${args[@]}" 2>&1)" || pt_rc=$?
+  printf '%s\n' "$pt_out"
+  [[ "$pt_rc" -eq 0 ]] && return 0
   # provision-thoughts failed — usually push-auth (an M2 precondition), not the
   # clone. If the primary thoughts repo is present AND has a usable HEAD (a real
   # read-OK clone, not a partial/interrupted one), severity depends on whether
-  # this node will own work.
-  local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/${primary_org:-coalesce-labs}/thoughts"
-  if [[ -d "$primary/.git" ]] && git -C "$primary" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  # this node will own work. Read the org the provisioner actually settled on
+  # rather than assuming a hardcoded name: with --registry and no declared
+  # primary it picks the first derived org, which only it knows.
+  local resolved_org
+  resolved_org="$(sed -nE 's/^\[provision-thoughts\] Primary org: (.+)$/\1/p' <<<"$pt_out" | tail -1)"
+  [[ -n "$resolved_org" ]] || resolved_org="$primary_org"
+  local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/${resolved_org}/thoughts"
+  if [[ -n "$resolved_org" ]] && [[ -d "$primary/.git" ]] && git -C "$primary" rev-parse --verify -q HEAD >/dev/null 2>&1; then
     # CTL-1293: a multiHost MEMBER (roster>1) WILL own HRW work, and a worker
     # that can't push thoughts strands its research/learnings/handoffs (peers
     # never see them) — so an unverified push is a HARD blocker, not a warning.

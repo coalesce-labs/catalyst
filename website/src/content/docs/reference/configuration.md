@@ -58,6 +58,42 @@ You usually don't edit this by hand. When you run `setup-catalyst.sh` with a Lin
 your real status names and fills `stateMap` in. Pointing `stateMap` at a status that doesn't exist
 makes the next update fail, so only edit it if your status names are unusual.
 
+### Thoughts persistence (`catalyst.thoughts`)
+
+Agent notes — research, plans, handoffs — are written to a git-backed `thoughts` repo, one per
+GitHub organization. Three keys, and the first two are easy to confuse:
+
+```json
+{
+  "catalyst": {
+    "thoughts": {
+      "org": "rightsite-cloud",
+      "profile": "adva",
+      "directory": "Adva",
+      "user": null
+    }
+  }
+}
+```
+
+| Key         | What it does                                                                                                 |
+| ----------- | ------------------------------------------------------------------------------------------------------------ |
+| `org`       | **GitHub owner** hosting this project's `thoughts` repo — provisioning clones `github.com/<org>/thoughts.git` |
+| `profile`   | **HumanLayer profile name** — the key under `.thoughts.profiles` in `humanlayer.json`                        |
+| `directory` | Subdirectory inside the thoughts repo for this project's notes (defaults to the repo's own basename)          |
+| `user`      | Username passed to the thoughts CLI; `null` uses the CLI default                                              |
+
+`org` and `profile` are **different things and need not match**. `org` is a GitHub owner; `profile`
+is a local alias. Nor does `org` have to match the org of the project's own code repo — the example
+above is the real shape: code under `github.com/groundworkapp/Adva`, thoughts under
+`github.com/rightsite-cloud/thoughts`, reached through the HumanLayer profile `adva`.
+
+`provision-thoughts.sh` reads `org` from each registered project's own `.catalyst/config.json`. If
+`org` is absent it falls back to `profile`, then to the org segment of the project's checkout path —
+each fallback prints a `WARN` naming the project, because both are guesses that are only right when
+the names happen to coincide. Set `org` explicitly on every project; a missing `org` degrades
+loudly but never aborts a node join.
+
 ## How work runs: `dispatchMode`
 
 The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
