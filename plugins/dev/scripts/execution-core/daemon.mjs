@@ -128,6 +128,7 @@ import {
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { labelMarkerBase } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth)
 import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
+import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator clear
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
 import {
   writeBootMarker,
@@ -600,6 +601,9 @@ export async function handleCommentWake(
       } catch {
         /* observability only */
       }
+      // CTL-1643: clear the durable escalation record so the board durable-escalation
+      // card disappears when the operator responds. Fail-open (never throws).
+      forgetDurableEscalation(orchDir, ticket);
     }
   }
 

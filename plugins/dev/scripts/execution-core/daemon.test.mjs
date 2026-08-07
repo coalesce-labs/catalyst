@@ -3410,6 +3410,43 @@ describe("CTL-764 Phase 4 — handleCommentWake clears durable needs-input label
     const needsInputRemovals = removed.filter((r) => r.label === "needs-input");
     expect(needsInputRemovals).toHaveLength(0);
   });
+
+  // CTL-1643: a confirmed needs-human clear also removes the durable escalation
+  // record so the board durable-escalation card disappears when the operator responds.
+  test("CTL-1643: confirmed needs-human clear removes the durable escalation record", async () => {
+    const { recordDurableEscalation, readDurableEscalations } = await import(
+      "./durable-escalation.mjs"
+    );
+    const orch = tmpOrcDir();
+    // Seed a durable escalation record for the ticket.
+    recordDurableEscalation({
+      orchDir: orch,
+      ticket: "CTL-1",
+      phase: "implement",
+      reason: "stuck > 24h",
+      labelConfirmed: false,
+      commentPosted: true,
+      source: "scheduler",
+      now: Date.now(),
+    });
+    expect(readDurableEscalations(orch)).toHaveLength(1);
+
+    // humanProvenance = Boolean(authorId) && Boolean(botUserId) — both must be set
+    // for the needs-human clear path to run. isManagedTicket must also return true.
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer from human", authorId: "human-user" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true, wrote: true }),
+        botUserId: "bot-user-id",
+        isManagedTicket: () => true,
+        forgetIntent: () => true,
+      }
+    );
+    // The durable record must be gone after the confirmed clear.
+    expect(readDurableEscalations(orch)).toHaveLength(0);
+  });
 });
 
 // ─── CTL-1608 — stalled-PR timer gated on stalledPrSweep.enabled ─────────────
