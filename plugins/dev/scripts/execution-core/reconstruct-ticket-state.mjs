@@ -8,8 +8,10 @@
 //   node reconstruct-ticket-state.mjs --ticket CTL-XXXX [--json]
 
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Database } from "bun:sqlite";
 import { PHASES, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
 import { createWorktree } from "./worktree.mjs";
 import { defaultCheckOpenPrs } from "./open-pr-gate.mjs";
@@ -55,7 +57,15 @@ function defaultGetProjection(orchDir, ticket) {
       const raw = JSON.parse(
         readFileSync(join(workerDir, `phase-${phase}.json`), "utf8"),
       );
-      if (raw?.status === "done" || raw?.status === "complete") {
+      // "skipped" is terminal-success for monitor-deploy specifically (the
+      // supported no-deployment path — matches scheduler.mjs deriveAdvancement's
+      // `status === "done" || (status === "skipped" && latest === "monitor-deploy")`
+      // semantics). For every other phase "skipped" is not a completion signal.
+      const isComplete =
+        raw?.status === "done" ||
+        raw?.status === "complete" ||
+        (raw?.status === "skipped" && phase === "monitor-deploy");
+      if (isComplete) {
         completed.push(phase);
       }
     } catch {
@@ -63,6 +73,44 @@ function defaultGetProjection(orchDir, ticket) {
     }
   }
   return completed.length > 0 ? { completedPhases: completed } : null;
+}
+
+// defaultCatalystDbPath — mirrors gateway-read.mjs's defaultDbPath idiom
+// (CATALYST_DIR override, else ~/catalyst).
+function defaultCatalystDbPath() {
+  return resolve(process.env.CATALYST_DIR ?? `${homedir()}/catalyst`, "catalyst.db");
+}
+
+// defaultCheckArchive — fail-open lookup against the archived_workers index
+// (ADR-011 / migration 003_archives.sql). A ticket with an archived_workers
+// row has already been through phase-teardown's post-SUMMARY.md archive
+// sweep and is unconditionally terminal — without this, reconstruction falls
+// back to the thoughts-artifact walk, finds monitor-deploy as the last
+// artifact, and rebuilds a worktree to resume teardown on an already-done
+// ticket. Mirrors gateway-read.mjs's readonly-open / fail-open-on-any-error
+// contract: an absent DB, a pre-archive-migration schema, or lock contention
+// must never throw — reconstruction proceeds via the other sources instead.
+function defaultCheckArchive(ticket, { dbPath = defaultCatalystDbPath() } = {}) {
+  let db;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    db.run("PRAGMA busy_timeout = 250");
+    const row = db
+      .query(
+        "SELECT final_status FROM archived_workers WHERE ticket = ? ORDER BY archived_at DESC LIMIT 1",
+      )
+      .get(ticket);
+    if (!row) return null;
+    return { terminal: true, completedPhases: PHASES.slice() };
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // already closed
+    }
+  }
 }
 
 // defaultBuildWorktree — create or reuse the ticket's worktree, always passing
@@ -96,7 +144,7 @@ export async function reconstructTicketState(
   {
     orchDir = process.env.CATALYST_ORCHESTRATOR_DIR,
     repoRoot = process.cwd(),
-    checkArchive = () => null,
+    checkArchive = defaultCheckArchive,
     getProjection = defaultGetProjection,
     checkOpenPrs = (t) => defaultCheckOpenPrs(t, { cwd: repoRoot }),
     buildWorktree = defaultBuildWorktree,

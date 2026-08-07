@@ -145,6 +145,13 @@ if [[ "$ALREADY_MERGED" -eq 1 ]]; then
   write_phase_thoughts_doc "pr" "$TICKET" \
     "already-merged-to-main (PR #${MERGED_PR_NUMBER:-?}: ${MERGED_PR_URL:-})" || true
 
+  # CTL-1490: run the same sync gate the normal End block runs (line ~440)
+  # before this path's terminal emit. Without it, shadow/enforce mode (and
+  # multi-host off mode) never publish this artifact off-host, so a takeover
+  # with no local signal files falls back to review's thoughts doc and repeats
+  # the pr phase despite this path having already recorded a durable outcome.
+  "${PLUGIN_ROOT}/scripts/lib/thoughts-sync-gate.sh" --phase "$PHASE" --ticket "$TICKET" || exit 11
+
   "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
     --phase "$PHASE" --ticket "$TICKET" --status complete
   [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" done "$CHANNEL" --as "$TICKET" >/dev/null 2>&1 || true
