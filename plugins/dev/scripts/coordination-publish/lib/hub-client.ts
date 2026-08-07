@@ -20,6 +20,8 @@ type FetchLike = (
 export interface HubClientOpts {
   hubUrl: string;
   dlqPath: string;
+  /** Per-host cloud bearer token; sent as `Authorization: Bearer <token>`. Absent ⇒ no auth header (interim/dev). */
+  token?: string;
   /** Append a coordination_publish_degraded event here after N consecutive failures. */
   eventLogPath?: string;
   /** Consecutive-failure count that trips the degraded event. Default 5. */
@@ -31,6 +33,13 @@ export interface HubClientOpts {
   maxDrainBatches?: number;
   /** Inject a fetch impl for tests. Defaults to global fetch. */
   fetchImpl?: FetchLike;
+}
+
+function stripBodyPayload(rec: CoordinationRecord): CoordinationRecord {
+  const body = rec.body as Record<string, unknown> | undefined;
+  if (!body || !("payload" in body)) return rec;
+  const { payload: _drop, ...bodyRest } = body;
+  return { ...rec, body: bodyRest };
 }
 
 function maxSeq(batch: CoordinationRecord[]): number {
@@ -68,10 +77,13 @@ export class HubClient {
   }
 
   private async sendBatch(batch: CoordinationRecord[]): Promise<void> {
+    const wire = batch.map(stripBodyPayload);
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.opts.token) headers["Authorization"] = `Bearer ${this.opts.token}`;
     const res = await this.fetchImpl(this.url(), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ records: batch }),
+      headers,
+      body: JSON.stringify({ records: wire }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
     });
     if (!res.ok) throw new Error(`coordination hub HTTP ${res.status}`);

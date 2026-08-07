@@ -101,6 +101,26 @@ export interface HubClientLike {
   drainDlq?: () => Promise<void>;
 }
 
+/**
+ * Pure factory that decides whether to construct a HubClient, return a degraded reason, or
+ * return nothing (interim / inbound-only path). Extracted so unit tests can exercise the
+ * enforce×hubUrl×token matrix without running the entrypoint.
+ *
+ * Decision table:
+ *   mode ≠ "enforce" OR no hubUrl → {} (no client, no reason — interim / shadow / off)
+ *   enforce + hubUrl + no token    → { reason } (loud one-time warn; daemon stays up inbound-only)
+ *   enforce + hubUrl + token       → { client }
+ */
+export function buildHubClient(
+  cfg: { mode: string; hubUrl: string | null },
+  token: string | null,
+  paths: { dlqPath: string; eventLogPath?: string }
+): { client?: HubClient; reason?: string } {
+  if (cfg.mode !== "enforce" || !cfg.hubUrl) return {};
+  if (!token) return { reason: "enforce+hubUrl but no cloud token — outbound publish disabled" };
+  return { client: new HubClient({ hubUrl: cfg.hubUrl, dlqPath: paths.dlqPath, eventLogPath: paths.eventLogPath, token }) };
+}
+
 export interface PublisherOpts {
   mode: CoordinationMode;
   mirrorPath: string;
@@ -299,10 +319,13 @@ if (import.meta.main) {
   process.on("SIGTERM", () => ac.abort());
   process.on("SIGINT", () => ac.abort());
 
-  const hubClient =
-    cfg.mode === "enforce" && cfg.hubUrl
-      ? new HubClient({ hubUrl: cfg.hubUrl, dlqPath: DLQ_PATH, eventLogPath: EVENT_LOG_PATH })
-      : undefined;
+  const secretContractSpecifier = ["../lib/secret-contract.mjs"].join("");
+  const { resolveSecret } = await import(secretContractSpecifier) as { resolveSecret: (id: string) => { value?: string | null } };
+  const cloudToken = resolveSecret("cloud-token").value ?? null;
+
+  const built = buildHubClient(cfg, cloudToken, { dlqPath: DLQ_PATH, eventLogPath: EVENT_LOG_PATH });
+  if (built.reason) console.error(`[coordination-publish] ${built.reason}`);
+  const hubClient = built.client;
 
   const pub = createCoordinationPublisher({
     mode: cfg.mode as CoordinationMode,

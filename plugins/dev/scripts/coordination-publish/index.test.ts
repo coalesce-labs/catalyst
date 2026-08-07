@@ -7,7 +7,9 @@ import {
   seedLocalSeqFromMirror,
   readCoordinationCheckpoint,
   currentEventLogPath,
+  buildHubClient,
 } from "./index.ts";
+import { HubClient } from "./lib/hub-client.ts";
 
 // A minimal canonical envelope with a stamped event.stream_class (Phase 2 output).
 function evLine(name: string, streamClass: "coordination" | "telemetry", extra: Record<string, unknown> = {}): string {
@@ -329,5 +331,37 @@ describe("seedLocalSeqFromMirror", () => {
   test("malformed last line → 0 (never throws)", () => {
     writeFileSync(mirrorPath, "{ not json\n");
     expect(seedLocalSeqFromMirror(mirrorPath)).toBe(0);
+  });
+});
+
+describe("buildHubClient (CTL-1668 Phase 2)", () => {
+  let dir: string, dlqPath: string, eventLogPath: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ctl1668-build-"));
+    dlqPath = join(dir, "dlq.jsonl");
+    eventLogPath = join(dir, "events.jsonl");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const paths = () => ({ dlqPath, eventLogPath });
+
+  test("enforce + hubUrl + token → HubClient with token", () => {
+    const r = buildHubClient({ mode: "enforce", hubUrl: "https://h" }, "tok", paths());
+    expect(r.client).toBeInstanceOf(HubClient);
+    expect(r.reason).toBeUndefined();
+  });
+
+  test("enforce + hubUrl + NO token → no client, degraded reason", () => {
+    const r = buildHubClient({ mode: "enforce", hubUrl: "https://h" }, null, paths());
+    expect(r.client).toBeUndefined();
+    expect(r.reason).toMatch(/no cloud token/i);
+  });
+
+  test("shadow mode → never a client regardless of token", () => {
+    expect(buildHubClient({ mode: "shadow", hubUrl: "https://h" }, "tok", paths()).client).toBeUndefined();
+  });
+
+  test("enforce + no hubUrl → no client (interim inbound-only)", () => {
+    expect(buildHubClient({ mode: "enforce", hubUrl: null }, "tok", paths()).client).toBeUndefined();
   });
 });

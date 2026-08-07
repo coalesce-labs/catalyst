@@ -570,15 +570,22 @@ _start_coordination_locked() {
   # The fingerprint captures everything the LONG-LIVED daemon reads only at startup:
   # resolved config (mode/hubUrl), the plugin checkout (so a refresh redeploys), the
   # state/events roots it derives its paths from (CATALYST_DIR/CATALYST_EVENTS_DIR),
-  # and the enforce-mode interim inbound source (CATALYST_LOKI_QUERY_URL /
+  # the enforce-mode interim inbound source (CATALYST_LOKI_QUERY_URL /
   # OTEL_EXPORTER_OTLP_ENDPOINT) — Codex P2: a reinstall that changes any of these
-  # must bounce the publisher, else it keeps using the old value. Any change → restart.
-  local resolved mode hub fp checkout_id
+  # must bounce the publisher, else it keeps using the old value — and token presence
+  # (CTL-1668): a first-time token provisioning in cloud-sync.env must bounce the daemon
+  # so it picks up the credential (value is never written; only 0/1 presence is recorded).
+  local resolved mode hub fp checkout_id token_present
   resolved="$(coordination_resolve)"
   mode="${resolved%%$'\t'*}"
   hub="${resolved#*$'\t'}"
   checkout_id="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
-  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+  token_present="$(
+    set +u
+    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
+    [[ -n "${CATALYST_CLOUD_TOKEN:-}" ]] && echo "1" || echo "0"
+  )"
+  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|token:${token_present}"
 
   local pid; pid="$(coordination_pid)"
 
@@ -621,10 +628,16 @@ _start_coordination_locked() {
     warn "coordination-publish entrypoint missing at $COORDINATION_SCRIPT — skipping"
     return 1
   fi
-  # 4. Launch detached (the daemon reads CATALYST_DIR/EVENTS_DIR + config from env/Layer-2).
+  # 4. Launch detached. Source cloud-sync.env in a subshell so the per-host cloud token
+  #    (CTL-1668: CATALYST_CLOUD_TOKEN / configured name) reaches the daemon without
+  #    persisting the credential into the long-lived catalyst-stack shell process.
   log "starting coordination-publish (mode: $mode, log: $COORDINATION_LOG)"
-  nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
-  echo $! > "$COORDINATION_PID"
+  (
+    set +u
+    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
+    nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
+    echo $! > "$COORDINATION_PID"
+  )
   printf '%s' "$fp" > "$COORDINATION_FP"   # record the config this pid was launched with
   disown $! 2>/dev/null || true
   sleep 1
