@@ -151,6 +151,14 @@ run "status lists execution-core" bash -c "
   PATH='${STUBDIR}:${REAL_PATH}' '${STACK}' status 2>&1 | grep -q execution-core
 "
 
+# CTL-1494: status must inventory the coordination-publish daemon. With no
+# CATALYST_COORDINATION_MODE set (default off) the line reads
+# 'coordination     off (inert)'; must remain green even with no bun on PATH
+# (coordination_mode falls back to off).
+run "status lists coordination" bash -c "
+  PATH='${STUBDIR}:${REAL_PATH}' '${STACK}' status 2>&1 | grep -q coordination
+"
+
 run "stop exits 0" bash -c "
   PATH='${STUBDIR}:${REAL_PATH}' '${STACK}' stop >/dev/null 2>&1
 "

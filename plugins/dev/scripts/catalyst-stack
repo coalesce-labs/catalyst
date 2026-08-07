@@ -185,6 +185,18 @@ SHIPPER_STORAGE="${CATALYST_DIR:-$HOME/catalyst}/alloy-data"
 SHIPPER_CONFIG="${SCRIPT_DIR}/log-shipper/config.alloy"
 SHIPPER_LAUNCHER="${SCRIPT_DIR}/log-shipper/launch.sh"
 
+# CTL-1494: the coordination-publish daemon (CTL-1488 Phase 3). A raw bun `.ts`
+# with no CLI wrapper, so — like the log-shipper above — catalyst-stack owns its
+# pid/log inline via the self-managed nohup-child idiom. These paths are distinct
+# from the daemon's own mirror (~/catalyst/coordination.jsonl), checkpoint
+# (coordination-publish.checkpoint.json), and DLQ (coordination-publish-dlq.jsonl)
+# — no clobber. The daemon self-exits when the resolved mode is `off` (ADR-023),
+# which coordination_mode() short-circuits so we never spawn a bun that immediately
+# dies (and never false-alarm the post-launch liveness re-check on that self-exit).
+COORDINATION_PID="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.pid"
+COORDINATION_LOG="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.log"
+COORDINATION_SCRIPT="${SCRIPT_DIR}/coordination-publish/index.ts"
+
 # CTL-1348: the standalone catalyst-updater daemon (the 5th launchd agent). Installed
 # ONLY by the explicit 'catalyst-stack adopt-updater' cutover — NOT by install-services,
 # which is re-run routinely and would silently cut nodes over. UPDATER_LOG matches the
@@ -381,6 +393,100 @@ stop_shipper() {
     log "log-shipper not running"
   fi
   rm -f "$SHIPPER_PID"
+}
+
+# ─── coordination-publish (CTL-1494 / CTL-1488) ──────────────────────────────
+# Lifecycle primitives for the coordination-publish daemon, mirroring the
+# shipper_* nohup-child template. The daemon is inert-by-default (ADR-023: mode
+# `off` → process.exit(0)); coordination_mode() resolves the SAME mode the daemon
+# would, so start_coordination short-circuits cleanly on `off` instead of spawning
+# a bun that immediately self-exits.
+
+# coordination_mode — resolve the coordination mode IDENTICALLY to the daemon's own
+# readCoordinationConfig() (env kill-switch/override > Layer-2 > default off), by
+# importing config.mjs under bun. Fail-CLOSED to "off" on any bun/import failure —
+# a bun-less host cannot run the bun daemon anyway, so inert is the correct posture.
+coordination_mode() {
+  local cfgmjs="${SCRIPT_DIR}/execution-core/config.mjs"
+  if command -v bun >/dev/null 2>&1 && [[ -f "$cfgmjs" ]]; then
+    local out
+    if out="$(CFG_MJS="$cfgmjs" bun -e '
+        const m = await import(process.env.CFG_MJS);
+        try { process.stdout.write(String(m.readCoordinationConfig().mode || "off")); }
+        catch { process.stdout.write("off"); }
+      ' 2>/dev/null)" && [[ -n "$out" ]]; then
+      printf '%s' "$out"; return 0
+    fi
+  fi
+  printf 'off'
+}
+
+# coordination_pid — print the live coordination-publish pid recorded in
+# COORDINATION_PID, or nothing. Validates the pid is alive AND is actually the
+# coordination-publish process (guards pid reuse), mirroring shipper_pid.
+coordination_pid() {
+  local pid
+  [[ -f "$COORDINATION_PID" ]] || return 0
+  pid="$(cat "$COORDINATION_PID" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 0
+  pid_alive "$pid" || return 0
+  if ps -p "$pid" -o command= 2>/dev/null | grep -q 'coordination-publish'; then
+    printf '%s\n' "$pid"
+  fi
+}
+
+start_coordination() {
+  # 0. MODE GATE — off (default) is a clean no-op (ADR-023 inert contract). Also
+  #    covers the bun-less host (coordination_mode → off), so no launch is attempted
+  #    there. Short-circuiting here means the sleep-1 liveness re-check below only
+  #    runs in shadow/enforce, where a fast exit genuinely IS a failure.
+  local mode; mode="$(coordination_mode)"
+  if [[ "$mode" == "off" ]]; then
+    log "coordination-publish mode=off — inert, skipping"
+    return 0
+  fi
+  # 1. IDEMPOTENT — never double-start a live daemon (re-run every 600s keep-alive tick).
+  local pid; pid="$(coordination_pid)"
+  if pid_alive "$pid"; then
+    log "coordination-publish already running (pid $pid, mode $mode)"
+    return 0
+  fi
+  # 2. MISSING-BINARY LOUD, NON-FATAL (shipper posture — return 1, never exit).
+  if ! command -v bun >/dev/null 2>&1; then
+    warn "bun not found — coordination-publish NOT started (mode=$mode)"
+    return 1
+  fi
+  # 3. Entrypoint presence guard.
+  if [[ ! -f "$COORDINATION_SCRIPT" ]]; then
+    warn "coordination-publish entrypoint missing at $COORDINATION_SCRIPT — skipping"
+    return 1
+  fi
+  # 4. Launch detached (the daemon reads CATALYST_DIR/EVENTS_DIR + config from env/Layer-2).
+  log "starting coordination-publish (mode: $mode, log: $COORDINATION_LOG)"
+  nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
+  echo $! > "$COORDINATION_PID"
+  disown $! 2>/dev/null || true
+  sleep 1
+  pid="$(coordination_pid)"
+  if pid_alive "$pid"; then
+    log "  → coordination-publish started (pid $pid)"
+  else
+    warn "coordination-publish failed to start — see $COORDINATION_LOG"
+    return 1
+  fi
+}
+
+stop_coordination() {
+  local pid; pid="$(coordination_pid)"
+  if pid_alive "$pid"; then
+    log "stopping coordination-publish (pid $pid)"
+    kill "$pid" 2>/dev/null            # daemon traps SIGTERM → graceful flush + checkpoint
+    sleep 1
+    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  else
+    log "coordination-publish not running"
+  fi
+  rm -f "$COORDINATION_PID"
 }
 
 start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
@@ -780,6 +886,14 @@ cmd_start() {
   if [[ "$node_class" != "developer" ]]; then
     start_forward
   fi
+  # CTL-1494: coordination-publish follows the reporting substrate (worker + monitor,
+  # gated != developer, same as start_forward). Non-fatal — a broken/absent publisher
+  # must never block the stack (CTL-988 non-load-bearing). When the mode resolves to
+  # `off` (the default) start_coordination is a clean no-op, so this is byte-identical
+  # inert on an unconfigured node.
+  if [[ "$node_class" != "developer" ]]; then
+    start_coordination || warn "continuing without coordination-publish (coordination mirror won't be written)"
+  fi
   # CTL-1263: the log-shipper comes up LAST — it only tails the daemons' .log
   # files, so it should start after the daemons it observes. start_shipper is
   # idempotent + non-fatal (warns loudly on a missing binary, returns 1).
@@ -813,6 +927,9 @@ cmd_stop() {
   stop_shipper
   # CTL-1654: stop event-mirror on observation nodes; idempotent no-op on workers.
   stop_event_mirror
+  # CTL-1494: coordination-publish started after forward/before shipper, so stop it
+  # here (after the shipper/event-mirror, before stop_daemon/stop_forward).
+  stop_coordination
   stop_daemon
   stop_forward
   stop_monitor
@@ -852,6 +969,16 @@ cmd_status() {
   echo -n "  monitor          "; catalyst-monitor status 2>&1 | head -1
   echo -n "  execution-core   "; catalyst-execution-core status 2>&1 | head -1
   echo -n "  otel-forward     "; catalyst-monitor forward-status 2>&1 | head -1
+  # CTL-1494: coordination-publish. off (the default / bun-less host) reports
+  # "off (inert)"; otherwise report running+pid+mode or stopped+mode.
+  local cmode; cmode="$(coordination_mode)"
+  if [[ "$cmode" == "off" ]]; then
+    echo "  coordination     off (inert)"
+  else
+    local cp; cp="$(coordination_pid)"
+    if pid_alive "$cp"; then echo "  coordination     running  pid=$cp  mode=$cmode"
+    else echo "  coordination     stopped  mode=$cmode"; fi
+  fi
   # CTL-1285: when the dedicated KeepAlive agent owns Alloy it writes no pidfile,
   # so detect it by plist + a live `alloy run` matching our config. Falling back to
   # the pidfile-only check would mis-report a launchd-managed shipper as "stopped".
