@@ -91,12 +91,25 @@ export const CLEANUP_GRACE_MS = 60_000;
 //     state (state === "MERGED" || mergedAt != null) via an injectable prView
 //     seam, fail-CLOSED on any error/unresolvable PR; event.force === true is
 //     kept as a no-gh fast-path for the manual CLI MERGED row.
+// `priorVerdict` (CTL-1639 Codex round-4 P1) — when the caller is REVALIDATING
+// after a prior call already confirmed the merge/provenance facts for this
+// SAME event (the post-salvage re-check in `_handlePrMergedCleanup`), pass
+// the prior verdict object back in. `confirmedMerged`/`orchProvenance` are
+// facts about the PR/registry, not the worktree's live local state — a PR
+// that was MERGED does not become un-merged a few seconds/minutes later
+// while salvage runs, so re-resolving them is redundant, synchronous
+// (`gh pr list` + `gh pr view`, no subprocess timeout) work on the daemon's
+// shared event loop for no new information. Reusing them skips that network
+// round-trip entirely; the MUTABLE local safety evidence this re-check exists
+// to catch — live `claude agents`/lsof procLive, and a fresh git dirty/
+// unmerged read — is still fully re-run every time, unconditionally.
 export async function defaultAssessWorktreeRemoval(
   event,
   readAgents = () => listClaudeAgentsResult(),
   orchDirs = listOrchDirs(),
   prView = makePrView((/* ticket */) => event.worktree_path),
   resolvePr = (e) => defaultResolvePrForEvent(e),
+  priorVerdict = null,
 ) {
   const gateRunGit = (args) =>
     spawnSync("git", ["-C", event.worktree_path, ...args], { encoding: "utf8" });
@@ -106,6 +119,8 @@ export async function defaultAssessWorktreeRemoval(
   // session". (getAgentsCached().agents ALWAYS returns an array — cold cache → []
   // — which would silently defeat the gate; CTL-791 adversarial review.)
   // `readAgents` is injectable so a test can drive the failed-read branch.
+  // Always re-run fresh — this is exactly the mutable local evidence a
+  // post-salvage re-check exists to catch, never skipped/reused.
   let agentsList = [];
   let agentsOk = false;
   try {
@@ -125,8 +140,17 @@ export async function defaultAssessWorktreeRemoval(
   // (the manual CLI MERGED row) short-circuits with no gh round-trip; every other
   // path resolves the ticket's PR and asks gh. Fail-CLOSED: an unresolvable PR or
   // any gh/parse error leaves confirmedMerged false → "not-merged" → defer.
+  //
+  // Reuse from `priorVerdict` when offered — only if it was itself confirmed
+  // true; a prior `false` might just mean "not resolved yet" rather than
+  // "definitively not merged", so a false prior value is NOT trusted as a
+  // final answer and this call still resolves it for real (fail-closed stays
+  // fail-closed either way — the retry can only make confirmedMerged MORE
+  // permissive by upgrading a real, current gh answer, never less).
   let confirmedMerged = event.force === true;
-  if (!confirmedMerged) {
+  if (!confirmedMerged && priorVerdict?.confirmedMerged === true) {
+    confirmedMerged = true;
+  } else if (!confirmedMerged) {
     try {
       const pr = resolvePr(event);
       if (pr?.number) {
@@ -138,18 +162,29 @@ export async function defaultAssessWorktreeRemoval(
     }
   }
 
-  return isSafeToRemoveWorktree(
+  // orchProvenance is a static local registry read (cheap, no network) — reuse
+  // when offered mainly for consistency with confirmedMerged's reuse, not
+  // because it's independently expensive.
+  const orchProvenance =
+    typeof priorVerdict?.orchProvenance === "boolean"
+      ? priorVerdict.orchProvenance
+      : hasOrchProvenance(event.ticket, { orchDirs });
+
+  const result = isSafeToRemoveWorktree(
     event.worktree_path,
     {
       ticket: event.ticket,
       repoRoot: event.worktree_path,
       branch: event.branch,
       terminal: true,
-      prMerged: confirmedMerged, // confirmed GitHub MERGED (force fast-path OR prView)
-      orchProvenance: hasOrchProvenance(event.ticket, { orchDirs }),
+      prMerged: confirmedMerged, // confirmed GitHub MERGED (force fast-path OR prView OR reused)
+      orchProvenance,
     },
     { runGit: gateRunGit, agentsList, agentsOk, procLive: lsofCwdUnder(event.worktree_path) === true },
   );
+  // Additive fields (existing callers destructure only .safe/.reasons) so a
+  // SUBSEQUENT call on the same event can reuse these via `priorVerdict`.
+  return { ...result, confirmedMerged, orchProvenance };
 }
 
 // defaultResolvePrForEvent — CTL-1218 Part B. Resolve the GitHub PR descriptor
@@ -620,7 +655,22 @@ export class Reaper {
       });
       return;
     }
-    const verdictAfterSalvage = await this.assessWorktreeRemoval(event);
+    // CTL-1639 Codex round-4 P1: reuse the already-confirmed merge/provenance
+    // facts from `verdict` above instead of re-resolving them — those facts
+    // are about the PR/registry, not the worktree's live local state, so
+    // re-running the synchronous `gh pr list`/`gh pr view` round-trip here
+    // (on the daemon's shared event loop, with no subprocess timeout) buys no
+    // new information. The mutable local safety evidence (live agents/lsof,
+    // fresh git dirty/unmerged state) below is still fully re-verified, which
+    // is the actual point of this post-salvage re-check.
+    const verdictAfterSalvage = await this.assessWorktreeRemoval(
+      event,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      verdict,
+    );
     if (!verdictAfterSalvage.safe) {
       deferWorktreeCleanup(
         event.worktree_path,

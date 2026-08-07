@@ -40,18 +40,45 @@ _wsv_diff() {
 }
 
 # _wsv_salvage_submodule <wt> <rel-path> <stem> — best-effort; writes
-# <stem>.submodule-<sanitized-path>.{patch,index.patch,-untracked.tar} for
-# ONE submodule's own working tree (the submodule is itself a git worktree,
-# so its own uncommitted diff/untracked files are invisible from the
-# superproject's diff, which records only an opaque "Subproject commit
-# <sha>-dirty" marker). Returns 0 iff at least one artifact was written.
+# <stem>.submodule-<sanitized-path>-<hash>.{bundle,patch,index.patch,-untracked.tar}
+# for ONE submodule's own working tree (the submodule is itself a git worktree,
+# so its own uncommitted diff/untracked files AND unpushed commits are invisible
+# from the superproject's diff, which records only an opaque "Subproject commit
+# <sha>-dirty" marker). The `-<hash>` suffix (a short hash of the FULL `rel`
+# path) makes the artifact name injective even when two distinct submodule
+# paths normalize to the same string under the `/`/space -> `_` substitution
+# (e.g. `vendor/foo` and `vendor_foo` both naively become `vendor_foo`) — the
+# `tr` component stays for human readability, the hash suffix is what actually
+# guarantees no collision.
+#
+# Return code communicates a 3-state outcome the caller must not conflate:
+#   0 = at least one artifact was written (this submodule had something to save)
+#   1 = clean — no unpushed commits/diff/untracked files, nothing to save
+#   2 = ATTEMPTED but at least one artifact write failed (real error, not "clean")
 _wsv_salvage_submodule() {
   local wt="$1" rel="$2" stem="$3"
   local sm_dir="${wt}/${rel}"
   git -C "$sm_dir" rev-parse --git-dir >/dev/null 2>&1 || return 1
   local safe_name; safe_name="$(printf '%s' "$rel" | tr '/ ' '__')"
-  local base="${stem}.submodule-${safe_name}"
-  local saved=0
+  local path_hash; path_hash="$(printf '%s' "$rel" | cksum | cut -d' ' -f1)"
+  local base="${stem}.submodule-${safe_name}-${path_hash}"
+  local saved=0 failed=0
+
+  # Unpushed commits within the submodule itself — invisible to the superproject
+  # patch (which records only the gitlink SHA), and force-removing the linked
+  # worktree can take the submodule's object database with it.
+  local sm_unpushed_n
+  sm_unpushed_n="$(git -C "$sm_dir" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0)"
+  if [[ "$sm_unpushed_n" -gt 0 ]]; then
+    local tmp_b="${base}.bundle.tmp.$$"
+    if git -C "$sm_dir" bundle create "$tmp_b" HEAD --not --remotes >/dev/null 2>&1 \
+         && mv -f "$tmp_b" "${base}.bundle" 2>/dev/null; then
+      saved=1
+    else
+      rm -f "$tmp_b" 2>/dev/null || true
+      failed=1
+    fi
+  fi
 
   if ! _wsv_diff "$sm_dir" --quiet HEAD 2>/dev/null; then
     local tmp="${base}.patch.tmp.$$"
@@ -59,6 +86,7 @@ _wsv_salvage_submodule() {
       saved=1
     else
       rm -f "$tmp" 2>/dev/null || true
+      failed=1
     fi
   fi
   if ! _wsv_diff "$sm_dir" --cached --quiet HEAD 2>/dev/null; then
@@ -67,6 +95,7 @@ _wsv_salvage_submodule() {
       saved=1
     else
       rm -f "$tmpi" 2>/dev/null || true
+      failed=1
     fi
   fi
   local sm_untracked
@@ -78,13 +107,25 @@ _wsv_salvage_submodule() {
       saved=1
     else
       rm -f "$tmpt" 2>/dev/null || true
+      failed=1
     fi
   fi
-  [[ "$saved" -eq 1 ]]
+
+  if [[ "$saved" -eq 1 ]]; then
+    return 0
+  elif [[ "$failed" -eq 1 ]]; then
+    return 2
+  else
+    return 1
+  fi
 }
 
 # salvage_worktree <wt> <ticket> [--base <ref>] [--reason <str>] [--orch <id>] [--site <str>]
 # ALWAYS returns 0. Emits exactly one worktree.salvage.{created,skipped,failed}.
+# Also sets the global `_WSV_LAST_STATUS` to "created"|"skipped"|"failed" for a
+# caller that needs the real per-invocation outcome without breaking the
+# always-succeeds return-code contract (e.g. orphan-sweep.sh's dedup wrapper,
+# which must NOT remember a failed attempt as "already saved").
 salvage_worktree() {
   local wt="${1:-}" ticket="${2:-}"; shift 2 2>/dev/null || true
   local base="" reason="" orch="" site=""
@@ -103,6 +144,7 @@ salvage_worktree() {
 
   # Defensive: not a git worktree → nothing we can do; report failed, never abort.
   if [[ -z "$wt" || ! -d "$wt" ]] || ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+    _WSV_LAST_STATUS="failed"
     emit_salvage_failed --ticket "$ticket" --orch "$orch" \
       --payload-json "$(jq -nc --arg s "$site" --arg r "$reason" '{site:$s,reason:$r,error:"not-a-worktree"}')"
     return 0
@@ -111,6 +153,7 @@ salvage_worktree() {
   local dir ts uniq stem bundle patch idxpatch untar
   dir="$(_wsv_salvage_dir)"; ts="$(date -u +%Y%m%dT%H%M%SZ)"
   if ! mkdir -p "$dir" 2>/dev/null; then
+    _WSV_LAST_STATUS="failed"
     emit_salvage_failed --ticket "$ticket" --orch "$orch" \
       --payload-json "$(jq -nc --arg s "$site" '{site:$s,error:"mkdir-failed"}')"
     return 0
@@ -150,16 +193,26 @@ salvage_worktree() {
     fi
   fi
 
-  # (a2) `git update-index --assume-unchanged` marks a tracked file so plain
-  #      status/diff treat it as clean even after a local edit — the removal
-  #      classifiers rely on that same status/diff, so such a worktree can be
-  #      classified SAFE and force-removed while it holds unique local bytes.
-  #      Clear the bit before diffing so (b) below actually sees the edit; the
+  # (a2) Two DISTINCT index bits make `git status`/`git diff` blind to a real
+  #      tracked-file edit, and the removal classifiers rely on that same
+  #      status/diff — so a worktree can be classified SAFE/skipped and
+  #      force-removed while it holds unique local bytes:
+  #        - `git update-index --assume-unchanged` (lowercase `h` in
+  #          `git ls-files -v`) — a local-only "trust me, it's clean" hint.
+  #        - `git update-index --skip-worktree` (uppercase `S`) — sparse-checkout's
+  #          "don't even look at the working copy" bit; distinct flag, distinct
+  #          clear command, and `git ls-files -v` reports it with its own
+  #          (uppercase) letter, not folded into the `h` case above.
+  #      Clear both before diffing so (b) below actually sees the edit; the
   #      worktree is doomed either way, so mutating its index has no downside.
-  local au_files
+  local au_files sw_files
   au_files="$(git -C "$wt" ls-files -v 2>/dev/null | awk '/^h /{ $1=""; sub(/^ /,""); print }')"
   if [[ -n "$au_files" ]]; then
     ( cd "$wt" && printf '%s\n' "$au_files" | xargs -I{} git update-index --no-assume-unchanged -- {} ) 2>/dev/null || true
+  fi
+  sw_files="$(git -C "$wt" ls-files -v 2>/dev/null | awk '/^S /{ $1=""; sub(/^ /,""); print }')"
+  if [[ -n "$sw_files" ]]; then
+    ( cd "$wt" && printf '%s\n' "$sw_files" | xargs -I{} git update-index --no-skip-worktree -- {} ) 2>/dev/null || true
   fi
 
   # (b) Tracked uncommitted work → patch(es). Two DISTINCT deltas must each be
@@ -218,15 +271,29 @@ salvage_worktree() {
   local sm_status_lines
   sm_status_lines="$(git -C "$wt" submodule status --recursive 2>/dev/null || true)"
   if [[ -n "$sm_status_lines" ]]; then
-    local sm_line sm_status sm_path
+    local sm_line sm_status sm_rest sm_path sm_rc
     while IFS= read -r sm_line; do
       [[ -z "$sm_line" ]] && continue
       sm_status="${sm_line:0:1}"
       # '-' = not initialized — no checked-out working tree under it to salvage.
       [[ "$sm_status" == "-" ]] && continue
-      sm_path="$(printf '%s' "${sm_line:1}" | awk '{print $2}')"
+      # `git submodule status` format after the 1-char status: "<sha> <path>[ (<describe>)]".
+      # A plain `awk '{print $2}'` truncates a path containing spaces to its first
+      # word — strip the fixed-width leading "<sha> " and the optional trailing
+      # " (...)" describe suffix instead, leaving any spaces IN the path intact.
+      sm_rest="${sm_line:1}"
+      sm_path="$(printf '%s' "$sm_rest" | sed -E 's/^[0-9a-f]+ //; s/ \([^)]*\)$//')"
       [[ -z "$sm_path" || ! -d "${wt}/${sm_path}" ]] && continue
-      _wsv_salvage_submodule "$wt" "$sm_path" "$stem" && submodules_saved=$((submodules_saved + 1))
+      _wsv_salvage_submodule "$wt" "$sm_path" "$stem"
+      sm_rc=$?
+      if [[ "$sm_rc" -eq 0 ]]; then
+        submodules_saved=$((submodules_saved + 1))
+      elif [[ "$sm_rc" -eq 2 ]]; then
+        # Attempted but at least one artifact write failed — do NOT let the
+        # top-level opaque dirty-gitlink patch mask this: the missing
+        # submodule bytes are unrecoverable once force-removal proceeds.
+        [[ -z "$err" ]] && err="submodule-salvage-failed"
+      fi
     done <<<"$sm_status_lines"
   fi
 
@@ -239,12 +306,22 @@ salvage_worktree() {
     '{ticket:$t,site:$s,reason:$r,bundle:$b,patch:$p,index_patch:$ip,untracked_tar:$u,
       commits_saved:$cs,files_changed:$fc,untracked_count:$uc,submodules_saved:$sms}')" || payload="{}"
 
+  # _WSV_LAST_STATUS: an optional out-of-band signal for callers that need to
+  # know whether THIS invocation actually succeeded — `salvage_worktree` itself
+  # deliberately always `return 0`s (its documented, relied-upon contract: a
+  # salvage failure must never block the destructive removal it's guarding),
+  # so the return code alone can't carry this. Set right before the matching
+  # emit so a caller reading it immediately after the call sees the true
+  # per-invocation outcome (created/skipped/failed), not a stale prior value.
   if [[ -n "$err" ]]; then
+    _WSV_LAST_STATUS="failed"
     emit_salvage_failed --ticket "$ticket" --orch "$orch" \
       --payload-json "$(printf '%s' "$payload" | jq -c --arg e "$err" '. + {error:$e}')"
   elif [[ -n "$saved_bundle" || -n "$saved_patch" || -n "$saved_idxpatch" || -n "$saved_untar" || "$submodules_saved" -gt 0 ]]; then
+    _WSV_LAST_STATUS="created"
     emit_salvage_created --ticket "$ticket" --orch "$orch" --payload-json "$payload"
   else
+    _WSV_LAST_STATUS="skipped"
     emit_salvage_skipped --ticket "$ticket" --orch "$orch" --payload-json "$payload"
   fi
   return 0

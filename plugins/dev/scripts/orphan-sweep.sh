@@ -106,7 +106,16 @@ _ows_fingerprint_path() {
 # _ows_fingerprint <wt> — a single hash summarizing "is there anything NEW to
 # salvage since last time": HEAD sha + a content hash of the working diff, the
 # staged diff, and the untracked-file set (by git BLOB hash, so a content edit
-# to an already-untracked file is caught too, not just add/remove).
+# to an already-untracked file is caught too, not just add/remove) — AND, for
+# each initialized submodule, the same three components taken from the
+# submodule's OWN working tree. Without the submodule component, a retained
+# SALVAGE_DIRTY worktree whose top-level state is stable but whose submodule
+# content keeps changing would fingerprint identically forever (the top-level
+# diff only ever sees the stable opaque "Subproject commit <sha>-dirty"
+# marker) — salvage_worktree_dedup would then skip every later archive and the
+# newest submodule edits would never reach a recovery artifact. Mirrors the
+# same submodule-path-parsing care as the primitive's own loop (a path can
+# contain spaces; a plain `awk '{print $2}'` would truncate it).
 _ows_fingerprint() {
   local wt="$1"
   {
@@ -115,6 +124,21 @@ _ows_fingerprint() {
     git -C "$wt" diff --cached HEAD 2>/dev/null | git -C "$wt" hash-object --stdin 2>/dev/null
     git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
       | xargs -0 -I{} git -C "$wt" hash-object {} 2>/dev/null | sort
+    local sm_line sm_status sm_rest sm_path sm_dir
+    git -C "$wt" submodule status --recursive 2>/dev/null | while IFS= read -r sm_line; do
+      [[ -z "$sm_line" ]] && continue
+      sm_status="${sm_line:0:1}"
+      [[ "$sm_status" == "-" ]] && continue
+      sm_rest="${sm_line:1}"
+      sm_path="$(printf '%s' "$sm_rest" | sed -E 's/^[0-9a-f]+ //; s/ \([^)]*\)$//')"
+      [[ -z "$sm_path" || ! -d "${wt}/${sm_path}" ]] && continue
+      sm_dir="${wt}/${sm_path}"
+      git -C "$sm_dir" rev-parse HEAD 2>/dev/null
+      git -C "$sm_dir" diff HEAD 2>/dev/null | git -C "$sm_dir" hash-object --stdin 2>/dev/null
+      git -C "$sm_dir" diff --cached HEAD 2>/dev/null | git -C "$sm_dir" hash-object --stdin 2>/dev/null
+      git -C "$sm_dir" ls-files --others --exclude-standard -z 2>/dev/null \
+        | xargs -0 -I{} git -C "$sm_dir" hash-object {} 2>/dev/null | sort
+    done
   } | git -C "$wt" hash-object --stdin 2>/dev/null
 }
 
@@ -143,14 +167,24 @@ salvage_worktree_dedup() {
     log "salvage unchanged since last sweep, skipping re-archive: $wt"
     return 0
   fi
+  _WSV_LAST_STATUS=""
   salvage_worktree "$wt" "$ticket" "$@"
-  # Only remember this fingerprint as "already saved" when the salvage dir was
-  # actually writable for the attempt — a transient I/O error (full/read-only
-  # disk) must keep being retried (and keep reporting worktree.salvage.failed)
-  # on the next sweep rather than being silently dedup-skipped forever.
-  dir="$(command -v _wsv_salvage_dir >/dev/null 2>&1 && _wsv_salvage_dir || printf '%s' "${CATALYST_SALVAGE_DIR:-${CATALYST_DIR:-$HOME/catalyst}/salvage}")"
-  if [[ -n "$fp_now" && -w "$dir" ]]; then
-    mkdir -p "$(dirname "$fp_path")" 2>/dev/null && printf '%s' "$fp_now" >"$fp_path" 2>/dev/null || true
+  # Only remember this fingerprint as "already saved" when the attempt ITSELF
+  # actually succeeded (created or clean-skipped) — checking merely that the
+  # salvage dir was `-w` at this point is not enough: `salvage_worktree`
+  # deliberately always `return 0`s (its fail-open contract), so a real
+  # mid-write failure (ENOSPC hit mid-bundle, a corrupt object, a partial
+  # tar) can still leave the directory itself writable while the actual
+  # artifact is missing or incomplete. `_WSV_LAST_STATUS` (set by
+  # `salvage_worktree` right before its matching emit) carries the true
+  # per-invocation outcome; only "created"/"skipped" earn the dedup-skip on
+  # the next sweep — "failed" must keep being retried (and keep reporting
+  # worktree.salvage.failed) until the underlying problem is fixed.
+  if [[ -n "$fp_now" && "$_WSV_LAST_STATUS" != "failed" ]]; then
+    dir="$(command -v _wsv_salvage_dir >/dev/null 2>&1 && _wsv_salvage_dir || printf '%s' "${CATALYST_SALVAGE_DIR:-${CATALYST_DIR:-$HOME/catalyst}/salvage}")"
+    if [[ -w "$dir" ]]; then
+      mkdir -p "$(dirname "$fp_path")" 2>/dev/null && printf '%s' "$fp_now" >"$fp_path" 2>/dev/null || true
+    fi
   fi
 }
 

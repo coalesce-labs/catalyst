@@ -348,8 +348,12 @@ WT="$(make_repo "${SCRATCH}/t20")"
   printf 'sub-untracked\n' > subdir/scratch.txt  # untracked file INSIDE the submodule
 )
 salvage_worktree "$WT" TEST-20 --site t20
-SM_PATCH="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-20-*.submodule-subdir.patch 2>/dev/null | head -1)"
-SM_TAR="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-20-*.submodule-subdir-untracked.tar 2>/dev/null | head -1)"
+# Artifact names carry a trailing `-<hash>` collision-proofing suffix on the
+# submodule path component (Codex round-4 P1: two distinct submodule paths
+# that normalize the same way, e.g. `vendor/foo` and `vendor_foo`, must not
+# derive the same artifact name) — glob past it rather than pin the exact hash.
+SM_PATCH="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-20-*.submodule-subdir-*.patch 2>/dev/null | head -1)"
+SM_TAR="$(ls "${CATALYST_SALVAGE_DIR}"/TEST-20-*.submodule-subdir-*-untracked.tar 2>/dev/null | head -1)"
 assert_true "[[ -s '$SM_PATCH' ]]" "T20 submodule's own uncommitted diff archived"
 assert_true "grep -q 'sub-dirty-edit' '$SM_PATCH'" "T20 submodule patch carries the actual edit bytes"
 assert_true "[[ -f '$SM_TAR' ]]" "T20 submodule's own untracked file archived"
