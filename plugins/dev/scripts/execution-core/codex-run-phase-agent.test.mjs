@@ -580,6 +580,61 @@ describe("buildCodexArgs — thoughts/ symlink resolution into writable_roots", 
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  // 2026-08-07 hardening (round-2 review, PR #3082): a prior codex turn already
+  // has write access to its OWN worktree (including thoughts/), so it can plant
+  // an arbitrary symlink there for free. These tests prove that planted symlink
+  // can't turn into a FUTURE dispatch's filesystem-wide writable_roots grant.
+
+  test("an UNPROVISIONED symlink name under thoughts/ (e.g. thoughts/root -> /) is never resolved into writable_roots", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      // Not "shared" or "global" — an attacker/compromised-turn-planted name.
+      symlinkSync("/", join(thoughtsDir, "root"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+      expect(roots).not.toContain("/");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a PROVISIONED entry (thoughts/shared) resolving to a dangerously shallow target (/) is excluded, not granted", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      const thoughtsDir = join(worktreePath, "thoughts");
+      mkdirSync(thoughtsDir, { recursive: true });
+      symlinkSync("/", join(thoughtsDir, "shared"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+      expect(roots).not.toContain("/");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("LEGACY shape: thoughts itself symlinked straight to / is excluded, not granted", () => {
+    const { root, worktreePath } = makeWorktreeWithThoughts(({ worktreePath }) => {
+      symlinkSync("/", join(worktreePath, "thoughts"));
+    });
+    try {
+      const spec = makeCodexSpec();
+      const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath });
+      const roots = extractWritableRoots(args);
+      expect(roots).toEqual([...CFG.writableRoots, "/ec"]);
+      expect(roots).not.toContain("/");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── buildCodexEnv ───────────────────────────────────────────────────────────

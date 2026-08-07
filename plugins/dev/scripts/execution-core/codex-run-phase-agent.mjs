@@ -306,6 +306,31 @@ function resolveDevPluginRoot(pluginDirs) {
   return pluginDirs.find((p) => typeof p === "string" && p.length > 0);
 }
 
+// PROVISIONED_THOUGHTS_ENTRIES — the only immediate `thoughts/` entry names
+// lib/provision-thoughts.sh ever creates as symlinks (see its `globalDir:
+// "global"` / shared-dir provisioning). resolveThoughtsRoots enumerates ONLY
+// these — never every symlink an attacker (or a prior compromised codex turn,
+// which already has write access to its OWN worktree, including thoughts/)
+// could plant under thoughts/ with an arbitrary name (e.g. `thoughts/root`).
+const PROVISIONED_THOUGHTS_ENTRIES = new Set(["shared", "global"]);
+
+// isSaneThoughtsTarget — the resolved target of a thoughts/ symlink must not
+// be the filesystem root or a bare top-level directory (`/`, `/etc`, `/Users`,
+// …). Every legitimate thoughts-repo target nests at least one level below a
+// real checkout (e.g. `/Users/x/thoughts/repos/proj/shared`,
+// `/home/x/thoughts-repo/global`) — a resolved depth of 0–1 is exactly the
+// shape a malicious `thoughts/shared -> /` (or `-> /etc`) symlink produces,
+// and is the concrete cross-run sandbox-escape vector this guards against:
+// codex's own worktree writes are already sandboxed to the worktree, so
+// planting such a symlink costs an attacker nothing, but a FUTURE dispatch's
+// resolveWritableRoots would otherwise hand that resolved path (up to `/`
+// itself) real filesystem write access.
+function isSaneThoughtsTarget(p) {
+  if (typeof p !== "string" || !isAbsolute(p)) return false;
+  const segments = p.split("/").filter(Boolean);
+  return segments.length >= 2;
+}
+
 // resolveThoughtsRoots — the REAL path(s) any symlink under the worktree's
 // `thoughts/` points to (they point OUTSIDE the workspace — see the protocol
 // doc). Added to the writable roots so codex can write research/plan artifacts
@@ -326,6 +351,10 @@ function resolveDevPluginRoot(pluginDirs) {
 // build (2026-07-14) with zero test coverage on this function, only surfacing
 // once research/plan started getting routed through codex-exec.
 //
+// 2026-08-07 hardening (round-2 review, PR #3082): both shapes below are now
+// gated by isSaneThoughtsTarget — see its comment for the sandbox-escape
+// scenario this closes.
+//
 // Handles BOTH shapes: `thoughts` itself being a symlink (the legacy/simple
 // case this function originally assumed), and `thoughts` being a real
 // directory whose entries are symlinks (the actual, far more common shape).
@@ -341,16 +370,19 @@ function resolveThoughtsRoots(worktreePath) {
   // Legacy/simple shape: `thoughts` itself is a symlink straight to the target.
   if (stat.isSymbolicLink()) {
     try {
-      return [realpathSync(thoughtsPath)];
+      const real = realpathSync(thoughtsPath);
+      return isSaneThoughtsTarget(real) ? [real] : [];
     } catch {
       return [];
     }
   }
   if (!stat.isDirectory()) return [];
-  // Real-directory shape: resolve each immediate entry that is ITSELF a
-  // symlink (e.g. thoughts/global, thoughts/shared) to its real target. A
-  // real (non-symlink) entry, e.g. thoughts/searchable, is left alone — it's
-  // already inside the worktree and needs no additional writable root.
+  // Real-directory shape: resolve ONLY the provisioned entries (`global`,
+  // `shared` — see PROVISIONED_THOUGHTS_ENTRIES) that are themselves symlinks,
+  // to their real target. A real (non-symlink) entry, e.g. thoughts/searchable,
+  // is left alone — it's already inside the worktree and needs no additional
+  // writable root. Any OTHER symlinked entry (unprovisioned name) is skipped
+  // outright, never resolved.
   const out = [];
   let entries;
   try {
@@ -359,10 +391,12 @@ function resolveThoughtsRoots(worktreePath) {
     return [];
   }
   for (const entry of entries) {
+    if (!PROVISIONED_THOUGHTS_ENTRIES.has(entry)) continue;
     const entryPath = join(thoughtsPath, entry);
     try {
       if (!lstatSync(entryPath).isSymbolicLink()) continue;
-      out.push(realpathSync(entryPath));
+      const real = realpathSync(entryPath);
+      if (isSaneThoughtsTarget(real)) out.push(real);
     } catch {
       // Broken symlink / permission error on this one entry — skip it, keep
       // going; never let one bad entry drop the rest of the census.
