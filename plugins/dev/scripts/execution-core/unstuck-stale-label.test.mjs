@@ -36,6 +36,23 @@ describe("classifyTerminalStaleLabel (CTL-1064 catD)", () => {
     expect(r.label).toBe("waiting");
   });
 
+  // Regression: CTL-764 renamed the held-label VALUE from "waiting" to "queued".
+  // A Done ticket carrying the current "queued" label must still be cleared —
+  // before this fix ATTENTION_LABELS only recognized the pre-rename "waiting"
+  // literal, so this exact case (a completed ticket with a stale "queued"
+  // label) was silently skipped by the sweep forever.
+  test("Done + queued → clear-label", () => {
+    const r = classifyTerminalStaleLabel({ linearState: "Done", attentionLabels: ["queued"] });
+    expect(r.action).toBe("clear-label");
+    expect(r.label).toBe("queued");
+  });
+
+  test("Done + needs-input → clear-label", () => {
+    const r = classifyTerminalStaleLabel({ linearState: "Done", attentionLabels: ["needs-input"] });
+    expect(r.action).toBe("clear-label");
+    expect(r.label).toBe("needs-input");
+  });
+
   test("In Progress + needs-human → skip (not terminal)", () => {
     const r = classifyTerminalStaleLabel({ linearState: "In Progress", attentionLabels: ["needs-human"] });
     expect(r.action).toBe("skip");
@@ -146,9 +163,11 @@ describe("collectTerminalStaleLabelCandidates (CTL-1064 catD census)", () => {
 // Constants
 // ---------------------------------------------------------------------------
 describe("ATTENTION_LABELS / TERMINAL_LINEAR_STATES (CTL-1064 catD)", () => {
-  test("ATTENTION_LABELS contains needs-human, blocked, waiting", () => {
+  test("ATTENTION_LABELS contains needs-human, needs-input, blocked, queued, waiting", () => {
     expect(ATTENTION_LABELS).toContain("needs-human");
+    expect(ATTENTION_LABELS).toContain("needs-input");
     expect(ATTENTION_LABELS).toContain("blocked");
+    expect(ATTENTION_LABELS).toContain("queued");
     expect(ATTENTION_LABELS).toContain("waiting");
   });
   test("TERMINAL_LINEAR_STATES contains Canceled, Duplicate, Done", () => {

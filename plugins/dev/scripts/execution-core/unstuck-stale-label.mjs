@@ -1,16 +1,26 @@
 // unstuck-stale-label.mjs — CTL-1064 Category D pure classifier.
 //
 // Classifies a terminal (Canceled/Duplicate/Done) ticket that still carries an
-// attention label (needs-human / blocked / waiting) as 'clear-label'. Uses
-// gateway.listLabeledTickets (NOT listStartedTickets, which excludes terminal
-// tickets — the documented enumeration gap). The act seam delegates to
-// clearStalledLabel (label-guard.mjs:124), which removes the Linear label AND
-// deletes both .linear-label-<label>.applied/.skipped markers together —
-// closing the suppression trap.
+// attention/hold label (needs-human / needs-input / blocked / queued) as
+// 'clear-label'. Uses gateway.listLabeledTickets (NOT listStartedTickets,
+// which excludes terminal tickets — the documented enumeration gap). The act
+// seam delegates to clearStalledLabel (label-guard.mjs:124), which removes the
+// Linear label AND deletes both .linear-label-<label>.applied/.skipped markers
+// together — closing the suppression trap.
 
-// ATTENTION_LABELS — the three attention labels the sweep can clear from
-// terminal tickets. Keep in sync with deriveAttention (orch-monitor/board-data.mjs).
-export const ATTENTION_LABELS = Object.freeze(["needs-human", "blocked", "waiting"]);
+// ATTENTION_LABELS — the attention/hold labels the sweep can clear from
+// terminal tickets. Keep in sync with deriveAttention + HELD_LABEL_WAITING
+// (orch-monitor/lib/board-data.mjs). CTL-764 renamed the held-label VALUE from
+// "waiting" to "queued" — "waiting" is kept here too so a ticket that still
+// carries the pre-rename literal (e.g. written before a daemon restart picked
+// up the rename) is still cleared once terminal, not silently skipped forever.
+export const ATTENTION_LABELS = Object.freeze([
+  "needs-human",
+  "needs-input",
+  "blocked",
+  "queued",
+  "waiting",
+]);
 
 // TERMINAL_LINEAR_STATES — ticket states in which stale labels should be cleared.
 export const TERMINAL_LINEAR_STATES = Object.freeze(["Canceled", "Duplicate", "Done"]);
