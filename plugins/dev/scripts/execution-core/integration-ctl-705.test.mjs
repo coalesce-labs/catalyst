@@ -84,21 +84,38 @@ const noopReclaim = () => "noop";
 
 describe("CAT-36 new-work admission", () => {
   test("an untriaged top-ranked ticket does not consume the only free slot", () => {
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
-    const dispatch = makeRealDispatch();
-    schedulerTick(orchDir, {
-      readEligible: () => [
-        { identifier: "CTL-BLOCK", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
-        { identifier: "CTL-READY", priority: 2, createdAt: "2026-05-02T00:00:00Z" },
-      ],
-      reclaimDeadWork: noopReclaim,
-      liveBackgroundCount: () => 0,
-      dispatch,
-      hasTriageArtifact: (_dir, ticket) => ticket === "CTL-READY",
-      listStartedTickets: () => new Set(),
-      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => {} },
-    });
-    expect(dispatch.calls.map((call) => call.ticket)).toEqual(["CTL-READY"]);
+    const testOrchDir = mkdtempSync(join(tmpdir(), "cat36-admission-"));
+    try {
+      mkdirSync(join(testOrchDir, "workers"), { recursive: true });
+      writeFileSync(join(testOrchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+      __resetForTests();
+      const dispatch = makeRealDispatch();
+      schedulerTick(testOrchDir, {
+        readEligible: () => [
+          { identifier: "CTL-BLOCK", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+          { identifier: "CTL-READY", priority: 2, createdAt: "2026-05-02T00:00:00Z" },
+        ],
+        reclaimDeadWork: noopReclaim,
+        liveBackgroundCount: () => 0,
+        dispatch,
+        hasTriageArtifact: (_dir, ticket) => ticket === "CTL-READY",
+        listStartedTickets: () => new Set(),
+        hosts: ["test-host"],
+        hostName: "test-host",
+        isDraining: () => false,
+        recoveryPass: { mode: "off" },
+        boardHealth: { mode: "off" },
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => {},
+          applyLabel: () => {},
+        },
+      });
+      expect(dispatch.calls.map((call) => call.ticket)).toEqual(["CTL-READY"]);
+    } finally {
+      __resetForTests();
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
   });
 });
 

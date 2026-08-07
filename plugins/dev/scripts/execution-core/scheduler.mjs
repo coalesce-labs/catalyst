@@ -4490,6 +4490,7 @@ export function schedulerTick(
     hasInProcessRoute = false,
   } = {}
 ) {
+  const _hasTriageArtifact = hasTriageArtifact ?? defaultHasTriageArtifact;
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
   // readFileSync; a per-tick read lets `hosts.json` edits take effect without a
   // daemon restart). multiHost gates the Linear-touching claim: a single-host
@@ -6395,7 +6396,9 @@ export function schedulerTick(
         (t) =>
           readyIds.has(t.identifier) &&
           (triagedWaitingSet.has(t.identifier) ||
-            canOccupySlotNow(orchDir, t.identifier, { hasTriageArtifact }).ok)
+            canOccupySlotNow(orchDir, t.identifier, {
+              hasTriageArtifact: _hasTriageArtifact,
+            }).ok)
       );
       const readyCandidates = rankTickets(admissionContenders);
       const admittedSlice = selectDispatchablePerProject(
@@ -6700,7 +6703,9 @@ export function schedulerTick(
       const topQueued = ranking.find(
         (d) =>
           !d.inFlight &&
-          canOccupySlotNow(orchDir, d.identifier, { hasTriageArtifact }).ok
+          canOccupySlotNow(orchDir, d.identifier, {
+            hasTriageArtifact: _hasTriageArtifact,
+          }).ok
       );
       // Victim candidates: in-flight, sorted worst-to-best (reverse ranking).
       const inFlightRanked = ranking.filter((d) => d.inFlight);
@@ -7391,7 +7396,6 @@ export function schedulerTick(
   // _listStartedTickets: default is the real dir-scan. Tests seeding triage.json
   //   (which creates workers/<ticket>/) inject `() => new Set()` to prevent the
   //   seeded ticket from being excluded by dir-existence before the guard fires.
-  const _hasTriageArtifact = hasTriageArtifact ?? defaultHasTriageArtifact;
   const _listStartedTickets = listStartedTicketsOpt ?? listStartedTickets;
 
   const dispatchableReady = ready.filter((t) => {
@@ -7407,10 +7411,19 @@ export function schedulerTick(
     }
     if (lastHoldLogged.get(t.identifier) !== readiness.reason) {
       lastHoldLogged.set(t.identifier, readiness.reason);
-      log.info(
-        { ticket: t.identifier, reason: readiness.reason },
-        "ctl-1150: new-work candidate not yet triaged (no triage.json) — holding (CAT-36: no longer consumes budget)"
-      );
+      const context = {
+        ticket: t.identifier,
+        reason: readiness.reason,
+        ...(readiness.error ? { error: String(readiness.error) } : {}),
+      };
+      if (readiness.error) {
+        log.warn(context, "ctl-1150: triage artifact probe failed — holding new-work candidate");
+      } else {
+        log.info(
+          context,
+          "ctl-1150: new-work candidate not yet triaged (no triage.json) — holding (CAT-36: no longer consumes budget)"
+        );
+      }
     }
     return false;
   });
@@ -7418,10 +7431,15 @@ export function schedulerTick(
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.
-  const selected = selectDispatchablePerProject(dispatchableReady, _listStartedTickets(orchDir), freeSlots, {
-    perProject: concurrency?.perProject,
-    inFlight: inFlightTickets,
-  });
+  const selected = selectDispatchablePerProject(
+    dispatchableReady,
+    _listStartedTickets(orchDir),
+    freeSlots,
+    {
+      perProject: concurrency?.perProject,
+      inFlight: inFlightTickets,
+    }
+  );
   // CTL-706: per-project slot-usage gauge (dashboarding). log-line-only,
   // matching the cache.stats() per-tick metric convention.
   if (concurrency?.perProject && Object.keys(concurrency.perProject).length > 0) {
