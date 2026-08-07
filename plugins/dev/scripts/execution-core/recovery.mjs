@@ -2464,6 +2464,16 @@ export function reclaimDeadWorkIfPossible(
     // cycling through the ask-cap, so their caller-supplied finalAttemptCount
     // already carries real, correct meaning and must not be overridden.
     const effectiveAttemptCount = capApplies ? priorAsks + 1 : finalAttemptCount;
+    // Codex P2 (round 1, PR #3082): reassertTerminalIfLost is a REPAIR — it
+    // re-writes a lost/malformed stalled signal without recording a new ask
+    // (no appendEscalatedEvent/recordEscalationFn call on this path). When the
+    // repair is triggered by a spent cap, the "+1" in effectiveAttemptCount
+    // wrongly counts THIS repair as a new attempt, inflating a 3-ask cap into
+    // a persisted "4 attempt(s)". Use the recorded priorAsks (no +1) for a
+    // capSpent repair; the no-probe-for-phase repair path (capSpent === false)
+    // already carries the correct caller-supplied finalAttemptCount via
+    // effectiveAttemptCount, so it is left untouched.
+    const repairAttemptCount = capSpent ? priorAsks : effectiveAttemptCount;
     const reassertTerminalIfLost = () => {
       let already = null;
       try {
@@ -2478,7 +2488,7 @@ export function reclaimDeadWorkIfPossible(
         orchDir,
         ticket,
         phase,
-        explanation: buildEscExplanation(),
+        explanation: buildEscExplanation(repairAttemptCount),
         stalledReason: capSpent ? "escalation-ask-cap" : reason,
       });
       log.warn(
@@ -2500,15 +2510,19 @@ export function reclaimDeadWorkIfPossible(
     // all other reasons → AUTHORIZATION (agent can retry with authority).
     // CTL-1442: wrapped as a (pure) builder so the spent-cap re-assert can
     // produce a fresh brief lazily without duplicating the CTL-1130 logic.
-    function buildEscExplanation() {
+    // Codex P2 (round 1, PR #3082): accepts an explicit `attemptCount`
+    // (defaulting to effectiveAttemptCount, the genuine-new-ask value) so a
+    // capSpent REPAIR call can pass the recorded priorAsks instead — see
+    // repairAttemptCount above.
+    function buildEscExplanation(attemptCount = effectiveAttemptCount) {
     const escType = reasonToType(reason);
-    const whyField = reasonToWhyField(reason, effectiveAttemptCount);
+    const whyField = reasonToWhyField(reason, attemptCount);
     let explanation;
     const explanationFields =
       escType === "manual"
         ? {
             escalation_type: "manual",
-            problem: `${phase} escalated after ${effectiveAttemptCount} attempt(s): ${reason}`,
+            problem: `${phase} escalated after ${attemptCount} attempt(s): ${reason}`,
             call_to_action:
               extras?.call_to_action ??
               `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
@@ -2517,20 +2531,20 @@ export function reclaimDeadWorkIfPossible(
             instructions: extras?.instructions ?? ["check CATALYST_WORKFLOW_GITHUB_TOKEN"],
             remediation_then_retry: `re-run ${ticket} ${phase} after granting the capability`,
             why_not_auto: whyField.value,
-            observed: { final_attempt_count: effectiveAttemptCount, ...(extras?.observed ?? {}) },
+            observed: { final_attempt_count: attemptCount, ...(extras?.observed ?? {}) },
             attempts: extras?.attempts ?? [],
           }
         : {
             escalation_type: "authorization",
-            problem: `${phase} escalated after ${effectiveAttemptCount} attempt(s): ${reason}`,
+            problem: `${phase} escalated after ${attemptCount} attempt(s): ${reason}`,
             call_to_action:
               extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
             recommendation: `retry ${ticket} ${phase} after investigating ${reason}`,
-            risk: `continued retries risk wasting budget; ${effectiveAttemptCount} attempt(s) already made`,
+            risk: `continued retries risk wasting budget; ${attemptCount} attempt(s) already made`,
             why_asking: whyField.value,
             could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
             authorize_label: `retry ${ticket} ${phase}`,
-            observed: { final_attempt_count: effectiveAttemptCount, ...(extras?.observed ?? {}) },
+            observed: { final_attempt_count: attemptCount, ...(extras?.observed ?? {}) },
             // CTL-1442: truthful ask history — this call site historically passed
             // no extras, so the payload showed attempts:[] forever while asking
             // "authorize retry?" every window (audit RC4). Scoped to the SAME
@@ -3454,11 +3468,15 @@ export function reclaimDeadWorkIfPossible(
       currentProgress,
       rateLimited
         ? {
+            // Codex P2 (round 1, PR #3082): detectRateLimit only inspects the
+            // ONE latest dead session (prevBgJobId) — earlier attempts may
+            // have done real work or failed for unrelated reasons, so this
+            // must describe the detected attempt only, not claim "every".
             call_to_action:
-              `${ticket} ${phase} looks like it hit a Claude account usage/rate limit on every ` +
-              "attempt (its dead session transcript shows the harness's own rate-limit reply, " +
-              "not real work) — wait for the usage window to reset and reply to retry, or reroute " +
-              "this phase to a different executor?",
+              `${ticket} ${phase}'s latest dead attempt looks like it hit a Claude account ` +
+              "usage/rate limit (its dead session transcript shows the harness's own " +
+              "rate-limit reply, not real work) — wait for the usage window to reset and " +
+              "reply to retry, or reroute this phase to a different executor?",
             observed: { likely_cause: "account-rate-limited" },
           }
         : undefined,
