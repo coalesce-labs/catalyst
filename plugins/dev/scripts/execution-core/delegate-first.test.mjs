@@ -16,6 +16,11 @@ function makeOpts({
   events = [],
   env = {},
   explanation = { call_to_action: "do something" },
+  // CTL-1609 (Codex P1): enforce now REQUIRES a confirmed-enabled delegate runner
+  // before it may suppress the needs-human label. Default "on" here so the
+  // pre-existing enforce cases keep exercising the enqueue path; the fail-safe
+  // gate itself is covered by its own describe block below.
+  runnerMode = "on",
 } = {}) {
   return {
     site: "test-site",
@@ -25,6 +30,7 @@ function makeOpts({
     explanation,
     deps: {
       enqueue: enqueueFn,
+      readRunnerConfig: () => ({ mode: runnerMode }),
     },
     applyLabel: {
       applyLabel: (...args) => {
@@ -231,5 +237,101 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
 
     expect(labelCalls).toHaveLength(1);
     expect(result.routed).toBe(false);
+  });
+});
+
+// ─── CTL-1609 (Codex P1): runner-disabled fail-safe gate ──────────────────────
+//
+// enforce may suppress the needs-human label ONLY when a runner is confirmed
+// enabled to drain the queue. readDelegateRunnerConfig couples the runner's
+// default to CATALYST_BOARD_HEALTH / CATALYST_RECOVERY_PASS — it knows nothing
+// about CATALYST_DELEGATE_FIRST — so lighting only DELEGATE_FIRST would otherwise
+// queue intents forever with no human ever told.
+describe("routeStuckTicketToDelegate — runner-disabled fail-safe (CTL-1609)", () => {
+  test("enforce + runner off → does NOT enqueue, DOES label, reason runner-disabled", () => {
+    const labelCalls = [];
+    const events = [];
+    let enqueueCalls = 0;
+    const result = routeStuckTicketToDelegate(
+      orchDir,
+      "CTL-RD1",
+      makeOpts({
+        labelCalls,
+        events,
+        runnerMode: "off",
+        enqueueFn: () => {
+          enqueueCalls += 1;
+          return { enqueued: true, reason: "enqueued" };
+        },
+        env: { CATALYST_DELEGATE_FIRST: "enforce" },
+      })
+    );
+
+    // The safety net fires: a human is told rather than the ticket going quiet.
+    expect(enqueueCalls).toBe(0);
+    expect(labelCalls).toHaveLength(1);
+    expect(result.routed).toBe(false);
+    expect(result.labelled).toBe(true);
+    expect(result.reason).toBe("runner-disabled");
+    const fallback = events.find((e) => e.name === "delegate.route-fallback");
+    expect(fallback).toBeDefined();
+    expect(fallback.reason).toBe("runner-disabled");
+  });
+
+  test("enforce + runner on → routes (gate does not block the enabled path)", () => {
+    const labelCalls = [];
+    let enqueueCalls = 0;
+    const result = routeStuckTicketToDelegate(
+      orchDir,
+      "CTL-RD2",
+      makeOpts({
+        labelCalls,
+        runnerMode: "on",
+        enqueueFn: () => {
+          enqueueCalls += 1;
+          return { enqueued: true, reason: "enqueued" };
+        },
+        env: { CATALYST_DELEGATE_FIRST: "enforce" },
+      })
+    );
+
+    expect(enqueueCalls).toBe(1);
+    expect(labelCalls).toHaveLength(0);
+    expect(result.routed).toBe(true);
+  });
+
+  test("the gate is enforce-only — shadow still labels and never consults the runner", () => {
+    const labelCalls = [];
+    let runnerReads = 0;
+    const opts = makeOpts({
+      labelCalls,
+      env: { CATALYST_DELEGATE_FIRST: "shadow" },
+    });
+    opts.deps.readRunnerConfig = () => {
+      runnerReads += 1;
+      return { mode: "off" };
+    };
+
+    const result = routeStuckTicketToDelegate(orchDir, "CTL-RD3", opts);
+
+    expect(runnerReads).toBe(0);
+    expect(labelCalls).toHaveLength(1);
+    expect(result.shadow).toBe(true);
+  });
+
+  test("real readDelegateRunnerConfig: DELEGATE_FIRST=enforce alone leaves the runner off", () => {
+    // The exact operator mistake the gate exists for — asserted against the REAL
+    // resolver, not a stub, so a future coupling change surfaces here.
+    const labelCalls = [];
+    const opts = makeOpts({
+      labelCalls,
+      env: { CATALYST_DELEGATE_FIRST: "enforce" },
+    });
+    delete opts.deps.readRunnerConfig; // use the production resolver
+
+    const result = routeStuckTicketToDelegate(orchDir, "CTL-RD4", opts);
+
+    expect(result.reason).toBe("runner-disabled");
+    expect(labelCalls).toHaveLength(1);
   });
 });

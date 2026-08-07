@@ -2411,7 +2411,13 @@ export function maybeEscalateDispatchFailures(
       could_higher_tier_resolve: false,
       authorize_label: `retry ${marker.ticket}`,
     },
-    deps: { orchDir },
+    // CTL-1609 (Codex P1): without a ceiling, enqueueDelegateIntent's
+    // resolveMaxParallel falls back to Infinity and `queue-full` — the documented
+    // fallback to a human — becomes unreachable. Resolved lazily so the state.json
+    // read is paid only on the enforce path that actually enqueues. This site cannot
+    // reuse schedulerTick's `maxParallel`: it is a separate exported function, and
+    // its two call sites sit above that binding in the tick.
+    deps: { orchDir, maxParallel: () => readMaxParallel(orchDir) },
   });
   appendEvent({
     ticket: marker.ticket,
@@ -5763,7 +5769,11 @@ export function schedulerTick(
                   ],
                   why_you: "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
                 },
-                deps: { orchDir },
+                // CTL-1609 (Codex P1): thread the tick's resolved ceiling so
+                // enqueueDelegateIntent can return `queue-full` instead of defaulting
+                // to Infinity. Without it a cycle larger than maxParallel enqueues
+                // every member in one tick and starves normal admission.
+                deps: { orchDir, maxParallel },
               });
               // CTL-764 finding 8: emit only on an actual label write (a persisted
               // marker after restart / belief-owner deferral is not a fresh escalation).
@@ -6584,7 +6594,9 @@ export function schedulerTick(
                 ],
                 why_you: "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
               },
-              deps: { orchDir },
+              // CTL-1609 (Codex P1): thread the tick's resolved ceiling — see the
+              // dependency-cycle site above for why Infinity is unsafe here.
+              deps: { orchDir, maxParallel },
             });
             // CTL-764 finding 8: emit only on an actual label write (a persisted
             // marker after restart / belief-owner deferral is not a fresh escalation).
@@ -7204,7 +7216,9 @@ export function schedulerTick(
                 problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${stalledSig?.stalledReason ?? "no reason"}) and is not terminal`,
                 call_to_action: `decide whether to retry ${ticket} or close it`,
               },
-              deps: { orchDir },
+              // CTL-1609 (Codex P1): thread the tick's resolved ceiling so a large
+              // terminal-sweep cohort cannot enqueue past maxParallel.
+              deps: { orchDir, maxParallel },
             });
             // CTL-764 finding 8: emit worker.transition ONLY when the label write
             // actually occurred. A persisted .linear-label-needs-human marker after a

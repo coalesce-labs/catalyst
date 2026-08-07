@@ -9,6 +9,7 @@
 // Ordered fallback: (auto-fix [deferred]) → delegate → human.
 import { enqueueDelegateIntent } from "./delegate-queue.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
+import { readDelegateRunnerConfig } from "./config.mjs";
 
 const VALID_MODES = new Set(["off", "shadow", "enforce"]);
 
@@ -91,6 +92,25 @@ export function routeStuckTicketToDelegate(
   }
 
   // ── enforce: enqueue to delegate, fall back to label on failure ───────────
+  //
+  // FAIL-SAFE GATE (Codex P1). Suppressing `needs-human` is only sound when
+  // something will actually drain the queue. `readDelegateRunnerConfig` couples the
+  // runner's default to CATALYST_BOARD_HEALTH / CATALYST_RECOVERY_PASS being
+  // `enforce` — it knows nothing about CATALYST_DELEGATE_FIRST. So an operator who
+  // lights ONLY this flag would get intents that queue forever (holding slot
+  // reservations) with the label suppressed and no human ever told: a silent
+  // black hole exactly where the escalation safety net is supposed to be.
+  //
+  // We refuse to route rather than auto-enabling the runner, because auto-enabling
+  // would change behavior for pathways nobody opted into. Escalate loudly instead
+  // of going quiet: fall through to the label.
+  const readRunnerConfig = deps.readRunnerConfig ?? readDelegateRunnerConfig;
+  if (readRunnerConfig(env).mode !== "on") {
+    appendEvent({ name: "delegate.route-fallback", ticket, site, reason: "runner-disabled" });
+    const labelled = labelDirect();
+    return { routed: false, labelled, reason: "runner-disabled" };
+  }
+
   const enqueue = deps.enqueue ?? enqueueDelegateIntent;
   const q = enqueue(
     ticket,

@@ -1377,3 +1377,71 @@ describe("labelNeedsHumanUnlessBeliefOwner — explanation threading (CTL-1609)"
     expect(sig.explanation.call_to_action).toBe("resolve the dispatch failure for CTL-E7");
   });
 });
+
+// ─── CTL-1609 (Codex P1): live recovery-pass worker guard ─────────────────────
+//
+// phase-recovery-pass.json is not only an explanation carrier — it is the
+// recovery-pass worker's own status record, and `dispatched`/`running` is exactly
+// what the liveness probes read (delegate-queue's recoveryPassWorkerLive, the SDK
+// occupancy accounting). Stamping `needs-human` over a live worker makes it
+// invisible: it stops deduping a re-enqueue (double-dispatch) and drops out of
+// capacity accounting. Reachable in normal operation — a sibling phase can fail
+// while the recovery-pass worker is still running.
+describe("labelNeedsHumanUnlessBeliefOwner — live recovery-pass worker guard (CTL-1609)", () => {
+  const SIG = (ticket) => join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+
+  function seedSignal(ticket, status) {
+    const workerDir = join(orchDir, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      SIG(ticket),
+      JSON.stringify({ ticket, status, phase: "recovery-pass", bg_job_id: "job-live-1" })
+    );
+  }
+
+  function applyWith(ticket) {
+    return labelNeedsHumanUnlessBeliefOwner(
+      orchDir,
+      ticket,
+      { applyLabel: () => ({ applied: true }) },
+      {
+        env: { CATALYST_INTENTS_ENFORCE: "0" },
+        site: "terminal-sweep",
+        log: { info: () => {}, warn: () => {} },
+        explanation: { problem: "sibling phase failed", call_to_action: "review" },
+      }
+    );
+  }
+
+  for (const status of ["dispatched", "running"]) {
+    test(`does NOT overwrite a live '${status}' recovery-pass signal`, () => {
+      seedSignal(`CTL-LW-${status}`, status);
+      const wrote = applyWith(`CTL-LW-${status}`);
+
+      // The label itself still applies — only the signal-file mutation is skipped.
+      expect(wrote).toBe(true);
+      const sig = JSON.parse(readFileSync(SIG(`CTL-LW-${status}`), "utf8"));
+      expect(sig.status).toBe(status); // live worker's record preserved verbatim
+      expect(sig.bg_job_id).toBe("job-live-1");
+      expect(sig.explanation).toBeUndefined();
+    });
+  }
+
+  test("still writes when the prior signal is a terminal/non-live status", () => {
+    seedSignal("CTL-LW-done", "done");
+    const wrote = applyWith("CTL-LW-done");
+
+    expect(wrote).toBe(true);
+    const sig = JSON.parse(readFileSync(SIG("CTL-LW-done"), "utf8"));
+    expect(sig.status).toBe("needs-human");
+    expect(sig.explanation.call_to_action).toBe("review");
+  });
+
+  test("still writes when there is no prior signal at all", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-LW-none"), { recursive: true });
+    const wrote = applyWith("CTL-LW-none");
+
+    expect(wrote).toBe(true);
+    expect(JSON.parse(readFileSync(SIG("CTL-LW-none"), "utf8")).status).toBe("needs-human");
+  });
+});

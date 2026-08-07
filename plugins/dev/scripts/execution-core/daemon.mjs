@@ -1843,6 +1843,12 @@ function startReaperAndTimer({
       intervalSeconds: rescueCfg.intervalSeconds ?? RESCUE_DEFAULTS.intervalSeconds,
       orchDir,
       config: rescueCfg,
+      // CTL-1609 (Codex P1): the delegate ceiling for this timer's escalation
+      // enqueues. Resolved lazily per escalation (not captured at boot) so an
+      // autotuned maxParallel is honored without a daemon restart. Injected here
+      // because the daemon already owns concurrency — importing readMaxParallel
+      // inside the timer would pull scheduler.mjs's bun:sqlite graph into it.
+      maxParallel: () => readMaxParallel(orchDir),
     });
   }
 

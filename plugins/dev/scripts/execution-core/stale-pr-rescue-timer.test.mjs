@@ -933,3 +933,129 @@ describe("readStalePrRescueConfig", () => {
     expect(readStalePrRescueConfig("")).toEqual({});
   });
 });
+
+// ─── CTL-1609 (Codex P1): verified-or-loud escalation latch ───────────────────
+//
+// `rescue.json.escalatedAt` is a PERMANENT skip in decideRescue. Writing it
+// before the escalation is confirmed is the difference between "a human was told"
+// and "this PR is silently stuck forever". Only a confirmed needs-human label
+// latches; a delegate route (which can still fail) and a fence-suppressed or
+// transport-less escalation must stay retryable AND emit loudly.
+describe("escalation durability — escalatedAt only on a confirmed escalation (CTL-1609)", () => {
+  // Build a ticket that decideRescue will route to `escalate` (worktree missing).
+  function mkEscalatingTicket(orchDir, ticket, clock) {
+    mkTicketDir(orchDir, ticket);
+    writeSignal(orchDir, ticket, "pr", {
+      status: "done",
+      bg_job_id: "dead-job",
+      pr: { number: 77, url: "https://github.com/org/repo/pull/77" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, ticket, {
+      firstSeenAt: new Date(clock.now() - 660_000).toISOString(),
+    });
+  }
+
+  async function runOneTick(orchDir, clock, escalateFn, events) {
+    startStalePrRescueTimer({
+      enabled: true,
+      orchDir,
+      intervalSeconds: 1,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      clock,
+      ...makeSeams({
+        escalate: escalateFn,
+        worktreeExists: () => false, // → decideRescue: escalate(worktree_missing)
+        emit: (name, payload) => events.push({ name, payload }),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+
+  it("confirmed label → escalatedAt latched, second tick does not re-escalate", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkEscalatingTicket(orchDir, "CTL-E1", clock);
+    const calls = [];
+    const events = [];
+    await runOneTick(
+      orchDir,
+      clock,
+      (t) => {
+        calls.push(t);
+        return { confirmed: true, routed: false, reason: "labelled" };
+      },
+      events
+    );
+
+    expect(calls.length).toBe(1);
+    expect(readRescueState(orchDir, "CTL-E1")?.escalatedAt).toBeTruthy();
+    clock.advance(1_000);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.length).toBe(1); // already_escalated
+  });
+
+  it("delegate ROUTE (unconfirmed) → escalatedAt withheld, stays retryable, emits loudly", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkEscalatingTicket(orchDir, "CTL-E2", clock);
+    const calls = [];
+    const events = [];
+    await runOneTick(
+      orchDir,
+      clock,
+      (t) => {
+        calls.push(t);
+        return { confirmed: false, routed: true, reason: "enqueued" };
+      },
+      events
+    );
+
+    const rs = readRescueState(orchDir, "CTL-E2");
+    // The bug: latching here would make decideRescue skip forever even though the
+    // delegate can still fail and nothing would ever re-surface the PR.
+    expect(rs?.escalatedAt).toBeUndefined();
+    expect(rs?.lastEscalationFailure).toBe("enqueued");
+    const loud = events.find((e) => e.name.startsWith("phase.rescue.escalation-unconfirmed."));
+    expect(loud).toBeDefined();
+    expect(loud.payload.routed).toBe(true);
+    // and it is genuinely retryable — a second tick escalates again
+    clock.advance(1_000);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.length).toBe(2);
+  });
+
+  it("fence-suppressed (unconfirmed, not routed) → withheld + loud", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkEscalatingTicket(orchDir, "CTL-E3", clock);
+    const events = [];
+    await runOneTick(
+      orchDir,
+      clock,
+      () => ({ confirmed: false, routed: false, reason: "fence-suppressed" }),
+      events
+    );
+
+    const rs = readRescueState(orchDir, "CTL-E3");
+    expect(rs?.escalatedAt).toBeUndefined();
+    expect(rs?.lastEscalationFailure).toBe("fence-suppressed");
+    expect(
+      events.find((e) => e.name.startsWith("phase.rescue.escalation-unconfirmed."))
+    ).toBeDefined();
+  });
+
+  it("legacy seam returning a non-contract value still latches (back-compat)", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkEscalatingTicket(orchDir, "CTL-E4", clock);
+    const sink = [];
+    const events = [];
+    // `array.push(...)` returns a NUMBER — the shape every pre-existing test stub
+    // returns. It must not be mistaken for an unconfirmed outcome.
+    await runOneTick(orchDir, clock, (t) => sink.push(t), events);
+
+    expect(readRescueState(orchDir, "CTL-E4")?.escalatedAt).toBeTruthy();
+  });
+});

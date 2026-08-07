@@ -388,6 +388,12 @@ export function inEscalationCooldown(orchDir, ticket, phase, now) {
 // clobber it. `degraded:true` means the earlier writer also fell back → the
 // new coerce may be equivalent or richer, so we overwrite; absent `degraded`
 // (a proper typed-union object) means a human-readable curated signal → keep.
+// The recovery-pass statuses that mean a worker is in flight and owns
+// phase-recovery-pass.json. Must stay in sync with delegate-queue.mjs's
+// recoveryPassWorkerLive (the enqueue-time dedup probe) — those are the reads
+// that go blind if this file's status is overwritten.
+const LIVE_RECOVERY_PASS_STATUSES = new Set(["dispatched", "running"]);
+
 function writeExplanationSignal(orchDir, ticket, explanation, { log: logArg = null } = {}) {
   if (!orchDir || !ticket || !explanation) return;
   try {
@@ -397,6 +403,31 @@ function writeExplanationSignal(orchDir, ticket, explanation, { log: logArg = nu
       prior = JSON.parse(readFileSync(p, "utf8")) ?? {};
     } catch {
       prior = {};
+    }
+    // LIVE-WORKER guard (CTL-1609, Codex P1). `phase-recovery-pass.json` is not
+    // only an explanation carrier — it is the recovery-pass worker's own status
+    // record, and `dispatched`/`running` is exactly what the liveness probes read
+    // (delegate-queue's recoveryPassWorkerLive, the SDK occupancy accounting).
+    // Stamping `status:"needs-human"` over a live worker makes that worker
+    // invisible: it stops deduping a re-enqueue (double-dispatch) and drops out of
+    // capacity accounting. A ticket can legitimately be in both states at once —
+    // a sibling phase failed while its recovery-pass worker is still running — so
+    // this is reachable in normal operation, not a corner case.
+    //
+    // Preserve the live record verbatim rather than merging: the worker itself
+    // writes this file, so a concurrent partial update from here could interleave.
+    // The label still applies (this function is called AFTER the confirmed label
+    // write); only the signal-file mutation is skipped.
+    if (LIVE_RECOVERY_PASS_STATUSES.has(prior.status)) {
+      try {
+        (logArg ?? log).warn(
+          { ticket, priorStatus: prior.status },
+          "label-guard: live recovery-pass worker — preserving its signal, explanation not written"
+        );
+      } catch {
+        /* logging must never block the label path */
+      }
+      return;
     }
     // No-overwrite guard for the `attempts-exhausted` site (and any future site
     // that pre-writes a rich curated explanation before the label apply).

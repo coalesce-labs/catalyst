@@ -788,7 +788,11 @@ function dispatchTriage(
           problem: `${t} hit the triage re-dispatch cap (${TRIAGE_DISPATCH_CAP})`,
           call_to_action: `triage ${t} manually or re-scope it`,
         },
-        deps: { orchDir: dir },
+        // CTL-1609 (Codex P1): supply the configured ceiling so
+        // enqueueDelegateIntent can reach `queue-full` → human instead of
+        // defaulting to Infinity. Lazy: the state.json read is paid only on the
+        // enforce path that actually enqueues.
+        deps: { orchDir: dir, maxParallel: () => readMaxParallel(dir) },
       }),
     // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
     // ticket's LIVE state must still equal this workflow-state name at launch.
