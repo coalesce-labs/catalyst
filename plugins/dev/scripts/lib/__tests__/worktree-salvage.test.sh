@@ -321,7 +321,14 @@ WT="$(make_repo "${SCRATCH}/t20")"
   # protocol-restriction-proof way to end up with the exact same on-disk
   # shape (.gitmodules + gitlink + a real nested checkout) that
   # `git submodule status --recursive` inspects.
-  git clone --quiet "$SUBORIGIN" subdir
+  # -b main (NOT a bare `git clone`): the bare $SUBORIGIN's own HEAD symref
+  # still points at whatever `init.defaultBranch` defaulted to (varies by git
+  # config — "master" on some CI images, "main" locally) and that branch was
+  # NEVER created (only "main" was ever pushed to), so an unqualified clone
+  # prints "remote HEAD refers to nonexistent ref" and checks out NOTHING —
+  # `subdir` ends up a bare, file-less .git dir and every assertion below
+  # fails on an empty SUB_SHA. Ask for the branch we know exists, explicitly.
+  git clone --quiet -b main "$SUBORIGIN" subdir
   git config -f .gitmodules submodule.subdir.path subdir
   git config -f .gitmodules submodule.subdir.url "$SUBORIGIN"
   git add .gitmodules
