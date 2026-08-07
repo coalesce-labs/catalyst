@@ -44,6 +44,8 @@ import {
   defaultAppendBootResumePhaseRegressionEvent,
   // CTL-1044
   defaultAppendOperatorEvent,
+  // 2026-08-03
+  detectSessionRateLimitHit,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -2445,6 +2447,92 @@ describe("reclaimDeadWorkIfPossible — CTL-736 progress gate", () => {
     expect(writeProgressMark.calls.length).toBe(0); // no new high-water on a stop
   });
 
+  // 2026-08-03 fix: confirmed live across 11 real tickets — every no-progress
+  // escalation's human-facing text/observed field read "escalated after 0
+  // attempt(s)" regardless of how many REAL ask/retry cycles actually ran,
+  // because escalateOnce's finalAttemptCount param historically received the
+  // CTL-736 progress QUANTITY (always 0 here — that's what triggers the STOP
+  // branch), not an attempt count, while the `attempts` array was correctly
+  // built from the real ask history. This is the 3rd-cycle case (2 prior asks
+  // on record, this ask trips the ask-cap): the count must now read 3
+  // everywhere, matching `attempts.length`.
+  test("no-progress escalation on its 3rd real cycle reports final_attempt_count:3 (not 0), matching the real ask history", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2, // no forward progress → no-progress STOP
+      appendEscalatedEvent,
+      readEscalationRecordFn: () => ({ reason: "no-progress", askCount: 2, asks: [111, 222] }),
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const call = appendEscalatedEvent.calls[0][0];
+    expect(call.reason).toBe("no-progress");
+    // The bug: this used to always be 0 (the progress quantity), never the
+    // real ask count — even when `attempts` (below) correctly showed 3.
+    expect(call.final_attempt_count).toBe(3);
+    const explanation = call.extras.explanation;
+    expect(explanation.problem).toBe("implement escalated after 3 attempt(s): no-progress");
+    expect(explanation.risk).toBe("continued retries risk wasting budget; 3 attempt(s) already made");
+    expect(explanation.observed.final_attempt_count).toBe(3);
+    expect(explanation.why_asking).toBe("no forward progress after 3 attempt(s) — stop-and-escalate");
+    // The real ask history: 2 prior + this one = 3, exactly matching the count above.
+    expect(explanation.attempts).toEqual([111, 222, 1_000_000]);
+  });
+
+  // 2026-08-03 fix: confirmed live across 11 real tickets on 2 hosts — every
+  // one's dead session transcript showed nothing but the Claude harness's own
+  // "You've hit your session limit" reply on every attempt (zero real tool
+  // use), yet the escalation read as generic "no forward progress," which
+  // reads as "the WORK is stuck" when the true story is "the ACCOUNT is
+  // rate-limited." This does NOT change the STOP/escalate decision or the
+  // ask-cap — only enriches the explanation once that decision is made.
+  test("a no-progress STOP whose dead session hit an account rate limit gets an accurate call_to_action + observed.likely_cause", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2, // no forward progress → no-progress STOP
+      appendEscalatedEvent,
+      detectRateLimit: (bgJobId) => {
+        expect(bgJobId).toBe("job-x"); // the seam receives the dead worker's OWN bg_job_id
+        return true;
+      },
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const explanation = appendEscalatedEvent.calls[0][0].extras.explanation;
+    expect(explanation.observed.likely_cause).toBe("account-rate-limited");
+    expect(explanation.call_to_action).toMatch(/usage\/rate limit/);
+    expect(explanation.call_to_action).toMatch(/wait for the usage window to reset/);
+    // The underlying reason/cap machinery is UNCHANGED — still "no-progress".
+    expect(appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
+  });
+
+  test("a no-progress STOP whose dead session shows NO rate-limit signature keeps the original generic explanation", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2,
+      appendEscalatedEvent,
+      detectRateLimit: () => false,
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const explanation = appendEscalatedEvent.calls[0][0].extras.explanation;
+    expect(explanation.observed.likely_cause).toBeUndefined();
+    expect(explanation.call_to_action).toBe("authorize CTL-9 implement to retry or change approach?");
+  });
+
+  test("a throwing detectRateLimit seam degrades to the generic explanation, never breaks the STOP", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2,
+      readProgressMark: () => 2,
+      appendEscalatedEvent,
+      detectRateLimit: () => { throw new Error("boom"); },
+    }));
+    expect(r).toBe("no-progress-stopped");
+    const explanation = appendEscalatedEvent.calls[0][0].extras.explanation;
+    expect(explanation.observed.likely_cause).toBeUndefined();
+  });
+
   test("first death with no prior mark (readProgressMark -1) always gets one revive — even at zero progress", () => {
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
@@ -4517,6 +4605,143 @@ describe("resolvePhaseSessionId", () => {
     mkdirSync(join(jobsDir, "nolink"), { recursive: true });
     writeFileSync(join(jobsDir, "nolink", "state.json"), JSON.stringify({ state: "stopped" }));
     expect(resolvePhaseSessionId("nolink", { jobsDir })).toBeNull();
+  });
+});
+
+// 2026-08-03: detectSessionRateLimitHit — see recovery.mjs's own header comment
+// for the full incident (11 real tickets, 2 hosts, escalated as generic
+// "no-progress" when every dead session's transcript showed nothing but the
+// Claude harness's own rate-limit reply).
+describe("detectSessionRateLimitHit", () => {
+  function assistantLine(text) {
+    return JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  }
+
+  test("no bgJobId → false, resolveSession never called", () => {
+    const resolveSession = () => { throw new Error("must not be called"); };
+    expect(detectSessionRateLimitHit(null, { resolveSession })).toBe(false);
+    expect(detectSessionRateLimitHit(undefined, { resolveSession })).toBe(false);
+  });
+
+  test("resolveSession returns null (no resolvable session) → false", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", { resolveSession: () => null, findTranscriptFn: () => "/should-not-be-used" }),
+    ).toBe(false);
+  });
+
+  test("findTranscript returns null (no transcript on disk) → false", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => null,
+        readTranscriptFn: () => { throw new Error("must not read — no transcript path"); },
+      }),
+    ).toBe(false);
+  });
+
+  test("a transcript whose tail shows the literal session-limit reply → true", () => {
+    const lines = [
+      JSON.stringify({ type: "system", subtype: "init" }),
+      assistantLine("You've hit your session limit · resets 10:50pm (America/Chicago)"),
+    ].join("\n");
+    const result = detectSessionRateLimitHit("job-x", {
+      resolveSession: () => "uuid-1",
+      findTranscriptFn: () => "/fake/transcript.jsonl",
+      readTranscriptFn: () => lines,
+    });
+    expect(result).toBe(true);
+  });
+
+  test("the 'usage limit' phrasing variant also matches", () => {
+    const lines = assistantLine("You've hit your usage limit · resets tomorrow");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+      }),
+    ).toBe(true);
+  });
+
+  test("a transcript with real research content (no rate-limit phrase) → false", () => {
+    const lines = [
+      assistantLine("I'll start by reading the coordinator module..."),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: {} }] } }),
+    ].join("\n");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+      }),
+    ).toBe(false);
+  });
+
+  test("the phrase appears only OUTSIDE the tail window → false (tail-only scan, not full-file)", () => {
+    const earlyHit = assistantLine("You've hit your session limit · resets soon");
+    const filler = Array.from({ length: 30 }, () => assistantLine("real work happening here")).join("\n");
+    const lines = [earlyHit, filler].join("\n");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+        tailLines: 5,
+      }),
+    ).toBe(false);
+  });
+
+  test("malformed JSON lines interspersed do not prevent finding the real match", () => {
+    const lines = [
+      "{not valid json",
+      assistantLine("You've hit your session limit · resets later"),
+      "another { broken line",
+    ].join("\n");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+      }),
+    ).toBe(true);
+  });
+
+  test("resolveSession throwing degrades to false, never throws", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", { resolveSession: () => { throw new Error("boom"); } }),
+    ).toBe(false);
+  });
+
+  test("findTranscript throwing degrades to false, never throws", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => { throw new Error("boom"); },
+      }),
+    ).toBe(false);
+  });
+
+  test("readFileSync throwing (unreadable transcript) degrades to false, never throws", () => {
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => { throw new Error("EACCES"); },
+      }),
+    ).toBe(false);
+  });
+
+  test("a non-assistant entry (e.g. user/system) mentioning the phrase in passing is ignored", () => {
+    const lines = [
+      JSON.stringify({ type: "user", message: { content: "did you hit your session limit earlier?" } }),
+    ].join("\n");
+    expect(
+      detectSessionRateLimitHit("job-x", {
+        resolveSession: () => "uuid-1",
+        findTranscriptFn: () => "/fake/transcript.jsonl",
+        readTranscriptFn: () => lines,
+      }),
+    ).toBe(false);
   });
 });
 
