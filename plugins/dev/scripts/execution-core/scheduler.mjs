@@ -7400,10 +7400,31 @@ export function schedulerTick(
   const _hasTriageArtifact = hasTriageArtifact ?? defaultHasTriageArtifact;
   const _listStartedTickets = listStartedTicketsOpt ?? listStartedTickets;
 
+  const dispatchableReady = ready.filter((t) => {
+    const readiness = canOccupySlotNow(orchDir, t.identifier, {
+      hasTriageArtifact: _hasTriageArtifact,
+    });
+    if (readiness.ok) {
+      lastHoldLogged.delete(t.identifier);
+      return true;
+    }
+    if (heldReasons.length < 20) {
+      heldReasons.push({ ticket: t.identifier, reason: readiness.reason });
+    }
+    if (lastHoldLogged.get(t.identifier) !== readiness.reason) {
+      lastHoldLogged.set(t.identifier, readiness.reason);
+      log.info(
+        { ticket: t.identifier, reason: readiness.reason },
+        "ctl-1150: new-work candidate not yet triaged (no triage.json) — holding (CAT-36: no longer consumes budget)"
+      );
+    }
+    return false;
+  });
+
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.
-  const selected = selectDispatchablePerProject(ready, _listStartedTickets(orchDir), freeSlots, {
+  const selected = selectDispatchablePerProject(dispatchableReady, _listStartedTickets(orchDir), freeSlots, {
     perProject: concurrency?.perProject,
     inFlight: inFlightTickets,
   });
@@ -7427,19 +7448,6 @@ export function schedulerTick(
     // marker, no failure event — mirroring the CTL-781 assignee-unreadable hold.
     // The candidate stays in the eligible set and dispatches next tick once
     // triage.json lands.
-    const readiness = canOccupySlotNow(orchDir, t.identifier, { hasTriageArtifact: _hasTriageArtifact });
-    if (!readiness.ok) {
-      if (heldReasons.length < 20) heldReasons.push({ ticket: t.identifier, reason: readiness.reason });
-      if (lastHoldLogged.get(t.identifier) !== readiness.reason) {
-        lastHoldLogged.set(t.identifier, readiness.reason);
-        log.info(
-          { ticket: t.identifier, reason: readiness.reason },
-          "ctl-1150: new-work candidate not yet triaged (no triage.json) — holding (CAT-36: no longer consumes budget)"
-        );
-      }
-      continue;
-    }
-    lastHoldLogged.delete(t.identifier);
     if (inDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, now())) continue; // CTL-624: throttle refused re-dispatch
     // CTL-537: sequencing gate — only when a worker is already in-flight and a
     // seam is wired. Fail-open verdicts dispatch normally.
