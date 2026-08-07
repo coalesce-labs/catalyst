@@ -2,7 +2,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test autotune-writeback.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeLayer2MaxParallel } from "./autotune.mjs";
@@ -74,6 +74,19 @@ describe("writeLayer2MaxParallel", () => {
     const files = require("node:fs").readdirSync(dir);
     const hasTmp = files.some((f) => f.includes(".tmp."));
     expect(hasTmp).toBe(false);
+  });
+
+  test("writes at mode 600, regardless of any prior looser mode on the file", () => {
+    // doctor's layer2-perms check FAILs on anything looser than 600 (Layer-2 can
+    // carry secrets). Start the file at a deliberately loose mode to pin that the
+    // write-back doesn't just preserve whatever was there — it sets 600 outright.
+    const p = join(dir, "config.json");
+    writeFileSync(p, JSON.stringify({ catalyst: {} }));
+    chmodSync(p, 0o644);
+    const ok = writeLayer2MaxParallel(p, 9);
+    expect(ok).toBe(true);
+    const mode = statSync(p).mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 
   test("uses injected readFileSync / writeFileSync / renameSync seams", () => {
