@@ -96,8 +96,34 @@ export function getDrainFlagPath(orchDir) {
   return join(orchDir, "drain");
 }
 
-export function isDraining(orchDir) {
-  return existsSync(getDrainFlagPath(orchDir));
+// CTL-1678: per-node drain override. A worker sets CATALYST_DRAIN_DISABLED=1 in its
+// durable Layer-2 execution-core.env to PERMANENTLY ignore the drain flag (an
+// unattributed writer keeps halting the fleet — CTL-1675). `=== "1"` opt-in, matching
+// applyBootDrainPolicy's CATALYST_BOOT_DRAINED idiom. `env` is an injectable seam.
+export function isDrainDisabled(env = process.env) {
+  return env?.CATALYST_DRAIN_DISABLED === "1";
+}
+
+// CTL-1678: the real drain chokepoint. flagPresent = the sentinel file exists;
+// disabled = the per-node override; draining = flagPresent && !disabled (the value
+// every admission consumer acts on). Status surfaces read the full object so they can
+// report "draining-but-ignored" distinctly from "not draining".
+export function resolveDrainState(orchDir, { env = process.env } = {}) {
+  const flagPresent = existsSync(getDrainFlagPath(orchDir));
+  const disabled = isDrainDisabled(env);
+  return { flagPresent, disabled, draining: flagPresent && !disabled };
+}
+
+// CTL-1678: isDraining now delegates to resolveDrainState so the flag-file read lives
+// in exactly one place. The optional second arg is an injectable env seam; every
+// existing call site passes only orchDir, so this stays backward-compatible.
+export function isDraining(orchDir, { env = process.env } = {}) {
+  return resolveDrainState(orchDir, { env }).draining;
+}
+
+// CTL-1678: once-per-episode marker for the "drain observed and ignored" tripwire.
+export function getDrainIgnoredMarkerPath(orchDir) {
+  return join(orchDir, "drain.ignored");
 }
 
 // CTL-1095/CTL-1321: path of the once-per-episode "drained" sentinel marker. The
