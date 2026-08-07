@@ -858,6 +858,21 @@ export function resolveWaitingCreatedAt(
   return resolved;
 }
 
+export function nextStarvationState(
+  streak,
+  { didWork, freeSlots, hasWaitingWork, livenessFresh, draining }
+) {
+  if (didWork || !hasWaitingWork || draining || (freeSlots <= 0 && livenessFresh)) {
+    return { streak: 0, warn: false, reason: null };
+  }
+  const next = streak + 1;
+  const warn =
+    next === STARVATION_WARN_STREAK ||
+    (next > STARVATION_WARN_STREAK &&
+      (next - STARVATION_WARN_STREAK) % STARVATION_REWARN_EVERY === 0);
+  return { streak: next, warn, reason: livenessFresh ? "dispatch-starvation" : "stale-liveness" };
+}
+
 // readClusterGeneration / writeClusterGeneration (CTL-864 remediation) — the
 // persisted cross-host fence token for a ticket.
 //
@@ -6707,6 +6722,12 @@ export function schedulerTick(
             hasTriageArtifact: _hasTriageArtifact,
           }).ok
       );
+      if (!topQueued && ranking.some((d) => !d.inFlight)) {
+        log.debug(
+          { queued: ranking.filter((d) => !d.inFlight).length },
+          "scheduler: preemption suppressed — no queued ticket is dispatch-ready (CAT-36)"
+        );
+      }
       // Victim candidates: in-flight, sorted worst-to-best (reverse ranking).
       const inFlightRanked = ranking.filter((d) => d.inFlight);
       // Scan from lowest-ranked in-flight (last in sorted array) toward highest.
@@ -7409,11 +7430,14 @@ export function schedulerTick(
     if (heldReasons.length < 20) {
       heldReasons.push({ ticket: t.identifier, reason: readiness.reason });
     }
-    if (lastHoldLogged.get(t.identifier) !== readiness.reason) {
-      lastHoldLogged.set(t.identifier, readiness.reason);
+    const previousHold = lastHoldLogged.get(t.identifier);
+    const holdStreak = previousHold?.reason === readiness.reason ? previousHold.streak + 1 : 1;
+    lastHoldLogged.set(t.identifier, { reason: readiness.reason, streak: holdStreak });
+    if (holdStreak === 1 || holdStreak % HOLD_RELOG_EVERY === 0) {
       const context = {
         ticket: t.identifier,
         reason: readiness.reason,
+        held_ticks: holdStreak,
         ...(readiness.error ? { error: String(readiness.error) } : {}),
       };
       if (readiness.error) {
@@ -7451,15 +7475,6 @@ export function schedulerTick(
 
   const dispatched = [];
   for (const t of selected) {
-    // CTL-1150: hold an eligible candidate whose triage hasn't produced
-    // triage.json yet. The monitor defers triage under slot pressure
-    // (computeTriageBudget, CTL-716) and sweepMissingTriage retries; until then
-    // dispatching research trips phase-agent-dispatch's prior-artifact guard
-    // (research requires signal:triage.json) and emits spurious
-    // phase.research.failed + phase.dispatch.failed. Silent hold — no cooldown
-    // marker, no failure event — mirroring the CTL-781 assignee-unreadable hold.
-    // The candidate stays in the eligible set and dispatches next tick once
-    // triage.json lands.
     if (inDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, now())) continue; // CTL-624: throttle refused re-dispatch
     // CTL-537: sequencing gate — only when a worker is already in-flight and a
     // seam is wired. Fail-open verdicts dispatch normally.
@@ -8038,26 +8053,22 @@ export function schedulerTick(
   const didWork =
     dispatched.length > 0 || advanced.length > 0 || promotedCount > 0 || resumedCount > 0;
   const hasWaitingWork = eligible.length > 0 || triagedWaitingCount > 0;
-  if (didWork || freeSlots <= 0 || !hasWaitingWork) {
-    starvationStreak = 0;
-  } else {
-    starvationStreak += 1;
-    if (
-      starvationStreak === STARVATION_WARN_STREAK ||
-      (starvationStreak > STARVATION_WARN_STREAK &&
-        (starvationStreak - STARVATION_WARN_STREAK) % STARVATION_REWARN_EVERY === 0)
-    ) {
+  const starvation = nextStarvationState(starvationStreak, {
+    didWork, freeSlots, hasWaitingWork, livenessFresh, draining,
+  });
+  starvationStreak = starvation.streak;
+  if (starvation.warn) {
       log.warn(
         {
           ticks: starvationStreak,
+          reason: starvation.reason,
           free_slots: freeSlots,
           eligible_count: eligible.length,
           triaged_waiting: triagedWaitingCount,
           held: heldReasons,
         },
-        "scheduler: board appears frozen — free slots and queued work but nothing dispatched (CAT-36)"
+        "scheduler: board appears frozen — queued work cannot make progress (CAT-36)"
       );
-    }
   }
 
   // CTL-1330 Tier 1: one structured line per tick. total_ms IS the synchronous
@@ -8299,6 +8310,7 @@ const lastHeldEmitState = new Map();
 const lastHoldLogged = new Map();
 const STARVATION_WARN_STREAK = 3;
 const STARVATION_REWARN_EVERY = 10;
+const HOLD_RELOG_EVERY = 10;
 // A scheduler process owns one orchDir, so one process-wide streak is sufficient.
 let starvationStreak = 0;
 // CTL-764 Phase 5: last-emitted disposition per ticket for the worker.transition

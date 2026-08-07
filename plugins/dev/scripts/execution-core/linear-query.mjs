@@ -507,7 +507,7 @@ export function fetchTicketRelations(identifier, { exec = defaultExec, cache } =
 // (callers and tests rely on it); fetchTicketsBatch keys its Map on
 // node.identifier separately. A missing priority normalizes to null ("unknown"),
 // matching fetchTicketRelations (NOT normalizeTicket's eligible-set default of 0).
-function normalizeRelations(node) {
+export function normalizeRelations(node) {
   return {
     state: node?.state?.name ?? node?.state ?? null,
     // CTL-878: parent epic identifier (or null). Carried so the admission gate's

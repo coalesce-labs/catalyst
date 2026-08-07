@@ -29,6 +29,7 @@ import {
   buildDelegateBatchCurlArgs,
   fetchTicketsDelegateBatch,
   parseTerminalTimeoutMs,
+  normalizeRelations,
   __rawExecForTest,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
@@ -189,6 +190,11 @@ describe("runEligibleQuery", () => {
       stdout: ticketsJson([{ identifier: "ENG-1", state: { name: "Todo" } }]),
     });
     expect(runEligibleQuery(query, { exec })[0].createdAt).toBeNull();
+  });
+
+  test("normalizeRelations preserves a Linear-supplied createdAt", () => {
+    const createdAt = "2026-05-01T00:00:00Z";
+    expect(normalizeRelations({ identifier: "ENG-1", createdAt }).createdAt).toBe(createdAt);
   });
 
   test("passes relations / inverseRelations through verbatim for the dependency graph", () => {

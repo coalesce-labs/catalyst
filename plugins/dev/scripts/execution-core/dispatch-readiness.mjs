@@ -1,11 +1,17 @@
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 
 export const NOT_DISPATCHABLE_UNTRIAGED = "untriaged-no-triage-artifact";
 export const NOT_DISPATCHABLE_TRIAGE_PROBE_ERROR = "triage-probe-error";
 
 export function defaultHasTriageArtifact(orchDir, ticket) {
-  return existsSync(join(orchDir, "workers", ticket, "triage.json"));
+  try {
+    statSync(join(orchDir, "workers", ticket, "triage.json"));
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return false;
+    throw error;
+  }
 }
 
 export function canOccupySlotNow(orchDir, ticket, { hasTriageArtifact } = {}) {
