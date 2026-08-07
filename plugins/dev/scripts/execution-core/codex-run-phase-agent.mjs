@@ -325,10 +325,67 @@ const PROVISIONED_THOUGHTS_ENTRIES = new Set(["shared", "global"]);
 // planting such a symlink costs an attacker nothing, but a FUTURE dispatch's
 // resolveWritableRoots would otherwise hand that resolved path (up to `/`
 // itself) real filesystem write access.
+//
+// 2026-08-07 P1 follow-up (Codex round-3, PR #3082): a bare segment-count
+// floor alone is NOT sufficient — `thoughts/shared -> /home/alice` (or any
+// other 2+-segment path an attacker chooses) still passes a `>= 2` (or even
+// a raised `>= 3`) check while granting write access to an arbitrary,
+// unrelated directory. The real, structural defense is
+// resolveConfiguredThoughtsAnchor below: validate the resolved target
+// against the WORKTREE'S OWN configured thoughts repository (the same
+// `.catalyst/config.json` → `catalyst.thoughts.directory` source of truth
+// lib/assert-thoughts-project.sh already uses for exactly this purpose), not
+// a shape heuristic. isSaneThoughtsTarget is kept ONLY as a last-resort
+// structural floor for the legacy direct-symlink shape and as a fallback
+// when a worktree genuinely has no thoughts config to validate against
+// (fail-open, mirroring assert-thoughts-project.sh's own precedent) — it is
+// no longer the primary guard for the common `shared`/`global` shape.
 function isSaneThoughtsTarget(p) {
   if (typeof p !== "string" || !isAbsolute(p)) return false;
   const segments = p.split("/").filter(Boolean);
   return segments.length >= 2;
+}
+
+// resolveConfiguredThoughtsDirectory — reads the SAME field
+// lib/assert-thoughts-project.sh validates thoughts/shared against:
+// `.catalyst/config.json` → `catalyst.thoughts.directory`, from the worktree
+// root. Returns null (not an empty string) when the file is missing,
+// unparsable, or the field is absent — the caller treats null as "no
+// authoritative anchor available" and falls back to the structural check,
+// same fail-open precedent as assert-thoughts-project.sh.
+function resolveConfiguredThoughtsDirectory(worktreePath) {
+  if (!worktreePath) return null;
+  try {
+    const cfg = JSON.parse(readFileSync(join(worktreePath, ".catalyst", "config.json"), "utf8"));
+    const dir = cfg?.catalyst?.thoughts?.directory;
+    return typeof dir === "string" && dir.length > 0 ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+// resolveConfiguredThoughtsAnchor — validates a resolved `thoughts/shared`
+// target against the worktree's configured thoughts directory, requiring the
+// SAME `/repos/<directory>/` segment lib/assert-thoughts-project.sh requires
+// (the two checks are independent implementations of the identical contract
+// on purpose — one shell, one JS — not a shared function call). On a match,
+// derives and returns the THOUGHTS_REPO root (everything before that
+// segment) so the sibling `thoughts/global` target — always
+// `<THOUGHTS_REPO>/<globalDir>` per lib/provision-thoughts.sh /
+// worktree-thoughts-init.sh — can be validated as nested under that SAME,
+// now-trusted root rather than trusted independently. Returns null when
+// there is no configured directory to check (fail-open — caller falls back
+// to isSaneThoughtsTarget) OR when a configured directory is present but the
+// resolved target does NOT contain the expected segment (fail-CLOSED — a
+// declared, non-matching directory is a genuine mismatch, not an absence,
+// and the caller must reject the target outright rather than fall back).
+function resolveConfiguredThoughtsAnchor(worktreePath, resolvedSharedTarget) {
+  const directory = resolveConfiguredThoughtsDirectory(worktreePath);
+  if (!directory) return { anchor: null, mismatch: false };
+  const expectedSegment = `/repos/${directory}/`;
+  const idx = resolvedSharedTarget.indexOf(expectedSegment);
+  if (idx === -1) return { anchor: null, mismatch: true };
+  return { anchor: resolvedSharedTarget.slice(0, idx), mismatch: false };
 }
 
 // resolveThoughtsRoots — the REAL path(s) any symlink under the worktree's
@@ -354,6 +411,13 @@ function isSaneThoughtsTarget(p) {
 // 2026-08-07 hardening (round-2 review, PR #3082): both shapes below are now
 // gated by isSaneThoughtsTarget — see its comment for the sandbox-escape
 // scenario this closes.
+//
+// 2026-08-07 hardening, round 2 (round-3 review, same PR): a bare structural
+// floor alone was insufficient (any attacker-chosen 2+-segment path still
+// passed). The real-directory shape below now validates `shared`/`global`
+// against the worktree's CONFIGURED thoughts directory when one is declared
+// — see resolveConfiguredThoughtsAnchor's doc comment — falling back to the
+// structural floor only when no thoughts directory is configured at all.
 //
 // Handles BOTH shapes: `thoughts` itself being a symlink (the legacy/simple
 // case this function originally assumed), and `thoughts` being a real
@@ -383,20 +447,62 @@ function resolveThoughtsRoots(worktreePath) {
   // is left alone — it's already inside the worktree and needs no additional
   // writable root. Any OTHER symlinked entry (unprovisioned name) is skipped
   // outright, never resolved.
+  //
+  // `shared` is resolved FIRST (fixed iteration order below, not readdir
+  // order) so its config-validated target can anchor `global`'s validation —
+  // see resolveConfiguredThoughtsAnchor's doc comment.
+  //
+  // Two DISTINCT validation regimes, chosen ONCE by whether this worktree
+  // declares a thoughts directory at all (`configuredDirectory`, read once
+  // up front — not re-derived per entry):
+  //   - CONFIGURED (the common case for every catalyst-managed worktree):
+  //     `shared` must match the declared `/repos/<directory>/` segment or is
+  //     rejected outright (fail-CLOSED — a declared, non-matching directory
+  //     is a genuine mismatch). `global` must nest under THAT validated
+  //     anchor or is likewise rejected outright — no structural fallback for
+  //     either entry once a directory is declared, since a fixed segment
+  //     count alone is exactly the insufficient guard Codex's round-3 finding
+  //     flagged (an attacker-chosen 2+-segment target still passes a bare
+  //     length check).
+  //   - UNCONFIGURED (no `.catalyst/config.json` thoughts directory at all):
+  //     nothing to validate against — fall back to the structural floor
+  //     (isSaneThoughtsTarget) independently for each entry, the same
+  //     fail-open precedent lib/assert-thoughts-project.sh already sets for
+  //     an unconfigured project.
   const out = [];
   let entries;
   try {
-    entries = readdirSync(thoughtsPath);
+    entries = new Set(readdirSync(thoughtsPath));
   } catch {
     return [];
   }
-  for (const entry of entries) {
-    if (!PROVISIONED_THOUGHTS_ENTRIES.has(entry)) continue;
+  const configuredDirectory = resolveConfiguredThoughtsDirectory(worktreePath);
+  let anchor = null; // THOUGHTS_REPO root, once `shared` validates against config
+  for (const entry of ["shared", "global"]) {
+    if (!entries.has(entry) || !PROVISIONED_THOUGHTS_ENTRIES.has(entry)) continue;
     const entryPath = join(thoughtsPath, entry);
     try {
       if (!lstatSync(entryPath).isSymbolicLink()) continue;
       const real = realpathSync(entryPath);
-      if (isSaneThoughtsTarget(real)) out.push(real);
+      if (!configuredDirectory) {
+        // UNCONFIGURED regime — structural floor only, no anchor tracking.
+        if (isSaneThoughtsTarget(real)) out.push(real);
+        continue;
+      }
+      // CONFIGURED regime — anchor-only, no structural fallback.
+      if (entry === "shared") {
+        const { anchor: derived } = resolveConfiguredThoughtsAnchor(worktreePath, real);
+        if (derived) {
+          anchor = derived;
+          out.push(real);
+        }
+        // else: declared directory present but `shared`'s target doesn't
+        // contain the expected segment — reject outright, `anchor` stays null.
+      } else if (anchor && (real === anchor || real.startsWith(`${anchor}/`))) {
+        out.push(real);
+        // else: no validated anchor (shared missing/mismatched), or global
+        // doesn't nest under it — reject outright.
+      }
     } catch {
       // Broken symlink / permission error on this one entry — skip it, keep
       // going; never let one bad entry drop the rest of the census.
