@@ -39,6 +39,7 @@ default_state_for() {
   case "$1" in
     backlog)     echo "Backlog" ;;
     todo)        echo "Todo" ;;
+    triage)      echo "Triage" ;;  # requires the team's native Linear Triage mode enabled (triageEnabled), else no such state exists to resolve
     research)    echo "In Progress" ;;
     planning)    echo "In Progress" ;;
     inProgress)  echo "In Progress" ;;
@@ -118,6 +119,21 @@ elif [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 
   TARGET_STATE=$(jq -r --arg p "$PROJECT_KEY" --arg k "$TRANSITION" \
     '(.catalyst.projects[]? | select(.key == $p) | .stateMap[$k]) // .catalyst.linear.stateMap[$k] // empty' \
     "$CONFIG_PATH" 2>/dev/null)
+fi
+# A "triage" transition's true target is whatever the project's registered
+# eligibleQuery.triageStatus says (resolveEligibleQuery in registry.mjs, same
+# default "Triage"), NOT necessarily the literal string "Triage" — a project
+# customized to e.g. "Intake" has no reason to also duplicate that into
+# stateMap.triage. Check the execution-core registry BEFORE falling through to
+# default_state_for's hardcoded "Triage", so this stays in sync with what
+# applyTriageStatus() actually verifies against.
+if [ -z "$TARGET_STATE" ] && [ "$TRANSITION" = "triage" ] && command -v jq >/dev/null 2>&1; then
+  EXEC_REGISTRY_PATH="${CATALYST_DIR:-$HOME/catalyst}/execution-core/registry.json"
+  if [ -f "$EXEC_REGISTRY_PATH" ]; then
+    TARGET_STATE=$(jq -r --arg t "$PROJECT_KEY" \
+      '(.projects[]? | select(.team == $t) | .eligibleQuery.triageStatus) // empty' \
+      "$EXEC_REGISTRY_PATH" 2>/dev/null)
+  fi
 fi
 if [ -z "$TARGET_STATE" ]; then
   TARGET_STATE="$(default_state_for "$TRANSITION")"
