@@ -339,6 +339,39 @@ expect_eq "fallback: layer2 false exits non-zero"     "1"       "$NOBUN_FALSE_EC
 expect_eq "fallback: layer2 false verdict=fail"       "fail"    "$(printf '%s' "$NOBUN_FALSE_OUT" | jq -r '.verdict')"
 expect_eq "fallback: layer2 false node_class=monitor" "monitor" "$(printf '%s' "$NOBUN_FALSE_OUT" | jq -r '.node_class')"
 
+# ── CTL-1678: _vn_drained honors CATALYST_DRAIN_DISABLED; _vn_drain_disabled ──
+# A drain-disabled worker admits new work, so _vn_drained must report `no` even
+# when the physical flag file exists (truthful — the override neutralizes it).
+DRAIN_SCRATCH="$(mktemp -d)"
+mkdir -p "${DRAIN_SCRATCH}/execution-core"
+: > "${DRAIN_SCRATCH}/execution-core/drain"   # physical flag present
+
+# flag present + override set → no (override wins)
+expect_eq "_vn_drained: flag present + DRAIN_DISABLED=1 → no" "no" \
+  "$( CATALYST_DIR="$DRAIN_SCRATCH" CATALYST_DRAIN_DISABLED=1 _vn_drained )"
+# flag present + env unset → yes (unchanged legacy behavior)
+expect_eq "_vn_drained: flag present + env unset → yes" "yes" \
+  "$( CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drained' )"
+# boot-drained + env unset → yes (unchanged)
+expect_eq "_vn_drained: boot-drained + env unset → yes" "yes" \
+  "$( CATALYST_DIR="${DRAIN_SCRATCH}/absent" CATALYST_BOOT_DRAINED=1 bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drained' )"
+
+# _vn_drain_disabled: yes iff CATALYST_DRAIN_DISABLED == "1"
+expect_eq "_vn_drain_disabled: =1 → yes" "yes" "$( CATALYST_DRAIN_DISABLED=1 _vn_drain_disabled )"
+expect_eq "_vn_drain_disabled: =0 → no"  "no"  "$( CATALYST_DRAIN_DISABLED=0 _vn_drain_disabled )"
+expect_eq "_vn_drain_disabled: unset → no" "no" \
+  "$( bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drain_disabled' )"
+
+# _vn_v_drain_disabled verdict helper (advisory PASS either way)
+expect_eq "_vn_v_drain_disabled: yes → PASS" "PASS" "$(status_of "$(_vn_v_drain_disabled yes)")"
+expect_eq "_vn_v_drain_disabled: no → PASS"  "PASS" "$(status_of "$(_vn_v_drain_disabled no)")"
+case "$(_vn_v_drain_disabled yes)" in
+  *"ignores the drain flag"*) ok "_vn_v_drain_disabled: yes detail names 'ignores the drain flag'" ;;
+  *) fail "_vn_v_drain_disabled: yes detail" "missing 'ignores the drain flag'" ;;
+esac
+
+rm -rf "$DRAIN_SCRATCH"
+
 rm -rf "$SCRATCH"
 
 echo ""

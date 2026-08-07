@@ -3115,8 +3115,14 @@ _vn_monitor_running() {
   if command -v catalyst-monitor >/dev/null 2>&1 \
      && catalyst-monitor status 2>/dev/null | grep -qi 'monitor running'; then echo yes; else echo no; fi
 }
+# _vn_drain_disabled — CTL-1678: this node ignores the drain flag when
+# CATALYST_DRAIN_DISABLED=1 (a worker-only override; `=== "1"` opt-in).
+_vn_drain_disabled() { [[ "${CATALYST_DRAIN_DISABLED:-}" == "1" ]] && echo yes || echo no; }
 # _vn_drained — node would refuse new work: persistent drain flag OR boot-drain opt-in.
+# CTL-1678: the CATALYST_DRAIN_DISABLED=1 override neutralizes the flag, so a
+# drain-disabled node reports `no` (it admits new work) even if the flag file exists.
 _vn_drained() {
+  if [[ "${CATALYST_DRAIN_DISABLED:-}" == "1" ]]; then echo no; return; fi
   if [[ -f "${CATALYST_DIR:-$HOME/catalyst}/execution-core/drain" || "${CATALYST_BOOT_DRAINED:-}" == "1" ]]; then
     echo yes
   else
@@ -3261,6 +3267,16 @@ _vn_v_dev_no_work() {
   printf 'WARN|single-host roster includes this node and it is not drained — safe only while the work daemons are down (see broker/exec-core); set CATALYST_BOOT_DRAINED=1 to be explicit\n'
 }
 
+# _vn_v_drain_disabled <yes|no> — CTL-1678: advisory PASS either way (the override
+# is an intended worker-only operator action; never fails the run).
+_vn_v_drain_disabled() {
+  if [[ "$1" == "yes" ]]; then
+    printf 'PASS|drain-disabled — ignores the drain flag (CTL-1678)\n'
+  else
+    printf 'PASS|not drain-disabled — honors the drain flag\n'
+  fi
+}
+
 # --- check runner (mirrors the _vu_* runner; adds a non-fatal WARN status) -----
 VN_JSON="no"
 VN_NAMES=(); VN_TIERS=(); VN_REQUIRED=(); VN_STATUSES=(); VN_DETAILS=()
@@ -3311,6 +3327,7 @@ _vn_run_worker() {
   _vn_emit "exec-core-running" T1 true "$(_vn_v_daemon_up execution-core "$(_vn_exec_core_running)")"
   _vn_emit "monitor-running"   T1 true "$(_vn_v_daemon_up monitor "$(_vn_monitor_running)")"
   _vn_emit "pull-owner"        T1 true "$(_vn_v_worker_owner "${CATALYST_PLUGIN_PULL_OWNER:-}" "$(_vu_read_pull_owner "$VN_CFG")")"
+  _vn_emit "drain-disabled"    T1 false "$(_vn_v_drain_disabled "$(_vn_drain_disabled)")"  # CTL-1678: scenario 3 visibility (advisory, non-required)
   if [[ "$VN_JSON" != "yes" ]]; then
     echo "    note: LOCAL subset only — full activation-gate grading (Linear/bot/HRW/webhook/PATH) is 'catalyst-doctor' (CTL-1355 doctor.mjs, the follow-up)."
   fi

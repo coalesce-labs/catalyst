@@ -42,6 +42,7 @@ import {
   resolveNodeClass,
   NODE_CLASSES,
   isDraining,
+  resolveDrainState, // CTL-1678: three-state drain resolver for checkDrainDisabled
   getExecutionCoreDir,
   // CTL-1375: configured-repo discovery for the repo-icon token-scope advisory.
   getRegistryPath,
@@ -3157,6 +3158,42 @@ async function defaultLinearGraphQLPost(query, token) {
   return res.json();
 }
 
+// checkDrainDisabled — CTL-1678. Advisory report of the per-node drain override.
+// A worker with CATALYST_DRAIN_DISABLED=1 permanently ignores the drain flag; this
+// surfaces the third "draining-but-ignored" state so an operator scanning doctor
+// output sees an active neutralization. NEVER FAILs (advisory, like checkWorkerLabels)
+// — the override is an intended operator action, so its presence must not block the
+// activation gate. WARN only when the flag is present AND being ignored; PASS/INFO
+// otherwise. Worker-suite only (the env is worker-only).
+export function checkDrainDisabled(deps = {}) {
+  const {
+    env = process.env,
+    orchDir = getExecutionCoreDir(),
+    resolveDrainState: _resolve = resolveDrainState,
+  } = deps;
+  const { flagPresent, disabled } = _resolve(orchDir, { env });
+  if (disabled && flagPresent) {
+    return mkCheck(
+      "drain-disabled",
+      STATUS.WARN,
+      "drain flag is present but being IGNORED (CATALYST_DRAIN_DISABLED=1) — " +
+        "this node admits new work despite an active drain (CTL-1678)",
+    );
+  }
+  if (disabled) {
+    return mkCheck(
+      "drain-disabled",
+      STATUS.PASS,
+      "drain-disabled — this node ignores the drain flag (CATALYST_DRAIN_DISABLED=1, CTL-1678)",
+    );
+  }
+  return mkCheck(
+    "drain-disabled",
+    STATUS.INFO,
+    "not drain-disabled — this node honors the drain flag (CTL-1678)",
+  );
+}
+
 // checkWorkerLabels — CTL-1481. Advisory health of the workspace `worker`
 // label group + its `worker:<host>` children (the best-effort claim-win
 // VISIBILITY PROJECTION stamped by worker-label.mjs — never the claim
@@ -4658,6 +4695,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
+    () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
   ];
 }
 
