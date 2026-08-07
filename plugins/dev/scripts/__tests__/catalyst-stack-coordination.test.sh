@@ -20,7 +20,24 @@ STACK="${REPO_ROOT}/plugins/dev/scripts/catalyst-stack"
 FAILURES=0
 PASSES=0
 SCRATCH="$(mktemp -d)"
-trap 'rm -rf "$SCRATCH"' EXIT
+# Cleanup also reaps any straggler fake-publisher process (self-bounded to 60s as a
+# backstop, but kill it eagerly so the suite never leaks a background process —
+# AGENTS.md "make the LOOP ITSELF self-limiting; never let cleanup be load-bearing").
+trap 'pkill -f "${SCRATCH}/coordination-publish" 2>/dev/null || true; rm -rf "$SCRATCH"' EXIT
+
+# A fake "live publisher": a bash script whose PATH contains the token
+# "coordination-publish" (so the coordination_pid command-grep guard + the
+# COORDINATION_SCRIPT-override pgrep fallback both recognize it) and which
+# self-bounds to 60s so a broken kill path can never strand it. IGNORE_TERM=1
+# makes it ignore SIGTERM, to exercise the SIGKILL-after-grace fallback.
+FAKE_PUB="${SCRATCH}/coordination-publish/index.ts"
+mkdir -p "$(dirname "$FAKE_PUB")"
+cat > "$FAKE_PUB" <<'PROC'
+#!/usr/bin/env bash
+[[ "${IGNORE_TERM:-0}" == "1" ]] && trap '' TERM
+end=$((SECONDS + 60)); while [ "$SECONDS" -lt "$end" ]; do sleep 1; done
+PROC
+chmod +x "$FAKE_PUB"
 
 pass()  { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
 failx() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; [[ -n "${2:-}" ]] && sed 's/^/      /' <<<"$2"; }
@@ -68,6 +85,63 @@ OUT_NOBUN="$(PATH="$MINIMAL_PATH" CATALYST_DIR="$CATALYST_DIR_NOBUN" CATALYST_CO
 
 if grep -q 'RC=0' <<<"$OUT_NOBUN"; then pass "bun-missing: non-fatal (clean skip, returns 0 via off-fallback)"; else failx "bun-missing: non-fatal (clean skip, returns 0 via off-fallback)" "$OUT_NOBUN"; fi
 if [[ ! -f "${CATALYST_DIR_NOBUN}/coordination-publish.pid" ]]; then pass "bun-missing: writes NO PID file"; else failx "bun-missing: writes NO PID file"; fi
+
+# --- reconcile-on-off: mode=off while a publisher is live ⇒ stop it, no PID file ---
+# Codex P1: the daemon reads config only at startup, so a prior shadow/enforce process
+# must be STOPPED when the resolved mode flips to off — not left mirroring/egressing.
+CDIR_R="${SCRATCH}/catalyst-reconcile"; mkdir -p "$CDIR_R"
+OUT_R="$(PATH="${STUB_OFF}:${PATH}" CATALYST_DIR="$CDIR_R" COORD_FAKE="$FAKE_PUB" \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    COORDINATION_SCRIPT="$COORD_FAKE"
+    bash "$COORDINATION_SCRIPT" & echo $! > "$COORDINATION_PID"
+    sleep 1
+    livepid="$(cat "$COORDINATION_PID")"
+    start_coordination; echo "RC=$?"
+    sleep 1
+    if kill -0 "$livepid" 2>/dev/null; then echo "PROC_ALIVE"; kill -9 "$livepid" 2>/dev/null; else echo "PROC_DEAD"; fi
+    [[ -f "$COORDINATION_PID" ]] && echo "PIDFILE_PRESENT" || echo "PIDFILE_GONE"
+  ' 2>&1)"
+if grep -q 'RC=0' <<<"$OUT_R"; then pass "reconcile-off: returns 0"; else failx "reconcile-off: returns 0" "$OUT_R"; fi
+if grep -qi 'stale config' <<<"$OUT_R"; then pass "reconcile-off: logs the stale-config stop"; else failx "reconcile-off: logs the stale-config stop" "$OUT_R"; fi
+if grep -q 'PROC_DEAD' <<<"$OUT_R"; then pass "reconcile-off: stops the live publisher"; else failx "reconcile-off: stops the live publisher" "$OUT_R"; fi
+if grep -q 'PIDFILE_GONE' <<<"$OUT_R"; then pass "reconcile-off: removes the PID file"; else failx "reconcile-off: removes the PID file" "$OUT_R"; fi
+
+# --- bounded shutdown: a SIGTERM-ignoring publisher survives the grace window, then
+#     is SIGKILLed — proves stop_coordination waits for the flush instead of a hard 1s.
+CDIR_S="${SCRATCH}/catalyst-stopgrace"; mkdir -p "$CDIR_S"
+OUT_S="$(CATALYST_DIR="$CDIR_S" COORD_FAKE="$FAKE_PUB" COORDINATION_STOP_GRACE_SECONDS=2 \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    COORDINATION_SCRIPT="$COORD_FAKE"
+    IGNORE_TERM=1 bash "$COORDINATION_SCRIPT" & echo $! > "$COORDINATION_PID"
+    sleep 1
+    livepid="$(cat "$COORDINATION_PID")"
+    t0="$SECONDS"; stop_coordination; t1="$SECONDS"
+    if kill -0 "$livepid" 2>/dev/null; then echo "STILL_ALIVE"; kill -9 "$livepid" 2>/dev/null; else echo "KILLED"; fi
+    echo "ELAPSED=$((t1 - t0))"
+  ' 2>&1)"
+if grep -q 'KILLED' <<<"$OUT_S"; then pass "stop-grace: SIGKILLs a SIGTERM-ignoring publisher"; else failx "stop-grace: SIGKILLs a SIGTERM-ignoring publisher" "$OUT_S"; fi
+if grep -qi 'forcing SIGKILL' <<<"$OUT_S"; then pass "stop-grace: warns before forcing"; else failx "stop-grace: warns before forcing" "$OUT_S"; fi
+ELAPSED_S="$(grep -o 'ELAPSED=[0-9]*' <<<"$OUT_S" | cut -d= -f2)"
+if [[ -n "$ELAPSED_S" && "$ELAPSED_S" -ge 2 ]]; then pass "stop-grace: honors the ${ELAPSED_S}s graceful window (≥2s)"; else failx "stop-grace: honors the graceful window (≥2s)" "$OUT_S"; fi
+
+# --- PID-discovery fallback: PID file deleted, but a publisher is still live ⇒
+#     coordination_pid rediscovers it by command line (Codex P1: no orphan/dup).
+CDIR_D="${SCRATCH}/catalyst-discover"; mkdir -p "$CDIR_D"
+OUT_D="$(CATALYST_DIR="$CDIR_D" COORD_FAKE="$FAKE_PUB" \
+  bash --noprofile --norc -c '
+    source "'"${STACK}"'" 2>/dev/null || true
+    COORDINATION_SCRIPT="$COORD_FAKE"
+    bash "$COORDINATION_SCRIPT" & realpid=$!
+    sleep 1
+    rm -f "$COORDINATION_PID"      # simulate a lost/corrupt PID file
+    found="$(coordination_pid)"
+    echo "FOUND=[$found] REAL=[$realpid]"
+    kill -9 "$realpid" 2>/dev/null
+  ' 2>&1)"
+REAL_D="$(grep -o 'REAL=\[[0-9]*\]' <<<"$OUT_D" | grep -o '[0-9]*')"
+if [[ -n "$REAL_D" ]] && grep -q "FOUND=\[${REAL_D}\]" <<<"$OUT_D"; then pass "pid-discovery: rediscovers the publisher after PID-file loss"; else failx "pid-discovery: rediscovers the publisher after PID-file loss" "$OUT_D"; fi
 
 echo ""
 echo "  ${PASSES} passed, ${FAILURES} failed"

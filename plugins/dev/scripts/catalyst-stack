@@ -196,6 +196,15 @@ SHIPPER_LAUNCHER="${SCRIPT_DIR}/log-shipper/launch.sh"
 COORDINATION_PID="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.pid"
 COORDINATION_LOG="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.log"
 COORDINATION_SCRIPT="${SCRIPT_DIR}/coordination-publish/index.ts"
+# Resolved-config fingerprint (mode|hubUrl) captured at launch. The daemon reads
+# its config ONLY at startup, so a later keep-alive tick compares this against the
+# freshly-resolved config and bounces the process when they diverge (Codex P1:
+# reconcile a running publisher when its mode/hub changes).
+COORDINATION_FP="${CATALYST_DIR:-$HOME/catalyst}/coordination-publish.fingerprint"
+# Bounded graceful-shutdown window (seconds) before SIGKILL. Enforce-mode flush
+# drains through the hub with 5s request timeouts + retries, so one second is not
+# enough (Codex P1: let the shutdown flush finish before forcing termination).
+COORDINATION_STOP_GRACE_SECONDS="${COORDINATION_STOP_GRACE_SECONDS:-30}"
 
 # CTL-1348: the standalone catalyst-updater daemon (the 5th launchd agent). Installed
 # ONLY by the explicit 'catalyst-stack adopt-updater' cutover — NOT by install-services,
@@ -402,54 +411,107 @@ stop_shipper() {
 # would, so start_coordination short-circuits cleanly on `off` instead of spawning
 # a bun that immediately self-exits.
 
-# coordination_mode — resolve the coordination mode IDENTICALLY to the daemon's own
-# readCoordinationConfig() (env kill-switch/override > Layer-2 > default off), by
-# importing config.mjs under bun. Fail-CLOSED to "off" on any bun/import failure —
-# a bun-less host cannot run the bun daemon anyway, so inert is the correct posture.
+# coordination_mode — resolve just the coordination mode, IDENTICALLY to the
+# daemon's own readCoordinationConfig(). Thin wrapper over coordination_resolve()
+# (defined below) so mode + hubUrl always come from one resolution path.
 coordination_mode() {
+  local resolved; resolved="$(coordination_resolve)"
+  printf '%s' "${resolved%%$'\t'*}"
+}
+
+# coordination_pid — print the live coordination-publish pid, or nothing.
+# Prefers the pid recorded in COORDINATION_PID; both branches validate the pid is
+# alive AND is actually the coordination-publish process (guards pid reuse),
+# mirroring shipper_pid.
+#
+# Codex P1 (bounded supervisor): the nohup child reparents to init and outlives
+# this command, so its only handle is the PID file. If that file is deleted,
+# emptied, or overwritten, a naive lookup would (a) let `start` spawn a DUPLICATE
+# publisher and (b) leave `stop` unable to reach the original — an unbounded
+# orphan making network egress in enforce mode. So when the PID file can't resolve
+# a live publisher, fall back to discovering it by command line. That keeps `start`
+# idempotent and `stop` reachable regardless of PID-file state.
+coordination_pid() {
+  local pid
+  if [[ -f "$COORDINATION_PID" ]]; then
+    pid="$(cat "$COORDINATION_PID" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && pid_alive "$pid" \
+       && ps -p "$pid" -o command= 2>/dev/null | grep -q 'coordination-publish'; then
+      printf '%s\n' "$pid"; return 0
+    fi
+  fi
+  # Fallback: PID file missing/stale but a publisher may still be running. Discover
+  # by the entrypoint path, then re-confirm via the command grep (guards a match on
+  # this script or an unrelated process). head -1 picks the oldest match.
+  pid="$(pgrep -f "$COORDINATION_SCRIPT" 2>/dev/null | head -1 || true)"
+  if [[ -n "$pid" ]] && pid_alive "$pid" \
+     && ps -p "$pid" -o command= 2>/dev/null | grep -q 'coordination-publish'; then
+    printf '%s\n' "$pid"; return 0
+  fi
+  return 0
+}
+
+# coordination_resolve — print "<mode>\t<hubUrl>" resolved IDENTICALLY to the
+# daemon's own readCoordinationConfig() (env kill-switch/override > Layer-2 >
+# default off), via one bun import. Fail-CLOSED to "off\t" on any bun/import
+# failure — a bun-less host cannot run the bun daemon anyway, so inert is correct.
+coordination_resolve() {
   local cfgmjs="${SCRIPT_DIR}/execution-core/config.mjs"
   if command -v bun >/dev/null 2>&1 && [[ -f "$cfgmjs" ]]; then
     local out
     if out="$(CFG_MJS="$cfgmjs" bun -e '
         const m = await import(process.env.CFG_MJS);
-        try { process.stdout.write(String(m.readCoordinationConfig().mode || "off")); }
-        catch { process.stdout.write("off"); }
+        try {
+          const c = m.readCoordinationConfig();
+          process.stdout.write(String(c.mode || "off") + "\t" + String(c.hubUrl || ""));
+        } catch { process.stdout.write("off\t"); }
       ' 2>/dev/null)" && [[ -n "$out" ]]; then
       printf '%s' "$out"; return 0
     fi
   fi
-  printf 'off'
-}
-
-# coordination_pid — print the live coordination-publish pid recorded in
-# COORDINATION_PID, or nothing. Validates the pid is alive AND is actually the
-# coordination-publish process (guards pid reuse), mirroring shipper_pid.
-coordination_pid() {
-  local pid
-  [[ -f "$COORDINATION_PID" ]] || return 0
-  pid="$(cat "$COORDINATION_PID" 2>/dev/null || true)"
-  [[ -n "$pid" ]] || return 0
-  pid_alive "$pid" || return 0
-  if ps -p "$pid" -o command= 2>/dev/null | grep -q 'coordination-publish'; then
-    printf '%s\n' "$pid"
-  fi
+  printf 'off\t'
 }
 
 start_coordination() {
-  # 0. MODE GATE — off (default) is a clean no-op (ADR-023 inert contract). Also
-  #    covers the bun-less host (coordination_mode → off), so no launch is attempted
-  #    there. Short-circuiting here means the sleep-1 liveness re-check below only
-  #    runs in shadow/enforce, where a fast exit genuinely IS a failure.
-  local mode; mode="$(coordination_mode)"
+  # Resolve mode + hubUrl exactly as the daemon would, in ONE bun import, and
+  # fingerprint them. The daemon reads its config only at startup, so this
+  # fingerprint is how a keep-alive tick notices a config change and reconciles.
+  local resolved mode hub fp
+  resolved="$(coordination_resolve)"
+  mode="${resolved%%$'\t'*}"
+  hub="${resolved#*$'\t'}"
+  fp="${mode}|${hub}"
+
+  local pid; pid="$(coordination_pid)"
+
+  # 0. MODE GATE — off (default) is inert (ADR-023). But if a publisher is STILL
+  #    running from a prior shadow/enforce config (operator flipped Layer-2 to off,
+  #    or CATALYST_COORDINATION_MODE=0 kill-switch), it keeps mirroring and — in
+  #    enforce — making network requests until stopped, since it can't re-read
+  #    config in place. Reconcile by stopping it, THEN short-circuit (Codex P1).
+  #    Also covers the bun-less host (coordination_resolve → off): nothing to stop.
   if [[ "$mode" == "off" ]]; then
-    log "coordination-publish mode=off — inert, skipping"
+    if pid_alive "$pid"; then
+      log "coordination-publish mode=off but pid $pid still live (stale config) — stopping"
+      stop_coordination
+    else
+      log "coordination-publish mode=off — inert, skipping"
+    fi
     return 0
   fi
-  # 1. IDEMPOTENT — never double-start a live daemon (re-run every 600s keep-alive tick).
-  local pid; pid="$(coordination_pid)"
+  # 1. IDEMPOTENT — never double-start a live daemon (re-run every 600s keep-alive
+  #    tick), BUT bounce it when the resolved config changed since launch: the
+  #    daemon can't hot-reload mode/hubUrl, so a change requires a restart to take
+  #    effect (Codex P1: reconcile the running publisher when config changes).
   if pid_alive "$pid"; then
-    log "coordination-publish already running (pid $pid, mode $mode)"
-    return 0
+    local live_fp; live_fp="$(cat "$COORDINATION_FP" 2>/dev/null || true)"
+    if [[ "$live_fp" == "$fp" ]]; then
+      log "coordination-publish already running (pid $pid, mode $mode)"
+      return 0
+    fi
+    log "coordination-publish config changed (${live_fp:-<unknown>} → $fp) — restarting (pid $pid)"
+    stop_coordination
+    pid=""
   fi
   # 2. MISSING-BINARY LOUD, NON-FATAL (shipper posture — return 1, never exit).
   if ! command -v bun >/dev/null 2>&1; then
@@ -465,6 +527,7 @@ start_coordination() {
   log "starting coordination-publish (mode: $mode, log: $COORDINATION_LOG)"
   nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
   echo $! > "$COORDINATION_PID"
+  printf '%s' "$fp" > "$COORDINATION_FP"   # record the config this pid was launched with
   disown $! 2>/dev/null || true
   sleep 1
   pid="$(coordination_pid)"
@@ -481,12 +544,23 @@ stop_coordination() {
   if pid_alive "$pid"; then
     log "stopping coordination-publish (pid $pid)"
     kill "$pid" 2>/dev/null            # daemon traps SIGTERM → graceful flush + checkpoint
-    sleep 1
-    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+    # Codex P1: give the graceful flush a bounded window to finish before forcing.
+    # An enforce-mode publisher drains through the hub (5s request timeouts +
+    # retries), so a 1s deadline would SIGKILL mid-flush and drop coordination rows
+    # that mirror-dedup then never rebuilds. Poll (sleep, don't spin) up to the
+    # grace bound; only then force. No `timeout(1)` dep — stock macOS lacks it.
+    local waited=0
+    while pid_alive "$pid" && [[ "$waited" -lt "$COORDINATION_STOP_GRACE_SECONDS" ]]; do
+      sleep 1; waited=$((waited + 1))
+    done
+    if pid_alive "$pid"; then
+      warn "coordination-publish pid $pid still alive after ${COORDINATION_STOP_GRACE_SECONDS}s — forcing SIGKILL"
+      kill -9 "$pid" 2>/dev/null || true
+    fi
   else
     log "coordination-publish not running"
   fi
-  rm -f "$COORDINATION_PID"
+  rm -f "$COORDINATION_PID" "$COORDINATION_FP"
 }
 
 start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
