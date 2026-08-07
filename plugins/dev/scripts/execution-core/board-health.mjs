@@ -68,6 +68,12 @@ const DEFAULT_THRESHOLDS = {
   // Same 24h default as unownedInFlightMs — both share the "weeks is too long,
   // 24h is already past any legitimate inter-phase gap" rationale.
   strandedMidPipelineMs: Number(process.env.CATALYST_BH_STRANDED_MS) || 24 * 3_600_000,
+  // CTL-1608: stalled-PR staleness thresholds (review-latency / CI-health /
+  // no-push), independent of worker liveness. Conservative defaults — longer
+  // than orphanedPrAgeMs (48h) to avoid false positives on normal review cadence.
+  stalledPrReviewMs: Number(process.env.CATALYST_BH_STALLED_PR_REVIEW_MS) || 3 * 24 * 3_600_000,
+  stalledPrCiMs: Number(process.env.CATALYST_BH_STALLED_PR_CI_MS) || 2 * 24 * 3_600_000,
+  stalledPrNoPushMs: Number(process.env.CATALYST_BH_STALLED_PR_NOPUSH_MS) || 5 * 24 * 3_600_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -408,7 +414,16 @@ export function assembleBoardState({
   // the real implementation (shadow-first "wire-before-observe" pattern, same as
   // getPrStatusMap). Never invoked in off mode so off stays byte-identical.
   getStrandedEvidence = () => new Map(),
+  // CTL-1608: pre-fetched stalled-PR state map (workers/<T>/stalled-pr.json,
+  // stamped by the stalled-pr timer). Empty Map default ⇒ checkStalledPr stays
+  // observable:false (shadow-first seam: wiring lands before the timer populates).
+  getStalledPrState = () => new Map(),
   now = () => Date.now(),
+  // CTL-1649: does a triage.json artifact exist for a given ticket? Injected so
+  // board-health.mjs stays fs-free (no fs import). Default () => true is
+  // inert/shadow-safe: !present is always false → nothing is excluded until the
+  // daemon binds the real fs check. See selectAnchorCandidates.
+  hasTriageArtifact = () => true,
 } = {}) {
   const nowMs = now();
   const safe = (fn, fallback) => {
@@ -441,6 +456,9 @@ export function assembleBoardState({
       // injected brief carries it per-ticket (consumed by the stuck-PR cohort
       // brief) without re-reading each signal file.
       failureReason: s.raw?.failureReason ?? s.failureReason ?? null,
+      // CTL-1649: preserve attentionReason so selectAnchorCandidates can exclude
+      // tickets whose ONLY non-clean signal is a triage launch failure.
+      attentionReason: s.raw?.attentionReason ?? s.attentionReason ?? null,
     };
   });
 
@@ -452,6 +470,42 @@ export function assembleBoardState({
     state: e.state ?? e.linear_state ?? null,
     updatedAt: e.updatedAt ?? e.updated_at ?? null,
   }));
+
+  // CTL-1649: compute the set of tickets whose ONLY non-clean signal is a triage
+  // launch failure. These are excluded from selectAnchorCandidates (the actuation
+  // gate) so the monitor's triage retry path retains sole ownership of the worktree.
+  //
+  // A ticket is in the set iff:
+  //   - it has ≥1 triage launch-failure signal: phase=="triage", status∈NEEDS_HUMAN_STATUSES,
+  //     attentionReason truthy, and no triage.json artifact (hasTriageArtifact seam returns false)
+  //   - it has 0 other non-clean signals for OTHER phases/statuses
+  //
+  // With the default hasTriageArtifact seam (() => true), !present is always false
+  // → isLaunchFailure is always false → the set is always empty → inert (shadow-safe,
+  // the daemon activates it by binding the real fs check).
+  const isLaunchFailureSignal = (s) =>
+    s.phase === "triage" &&
+    NEEDS_HUMAN_STATUSES.has((s.status ?? "").toLowerCase()) &&
+    !!s.attentionReason &&
+    !hasTriageArtifact(s.ticket);
+
+  const isOtherStuckSignal = (s) =>
+    NEEDS_HUMAN_STATUSES.has((s.status ?? "").toLowerCase()) && !isLaunchFailureSignal(s);
+
+  const triageLaunchFailureOnlyTickets = new Set();
+  // Group signals by ticket to check for the "only launch-failure signals" predicate.
+  const signalsByTicket = new Map();
+  for (const s of signals) {
+    if (!s.ticket) continue;
+    const arr = signalsByTicket.get(s.ticket);
+    if (arr) arr.push(s);
+    else signalsByTicket.set(s.ticket, [s]);
+  }
+  for (const [ticket, sigs] of signalsByTicket) {
+    if (sigs.some(isLaunchFailureSignal) && !sigs.some(isOtherStuckSignal)) {
+      triageLaunchFailureOnlyTickets.add(ticket);
+    }
+  }
 
   return Object.freeze({
     ticketsById,
@@ -487,6 +541,9 @@ export function assembleBoardState({
     // skip getPrStatusMap() entirely so off is byte-identical to origin/main (the
     // phantom/orphaned-PR invariants also stay out of evaluateInvariants in off).
     prStatusMap: mode === "off" ? new Map() : safe(() => getPrStatusMap(), new Map()),
+    // CTL-1608 off-gate: in off the stalled-PR state read must NOT run — skip
+    // getStalledPrState() so off stays byte-identical to origin/main.
+    stalledPrMap: mode === "off" ? new Map() : safe(() => getStalledPrState(), new Map()),
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs),
     ownerForTicket: typeof ownerForTicket === "function" ? ownerForTicket : null,
     // CTL-1157 (Codex #4): the ticket→owner/repo resolver for the composite
@@ -497,6 +554,12 @@ export function assembleBoardState({
     // shadow/enforce invoke getStrandedEvidence() once per proceeding scan.
     strandedEvidence: mode === "off" ? new Map() : safe(() => getStrandedEvidence(), new Map()),
     now: nowMs,
+    // CTL-1649: tickets whose ONLY non-clean signal is a triage launch failure.
+    // selectAnchorCandidates excludes these from anchor candidates so the monitor's
+    // triage retry path retains sole ownership of the worktree. With the default
+    // hasTriageArtifact seam this is always an empty Set (shadow-safe, inert until
+    // the daemon binds the real fs check at the scheduler call site).
+    triageLaunchFailureOnlyTickets,
   });
 }
 
@@ -542,6 +605,10 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // observable:false when no evidence seam is provided (shadow-first: Phase 1
       // dark, Phase 2 wires the real getStrandedEvidence builder).
       strandedMidPipeline: () => checkStrandedMidPipeline(boardState, thresholds),
+      // CTL-1608: the review-latency / CI-health / no-push cohort — the PR that
+      // stopped progressing while its worker is technically still alive. Cohort-
+      // gated like its siblings so the off set stays byte-identical.
+      stalledPr: () => checkStalledPr(boardState, thresholds),
     });
   }
   const out = {};
@@ -1092,6 +1159,52 @@ function checkOrphanedOpenPr(b, t) {
   );
 }
 
+// #11 — stalled open PR (CTL-1608). A PR that has stopped progressing —
+// review requested but unanswered, CI red, or no push — for longer than the
+// per-signal threshold, INDEPENDENT of worker liveness (the gap checkOrphanedOpenPr
+// leaves: it excludes any PR with a live worker). Fed by the stalled-pr timer's
+// per-ticket stalled-pr.json stamps; a null stamp means "not in that stalled
+// state". Empty map ⇒ observable:false (shadow-first seam).
+function checkStalledPr(b, t) {
+  const map = b.stalledPrMap;
+  if (!(map instanceof Map) || map.size === 0) {
+    return invariant(true, 0, false, [], "no stalled-PR map → stalled open-PR not observable");
+  }
+  const flagged = [];
+  const reasons = {};
+  for (const [id, d] of b.ticketsById) {
+    if (isTerminalLinearState(d)) continue; // never anchor recovery on finished work
+    const e = map.get(id);
+    if (!e) continue;
+    if (String(e.state ?? "").toLowerCase() !== "open") continue;
+    const ageOf = (ts) => {
+      const ms = ts ? Date.parse(ts) : NaN;
+      return Number.isFinite(ms) ? b.now - ms : null;
+    };
+    const hits = [];
+    const ci = ageOf(e.ciFirstFailedAt);
+    if (ci != null && ci > t.stalledPrCiMs) hits.push("ci-failing");
+    const rv = ageOf(e.reviewRequestedAt);
+    if (rv != null && rv > t.stalledPrReviewMs) hits.push("review-latency");
+    const np = ageOf(e.lastPushAt);
+    if (np != null && np > t.stalledPrNoPushMs) hits.push("no-push");
+    if (hits.length) {
+      flagged.push(id);
+      reasons[id] = hits;
+    }
+  }
+  return invariant(
+    flagged.length === 0,
+    flagged.length,
+    true,
+    flagged,
+    flagged.length
+      ? `${flagged.length} open PR(s) stalled on ${[...new Set(Object.values(reasons).flat())].join("/")}`
+      : "no stalled open PRs",
+    { reasons, caveat: "durations are timer-stamped from live gh probes — verify with gh pr view" },
+  );
+}
+
 // #9 — frozen needs-human (CTL-1157, LABEL-based). A ticket carrying the
 // needs-human Linear label that has not moved past the frozen-age threshold.
 // Distinct from #10 needsHumanPile (STATUS-based, from the signal file). No
@@ -1340,6 +1453,13 @@ export function proposeMoves(invariants, _b) {
         route: cls.route, rationale: cls.rationale ?? "stranded mid-pipeline ticket classified for revival" });
     }
   }
+  // CTL-1608: a PR that stopped progressing (review/CI/no-push) is actionable
+  // work → tier1, alongside the orphaned-PR cohort. Sanctioned latches suppressed.
+  for (const t of invariants.stalledPr?.flagged ?? []) {
+    if (!invariants.stalledPr.ok && !sanction(t)) {
+      tier1.push({ ticket: t, move: "nudge-stalled-pr", rationale: "open PR stopped progressing (review/CI/no-push) past threshold" });
+    }
+  }
   for (const h of invariants.strandedNode?.flagged ?? []) {
     if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
   }
@@ -1392,10 +1512,19 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
       return true; // fail-open: a broken HRW read must not block self-owned actuation
     }
   };
+  // CTL-1649: tickets whose ONLY non-clean signal is a triage launch failure are
+  // excluded from anchor candidates — the monitor's triage retry path owns that
+  // worktree and must not be raced by a holistic recovery-pass.
+  // A ticket with a completed triage artifact and a stuck post-triage phase is
+  // NOT in this set and remains anchor-eligible. With the default board shape
+  // (no hasTriageArtifact seam bound), the set is empty and this is a no-op.
+  const excluded = board?.triageLaunchFailureOnlyTickets instanceof Set
+    ? board.triageLaunchFailureOnlyTickets
+    : new Set();
   const out = [];
   const seen = new Set();
   const add = (t) => {
-    if (t && !seen.has(t)) {
+    if (t && !excluded.has(t) && !seen.has(t)) {
       seen.add(t);
       out.push(t);
     }
@@ -1452,9 +1581,9 @@ export function buildBoardContext(boardState, invariants) {
     };
   });
   return {
-    // CTL-1157: v2 adds the three stuck cohorts (additive; readers default each
+    // CTL-1608: v3 adds the stalled-PR cohort (additive; readers default each
     // field to []). The skill reads them defensively, never gates on the schema.
-    schema: "recovery-board-context/v2",
+    schema: "recovery-board-context/v3",
     snapshotAt: new Date(boardState.now).toISOString(),
     host: { self: boardState.self, roster: boardState.roster, multiHost: boardState.multiHost },
     slots: {
@@ -1485,6 +1614,8 @@ export function buildBoardContext(boardState, invariants) {
     // resume-from-remote / adopt / restart-fresh) without re-running the board scan.
     // {} when green or unobservable (shadow-safe).
     strandedMidPipeline: invariants.strandedMidPipeline?.classified ?? {},
+    // CTL-1608 v3: the stalled-PR cohort, surfaced additively for the delegate.
+    stalledPrs: invariants.stalledPr?.flagged ?? [],
     strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
       host,
       // the tickets HRW-owned by this stranded host — the delegate's actionable
@@ -1630,6 +1761,11 @@ export function boardHealthPass({
   // checkStrandedMidPipeline. Empty-Map default (same shadow-first pattern as
   // getPrStatusMap) → invariant stays observable:false until Phase 2 wires it.
   getStrandedEvidence,
+  // CTL-1608: pre-fetched stalled-PR stamp map (workers/*/stalled-pr.json). Must be
+  // forwarded to assembleBoardState below — an undeclared property is silently
+  // dropped by the destructure, which would pin checkStalledPr to the empty-Map
+  // default and make `nudge-stalled-pr` unreachable even with the sweep enabled.
+  getStalledPrState,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
@@ -1638,6 +1774,8 @@ export function boardHealthPass({
   act = undefined, // ONLY reachable in enforce; the daemon injects it (CTL-1300), shadow/off never do
   now = () => Date.now(),
   log = () => {},
+  // CTL-1649: triage artifact presence seam (daemon-bound); default inert (→ empty exclusion set).
+  hasTriageArtifact = undefined,
 } = {}) {
   if (mode === "off") return { ran: false, reason: "off" }; // strict no-op
   const nowMs = now();
@@ -1655,6 +1793,9 @@ export function boardHealthPass({
     getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), mode, now,
     getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
+    getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
+    // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
+    ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);

@@ -82,6 +82,12 @@ source "${SCRIPT_DIR}/lib/phase-sequence.sh"
 source "${SCRIPT_DIR}/lib/worktree-rebase.sh"
 # shellcheck source=lib/worktree-remove-guard.sh
 source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
+# CTL-708: opt-in bounded-LLM resolver for the source-conflict case
+# rebase_onto_base_classified otherwise always stalls on. Inert unless
+# CATALYST_CTL708_ENABLE is set — see lib/ctl708-resolve.sh header.
+# shellcheck source=lib/ctl708-resolve.sh
+source "${SCRIPT_DIR}/lib/ctl708-resolve.sh"
+ctl708_wire_resolver
 # shellcheck source=lib/phase-artifact-gate.sh
 source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 

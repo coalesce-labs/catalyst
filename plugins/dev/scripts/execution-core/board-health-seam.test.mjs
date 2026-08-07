@@ -278,6 +278,80 @@ describe("boardHealthPass — stranded route dispatch (CTL-1644 Phase 3)", () =>
   });
 });
 
+// CTL-1608 (Codex P1): boardHealthPass must DESTRUCTURE and FORWARD getStalledPrState.
+// The scheduler passed the thunk from the start, but an option boardHealthPass does not
+// name is silently dropped by the destructure — so the map never reached
+// assembleBoardState, checkStalledPr stayed pinned to its empty-Map default, and
+// `nudge-stalled-pr` was unreachable even with the sweep enabled. These assert the wire
+// end-to-end (thunk invoked → invariant observable → move proposed), not just its shape.
+describe("boardHealthPass — getStalledPrState is forwarded to board assembly (CTL-1608)", () => {
+  const NOW_MS = 1_750_000_000_000;
+  const DAY_MS = 24 * 3_600_000;
+  const iso = (msAgo) => new Date(NOW_MS - msAgo).toISOString();
+
+  // A PR whose CI has been failing for 3 days — past the 2-day stalledPrCiMs default.
+  const stalledMap = () =>
+    new Map([["CTL-77", {
+      ticket: "CTL-77", prNumber: 7, repo: "coalesce-labs/catalyst", state: "OPEN",
+      observedAt: iso(0), ciFirstFailedAt: iso(3 * DAY_MS),
+      reviewRequestedAt: null, lastPushAt: iso(0), lastKnownHeadOid: "abc123",
+    }]]);
+
+  const mkOpts = (mode, extraOpts = {}) => ({
+    mode,
+    orchDir,
+    getBoard: () => [{ identifier: "CTL-77", state: "In Review",
+      updatedAt: iso(3 * DAY_MS), labels: [], pr_number: 7 }],
+    getWorkerSignals: () => [],
+    getEligible: () => [],
+    capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4, admissionGated: false },
+    isThrottledFn: () => false,
+    now: () => NOW_MS,
+    emit: () => {},
+    ...extraOpts,
+  });
+
+  test("invokes the injected getStalledPrState thunk (it is not silently dropped)", () => {
+    let called = 0;
+    boardHealthPass(mkOpts("shadow", {
+      getStalledPrState: () => { called += 1; return stalledMap(); },
+    }));
+    expect(called).toBe(1);
+  });
+
+  test("forwarded map makes checkStalledPr observable and flags the stalled ticket", () => {
+    const result = boardHealthPass(mkOpts("shadow", { getStalledPrState: stalledMap }));
+    expect(result.invariants?.stalledPr?.observable).toBe(true);
+    expect(result.invariants?.stalledPr?.ok).toBe(false);
+    expect(result.invariants?.stalledPr?.flagged).toContain("CTL-77");
+  });
+
+  test("unwired (no thunk) stays observable:false — the shadow-first default is preserved", () => {
+    const result = boardHealthPass(mkOpts("shadow"));
+    expect(result.invariants?.stalledPr?.observable).toBe(false);
+    expect(result.invariants?.stalledPr?.ok).toBe(true);
+  });
+
+  test("enforce: the forwarded map reaches the delegate as a nudge-stalled-pr candidate", () => {
+    const actArgs = [];
+    boardHealthPass(mkOpts("enforce", {
+      getStalledPrState: stalledMap,
+      act: (args) => { actArgs.push(args); return { dispatched: true, candidate: "CTL-77" }; },
+    }));
+    expect(actArgs.length).toBe(1);
+    expect(actArgs[0].candidates).toContain("CTL-77");
+    expect(actArgs[0].boardContext?.stalledPrs).toContain("CTL-77");
+  });
+
+  test("off mode never invokes the thunk (off stays byte-identical)", () => {
+    let called = 0;
+    boardHealthPass(mkOpts("off", {
+      getStalledPrState: () => { called += 1; return stalledMap(); },
+    }));
+    expect(called).toBe(0);
+  });
+});
+
 // CTL-1157 (MUST-FIX 2 + GROUP-3 #3): the holistic board-health `act` loop, tested
 // pure via the extracted holisticBoardHealthAct (the daemon binds the real recovery
 // seams around it).
@@ -423,5 +497,29 @@ describe("holisticBoardHealthAct — one real dispatch per scan, skip non-dispat
     );
     expect(invoked).toEqual(["CTL-anchor"]);
     expect(r.ticket).toBe("CTL-anchor");
+  });
+});
+
+// ─── CTL-1608 — scheduler threads getStalledPrState into boardHealthPassFn ───
+describe("schedulerTick — CTL-1608 getStalledPrState seam", () => {
+  test("boardHealthPassFn receives getStalledPrState that returns a Map", () => {
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: () => {},
+      reclaimDeadWork: () => "noop",
+      concurrency: { maxParallel: 4 },
+      liveBackgroundCount: () => 4,
+      boardHealth: { mode: "shadow" },
+      boardHealthPassFn: (opts) => {
+        calls.push(opts);
+        return { ran: true, ranAtMs: 1 };
+      },
+    });
+    expect(calls.length).toBe(1);
+    const o = calls[0];
+    expect(typeof o.getStalledPrState).toBe("function");
+    expect(o.getStalledPrState()).toBeInstanceOf(Map);
   });
 });

@@ -302,6 +302,10 @@ import {
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
 // flip enforce on — the mode gate stays at its safe 'off' default (ADR-023).
 import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
+// CTL-1641: the production escalate seam (needs-human label + authored Linear
+// comment). Wired into the runTick unstuckSweep literal; fires ONLY in enforce
+// mode on candidates the escalate branch reaches. Does NOT flip enforce on.
+import { buildUnstuckEscalateSeam } from "./unstuck-escalate-seam.mjs";
 import {
   readUnstuckSweepConfig,
   readRecoveryPassConfig,
@@ -370,6 +374,8 @@ import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
+import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
+import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609: delegate-first escalation seam
 import {
   getAllTicketDescriptors,
   getAllPrStatuses,
@@ -2392,10 +2398,30 @@ export function maybeEscalateDispatchFailures(
   { writeStatus, appendEvent, env = process.env } = {}
 ) {
   if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return false;
-  const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, marker.ticket, writeStatus, {
-    env,
+  const result = routeStuckTicketToDelegate(orchDir, marker.ticket, {
     site: "dispatch-failures",
+    reason: `dispatch-circuit-breaker:${marker.consecutiveFailures}`,
+    boardContext: { phase: marker.phase, code: marker.code },
+    applyLabel: writeStatus,
+    env,
     log,
+    explanation: {
+      escalation_type: "authorization",
+      problem: `dispatch failed ${marker.consecutiveFailures}× on ${marker.phase} (${marker.code})`,
+      call_to_action: `authorize retry of ${marker.ticket} or cancel`,
+      recommendation: "retry dispatch",
+      risk: `${marker.code} — ${marker.consecutiveFailures} consecutive failures on the ${marker.phase} phase`,
+      why_asking: "circuit breaker tripped; repeated dispatch failures require operator review",
+      could_higher_tier_resolve: false,
+      authorize_label: `retry ${marker.ticket}`,
+    },
+    // CTL-1609 (Codex P1): without a ceiling, enqueueDelegateIntent's
+    // resolveMaxParallel falls back to Infinity and `queue-full` — the documented
+    // fallback to a human — becomes unreachable. Resolved lazily so the state.json
+    // read is paid only on the enforce path that actually enqueues. This site cannot
+    // reuse schedulerTick's `maxParallel`: it is a separate exported function, and
+    // its two call sites sit above that binding in the tick.
+    deps: { orchDir, maxParallel: () => readMaxParallel(orchDir) },
   });
   appendEvent({
     ticket: marker.ticket,
@@ -2404,7 +2430,7 @@ export function maybeEscalateDispatchFailures(
     code: marker.code,
     consecutiveFailures: marker.consecutiveFailures,
   });
-  return wrote;
+  return result.labelled === true;
 }
 
 // CTL-712: the refused-dispatch path writes NO signal file (the artifact gate
@@ -4873,7 +4899,8 @@ export function schedulerTick(
           ureport.acted.length ||
           ureport.wouldAct.length ||
           ureport.escalated.length ||
-          ureport.wouldEscalate.length
+          ureport.wouldEscalate.length ||
+          ureport.escalateFailures.length          // CTL-1641
         ) {
           log.info(
             {
@@ -4882,6 +4909,7 @@ export function schedulerTick(
               wouldAct: ureport.wouldAct.length,
               escalated: ureport.escalated.length,
               wouldEscalate: ureport.wouldEscalate.length,
+              escalateFailures: ureport.escalateFailures.length,   // CTL-1641
               skipped: ureport.skipped.length,
               failed: ureport.failed.length,
             },
@@ -5002,6 +5030,10 @@ export function schedulerTick(
               labelNeedsHuman: (dir, t) =>
                 labelNeedsHumanUnlessBeliefOwner(dir, t, writeStatus, {
                   site: "attempts-exhausted",
+                  // The curated explanation is already on disk from escalateExhaustedIntents's
+                  // prior writeSignal call. Pass a thin hint so the absent-warn is suppressed;
+                  // writeExplanationSignal's no-overwrite guard keeps the richer signal intact.
+                  explanation: { human_question: "see recovery-pass escalation brief" },
                 }),
               // Codex R1: a finished ticket's stale ledger is forgotten by the
               // terminal cleanup LATER in the tick — never page a human for it.
@@ -5482,6 +5514,10 @@ export function schedulerTick(
           // below; a bare tick passes none → empty-Map default keeps the new invariant
           // observable:false (shadow-first, ADR-023).
           getStrandedEvidence: _boardHealth.getStrandedEvidence,
+          // CTL-1608: inject the stalled-PR stamp map (from workers/*/stalled-pr.json).
+          // The daemon binds this to read from the real orchDir; a bare tick passes
+          // nothing → assembleBoardState defaults to () => new Map() (observable:false).
+          getStalledPrState: _boardHealth.getStalledPrState ?? (() => readStalledPrState(orchDir)),
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the
@@ -5505,6 +5541,10 @@ export function schedulerTick(
           act: _boardHealth.act,
           log: (o, m) => log.warn?.(o, m),
           now,
+          // CTL-1649: bind the real triage artifact check so selectAnchorCandidates
+          // can exclude tickets whose only non-clean signal is a triage launch failure.
+          // existsSync/join are already imported in scheduler.mjs.
+          hasTriageArtifact: (ticket) => existsSync(join(orchDir, "workers", ticket, "triage.json")),
         });
         if (_bhResult?.ran) _boardHealthLastRunMs = _bhResult.ranAtMs;
         // CTL-1157 (Codex round-5): a successful board-health ENFORCE dispatch enqueued
@@ -5722,14 +5762,32 @@ export function schedulerTick(
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
             if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
-              const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
-                env,
+              const dcResult = routeStuckTicketToDelegate(orchDir, member, {
                 site: "dependency-cycle",
+                reason: "dependency-cycle",
+                boardContext: { members: anomaly.members },
+                applyLabel: writeStatus,
+                env,
                 log,
+                explanation: {
+                  escalation_type: "decision",
+                  problem: `${member} is in a dependency cycle: ${anomaly.members.join(" → ")}`,
+                  call_to_action: `break the cycle for ${member}: reprioritize a member or drop a dependency`,
+                  options: [
+                    { label: "reprioritize", tradeoff: "changes queue order for all cycle members" },
+                    { label: "drop dependency", tradeoff: "may leave a blocker unaddressed" },
+                  ],
+                  why_you: "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
+                },
+                // CTL-1609 (Codex P1): thread the tick's resolved ceiling so
+                // enqueueDelegateIntent can return `queue-full` instead of defaulting
+                // to Infinity. Without it a cycle larger than maxParallel enqueues
+                // every member in one tick and starves normal admission.
+                deps: { orchDir, maxParallel },
               });
               // CTL-764 finding 8: emit only on an actual label write (a persisted
               // marker after restart / belief-owner deferral is not a fresh escalation).
-              if (wrote) {
+              if (dcResult.labelled === true) {
                 recordTransition({
                   ticket: member,
                   toDisposition: "needs-human",
@@ -6529,14 +6587,30 @@ export function schedulerTick(
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
           if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
-            const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
-              env,
+            const c925Result = routeStuckTicketToDelegate(orchDir, member, {
               site: "ctl-925-cycle",
+              reason: "dependency-cycle",
+              boardContext: { members: anomaly.members },
+              applyLabel: writeStatus,
+              env,
               log,
+              explanation: {
+                escalation_type: "decision",
+                problem: `${member} is in a dependency cycle among eligible tickets: ${anomaly.members.join(" → ")}`,
+                call_to_action: `break the cycle for ${member}: reprioritize a member or drop a dependency`,
+                options: [
+                  { label: "reprioritize", tradeoff: "changes queue order for all cycle members" },
+                  { label: "drop dependency", tradeoff: "may leave a blocker unaddressed" },
+                ],
+                why_you: "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
+              },
+              // CTL-1609 (Codex P1): thread the tick's resolved ceiling — see the
+              // dependency-cycle site above for why Infinity is unsafe here.
+              deps: { orchDir, maxParallel },
             });
             // CTL-764 finding 8: emit only on an actual label write (a persisted
             // marker after restart / belief-owner deferral is not a fresh escalation).
-            if (wrote) {
+            if (c925Result.labelled === true) {
               recordTransition({
                 ticket: member,
                 toDisposition: "needs-human",
@@ -7140,16 +7214,27 @@ export function schedulerTick(
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
           if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
-            const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
-              env,
+            const stalledSig = signalByTicket.get(ticket);
+            const tsResult = routeStuckTicketToDelegate(orchDir, ticket, {
               site: "terminal-sweep",
+              reason: stalledSig?.stalledReason ?? "stalled",
+              boardContext: { status: stalledSig?.status, phase: stalledSig?.phase },
+              applyLabel: writeStatus,
+              env,
               log,
+              explanation: {
+                problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${stalledSig?.stalledReason ?? "no reason"}) and is not terminal`,
+                call_to_action: `decide whether to retry ${ticket} or close it`,
+              },
+              // CTL-1609 (Codex P1): thread the tick's resolved ceiling so a large
+              // terminal-sweep cohort cannot enqueue past maxParallel.
+              deps: { orchDir, maxParallel },
             });
             // CTL-764 finding 8: emit worker.transition ONLY when the label write
             // actually occurred. A persisted .linear-label-needs-human marker after a
             // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
             // label — recording a fresh needs-human transition there is a false escalation.
-            if (wrote) {
+            if (tsResult.labelled === true) {
               recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
             }
           } else {
@@ -8051,6 +8136,39 @@ function runTick() {
             },
             // runGit / fs primitives / emitPhaseComplete fall back to real defaults
             // inside unstuck-act-seams.mjs (git, node:fs, phase-agent-emit-complete).
+          }),
+        // CTL-1641: wire the production escalate seam. Fires ONLY on the enforce
+        // branch (the driver calls escalate solely when decision.action === "escalate");
+        // the mode gate (readUnstuckSweepConfig, default 'off') is UNTOUCHED, so
+        // production stays inert until an operator opts in. Operators can override via
+        // runningOpts.unstuckEscalate. The census is already HRW-gated by
+        // ownsForRecovery at the schedulerTick call site, so no second fenceGuard here.
+        escalate:
+          runningOpts.unstuckEscalate ??
+          buildUnstuckEscalateSeam({
+            orchDir: runningOpts.orchDir,
+            writeStatus: runningOpts.writeStatus ?? linearWrite,
+            env: process.env,
+            resolveWorktreePath: (ticket) => {
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+              }
+              return null;
+            },
+            queryPR: (ticket) => {
+              const adapter = runningOpts.prAdapter;
+              if (!adapter || typeof adapter.prView !== "function") return null;
+              let pr = null;
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket) { pr = sig.raw?.pr ?? sig.pr ?? null; if (pr?.number) break; }
+              }
+              if (!pr?.number) return null;
+              try {
+                const view = adapter.prView(ticket, pr);
+                if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
+                return view?.state ?? null;
+              } catch { return null; }
+            },
           }),
         // emit: the dedicated unstuck unified-log emitter (NOT emitReapIntent,
         // whose closed vocabulary throws on unstuck.* — CTL-1064). Explicit here
