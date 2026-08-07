@@ -138,6 +138,8 @@ import {
   recordEscalation as defaultRecordEscalation,
   readEscalationRecord as defaultReadEscalationRecord, // CTL-1442: ask-cap gate
   ESCALATION_ASK_CAP, // CTL-1442
+  LABEL_CONFIRM_CAP, // CTL-1643: transient-retry cap before loud alert
+  labelMarkerBase, // CTL-1643: inspect .applied/.skipped markers without re-calling labelOnce
   labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
 import {
@@ -146,6 +148,10 @@ import {
   latestCompleteEventTs,
   latestCompleteEventAttempt,
 } from "./event-scan.mjs";
+import {
+  recordDurableEscalation,
+  readDurableEscalations,
+} from "./durable-escalation.mjs"; // CTL-1643: GC-surviving escalation store
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
 const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", import.meta.url));
@@ -2448,22 +2454,89 @@ export function reclaimDeadWorkIfPossible(
     }
     const explanation = buildEscExplanation();
     const enrichedExtras = { ...(extras ?? {}), explanation };
-    appendEscalatedEvent({
-      phase,
+    // CTL-1643: gate the event so it fires at most once per EPISODE. An episode
+    // ends when the 10-min cooldown is written (confirmed, unrecoverable, or cap).
+    // During a transient episode (no cooldown file ever written) we detect a
+    // prior fire via labelAttempts > 0 in the durable record. When the cooldown
+    // file exists — even if it has expired (new episode) — the gate is open so
+    // the fresh episode fires fresh. Phase is part of the key: a different-phase
+    // escalation on the same ticket is always a fresh fire.
+    const existingEscRec = readDurableEscalations(orchDir).find((r) => r.ticket === ticket);
+    const existingCooldownRec = readEscalationRecordFn(orchDir, ticket, phase);
+    const commentAlreadyPosted = !existingCooldownRec
+      && existingEscRec?.phase === phase
+      && (existingEscRec?.labelAttempts ?? 0) > 0;
+    if (!commentAlreadyPosted) {
+      appendEscalatedEvent({
+        phase,
+        ticket,
+        orchId,
+        reason,
+        final_attempt_count: finalAttemptCount,
+        extras: enrichedExtras,
+      });
+    }
+    // CTL-1643: capture the label-apply outcome (previously discarded). Gate the
+    // 10-min cooldown on confirmed-or-unrecoverable so a transient 429 leaves the
+    // retry window open. The .applied/.skipped markers written by labelOnce let us
+    // classify the outcome without repeating the API call.
+    const labelConfirmed = applyStalledLabel({ orchDir, ticket });
+    const markerBase = labelMarkerBase(orchDir, ticket, "needs-human");
+    const labelApplied = labelConfirmed || existsSync(`${markerBase}.applied`);
+    const labelUnrecoverable = existsSync(`${markerBase}.skipped`);
+    const durableRec = recordDurableEscalation({
+      orchDir,
       ticket,
-      orchId,
+      phase,
       reason,
-      final_attempt_count: finalAttemptCount,
-      extras: enrichedExtras,
+      labelConfirmed: labelApplied,
+      source: "scheduler",
+      now: now(),
     });
-    applyStalledLabel({ orchDir, ticket });
-    recordEscalationFn(orchDir, ticket, phase, reason, now());
+    // CTL-1643: track whether the cooldown was already written by the
+    // confirmed/unrecoverable/cap-reached gate below, so the two immediate-
+    // terminal branches further down (ask-cap reached, no-probe-for-phase)
+    // can still guarantee exactly one recordEscalationFn call even when the
+    // label write is transient/unconfirmed (e.g. a belief-owner deferral
+    // under CATALYST_INTENTS_ENFORCE=1) — those branches never get a second
+    // tick to retry, so unlike the "transient + under cap" no-op case above,
+    // they must not silently skip the cooldown record (regression: recovery
+    // .test.mjs "supersede guard tolerates an unknown phase on the SIGNAL
+    // ITSELF" expected exactly 1 recordEscalation call and got 0).
+    let cooldownRecorded = false;
+    if (labelApplied || labelUnrecoverable) {
+      // Confirmed or unrecoverable: write the 10-min cooldown (unchanged path).
+      recordEscalationFn(orchDir, ticket, phase, reason, now());
+      cooldownRecorded = true;
+    } else if (durableRec.labelAttempts >= LABEL_CONFIRM_CAP) {
+      // Cap reached without confirmation: emit a loud operator-visible alert so the
+      // escalation remains visible even without a Linear label, then write the cooldown
+      // to stop hammering the API. The durable record keeps the card on the board.
+      appendEvent({
+        "event.name": `escalation.label-unconfirmed.${ticket}`,
+        payload: { ticket, phase, reason, labelAttempts: durableRec.labelAttempts },
+      });
+      log.warn(
+        { ticket, phase, reason, labelAttempts: durableRec.labelAttempts },
+        "ctl-1643: needs-human label unconfirmed after cap attempts — emitting loud alert and writing cooldown"
+      );
+      recordEscalationFn(orchDir, ticket, phase, reason, now());
+      cooldownRecorded = true;
+    }
+    // else: transient + under cap → NO cooldown written → next tick retries the label.
     // CTL-1442: this ask consumed the cap → go TERMINAL. Flip the phase signal
     // to stalled with the curated explanation persisted on it (deriveExplanation
     // renders it in the monitor's Needs-You inbox), so the reclaim sweep stops
     // re-evaluating the ticket and the operator sees ONE final, complete ask
     // instead of an endless every-10-min echo.
     if (capApplies && priorAsks + 1 >= escalationAskCap) {
+      if (!cooldownRecorded) {
+        // This ask is terminal — there is no next tick to retry the label on,
+        // so the cooldown must be recorded now even though the label write
+        // itself was transient/unconfirmed (matches pre-CTL-1643 behavior,
+        // which called recordEscalationFn unconditionally here).
+        recordEscalationFn(orchDir, ticket, phase, reason, now());
+      }
       markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
       log.warn(
         { ticket, phase, reason, asks: priorAsks + 1 },
@@ -2480,6 +2553,12 @@ export function reclaimDeadWorkIfPossible(
     // its prior non-terminal status would let listInFlightTickets keep
     // counting it as an occupied worker slot forever (Codex #3027 P1).
     if (reason === "no-probe-for-phase") {
+      if (!cooldownRecorded) {
+        // Same rationale as the ask-cap-terminal branch above: this is a
+        // first-and-only occurrence with no retry path, so the cooldown
+        // must be recorded now regardless of label-confirm outcome.
+        recordEscalationFn(orchDir, ticket, phase, reason, now());
+      }
       markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalledReason: reason });
       log.warn(
         { ticket, phase, reason },

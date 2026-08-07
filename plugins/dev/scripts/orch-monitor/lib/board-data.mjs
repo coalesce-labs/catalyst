@@ -56,6 +56,7 @@ import { getEventLogPath } from "../../execution-core/config.mjs";
 // bun:sqlite/pino edge, so this import is graph-safe.
 import { recordFullRead, scanFileLines } from "./event-log-reader.ts"; // CTL-1529: bounded chunked scan
 import { isLinearTerminal } from "../../execution-core/terminal-state.mjs";
+import { readDurableEscalations } from "../../execution-core/durable-escalation.mjs"; // CTL-1643: GC-surviving escalation store
 import { readClusterProjects } from "./cluster-roster.ts";
 
 const execFileP = promisify(execFile);
@@ -1523,6 +1524,93 @@ export function synthesizeParkedNeedsHumanTickets(
   return cards;
 }
 
+// synthesizeDurableEscalations — CTL-1643: surface durable escalation records on
+// the board even when the worker dir has been GC'd (Hole 2) and even when the
+// needs-human label never confirmed in Linear (Hole 1). Mirrors the parked-synthesis
+// pattern: one attention card per durable record, deduped against every existing
+// card id. Terminal-aware: tickets at Done/Canceled are excluded via `linfo`
+// (linearState) or an explicit `terminalIds` Set injected by the caller. The
+// `reason` and `escalatedAt` come directly from the durable record — the board
+// always shows the original escalation reason and timestamp, even through retries.
+// Exported so unit tests can exercise it without the filesystem read.
+export function synthesizeDurableEscalations(
+  records,
+  existingIds,
+  now,
+  replicaTitles = {},
+  linfo = {},
+  terminalIds = new Set(),
+) {
+  if (!Array.isArray(records)) return [];
+  const seen = existingIds instanceof Set ? new Set(existingIds) : new Set(existingIds ?? []);
+  const terminal = terminalIds instanceof Set ? terminalIds : new Set();
+  const cards = [];
+  for (const rec of records) {
+    if (!rec || !rec.ticket) continue;
+    if (seen.has(rec.ticket)) continue;
+    // Terminal-aware: skip tickets already at Done/Canceled in Linear.
+    if (terminal.has(rec.ticket) || isLinearTerminal(linfo?.[rec.ticket]?.linearState)) continue;
+    seen.add(rec.ticket);
+    const replicaTitle =
+      typeof replicaTitles?.[rec.ticket] === "string" && replicaTitles[rec.ticket].length > 0
+        ? replicaTitles[rec.ticket]
+        : null;
+    const linfoTitle =
+      typeof linfo?.[rec.ticket]?.title === "string" && linfo[rec.ticket].title.length > 0
+        ? linfo[rec.ticket].title
+        : null;
+    cards.push({
+      id: rec.ticket,
+      title: replicaTitle || linfoTitle || rec.ticket,
+      type: "durable-escalation",
+      repo: repoFor(rec.ticket),
+      team: teamFor(rec.ticket),
+      phase: "queued",
+      status: "parked",
+      model: null,
+      linearState: typeof linfo?.[rec.ticket]?.linearState === "string"
+        ? linfo[rec.ticket].linearState
+        : "",
+      workerStatus: null,
+      activeState: null,
+      working: false,
+      lastActiveMs: null,
+      priority: typeof linfo?.[rec.ticket]?.priority === "number"
+        ? linfo[rec.ticket].priority
+        : 0,
+      estimate: null,
+      scope: null,
+      project: null,
+      held: null,
+      labels: [],
+      heldSince: null,
+      currentPhaseSince: null,
+      attention: "needs-human",
+      // attentionSince is anchored to the ORIGINAL escalatedAt — preserved through
+      // retry ticks so the operator sees "how long has it needed you" from the first
+      // escalation, not the most recent label-retry attempt.
+      attentionSince: rec.escalatedAt ?? null,
+      humanQuestion: typeof rec.reason === "string" ? rec.reason : "Escalated for a human.",
+      explanation: null,
+      pr: null,
+      prUrl: null,
+      mergeStateStatus: null,
+      prStuckReason: null,
+      costUSD: null,
+      tokens: null,
+      turns: null,
+      phaseCosts: null,
+      phaseSummary: [],
+      blockers: [],
+      updatedAt: rec.lastTs ?? new Date(now).toISOString(),
+      host: null,
+      generation: null,
+      failureReason: null,
+    });
+  }
+  return cards;
+}
+
 // ── Linear enrichment: priority / estimate / project / labels / relations /
 // assignee, read EXCLUSIVELY from the broker's durable caches (CTL-883).
 //
@@ -2264,6 +2352,26 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
     linfo
   );
   tickets = [...tickets, ...parkedTickets];
+
+  // CTL-1643: durable escalation cards. Read the GC-surviving per-ticket
+  // escalation records written by the scheduler's escalateOnce (even when the
+  // worker dir was torn down by J4 and even when the needs-human label never
+  // confirmed in Linear). Deduped against every existing card id (now including
+  // the parked set); terminal/Done/Canceled tickets excluded by isLinearTerminal.
+  const terminalLinearIds = new Set(
+    Object.keys(linfo).filter((id) => isLinearTerminal(linfo[id]?.linearState))
+  );
+  const durableEscalationRecords = readDurableEscalations(EC);
+  const durableCardIds = new Set(tickets.map((t) => t.id));
+  const durableTickets = synthesizeDurableEscalations(
+    durableEscalationRecords,
+    durableCardIds,
+    now,
+    replicaTitles,
+    linfo,
+    terminalLinearIds,
+  );
+  tickets = [...tickets, ...durableTickets];
 
   // CTL-1588: annotate-not-hide. A parked needs-human/needs-input ticket can
   // still be Todo in Linear (so it sits in the eligible projection) while the
