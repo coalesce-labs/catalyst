@@ -311,7 +311,31 @@ git clone --quiet "$SUBORIGIN" "$SUBSCRATCH" 2>/dev/null
 ( cd "$SUBSCRATCH"; printf 'sub-base\n' > sub.txt; git add sub.txt; git commit --quiet -m sub-base; git push --quiet origin HEAD:refs/heads/main )
 WT="$(make_repo "${SCRATCH}/t20")"
 ( cd "$WT"
-  git -c protocol.file.allow=always submodule --quiet add "$SUBORIGIN" subdir 2>/dev/null
+  # Register the submodule WITHOUT `git submodule add` — its internal fetch is
+  # subject to `protocol.file.allow` submodule-recursive-clone restrictions
+  # (CVE-2022-39253 hardening; default varies by git build/CI image, e.g. a
+  # `-c protocol.file.allow=always` on the add command doesn't reliably reach
+  # git's own internal clone step everywhere). A plain top-level `git clone`
+  # is always a "user" action and unaffected, so clone it ourselves and wire
+  # up .gitmodules + the 160000 gitlink by hand — a completely portable,
+  # protocol-restriction-proof way to end up with the exact same on-disk
+  # shape (.gitmodules + gitlink + a real nested checkout) that
+  # `git submodule status --recursive` inspects.
+  git clone --quiet "$SUBORIGIN" subdir
+  git config -f .gitmodules submodule.subdir.path subdir
+  git config -f .gitmodules submodule.subdir.url "$SUBORIGIN"
+  git add .gitmodules
+  # The 160000 gitlink MUST be staged BEFORE `git submodule init` — init reads
+  # the INDEX (not just .gitmodules) to know which paths are submodules, so
+  # calling it before the gitlink exists is a silent no-op (exit 0, nothing
+  # written to .git/config). `git submodule init` itself is a config-only
+  # copy (no network I/O) — without it the submodule shows as
+  # NOT-INITIALIZED ('-' status prefix) even though a real checkout is
+  # sitting right there, and `submodule status --recursive` (what
+  # salvage_worktree walks) skips it.
+  SUB_SHA="$(git -C subdir rev-parse HEAD)"
+  git update-index --add --cacheinfo 160000,"$SUB_SHA",subdir
+  git submodule init >/dev/null
   git commit --quiet -m "add submodule"
   printf 'sub-dirty-edit\n' >> subdir/sub.txt   # uncommitted edit INSIDE the submodule
   printf 'sub-untracked\n' > subdir/scratch.txt  # untracked file INSIDE the submodule
