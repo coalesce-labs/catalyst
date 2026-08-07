@@ -21,6 +21,34 @@ fail() {
 }
 assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else fail "$1" "expected '$2' got '$3'"; fi; }
 
+# CAT-35: the helper is sourced by zsh phase workers with nounset enabled.
+if command -v zsh >/dev/null 2>&1; then
+	out="$(zsh -u -c "
+		set -uo pipefail
+		source '${HELPER}'
+		_lrr_emit_fallback_event 'CAT-35' 'stale-absent' 'test' 2>&1
+		echo EMIT_OK
+	" 2>&1)"
+	case "$out" in
+		*"parameter not set"*) fail "T-zsh1 emitters survive zsh -u" "$out" ;;
+		*EMIT_OK*)             ok   "T-zsh1 emitters survive zsh -u" ;;
+		*)                     fail "T-zsh1 emitters survive zsh -u" "$out" ;;
+	esac
+
+	ev_dir="$(mktemp -d)"
+	zsh -u -c "
+		set -uo pipefail
+		export CATALYST_EVENTS_DIR='${ev_dir}'
+		source '${HELPER}'
+		_lrr_emit_fallback_event 'CAT-35' 'stale-absent' 'test'
+	" >/dev/null 2>&1
+	n="$(cat "${ev_dir}"/*.jsonl 2>/dev/null | grep -c 'catalyst.replica.read_fallback' || echo 0)"
+	assert_eq "T-zsh2 fallback event appended under zsh" "1" "$n"
+	rm -rf "$ev_dir"
+else
+	echo "  SKIP: zsh not available (T-zsh1/T-zsh2)"
+fi
+
 command -v sqlite3 >/dev/null 2>&1 || {
 	echo "SKIP: sqlite3 not available"
 	exit 0

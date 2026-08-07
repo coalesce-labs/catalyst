@@ -39,6 +39,12 @@ _CATALYST_LINEAR_READ_REPLICA_SH=1
 # Live-read fallback cap in ms (matches catalyst-linear's runLinearis); default 8s.
 : "${CATALYST_LINEARIS_TIMEOUT_MS:=8000}"
 
+# Portable self-path: BASH_SOURCE under bash, prompt-expansion %x under zsh
+# (CTL-618, same idiom as lib/canonical-event.sh). Resolve once while sourcing;
+# expanding BASH_SOURCE inside the emitters throws under zsh -u (CAT-35).
+__LRR_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
+__LRR_LIB_DIR="$(cd "$(dirname "$__LRR_SELF")" && pwd)"
+
 # _lrr_emit_fallback_event <ID> <reason> <source> — best-effort: append a WARN
 # `catalyst.replica.read_fallback` event to the unified log so every replica
 # miss/stale fallback is measurable in Loki (otel-forward ships this log; agent
@@ -47,7 +53,7 @@ _CATALYST_LINEAR_READ_REPLICA_SH=1
 # burst this at read-rate × outage-duration).
 _lrr_emit_fallback_event() {
   local id="$1" reason="$2" source="${3:-helper}"
-  local lib; lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/canonical-event.sh"
+  local lib="${__LRR_LIB_DIR}/canonical-event.sh"
   [[ -r "$lib" ]] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   # shellcheck disable=SC1090
@@ -81,7 +87,7 @@ _lrr_emit_fallback_event() {
 # (CTL-988: a diagnostic tap with no fallback once froze the fleet 17-37h).
 _lrr_emit_read_event() {
   local id="$1" source="$2" result="$3" age_ms="${4:-}"
-  local lib; lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/canonical-event.sh"
+  local lib="${__LRR_LIB_DIR}/canonical-event.sh"
   [[ -r "$lib" ]] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   # shellcheck disable=SC1090
