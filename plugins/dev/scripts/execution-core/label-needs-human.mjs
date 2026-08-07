@@ -23,6 +23,15 @@ const get = (flag) => {
 const ticket = get("--ticket");
 const orchDir = get("--orch-dir");
 const reason = get("--reason") ?? "shell-escalation";
+// Optional caller-built explanation. Unparseable JSON degrades to undefined so
+// the guard falls back to its generic explanation rather than failing the apply.
+let explanation;
+try {
+  const raw = get("--explanation");
+  if (raw) explanation = JSON.parse(raw);
+} catch {
+  explanation = undefined;
+}
 
 if (!ticket || !orchDir) {
   console.error("label-needs-human: --ticket and --orch-dir are required (no-op)");
@@ -34,7 +43,7 @@ try {
     orchDir,
     ticket,
     { applyLabel },
-    { site: reason },
+    { site: reason, explanation },
   );
   console.error(
     `label-needs-human: ${ticket} needs-human apply -> ${applied ? "applied" : "deferred/no-op"}`,

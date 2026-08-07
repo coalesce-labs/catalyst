@@ -4945,9 +4945,13 @@ export function schedulerTick(
         const rSigs = readWorkerSignals(orchDir)
           .filter(
             (sig) =>
-              // CTL-1552: escalations now write the terminal "stalled" (was the
-              // bespoke non-terminal "needs-human"), already covered below — no
-              // writer emits "needs-human" as a signal status anymore.
+              // CTL-1552 normalized recovery-emit's escalation onto the terminal
+              // "stalled" (covered below), but label-guard's writeExplanationSignal
+              // still writes phase-recovery-pass.json with status "needs-human"
+              // after a confirmed label apply, and byActivePhase prefers that
+              // non-terminal signal over failed/stalled siblings. Dropping it here
+              // would silently hide those tickets from recovery reasoning.
+              sig.status === "needs-human" ||
               sig.status === "failed" ||
               sig.status === "stalled" ||
               resolveTicketType(orchDir, sig.ticket) === "unknown"

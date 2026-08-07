@@ -50,11 +50,19 @@ _escalate_workflow_scope_push() {
   # bun:sqlite).
   local _orch="${ORCH_DIR:-${CATALYST_ORCHESTRATOR_DIR:-}}"
   if [[ -n "${_orch:-}" ]]; then
+    # bun ONLY — never node. label-needs-human.mjs transitively imports
+    # bun:sqlite, so node exits ERR_UNSUPPORTED_ESM_URL_SCHEME and the fail-open
+    # redirect below would silently leave the label AND its marker unapplied.
     local _rt
-    _rt="$(command -v bun 2>/dev/null || command -v node 2>/dev/null || true)"
+    _rt="$(command -v bun 2>/dev/null || true)"
     if [[ -n "${_rt:-}" ]]; then
+      # Thread the MANUAL explanation already built above. Without it the guard
+      # writes a generic "unexplained failure" phase-recovery-pass.json, which the
+      # monitor prefers over the failed-phase signal — hiding the actionable
+      # OAuth-scope instructions from the Needs-You inbox.
       "$_rt" "${PLUGIN_ROOT}/scripts/execution-core/label-needs-human.mjs" \
         --ticket "${TICKET}" --orch-dir "${_orch}" \
+        --explanation "${expl_json}" \
         --reason push_rejected_no_workflow_scope >/dev/null 2>&1 || true
     fi
   fi

@@ -315,6 +315,13 @@ if [[ -s "$CLI_ARGS_FILE" ]] && grep -q -- "--ticket CTL-S11" "$CLI_ARGS_FILE" \
 else
   fail "11g: guard CLI not invoked as expected — got: $(cat "$CLI_ARGS_FILE" 2>/dev/null)"
 fi
+# the MANUAL explanation is threaded through, not left for the guard to
+# manufacture a generic one that would outrank the failed-phase signal
+if grep -q -- "--explanation" "$CLI_ARGS_FILE" 2>/dev/null; then
+  pass "11g: guard CLI invoked with --explanation"
+else
+  fail "11g: --explanation not threaded — got: $(cat "$CLI_ARGS_FILE" 2>/dev/null)"
+fi
 # the raw `linearis ... --labels needs-human` path is GONE
 if [[ -f "${S11G_SCRATCH}/linearis.args" ]] && grep -q -- "--labels needs-human" "${S11G_SCRATCH}/linearis.args"; then
   fail "11g: raw 'linearis --labels needs-human' was still called — got: $(cat "${S11G_SCRATCH}/linearis.args")"
