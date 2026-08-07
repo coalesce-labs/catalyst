@@ -707,6 +707,23 @@ run "T26a: SALVAGE_DIRTY fixture not removed, salvage logged" \
 run "T26a-b: SALVAGE_DIRTY-WT not in git worktree remove" \
   bash -c "! grep -E 'worktree remove.*SALVAGE_DIRTY|SALVAGE_DIRTY.*worktree remove' '${GIT_LOG}' 2>/dev/null; true"
 
+# T26a-c (CTL-1639): the DIRTY tree is kept, but salvage_worktree still runs
+# first. A dirty-only tree has NO unpushed commits, so (Codex P1 fix) salvage now
+# probes the revision set and skips `git bundle` entirely — its salvage mechanism
+# is the tracked-diff patch. The `git diff HEAD` probe against the SALVAGE_DIRTY
+# path proves the uncommitted diff was snapshotted before the keep (closes the
+# never-reaped gap). Isolated sweep root (see T26b-c) so the assertion never rides
+# the shared T26 root's accumulated fixture ordering.
+DIRTY_ISO_ROOT="${SCRATCH}/wt_dirty_iso"
+DIRTY_ISO_LOG="${SCRATCH}/git_dirty_iso.log"
+mkdir -p "${DIRTY_ISO_ROOT}/SALVAGE_DIRTY-WT/.git"
+touch -t 202501010000 "${DIRTY_ISO_ROOT}/SALVAGE_DIRTY-WT" 2>/dev/null || true
+GIT_LOG="$DIRTY_ISO_LOG" SWEEP_WT_ROOT="$DIRTY_ISO_ROOT" \
+  SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent \
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash "${SWEEP}" >/dev/null 2>&1 || true
+run "T26a-c: SALVAGE_DIRTY salvaged (diff probe ran on the dirty tree)" \
+  bash -c "grep -E 'SALVAGE_DIRTY.*diff' '${DIRTY_ISO_LOG}' 2>/dev/null"
+
 # T26b: SALVAGE_UNPUSHED fixture -> NOT removed, log says "salvage"
 UNPUSHED_WT="${SWEEP_WT_ROOT}/SALVAGE_UNPUSHED-WT"
 mkdir -p "${UNPUSHED_WT}/.git"
@@ -718,6 +735,26 @@ run "T26b: SALVAGE_UNPUSHED fixture not removed, salvage logged" \
 run "T26b-b: SALVAGE_UNPUSHED-WT not in git worktree remove" \
   bash -c "! grep -E 'worktree remove.*SALVAGE_UNPUSHED|SALVAGE_UNPUSHED.*worktree remove' '${GIT_LOG}' 2>/dev/null; true"
 
+# T26b-c (CTL-1639): the local bundle salvage runs at the top of the
+# SALVAGE_UNPUSHED branch, independent of SWEEP_SALVAGE_PUSH (here 0/default), so
+# the unpushed commits are captured to ~/catalyst/salvage/ even when the tree is
+# kept. The git bundle-create probe against the SALVAGE_UNPUSHED path proves it.
+# T26b-c (CTL-1639): the local bundle salvage runs at the TOP of the
+# SALVAGE_UNPUSHED branch, independent of SWEEP_SALVAGE_PUSH, so unpushed commits
+# are captured even when the tree is kept. Run this in an ISOLATED sweep root
+# holding ONLY the UNPUSHED fixture — the shared T26 root accumulates enough
+# earlier fixtures that the pre-existing `while read` sweep loop (both original
+# and post-CTL-1639) never reaches a 7th entry, which would mask the assertion.
+UNPUSHED_ISO_ROOT="${SCRATCH}/wt_unpushed_iso"
+UNPUSHED_ISO_LOG="${SCRATCH}/git_unpushed_iso.log"
+mkdir -p "${UNPUSHED_ISO_ROOT}/SALVAGE_UNPUSHED-WT/.git"
+touch -t 202501010000 "${UNPUSHED_ISO_ROOT}/SALVAGE_UNPUSHED-WT" 2>/dev/null || true
+GIT_LOG="$UNPUSHED_ISO_LOG" SWEEP_WT_ROOT="$UNPUSHED_ISO_ROOT" \
+  SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent \
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash "${SWEEP}" >/dev/null 2>&1 || true
+run "T26b-c: SALVAGE_UNPUSHED salvaged locally (bundle probe ran, push-flag-independent)" \
+  bash -c "grep -E 'SALVAGE_UNPUSHED.*bundle' '${UNPUSHED_ISO_LOG}' 2>/dev/null"
+
 # T27: --dry-run -> logs "would remove" for SAFE dirs, GIT_LOG has no worktree remove
 rm -f "$GIT_LOG"
 run "T27: dry-run logs would-remove for SAFE dirs" \
@@ -725,6 +762,34 @@ run "T27: dry-run logs would-remove for SAFE dirs" \
 
 run "T27b: dry-run GIT_LOG has no worktree remove" \
   bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' --dry-run && ! grep -q 'worktree remove' '${GIT_LOG}' 2>/dev/null; true"
+
+# T27c/T27d (CTL-1639, Codex P2): --dry-run over SALVAGE_* fixtures must be
+# side-effect free — a "would salvage" preview, but NO salvage_worktree run (no
+# git bundle probe against the tree, no artifacts/telemetry). Isolated roots so
+# the sweep loop always reaches the fixture.
+DRY_DIRTY_ROOT="${SCRATCH}/wt_dry_dirty_iso"
+DRY_DIRTY_LOG="${SCRATCH}/git_dry_dirty_iso.log"
+mkdir -p "${DRY_DIRTY_ROOT}/SALVAGE_DIRTY-WT/.git"
+touch -t 202501010000 "${DRY_DIRTY_ROOT}/SALVAGE_DIRTY-WT" 2>/dev/null || true
+GIT_LOG="$DRY_DIRTY_LOG" SWEEP_WT_ROOT="$DRY_DIRTY_ROOT" \
+  SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent \
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash "${SWEEP}" --dry-run >"${SCRATCH}/dry_dirty.out" 2>&1 || true
+run "T27c: dry-run SALVAGE_DIRTY logs would-salvage preview" \
+  bash -c "grep -qi 'would salvage' '${SCRATCH}/dry_dirty.out'"
+run "T27c-b: dry-run SALVAGE_DIRTY runs no bundle probe (side-effect free)" \
+  bash -c "! grep -E 'SALVAGE_DIRTY.*bundle' '${DRY_DIRTY_LOG}' 2>/dev/null; true"
+
+DRY_UNP_ROOT="${SCRATCH}/wt_dry_unp_iso"
+DRY_UNP_LOG="${SCRATCH}/git_dry_unp_iso.log"
+mkdir -p "${DRY_UNP_ROOT}/SALVAGE_UNPUSHED-WT/.git"
+touch -t 202501010000 "${DRY_UNP_ROOT}/SALVAGE_UNPUSHED-WT" 2>/dev/null || true
+GIT_LOG="$DRY_UNP_LOG" SWEEP_WT_ROOT="$DRY_UNP_ROOT" \
+  SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent \
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash "${SWEEP}" --dry-run >"${SCRATCH}/dry_unp.out" 2>&1 || true
+run "T27d: dry-run SALVAGE_UNPUSHED logs would-salvage preview" \
+  bash -c "grep -qi 'would salvage' '${SCRATCH}/dry_unp.out'"
+run "T27d-b: dry-run SALVAGE_UNPUSHED runs no bundle probe (side-effect free)" \
+  bash -c "! grep -E 'SALVAGE_UNPUSHED.*bundle' '${DRY_UNP_LOG}' 2>/dev/null; true"
 
 # T28: SWEEP_WT_ROOT=/nonexistent -> exit 0, no error
 run "T28: nonexistent SWEEP_WT_ROOT exits 0" \

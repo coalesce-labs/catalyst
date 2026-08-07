@@ -87,6 +87,107 @@ export PATH="${PATH}:${SCRIPT_DIR}"
 # shellcheck disable=SC1091
 [ -r "${SCRIPT_DIR}/lib/worktree-remove-guard.sh" ] && source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 
+# CTL-1639: local salvage primitive — snapshot unpushed commits + dirty tree to
+# ~/catalyst/salvage/ before a destructive worktree removal (additive to the
+# push-based salvage_push_then_remove below; fail-open, never blocks a removal).
+# shellcheck source=lib/worktree-salvage.sh
+# shellcheck disable=SC1091
+[ -r "${SCRIPT_DIR}/lib/worktree-salvage.sh" ] && source "${SCRIPT_DIR}/lib/worktree-salvage.sh"
+
+# _ows_fingerprint_path <wt> — per-worktree dedup-state file under the salvage
+# dir, keyed by a sanitized absolute path (stable across sweep runs).
+_ows_fingerprint_path() {
+  local wt="$1" dir key
+  dir="$(command -v _wsv_salvage_dir >/dev/null 2>&1 && _wsv_salvage_dir || printf '%s' "${CATALYST_SALVAGE_DIR:-${CATALYST_DIR:-$HOME/catalyst}/salvage}")"
+  key="$(printf '%s' "$wt" | tr '/ ' '__')"
+  printf '%s/.state/%s.fp' "$dir" "$key"
+}
+
+# _ows_fingerprint <wt> — a single hash summarizing "is there anything NEW to
+# salvage since last time": HEAD sha + a content hash of the working diff, the
+# staged diff, and the untracked-file set (by git BLOB hash, so a content edit
+# to an already-untracked file is caught too, not just add/remove) — AND, for
+# each initialized submodule, the same three components taken from the
+# submodule's OWN working tree. Without the submodule component, a retained
+# SALVAGE_DIRTY worktree whose top-level state is stable but whose submodule
+# content keeps changing would fingerprint identically forever (the top-level
+# diff only ever sees the stable opaque "Subproject commit <sha>-dirty"
+# marker) — salvage_worktree_dedup would then skip every later archive and the
+# newest submodule edits would never reach a recovery artifact. Mirrors the
+# same submodule-path-parsing care as the primitive's own loop (a path can
+# contain spaces; a plain `awk '{print $2}'` would truncate it).
+_ows_fingerprint() {
+  local wt="$1"
+  {
+    git -C "$wt" rev-parse HEAD 2>/dev/null || echo "no-head"
+    git -C "$wt" diff HEAD 2>/dev/null | git -C "$wt" hash-object --stdin 2>/dev/null
+    git -C "$wt" diff --cached HEAD 2>/dev/null | git -C "$wt" hash-object --stdin 2>/dev/null
+    git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
+      | xargs -0 -I{} git -C "$wt" hash-object {} 2>/dev/null | sort
+    local sm_line sm_status sm_rest sm_path sm_dir
+    git -C "$wt" submodule status --recursive 2>/dev/null | while IFS= read -r sm_line; do
+      [[ -z "$sm_line" ]] && continue
+      sm_status="${sm_line:0:1}"
+      [[ "$sm_status" == "-" ]] && continue
+      sm_rest="${sm_line:1}"
+      sm_path="$(printf '%s' "$sm_rest" | sed -E 's/^[0-9a-f]+ //; s/ \([^)]*\)$//')"
+      [[ -z "$sm_path" || ! -d "${wt}/${sm_path}" ]] && continue
+      sm_dir="${wt}/${sm_path}"
+      git -C "$sm_dir" rev-parse HEAD 2>/dev/null
+      git -C "$sm_dir" diff HEAD 2>/dev/null | git -C "$sm_dir" hash-object --stdin 2>/dev/null
+      git -C "$sm_dir" diff --cached HEAD 2>/dev/null | git -C "$sm_dir" hash-object --stdin 2>/dev/null
+      git -C "$sm_dir" ls-files --others --exclude-standard -z 2>/dev/null \
+        | xargs -0 -I{} git -C "$sm_dir" hash-object {} 2>/dev/null | sort
+    done
+  } | git -C "$wt" hash-object --stdin 2>/dev/null
+}
+
+# salvage_worktree_dedup <wt> <ticket> [salvage_worktree args...] — CTL-1639
+# Codex round-2 P1: the sweep runs every 1–3h and the salvage dir has no
+# retention/dedup, so a worktree that stays in SALVAGE_UNPUSHED/SALVAGE_DIRTY
+# across many sweeps (the default SWEEP_SALVAGE_PUSH=0 keeps it, and
+# SALVAGE_DIRTY is always kept) would otherwise re-archive an IDENTICAL
+# bundle/patch/tar under a new unique name every single sweep, growing the
+# salvage dir without bound. Skip the real call (no new artifacts, no
+# telemetry) when the fingerprint is unchanged since the worktree's last
+# recorded salvage. Scoped to the sweep's OWN call sites, not inside
+# salvage_worktree itself — the primitive's other callers (dispatcher L3
+# recreate, the JS reaper, phase-teardown) each act on a worktree exactly
+# once, and salvage_worktree's own multi-call contract (two rapid calls on the
+# same worktree keep two distinct artifacts) stays intact for them.
+salvage_worktree_dedup() {
+  local wt="$1" ticket="$2"; shift 2 2>/dev/null || true
+  if ! command -v salvage_worktree >/dev/null 2>&1; then return 0; fi
+  local fp_path fp_now fp_prev dir
+  fp_path="$(_ows_fingerprint_path "$wt")"
+  fp_now="$(_ows_fingerprint "$wt")"
+  fp_prev=""
+  [[ -r "$fp_path" ]] && fp_prev="$(cat "$fp_path" 2>/dev/null || true)"
+  if [[ -n "$fp_now" && "$fp_now" == "$fp_prev" ]]; then
+    log "salvage unchanged since last sweep, skipping re-archive: $wt"
+    return 0
+  fi
+  _WSV_LAST_STATUS=""
+  salvage_worktree "$wt" "$ticket" "$@"
+  # Only remember this fingerprint as "already saved" when the attempt ITSELF
+  # actually succeeded (created or clean-skipped) — checking merely that the
+  # salvage dir was `-w` at this point is not enough: `salvage_worktree`
+  # deliberately always `return 0`s (its fail-open contract), so a real
+  # mid-write failure (ENOSPC hit mid-bundle, a corrupt object, a partial
+  # tar) can still leave the directory itself writable while the actual
+  # artifact is missing or incomplete. `_WSV_LAST_STATUS` (set by
+  # `salvage_worktree` right before its matching emit) carries the true
+  # per-invocation outcome; only "created"/"skipped" earn the dedup-skip on
+  # the next sweep — "failed" must keep being retried (and keep reporting
+  # worktree.salvage.failed) until the underlying problem is fixed.
+  if [[ -n "$fp_now" && "$_WSV_LAST_STATUS" != "failed" ]]; then
+    dir="$(command -v _wsv_salvage_dir >/dev/null 2>&1 && _wsv_salvage_dir || printf '%s' "${CATALYST_SALVAGE_DIR:-${CATALYST_DIR:-$HOME/catalyst}/salvage}")"
+    if [[ -w "$dir" ]]; then
+      mkdir -p "$(dirname "$fp_path")" 2>/dev/null && printf '%s' "$fp_now" >"$fp_path" 2>/dev/null || true
+    fi
+  fi
+}
+
 # _removal_guard_ok <path> — the SINGLE fail-closed predicate every `git worktree
 # remove --force` site gates on (CTL-1417). Returns 0 (safe to force-remove) ONLY
 # when the guard function loaded AND it cleared the path. If the guard lib was
@@ -1270,6 +1371,21 @@ sweep_worktrees() {
           if ! _removal_guard_ok "$wt"; then
             log "skip (guard refused/unavailable — live handle/self): $wt"; _sweep_count activeSkipped; continue
           fi
+          # CTL-1639: salvage before remove. SAFE means nothing to save, so this
+          # emits worktree.salvage.skipped — cheap and harmless, and it defends
+          # against a stale SAFE verdict racing an eleventh-hour local edit.
+          command -v salvage_worktree >/dev/null 2>&1 && \
+            salvage_worktree "$wt" "$wt_id" --site "orphan-sweep-safe" || true
+          # CTL-1639 Codex round-2 P1: salvage is synchronous and can take a
+          # moment on a large tree; a worker or operator could enter the
+          # worktree during that interval. Re-assert the guard immediately
+          # before the force-remove rather than acting on the pre-salvage
+          # result computed above (mirrors the dispatcher's L3 fix —
+          # `_removal_guard_ok` re-checked right after salvage,
+          # phase-agent-dispatch).
+          if ! _removal_guard_ok "$wt"; then
+            log "skip (guard refused/unavailable post-salvage — live handle/self): $wt"; _sweep_count activeSkipped; continue
+          fi
           git worktree remove --force "$wt" 2>/dev/null && {
             log "removed worktree (SAFE): $wt"
             _sweep_count removed; removed_count=$((removed_count+1))
@@ -1287,6 +1403,13 @@ sweep_worktrees() {
             continue
           fi
           kb="$(_du_kb "$wt")"
+          # CTL-1639: a stale/missing gitdir pointer isn't a usable git
+          # worktree, so salvage_worktree (git-based) can't inspect it at
+          # all — but that doesn't mean the remaining working files carry no
+          # unique local edits. Archive the raw directory to a plain tar
+          # first (fail-open, never blocks the removal).
+          command -v salvage_raw_directory >/dev/null 2>&1 && \
+            salvage_raw_directory "$wt" "$wt_id" --site "orphan-sweep-gitfile" || true
           rm -rf "$wt" && {
             log "removed orphan gitfile dir: $wt"
             _sweep_count removed; removed_count=$((removed_count+1))
@@ -1296,6 +1419,20 @@ sweep_worktrees() {
           ;;
         SALVAGE_UNPUSHED)
           wt_id="$(basename "$wt")"
+          # CTL-1639: always snapshot the unpushed commits locally FIRST, before
+          # any removal and independent of SWEEP_SALVAGE_PUSH — the local bundle
+          # is the always-on additive safety net the network push (default-off,
+          # HEAD-only) never was. Dry-run stays side-effect free (Codex P2): a
+          # preview log, no bundle/patch/tar artifacts and no telemetry, mirroring
+          # the SAFE branch's early is_dry check.
+          if is_dry; then
+            log "[dry-run] would salvage unpushed commits (bundle to salvage dir): $wt"
+          else
+            # CTL-1639 Codex round-2 P1: dedup — a retained SALVAGE_UNPUSHED
+            # worktree is re-visited every sweep; only re-archive when the
+            # content actually changed since the last salvage of THIS tree.
+            salvage_worktree_dedup "$wt" "$wt_id" --site "orphan-sweep-unpushed"
+          fi
           if [[ "$SWEEP_SALVAGE_PUSH" == "1" ]]; then
             if salvage_push_then_remove "$wt" "$wt_id"; then
               if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
@@ -1318,7 +1455,20 @@ sweep_worktrees() {
           fi
           ;;
         SALVAGE_DIRTY)
-          log "skip SALVAGE_DIRTY (has real uncommitted changes): $wt"
+          # CTL-1639: the sweep still KEEPS a dirty tree (does not remove it), but
+          # snapshot the uncommitted diff to ~/catalyst/salvage/ first so the work
+          # is on disk even if an operator later force-cleans the tree by hand —
+          # closing the "preserved only by never being reaped" data-loss gap.
+          # Dry-run stays side-effect free (Codex P2): preview only.
+          if is_dry; then
+            log "[dry-run] would salvage uncommitted changes (patch to salvage dir), keeping tree: $wt"
+          else
+            # CTL-1639 Codex round-2 P1: dedup — see SALVAGE_UNPUSHED above.
+            # SALVAGE_DIRTY is ALWAYS kept, so without this a long-lived dirty
+            # tree would re-archive an identical patch every sweep forever.
+            salvage_worktree_dedup "$wt" "$(basename "$wt")" --site "orphan-sweep-dirty"
+            log "skip SALVAGE_DIRTY (snapshotted uncommitted changes, keeping tree): $wt"
+          fi
           _sweep_count salvageSkipped
           ;;
         KEEP)
