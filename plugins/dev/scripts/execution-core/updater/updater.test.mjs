@@ -49,6 +49,7 @@ describe("runRefreshOnce (CTL-1348 poll/boot/event refresh)", () => {
       repoConfigPath: "/repo/.catalyst/config.json",
       refreshAllFn,
       resolveRootsFn: (o) => { rootsCalledWith = o; return ["/r/a", "/r/b"]; },
+      installCliFn: () => {}, // hermetic: /r/a is changed:true; without the stub this execs the real install-cli.sh (CTL-1381)
     });
     // Codex P1: repoConfigPath MUST reach both root resolution and the refresh, else a
     // node whose pluginDirs live in the repo config resolves zero roots and pulls nothing.
@@ -105,6 +106,93 @@ describe("runRefreshOnce (CTL-1348 poll/boot/event refresh)", () => {
     const warns = events.filter((e) => e.event === UPDATER_NO_PLUGIN_DIRS_EVENT);
     expect(warns.length).toBe(1);
     expect(warns[0].severity).toBe("WARN");
+  });
+});
+
+describe("runRefreshOnce installCliFn seam (CTL-1381)", () => {
+  test("fires installCliFn once per changed root, not for unchanged roots", () => {
+    const calls = [];
+    const installCliFn = ({ root }) => calls.push(root);
+    runRefreshOnce({
+      reason: "poll",
+      log: fakeLog(),
+      emitFn: () => {},
+      nowFn: () => 0,
+      nodeClass: "worker",
+      hostNameVal: "mini",
+      refreshAllFn: () => [
+        { root: "/r/a", pulled: true, changed: true, failed: false, oldSha: "old", newSha: "new" },
+        { root: "/r/b", pulled: true, changed: false, failed: false, oldSha: "x", newSha: "x" },
+      ],
+      resolveRootsFn: () => ["/r/a", "/r/b"],
+      installCliFn,
+    });
+    expect(calls).toEqual(["/r/a"]);
+  });
+
+  test("installCliFn not called when nothing changed", () => {
+    const calls = [];
+    runRefreshOnce({
+      reason: "poll",
+      log: fakeLog(),
+      emitFn: () => {},
+      nowFn: () => 0,
+      nodeClass: "worker",
+      hostNameVal: "mini",
+      refreshAllFn: () => [
+        { root: "/r/a", pulled: true, changed: false, failed: false, oldSha: "x", newSha: "x" },
+      ],
+      resolveRootsFn: () => ["/r/a"],
+      installCliFn: ({ root }) => calls.push(root),
+    });
+    expect(calls.length).toBe(0);
+  });
+
+  test("fail-open: installCliFn throw does not propagate; emits cli_install_failed WARN; metric log still fires", () => {
+    const log = fakeLog();
+    const events = [];
+    let threw = false;
+    runRefreshOnce({
+      reason: "poll",
+      log,
+      emitFn: (e) => events.push(e),
+      nowFn: () => 0,
+      nodeClass: "worker",
+      hostNameVal: "mini",
+      refreshAllFn: () => [
+        { root: "/r/a", pulled: true, changed: true, failed: false, oldSha: "old", newSha: "new" },
+      ],
+      resolveRootsFn: () => ["/r/a"],
+      installCliFn: () => { threw = true; throw new Error("install-cli failed"); },
+    });
+    expect(threw).toBe(true);
+    const failEv = events.find((e) => e.event === "plugin.checkout.cli_install_failed");
+    expect(failEv).toBeTruthy();
+    expect(failEv.severity).toBe("WARN");
+    expect(failEv.detail.checkout).toBe("/r/a");
+    expect(typeof failEv.detail.error).toBe("string");
+    expect(failEv.detail.error.length).toBeGreaterThan(0);
+    const metricLine = log.calls.find((c) => c.msg?.startsWith("updater: refresh"));
+    expect(metricLine).toBeTruthy();
+  });
+
+  test("installCliFn called once per changed root when multiple roots changed", () => {
+    const calls = [];
+    runRefreshOnce({
+      reason: "poll",
+      log: fakeLog(),
+      emitFn: () => {},
+      nowFn: () => 0,
+      nodeClass: "worker",
+      hostNameVal: "mini",
+      refreshAllFn: () => [
+        { root: "/r/a", pulled: true, changed: true, failed: false, oldSha: "old", newSha: "new" },
+        { root: "/r/b", pulled: true, changed: true, failed: false, oldSha: "p", newSha: "q" },
+      ],
+      resolveRootsFn: () => ["/r/a", "/r/b"],
+      installCliFn: ({ root }) => calls.push(root),
+    });
+    expect(calls).toEqual(["/r/a", "/r/b"]);
   });
 });
 
@@ -339,6 +427,59 @@ describe("startUpdater wiring (CTL-1348 three-timer loop)", () => {
     expect(refreshCount).toBe(2);
     handle.stop();
     expect(timers.every((t) => t.cleared)).toBe(true);
+  });
+
+  test("installCliFn seam fires via startUpdater on a changed refresh (CTL-1381)", () => {
+    const { timers, setIntervalFn, clearIntervalFn } = captureTimers();
+    const installCalls = [];
+    const handle = startUpdater({
+      log: fakeLog(),
+      setIntervalFn,
+      clearIntervalFn,
+      emitFn: () => {},
+      refreshAllFn: () => [
+        { root: "/r/x", pulled: true, changed: true, failed: false, oldSha: "a", newSha: "b" },
+      ],
+      resolveRootsFn: () => ["/r/x"],
+      getLogPathFn: () => join(mkdtempSync(join(tmpdir(), "updater-cli-")), "events.jsonl"),
+      repoFullName: "coalesce-labs/catalyst",
+      pollIntervalMs: 90_000,
+      eventPollIntervalMs: 5_000,
+      heartbeatIntervalMs: 120_000,
+      installCliFn: ({ root }) => installCalls.push(root),
+    });
+    // boot fired once
+    expect(installCalls).toEqual(["/r/x"]);
+    // drive one more poll tick
+    const poll = timers.find((t) => t.ms === 90_000);
+    poll.fn();
+    expect(installCalls).toEqual(["/r/x", "/r/x"]);
+    handle.stop();
+  });
+
+  test("installCliFn NOT called via startUpdater when changed:false (CTL-1381)", () => {
+    const { timers, setIntervalFn, clearIntervalFn } = captureTimers();
+    const installCalls = [];
+    const handle = startUpdater({
+      log: fakeLog(),
+      setIntervalFn,
+      clearIntervalFn,
+      emitFn: () => {},
+      refreshAllFn: () => [
+        { root: "/r/x", pulled: true, changed: false, failed: false, oldSha: "s", newSha: "s" },
+      ],
+      resolveRootsFn: () => ["/r/x"],
+      getLogPathFn: () => join(mkdtempSync(join(tmpdir(), "updater-nop-")), "events.jsonl"),
+      repoFullName: "coalesce-labs/catalyst",
+      pollIntervalMs: 90_000,
+      eventPollIntervalMs: 5_000,
+      heartbeatIntervalMs: 120_000,
+      installCliFn: ({ root }) => installCalls.push(root),
+    });
+    const poll = timers.find((t) => t.ms === 90_000);
+    poll.fn();
+    expect(installCalls.length).toBe(0);
+    handle.stop();
   });
 
   test("a later zero-roots refresh CLEARS the stale heartbeat checkout list (Codex P2)", () => {
