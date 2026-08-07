@@ -567,12 +567,17 @@ _start_coordination_locked() {
   # hot-reload path covers monitor/exec-core but not this CLI-less daemon, so it
   # rides the keep-alive tick instead). Fail-safe: a non-git checkout just omits the
   # SHA and the fingerprint stays mode|hub.
+  # The fingerprint captures everything the LONG-LIVED daemon reads only at startup:
+  # resolved config (mode/hubUrl), the plugin checkout (so a refresh redeploys), and
+  # the state/events roots it derives its paths from — CATALYST_DIR and
+  # CATALYST_EVENTS_DIR (Codex P2: a reinstall that changes the events dir must bounce
+  # the publisher, else it keeps tailing the old directory). Any change → restart.
   local resolved mode hub fp checkout_id
   resolved="$(coordination_resolve)"
   mode="${resolved%%$'\t'*}"
   hub="${resolved#*$'\t'}"
   checkout_id="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
-  fp="${mode}|${hub}|${checkout_id}"
+  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}"
 
   local pid; pid="$(coordination_pid)"
 
@@ -635,13 +640,17 @@ _start_coordination_locked() {
 # the SAME start lock (Codex P1): otherwise a manual stop racing a scheduled start
 # (after start acquired the lock but before it wrote the PID file) sees no publisher,
 # returns, and the start then spawns a detached publisher AFTER the stop completed —
-# leaving mirroring/egress running despite a successful stop. Bounded wait for the
-# in-flight start to finish; if the lock can't be taken (still in-flight, or a
-# non-empty leak), fall through and stop best-effort anyway — stopping is always
-# safe. Internal callers that already hold the lock use _stop_coordination_unlocked.
+# leaving mirroring/egress running despite a successful stop. The wait bound MUST
+# exceed the start's own worst-case critical section — a config-change restart holds
+# the lock across the up-to-COORDINATION_STOP_GRACE_SECONDS graceful stop plus the
+# launch — or stop could expire and race it (Codex P1); default = grace + 20s margin.
+# If the lock still can't be taken (a truly stuck start, or a non-empty leak), fall
+# through and stop best-effort anyway — stopping is always safe. Internal callers
+# that already hold the lock use _stop_coordination_unlocked.
 stop_coordination() {
   local got=0 tries=0
-  while [[ "$tries" -lt "${COORDINATION_STOP_LOCK_WAIT_SECONDS:-15}" ]]; do
+  local wait_bound="${COORDINATION_STOP_LOCK_WAIT_SECONDS:-$((COORDINATION_STOP_GRACE_SECONDS + 20))}"
+  while [[ "$tries" -lt "$wait_bound" ]]; do
     if _coordination_lock_acquire; then got=1; break; fi
     tries=$((tries + 1)); sleep 1
   done
