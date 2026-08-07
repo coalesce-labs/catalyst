@@ -138,6 +138,29 @@ assert_eq "phase.research.rebase-conflict-stalled.CTL-100" \
 assert_eq "thoughts_symlink_broken" \
   "$(jq -r '.body.payload.reason' <<<"$LINE")" "thoughts stalled reason"
 
+# ── 8. emit_ctl708_resolution ────────────────────────────────────────────────
+echo "8. emit_ctl708_resolution resolved → INFO"
+emit_ctl708_resolution \
+  --orch "" --ticket CTL-708 --phase implement \
+  --outcome resolved --files '["a.ts"]' --reason ""
+LINE="$(last_event_line)"
+assert_eq "phase.implement.ctl708-resolution.CTL-708" \
+  "$(jq -r '.attributes["event.name"]' <<<"$LINE")" "ctl708-resolution event name"
+assert_eq "INFO" \
+  "$(jq -r '.severityText' <<<"$LINE")" "resolved severity is INFO"
+assert_eq "resolved" \
+  "$(jq -r '.body.payload.outcome' <<<"$LINE")" "resolved outcome payload"
+
+echo "9. emit_ctl708_resolution declined → WARN"
+emit_ctl708_resolution \
+  --orch "" --ticket CTL-708 --phase implement \
+  --outcome declined --files '[]' --reason "file_count 8 exceeds max_files=6"
+LINE="$(last_event_line)"
+assert_eq "WARN" \
+  "$(jq -r '.severityText' <<<"$LINE")" "declined severity is WARN"
+assert_eq "file_count 8 exceeds max_files=6" \
+  "$(jq -r '.body.payload.reason' <<<"$LINE")" "declined reason payload"
+
 echo
 echo "results: $PASSES passed, $FAILURES failed"
 [ $FAILURES -eq 0 ]

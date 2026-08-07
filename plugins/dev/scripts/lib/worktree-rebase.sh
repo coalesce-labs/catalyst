@@ -420,16 +420,75 @@ rebase_onto_base_classified() {
     return
   fi
 
-  if git rebase --continue 2>/dev/null; then
-    noise_stash_pop "$marker"
-    emit_auto_rebased \
-      --orch     "${ORCH_ID:-}" \
-      --ticket   "${TICKET:-}" \
-      --phase    "${PHASE:-}" \
-      --strategy additive 2>/dev/null || true
-    return 0
-  fi
+  # CTL-708 P2: a multi-commit branch can conflict in more than one rebased
+  # commit. A single `git rebase --continue` only replays the NEXT commit —
+  # if that exposes another conflict, git stops again mid-rebase instead of
+  # failing outright. Loop bounded by CATALYST_CTL708_CONTINUE_MAX so each
+  # subsequent stop is reclassified and, for a new source conflict, re-routed
+  # through ctl708_escalate rather than being mis-reported as
+  # `continue_failed` — which bypasses the source-conflict-keyed downstream
+  # routing described above.
+  local continue_max="${CATALYST_CTL708_CONTINUE_MAX:-20}" continue_i=0
+  while (( continue_i < continue_max )); do
+    continue_i=$(( continue_i + 1 ))
 
-  # --continue itself conflicted; stall.
+    if git rebase --continue 2>/dev/null; then
+      noise_stash_pop "$marker"
+      emit_auto_rebased \
+        --orch     "${ORCH_ID:-}" \
+        --ticket   "${TICKET:-}" \
+        --phase    "${PHASE:-}" \
+        --strategy additive 2>/dev/null || true
+      return 0
+    fi
+
+    # --continue failed. If no rebase is in progress anymore, git refused
+    # for a reason unrelated to a fresh conflict — report as before.
+    if ! rebase_in_progress; then
+      _stall_and_return "$marker" continue_failed 2
+      return
+    fi
+
+    # Still mid-rebase — the next replayed commit produced a new conflict.
+    # Reclassify at this stop and route it exactly as the first conflict was
+    # routed above.
+    classify_conflicted_files
+    tc="${#RT_TEST[@]}"
+    nc="${#RT_NOISE[@]}"
+    sc="${#RT_SOURCE[@]}"
+    thc="${#RT_THOUGHTS[@]}"
+    emit_rebase_conflict_categorized \
+      --orch          "${ORCH_ID:-}" \
+      --ticket        "${TICKET:-}" \
+      --phase         "${PHASE:-}" \
+      --test-count    "$tc" \
+      --noise-count   "$nc" \
+      --source-count  "$sc" \
+      --thoughts-count "$thc" 2>/dev/null || true
+
+    if [[ $thc -gt 0 ]]; then
+      _stall_and_return "$marker" thoughts_symlink_broken 3
+      return
+    fi
+
+    if [[ $sc -gt 0 ]]; then
+      if ! ctl708_escalate "${RT_SOURCE[@]+"${RT_SOURCE[@]}"}"; then
+        _stall_and_return "$marker" source_conflict_ctl708_unavailable 2
+        return
+      fi
+    fi
+
+    if [[ $nc -gt 0 ]]; then
+      git checkout --ours   -- "${RT_NOISE[@]}" 2>/dev/null
+      git add               -- "${RT_NOISE[@]}" 2>/dev/null
+    fi
+    if [[ $tc -gt 0 ]]; then
+      git checkout --theirs -- "${RT_TEST[@]}"  2>/dev/null
+      git add               -- "${RT_TEST[@]}"  2>/dev/null
+    fi
+  done
+
+  # Exhausted the bounded retry loop without a clean continue — park the
+  # same way an unresolved single-stop conflict would.
   _stall_and_return "$marker" continue_failed 2
 }
