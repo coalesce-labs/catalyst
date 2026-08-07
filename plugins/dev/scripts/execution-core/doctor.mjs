@@ -4469,26 +4469,48 @@ export function checkPluginSourceFreshness(deps = {}) {
 // auto-clears it. Age-gated via the SHARED lib/stale-lock.mjs classifier, so the
 // "safe age" can't drift from what the pull path clears, and a live git op (a
 // fresh lock) is reported as in-progress, never flagged.
+//
+// Codex P2 (#2530): a checkout provisioned via `setup-plugin-source.sh --path`
+// only persists the custom root through catalyst.orchestration.pluginDirs — it
+// does NOT guarantee CATALYST_PLUGIN_SOURCE is set in doctor's environment. The
+// old hardcoded ~/catalyst/plugin-source default could report "no stale lock"
+// while the ACTUAL configured checkout sat frozen. Resolve the same
+// resolvePluginCheckoutRoots() the adjacent freshness check and the real pull
+// path use (CTL-1421), so this check inspects the checkout(s) that are actually
+// live rather than an unconditional guess. An explicit `root` still wins (tests /
+// single-checkout callers); the historical env/default guess is the last-resort
+// fallback only when nothing resolves at all (no pluginDirs configured).
 export function checkStaleLock(deps = {}) {
   const {
-    root = process.env.CATALYST_PLUGIN_SOURCE || resolve(homedir(), "catalyst", "plugin-source"),
+    root,
+    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
     now = Date.now(),
     thresholdMs = STALE_LOCK_THRESHOLD_MS,
     statFn,
   } = deps;
-  const s = staleLockStatus({ root, now, thresholdMs, statFn });
-  if (!s.present) {
-    return [mkCheck("stale-plugin-lock", STATUS.PASS, `no stale git index.lock in plugin-source (${root})`)];
+  const resolved = root ? [root] : resolveRootsFn();
+  const roots =
+    resolved.length > 0
+      ? resolved
+      : [process.env.CATALYST_PLUGIN_SOURCE || resolve(homedir(), "catalyst", "plugin-source")];
+
+  const statuses = roots.map((r) => ({ r, s: staleLockStatus({ root: r, now, thresholdMs, statFn }) }));
+  const stale = statuses.filter(({ s }) => s.present && s.stale);
+  if (stale.length > 0) {
+    const thMins = Math.round(thresholdMs / 60000);
+    const details = stale
+      .map(({ r, s }) => `${indexLockPath(r)} (~${Math.round(s.ageMs / 60000)}m old)`)
+      .join("; ");
+    return [mkCheck("stale-plugin-lock", STATUS.WARN,
+      `stale .git/index.lock (age ≥ ${thMins}m threshold) — plugin pulls are FROZEN until it clears; the updater/broker auto-clears it on its next pull (CTL-1415), or remove by hand: ${details}`)];
   }
-  if (!s.stale) {
-    const secs = Math.round(s.ageMs / 1000);
+  const inProgress = statuses.find(({ s }) => s.present && !s.stale);
+  if (inProgress) {
+    const secs = Math.round(inProgress.s.ageMs / 1000);
     const thSecs = Math.round(thresholdMs / 1000);
     return [mkCheck("stale-plugin-lock", STATUS.PASS, `a git operation is in progress in plugin-source (index.lock ${secs}s old < ${thSecs}s threshold) — not stale`)];
   }
-  const mins = Math.round(s.ageMs / 60000);
-  const thMins = Math.round(thresholdMs / 60000);
-  return [mkCheck("stale-plugin-lock", STATUS.WARN,
-    `stale .git/index.lock in plugin-source (age ~${mins}m ≥ ${thMins}m threshold) — plugin pulls are FROZEN until it clears; the updater/broker auto-clears it on its next pull (CTL-1415), or remove ${indexLockPath(root)} by hand`)];
+  return [mkCheck("stale-plugin-lock", STATUS.PASS, `no stale git index.lock in plugin-source (${roots.join(", ")})`)];
 }
 
 // ─── Suite selection ─────────────────────────────────────────────────────────

@@ -1663,6 +1663,55 @@ describe("clearStaleIndexLock", () => {
     expect(ev).toBeDefined();
     expect(ev.severity).toBe("WARN");
   });
+
+  // Codex P1 (#2530): a concurrent cleanup attempt could classify the SAME old
+  // lock as stale, then lose a race to a different attempt that already cleared
+  // it and started a new git op (a fresh index.lock). The re-check right before
+  // removal must see that the lock is no longer present-and-stale and bail out
+  // — never unlinking a lock a live git op now holds.
+  test("re-check race: lock no longer stale by removal time → NOT removed, no event", () => {
+    const emitted = [];
+    const removed = [];
+    let calls = 0;
+    // First staleLockStatus call (classification) sees the old stale lock;
+    // second call (the pre-removal re-check) sees a brand-new fresh lock —
+    // simulating another process having cleared+restarted git in between.
+    const statFn = (path) => {
+      calls += 1;
+      if (path !== LOCK_PATH) return null;
+      return calls === 1 ? LOCK_NOW - 3_600_000 : LOCK_NOW; // 1h stale, then 0s fresh
+    };
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn,
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+    expect(calls).toBeGreaterThanOrEqual(2); // both the classification and the re-check ran
+  });
+
+  test("re-check race: lock disappears entirely by removal time (already cleared) → NOT removed, no event", () => {
+    const emitted = [];
+    const removed = [];
+    let calls = 0;
+    const statFn = (path) => {
+      calls += 1;
+      if (path !== LOCK_PATH) return null;
+      return calls === 1 ? LOCK_NOW - 3_600_000 : null; // stale, then gone
+    };
+    const res = clearStaleIndexLock({
+      root: LOCK_ROOT, now: LOCK_NOW, thresholdMs: 600_000,
+      emitFn: (e) => emitted.push(e),
+      statFn,
+      rmFn: (p) => removed.push(p),
+    });
+    expect(res.cleared).toBe(false);
+    expect(removed).toEqual([]);
+    expect(emitted).toEqual([]);
+  });
 });
 
 describe("refreshPluginCheckout — stale-lock pre-pull clear (CTL-1415)", () => {

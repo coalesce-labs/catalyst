@@ -129,6 +129,16 @@ function defaultRmFn(path) {
  * git op anyway (which then fails loudly via refresh_failed rather than this
  * masking it).
  *
+ * Codex P1 (#2530): two overlapping cleanup attempts could both classify the SAME
+ * old lock as stale; the first removes it and starts git (creating a fresh
+ * index.lock), then the second — still acting on its earlier classification —
+ * would unlink that brand-new live lock, defeating git's mutual exclusion. Right
+ * before removing, we re-run staleLockStatus and bail (no-op) if the lock is no
+ * longer present-and-stale at that instant — this narrows the race window to the
+ * single re-check rather than the whole caller's prior work, and a second
+ * concurrent attempt that loses the race simply leaves the winner's fresh lock
+ * alone instead of destroying it.
+ *
  * @returns {{present, ageMs, stale, cleared:boolean, error?:string}}
  */
 export function clearStaleIndexLock({
@@ -141,6 +151,13 @@ export function clearStaleIndexLock({
 }) {
   const status = staleLockStatus({ root, now, thresholdMs, statFn });
   if (!status.present || !status.stale) return { ...status, cleared: false };
+  // Re-verify immediately before removing (see Codex P1 note above). Reuses the
+  // same `now` as the classification above — what matters is a fresh statFn
+  // read of the lock's mtime, not wall-clock drift between the two calls (this
+  // whole function runs synchronously), and reusing `now` keeps the recheck
+  // seam-injectable/deterministic for tests instead of reaching for a real clock.
+  const recheck = staleLockStatus({ root, now, thresholdMs, statFn });
+  if (!recheck.present || !recheck.stale) return { ...status, cleared: false };
   try {
     rmFn(indexLockPath(root));
     emitFn?.({
