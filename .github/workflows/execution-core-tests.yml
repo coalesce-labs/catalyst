@@ -1,7 +1,11 @@
 # execution-core-tests.yml
 #
 # Runs the stable execution-core unit-test suite on every PR and push to main
-# that touches the execution-core source tree.
+# that touches the execution-core source tree. The workflow itself now always
+# triggers on `pull_request` (see the PR-TRIGGER NOTE below); `detect-changes` +
+# `execution-core-unit-tests`'s job-level `if:` is what keeps the actual suite
+# scoped to relevant changes — a PR that doesn't touch execution-core gets a fast
+# `skipped` conclusion instead of paying for the full ~30-step job.
 #
 # REQUIRED-STATUS-CHECK OPERATOR NOTE (CTL-963)
 # -----------------------------------------------
@@ -25,8 +29,22 @@
 
 name: Execution Core Unit Tests
 
+# PR-TRIGGER NOTE (thagale/catalyst PR #30 follow-up)
+# -----------------------------------------------------
+# `pull_request` deliberately carries NO `paths:` filter, unlike `push` below. A
+# required status check that is also path-filtered AT THE TRIGGER LEVEL can never
+# resolve on a PR whose diff doesn't match the filter — GitHub has nothing to post
+# a conclusion for, so branch protection waits on "Expected" forever and the PR is
+# permanently BLOCKED regardless of what it touches (observed on a PR that only
+# changed `.catalyst/config.json`). The workflow now always triggers on `pull_request`
+# so the check always posts a real conclusion; the path-scoping moved into the
+# `detect-changes` job below plus `execution-core-unit-tests`'s job-level `if:`. A
+# job skipped via `if:` still reports a conclusion (`skipped`), which GitHub DOES
+# accept as satisfying a required status check — unlike a workflow that never ran.
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
     paths:
       - "plugins/dev/scripts/execution-core/**"
@@ -82,61 +100,49 @@ on:
       - "package.json"
       - "bun.lock"
       - "turbo.json"
-  push:
-    branches: [main]
-    paths:
-      - "plugins/dev/scripts/execution-core/**"
-      # CTL-1348: the updater safety tests (updater/plugin-pull-defer.test.mjs) import and
-      # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
-      # only the broker must run this suite too (Codex P2).
-      - "plugins/dev/scripts/broker/**"
-      # CTL-1529 round 3: event-log-read-guard.test.mjs scans the WHOLE
-      # plugins/dev/scripts tree for whole-file event-log reads (round 2 scanned an
-      # enumerated 4 of 16 directories and the header overstated it). The trigger
-      # must match the scan, or a new whole-log read lands in an untriggered
-      # directory and the guard never runs — which is how otel-forward/lib/dlq.ts's
-      # three unbounded reads sat unnoticed in a long-lived daemon.
-      - "plugins/dev/scripts/**"
-      # NOTE: the glob above SUBSUMES every plugins/dev/scripts path listed below.
-      # They are retained as documentation of WHICH STEP each path feeds, not as
-      # triggers — do not read the list as the trigger set.
-      # CTL-1369: launcher / router / CLI-registration entry path (see PR-trigger note above).
-      - "plugins/dev/scripts/catalyst-install"
-      - "plugins/dev/scripts/catalyst"
-      - "plugins/dev/scripts/catalyst-linear"
-      - "plugins/dev/scripts/catalyst-stack"
-      # CTL-1531: orphan-sweep-plist.test.sh VALIDATES this template, so a PR that
-      # edits only the plist must run this workflow or the test never sees it.
-      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
-      - "plugins/dev/scripts/install-cli.sh"
-      - "plugins/dev/scripts/check-setup.sh"
-      # CTL-1531: orphan-sweep.sh is a DESTRUCTIVE, kill-processes script whose
-      # only guard is __tests__/orphan-sweep.test.sh (run below). Before CTL-1531
-      # it appeared in no workflow at all, so a change to its kill gates could
-      # merge entirely unverified.
-      - "plugins/dev/scripts/orphan-sweep.sh"
-      # CTL-1531 round 3: the installer resolves the SWEEP_PROC_WIDEN value baked
-      # into the LaunchAgent (shadow vs enforce for the widened process killer),
-      # and the template is where that key lives — both are guarded by
-      # install-orphan-sweep{,-guard}.test.sh below.
-      - "plugins/dev/scripts/install-orphan-sweep.sh"
-      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
-      - "plugins/dev/scripts/__tests__/**"
-      # CTL-1387: see the pull_request note above.
-      - "plugins/dev/scripts/gen-cli-reference.sh"
-      - "website/src/content/docs/reference/catalyst-cli.md"
-      # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
-      # either must run migrate-dual-harness.test.sh below.
-      - "plugins/dev/scripts/migrate-dual-harness.sh"
-      - "plugins/dev/scripts/check-project-setup.sh"
-      - ".github/workflows/execution-core-tests.yml"
-      # CTL-1628: see the pull_request note above.
-      - "package.json"
-      - "bun.lock"
-      - "turbo.json"
 
 jobs:
+  # Always runs (see the PR-TRIGGER NOTE above) so `execution-core-unit-tests`'s
+  # required check always has a conclusion to post. Mirrors the same path set the
+  # `push` trigger above enforces at the workflow level, via `dorny/paths-filter`
+  # (gitignore-style globs, same semantics as `on.paths`) since `pull_request` no
+  # longer filters at the trigger.
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - "plugins/dev/scripts/execution-core/**"
+              - "plugins/dev/scripts/broker/**"
+              - "plugins/dev/scripts/**"
+              - "plugins/dev/scripts/catalyst-install"
+              - "plugins/dev/scripts/catalyst"
+              - "plugins/dev/scripts/catalyst-linear"
+              - "plugins/dev/scripts/catalyst-stack"
+              - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
+              - "plugins/dev/scripts/install-cli.sh"
+              - "plugins/dev/scripts/check-setup.sh"
+              - "plugins/dev/scripts/orphan-sweep.sh"
+              - "plugins/dev/scripts/install-orphan-sweep.sh"
+              - "plugins/dev/scripts/__tests__/**"
+              - "plugins/dev/scripts/gen-cli-reference.sh"
+              - "website/src/content/docs/reference/catalyst-cli.md"
+              - "plugins/dev/scripts/migrate-dual-harness.sh"
+              - "plugins/dev/scripts/check-project-setup.sh"
+              - ".github/workflows/execution-core-tests.yml"
+              - "package.json"
+              - "bun.lock"
+              - "turbo.json"
+
   execution-core-unit-tests:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:

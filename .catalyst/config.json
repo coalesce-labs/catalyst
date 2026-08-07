@@ -2,25 +2,25 @@
   "catalyst": {
     "projectKey": "catalyst-workspace",
     "project": {
-      "ticketPrefix": "CTL"
+      "ticketPrefix": "CAT"
     },
     "linear": {
-      "teamKey": "CTL",
+      "teamKey": "CAT",
       "stateMap": {
         "backlog": "Backlog",
         "todo": "Todo",
-        "triage": "Triage",
-        "research": "Research",
-        "planning": "Plan",
-        "inProgress": "Implement",
-        "verifying": "Validate",
-        "reviewing": "Validate",
-        "remediating": "Remediate",
-        "inReview": "PR",
+        "triage": "In Progress",
+        "research": "In Progress",
+        "planning": "In Progress",
+        "inProgress": "In Progress",
+        "verifying": "In Progress",
+        "reviewing": "In Progress",
+        "remediating": "In Progress",
+        "inReview": "In Review",
         "done": "Done",
         "canceled": "Canceled"
       },
-      "teamId": "e7e703c4-13a8-42d4-97c1-25e342618f25"
+      "teamId": "bb2c7369-7f6a-471b-9352-aaf7c4046452"
     },
     "thoughts": {
       "profile": "coalesce-labs",
