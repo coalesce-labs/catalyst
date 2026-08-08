@@ -217,6 +217,25 @@ cmd_start() {
 		local _accounts_env="${HOME}/.config/catalyst/claude-accounts.env"
 		# shellcheck disable=SC1090
 		[[ -f "$_accounts_env" ]] && source "$_accounts_env"
+	elif [[ "${CATALYST_EXECUTOR:-}" == "bg" ]]; then
+		# CAT-90: a bg-executor node spawns the standalone `claude --bg` CLI as a
+		# child of this daemon, and that CLI resolves ITS OWN credentials via
+		# Keychain-then-~/.claude/.credentials.json — a path a non-interactive
+		# LaunchAgent can never refresh via `claude auth login` (that only
+		# updates Keychain, which requires an interactive ACL grant the
+		# LaunchAgent's session can't satisfy; confirmed 2026-08-08 on
+		# sophon/vega, both stuck reading a real-but-stale-for-this-node
+		# capped account while the operator's own interactive session was
+		# healthy). Source the SAME per-node claude-accounts.env the sdk arm
+		# above uses, so a provisioned CLAUDE_CODE_OAUTH_TOKEN reaches
+		# `claude --bg`'s environment too (child processes inherit the
+		# daemon's env by default). Unlike the sdk arm, do NOT unset
+		# ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN first — bg workers are
+		# allowed to authenticate via those, and clearing them here would
+		# silently break a node relying on that path instead.
+		local _accounts_env="${HOME}/.config/catalyst/claude-accounts.env"
+		# shellcheck disable=SC1090
+		[[ -f "$_accounts_env" ]] && source "$_accounts_env"
 	fi
 	# CTL-1289: belt-and-suspenders — a daemon started by hand (not via the
 	# catalyst-stack launchd plist, which already sets _stack_agent_path) inherits
