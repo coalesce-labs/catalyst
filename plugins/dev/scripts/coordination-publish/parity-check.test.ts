@@ -4,17 +4,19 @@ import { computeParity, verdictToExit } from "./parity-check.ts";
 type WorkerStateRow = { orchestrator: string; ticket: string; status: string; phase?: string };
 type CoordinationRow = Record<string, unknown>;
 
-function ws(ticket: string, status: string): WorkerStateRow {
-  return { orchestrator: ticket, ticket, status, phase: "teardown" };
+function ws(ticket: string, status: string, orchestrator: string = ticket): WorkerStateRow {
+  return { orchestrator, ticket, status, phase: "teardown" };
 }
 
-function row(ticket: string, eventName: string): CoordinationRow {
+function row(ticket: string, eventName: string, orchestrator: string = ticket): CoordinationRow {
   return {
-    id: `ev-${ticket}-${eventName}`,
+    id: `ev-${ticket}-${eventName}-${orchestrator}`,
     local_seq: 1,
     attributes: {
       "event.name": `${eventName}.${ticket}`,
       "event.stream_class": "coordination",
+      // Real coordination events carry the emitting orchestrator here; parity keys on it.
+      "catalyst.orchestrator.id": orchestrator,
     },
     body: {},
   };
@@ -46,6 +48,41 @@ describe("computeParity (CTL-1668 Phase 3)", () => {
     });
     expect(r.coverageGaps).toContainEqual({ orchestrator: "CTL-2", ticket: "CTL-2" });
     expect(r.divergences).toHaveLength(0);
+  });
+
+  test("complete is a SUCCESS terminal status: complete vs failure coordination → divergent", () => {
+    // broker-state.mjs WORKER_TERMINAL_STATUSES includes "complete" as a canonical done status.
+    // Skipping the comparison for it (returning null) would hide a real conflict as healthy.
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "complete")],
+      coordinationRows: [row("CTL-1", "phase.implement.failed")],
+    });
+    expect(r.divergences.length).toBeGreaterThan(0);
+    expect(r.verdict).toBe("divergent");
+  });
+
+  test("complete matched to a success terminal coordination → healthy", () => {
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "complete")],
+      coordinationRows: [row("CTL-1", "phase.teardown.complete")],
+    });
+    expect(r.divergences).toHaveLength(0);
+    expect(r.verdict).toBe("healthy");
+  });
+
+  test("same ticket, two orchestrators: parity keys on (orchestrator, ticket), no cross-contamination", () => {
+    // orchA finished clean; orchB's run failed. Keyed by ticket alone, orchA's "done" would be
+    // compared against orchB's failure terminal and diverge falsely. Composite keying isolates them.
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "done", "orchA"), ws("CTL-1", "done", "orchB")],
+      coordinationRows: [
+        row("CTL-1", "phase.teardown.complete", "orchA"),
+        row("CTL-1", "phase.implement.failed", "orchB"),
+      ],
+    });
+    expect(r.matchedPairs).toBe(2);
+    expect(r.divergences).toHaveLength(1);
+    expect(r.divergences[0]?.orchestrator).toBe("orchB");
   });
 
   test("wire order preserved: rows consumed in input order, never sorted", () => {

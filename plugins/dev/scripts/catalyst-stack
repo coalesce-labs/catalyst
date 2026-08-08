@@ -241,6 +241,15 @@ pid_alive() {
 [[ -f "${SCRIPT_DIR}/lib/plugin-dirs.sh" ]] || fail "missing lib/plugin-dirs.sh next to catalyst-stack"
 . "${SCRIPT_DIR}/lib/plugin-dirs.sh"
 
+# CTL-1616 PR5 secret-contract bash mirror — sourced once at load (SAFE: pure function/array
+# definitions, no subprocess/network/jq until a function runs). Gives _start_coordination_locked
+# access to catalyst_secret_cloud_token_name so the token-presence fingerprint resolves the
+# CONFIGURED cloud-token env-var name (CATALYST_CLOUD_TOKEN_ENV / Layer-2 catalyst.cloud.tokenEnv /
+# default) instead of hardcoding CATALYST_CLOUD_TOKEN (Codex P1, CTL-1668). Optional: a checkout
+# missing the lib must not break the whole stack CLI, so guard the source.
+# shellcheck source=lib/catalyst-secret-contract.sh
+[[ -f "${SCRIPT_DIR}/lib/catalyst-secret-contract.sh" ]] && . "${SCRIPT_DIR}/lib/catalyst-secret-contract.sh"
+
 mitm_pid() { pgrep -f "mitmdump -s.*mitm_linear_addon" 2>/dev/null | head -1; }
 
 # ─── Service start/stop primitives ──────────────────────────────────────────
@@ -580,10 +589,23 @@ _start_coordination_locked() {
   mode="${resolved%%$'\t'*}"
   hub="${resolved#*$'\t'}"
   checkout_id="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+  # Record presence of the CONFIGURED cloud-token env var — resolved via the secret-contract
+  # mirror's catalyst_secret_cloud_token_name (env override → Layer-2 catalyst.cloud.tokenEnv →
+  # default) — not the hardcoded CATALYST_CLOUD_TOKEN. A custom-named token otherwise never flips
+  # the fingerprint off `token:0`, so a first-time provisioning of the custom var leaves the
+  # long-lived publisher un-restarted and outbound delivery disabled until a manual stop (Codex
+  # P1, CTL-1668). The name is resolved INSIDE the subshell AFTER sourcing cloud-sync.env so a
+  # name override living in that file is honored too — matching the daemon, which launch.sh starts
+  # with that file sourced. Fail-safe: resolver/lib absent → default CATALYST_CLOUD_TOKEN name.
   token_present="$(
     set +u
     [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
-    [[ -n "${CATALYST_CLOUD_TOKEN:-}" ]] && echo "1" || echo "0"
+    _tok_name="CATALYST_CLOUD_TOKEN"
+    if declare -f catalyst_secret_cloud_token_name >/dev/null 2>&1; then
+      catalyst_secret_cloud_token_name cloud-token >/dev/null 2>&1
+      [[ -n "${CATALYST_SECRET_TOKEN_NAME:-}" ]] && _tok_name="$CATALYST_SECRET_TOKEN_NAME"
+    fi
+    [[ -n "${!_tok_name:-}" ]] && echo "1" || echo "0"
   )"
   fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|token:${token_present}"
 

@@ -25,6 +25,23 @@ function ticketFromEventName(eventName: string): string {
   return parts[parts.length - 1] ?? "";
 }
 
+// worker_state is PRIMARY KEY (orchestrator, ticket) in broker-state.mjs, and coordination
+// events carry the emitting orchestrator in attributes["catalyst.orchestrator.id"]. Parity must
+// match on that composite identity — keying by ticket alone merges records from multiple
+// orchestrators/runs of the same ticket, so one run's projection row gets compared against
+// another run's terminal event, producing a false divergence or a false match (Codex P1).
+function orchestratorFromRow(row: CoordinationRow): string {
+  const attrs = row.attributes as Record<string, unknown> | undefined;
+  const orch = attrs?.["catalyst.orchestrator.id"];
+  return typeof orch === "string" ? orch : "";
+}
+
+// NUL-joined composite key — NUL can never appear in an orchestrator id or ticket, so the join
+// is unambiguous (no "a" + "b\x00c" vs "a\x00b" + "c" collision).
+function parityKey(orchestrator: string, ticket: string): string {
+  return `${orchestrator}\u0000${ticket}`;
+}
+
 function terminalOutcomeFromEventName(eventName: string): "success" | "failure" | null {
   const parts = eventName.split(".");
   if (parts.length < 2) return null;
@@ -34,8 +51,12 @@ function terminalOutcomeFromEventName(eventName: string): "success" | "failure" 
   return null;
 }
 
+// Mirrors broker-state.mjs's canonical WORKER_TERMINAL_STATUSES = {"done","failed","complete"}:
+// "complete" is a SUCCESSFUL terminal outcome (the canonical CTL-532 done status), not a skip.
+// Classifying it as null here would let a worker_state row whose coordination stream ends in a
+// failure event pass unexamined and report "healthy" (Codex P1).
 function workerStateOutcome(status: string): "success" | "failure" | null {
-  if (status === "done") return "success";
+  if (status === "done" || status === "complete") return "success";
   if (status === "failed") return "failure";
   return null;
 }
@@ -46,8 +67,9 @@ export function computeParity(input: {
 }): ParityResult {
   const { workerStates, coordinationRows } = input;
 
-  // Build coordination index in input order (never sort).
-  const coordByTicket = new Map<string, CoordinationRow[]>();
+  // Build coordination index in input order (never sort), keyed by the (orchestrator, ticket)
+  // composite so a worker_state row only ever matches coordination rows from its OWN run.
+  const coordByKey = new Map<string, CoordinationRow[]>();
   const orderedTickets: string[] = [];
   const seenTickets = new Set<string>();
 
@@ -56,13 +78,15 @@ export function computeParity(input: {
     const eventName = typeof attrs?.["event.name"] === "string" ? attrs["event.name"] : "";
     const ticket = ticketFromEventName(eventName);
     if (!ticket) continue;
+    // orderedTickets stays ticket-scoped (wire-order provenance, not a match key).
     if (!seenTickets.has(ticket)) {
       seenTickets.add(ticket);
       orderedTickets.push(ticket);
     }
-    const existing = coordByTicket.get(ticket);
+    const key = parityKey(orchestratorFromRow(row), ticket);
+    const existing = coordByKey.get(key);
     if (existing) existing.push(row);
-    else coordByTicket.set(ticket, [row]);
+    else coordByKey.set(key, [row]);
   }
 
   let matchedPairs = 0;
@@ -70,7 +94,7 @@ export function computeParity(input: {
   const divergences: ParityResult["divergences"] = [];
 
   for (const ws of workerStates) {
-    const rows = coordByTicket.get(ws.ticket);
+    const rows = coordByKey.get(parityKey(ws.orchestrator, ws.ticket));
     if (!rows || rows.length === 0) {
       coverageGaps.push({ orchestrator: ws.orchestrator, ticket: ws.ticket });
       continue;
