@@ -187,11 +187,30 @@ export function reasoningRecoveryPass(items, opts = {}) {
     terminalSkipped: [],
   };
 
+  // CTL-1679 Phase 3: per-ticket skip breadcrumb. A reason-bearing failure that is
+  // skipped (cooldown / escalated-latch) previously emitted ONLY the coarse
+  // recovery.tick roster — the specific reason that keeps getting skipped was not
+  // per-ticket queryable, so a coverage gap (e.g. an unrecognized retry-safe reason
+  // latched to a human) was invisible in Loki. Emit recovery.skipped.<sanitized
+  // reason> so `count by (reason)` over the JSONL log surfaces every gap.
+  // recovery.* is deliberately UNPROTECTED — no namespace registration needed.
+  const emitSkipBreadcrumb = (item) => {
+    const reason =
+      item.evidence?.failureReason ?? item.evidence?.signal?.failureReason ?? null;
+    if (!reason) return; // only reason-bearing skips are queryable gaps
+    emitEvent({
+      type: `recovery.skipped.${sanitizeReasonForEvent(reason)}`,
+      ticket: item.ticket,
+      reason,
+    });
+  };
+
   for (const item of items) {
     // Check cooldown / already-escalated
     if (shouldSkipItem(item.ticket)) {
       log(`recovery-reasoning: ${item.ticket} skipped (cooldown/escalated)`);
       tickStats.ledgerSkipped.push(item.ticket);
+      emitSkipBreadcrumb(item);
       continue;
     }
 
@@ -236,9 +255,15 @@ export function reasoningRecoveryPass(items, opts = {}) {
     }
 
     // PROPOSE: classify per CTL-828
+    // CTL-1679 Phase 3: thread the ticket id + intent-budget reader so the
+    // retry-safe rules can bound their retries against the shared ledger.
     let classification;
     try {
-      classification = classifyTicket(evidence, { log });
+      classification = classifyTicket(evidence, {
+        log,
+        ticket: item.ticket,
+        readIntentAttempts,
+      });
     } catch (err) {
       log(`recovery-reasoning: ${item.ticket} classification error: ${err.message}`);
       tickStats.actions.errors += 1;
@@ -345,6 +370,19 @@ export function reasoningRecoveryPass(items, opts = {}) {
           details,
         });
         actionLog.push("emitted recovery.would-fix");
+        // CTL-1679 Phase 3: a retry-safe redispatch is a bounded RETRY, not an
+        // open-ended fix — emit the recovery.would-retry twin so the shadow-rollout
+        // LogQL can distinguish "would have retried" from other would-fixes.
+        // recovery.* is deliberately UNPROTECTED — no namespace registration needed.
+        if (fix_class === "retry_safe_redispatch" || fix_class === "fence_stale_redispatch") {
+          emitEvent({
+            type: "recovery.would-retry",
+            ticket: item.ticket,
+            fix_class,
+            reason: details?.reason ?? null,
+          });
+          actionLog.push("emitted recovery.would-retry");
+        }
       } else if (decision === "escalate") {
         emitEvent({
           type: "recovery.would-escalate",
@@ -805,11 +843,82 @@ function _prNotMergedReasonText(probe) {
   return `PR #${probe.prNumber} not merged — ${parts.join("; ")}`;
 }
 
+// CTL-1679 Phase 3: the shared bounded-retry budget decision for a retry-safe
+// failure. Consults the recovery-intent ledger (attempts auto-increment; the same
+// RECOVERY_MAX_ATTEMPTS budget the fix/escalate cooldown ledger already uses) so
+// NO retry-safe reason — the deterministic cluster_fence_stale OR a generic
+// unrecognized-but-safe failure — can loop unboundedly:
+//   attempts < MAX → { retry: true }  (redispatch via the fence-stale seam)
+//   attempts ≥ MAX → { retry: false } (escalate with a reason-named coverage-gap
+//                     explanation carrying the attempts history)
+// Pure over the injected reader; readIntentAttempts defaults to the on-disk ledger
+// reader (orchDir from env) but is injectable for hermetic tests.
+export function retrySafeBudgetDecision(ticket, { readIntentAttempts = defaultReadIntentAttempts } = {}) {
+  let attempts = 0;
+  try {
+    attempts = readIntentAttempts(ticket) ?? 0;
+  } catch {
+    attempts = 0; // fail-open: an unreadable ledger means "never retried" → allow
+  }
+  return { retry: attempts < RECOVERY_MAX_ATTEMPTS, attempts };
+}
+
+// CTL-1679 Phase 3: build the reason-named coverage-gap escalation for a
+// retry-safe failure whose retry budget is exhausted. Reuses the buildEscalationPayload
+// tagged-union shape (escalation_type + problem/call_to_action) so the existing
+// escalate path writes it verbatim, and names the reason so the operator inbox
+// renders a real "unrecognized retry-safe failure <reason>" card instead of a bare label.
+export function buildRetrySafeExhaustionExplanation(ticket, reason, attempts) {
+  return {
+    escalation_type: "coverage_gap",
+    problem:
+      `${ticket}: the retry-safe failure "${reason}" exhausted its ${RECOVERY_MAX_ATTEMPTS}-attempt ` +
+      `bounded-retry budget (${attempts} attempts) without resolving — it is an unrecognized ` +
+      `coverage gap (no deterministic seam or bounded-LLM rule matches this reason).`,
+    call_to_action:
+      `Investigate why re-dispatching ${ticket} did not clear "${reason}"; if this reason is ` +
+      `mechanically recoverable, add a classifier rule for it, otherwise resolve the ticket by hand.`,
+    blocked_capability:
+      `automatic recovery of the retry-safe failure "${reason}" — it survived the bounded retry budget`,
+    instructions: [
+      `Read ${ticket}'s worker evidence (claude logs + the failed phase signal)`,
+      `Decide whether "${reason}" needs a new classifier rule or a hand fix`,
+    ],
+    attempts: [{ reason, count: attempts, budget: RECOVERY_MAX_ATTEMPTS }],
+    why_not_auto:
+      `the retry-safe redispatch was attempted ${attempts} time(s) and did not resolve "${reason}", ` +
+      `so further automatic retries would loop without progress`,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+// CTL-1679 Phase 3: sanitize an arbitrary failure reason into a safe event-name
+// suffix for the per-ticket recovery.skipped.<reason> breadcrumb (dots break the
+// phase-event name parser; keep it to a bounded [a-z0-9_-] slug).
+export function sanitizeReasonForEvent(reason) {
+  if (typeof reason !== "string" || reason === "") return "unknown";
+  return reason
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64) || "unknown";
+}
+
 export function defaultClassifyTicket(evidence, opts = {}) {
-  const { log = defaultLogFn, probePrBlock } = opts;
+  const {
+    log = defaultLogFn,
+    probePrBlock,
+    // CTL-1679 Phase 3: the intent-budget reader + the ticket id, threaded from
+    // reasoningRecoveryPass so the retry-safe rules can bound their retries.
+    // Default to the on-disk ledger reader (orchDir from env); a bare classifier
+    // call (no ticket) reads attempts=0 → the retry path stays available.
+    readIntentAttempts = defaultReadIntentAttempts,
+    ticket: optTicket,
+  } = opts;
 
   // Extract evidence fields
   const { logsOutput, jobState, signal, beliefState, failureReason } = evidence;
+  const ticket = optTicket ?? evidence.ticket ?? signal?.ticket ?? null;
 
   // CTL-1496 / CTL-1680: route to the live PR-state probe for any "merge not confirmed" failure.
   // Covers teardown's literal "pr_not_merged" (CTL-1496) AND phase-monitor-deploy's bespoke
@@ -826,6 +935,30 @@ export function defaultClassifyTicket(evidence, opts = {}) {
   // to derive the failed phase for the fence-stale-redispatch seam.
   const deterministic = checkDeterministicErrors(logsOutput, effectiveFailureReason, signal);
   if (deterministic) {
+    // CTL-1679 Phase 3: the cluster_fence_stale deterministic redispatch is
+    // retry-safe but must NOT loop forever on an infinitely-stale fence — gate it
+    // on the shared retry budget. Within budget → fix; exhausted → escalate with a
+    // reason-named coverage-gap explanation. Other deterministic seams (orphan,
+    // workflow-token) are unbounded as before.
+    if (deterministic.fix_class === "fence_stale_redispatch") {
+      const budget = retrySafeBudgetDecision(ticket, { readIntentAttempts });
+      if (!budget.retry) {
+        return {
+          decision: "escalate",
+          fix_class: "human",
+          details: {
+            reason:
+              `cluster_fence_stale: retry budget exhausted (${budget.attempts}/${RECOVERY_MAX_ATTEMPTS}) ` +
+              `— a repeatedly-stale fence needs a human`,
+            explanation: buildRetrySafeExhaustionExplanation(
+              ticket,
+              "cluster_fence_stale",
+              budget.attempts,
+            ),
+          },
+        };
+      }
+    }
     return {
       decision: "fix",
       fix_class: deterministic.fix_class,
@@ -846,6 +979,41 @@ export function defaultClassifyTicket(evidence, opts = {}) {
       details: {
         reason: boundedLlm.reason,
         brief: boundedLlm.brief,
+      },
+    };
+  }
+
+  // CTL-1679 Phase 3: generalized bounded-retry for UNRECOGNIZED-but-retry-safe
+  // failures. Reached only when no Rule-1/Rule-2 handler matched. When the signal
+  // carries retrySafe:true (the fence guard stamps it; any future retry-safe reason
+  // can too), consult the shared budget: within budget → redispatch via the generic
+  // fence-stale-redispatch seam (it is the reason-neutral "reset to pending +
+  // re-dispatch" actuator); exhausted → escalate naming the reason as an
+  // unrecognized coverage gap. An unrecognized UNSAFE failure (no retrySafe) skips
+  // this rule entirely and falls through to Rule 3's immediate escalate (unchanged).
+  if (evidence.retrySafe === true) {
+    const reason = effectiveFailureReason ?? "unrecognized-retry-safe";
+    const phase = signal?.phase;
+    const budget = retrySafeBudgetDecision(ticket, { readIntentAttempts });
+    if (budget.retry) {
+      return {
+        decision: "fix",
+        fix_class: "retry_safe_redispatch",
+        details: {
+          reason: `retry-safe failure "${reason}" (attempt ${budget.attempts + 1}/${RECOVERY_MAX_ATTEMPTS}); re-dispatching`,
+          seam_id: "fence-stale-redispatch",
+          ...(phase !== undefined ? { phase } : {}),
+        },
+      };
+    }
+    return {
+      decision: "escalate",
+      fix_class: "human",
+      details: {
+        reason:
+          `unrecognized retry-safe failure "${reason}": retry budget exhausted ` +
+          `(${budget.attempts}/${RECOVERY_MAX_ATTEMPTS})`,
+        explanation: buildRetrySafeExhaustionExplanation(ticket, reason, budget.attempts),
       },
     };
   }
