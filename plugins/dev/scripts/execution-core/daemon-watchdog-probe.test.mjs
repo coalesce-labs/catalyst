@@ -158,6 +158,70 @@ describe("concurrent-tick safety — restart state advances BEFORE the await", (
   });
 });
 
+describe("stop() cancels an in-flight restart (CTL-1502 Codex P1)", () => {
+  // Stack shutdown stops execution-core BEFORE otel-forward, so an un-cancelled
+  // forward-restart child can finish its stop/start AFTER stop_forward returned
+  // and leave the forwarder running despite the requested shutdown.
+  test("aborts the spawned restart and exposes the settled transaction", async () => {
+    let sawSignal = null;
+    let aborted = false;
+    let release;
+    const gate = new Promise((res) => {
+      release = res;
+    });
+    const probe = startDaemonWatchdogProbe({
+      clock: recordingClock(),
+      config: { mode: "enforce", intervalMs: 120_000, dlqMaxBytes: DLQ_MAX, stalenessMs: 900_000, cooldownMs: 10_000, sustainedTicks: 1, verifyTicks: 2 },
+      targets: [TARGET],
+      readDlqBytes: () => DLQ_MAX, // always stuck
+      readLagStuck: () => false,
+      restart: async (_t, { signal } = {}) => {
+        sawSignal = signal;
+        signal?.addEventListener("abort", () => {
+          aborted = true;
+          release();
+        });
+        await gate;
+      },
+      alert: { raiseAlert: () => {}, clearAlert: () => {}, escalate: () => {} },
+      now: () => 1_000_000,
+      log: { warn: () => {}, info: () => {}, error: () => {} },
+      io: {},
+    });
+
+    const first = probe.tick(); // enters restart, blocks on gate
+    // tick() awaits its probe reads before spawning — drain the microtask queue.
+    await new Promise((res) => setTimeout(res, 0));
+    expect(sawSignal).toBeTruthy();
+    expect(aborted).toBe(false);
+
+    await probe.stop(); // must abort the in-flight child AND be awaitable
+    expect(aborted).toBe(true);
+    await first;
+  });
+
+  test("after stop() a further tick starts no new restart", async () => {
+    let restartCalls = 0;
+    const probe = startDaemonWatchdogProbe({
+      clock: recordingClock(),
+      config: { mode: "enforce", intervalMs: 120_000, dlqMaxBytes: DLQ_MAX, stalenessMs: 900_000, cooldownMs: 0, sustainedTicks: 1, verifyTicks: 2 },
+      targets: [TARGET],
+      readDlqBytes: () => DLQ_MAX,
+      readLagStuck: () => false,
+      restart: async () => {
+        restartCalls += 1;
+      },
+      alert: { raiseAlert: () => {}, clearAlert: () => {}, escalate: () => {} },
+      now: () => 1_000_000,
+      log: { warn: () => {}, info: () => {}, error: () => {} },
+      io: {},
+    });
+    probe.stop();
+    await probe.tick();
+    expect(restartCalls).toBe(0);
+  });
+});
+
 describe("verify window", () => {
   test("predicate clears within verifyTicks → clearAlert once, episode re-arms", async () => {
     const { probe, ctl, alertCalls } = makeProbe({ mode: "enforce", sustainedTicks: 1, verifyTicks: 2, cooldownMs: 0 });

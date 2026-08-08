@@ -62,9 +62,15 @@ async function safeAsync(fn, sentinel) {
 
 // defaultRestart — shell catalyst-monitor.sh <restartArgs> (Phase 1's atomic
 // forward-restart). Rejects on non-zero exit so the caller's try/catch can log it.
-function defaultRestart(target) {
+// `signal` (CTL-1502 Codex P1) lets stop() kill an in-flight forward-restart:
+// stack shutdown stops execution-core BEFORE otel-forward, so an un-cancelled
+// child could finish its stop/start transaction after stop_forward returned and
+// leave the forwarder running despite the requested shutdown.
+function defaultRestart(target, { signal } = {}) {
   return new Promise((resolve, reject) => {
-    execFile(MONITOR_SCRIPT, target.restartArgs ?? [], (err) => (err ? reject(err) : resolve()));
+    execFile(MONITOR_SCRIPT, target.restartArgs ?? [], { signal }, (err) =>
+      err ? reject(err) : resolve(),
+    );
   });
 }
 
@@ -116,6 +122,13 @@ export function startDaemonWatchdogProbe({
   };
   const enforce = mode === "enforce";
   const state = new Map();
+  // CTL-1502 Codex P1: stop() must cancel an in-flight restart, not just future
+  // timer callbacks. `stopping` closes the window between the gates and the
+  // spawn; `restartAbort` kills a child that already spawned; `inFlightRestart`
+  // lets a caller await the settled transaction.
+  let stopping = false;
+  let restartAbort = null;
+  let inFlightRestart = null;
 
   function getState(name) {
     let s = state.get(name);
@@ -128,6 +141,7 @@ export function startDaemonWatchdogProbe({
 
   async function tick() {
     if (mode === "off") return; // defensive — the daemon gates on enabled anyway
+    if (stopping) return; // shutdown requested — start no new work
     for (const t of targets) {
       // A target with an unresolvable path can't be probed — skip it, keep going.
       if (!t?.dlqPath || !t?.checkpointPath) {
@@ -199,12 +213,20 @@ export function startDaemonWatchdogProbe({
       s.restarted = true;
       s.restartedAt = nowMs;
       if (enforce) {
+        // Re-check under the same synchronous run as the spawn: stop() may have
+        // been called while this tick awaited its probe reads above.
+        if (stopping) continue;
         alert.raiseAlert(t, { tripped, sinceMs }, alertIo);
         s.raised = true;
+        restartAbort = new AbortController();
         try {
-          await restart(t);
+          inFlightRestart = restart(t, { signal: restartAbort.signal });
+          await inFlightRestart;
         } catch (err) {
           log.warn?.({ daemon: t.name, err: err?.message }, "daemon-watchdog: restart failed");
+        } finally {
+          inFlightRestart = null;
+          restartAbort = null;
         }
       } else {
         // shadow: advance the state machine + log, but perform NO side effect.
@@ -218,5 +240,18 @@ export function startDaemonWatchdogProbe({
     tick().catch(() => {});
   }, intervalMs);
   if (typeof handle?.unref === "function") handle.unref();
-  return { stop: () => clock.clearInterval(handle), tick };
+  // stop() stays synchronous for stopDaemon's sync shutdown path (it aborts the
+  // child eagerly), but returns the in-flight restart promise so a caller that
+  // wants to await the settled transaction can.
+  function stop() {
+    stopping = true;
+    clock.clearInterval(handle);
+    try {
+      restartAbort?.abort();
+    } catch {
+      /* best-effort — an abort failure must not wedge shutdown */
+    }
+    return inFlightRestart ? inFlightRestart.catch(() => {}) : undefined;
+  }
+  return { stop, tick };
 }

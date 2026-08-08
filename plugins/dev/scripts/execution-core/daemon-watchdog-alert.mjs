@@ -164,7 +164,12 @@ function defaultRunFinding(args) {
 function safeLog(io, level, obj, msg) {
   try {
     const l = io.log ?? defaultLog;
-    (l[level] ?? l.info ?? (() => {}))(obj, msg);
+    // Codex P1: invoke through `.call(l, …)` — pino's level methods rely on the
+    // logger as their `this` receiver, so extracting the function and calling it
+    // bare throws, and the catch below would silently swallow every record on
+    // the one sink (the exec-core pino .log → Alloy → Loki) that is deliberately
+    // independent of the possibly-wedged otel-forward egress.
+    (l[level] ?? l.info ?? (() => {})).call(l, obj, msg);
   } catch {
     /* best-effort */
   }

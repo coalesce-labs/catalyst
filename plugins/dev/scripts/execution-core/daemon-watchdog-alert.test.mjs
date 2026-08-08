@@ -160,6 +160,46 @@ describe("best-effort — never throws", () => {
     }
   });
 
+  // Codex P1 regression: safeLog used to extract the level method and call it
+  // bare, losing the logger receiver. Pino's real level methods depend on
+  // `this`, so the call threw and safeLog's catch silently dropped the record.
+  // The other tests here can't see it — arrow-function spies ignore `this`.
+  test("logs through a receiver-dependent (pino-shaped) logger", () => {
+    const { dir, cleanup } = tmp();
+    try {
+      const seen = [];
+      const logger = {
+        _sink: seen, // only reachable via `this`
+        error(o, m) {
+          this._sink.push(["error", o, m]);
+        },
+        warn(o, m) {
+          this._sink.push(["warn", o, m]);
+        },
+        info(o, m) {
+          this._sink.push(["info", o, m]);
+        },
+      };
+      const io = {
+        log: logger,
+        logPath: join(dir, "recv.jsonl"),
+        markerDir: join(dir, "watchdog"),
+        runFinding() {},
+        now: () => "2026-07-23T12:00:00.000Z",
+      };
+
+      raiseAlert(TARGET, { tripped: ["dlq"], sinceMs: 5000 }, io);
+      clearAlert(TARGET, { sinceMs: 5000 }, io);
+
+      // Pre-fix these were swallowed by safeLog's catch and `seen` stayed empty.
+      expect(seen.map((c) => c[0])).toEqual(["error", "info"]);
+      expect(seen[0][2]).toBe("daemon-watchdog: stuck");
+      expect(seen[1][2]).toBe("daemon-watchdog: cleared");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("a throwing runFinding is swallowed by escalate", () => {
     const { dir, cleanup } = tmp();
     try {

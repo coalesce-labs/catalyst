@@ -684,6 +684,60 @@ cmd_url() {
   echo "http://localhost:$PORT"
 }
 
+# ─── Forwarder mutation lock (CTL-1502 Codex P1) ────────────────────────────
+# forward-start / forward-stop / forward-restart all read-then-write the shared
+# pid file. Without a lock spanning the whole transaction, launchd's periodic
+# `catalyst-stack start`, an operator's `forward-start`, and the daemon
+# watchdog's enforced restart can each pass read_forward_pid and every one of
+# them launch a forwarder: the last writer wins the pid file and the others are
+# left untracked, tailing and re-delivering the same events, and a later
+# forward-stop kills only the recorded pid.
+#
+# `mkdir` is the portable atomic test-and-set (stock macOS ships no flock).
+FORWARD_LOCK_DIR="${CATALYST_DIR}/otel-forward.lock"
+FORWARD_LOCK_HELD=""
+
+# Stale-lock reaper: a holder that died mid-transaction (SIGKILL, panic) would
+# otherwise wedge every future forwarder mutation. The owner pid is recorded
+# inside the lock dir; if that process is gone, the lock is debris — drop it.
+_forward_lock_is_stale() {
+  local owner
+  owner="$(cat "${FORWARD_LOCK_DIR}/owner" 2>/dev/null)" || return 1
+  [[ -n "$owner" ]] || return 0                 # no owner recorded → debris
+  kill -0 "$owner" 2>/dev/null && return 1      # owner alive → genuinely held
+  return 0
+}
+
+release_forward_lock() {
+  [[ -n "$FORWARD_LOCK_HELD" ]] || return 0
+  rm -rf "$FORWARD_LOCK_DIR" 2>/dev/null || true
+  FORWARD_LOCK_HELD=""
+}
+
+# Bounded wait — never blocks a stack start forever. Returns 1 on timeout so the
+# caller can decide; callers here treat that as "someone else is mutating, skip".
+acquire_forward_lock() {
+  local waited=0
+  [[ -n "$FORWARD_LOCK_HELD" ]] && return 0     # reentrant: already ours
+  mkdir -p "$CATALYST_DIR" 2>/dev/null || true
+  while [[ $waited -lt 100 ]]; do               # ~10s at 0.1s per turn
+    if mkdir "$FORWARD_LOCK_DIR" 2>/dev/null; then
+      echo "$$" > "${FORWARD_LOCK_DIR}/owner" 2>/dev/null || true
+      FORWARD_LOCK_HELD=1
+      # Release on any exit path, including the signals launchd/stack send.
+      trap release_forward_lock EXIT INT TERM
+      return 0
+    fi
+    if _forward_lock_is_stale; then
+      rm -rf "$FORWARD_LOCK_DIR" 2>/dev/null || true
+      continue                                  # retry immediately
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
 read_forward_pid() {
   if [[ -f "$FORWARD_PID_FILE" ]]; then
     local pid
@@ -696,7 +750,11 @@ read_forward_pid() {
   return 1
 }
 
-cmd_forward_start() {
+# _forward_start_impl / _forward_stop_impl — lock-free bodies. The public
+# cmd_* wrappers below own the lock so forward-restart can hold ONE lock across
+# the whole stop→start transaction rather than two independent ones (which
+# would leave the gap this P1 is about wide open between them).
+_forward_start_impl() {
   if read_forward_pid >/dev/null; then
     echo "Forwarder already running (pid $(cat "$FORWARD_PID_FILE"))"
     return 0
@@ -708,7 +766,7 @@ cmd_forward_start() {
   echo "Forwarder started (pid $fwd_pid)"
 }
 
-cmd_forward_stop() {
+_forward_stop_impl() {
   local pid
   if ! pid=$(read_forward_pid); then
     echo "Forwarder not running"; return 0
@@ -732,13 +790,46 @@ cmd_forward_status() {
   fi
 }
 
+cmd_forward_start() {
+  if ! acquire_forward_lock; then
+    echo "Forwarder busy (another start/stop/restart in progress) — skipping start"
+    return 0
+  fi
+  _forward_start_impl
+  local rc=$?
+  release_forward_lock
+  return $rc
+}
+
+cmd_forward_stop() {
+  if ! acquire_forward_lock; then
+    echo "Forwarder busy (another start/stop/restart in progress) — skipping stop"
+    return 0
+  fi
+  _forward_stop_impl
+  local rc=$?
+  release_forward_lock
+  return $rc
+}
+
 cmd_forward_restart() {
   # CTL-1502: atomic restart — stop (SIGTERM→SIGKILL→pid-file cleanup) then start.
   # Both halves are already idempotent/no-op-safe, so a restart from any state
   # (running, dead-pid, not-running) converges to "running with a fresh pid".
   # Used by the stuck-but-alive daemon watchdog as its one restart primitive.
-  cmd_forward_stop
-  cmd_forward_start
+  #
+  # Codex P1: ONE lock spans both halves. Holding it across stop→start is what
+  # makes this a transaction — a concurrent `catalyst-stack start` can no longer
+  # observe the momentarily-stopped forwarder and launch a second, untracked one.
+  if ! acquire_forward_lock; then
+    echo "Forwarder busy (another start/stop/restart in progress) — skipping restart"
+    return 0
+  fi
+  _forward_stop_impl
+  _forward_start_impl
+  local rc=$?
+  release_forward_lock
+  return $rc
 }
 
 usage() {
