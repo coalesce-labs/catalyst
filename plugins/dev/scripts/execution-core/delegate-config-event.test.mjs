@@ -248,6 +248,30 @@ describe("readDelegateRunnerConfig (CTL-1331)", () => {
     expect(cfg.intervalMs).toBe(15000);
     expect(cfg.intentTtlMs).toBe(1800000);
   });
+
+  // CAT-39: reapDeadlineMs — how long a spawned runner can go untracked-as-exited
+  // before startDelegateRunnerTimer reaps it (SIGTERM, then SIGKILL after a grace
+  // window), independent of whether the single-instance lock still shows it as live.
+  test("reapDeadlineMs defaults to 600000 (10 minutes)", () => {
+    const cfg = readDelegateRunnerConfig({ ...NO_L2 });
+    expect(cfg.reapDeadlineMs).toBe(600000);
+  });
+
+  test("CATALYST_DELEGATE_RUNNER_REAP_DEADLINE_MS overrides the reap deadline", () => {
+    const cfg = readDelegateRunnerConfig({
+      ...NO_L2,
+      CATALYST_DELEGATE_RUNNER_REAP_DEADLINE_MS: "120000",
+    });
+    expect(cfg.reapDeadlineMs).toBe(120000);
+  });
+
+  test("a non-numeric reap-deadline override falls back to the default", () => {
+    const cfg = readDelegateRunnerConfig({
+      ...NO_L2,
+      CATALYST_DELEGATE_RUNNER_REAP_DEADLINE_MS: "soon",
+    });
+    expect(cfg.reapDeadlineMs).toBe(600000);
+  });
 });
 
 // ---------------------------------------------------------------------------

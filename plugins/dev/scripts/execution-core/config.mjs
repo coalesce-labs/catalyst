@@ -2073,6 +2073,15 @@ export function readDelegateRunnerConfig(env = process.env) {
     mode,
     intervalMs: readPositiveIntEnv(env.CATALYST_DELEGATE_RUNNER_INTERVAL_MS, 15000),
     intentTtlMs: readPositiveIntEnv(env.CATALYST_DELEGATE_INTENT_TTL_MS, 1800000),
+    // CAT-39: the detached drainer this timer spawns runs entirely off the
+    // daemon's event loop (by design — see delegate-runner.mjs's header), so a
+    // hang inside it (confirmed in production: a blocking spawnSync call that
+    // never returns) is invisible to every board-health invariant and can spin
+    // a core for days. 10 minutes is generous headroom above a normal drain
+    // (worktree provision + a `claude --bg` launch call, which returns in
+    // seconds — it does not wait for the launched worker) while catching a
+    // real hang in tens of ticks rather than the observed 8h17m/1d8h22m.
+    reapDeadlineMs: readPositiveIntEnv(env.CATALYST_DELEGATE_RUNNER_REAP_DEADLINE_MS, 600000),
   };
 }
 
