@@ -20,45 +20,90 @@ import {
   mkdirSync,
   existsSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getRegistryPath, log } from "./config.mjs";
+
+const defaultReadLayer1 = (path) => readFileSync(path, "utf8");
+
+// Compare the registry's team with the team declared by the checkout's Layer-1
+// config. Unknown is deliberately distinct from mismatch: an absent, unreadable,
+// or malformed config is not evidence that the registry points at another team.
+// Total by design because this runs on the daemon's registry hot path.
+export function teamIdentityOf(entry, readLayer1 = defaultReadLayer1) {
+  const unknown = { declared: null, matches: null };
+  try {
+    const raw = readLayer1(join(entry.repoRoot, ".catalyst", "config.json"));
+    const parsed = JSON.parse(raw);
+    const declared = (parsed?.catalyst ?? parsed)?.linear?.teamKey;
+    if (typeof declared !== "string" || declared.trim() === "") return unknown;
+    const normalize = (value) => String(value).trim().toUpperCase();
+    return {
+      declared: declared.trim(),
+      matches: normalize(declared) === normalize(entry.team),
+    };
+  } catch {
+    return unknown;
+  }
+}
 
 // listProjects() — every well-formed entry in the registry. Missing file → [].
 // Malformed JSON → log.warn + []. An entry missing `team` or `repoRoot` is
 // skipped (it cannot be addressed or dispatched), mirroring enrollment.mjs's
 // listEnrolledProjects() defensiveness.
-export function listProjects() {
+export function listProjects(deps = {}) {
+  const {
+    readRegistry = () => readFileSync(getRegistryPath(), "utf8"),
+    exists = existsSync,
+    readLayer1 = defaultReadLayer1,
+    warn = log.warn,
+  } = deps;
   const file = getRegistryPath();
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync(file, "utf8"));
+    parsed = JSON.parse(readRegistry());
   } catch (err) {
     // ENOENT — registry not created yet — is the common, non-error case.
     if (err?.code === "ENOENT") return [];
-    log.warn({ file, err: err.message }, "skipping malformed execution-core registry");
+    warn({ file, err: err.message }, "skipping malformed execution-core registry");
     return [];
   }
   const entries = Array.isArray(parsed?.projects) ? parsed.projects : [];
   const projects = [];
   for (const entry of entries) {
     if (!entry?.team || !entry?.repoRoot) {
-      log.warn({ file }, "skipping registry entry missing team or repoRoot");
+      warn({ file }, "skipping registry entry missing team or repoRoot");
       continue;
     }
-    if (!existsSync(entry.repoRoot)) {
+    let identity = { declared: null, matches: null };
+    if (!exists(entry.repoRoot)) {
       // CTL-854: a copied/stale registry can carry a repoRoot absent on this host.
       // Keep the entry (behavior unchanged) but flag the misconfiguration so it is
       // visible instead of failing silently at dispatch time.
-      log.warn(
+      warn(
         { file, team: entry.team, repoRoot: entry.repoRoot },
         "registry entry repoRoot does not exist on this host",
       );
+    } else {
+      identity = teamIdentityOf(entry, readLayer1);
+      if (identity.matches === false) {
+        warn(
+          {
+            file,
+            team: entry.team,
+            declaredTeam: identity.declared,
+            repoRoot: entry.repoRoot,
+          },
+          "registry entry repoRoot declares a different Linear team — worktrees cut from it " +
+            "inherit the wrong teamId/ticketPrefix/pushRemote (CAT-52)",
+        );
+      }
     }
     projects.push({
       team: entry.team,
       repoRoot: entry.repoRoot,
       eligibleQuery: entry.eligibleQuery ?? null,
+      identity,
     });
   }
   return projects;
