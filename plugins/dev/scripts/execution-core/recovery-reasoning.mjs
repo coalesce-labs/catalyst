@@ -507,6 +507,20 @@ export const PR_NOT_MERGED_REASON = "pr_not_merged";
 // Recognize them so the same live PR-state probe runs, instead of falling through to defer/escalate.
 export const MONITOR_DEPLOY_EMPTY_SHA_PREFIX =
   "phase-monitor-merge.json has empty .pr.mergeCommitSha";
+// CTL-1680 (Codex #3079 round-3 P1): pull the PR number out of a failure reason that
+// names one. phase-monitor-deploy emits `… gh REST fallback also returned empty for
+// pr#<N>`; the tolerant pattern also accepts `PR #<N>` / `pr #<N>` so a future reason
+// phrased that way is picked up too. Returns a positive integer or undefined — never
+// throws, and never guesses from a bare number (an unprefixed digit run in prose is
+// far more likely a SHA fragment, count, or timestamp than a PR id).
+export function parsePrNumberFromReason(reason) {
+  if (typeof reason !== "string") return undefined;
+  const m = /\bpr\s*#(\d+)\b/i.exec(reason);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
 export function isPrMergeUnconfirmedReason(reason) {
   return (
     reason === PR_NOT_MERGED_REASON ||
@@ -534,9 +548,18 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
   const repo = evidence.repo ?? evidence.signal?.repo ?? undefined;
   const worktreePath =
     evidence.worktreePath ?? evidence.signal?.worktreePath ?? undefined;
+  // CTL-1680 (Codex #3079 round-3 P1): phase-monitor-deploy's empty-SHA guard names
+  // the PR in its own reason string (`… returned empty for pr#<N>`). Thread that
+  // number to the probe so it resolves THAT PR exactly. Without it, a ticket with no
+  // head branch and several non-open historical PRs fell back to a title search that
+  // collapses every match to one — and the MERGED branch below would then recover a
+  // DIFFERENT PR's merge SHA and resume deployment on the wrong commit.
+  const prNumber = parsePrNumberFromReason(
+    evidence.failureReason ?? evidence.signal?.failureReason,
+  );
   let probe;
   try {
-    probe = probePrBlock(ticket, { branch, repo, worktreePath });
+    probe = probePrBlock(ticket, { branch, repo, worktreePath, prNumber });
   } catch (e) {
     log?.(`pr-block probe failed: ${e.message}`);
     return {

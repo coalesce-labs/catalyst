@@ -196,7 +196,20 @@ GH_OWNER="${REPO%/*}"; GH_NAME="${REPO#*/}"
 # exceed the window at promotion time, merging with zero window. Take the LATER of
 # pushedDate and the most recent READY_FOR_REVIEW_EVENT timelineItem (a PR never
 # drafted has no such event, so pushedDate wins unchanged).
-HEAD_EXPOSED_AT="$(gh api graphql -f query='
+# CTL-1680 (Codex #3079 round-3 P1): a TRANSIENT failure of this lookup must not be
+# treated as "no ready-for-review event". The old form swallowed every error with
+# `|| true`, so a network/API blip produced an empty result, fell through to the REST
+# committer date (which for a long-drafted PR is far older than its promotion), made
+# HEAD_AGE_SEC already exceed the window, and merged with ZERO reviewer wait — the
+# exact hole the window exists to close. Retry, then distinguish the two outcomes:
+#   * query SUCCEEDED but returned nothing  → genuinely no timestamp; the REST
+#     committer-date fallback below is correct.
+#   * query FAILED every attempt            → exposure time is UNKNOWN; fail SAFE by
+#     treating HEAD as freshly exposed (age 0) so the FULL window is waited out.
+HEAD_EXPOSED_AT=""
+HEAD_EXPOSED_LOOKUP_OK=false
+for _attempt in 1 2 3; do
+  if HEAD_EXPOSED_AT="$(gh api graphql -f query='
   query($owner:String!,$name:String!,$pr:Int!){
     repository(owner:$owner,name:$name){ pullRequest(number:$pr){
       commits(last:1){ nodes { commit { oid pushedDate committedDate } } }
@@ -206,8 +219,18 @@ HEAD_EXPOSED_AT="$(gh api graphql -f query='
     | (($pr.commits.nodes[0].commit | (.pushedDate // .committedDate)) // "") as $pushed
     | (($pr.timelineItems.nodes[0].createdAt) // "") as $ready
     | (if ($ready != "" and $ready > $pushed) then $ready else $pushed end)
-    | select(. != "")' 2>/dev/null || true)"
-[[ -n "$HEAD_EXPOSED_AT" ]] || HEAD_EXPOSED_AT="$(gh api "repos/${REPO}/commits/${REVIEWED_HEAD}" --jq '.commit.committer.date' 2>/dev/null || true)"
+    | select(. != "")' 2>/dev/null)"; then
+    HEAD_EXPOSED_LOOKUP_OK=true
+    break
+  fi
+  HEAD_EXPOSED_AT=""
+  [[ "$_attempt" -lt 3 ]] && sleep $(( _attempt * 5 ))
+done
+# Only fall back to the REST committer date when the lookup actually SUCCEEDED and
+# simply had no timestamp to give (never to paper over a failed lookup).
+if [[ "$HEAD_EXPOSED_LOOKUP_OK" == true && -z "$HEAD_EXPOSED_AT" ]]; then
+  HEAD_EXPOSED_AT="$(gh api "repos/${REPO}/commits/${REVIEWED_HEAD}" --jq '.commit.committer.date' 2>/dev/null || true)"
+fi
 # CTL-1680 (Codex #3079 P1 portability): HEAD age via jq `fromdateiso8601`, NOT the
 # BSD/macOS-only `date -j` timestamp parser. On a Linux worker the BSD form fails,
 # falls to `echo 0`, HEAD_AGE_SEC becomes ~the current epoch, the window check is
@@ -217,6 +240,11 @@ HEAD_EXPOSED_AT="$(gh api graphql -f query='
 HEAD_AGE_SEC=""
 if [[ -n "$HEAD_EXPOSED_AT" ]]; then
   HEAD_AGE_SEC="$(jq -n --arg a "$HEAD_EXPOSED_AT" '(now - ($a|fromdateiso8601)) | floor' 2>/dev/null || echo "")"
+elif [[ "$HEAD_EXPOSED_LOOKUP_OK" != true ]]; then
+  # Exposure time unknown after retries → assume the head was JUST exposed so the
+  # reviewer-arrival wait below runs its full length. An empty HEAD_AGE_SEC would
+  # skip that block entirely and merge unreviewed, so 0 (not "") is the safe value.
+  HEAD_AGE_SEC=0
 fi
 # Automated-reviewer CLEAN-PASS present ON THIS HEAD? (Codex #3079 P1) Every check is
 # scoped to REVIEWED_HEAD — a PR-wide match would let a STALE-head verdict (from

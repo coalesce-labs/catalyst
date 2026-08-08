@@ -2908,3 +2908,81 @@ describe("CTL-1680: monitor-deploy empty-SHA routes to PR-state probe", () => {
     expect(b.toLowerCase()).toContain("do not re-merge");
   });
 });
+
+// CTL-1680 (Codex #3079 round-3 P1): the empty-SHA failure reason names the PR
+// (`… returned empty for pr#<N>`). Parse it and thread it to the probe so recovery
+// acts on THAT PR — not whichever historical PR a title search happens to return.
+describe("parsePrNumberFromReason + probe threading", () => {
+  test("extracts the number from phase-monitor-deploy's real reason string", async () => {
+    const { parsePrNumberFromReason } = await import("./recovery-reasoning.mjs");
+    expect(
+      parsePrNumberFromReason(
+        "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#290",
+      ),
+    ).toBe(290);
+  });
+
+  test("tolerates the spaced/uppercase spellings", async () => {
+    const { parsePrNumberFromReason } = await import("./recovery-reasoning.mjs");
+    expect(parsePrNumberFromReason("blocked on PR #42")).toBe(42);
+    expect(parsePrNumberFromReason("blocked on pr # 42")).toBe(undefined);
+    expect(parsePrNumberFromReason("blocked on pr #42 today")).toBe(42);
+  });
+
+  test("never guesses from a bare number or a non-string", async () => {
+    const { parsePrNumberFromReason } = await import("./recovery-reasoning.mjs");
+    // An unprefixed digit run is far more likely a SHA fragment/count/timestamp.
+    expect(parsePrNumberFromReason("empty .pr.mergeCommitSha after 290 seconds")).toBe(undefined);
+    expect(parsePrNumberFromReason("pr_not_merged")).toBe(undefined);
+    expect(parsePrNumberFromReason(undefined)).toBe(undefined);
+    expect(parsePrNumberFromReason(null)).toBe(undefined);
+    expect(parsePrNumberFromReason(290)).toBe(undefined);
+  });
+
+  test("classifyPrNotMerged threads the parsed number into the probe", async () => {
+    const { classifyPrNotMerged } = await import("./recovery-reasoning.mjs");
+    let seen;
+    const probePrBlock = (_ticket, opts) => {
+      seen = opts;
+      return {
+        prNumber: 290,
+        state: "MERGED",
+        mergeCommitSha: "deadbeefcafe",
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      };
+    };
+    const out = classifyPrNotMerged(
+      {
+        ticket: "CTL-9",
+        failureReason:
+          "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#290",
+      },
+      { probePrBlock },
+    );
+    expect(seen.prNumber).toBe(290);
+    expect(out.decision).toBe("fix");
+  });
+
+  test("a reason naming no PR threads undefined (search path preserved)", async () => {
+    const { classifyPrNotMerged } = await import("./recovery-reasoning.mjs");
+    let seen;
+    const probePrBlock = (_ticket, opts) => {
+      seen = opts;
+      return {
+        prNumber: null,
+        state: null,
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      };
+    };
+    classifyPrNotMerged({ ticket: "CTL-9", failureReason: "pr_not_merged" }, { probePrBlock });
+    expect(seen.prNumber).toBe(undefined);
+  });
+});

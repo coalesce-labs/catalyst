@@ -133,9 +133,26 @@ const PR_VIEW_FIELDS =
 // daemon's cwd points at (CTL-1496 P1: without `-R`/cwd it resolved the daemon
 // repo → false "no open PR" escalation or an unrelated same-ticket PR).
 // Returns the parsed PR object or null.
-function resolveTicketPr(gh, ticket, branch, owner, name) {
-  const selector = branch ? ["--head", branch] : ["--search", `${ticket} in:title`];
+function resolveTicketPr(gh, ticket, branch, owner, name, prNumber) {
   const repoArgs = owner && name ? ["-R", `${owner}/${name}`] : [];
+
+  // CTL-1680 (Codex #3079 round-3 P1): when the FAILURE REASON itself names the PR
+  // (phase-monitor-deploy's empty-SHA guard emits `… returned empty for pr#<N>`),
+  // that number is the most precise identifier available — strictly better than any
+  // search. Resolve it EXACTLY and stop. Without this, a ticket with no branch and
+  // several non-open historical PRs fell through to the title search, which collapses
+  // every historical match to `--limit 1` and can select a DIFFERENT PR; the MERGED
+  // branch of the classifier would then recover that other PR's merge SHA and resume
+  // deployment on the wrong commit. A number that resolves to nothing (wrong repo,
+  // deleted PR) falls through to the existing search rather than failing the probe.
+  if (Number.isInteger(prNumber) && prNumber > 0) {
+    const exact = safeJson(
+      gh(["pr", "view", String(prNumber), ...repoArgs, "--json", PR_VIEW_FIELDS]),
+    );
+    if (exact && exact.number) return exact;
+  }
+
+  const selector = branch ? ["--head", branch] : ["--search", `${ticket} in:title`];
   const baseArgs = [
     "pr",
     "list",
@@ -210,7 +227,10 @@ function fetchAllReviewThreads(gh, owner, name, prNumber) {
   );
 }
 
-export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch, worktreePath } = {}) {
+export function defaultProbePrBlock(
+  ticket,
+  { gh = realGh, repo, branch, worktreePath, prNumber } = {},
+) {
   // Resolve owner/name: prefer an explicitly-threaded `repo`, else `gh repo
   // view` run IN THE TICKET'S WORKTREE (cwd) so it reports the ticket's repo,
   // not the daemon's checkout. Falls back to the daemon cwd only when neither is
@@ -229,7 +249,7 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch, worktre
   // Resolve the ticket's PR by head branch (when threaded) or ticket-in-title
   // search — independent of the daemon's cwd/current branch, scoped to the
   // resolved owner/name.
-  const view = resolveTicketPr(gh, ticket, branch, owner, name);
+  const view = resolveTicketPr(gh, ticket, branch, owner, name, prNumber);
   if (!view || !view.number) return emptyProbe();
 
   const rollup = view.statusCheckRollup || [];
