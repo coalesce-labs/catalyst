@@ -10,7 +10,7 @@
 // markOom, resolveMeta) so tick() is fully unit-testable with no real I/O.
 
 import { execFileSync } from "node:child_process";
-import { freemem } from "node:os";
+import { availableMemMb } from "./host-memory.mjs";
 import { getAgentsCached } from "./claude-agents.mjs";
 import { claudeStop } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
@@ -40,16 +40,14 @@ function defaultPsLines() {
   }
 }
 
-// defaultHostFreeMb — os.freemem() is a plain syscall wrapper (no subprocess),
-// portable across the fleet's hosts. Returns null on any failure so a bad read
-// degrades to "headroom unknown" (classifyMemPressure then falls back to the
-// absolute killThresholdMb backstop only — never crashes the tick).
+// defaultHostFreeMb — actually-available host memory (see host-memory.mjs:
+// raw os.freemem() excludes macOS's reclaimable inactive/purgeable pages,
+// which chronically misreads a healthy host as near-OOM). Returns null on
+// any failure so a bad read degrades to "headroom unknown" (classifyMemPressure
+// then falls back to the absolute killThresholdMb backstop only — never
+// crashes the tick).
 function defaultHostFreeMb() {
-  try {
-    return Math.round(freemem() / 1024 / 1024);
-  } catch {
-    return null;
-  }
+  return availableMemMb();
 }
 
 function defaultResolveMeta(agent) {
