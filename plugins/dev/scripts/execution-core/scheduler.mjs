@@ -8052,23 +8052,35 @@ export function schedulerTick(
 
   const didWork =
     dispatched.length > 0 || advanced.length > 0 || promotedCount > 0 || resumedCount > 0;
-  const hasWaitingWork = eligible.length > 0 || triagedWaitingCount > 0;
+  // `ready`, NOT `eligible`: `ready` is `eligible` minus dependency-blocked
+  // tickets and minus tickets this host does not own (HRW). Deriving the signal
+  // from `eligible` would warn forever on two HEALTHY steady states — a board
+  // whose every eligible ticket is blocked by an open dependency, and a cluster
+  // node whose peers own all the currently-eligible slices — since `didWork`
+  // stays false and the streak never resets. Held-untriaged candidates are still
+  // in `ready`, so the intended wedge signal is preserved.
+  const hasWaitingWork = ready.length > 0 || triagedWaitingCount > 0;
   const starvation = nextStarvationState(starvationStreak, {
-    didWork, freeSlots, hasWaitingWork, livenessFresh, draining,
+    didWork,
+    freeSlots,
+    hasWaitingWork,
+    livenessFresh,
+    draining,
   });
   starvationStreak = starvation.streak;
   if (starvation.warn) {
-      log.warn(
-        {
-          ticks: starvationStreak,
-          reason: starvation.reason,
-          free_slots: freeSlots,
-          eligible_count: eligible.length,
-          triaged_waiting: triagedWaitingCount,
-          held: heldReasons,
-        },
-        "scheduler: board appears frozen — queued work cannot make progress (CAT-36)"
-      );
+    log.warn(
+      {
+        ticks: starvationStreak,
+        reason: starvation.reason,
+        free_slots: freeSlots,
+        eligible_count: eligible.length,
+        ready_count: ready.length,
+        triaged_waiting: triagedWaitingCount,
+        held: heldReasons,
+      },
+      "scheduler: board appears frozen — queued work cannot make progress (CAT-36)"
+    );
   }
 
   // CTL-1330 Tier 1: one structured line per tick. total_ms IS the synchronous
