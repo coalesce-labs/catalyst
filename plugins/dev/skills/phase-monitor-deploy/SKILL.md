@@ -133,7 +133,7 @@ if [[ -z "$MERGE_SHA" ]]; then
   REPO="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")"
   if [[ -z "$REPO" ]]; then
     "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
-      --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh repo view returned empty"
+      --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh repo view returned empty for pr#${PR_NUMBER}"
     exit 1
   fi
   MERGE_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty' 2>/dev/null || echo "")"
