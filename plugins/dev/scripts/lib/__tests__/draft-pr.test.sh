@@ -1374,6 +1374,62 @@ new_fixture safety-blast-offset
 assert_eq "0" "$(cat "${SCRATCH}/safety-blast-offset.exit" 2>/dev/null)" "11c: offsetting insertion does not trip the gate"
 assert_eq "$(cat "${SCRATCH}/safety-blast-offset.local")" "$(cat "${SCRATCH}/safety-blast-offset.remote")" "11c: origin/feature advanced to HEAD (push succeeded)"
 
+# ─── Suite 12: _draft_pr_push_remote — fork-aware push routing (CAT-2026-08-08) ─
+# A repo where "origin" is a third-party upstream the daemon's identity only
+# has pull rights on (e.g. coalesce-labs/catalyst) needs pushes routed to a
+# writable fork remote via .catalyst/config.json's catalyst.pr.pushRemote.
+echo ""
+echo "Suite 12: _draft_pr_push_remote — fork-aware push routing"
+
+# 12a: no config file at all → default "origin" (existing behavior unchanged)
+echo "12a: no .catalyst/config.json → defaults to origin"
+new_fixture push-remote-default
+(
+  cd "$WORK"
+  source "$DRAFT_PR_LIB"
+  _draft_pr_push_remote > "${SCRATCH}/12a.out"
+)
+assert_eq "origin" "$(cat "${SCRATCH}/12a.out")" "12a: defaults to origin with no config"
+
+# 12b: catalyst.pr.pushRemote:"fork" configured AND a fork remote exists →
+#      resolves to "fork", and draft_pr_push_verify actually lands the push on
+#      the fork bare repo, leaving origin untouched.
+echo "12b: pushRemote:fork configured + fork remote exists → pushes to fork, not origin"
+new_fixture push-remote-fork
+FORK_BARE="${SCRATCH}/push-remote-fork/fork.git"
+git init --quiet --bare -b main "${FORK_BARE}"
+(
+  cd "$WORK"
+  git remote add fork "${FORK_BARE}"
+  mkdir -p .catalyst
+  printf '{"catalyst":{"pr":{"pushRemote":"fork"}}}' > .catalyst/config.json
+  source "$DRAFT_PR_LIB"
+  _draft_pr_push_remote > "${SCRATCH}/12b-remote.out"
+  set +e
+  draft_pr_push_verify >/dev/null 2>&1
+  set -e
+  git rev-parse HEAD > "${SCRATCH}/12b.local"
+)
+assert_eq "fork" "$(cat "${SCRATCH}/12b-remote.out")" "12b: _draft_pr_push_remote resolves to fork"
+FORK_FEATURE_SHA="$(git --git-dir="${FORK_BARE}" rev-parse --verify --quiet feature 2>/dev/null || echo '<none>')"
+ORIGIN_FEATURE_SHA="$(git --git-dir="${ORIGIN}" rev-parse --verify --quiet feature 2>/dev/null || echo '<none>')"
+assert_eq "$(cat "${SCRATCH}/12b.local")" "$FORK_FEATURE_SHA" "12b: push landed on the fork bare repo"
+assert_eq "<none>" "$ORIGIN_FEATURE_SHA" "12b: origin was never pushed to"
+
+# 12c: pushRemote:"fork" configured but no such remote exists in this checkout
+#      → fail-open back to "origin" rather than erroring (matches every other
+#      helper in this file's fail-open convention for a missing/bad config).
+echo "12c: pushRemote:fork configured but remote doesn't exist → fails open to origin"
+new_fixture push-remote-missing
+(
+  cd "$WORK"
+  mkdir -p .catalyst
+  printf '{"catalyst":{"pr":{"pushRemote":"fork"}}}' > .catalyst/config.json
+  source "$DRAFT_PR_LIB"
+  _draft_pr_push_remote > "${SCRATCH}/12c.out"
+)
+assert_eq "origin" "$(cat "${SCRATCH}/12c.out")" "12c: falls open to origin when the configured remote is absent"
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"

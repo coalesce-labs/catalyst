@@ -4,8 +4,8 @@
 # POSIX/zsh-safe: no ${VAR,,}, no shopt, no ${BASH_SOURCE[0]} at top-level.
 #
 # Exported functions:
-#   draft_pr_push                 — push current branch to origin (idempotent, fail-open)
-#   draft_pr_push_verify          — push + prove origin==HEAD; fail-closed; rc=3 when
+#   draft_pr_push                 — push current branch to the push remote (idempotent, fail-open)
+#   draft_pr_push_verify          — push + prove push-remote==HEAD; fail-closed; rc=3 when
 #                                   the push is rejected for missing 'workflow' OAuth scope
 #                                   and no CATALYST_WORKFLOW_GITHUB_TOKEN is configured
 #   draft_pr_push_token TOKEN ... — push using an explicit PAT, bypassing GITHUB_TOKEN
@@ -14,6 +14,15 @@
 #   draft_pr_ensure BASE TICKET   — ensure a draft PR exists; echoes NUM<TAB>URL<TAB>ISDRAFT
 #   draft_pr_promote              — promote current branch's PR from draft to ready
 #   draft_pr_enabled              — read .catalyst/config.json knob (default true)
+#
+# Push target vs. diff base: every push site in this file pushes to the
+# CONFIGURED PUSH REMOTE (see _draft_pr_push_remote — defaults to "origin",
+# overridable via .catalyst/config.json's catalyst.pr.pushRemote for repos
+# where "origin" is a third-party upstream the daemon's identity can only
+# read). Diff/comparison sites (_draft_pr_pending_range, draft_pr_ensure's
+# commit range, draft_pr_diff_touches_workflows) intentionally keep comparing
+# against "origin" regardless — that's the authoritative default branch to
+# diff against either way, independent of where the branch gets pushed.
 #
 # Reserved return codes:
 #   3 — draft_pr_push_verify: push rejected for missing 'workflow' OAuth scope and no
@@ -190,7 +199,33 @@ _draft_pr_default_base() {
   printf 'main\n'
 }
 
-# draft_pr_push — idempotent push of current branch to origin. Fail-open.
+# _draft_pr_push_remote — resolve which git remote pushes go to. Reads
+# .catalyst/config.json's catalyst.pr.pushRemote (same read pattern as
+# draft_pr_enabled below); defaults to "origin" when unset, unparseable, or
+# the configured remote doesn't actually exist in this checkout.
+#
+# Exists because a repo where the daemon's own git identity has read-only
+# ("pull") access to "origin" (a third-party upstream it doesn't own, e.g.
+# coalesce-labs/catalyst) needs every push routed to a writable fork remote
+# instead. Before this, draft_pr_push/draft_pr_push_verify hardcoded "origin"
+# unconditionally, so the automated pr phase 403'd on every single attempt in
+# any repo shaped that way (confirmed 2026-08-08, CAT team's registry
+# repoRoot: git push -u origin HEAD → "has pull permission but no push
+# permission on coalesce-labs/catalyst"). "origin" stays correct everywhere
+# else in this file (diff/comparison base) — only the push target changes.
+_draft_pr_push_remote() {
+  local config_path="${CATALYST_CONFIG_PATH:-.catalyst/config.json}"
+  local remote="origin"
+  if [[ -f "$config_path" ]] && command -v jq >/dev/null 2>&1; then
+    local configured
+    configured="$(jq -r '.catalyst.pr.pushRemote // empty' "$config_path" 2>/dev/null || true)"
+    [[ -n "$configured" ]] && remote="$configured"
+  fi
+  git remote get-url "$remote" >/dev/null 2>&1 || remote="origin"
+  printf '%s\n' "$remote"
+}
+
+# draft_pr_push — idempotent push of current branch to the push remote. Fail-open.
 # CTL-693: suppress local pre-push hooks (trunk trufflehog/fmt/tests) on the
 # automated phase-agent push path — CI on origin/main already runs those gates.
 # Per-invocation `-c core.hooksPath=/dev/null` only; never mutates persistent
@@ -199,8 +234,9 @@ _draft_pr_default_base() {
 draft_pr_push() {
   command -v git >/dev/null 2>&1 || { _draft_pr_warn "git unavailable"; return 1; }
   _draft_pr_safety_gate || return "$_DRAFT_PR_SAFETY_GATE_RC"
-  local errf
+  local errf remote
   errf="$(mktemp -t draft-pr-push-XXXXXX 2>/dev/null || echo "/tmp/draft-pr-push-$$")"
+  remote="$(_draft_pr_push_remote)"
   if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
     if ! git -c core.hooksPath=/dev/null push 2>"$errf"; then
       if _draft_pr_is_workflow_scope_error "$errf"; then
@@ -211,7 +247,7 @@ draft_pr_push() {
       rm -f "$errf"; return 1
     fi
   else
-    if ! git -c core.hooksPath=/dev/null push -u origin HEAD 2>"$errf"; then
+    if ! git -c core.hooksPath=/dev/null push -u "$remote" HEAD 2>"$errf"; then
       if _draft_pr_is_workflow_scope_error "$errf"; then
         _draft_pr_warn "git push -u failed: missing 'workflow' OAuth scope (continuing)"
       else
@@ -339,11 +375,12 @@ draft_pr_promote() {
 draft_pr_push_verify() {
   command -v git >/dev/null 2>&1 || { _draft_pr_warn "git unavailable"; return 1; }
   _draft_pr_safety_gate || return "$_DRAFT_PR_SAFETY_GATE_RC"
-  local branch local_sha remote_sha errf
+  local branch local_sha remote_sha errf remote
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   [[ -z "$branch" || "$branch" == "HEAD" ]] && { _draft_pr_warn "detached HEAD; cannot push-verify"; return 1; }
   local_sha="$(git rev-parse HEAD 2>/dev/null || true)"
   [[ -z "$local_sha" ]] && { _draft_pr_warn "cannot resolve local HEAD"; return 1; }
+  remote="$(_draft_pr_push_remote)"
 
   errf="$(mktemp -t draft-pr-push-XXXXXX 2>/dev/null || echo "/tmp/draft-pr-push-verify-$$")"
 
@@ -352,14 +389,14 @@ draft_pr_push_verify() {
   # scoped credential instead of attempting the plain push that will be rejected.
   if [[ -n "${CATALYST_WORKFLOW_GITHUB_TOKEN:-}" ]] && draft_pr_diff_touches_workflows; then
     _draft_pr_warn "workflow files + CATALYST_WORKFLOW_GITHUB_TOKEN set — routing through scoped token proactively"
-    if draft_pr_push_token "$CATALYST_WORKFLOW_GITHUB_TOKEN" -u origin HEAD >/dev/null 2>&1; then
+    if draft_pr_push_token "$CATALYST_WORKFLOW_GITHUB_TOKEN" -u "$remote" HEAD >/dev/null 2>&1; then
       rm -f "$errf"
-      git fetch --quiet origin "$branch" 2>/dev/null || true
-      remote_sha="$(git rev-parse "origin/${branch}" 2>/dev/null || true)"
+      git fetch --quiet "$remote" "$branch" 2>/dev/null || true
+      remote_sha="$(git rev-parse "${remote}/${branch}" 2>/dev/null || true)"
       if [[ -n "$remote_sha" && "$remote_sha" == "$local_sha" ]]; then
         printf '%s\n' "$local_sha"; return 0
       fi
-      _draft_pr_warn "post-push verify mismatch (proactive route): local=${local_sha} origin/${branch}=${remote_sha:-<none>}"
+      _draft_pr_warn "post-push verify mismatch (proactive route): local=${local_sha} ${remote}/${branch}=${remote_sha:-<none>}"
       return 1
     fi
     _draft_pr_warn "proactive scoped-token push failed"
@@ -367,7 +404,7 @@ draft_pr_push_verify() {
     return "$_DRAFT_PR_WORKFLOW_SCOPE_RC"
   fi
 
-  if ! git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>"$errf"; then
+  if ! git -c core.hooksPath=/dev/null push -u "$remote" HEAD >/dev/null 2>"$errf"; then
     if _draft_pr_is_workflow_scope_error "$errf"; then
       _draft_pr_warn "push rejected: missing 'workflow' OAuth scope"
       rm -f "$errf"
@@ -376,7 +413,7 @@ draft_pr_push_verify() {
         _draft_pr_warn "retrying push with CATALYST_WORKFLOW_GITHUB_TOKEN"
         local tok_errf
         tok_errf="$(mktemp -t draft-pr-tok-XXXXXX 2>/dev/null || echo "/tmp/draft-pr-tok-$$")"
-        if draft_pr_push_token "$CATALYST_WORKFLOW_GITHUB_TOKEN" -u origin HEAD >/dev/null 2>"$tok_errf"; then
+        if draft_pr_push_token "$CATALYST_WORKFLOW_GITHUB_TOKEN" -u "$remote" HEAD >/dev/null 2>"$tok_errf"; then
           rm -f "$tok_errf"
         else
           _draft_pr_warn "token-routed push also failed"
@@ -388,7 +425,7 @@ draft_pr_push_verify() {
       fi
     else
       _draft_pr_warn "fast-forward push failed; retrying with --force-with-lease"
-      if ! git -c core.hooksPath=/dev/null push --force-with-lease -u origin HEAD >/dev/null 2>"$errf"; then
+      if ! git -c core.hooksPath=/dev/null push --force-with-lease -u "$remote" HEAD >/dev/null 2>"$errf"; then
         if _draft_pr_is_workflow_scope_error "$errf"; then
           _draft_pr_warn "force-with-lease push rejected: missing 'workflow' OAuth scope"
           rm -f "$errf"
@@ -396,7 +433,7 @@ draft_pr_push_verify() {
             _draft_pr_warn "retrying force-with-lease with CATALYST_WORKFLOW_GITHUB_TOKEN"
             local tok_errf2
             tok_errf2="$(mktemp -t draft-pr-tok-XXXXXX 2>/dev/null || echo "/tmp/draft-pr-tok2-$$")"
-            if draft_pr_push_token "$CATALYST_WORKFLOW_GITHUB_TOKEN" --force-with-lease -u origin HEAD >/dev/null 2>"$tok_errf2"; then
+            if draft_pr_push_token "$CATALYST_WORKFLOW_GITHUB_TOKEN" --force-with-lease -u "$remote" HEAD >/dev/null 2>"$tok_errf2"; then
               rm -f "$tok_errf2"
             else
               rm -f "$tok_errf2"
@@ -418,13 +455,13 @@ draft_pr_push_verify() {
     rm -f "$errf"
   fi
 
-  git fetch --quiet origin "$branch" 2>/dev/null || true
-  remote_sha="$(git rev-parse "origin/${branch}" 2>/dev/null || true)"
+  git fetch --quiet "$remote" "$branch" 2>/dev/null || true
+  remote_sha="$(git rev-parse "${remote}/${branch}" 2>/dev/null || true)"
   if [[ -n "$remote_sha" && "$remote_sha" == "$local_sha" ]]; then
     printf '%s\n' "$local_sha"
     return 0
   fi
-  _draft_pr_warn "post-push verify mismatch: local=${local_sha} origin/${branch}=${remote_sha:-<none>}"
+  _draft_pr_warn "post-push verify mismatch: local=${local_sha} ${remote}/${branch}=${remote_sha:-<none>}"
   return 1
 }
 

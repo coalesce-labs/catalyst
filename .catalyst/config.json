@@ -4,6 +4,9 @@
     "project": {
       "ticketPrefix": "CTL"
     },
+    "pr": {
+      "pushRemote": "fork"
+    },
     "linear": {
       "teamKey": "CTL",
       "stateMap": {
