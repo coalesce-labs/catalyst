@@ -10,7 +10,6 @@ export function readJobTimelineBlock(bgJobId, { readFileFn = readFileSync, jobsR
   if (!bgJobId) return miss;
   let raw;
   try {
-    // EVENT-LOG-FULL-READ-OK(CTL-1442): one job's bounded timeline, not the shared event log.
     raw = readFileFn(join(jobsRoot ?? getJobsRoot(), bgJobId, "timeline.jsonl"), "utf8");
   } catch {
     return miss;

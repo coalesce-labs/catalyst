@@ -1,9 +1,14 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makePhaseAwareDispatchFn } from "./dispatch.mjs";
 import { parkLane } from "./lane-cooldown.mjs";
+
+test("daemon threads orchDir into the production phase-aware dispatch factory", () => {
+  const daemonSource = readFileSync(new URL("./daemon.mjs", import.meta.url), "utf8");
+  expect(daemonSource).toMatch(/makePhaseAwareDispatchFn\(\{[\s\S]*?\borchDir,\s*[\s\S]*?\}\);/);
+});
 
 test("a bg phase falls back to codex while bg is parked", () => {
   const dir = mkdtempSync(join(tmpdir(), "dispatch-fallback-"));

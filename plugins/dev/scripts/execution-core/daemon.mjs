@@ -1159,6 +1159,7 @@ export function startDaemon({
       codexBootEligible: codexElig.eligible,
       sdkBootEligible,
       configPath,
+      orchDir,
       emitEvent: defaultAppendOperatorEvent,
       log,
     });
