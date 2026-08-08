@@ -573,9 +573,16 @@ do_provision_thoughts() {
   # AGENTS.md "Configuration"), not a GitHub org (Codex #3080 P1). NOT repoUrl's
   # org either — repoUrl/pluginSourceUrl point at wherever the catalyst plugin
   # source itself lives, which can be a different org/personal fork entirely.
-  local primary_org primary_org_source
+  local primary_org primary_org_source primary_profile
   primary_org="$(bundle_get '.thoughtsOrg')"
   primary_org_source="$(bundle_get '.thoughtsOrgSource')"
+  # Codex #3080 P1: the profile ALIAS paired with the org. It need not equal the owner
+  # (rightsite-cloud/adva), and provision-thoughts' bare-CSV path would otherwise
+  # register profile == org — leaving humanlayer.json with no `adva` profile even though
+  # create-worktree.sh later requests `adva` by name from Layer-1, so background
+  # worktrees resolve a nonexistent profile and fail to sync thoughts. Empty on an older
+  # bundle (identity applies, the previous behavior).
+  primary_profile="$(bundle_get '.thoughtsProfile')"
   if [[ "$primary_org_source" == "thoughts.profile" ]]; then
     warn "join bundle carries no catalyst.thoughts.org — using catalyst.thoughts.profile ('$primary_org') as the GitHub org."
     warn "profile is a HumanLayer alias and need not equal the owner; set catalyst.thoughts.org in the seed's .catalyst/config.json."
@@ -592,8 +599,12 @@ do_provision_thoughts() {
     # defaultProfile — registry order is not a primary-org declaration
     # (Codex #3080 P1).
     [[ -n "$primary_org" ]] && args+=(--primary-org "$primary_org")
+    [[ -n "$primary_profile" ]] && args+=(--primary-profile "$primary_profile")
   elif [[ -n "$primary_org" ]]; then
-    args+=(--orgs "$primary_org")
+    # Carry the paired alias through the no-registry path too — this is the branch that
+    # discarded it (Codex #3080 P1).
+    args+=(--orgs "$primary_org" --primary-org "$primary_org")
+    [[ -n "$primary_profile" ]] && args+=(--primary-profile "$primary_profile")
   else
     # No registry AND no declared org: provision-thoughts has nothing to act on
     # and would hard-exit. Thoughts persistence is optional, so skip the stage

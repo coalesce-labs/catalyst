@@ -14,7 +14,7 @@
 #
 # Usage:
 #   provision-thoughts.sh [--node-user NAME] [--hlt-root DIR] [--config FILE] [--orgs a,b,c]
-#                         [--registry FILE] [--primary-org ORG]
+#                         [--registry FILE] [--primary-org ORG] [--primary-profile ALIAS]
 #                         [--dry-run] [--no-clone] [--verify-only]
 #
 # Where each org comes from: a registry project's thoughts org is read from that
@@ -89,6 +89,12 @@ DRY_RUN=0; NO_CLONE=0; VERIFY_ONLY=0
 # Declared by --primary-org (or this env default); when nothing declares it, it
 # settles on the first derived org.
 PRIMARY_ORG="${CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG:-}"
+# Codex #3080 P1: the HumanLayer profile ALIAS paired with PRIMARY_ORG. The alias need
+# not equal the owner (the documented rightsite-cloud/adva layout), and the bare --orgs
+# CSV carries no profile information at all — so without this the primary is registered
+# with profile == org and a project requesting `adva` by name resolves to a nonexistent
+# profile. Empty means identity (profile == org), the previous behavior.
+PRIMARY_PROFILE=""
 
 while [[ $# -gt 0 ]]; do case "$1" in
   --node-user) NODE_USER="$2"; shift 2 ;;
@@ -97,6 +103,7 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --orgs)      ORGS_CSV="$2"; shift 2 ;;
   --registry)  REGISTRY="$2"; shift 2 ;;
   --primary-org) PRIMARY_ORG="$2"; shift 2 ;;
+  --primary-profile) PRIMARY_PROFILE="$2"; shift 2 ;;
   --dry-run)   DRY_RUN=1; shift ;;
   --no-clone)  NO_CLONE=1; shift ;;
   --verify-only) VERIFY_ONLY=1; shift ;;
@@ -156,10 +163,18 @@ load_registry_roots() {
 
 # ── Derive the org set ────────────────────────────────────────────────────────
 if [[ -n "$ORGS_CSV" ]]; then
-  # A bare CSV carries no profile information — profile == org (identity).
+  # A bare CSV carries no profile information — profile == org (identity), EXCEPT for
+  # the declared primary, whose alias --primary-profile supplies (Codex #3080 P1).
   declare -a _csv=()
   IFS=',' read -r -a _csv <<<"$ORGS_CSV"
-  for o in "${_csv[@]}"; do [[ -n "$o" ]] && add_org "$o"; done
+  for o in "${_csv[@]}"; do
+    [[ -n "$o" ]] || continue
+    if [[ -n "$PRIMARY_PROFILE" && ( "$o" == "$PRIMARY_ORG" || -z "$PRIMARY_ORG" ) ]]; then
+      add_org "$o" "$PRIMARY_PROFILE"
+    else
+      add_org "$o"
+    fi
+  done
 elif [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
   info "Deriving orgs from registry: $REGISTRY"
   # add_org de-dupes, so no separate dedupe pass. Guard the empty-array
@@ -174,7 +189,7 @@ elif [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
   fi
 elif [[ -n "$PRIMARY_ORG" ]]; then
   warn "no --orgs and no readable --registry; defaulting to primary only ($PRIMARY_ORG)"
-  add_org "$PRIMARY_ORG"
+  add_org "$PRIMARY_ORG" "${PRIMARY_PROFILE:-$PRIMARY_ORG}"
 else
   fail "no org specified — pass --orgs, --registry, --primary-org, or set CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG"
   exit 1
@@ -186,7 +201,7 @@ fi
 # are never reached in the failure case.)
 if ((${#ORGS[@]} == 0)); then
   if [[ -n "$PRIMARY_ORG" ]]; then
-    add_org "$PRIMARY_ORG"
+    add_org "$PRIMARY_ORG" "${PRIMARY_PROFILE:-$PRIMARY_ORG}"
   else
     fail "registry yielded no recognized org and no --primary-org / CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG is set"
     exit 1
@@ -194,8 +209,9 @@ if ((${#ORGS[@]} == 0)); then
 elif [[ -n "$PRIMARY_ORG" ]]; then
   # Force-include the declared primary. A no-op when the registry already
   # resolved it — which is what we want, since that entry carries the project's
-  # real profile alias and this one would only know the identity default.
-  add_org "$PRIMARY_ORG"
+  # real profile alias and this one would only know the identity default (or the one
+  # --primary-profile declared, Codex #3080 P1).
+  add_org "$PRIMARY_ORG" "${PRIMARY_PROFILE:-$PRIMARY_ORG}"
 fi
 # No primary declared: it is whichever org came out first (--orgs order, or
 # registry derivation order). Callers that care must declare one — see
