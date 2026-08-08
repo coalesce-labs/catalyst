@@ -21,7 +21,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test in-flight-supersede.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { isTicketInFlight, livePhaseEntries } from "./scheduler.mjs";
+import { isTicketInFlight, livePhaseEntries, deriveAdvancement } from "./scheduler.mjs";
 
 // Key order IS the fixture: readPhaseSignals inserts entries in ascending-mtime
 // order, so "first key = oldest dispatch, last key = most recent dispatch".
@@ -122,5 +122,34 @@ describe("terminal-sweep parity — the sweep's failure scan uses the same decis
 
   test("a same-ordinal remediate does not mask a failed verify → still escalates", () => {
     expect(sweepWouldEscalate({ verify: "failed", remediate: "done" })).toBe(true);
+  });
+});
+
+describe("deriveAdvancement — consumes the SAME supersession decision", () => {
+  // CTL-1660 P1 round 3 (Codex #3081): once livePhaseEntries admits a
+  // backward-redispatched ticket to the advancement sweep, deriveAdvancement's raw
+  // ordinal scan became reachable — and would select the stale higher-ordinal phase.
+  test("stale `review: done` behind a running redispatched implement does NOT advance to pr", () => {
+    // The regression: ordinal scan picked `review` (done) and returned "pr",
+    // dispatching the PR phase while implement was still running — skipping
+    // verify and review for the replacement work.
+    expect(deriveAdvancement({ review: "done", implement: "running" })).toBe(null);
+  });
+
+  test("stale `review: done` behind a FAILED redispatched implement does not advance", () => {
+    expect(deriveAdvancement({ review: "done", implement: "failed" })).toBe(null);
+  });
+
+  test("normal forward advancement is unchanged", () => {
+    expect(deriveAdvancement({ triage: "done" })).toBe("research");
+    expect(deriveAdvancement({ triage: "done", research: "done" })).toBe("plan");
+  });
+
+  test("a still-running current phase never advances", () => {
+    expect(deriveAdvancement({ implement: "done", verify: "running" })).toBe(null);
+  });
+
+  test("an already-dispatched successor still blocks advancement (conservative guard)", () => {
+    expect(deriveAdvancement({ triage: "done", research: "running" })).toBe(null);
   });
 });

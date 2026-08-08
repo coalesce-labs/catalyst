@@ -1747,8 +1747,22 @@ export function readAllEligibleTickets() {
 // remediateCycleCount: 0 }, which preserves the legacy verify → review edge.
 export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount = 0 } = {}) {
   const sig = signals ?? {};
+  // CTL-1660 P1 round 3 (Codex #3081): pick the latest phase from the LIVE set, not a
+  // raw ordinal scan. With an older `review: done` behind a newly redispatched
+  // `implement: running`, the ordinal scan selected the stale `review`, saw `done`,
+  // and returned `pr` — dispatching the PR phase while the replacement implementation
+  // was still running, skipping its verify and review entirely. (This became
+  // reachable once livePhaseEntries admitted such tickets to the advancement sweep,
+  // so the two must consume the same supersession decision.)
+  //
+  // The `in sig` guards below still consult the FULL signal map on purpose: refusing
+  // to advance into a successor that has any signal at all — even a stale one — is
+  // the conservative direction. It can only withhold an advancement, never invent a
+  // wrong one.
+  const liveSet = new Set(livePhaseEntries(sig).map(([p]) => p));
   let latest = null;
-  for (const p of PHASES) if (p in sig) latest = p; // remediate ∉ PHASES → invisible here
+  // remediate ∉ PHASES → invisible here
+  for (const p of PHASES) if (p in sig && liveSet.has(p)) latest = p;
   // CTL-703: `skipped` is advancement-eligible for monitor-deploy ONLY.
   // monitor-deploy `skipped` must advance to teardown (just as `done` does),
   // so the pipeline can reach the dedicated teardown phase even when no deploy
