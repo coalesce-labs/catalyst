@@ -23,6 +23,7 @@ import { sdkRunPhaseAgent, defaultEmitBackstop, scrubSecrets } from "./sdk-run-p
 import { codexRunPhaseAgent } from "./codex-run-phase-agent.mjs"; // CTL-1457: the executor=codex-exec launch verb (spawns `codex exec --json` as a child process)
 import { hasFreshClaim } from "./signal-reader.mjs"; // CTL-1367 P2-G: a young single-flight claim makes a missing SDK signal a benign claim-lost no-op
 import { log, resolveExecutorForPhase } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires; CTL-1457: per-phase executor routing hook (the default seam threaded into makePhaseAwareDispatchFn)
+import { inLaneCooldown, readLaneCooldown } from "./lane-cooldown.mjs";
 
 // phase-agent-dispatch sits one directory up from execution-core/.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
@@ -334,6 +335,8 @@ export function makePhaseAwareDispatchFn({
   resolveExecutorForPhase = _defaultResolveExecutorForPhase,
   dispatchForExecutor = _defaultDispatchForExecutor,
   log: logger = log,
+  orchDir = null,
+  now = Date.now,
 } = {}) {
   return (args, seams = {}) => {
     // Per-phase routing. Only an EXPLICITLY-routed phase (source "executorByPhase")
@@ -374,6 +377,16 @@ export function makePhaseAwareDispatchFn({
     // phase keeps effective === bootExecutor (which already carries the boot degrade).
     if (effective === "sdk" && !sdkBootEligible) {
       effective = bootExecutor === "sdk" ? "bg" : bootExecutor;
+    }
+    const bgParked = orchDir ? inLaneCooldown(orchDir, "bg", now()) : false;
+    if (bgParked && effective === "bg") {
+      const marker = readLaneCooldown(orchDir, "bg");
+      if (codexBootEligible) {
+        effective = "codex-exec";
+        emitEvent?.({ "event.name": "execution-core.executor.usage-limit-fallback", payload: { ticket: args.ticket, phase: args.phase, from: "bg", to: "codex-exec", expiresAt: marker?.expiresAt } });
+      } else {
+        emitEvent?.({ "event.name": "execution-core.executor.no-healthy-lane", payload: { ticket: args.ticket, phase: args.phase, lane: "bg", expiresAt: marker?.expiresAt } });
+      }
     }
     const fn = dispatchForExecutor(effective);
     if (effective === "sdk" || effective === "codex-exec") {

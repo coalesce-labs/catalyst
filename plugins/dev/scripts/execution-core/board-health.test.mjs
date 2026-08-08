@@ -28,6 +28,7 @@ import {
   eligibleDeferredAnchors,
   makeOwnsFilter,
   resolveRosterSeam,
+  deriveRing,
 } from "./board-health.mjs";
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
 // exercises the production body.payload.details nesting + attribute promotion.
@@ -49,6 +50,16 @@ function quotaSnapshot({ remaining = 5000, sampledAt = new Date(NOW).toISOString
     sampledAt,
   };
 }
+
+// CAT-58: the account usage cliff is its OWN invariant (accountUsageHeadroom) —
+// `rateLimitHeadroom` belongs to CAT-40's GitHub core REST quota check.
+test("account usage headroom is derived from sampled utilization", () => {
+  const ring = deriveRing([{ "event.name": "account.ratelimit.sampled", payload: { sevenDayPct: 100, sevenDayResetsAt: "2026-08-10T17:59:59Z" } }]);
+  const inv = evaluateInvariants({ ring, mode: "enforce", ticketsById: new Map(), signals: [], eligible: [], capacity: { free: 0 }, now: NOW }).accountUsageHeadroom;
+  expect(inv.observable).toBe(true);
+  expect(inv.ok).toBe(false);
+  expect(inv).toMatchObject({ sevenDayPct: 100, resetsAt: "2026-08-10T17:59:59Z" });
+});
 
 // mkPrStatusMap — build the composite `Map<number, Map<repoKey, entry>>` shape
 // (CTL-1157, Codex #4) that broker-state.getAllPrStatuses now returns, from flat

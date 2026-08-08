@@ -371,7 +371,14 @@ function extractBlockers(descriptor) {
 // deriveRing — distill the bounded recent-event tail into the few out-of-band
 // signals the invariants need. Best-effort: an event class that isn't present
 // yields null/empty, and the dependent invariant degrades to observable:false.
-function deriveRing(events, nowMs, self) {
+export const NEAR_CLIFF_PCT = Number(process.env.CATALYST_NEAR_CLIFF_PCT) || 90;
+export function deriveNearCliff(payload) {
+  if (payload?.nearCliff != null || payload?.near_cliff != null) return !!(payload.nearCliff ?? payload.near_cliff);
+  const values = [payload?.fiveHourPct, payload?.sevenDayPct].filter((n) => typeof n === "number" && Number.isFinite(n));
+  return values.length > 0 && Math.max(...values) >= NEAR_CLIFF_PCT;
+}
+
+export function deriveRing(events, nowMs, self) {
   const ring = {
     recentDispatchTs: null,
     cacheReconcile: null,
@@ -402,6 +409,9 @@ function deriveRing(events, nowMs, self) {
     } else if (/account\.ratelimit|ratelimit\.sampled/i.test(name)) {
       // Anthropic subscription telemetry only. GitHub core quota arrives through
       // the dedicated githubQuota snapshot seam below, never through this ring.
+      // The ring stays a faithful passthrough of the sampled payload — the
+      // usage-limit cliff is DERIVED in checkAccountUsageHeadroom (CAT-58), not
+      // synthesized here, so this stays raw telemetry.
       ring.accountRatelimit = { ...payload };
     } else if (/reconcile\.failing/i.test(name)) {
       const team = payload.team ?? name.split(".").pop();
@@ -713,6 +723,10 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // gated like its siblings so the off set stays byte-identical.
       stalledPr: () => checkStalledPr(boardState, thresholds),
       nodeProductivity: () => checkNodeProductivity(boardState, thresholds),
+      // CAT-58: the account's own subscription usage-limit cliff (5h / 7d), the
+      // condition that makes every Claude-lane re-dispatch futile until reset.
+      // Cohort-gated like its siblings so the off set stays byte-identical.
+      accountUsageHeadroom: () => checkAccountUsageHeadroom(boardState),
     });
   }
   const out = {};
@@ -858,6 +872,26 @@ function checkRateLimitHeadroom(b, t) {
   if (b.githubQuotaMode !== "enforce") return invariant(true, 0, false, [], note);
   const failed = q.state === "low" || q.state === "exhausted";
   return invariant(!failed, failed ? 1 : 0, true, [], note);
+}
+
+// #5b — Anthropic ACCOUNT usage-limit headroom (CAT-58). Distinct from #5: that
+// one reads the GitHub core REST quota snapshot, this one reads the account's own
+// 5-hour / 7-day subscription utilization off the `account.ratelimit` ring. Both
+// can wedge the fleet and they reset independently, so they are separate
+// invariants rather than one overloaded `rateLimitHeadroom` key. Cohort-gated in
+// evaluateInvariants so the `off` invariant set stays byte-identical to main.
+function checkAccountUsageHeadroom(b) {
+  const rl = b.ring?.accountRatelimit;
+  if (!rl) {
+    return invariant(true, 0, false, [], "no out-of-band account usage signal (subscription telemetry absent)");
+  }
+  // Derived here rather than read off the ring: the ring is raw sampled telemetry
+  // (CAT-40 locks that passthrough with a test), so the cliff judgment lives here.
+  const near = deriveNearCliff(rl);
+  const values = [rl.fiveHourPct, rl.sevenDayPct].filter((n) => typeof n === "number" && Number.isFinite(n));
+  const pct = values.length ? Math.max(...values) : 0;
+  const resetsAt = rl.sevenDayResetsAt ?? rl.fiveHourResetsAt ?? null;
+  return invariant(!near, near ? 1 : 0, true, near ? ["account-usage"] : [], near ? `account at ${pct}% utilization — resets ${resetsAt ?? "unknown"}` : `account usage headroom ok (${pct}%)`, { fiveHourPct: rl.fiveHourPct ?? null, sevenDayPct: rl.sevenDayPct ?? null, resetsAt, nearCliffPct: NEAR_CLIFF_PCT });
 }
 
 // #6 — stranded node (mini-2 class): a rostered host that HRW-owns a share of
@@ -1517,9 +1551,15 @@ export function decideBoardHealth(invariants, boardState) {
     return decision("skip", "no-free-slots", invariantsFailed, emptyMoves(), sanctioned);
   }
   // Gate 3 — near a rate-limit cliff → acting now risks 429s → skip (and obey it).
+  // Two independent cliffs gate here: the GitHub core REST quota (CAT-40) and the
+  // account's own subscription usage limit (CAT-58). Either one makes acting futile.
   const rl = invariants.rateLimitHeadroom;
   if (rl && rl.observable && !rl.ok) {
     return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves(), sanctioned);
+  }
+  const au = invariants.accountUsageHeadroom;
+  if (au && au.observable && !au.ok) {
+    return decision("skip", "account-usage-cliff", invariantsFailed, emptyMoves(), sanctioned);
   }
   // Gate 4 — actionable work + headroom → proceed.
   const reason =

@@ -1,0 +1,21 @@
+import { test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { laneCooldownPath, readLaneCooldown, inLaneCooldown, parkLane } from "./lane-cooldown.mjs";
+let dir;
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "lane-cooldown-")); });
+afterEach(() => rmSync(dir, { recursive: true, force: true }));
+test("parked lane expires at reset and never shortens", () => {
+  const now = Date.parse("2026-08-08T20:00:00Z");
+  parkLane(dir, "bg", { resetsAt: "2026-08-10T18:00:00Z", now });
+  parkLane(dir, "bg", { resetsAt: "2026-08-09T18:00:00Z", now });
+  expect(readLaneCooldown(dir, "bg").expiresAt).toBe(Date.parse("2026-08-10T18:00:00Z"));
+  expect(inLaneCooldown(dir, "bg", now)).toBe(true);
+  expect(inLaneCooldown(dir, "bg", Date.parse("2026-08-11T00:00:00Z"))).toBe(false);
+});
+test("missing and malformed markers fail open", () => {
+  expect(inLaneCooldown(dir, "bg", Date.now())).toBe(false);
+  mkdirSync(join(dir, ".lane-cooldowns")); writeFileSync(laneCooldownPath(dir, "bg"), "{{{");
+  expect(inLaneCooldown(dir, "bg", Date.now())).toBe(false);
+});
