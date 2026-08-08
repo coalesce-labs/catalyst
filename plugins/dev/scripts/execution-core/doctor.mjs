@@ -3577,6 +3577,14 @@ export function checkRegistryTeamIdentity(deps = {}) {
     );
   }
   const known = projects.filter((project) => project?.identity?.matches === true).length;
+  if (known === 0) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `0/${projects.length} registry entries could be verified against their repoRoot's declared ` +
+        "teamKey; no mismatches observed (CAT-52)",
+    );
+  }
   return mkCheck(
     "registry-team-identity",
     STATUS.PASS,

@@ -170,7 +170,15 @@ export function upsertProjectEntry({ team, repoRoot, eligibleQuery } = {}) {
   };
   // Start from the current entries, drop any prior record for this team, then
   // append the fresh one — replace-in-place semantics with no duplicates.
-  const projects = listProjects().filter((p) => p.team !== team);
+  // listProjects() attaches the derived `identity` observation for consumers.
+  // Registry writes remain schema-clean: never persist that runtime-only field.
+  const projects = listProjects()
+    .filter((p) => p.team !== team)
+    .map(({ team: existingTeam, repoRoot: existingRoot, eligibleQuery: existingQuery }) => ({
+      team: existingTeam,
+      repoRoot: existingRoot,
+      eligibleQuery: existingQuery,
+    }));
   projects.push(entry);
 
   const file = getRegistryPath();
