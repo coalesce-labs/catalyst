@@ -591,6 +591,7 @@ jobs:
             doctor.test.mjs \
             doctor-replica.test.mjs \
             __tests__/replica-health.test.mjs \
+            __tests__/replica-health-event.test.mjs \
             __tests__/linear-query-triage-source.test.mjs \
             eligible-set.test.mjs \
             event-cursor.test.mjs \

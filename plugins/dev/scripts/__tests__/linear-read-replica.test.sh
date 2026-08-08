@@ -23,12 +23,21 @@ assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else fail "$1" "expected '$2' go
 
 # CAT-35: the helper is sourced by zsh phase workers with nounset enabled.
 if command -v zsh >/dev/null 2>&1; then
+	# Both zsh probes CALL a real emitter, so each needs its own CATALYST_EVENTS_DIR.
+	# Without it the emitter resolves $HOME/catalyst/events and appends a synthetic
+	# `catalyst.replica.read_fallback` WARN to the operator's live unified event log
+	# on every CI run — the very signal this branch makes alertable. (The suite-wide
+	# export at the bottom of this file lands AFTER this block, so it does not cover
+	# these two.) T-zsh1 gets its own dir so T-zsh2's exact-count assert stays 1.
+	zsh1_dir="$(mktemp -d)"
 	out="$(zsh -u -c "
 		set -uo pipefail
+		export CATALYST_EVENTS_DIR='${zsh1_dir}'
 		source '${HELPER}'
 		_lrr_emit_fallback_event 'CAT-35' 'stale-absent' 'test' 2>&1
 		echo EMIT_OK
 	" 2>&1)"
+	rm -rf "$zsh1_dir"
 	case "$out" in
 		*"parameter not set"*) fail "T-zsh1 emitters survive zsh -u" "$out" ;;
 		*EMIT_OK*)             ok   "T-zsh1 emitters survive zsh -u" ;;
