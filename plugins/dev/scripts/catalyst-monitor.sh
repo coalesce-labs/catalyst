@@ -861,6 +861,77 @@ cmd_forward_restart() {
   return $rc
 }
 
+# ─── Standalone daemon-watchdog (CTL-1502 Codex P1) ─────────────────────────
+# On a monitor-class node `catalyst-stack` starts otel-forward but NOT
+# execution-core, so the watchdog armed inside startDaemon never runs there and
+# the forwarder is supervised by pid-liveness alone. These commands supervise
+# daemon-watchdog-run.mjs — the same probe, hosted standalone — so an
+# observation node gets the same stuck detection. A worker node keeps the
+# in-daemon probe and never starts this, so exactly one supervisor exists either
+# way. Same pid-file + identity-check conventions as the forward-* commands.
+WATCHDOG_PID_FILE="${CATALYST_DIR}/daemon-watchdog.pid"
+WATCHDOG_LOG="${CATALYST_DIR}/daemon-watchdog.log"
+WATCHDOG_SCRIPT="${SCRIPT_DIR}/execution-core/daemon-watchdog-run.mjs"
+
+_watchdog_pid_is_ours() {
+  local pid="$1" cmd
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  [[ -n "$cmd" ]] || return 1
+  [[ "$cmd" == *"daemon-watchdog-run"* ]]
+}
+
+read_watchdog_pid() {
+  if [[ -f "$WATCHDOG_PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && _watchdog_pid_is_ours "$pid"; then
+      echo "$pid"; return 0
+    fi
+    rm -f "$WATCHDOG_PID_FILE" 2>/dev/null || true
+  fi
+  return 1
+}
+
+cmd_watchdog_start() {
+  if read_watchdog_pid >/dev/null; then
+    echo "Daemon watchdog already running (pid $(cat "$WATCHDOG_PID_FILE"))"
+    return 0
+  fi
+  if [[ ! -f "$WATCHDOG_SCRIPT" ]]; then
+    echo "Daemon watchdog script not found ($WATCHDOG_SCRIPT) — not started" >&2
+    return 1
+  fi
+  nohup bun run "$WATCHDOG_SCRIPT" > "$WATCHDOG_LOG" 2>&1 &
+  local wd_pid=$!
+  disown "$wd_pid" 2>/dev/null || true
+  echo "$wd_pid" > "$WATCHDOG_PID_FILE"
+  echo "Daemon watchdog started (pid $wd_pid)"
+}
+
+cmd_watchdog_stop() {
+  local pid
+  if ! pid=$(read_watchdog_pid); then
+    echo "Daemon watchdog not running"; return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  local waited=0
+  while [[ $waited -lt 30 ]] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1; waited=$((waited + 1))
+  done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+  rm -f "$WATCHDOG_PID_FILE" 2>/dev/null || true
+  echo "Daemon watchdog stopped"
+}
+
+cmd_watchdog_status() {
+  local pid
+  if pid=$(read_watchdog_pid); then
+    echo "Daemon watchdog running (pid $pid)"
+  else
+    echo "Daemon watchdog not running"
+  fi
+}
+
 usage() {
   echo "Usage: catalyst-monitor.sh <command> [options]"
   echo ""
@@ -875,6 +946,9 @@ usage() {
   echo "  forward-stop       Stop otel-forward daemon"
   echo "  forward-status     Check if otel-forward daemon is running"
   echo "  forward-restart    Atomically stop then start the otel-forward daemon"
+  echo "  watchdog-start     Start the standalone daemon watchdog (observation nodes)"
+  echo "  watchdog-stop      Stop the standalone daemon watchdog"
+  echo "  watchdog-status    Check if the standalone daemon watchdog is running"
 }
 
 cmd="${1:-help}"
@@ -887,6 +961,9 @@ case "$cmd" in
   status)    cmd_status "$@" ;;
   open)      cmd_open "$@" ;;
   url)       cmd_url ;;
+  watchdog-start)  cmd_watchdog_start ;;
+  watchdog-stop)   cmd_watchdog_stop ;;
+  watchdog-status) cmd_watchdog_status ;;
   forward-start)  cmd_forward_start ;;
   forward-stop)   cmd_forward_stop ;;
   forward-status) cmd_forward_status ;;

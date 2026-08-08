@@ -488,6 +488,23 @@ mode, restarts the stuck daemon exactly once per breach episode.
   returns a non-crossing sentinel on throw so the guardrail can never wedge the daemon tick. First
   ship registers exactly one target (otel-forward) behind a descriptor registry, so a second watched
   daemon is a one-line addition.
+- **Two hosts for one probe, gated by node class.** `catalyst-stack` starts otel-forward on both
+  worker and monitor nodes but execution-core on workers only, so arming the probe solely from
+  `startDaemon` would leave every **monitor**-node forwarder supervised by pid-liveness alone. A
+  **worker** keeps the in-daemon probe; a **monitor** node runs the same probe standalone via
+  `execution-core/daemon-watchdog-run.mjs`, supervised by
+  `catalyst-monitor watchdog-start|watchdog-stop|watchdog-status` (pid file + identity check, the
+  `forward-*` shape). A **developer** node runs no forwarder, so nothing to watch. Exactly one
+  supervisor per forwarder in every topology; `cmd_stop` stops the watchdog *before* the forwarder
+  so an in-flight enforced restart cannot relaunch it after shutdown.
+- **Restart safety in `catalyst-monitor.sh`.** The forwarder's start/stop/restart share a portable
+  `mkdir`-based mutation lock (stock macOS has no `flock`) with a dead-owner stale reaper and a
+  bounded wait; `forward-restart` holds **one** lock across both halves, so a concurrent
+  `catalyst-stack start` can't observe the momentarily-stopped forwarder and launch a second,
+  untracked one. Its `INT`/`TERM` handler **exits** rather than returning (a returning handler would
+  let an aborted restart resume into the start half). Pid files are matched by process **identity**,
+  not just `kill -0`, and fail closed — a recycled pid is treated as a stale file, never a kill
+  target. Covered by `__tests__/daemon-watchdog-supervision.test.sh`.
 
 ### Two-axis worker state & the recordTransition chokepoint (CTL-764)
 
