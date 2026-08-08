@@ -53,7 +53,7 @@ Keep it light. The only required field is `status`:
 ---
 title: Human-readable title
 status: draft            # draft | accepted
-ticket: CTL-1234         # optional — the Linear ticket, if any
+ticket: PROJ-1234        # optional — the Linear ticket, if any
 pr: 2345                 # optional — the PR that shipped it, if accepted
 created: 2026-07-01      # optional
 ---
