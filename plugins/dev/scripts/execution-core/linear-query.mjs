@@ -1399,6 +1399,7 @@ export function runEligibleQuery(
 // "replica-miss" (dead writer, mid-reseed, or a throw).
 export function runTriageStateQuery(query, { replica, onSource, recordRead = recordDaemonRead } = {}) {
   if (!query?.triageStatus) {
+    // Ratified Option A above: no metric because this branch consults neither replica nor API.
     onSource?.("no-triage-status", 0);
     return [];
   }

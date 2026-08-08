@@ -23,11 +23,11 @@ alone leaves readers disconnected; the flag alone produces replica misses agains
 ## Loki queries
 
 ```logql
-{service_name="catalyst.execution-core"} | field="event.name" =~ "monitor\\.replica\\.degraded\\..*"
+{service_name="catalyst.execution-core"} | json | attributes["event.name"] =~ "monitor\\.replica\\.degraded\\..*"
 ```
 
 ```logql
-{service_name="catalyst.linear-read"} | field="event.name" = "catalyst.replica.read_fallback"
+{service_name="catalyst.linear-read"} | json | attributes["event.name"] = "catalyst.replica.read_fallback"
 ```
 
 Grafana alert provisioning belongs in the sibling `catalyst-otel` repository. Validate any rule

@@ -57,9 +57,36 @@ test("healthy without a prior alert emits nothing", () => {
 
 test("no-triage-status is not degradation", () => {
   const events = [];
+  let writes = 0;
   resetReplicaHealth();
-  for (let i = 0; i < 9; i += 1) recordReplicaRead("CAT", "no-triage-status", opts(events));
+  for (let i = 0; i < 9; i += 1) {
+    recordReplicaRead("CAT", "no-triage-status", {
+      ...opts(events),
+      writeMarker: () => { writes += 1; },
+    });
+  }
   expect(events).toHaveLength(0);
+  expect(writes).toBe(0);
+});
+
+test("failed degraded event append retries on the next read", () => {
+  const events = [];
+  let attempts = 0;
+  resetReplicaHealth();
+  const retryingOpts = {
+    ...opts(events),
+    threshold: 1,
+    appendEvent: (event) => {
+      attempts += 1;
+      if (attempts === 1) return false;
+      events.push(event);
+      return true;
+    },
+  };
+  recordReplicaRead("CAT", "no-replica", retryingOpts);
+  recordReplicaRead("CAT", "no-replica", retryingOpts);
+  expect(attempts).toBe(2);
+  expect(events).toHaveLength(1);
 });
 
 test("streaks are per team", () => {

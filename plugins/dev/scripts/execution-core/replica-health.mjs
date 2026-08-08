@@ -55,12 +55,13 @@ export function recordReplicaRead(team, source, {
   threshold = REPLICA_DEGRADED_ALERT_THRESHOLD,
 } = {}) {
   try {
+    if (!DEGRADED_SOURCES.has(source) && source !== "replica") return;
     const entry = ensureEntry(team, readMarker);
     if (DEGRADED_SOURCES.has(source)) {
       entry.consecutiveDegraded += 1;
       if (entry.consecutiveDegraded >= threshold && !entry.alerting) {
-        entry.alerting = true;
-        appendEvent({ team, action: REPLICA_DEGRADED_ACTION, source, consecutiveDegraded: entry.consecutiveDegraded });
+        const appended = appendEvent({ team, action: REPLICA_DEGRADED_ACTION, source, consecutiveDegraded: entry.consecutiveDegraded });
+        if (appended !== false) entry.alerting = true;
       }
     } else if (source === "replica") {
       const wasAlerting = entry.alerting;
