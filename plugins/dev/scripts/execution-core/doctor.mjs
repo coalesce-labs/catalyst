@@ -271,7 +271,7 @@ export function checkRepoPushPermission(deps = {}) {
   } = deps;
   const resolvedPushRemote = pushRemote ?? resolvePushRemote({ repoRoot, env, layer1Path: configPath, layer2Path: layer2ConfigPath, spawn });
   let mode;
-  try { mode = resolveMode({ env }); } catch { mode = "shadow"; }
+  try { mode = resolveMode({ env, configPath }); } catch { mode = "shadow"; }
   if (mode === "off") {
     return [mkCheck("repo-push-permission", STATUS.INFO, "publish preflight is off — push permission not checked")];
   }
