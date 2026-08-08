@@ -32,6 +32,10 @@ Config lives in `~/.config/catalyst/config-{projectKey}.json` under
 
 ### OTLP
 
+Minimal shape to enable it — the two keys with no default. Every tunable
+(`batchSize`, `flushIntervalMs`, `lokiAcceptWindowMs`, `maxRetryElapsedMs`, …) and its
+default value live ONLY in the configuration reference; see "Config knobs" below.
+
 ```json
 {
   "catalyst": {
@@ -39,11 +43,7 @@ Config lives in `~/.config/catalyst/config-{projectKey}.json` under
       "forwarders": {
         "otlp": {
           "enabled": true,
-          "endpoint": "http://localhost:4318",
-          "batchSize": 100,
-          "flushIntervalMs": 5000,
-          "lokiAcceptWindowMs": 3600000,
-          "maxRetryElapsedMs": 60000
+          "endpoint": "http://localhost:4318"
         }
       }
     }
