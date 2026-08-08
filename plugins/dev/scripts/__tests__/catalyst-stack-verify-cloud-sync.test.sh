@@ -50,6 +50,14 @@ check "activate merges mode" jq -e '.keep == true and .catalyst.linearReplica.mo
 BEFORE="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"; cmd_activate_replica --dry-run >/dev/null; AFTER="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"
 check "dry-run changes nothing" test "$BEFORE" = "$AFTER"
 
+printf '{"catalyst":{"linearReplica":"off","token":"keep-secret"},"keep":true}\n' > "$CATALYST_LAYER2_CONFIG_FILE"
+cmd_activate_replica >/dev/null
+check "activate normalizes legacy mode without clobbering config" jq -e '.keep == true and .catalyst.token == "keep-secret" and .catalyst.linearReplica.mode == "on"' "$CATALYST_LAYER2_CONFIG_FILE"
+
+printf '{malformed\n' > "$CATALYST_LAYER2_CONFIG_FILE"; BEFORE="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"; cmd_activate_replica >/dev/null 2>&1; EC=$?; AFTER="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"
+check "activate refuses malformed existing config" test "$EC" -ne 0
+check "malformed config remains unchanged" test "$BEFORE" = "$AFTER"
+
 check "docs mention verify" grep -q 'catalyst-stack verify-cloud-sync' "$(cd "$TEST_DIR/../../../.." && pwd)/website/src/content/docs/reference/configuration.md"
 check "docs mention activate" grep -q 'catalyst-stack activate-replica' "$(cd "$TEST_DIR/../../../.." && pwd)/website/src/content/docs/reference/configuration.md"
 

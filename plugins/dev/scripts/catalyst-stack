@@ -2452,31 +2452,31 @@ cloud_sync_verify_report() {
   local probe token_present checks='[]' first_failure="" overall="true"
   probe="$(cloud_sync_probe_token --host "$(_stack_host_name)")"
   token_present="$(printf '%s\n' "$probe" | sed -n 's/^present=//p')"
-  _csv_add() { local name="$1" status="$2" reason="$3"; checks="$(jq -c --arg n "$name" --arg s "$status" --arg r "$reason" '. + [{name:$n,status:$s,reason:$r}]' <<<"$checks")"; if [[ "$status" == "FAIL" ]]; then overall=false; [[ -n "$first_failure" ]] || first_failure="$reason"; fi; }
-  [[ "$token_present" == yes ]] && _csv_add token PASS "token present" || _csv_add token FAIL "cloud token absent"
+  _cloud_sync_verify_add() { local name="$1" status="$2" reason="$3"; checks="$(jq -c --arg n "$name" --arg s "$status" --arg r "$reason" '. + [{name:$n,status:$s,reason:$r}]' <<<"$checks")"; if [[ "$status" == "FAIL" ]]; then overall=false; [[ -n "$first_failure" ]] || first_failure="$reason"; fi; }
+  [[ "$token_present" == yes ]] && _cloud_sync_verify_add token PASS "token present" || _cloud_sync_verify_add token FAIL "cloud token absent"
   if [[ "${CATALYST_CLOUD_SYNC_TEST_MODE:-}" == 1 ]]; then
-    _csv_add agent UNKNOWN "launchctl skipped in test mode"
+    _cloud_sync_verify_add agent UNKNOWN "launchctl skipped in test mode"
   elif [[ -f "$CLOUD_SYNC_AGENT_PLIST" ]] && launchctl list 2>/dev/null | awk -v l="$CLOUD_SYNC_AGENT_LABEL" '$3==l && $1!="-" && $1!="0" {ok=1} END{exit !ok}'; then
-    _csv_add agent PASS "agent loaded with pid"
-  else _csv_add agent UNKNOWN "agent not running"; fi
+    _cloud_sync_verify_add agent PASS "agent loaded with pid"
+  else _cloud_sync_verify_add agent UNKNOWN "agent not running"; fi
   local db_ok=no
-  if [[ ! -e "$db" ]]; then _csv_add replica-db FAIL "replica db absent"
-  else local size; size="$(stat -f %z "$db" 2>/dev/null || stat -c %s "$db" 2>/dev/null || echo 0)"; if (( size >= 65536 )); then db_ok=yes; _csv_add replica-db PASS "replica db present"; else _csv_add replica-db FAIL "replica db below 65536 bytes"; fi; fi
+  if [[ ! -e "$db" ]]; then _cloud_sync_verify_add replica-db FAIL "replica db absent"
+  else local size; size="$(stat -f %z "$db" 2>/dev/null || stat -c %s "$db" 2>/dev/null || echo 0)"; if (( size >= 65536 )); then db_ok=yes; _cloud_sync_verify_add replica-db PASS "replica db present"; else _cloud_sync_verify_add replica-db FAIL "replica db below 65536 bytes"; fi; fi
   local schema_ok=yes table
   if [[ "$db_ok" == yes ]] && command -v sqlite3 >/dev/null 2>&1; then
     for table in $CLOUD_SYNC_REPLICA_TABLES; do sqlite3 "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table';" 2>/dev/null | grep -q 1 || schema_ok=no; done
   else schema_ok=no; fi
-  [[ "$schema_ok" == yes ]] && _csv_add schema PASS "expected schema present" || _csv_add schema FAIL "expected schema absent"
+  [[ "$schema_ok" == yes ]] && _cloud_sync_verify_add schema PASS "expected schema present" || _cloud_sync_verify_add schema FAIL "expected schema absent"
   local rows=0; [[ "$schema_ok" == yes ]] && rows="$(sqlite3 "$db" 'SELECT COUNT(*) FROM issues;' 2>/dev/null || echo 0)"
-  [[ "${rows:-0}" =~ ^[0-9]+$ && "${rows:-0}" -gt 0 ]] && _csv_add rows PASS "$rows issues" || _csv_add rows FAIL "issues table empty"
+  [[ "${rows:-0}" =~ ^[0-9]+$ && "${rows:-0}" -gt 0 ]] && _cloud_sync_verify_add rows PASS "$rows issues" || _cloud_sync_verify_add rows FAIL "issues table empty"
   local lock="$db.writer.lock" stale_ms="${CATALYST_LINEAR_REPLICA_STALE_MS:-300000}" lock_ok=no age_ms=""
   if [[ -f "$lock" ]]; then local mt now; mt="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0)"; now="$(date +%s)"; age_ms=$(( (now-mt)*1000 )); (( age_ms < stale_ms )) && lock_ok=yes; fi
-  [[ "$lock_ok" == yes ]] && _csv_add writer-lock PASS "writer heartbeat fresh" || _csv_add writer-lock FAIL "writer lock absent or stale"
+  [[ "$lock_ok" == yes ]] && _cloud_sync_verify_add writer-lock PASS "writer heartbeat fresh" || _cloud_sync_verify_add writer-lock FAIL "writer lock absent or stale"
   local cursor=""; [[ "$schema_ok" == yes ]] && cursor="$(sqlite3 "$db" "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;" 2>/dev/null || true)"
-  [[ -n "$cursor" ]] && _csv_add seed-cursor PASS "seed cursor present" || _csv_add seed-cursor FAIL "seed cursor absent"
+  [[ -n "$cursor" ]] && _cloud_sync_verify_add seed-cursor PASS "seed cursor present" || _cloud_sync_verify_add seed-cursor FAIL "seed cursor absent"
   local cfg="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}" mode="off"
   [[ -f "$cfg" ]] && mode="$(jq -r '.catalyst.linearReplica.mode // .catalyst.linearReplica // "off"' "$cfg" 2>/dev/null || echo off)"
-  [[ "$mode" == on ]] && _csv_add read-flag PASS "read flag on" || _csv_add read-flag INFO "read flag $mode"
+  [[ "$mode" == on ]] && _cloud_sync_verify_add read-flag PASS "read flag on" || _cloud_sync_verify_add read-flag INFO "read flag $mode"
   local report; report="$(jq -nc --argjson ok "$overall" --arg first "$first_failure" --arg db "$db" --argjson checks "$checks" '{ok:$ok,first_failure:$first,db_path:$db,checks:$checks}')"
   if [[ "$json_mode" == yes ]]; then printf '%s\n' "$report"; else jq -r '.checks[] | "\(.status)\t\(.name)\t\(.reason)"' <<<"$report"; fi
   [[ "$strict" != yes || "$overall" == true ]]
@@ -2492,7 +2492,15 @@ cmd_activate_replica() {
     echo "activate-replica: refusing: $(jq -r '.first_failure' <<<"$report")" >&2; return 1
   fi
   local cfg="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"
-  local merged; merged="$(jq -c '.catalyst.linearReplica.mode="on"' "$cfg" 2>/dev/null || jq -nc '{catalyst:{linearReplica:{mode:"on"}}}')"
+  local merged
+  if [[ -f "$cfg" ]]; then
+    merged="$(jq -c '.catalyst.linearReplica = ((.catalyst.linearReplica // {}) | if type == "object" then . else {} end) | .catalyst.linearReplica.mode = "on"' "$cfg")" || {
+      echo "activate-replica: refusing: existing Layer-2 config is not valid JSON" >&2
+      return 1
+    }
+  else
+    merged="$(jq -nc '{catalyst:{linearReplica:{mode:"on"}}}')"
+  fi
   if [[ "$dry_run" == yes ]]; then printf '%s\n' "$merged"; return 0; fi
   mkdir -p "$(dirname "$cfg")"; local tmp="${cfg}.tmp.$$"; printf '%s\n' "$merged" > "$tmp" && mv "$tmp" "$cfg"
   log "activated local Linear replica; restart execution-core to construct the reader"
