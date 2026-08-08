@@ -13,10 +13,22 @@ import { schedulerTick } from "./scheduler.mjs";
 const NOW = Date.parse("2026-06-09T12:00:00Z");
 
 let orchDir;
+let prevCatalystDir;
 beforeEach(() => {
   orchDir = mkdtempSync(join(tmpdir(), "ctl729-int-"));
+  // These scenarios run the REAL killHungWorker (killEscalate is left undefined),
+  // which calls emitReapIntent — and that resolves its target from
+  // getEventLogPath() with no path argument and no per-call override. Without
+  // this redirect the suite appends `phase.terminal.reap-requested` fixtures to
+  // the LIVE ~/catalyst/events/<ym>.jsonl that the broker, the reaper, the HUD
+  // and board-health all read. Same guard the nine sibling reap-emitting suites
+  // already use.
+  prevCatalystDir = process.env.CATALYST_DIR;
+  process.env.CATALYST_DIR = orchDir; // getEventLogPath → orchDir/events/<ym>.jsonl
 });
 afterEach(() => {
+  if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+  else process.env.CATALYST_DIR = prevCatalystDir;
   rmSync(orchDir, { recursive: true, force: true });
 });
 
