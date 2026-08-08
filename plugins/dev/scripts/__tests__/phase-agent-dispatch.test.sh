@@ -1433,7 +1433,7 @@ export CATALYST_RECREATE_WORKTREE_DIR="$T38_WT_BASE"
 printf '{"ticket":"CTL-100","phase":"triage","status":"done"}\n' >"${WORKER_DIR}/triage.json"
 ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
 (cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase research --ticket CTL-100 \
-	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t38.out" 2>/dev/null)
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t38.out" 2>"${TEST_DIR}/t38.err")
 RC38=$?
 SIGNAL="${WORKER_DIR}/phase-research.json"
 assert_eq "0" "$RC38" "recreate: final dispatch exits 0 (second dispatch succeeds)"
@@ -2272,7 +2272,7 @@ assert_eq "prelaunch-ready" "$(echo "$SPEC" | jq -r '.status')" "spec.status = p
 assert_eq "prelaunch-only" "$(echo "$SPEC" | jq -r '.launchMode')" "spec.launchMode = prelaunch-only"
 assert_eq "1" "$(echo "$SPEC" | jq -r '.generation')" "spec.generation = the claimed fencing token"
 assert_eq "null" "$(echo "$SPEC" | jq -r '.bg_job_id')" "spec.bg_job_id = null"
-assert_eq "${TEST_DIR}/proj" "$(echo "$SPEC" | jq -r '.worktreePath')" "spec.worktreePath = the dispatch cwd (SDK query() cwd)"
+assert_eq "$(cd "${TEST_DIR}/proj" && pwd -P)" "$(echo "$SPEC" | jq -r '.worktreePath')" "spec.worktreePath = the normalized dispatch cwd (SDK query() cwd)"
 assert_eq "/catalyst-dev:phase-triage CTL-100 --orch-dir ${ORCH_DIR}" \
 	"$(echo "$SPEC" | jq -r '.prompt')" "spec.prompt = the phase slash command"
 

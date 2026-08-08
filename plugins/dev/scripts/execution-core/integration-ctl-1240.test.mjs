@@ -75,14 +75,25 @@ function fakeDispatch({ code = 0 } = {}) {
 }
 
 // Recording gateway spy: tracks every getDescriptor call.
+//
+// The spy also records each call's stack so a test can assert WHICH census
+// consulted the gateway. A bare `calls.toContain(ticket)` does not discriminate:
+// several passes in one tick resolve the same ticket's state (the terminal sweep
+// via isTicketTerminalOrMerged, for one), so that assertion stays green even when
+// the census under test never ran at all. calledFrom() pins it to the caller.
 function makeGatewaySpy(descriptors = {}) {
   const calls = [];
+  const stacks = [];
   const spy = {
     getDescriptor: (id) => {
       calls.push(id);
+      stacks.push({ id, stack: new Error().stack ?? "" });
       return descriptors[id] ?? null;
     },
     get calls() { return calls; },
+    // True iff `id` was resolved through a call originating in `sourceFile`.
+    calledFrom: (id, sourceFile) =>
+      stacks.some((s) => s.id === id && s.stack.includes(sourceFile)),
   };
   return spy;
 }
@@ -189,11 +200,11 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
   //           → spy consulted.
 
   test("default stall-clear census uses { cache, gateway } via runningOpts", () => {
-    // CTL-1504 requires a canonical TEAM-123 key (`^[A-Z][A-Z0-9_]*-\d+$`) — a
-    // trailing letter suffix like the old "CTL-1240-STALL" is debris-filtered
-    // by isTicketKey() before defaultCollectStallClearCandidates ever reaches
-    // the isLinearTerminal probe, so the gateway spy was never consulted (CAT-62).
-    const STALL_TICKET = "CTL-99991240";
+    // Must be a canonical TEAM-123 key: CTL-1504 added an isTicketKey guard to the
+    // worker-dir censuses (stall-janitor.mjs, unstuck-sweep.mjs), so a descriptive
+    // id like "CTL-1240-STALL" is skipped as debris and the closure under test never
+    // runs — the spy stays empty and the assertion fails for the wrong reason.
+    const STALL_TICKET = "STALL-1240";
 
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     // Seed the stalled signal — stalledReason triggers the J3 isLinearTerminal probe.
@@ -223,7 +234,9 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
 
     // The stall-clear census isLinearTerminal closure must have consulted the gateway.
     // PRE-FIX: fetchTicketState(id) bare → spy never called → assertion fails.
-    expect(gateway.calls).toContain(STALL_TICKET);
+    // Pinned to stall-janitor.mjs so an unrelated pass resolving the same ticket
+    // cannot satisfy this on the census's behalf.
+    expect(gateway.calledFrom(STALL_TICKET, "stall-janitor.mjs")).toBe(true);
   });
 
   // ── Site 5: default unstuck census (scheduler.mjs:5356–5361) ─────────────────
@@ -237,7 +250,11 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
   //           → spy consulted.
 
   test("default unstuck census uses { cache, gateway } via runningOpts", () => {
-    const STUCK_TICKET = "CTL-1240-STUCK";
+    // Canonical TEAM-123 key for the same CTL-1504 isTicketKey reason as above.
+    // "CTL-1240-STUCK" was likewise skipped by the census; this assertion only
+    // passed because another pass in the same tick happened to consult the spy,
+    // so it was not actually exercising the unstuck census closure.
+    const STUCK_TICKET = "STUCK-1240";
 
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     writeSignal(STUCK_TICKET, "implement", "stalled", {
@@ -264,6 +281,7 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
 
     // The unstuck census isLinearTerminal closure must have consulted the gateway.
     // PRE-FIX: fetchTicketState(id) bare → spy never called → assertion fails.
-    expect(gateway.calls).toContain(STUCK_TICKET);
+    // Pinned to unstuck-sweep.mjs for the same reason as the stall-clear case.
+    expect(gateway.calledFrom(STUCK_TICKET, "unstuck-sweep.mjs")).toBe(true);
   });
 });

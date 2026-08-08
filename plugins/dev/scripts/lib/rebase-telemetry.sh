@@ -42,7 +42,12 @@ _emit_rebase_event() {
     --worker     "$ticket" \
     --linear-ticket "$ticket" \
     --payload-json "$payload")" || return 0
-  canonical_jsonl_append "${EVENTS_DIR:-$HOME/catalyst/events}" "$line"
+  # CAT-31 review P2: honor the same events-dir chain every other bash producer
+  # uses (see lib/phase-emit-complete.sh). Hard-coding $HOME/catalyst/events sent
+  # these events outside the unified log on any install that relocates it via
+  # CATALYST_EVENTS_DIR or CATALYST_DIR — invisible to the broker, HUD and OTel
+  # forwarder. EVENTS_DIR stays the first override for existing callers.
+  canonical_jsonl_append "${EVENTS_DIR:-${CATALYST_EVENTS_DIR:-${CATALYST_DIR:-$HOME/catalyst}/events}}" "$line"
 }
 
 # emit_stale_base_detected — WARN: the worktree is behind origin/<base>.
@@ -93,6 +98,13 @@ emit_auto_rebased() {
     --severity INFO \
     --orch "$orch" --ticket "$ticket" \
     --payload-json "$payload"
+}
+
+emit_dispatch_cwd_corrected() {
+  local phase="$1" ticket="$2" orch="$3" from="$4" to="$5" source="$6" payload
+  payload="$(jq -nc --arg f "$from" --arg t "$to" --arg s "$source" '{from:$f,to:$t,source:$s}')" || payload="{}"
+  _emit_rebase_event --event-name "phase.${phase}.dispatch-cwd-corrected.${ticket}" \
+    --severity WARN --orch "$orch" --ticket "$ticket" --payload-json "$payload"
 }
 
 # emit_rebase_conflict_categorized — WARN: conflicted files categorized by type.
