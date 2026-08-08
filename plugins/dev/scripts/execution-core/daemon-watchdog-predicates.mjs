@@ -57,8 +57,29 @@ export function forwarderEventLogPath() {
 export function readLagStuck({ checkpointPath, eventLogPath, stalenessMs, now }) {
   try {
     const { lastForwardedTs } = JSON.parse(readFileSync(checkpointPath, "utf8"));
-    const lastMs = Date.parse(lastForwardedTs);
-    if (!Number.isFinite(lastMs)) return false;
+    let lastMs = Date.parse(lastForwardedTs);
+    if (!Number.isFinite(lastMs)) {
+      // Codex P1 — COLD-START baseline. `lastForwardedTs` is legitimately absent
+      // on a fresh install (and on a legacy checkpoint) until the FIRST batch is
+      // successfully delivered. Returning false here left a forwarder that wedges
+      // (or whose every delivery fails) before that first success undetectable by
+      // this predicate indefinitely, no matter how far the event log ran ahead —
+      // the watchdog could only act once the DLQ crossed its 1 GiB default.
+      //
+      // Use the checkpoint file's CREATION time as the stand-in for "forwarding
+      // started here": the forwarder writes the checkpoint at startup, so
+      // "created N ms ago, still nothing delivered, and the log has fresh work"
+      // is exactly the cold-start stall. birthtime is the only honest choice —
+      // mtime is rewritten unconditionally every 10s (the same trap the
+      // lastForwardedTs keying exists to avoid).
+      //
+      // Where birthtime is unavailable (0/NaN on some filesystems), fall through
+      // to false and keep the pre-existing non-crossing behavior rather than
+      // inventing a baseline that could fake a breach.
+      const birthMs = statSync(checkpointPath).birthtimeMs;
+      if (!Number.isFinite(birthMs) || birthMs <= 0) return false;
+      lastMs = birthMs;
+    }
     const eventLogMtimeMs = statSync(eventLogPath).mtimeMs; // throws → caught → false
     const backlog = eventLogMtimeMs > lastMs; // fresh work after the last forward
     return backlog && now - lastMs >= stalenessMs;

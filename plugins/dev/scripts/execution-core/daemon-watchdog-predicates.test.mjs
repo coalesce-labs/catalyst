@@ -14,6 +14,7 @@ import {
   ftruncateSync,
   closeSync,
   utimesSync,
+  statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,6 +126,102 @@ describe("readDlqBytes (statSync size, never readFileSync)", () => {
       ftruncateSync(fd, THREE_GB); // sparse — no bytes actually written
       closeSync(fd);
       expect(readDlqBytes(p)).toBe(THREE_GB);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// Codex P1 regression: on a fresh install (and on a legacy checkpoint)
+// lastForwardedTs is absent until the FIRST batch is delivered. Before the fix
+// this predicate returned false unconditionally in that state, so a forwarder
+// that wedged before its first success was invisible here no matter how far the
+// event log ran ahead — only a 1 GiB DLQ could trip the watchdog.
+describe("readLagStuck cold start (no lastForwardedTs yet)", () => {
+  const NOW = Date.parse("2026-07-23T12:00:00.000Z");
+  const STALE = 900_000; // 15 min
+
+  // The checkpoint's CREATION time stands in for "forwarding started here".
+  // Node reports birthtimeMs from the real file, so age it by writing the file
+  // and comparing against a `now` far enough in its future.
+  function coldSetup({ eventLogMtimeMs, payload }) {
+    const { dir, cleanup } = tmp();
+    const checkpointPath = join(dir, "checkpoint.json");
+    const eventLogPath = join(dir, "events.jsonl");
+    writeFileSync(checkpointPath, JSON.stringify(payload));
+    writeFileSync(eventLogPath, "x");
+    if (eventLogMtimeMs != null) {
+      const t = new Date(eventLogMtimeMs);
+      utimesSync(eventLogPath, t, t);
+    }
+    const birthMs = statSync(checkpointPath).birthtimeMs;
+    return { checkpointPath, eventLogPath, birthMs, cleanup };
+  }
+
+  for (const [label, payload] of [
+    ["absent", {}],
+    ["null", { lastForwardedTs: null }],
+    ["unparseable", { lastForwardedTs: "not-a-date" }],
+  ]) {
+    test(`${label} lastForwardedTs + backlog older than stalenessMs → true`, () => {
+      const { checkpointPath, eventLogPath, birthMs, cleanup } = coldSetup({
+        payload,
+        // Backlog: the log was written AFTER the checkpoint was created.
+        eventLogMtimeMs: Date.now() + 1_000,
+      });
+      try {
+        // `now` far enough past the checkpoint's birth to exceed stalenessMs.
+        const now = birthMs + STALE + 60_000;
+        expect(
+          readLagStuck({ checkpointPath, eventLogPath, stalenessMs: STALE, now }),
+        ).toBe(true);
+      } finally {
+        cleanup();
+      }
+    });
+  }
+
+  test("cold start still within stalenessMs → false (no premature trip)", () => {
+    const { checkpointPath, eventLogPath, birthMs, cleanup } = coldSetup({
+      payload: {},
+      eventLogMtimeMs: Date.now() + 1_000,
+    });
+    try {
+      const now = birthMs + 1_000; // 1s in — nowhere near the 15 min threshold
+      expect(
+        readLagStuck({ checkpointPath, eventLogPath, stalenessMs: STALE, now }),
+      ).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("cold start with NO backlog → false (idle host never trips)", () => {
+    const { checkpointPath, eventLogPath, birthMs, cleanup } = coldSetup({
+      payload: {},
+      eventLogMtimeMs: NOW - 10 * 86_400_000, // log untouched long before the checkpoint
+    });
+    try {
+      const now = birthMs + STALE + 60_000;
+      expect(
+        readLagStuck({ checkpointPath, eventLogPath, stalenessMs: STALE, now }),
+      ).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("missing checkpoint file → false (non-crossing, unchanged)", () => {
+    const { dir, cleanup } = tmp();
+    try {
+      expect(
+        readLagStuck({
+          checkpointPath: join(dir, "nope.json"),
+          eventLogPath: join(dir, "events.jsonl"),
+          stalenessMs: STALE,
+          now: NOW,
+        }),
+      ).toBe(false);
     } finally {
       cleanup();
     }

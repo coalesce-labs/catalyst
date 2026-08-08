@@ -184,6 +184,18 @@ else
 fi
 rm -rf "$CFG_HOME"
 
+# The runner's own <cwd>/.catalyst/config.json fallback is not enough under
+# launchd: the stack LaunchAgent sets neither WorkingDirectory nor
+# CATALYST_CONFIG_FILE, so after a reboot cwd is `/` and the fallback resolves
+# /.catalyst/config.json — silently reverting a monitor node's only watchdog to
+# shadow defaults. The spawn must PIN the path.
+if grep -B12 'nohup bun run "\$WATCHDOG_SCRIPT"' "$MONITOR_SH" | grep -q 'wd_config' \
+   && grep -q 'CATALYST_CONFIG_FILE="\$wd_config" nohup bun run "\$WATCHDOG_SCRIPT"' "$MONITOR_SH"; then
+  ok "watchdog spawn pins CATALYST_CONFIG_FILE (survives a launchd cwd of /)"
+else
+  fail "watchdog spawn does not pin the Layer-1 config path"
+fi
+
 # ── 5. the watchdog lifecycle is serialized too ────────────────────────────
 # Two concurrent watchdog-starts could otherwise both pass read_watchdog_pid
 # before either wrote the pid file, leaving an untracked enforce-mode watchdog

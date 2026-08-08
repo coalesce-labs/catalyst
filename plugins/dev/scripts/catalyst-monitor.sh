@@ -969,9 +969,24 @@ _watchdog_start_impl() {
     echo "Daemon watchdog script not found ($WATCHDOG_SCRIPT) — not started" >&2
     return 1
   fi
+  # Codex P1: PIN the Layer-1 config path for the child. The runner's own
+  # fallback is <cwd>/.catalyst/config.json, but the stack LaunchAgent supplies
+  # neither WorkingDirectory nor CATALYST_CONFIG_FILE — so after a reboot cwd is
+  # `/` and that fallback resolves /.catalyst/config.json, silently reverting the
+  # monitor node's only watchdog to shadow defaults and ignoring a configured
+  # `enforce`/`off`. Resolve it here (where SCRIPT_DIR is symlink-resolved to the
+  # real plugin checkout) and export it, so launchd and an interactive start
+  # agree. An explicit CATALYST_CONFIG_FILE always wins.
+  local wd_config="${CATALYST_CONFIG_FILE:-}"
+  if [[ -z "$wd_config" ]]; then
+    local repo_root
+    repo_root="$(cd -P "${SCRIPT_DIR}/../../.." 2>/dev/null && pwd)" || repo_root=""
+    [[ -n "$repo_root" && -f "${repo_root}/.catalyst/config.json" ]] \
+      && wd_config="${repo_root}/.catalyst/config.json"
+  fi
   # APPEND (>>), never truncate: this is the shared execution-core daemon log.
   mkdir -p "$(dirname "$WATCHDOG_LOG")" 2>/dev/null || true
-  nohup bun run "$WATCHDOG_SCRIPT" >> "$WATCHDOG_LOG" 2>&1 &
+  CATALYST_CONFIG_FILE="$wd_config" nohup bun run "$WATCHDOG_SCRIPT" >> "$WATCHDOG_LOG" 2>&1 &
   local wd_pid=$!
   disown "$wd_pid" 2>/dev/null || true
   echo "$wd_pid" > "$WATCHDOG_PID_FILE"
