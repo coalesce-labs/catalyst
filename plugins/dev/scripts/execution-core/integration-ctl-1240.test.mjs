@@ -111,6 +111,23 @@ const recoveryIntentMarker = (ticket) =>
 //          → fail-open non-terminal → both tickets processed).
 // POST-FIX: spy consulted; Done ticket filtered (terminal), In-Progress ticket kept.
 
+// CTL-1504 interaction — fixture naming is load-bearing, and the two groups differ:
+//
+//   * The Phase 2 CENSUS tests below must use CANONICAL Linear keys
+//     (`TICKET_KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/`, ticket-key.mjs). CTL-1504 added
+//     `if (!isTicketKey(ticket)) continue` to defaultCollectStallClearCandidates
+//     (stall-janitor.mjs) and defaultCollectUnstuckCandidates (unstuck-sweep.mjs)
+//     so a debris dir is never handed to a live `linearis issues read`. A suffixed
+//     name like `CTL-1240-STALL` does not end in `-<digits>`, so the census skipped
+//     the fixture's worker dir outright, the isLinearTerminal probe never ran, and
+//     the gateway spy went unconsulted — which is why the stall-clear assertion
+//     failed on `main` for reasons unrelated to its subject. Keep them numeric.
+//
+//   * The Phase 1 tickets below deliberately KEEP their suffixed names. That path
+//     has no isTicketKey guard, and a canonical key makes fetchTicketState fall
+//     through past the gateway spy to the live `linearis` tier (observed: 131ms →
+//     3.2s, and the would-defer event stops being emitted). The non-key name is
+//     what keeps this test hermetic and off the network.
 describe("CTL-1240 Phase 1 — gateway threaded through startScheduler spine", () => {
   const DONE_TICKET = "CTL-1240-DONE";
   const LIVE_TICKET = "CTL-1240-LIVE";
@@ -189,7 +206,7 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
   //           → spy consulted.
 
   test("default stall-clear census uses { cache, gateway } via runningOpts", () => {
-    const STALL_TICKET = "CTL-1240-STALL";
+    const STALL_TICKET = "CTL-12401";
 
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     // Seed the stalled signal — stalledReason triggers the J3 isLinearTerminal probe.
@@ -233,7 +250,7 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
   //           → spy consulted.
 
   test("default unstuck census uses { cache, gateway } via runningOpts", () => {
-    const STUCK_TICKET = "CTL-1240-STUCK";
+    const STUCK_TICKET = "CTL-12402";
 
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     writeSignal(STUCK_TICKET, "implement", "stalled", {
