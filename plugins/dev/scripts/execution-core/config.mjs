@@ -1269,6 +1269,27 @@ export const HEARTBEAT_RESTORE_HOLD_MS = resolveRestoreHoldMs(
   HEARTBEAT_GRACE_MS,
 );
 
+export const DISPATCH_OUTAGE_SUSTAINED_MS =
+  Number(process.env.CATALYST_DISPATCH_OUTAGE_SUSTAINED_MS) || 300_000;
+
+export function getDispatchOutageFallback() {
+  const fallback = "last-known-good";
+  try {
+    const envValue = process.env.CATALYST_DISPATCH_OUTAGE_FALLBACK;
+    let configValue;
+    try {
+      configValue = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))
+        ?.catalyst?.cluster?.dispatchOutageFallback;
+    } catch {
+      configValue = undefined;
+    }
+    const value = envValue ?? configValue ?? fallback;
+    return value === "last-known-good" || value === "full-roster" ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // CLUSTER_SYNC_INTERVAL_MS — how often the daemon git-pulls the catalyst-cluster
 // clone so a roster change committed on one node (CTL-1274 cluster cli) reaches
 // every running daemon without a restart. 5 min keeps the pull cheap while

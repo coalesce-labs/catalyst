@@ -99,10 +99,18 @@ offline owner's slice fails over to a live host instead of stranding in Todo for
   is NOT reclaimed, since a never-seen host has no work to reclaim). The asymmetry is deliberate:
   dispatch fails an unseen owner's slice **over**; recovery must not reclaim a host's non-existent work.
 
-Both altitudes preserve the same fail-safes: single-host is a strict no-op, and a total liveness
-outage (heartbeat read throws / everyone looks dead) degrades to the **full roster** (each node owns
-only its own HRW slice — never double-acts). The Linear-CAS claim (`cluster-claim.mjs` soft-CAS on
-`catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains the transition-race serializer.
+Both altitudes preserve the single-host no-op. A transient total-liveness outage degrades to the
+**full roster**. After five minutes, dispatch defaults to the persisted last-known-good live roster;
+`catalyst.cluster.dispatchOutageFallback: "full-roster"` explicitly opts back into the old sustained
+outage behavior. A cold start with no last-known-good set remains on the full roster rather than
+using `[self]`, which would make every host own every ticket. The Linear-CAS claim
+(`cluster-claim.mjs` soft-CAS on `catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains
+the transition-race serializer.
+
+The daemon boot announcement reports `ownsRawRoster` and `ownsDispatchRoster`; only the latter
+reflects live dispatch ownership. Board health's `strandedNode` invariant is liveness-driven.
+Team-level reconcile failures remain visible as context but never authorize takeover of another
+host's work.
 
 **Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
 scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.

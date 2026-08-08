@@ -78,6 +78,7 @@ function mkBoard(o = {}) {
     eligible: o.eligible ?? [],
     roster: o.roster ?? [],
     dispatchRoster: o.dispatchRoster ?? o.roster ?? [],
+    notLiveHosts: Object.prototype.hasOwnProperty.call(o, "notLiveHosts") ? o.notLiveHosts : [],
     self: o.self ?? "mini",
     multiHost: o.multiHost ?? false,
     // CTL-1157: assembleBoardState now records the run mode on the board so
@@ -298,7 +299,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
     expect(stale).toMatchObject({ ok: true, failed: 0, observable: false });
   });
 
-  test("strandedNode: rostered host owns work + reconcile failing → flag (observable)", () => {
+  test("strandedNode: team reconcile failure is reported but cannot authorize takeover", () => {
     const ticketsById = new Map([["CTL-A", { identifier: "CTL-A" }]]);
     const ownerForTicket = () => "mini-2";
     const r = evaluateInvariants(
@@ -306,23 +307,36 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
         ticketsById,
         roster: ["mini", "mini-2"],
         ownerForTicket,
-        reconcileMarkers: { "mini-2": { consecutiveFailures: 3 } },
+        reconcileMarkers: { CAT: { consecutiveFailures: 3 } },
+        notLiveHosts: [],
       }),
     );
-    expect(r.strandedNode.ok).toBe(false);
+    expect(r.strandedNode.ok).toBe(true);
     expect(r.strandedNode.observable).toBe(true);
-    expect(r.strandedNode.flagged).toEqual(["mini-2"]);
+    expect(r.strandedNode.flagged).toEqual([]);
+    expect(r.strandedNode.reconcileFailingTeams).toEqual(["CAT"]);
   });
 
-  test("strandedNode: no HRW owner fn OR no reconcile signal → not observable", () => {
+  test("strandedNode: no HRW owner fn OR unbound liveness → not observable", () => {
     const noHrw = evaluateInvariants(mkBoard({ roster: ["mini", "mini-2"], ownerForTicket: null }));
     expect(noHrw.strandedNode.observable).toBe(false);
 
     const ticketsById = new Map([["CTL-A", { identifier: "CTL-A" }]]);
     const noSignal = evaluateInvariants(
-      mkBoard({ ticketsById, roster: ["mini", "mini-2"], ownerForTicket: () => "mini-2", reconcileMarkers: {} }),
+      mkBoard({ ticketsById, roster: ["mini", "mini-2"], ownerForTicket: () => "mini-2", notLiveHosts: null }),
     );
     expect(noSignal.strandedNode.observable).toBe(false);
+  });
+
+  test("strandedNode: not-live host with an HRW share is flagged", () => {
+    const ticketsById = new Map([["CTL-A", { identifier: "CTL-A" }]]);
+    const r = evaluateInvariants(mkBoard({
+      ticketsById,
+      roster: ["mini", "mini-2"],
+      ownerForTicket: () => "mini-2",
+      notLiveHosts: ["mini-2"],
+    }));
+    expect(r.strandedNode).toMatchObject({ ok: false, failed: 1, observable: true, flagged: ["mini-2"] });
   });
 
   test("a throwing invariant fails OPEN ({ok:true,error}) and never aborts the scan", () => {

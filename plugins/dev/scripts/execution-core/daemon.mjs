@@ -131,6 +131,7 @@ import {
   clearHoldStopCooldown, // CTL-768
   defaultClearStall, // CTL-1067: J3 stall-clear seam
   readMaxParallel, // CTL-1551: the SCHEDULER-ENFORCED slot ceiling for the heartbeat
+  resolveDispatchRoster,
   clearDispositionEmit as defaultClearDispositionEmit, // Codex #2970 round 3: reset the in-process worker.transition dedup after an out-of-band clear
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
@@ -1711,6 +1712,31 @@ export function startDaemon({
   const bootSelf = _ident.action === "noop" ? (bootHostName ?? getHostName()) : _ident.name;
   const bootEligible = readAllEligible();
   const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
+  let dispatchRosterForBoot = null;
+  let bootOwnsDispatch = null;
+  try {
+    dispatchRosterForBoot = resolveDispatchRoster({
+      roster: bootRoster,
+      orchDir,
+      self: bootSelf,
+      persist: false,
+    });
+    bootOwnsDispatch = bootEligible.filter((t) =>
+      ownedBy(t.identifier, dispatchRosterForBoot, bootSelf)
+    ).length;
+  } catch {
+    /* boot observability is fail-open */
+  }
+
+  if (bootMultiHost && Array.isArray(dispatchRosterForBoot)) {
+    const absentPeers = bootRoster.filter((host) => host !== bootSelf && !dispatchRosterForBoot.includes(host));
+    if (absentPeers.length > 0) {
+      log.warn(
+        { host: bootSelf, neverLiveHosts: absentPeers, roster: bootRoster, dispatchRoster: dispatchRosterForBoot },
+        "execution-core daemon: rostered worker(s) are not live. Their HRW share fails over while peer liveness is healthy but may revert during a peer-view outage; start the daemon there, or remove a non-worker node from catalyst.cluster.staticRoster / catalyst-cluster cluster.json.",
+      );
+    }
+  }
 
   // CTL-1271: a multi-host configuration that resolves to a single-host roster is
   // a SILENT eviction — every peer drops out of HRW and this node owns the whole
@@ -1770,7 +1796,9 @@ export function startDaemon({
     {
       orchDir,
       host: bootSelf,
-      owns: bootOwns,
+      ownsRawRoster: bootOwns,
+      ownsDispatchRoster: bootOwnsDispatch,
+      owns: bootOwns, // compatibility alias for existing log consumers
       eligible: bootEligible.length,
       roster: bootRoster,
       source: bootSource,

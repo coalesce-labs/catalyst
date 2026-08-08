@@ -461,6 +461,17 @@ export function resolveRosterSeam(value, fallback) {
   }
 }
 
+// `null` is deliberately distinct from `[]`: null means the liveness signal
+// could not be observed, while [] means it was observed and every host is live.
+export function resolveNotLiveHosts(notLiveHosts) {
+  try {
+    const value = typeof notLiveHosts === "function" ? notLiveHosts() : notLiveHosts;
+    return Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export function assembleBoardState({
   orchDir,
   getBoard = () => [],
@@ -473,6 +484,7 @@ export function assembleBoardState({
   // (scheduler.mjs); empty default keeps the holistic foreign-failover unreachable
   // (shadow-safe AND N=1-safe).
   deadHosts = [],
+  getNotLiveHosts = () => null,
   self = "",
   multiHost = false,
   capacity = { maxParallel: 0, liveCount: 0, freeSlots: 0 },
@@ -615,6 +627,7 @@ export function assembleBoardState({
     // CTL-1524 (C4b): resolve here too, so a direct assembleBoardState caller may
     // also pass a thunk. Already-resolved arrays pass through untouched.
     deadHosts: resolveDeadHosts(deadHosts),
+    notLiveHosts: safe(() => resolveNotLiveHosts(getNotLiveHosts), null),
     self: self ?? "",
     multiHost: !!multiHost,
     // CTL-1157 off-gate: carried so evaluateInvariants can skip the cohort checks
@@ -860,12 +873,15 @@ function checkRateLimitHeadroom(b, t) {
   return invariant(!failed, failed ? 1 : 0, true, [], note);
 }
 
-// #6 — stranded node (mini-2 class): a rostered host that HRW-owns a share of
-// the board but whose team reconcile is failing. Cross-host PEER liveness needs
-// the heartbeat/Loki path → only the local-marker form ships now.
+// #6 — stranded node: a rostered host that HRW-owns a share of the board but is
+// NOT live. Only liveness reaches `flagged`, because it authorizes foreign-work
+// takeover. Fleet-wide, team-keyed reconcile failures are operator context only.
 function checkStrandedNode(b) {
   if (!b.ownerForTicket || b.roster.length === 0) {
     return invariant(true, 0, false, [], "no roster/HRW → stranded-node not observable");
+  }
+  if (b.notLiveHosts == null) {
+    return invariant(true, 0, false, [], "liveness signal unbound → stranded-node not observable");
   }
   const ownedByHost = new Map();
   for (const [id] of b.ticketsById) {
@@ -876,26 +892,26 @@ function checkStrandedNode(b) {
   }
   const failing = b.ring?.reconcileFailing ?? new Set();
   const markers = b.reconcileMarkers ?? {};
+  const notLive = new Set(b.notLiveHosts);
   const flagged = [];
   for (const host of b.roster) {
     const share = ownedByHost.get(host) ?? 0;
     if (share <= 0) continue;
-    const markerFail = (markers[host]?.consecutiveFailures ?? 0) > 0;
-    const ringFail = failing.has(host);
-    if (markerFail || ringFail) flagged.push(host);
+    if (notLive.has(host)) flagged.push(host);
   }
-  // observable only if we have SOME reconcile signal to judge against.
-  const haveSignal = Object.keys(markers).length > 0 || failing.size > 0;
+  const reconcileFailingTeams = [...new Set([
+    ...Object.entries(markers).filter(([, marker]) => (marker?.consecutiveFailures ?? 0) > 0).map(([team]) => team),
+    ...failing,
+  ])].sort();
   return invariant(
     flagged.length === 0,
     flagged.length,
-    haveSignal,
+    true,
     flagged,
     flagged.length
-      ? `node(s) stranded (own work, reconcile failing): ${flagged.join(", ")}`
-      : haveSignal
-        ? "all rostered nodes participating"
-        : "no reconcile-health signal → peer liveness not observable",
+      ? `${flagged.length} rostered host(s) own work but are not live: ${flagged.join(", ")}`
+      : "all rostered nodes participating",
+    { reconcileFailingTeams },
   );
 }
 
@@ -1639,7 +1655,7 @@ export function proposeMoves(invariants, _b) {
     }
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
-    if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
+    if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but is not live" });
   }
   for (const h of invariants.nodeProductivity?.flagged ?? []) {
     if (!invariants.nodeProductivity.ok) tier3.push({
@@ -1988,6 +2004,7 @@ export function boardHealthPass({
   getPeerProductivity,
   productivityMode,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
+  getNotLiveHosts,
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
   isThrottledFn = isThrottled,
@@ -2011,7 +2028,7 @@ export function boardHealthPass({
     // so the expensive whole-log heartbeat read behind the daemon's thunk is paid
     // only on a tick that actually proceeds, not on all ~59 throttled ticks between
     // 5-minute passes. Arrays still work unchanged (resolveDeadHosts is a no-op).
-    getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), mode, now,
+    getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), getNotLiveHosts, mode, now,
     getDeferredBoardHealthTickets, // CTL-1432 (B2). CTL-1552: sanctionedNeedsHuman removed.
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)

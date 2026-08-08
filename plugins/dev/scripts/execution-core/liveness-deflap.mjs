@@ -13,7 +13,10 @@
 // Applies to the DISPATCH roster only (not recovery — see plan Phase 2 Overview):
 // recovery keeps its grace-only surviving roster.
 //
-// Per-host observation state is a tiny `{ <host>: { liveSince: <ms>|null } }` map
+// Per-host observation state is a tiny `{ <host>: { liveSince: <ms>|null,
+// everLive: <boolean> } }` map. `everLive` is monotonic-once-true and exists
+// solely to distinguish "never checked in" from "went quiet"; admission does
+// not read it. `__`-prefixed entries are metadata, never hosts.
 // the caller persists (scheduler is the sole writer; monitor reads it read-only).
 
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
@@ -21,6 +24,29 @@ import { join } from "node:path";
 
 // The on-disk observation-state file, relative to an orchestrator dir.
 export const DEFLAP_STATE_FILE = ".liveness-deflap.json";
+
+export function markOutage(prevState = {}, nowMs = Date.now()) {
+  if (prevState.__outage?.sinceMs != null) return { ...prevState };
+  return { ...prevState, __outage: { sinceMs: nowMs } };
+}
+
+export function clearOutage(state = {}) {
+  const { __outage: _ignored, ...rest } = state;
+  return rest;
+}
+
+export function outageDurationMs(state = {}, nowMs = Date.now()) {
+  const since = Number(state.__outage?.sinceMs);
+  return Number.isFinite(since) ? Math.max(0, nowMs - since) : 0;
+}
+
+export function lastGoodRoster(state = {}) {
+  return Array.isArray(state.__lastGoodRoster) ? [...state.__lastGoodRoster] : [];
+}
+
+export function withLastGoodRoster(state = {}, roster = []) {
+  return { ...state, __lastGoodRoster: [...new Set((roster ?? []).filter(Boolean))] };
+}
 
 // computeDispatchRoster — apply the restore-side deflap to the surviving roster.
 //
@@ -76,14 +102,14 @@ export function computeDispatchRoster({
     // self appears in the live set this tick.
     if (self !== undefined && h === self) {
       const liveSince = nowMs - holdMs;
-      nextState[h] = { liveSince };
+      nextState[h] = { liveSince, everLive: true };
       dispatchRoster.push(h);
       continue;
     }
 
     if (!surviving.has(h)) {
       // Shed / dead this tick → reset the restore hold; not dispatch-eligible.
-      nextState[h] = { liveSince: null };
+      nextState[h] = { liveSince: null, everLive: prevState[h]?.everLive === true };
       continue;
     }
 
@@ -100,7 +126,7 @@ export function computeDispatchRoster({
       liveSince = nowMs;
     }
 
-    nextState[h] = { liveSince };
+    nextState[h] = { liveSince, everLive: true };
     if (nowMs - liveSince >= holdMs) dispatchRoster.push(h);
   }
 

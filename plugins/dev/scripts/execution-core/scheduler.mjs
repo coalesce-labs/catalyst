@@ -378,6 +378,8 @@ import {
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
   HEARTBEAT_GRACE_MS, // CTL-1191: dead-host grace for surviving-roster recovery gate
   HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
+  DISPATCH_OUTAGE_SUSTAINED_MS,
+  getDispatchOutageFallback,
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
 import {
@@ -386,7 +388,16 @@ import {
 } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
-import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
+import {
+  computeDispatchRoster,
+  readDeflapState,
+  writeDeflapState,
+  markOutage,
+  clearOutage,
+  outageDurationMs,
+  lastGoodRoster,
+  withLastGoodRoster,
+} from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
 import { readGithubQuota } from "./github-quota-timer.mjs";
@@ -553,6 +564,14 @@ function readPositiveLive(
   }
 }
 
+export function computeNotLiveHosts(roster, opts = {}) {
+  if (!Array.isArray(roster)) return null;
+  const { live } = readPositiveLive(roster, opts);
+  if (!Array.isArray(live)) return null;
+  const liveSet = new Set(live);
+  return roster.filter((host) => !liveSet.has(host));
+}
+
 // computeDispatchSurvivingRoster — the positive-liveness dispatch roster with the
 // outage fail-safe folded in: sheds a NEVER-live rostered host (absent from
 // lastSeen — the CTL-1057 permanently-offline case) so its HRW slice fails over,
@@ -592,6 +611,8 @@ export function resolveDispatchRoster({
   persist = false,
   readHeartbeats = readClusterHeartbeats,
   holdMs = HEARTBEAT_RESTORE_HOLD_MS,
+  sustainedMs = DISPATCH_OUTAGE_SUSTAINED_MS,
+  outageFallback = undefined,
   // CTL-1091 review F2: observability hook fired ONLY on the outage→full-roster
   // degradation (below). Default no-op keeps the pure resolve silent for unit
   // callers and the read-only monitor site; the scheduler's write path wires the
@@ -602,23 +623,33 @@ export function resolveDispatchRoster({
   const prevState = readDeflapState(orchDir);
   const { live, error } = readPositiveLive(roster, { readHeartbeats, nowMs });
   if (!live || live.length === 0) {
-    // Total outage → full roster, observation state untouched. Surface the
-    // degradation (its silence was CTL-1091 verify F2): cross-host failover has
-    // effectively turned OFF this tick and every host has dropped back to owning
-    // only its own HRW slice. The fail-safe is correct; only its silence was the
-    // risk. Never let an observability throw break the roster resolve.
+    const nextState = markOutage(prevState, nowMs);
+    const outageMs = outageDurationMs(nextState, nowMs);
+    const sustained = outageMs >= sustainedMs;
+    const mode = outageFallback ?? getDispatchOutageFallback();
+    const lkg = lastGoodRoster(nextState);
+    const narrowed = [...new Set([
+      ...lkg.filter((h) => roster.includes(h)),
+      ...(typeof self === "string" && self ? [self] : []),
+    ])];
+    const useLastGood = sustained && mode === "last-known-good" && lkg.length > 0 && narrowed.length > 0;
+    const degradedRoster = useLastGood ? narrowed : roster;
     try {
       onDegrade({
         roster,
         self,
         reason: error ? "heartbeat-read-threw" : "nobody-positively-live",
         error: error ? (error.message ?? String(error)) : null,
+        sustained,
+        outageMs,
+        degradedTo: useLastGood ? "last-known-good" : "full-roster",
+        lastGoodRoster: lkg,
       });
     } catch {
       /* observability is best-effort */
     }
-    if (persist) writeDeflapState(orchDir, prevState);
-    return roster;
+    if (persist) writeDeflapState(orchDir, nextState);
+    return degradedRoster;
   }
   const { dispatchRoster, nextState } = computeDispatchRoster({
     survivingRoster: live,
@@ -628,7 +659,8 @@ export function resolveDispatchRoster({
     nowMs,
     self,
   });
-  if (persist) writeDeflapState(orchDir, nextState);
+  const healthyState = withLastGoodRoster(clearOutage(nextState), dispatchRoster);
+  if (persist) writeDeflapState(orchDir, healthyState);
   return dispatchRoster;
 }
 
@@ -641,13 +673,23 @@ export function resolveDispatchRoster({
 // read-path bug. The read-only monitor site stays silent (no onDegrade), so the
 // scheduler is the sole emitter and there is no double-logging.
 const DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS = 60_000;
+const DISPATCH_ROSTER_SUSTAINED_WARN_INTERVAL_MS = 600_000;
 let _lastDispatchRosterOutageWarnMs = 0;
-function warnDispatchRosterOutage({ roster, self, reason, error } = {}) {
+let _lastSustainedWarnMs = 0;
+let _sustainedEpisodeLogged = false;
+function warnDispatchRosterOutage({ roster, self, reason, error, sustained = false, outageMs = 0, degradedTo = "full-roster", lastGoodRoster = [] } = {}) {
   const nowMs = Date.now();
-  if (nowMs - _lastDispatchRosterOutageWarnMs < DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS) return;
-  _lastDispatchRosterOutageWarnMs = nowMs;
+  if (sustained) {
+    if (_sustainedEpisodeLogged && nowMs - _lastSustainedWarnMs < DISPATCH_ROSTER_SUSTAINED_WARN_INTERVAL_MS) return;
+    _sustainedEpisodeLogged = true;
+    _lastSustainedWarnMs = nowMs;
+  } else {
+    _sustainedEpisodeLogged = false;
+    if (nowMs - _lastDispatchRosterOutageWarnMs < DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS) return;
+    _lastDispatchRosterOutageWarnMs = nowMs;
+  }
   log.warn(
-    { roster, self, reason, error, degradedTo: "full-roster" },
+    { roster, self, reason, error, sustained, outageMs, degradedTo, lastGoodRoster },
     "ctl-1091: dispatch-roster liveness read degraded to the FULL roster — cross-host failover is OFF this tick (every host owns only its own HRW slice). This is the correct fail-safe; investigate the heartbeat/Loki feed if it persists.",
   );
 }
@@ -6132,6 +6174,7 @@ export function schedulerTick(
             typeof _boardHealth.deadHosts === "function"
               ? () => _boardHealth.deadHosts(roster, { readHeartbeats: tickReadHeartbeats })
               : (_boardHealth.deadHosts ?? []),
+          getNotLiveHosts: () => computeNotLiveHosts(roster, { readHeartbeats: tickReadHeartbeats }),
           lastRunMs: _boardHealthLastRunMs,
           // emit defaults to defaultEmitEvent. CTL-1300: thread the optional `act`
           // seam — supplied ONLY by the daemon binding (the holistic recovery-pass

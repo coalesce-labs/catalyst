@@ -10471,6 +10471,48 @@ describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => 
     expect(persisted.laptop.liveSince).toBe(1234);
   });
 
+  test("sustained outage narrows to the last-known-good roster by default", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ __lastGoodRoster: ["mini"], __outage: { sinceMs: 1_000 } }),
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost", "gone"],
+      orchDir,
+      self: "mini",
+      nowMs: 10_000,
+      sustainedMs: 5_000,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("cold-start sustained outage remains on the full roster", () => {
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost"],
+      orchDir,
+      self: "mini",
+      nowMs: 10_000,
+      sustainedMs: 0,
+      readHeartbeats: () => ({}),
+    });
+    // `[self]` on every host would make every host own every ticket.
+    expect(out).toEqual(["mini", "ghost"]);
+  });
+
+  test("full-roster opt-out retains the old sustained-outage behavior", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ __lastGoodRoster: ["mini"], __outage: { sinceMs: 1_000 } }),
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost"], orchDir, self: "mini", nowMs: 10_000,
+      sustainedMs: 5_000, outageFallback: "full-roster", readHeartbeats: () => ({}),
+    });
+    expect(out).toEqual(["mini", "ghost"]);
+  });
+
   test("persist:false does NOT write the deflap file", () => {
     resolveDispatchRoster({
       roster: ["mini", "ghost"],

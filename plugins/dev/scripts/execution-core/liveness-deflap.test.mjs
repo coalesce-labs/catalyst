@@ -80,6 +80,17 @@ describe("computeDispatchRoster — restore deflap (CTL-1091)", () => {
     expect(dispatchRoster).toEqual(["mini"]);
   });
 
+  test("everLive distinguishes never-seen from went-dead and remains monotonic", () => {
+    const { nextState } = computeDispatchRoster({
+      survivingRoster: ["a"], roster: ["a", "b", "c"],
+      prevState: { b: { liveSince: 123, everLive: true } },
+      holdMs: HOLD, nowMs: 5_000, self: "a",
+    });
+    expect(nextState.a.everLive).toBe(true);
+    expect(nextState.b).toEqual({ liveSince: null, everLive: true });
+    expect(nextState.c.everLive).toBe(false);
+  });
+
   test("never delays the SELF host, even if it looks freshly restored", () => {
     // A host never defers taking its OWN work — self is admitted regardless of hold.
     const { dispatchRoster } = computeDispatchRoster({
