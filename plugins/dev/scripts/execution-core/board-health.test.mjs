@@ -35,6 +35,19 @@ const NOW = Date.parse("2026-06-20T12:00:00Z");
 const MIN = 60_000;
 const HOUR = 3_600_000;
 
+function quotaSnapshot({ remaining = 5000, sampledAt = new Date(NOW).toISOString() } = {}) {
+  return {
+    core: {
+      limit: 5000,
+      used: 5000 - remaining,
+      remaining,
+      resetAt: "2026-06-20T13:00:00.000Z",
+    },
+    host: "mini",
+    sampledAt,
+  };
+}
+
 // mkPrStatusMap — build the composite `Map<number, Map<repoKey, entry>>` shape
 // (CTL-1157, Codex #4) that broker-state.getAllPrStatuses now returns, from flat
 // {prNumber, repo, status, updatedAt} rows. Mirrors how the real reader nests
@@ -76,6 +89,8 @@ function mkBoard(o = {}) {
     prStatusMap: o.prStatusMap ?? new Map(),
     // CTL-1608: pre-fetched stalled-PR state map (timer-stamped durations).
     stalledPrMap: o.stalledPrMap ?? new Map(),
+    githubQuota: o.githubQuota ?? null,
+    githubQuotaMode: o.githubQuotaMode ?? "shadow",
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -234,14 +249,38 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
     expect(noJoin.projectSilence.observable).toBe(false);
   });
 
-  test("rateLimitHeadroom: near-cliff flags (observable); absent signal → not observable", () => {
-    const near = evaluateInvariants(mkBoard({ ring: { accountRatelimit: { nearCliff: true } } }));
-    expect(near.rateLimitHeadroom.ok).toBe(false);
-    expect(near.rateLimitHeadroom.failed).toBe(1);
-    expect(near.rateLimitHeadroom.observable).toBe(true);
+  test("rateLimitHeadroom is dark by default and shadow publishes an exhausted sample", () => {
+    const absent = evaluateInvariants(mkBoard());
+    expect(absent.rateLimitHeadroom).toMatchObject({ ok: true, failed: 0, observable: false });
 
-    const absent = evaluateInvariants(mkBoard({ ring: { accountRatelimit: null } }));
-    expect(absent.rateLimitHeadroom.observable).toBe(false);
+    const exhausted = evaluateInvariants(mkBoard({
+      githubQuotaMode: "shadow",
+      githubQuota: quotaSnapshot({ remaining: 0 }),
+    })).rateLimitHeadroom;
+    expect(exhausted).toMatchObject({ ok: true, failed: 0, observable: false });
+    expect(exhausted.note).toContain("0/5000");
+    expect(exhausted.note).toContain("2026-06-20T13:00:00.000Z");
+  });
+
+  test("rateLimitHeadroom enforce maps ok/low/exhausted and stale samples safely", () => {
+    const ok = evaluateInvariants(mkBoard({
+      githubQuotaMode: "enforce", githubQuota: quotaSnapshot({ remaining: 501 }),
+    })).rateLimitHeadroom;
+    expect(ok).toMatchObject({ ok: true, failed: 0, observable: true });
+
+    for (const remaining of [500, 0]) {
+      const result = evaluateInvariants(mkBoard({
+        githubQuotaMode: "enforce", githubQuota: quotaSnapshot({ remaining }),
+      })).rateLimitHeadroom;
+      expect(result).toMatchObject({ ok: false, failed: 1, observable: true });
+      expect(result.flagged).toEqual([]);
+    }
+
+    const stale = evaluateInvariants(mkBoard({
+      githubQuotaMode: "enforce",
+      githubQuota: quotaSnapshot({ remaining: 0, sampledAt: new Date(NOW - 16 * MIN).toISOString() }),
+    })).rateLimitHeadroom;
+    expect(stale).toMatchObject({ ok: true, failed: 0, observable: false });
   });
 
   test("strandedNode: rostered host owns work + reconcile failing → flag (observable)", () => {
@@ -869,6 +908,16 @@ describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned
 
 // ─── buildBoardScanEvent — the flat event the emit envelope rides ───────────
 describe("buildBoardScanEvent", () => {
+  test("publishes GitHub quota numerics and reset/host payload fields", () => {
+    const board = mkBoard({ githubQuota: quotaSnapshot({ remaining: 250 }) });
+    const invs = evaluateInvariants(board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    expect(ev.details.githubCoreRemaining).toBe(250);
+    expect(ev.details.githubCoreRemainingPct).toBe(5);
+    expect(ev.details.githubQuotaResetAt).toBe("2026-06-20T13:00:00.000Z");
+    expect(ev.details.githubQuotaHost).toBe("mini");
+  });
+
   test("type/ticket/scalars at top of details; rosters as arrays; mode echoed", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
     const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
@@ -965,6 +1014,18 @@ describe("buildBoardScanEvent", () => {
 
 // ─── buildBoardContext — the whole-board brief the delegate gets injected ────
 describe("buildBoardContext", () => {
+  test("publishes normalized githubQuota separately from stripped invariants", () => {
+    const board = mkBoard({ githubQuota: quotaSnapshot({ remaining: 250 }) });
+    const ctx = buildBoardContext(board, evaluateInvariants(board));
+    expect(ctx.githubQuota).toMatchObject({
+      state: "low", remaining: 250, limit: 5000, remainingPct: 5,
+      resetAt: "2026-06-20T13:00:00.000Z", host: "mini", ageMs: 0,
+    });
+    expect(ctx.invariants.rateLimitHeadroom).toEqual({ ok: true, failed: 0 });
+    const empty = mkBoard();
+    expect(buildBoardContext(empty, evaluateInvariants(empty)).githubQuota).toBeNull();
+  });
+
   test("stuckWorkers from flagged signals; invariants block; slots + queue", () => {
     const board = mkBoard({
       self: "mini",
@@ -1004,6 +1065,28 @@ describe("buildBoardContext", () => {
 
 // ─── assembleBoardState — the one impure reader (reads only) ─────────────────
 describe("assembleBoardState", () => {
+  test("github quota seam is skipped in off and sampled in shadow", () => {
+    let calls = 0;
+    const getGithubQuota = () => { calls += 1; return quotaSnapshot(); };
+    expect(assembleBoardState({ mode: "off", getGithubQuota, now: () => NOW }).githubQuota).toBeNull();
+    expect(calls).toBe(0);
+    expect(assembleBoardState({ mode: "shadow", getGithubQuota, now: () => NOW }).githubQuota).toEqual(quotaSnapshot());
+    expect(calls).toBe(1);
+  });
+
+  test("account quota ring retains Anthropic payload without synthesizing nearCliff", () => {
+    const board = assembleBoardState({
+      now: () => NOW,
+      readEventRing: () => [{
+        ts: new Date(NOW).toISOString(),
+        attributes: { "event.name": "account.ratelimit.sampled" },
+        body: { payload: { fiveHourPct: 42, sevenDayPct: 17 } },
+      }],
+    });
+    expect(board.ring.accountRatelimit).toEqual({ fiveHourPct: 42, sevenDayPct: 17 });
+    expect(board.ring.accountRatelimit).not.toHaveProperty("nearCliff");
+  });
+
   test("normalizes descriptors/signals/eligible; reads signal.updatedAt/phase TOP-LEVEL (no evidence.signal)", () => {
     const board = assembleBoardState({
       orchDir: "/tmp/x",
@@ -2649,4 +2732,3 @@ describe("boardHealthPass enforce — launch-failure exclusion prevents recovery
     expect(actInvoked).toBe(false);
   });
 });
-
