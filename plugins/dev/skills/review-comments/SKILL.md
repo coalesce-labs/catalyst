@@ -3,7 +3,7 @@ name: review-comments
 description: "Systematically pull, categorize, and address all PR review comments — code change requests, questions, and suggestions. This skill fetches comments via gh api, groups them by file, implements fixes, handles disagreements diplomatically, and pushes a single commit. You should not try to handle PR review feedback manually — this skill ensures nothing gets missed. **ALWAYS consult this skill when** the user says 'address comments', 'fix review feedback', 'handle PR comments', 'respond to reviewers', 'address review', 'review feedback', or mentions that a PR has unresolved comments or review threads. Also used by /oneshot Phase 5 to process reviewer feedback before merging."
 disable-model-invocation: false
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
-version: 1.1.0
+version: 1.2.0
 argument-hint: "[PR-number]"
 ---
 
@@ -73,10 +73,20 @@ fixed inline; P2-or-lower findings go to Step 3b (follow-up ticket) instead of S
 | **Approval / praise** | — | No action needed |
 | **Already resolved** | — | Skip (check if thread is marked resolved) |
 
-Severity: defer to the reviewer/bot's own tag when one is given (critical/blocking → P1;
-minor/nit/suggestion → P2). Otherwise judge against the P1 definition (correctness bug, security
-issue, data loss, broken build/tests, spec violation) — when genuinely unsure, treat it as P1
+Severity: classify by substance against the P1 definition (correctness bug, security issue, data
+loss, broken build/tests, spec violation) — don't just trust a reviewer's own numeric label. Only
+defer to an explicit tag when its vocabulary maps cleanly onto blocking-vs-not
+(`critical`/`blocking` → P1, `minor`/`nit`/`suggestion` → P2). Common bot P0–P3 scales often do
+NOT map cleanly: Codex, for instance, uses P2 for an ordinary, still-real correctness defect, not
+merely a style nit — treating every bot "P2" as automatically deferrable would let a genuine bug
+slip into a follow-up ticket instead of getting fixed. When genuinely unsure, treat it as P1
 rather than defer it.
+
+**Round-carryover exemption:** a P2 finding raised in round 1 that simply never got fixed
+(omitted, or the fix didn't land) is still owed from round 1 — it does not become ticket-eligible
+just by reappearing in round 2. Round-2+ ticketing is for genuinely new findings (or a
+previously-fixed one a reviewer reopens with fresh critique), not a way for an incomplete round-1
+remediation to dodge the round it was actually due in.
 
 For each actionable comment, note:
 - File path and line number
