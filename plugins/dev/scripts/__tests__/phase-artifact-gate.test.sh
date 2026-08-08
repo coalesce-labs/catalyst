@@ -174,6 +174,21 @@ match_thoughts_artifact "$NEST_DIR" "CTL-3030" >/dev/null 2>&1 || RC13=$?
 assert_eq "1" "$RC13" "nested-only dir returns non-zero (subdirectory not descended)"
 
 echo ""
+echo "Test 15 (regression): match_thoughts_artifact handles a dir path containing glob metacharacters"
+# Codex review (PR #3108 round 1): an earlier revision depth-limited via
+# \`-type d ! -path "\$dir" -prune\` instead of -maxdepth. -path pattern-matches
+# its argument, so a <dir> containing glob metacharacters (e.g. a worktree
+# named repo[1]) never matched itself and got pruned, silently returning no
+# matches. -maxdepth is purely numeric and has no such failure mode.
+BRACKET_DIR="${SCRATCH}/repo[1]/thoughts/shared/research"
+mkdir -p "$BRACKET_DIR"
+touch "${BRACKET_DIR}/2026-01-01-ctl-5050.md"
+OUT15="$(match_thoughts_artifact "$BRACKET_DIR" "CTL-5050")"
+RC15=$?
+assert_eq "0" "$RC15" "bracket-containing dir path still matches (return code 0)"
+assert_contains "$OUT15" "2026-01-01-ctl-5050.md" "bracket-containing dir path finds the artifact"
+
+echo ""
 echo "Test 14 (regression): match_thoughts_artifact prints matches in deterministic sorted order"
 ORDER_DIR="${SCRATCH}/thoughts/shared/order"
 mkdir -p "$ORDER_DIR"

@@ -92,9 +92,21 @@ own_thoughts_artifact_dir_for_phase() {
 # bash OR zsh now behaves identically. Bash-3.2 safe: uses tr for lowercasing,
 # no mapfile.
 #
-# Depth-limited via the classic `-prune` idiom rather than `-maxdepth`/`-mindepth`:
-# prune any directory encountered that is not <dir> itself, so find never
-# descends into subdirectories, without depending on either flag being present.
+# Depth-limited via `-maxdepth 1`, deliberately NOT the `-prune`+`-path`
+# idiom that's sometimes used to avoid `-maxdepth`: an earlier revision of
+# this function used `find "$dir" -type d ! -path "$dir" -prune -o ...` to
+# sidestep -maxdepth, but `-path` pattern-matches its argument (fnmatch-style
+# glob, same as `-name`/`-iname`) rather than comparing it literally — so a
+# <dir> containing glob metacharacters (e.g. a worktree path like
+# `repo[1]/thoughts/shared/research`) never matches `-path "$dir"` against
+# itself, gets pruned as if it were an unrelated subdirectory, and the whole
+# directory silently returns no matches even though the file is right there
+# (reproduced with `repo[1]/2026-01-01-ctl-1.md`; confirmed via Codex review).
+# `-maxdepth` carries no such risk (it's a purely numeric depth bound, no
+# path/pattern matching involved) and is supported identically by both GNU
+# find (Linux CI) and BSD find (macOS, this repo's primary fleet host — see
+# `find(1)`'s "-maxdepth n ... extensions to IEEE Std 1003.1-2001"), so it is
+# the safer choice here despite not being in the POSIX base spec.
 # `! -name '.*'` excludes dotfiles (macOS AppleDouble `._*` siblings, editor
 # swap files) to match the previous glob's default (non-dotglob) behavior,
 # which silently skipped leading-dot basenames. Output is piped through `sort`
@@ -111,8 +123,7 @@ match_thoughts_artifact() {
 
 	local matches
 	matches="$(
-		find "$dir" -type d ! -path "$dir" -prune -o \
-			-type f ! -name '.*' \( -iname "*-${lc}.md" -o -iname "*-${lc}-*.md" \) -print \
+		find "$dir" -maxdepth 1 -type f ! -name '.*' \( -iname "*-${lc}.md" -o -iname "*-${lc}-*.md" \) \
 			2>/dev/null | sort
 	)"
 
