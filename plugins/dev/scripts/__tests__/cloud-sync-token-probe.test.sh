@@ -24,6 +24,10 @@ check "absent token" has_line "present=no"
 check "default source" has_line "source=default"
 check "interactive token ignored" has_line "present=no"
 
+H="$TMP_ROOT/interactive-override"; mkdir -p "$H/.config/catalyst"; printf 'export CATALYST_CLOUD_TOKEN_ENV=MY_TOKEN\n' > "$H/.config/catalyst/cluster.env"; chmod 600 "$H/.config/catalyst/cluster.env"
+OUT="$(HOME="$H" MY_TOKEN=interactive CLOUD_SYNC_CONFIG_DIR="$(cd "${SCRIPT_DIR}/../execution-core" && pwd)" cloud_sync_probe_token --host test-host 2>"$H/stderr")"
+check "interactive overridden token ignored" has_line "present=no"
+
 H="$TMP_ROOT/cloud"; mkdir -p "$H/.config/catalyst"; printf 'export CATALYST_CLOUD_TOKEN=abc\n' > "$H/.config/catalyst/cloud-sync.env"; chmod 600 "$H/.config/catalyst/cloud-sync.env"; run_probe "$H"
 check "cloud-sync token present" has_line "present=yes"
 check "cloud-sync source" has_line "source=cloud-sync.env"

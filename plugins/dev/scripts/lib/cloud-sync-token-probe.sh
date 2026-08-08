@@ -20,6 +20,14 @@ cloud_sync_probe_token() {
     local cluster_file="$HOME/.config/catalyst/cluster.env"
     local cloud_file="$HOME/.config/catalyst/cloud-sync.env"
     local source_name="default" perms_warning="no"
+    # Discover an override name from the launchd-visible files, clear any value
+    # inherited from the interactive shell under that name, then source the
+    # files again. Only the second pass is allowed to supply the token value.
+    [[ -r "$cluster_file" ]] && . "$cluster_file"
+    [[ -r "$cloud_file" ]] && . "$cloud_file"
+    local config_dir="${CLOUD_SYNC_CONFIG_DIR:-$(cd "${_CSTP_DIR}/../execution-core" && pwd)}" name
+    name="$(CFG_DIR="$config_dir" bun -e 'const m = await import(process.env.CFG_DIR + "/config.mjs"); process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);' 2>/dev/null || printf 'CATALYST_CLOUD_TOKEN')"
+    unset "$name" CATALYST_CLOUD_TOKEN 2>/dev/null || true
     if [[ -r "$cluster_file" ]]; then
       . "$cluster_file"
       source_name="cluster.env"
@@ -30,7 +38,6 @@ cloud_sync_probe_token() {
       source_name="cloud-sync.env"
       [[ "$(stat -f '%Lp' "$cloud_file" 2>/dev/null || stat -c '%a' "$cloud_file" 2>/dev/null || echo 600)" == "600" ]] || perms_warning="yes"
     fi
-    local config_dir="${CLOUD_SYNC_CONFIG_DIR:-$(cd "${_CSTP_DIR}/../execution-core" && pwd)}" name
     name="$(CFG_DIR="$config_dir" bun -e 'const m = await import(process.env.CFG_DIR + "/config.mjs"); process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);' 2>/dev/null || printf 'CATALYST_CLOUD_TOKEN')"
     local present="no"
     [[ -n "${!name:-}" ]] && present="yes"
