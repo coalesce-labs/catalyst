@@ -13582,4 +13582,126 @@ describe("CTL-1667: terminalDoneOnce current-PR-merged gate", () => {
     expect(calls).toBe(1); // second tick suppressed — no unbounded poll
     expect(dones).toEqual([]); // still refused (PR never merged)
   });
+
+  // Review fix (Codex P1, round 2, #3061): the cooldown above bounds the PROBE
+  // FREQUENCY but not the TOTAL count — a dir stuck on a permanently-OPEN or
+  // unverifiable PR would otherwise re-arm and re-probe `gh` every cooldown
+  // window forever. Once the total refusal count reaches
+  // TERMINAL_PR_CHECK_MAX_ATTEMPTS (default 12), the gate must stop calling
+  // `gh` for that dir entirely — even outside the per-probe cooldown window.
+  test("CTL-1667 (review fix): terminalDoneOnce bounds the TOTAL probe count, not just the frequency", () => {
+    writePrSignals("CTL-77", 770);
+    // Pre-seed the suppress marker at the exhaustion threshold, timestamped
+    // WELL outside the cooldown window so a frequency-only bound would allow
+    // (and this test would otherwise force) a re-probe.
+    writeFileSync(
+      join(orchDir, "workers", "CTL-77", ".terminal-pr-check-suppressed"),
+      JSON.stringify({ ts: 0, count: 12 })
+    );
+    let calls = 0;
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: {
+        prView: () => {
+          calls += 1;
+          return { state: "OPEN", mergedAt: null };
+        },
+      },
+    });
+    expect(calls).toBe(0); // budget exhausted — no gh call at all
+    expect(dones).toEqual([]); // stays refused (exhausting the budget never grants Done)
+  });
+
+  // Review fix (Codex P1, #3061): binds a retained `teardown: done` signal to
+  // the CURRENT run. A later phase (`pr`) dispatched AFTER teardown's own
+  // completion is proof the worker dir was reused by a run whose
+  // monitor-merge/monitor-deploy/teardown have not actually been verified —
+  // Done must be refused even though the (stale) teardown signal says "done"
+  // and even though the later PR happens to be merged.
+  test("CTL-1667 (review fix): terminalDoneOnce refuses Done when teardown evidence predates a later phase dispatch (stale signal)", () => {
+    const dir = join(orchDir, "workers", "CTL-78");
+    mkdirSync(dir, { recursive: true });
+    // Teardown "done" from an EARLIER run, completed at T0. Production always
+    // sets updatedAt alongside completedAt (phase-agent-emit-complete); the
+    // staleness check reads updatedAt (mirrors is_poststale_signal), so both
+    // are set here to match a real signal file's shape.
+    writeFileSync(
+      join(dir, "phase-teardown.json"),
+      JSON.stringify({
+        ticket: "CTL-78",
+        phase: "teardown",
+        status: "done",
+        completedAt: "2026-08-01T00:00:00Z",
+        updatedAt: "2026-08-01T00:00:00Z",
+      })
+    );
+    // `pr` phase (re)dispatched LATER, at T1 > T0 — a revived/newer run.
+    writeFileSync(
+      join(dir, "phase-pr.json"),
+      JSON.stringify({
+        ticket: "CTL-78",
+        phase: "pr",
+        status: "done",
+        pr: { number: 780 },
+        startedAt: "2026-08-05T00:00:00Z",
+      })
+    );
+    let calls = 0;
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: {
+        prView: () => {
+          calls += 1;
+          return { state: "MERGED", mergedAt: "2026-08-05T01:00:00Z" }; // the NEW PR IS merged
+        },
+      },
+    });
+    expect(dones).toEqual([]); // refused: stale teardown evidence, despite the merged PR
+    expect(calls).toBe(0); // never even reaches the merge-check gh call — caught earlier
+  });
+
+  // Companion: the SAME staleness check must NOT interfere with a genuine,
+  // single-run completion — the common case every other CTL-1667 test above
+  // already exercises implicitly (no sibling phase file is ever newer than
+  // teardown there). This test makes the non-interference explicit by setting
+  // real, correctly-ordered timestamps end to end.
+  test("CTL-1667 (review fix): terminalDoneOnce still writes Done for a genuinely fresh, correctly-ordered run", () => {
+    const dir = join(orchDir, "workers", "CTL-79");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-pr.json"),
+      JSON.stringify({
+        ticket: "CTL-79",
+        phase: "pr",
+        status: "done",
+        pr: { number: 790 },
+        startedAt: "2026-08-01T00:00:00Z",
+      })
+    );
+    // Teardown completes AFTER pr started — the normal, non-stale ordering.
+    writeFileSync(
+      join(dir, "phase-teardown.json"),
+      JSON.stringify({
+        ticket: "CTL-79",
+        phase: "teardown",
+        status: "done",
+        completedAt: "2026-08-03T00:00:00Z",
+        updatedAt: "2026-08-03T00:00:00Z",
+      })
+    );
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "2026-08-02T00:00:00Z" }) },
+    });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-79" }));
+  });
 });

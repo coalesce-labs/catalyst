@@ -1021,6 +1021,56 @@ export function readPhaseSignals(orchDir, ticket) {
   return signals;
 }
 
+// readPhaseSignalTimestamp — `.updatedAt // .startedAt` off one phase's signal
+// file, mirroring is_poststale_signal's own timestamp precedence
+// (lib/phase-signal-freshness.sh). Returns null when the phase's signal file
+// is absent, unreadable, or carries neither field (CTL-1667 review fix, #3061).
+function readPhaseSignalTimestamp(orchDir, ticket, phase) {
+  try {
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
+    return sig?.updatedAt ?? sig?.startedAt ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// isTerminalTeardownStale — CTL-1667 (review fix, #3061): true when SOME OTHER
+// phase in the worker dir was (re)dispatched strictly AFTER the terminal
+// `teardown` signal's own timestamp. See the call site in terminalDoneOnce for
+// the full rationale — in short, a `teardown: done` signal has no FSM
+// successor to be invalidated by the dispatcher's post-stale handling the way
+// every other phase's stale signal is, so this is the one place that binds it
+// to the current run. Every phase-agent-dispatch write (fresh OR revive)
+// unconditionally stamps a fresh `startedAt`, so any sibling phase file newer
+// than teardown's own timestamp proves the worker dir was touched by a run
+// that started after teardown last reported done. Conservative: an
+// unestablishable baseline (teardown's own timestamp absent/unreadable) or no
+// comparably-timestamped sibling returns false — never invents staleness from
+// a data gap, only detects a genuine one.
+function isTerminalTeardownStale(orchDir, ticket) {
+  const teardownAt = readPhaseSignalTimestamp(orchDir, ticket, TERMINAL_PHASE);
+  if (!teardownAt) return false; // no baseline to compare against → not proven stale
+  const dir = join(orchDir, "workers", ticket);
+  let files;
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const f of files) {
+    const m = /^phase-(.+)\.json$/.exec(f);
+    if (!m || m[1] === TERMINAL_PHASE || m[1].includes("-yield-")) continue;
+    let startedAt;
+    try {
+      startedAt = JSON.parse(readFileSync(join(dir, f), "utf8"))?.startedAt;
+    } catch {
+      continue; // unreadable sibling — not comparable evidence either way
+    }
+    if (typeof startedAt === "string" && startedAt > teardownAt) return true;
+  }
+  return false;
+}
+
 // isTicketInFlight — true when a ticket still occupies a worker slot. Pure over
 // a phase→status map. In-flight = has ≥1 signal AND is neither pipeline-complete
 // (monitor-deploy done) nor failed/stalled/aborted. A ticket mid-advance (plan
@@ -3129,14 +3179,50 @@ const TERMINAL_PR_CHECK_COOLDOWN_MS = (() => {
   return Number.isFinite(v) && v > 0 ? v : 5 * 60_000;
 })();
 
+// CTL-1667 (review fix, #3061): the cooldown above bounds the PROBE
+// FREQUENCY, not the total number of probes — a retained `teardown: done`
+// dir sitting on an OPEN or perpetually-unverifiable PR re-arms automatically
+// every time the cooldown expires and probes `gh` again, FOREVER. That is
+// still an unbounded synchronous GitHub poll (just a slow one), which
+// AGENTS.md ("Working the Loop") requires to be a bounded fallback, not an
+// indefinite one. TERMINAL_PR_CHECK_MAX_ATTEMPTS caps the total number of
+// refusals this gate will ever probe for a given worker dir; once the cap is
+// reached the gate stops calling `gh` for that dir entirely (it still refuses
+// Done — never the reverse — so exhausting the budget can only make the gate
+// MORE conservative, never less).
+const TERMINAL_PR_CHECK_MAX_ATTEMPTS = (() => {
+  const v = Number(process.env.CATALYST_TERMINAL_PR_CHECK_MAX_ATTEMPTS);
+  return Number.isFinite(v) && v > 0 ? v : 12; // default: ~1h of 5-min-cooldown probing
+})();
+
 function terminalPrCheckMarkerPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".terminal-pr-check-suppressed");
 }
 
+function terminalPrCheckExhaustedMarkerPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".terminal-pr-check-exhausted");
+}
+
 // stampTerminalPrCheckSuppress — record that the current-PR-merged gate refused
-// Done this tick. Best-effort: a failed write just means we re-probe next tick.
+// Done this tick, and bump the total-attempts counter (CTL-1667 review fix:
+// bounds the total probe count, not just the per-probe cooldown). Best-effort:
+// a failed write just means we re-probe next tick.
 function stampTerminalPrCheckSuppress(orchDir, ticket, nowMs) {
-  stampCooldownMarker(terminalPrCheckMarkerPath(orchDir, ticket), nowMs);
+  let count = 1;
+  try {
+    const prior = JSON.parse(readFileSync(terminalPrCheckMarkerPath(orchDir, ticket), "utf8"));
+    if (Number.isFinite(prior?.count)) count = prior.count + 1;
+  } catch {
+    /* first refusal, or an unreadable prior marker — start the count at 1 */
+  }
+  try {
+    writeFileSync(
+      terminalPrCheckMarkerPath(orchDir, ticket),
+      JSON.stringify({ ts: nowMs, count })
+    );
+  } catch {
+    /* best-effort — re-probe next tick */
+  }
 }
 
 // isTerminalPrCheckSuppressFresh — true when the gate refused within the cooldown
@@ -3151,6 +3237,37 @@ function isTerminalPrCheckSuppressFresh(orchDir, ticket, nowMs) {
     return Number.isFinite(ts) && nowMs - ts < TERMINAL_PR_CHECK_COOLDOWN_MS;
   } catch {
     return false;
+  }
+}
+
+// isTerminalPrCheckExhausted — true once the total refusal count recorded by
+// stampTerminalPrCheckSuppress has reached TERMINAL_PR_CHECK_MAX_ATTEMPTS
+// (CTL-1667 review fix, #3061). A missing/unparseable marker (never refused
+// yet) returns false.
+function isTerminalPrCheckExhausted(orchDir, ticket) {
+  try {
+    const { count } = JSON.parse(readFileSync(terminalPrCheckMarkerPath(orchDir, ticket), "utf8"));
+    return Number.isFinite(count) && count >= TERMINAL_PR_CHECK_MAX_ATTEMPTS;
+  } catch {
+    return false;
+  }
+}
+
+// warnTerminalPrCheckExhaustedOnce — surface the probe-budget exhaustion LOUDLY
+// exactly once per worker dir (never a silent-forever refusal — "Surface
+// anomalies loudly"), via a dedicated marker so the WARN doesn't repeat every
+// tick once the budget is spent. Best-effort.
+function warnTerminalPrCheckExhaustedOnce(orchDir, ticket) {
+  const marker = terminalPrCheckExhaustedMarkerPath(orchDir, ticket);
+  if (existsSync(marker)) return;
+  log.warn(
+    { ticket, maxAttempts: TERMINAL_PR_CHECK_MAX_ATTEMPTS },
+    "ctl-1667: terminal-PR-merged probe budget exhausted — no further gh polling for this dir; Done stays refused"
+  );
+  try {
+    writeFileSync(marker, "");
+  } catch {
+    /* best-effort — a repeat WARN next tick is harmless */
   }
 }
 
@@ -3217,6 +3334,38 @@ export function terminalDoneOnce(
     stampFenceSuppress(orchDir, ticket, now());
     return null;
   }
+  // CTL-1667 (review fix, #3061) — bind the retained `teardown: done` evidence
+  // to the CURRENT run before trusting it at all. deriveAdvancement never
+  // re-dispatches a terminal `teardown` signal (transition() has no successor
+  // once `teardown` is `done`), so — unlike every non-terminal phase — a
+  // `teardown: done` signal left over from an EARLIER run is never invalidated
+  // by the dispatcher's post-stale handling (is_poststale_signal /
+  // POSTSTALE_SIGNAL, lib/phase-signal-freshness.sh, this same PR): nothing
+  // ever asks phase-agent-dispatch to dispatch `teardown` again, so that
+  // invalidation code path simply never runs for this phase. If the worker dir
+  // was reused for a later run (a revive/redispatch of an earlier phase, e.g.
+  // `pr`, after this teardown already reported done — without clearing the
+  // stale phase-teardown.json), that later dispatch always writes its OWN
+  // phase-<x>.json with a fresh `startedAt` (phase-agent-dispatch's
+  // unconditional skeleton write). A later phase's `startedAt` newer than this
+  // teardown's own completion is therefore proof the retained "done" evidence
+  // predates — and cannot cover — that later run, whether or not its own
+  // phase-pr.json currently resolves a PR number (it may not exist yet, or may
+  // have been overwritten again by a still-later redispatch). Conservative in
+  // the SAME direction as is_poststale_signal: no comparable timestamp on
+  // either side (this teardown signal, or every sibling phase file) proves
+  // nothing, so it is NOT treated as stale — a data gap never invents
+  // staleness, it only ever fails to detect a genuine one.
+  if (isTerminalTeardownStale(orchDir, ticket)) {
+    if (!isTerminalPrCheckSuppressFresh(orchDir, ticket, now())) {
+      stampTerminalPrCheckSuppress(orchDir, ticket, now());
+    }
+    log.warn(
+      { ticket },
+      "ctl-1667: retained teardown:done signal predates a later phase dispatch — refusing Done (stale evidence)"
+    );
+    return null;
+  }
   // CTL-1667 — GATE: the current run's PR must be MERGED before Done.
   // Mirrors reconcileTerminalBackstop GATE 2 (`prAdapter.prView`). Engages only
   // when a current PR number is resolvable from phase-pr.json; when it is absent
@@ -3236,9 +3385,21 @@ export function terminalDoneOnce(
   //     skipped for a window instead of re-running on every ~2x/sec tick (the
   //     AGENTS.md "bounded poll as fallback" contract). The merge still converges
   //     to Done once the cooldown expires and the next tick sees MERGED.
+  //   • Bounded TOTAL probes — the cooldown above only bounds the FREQUENCY. A
+  //     dir stuck refusing forever (a permanently-open or unverifiable PR)
+  //     would otherwise re-arm and re-probe `gh` every cooldown window
+  //     indefinitely. TERMINAL_PR_CHECK_MAX_ATTEMPTS caps the total refusal
+  //     count; once exhausted the gate stops calling `gh` for this dir at all
+  //     (it stays refused — exhausting the budget only makes it MORE
+  //     conservative, never less) and surfaces the exhaustion loudly exactly
+  //     once instead of polling silently forever.
   {
     const currentPrNum = readCurrentRunPrNumber(orchDir, ticket);
     if (currentPrNum != null) {
+      if (isTerminalPrCheckExhausted(orchDir, ticket)) {
+        warnTerminalPrCheckExhaustedOnce(orchDir, ticket);
+        return null; // bounded: total probe budget spent — stay refused, no further gh calls
+      }
       if (isTerminalPrCheckSuppressFresh(orchDir, ticket, now())) return null; // bounded: within cooldown, skip the gh probe
       if (!prAdapter || typeof prAdapter.prView !== "function") {
         stampTerminalPrCheckSuppress(orchDir, ticket, now());
