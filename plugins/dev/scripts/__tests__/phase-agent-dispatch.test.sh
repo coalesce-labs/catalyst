@@ -2429,17 +2429,24 @@ LAUNCHED73="no"
 assert_not_contains "$STATUS73" "claim-lost" "73: poststale w/o generation is NOT claim-lost (reaper frees orphan claim)"
 assert_eq "yes" "$LAUNCHED73" "73: fresh worker WAS launched despite leftover claim"
 
-# ─── Test 74 (CTL-1667 review fix, round 4, #3061): a poststale signal WITHOUT
-# a numeric .generation must recover the prior generation from on-disk claim
-# files rather than defaulting to 0 (→ TARGET_GENERATION 1). If the prior run
-# had already revived past generation 1 (a real monitor-deploy.claim.2 exists
-# on disk), recycling generation 1 lets a delayed worker from that EARLIER
-# generation later complete and pass phase-agent-emit-complete's `mine <
-# signal` fence on an EQUAL generation — overwriting the current run's signal.
-# TARGET_GENERATION must land at 3 here (one past the highest real claim ever
-# made for this phase), never 1.
+# ─── Test 74 (CTL-1667 review fix, round 5, #3061): a poststale signal WITHOUT
+# a numeric .generation must compute TARGET_GENERATION DETERMINISTICALLY, so
+# that two dispatchers racing on it converge on the SAME generation and exactly
+# one wins the O_EXCL claim.
+#
+# Round 4 recovered the prior generation by scanning the on-disk claim files for
+# the highest N. That reintroduced the double-spawn the CTL-736 invariant exists
+# to close: the claim set is MUTATED by this very computation, so a staggered
+# pair sees each other's claim and advances to DIFFERENT generations (A: max 2 →
+# 3, then B: max 3 → 4), each winning its own file, and BOTH spawn a worker that
+# can run the post-PR side effects. This test now pins the property that
+# actually matters — determinism ⇒ single-flight — rather than the specific
+# number the scan produced. The gap round 4 was patching is fixed at its source
+# (phase-monitor-deploy threads _MD_GEN through all three result branches, so it
+# no longer drops .generation); a signal reaching here without one came from the
+# un-fenced degraded path, where no generation was ever established.
 echo ""
-echo "Test 74 (CTL-1667, review fix round 4): poststale signal w/o generation recovers past a real prior generation (never recycles)"
+echo "Test 74 (CTL-1667, review fix round 5): poststale signal w/o generation is DETERMINISTIC — a racing twin cannot win a second generation"
 fresh_env t74
 TS_NOW74="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TS_OLD74="$(date -u -v-86400S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '86400 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '2000-01-01T00:00:00Z')"
@@ -2466,12 +2473,38 @@ STDOUT74=$("$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH
 STATUS74=$(echo "$STDOUT74" | jq -r '.status // ""')
 LAUNCHED74="no"
 [[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED74="yes"
-assert_not_contains "$STATUS74" "claim-lost" "74: poststale w/o generation (real prior gen 2) is NOT claim-lost"
+assert_not_contains "$STATUS74" "claim-lost" "74: poststale w/o generation is NOT claim-lost"
 assert_eq "yes" "$LAUNCHED74" "74: fresh worker WAS launched"
 NEW_GEN74="$(jq -r '.generation' "${WORKER_DIR}/phase-monitor-deploy.json")"
-assert_eq "3" "$NEW_GEN74" "74: TARGET_GENERATION recovered past the real gen-2 claim (=3, never recycles gen 1 or 2)"
-assert_eq "yes" "$([[ -f "${WORKER_DIR}/monitor-deploy.claim.3" ]] && echo yes || echo no)" \
-	"74: new claim file is monitor-deploy.claim.3 (not a collision-prone gen-1 recycle)"
+# The value is whatever the DETERMINISTIC rule yields; what must hold is that it
+# is a fixed function of the signal, not of the mutable claim set — so the
+# racing twin below recomputes this SAME number.
+assert_eq "yes" "$([[ -f "${WORKER_DIR}/monitor-deploy.claim.${NEW_GEN74}" ]] && echo yes || echo no)" \
+	"74: the winner's claim file matches the generation it stamped"
+# The pre-existing higher claim from the prior run must NOT have moved the
+# target — that is exactly the mutable-input dependency round 5 removed.
+assert_eq "no" "$([[ -f "${WORKER_DIR}/monitor-deploy.claim.3" ]] && echo yes || echo no)" \
+	"74: target was NOT derived from the on-disk claim high-water mark (no gen-3 claim)"
+
+# ─── The race: a twin dispatcher on the same unchanged inputs ────────────────
+# It must recompute the SAME generation, collide on the O_EXCL claim, bow out as
+# claim-lost, and launch NO second worker. (Under the round-4 scan it would have
+# seen the winner's new claim, advanced past it, and won a second generation.)
+CLAIMS_BEFORE74="$(ls "${WORKER_DIR}"/monitor-deploy.claim.* 2>/dev/null | wc -l | tr -d ' ')"
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT74B=$("$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+STATUS74B=$(echo "$STDOUT74B" | jq -r '.status // ""')
+LAUNCHED74B="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED74B="yes"
+CLAIMS_AFTER74="$(ls "${WORKER_DIR}"/monitor-deploy.claim.* 2>/dev/null | wc -l | tr -d ' ')"
+# The twin is refused by whichever guard it reaches first — the soft status guard
+# (the winner's signal now reads dispatched/running) or, if it raced past that, the
+# O_EXCL claim collision. Either is single-flight; what must NEVER appear is a
+# second dispatch, so assert the refusal set rather than one specific guard.
+assert_eq "yes" "$(case "$STATUS74B" in claim-lost|running|dispatched|idempotent) echo yes ;; *) echo no ;; esac)" \
+	"74: the racing twin is refused (status='${STATUS74B}', single-flight held)"
+assert_eq "no" "$LAUNCHED74B" "74: the racing twin launched NO second worker (no double-spawn)"
+assert_eq "$CLAIMS_BEFORE74" "$CLAIMS_AFTER74" "74: the twin won no additional generation (claim count unchanged)"
 
 echo ""
 echo "─────────────────────────────────────────────"

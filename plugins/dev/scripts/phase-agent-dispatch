@@ -636,36 +636,28 @@ fi
 # The claim-file FORMAT is kept in sync with execution-core/claim.mjs
 # claimPath(): ${WORKER_DIR}/<phase>.claim.<generation>.
 #
-# CTL-1667 (review fix, round 4, #3061): recover the prior generation from
-# on-disk claim files when the signal itself carries no numeric .generation.
-# The post-PR result-branch rewrites (monitor-merge/monitor-deploy/teardown)
-# compose the signal with `jq -nc` and can drop the field (this is the same
-# class of gap the earlier missing-generation fix closed for the
-# poststale-signal case specifically — this recovers it generally, for ANY
-# revive whose signal lacks .generation). Defaulting to 0 (→ TARGET_GENERATION
-# 1) in that case REUSES a generation the worker dir may already have live: if
-# the prior run had already revived to generation 2+, a delayed generation-1
-# (or -2) worker from that run can still complete later and, because
-# phase-agent-emit-complete's fence (`mine < signal` bows out) does NOT fire
-# on an EQUAL generation, its stale result can overwrite the current run's
-# fresh signal. The claim body's OWN .generation is always numeric — a claim
-# file is never subject to the JSON-rewrite drop — so scanning
-# ${PHASE}.claim.<N> for the highest N ever actually claimed for this phase
-# and recovering EXISTING_GENERATION from it guarantees TARGET_GENERATION
-# strictly advances past every claim this worker dir has made, never recycles
-# one.
-if [[ -n $EXISTING_STATUS && -z $EXISTING_GENERATION ]]; then
-	MAX_CLAIM_GEN=0
-	for _cf in "${WORKER_DIR}/${PHASE}.claim."*; do
-		[[ -f "$_cf" ]] || continue
-		_cg="${_cf##*.claim.}"
-		[[ $_cg =~ ^[0-9]+$ ]] || continue
-		((_cg > MAX_CLAIM_GEN)) && MAX_CLAIM_GEN="$_cg"
-	done
-	((MAX_CLAIM_GEN > 0)) && EXISTING_GENERATION="$MAX_CLAIM_GEN"
-	unset _cf _cg
-fi
-
+# CTL-1667 (review fix, round 5, #3061): a previous round recovered the prior
+# generation here by scanning ${PHASE}.claim.<N> for the highest N on disk when
+# the signal carried no numeric .generation. That has been REMOVED — it derived
+# TARGET_GENERATION from the live claim set, which is precisely what the CTL-736
+# invariant above forbids, and it reintroduced the double-spawn that invariant
+# exists to close: two redispatches racing on a generation-less signal see each
+# OTHER's claim, compute DIFFERENT targets (A: max 2 → 3, then B: max 3 → 4),
+# and each wins its own O_EXCL file, so both spawn a worker and both can run the
+# post-PR side effects. The claim set is mutated by this very computation, so it
+# can never be a stable input to it. (The CTL-837 orphan-GC below depends on the
+# same determinism: it reaps a pre-spawn orphan only because "every later fresh
+# dispatch recomputes the SAME generation".)
+#
+# The gap that scan was patching is fixed at its SOURCE instead: phase-monitor-deploy
+# — the only phase that recomposes its signal from scratch with `jq -nc`, and so
+# the only one that could drop the field — now threads the dispatcher-stamped
+# generation through all three of its result branches (_MD_GEN, phase-monitor-deploy
+# SKILL.md). phase-monitor-merge and phase-teardown never recompose the signal that
+# way, so nothing else drops it. A signal that still carries no .generation is one
+# the dispatcher never stamped (the un-fenced degraded path), where no generation
+# was ever established and the deterministic default of 0 → TARGET_GENERATION 1 is
+# the correct answer rather than a recycled one.
 # --dry-run NEVER claims (a preview must be side-effect-free): it computes the
 # would-be generation without creating the claim file.
 if [[ -z $EXISTING_STATUS ]]; then
