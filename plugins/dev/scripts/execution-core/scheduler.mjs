@@ -89,6 +89,10 @@ import {
 } from "./linear-query.mjs";
 import { gatewayLabelsHit, descriptorAgeMs } from "./gateway-read.mjs"; // CTL-1079 / CTL-1570
 import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup
+import {
+  appendPublishPreflightBlockedEvent as defaultAppendPublishPreflightBlockedEvent,
+  appendPublishPreflightWouldBlockEvent as defaultAppendPublishPreflightWouldBlockEvent,
+} from "./publish-preflight-event.mjs";
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
 // The gatedTeardownWorktree import is removed; the teardown phase agent
@@ -4268,6 +4272,12 @@ export function schedulerTick(
     // production; sweep-specific tests inject their own stubs.
     classifyResolution = () => "unknown",
     isBgJobAlive = () => true,
+    // CAT-60: safe no-op defaults keep direct schedulerTick calls hermetic.
+    probePublishCapability = () => ({ state: "unknown" }),
+    publishPreflightMode = "off",
+    appendPublishPreflightBlockedEvent = defaultAppendPublishPreflightBlockedEvent,
+    appendPublishPreflightWouldBlockEvent = defaultAppendPublishPreflightWouldBlockEvent,
+    escalatePublishDenied = () => {},
     // CTL-1410 Phase B: in-process SDK-worker probe for the sweep. The REAL
     // registry read is the safe default here — it is a local Map lookup in this
     // same process (never shells out), and an empty registry (bare unit tick)
@@ -4696,6 +4706,8 @@ export function schedulerTick(
   //
   // Returns: { ok, code, reason, signal } on a real dispatch attempt, or
   // { aborted: true } when preDispatch vetoed the iteration (caller `continue`s).
+  // Dedup shadow observations within this tick: permission is repo-scoped, not ticket-scoped.
+  const publishWouldBlockSeen = new Set();
   function dispatchAndVerify(
     orchDir,
     ticket,
@@ -4711,6 +4723,35 @@ export function schedulerTick(
       failLogIncludePhase = true, // Pass 2's original rc!=0 log omits the phase field
     }
   ) {
+    // CAT-60: one choke-point covers advancement, parked resume, and new work.
+    // Definitive denials gate only in enforce; unknown always proceeds.
+    let pub = { state: "unknown" };
+    try {
+      pub = probePublishCapability({ orchDir, ticket, phase }) ?? pub;
+    } catch (err) {
+      log.warn({ ticket, phase, err: err?.message }, "publish-preflight: probe threw; dispatch proceeding");
+    }
+    if (pub.state === "denied" && publishPreflightMode !== "off") {
+      if (publishPreflightMode === "enforce") {
+        safeEmit(appendPublishPreflightBlockedEvent, { ticket, phase, verdict: pub }, { ticket, phase });
+        try {
+          escalatePublishDenied({ orchDir, ticket, phase, verdict: pub,
+            explanation: {
+              problem: `Cannot publish to ${pub.slug ?? "the configured repository"}: the automation identity lacks push permission.`,
+              call_to_action: `Grant push permission${pub.login ? ` to ${pub.login}` : ""} on ${pub.slug ?? "the configured push remote"}, or configure catalyst.pr.pushRemote to a writable remote.`,
+            },
+          });
+        } catch (err) {
+          log.warn({ ticket, err: err?.message }, "publish-preflight: escalation failed; dispatch remains blocked");
+        }
+        return { aborted: true };
+      }
+      const repoKey = pub.slug ?? ticket;
+      if (!publishWouldBlockSeen.has(repoKey)) {
+        publishWouldBlockSeen.add(repoKey);
+        safeEmit(appendPublishPreflightWouldBlockEvent, { ticket, phase, verdict: pub }, { ticket, phase });
+      }
+    }
     // CTL-660: record the dispatch DECISION before the spawn. Best-effort.
     safeEmit(
       appendDispatchRequestedEvent,
@@ -8550,6 +8591,11 @@ function runTick() {
       // + the standalone main() pass the real impls to arm the sweep.
       classifyResolution: runningOpts.classifyResolution,
       isBgJobAlive: runningOpts.isBgJobAlive,
+      probePublishCapability: runningOpts.probePublishCapability,
+      publishPreflightMode: runningOpts.publishPreflightMode,
+      appendPublishPreflightBlockedEvent: runningOpts.appendPublishPreflightBlockedEvent,
+      appendPublishPreflightWouldBlockEvent: runningOpts.appendPublishPreflightWouldBlockEvent,
+      escalatePublishDenied: runningOpts.escalatePublishDenied,
       // CTL-781: respect-assignment + self-assign seams (undefined = gate off).
       botUserIds: runningOpts.botUserIds,
       botWriteId: runningOpts.botWriteId,
@@ -9250,6 +9296,11 @@ export function startScheduler({
   // real daemon (startDaemon) and the standalone main() pass the real impls.
   classifyResolution,
   isBgJobAlive,
+  probePublishCapability,
+  publishPreflightMode = "off",
+  appendPublishPreflightBlockedEvent,
+  appendPublishPreflightWouldBlockEvent,
+  escalatePublishDenied,
   // CTL-781: respect-assignment + self-assign. Undefined → gate off (fail-open).
   botUserIds,
   botWriteId,
@@ -9289,6 +9340,11 @@ export function startScheduler({
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam
     isBgJobAlive, // CTL-671: optional phantom-sweep bg-liveness seam
+    probePublishCapability,
+    publishPreflightMode,
+    appendPublishPreflightBlockedEvent,
+    appendPublishPreflightWouldBlockEvent,
+    escalatePublishDenied,
     botUserIds, // CTL-781: respect-assignment predicate membership set
     botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
     appendIntentEvent, // CTL-936: operator-event seam for intent.ineffective
