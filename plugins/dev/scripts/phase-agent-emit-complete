@@ -370,6 +370,15 @@ if [[ -n $CALLER_PAYLOAD ]]; then
 	[[ -n $PAYLOAD ]] || PAYLOAD="$BASE_PAYLOAD"
 fi
 
+# CTL-1679: extract retry_safe from the caller payload so the signal writer below
+# can persist it as `retrySafe` on the phase signal (the recovery-pass classifier
+# reads it off the signal/evidence). Only "true" propagates; a malformed / absent
+# payload leaves it empty and the signal gains no retrySafe key (back-compat).
+RETRY_SAFE=""
+if [[ -n $CALLER_PAYLOAD ]]; then
+	RETRY_SAFE=$(jq -r 'if (.retry_safe == true) then "true" else empty end' <<<"$CALLER_PAYLOAD" 2>/dev/null || echo "")
+fi
+
 LINE=$(build_canonical_line \
 	--ts "$TS" \
 	--severity "$SEVERITY" \
@@ -439,6 +448,7 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 			--arg phase "$PHASE" \
 			--arg host_name "$_EMIT_HOST_NAME" \
 			--arg host_id "$_EMIT_HOST_ID" \
+			--arg retry_safe "$RETRY_SAFE" \
 			".status = \$status
            | ${SET_COMPLETED}
            | .updatedAt = \$ts
@@ -446,6 +456,7 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
               elif \$reason == \"\" then .
               else .failureReason = \$reason end)
            | (if \$handoff == \"\" then . else .handoffPath    = \$handoff end)
+           | (if \$retry_safe == \"true\" then .retrySafe = true else . end)
            | (if \$status  == \"needs-input\" then .parkedFrom = \$phase
                 | (if (.needsHumanSince == null) then .needsHumanSince = \$ts else . end)
               else . end)
