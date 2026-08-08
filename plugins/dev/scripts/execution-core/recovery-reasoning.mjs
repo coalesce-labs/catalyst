@@ -643,6 +643,16 @@ export function defaultClassifyTicket(evidence, opts = {}) {
   // Rule 1: Check for deterministic errors in logs
   const deterministic = checkDeterministicErrors(logsOutput, failureReason);
   if (deterministic) {
+    if (deterministic.escalate) {
+      return {
+        decision: "escalate",
+        fix_class: deterministic.fix_class,
+        details: {
+          reason: deterministic.reason,
+          explanation: deterministic.explanation,
+        },
+      };
+    }
     return {
       decision: "fix",
       fix_class: deterministic.fix_class,
@@ -711,6 +721,23 @@ export function checkDeterministicErrors(logsOutput, failureReason) {
       fix_class: "push_rejected_no_workflow_scope",
       seam_id: "workflow-token-redispatch",
       reason: "Push rejected (no workflow scope); re-arm phase-pr to re-run with the scoped token",
+    };
+  }
+  if (failureReason === "push_denied_no_permission") {
+    return {
+      fix_class: "push_denied_no_permission",
+      seam_id: null,
+      escalate: true,
+      reason:
+        "Cannot publish to the repository: the automation's GitHub identity lacks push " +
+        "permission on the configured push remote. Reviewed commits exist only on this " +
+        "host until the push target or the identity's permission changes.",
+      explanation: {
+        problem:
+          "The configured push remote rejected the automation identity because it lacks repository push permission.",
+        call_to_action:
+          "Grant the automation identity push permission on that repository, or set catalyst.pr.pushRemote to a writable remote.",
+      },
     };
   }
   // Merge-conflict and rebase-failed via failureReason → bounded-LLM, not a seam stub.
@@ -1304,6 +1331,16 @@ function promoteNumericAttrs(type, details) {
     // gap between them (total − held) is the dispatchable set as Phase 3 lands.
     num("cohort_stranded_mid_pipeline", details.strandedCount);
     num("cohort_stranded_held", details.strandedHeldCount);
+    // CAT-40 (Codex P1): promote the GitHub core-REST quota scalars. They are the
+    // whole point of the sampler — a board-wide cause with per-ticket symptoms —
+    // and the forwarder drops body.payload off-host, so leaving them in details
+    // makes the default shadow rollout unverifiable: an operator could see the
+    // scan fire but never chart the quota it observed. Both are bounded (a count
+    // and a 0-100 percentage); the reset timestamp and sampling host stay in
+    // body.payload. `num` drops nulls, so an absent snapshot promotes nothing
+    // rather than charting a fake zero.
+    num("recovery.github.core_remaining", details.githubCoreRemaining);
+    num("recovery.github.core_remaining_pct", details.githubCoreRemainingPct);
   }
   return a;
 }

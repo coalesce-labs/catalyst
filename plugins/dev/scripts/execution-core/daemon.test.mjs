@@ -3596,3 +3596,47 @@ describe("maybeReapOrphanedDelegateRunners (CAT-39)", () => {
     }).not.toThrow();
   });
 });
+
+// ─── CAT-40 — GitHub quota sampler is primed BEFORE the scheduler's first pass ─
+//
+// Codex P1 (round 2): the scheduler's initial board-health pass runs
+// synchronously inside startDaemon. Arming only a future interval left that pass
+// with no snapshot, so under CATALYST_BH_GH_QUOTA=enforce it advanced the
+// board-health throttle while quota read `unknown` — and because the scheduler's
+// own timer was registered first, the next scan could also precede the first
+// sample, stretching the blind window to ~10 minutes on a host that was
+// "sampling" the whole time. Ordering is the fix, so ordering is the assertion.
+describe("CAT-40 — GitHub quota timer start ordering", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    enableReaper: false,
+    enableHeartbeat: false,
+    enableWaitWatcher: false,
+    enableMemorySampler: false,
+    enableFleetHealth: false,
+    enableRatelimitPoller: false,
+    readAllEligible: () => [],
+  });
+
+  test("the quota timer is started, and primed, before startScheduler runs", () => {
+    const order = [];
+    startDaemon({
+      ...baseOpts(),
+      startScheduler: () => { order.push("scheduler"); },
+      startGithubQuotaTimer: (opts) => {
+        order.push("quota-timer");
+        expect(opts.primeImmediately).toBe(true);
+        expect(opts.enabled).toBe(true);
+        return { stop: () => {}, primed: true };
+      },
+    });
+    expect(order).toEqual(["quota-timer", "scheduler"]);
+  });
+});

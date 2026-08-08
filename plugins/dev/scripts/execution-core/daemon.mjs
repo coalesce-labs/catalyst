@@ -57,6 +57,9 @@ import {
   readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
   hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
+  readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
+  readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
+  resolvePublishPreflightMode,
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -102,6 +105,7 @@ import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree
 import { startDelegateRunnerTimer, reapOrphanedRunners } from "./delegate-runner.mjs"; // CAT-39: reapOrphanedRunners is a boot-time-only sweep, called explicitly below
 import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
 import { startStalledPrTimer as realStartStalledPrTimer, readStalledPrSweepConfig, DEFAULTS as STALLED_DEFAULTS } from "./stalled-pr-timer.mjs";
+import { startGithubQuotaTimer as realStartGithubQuotaTimer, readGithubQuotaSweepConfig, DEFAULTS as GITHUB_QUOTA_TIMER_DEFAULTS } from "./github-quota-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
 import { startOrphanPrSweepTimer, readOrphanPrSweepConfig } from "./orphan-pr-sweep-timer.mjs";
 import { DEFAULTS as ORPHAN_DEFAULTS } from "./orphan-pr-sweep.mjs";
@@ -135,6 +139,7 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
+import { probePublishCapability as realProbePublishCapability, resolvePushRemote } from "./publish-preflight.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
@@ -181,6 +186,8 @@ let _orphanPrSweepTimer = null;
 let _linearReconcileTimer = null;
 // CTL-1608: periodic stalled-PR detection sweep timer.
 let _stalledPrTimer = null;
+// CAT-40: periodic GitHub core REST quota snapshot sampler.
+let _githubQuotaTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
@@ -796,6 +803,8 @@ export function startDaemon({
   stalledPrSweepConfig = null,
   // CTL-1608: injectable seam for the stalled-PR timer (tests spy on it).
   startStalledPrTimer: startStalledPrTimerFn = realStartStalledPrTimer,
+  // CAT-40: injectable GitHub quota sampler seam.
+  startGithubQuotaTimer: startGithubQuotaTimerFn = realStartGithubQuotaTimer,
   // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
@@ -1215,6 +1224,30 @@ export function startDaemon({
     // entry points. The monitor receives dispatchFn for its →Triage one-shot, and
     // the onComment callback routes comment-wakes through commentWakeDispatch (the
     // same executor) — no split-brain.
+    // CAT-40: sample the GitHub core REST quota independently of board scans. The
+    // rate_limit endpoint does not consume the quota it reports; the timer only
+    // publishes a snapshot and board-health separately decides shadow/enforce.
+    //
+    // Codex P1 (round 2): this MUST be armed — and primed — before schedulerFn
+    // below, which runs a synchronous initial board-health pass. Arming only the
+    // interval left that first pass with no snapshot, so under
+    // CATALYST_BH_GH_QUOTA=enforce it advanced the board-health throttle while
+    // quota read `unknown`; with the scheduler's own timer registered first the
+    // blind window could span two scans (~10 min) on a host that had in fact been
+    // sampling all along. `primeImmediately` samples inline, so by the time the
+    // scheduler's first pass reads github-quota.json the snapshot is there.
+    // Sampling is host-local observation, not actuation, so it stays OUTSIDE the
+    // _isWorkerNode gate — a monitor node publishes its own quota too.
+    {
+      const githubQuotaCfg = readGithubQuotaSweepConfig(configPath);
+      _githubQuotaTimer = startGithubQuotaTimerFn({
+        enabled: githubQuotaCfg.enabled ?? true,
+        intervalSeconds: githubQuotaCfg.intervalSeconds ?? GITHUB_QUOTA_TIMER_DEFAULTS.intervalSeconds,
+        orchDir,
+        primeImmediately: true,
+      });
+    }
+
     // CTL-1654: the actuator arming below (monitorFn + schedulerFn + auto-tuner) is
     // gated on _isWorkerNode — see the observe-only backstop comment above.
     if (_isWorkerNode) {
@@ -1282,6 +1315,18 @@ export function startDaemon({
       // terminal-ness from the local Catalyst-Cloud replica. undefined → inert.
       replica: replicaReader,
       isBgJobAlive,
+      // CAT-60: production arms the otherwise-hermetic scheduler seam. Resolve
+      // the project repo from the ticket prefix and cache per remote slug.
+      publishPreflightMode: resolvePublishPreflightMode({ configPath }),
+      probePublishCapability: ({ ticket }) => {
+        const team = String(ticket || "").split("-")[0];
+        const project = realListProjects().find((p) => p.team === team);
+        return realProbePublishCapability({
+          repoRoot: project?.repoRoot,
+          pushRemote: resolvePushRemote({ repoRoot: project?.repoRoot, layer1Path: configPath, layer2Path }),
+          cacheDir: join(orchDir, ".publish-preflight"),
+        });
+      },
       // CTL-1044: provide the production operator-event appender for the
       // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
       // the seam is null and the advance-shadow comparator's disagree/tick
@@ -2136,6 +2181,14 @@ export function stopDaemon() {
       /* timer already stopped */
     }
     _stalledPrTimer = null;
+  }
+  if (_githubQuotaTimer) {
+    try {
+      _githubQuotaTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _githubQuotaTimer = null;
   }
   _reaper = null;
   // CTL-650: stop the wait-state watcher.

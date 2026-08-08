@@ -72,6 +72,21 @@ try {
 }
 export { log };
 
+export const PUBLISH_PREFLIGHT_MODES = ["off", "shadow", "enforce"];
+
+export function resolvePublishPreflightMode({ env = process.env, configPath = null, logger = log } = {}) {
+  let raw = env?.CATALYST_PUBLISH_PREFLIGHT;
+  if (raw == null && configPath) {
+    try {
+      raw = JSON.parse(readFileSync(configPath, "utf8"))?.catalyst?.orchestration?.publishPreflight?.mode;
+    } catch { /* missing/malformed config uses shipped default */ }
+  }
+  const mode = typeof raw === "string" ? raw.trim().toLowerCase() : "shadow";
+  if (PUBLISH_PREFLIGHT_MODES.includes(mode)) return mode;
+  logger?.warn?.({ value: raw }, "publish-preflight: invalid mode; using shadow");
+  return "shadow";
+}
+
 // CTL-1617: the canonical deployment-mode resolver is a zero-import leaf
 // (../lib/deployment-mode.mjs) shared verbatim by execution-core (this
 // re-export) and orch-monitor (direct cross-directory import) — never
@@ -153,6 +168,10 @@ export function getEligibleDir() {
 // staleness signal.
 export function getReconcileHealthDir() {
   return resolve(getExecutionCoreDir(), "reconcile-health");
+}
+
+export function getReplicaHealthDir() {
+  return resolve(getExecutionCoreDir(), "replica-health");
 }
 
 // CTL-1503 — fleet-health durable-latch dir. Holds the edge-trigger latch marker
@@ -1143,6 +1162,9 @@ export const RECONCILE_INTERVAL_MS =
 export const RECONCILE_FAILURE_ALERT_THRESHOLD =
   Number(process.env.EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD) || 3;
 
+export const REPLICA_DEGRADED_ALERT_THRESHOLD =
+  Number(process.env.EXECUTION_CORE_REPLICA_DEGRADED_ALERT_THRESHOLD) || 3;
+
 // Debounce window: state_changed events that enter the eligible state coalesce
 // into one reconcile poll per affected project per burst.
 export const EVENT_DEBOUNCE_MS =
@@ -1864,6 +1886,18 @@ export function readBoardHealthConfig(env = process.env) {
     mode = "shadow"; // CTL-1290 floor: shadow mutates nothing; garbage → shadow
   }
   return { mode };
+}
+
+// CAT-40: GitHub quota actuation is independently shadow-first even when the
+// broader board-health delegate runs in enforce mode.
+export function readGithubQuotaBoardHealthConfig(env = process.env) {
+  const l2 = readLayer2BoardHealth();
+  const value = env.CATALYST_BH_GH_QUOTA;
+  if (typeof value === "string" && BOARD_HEALTH_MODES.has(value)) return { mode: value };
+  if (typeof l2.githubQuota === "string" && BOARD_HEALTH_MODES.has(l2.githubQuota)) {
+    return { mode: l2.githubQuota };
+  }
+  return { mode: "shadow" };
 }
 
 // CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce

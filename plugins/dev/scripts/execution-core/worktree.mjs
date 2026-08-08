@@ -41,7 +41,8 @@ export function createWorktree({ ticket, repoRoot, expectedBranch }, { spawn = s
   };
 }
 
-// parseWorktreeForBranch — pure. Find the worktree path bound to branch
+// parseWorktreeForBranch — pure. Bash twin: lib/worktree-resolve.sh:_wtr_worktree_for_branch.
+// Find the worktree path bound to branch
 // refs/heads/<ticket> in `git worktree list --porcelain` output. The porcelain
 // format is blank-line-separated blocks; each block opens with `worktree <path>`
 // and (for a checked-out branch) carries a `branch refs/heads/<name>` line. The

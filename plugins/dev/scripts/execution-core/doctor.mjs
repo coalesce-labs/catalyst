@@ -24,7 +24,7 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync } from "node:fs";
+import { readFileSync, statSync, existsSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
 import { resolve, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -88,6 +88,8 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
+import { resolvePublishPreflightMode } from "./config.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -126,6 +128,46 @@ function readLinearBotUserIds(l1Path, l2Path) {
 export const STATUS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" };
 
 export const mkCheck = (name, status, detail) => ({ name, status, detail });
+
+// checkRepoPushPermission — CAT-60. Grade the worker's ability to publish to
+// its resolved write remote independently of scheduler dispatch. Only a
+// definitive denial can fail; operational uncertainty is always informational.
+export function checkRepoPushPermission(deps = {}) {
+  const {
+    repoRoot = process.cwd(),
+    pushRemote,
+    configPath = process.env.CATALYST_CONFIG_FILE || layer1Path(),
+    layer2ConfigPath = layer2Path(),
+    env = process.env,
+    cacheDir = resolve(getExecutionCoreDir(), ".publish-preflight"),
+    probe = probePublishCapability,
+    resolveMode = resolvePublishPreflightMode,
+    now,
+    spawn,
+  } = deps;
+  const resolvedPushRemote = pushRemote ?? resolvePushRemote({ repoRoot, env, layer1Path: configPath, layer2Path: layer2ConfigPath, spawn });
+  let mode;
+  try { mode = resolveMode({ env, configPath }); } catch { mode = "shadow"; }
+  if (mode === "off") {
+    return [mkCheck("repo-push-permission", STATUS.INFO, "publish preflight is off — push permission not checked")];
+  }
+  let verdict;
+  try { verdict = probe({ repoRoot, pushRemote: resolvedPushRemote, env, cacheDir, now, spawn }); }
+  catch (err) {
+    verdict = { state: "unknown", detail: err?.message ?? "publish probe threw" };
+  }
+  const target = `${verdict?.slug ?? "the configured repository"} via ${resolvedPushRemote}`;
+  const identity = verdict?.login ? ` for ${verdict.login}` : "";
+  const cached = verdict?.cached ? " (cached)" : "";
+  if (verdict?.state === "allowed") {
+    return [mkCheck("repo-push-permission", STATUS.PASS, `publish push permission allowed on ${target}${identity}${cached}`)];
+  }
+  if (verdict?.state === "denied") {
+    const status = mode === "enforce" ? STATUS.FAIL : STATUS.WARN;
+    return [mkCheck("repo-push-permission", status, `publish push permission denied on ${target}${identity} (${mode})${cached}`)];
+  }
+  return [mkCheck("repo-push-permission", STATUS.INFO, `publish push permission could not be determined for ${target}: ${verdict?.detail ?? "unknown"}${cached}`)];
+}
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
@@ -2817,6 +2859,41 @@ export function checkCloudTokenEnv(deps = {}) {
   return checks;
 }
 
+// CAT-35 replica-schema verification helpers. The production reader (replica-read.mjs)
+// prepares queries against `issues` and `sync_meta`; a file that lacks either is unusable
+// no matter how large it is, so `replica-schema` must not PASS on size alone.
+export const REQUIRED_REPLICA_TABLES = ["issues", "sync_meta"];
+const SQLITE_MAGIC = "SQLite format 3\0";
+
+// defaultIsSqliteFile — read ONLY the 16-byte magic header (never the whole file, which
+// can be hundreds of MiB). Returns false on any read error: unreadable is not verified.
+function defaultIsSqliteFile(path) {
+  let fd = null;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(SQLITE_MAGIC.length);
+    const read = readSync(fd, buf, 0, buf.length, 0);
+    return read === buf.length && buf.toString("latin1") === SQLITE_MAGIC;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+// defaultReadDbTables — table names via the sqlite3 CLI (an OPTIONAL dependency; doctor
+// runs under bare node and must not import bun:sqlite). Returns null — meaning "could not
+// verify", distinct from [] meaning "verified, no tables" — when sqlite3 is absent or the
+// query fails, so the caller reports unverified instead of inventing a WARN.
+function defaultReadDbTables(path) {
+  const r = spawnSync("sqlite3", ["-readonly", path, "SELECT name FROM sqlite_master WHERE type='table'"], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null;
+  return r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+}
+
 // checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
 // writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
 // is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
@@ -2843,6 +2920,8 @@ export function checkCloudSync(deps = {}) {
     // (4× the SDK's 15s lock-stale) absorbs heartbeat jitter; > this ⇒ heartbeat stopped.
     lockStaleMs = Number(process.env.CATALYST_REPLICA_LOCK_STALE_MS) || 60_000,
     sizeFloorBytes = 65_536,
+    isSqliteFile = defaultIsSqliteFile, // CAT-35
+    readDbTables = defaultReadDbTables, // CAT-35
   } = deps;
 
   const installed = agentInstalled(label, laDir);
@@ -2872,12 +2951,13 @@ export function checkCloudSync(deps = {}) {
   // measures "time since last mirrored change", NOT writer liveness. The feed-independent
   // liveness signal is the writer-lock HEARTBEAT (<db>.writer.lock), rewritten ~every 5s.
   // Gate liveness on the lock heartbeat; report the data-age as info only, never as "down".
+  let size = 0;
+  let statOk = false;
   if (!dbPresent) {
     checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
   } else {
-    let size = 0;
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
-    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; } catch { /* unreadable → handled below */ }
+    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; statOk = true; } catch { /* unreadable → handled below */ }
     try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) dataNewest = Math.max(dataNewest, w.mtimeMs); } catch { /* no -wal sidecar */ }
     let lockMtime = 0;
     try { lockMtime = statFile(`${dbPath}.writer.lock`).mtimeMs; } catch { /* no lock: guard disabled / writer not started */ }
@@ -2902,6 +2982,38 @@ export function checkCloudSync(deps = {}) {
     }
   }
 
+  // CAT-35: distinguish a never-seeded/no-schema file from ordinary staleness.
+  // Size alone must never earn a PASS: a truncated, corrupt, or entirely unrelated
+  // file above the floor would otherwise be declared "schema seeded" while every
+  // production read misses, which is the exact failure this check exists to catch.
+  // So a PASS additionally requires the SQLite magic header AND — when a sqlite3
+  // reader is available — the two tables the production reader actually prepares
+  // against (`issues`, `sync_meta`). With no reader present we say so rather than
+  // claiming verification we did not perform.
+  if (dbPresent) {
+    if (!statOk) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is present but unreadable — cannot determine whether schema is seeded"));
+    } else if (size === 0) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is 0 bytes — no schema, never seeded; the writer has never authenticated"));
+    } else if (size < sizeFloorBytes) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${size}B (< ${sizeFloorBytes}B floor) — seed incomplete`));
+    } else if (!isSqliteFile(dbPath)) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${Math.round(size / 1024)}KiB but has no SQLite header — corrupt or not a database; every read will miss`));
+    } else {
+      const tables = readDbTables(dbPath);
+      if (tables === null) {
+        checks.push(mkCheck("replica-schema", STATUS.INFO, `replica db ${Math.round(size / 1024)}KiB, valid SQLite header — table presence unverified (no sqlite3 reader available)`));
+      } else {
+        const missing = REQUIRED_REPLICA_TABLES.filter((t) => !tables.includes(t));
+        checks.push(
+          missing.length > 0
+            ? mkCheck("replica-schema", STATUS.WARN, `replica db ${Math.round(size / 1024)}KiB is missing required table(s): ${missing.join(", ")} — the reader cannot prepare its queries`)
+            : mkCheck("replica-schema", STATUS.PASS, `replica db ${Math.round(size / 1024)}KiB — schema seeded (${REQUIRED_REPLICA_TABLES.join(" + ")} present)`),
+        );
+      }
+    }
+  }
+
   // (c) token presence — by NAME only, NEVER the value.
   const tokenVal = env[tokenEnv.envVar];
   const tokenSet = typeof tokenVal === "string" && tokenVal.length > 0;
@@ -2922,6 +3034,18 @@ export function checkCloudSync(deps = {}) {
     checks.push(mkCheck("replica-read-flag", STATUS.WARN, "writer running + replica present but CATALYST_LINEAR_REPLICA=off — flip it on to read from the replica"));
   } else {
     checks.push(mkCheck("replica-read-flag", STATUS.INFO, "replica read tier off (CATALYST_LINEAR_REPLICA unset/off)"));
+  }
+
+  const tokenMissing = !tokenSet;
+  const flagOff = mode !== "on";
+  if (tokenMissing && flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier INERT end-to-end: token ${tokenEnv.envVar} unset AND CATALYST_LINEAR_REPLICA off. Both must be fixed, token FIRST`));
+  } else if (tokenMissing || flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier partially configured (${tokenMissing ? `token ${tokenEnv.envVar} unset` : "CATALYST_LINEAR_REPLICA off"}) — reads still fall back`));
+  } else {
+    checks.push(mkCheck("replica-tier", STATUS.PASS, "replica tier fully configured (token set + read flag on)"));
   }
 
   return checks;
@@ -4489,6 +4613,13 @@ export function checksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
+    repoRoot,
+    pushRemote,
+    publishProbe,
+    publishPreflightMode,
+    publishCacheDir,
+    publishNow,
+    publishSpawn,
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -4656,6 +4787,15 @@ export function checksForClass(nc, opts = {}) {
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
+    () => checkRepoPushPermission({
+      repoRoot,
+      pushRemote,
+      probe: publishProbe,
+      resolveMode: publishPreflightMode ? () => publishPreflightMode : undefined,
+      cacheDir: publishCacheDir,
+      now: publishNow,
+      spawn: publishSpawn,
+    }), // CAT-60: workers must be able to publish to the resolved write remote
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
   ];

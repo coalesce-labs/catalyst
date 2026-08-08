@@ -1,5 +1,8 @@
 # Architecture
 
+For the local Linear writer, freshness gate, read tiers, configuration order, and health signals,
+see [Linear read replica](linear-replica.md).
+
 ## Three-Layer System
 
 1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/pm/`, `plugins/legacy/`, …) —
@@ -299,12 +302,36 @@ via `orchestrate-phase-advance`, and dispatches the next `--bg` job. Dispatcher:
 `plugins/dev/scripts/phase-agent-dispatch` (CTL-448). `oneshot-legacy` (single long-lived
 job/ticket) is the runtime fallback when the key is missing.
 
-### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707)
+### Publish-capability preflight and the push remote (CAT-60)
+
+GitHub access is asymmetric: cloning, fetching, and reading a repository can succeed for an identity
+that cannot publish a branch there. Catalyst resolves the write target separately and checks its
+push capability inside `dispatchAndVerify`, immediately before launching a phase worker.
+
+Historically three surfaces assumed `origin`: the rebase/diff base, the push target, and remote-branch
+discovery during resume. CAT-60 makes the push target and resume discovery use the resolved push
+remote. The rebase/diff base deliberately remains `origin/<base>`; publication routing cannot
+change the canonical integration base.
+
+The probe returns `allowed`, `denied`, or `unknown` under an `off` / `shadow` / `enforce` rollout
+flag (`CATALYST_PUBLISH_PREFLIGHT` over Layer-2 configuration, default `shadow`). Shadow emits
+`publish.preflight.would-block` and continues. Enforce blocks only a definitive denial and emits
+`publish.preflight.blocked`; unknown always proceeds. A bounded identity-aware cache conserves
+GitHub quota. The worker-only doctor check reports PASS when allowed, WARN for shadow denial, FAIL
+for enforce denial, and INFO when inconclusive.
+
+### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),
 `phase-agent-dispatch` rebases the ticket's worktree onto current `origin/<base>` before launching
 the worker, so divergence surfaces early instead of riding stale to `monitor-merge` (CTL-608).
 CTL-707 replaced the binary CTL-667 rebase with a 4-layer strategy:
+
+Before config resolution, signal creation, rebase, and worker launch, the dispatcher resolves the
+ticket worktree through an explicit flag, the project registry, the current repository, then a
+backwards-compatible cwd fallback. It changes into that resolved tree, making dispatch safe from
+any caller cwd; the JS caller's `cwd` remains a belt-and-braces reinforcement. This also prevents
+L3 destroy-and-recreate from selecting a bystander worktree.
 
 - **L1 — Periodic background refresh** (`execution-core/worktree-refresh-timer.mjs`): keeps idle
   running worktrees current. Config
@@ -333,12 +360,14 @@ CTL-707 replaced the binary CTL-667 rebase with a 4-layer strategy:
 | `phase.<phase>.auto-rebased.<ticket>`                | INFO     | L1 + L2 (clean/additive) |
 | `phase.<phase>.rebase-conflict-categorized.<ticket>` | WARN     | L2 (pre-stall)           |
 | `phase.<phase>.rebase-conflict-stalled.<ticket>`     | ERROR    | L2 (terminal)            |
+| `phase.<phase>.dispatch-cwd-corrected.<ticket>`      | WARN     | CAT-31 resolver           |
 
 Loki:
 `{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.auto-rebased\\..*"`
 (swap suffix per event).
 
-Invariants (unchanged from CTL-667): **fresh-only** (resume `--resume-session` skips, CTL-658);
+Invariants (unchanged from CTL-667): **cwd-independent** (the target is resolved, not inherited);
+**fresh-only** (resume `--resume-session` skips, CTL-658);
 **build-phase-only** (`is_rebase_phase` in `lib/phase-sequence.sh`;
 `triage`/`pr`/`remediate`/`monitor-*`/`teardown` exempt); **local-only** (never pushes/touches the
 PR; `.catalyst/config.json`,`.trunk/*` stashed across rebase); transient `git fetch` failure (rc=1)
@@ -600,6 +629,16 @@ ring, scoped to the current month's file). The append is idempotent: events alre
 file are never double-written. `catalyst-events tail`/`wait-for` on the observation node then
 resolve fleet events locally with no polling loop. The fan-in is transport-abstracted (injectable
 `fetchFn`) so a future cloud-changefeed transport drops in without touching the dedup core.
+
+### GitHub core REST quota snapshot (CAT-40)
+
+The execution-core daemon samples `gh api rate_limit` on a dedicated timer and atomically writes the
+host's normalized core REST quota to `<orchDir>/github-quota.json`. Board-health reads that local
+snapshot rather than spending a GitHub call on its scan path, publishes the remaining count,
+percentage, reset time, sampling host, and snapshot age, and emits the scalar values on
+`recovery.board-scan`. Sampling and publication are on by default, but actuation is not:
+`CATALYST_BH_GH_QUOTA` defaults to `shadow`, so `rateLimitHeadroom` stays unobservable to Gate 3
+until an operator explicitly selects `enforce`.
 
 ### Linear app-actor self-echo guard (`botUserId`)
 
