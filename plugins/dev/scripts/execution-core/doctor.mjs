@@ -93,7 +93,7 @@ import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CT
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 import { listProjects } from "./registry.mjs";
-import { probePublishCapability } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
+import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
 import { resolvePublishPreflightMode } from "./config.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
@@ -140,7 +140,9 @@ export const mkCheck = (name, status, detail) => ({ name, status, detail });
 export function checkRepoPushPermission(deps = {}) {
   const {
     repoRoot = process.cwd(),
-    pushRemote = process.env.CATALYST_PUSH_REMOTE || "origin",
+    pushRemote,
+    configPath = process.env.CATALYST_CONFIG_FILE || layer1Path(),
+    layer2ConfigPath = layer2Path(),
     env = process.env,
     cacheDir = resolve(getExecutionCoreDir(), ".publish-preflight"),
     probe = probePublishCapability,
@@ -148,17 +150,18 @@ export function checkRepoPushPermission(deps = {}) {
     now,
     spawn,
   } = deps;
+  const resolvedPushRemote = pushRemote ?? resolvePushRemote({ repoRoot, env, layer1Path: configPath, layer2Path: layer2ConfigPath, spawn });
   let mode;
   try { mode = resolveMode({ env }); } catch { mode = "shadow"; }
   if (mode === "off") {
     return [mkCheck("repo-push-permission", STATUS.INFO, "publish preflight is off — push permission not checked")];
   }
   let verdict;
-  try { verdict = probe({ repoRoot, pushRemote, env, cacheDir, now, spawn }); }
+  try { verdict = probe({ repoRoot, pushRemote: resolvedPushRemote, env, cacheDir, now, spawn }); }
   catch (err) {
     verdict = { state: "unknown", detail: err?.message ?? "publish probe threw" };
   }
-  const target = `${verdict?.slug ?? "the configured repository"} via ${pushRemote}`;
+  const target = `${verdict?.slug ?? "the configured repository"} via ${resolvedPushRemote}`;
   const identity = verdict?.login ? ` for ${verdict.login}` : "";
   const cached = verdict?.cached ? " (cached)" : "";
   if (verdict?.state === "allowed") {
