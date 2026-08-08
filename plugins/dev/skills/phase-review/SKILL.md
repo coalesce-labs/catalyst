@@ -5,9 +5,10 @@ description: |
   Wraps the /review skill (gstack) — explicitly skips /ultrareview per user decision.
   Reads verify.json from the prior phase, runs /review against the diff, writes
   ${ORCH_DIR}/workers/<TICKET>/review.json, and creates a remediation commit for
-  any HIGH-severity finding that has a deterministic fix. Emits
-  phase.review.complete.<ticket>. Spawned via phase-agent-dispatch via slash
-  command — hence `user-invocable: true`.
+  any HIGH-severity finding that has a deterministic fix. MEDIUM/LOW findings are
+  filed to a follow-up ticket per the PR review convergence policy (2026-08-07)
+  instead of being silently dropped. Emits phase.review.complete.<ticket>.
+  Spawned via phase-agent-dispatch via slash command — hence `user-invocable: true`.
 user-invocable: true
 disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
@@ -125,11 +126,18 @@ multi-agent cloud review, the user runs it interactively before merge.
 ### 2. Merge findings from verify.json
 
 The `findings` array in `verify.json` (from [[phase-verify]]) is the upstream
-source of truth. Treat each verify finding as a candidate review item:
+source of truth. Treat each verify finding as a candidate review item. This
+phase is round 1 of the fleet's PR review convergence policy (see the
+target repo's `docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md` —
+P1 fixed every round, P2-and-lower ticketed rather than chased indefinitely):
 
-- HIGH severity + deterministic fix → remediation commit
-- HIGH severity + ambiguous fix → record in `review.json` for human attention
-- MEDIUM / LOW → record but do not commit
+- HIGH severity (P1) + deterministic fix → remediation commit
+- HIGH severity (P1) + ambiguous fix → record in `review.json` for human attention
+- MEDIUM / LOW (P2-and-lower) → do not commit. File (or append to) one
+  follow-up ticket for this PR — see "Filing the follow-up ticket" below —
+  with the finding pasted verbatim (file:line, message). Record the ticket
+  ID against the finding so `review-comments` can append to the same
+  ticket instead of opening a new one on a later round.
 
 The fix decision is deterministic when:
 
@@ -137,6 +145,16 @@ The fix decision is deterministic when:
   before/after, AND
 - The fix is local (no cross-file refactor), AND
 - The fix doesn't change a public API or test expectation.
+
+### Filing the follow-up ticket (P2-and-lower)
+
+If any MEDIUM/LOW findings survive step 2, file (or append to) exactly one follow-up ticket for
+this ticket/branch, using the target repo's normal ticket-authoring convention (`gherkin-ticket`
+where Linear is used). Title: `[follow-up] ${TICKET} — deferred review findings`. Body: each
+finding pasted verbatim, one per bullet, with file:line. This runs before the PR exists, so there
+is no thread to reply to yet — `review-comments` (round 2+ on the opened PR) appends to this same
+ticket rather than opening a new one; it discovers the existing ticket via `review.json`'s
+`followUpTicket` field (below).
 
 ### 3. Create at most ONE remediation commit
 
@@ -167,16 +185,21 @@ jq -nc \
   --argjson findings "$REVIEW_FINDINGS_JSON" \
   --arg sha "$REMEDIATION_SHA" \
   --argjson passed "$REVIEW_PASSED" \
+  --arg followUpTicket "${FOLLOW_UP_TICKET:-}" \
   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{findings: $findings,
     remediationCommit: (if $sha == "" then null else $sha end),
+    followUpTicket: (if $followUpTicket == "" then null else $followUpTicket end),
     reviewPassed: $passed,
     generatedAt: $ts}' > "${ARTIFACT}.tmp" \
   && mv "${ARTIFACT}.tmp" "$ARTIFACT"
 ```
 
 **Findings array shape** — each entry mirrors phase-verify's shape plus an
-`addressedBy` field:
+`addressedBy` field. `follow-up-ticket` is the P2-and-lower outcome from the
+convergence policy above; `$FOLLOW_UP_TICKET`, once set, is also written at
+the artifact's top level (`followUpTicket`) so `review-comments` can append
+to the same ticket on a later round instead of opening a new one:
 
 ```json
 {
@@ -185,7 +208,7 @@ jq -nc \
   "file": "path/to/file.ts",
   "line": 42,
   "message": "Short description",
-  "addressedBy": "remediation-commit|deferred-to-human|none"
+  "addressedBy": "remediation-commit|deferred-to-human|follow-up-ticket|none"
 }
 ```
 
