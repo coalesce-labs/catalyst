@@ -757,6 +757,44 @@ B4_EMITTED="$(jq -r '.attributes."event.name" // empty' \
 assert_eq "case B4: emits teardown.failed on gh error" "phase.teardown.failed.CTL-9999" "$B4_EMITTED"
 
 # ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Case B5 (CTL-1667 review fix, round 3): EMPTY/malformed merge PR number → FAILS (fail-closed identity)"
+setup_b_case "caseb5"
+NOW_B5="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n '{status:"done",pr:{number:200}}' > "$WORKERB/phase-pr.json"
+# Legacy/malformed monitor-merge signal: file exists (passes the prior-artifact
+# guard) but carries no .pr.number at all.
+jq -nc --arg t "$NOW_B5" '{mergedAt:$t,ciStatus:"merged"}' \
+  > "$WORKERB/phase-monitor-merge.json"
+jq -nc --arg t "$NOW_B5" '{status:"done",deploy_state:"success",startedAt:$t,completedAt:$t}' \
+  > "$WORKERB/phase-monitor-deploy.json"
+jq -nc --arg t "$NOW_B5" '{status:"running",startedAt:$t}' > "$WORKERB/phase-teardown.json"
+# gh stub: current PR#200 IS merged — the empty merge artifact is the ONLY
+# thing that should block this from passing.
+GH_FIX_B5="$TMPROOT/caseb5-gh-fixture.json"
+jq -n --arg t "$NOW_B5" '{state:"MERGED",mergedAt:$t,number:200}' > "$GH_FIX_B5"
+install_gh_stub "$STUB_BINB" "$GH_FIX_B5"
+run_b_case "caseb5"
+B5_EXIT="$(cat "$CDIR/exit-code" 2>/dev/null || echo 0)"
+if [ "$B5_EXIT" -ne 0 ]; then
+  ok "case B5: exits non-zero (empty merge-signal PR number → fail-closed)"
+else
+  fail "case B5: exits non-zero (empty merge-signal PR number → fail-closed)" "got exit 0"
+fi
+if [ -d "$WT_PATHB" ]; then
+  ok "case B5: worktree NOT removed"
+else
+  fail "case B5: worktree NOT removed" "worktree was deleted"
+fi
+B5_EMITTED="$(jq -r '.attributes."event.name" // empty' \
+  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+assert_eq "case B5: emits teardown.failed" "phase.teardown.failed.CTL-9999" "$B5_EMITTED"
+B5_TRANS=0
+[ -f "$CDIR/linear-transition-calls.log" ] && \
+  B5_TRANS="$(wc -l < "$CDIR/linear-transition-calls.log" 2>/dev/null | tr -d ' ' || echo 0)"
+assert_eq "case B5: linear-transition NOT called" "0" "$B5_TRANS"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Summary
 
 echo ""

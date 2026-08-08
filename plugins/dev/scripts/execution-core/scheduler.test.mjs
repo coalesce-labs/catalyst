@@ -13705,3 +13705,133 @@ describe("CTL-1667: terminalDoneOnce current-PR-merged gate", () => {
     expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-79" }));
   });
 });
+
+// ─── CTL-1667 (review fix, round 3, #3061): sanitize stale post-PR signals
+// before the advancement sweep's deriveAdvancement call ────────────────────
+// Without this, a retained STALE monitor-merge/monitor-deploy/teardown signal
+// (referencing an EARLIER run's PR, left over after a revive at an earlier
+// phase produced a NEW phase-pr.json) makes deriveAdvancement treat that phase
+// as "already dispatched" and skip straight past it — so is_poststale_signal
+// inside phase-agent-dispatch never even gets a chance to run, since the
+// dispatcher is never invoked for that phase at all.
+describe("CTL-1667 (review fix, round 3): sanitize stale post-PR signals before advancement", () => {
+  test("advancement sweep RE-dispatches monitor-merge when its signal is stale (mismatched PR#)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // Current run's PR (#200), just opened.
+    writeSignalRaw("CTL-80", "pr", {
+      ticket: "CTL-80",
+      phase: "pr",
+      status: "done",
+      pr: { number: 200 },
+      startedAt: "2026-08-05T00:00:00Z",
+      updatedAt: "2026-08-05T00:00:00Z",
+    });
+    // STALE monitor-merge signal retained from an EARLIER run's PR (#100) —
+    // predates the current PR entirely.
+    writeSignalRaw("CTL-80", "monitor-merge", {
+      ticket: "CTL-80",
+      phase: "monitor-merge",
+      status: "done",
+      pr: { number: 100 },
+      startedAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    // Without sanitization, deriveAdvancement would see "latest=monitor-merge,
+    // done" and skip straight to monitor-deploy — silently bypassing merge
+    // verification for the CURRENT PR. With sanitization, the stale
+    // monitor-merge entry is dropped, "latest" falls back to `pr`, and
+    // monitor-merge is correctly RE-dispatched for the current run.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-80", phase: "monitor-merge" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-80", phase: "monitor-merge" }]);
+  });
+
+  test("advancement sweep RE-dispatches monitor-merge when its signal predates the current PR (stale timestamp, no PR# to compare)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignalRaw("CTL-81", "pr", {
+      ticket: "CTL-81",
+      phase: "pr",
+      status: "done",
+      pr: { number: 210 },
+      startedAt: "2026-08-05T00:00:00Z",
+      updatedAt: "2026-08-05T00:00:00Z",
+    });
+    // Stale monitor-merge with NO .pr.number at all (legacy/malformed shape) —
+    // falls through to the timestamp rule, which alone proves staleness here.
+    writeSignalRaw("CTL-81", "monitor-merge", {
+      ticket: "CTL-81",
+      phase: "monitor-merge",
+      status: "done",
+      startedAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-81", phase: "monitor-merge" }]);
+  });
+
+  test("advancement sweep still advances normally past a genuinely FRESH monitor-merge signal (matching PR#, correct ordering)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignalRaw("CTL-82", "pr", {
+      ticket: "CTL-82",
+      phase: "pr",
+      status: "done",
+      pr: { number: 220 },
+      startedAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+    });
+    // monitor-merge for the SAME PR, completed AFTER pr — genuinely fresh.
+    writeSignalRaw("CTL-82", "monitor-merge", {
+      ticket: "CTL-82",
+      phase: "monitor-merge",
+      status: "done",
+      pr: { number: 220 },
+      startedAt: "2026-08-02T00:00:00Z",
+      updatedAt: "2026-08-02T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    // NOT stale → sanitization is a no-op → the sweep advances past
+    // monitor-merge to monitor-deploy, the normal happy path.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-82", phase: "monitor-deploy" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-82", phase: "monitor-deploy" }]);
+  });
+
+  test("advancement sweep is unaffected when phase-pr.json is absent (ambiguous — never invents staleness)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // No phase-pr.json at all — sanitization must not touch monitor-merge here
+    // (matches is_poststale_signal's own conservative default).
+    writeSignalRaw("CTL-83", "monitor-merge", {
+      ticket: "CTL-83",
+      phase: "monitor-merge",
+      status: "done",
+      pr: { number: 230 },
+      startedAt: "2026-08-01T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-83", phase: "monitor-deploy" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-83", phase: "monitor-deploy" }]);
+  });
+});

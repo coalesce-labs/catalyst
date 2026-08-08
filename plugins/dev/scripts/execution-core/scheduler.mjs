@@ -1514,6 +1514,65 @@ function readPhaseSignalRaw(orchDir, ticket, phase) {
   }
 }
 
+// POST_PR_PHASES — mirrors lib/phase-signal-freshness.sh's POST_PR_PHASES
+// exactly: the three phases whose signal can go stale relative to a LATER
+// phase-pr.json (CTL-1667 review fix, round 3, #3061).
+const POST_PR_PHASES = ["monitor-merge", "monitor-deploy", TERMINAL_PHASE];
+
+// isPostPrSignalStale — JS port of is_poststale_signal
+// (lib/phase-signal-freshness.sh) for the scheduler-side advancement sweep.
+// KEEP THE TWO RULES IN SYNC with that file (bash cannot import this .mjs):
+//   1. PR-number mismatch (both signal.pr.number and phase-pr.pr.number
+//      present and different) → STALE — definitive, takes precedence.
+//   2. Signal predates phase-pr.json's timestamp (`.updatedAt // .startedAt`
+//      on both sides) → STALE.
+//   3. Anything ambiguous (missing files, unresolvable timestamps, no PR
+//      numbers to compare) → NOT stale. A data gap never invents staleness,
+//      it only ever fails to detect a genuine one — the same fail-safe
+//      direction the bash predicate uses for its own caller (avoiding a
+//      spurious re-dispatch); here it avoids spuriously discarding a
+//      genuinely-current signal.
+function isPostPrSignalStale(orchDir, ticket, phase) {
+  if (!POST_PR_PHASES.includes(phase)) return false;
+  const sig = readPhaseSignalRaw(orchDir, ticket, phase);
+  const pr = readPhaseSignalRaw(orchDir, ticket, "pr");
+  if (!sig || !pr) return false; // either file absent → cannot prove staleness
+  const sigPr = sig?.pr?.number;
+  const curPr = pr?.pr?.number;
+  if (sigPr != null && curPr != null && sigPr !== curPr) return true;
+  const sigTs = sig?.updatedAt ?? sig?.startedAt ?? null;
+  const prTs = pr?.updatedAt ?? pr?.startedAt ?? null;
+  if (typeof sigTs === "string" && typeof prTs === "string") return sigTs < prTs;
+  return false;
+}
+
+// sanitizeStalePostPrSignals — CTL-1667 (review fix, round 3, #3061): strip any
+// post-PR phase signal (monitor-merge, monitor-deploy, teardown) proven stale
+// relative to the current phase-pr.json BEFORE deriveAdvancement ever sees it.
+// deriveAdvancement is pure and treats the highest-indexed phase present in
+// `signals` as "latest", then advances past it — so a RETAINED stale signal
+// (e.g. an old phase-monitor-merge.json left over from a run that was revived
+// at an earlier phase, with a new phase-pr.json but no fresh monitor-merge
+// dispatch yet) makes it skip straight past that phase for the current run
+// instead of re-dispatching it. is_poststale_signal already exists to catch
+// exactly this — but ONLY inside phase-agent-dispatch, which is never invoked
+// here in the first place: deriveAdvancement decided the phase was "already
+// dispatched" before any dispatcher call happens. Filtering the stale entries
+// out of the signals map here makes deriveAdvancement re-derive "latest" from
+// the next OLDER, still-fresh phase, so the stale phase is re-dispatched like
+// any other missing one — restoring monitor-merge/monitor-deploy/teardown
+// verification for the CURRENT PR instead of silently skipping it.
+function sanitizeStalePostPrSignals(orchDir, ticket, signals) {
+  let out = signals;
+  for (const phase of POST_PR_PHASES) {
+    if (phase in out && isPostPrSignalStale(orchDir, ticket, phase)) {
+      if (out === signals) out = { ...signals }; // copy-on-write — never mutate the caller's map
+      delete out[phase];
+    }
+  }
+  return out;
+}
+
 // predecessorPhaseOf — the completed phase whose happy-path successor is `next`
 // (i.e. the worker that just finished and triggered this advance), or null.
 // Uses the NEXT_PHASE inversion so it is unambiguous on every LINEAR edge. The
@@ -6762,7 +6821,14 @@ export function schedulerTick(
     // signals so deriveAdvancement re-dispatches a fresh verify this tick).
     maybeResetForRemediateCycle(orchDir, ticket);
 
-    const signals = readPhaseSignals(orchDir, ticket);
+    // CTL-1667 (review fix, round 3, #3061): strip any post-PR phase signal
+    // (monitor-merge/monitor-deploy/teardown) proven stale relative to the
+    // current phase-pr.json BEFORE deriveAdvancement sees it — see
+    // sanitizeStalePostPrSignals for the full rationale. Without this,
+    // deriveAdvancement treats a retained stale signal as "already dispatched"
+    // and advances PAST it, so the phase-agent-dispatch-side freshness check
+    // (is_poststale_signal) never even gets a chance to run for that phase.
+    const signals = sanitizeStalePostPrSignals(orchDir, ticket, readPhaseSignals(orchDir, ticket));
     // CTL-653: the verdict-router reads — verify.json verdict + event-counted
     // cycle budget. Injected into deriveAdvancement so the router stays pure.
     const verdict = readVerifyVerdict({ ticket, orchDir });

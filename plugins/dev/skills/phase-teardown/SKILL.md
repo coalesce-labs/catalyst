@@ -140,9 +140,17 @@ fi
 
 # Identity: the merge signal must be for the current run's PR.
 # A prior run's merged PR in phase-monitor-merge.json must not satisfy this gate.
-if [[ -n "$CUR_PR" && -n "$MERGE_PR" && "$CUR_PR" != "$MERGE_PR" ]]; then
+# CTL-1667 (review fix, round 3, #3061): require MERGE_PR itself to be present,
+# not just matching when both happen to resolve. phase-monitor-merge.json is
+# REQUIRED to exist above (prior_artifact_missing:monitor_merge), but an EMPTY,
+# malformed, or legacy-shaped merge artifact (no `.pr.number`) previously
+# skipped this whole identity check entirely (the `-n "$MERGE_PR"` conjunct was
+# false), letting a stale/malformed merge artifact authorize Done on the
+# current PR's live-merged state without ever proving monitor-merge actually
+# ran for THIS run's PR.
+if [[ -n "$CUR_PR" && ( -z "$MERGE_PR" || "$CUR_PR" != "$MERGE_PR" ) ]]; then
   "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
-    --reason "pr_not_merged:stale_merge_signal(pr=${MERGE_PR},cur=${CUR_PR})" \
+    --reason "pr_not_merged:stale_merge_signal(pr=${MERGE_PR:-<empty>},cur=${CUR_PR})" \
     ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
     || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
   exit 1
