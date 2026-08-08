@@ -93,6 +93,61 @@ function makeRealDispatch() {
 const noopReclaim = () => "noop";
 
 describe("CAT-36 new-work admission", () => {
+  // CAT-36 (Codex P2, #3140): the hold-streak map self-cleaned only on the
+  // "became ready" path, so a ticket that LEFT `ready` (removed, reassigned,
+  // newly dependency-blocked) kept its entry for the daemon's lifetime — and a
+  // later reappearance resumed the obsolete streak, swallowing the first
+  // diagnostic of the new hold episode. The map must track this tick's ready
+  // set, so the re-appearance logs at held_ticks:1 again.
+  test("a held ticket that leaves the ready set restarts its hold streak", () => {
+    const testOrchDir = mkdtempSync(join(tmpdir(), "cat36-holdmap-"));
+    const infos = [];
+    const realInfo = log.info;
+    try {
+      mkdirSync(join(testOrchDir, "workers"), { recursive: true });
+      writeFileSync(join(testOrchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+      __resetForTests();
+      log.info = (...args) => infos.push(args);
+      const opts = (eligible) => ({
+        readEligible: () => eligible,
+        reclaimDeadWork: noopReclaim,
+        liveBackgroundCount: () => 0,
+        dispatch: makeRealDispatch(),
+        hasTriageArtifact: () => false, // always held
+        listStartedTickets: () => new Set(),
+        // Single-host roster: HRW is a strict no-op, so this host owns the
+        // ticket and it actually reaches the hold filter.
+        hosts: ["test-host"],
+        hostName: "test-host",
+        isDraining: () => false,
+        recoveryPass: { mode: "off" },
+        boardHealth: { mode: "off" },
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => {},
+          applyLabel: () => {},
+        },
+      });
+      const present = [{ identifier: "CTL-HOLD", priority: 1, createdAt: "2026-05-01T00:00:00Z" }];
+      schedulerTick(testOrchDir, opts(present)); // held, streak 1 → logs
+      schedulerTick(testOrchDir, opts(present)); // held, streak 2 → silent
+      schedulerTick(testOrchDir, opts([])); // LEAVES ready → entry must be pruned
+      schedulerTick(testOrchDir, opts(present)); // reappears → streak 1 → logs again
+
+      const heldTicks = infos
+        .filter((args) =>
+          args.some((a) => typeof a === "string" && a.includes("not yet triaged"))
+        )
+        .map((args) => args.find((a) => a && typeof a === "object")?.held_ticks);
+      // Pre-fix the second episode resumed at 3 and never logged at all.
+      expect(heldTicks).toEqual([1, 1]);
+    } finally {
+      log.info = realInfo;
+      __resetForTests();
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
   test("an untriaged top-ranked ticket does not consume the only free slot", () => {
     const testOrchDir = mkdtempSync(join(tmpdir(), "cat36-admission-"));
     try {
@@ -128,7 +183,14 @@ describe("CAT-36 new-work admission", () => {
     }
   });
 
-  test("an untriaged queued ticket cannot trigger preemption", () => {
+  // CAT-36 (Codex P1, #3140): the budget guard belongs to the new-work and
+  // admission sweeps ONLY — it must not reach the preemption sweep. There, the
+  // freed slot is spent by the MONITOR's triage dispatch (computeTriageBudget is
+  // just computeFreeSlots), so an untriaged urgent ticket is precisely who needs
+  // it. Gating preemption on triage.json also could never be satisfied:
+  // buildGlobalRanking's queued descriptors are by construction the tickets with
+  // no workers/<t>/ dir, which is where triage.json would have to live.
+  test("an untriaged urgent queued ticket still triggers preemption", () => {
     const T0 = 200_000;
     seedWorker("CTL-LIVE", "research", 4, T0 - 90_000, "bg-live");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -142,10 +204,10 @@ describe("CAT-36 new-work admission", () => {
       killBgJob: kill,
       hasTriageArtifact: () => false,
     };
-    schedulerTick(orchDir, { ...opts, now: () => T0 });
-    schedulerTick(orchDir, { ...opts, now: () => T0 + 35_000 });
-    expect(kill.calls).toHaveLength(0);
-    expect(readSignal("CTL-LIVE", "research")?.status).toBe("running");
+    schedulerTick(orchDir, { ...opts, now: () => T0 }); // opens hysteresis
+    schedulerTick(orchDir, { ...opts, now: () => T0 + 35_000 }); // preempts
+    expect(kill.calls.map((c) => c.bgJobId)).toContain("bg-live");
+    expect(readSignal("CTL-LIVE", "research")?.status).toBe("preempted");
   });
 });
 
@@ -229,6 +291,101 @@ describe("CAT-36 starvation warning cadence", () => {
             applyPhaseStatus: () => {},
             applyTerminalDone: () => {},
             applyLabel: () => {},
+          },
+        });
+      }
+      const frozen = warnings.filter((args) =>
+        args.some((a) => typeof a === "string" && a.includes("board appears frozen"))
+      );
+      expect(frozen).toHaveLength(0);
+    } finally {
+      log.warn = realWarn;
+      __resetForTests();
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
+  });
+
+  // CAT-36 (Codex P2, #3140): the same false-positive class, one pool over.
+  // triagedWaitingCount is captured BEFORE dependency readiness is applied, so a
+  // triaged waiter parked behind an open dependency kept hasWaitingWork true and
+  // warned "board appears frozen" on a board that is correctly idle. The streak
+  // must be gated on the dependency-READY subset.
+  test("a triaged waiter blocked by an open dependency never warns", () => {
+    const testOrchDir = mkdtempSync(join(tmpdir(), "cat36-blocked-"));
+    const warnings = [];
+    const realWarn = log.warn;
+    try {
+      // A triaged-waiting candidate: triage done, no research signal.
+      const waiterDir = join(testOrchDir, "workers", "CTL-WAIT");
+      mkdirSync(waiterDir, { recursive: true });
+      writeFileSync(
+        join(waiterDir, "phase-triage.json"),
+        JSON.stringify({ ticket: "CTL-WAIT", phase: "triage", status: "done" })
+      );
+      writeFileSync(join(testOrchDir, "state.json"), JSON.stringify({ maxParallel: 4 }));
+      __resetForTests();
+
+      // CTL-WAIT is blocked_by CTL-DEP, and CTL-DEP is NOT terminal → the
+      // admission graph drops CTL-WAIT from readyIds.
+      const fetchBatch = (ids) => {
+        const m = new Map();
+        for (const id of ids) {
+          if (id === "CTL-WAIT") {
+            m.set(id, {
+              state: "In Progress",
+              priority: 1,
+              labels: [],
+              // buildDependencyEdges reads relations.nodes[].relatedIssue
+              // (inverseRelations is the one that uses `.issue`).
+              relations: { nodes: [{ type: "blocked_by", relatedIssue: { identifier: "CTL-DEP" } }] },
+              inverseRelations: { nodes: [] },
+            });
+          } else {
+            m.set(id, {
+              state: "In Progress", // non-terminal blocker
+              priority: null,
+              labels: [],
+              relations: { nodes: [] },
+              inverseRelations: { nodes: [] },
+            });
+          }
+        }
+        return m;
+      };
+
+      log.warn = (...args) => warnings.push(args);
+      for (let tick = 0; tick < 5; tick += 1) {
+        schedulerTick(testOrchDir, {
+          // CTL-WAIT is eligible but dependency-blocked, so `ready` is empty
+          // while the triaged-waiting pool is not — exactly the shape that made
+          // the pre-fix streak advance on a correctly-idle board. The eligible
+          // projection carries the relations in production, so the new-work
+          // readiness graph sees the same edge the admission graph does.
+          readEligible: () => [
+            {
+              identifier: "CTL-WAIT",
+              priority: 1,
+              createdAt: "2026-05-01T00:00:00Z",
+              relations: {
+                nodes: [{ type: "blocked_by", relatedIssue: { identifier: "CTL-DEP" } }],
+              },
+              inverseRelations: { nodes: [] },
+            },
+          ],
+          reclaimDeadWork: noopReclaim,
+          liveBackgroundCount: () => 0, // free slots exist
+          dispatch: makeRealDispatch(),
+          hasTriageArtifact: () => true,
+          listStartedTickets: () => new Set(),
+          fetchBatch,
+          isDraining: () => false,
+          recoveryPass: { mode: "off" },
+          boardHealth: { mode: "off" },
+          writeStatus: {
+            applyPhaseStatus: () => {},
+            applyTerminalDone: () => {},
+            applyLabel: () => {},
+            removeLabel: () => ({ removed: true }),
           },
         });
       }

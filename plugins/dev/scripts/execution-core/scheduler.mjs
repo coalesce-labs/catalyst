@@ -6157,6 +6157,8 @@ export function schedulerTick(
   let promotedCount = 0;
   let admittedThisTick = new Set();
   let triagedWaitingCount = 0;
+  // Dependency-ready subset of the above — the starvation streak's input.
+  let triagedWaitingReadyCount = 0;
   const heldReasons = [];
   {
     // A.1 — the triaged-waiting pool: exactly the set sweep 1 would free-promote
@@ -6346,6 +6348,16 @@ export function schedulerTick(
       // picture (empty edges from a null read would otherwise read as "ready") —
       // hold it (drop from readyIds → classified "blocked"). Retries next tick.
       for (const ticket of readFailedTickets) readyIds.delete(ticket);
+
+      // CAT-36 (Codex P2, #3140): the STARVATION signal must count only the
+      // triaged waiters that dependency-readiness would actually let through.
+      // `triagedWaitingCount` is captured before this filter, so a waiter parked
+      // behind an open dependency would otherwise keep hasWaitingWork true
+      // forever and warn "board appears frozen" on a board that is correctly
+      // idle — the same false-positive class the `ready`-not-`eligible` choice
+      // below avoids. Keep the raw count for the log field (an operator wants to
+      // see the whole waiting pool); gate the streak on the ready subset.
+      triagedWaitingReadyCount = triagedWaiting.filter((t) => readyIds.has(t)).length;
 
       // A.5 — cycle escalation: a triaged-waiting ticket in a dependency cycle
       // can never become ready, so flag it needs-human (labelOnce, apply-once).
@@ -6723,21 +6735,22 @@ export function schedulerTick(
     if (computeFreeSlots(maxParallel, occupiedCount) <= 0) {
       // Build the global ranking to find topQueued and potential victim.
       const ranking = buildGlobalRanking(orchDir, eligible);
-      // Preempt only for a candidate that can consume the freed slot now;
-      // otherwise an untriaged ticket would park useful work for no gain.
-      const topQueued = ranking.find(
-        (d) =>
-          !d.inFlight &&
-          canOccupySlotNow(orchDir, d.identifier, {
-            hasTriageArtifact: _hasTriageArtifact,
-          }).ok
-      );
-      if (!topQueued && ranking.some((d) => !d.inFlight)) {
-        log.debug(
-          { queued: ranking.filter((d) => !d.inFlight).length },
-          "scheduler: preemption suppressed — no queued ticket is dispatch-ready (CAT-36)"
-        );
-      }
+      // CAT-36 (Codex P1, #3140): do NOT gate this on canOccupySlotNow. Two
+      // reasons, either one fatal:
+      //   1. It can never be true here. buildGlobalRanking's queued descriptors
+      //      are exactly the eligible tickets NOT in listStartedTickets — i.e.
+      //      those with no workers/<ticket>/ dir — while canOccupySlotNow
+      //      requires workers/<ticket>/triage.json, which implies that dir. The
+      //      two sets are disjoint in production, so the guard silently disabled
+      //      preemption outright.
+      //   2. It asks the wrong question. The slot a preemption frees is spent by
+      //      the MONITOR's triage dispatch (computeTriageBudget is just
+      //      computeFreeSlots), not only by a pipeline-phase dispatch. An
+      //      untriaged urgent ticket genuinely needs that slot — to be triaged.
+      // The budget fix this ticket is about lives in the new-work + admission
+      // sweeps (dispatchableReady / admissionContenders), which is where
+      // "can't start ⇒ don't spend a slot on it" actually applies.
+      const topQueued = ranking.find((d) => !d.inFlight);
       // Victim candidates: in-flight, sorted worst-to-best (reverse ranking).
       const inFlightRanked = ranking.filter((d) => d.inFlight);
       // Scan from lowest-ranked in-flight (last in sorted array) toward highest.
@@ -7462,6 +7475,19 @@ export function schedulerTick(
     return false;
   });
 
+  // CAT-36 (Codex P2, #3140): the hold-streak map is only self-cleaning on the
+  // `readiness.ok` path above — a ticket that leaves `ready` entirely (removed,
+  // reassigned to another host, or newly dependency-blocked) is never visited
+  // again, so its entry would live for the daemon's lifetime and a later
+  // reappearance would resume the obsolete streak, suppressing the first
+  // diagnostic of the NEW hold episode. Prune to exactly this tick's ready set.
+  if (lastHoldLogged.size > 0) {
+    const readyNow = new Set(ready.map((t) => t.identifier));
+    for (const ticket of lastHoldLogged.keys()) {
+      if (!readyNow.has(ticket)) lastHoldLogged.delete(ticket);
+    }
+  }
+
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.
@@ -8069,7 +8095,9 @@ export function schedulerTick(
   // node whose peers own all the currently-eligible slices — since `didWork`
   // stays false and the streak never resets. Held-untriaged candidates are still
   // in `ready`, so the intended wedge signal is preserved.
-  const hasWaitingWork = ready.length > 0 || triagedWaitingCount > 0;
+  // triagedWaitingReadyCount, NOT triagedWaitingCount — same reason, applied to
+  // the other pool: a triaged waiter behind an open dependency is not starved.
+  const hasWaitingWork = ready.length > 0 || triagedWaitingReadyCount > 0;
   const starvation = nextStarvationState(starvationStreak, {
     didWork,
     freeSlots,
@@ -8087,6 +8115,7 @@ export function schedulerTick(
         eligible_count: eligible.length,
         ready_count: ready.length,
         triaged_waiting: triagedWaitingCount,
+        triaged_waiting_ready: triagedWaitingReadyCount,
         held: heldReasons,
       },
       "scheduler: board appears frozen — queued work cannot make progress (CAT-36)"

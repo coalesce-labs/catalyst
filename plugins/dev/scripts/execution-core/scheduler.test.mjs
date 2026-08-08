@@ -7203,7 +7203,6 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 2, // saturated
       reclaimDeadWork: noopReclaim,
-      hasTriageArtifact: () => true,
     };
     // Tick 1: hysteresis window opens, no preemption yet.
     schedulerTick(orchDir, { ...tickOpts, now: () => T0, killBgJob: makeKillStub() });
@@ -7243,21 +7242,34 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
     expect(kill.calls).toHaveLength(0);
   });
 
-  test("no preemption when the top-ranked queued ticket is untriaged", () => {
-    const NOW = 100_000;
-    seedWorker("CTL-1", "research", 4, NOW - 90_000, "bg-ctl1");
+  // CAT-36 regression guard (Codex P1, #3140). A queued descriptor in
+  // buildGlobalRanking is BY CONSTRUCTION a ticket with no workers/<t>/ dir, so
+  // it can never own a triage.json. Gating preemption on the triage artifact
+  // therefore disabled preemption entirely in production — and it asked the
+  // wrong question anyway: the freed slot is what lets the monitor TRIAGE this
+  // ticket (computeTriageBudget == computeFreeSlots). No hasTriageArtifact
+  // injection here — that is the point: this mirrors production.
+  test("preemption still fires for an urgent queued ticket that has no triage artifact", () => {
+    const T0 = 100_000;
+    seedWorker("CTL-1", "research", 4, T0 - 90_000, "bg-ctl1");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const tickOpts = {
+      readEligible: () => [makePrioEligible("CTL-9", 1)], // Urgent, untriaged
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1, // saturated
+      reclaimDeadWork: noopReclaim,
+    };
+    // Tick 1 opens the hysteresis window; tick 2 (35s later) preempts.
+    schedulerTick(orchDir, { ...tickOpts, now: () => T0, killBgJob: makeKillStub() });
     const kill = makeKillStub();
     schedulerTick(orchDir, {
-      readEligible: () => [makePrioEligible("CTL-9", 1)],
-      dispatch: fakeDispatch(),
-      liveBackgroundCount: () => 1,
-      reclaimDeadWork: noopReclaim,
-      hasTriageArtifact: () => false,
-      now: () => NOW,
+      ...tickOpts,
+      now: () => T0 + 35_000,
       killBgJob: kill,
+      appendPreemptedEvent: makePreemptStub(),
     });
-    expect(kill.calls).toHaveLength(0);
+    expect(kill.calls.map((c) => c.bgJobId)).toContain("bg-ctl1");
+    expect(readSignal("CTL-1", "research").status).toBe("preempted");
   });
 
   test("no preemption when queued ticket does not out-rank any in-flight", () => {
@@ -7359,7 +7371,6 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 1,
       reclaimDeadWork: noopReclaim,
-      hasTriageArtifact: () => true,
     };
     // __resetForTests clears hysteresis from the first tick (mtime-guarded tick above).
     __resetForTests();
@@ -7387,7 +7398,6 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 1,
       reclaimDeadWork: noopReclaim,
-      hasTriageArtifact: () => true,
       now: () => T0,
       killBgJob: kill1,
     });
@@ -7400,7 +7410,6 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       dispatch: fakeDispatch(),
       liveBackgroundCount: () => 1,
       reclaimDeadWork: noopReclaim,
-      hasTriageArtifact: () => true,
       now: () => T0 + 35_000,
       killBgJob: kill2,
       appendPreemptedEvent: makePreemptStub(),
