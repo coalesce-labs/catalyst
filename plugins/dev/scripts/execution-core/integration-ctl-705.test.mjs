@@ -19,6 +19,8 @@ import {
   writeWorkerPriority,
   nextStarvationState,
 } from "./scheduler.mjs";
+import { log } from "./config.mjs";
+import { ownedBy } from "./hrw.mjs";
 
 let orchDir;
 let catalystDir;
@@ -178,6 +180,67 @@ describe("CAT-36 starvation warning cadence", () => {
   test("counts queued work blocked by stale liveness with a distinct reason", () => {
     const result = nextStarvationState(2, { ...idle, freeSlots: 0, livenessFresh: false });
     expect(result).toEqual({ streak: 3, warn: true, reason: "stale-liveness" });
+  });
+
+  // Regression guard for the phase-review finding: hasWaitingWork must be derived
+  // from `ready` (eligible minus dependency-blocked minus not-HRW-owned), not from
+  // `eligible`. Deriving it from `eligible` warns forever on a HEALTHY cluster node
+  // whose peers own every currently-eligible slice — didWork stays false and free
+  // slots exist, so the streak never resets.
+  test("a cluster node owning none of the eligible slices never warns", () => {
+    const testOrchDir = mkdtempSync(join(tmpdir(), "cat36-starve-"));
+    const warnings = [];
+    const realWarn = log.warn;
+    try {
+      mkdirSync(join(testOrchDir, "workers"), { recursive: true });
+      writeFileSync(join(testOrchDir, "state.json"), JSON.stringify({ maxParallel: 4 }));
+      __resetForTests();
+      const hosts = ["host-a", "host-b"];
+      // Pick identifiers this host does NOT own, so `ready` is empty while
+      // `eligible` is not. Resolved via the real HRW hash so the test cannot
+      // drift from ownedBy's behavior.
+      const foreign = [];
+      for (let i = 1; foreign.length < 2 && i < 200; i += 1) {
+        const id = `CTL-${i}`;
+        if (!ownedBy(id, hosts, "host-a")) foreign.push(id);
+      }
+      expect(foreign).toHaveLength(2);
+
+      log.warn = (...args) => warnings.push(args);
+      for (let tick = 0; tick < 5; tick += 1) {
+        schedulerTick(testOrchDir, {
+          readEligible: () =>
+            foreign.map((identifier) => ({
+              identifier,
+              priority: 1,
+              createdAt: "2026-05-01T00:00:00Z",
+            })),
+          reclaimDeadWork: noopReclaim,
+          liveBackgroundCount: () => 0,
+          dispatch: makeRealDispatch(),
+          hasTriageArtifact: () => true,
+          listStartedTickets: () => new Set(),
+          hosts,
+          hostName: "host-a",
+          isDraining: () => false,
+          recoveryPass: { mode: "off" },
+          boardHealth: { mode: "off" },
+          writeStatus: {
+            applyPhaseStatus: () => {},
+            applyTerminalDone: () => {},
+            applyLabel: () => {},
+          },
+        });
+      }
+      const frozen = warnings.filter((args) =>
+        args.some((a) => typeof a === "string" && a.includes("board appears frozen"))
+      );
+      expect(frozen).toHaveLength(0);
+    } finally {
+      log.warn = realWarn;
+      __resetForTests();
+      rmSync(testOrchDir, { recursive: true, force: true });
+    }
   });
 });
 
