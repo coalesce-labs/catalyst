@@ -140,6 +140,30 @@ describe("computeParity (CTL-1668 Phase 3)", () => {
     expect(r.verdict).toBe("divergent");
   });
 
+  test("identity-less terminal row (SDK fallback, no orchestrator) still matches by ticket → diverges", () => {
+    // defaultAppendEventLog fallback emits a terminal event with the ticket but no
+    // catalyst.orchestrator.id. It must not silently disappear from the check.
+    const noOrch = row("CTL-1", "phase.implement.failed", "CTL-1");
+    delete (noOrch.attributes as Record<string, unknown>)["catalyst.orchestrator.id"];
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "done", "orchA")],
+      coordinationRows: [noOrch],
+    });
+    expect(r.matchedPairs).toBe(1);
+    expect(r.divergences).toHaveLength(1);
+    expect(r.verdict).toBe("divergent");
+  });
+
+  test("identity-less terminal cannot be masked by another healthy pair", () => {
+    const noOrch = row("CTL-1", "phase.implement.failed", "CTL-1");
+    delete (noOrch.attributes as Record<string, unknown>)["catalyst.orchestrator.id"];
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "done", "orchA"), ws("CTL-2", "done")],
+      coordinationRows: [noOrch, row("CTL-2", "phase.teardown.complete")],
+    });
+    expect(r.verdict).toBe("divergent");
+  });
+
   test("wire order preserved: rows consumed in input order, never sorted", () => {
     const rows = [row("CTL-3", "..."), row("CTL-1", "..."), row("CTL-2", "...")];
     const r = computeParity({ workerStates: [], coordinationRows: rows });

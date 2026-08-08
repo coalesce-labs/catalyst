@@ -53,7 +53,10 @@ export interface ChangeSource {
   pullChanges(since: number): Promise<PullResult>;
 }
 
-type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+type FetchLike = (
+  url: string,
+  init?: { signal?: AbortSignal; headers?: Record<string, string> },
+) => Promise<Response>;
 
 /** Read the set of event ids already present in the mirror (the `id` field of every line). */
 export function readMirrorEventIds(mirrorPath: string): Set<string> {
@@ -294,6 +297,10 @@ export interface HubChangeSourceOpts {
   hubUrl: string;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
+  /** Per-host cloud bearer token; sent as `Authorization: Bearer <token>`, matching the outbound
+   *  HubClient. The cloud contract derives tenant from the token, so an unauthenticated inbound GET
+   *  returns an auth error and mirror convergence stalls even while outbound publish succeeds. */
+  token?: string | null;
 }
 
 /**
@@ -303,11 +310,14 @@ export interface HubChangeSourceOpts {
 export function createHubChangeSource(opts: HubChangeSourceOpts): ChangeSource {
   const fetchImpl = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
   const base = opts.hubUrl.replace(/\/$/, "");
+  const headers: Record<string, string> | undefined = opts.token
+    ? { Authorization: `Bearer ${opts.token}` }
+    : undefined;
   return {
     async pullChanges(since: number): Promise<PullResult> {
       const url = `${base}/coordination/changes?since=${since}`;
       try {
-        const res = await fetchImpl(url, { signal: AbortSignal.timeout(opts.timeoutMs ?? 5000) });
+        const res = await fetchImpl(url, { signal: AbortSignal.timeout(opts.timeoutMs ?? 5000), headers });
         if (res.status === 409) return { ok: false, underflow: true };
         if (!res.ok) return { ok: false, error: true };
         const text = await res.text();

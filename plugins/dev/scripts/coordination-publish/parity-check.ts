@@ -100,6 +100,15 @@ export function computeParity(input: {
   // Build coordination index in input order (never sort), keyed by the (orchestrator, ticket)
   // composite so a worker_state row only ever matches coordination rows from its OWN run.
   const coordByKey = new Map<string, CoordinationRow[]>();
+  // Identity-less fallback: coordination rows with NO catalyst.orchestrator.id. The SDK terminal
+  // emitter's defaultAppendEventLog fallback (sdk-run-phase-agent.mjs) — used when
+  // phase-agent-emit-complete is missing or fails — writes exactly this shape: a real terminal
+  // event carrying the ticket but no orchestrator. Dropping it from the composite index would make
+  // a FAILED terminal silently unmatchable to its (orchestrator, ticket) worker row, so a healthy
+  // pair elsewhere could still return verdict=healthy/0 (Codex P1). Match these against EVERY
+  // worker_state for the ticket instead — conservative: a failed identity-less terminal then
+  // diverges rather than disappearing.
+  const coordNoOrchByTicket = new Map<string, CoordinationRow[]>();
   const orderedTickets: string[] = [];
   const seenTickets = new Set<string>();
 
@@ -113,10 +122,12 @@ export function computeParity(input: {
       seenTickets.add(ticket);
       orderedTickets.push(ticket);
     }
-    const key = parityKey(orchestratorFromRow(row), ticket);
-    const existing = coordByKey.get(key);
+    const orchestrator = orchestratorFromRow(row);
+    const index = orchestrator === "" ? coordNoOrchByTicket : coordByKey;
+    const key = orchestrator === "" ? ticket : parityKey(orchestrator, ticket);
+    const existing = index.get(key);
     if (existing) existing.push(row);
-    else coordByKey.set(key, [row]);
+    else index.set(key, [row]);
   }
 
   let matchedPairs = 0;
@@ -124,8 +135,12 @@ export function computeParity(input: {
   const divergences: ParityResult["divergences"] = [];
 
   for (const ws of workerStates) {
-    const rows = coordByKey.get(parityKey(ws.orchestrator, ws.ticket));
-    if (!rows || rows.length === 0) {
+    // Composite-keyed rows for this run PLUS any identity-less rows for the same ticket.
+    const rows = [
+      ...(coordByKey.get(parityKey(ws.orchestrator, ws.ticket)) ?? []),
+      ...(coordNoOrchByTicket.get(ws.ticket) ?? []),
+    ];
+    if (rows.length === 0) {
       coverageGaps.push({ orchestrator: ws.orchestrator, ticket: ws.ticket });
       continue;
     }

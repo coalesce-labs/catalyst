@@ -584,30 +584,47 @@ _start_coordination_locked() {
   # must bounce the publisher, else it keeps using the old value — and token presence
   # (CTL-1668): a first-time token provisioning in cloud-sync.env must bounce the daemon
   # so it picks up the credential (value is never written; only 0/1 presence is recorded).
-  local resolved mode hub fp checkout_id token_present
+  local resolved mode hub fp checkout_id token_fp
   resolved="$(coordination_resolve)"
   mode="${resolved%%$'\t'*}"
   hub="${resolved#*$'\t'}"
   checkout_id="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
-  # Record presence of the CONFIGURED cloud-token env var — resolved via the secret-contract
-  # mirror's catalyst_secret_cloud_token_name (env override → Layer-2 catalyst.cloud.tokenEnv →
-  # default) — not the hardcoded CATALYST_CLOUD_TOKEN. A custom-named token otherwise never flips
-  # the fingerprint off `token:0`, so a first-time provisioning of the custom var leaves the
-  # long-lived publisher un-restarted and outbound delivery disabled until a manual stop (Codex
-  # P1, CTL-1668). The name is resolved INSIDE the subshell AFTER sourcing cloud-sync.env so a
-  # name override living in that file is honored too — matching the daemon, which launch.sh starts
-  # with that file sourced. Fail-safe: resolver/lib absent → default CATALYST_CLOUD_TOKEN name.
-  token_present="$(
+  # token_fp — a NON-SECRET change marker for the resolved cloud token: `<presence>:<name>:<hash>`,
+  # where <name> is the CONFIGURED env-var name (via the secret-contract mirror
+  # catalyst_secret_cloud_token_name: env override → Layer-2 catalyst.cloud.tokenEnv → default, NOT
+  # the hardcoded CATALYST_CLOUD_TOKEN) and <hash> is a truncated (12-hex) sha256 of the value.
+  # Two Codex P1s drove this shape:
+  #  - Bare presence (token:0/1) misses a ROTATION of a populated token (1→1) or a switch between
+  #    two populated variables — the fingerprint stays identical, the keep-alive tick treats the
+  #    publisher as current, and it keeps using the revoked startup credential (auth failures + DLQ
+  #    growth) until a manual stop. The one-way truncated hash is a change marker, NOT the
+  #    credential, so the secret-env hygiene rule (never persist the value) still holds. A custom
+  #    token NAME is likewise captured so a name change alone bounces the daemon.
+  #  - The token must be SOURCED before it can be resolved/hashed: the CTL-1307 projection stores it
+  #    in cluster.env on launchd hosts (launchd sources no shell rc), so this subshell sources
+  #    cluster.env THEN cloud-sync.env — same order as cloud-sync/launch.sh and health-responder's
+  #    _token_provisioned — else enforce+hub would fingerprint `token:0:…` and never start with the
+  #    credential. Fail-safe: resolver/lib absent → default name; shasum absent → empty hash
+  #    (presence + name still gate; rotation-of-same-var degrades to undetected — no worse than a
+  #    host without hashing).
+  token_fp="$(
     set +u
+    [[ -r "$HOME/.config/catalyst/cluster.env" ]] && . "$HOME/.config/catalyst/cluster.env"
     [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
     _tok_name="CATALYST_CLOUD_TOKEN"
     if declare -f catalyst_secret_cloud_token_name >/dev/null 2>&1; then
       catalyst_secret_cloud_token_name cloud-token >/dev/null 2>&1
       [[ -n "${CATALYST_SECRET_TOKEN_NAME:-}" ]] && _tok_name="$CATALYST_SECRET_TOKEN_NAME"
     fi
-    [[ -n "${!_tok_name:-}" ]] && echo "1" || echo "0"
+    _tok_val="${!_tok_name:-}"
+    if [[ -n "$_tok_val" ]]; then
+      _tok_hash="$(printf '%s' "$_tok_val" | shasum -a 256 2>/dev/null | cut -c1-12)"
+      printf '1:%s:%s' "$_tok_name" "$_tok_hash"
+    else
+      printf '0:%s:' "$_tok_name"
+    fi
   )"
-  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|token:${token_present}"
+  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|token:${token_fp}"
 
   local pid; pid="$(coordination_pid)"
 
@@ -650,9 +667,13 @@ _start_coordination_locked() {
     warn "coordination-publish entrypoint missing at $COORDINATION_SCRIPT — skipping"
     return 1
   fi
-  # 4. Launch detached. Source cloud-sync.env in a subshell so the per-host cloud token
-  #    (CTL-1668: CATALYST_CLOUD_TOKEN / configured name) reaches the daemon without
-  #    persisting the credential into the long-lived catalyst-stack shell process.
+  # 4. Launch detached. Source the projected cloud env in a subshell so the per-host cloud token
+  #    (CTL-1668: CATALYST_CLOUD_TOKEN / configured name) reaches the daemon without persisting the
+  #    credential into the long-lived catalyst-stack shell process. Source cluster.env THEN
+  #    cloud-sync.env — the CTL-1307 projection stores the token in cluster.env on launchd hosts
+  #    (Codex P1: sourcing only cloud-sync.env launched enforce+hub WITHOUT the credential and
+  #    degraded to inbound-only on every keep-alive tick); order matches the fingerprint subshell
+  #    above and cloud-sync/launch.sh.
   log "starting coordination-publish (mode: $mode, log: $COORDINATION_LOG)"
   # Capture the PID and disown INSIDE the subshell that starts the job — that is the only
   # shell where `$!` refers to this `bun &`. Doing `disown $!` in the parent (Codex P1) is
@@ -661,6 +682,7 @@ _start_coordination_locked() {
   # wedging every future start on the leaked non-empty lock) or a stale, unrelated PID.
   (
     set +u
+    [[ -r "$HOME/.config/catalyst/cluster.env" ]] && . "$HOME/.config/catalyst/cluster.env"
     [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
     nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
     _cp_pid=$!

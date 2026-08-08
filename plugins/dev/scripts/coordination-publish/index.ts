@@ -357,7 +357,10 @@ if (import.meta.main) {
     const { createMirrorTailClient, createHubChangeSource } = await import("./lib/mirror-tail-client.ts");
     let source;
     if (cfg.hubUrl) {
-      source = createHubChangeSource({ hubUrl: cfg.hubUrl });
+      // Authenticate the inbound pull with the SAME tenant-bearing token as the outbound
+      // HubClient — the cloud contract derives tenant from the token, so an unauthenticated GET
+      // stalls mirror convergence even while publish succeeds (Codex P1).
+      source = createHubChangeSource({ hubUrl: cfg.hubUrl, token: cloudToken });
     } else {
       const lokiUrlSpecifier = ["../execution-core/config.mjs"].join("");
       const { getLokiQueryUrl } = await import(lokiUrlSpecifier);

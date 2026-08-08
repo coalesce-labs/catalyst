@@ -300,6 +300,28 @@ describe("createHubChangeSource", () => {
     }
   });
 
+  test("sends Authorization: Bearer <token> on the inbound pull when a token is configured", async () => {
+    let seen: Record<string, string> | undefined;
+    const fetchImpl = async (_url: string, init?: { headers?: Record<string, string> }) => {
+      seen = init?.headers;
+      return new Response("", { status: 200 });
+    };
+    const src = createHubChangeSource({ hubUrl: "https://hub.example", fetchImpl, token: "tok-abc" });
+    await src.pullChanges(0);
+    expect(seen?.["Authorization"]).toBe("Bearer tok-abc");
+  });
+
+  test("omits the Authorization header when no token (interim/dev)", async () => {
+    let seen: Record<string, string> | undefined = { sentinel: "x" };
+    const fetchImpl = async (_url: string, init?: { headers?: Record<string, string> }) => {
+      seen = init?.headers;
+      return new Response("", { status: 200 });
+    };
+    const src = createHubChangeSource({ hubUrl: "https://hub.example", fetchImpl });
+    await src.pullChanges(0);
+    expect(seen).toBeUndefined();
+  });
+
   test("a 409 response maps to underflow", async () => {
     const fetchImpl = async () =>
       new Response(JSON.stringify({ error: "cursor_underflow", resync: true }), { status: 409 });
