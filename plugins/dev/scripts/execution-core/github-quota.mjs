@@ -1,9 +1,23 @@
 // Pure normalization and evaluation for GitHub's `rate_limit` response.
 // This module deliberately owns no filesystem, subprocess, or clock IO.
 
+// Codex P2 (CAT-40): `Number(x) || fallback` silently discards an explicit 0.
+// A `0` percentage floor is a MEANINGFUL operator choice — "only total
+// exhaustion blocks dispatch" — and `||` turned it into the 10% default, so
+// 1-10% remaining tripped Gate 3 against the configured intent. Take any finite
+// non-negative number at face value; fall back only when the value is absent or
+// unparseable.
+// An empty/whitespace-only string is "unset", not zero — `Number("")` is 0, which
+// would otherwise turn an exported-but-blank env var into the strictest setting.
+function finiteOr(value, fallback) {
+  if (value == null || (typeof value === "string" && value.trim() === "")) return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 export const GITHUB_QUOTA_DEFAULTS = {
-  coreRemainingPct: Number(process.env.CATALYST_BH_GH_CORE_PCT) || 10,
-  stalenessMs: Number(process.env.CATALYST_BH_GH_QUOTA_STALE_MS) || 15 * 60_000,
+  coreRemainingPct: finiteOr(process.env.CATALYST_BH_GH_CORE_PCT, 10),
+  stalenessMs: finiteOr(process.env.CATALYST_BH_GH_QUOTA_STALE_MS, 15 * 60_000),
 };
 
 function normalizeResource(resource) {
@@ -69,7 +83,7 @@ export function evaluateQuotaHeadroom(snapshot, thresholds = {}, nowMs) {
   }
 
   const ageMs = Math.max(0, nowMs - sampledMs);
-  const stalenessMs = Number(thresholds.stalenessMs) || GITHUB_QUOTA_DEFAULTS.stalenessMs;
+  const stalenessMs = finiteOr(thresholds.stalenessMs, GITHUB_QUOTA_DEFAULTS.stalenessMs);
   const fields = {
     remaining,
     limit,
@@ -80,6 +94,6 @@ export function evaluateQuotaHeadroom(snapshot, thresholds = {}, nowMs) {
   };
   if (fields.stale) return unknown(fields);
   if (remaining === 0) return { state: "exhausted", ...fields };
-  const floor = Number(thresholds.coreRemainingPct) || GITHUB_QUOTA_DEFAULTS.coreRemainingPct;
+  const floor = finiteOr(thresholds.coreRemainingPct, GITHUB_QUOTA_DEFAULTS.coreRemainingPct);
   return { state: fields.remainingPct <= floor ? "low" : "ok", ...fields };
 }

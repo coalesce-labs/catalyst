@@ -80,6 +80,31 @@ describe("github quota timer", () => {
     expect(calls).toBe(0);
   });
 
+  // Codex P2 (CAT-40): setInterval coerces NaN to 1ms. With the timer enabled by
+  // default, a mistyped intervalSeconds turned the quota SAMPLER into a `gh api
+  // rate_limit` spawn storm — the exact budget exhaustion it exists to detect.
+  // The daemon's `?? DEFAULTS` cannot catch it: a wrong TYPE is not null.
+  test("a non-numeric interval falls back to the default cadence instead of NaN (1ms)", () => {
+    const warnings = [];
+    const log = { warn: (fields, msg) => warnings.push({ fields, msg }) };
+    for (const bad of ["five minutes", {}, [], NaN, Infinity, 0, -30, null, undefined]) {
+      const seen = [];
+      const clock = { setInterval: (_fn, ms) => { seen.push(ms); return { unref() {} }; }, clearInterval() {}, now: () => NOW };
+      startGithubQuotaTimer({ enabled: true, orchDir: "/unused", intervalSeconds: bad, clock, log }).stop();
+      expect(seen).toEqual([DEFAULTS.intervalSeconds * 1_000]);
+    }
+    // Every rejection is loud — a silently-defaulted knob is how this class hides.
+    expect(warnings.length).toBeGreaterThan(0);
+  });
+
+  test("a valid interval is passed through in milliseconds", () => {
+    const seen = [];
+    const clock = { setInterval: (_fn, ms) => { seen.push(ms); return { unref() {} }; }, clearInterval() {}, now: () => NOW };
+    startGithubQuotaTimer({ enabled: true, orchDir: "/unused", intervalSeconds: 45, clock }).stop();
+    startGithubQuotaTimer({ enabled: true, orchDir: "/unused", intervalSeconds: "90", clock }).stop();
+    expect(seen).toEqual([45_000, 90_000]);
+  });
+
   test("reads config and exports a five-minute default", () => {
     const dir = tempDir();
     const path = join(dir, "config.json");

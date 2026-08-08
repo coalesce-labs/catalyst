@@ -70,4 +70,26 @@ describe("evaluateQuotaHeadroom", () => {
     expect(GITHUB_QUOTA_DEFAULTS.coreRemainingPct).toBeGreaterThan(0);
     expect(GITHUB_QUOTA_DEFAULTS.stalenessMs).toBeGreaterThan(0);
   });
+
+  // Codex P2 (CAT-40): an explicit 0 floor means "only total exhaustion blocks
+  // dispatch". `Number(x) || default` swallowed it and applied the 10% default,
+  // so 1-10% remaining tripped Gate 3 against the operator's configuration.
+  test("an explicit zero percentage floor is honoured, not replaced by the default", () => {
+    expect(evaluateQuotaHeadroom(snapshot(1), { coreRemainingPct: 0 }, NOW)).toMatchObject({ state: "ok" });
+    expect(evaluateQuotaHeadroom(snapshot(500), { coreRemainingPct: 0 }, NOW)).toMatchObject({ state: "ok" });
+    // Total exhaustion still trips — the zero floor narrows the band, it does not disable the check.
+    expect(evaluateQuotaHeadroom(snapshot(0), { coreRemainingPct: 0 }, NOW)).toMatchObject({ state: "exhausted" });
+  });
+
+  test("an explicit zero staleness threshold marks any aged sample stale", () => {
+    expect(evaluateQuotaHeadroom(snapshot(5000, 5000, new Date(NOW - 1).toISOString()), { stalenessMs: 0 }, NOW))
+      .toMatchObject({ state: "unknown", stale: true });
+  });
+
+  test("unusable threshold values fall back to the defaults instead of NaN-comparing", () => {
+    for (const bad of [null, undefined, "", "  ", "abc", {}, NaN, -5]) {
+      expect(evaluateQuotaHeadroom(snapshot(5000), { coreRemainingPct: bad }, NOW)).toMatchObject({ state: "ok" });
+      expect(evaluateQuotaHeadroom(snapshot(1), { coreRemainingPct: bad }, NOW)).toMatchObject({ state: "low" });
+    }
+  });
 });

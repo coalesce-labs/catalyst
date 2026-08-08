@@ -44,6 +44,25 @@ function defaultRunGh() {
   });
 }
 
+// Codex P2 (CAT-40): the config value is operator-supplied JSON, so it can be a
+// string or an object. `Math.max(1, NaN)` is NaN and setInterval coerces NaN to
+// 1ms — with the timer enabled by default that turns a typo into a `gh api
+// rate_limit` spawn storm bounded only by how fast each call returns, on a
+// sampler whose entire purpose is protecting the API budget. The daemon's `??`
+// cannot catch this: a bad TYPE is not null. Reject anything non-finite or
+// non-positive and take the documented 5-minute cadence instead, loudly.
+export function resolveIntervalMs(intervalSeconds, log = defaultLog) {
+  const n = Number(intervalSeconds);
+  if (!Number.isFinite(n) || n <= 0) {
+    log?.warn?.(
+      { intervalSeconds, fallbackSeconds: DEFAULTS.intervalSeconds },
+      "github-quota-timer: intervalSeconds is not a positive finite number — using the default cadence",
+    );
+    return DEFAULTS.intervalSeconds * 1_000;
+  }
+  return Math.max(1, n) * 1_000;
+}
+
 function realClock() {
   return {
     setInterval: (fn, ms) => setInterval(fn, ms),
@@ -64,7 +83,7 @@ export function startGithubQuotaTimer({
   fileOps = { writeFileSync, renameSync },
 } = {}) {
   if (!enabled || !orchDir) return { stop: () => {} };
-  const intervalMs = Math.max(1, intervalSeconds) * 1_000;
+  const intervalMs = resolveIntervalMs(intervalSeconds, log);
   const handle = clock.setInterval(async () => {
     try {
       const result = await runGh();

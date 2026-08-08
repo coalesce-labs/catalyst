@@ -918,6 +918,27 @@ describe("buildBoardScanEvent", () => {
     expect(ev.details.githubQuotaHost).toBe("mini");
   });
 
+  // Codex P1 (CAT-40): the forwarder ships attributes and DROPS body.payload
+  // off-host, so a scalar left only in details is unqueryable in Loki/Grafana —
+  // the default shadow rollout would emit board scans with no chartable quota,
+  // leaving an operator unable to validate the feature before enforcing it.
+  test("Codex P1: quota scalars are promoted into OTel attributes, not just details", () => {
+    const board = mkBoard({ githubQuota: quotaSnapshot({ remaining: 250 }) });
+    const invs = evaluateInvariants(board);
+    const flat = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
+    expect(attrs["recovery.github.core_remaining"]).toBe(250);
+    expect(attrs["recovery.github.core_remaining_pct"]).toBe(5);
+  });
+
+  test("Codex P1: an absent snapshot promotes nothing rather than charting a fake zero", () => {
+    const invs = evaluateInvariants(mkBoard());
+    const flat = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, mkBoard()) });
+    const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
+    expect(attrs).not.toHaveProperty("recovery.github.core_remaining");
+    expect(attrs).not.toHaveProperty("recovery.github.core_remaining_pct");
+  });
+
   test("type/ticket/scalars at top of details; rosters as arrays; mode echoed", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
     const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
