@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkRepoPushPermission, runDoctor } from "./doctor.mjs";
@@ -41,6 +41,41 @@ describe("checkRepoPushPermission (CAT-60)", () => {
     expect(checkRepoPushPermission(deps)[0].status).toBe("pass");
     expect(checkRepoPushPermission(deps)[0].status).toBe("pass");
     expect(ghCalls).toBe(3); // identity is refreshed before selecting its cache key
+  });
+
+  // Regression: every other case here injects `resolveMode`, so the real
+  // resolver was never exercised — and checkRepoPushPermission was calling it
+  // as resolveMode({ env }) without the configPath it had already destructured
+  // for resolvePushRemote. A Layer-1 enforce was therefore invisible to doctor
+  // and a denied verdict graded WARN instead of the documented FAIL. Drive the
+  // mode from a config FILE (no stub, no env) so that omission cannot return.
+  test("Layer-1 config enforce reaches the real resolver and makes denied a FAIL", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-preflight-cfg-"));
+    const configPath = join(dir, "config.json");
+    writeFileSync(configPath, JSON.stringify({
+      catalyst: { orchestration: { publishPreflight: { mode: "enforce" } } },
+    }));
+    const got = checkRepoPushPermission({
+      repoRoot: "/repo", pushRemote: "fork", configPath, env: {},
+      probe: () => verdict("denied"),
+    })[0];
+    expect(got.status).toBe("fail");
+    expect(got.detail).toContain("(enforce)");
+  });
+
+  test("env still overrides a Layer-1 config mode", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-preflight-cfg-"));
+    const configPath = join(dir, "config.json");
+    writeFileSync(configPath, JSON.stringify({
+      catalyst: { orchestration: { publishPreflight: { mode: "enforce" } } },
+    }));
+    const got = checkRepoPushPermission({
+      repoRoot: "/repo", pushRemote: "fork", configPath,
+      env: { CATALYST_PUBLISH_PREFLIGHT: "shadow" },
+      probe: () => verdict("denied"),
+    })[0];
+    expect(got.status).toBe("warn");
+    expect(got.detail).toContain("(shadow)");
   });
 
   test("all messages qualify permission as push/publish", () => {
