@@ -1801,9 +1801,16 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
           /* best-effort — a leftover tombstone is the very thing we're clearing */
         }
       }
-      // (2) reset signal → pending, drop failureReason, preserve all other fields.
+      // (2) reset signal → pending, drop failureReason AND retrySafe, preserve all
+      // other fields. Clearing retrySafe is load-bearing: a re-dispatched phase that
+      // later fails for a DIFFERENT, unrecognized-and-UNSAFE reason (emitted without
+      // --payload-json, so it stamps no retry_safe) must NOT inherit this run's stale
+      // retrySafe:true — that would misroute it into the bounded-retry rule instead of
+      // an immediate escalate (Codex finding). The next genuine fence-stale bow-out
+      // re-stamps it fresh via emit-complete's --payload-json.
       sig.status = "pending";
       delete sig.failureReason;
+      delete sig.retrySafe;
       const tmp = `${signalPath}.tmp.${process.pid}`;
       writeFileSync(tmp, JSON.stringify(sig, null, 2));
       renameSync(tmp, signalPath);

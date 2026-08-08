@@ -680,10 +680,20 @@ describe("reasoningRecoveryPass", () => {
     },
   };
 
+  // Hermetic injections shared by the CTL-1679 reasoningRecoveryPass tests: the
+  // default shouldSkipItem/readIntentAttempts read the LIVE host ledger under
+  // ~/catalyst/execution-core/.recovery-intents/ (a real CTL-9.json on a worker
+  // host would skip the item / exhaust the budget), so pin them here.
+  const hermeticRecovery = {
+    shouldSkipItem: () => false,
+    readIntentAttempts: () => 0,
+  };
+
   test("CTL-1679: cluster_fence_stale in SHADOW → would-fix, no seam", () => {
     const events = [];
     let seamCalls = 0;
     const result = reasoningRecoveryPass([fenceStaleItem], {
+      ...hermeticRecovery,
       mode: "shadow",
       invokeSeam: () => {
         seamCalls += 1;
@@ -702,6 +712,7 @@ describe("reasoningRecoveryPass", () => {
     const events = [];
     const seamCalls = [];
     reasoningRecoveryPass([fenceStaleItem], {
+      ...hermeticRecovery,
       mode: "enforce",
       invokeSeam: (ticket, seamId, brief) => {
         seamCalls.push({ ticket, seamId, brief });
@@ -720,6 +731,7 @@ describe("reasoningRecoveryPass", () => {
   test("CTL-1679: cluster_fence_stale ENFORCE seam failure → recovery.fix-failed", () => {
     const events = [];
     reasoningRecoveryPass([fenceStaleItem], {
+      ...hermeticRecovery,
       mode: "enforce",
       invokeSeam: () => ({ success: false, reason: "signal absent", details: {} }),
       recordIntent: () => {},
@@ -746,6 +758,7 @@ describe("reasoningRecoveryPass", () => {
     const events = [];
     let seamCalls = 0;
     reasoningRecoveryPass([retrySafeItem], {
+      ...hermeticRecovery,
       mode: "shadow",
       classifyTicket: () => ({
         decision: "fix",
