@@ -189,7 +189,11 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
   //           → spy consulted.
 
   test("default stall-clear census uses { cache, gateway } via runningOpts", () => {
-    const STALL_TICKET = "CTL-1240-STALL";
+    // CTL-1504 requires a canonical TEAM-123 key (`^[A-Z][A-Z0-9_]*-\d+$`) — a
+    // trailing letter suffix like the old "CTL-1240-STALL" is debris-filtered
+    // by isTicketKey() before defaultCollectStallClearCandidates ever reaches
+    // the isLinearTerminal probe, so the gateway spy was never consulted (CAT-62).
+    const STALL_TICKET = "CTL-99991240";
 
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     // Seed the stalled signal — stalledReason triggers the J3 isLinearTerminal probe.
