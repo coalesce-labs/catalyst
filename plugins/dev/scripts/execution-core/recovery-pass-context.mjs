@@ -340,6 +340,10 @@ function printDispatchedBrief(ticket, orchDir) {
     if (bc.strandedNodes?.length) {
       console.log(`stranded nodes: ${bc.strandedNodes.map((n) => n.host).join(", ")}`);
     }
+    const ghq = bc.githubQuota;
+    if (ghq?.state === "low" || ghq?.state === "exhausted") {
+      console.log(`GitHub core quota: ${ghq.remaining}/${ghq.limit} remaining; resets ${ghq.resetAt ?? "unknown"}`);
+    }
     // CTL-1644 (Codex P1 → P2 round 3): surface the per-ticket classified revival
     // routes so the delegate can enumerate this cohort and distinguish
     // pr-not-merged / resume-from-remote / restart-fresh. The recovery-pass skill

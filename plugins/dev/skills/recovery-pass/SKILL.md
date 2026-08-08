@@ -397,8 +397,11 @@ each, print `BOARD <invariant> OK` or `BOARD <invariant> ANOMALY: <what> → <ac
 > **If your brief carried an injected board context (CTL-1300 holistic dispatch),
 > START FROM IT — don't re-derive cold.** When the daemon-side board-health delegate
 > dispatched you, the `board context (whole-board, read-only)` block already carries
-> this scan's result: per-invariant `{ok, failed}`, the stuck workers + ages, the
-> stranded nodes + their owned tickets, slots, and the eligible-queue depth. Treat
+> this scan's result: the stuck workers + ages, the stranded nodes + their owned
+> tickets, slots, and the eligible-queue depth. When a GitHub quota snapshot is
+> available, its dedicated `githubQuota` field carries `{state, remaining, limit,
+> remainingPct, resetAt, host, ageMs}`; use its reset time when diagnosing a REST
+> rate-limit cliff. Treat
 > those as the daemon's authoritative findings for the invariants below — confirm
 > and ACT on them rather than re-running the full LogQL/PromQL sweep from scratch
 > (the daemon already paid that cost; re-hammering Loki/Linear is itself a wedge

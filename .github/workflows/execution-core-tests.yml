@@ -616,4 +616,6 @@ jobs:
             updater/updater-tracing.test.mjs \
             github-auth-preflight.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
+            github-quota.test.mjs \
+            github-quota-timer.test.mjs \
             cluster-sync.test.mjs

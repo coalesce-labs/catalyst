@@ -35,6 +35,7 @@
 
 import { isThrottled } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
+import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
 const DEFAULT_THRESHOLDS = {
@@ -74,6 +75,8 @@ const DEFAULT_THRESHOLDS = {
   stalledPrReviewMs: Number(process.env.CATALYST_BH_STALLED_PR_REVIEW_MS) || 3 * 24 * 3_600_000,
   stalledPrCiMs: Number(process.env.CATALYST_BH_STALLED_PR_CI_MS) || 2 * 24 * 3_600_000,
   stalledPrNoPushMs: Number(process.env.CATALYST_BH_STALLED_PR_NOPUSH_MS) || 5 * 24 * 3_600_000,
+  githubCoreRemainingPct: GITHUB_QUOTA_DEFAULTS.coreRemainingPct,
+  githubQuotaStaleMs: GITHUB_QUOTA_DEFAULTS.stalenessMs,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -317,7 +320,9 @@ function deriveRing(events, nowMs) {
         mode: payload.mode ?? null,
       };
     } else if (/account\.ratelimit|ratelimit\.sampled/i.test(name)) {
-      ring.accountRatelimit = { nearCliff: !!(payload.nearCliff ?? payload.near_cliff), ...payload };
+      // Anthropic subscription telemetry only. GitHub core quota arrives through
+      // the dedicated githubQuota snapshot seam below, never through this ring.
+      ring.accountRatelimit = { ...payload };
     } else if (/reconcile\.failing/i.test(name)) {
       const team = payload.team ?? name.split(".").pop();
       if (team) ring.reconcileFailing.add(team);
@@ -418,6 +423,10 @@ export function assembleBoardState({
   // stamped by the stalled-pr timer). Empty Map default ⇒ checkStalledPr stays
   // observable:false (shadow-first seam: wiring lands before the timer populates).
   getStalledPrState = () => new Map(),
+  // CAT-40: host-local GitHub core REST quota snapshot. Off is strictly dark;
+  // shadow (the default) reads and publishes but cannot actuate.
+  getGithubQuota = () => null,
+  githubQuotaMode = process.env.CATALYST_BH_GH_QUOTA || "shadow",
   now = () => Date.now(),
   // CTL-1649: does a triage.json artifact exist for a given ticket? Injected so
   // board-health.mjs stays fs-free (no fs import). Default () => true is
@@ -544,6 +553,8 @@ export function assembleBoardState({
     // CTL-1608 off-gate: in off the stalled-PR state read must NOT run — skip
     // getStalledPrState() so off stays byte-identical to origin/main.
     stalledPrMap: mode === "off" ? new Map() : safe(() => getStalledPrState(), new Map()),
+    githubQuota: mode === "off" || githubQuotaMode === "off" ? null : safe(() => getGithubQuota(), null),
+    githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode) ? githubQuotaMode : "shadow",
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs),
     ownerForTicket: typeof ownerForTicket === "function" ? ownerForTicket : null,
     // CTL-1157 (Codex #4): the ticket→owner/repo resolver for the composite
@@ -571,7 +582,7 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
     workerAge: () => checkWorkerAge(boardState, thresholds),
     blockedTree: () => checkBlockedTree(boardState),
     projectSilence: () => checkProjectSilence(boardState, thresholds),
-    rateLimitHeadroom: () => checkRateLimitHeadroom(boardState),
+    rateLimitHeadroom: () => checkRateLimitHeadroom(boardState, thresholds),
     strandedNode: () => checkStrandedNode(boardState),
   };
   // CTL-1157 off-gate: the four NEW cohort invariants run ONLY in shadow/enforce
@@ -731,15 +742,23 @@ function checkProjectSilence(b, t) {
   );
 }
 
-// #5 — rate-limit headroom. Anthropic proxy via the ring; Linear/GitHub have no
-// durable out-of-band 429 signal yet (breaker is in-proc only) → observable:false.
-function checkRateLimitHeadroom(b) {
-  const rl = b.ring?.accountRatelimit;
-  if (!rl) {
-    return invariant(true, 0, false, [], "no out-of-band rate-limit signal (Linear/GitHub breaker in-proc only)");
+// #5 — GitHub core REST quota. Linear still has no durable out-of-band sample;
+// its in-process breaker remains separate follow-up work.
+function checkRateLimitHeadroom(b, t) {
+  if (b.githubQuotaMode === "off") {
+    return invariant(true, 0, false, [], "GitHub quota sampling off");
   }
-  const near = !!rl.nearCliff;
-  return invariant(!near, near ? 1 : 0, true, [], near ? "near a rate-limit cliff" : "rate-limit headroom ok");
+  const q = evaluateQuotaHeadroom(b.githubQuota, {
+    coreRemainingPct: t.githubCoreRemainingPct,
+    stalenessMs: t.githubQuotaStaleMs,
+  }, b.now);
+  if (q.state === "unknown") {
+    return invariant(true, 0, false, [], q.stale ? "GitHub quota snapshot stale" : "no GitHub quota snapshot");
+  }
+  const note = `GitHub core quota ${q.remaining}/${q.limit} (${q.remainingPct.toFixed(1)}%) remaining; resets ${q.resetAt ?? "unknown"}`;
+  if (b.githubQuotaMode !== "enforce") return invariant(true, 0, false, [], note);
+  const failed = q.state === "low" || q.state === "exhausted";
+  return invariant(!failed, failed ? 1 : 0, true, [], note);
 }
 
 // #6 — stranded node (mini-2 class): a rostered host that HRW-owns a share of
@@ -1582,9 +1601,25 @@ export function selectAnchor(moves, board) {
   return selectAnchorCandidates(moves, board)[0] ?? null;
 }
 
+function quotaForPublication(board) {
+  if (!board?.githubQuota) return null;
+  const q = evaluateQuotaHeadroom(board.githubQuota, GITHUB_QUOTA_DEFAULTS, board.now);
+  if (q.state === "unknown" && q.remaining == null) return null;
+  return {
+    state: q.state,
+    remaining: q.remaining,
+    limit: q.limit,
+    remainingPct: q.remainingPct,
+    resetAt: q.resetAt,
+    host: board.githubQuota.host ?? null,
+    ageMs: q.ageMs,
+  };
+}
+
 // ── (5) buildBoardContext — PURE. The whole-board brief the dispatched delegate
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
+  const githubQuota = quotaForPublication(boardState);
   // CTL-1157: the stuck-worker set is the UNION of the age-flagged workers and the
   // status-based needs-human pile (Workstream B), deduped by ticket.
   const stuckTickets = [
@@ -1636,6 +1671,7 @@ export function buildBoardContext(boardState, invariants) {
     strandedMidPipeline: invariants.strandedMidPipeline?.classified ?? {},
     // CTL-1608 v3: the stalled-PR cohort, surfaced additively for the delegate.
     stalledPrs: invariants.stalledPr?.flagged ?? [],
+    githubQuota,
     strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
       host,
       // the tickets HRW-owned by this stranded host — the delegate's actionable
@@ -1660,6 +1696,7 @@ export function buildBoardContext(boardState, invariants) {
 // emit envelope. Scalars at the top of details (CTL-1291 promotes them to
 // chartable attributes); rosters/move arrays stay in details → body.payload.
 export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
+  const githubQuota = quotaForPublication(board);
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
   // proposedMoves but never whether anything was dispatched — the blind spot behind
@@ -1736,6 +1773,8 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       slotCapacity: _slotCap,
       slotInUse,
       slotFree,
+      githubCoreRemaining: githubQuota?.remaining ?? null,
+      githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
       ),
@@ -1755,6 +1794,8 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       // (a ticket id) so it lives here in body.payload, never promoted.
       // deriveRing (C2) reads `payload.act.dispatched` from this.
       act: actOutcome,
+      githubQuotaResetAt: githubQuota?.resetAt ?? null,
+      githubQuotaHost: githubQuota?.host ?? null,
     },
   };
 }
@@ -1786,6 +1827,8 @@ export function boardHealthPass({
   // dropped by the destructure, which would pin checkStalledPr to the empty-Map
   // default and make `nudge-stalled-pr` unreachable even with the sweep enabled.
   getStalledPrState,
+  getGithubQuota,
+  githubQuotaMode,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
@@ -1814,6 +1857,8 @@ export function boardHealthPass({
     getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
+    getGithubQuota,
+    githubQuotaMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
     ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
   });

@@ -1873,6 +1873,18 @@ export function readBoardHealthConfig(env = process.env) {
   return { mode };
 }
 
+// CAT-40: GitHub quota actuation is independently shadow-first even when the
+// broader board-health delegate runs in enforce mode.
+export function readGithubQuotaBoardHealthConfig(env = process.env) {
+  const l2 = readLayer2BoardHealth();
+  const value = env.CATALYST_BH_GH_QUOTA;
+  if (typeof value === "string" && BOARD_HEALTH_MODES.has(value)) return { mode: value };
+  if (typeof l2.githubQuota === "string" && BOARD_HEALTH_MODES.has(l2.githubQuota)) {
+    return { mode: l2.githubQuota };
+  }
+  return { mode: "shadow" };
+}
+
 // CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce
 // discipline (ADR-023) and env-override → Layer-2 → default precedence as
 // readBoardHealthConfig, with ONE deliberate difference: the default is "off",
