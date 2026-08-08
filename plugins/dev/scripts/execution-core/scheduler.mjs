@@ -62,6 +62,11 @@ import {
   ANCILLARY_PHASES, // CTL-1323: remediate etc. — still real pipeline work (PHASES is already imported from phase-fsm above)
 } from "../lib/workflow-descriptor.mjs";
 export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
+
+const configuredEmptyWorkerDirGrace = Number(process.env.CATALYST_EMPTY_WORKER_DIR_GRACE_MS);
+export const EMPTY_WORKER_DIR_GRACE_MS = Number.isFinite(configuredEmptyWorkerDirGrace)
+  ? configuredEmptyWorkerDirGrace
+  : 600_000;
 // CTL-653: the verdict-router reads (verify.json verdict + event-counted cycle
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
@@ -640,7 +645,7 @@ function warnDispatchRosterOutage({ roster, self, reason, error } = {}) {
   _lastDispatchRosterOutageWarnMs = nowMs;
   log.warn(
     { roster, self, reason, error, degradedTo: "full-roster" },
-    "ctl-1091: dispatch-roster liveness read degraded to the FULL roster — cross-host failover is OFF this tick (every host owns only its own HRW slice). This is the correct fail-safe; investigate the heartbeat/Loki feed if it persists.",
+    "ctl-1091: dispatch-roster liveness read degraded to the FULL roster — cross-host failover is OFF this tick (every host owns only its own HRW slice). This is the correct fail-safe; investigate the heartbeat/Loki feed if it persists."
   );
 }
 
@@ -971,9 +976,7 @@ export function readCurrentRunPrRepo(orchDir, ticket) {
     const pr = JSON.parse(readFileSync(p, "utf8"))?.pr;
     if (!pr) return null;
     if (typeof pr.repo === "string" && pr.repo) return pr.repo;
-    const m =
-      typeof pr.url === "string" &&
-      pr.url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+    const m = typeof pr.url === "string" && pr.url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
     return m ? m[1] : null;
   } catch {
     return null;
@@ -989,6 +992,15 @@ export function readCurrentRunPrRepo(orchDir, ticket) {
 // always means more recent (false whenever an earlier phase is deliberately
 // re-dispatched after a later phase already left a signal, e.g. re-running
 // `implement` after `review` requested changes).
+export function isPhaseSignalName(name) {
+  const match = /^phase-(.+)\.json$/.exec(name);
+  return Boolean(match && !match[1].includes("-yield-"));
+}
+
+export function workerDirHasPhaseSignals(names) {
+  return (names ?? []).some(isPhaseSignalName);
+}
+
 export function readPhaseSignals(orchDir, ticket) {
   const dir = join(orchDir, "workers", ticket);
   const signals = {};
@@ -1000,9 +1012,8 @@ export function readPhaseSignals(orchDir, ticket) {
   }
   const entries = [];
   for (const f of files) {
+    if (!isPhaseSignalName(f)) continue;
     const m = /^phase-(.+)\.json$/.exec(f);
-    if (!m) continue;
-    if (m[1].includes("-yield-")) continue; // CTL-702: skip yield tombstones
     const path = join(dir, f);
     let status;
     try {
@@ -1029,7 +1040,9 @@ export function readPhaseSignals(orchDir, ticket) {
 // is absent, unreadable, or carries neither field (CTL-1667 review fix, #3061).
 function readPhaseSignalTimestamp(orchDir, ticket, phase) {
   try {
-    const sig = JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8")
+    );
     return sig?.updatedAt ?? sig?.startedAt ?? null;
   } catch {
     return null;
@@ -1209,6 +1222,11 @@ export function isPhantomWorkerDir(signals) {
     if (!PHANTOM_TERMINAL_STATUSES.has(status)) return false; // active / parked / escalated → not phantom
   }
   return true; // only terminal-success non-pipeline signals (e.g. recovery-pass:done)
+}
+
+export function isReclaimableEmptyWorkerDir({ hasSignals, ageMs, graceMs }) {
+  if (hasSignals || !Number.isFinite(ageMs) || ageMs < 0) return false;
+  return ageMs >= graceMs;
 }
 
 // bgLivenessProtects — CTL-1336. The Pass 0a phantom-sweep decision: does the warm
@@ -1850,13 +1868,31 @@ export function buildPerProjectGauge(inFlight, perProject = {}, freeSlots) {
 // re-pulled as new work (revive of a failed ticket is a separate owner's job).
 export function listStartedTickets(orchDir) {
   try {
+    const nowMs = Date.now();
     return new Set(
       readdirSync(join(orchDir, "workers"), { withFileTypes: true })
         .filter((d) => d.isDirectory())
         // CTL-1323: a phantom recovery-pass dir does NOT count as "started" — otherwise
         // the new-work pull (buildGlobalRanking) excludes the ticket forever and it
         // strands in Todo with no live worker. Dropping it here re-pulls it as fresh work.
-        .filter((d) => !isPhantomWorkerDir(readPhaseSignals(orchDir, d.name)))
+        .filter((d) => {
+          const signals = readPhaseSignals(orchDir, d.name);
+          if (isPhantomWorkerDir(signals)) return false;
+          if (Object.keys(signals).length > 0) return true;
+          let ageMs = Number.NaN;
+          try {
+            ageMs = nowMs - statSync(join(orchDir, "workers", d.name)).mtimeMs;
+          } catch {
+            // Fail closed: an unreadable/vanished dir remains held for this tick.
+          }
+          // CAT-24: aged zero-signal residue must not exclude a ticket forever. The
+          // grace protects phase-agent-dispatch's mkdir→first-signal bare-dir window.
+          return !isReclaimableEmptyWorkerDir({
+            hasSignals: false,
+            ageMs,
+            graceMs: EMPTY_WORKER_DIR_GRACE_MS,
+          });
+        })
         .map((d) => d.name)
     );
   } catch {
@@ -2989,7 +3025,10 @@ function recordReplicaVouchRecheckIfDue(orchDir, ticket, now) {
   }
   try {
     mkdirSync(join(orchDir, ".replica-vouch-rechecks"), { recursive: true });
-    writeFileSync(replicaVouchRecheckPath(orchDir, ticket), JSON.stringify({ ticket, probedAt: now }));
+    writeFileSync(
+      replicaVouchRecheckPath(orchDir, ticket),
+      JSON.stringify({ ticket, probedAt: now })
+    );
     return true;
   } catch {
     return false; // fail-open: replica tier stays on; live recheck deferred
@@ -3324,10 +3363,7 @@ function stampTerminalPrCheckSuppress(orchDir, ticket, nowMs) {
     /* first refusal, or an unreadable prior marker — start the count at 1 */
   }
   try {
-    writeFileSync(
-      terminalPrCheckMarkerPath(orchDir, ticket),
-      JSON.stringify({ ts: nowMs, count })
-    );
+    writeFileSync(terminalPrCheckMarkerPath(orchDir, ticket), JSON.stringify({ ts: nowMs, count }));
   } catch {
     /* best-effort — re-probe next tick */
   }
@@ -3848,7 +3884,7 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
 //      or an operator re-arms via orch-monitor respond-ticket. Storm-prevention is
 //      preserved — the marker is still written at most once; a failed clear is
 //      intentionally left re-armable (a future genuine escalation must get through).
-export function defaultClearStall(orchDir, writeStatus) {
+export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {}) {
   return ({ ticket, phase }) => {
     if (!ticket || !phase) return false;
     const workerDir = join(orchDir, "workers", ticket);
@@ -3903,6 +3939,22 @@ export function defaultClearStall(orchDir, writeStatus) {
     //    gate starts fresh. Without this, the labelAttempts > 0 guard in
     //    escalateOnce suppresses the re-escalation event after the operator re-arms.
     forgetDurableEscalation(orchDir, ticket);
+    // 6. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
+    // deleting its last real phase signal. Such residue holds no slot yet excludes
+    // the ticket from new-work dispatch. Tombstones are not real signals.
+    try {
+      const names = readdirSync(workerDir);
+      if (!workerDirHasPhaseSignals(names)) {
+        rmDir(workerDir, { recursive: true, force: true });
+      }
+    } catch (err) {
+      if (err?.code !== "ENOENT") {
+        log.warn(
+          { ticket, phase, err: err?.message },
+          "stall-janitor: empty worker-dir removal failed (CAT-24)"
+        );
+      }
+    }
     return true;
   };
 }
@@ -4937,11 +4989,7 @@ export function schedulerTick(
       // Only a FRESH descriptor may vouch (same guard as classifyTicketResolution):
       // a stale { removed:false } row from a missed removal webhook must not
       // suppress deletion verification forever.
-      if (
-        desc &&
-        desc.removed !== true &&
-        descriptorAgeMs(desc, now()) <= GATEWAY_EXISTS_FRESH_MS
-      )
+      if (desc && desc.removed !== true && descriptorAgeMs(desc, now()) <= GATEWAY_EXISTS_FRESH_MS)
         continue;
       // Removed tombstone OR gateway miss (no gateway / no descriptor / unreadable
       // db — e.g. the standalone no-gateway daemon): deletion cannot be ruled out
@@ -5433,7 +5481,7 @@ export function schedulerTick(
           ureport.wouldAct.length ||
           ureport.escalated.length ||
           ureport.wouldEscalate.length ||
-          ureport.escalateFailures.length          // CTL-1641
+          ureport.escalateFailures.length // CTL-1641
         ) {
           log.info(
             {
@@ -5442,7 +5490,7 @@ export function schedulerTick(
               wouldAct: ureport.wouldAct.length,
               escalated: ureport.escalated.length,
               wouldEscalate: ureport.wouldEscalate.length,
-              escalateFailures: ureport.escalateFailures.length,   // CTL-1641
+              escalateFailures: ureport.escalateFailures.length, // CTL-1641
               skipped: ureport.skipped.length,
               failed: ureport.failed.length,
             },
@@ -6084,7 +6132,8 @@ export function schedulerTick(
           // CTL-1649: bind the real triage artifact check so selectAnchorCandidates
           // can exclude tickets whose only non-clean signal is a triage launch failure.
           // existsSync/join are already imported in scheduler.mjs.
-          hasTriageArtifact: (ticket) => existsSync(join(orchDir, "workers", ticket, "triage.json")),
+          hasTriageArtifact: (ticket) =>
+            existsSync(join(orchDir, "workers", ticket, "triage.json")),
         });
         if (_bhResult?.ran) _boardHealthLastRunMs = _bhResult.ranAtMs;
         // CTL-1157 (Codex round-5): a successful board-health ENFORCE dispatch enqueued
@@ -6223,7 +6272,10 @@ export function schedulerTick(
             const from = currentLabels
               .filter((label) => WORKER_STATUS_LABELS.includes(label))
               .map((label) => (label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label))
-              .reduce((best, label) => (best === null || rank(label) < rank(best) ? label : best), null);
+              .reduce(
+                (best, label) => (best === null || rank(label) < rank(best) ? label : best),
+                null
+              );
             recordTransition({
               ticket,
               fromDisposition: from,
@@ -6319,10 +6371,14 @@ export function schedulerTick(
                   problem: `${member} is in a dependency cycle: ${anomaly.members.join(" → ")}`,
                   call_to_action: `break the cycle for ${member}: reprioritize a member or drop a dependency`,
                   options: [
-                    { label: "reprioritize", tradeoff: "changes queue order for all cycle members" },
+                    {
+                      label: "reprioritize",
+                      tradeoff: "changes queue order for all cycle members",
+                    },
                     { label: "drop dependency", tradeoff: "may leave a blocker unaddressed" },
                   ],
-                  why_you: "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
+                  why_you:
+                    "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
                 },
                 // CTL-1609 (Codex P1): thread the tick's resolved ceiling so
                 // enqueueDelegateIntent can return `queue-full` instead of defaulting
@@ -6390,10 +6446,16 @@ export function schedulerTick(
           // Cycle member → owned by needs-human (labelOnce above). Clear any
           // stale held label so it doesn't double-signal, and drop its held
           // emit-state so a future non-cycle hold re-emits.
-          const cycleClearWrites = convergeHeldLabel(ticket, labelsByTicket.get(ticket), null, writeStatus, {
-            orchDir,
-            now,
-          });
+          const cycleClearWrites = convergeHeldLabel(
+            ticket,
+            labelsByTicket.get(ticket),
+            null,
+            writeStatus,
+            {
+              orchDir,
+              now,
+            }
+          );
           // CTL-1605 finding: invalidate on a genuine write only — mirrors the
           // durable blocked_by edge-write invalidation below and avoids evicting
           // the relations cache on every steady-state (zero-write) tick.
@@ -6446,20 +6508,26 @@ export function schedulerTick(
         // double-callback (a ticket wearing two stale held labels). Legacy "waiting"
         // normalizes to the canonical "queued" (finding 2) so the stream never carries
         // a fifth disposition value.
-        const admissionHeldWrites = convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, {
-          orchDir,
-          now,
-          onRemoveResult: (label, removed) => {
-            if (desired !== null || !removed || hasNeedsHuman) return;
-            const fromHeld = label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label;
-            recordTransition({
-              ticket,
-              fromDisposition: fromHeld,
-              toDisposition: null,
-              source: "scheduler-admission",
-            });
-          },
-        });
+        const admissionHeldWrites = convergeHeldLabel(
+          ticket,
+          labelsByTicket.get(ticket),
+          desired,
+          writeStatus,
+          {
+            orchDir,
+            now,
+            onRemoveResult: (label, removed) => {
+              if (desired !== null || !removed || hasNeedsHuman) return;
+              const fromHeld = label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label;
+              recordTransition({
+                ticket,
+                fromDisposition: fromHeld,
+                toDisposition: null,
+                source: "scheduler-admission",
+              });
+            },
+          }
+        );
         // CTL-1605 finding: a genuine held-label apply/remove just changed this
         // ticket's live label set — drop the relations cache entry so the next
         // tick's getRelations (and any terminal-stale live-label read above)
@@ -7169,7 +7237,8 @@ export function schedulerTick(
                   { label: "reprioritize", tradeoff: "changes queue order for all cycle members" },
                   { label: "drop dependency", tradeoff: "may leave a blocker unaddressed" },
                 ],
-                why_you: "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
+                why_you:
+                  "automated dispatch cannot resolve circular dependencies — operator must choose which dependency to break",
               },
               // CTL-1609 (Codex P1): thread the tick's resolved ceiling — see the
               // dependency-cycle site above for why Infinity is unsafe here.
@@ -8769,14 +8838,19 @@ function runTick() {
               if (!adapter || typeof adapter.prView !== "function") return null;
               let pr = null;
               for (const sig of readWorkerSignals(runningOpts.orchDir)) {
-                if (sig.ticket === ticket) { pr = sig.raw?.pr ?? sig.pr ?? null; if (pr?.number) break; }
+                if (sig.ticket === ticket) {
+                  pr = sig.raw?.pr ?? sig.pr ?? null;
+                  if (pr?.number) break;
+                }
               }
               if (!pr?.number) return null;
               try {
                 const view = adapter.prView(ticket, pr);
                 if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
                 return view?.state ?? null;
-              } catch { return null; }
+              } catch {
+                return null;
+              }
             },
           }),
         // emit: the dedicated unstuck unified-log emitter (NOT emitReapIntent,
@@ -8878,11 +8952,23 @@ function runTick() {
         // discarded before Phase 3 populates the real evidence.
         getStrandedEvidence: () => {
           const evidenceMap = new Map();
-          try { openBrokerStateDb(); } catch { /* best-effort */ }
+          try {
+            openBrokerStateDb();
+          } catch {
+            /* best-effort */
+          }
           let prMap = new Map();
           let descriptors = [];
-          try { prMap = getAllPrStatuses(); } catch { /* best-effort */ }
-          try { descriptors = getAllTicketDescriptors({ includeRemoved: false }); } catch { /* best-effort */ }
+          try {
+            prMap = getAllPrStatuses();
+          } catch {
+            /* best-effort */
+          }
+          try {
+            descriptors = getAllTicketDescriptors({ includeRemoved: false });
+          } catch {
+            /* best-effort */
+          }
           for (const d of descriptors) {
             // CTL-1644: broker rowToTicketDescriptor sets ONLY `.ticket` (e.g.
             // "CTL-9") — never `.identifier`/`.id` — so key evidence identically
@@ -8898,7 +8984,9 @@ function runTick() {
             let hasFreshIntent = false;
             try {
               hasFreshIntent = recoverySkipReason(id, { orchDir: runningOpts.orchDir }) !== null;
-            } catch { /* fail open — no intent treated as not protected */ }
+            } catch {
+              /* fail open — no intent treated as not protected */
+            }
             let openPr = null;
             const prNum = d.prNumber ?? d.pr_number ?? null;
             if (prNum != null) {
@@ -8906,7 +8994,9 @@ function runTick() {
               try {
                 const team = teamOf(id);
                 if (team) repo = ownerRepoFromRepoRoot(getProjectConfig(team)?.repoRoot ?? null);
-              } catch { /* best-effort — number-only fallback */ }
+              } catch {
+                /* best-effort — number-only fallback */
+              }
               // CTL-1644 (Codex P2): reuse board-health's lookupPrStatus so a
               // known-repo ticket never borrows an UNRELATED repo's #N. The prior
               // inline `byRepo.values().next().value` fallback picked an arbitrary
@@ -8984,7 +9074,11 @@ function runTick() {
           // escalated intent that can never age out), re-stamp it immediately so
           // it becomes TTL-bounded. Fail-open — repair failure never blocks dispatch.
           if (actResult?.latchedNoClock) {
-            try { recoveryRestampNoClockEscalations(deps); } catch { /* best-effort */ }
+            try {
+              recoveryRestampNoClockEscalations(deps);
+            } catch {
+              /* best-effort */
+            }
           }
           return actResult;
         },
@@ -9093,7 +9187,13 @@ function scheduleDebouncedTick(debounceMs) {
 // result, or {dispatched:false, reason:"all-candidates-cooldown"} when none dispatched.
 export function holisticBoardHealthAct(
   { anchor = null, candidates = [], boardContext, decision } = {},
-  { shouldSkipItem, invokeRecoveryPass, recordIntent, skipReason = null, latchHasNoClock = () => false } = {}
+  {
+    shouldSkipItem,
+    invokeRecoveryPass,
+    recordIntent,
+    skipReason = null,
+    latchHasNoClock = () => false,
+  } = {}
 ) {
   const ordered = candidates.length ? candidates : anchor ? [anchor] : [];
   // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
@@ -9309,7 +9409,10 @@ export function startScheduler({
       log.warn({ tickets: healed }, "scheduler: re-stamped no-clock escalated intents (CTL-1610)");
     }
   } catch (err) {
-    log.info({ err: err?.message }, "scheduler: restampNoClockEscalations threw — swallowed (CTL-1610)");
+    log.info(
+      { err: err?.message },
+      "scheduler: restampNoClockEscalations threw — swallowed (CTL-1610)"
+    );
   }
 
   // CTL-1330 Tier 1 wiring (ON by default).
