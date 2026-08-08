@@ -61,6 +61,12 @@ research/
 .catalyst/*.local.json
 .catalyst/*.backup
 
+# CAT-90: the per-node Claude OAuth token belongs in ~/.config/catalyst/
+# claude-accounts.env, outside any repo — never inside one. Safety net only
+# (this pattern can never legitimately match a tracked path): guards against
+# an accidental local copy landing inside the repo tree.
+claude-accounts.env
+
 # Website build artifacts
 website/node_modules/
 website/dist/
