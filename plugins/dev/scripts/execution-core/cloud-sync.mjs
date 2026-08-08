@@ -50,12 +50,16 @@
 // (default 3s) via exitAfterClose — a close() wedged on a dead socket can no longer strand
 // the process in a half-dead never-exits state launchd cannot recover from.
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
-import { getCloudSyncSelfHealPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
+import { getCloudSyncSelfHealPath, getEventLogPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
 import { classifyStall, clearSelfHealBreadcrumb, exitAfterClose, freshnessFields, readReplicaCounts, writeSelfHealBreadcrumb } from "./cloud-sync-telemetry.mjs";
 import { createRequire } from "node:module";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { randomBytes } from "node:crypto";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 const TAG = "[catalyst-cloud-sync]";
 
@@ -83,6 +87,40 @@ function hbLogger() {
 }
 const DEFAULT_BASE_URL = "https://api.catalyst-cloud.coalescelabs.ai/api/v1";
 const DEFAULT_ACCOUNT = "tenant-0";
+export const WRITER_IDLE_EVENT = "catalyst.replica.writer_idle";
+
+function emitWriterIdleEvent({ host, tokenEnv, tokenSource, dbPath }) {
+  try {
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const envelope = {
+      ts,
+      id: randomBytes(8).toString("hex"),
+      observedTs: ts,
+      severityText: "WARN",
+      severityNumber: 13,
+      traceId: randomBytes(16).toString("hex"),
+      spanId: randomBytes(8).toString("hex"),
+      resource: buildCatalystResource({ serviceName: "catalyst.cloud-sync", host }),
+      attributes: {
+        "event.name": WRITER_IDLE_EVENT,
+        "event.entity": "replica",
+        "event.action": "writer_idle",
+        "event.label": host,
+        host,
+        token_env: tokenEnv,
+        token_source: tokenSource,
+        db_path: dbPath,
+      },
+      body: { message: `cloud-sync writer idle: no token in ${tokenEnv} (source=${tokenSource})` },
+    };
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // scrub — strip any secret-shaped substring before anything reaches a log line. Covers
 // the cloud token riding the /connect URL (?token=…), an Authorization: Bearer header,
@@ -122,6 +160,9 @@ const token = process.env[envVar];
 // replica-token check surfaces the gap by NAME. Provision the token, then re-adopt /
 // kickstart to activate.
 if (!token) {
+  try {
+    emitWriterIdleEvent({ host: getHostName(), tokenEnv: envVar, tokenSource: source, dbPath });
+  } catch { /* fail-open — telemetry must never alter the clean idle exit */ }
   console.log(`${TAG} no token in ${envVar} (source=${source}); writer idle — provision the token, then adopt/kickstart to activate`);
   process.exit(0);
 }
