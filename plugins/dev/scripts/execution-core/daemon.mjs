@@ -142,7 +142,7 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
-import { probePublishCapability as realProbePublishCapability } from "./publish-preflight.mjs";
+import { probePublishCapability as realProbePublishCapability, resolvePushRemote } from "./publish-preflight.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
@@ -1320,7 +1320,7 @@ export function startDaemon({
         const project = realListProjects().find((p) => p.team === team);
         return realProbePublishCapability({
           repoRoot: project?.repoRoot,
-          pushRemote: process.env.CATALYST_PUSH_REMOTE || "origin",
+          pushRemote: resolvePushRemote({ repoRoot: project?.repoRoot, layer1Path: configPath, layer2Path }),
           cacheDir: join(orchDir, ".publish-preflight"),
         });
       },

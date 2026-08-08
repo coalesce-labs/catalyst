@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { probePublishCapability, parseGithubSlug } from "./publish-preflight.mjs";
+import { probePublishCapability, parseGithubSlug, resolvePushRemote } from "./publish-preflight.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "publish-preflight-"));
 const remote = { status: 0, stdout: "git@github.com:acme/widgets.git\n" };
@@ -14,7 +14,9 @@ test("parses SSH and HTTPS GitHub remotes", () => {
 
 test("push true is allowed and push false is denied with detail", () => {
   for (const [push, state] of [[true, "allowed"], [false, "denied"]]) {
-    const spawn = (_cmd, args) => args[0] === "-C" ? remote : { status: 0, stdout: JSON.stringify({ push, login: "robot" }) };
+    const spawn = (_cmd, args) => args[0] === "-C" ? remote
+      : args[1] === "user" ? { status: 0, stdout: "robot\n" }
+      : { status: 0, stdout: JSON.stringify({ push, owner: "acme" }) };
     const got = probePublishCapability({ repoRoot: root, spawn, cacheDir: null });
     expect(got.state).toBe(state);
     expect(got.slug).toBe("acme/widgets");
@@ -41,12 +43,12 @@ test("fresh definitive verdict is cached; unknown is not", () => {
   const spawn = (_cmd, args) => {
     if (args[0] === "-C") return remote;
     calls++;
-    return { status: 0, stdout: '{"push":false,"login":"robot"}' };
+    return args[1] === "user" ? { status: 0, stdout: "robot\n" } : { status: 0, stdout: '{"push":false,"owner":"acme"}' };
   };
   expect(probePublishCapability({ repoRoot: root, cacheDir, spawn, now: () => 100 }).cached).toBe(false);
   expect(probePublishCapability({ repoRoot: root, cacheDir, spawn, now: () => 101 }).cached).toBe(true);
-  expect(calls).toBe(1);
-  expect(readFileSync(join(cacheDir, "acme_widgets.json"), "utf8")).toContain("denied");
+  expect(calls).toBe(3); // identity is refreshed before selecting its cache key
+  expect(readFileSync(join(cacheDir, "acme_widgets__origin__robot.json"), "utf8")).toContain("denied");
 
   let unknownCalls = 0;
   const noCache = join(root, "unknown-cache");
@@ -57,5 +59,14 @@ test("fresh definitive verdict is cached; unknown is not", () => {
   };
   probePublishCapability({ repoRoot: root, cacheDir: noCache, spawn: badSpawn });
   probePublishCapability({ repoRoot: root, cacheDir: noCache, spawn: badSpawn });
-  expect(unknownCalls).toBe(2);
+  expect(unknownCalls).toBe(3); // second call refreshes identity, then uses short unknown cache
+});
+
+test("push remote resolution follows env, Layer-2, Layer-1, upstream, origin", () => {
+  const spawn = (_cmd, args) => {
+    if (args.includes("@{u}")) return { status: 0, stdout: "fork/topic\n" };
+    return { status: 0, stdout: "git@github.com:acme/widgets.git\n" };
+  };
+  expect(resolvePushRemote({ repoRoot: root, env: { CATALYST_PUSH_REMOTE: "envfork" }, spawn })).toBe("envfork");
+  expect(resolvePushRemote({ repoRoot: root, env: {}, spawn })).toBe("fork");
 });
