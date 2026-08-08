@@ -212,6 +212,23 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-install.test.sh
 
+      - name: daemon-watchdog supervision test (CTL-1502)
+        # Covers the bash half of the CTL-1502 Codex P1 fixes: node-class gating
+        # (the standalone watchdog runs on a monitor node and NOT on a worker, so
+        # a forwarder is never double-supervised), pid-identity checks (a recycled
+        # pid is never reported live and never signalled), and lock discipline
+        # (stale-owner reaping, a TERM handler that exits rather than resuming,
+        # and one lock spanning forward-restart's stop+start).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/daemon-watchdog-supervision.test.sh
+
+      - name: forward-restart subcommand test (CTL-1502)
+        # Exercises the real catalyst-monitor.sh forward-restart transaction
+        # (cold start, hot swap, back-to-back idempotence, usage/dispatch wiring)
+        # against a stubbed forwarder — nothing else in CI covers that path.
+        working-directory: plugins/dev/scripts
+        run: bash execution-core/__tests__/forward-restart.test.sh
+
       - name: CLI reference doc drift test
         # CTL-1387: asserts website/src/content/docs/reference/catalyst-cli.md
         # documents EXACTLY install-cli.sh's CLI_ENTRIES (and that the page, the
@@ -516,6 +533,10 @@ jobs:
             cluster-claim.test.mjs \
             comms-drain.test.mjs \
             codex-run-phase-agent.test.mjs \
+            daemon-watchdog-alert.test.mjs \
+            daemon-watchdog-config.test.mjs \
+            daemon-watchdog-predicates.test.mjs \
+            daemon-watchdog-probe.test.mjs \
             config-pino-fallback.test.mjs \
             __tests__/config-drain-disabled.test.mjs \
             __tests__/doctor-drain-disabled.test.mjs \

@@ -734,6 +734,12 @@ start_monitor()  { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
 stop_monitor()   { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
 start_forward()  { catalyst-monitor forward-start 2>&1 | sed 's/^/  /'; }
 stop_forward()   { catalyst-monitor forward-stop  2>&1 | sed 's/^/  /'; }
+# CTL-1502 (Codex P1): the standalone forwarder watchdog, for nodes that run
+# otel-forward WITHOUT execution-core. On a worker the probe is armed inside
+# startDaemon, so this is started ONLY on monitor-class nodes — exactly one
+# supervisor per forwarder in either topology.
+start_daemon_watchdog() { catalyst-monitor watchdog-start 2>&1 | sed 's/^/  /'; }
+stop_daemon_watchdog()  { catalyst-monitor watchdog-stop  2>&1 | sed 's/^/  /'; }
 
 start_daemon() {
   local use_proxy="$1"
@@ -1121,6 +1127,14 @@ cmd_start() {
   if [[ "$node_class" != "developer" ]]; then
     start_forward
   fi
+  # CTL-1502 (Codex P1): a monitor node runs otel-forward but NOT execution-core,
+  # so the in-daemon watchdog never arms and its forwarder would be supervised by
+  # pid-liveness alone. Start the standalone probe for exactly that case — a
+  # worker keeps the in-daemon one, a developer runs no forwarder to watch.
+  # Non-fatal: a watchdog is a tap, and a tap must never be load-bearing (CTL-988).
+  if [[ "$node_class" == "monitor" ]]; then
+    start_daemon_watchdog || warn "continuing without daemon-watchdog (forwarder supervised by pid-liveness only)"
+  fi
   # CTL-1494: coordination-publish follows the reporting substrate (worker + monitor,
   # gated != developer, same as start_forward). Non-fatal — a broken/absent publisher
   # must never block the stack (CTL-988 non-load-bearing). When the mode resolves to
@@ -1166,6 +1180,11 @@ cmd_stop() {
   # here (after the shipper/event-mirror, before stop_daemon/stop_forward).
   stop_coordination
   stop_daemon
+  # CTL-1502: stop the standalone watchdog BEFORE the forwarder it supervises —
+  # otherwise an in-flight enforced restart could relaunch otel-forward after
+  # stop_forward already took it down. Unconditional: it's an idempotent no-op on
+  # a node that never started one (matching stop_event_mirror's shape).
+  stop_daemon_watchdog
   stop_forward
   stop_monitor
   stop_broker
