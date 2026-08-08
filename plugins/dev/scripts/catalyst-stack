@@ -2442,6 +2442,27 @@ cmd_adopt_thoughts_sync() {
   fi
 }
 
+# _stat_field <bsd-fmt> <gnu-fmt> <path> — portable stat, fail-closed to 0.
+#
+# The obvious one-liner `stat -f %z f || stat -c %s f` is NOT safe: on GNU
+# coreutils `-f` means --file-system, so `%z` is read as a (missing) file
+# operand. GNU stat then prints the filesystem block for the REAL path to
+# *stdout* — a line starting `  File: "..."` — and still exits nonzero, so the
+# `||` fallback runs and its numeric answer is APPENDED to that text. The
+# caller's `(( size >= 65536 ))` then evaluates the bare token `File` and dies
+# with `File: unbound variable` under `set -u`, taking every downstream check
+# with it. Each implementation is therefore tried in its own capture and the
+# result is accepted only when it is entirely numeric.
+_stat_field() {
+  local bsd_fmt="$1" gnu_fmt="$2" path="$3" out
+  out="$(stat -f "$bsd_fmt" "$path" 2>/dev/null)" || out=""
+  if [[ ! "$out" =~ ^[0-9]+$ ]]; then
+    out="$(stat -c "$gnu_fmt" "$path" 2>/dev/null)" || out=""
+  fi
+  [[ "$out" =~ ^[0-9]+$ ]] || out=0
+  printf '%s' "$out"
+}
+
 # cloud_sync_verify_report [--json] [--strict] — read-only write→read chain report.
 CLOUD_SYNC_REPLICA_TABLES="issues issue_labels labels relations projects sync_meta"
 cloud_sync_verify_report() {
@@ -2464,7 +2485,7 @@ cloud_sync_verify_report() {
   else _cloud_sync_verify_add agent UNKNOWN "agent not running"; fi
   local db_ok=no
   if [[ ! -e "$db" ]]; then _cloud_sync_verify_add replica-db FAIL "replica db absent"
-  else local size; size="$(stat -f %z "$db" 2>/dev/null || stat -c %s "$db" 2>/dev/null || echo 0)"; if (( size >= 65536 )); then db_ok=yes; _cloud_sync_verify_add replica-db PASS "replica db present"; else _cloud_sync_verify_add replica-db FAIL "replica db below 65536 bytes"; fi; fi
+  else local size; size="$(_stat_field %z %s "$db")"; if (( size >= 65536 )); then db_ok=yes; _cloud_sync_verify_add replica-db PASS "replica db present"; else _cloud_sync_verify_add replica-db FAIL "replica db below 65536 bytes"; fi; fi
   local schema_ok=yes table
   if [[ "$db_ok" == yes ]] && command -v sqlite3 >/dev/null 2>&1; then
     for table in $CLOUD_SYNC_REPLICA_TABLES; do sqlite3 "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table';" 2>/dev/null | grep -q 1 || schema_ok=no; done
@@ -2473,7 +2494,7 @@ cloud_sync_verify_report() {
   local rows=0; [[ "$schema_ok" == yes ]] && rows="$(sqlite3 "$db" 'SELECT COUNT(*) FROM issues;' 2>/dev/null || echo 0)"
   [[ "${rows:-0}" =~ ^[0-9]+$ && "${rows:-0}" -gt 0 ]] && _cloud_sync_verify_add rows PASS "$rows issues" || _cloud_sync_verify_add rows FAIL "issues table empty"
   local lock="$db.writer.lock" stale_ms="${CATALYST_LINEAR_REPLICA_STALE_MS:-300000}" lock_ok=no age_ms=""
-  if [[ -f "$lock" ]]; then local mt now; mt="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0)"; now="$(date +%s)"; age_ms=$(( (now-mt)*1000 )); (( age_ms < stale_ms )) && lock_ok=yes; fi
+  if [[ -f "$lock" ]]; then local mt now; mt="$(_stat_field %m %Y "$lock")"; now="$(date +%s)"; age_ms=$(( (now-mt)*1000 )); (( age_ms < stale_ms )) && lock_ok=yes; fi
   [[ "$lock_ok" == yes ]] && _cloud_sync_verify_add writer-lock PASS "writer heartbeat fresh" || _cloud_sync_verify_add writer-lock FAIL "writer lock absent or stale"
   local cursor=""; [[ "$schema_ok" == yes ]] && cursor="$(sqlite3 "$db" "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;" 2>/dev/null || true)"
   [[ -n "$cursor" ]] && _cloud_sync_verify_add seed-cursor PASS "seed cursor present" || _cloud_sync_verify_add seed-cursor FAIL "seed cursor absent"
