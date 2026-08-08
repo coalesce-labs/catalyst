@@ -256,6 +256,27 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(batches[0][0].id).toBe("a");
   });
 
+  test("tokenless DLQ append failure RETAINS rows in memory and retries on flush (not dropped — Codex P1)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    const subdir = join(dir, "nope");
+    const dlqPath = join(subdir, "dlq.jsonl"); // parent dir missing → appendFileSync ENOENT
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubUrl: "https://hub.example", dlqPath,
+    });
+    await pub.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(1); // still mirrored (local-first)
+    expect(existsSync(dlqPath)).toBe(false);          // durable buffering failed
+    expect(pub.tokenlessRetryDepth()).toBe(1);        // RETAINED in memory, not dropped
+    // Heal the fault; the flush tick retries the retained row into the durable DLQ.
+    mkdirSync(subdir, { recursive: true });
+    await pub.flushToHub();
+    expect(pub.tokenlessRetryDepth()).toBe(0);
+    expect(existsSync(dlqPath)).toBe(true);
+    const batches = readFileSync(dlqPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(batches[0][0].id).toBe("a");
+  });
+
   test("enforce + NO hubUrl + dlqPath (interim inbound-only) does NOT buffer to DLQ — nothing to flush to", async () => {
     writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
     const dlqPath = join(dir, "dlq-none.jsonl");

@@ -148,6 +148,8 @@ export interface CoordinationPublisher {
   saveCheckpoint: () => void;
   currentLocalSeq: () => number;
   outboundDepth: () => number;
+  /** In-memory rows whose durable DLQ append failed and are awaiting a flushToHub retry. */
+  tokenlessRetryDepth: () => number;
   getStats: () => { written: number; skipped: number };
 }
 
@@ -176,6 +178,11 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
   const initialTailPath = opts.filePath ?? currentEventLogPath(opts.eventsDir ?? "");
   const startOffset = ck && ck.path === initialTailPath ? ck.offset : 0;
   const outbound: Array<Record<string, unknown>> = [];
+  // Tokenless-window retention: rows whose durable DLQ append FAILED (stale root-owned DLQ file,
+  // permissions, transient I/O). Held in memory and retried by flushToHub so a transient fault does
+  // not permanently lose them — symmetric with the authenticated HubClient path, which keeps its
+  // batch in `outbound` when a DLQ write fails rather than dropping it (Codex P1, round 9).
+  const tokenlessRetry: Array<Record<string, unknown>> = [];
   const stats = { written: 0, skipped: 0 };
 
   function processLine(line: string): void {
@@ -244,7 +251,11 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
       try {
         appendToDlq(opts.dlqPath, [record]);
       } catch (err) {
-        console.error("[coordination-publish] tokenless DLQ buffer failed (row is still mirrored)", err);
+        // Durable buffering failed — RETAIN the row in memory for flushToHub to retry, rather than
+        // dropping it (the tailer/checkpoint have already advanced past it and mirror-id dedup would
+        // skip it on restart, so a bare log would be permanent hub loss) (Codex P1, round 9).
+        console.error("[coordination-publish] tokenless DLQ buffer failed — retaining for retry", err);
+        tokenlessRetry.push(record);
       }
     }
   }
@@ -275,9 +286,23 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     // In-flight guard: flushToHub is void-called on a 1s timer, so a slow publish could overlap
     // the next tick. Skipping while one is in flight keeps a single publisher and avoids
     // double-publishing the same rows.
-    if (!opts.hubClient || flushing) return;
+    if (flushing) return;
     flushing = true;
     try {
+      // Tokenless-window DLQ retry (no hub client needed): re-append rows whose durable buffering
+      // failed earlier, so a transient DLQ fault self-heals on a later tick instead of losing them.
+      // Rows that still fail are re-retained for the next tick (bounded to the actual failed rows).
+      if (opts.mode === "enforce" && opts.hubUrl && opts.dlqPath && tokenlessRetry.length > 0) {
+        const pending = tokenlessRetry.splice(0, tokenlessRetry.length);
+        for (const rec of pending) {
+          try {
+            appendToDlq(opts.dlqPath, [rec]);
+          } catch {
+            tokenlessRetry.push(rec); // still failing → keep retaining
+          }
+        }
+      }
+      if (!opts.hubClient) return;
       if (outbound.length > 0) {
         // Snapshot without removing: splice ONLY after publish() resolves, so a publish() that throws
         // (HubClient.publish is documented never-throw, but a DLQ ENOSPC/EACCES or corrupt-line edge can
@@ -316,6 +341,7 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     saveCheckpoint,
     currentLocalSeq: () => localSeq,
     outboundDepth: () => outbound.length,
+    tokenlessRetryDepth: () => tokenlessRetry.length,
     getStats: () => ({ ...stats }),
   };
 }
