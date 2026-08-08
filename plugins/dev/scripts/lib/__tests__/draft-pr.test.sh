@@ -1374,6 +1374,19 @@ new_fixture safety-blast-offset
 assert_eq "0" "$(cat "${SCRATCH}/safety-blast-offset.exit" 2>/dev/null)" "11c: offsetting insertion does not trip the gate"
 assert_eq "$(cat "${SCRATCH}/safety-blast-offset.local")" "$(cat "${SCRATCH}/safety-blast-offset.remote")" "11c: origin/feature advanced to HEAD (push succeeded)"
 
+echo ""
+echo "Suite 12: configurable push remote + permission classifier (CAT-60)"
+new_fixture push-remote
+FORK="${SCRATCH}/push-remote/fork.git"
+git init --quiet --bare -b main "$FORK"
+git -C "$WORK" remote add fork "$FORK"
+assert_eq "origin" "$(cd "$WORK" && source "$DRAFT_PR_LIB" && _draft_pr_push_remote)" "12a: push remote defaults to origin"
+assert_eq "fork" "$(cd "$WORK" && CATALYST_PUSH_REMOTE=fork; export CATALYST_PUSH_REMOTE; source "$DRAFT_PR_LIB"; _draft_pr_push_remote)" "12b: env selects configured remote"
+printf '%s\n' 'remote: Permission to owner/repo.git denied to user.' > "${SCRATCH}/permission.err"
+if (source "$DRAFT_PR_LIB"; _draft_pr_is_permission_error "${SCRATCH}/permission.err"); then pass "12c: repository permission rejection detected"; else fail "12c: repository permission rejection detected"; fi
+printf '%s\n' 'refusing to allow an OAuth App to create or update workflow' > "${SCRATCH}/workflow.err"
+if (source "$DRAFT_PR_LIB"; _draft_pr_is_permission_error "${SCRATCH}/workflow.err"); then fail "12d: workflow-scope rejection excluded"; else pass "12d: workflow-scope rejection excluded"; fi
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"
