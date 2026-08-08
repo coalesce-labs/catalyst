@@ -241,6 +241,15 @@ pid_alive() {
 [[ -f "${SCRIPT_DIR}/lib/plugin-dirs.sh" ]] || fail "missing lib/plugin-dirs.sh next to catalyst-stack"
 . "${SCRIPT_DIR}/lib/plugin-dirs.sh"
 
+# CTL-1616 PR5 secret-contract bash mirror — sourced once at load (SAFE: pure function/array
+# definitions, no subprocess/network/jq until a function runs). Gives _start_coordination_locked
+# access to catalyst_secret_cloud_token_name so the token-presence fingerprint resolves the
+# CONFIGURED cloud-token env-var name (CATALYST_CLOUD_TOKEN_ENV / Layer-2 catalyst.cloud.tokenEnv /
+# default) instead of hardcoding CATALYST_CLOUD_TOKEN (Codex P1, CTL-1668). Optional: a checkout
+# missing the lib must not break the whole stack CLI, so guard the source.
+# shellcheck source=lib/catalyst-secret-contract.sh
+[[ -f "${SCRIPT_DIR}/lib/catalyst-secret-contract.sh" ]] && . "${SCRIPT_DIR}/lib/catalyst-secret-contract.sh"
+
 # _pristine_scripts_dir — the scripts dir of the registered pristine plugin-source
 # checkout, or "". Mirrored from install-orphan-sweep.sh (CTL-1473): shared helper
 # extracted here so catalyst-stack can guard the shipper config path.
@@ -610,15 +619,59 @@ _start_coordination_locked() {
   # The fingerprint captures everything the LONG-LIVED daemon reads only at startup:
   # resolved config (mode/hubUrl), the plugin checkout (so a refresh redeploys), the
   # state/events roots it derives its paths from (CATALYST_DIR/CATALYST_EVENTS_DIR),
-  # and the enforce-mode interim inbound source (CATALYST_LOKI_QUERY_URL /
+  # the enforce-mode interim inbound source (CATALYST_LOKI_QUERY_URL /
   # OTEL_EXPORTER_OTLP_ENDPOINT) — Codex P2: a reinstall that changes any of these
-  # must bounce the publisher, else it keeps using the old value. Any change → restart.
-  local resolved mode hub fp checkout_id
+  # must bounce the publisher, else it keeps using the old value — and token presence
+  # (CTL-1668): a first-time token provisioning in cloud-sync.env must bounce the daemon
+  # so it picks up the credential (value is never written; only 0/1 presence is recorded).
+  local resolved mode hub fp checkout_id token_fp
   resolved="$(coordination_resolve)"
   mode="${resolved%%$'\t'*}"
   hub="${resolved#*$'\t'}"
   checkout_id="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
-  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+  # token_fp — a NON-SECRET change marker for the resolved cloud token: `<presence>:<name>:<hash>`,
+  # where <name> is the CONFIGURED env-var name (via the secret-contract mirror
+  # catalyst_secret_cloud_token_name: env override → Layer-2 catalyst.cloud.tokenEnv → default, NOT
+  # the hardcoded CATALYST_CLOUD_TOKEN) and <hash> is a truncated (12-hex) sha256 of the value.
+  # Two Codex P1s drove this shape:
+  #  - Bare presence (token:0/1) misses a ROTATION of a populated token (1→1) or a switch between
+  #    two populated variables — the fingerprint stays identical, the keep-alive tick treats the
+  #    publisher as current, and it keeps using the revoked startup credential (auth failures + DLQ
+  #    growth) until a manual stop. The one-way truncated hash is a change marker, NOT the
+  #    credential, so the secret-env hygiene rule (never persist the value) still holds. A custom
+  #    token NAME is likewise captured so a name change alone bounces the daemon.
+  #  - The token must be SOURCED before it can be resolved/hashed: the CTL-1307 projection stores it
+  #    in cluster.env on launchd hosts (launchd sources no shell rc), so this subshell sources
+  #    cluster.env THEN cloud-sync.env — same order as cloud-sync/launch.sh and health-responder's
+  #    _token_provisioned — else enforce+hub would fingerprint `token:0:…` and never start with the
+  #    credential. Fail-safe: resolver/lib absent → default name; shasum absent → empty hash
+  #    (presence + name still gate; rotation-of-same-var degrades to undetected — no worse than a
+  #    host without hashing).
+  token_fp="$(
+    set +u
+    # cluster.env follows the projection config dir per cloud-token-env.mjs defaultConfigDir:
+    # CATALYST_CONFIG_DIR override else ~/.config/catalyst, so a host that sets CATALYST_CONFIG_DIR
+    # reads the token from where it was actually projected. cloud-sync.env, by contrast, is ALWAYS
+    # at the canonical $HOME/.config/catalyst — the cloud-sync launcher and provisioning runbook
+    # never relocate it, so a per-node token in the documented file must be sourced there even when
+    # CATALYST_CONFIG_DIR is overridden. Codex P1, round 10.
+    _cfg_dir="${CATALYST_CONFIG_DIR:-$HOME/.config/catalyst}"
+    [[ -r "$_cfg_dir/cluster.env" ]] && . "$_cfg_dir/cluster.env"
+    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
+    _tok_name="CATALYST_CLOUD_TOKEN"
+    if declare -f catalyst_secret_cloud_token_name >/dev/null 2>&1; then
+      catalyst_secret_cloud_token_name cloud-token >/dev/null 2>&1
+      [[ -n "${CATALYST_SECRET_TOKEN_NAME:-}" ]] && _tok_name="$CATALYST_SECRET_TOKEN_NAME"
+    fi
+    _tok_val="${!_tok_name:-}"
+    if [[ -n "$_tok_val" ]]; then
+      _tok_hash="$(printf '%s' "$_tok_val" | shasum -a 256 2>/dev/null | cut -c1-12)"
+      printf '1:%s:%s' "$_tok_name" "$_tok_hash"
+    else
+      printf '0:%s:' "$_tok_name"
+    fi
+  )"
+  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|token:${token_fp}"
 
   local pid; pid="$(coordination_pid)"
 
@@ -661,12 +714,33 @@ _start_coordination_locked() {
     warn "coordination-publish entrypoint missing at $COORDINATION_SCRIPT — skipping"
     return 1
   fi
-  # 4. Launch detached (the daemon reads CATALYST_DIR/EVENTS_DIR + config from env/Layer-2).
+  # 4. Launch detached. Source the projected cloud env in a subshell so the per-host cloud token
+  #    (CTL-1668: CATALYST_CLOUD_TOKEN / configured name) reaches the daemon without persisting the
+  #    credential into the long-lived catalyst-stack shell process. Source cluster.env THEN
+  #    cloud-sync.env — the CTL-1307 projection stores the token in cluster.env on launchd hosts
+  #    (Codex P1: sourcing only cloud-sync.env launched enforce+hub WITHOUT the credential and
+  #    degraded to inbound-only on every keep-alive tick); order matches the fingerprint subshell
+  #    above and cloud-sync/launch.sh.
   log "starting coordination-publish (mode: $mode, log: $COORDINATION_LOG)"
-  nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
-  echo $! > "$COORDINATION_PID"
+  # Capture the PID and disown INSIDE the subshell that starts the job — that is the only
+  # shell where `$!` refers to this `bun &`. Doing `disown $!` in the parent (Codex P1) is
+  # broken: the parent never backgrounded this job, so under `set -u` its `$!` is either unset
+  # (aborting the function AFTER the PID/fingerprint write but BEFORE the start-lock release —
+  # wedging every future start on the leaked non-empty lock) or a stale, unrelated PID.
+  (
+    set +u
+    # Same split as the fingerprint subshell: cluster.env from the projection config dir
+    # CATALYST_CONFIG_DIR override else ~/.config/catalyst, cloud-sync.env ALWAYS from the canonical
+    # $HOME/.config/catalyst — the launcher/runbook never relocate it. Codex P1.
+    _cfg_dir="${CATALYST_CONFIG_DIR:-$HOME/.config/catalyst}"
+    [[ -r "$_cfg_dir/cluster.env" ]] && . "$_cfg_dir/cluster.env"
+    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
+    nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
+    _cp_pid=$!
+    echo "$_cp_pid" > "$COORDINATION_PID"
+    disown "$_cp_pid" 2>/dev/null || true
+  )
   printf '%s' "$fp" > "$COORDINATION_FP"   # record the config this pid was launched with
-  disown $! 2>/dev/null || true
   sleep 1
   pid="$(coordination_pid)"
   if pid_alive "$pid"; then
@@ -1127,6 +1201,16 @@ cmd_start() {
   if [[ "$node_class" != "developer" ]]; then
     start_forward
   fi
+  # CTL-1307 / CTL-1668 (Codex P1): project the cluster-shared cloud token into machine-level env
+  # (writes ~/.config/catalyst/cluster.env) BEFORE start_coordination launches the publisher — NOT
+  # after. On a first start right after cluster-sync decrypts a newly provisioned/rotated token,
+  # cluster.env does not exist yet; if the publisher launches first it comes up tokenless, then
+  # consumes and checkpoints coordination rows WITHOUT buffering them for outbound (index.ts only
+  # buffers when the authenticated hubClient exists), and the next keep-alive restart dedups those
+  # already-mirrored rows instead of publishing them — permanent outbound data loss, not merely
+  # delayed auth. Quiet + fail-open + idempotent: a node with no decrypted token is a silent no-op.
+  _cloud_token_env_run quiet
+
   # CTL-1502 (Codex P1): a monitor node runs otel-forward but NOT execution-core,
   # so the in-daemon watchdog never arms and its forwarder would be supervised by
   # pid-liveness alone. Start the standalone probe for exactly that case — a
@@ -1161,10 +1245,8 @@ cmd_start() {
     start_event_mirror || warn "continuing without event-mirror (local tail/wait-for see only local events)"
   fi
 
-  # CTL-1307: project the cluster-shared cloud token into machine-level env, if
-  # one has been decrypted from the catalyst-cluster repo. Quiet + fail-open: a
-  # node not opted into catalyst-cloud has no token and this is a silent no-op.
-  _cloud_token_env_run quiet
+  # (CTL-1307 token projection now runs BEFORE start_coordination above, so the publisher
+  # launches with cluster.env already present — see the Codex-P1 note there.)
 
   log ""
   log "stack up — current state:"
@@ -1529,6 +1611,39 @@ render_stack_plist() {
     <key>OTEL_EXPORTER_OTLP_ENDPOINT</key>
     <string>$(_xml_escape "${OTEL_EXPORTER_OTLP_ENDPOINT}")</string>"
   fi
+  # CTL-1668 (Codex P1): pin the cloud-token LOCATION overrides. launchd's minimal RunAtLoad/keep-alive
+  # environment sources no shell rc, so without these a host installed with a nondefault
+  # CATALYST_CONFIG_DIR (where cloud-token-env.mjs projects/reads cluster.env) or a custom
+  # CATALYST_CLOUD_TOKEN_ENV (the token's env-var name) would, after reboot, project and source the
+  # DEFAULT ~/.config/catalyst/cluster.env under the DEFAULT token name — restarting an enforce
+  # publisher WITHOUT its credential and never noticing (the fingerprint resolves the default too).
+  # Captured at install time from the invoking environment; omitted when unset.
+  local cloudtok_env=""
+  if [[ -n "${CATALYST_CONFIG_DIR:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_CONFIG_DIR</key>
+    <string>$(_xml_escape "${CATALYST_CONFIG_DIR}")</string>"
+  fi
+  if [[ -n "${CATALYST_CLOUD_TOKEN_ENV:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_CLOUD_TOKEN_ENV</key>
+    <string>$(_xml_escape "${CATALYST_CLOUD_TOKEN_ENV}")</string>"
+  fi
+  # The secret-contract Layer-2 path resolver reads CATALYST_LAYER2_CONFIG_FILE (pinned above) →
+  # CATALYST_MACHINE_CONFIG → XDG_CONFIG_HOME/catalyst/config.json. Pin the latter two tiers too, or a
+  # host relying on them for catalyst.cloud.tokenEnv loses them under launchd's minimal env and the
+  # resolver falls back to the default Layer-2 file after reboot — resolving the wrong token name and
+  # launching an enforce publisher without its credential (Codex P1, round 11).
+  if [[ -n "${CATALYST_MACHINE_CONFIG:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_MACHINE_CONFIG</key>
+    <string>$(_xml_escape "${CATALYST_MACHINE_CONFIG}")</string>"
+  fi
+  if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>XDG_CONFIG_HOME</key>
+    <string>$(_xml_escape "${XDG_CONFIG_HOME}")</string>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -1562,7 +1677,7 @@ render_stack_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>$(_xml_escape "${HOME}")</string>${host_env}${catdir_env}${layer2_env}${coord_env}${otel_env}
+    <string>$(_xml_escape "${HOME}")</string>${host_env}${catdir_env}${layer2_env}${coord_env}${otel_env}${cloudtok_env}
   </dict>
 
   <!--
