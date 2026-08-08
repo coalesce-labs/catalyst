@@ -36,6 +36,9 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+// CTL-1568: read-only predicate — is the belief engine the needs-human owner?
+// label-guard imports only node builtins + config.mjs, so this adds no cycle.
+import { beliefOwnsNeedsHuman } from "./label-guard.mjs";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -2030,6 +2033,15 @@ export const RECOVERY_COOLDOWN_MS =
 export const RECOVERY_MAX_ATTEMPTS =
   Number(process.env.CATALYST_RECOVERY_MAX_ATTEMPTS) || 2;
 
+// CTL-1568: how many consecutive ticks an attempts-exhausted escalation may DEFER
+// because its needs-human label write did not land (fence suppression, rate limit,
+// missing label) before the sweep gives up, latches terminal, and raises the
+// escalation-split alarm. Bounded because the deferred entry stays un-latched so the
+// next tick retries — without a ceiling a permanently-fenced host would re-scan and
+// re-emit forever. Env-overridable, default 5 (NaN/0 → default, matching siblings).
+export const RECOVERY_MAX_ESCALATION_DEFERRALS =
+  Number(process.env.CATALYST_RECOVERY_MAX_ESCALATION_DEFERRALS) || 5;
+
 // CTL-1431: TTL on a terminal (escalated) recovery-intent. An escalated latch is
 // no longer permanent — after this window the intent goes stale and the ticket
 // re-enters the recovery triage funnel, so a months-old escalate cannot pin a
@@ -2342,6 +2354,62 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
   return defaultSkipReason(ticket, opts) !== null;
 }
 
+// ─── CTL-1568: escalation-deferral counter ──────────────────────────────────
+// Deliberately NOT stored in the recovery-intent ledger: defaultRecordIntent
+// latches `escalated` stickily and any write carrying decision:"escalate" trips
+// that latch, which would make the sweep skip the very ticket we still need to
+// retry. A side marker keeps the retry counter orthogonal to the latch.
+// Best-effort throughout — a counter failure must never break the sweep.
+function escalationDeferralPath(orchDir, ticket) {
+  return join(orchDir, ".escalation-deferrals", `${ticket}.json`);
+}
+
+// readEscalationDeferrals — this ticket's consecutive deferral count (0 when
+// absent/malformed). Read separately from the bump so the sweep can cheaply skip a
+// ticket whose deferrals are already exhausted BEFORE spending a Linear label write
+// on it. Never throws.
+export function readEscalationDeferrals(orchDir, ticket) {
+  try {
+    const prior = JSON.parse(readFileSync(escalationDeferralPath(orchDir, ticket), "utf8"));
+    return typeof prior?.count === "number" ? prior.count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// bumpEscalationDeferrals — increment and return this ticket's consecutive deferral
+// count (1 on the first).
+//
+// Returns NULL when the counter could not be persisted. That is deliberate and
+// load-bearing: the reorder that puts the label attempt ahead of the ledger latch
+// weakens Codex R1's "verify the latch before any human-facing side effect" rule,
+// whose purpose was to stop a disk-full/permission failure re-firing every tick. The
+// counter is what restores that bound — so if the counter itself cannot be written,
+// we have no bound, and the caller must stay SILENT (retry quietly, emit nothing)
+// rather than emit a WARN on every tick of a broken disk. Never throws.
+export function bumpEscalationDeferrals(orchDir, ticket, now) {
+  const p = escalationDeferralPath(orchDir, ticket);
+  const next = readEscalationDeferrals(orchDir, ticket) + 1;
+  try {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ ticket, count: next, lastAt: now }));
+  } catch {
+    return null; // unbounded → caller must not emit
+  }
+  return next;
+}
+
+// clearEscalationDeferrals — drop the counter once the escalation completes, so a
+// later unrelated exhaustion starts from a clean slate. Idempotent; never throws.
+export function clearEscalationDeferrals(orchDir, ticket) {
+  try {
+    unlinkSync(escalationDeferralPath(orchDir, ticket));
+    return true;
+  } catch {
+    return false; // absent is the common case
+  }
+}
+
 // escalateExhaustedIntents — CTL-1440 (P0b): the terminal-state policy sweep.
 // An intent whose fix attempts are exhausted (attempts >= max) WITHOUT a verdict
 // must escalate LOUDLY — ledger escalated:true (B1's 7-day TTL then ages it out
@@ -2361,7 +2429,20 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     recordIntent = (t, i) => defaultRecordIntent(t, i, { orchDir, now }),
     postComment = defaultPostComment,
     emitEvent = defaultEmitEvent,
-    labelNeedsHuman = null, // (orchDir, ticket) => void — scheduler wires label-guard
+    // CTL-1568: the seam's contract is now (orchDir, ticket) => boolean — TRUE only
+    // when the needs-human label was CONFIRMED applied on this call. The scheduler
+    // wires labelNeedsHumanUnlessBeliefOwner, which already returns exactly that
+    // (label-guard.mjs:381-411). The escalation comment is gated on it, so a stub
+    // that returns undefined reads as "did not land" and withholds the comment.
+    labelNeedsHuman = null,
+    // CTL-1568: distinguishes the two reasons the label write can report false.
+    // `false` from labelNeedsHuman means EITHER the write was suppressed/failed OR
+    // the belief engine owns the label (CATALYST_INTENTS_ENFORCE=1) and will apply
+    // it out-of-band. Only the first is a broken escalation; the second is the
+    // ticket's sanctioned "hand the escalation to the owning host" remedy, where
+    // the comment stays truthful. Defaults to the real predicate.
+    beliefOwnsLabel = () => beliefOwnsNeedsHuman(process.env),
+    maxDeferrals = RECOVERY_MAX_ESCALATION_DEFERRALS,
     writeSignal = (t, payload) => defaultWriteEscalationSignal(t, payload, { orchDir }),
     // Codex R1: a finished ticket can hold a stale exhausted ledger until the
     // terminal cleanup (recoveryForgetIntent) runs LATER in the tick — the sweep
@@ -2415,6 +2496,72 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       },
       attempts: [],
     };
+    // ─── CTL-1568: the LABEL is attempted FIRST, and it gates everything after ───
+    // The escalation comment claims "(See your inbox.)". For a ticket with no worker
+    // dir — 10 of 12 parked tickets, measured 2026-07-29 (daemon.mjs:431-434) — there
+    // is no signal file, so the board synthesizes that inbox row from the LABEL alone.
+    // A comment without the label therefore advertises an inbox entry that does not
+    // exist, which is the CTL-1568 split.
+    //
+    // The attempt MUST precede the ledger latch. defaultRecordIntent makes the latch
+    // STICKY (`(prior.escalated && !expired) || intent.escalated || decision ===
+    // "escalate"`, CTL-1431 F2), so once `escalated:true` is written no later call can
+    // un-latch it and the sweep would skip the ticket forever. Attempting the label
+    // first means a failed write leaves the ledger untouched, and the next tick
+    // re-scans and retries the whole act naturally.
+    //
+    // Bound the total cost: once a ticket has burned its deferrals the split alarm
+    // has already fired and only a human can resolve it, so stop spending a Linear
+    // label write on it every tick. This ceiling is what keeps the pre-latch attempt
+    // from re-firing forever on a persistently-failing host.
+    if (readEscalationDeferrals(orchDir, ticket) >= maxDeferrals) continue;
+
+    let labelled = false;
+    try {
+      labelled = labelNeedsHuman?.(orchDir, ticket) === true;
+    } catch (err) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate label failed: ${err.message}`);
+    }
+    // A `false` return has TWO causes and only one is a broken escalation: the belief
+    // engine (CATALYST_INTENTS_ENFORCE=1) owns needs-human and applies it out-of-band
+    // (label-guard.mjs:394-399). That is the ticket's sanctioned "hand the escalation
+    // to the owning host" remedy — ownership transferred, so the comment stays truthful.
+    let ownedByBelief = false;
+    if (!labelled) {
+      try {
+        ownedByBelief = beliefOwnsLabel() === true;
+      } catch {
+        ownedByBelief = false; // unreadable → treat as a real miss, never a transfer
+      }
+    }
+    if (!labelled && !ownedByBelief) {
+      // Half the escalation is missing. Post NO comment, latch NOTHING, and let the
+      // next tick retry. Bounded by maxDeferrals so a persistently-failing host raises
+      // the split alarm once instead of re-emitting a WARN every tick forever.
+      const deferrals = bumpEscalationDeferrals(orchDir, ticket, now());
+      if (deferrals === null) {
+        // Counter unwritable → no bound available. Retry quietly next tick; emitting
+        // here would re-fire on every tick of a broken disk (Codex R1's storm).
+        log(`recovery-reasoning: ${ticket} exhausted-escalate label did not land and the deferral counter is unwritable — retrying silently`);
+      } else if (deferrals < maxDeferrals) {
+        emitEvent({ type: "recovery.escalation.deferred", ticket, reason, deferrals, site: "attempts-exhausted" });
+        log(
+          `recovery-reasoning: ${ticket} exhausted-escalate label did not land — comment withheld, ` +
+            `escalation deferred (${deferrals}/${maxDeferrals}); retrying next tick`,
+        );
+      } else if (deferrals === maxDeferrals) {
+        // AC #5 — the should-never-happen state, raised ONCE, loudly.
+        emitEvent({ type: "recovery.escalation.split", ticket, reason, deferrals, site: "attempts-exhausted" });
+        log(
+          `recovery-reasoning: ${ticket} exhausted-escalate SPLIT — needs-human label has not landed ` +
+            `after ${deferrals} attempts; escalation cannot complete from this host`,
+        );
+      }
+      continue; // the act did not complete — not counted as escalated
+    }
+    // The label landed (or its owner has it) — this escalation can now complete.
+    clearEscalationDeferrals(orchDir, ticket);
+
     try {
       recordIntent(ticket, {
         type: "recovery-pass",
@@ -2448,11 +2595,6 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     } catch (err) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate signal write failed: ${err.message}`);
     }
-    try {
-      labelNeedsHuman?.(orchDir, ticket);
-    } catch (err) {
-      log(`recovery-reasoning: ${ticket} exhausted-escalate label failed: ${err.message}`);
-    }
     emitEvent({ type: "recovery.escalated", ticket, reason, escalation });
     try {
       postComment(
@@ -2463,7 +2605,10 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       /* comment is best-effort; the signal + event are the durable surfaces */
     }
     escalatedTickets.push(ticket);
-    log(`recovery-reasoning: ${ticket} attempts-exhausted → escalated loudly (CTL-1440)`);
+    log(
+      `recovery-reasoning: ${ticket} attempts-exhausted → escalated loudly (CTL-1440)` +
+        (ownedByBelief ? " [label owned by belief engine — CTL-1568 transfer]" : ""),
+    );
   }
   return escalatedTickets;
 }

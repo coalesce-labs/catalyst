@@ -67,6 +67,26 @@ import {
   defaultRecordIntent,
   recordVerdict,
 } from "./recovery-reasoning.mjs";
+// CTL-1568: this shim posts the escalation comment but never applied the
+// needs-human LABEL, so an agent reply could not bring the row back to the inbox.
+import { labelNeedsHumanUnlessBeliefOwner, beliefOwnsNeedsHuman } from "./label-guard.mjs";
+
+// CTL-1568 (Codex #2861 P0): this file's shebang is `#!/usr/bin/env node` and the
+// recovery-pass skill invokes it with `node`. A STATIC `import { applyLabel } from
+// "./linear-write.mjs"` reaches linear-query.mjs → gateway-read.mjs → `bun:sqlite`,
+// and Node throws ERR_UNSUPPORTED_ESM_URL_SCHEME during module LOADING — before
+// subcommand dispatch — so `fixed`, `leave-alone` and `escalated` all died outright,
+// not just the labelling path. Load it LAZILY instead: the import is evaluated only
+// on the one enforce-mode branch that actually labels, so every other subcommand
+// runs under plain Node with the Bun-only graph never touched.
+//
+// Verified by running `node recovery-emit.mjs` directly — the tests missed this
+// because they spawn the CLI through Bun's `process.execPath` (fixed below, so the
+// suite exercises the real `node` entrypoint the skill uses).
+async function loadApplyLabel() {
+  const mod = await import("./linear-write.mjs");
+  return mod.applyLabel;
+}
 
 const argv = process.argv.slice(2);
 const sub = argv[0];
@@ -267,17 +287,82 @@ if (sub === "escalated") {
     process.stderr.write(`recovery-emit: intent latch failed: ${err.message}\n`);
   }
 
-  // (4) CTL-1439 (P0a): ticket-visible escalation comment — the audit found the
+  // (4) CTL-1568: apply the needs-human LABEL. This shim never did, which is why
+  //     an agent reply could not bring the row back to the inbox and the CTL-1569
+  //     ≥3-turn loop could never close. The signal write in (2) flips
+  //     deriveAttention for a ticket that HAS a worker dir — but 10 of 12 parked
+  //     tickets have none on either host (daemon.mjs:431-434), and for those the
+  //     board synthesizes the inbox row from the LABEL alone. The signal is not a
+  //     substitute for it.
+  //
+  //     Deliberately UNFENCED. fenceGuard needs the scheduler's multiHost/gateway/
+  //     self, which a short-lived CLI has no cheap way to build; and every other
+  //     write in this file (signal, ledger, comment) is already unfenced, so
+  //     fencing only the label would recreate the exact CTL-1568 split it is meant
+  //     to close — label suppressed, comment posted. fenceGuard's own fail-closed
+  //     behaviour is untouched (AC #6).
+  //
+  //     Enforce-gated exactly like the comment: shadow mode must never write Linear.
+  let labelled = false;
+  if (RECOVERY_MODE === "enforce" && orchDir) {
+    try {
+      // CTL-1568 (Codex #2861 P0): resolve applyLabel HERE, not at module scope —
+      // this is the only branch that needs linear-write.mjs, and importing it
+      // eagerly killed the whole CLI under Node (see loadApplyLabel above). Top-level
+      // `await` is available: this is an ESM `sub === "escalated"` block, not a
+      // function body. Shadow mode never reaches this line, so it never pays the
+      // import cost either.
+      const applyLabel = await loadApplyLabel();
+      labelled =
+        labelNeedsHumanUnlessBeliefOwner(
+          orchDir,
+          ticket,
+          { applyLabel },
+          { site: "recovery-emit-escalated" },
+        ) === true;
+    } catch (err) {
+      process.stderr.write(`recovery-emit: needs-human label write threw on ${ticket}: ${err.message}\n`);
+    }
+  }
+  // A false return has two causes; only one is a broken escalation. When the belief
+  // engine owns needs-human it applies the label out-of-band — ownership transferred,
+  // so the comment stays truthful.
+  const ownedByBelief = !labelled && beliefOwnsNeedsHuman(process.env) === true;
+
+  // (5) CTL-1439 (P0a): ticket-visible escalation comment — the audit found the
   //     skill-side comment discipline failed in practice (0/7 posted), so the
   //     shim posts it itself. One line; the full briefing lives in the inbox.
-  postTicketComment(
-    ticket,
-    `🔼 **recovery-pass** escalated this to the operator — ${escalation.call_to_action ?? reason}. (See your inbox.)`,
-  );
+  //     CTL-1568: gated on the label, so it never claims an inbox row that is not
+  //     there. In shadow mode both are suppressed together, which is consistent.
+  if (labelled || ownedByBelief || RECOVERY_MODE !== "enforce") {
+    postTicketComment(
+      ticket,
+      `🔼 **recovery-pass** escalated this to the operator — ${escalation.call_to_action ?? reason}. (See your inbox.)`,
+    );
+  } else {
+    // AC #5 — the split is a should-never-happen state; raise it loudly rather than
+    // leaving a WARN line. Exit stays 0 (see below).
+    defaultEmitEvent({
+      type: "recovery.escalation.split",
+      ticket,
+      reason,
+      site: "recovery-emit-escalated",
+    });
+    process.stderr.write(
+      `recovery-emit: needs-human label did NOT land on ${ticket} — escalation comment withheld ` +
+        `(the inbox row would not exist); raised recovery.escalation.split\n`,
+    );
+  }
 
   process.stdout.write(
-    `recovery.escalated emitted for ${ticket} (type=${escalation.escalation_type})\n`,
+    `recovery.escalated emitted for ${ticket} (type=${escalation.escalation_type}` +
+      `, needs-human=${labelled ? "applied" : ownedByBelief ? "belief-owner" : "NOT-APPLIED"})\n`,
   );
+  // CTL-1568 (O1): exit 0 even when the label did not land. The recovery-pass skill
+  // invokes this shim as a bare bash call with no exit-code contract (SKILL.md:964),
+  // so a non-zero exit would be interpreted ad-hoc by an LLM worker and could retry
+  // the whole pass. recovery.escalation.split is the loud channel instead, and the
+  // durable surfaces (event, signal, ledger) have already landed.
   process.exit(0);
 }
 
