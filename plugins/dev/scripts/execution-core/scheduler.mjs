@@ -69,6 +69,7 @@ import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
+import { canOccupySlotNow, defaultHasTriageArtifact } from "./dispatch-readiness.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -836,6 +837,40 @@ export function writeWorkerPriority(orchDir, ticket, { priority, createdAt }) {
   } catch {
     // best-effort — missing worker dir or I/O failure; next dispatch retries
   }
+}
+
+// Resolves a waiting ticket's creation time and backfills priority.json with
+// both the caller's effective priority and the resolved creation timestamp.
+export function resolveWaitingCreatedAt(
+  orchDir,
+  ticket,
+  { persisted, rel, eligibleById, write = writeWorkerPriority, priority } = {}
+) {
+  if (persisted) return persisted;
+  const resolved = rel?.createdAt ?? eligibleById?.get(ticket)?.createdAt ?? null;
+  if (resolved) {
+    try {
+      write(orchDir, ticket, { priority, createdAt: resolved });
+    } catch {
+      // Best-effort persistence; this tick still ranks with the resolved value.
+    }
+  }
+  return resolved;
+}
+
+export function nextStarvationState(
+  streak,
+  { didWork, freeSlots, hasWaitingWork, livenessFresh, draining }
+) {
+  if (didWork || !hasWaitingWork || draining || (freeSlots <= 0 && livenessFresh)) {
+    return { streak: 0, warn: false, reason: null };
+  }
+  const next = streak + 1;
+  const warn =
+    next === STARVATION_WARN_STREAK ||
+    (next > STARVATION_WARN_STREAK &&
+      (next - STARVATION_WARN_STREAK) % STARVATION_REWARN_EVERY === 0);
+  return { streak: next, warn, reason: livenessFresh ? "dispatch-starvation" : "stale-liveness" };
 }
 
 // readClusterGeneration / writeClusterGeneration (CTL-864 remediation) — the
@@ -4470,6 +4505,7 @@ export function schedulerTick(
     hasInProcessRoute = false,
   } = {}
 ) {
+  const _hasTriageArtifact = hasTriageArtifact ?? defaultHasTriageArtifact;
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
   // readFileSync; a per-tick read lets `hosts.json` edits take effect without a
   // daemon restart). multiHost gates the Linear-touching claim: a single-host
@@ -6110,6 +6146,8 @@ export function schedulerTick(
   // before the preemption sweep (so it is independent of the dispatch sweeps).
   let promotedCount = 0;
   let admittedThisTick = new Set();
+  let triagedWaitingCount = 0;
+  const heldReasons = [];
   {
     // A.1 — the triaged-waiting pool: exactly the set sweep 1 would free-promote
     // this tick (triage:done, no research signal, not parked). Covers live
@@ -6238,13 +6276,22 @@ export function schedulerTick(
       // existing A.3 loop and STEP E read the same `triagedWaiting` binding).
       triagedWaiting.length = 0;
       triagedWaiting.push(...liveTriagedWaiting);
+      triagedWaitingCount = triagedWaiting.length;
 
       const waitingDescriptors = [];
+      const eligibleById = new Map((eligible ?? []).map((t) => [t.identifier, t]));
       const labelsByTicket = new Map(); // ticket → current Linear label set
       const readFailedTickets = new Set(); // fail-safe: missing read → held
       for (const ticket of triagedWaiting) {
         const rel = relByTicket.get(ticket) ?? null;
-        const { priority, createdAt } = readWorkerPriority(orchDir, ticket);
+        const { priority, createdAt: persistedCreatedAt } = readWorkerPriority(orchDir, ticket);
+        const effectivePriority = typeof rel?.priority === "number" ? rel.priority : priority;
+        const createdAt = resolveWaitingCreatedAt(orchDir, ticket, {
+          persisted: persistedCreatedAt,
+          rel,
+          eligibleById,
+          priority: effectivePriority,
+        });
         if (rel === null && !triageDeclaresZeroDeps(orchDir, ticket)) {
           // CTL-929: a transient Linear read failure (commonly linearBreaker open
           // from a 429) must NOT strand a ticket whose dependency picture is already
@@ -6261,7 +6308,7 @@ export function schedulerTick(
           identifier: ticket,
           // Prefer the live Linear priority; fall back to the persisted worker
           // priority when the read failed or carried no priority.
-          priority: typeof rel?.priority === "number" ? rel.priority : priority,
+          priority: effectivePriority,
           createdAt,
           state: { name: stateName },
           // CTL-878: carry the parent epic id so buildDependencyEdges (A.7) drops a
@@ -6354,14 +6401,21 @@ export function schedulerTick(
 
       // A.6 — priority + capacity selection over the COMBINED ready pool. Triaged
       // candidates compete fairly with brand-new ready work for the shared
-      // free-slot ceiling. Empty exclude is correct (candidates have no research
-      // signal yet). Brand-new eligible tickets in the slice are NOT acted on
-      // here — they flow through sweep 2; their presence only makes the triaged
-      // candidates compete fairly.
+      // free-slot ceiling. Eligible candidates must be able to consume any slot
+      // they win; triaged-waiting members are dispatchable by construction.
+      const triagedWaitingSet = new Set(triagedWaiting);
       const freeSlotsForPromotion = livenessIsFresh()
         ? Math.max(0, computeFreeSlots(maxParallel, occupiedCount))
         : 0;
-      const readyCandidates = rankTickets(admissionPool.filter((t) => readyIds.has(t.identifier)));
+      const admissionContenders = admissionPool.filter(
+        (t) =>
+          readyIds.has(t.identifier) &&
+          (triagedWaitingSet.has(t.identifier) ||
+            canOccupySlotNow(orchDir, t.identifier, {
+              hasTriageArtifact: _hasTriageArtifact,
+            }).ok)
+      );
+      const readyCandidates = rankTickets(admissionContenders);
       const admittedSlice = selectDispatchablePerProject(
         readyCandidates,
         new Set(),
@@ -6369,7 +6423,17 @@ export function schedulerTick(
         { perProject: concurrency?.perProject, inFlight: inFlightTickets }
       );
       admittedThisTick = new Set(
-        admittedSlice.filter((t) => triagedWaiting.includes(t.identifier)).map((t) => t.identifier)
+        admittedSlice.filter((t) => triagedWaitingSet.has(t.identifier)).map((t) => t.identifier)
+      );
+      log.debug(
+        {
+          free_slots_for_promotion: freeSlotsForPromotion,
+          contenders: readyCandidates.length,
+          pool: admissionPool.length,
+          admitted: admittedThisTick.size,
+          triaged_waiting: triagedWaiting.length,
+        },
+        "scheduler: STEP A admission (CAT-36)"
       );
 
       // A.7 — held-indicator convergence (CTL-755 ADDENDUM). For each candidate,
@@ -6649,7 +6713,21 @@ export function schedulerTick(
     if (computeFreeSlots(maxParallel, occupiedCount) <= 0) {
       // Build the global ranking to find topQueued and potential victim.
       const ranking = buildGlobalRanking(orchDir, eligible);
-      const topQueued = ranking.find((d) => !d.inFlight);
+      // Preempt only for a candidate that can consume the freed slot now;
+      // otherwise an untriaged ticket would park useful work for no gain.
+      const topQueued = ranking.find(
+        (d) =>
+          !d.inFlight &&
+          canOccupySlotNow(orchDir, d.identifier, {
+            hasTriageArtifact: _hasTriageArtifact,
+          }).ok
+      );
+      if (!topQueued && ranking.some((d) => !d.inFlight)) {
+        log.debug(
+          { queued: ranking.filter((d) => !d.inFlight).length },
+          "scheduler: preemption suppressed — no queued ticket is dispatch-ready (CAT-36)"
+        );
+      }
       // Victim candidates: in-flight, sorted worst-to-best (reverse ranking).
       const inFlightRanked = ranking.filter((d) => d.inFlight);
       // Scan from lowest-ranked in-flight (last in sorted array) toward highest.
@@ -7339,17 +7417,53 @@ export function schedulerTick(
   // _listStartedTickets: default is the real dir-scan. Tests seeding triage.json
   //   (which creates workers/<ticket>/) inject `() => new Set()` to prevent the
   //   seeded ticket from being excluded by dir-existence before the guard fires.
-  const _hasTriageArtifact =
-    hasTriageArtifact ?? ((dir, ticket) => existsSync(join(dir, "workers", ticket, "triage.json")));
   const _listStartedTickets = listStartedTicketsOpt ?? listStartedTickets;
+
+  const dispatchableReady = ready.filter((t) => {
+    const readiness = canOccupySlotNow(orchDir, t.identifier, {
+      hasTriageArtifact: _hasTriageArtifact,
+    });
+    if (readiness.ok) {
+      lastHoldLogged.delete(t.identifier);
+      return true;
+    }
+    if (heldReasons.length < 20) {
+      heldReasons.push({ ticket: t.identifier, reason: readiness.reason });
+    }
+    const previousHold = lastHoldLogged.get(t.identifier);
+    const holdStreak = previousHold?.reason === readiness.reason ? previousHold.streak + 1 : 1;
+    lastHoldLogged.set(t.identifier, { reason: readiness.reason, streak: holdStreak });
+    if (holdStreak === 1 || holdStreak % HOLD_RELOG_EVERY === 0) {
+      const context = {
+        ticket: t.identifier,
+        reason: readiness.reason,
+        held_ticks: holdStreak,
+        ...(readiness.error ? { error: String(readiness.error) } : {}),
+      };
+      if (readiness.error) {
+        log.warn(context, "ctl-1150: triage artifact probe failed — holding new-work candidate");
+      } else {
+        log.info(
+          context,
+          "ctl-1150: new-work candidate not yet triaged (no triage.json) — holding (CAT-36: no longer consumes budget)"
+        );
+      }
+    }
+    return false;
+  });
 
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.
-  const selected = selectDispatchablePerProject(ready, _listStartedTickets(orchDir), freeSlots, {
-    perProject: concurrency?.perProject,
-    inFlight: inFlightTickets,
-  });
+  const selected = selectDispatchablePerProject(
+    dispatchableReady,
+    _listStartedTickets(orchDir),
+    freeSlots,
+    {
+      perProject: concurrency?.perProject,
+      inFlight: inFlightTickets,
+    }
+  );
   // CTL-706: per-project slot-usage gauge (dashboarding). log-line-only,
   // matching the cache.stats() per-tick metric convention.
   if (concurrency?.perProject && Object.keys(concurrency.perProject).length > 0) {
@@ -7361,22 +7475,6 @@ export function schedulerTick(
 
   const dispatched = [];
   for (const t of selected) {
-    // CTL-1150: hold an eligible candidate whose triage hasn't produced
-    // triage.json yet. The monitor defers triage under slot pressure
-    // (computeTriageBudget, CTL-716) and sweepMissingTriage retries; until then
-    // dispatching research trips phase-agent-dispatch's prior-artifact guard
-    // (research requires signal:triage.json) and emits spurious
-    // phase.research.failed + phase.dispatch.failed. Silent hold — no cooldown
-    // marker, no failure event — mirroring the CTL-781 assignee-unreadable hold.
-    // The candidate stays in the eligible set and dispatches next tick once
-    // triage.json lands.
-    if (!_hasTriageArtifact(orchDir, t.identifier)) {
-      log.debug(
-        { ticket: t.identifier },
-        "ctl-1150: new-work candidate not yet triaged (no triage.json) — holding"
-      );
-      continue;
-    }
     if (inDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, now())) continue; // CTL-624: throttle refused re-dispatch
     // CTL-537: sequencing gate — only when a worker is already in-flight and a
     // seam is wired. Fail-open verdicts dispatch normally.
@@ -7952,6 +8050,39 @@ export function schedulerTick(
     appendCooldownGcEvent({ ticket, orchId: ticket, target_phase: phase });
   }
 
+  const didWork =
+    dispatched.length > 0 || advanced.length > 0 || promotedCount > 0 || resumedCount > 0;
+  // `ready`, NOT `eligible`: `ready` is `eligible` minus dependency-blocked
+  // tickets and minus tickets this host does not own (HRW). Deriving the signal
+  // from `eligible` would warn forever on two HEALTHY steady states — a board
+  // whose every eligible ticket is blocked by an open dependency, and a cluster
+  // node whose peers own all the currently-eligible slices — since `didWork`
+  // stays false and the streak never resets. Held-untriaged candidates are still
+  // in `ready`, so the intended wedge signal is preserved.
+  const hasWaitingWork = ready.length > 0 || triagedWaitingCount > 0;
+  const starvation = nextStarvationState(starvationStreak, {
+    didWork,
+    freeSlots,
+    hasWaitingWork,
+    livenessFresh,
+    draining,
+  });
+  starvationStreak = starvation.streak;
+  if (starvation.warn) {
+    log.warn(
+      {
+        ticks: starvationStreak,
+        reason: starvation.reason,
+        free_slots: freeSlots,
+        eligible_count: eligible.length,
+        ready_count: ready.length,
+        triaged_waiting: triagedWaitingCount,
+        held: heldReasons,
+      },
+      "scheduler: board appears frozen — queued work cannot make progress (CAT-36)"
+    );
+  }
+
   // CTL-1330 Tier 1: one structured line per tick. total_ms IS the synchronous
   // event-loop block; pass_durations attributes it; free_slots/liveness_fresh
   // expose whether new-work admission was held this tick (the wedge symptom).
@@ -8188,6 +8319,12 @@ const observedYieldFiles = new Set();
 // An admitted/cleared ticket is deleted so a future re-hold re-emits. Cleared on
 // daemon restart (via __resetForTests).
 const lastHeldEmitState = new Map();
+const lastHoldLogged = new Map();
+const STARVATION_WARN_STREAK = 3;
+const STARVATION_REWARN_EVERY = 10;
+const HOLD_RELOG_EVERY = 10;
+// A scheduler process owns one orchDir, so one process-wide streak is sufficient.
+let starvationStreak = 0;
 // CTL-764 Phase 5: last-emitted disposition per ticket for the worker.transition
 // only-on-change guard. Mirrors lastHeldEmitState but covers the full disposition set
 // (null = no label / cleared). Cleared on daemon restart (via __resetForTests).
@@ -9399,6 +9536,8 @@ export function __resetForTests() {
   stopScheduler();
   observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
+  lastHoldLogged.clear();
+  starvationStreak = 0;
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
   _stallJanitorCensusLastRunMs = 0; // CTL-1324: reset Pass 0j census throttle between tests
