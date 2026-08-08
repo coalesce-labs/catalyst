@@ -70,7 +70,23 @@ import {
 // CTL-1568: this shim posts the escalation comment but never applied the
 // needs-human LABEL, so an agent reply could not bring the row back to the inbox.
 import { labelNeedsHumanUnlessBeliefOwner, beliefOwnsNeedsHuman } from "./label-guard.mjs";
-import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
+
+// CTL-1568 (Codex #2861 P0): this file's shebang is `#!/usr/bin/env node` and the
+// recovery-pass skill invokes it with `node`. A STATIC `import { applyLabel } from
+// "./linear-write.mjs"` reaches linear-query.mjs → gateway-read.mjs → `bun:sqlite`,
+// and Node throws ERR_UNSUPPORTED_ESM_URL_SCHEME during module LOADING — before
+// subcommand dispatch — so `fixed`, `leave-alone` and `escalated` all died outright,
+// not just the labelling path. Load it LAZILY instead: the import is evaluated only
+// on the one enforce-mode branch that actually labels, so every other subcommand
+// runs under plain Node with the Bun-only graph never touched.
+//
+// Verified by running `node recovery-emit.mjs` directly — the tests missed this
+// because they spawn the CLI through Bun's `process.execPath` (fixed below, so the
+// suite exercises the real `node` entrypoint the skill uses).
+async function loadApplyLabel() {
+  const mod = await import("./linear-write.mjs");
+  return mod.applyLabel;
+}
 
 const argv = process.argv.slice(2);
 const sub = argv[0];
@@ -290,11 +306,18 @@ if (sub === "escalated") {
   let labelled = false;
   if (RECOVERY_MODE === "enforce" && orchDir) {
     try {
+      // CTL-1568 (Codex #2861 P0): resolve applyLabel HERE, not at module scope —
+      // this is the only branch that needs linear-write.mjs, and importing it
+      // eagerly killed the whole CLI under Node (see loadApplyLabel above). Top-level
+      // `await` is available: this is an ESM `sub === "escalated"` block, not a
+      // function body. Shadow mode never reaches this line, so it never pays the
+      // import cost either.
+      const applyLabel = await loadApplyLabel();
       labelled =
         labelNeedsHumanUnlessBeliefOwner(
           orchDir,
           ticket,
-          { applyLabel: defaultApplyLabel },
+          { applyLabel },
           { site: "recovery-emit-escalated" },
         ) === true;
     } catch (err) {

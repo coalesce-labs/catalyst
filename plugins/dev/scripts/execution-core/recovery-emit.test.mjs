@@ -17,7 +17,7 @@ import {
   existsSync,
   chmodSync,
 } from "node:fs";
-import { join as pathJoin } from "node:path";
+import { dirname as pathDirname, join as pathJoin } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -56,8 +56,22 @@ function seedLedger(ticket, entry) {
   writeFileSync(pathJoin(dir, `${ticket}.json`), JSON.stringify(entry));
 }
 
+// CTL-1568 (Codex #2861 P0): the recovery-pass skill invokes this CLI with `node`
+// (its shebang is `#!/usr/bin/env node`), NOT with Bun. Spawning it through Bun's
+// `process.execPath` is what hid the P0: a static `linear-write.mjs` import reached
+// `bun:sqlite`, which Bun resolves happily and Node rejects with
+// ERR_UNSUPPORTED_ESM_URL_SCHEME at module-load time — killing every subcommand in
+// production while the suite stayed green. Run against the REAL node entrypoint so
+// the interpreter under test is the one the skill actually uses. Falls back to
+// process.execPath only if node is genuinely absent, so the suite still runs on a
+// node-less machine rather than silently failing.
+const NODE_BIN = (() => {
+  const probe = spawnSync("node", ["--version"], { encoding: "utf8" });
+  return probe.status === 0 ? "node" : process.execPath;
+})();
+
 function runCli(args, envOverride = {}) {
-  return spawnSync(process.execPath, [CLI, ...args], {
+  return spawnSync(NODE_BIN, [CLI, ...args], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -70,7 +84,7 @@ function runCli(args, envOverride = {}) {
       // this suite applied needs-human to the real CTL-520 and CTL-521. Stubbing the
       // comment helper alone was never enough; the transport is what must be sealed.
       // Runtime is the tell (seconds ⇒ real network, milliseconds ⇒ stubbed).
-      PATH: `${pathJoin(catalystDir, "bin")}:/usr/bin:/bin`,
+      PATH: `${pathJoin(catalystDir, "bin")}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
       ...envOverride,
     },
   });
@@ -341,5 +355,43 @@ describe("recovery-emit escalated — needs-human label (CTL-1568)", () => {
     expect(res.status).toBe(0);
     expect(linearisCalls()).not.toContain("--labels needs-human");
     expect(existsSync(captureFile)).toBe(false);
+  });
+});
+
+// ─── CTL-1568 (Codex #2861 P0): the Node entrypoint must stay Bun-free ───────
+// recovery-emit.mjs ships `#!/usr/bin/env node` and the recovery-pass skill invokes
+// it with node. Its import graph reaches linear-write.mjs → linear-query.mjs →
+// gateway-read.mjs, which used to statically `import { Database } from "bun:sqlite"`.
+// Node rejects that specifier at module-load time (ERR_UNSUPPORTED_ESM_URL_SCHEME),
+// so EVERY subcommand died before dispatch. These assert the graph stays loadable
+// under real node — the runtime that actually runs it in production.
+
+describe("CTL-1568 P0 — the node entrypoint loads without Bun-only specifiers", () => {
+  const nodeCan = (expr) =>
+    spawnSync("node", ["-e", expr], { encoding: "utf8", cwd: pathDirname(CLI) });
+
+  test("linear-write.mjs (the labelling dependency) imports under node", () => {
+    const r = nodeCan(
+      `import("./linear-write.mjs").then(m=>{if(typeof m.applyLabel!=="function")process.exit(3);process.exit(0)}).catch(e=>{console.error(e.code||e.message);process.exit(1)})`,
+    );
+    expect(r.stderr ?? "").not.toContain("ERR_UNSUPPORTED_ESM_URL_SCHEME");
+    expect(r.status).toBe(0);
+  });
+
+  test("gateway-read.mjs's pure helpers import under node (no db construction)", () => {
+    const r = nodeCan(
+      `import("./gateway-read.mjs").then(m=>{if(m.descriptorAgeMs({updatedAt:new Date().toISOString()})>60000)process.exit(3);process.exit(0)}).catch(e=>{console.error(e.code||e.message);process.exit(1)})`,
+    );
+    expect(r.stderr ?? "").not.toContain("ERR_UNSUPPORTED_ESM_URL_SCHEME");
+    expect(r.status).toBe(0);
+  });
+
+  test("every subcommand dispatches under node instead of dying at load", () => {
+    for (const sub of ["fixed", "leave-alone", "escalated"]) {
+      const r = runCli([sub, "--ticket", "TST-P0", "--reason", "probe"], {
+        CATALYST_RECOVERY_PASS: "shadow",
+      });
+      expect(r.stderr ?? "").not.toContain("ERR_UNSUPPORTED_ESM_URL_SCHEME");
+    }
   });
 });
