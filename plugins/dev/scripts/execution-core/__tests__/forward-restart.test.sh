@@ -65,7 +65,21 @@ run_monitor forward-restart >/dev/null || { echo "FAIL: forward-restart (hot) ex
 PID2="$(cat "$FORWARD_PID_FILE")"
 [[ "$PID2" != "$PID1" ]] || { echo "FAIL: pid did not change on hot restart ($PID1 == $PID2)"; exit 1; }
 kill -0 "$PID2" 2>/dev/null || { echo "FAIL: new forwarder pid $PID2 not alive"; exit 1; }
-kill -0 "$PID1" 2>/dev/null && { echo "FAIL: old forwarder pid $PID1 still alive after restart"; exit 1; } || true
+# CTL-1502 CI FLAKE (CAT-62 follow-up): _forward_stop_impl already polls up to
+# 3s for PID1 to die post-SIGTERM before falling back to SIGKILL, so by the
+# time forward-restart returns PID1 should be gone. Confirmed via CI tracing
+# (2026-08-08) that on a loaded shared runner this test's OWN `kill -0` can
+# still observe a just-SIGKILL'd pid for a brief window before the kernel
+# finishes reaping it — an observer-side visibility lag, not a stop-sequence
+# defect (10 consecutive local runs and the traced CI run both show PID1
+# reliably gone by the time _forward_stop_impl returns). Give the reap up to
+# an extra 1s here rather than failing on the very first observation.
+PID1_GONE=0
+for _ in $(seq 1 10); do
+  kill -0 "$PID1" 2>/dev/null || { PID1_GONE=1; break; }
+  sleep 0.1
+done
+[[ "$PID1_GONE" == "1" ]] || { echo "FAIL: old forwarder pid $PID1 still alive after restart"; exit 1; }
 
 # --- Test 4: two back-to-back restarts both exit 0 (idempotent) ---
 run_monitor forward-restart >/dev/null || { echo "FAIL: 1st back-to-back restart exit != 0"; exit 1; }
