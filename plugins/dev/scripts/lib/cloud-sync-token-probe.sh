@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launchd-faithful cloud-sync token presence probe. Never prints token values.
 
-_CSTP_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
+_CSTP_SELF="${BASH_SOURCE[0]}"
 _CSTP_DIR="$(cd "$(dirname "$_CSTP_SELF")" && pwd)"
 
 cloud_sync_probe_token() {
