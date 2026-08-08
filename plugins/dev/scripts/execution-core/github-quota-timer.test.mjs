@@ -6,6 +6,7 @@ import {
   DEFAULTS,
   readGithubQuota,
   readGithubQuotaSweepConfig,
+  sampleGithubQuotaOnce,
   startGithubQuotaTimer,
 } from "./github-quota-timer.mjs";
 
@@ -103,6 +104,67 @@ describe("github quota timer", () => {
     startGithubQuotaTimer({ enabled: true, orchDir: "/unused", intervalSeconds: 45, clock }).stop();
     startGithubQuotaTimer({ enabled: true, orchDir: "/unused", intervalSeconds: "90", clock }).stop();
     expect(seen).toEqual([45_000, 90_000]);
+  });
+
+  // Codex P1 (CAT-40, round 2): the daemon's first board-health pass runs
+  // synchronously at boot, BEFORE this timer's first interval fires. Arming only
+  // a future interval left that pass with no snapshot at all — under
+  // CATALYST_BH_GH_QUOTA=enforce it advanced the board-health throttle while
+  // quota read `unknown`, a blind window that could span two scans (~10 min).
+  test("primeImmediately publishes a snapshot before startGithubQuotaTimer returns", () => {
+    const orchDir = tempDir();
+    try {
+      const clock = fakeClock();
+      // No tick(): the snapshot must exist purely from the call below.
+      const timer = startGithubQuotaTimer({
+        enabled: true, orchDir, clock, host: "mini-1",
+        intervalSeconds: 300, primeImmediately: true,
+        runGh: () => ({ status: 0, stdout: VALID }),
+      });
+      expect(timer.primed).toBe(true);
+      expect(readGithubQuota(orchDir)).toMatchObject({ host: "mini-1", core: { remaining: 4900 } });
+      timer.stop();
+    } finally { rmSync(orchDir, { recursive: true, force: true }); }
+  });
+
+  test("without primeImmediately nothing is published until the first interval fires", async () => {
+    const orchDir = tempDir();
+    try {
+      const clock = fakeClock();
+      const timer = startGithubQuotaTimer({ enabled: true, orchDir, clock, runGh: () => ({ status: 0, stdout: VALID }) });
+      expect(timer.primed).toBe(false);
+      expect(readGithubQuota(orchDir)).toBeNull();
+      await clock.tick();
+      expect(readGithubQuota(orchDir)).toMatchObject({ core: { remaining: 4900 } });
+      timer.stop();
+    } finally { rmSync(orchDir, { recursive: true, force: true }); }
+  });
+
+  test("a failing prime is non-fatal: the timer still arms and reports primed=false", () => {
+    const orchDir = tempDir();
+    try {
+      const clock = fakeClock();
+      const timer = startGithubQuotaTimer({
+        enabled: true, orchDir, clock, primeImmediately: true,
+        runGh: () => { throw new Error("gh unavailable at boot"); },
+        log: { warn() {} },
+      });
+      expect(timer.primed).toBe(false);
+      expect(readGithubQuota(orchDir)).toBeNull();
+      timer.stop();
+    } finally { rmSync(orchDir, { recursive: true, force: true }); }
+  });
+
+  test("sampleGithubQuotaOnce is synchronous — the write lands before the next statement", () => {
+    const orchDir = tempDir();
+    try {
+      // If this were async, `await`-free reads would see null even on success,
+      // and the daemon's synchronous startDaemon could not order the prime
+      // ahead of the scheduler's first board-health pass.
+      expect(sampleGithubQuotaOnce({ orchDir, runGh: () => ({ status: 0, stdout: VALID }), host: "h" })).toBe(true);
+      expect(readGithubQuota(orchDir)).toMatchObject({ core: { remaining: 4900 } });
+      expect(sampleGithubQuotaOnce({ orchDir: null })).toBe(false);
+    } finally { rmSync(orchDir, { recursive: true, force: true }); }
   });
 
   test("reads config and exports a five-minute default", () => {

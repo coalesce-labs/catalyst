@@ -1248,6 +1248,30 @@ export function startDaemon({
     // entry points. The monitor receives dispatchFn for its →Triage one-shot, and
     // the onComment callback routes comment-wakes through commentWakeDispatch (the
     // same executor) — no split-brain.
+    // CAT-40: sample the GitHub core REST quota independently of board scans. The
+    // rate_limit endpoint does not consume the quota it reports; the timer only
+    // publishes a snapshot and board-health separately decides shadow/enforce.
+    //
+    // Codex P1 (round 2): this MUST be armed — and primed — before schedulerFn
+    // below, which runs a synchronous initial board-health pass. Arming only the
+    // interval left that first pass with no snapshot, so under
+    // CATALYST_BH_GH_QUOTA=enforce it advanced the board-health throttle while
+    // quota read `unknown`; with the scheduler's own timer registered first the
+    // blind window could span two scans (~10 min) on a host that had in fact been
+    // sampling all along. `primeImmediately` samples inline, so by the time the
+    // scheduler's first pass reads github-quota.json the snapshot is there.
+    // Sampling is host-local observation, not actuation, so it stays OUTSIDE the
+    // _isWorkerNode gate — a monitor node publishes its own quota too.
+    {
+      const githubQuotaCfg = readGithubQuotaSweepConfig(configPath);
+      _githubQuotaTimer = startGithubQuotaTimerFn({
+        enabled: githubQuotaCfg.enabled ?? true,
+        intervalSeconds: githubQuotaCfg.intervalSeconds ?? GITHUB_QUOTA_TIMER_DEFAULTS.intervalSeconds,
+        orchDir,
+        primeImmediately: true,
+      });
+    }
+
     // CTL-1654: the actuator arming below (monitorFn + schedulerFn + auto-tuner) is
     // gated on _isWorkerNode — see the observe-only backstop comment above.
     if (_isWorkerNode) {
@@ -1521,18 +1545,6 @@ export function startDaemon({
           config: stalledCfg,
         });
       }
-    }
-
-    // CAT-40: sample GitHub core REST quota independently of board scans. The
-    // rate_limit endpoint does not consume the quota it reports; the timer only
-    // publishes a snapshot and board-health separately decides shadow/enforce.
-    {
-      const githubQuotaCfg = readGithubQuotaSweepConfig(configPath);
-      _githubQuotaTimer = startGithubQuotaTimerFn({
-        enabled: githubQuotaCfg.enabled ?? true,
-        intervalSeconds: githubQuotaCfg.intervalSeconds ?? GITHUB_QUOTA_TIMER_DEFAULTS.intervalSeconds,
-        orchDir,
-      });
     }
 
   } catch (err) {
