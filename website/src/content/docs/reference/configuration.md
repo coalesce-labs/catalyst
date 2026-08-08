@@ -169,6 +169,13 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.fleetHealth.swapUsedMbClearThreshold`          | `16384`                      | CTL-1503 hysteresis band — the latched swap degradation CLEARS (fires `fleet.health.recovered` once) only when swap drops strictly below this LOWER threshold, so a value hovering in `[clear, trip)` can't re-flap. Clamped below `swapUsedMbThreshold` if misconfigured. Env `EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD`. |
 | `orchestration.fleetHealth.selfHealEnabled`                   | `false`                      | Whether a sustained breach triggers self-heal (the two orphan-reaper intents plus a bounded `ppid==1` `node`/`bun` child sweep). **Default OFF** — the first ship is a pure alert. Enable with `EXECUTION_CORE_FLEET_SELF_HEAL=1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `orchestration.fleetHealth.sustainedTicks`                    | `2`                          | Consecutive degraded ticks required before self-heal fires (once per breach episode; re-armed only after a healthy tick).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `orchestration.daemonWatchdog.mode`                           | `shadow`                     | Stuck-but-alive daemon watchdog (CTL-1502). `off` disables; `shadow` detects + logs `would-restart` but never restarts; `enforce` restarts a stuck daemon (otel-forward) once per breach episode. Precedence: `CATALYST_DAEMON_WATCHDOG=0` (kill-switch → `off`) → `EXECUTION_CORE_DAEMON_WATCHDOG_MODE` → this key → `shadow`. |
+| `orchestration.daemonWatchdog.intervalMs`                     | `120000`                     | How often the probe checks the stuck predicates (ms). Env `EXECUTION_CORE_DAEMON_WATCHDOG_INTERVAL_MS`. |
+| `orchestration.daemonWatchdog.dlqMaxBytes`                    | `1073741824`                 | DLQ-file size (bytes, via `statSync` — O(1), robust past 2 GB) at or above which the `dlq` predicate trips. Default 1 GiB. Env `EXECUTION_CORE_DAEMON_WATCHDOG_DLQ_MAX_BYTES`. |
+| `orchestration.daemonWatchdog.stalenessMs`                    | `900000`                     | How long the checkpoint's `lastForwardedTs` may stay frozen — while the event log has fresher writes (real backlog) — before the `lag` predicate trips. Default 15 min. Env `EXECUTION_CORE_DAEMON_WATCHDOG_STALENESS_MS`. |
+| `orchestration.daemonWatchdog.cooldownMs`                     | `900000`                     | Minimum time between restarts (ms). Default 15 min — deliberately > the 600s launchd `StartInterval` so the two supervision layers never race. Env `EXECUTION_CORE_DAEMON_WATCHDOG_COOLDOWN_MS`. |
+| `orchestration.daemonWatchdog.sustainedTicks`                 | `2`                          | Consecutive breach ticks required before the watchdog acts (hysteresis). Env `EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS`. |
+| `orchestration.daemonWatchdog.verifyTicks`                    | `2`                          | Post-restart re-check window: if the predicate is still tripped after this many ticks, the watchdog escalates (latched alert + `severity:high` finding) instead of restarting again. Env `EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS`. |
 | `catalyst.stallJanitor.censusIntervalSeconds` _(Layer 2)_     | `900` (15 min)               | How often the stall-janitor's git-heavy worktree/stall censuses (J1 orphan-worktree, J3 stall-clear, J4 terminal-signal GC) may run, off the per-tick scheduler hot path. Each fires a `git worktree list` per repo plus a `git status` per terminal worktree, so running them every tick on a many-worktree host ages the daemon heartbeat and holds new-work dispatch; this cadence keeps them off the hot path while the cheap J2 ghost-session kill still runs every tick (CTL-1324). Env `CATALYST_STALL_JANITOR_INTERVAL_MS` (milliseconds) overrides.                                                                                                                                                                                                                                                                                                                                                                    |
 
 The orphan child-process reaper is the corroboration-heavy companion to the session-level reaper:
@@ -497,6 +504,45 @@ not per-repo:
   work-eligible worker. It is treated as the most restrictive class and `catalyst doctor` **FAILs**
   until the value is corrected — so a typo can never make a node pick up work.
 - A missing or malformed Layer-2 file never throws; it falls through to the `worker` default.
+
+### Drain override (`CATALYST_DRAIN_DISABLED`, CTL-1678)
+
+`CATALYST_DRAIN_DISABLED=1` is a **worker-only, per-node** override that makes the node
+**permanently ignore the drain flag**. It exists because an unattributed recurring writer (CTL-1675)
+keeps silently setting the drain sentinel fleet-wide, halting all new-work admission; this env lets a
+worker neutralize that flag durably without a code change.
+
+- **Where to set it:** in the durable **Layer-2** `~/.config/catalyst/execution-core.env` (it is
+  `source`d into the daemon's environment at launch), then `catalyst-stack restart`.
+- **Opt-in semantics:** strict `=== "1"` (matching `CATALYST_BOOT_DRAINED`). Any other value —
+  unset, `0`, `true`, empty — leaves the node honoring the flag. **Unset (the fleet default) is a
+  byte-for-byte no-op**; nothing changes until it is set.
+- **What it does:** it makes `isDraining()` return `false` at the single admission chokepoint, so
+  **every** new-work consumer (the scheduler dispatch gate, the monitor triage-dispatch gate, and the
+  admission-state reporter) admits work again through one seam. The physical `drain` file is left in
+  place — the override neutralizes it, it does not delete it.
+- **Tripwire (attribution):** whenever the flag is present but ignored, the daemon emits a
+  once-per-episode **`node.drain.ignored`** event carrying the flag's mtime and a truncated `ps`
+  snapshot, to keep gathering evidence for CTL-1675. It re-arms once the flag is removed and
+  re-created.
+- **The third state is visible:** `catalyst-execution-core drain --status-read` prints
+  `drain flag present but IGNORED (CATALYST_DRAIN_DISABLED=1)` (and warns on stderr when you toggle
+  the flag on a drain-disabled node), `catalyst doctor` reports an advisory `drain-disabled` check
+  (WARN when the flag is present-and-ignored, PASS/INFO otherwise — never a FAIL), and
+  `catalyst-stack verify-node` shows a `drain-disabled` line on the worker profile.
+- **Does not touch boot-drain.** `CATALYST_BOOT_DRAINED` and the boot-drain policy are deliberately
+  independent and unchanged, so a `developer`/`monitor` node keeps booting drained (this override is
+  **worker-only**).
+
+```bash
+# In ~/.config/catalyst/execution-core.env on a WORKER node (e.g. mini, mini-2):
+# MUST be `export`ed — this file is sourced (not `set -a`) before the daemon is
+# launched, and bash does not pass a bare (unexported) assignment to the child
+# process, so a non-exported value would leave the daemon still drained.
+export CATALYST_DRAIN_DISABLED=1
+# then:
+catalyst-stack restart
+```
 
 ### Read-replica endpoint (`catalyst.readReplica.baseUrl`, CTL-1346)
 
@@ -932,8 +978,6 @@ structural, not configured), so the telemetry that is the feature's whole point 
 | ------------------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CATALYST_BOARD_HEALTH` _(env var)_                     | `shadow`          | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (CTL-1300 — on a proceeding scan, dispatch **one holistic recovery-pass delegate** anchored to a flagged ticket and carrying the whole-board context; reuses the capped + cooldown'd recovery-pass actuator. **Operator-gated — never auto-enabled**). Garbage values fall back to `shadow`. Overrides Layer-2. |
 | `catalyst.boardHealth.mode` _(Layer-2)_                 | `shadow`          | Same three values; honored when the env var is unset.                                                                                                                                                                                                                                                                                                                                                                             |
-| `CATALYST_BH_SANCTIONED_LATCHES` _(env var)_            | _(empty)_         | Comma-separated ticket ids a human has **deliberately parked** at needs-human (CTL-1432 B3). They stay visible in the board context's `frozenNeedsHuman` but are suppressed from `proposeMoves`, so the delegate stops re-proposing them every scan (which otherwise drowns the genuinely-stuck tickets). Overrides Layer-2.                                                                                                      |
-| `catalyst.boardHealth.sanctionedNeedsHuman` _(Layer-2)_ | `[]`              | Array form of the sanctioned needs-human latch allowlist; honored when the env var is unset.                                                                                                                                                                                                                                                                                                                                      |
 | `CATALYST_BH_INTERVAL_MS`                               | `300000` (5 min)  | Cadence floor — the scan runs at most once per interval per host.                                                                                                                                                                                                                                                                                                                                                                 |
 | `CATALYST_BH_DISPATCH_STALL_MS`                         | `600000` (10 min) | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge.                                                                                                                                                                                                                                                                                                                                 |
 | `CATALYST_BH_WORKER_AGE_MS`                             | `14400000` (4 h)  | Fallback worker-age threshold (per-phase normals override it).                                                                                                                                                                                                                                                                                                                                                                    |
@@ -1010,6 +1054,15 @@ the scheme, whereas a bare `host[:port]` cannot state one and is therefore trust
 Requests with **no** `Origin` are allowed — browsers always send it on a POST, so only non-browser
 clients (`curl`, tests) omit it, and those are not CSRF vectors. This guard stops a browser being
 used as a confused deputy; it is not authentication.
+
+**Parking a ticket (CTL-1552).** To tell board-health "a human is holding this ticket, stop
+re-proposing it," apply the standalone `parked-by-human` Linear label to it (set/cleared from Linear
+by an operator). Board-health reads the label off the ticket descriptor, so the park applies on
+**every** host — unlike the per-host board-health sanctioned-latch env var it replaced (CTL-1432
+B3), which never synced across the cluster. The parked ticket stays visible in the board context's
+`frozenNeedsHuman` cohort and in the `recovery.board-scan` event's `details.sanctioned` list; it is
+suppressed only from `proposeMoves`/`eligibleDeferredAnchors`. It is **not** a member of the
+exclusive `worker-status` label group (a parked ticket keeps its `needs-human` label).
 
 ### Ingestion-silence detector (CTL-1122)
 
@@ -1187,3 +1240,31 @@ kill-switch and any unset/garbage value both resolve to `off`.
 | `catalyst.coordination.mode` _(Layer-2)_ | `off` | Same three values; honored when the env var is unset. |
 | `CATALYST_COORDINATION_HUB_URL` _(env var)_ | _(none)_ | Base URL of the catalyst-cloud coordination changefeed used in `enforce`. Overrides Layer-2. When empty/unset the publisher uses the interim Loki-tail transport instead. |
 | `catalyst.coordination.hubUrl` _(Layer-2)_ | `null` | Same; honored when the env var is unset. |
+
+**Cloud token (enforce delivery).** In `enforce` mode the publisher sends each batch to
+`<hubUrl>/coordination/publish` with an `Authorization: Bearer <token>` header. The **payload
+carries no tenant field** — the server derives tenant from the token. The token comes from the
+`cloud-token` secret-contract row (ADR-0008 leg-3 credential): `~/.config/catalyst/cloud-sync.env`
+must export the resolved var name (default `CATALYST_CLOUD_TOKEN`; the exact name is
+`CATALYST_CLOUD_TOKEN_ENV` → Layer-2 → `CATALYST_CLOUD_TOKEN`). `catalyst-stack start` sources
+this file in a subshell when spawning the daemon so the credential is inherited without leaking into
+the long-lived shell process.
+
+An enforce host with a valid `hubUrl` but **no** token degrades to inbound-only with a one-time
+warning — it never hammers the hub with 401s. Provisioning a token and restarting
+(`catalyst-stack start`) bounces the daemon (token presence is part of the restart fingerprint).
+
+**Shadow → enforce promotion (ADR-023 rollout gate).** Do not flip hosts to enforce until all of
+the following are true, verified by `bun coordination-publish/parity-check.ts` on each candidate
+host over a ≥3–5 day window:
+
+1. Non-zero matched pairs (the mirror contains coordination rows that align with the `worker_state`
+   projection — meaning the outbound stream is non-empty and well-formed).
+2. Zero divergences (no terminal-status conflicts between the coordination mirror and the
+   `worker_state` projection).
+3. Each candidate has been spot-checked for false positives.
+
+Once criteria are met, flip **one host at a time** to `enforce`. Rollback = unset the mode +
+`catalyst-stack start` (the daemon self-exits on `off`, ADR-023 rule 5). The three-way exit
+contract of `parity-check.ts`: `0` = healthy, `1` = divergent, `2` = inconclusive (mirror empty
+or no matching pairs — not an error, just not yet evaluable).

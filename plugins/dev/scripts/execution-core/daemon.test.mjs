@@ -782,6 +782,61 @@ describe("startDaemon", () => {
     expect(() => stopDaemon()).not.toThrow();
     expect(stopped).toBe(1);
   });
+
+  // CTL-1502: the stuck-but-alive daemon watchdog probe is started from
+  // startDaemon (shadow default → enabled), gated by enableDaemonWatchdog, and
+  // stopped in stopDaemon — mirroring the fleet-health wiring exactly.
+  test("starts the daemon watchdog when enabled (CTL-1502)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startDaemonWatchdogProbe: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableDaemonWatchdog: true,
+    });
+    expect(started).toBe(1);
+  });
+
+  test("skips the daemon watchdog when disabled (mode off → CTL-1502)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startDaemonWatchdogProbe: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableDaemonWatchdog: false,
+    });
+    expect(started).toBe(0);
+  });
+
+  test("stopDaemon stops the daemon watchdog and swallows a throwing stop() (CTL-1502)", () => {
+    let stopped = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startDaemonWatchdogProbe: () => ({
+        stop: () => {
+          stopped++;
+          throw new Error("simulated watchdog stop failure");
+        },
+      }),
+      enableDaemonWatchdog: true,
+    });
+    // Must not throw even though stop() throws
+    expect(() => stopDaemon()).not.toThrow();
+    expect(stopped).toBe(1);
+  });
 });
 
 // CTL-678 — main()-side resolver: pre-merge Layer-1 (committed seed) under
@@ -1695,6 +1750,32 @@ describe("handleCommentWake (CTL-549)", () => {
       }
     );
     expect(resetTickets).toContain("CTL-1");
+  });
+
+  // CTL-1552: the unpark now clears the needs-human LABEL and its once-marker
+  // TOGETHER (via clearStalledLabel), re-arming labelOnce. The prior raw
+  // removeLabel left workers/<T>/.linear-label-needs-human.applied orphaned.
+  test("CTL-1552 — unpark clears the needs-human once-marker as well as the label", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "needs-input", parkedFrom: "implement" });
+    const marker = join(orch, "workers", "CTL-1", ".linear-label-needs-human.applied");
+    writeFileSync(marker, "");
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        // clearStalledLabel treats a { removed: true } result as a confirmed
+        // removal → deletes the once-marker(s).
+        removeLabel: (ticket, label) => {
+          removed.push({ ticket, label });
+          return { removed: true };
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" }); // label removed…
+    expect(existsSync(marker)).toBe(false); // …AND the once-marker cleared (re-armed)
   });
 
   // Codex #2970 post-merge round 1: the EARLIER needs-input removal (inside the

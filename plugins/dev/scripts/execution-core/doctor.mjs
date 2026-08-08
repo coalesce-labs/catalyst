@@ -24,7 +24,7 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync } from "node:fs";
+import { readFileSync, statSync, existsSync, realpathSync } from "node:fs";
 import { resolve, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,8 @@ import {
   resolveNodeClass,
   NODE_CLASSES,
   isDraining,
+  resolveDrainState, // CTL-1678: three-state drain resolver for checkDrainDisabled
+  readDaemonRuntimeEnv, // CTL-1678 (round-3 P1): live daemon's boot-time env snapshot
   getExecutionCoreDir,
   // CTL-1375: configured-repo discovery for the repo-icon token-scope advisory.
   getRegistryPath,
@@ -88,6 +90,7 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
@@ -2553,6 +2556,165 @@ export function checkAgentBrowser(deps = {}) {
   return checks;
 }
 
+// defaultShipperState — load state + last exit of the log-shipper LaunchAgent.
+// Mirrors defaultReaperState but for ai.coalesce.catalyst-log-shipper.
+function defaultShipperState() {
+  try {
+    const r = spawnSync("launchctl", ["list", MANIFEST_LABELS.shipper], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0 || !r.stdout) return { loaded: false, lastExit: null };
+    const m = r.stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
+    return { loaded: true, lastExit: m ? parseInt(m[1], 10) : null };
+  } catch {
+    return { loaded: false, lastExit: null };
+  }
+}
+
+// defaultCanonicalShipperConfig — resolve the canonical config path from the
+// registered pristine plugin-source checkout (catalyst.orchestration.pluginDirs[0]).
+// Returns the absolute path or null if the config is absent/unreadable.
+function defaultCanonicalShipperConfig() {
+  try {
+    const cfg = JSON.parse(readFileSync(layer2Path(), "utf8"));
+    const pluginDirs = cfg?.catalyst?.orchestration?.pluginDirs;
+    const pd = Array.isArray(pluginDirs) ? pluginDirs[0] : (typeof pluginDirs === "string" ? pluginDirs : null);
+    if (!pd) return null;
+    return resolve(pd, "scripts", "log-shipper", "config.alloy");
+  } catch {
+    return null;
+  }
+}
+
+// checkLogShipper — CTL-1473: for classes whose manifest declares shipsLogs:true,
+// (a) FAILs when the shipper LaunchAgent is missing/unloaded, and (b) FAILs when
+// the plist's --config path does not resolve to the canonical config under the
+// registered pristine plugin-source checkout. A preinstall flag (from
+// CATALYST_DOCTOR_PREINSTALL=1) downgrades FAILs to WARNs so the join pre-install
+// gate can run before install-services creates the shipper. The post-install strict
+// verify runs without the flag and fails hard on a missing/misconfigured shipper.
+export function checkLogShipper(deps = {}) {
+  const {
+    shipsLogs: shipperRequired = false,
+    preinstall = false,
+    plistPath = resolve(homedir(), "Library", "LaunchAgents", `${MANIFEST_LABELS.shipper}.plist`),
+    readFile = (p) => readFileSync(p, "utf8"),
+    fileExists = (p) => existsSync(p),
+    realpath = (p) => {
+      // Runtime-agnostic: realpathSync is imported at module top (line 27), so
+      // symlink normalization runs under both node and bun. The prior
+      // require("node:fs") threw under node ESM (require is undefined), silently
+      // returning the un-normalized path (CTL-1473 verify silent-failure finding).
+      try { return realpathSync(p); } catch { return p; }
+    },
+    canonicalConfig = defaultCanonicalShipperConfig,
+    shipperState = defaultShipperState,
+  } = deps;
+
+  if (!shipperRequired) return [];
+
+  const sev = (s) => (preinstall && s === STATUS.FAIL ? STATUS.WARN : s);
+  const checks = [];
+
+  let xml;
+  try {
+    xml = readFile(plistPath);
+  } catch {
+    checks.push(mkCheck(
+      "shipper-installed",
+      sev(STATUS.FAIL),
+      `log-shipper agent (${MANIFEST_LABELS.shipper}) not installed — daemon logs won't reach Loki; run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  const { loaded, lastExit } = shipperState();
+  if (!loaded) {
+    checks.push(mkCheck(
+      "shipper-installed",
+      sev(STATUS.FAIL),
+      `log-shipper plist present but not loaded by launchd — run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  // CTL-1473 remediate (round-3): inspect lastExit exactly like checkReaper
+  // (line ~1728). The prior code destructured only `loaded` and dropped
+  // lastExit, so a loaded-but-crash-looping shipper (LastExitStatus 127/78,
+  // shipping nothing) with a canonical --config path reported shipper-config:
+  // PASS — the exact "green while shipping nothing" failure this ticket exists
+  // to prevent. FAIL (sev-wrapped so the preinstall gate downgrades to WARN)
+  // given shipsLogs criticality; PASS on 0 (clean) or null (loaded but never
+  // run yet) falls through to the canonical --config check below.
+  if (lastExit === 127) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited 127 (program path unresolved) — shipping nothing; reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+  if (typeof lastExit === "number" && lastExit !== 0) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited ${lastExit} — crash-looping and shipping nothing; check the shipper log and reinstall ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  // Extract the --config argument from the plist ProgramArguments
+  const cfgMatch = xml.match(/<string>([^<]*config\.alloy)<\/string>/);
+  const bakedConfig = cfgMatch ? cfgMatch[1] : null;
+  if (!bakedConfig) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper plist present and loaded but no --config alloy path found in ${plistPath} (malformed plist)`,
+    ));
+    return checks;
+  }
+
+  const canonical = typeof canonicalConfig === "function" ? canonicalConfig() : canonicalConfig;
+  if (!canonical) {
+    checks.push(mkCheck(
+      "shipper-config",
+      STATUS.WARN,
+      `log-shipper config path unverifiable (no pluginDirs in Layer-2 config) — baked path: ${bakedConfig}`,
+    ));
+    return checks;
+  }
+
+  const bakedExists = fileExists(bakedConfig);
+  if (!bakedExists) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper --config path does not exist on disk (ephemeral/deleted worktree?): ${bakedConfig} — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  let resolvedBaked = bakedConfig;
+  let resolvedCanon = canonical;
+  try { resolvedBaked = realpath(bakedConfig); } catch { /* use raw */ }
+  try { resolvedCanon = realpath(canonical); } catch { /* use raw */ }
+
+  if (resolvedBaked !== resolvedCanon) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper --config points at a non-canonical path (likely a deleted worktree): ${bakedConfig} (expected: ${canonical}) — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  checks.push(mkCheck("shipper-config", STATUS.PASS, `log-shipper config path is canonical (${bakedConfig})`));
+  return checks;
+}
+
+
 // checkCloudTokenEnv — CTL-1307. ADVISORY for the cluster-shared-token distribution
 // checks below (the `cloud-token` row's original CTL-1307 scope): CATALYST_CLOUD_TOKEN
 // is an OPTIONAL extension for a cluster node — a node stays fully local-only without
@@ -3156,6 +3318,95 @@ async function defaultLinearGraphQLPost(query, token) {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+// parseEnvFileVar / overlayDaemonDrainEnv — CTL-1678 (Codex P2). Read a single
+// `[export ]KEY=val` assignment out of an env-file body (same shape parseEnvFileExecutor
+// matches for CATALYST_EXECUTOR) and overlay the two durable drain overrides onto an env
+// object. The daemon launcher `source`s execution-core.env AFTER inheriting the ambient
+// env, so a file assignment wins over an inherited one — the overlay reproduces that
+// precedence (file value replaces ambient only when the file actually sets the key).
+function parseEnvFileFlag(text, re) {
+  if (typeof text !== "string" || !text) return null;
+  const m = text.match(re);
+  return m ? m[1] : null;
+}
+function overlayDaemonDrainEnv(env, envFileText) {
+  // Literal per-key regexes (no dynamic RegExp) mirroring parseEnvFileExecutor. File
+  // value replaces ambient only when the file actually sets the key (matching `source`).
+  const out = { ...env };
+  const dd = parseEnvFileFlag(envFileText, /^\s*(?:export\s+)?CATALYST_DRAIN_DISABLED=["']?([^"'\s]+)/m);
+  if (dd !== null) out.CATALYST_DRAIN_DISABLED = dd;
+  const bd = parseEnvFileFlag(envFileText, /^\s*(?:export\s+)?CATALYST_BOOT_DRAINED=["']?([^"'\s]+)/m);
+  if (bd !== null) out.CATALYST_BOOT_DRAINED = bd;
+  return out;
+}
+
+// checkDrainDisabled — CTL-1678. Advisory report of the per-node drain override.
+// A worker with CATALYST_DRAIN_DISABLED=1 permanently ignores the drain flag; this
+// surfaces the third "draining-but-ignored" state so an operator scanning doctor
+// output sees an active neutralization. NEVER FAILs (advisory, like checkWorkerLabels)
+// — the override is an intended operator action, so its presence must not block the
+// activation gate. WARN only when the flag is present AND being ignored; PASS/INFO
+// otherwise. Worker-suite only (the env is worker-only).
+export function checkDrainDisabled(deps = {}) {
+  const {
+    env = process.env,
+    orchDir = getExecutionCoreDir(),
+    resolveDrainState: _resolve = resolveDrainState,
+    // CTL-1678 (Codex P2): the durable CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED
+    // overrides live in the machine-local execution-core.env that the daemon launcher
+    // sources at start — `catalyst-doctor` runs doctor.mjs WITHOUT sourcing it, so a
+    // naive process.env read reports "honors the drain flag" while the running daemon
+    // ignores it (contradictory operator health output). Overlay the file's values onto
+    // the ambient env (file wins, matching `source` semantics) so this check mirrors the
+    // daemon's EFFECTIVE env. Mirrors checkSdkDaemonEnv's env-file read for CATALYST_EXECUTOR.
+    // Injectable seam; default reads the real file, absent/unreadable → "".
+    execCoreEnvPath = defaultExecCoreEnvPath(),
+    readEnvFile = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return "";
+      }
+    },
+    // CTL-1678 (Codex round-3 P1): when a daemon is RUNNING, the file overlay below can
+    // still lie — the overrides are restart-only, so a file edited after daemon start
+    // describes the NEXT daemon, not this one. Prefer the live daemon's boot-time
+    // snapshot (pid-gated: a marker from a dead daemon is ignored); the overlay is the
+    // fallback for the stopped-daemon case, where next-start config is the honest answer.
+    readRuntimeEnv = readDaemonRuntimeEnv,
+  } = deps;
+  const runtime = readRuntimeEnv(orchDir);
+  const effectiveEnv = runtime
+    ? {
+        CATALYST_DRAIN_DISABLED: runtime.drainDisabled ? "1" : "0",
+        // drainDisabled is recorded post-precedence (boot-drain already folded in), so
+        // the synthetic env never re-triggers isDrainDisabled's boot-drain gate.
+        CATALYST_BOOT_DRAINED: "0",
+      }
+    : overlayDaemonDrainEnv(env, readEnvFile(execCoreEnvPath));
+  const { flagPresent, disabled } = _resolve(orchDir, { env: effectiveEnv });
+  if (disabled && flagPresent) {
+    return mkCheck(
+      "drain-disabled",
+      STATUS.WARN,
+      "drain flag is present but being IGNORED (CATALYST_DRAIN_DISABLED=1) — " +
+        "this node admits new work despite an active drain (CTL-1678)",
+    );
+  }
+  if (disabled) {
+    return mkCheck(
+      "drain-disabled",
+      STATUS.PASS,
+      "drain-disabled — this node ignores the drain flag (CATALYST_DRAIN_DISABLED=1, CTL-1678)",
+    );
+  }
+  return mkCheck(
+    "drain-disabled",
+    STATUS.INFO,
+    "not drain-disabled — this node honors the drain flag (CTL-1678)",
+  );
 }
 
 // checkWorkerLabels — CTL-1481. Advisory health of the workspace `worker`
@@ -4542,6 +4793,9 @@ export function checksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
+    // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
+    // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
+    preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -4705,6 +4959,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
+    () => checkLogShipper({ shipsLogs: shipsLogs("worker"), preinstall }), // CTL-1473: log-shipper present + canonical config path
     () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
     () => checkAgentBrowser(), // CTL-1500: worker browser tool present + >= min + idle-timeout wired + reaper (advisory, never FAIL)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
@@ -4716,6 +4971,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
+    () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
   ];
 }
 

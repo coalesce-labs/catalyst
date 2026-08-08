@@ -32,6 +32,7 @@ import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
   applyBootDrainPolicy, // CTL-1321: boot accepting work by default
+  writeDaemonRuntimeEnv, // CTL-1678: boot-time env snapshot for read-only surfaces
   getRegistryPath,
   getEventLogPath,
   getJobsRoot, // CTL-1165 D3: job-dir GC root
@@ -41,6 +42,7 @@ import {
   readWaitWatcherConfig,
   readMemorySamplerConfig,
   readFleetHealthConfig, // CTL-1165 D5: fleet-health guardrail config (selfHeal default OFF)
+  readDaemonWatchdogConfig, // CTL-1502: stuck-but-alive daemon watchdog config (shadow default)
   readRatelimitPollerConfig,
   getHostName, // CTL-862
   resolveClusterHosts, // CTL-1273/CTL-1271: roster + source + multiHost for the boot assertion
@@ -57,6 +59,8 @@ import {
   readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
   hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
+  readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
+  readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -68,6 +72,7 @@ import {
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
+import { startDaemonWatchdogProbe as realStartDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs"; // CTL-1502: stuck-but-alive daemon watchdog
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
@@ -125,7 +130,7 @@ import {
   clearDispositionEmit as defaultClearDispositionEmit, // Codex #2970 round 3: reset the in-process worker.transition dedup after an out-of-band clear
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
-import { labelMarkerBase } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth)
+import { labelMarkerBase, clearStalledLabel } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle)
 import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator clear
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
@@ -188,6 +193,8 @@ let _waitWatcher = null;
 let _memorySampler = null;
 // CTL-1165 D5: pre-exhaustion fleet-health probe handle.
 let _fleetHealthProbe = null;
+// CTL-1502: stuck-but-alive daemon watchdog probe handle.
+let _daemonWatchdogProbe = null;
 // CTL-787: account-level rate-limit usage poller handle.
 let _ratelimitPoller = null;
 // CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
@@ -683,8 +690,14 @@ export async function handleCommentWake(
       clearHoldStopCooldown(orchDir, ticket, parkedPhase);
     }
 
+    // CTL-1552: clear the needs-human LABEL and its once-marker TOGETHER via
+    // clearStalledLabel — the operator-response unpark now owns both halves. The
+    // prior raw label-removal deleted the Linear label but orphaned the once-marker
+    // (workers/<T>/.linear-label-needs-human.applied), so labelOnce stayed disarmed
+    // (a genuine re-escalation could never re-apply). Both halves together re-arm
+    // the guard. Fail-open (clearStalledLabel never throws).
     try {
-      await removeLabel(ticket, "needs-human"); // CTL-1067 Bug 3: was "needs-human/question"
+      clearStalledLabel(orchDir, ticket, "needs-human", { removeLabel });
     } catch {
       /* fail-open */
     }
@@ -815,6 +828,14 @@ export function startDaemon({
   // undefined → resolve from config (env + Layer-1 via configPath) in the boot
   // body below; tests may force true/false and that wins via `??`.
   enableFleetHealth = undefined,
+  // CTL-1502: stuck-but-alive daemon watchdog probe. Injectable for tests; gated
+  // by the readDaemonWatchdogConfig mode (default "shadow" → enabled; off disables).
+  // Shadow-first: it detects + logs would-restart but performs no restart until an
+  // operator flips it to enforce.
+  startDaemonWatchdogProbe = realStartDaemonWatchdogProbe,
+  // undefined → resolve from config (env + Layer-1 via configPath) below; tests
+  // may force true/false and that wins via `??`.
+  enableDaemonWatchdog = undefined,
   // CTL-787: account-level rate-limit usage poller. Injectable for tests; gated
   // by a config knob (default-on, CATALYST_RATELIMIT_POLLER=0 disables) like the
   // memory sampler.
@@ -947,6 +968,15 @@ export function startDaemon({
     writeFileSync(tmp, String(process.pid));
     renameSync(tmp, pidFile);
   }
+
+  // CTL-1678 (Codex round-3 P1): snapshot the drain-override env THIS process captured,
+  // keyed by our pid, so read-only surfaces (status / doctor / verify-node) report the
+  // running daemon's effective state instead of re-reading the mutable env file (whose
+  // edits are restart-only and may describe a future daemon, not this one). Written
+  // AFTER the pid file — readers require both to agree, so the reverse order would
+  // publish a snapshot that is briefly unverifiable. `pidFile` is recorded in the
+  // payload because EXECUTION_CORE_PID_FILE can relocate it (round-5 P2).
+  writeDaemonRuntimeEnv(orchDir, { pidFile });
 
   // A throw from any composed boot step must not leave a stale PID file —
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
@@ -1367,6 +1397,17 @@ export function startDaemon({
       _fleetHealthProbe = startFleetHealthProbe({ orchDir, config: fleetHealthConfig });
     }
 
+    // CTL-1502: start the stuck-but-alive daemon watchdog. SHADOW by default
+    // (detect + log would-restart; no restart until an operator flips to enforce).
+    // Inside the same try/catch so a throw triggers PID-file cleanup via stopDaemon.
+    // Config resolved WITH configPath so the Layer-1
+    // catalyst.orchestration.daemonWatchdog knobs take effect, and passed to the
+    // probe so it reads the SAME resolved thresholds.
+    const daemonWatchdogConfig = readDaemonWatchdogConfig(configPath);
+    if (enableDaemonWatchdog ?? daemonWatchdogConfig.enabled) {
+      _daemonWatchdogProbe = startDaemonWatchdogProbe({ config: daemonWatchdogConfig });
+    }
+
     // CTL-787: start the account-level rate-limit usage poller. Inside the same
     // try/catch so a throw triggers PID-file cleanup via stopDaemon.
     if (enableRatelimitPoller) {
@@ -1579,6 +1620,21 @@ export function startDaemon({
       rewalkDispatched: _bootResume?.dispatched ?? 0,
     },
   });
+  // CTL-1552: record which config LAYER each governance knob resolved from
+  // (env-override / config / default) at boot, so an operator can tell at a
+  // glance whether e.g. board-health enforce came from the host env or Layer-2 —
+  // previously only the beliefs booleans' sources were legible. effectiveFlags
+  // carries the resolved mode values; flagSources carries the layer each came
+  // from (now including boardHealth/recoveryPass/unstuckSweep/deadDocWorker).
+  // Fail-open — the boot self-report must never block startup.
+  try {
+    log.info(
+      { effectiveFlags: readGovernanceConfig(), flagSources: readGovernanceSources() },
+      "execution-core daemon: governance flags resolved (value ← layer)",
+    );
+  } catch {
+    /* best-effort boot self-report */
+  }
   // CTL-1271: announce roster + source + multiHost at boot so an operator can
   // always read what the daemon resolved and where it came from.
   log.info(
@@ -2114,6 +2170,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: fleet-health-probe stop failed");
     }
     _fleetHealthProbe = null;
+  }
+  // CTL-1502: stop the stuck-but-alive daemon watchdog probe.
+  if (_daemonWatchdogProbe) {
+    try {
+      _daemonWatchdogProbe.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: daemon-watchdog stop failed");
+    }
+    _daemonWatchdogProbe = null;
   }
   // CTL-787: stop the account-level rate-limit usage poller.
   if (_ratelimitPoller) {

@@ -502,6 +502,88 @@ export function reasoningRecoveryPass(items, opts = {}) {
 // CTL-1496: the failureReason value emitted by phase-teardown's pr_not_merged gate.
 export const PR_NOT_MERGED_REASON = "pr_not_merged";
 
+// CTL-1680: phase-monitor-deploy's empty-mergeCommitSha false-done guard emits bespoke prose
+// reasons (not teardown's literal "pr_not_merged"). They all share this recognizable prefix.
+// Recognize them so the same live PR-state probe runs, instead of falling through to defer/escalate.
+export const MONITOR_DEPLOY_EMPTY_SHA_PREFIX =
+  "phase-monitor-merge.json has empty .pr.mergeCommitSha";
+// CTL-1680 (Codex #3079 round-3 P1): pull the PR number out of a failure reason that
+// names one. phase-monitor-deploy emits `… gh REST fallback also returned empty for
+// pr#<N>`; the tolerant pattern also accepts `PR #<N>` / `pr #<N>` so a future reason
+// phrased that way is picked up too. Returns a positive integer or undefined — never
+// throws, and never guesses from a bare number (an unprefixed digit run in prose is
+// far more likely a SHA fragment, count, or timestamp than a PR id).
+export function parsePrNumberFromReason(reason) {
+  if (typeof reason !== "string") return undefined;
+  const m = /\bpr\s*#(\d+)\b/i.exec(reason);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+// CTL-1680 (Codex #3079 round-4 P1): the reason string is only ONE of the places the
+// PR number lives, and two production reasons carry none —
+// phase-monitor-deploy's "…no PR number available for gh REST fallback" (phase-pr.json
+// had no `.pr.number`) and "…gh repo view returned empty" (the number WAS known but was
+// never written into the prose). For those, the number is still on disk in a SIBLING
+// phase artifact next to the failing signal. Read it from there, most-authoritative
+// first:
+//   phase-pr.json        .pr.number      — the PR the pipeline actually opened
+//   phase-monitor-merge  .pr.number      — same PR, recorded again at merge watch
+//   phase-implement.json .draftPr.number — the early draft PR (CTL-783), the only
+//                                          record when the pipeline never reached `pr`
+// Without this the probe falls through to a `--state all --limit 1` title search, which
+// on a ticket with several historical PRs can resolve a DIFFERENT attempt and recover
+// ITS merge SHA — resuming deployment on the wrong commit.
+//
+// Pure over the filesystem and total: any missing file, unreadable path, malformed JSON,
+// or non-positive value is skipped, and an exhausted search returns undefined so the
+// caller keeps its existing search fallback. `signalPath` is the failing phase signal's
+// own path (WorkerSignal.signalPath); its directory is the worker dir. A flat legacy
+// signal (workers/<T>.json) has no sibling phase artifacts — the reads simply miss.
+const PR_NUMBER_SIBLING_SOURCES = [
+  ["phase-pr.json", (d) => d?.pr?.number],
+  ["phase-monitor-merge.json", (d) => d?.pr?.number],
+  ["phase-implement.json", (d) => d?.draftPr?.number],
+];
+
+export function prNumberFromWorkerDir(signalPath, { readFile = readFileSync } = {}) {
+  if (typeof signalPath !== "string" || signalPath === "") return undefined;
+  const dir = dirname(signalPath);
+  for (const [name, pick] of PR_NUMBER_SIBLING_SOURCES) {
+    let n;
+    try {
+      n = pick(JSON.parse(readFile(join(dir, name), "utf8")));
+    } catch {
+      continue; // absent / unreadable / malformed → try the next source
+    }
+    const v = Number(n);
+    if (Number.isInteger(v) && v > 0) return v;
+  }
+  return undefined;
+}
+
+// CTL-1680 (Codex #3079 round-4 P1): resolve the PR number for a recovery item from
+// every place it can legitimately live, most-precise first — the failure reason's own
+// `pr#<N>`, then the sibling phase artifacts on disk. Returns undefined when nothing
+// names a PR, which leaves the probe's title-search fallback in place.
+export function resolvePrNumberForRecovery(evidence, { readFile = readFileSync } = {}) {
+  const fromReason = parsePrNumberFromReason(
+    evidence?.failureReason ?? evidence?.signal?.failureReason,
+  );
+  if (fromReason !== undefined) return fromReason;
+  return prNumberFromWorkerDir(evidence?.signalPath ?? evidence?.signal?.signalPath, {
+    readFile,
+  });
+}
+
+export function isPrMergeUnconfirmedReason(reason) {
+  return (
+    reason === PR_NOT_MERGED_REASON ||
+    (typeof reason === "string" && reason.startsWith(MONITOR_DEPLOY_EMPTY_SHA_PREFIX))
+  );
+}
+
 // CTL-1496: classify a pr_not_merged recovery item by probing live PR state.
 // All GitHub calls are behind the injectable probePrBlock seam so this function
 // stays pure and unit-testable with a fake probe.
@@ -522,9 +604,18 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
   const repo = evidence.repo ?? evidence.signal?.repo ?? undefined;
   const worktreePath =
     evidence.worktreePath ?? evidence.signal?.worktreePath ?? undefined;
+  // CTL-1680 (Codex #3079 round-3/4 P1): phase-monitor-deploy's empty-SHA guard names
+  // the PR in its own reason string (`… returned empty for pr#<N>`). Thread that
+  // number to the probe so it resolves THAT PR exactly. Without it, a ticket with no
+  // head branch and several non-open historical PRs fell back to a title search that
+  // collapses every match to one — and the MERGED branch below would then recover a
+  // DIFFERENT PR's merge SHA and resume deployment on the wrong commit. Round 4: two
+  // production reasons carry no `pr#<N>` at all, so fall back to the sibling phase
+  // artifacts on disk, where the exact number is still recorded.
+  const prNumber = resolvePrNumberForRecovery(evidence);
   let probe;
   try {
-    probe = probePrBlock(ticket, { branch, repo, worktreePath });
+    probe = probePrBlock(ticket, { branch, repo, worktreePath, prNumber });
   } catch (e) {
     log?.(`pr-block probe failed: ${e.message}`);
     return {
@@ -540,7 +631,30 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
     return {
       decision: "escalate",
       fix_class: "human",
-      details: { reason: `pr_not_merged: no open PR found for ${ticket}` },
+      details: { reason: `pr_not_merged: no PR found for ${ticket}` },
+    };
+  }
+
+  // CTL-1680: the empty-mergeCommitSha family (isPrMergeUnconfirmedReason) can fire
+  // on a PR that ACTUALLY merged — monitor-merge confirmed REST `.merged==true` but
+  // recorded an empty SHA, so monitor-deploy's guard tripped. With `--state all` the
+  // probe now resolves that PR as MERGED. The correct recovery is to re-record the
+  // merge SHA and resume monitor-deploy — NOT to escalate a successfully-merged PR to
+  // a human (Codex #3079 P1: the prior `--state open` probe missed it → false
+  // "no open PR" escalate). A merged PR has no failing/pending checks or open threads,
+  // so without this branch it would fall through to the generic terminal escalate.
+  if (probe.state === "MERGED") {
+    const sha = probe.mergeCommitSha;
+    return {
+      decision: "fix",
+      fix_class: "bounded-llm",
+      details: {
+        reason:
+          `PR #${probe.prNumber} is already MERGED` +
+          (sha ? ` (${sha.slice(0, 10)})` : "") +
+          ` but the merge SHA was not recorded; recover it and resume monitor-deploy`,
+        brief: generateRemediateBrief("pr-merge-sha-missing", probe),
+      },
     };
   }
 
@@ -633,10 +747,12 @@ export function defaultClassifyTicket(evidence, opts = {}) {
   // Extract evidence fields
   const { logsOutput, jobState, signal, beliefState, failureReason } = evidence;
 
-  // CTL-1496: pr_not_merged gets a live PR-state probe before any generic rules.
-  // Only fires for this specific failureReason; all other paths are untouched.
+  // CTL-1496 / CTL-1680: route to the live PR-state probe for any "merge not confirmed" failure.
+  // Covers teardown's literal "pr_not_merged" (CTL-1496) AND phase-monitor-deploy's bespoke
+  // empty-mergeCommitSha prose reasons (CTL-1680), which share a recognizable prefix.
+  // All other failure reasons are intentionally untouched — the probe is bounded to this family.
   const effectiveFailureReason = failureReason ?? signal?.failureReason;
-  if (effectiveFailureReason === PR_NOT_MERGED_REASON) {
+  if (isPrMergeUnconfirmedReason(effectiveFailureReason)) {
     return classifyPrNotMerged(evidence, { probePrBlock: probePrBlock ?? defaultProbePrBlock, log });
   }
 
@@ -890,6 +1006,25 @@ export function generateRemediateBrief(category, probe = null) {
     ]
       .filter(Boolean)
       .join(" "),
+    // CTL-1680: the PR merged but monitor-merge recorded an empty merge SHA, so
+    // monitor-deploy's empty-SHA guard false-failed. No code fix is needed — the work
+    // shipped; recover the SHA and let the pipeline proceed.
+    "pr-merge-sha-missing": [
+      probe
+        ? `PR #${probe.prNumber} is already MERGED` +
+          (probe.mergeCommitSha ? ` (merge commit ${probe.mergeCommitSha}).` : ".")
+        : "The PR for this ticket is already merged.",
+      "Do NOT re-merge or reopen it. Read the true merge commit SHA from " +
+        "`gh api repos/{owner}/{repo}/pulls/<n> --jq .merge_commit_sha`, " +
+        "write it into `.pr.mergeCommitSha` (and `.pr.mergedAt`, `.pr.ciStatus=merged`) " +
+        "in the ticket's phase-monitor-merge.json signal file, then re-dispatch " +
+        "monitor-deploy so the pipeline resumes from the recorded SHA.",
+      "Escalate ONLY if the PR is NOT actually merged on the base branch " +
+        "(verify with `gh pr view <n> --json state,mergedAt` — `merged` is not a " +
+        "supported `gh pr view --json` field; merged means state == \"MERGED\").",
+    ]
+      .filter(Boolean)
+      .join(" "),
   };
   return briefs[category] ?? `Resolve the ${category} issue and retry the phase.`;
 }
@@ -1106,12 +1241,18 @@ function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
     const signal = {
       ...prior,
       // CTL-1157 F #6 (Codex round-4): persist the ticket on the signal. signal-reader
-      // parseSignal keys off raw.ticket, and status:"needs-human" is NON-terminal, so
-      // this fresh recovery-pass signal wins over the failed phase signal — WITHOUT a
-      // ticket, readWorkerSignals() would then report ticket:null and scheduler-recovery
-      // / board-health consumers would lose the escalated ticket after the first pass.
+      // parseSignal keys off raw.ticket — WITHOUT a ticket, readWorkerSignals() would
+      // report ticket:null and scheduler-recovery / board-health consumers would lose
+      // the escalated ticket after the first pass.
+      // CTL-1552: status normalized to the terminal "stalled" + stalledReason (was the
+      // bespoke non-terminal "needs-human"). byActivePhase now ranks this vs. the failed
+      // phase signal by updatedAt recency (both terminal): this escalation is written
+      // LAST, so it stays the freshest and still wins. isTicketInFlight now frees the
+      // slot (intended). needs-human SEMANTICS ride on needsHumanSince + explanation +
+      // the Linear label/marker, not the raw status.
       ticket,
-      status: "needs-human",
+      status: "stalled",
+      stalledReason: "needs_human",
       needsHumanSince:
         typeof prior.needsHumanSince === "string" && prior.needsHumanSince !== ""
           ? prior.needsHumanSince

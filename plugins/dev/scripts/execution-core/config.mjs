@@ -8,7 +8,7 @@
 
 import { homedir, hostname } from "node:os";
 import { resolve, join } from "node:path";
-import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync, renameSync } from "node:fs";
 
 // CTL-1211: schema-version policy for cluster config. config-schema.mjs is a
 // dep-free sibling leaf, so this import cannot reintroduce the bun-install crash
@@ -96,8 +96,159 @@ export function getDrainFlagPath(orchDir) {
   return join(orchDir, "drain");
 }
 
-export function isDraining(orchDir) {
-  return existsSync(getDrainFlagPath(orchDir));
+// CTL-1678: per-node drain override. A worker sets CATALYST_DRAIN_DISABLED=1 in its
+// durable Layer-2 execution-core.env to PERMANENTLY ignore the drain flag (an
+// unattributed writer keeps halting the fleet — CTL-1675). `=== "1"` opt-in, matching
+// applyBootDrainPolicy's CATALYST_BOOT_DRAINED idiom. `env` is an injectable seam.
+//
+// CTL-1678 (Codex P1): boot-drain is AUTHORITATIVE over this worker-only override.
+// A node booted deliberately drained (CATALYST_BOOT_DRAINED=1 — the developer/monitor
+// idiom, whose sentinel applyBootDrainPolicy re-sets on every boot) must STAY drained
+// even if CATALYST_DRAIN_DISABLED=1 is also present: the override neutralizes an
+// OPERATIONAL drain sentinel, never the boot-drain policy, which the config contract
+// documents as "deliberately independent and unchanged". Both env vars persist for the
+// daemon's lifetime, so gating here keeps the override inert on a boot-drained node
+// across every runtime tick — and propagates to every consumer (isDraining,
+// resolveDrainState, and the maybeEmitDrainIgnored tripwire, which must NOT fire
+// "ignored" on a node that is legitimately boot-draining).
+export function isDrainDisabled(env = process.env) {
+  if (env?.CATALYST_BOOT_DRAINED === "1") return false;
+  return env?.CATALYST_DRAIN_DISABLED === "1";
+}
+
+// CTL-1678: the real drain chokepoint. flagPresent = the sentinel file exists;
+// disabled = the per-node override; draining = flagPresent && !disabled (the value
+// every admission consumer acts on). Status surfaces read the full object so they can
+// report "draining-but-ignored" distinctly from "not draining".
+export function resolveDrainState(orchDir, { env = process.env } = {}) {
+  const flagPresent = existsSync(getDrainFlagPath(orchDir));
+  const disabled = isDrainDisabled(env);
+  return { flagPresent, disabled, draining: flagPresent && !disabled };
+}
+
+// CTL-1678: isDraining now delegates to resolveDrainState so the flag-file read lives
+// in exactly one place. The optional second arg is an injectable env seam; every
+// existing call site passes only orchDir, so this stays backward-compatible.
+export function isDraining(orchDir, { env = process.env } = {}) {
+  return resolveDrainState(orchDir, { env }).draining;
+}
+
+// CTL-1678: once-per-episode marker for the "drain observed and ignored" tripwire.
+export function getDrainIgnoredMarkerPath(orchDir) {
+  return join(orchDir, "drain.ignored");
+}
+
+// CTL-1678 (Codex round-3 P1): the daemon's boot-time env snapshot. The durable
+// CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED overrides are restart-only — the
+// daemon captures them at launch and never re-reads execution-core.env. A read-only
+// surface (status / drain --status-read / doctor / verify-node) that sources or parses
+// the MUTABLE file therefore reports the next-restart configuration, not the env the
+// running daemon still honors. The daemon writes this marker at boot with its pid and
+// the override state it actually captured; readers prefer the marker while that pid is
+// alive and fall back to the env/file view only when no live daemon exists (where
+// "what the next start would do" IS the truthful answer).
+export function getDaemonRuntimeEnvPath(orchDir) {
+  return join(orchDir, "daemon-runtime-env.json");
+}
+
+// Fail-open (best-effort, mirrors writeBootMarker): a transient fs error must not
+// abort daemon boot. drainDisabled is recorded POST-precedence (isDrainDisabled folds
+// the boot-drain-is-authoritative rule), so readers consume it without re-deriving.
+export function writeDaemonRuntimeEnv(
+  orchDir,
+  { env = process.env, pid = process.pid, pidFile = null, now = () => new Date().toISOString() } = {}
+) {
+  const payload = {
+    pid,
+    // CTL-1678 (Codex round-5 P2): record the pid-file path the daemon ACTUALLY
+    // wrote, so a reader never has to re-derive it. EXECUTION_CORE_PID_FILE can
+    // relocate it (catalyst-execution-core, stack-reload.mjs), and a reader that
+    // guessed <orchDir>/daemon.pid would reject every snapshot on such a host —
+    // silently degrading this whole mechanism back to the mutable-file read it
+    // exists to replace. Null on a daemon started without --pid-file; readers then
+    // fall back to the same env-var chain the launcher uses.
+    pidFile,
+    startedAt: now(),
+    drainDisabled: isDrainDisabled(env),
+    bootDrained: env?.CATALYST_BOOT_DRAINED === "1",
+  };
+  try {
+    const p = getDaemonRuntimeEnvPath(orchDir);
+    const tmp = `${p}.tmp`;
+    writeFileSync(tmp, JSON.stringify(payload));
+    renameSync(tmp, p);
+  } catch { /* best-effort */ }
+  return payload;
+}
+
+// EPERM means "alive but not ours" — still alive for staleness purposes.
+function defaultIsPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+// Returns the marker ONLY when the daemon that wrote it is still alive; a marker
+// left by a crashed/stopped daemon is stale by definition and yields null.
+//
+// CTL-1678 (Codex round-4 P2): liveness alone is NOT identity. A crashed daemon
+// leaves its marker behind, and once the OS recycles that pid onto an unrelated
+// process, a bare `kill -0` probe would re-certify the dead daemon's snapshot as
+// authoritative — turning the fix for the mutable-file problem into a subtler
+// version of it. So the pid must ALSO still be the daemon of record: it has to match
+// the live contents of the launcher's daemon.pid (the same file `read_pid` gates
+// `status` on). Both conditions are required; either one failing means "no live
+// daemon" and callers fall back to the env/file view.
+// The launcher's pid-file path chain, mirrored exactly (catalyst-execution-core:24
+// `PID_FILE="${EXECUTION_CORE_PID_FILE:-$EC_DIR/daemon.pid}"`). `explicit` is the path
+// the daemon recorded in its own marker, which beats re-deriving when present.
+export function getDaemonPidPath(orchDir, { env = process.env, explicit = null } = {}) {
+  if (explicit) return explicit;
+  return env?.EXECUTION_CORE_PID_FILE || join(orchDir, "daemon.pid");
+}
+
+function defaultReadDaemonPid(orchDir, opts) {
+  try {
+    const n = Number.parseInt(readFileSync(getDaemonPidPath(orchDir, opts), "utf8").trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readDaemonRuntimeEnv(
+  orchDir,
+  { isPidAlive = defaultIsPidAlive, readDaemonPid = defaultReadDaemonPid, env = process.env } = {}
+) {
+  try {
+    const raw = JSON.parse(readFileSync(getDaemonRuntimeEnvPath(orchDir), "utf8"));
+    if (!raw || typeof raw.pid !== "number") return null;
+    // Prefer the path the daemon recorded; fall back to the launcher's env chain.
+    if (readDaemonPid(orchDir, { env, explicit: raw.pidFile ?? null }) !== raw.pid) return null;
+    if (!isPidAlive(raw.pid)) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+// resolveDrainStateForRead — the read-only-surface counterpart of resolveDrainState.
+// Flag-file presence is always read live (the sentinel is dynamic); the ENV half comes
+// from the live daemon's boot snapshot when one exists, else from the caller's env
+// (which read surfaces pre-source from execution-core.env — correct for a stopped
+// daemon, where next-start config is the running truth-to-be). `source` names which
+// tier answered so operator surfaces can say so.
+export function resolveDrainStateForRead(orchDir, { env = process.env, readRuntime = readDaemonRuntimeEnv } = {}) {
+  const runtime = readRuntime(orchDir);
+  if (runtime) {
+    const flagPresent = existsSync(getDrainFlagPath(orchDir));
+    const disabled = !!runtime.drainDisabled;
+    return { flagPresent, disabled, draining: flagPresent && !disabled, source: "daemon-runtime", daemonPid: runtime.pid };
+  }
+  return { ...resolveDrainState(orchDir, { env }), source: "env" };
 }
 
 // CTL-1095/CTL-1321: path of the once-per-episode "drained" sentinel marker. The
@@ -1541,6 +1692,86 @@ export function readWatchdogConfig() {
   return { mode, silenceThresholdMs, phaseBudgetMultiplier, reviveBudget };
 }
 
+// --- CTL-1502 — stuck-but-alive daemon watchdog config. Mode idiom mirrors
+// readWatchdogConfig (off/shadow/enforce, shadow-first); numeric knobs use the
+// env > Layer-1 catalyst.orchestration.daemonWatchdog > frozen-default
+// precedence (mirrors fleetHealthNumber). Re-reads process.env on every call so
+// tests mutate env freely. Never throws — a missing/malformed Layer-1 file falls
+// through to env/defaults.
+const DAEMON_WATCHDOG_DEFAULTS = Object.freeze({
+  intervalMs: 120_000, // ~120s tick, like fleet-health
+  dlqMaxBytes: 1_073_741_824, // 1 GiB DLQ ceiling (P1)
+  stalenessMs: 900_000, // 15 min frozen lastForwardedTs w/ backlog (P2)
+  cooldownMs: 900_000, // 15 min between restarts (> 600s launchd StartInterval)
+  sustainedTicks: 2, // consecutive breach ticks before acting (hysteresis)
+  verifyTicks: 2, // post-restart re-check window before escalating
+});
+
+// readDaemonWatchdogConfigLayer1 — pull catalyst.orchestration.daemonWatchdog out
+// of a project's .catalyst/config.json. Returns {} for a null/missing/unparseable
+// file or absent key so callers fall back to env/defaults. Never throws (mirrors
+// readFleetHealthConfigLayer1).
+export function readDaemonWatchdogConfigLayer1(configPath) {
+  if (!configPath) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const dw = parsed?.catalyst?.orchestration?.daemonWatchdog;
+    return dw && typeof dw === "object" ? dw : {};
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { configPath, err: err.message },
+        "daemon-watchdog: Layer-1 config unreadable; using defaults",
+      );
+    }
+    return {};
+  }
+}
+
+export function readDaemonWatchdogConfig(configPath) {
+  const l1 = readDaemonWatchdogConfigLayer1(configPath);
+  // CATALYST_DAEMON_WATCHDOG=0 is the kill-switch → mode:off (mirrors
+  // readWatchdogConfig's CATALYST_WATCHDOG=0). Otherwise env > Layer-1 > shadow.
+  const mode =
+    process.env.CATALYST_DAEMON_WATCHDOG === "0"
+      ? "off"
+      : resolveMode(process.env.EXECUTION_CORE_DAEMON_WATCHDOG_MODE, l1.mode);
+  return {
+    mode,
+    enabled: mode !== "off",
+    intervalMs: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_INTERVAL_MS,
+      l1.intervalMs,
+      DAEMON_WATCHDOG_DEFAULTS.intervalMs,
+    ),
+    dlqMaxBytes: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_DLQ_MAX_BYTES,
+      l1.dlqMaxBytes,
+      DAEMON_WATCHDOG_DEFAULTS.dlqMaxBytes,
+    ),
+    stalenessMs: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_STALENESS_MS,
+      l1.stalenessMs,
+      DAEMON_WATCHDOG_DEFAULTS.stalenessMs,
+    ),
+    cooldownMs: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_COOLDOWN_MS,
+      l1.cooldownMs,
+      DAEMON_WATCHDOG_DEFAULTS.cooldownMs,
+    ),
+    sustainedTicks: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS,
+      l1.sustainedTicks,
+      DAEMON_WATCHDOG_DEFAULTS.sustainedTicks,
+    ),
+    verifyTicks: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS,
+      l1.verifyTicks,
+      DAEMON_WATCHDOG_DEFAULTS.verifyTicks,
+    ),
+  };
+}
+
 // --- CTL-1137 cost-cap watcher config. SHADOW-FIRST, same shape + precedence as the
 // CTL-729 watchdog above: env > Layer-2 catalyst.costCap.* > code default, default
 // mode "shadow" (detect + log "would-abort", never kill, until an operator flips it to
@@ -1785,25 +2016,12 @@ export function readDeadDocWorkerConfig() {
 //             carrying the whole-board context. Operator-gated — never auto-enabled.
 export const BOARD_HEALTH_MODES = new Set(["off", "shadow", "enforce"]);
 
-// readSanctionedNeedsHuman — CTL-1432 (B3). The operator-sanctioned needs-human
-// latch allowlist: tickets a human has deliberately parked at needs-human that the
-// delegate must NOT re-propose as moves every scan (they drown the genuinely-stuck
-// tickets). They STAY visible in boardContext.frozenNeedsHuman — this only
-// suppresses them from proposeMoves. Env CATALYST_BH_SANCTIONED_LATCHES
-// (comma-separated ticket ids) overrides Layer-2 catalyst.boardHealth.
-// sanctionedNeedsHuman; default empty (suppress nothing).
-export function readSanctionedNeedsHuman(env = process.env) {
-  const raw = env.CATALYST_BH_SANCTIONED_LATCHES;
-  // CTL-1432 (Codex P2): a DEFINED env var — even empty — is an explicit override, so
-  // `CATALYST_BH_SANCTIONED_LATCHES=` clears the allowlist (empty → []). Only fall
-  // through to Layer-2 when the env var is UNSET (undefined).
-  if (typeof raw === "string") {
-    return raw.split(",").map((s) => s.trim()).filter(Boolean);
-  }
-  const l2 = readLayer2BoardHealth();
-  const list = l2?.sanctionedNeedsHuman;
-  return Array.isArray(list) ? list.filter((x) => typeof x === "string") : [];
-}
+// CTL-1552: the per-host sanctioned-latch reader (the board-health env-var /
+// Layer-2 needs-human allowlist from CTL-1432 B3) was DELETED.
+// The "a human is holding this ticket" sanction now rides on the ticket itself —
+// the standalone `parked-by-human` Linear label board-health reads from the
+// descriptor it already receives (isParkedByHuman) — so a park applies on EVERY
+// host instead of only the one that happened to look. See board-health.mjs.
 
 function readLayer2BoardHealth() {
   try {
@@ -2138,14 +2356,49 @@ export function readGovernanceConfig(env = process.env) {
   };
 }
 
-// readGovernanceSources — parallel view of where each beliefs flag's effective
+// CTL-1552: resolveModeSource — the layer a mode reader's effective value came
+// from, mirroring each reader's env→Layer-2→default precedence exactly.
+// "env-override" (a valid mode string OR the "0" kill-switch in env) | "config"
+// (a valid Layer-2 mode) | "default". Governance modes were previously invisible
+// to the boot self-report (only BELIEFS_FLAGS were reported), so an operator
+// could not tell whether e.g. board-health enforce came from the env or Layer-2.
+function resolveModeSource(envVal, l2Mode, modes) {
+  if (envVal === "0") return "env-override"; // kill-switch is an explicit env override
+  if (typeof envVal === "string" && modes.has(envVal)) return "env-override";
+  if (typeof l2Mode === "string" && modes.has(l2Mode)) return "config";
+  return "default";
+}
+
+// readGovernanceSources — parallel view of where each governance knob's effective
 // value came from: "env-override" | "config" | "default". Used by the boot
 // self-report (boot-event.mjs) and catalyst-stack status to surface env overrides.
+// CTL-1552: extended beyond the beliefs booleans to also cover the mode-reader
+// family (boardHealth / recoveryPass / unstuckSweep / deadDocWorker).
 export function readGovernanceSources(env = process.env) {
   const l2 = readLayer2Governance();
   const out = {};
   for (const [key, envName] of Object.entries(BELIEFS_FLAGS)) {
     out[key] = resolveBeliefsFlag(env[envName], l2[key]).source;
   }
+  out.boardHealth = resolveModeSource(
+    env.CATALYST_BOARD_HEALTH,
+    readLayer2BoardHealth().mode,
+    BOARD_HEALTH_MODES,
+  );
+  out.recoveryPass = resolveModeSource(
+    env.CATALYST_RECOVERY_PASS,
+    readLayer2RecoveryPass().mode,
+    RECOVERY_PASS_MODES,
+  );
+  out.unstuckSweep = resolveModeSource(
+    env.CATALYST_UNSTUCK_SWEEP ?? env.EXECUTION_CORE_UNSTUCK_SWEEP_MODE,
+    readLayer2UnstuckSweep().mode,
+    UNSTUCK_SWEEP_MODES,
+  );
+  out.deadDocWorker = resolveModeSource(
+    env.CATALYST_DEAD_DOC_WORKER_RECLAIM,
+    readLayer2DeadDocWorker().mode,
+    DEAD_DOC_WORKER_MODES,
+  );
   return out;
 }

@@ -51,6 +51,76 @@ describe("defaultProbePrBlock — PR resolution contract (CTL-1496)", () => {
     expect(resolveCall).not.toMatch(/^pr view/);
   });
 
+  // CTL-1680 (Codex #3079 round-1 P1): when no OPEN PR exists, fall back to
+  // `--state all` so a PR that already merged (empty-mergeCommitSha recovery
+  // family) is still found instead of yielding a false "no open PR" escalation.
+  test("falls back to --state all (finds a merged PR) when --state open is empty, and surfaces mergeCommitSha", () => {
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args.join(" "));
+      const key = args.join(" ");
+      if (key.startsWith("pr list") && key.includes("--state open")) return JSON.stringify([]);
+      if (key.startsWith("pr list") && key.includes("--state all"))
+        return JSON.stringify([
+          {
+            number: 290,
+            state: "MERGED",
+            mergeStateStatus: null,
+            mergeable: null,
+            statusCheckRollup: [],
+            mergeCommit: { oid: "abc1234def5678" },
+          },
+        ]);
+      if (key.includes("api graphql")) return JSON.stringify(EMPTY_THREADS);
+      if (key.includes("pr view 290 --json reviews")) return JSON.stringify({ reviews: [] });
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-99", { gh, repo: "o/r", branch: "ryan/ctl-99-slug" });
+    expect(r.prNumber).toBe(290);
+    expect(r.state).toBe("MERGED");
+    expect(r.mergeCommitSha).toBe("abc1234def5678");
+    const listCalls = calls.filter((c) => c.startsWith("pr list"));
+    // Both the open-first probe and the all-state fallback must have fired.
+    expect(listCalls.some((c) => c.includes("--state open"))).toBe(true);
+    expect(listCalls.some((c) => c.includes("--state all"))).toBe(true);
+    const resolveCall = listCalls.find((c) => c.includes("--state all"));
+    // mergeCommit must be requested so the SHA can be recovered.
+    expect(resolveCall).toContain("mergeCommit");
+  });
+
+  // CTL-1680 (Codex #3079 round-2 P1): a ticket can have more than one PR (an
+  // earlier, now-merged attempt plus the still-open pipeline PR). The active
+  // OPEN PR must win over a newer/matching MERGED one in the no-branch
+  // title-search path — never the reverse, which would record the wrong PR's
+  // SHA and resume deployment on it instead of remediating the actually-stuck
+  // open PR.
+  test("prefers the OPEN PR over a MERGED match in the no-branch title-search path", () => {
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args.join(" "));
+      const key = args.join(" ");
+      if (key.startsWith("pr list") && key.includes("--state open"))
+        return JSON.stringify([
+          { number: 501, state: "OPEN", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", statusCheckRollup: [] },
+        ]);
+      if (key.startsWith("pr list") && key.includes("--state all"))
+        // Should never be called — the open PR already resolved the search.
+        return JSON.stringify([
+          { number: 490, state: "MERGED", mergeStateStatus: null, mergeable: null, statusCheckRollup: [] },
+        ]);
+      if (key.includes("api graphql")) return JSON.stringify(EMPTY_THREADS);
+      if (key.includes("pr view 501 --json reviews")) return JSON.stringify({ reviews: [] });
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-99", { gh, repo: "o/r" });
+    expect(r.prNumber).toBe(501);
+    expect(r.state).toBe("OPEN");
+    const listCalls = calls.filter((c) => c.startsWith("pr list"));
+    expect(listCalls.some((c) => c.includes("--state open"))).toBe(true);
+    // The all-state fallback must NOT fire once an open PR is already found.
+    expect(listCalls.some((c) => c.includes("--state all"))).toBe(false);
+  });
+
   test("resolves by --head <branch> when the branch is threaded", () => {
     const calls = [];
     const gh = (args) => {
@@ -599,5 +669,67 @@ describe("CTL-1496 remediation — probe hardening (Codex review)", () => {
     expect(repoView.cwd).toBe("/wt/CTL-9");
     const prList = calls.find((c) => c.key.startsWith("pr list"));
     expect(prList.key).toContain("-R acme/from-worktree");
+  });
+});
+
+// CTL-1680 (Codex #3079 round-3 P1): when the failure reason names the PR, resolve
+// THAT PR exactly instead of falling back to a title search that can pick a
+// different historical PR — whose merge SHA would then resume the wrong deployment.
+describe("prNumber — exact PR resolution from the failure reason", () => {
+  const EMPTY_THREADS_JSON = JSON.stringify({
+    data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } },
+  });
+
+  function ghFor({ onExact, onList }) {
+    const calls = [];
+    const gh = (args) => {
+      const key = args.join(" ");
+      calls.push(key);
+      if (key.startsWith("repo view")) return JSON.stringify({ nameWithOwner: "acme/repo" });
+      if (key.includes("api graphql")) return EMPTY_THREADS_JSON;
+      if (key.startsWith("pr view")) return JSON.stringify(onExact);
+      if (key.startsWith("pr list")) return JSON.stringify(onList);
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    return { gh, calls };
+  }
+
+  const merged = (n) => ({
+    number: n,
+    state: "MERGED",
+    mergeStateStatus: "CLEAN",
+    mergeable: "MERGEABLE",
+    statusCheckRollup: [],
+    mergeCommit: { oid: `sha-of-${n}` },
+  });
+
+  test("resolves the named PR and never runs the title search", () => {
+    const { gh, calls } = ghFor({ onExact: merged(290), onList: [merged(117)] });
+    const r = defaultProbePrBlock("CTL-9", { gh, prNumber: 290 });
+    expect(r.prNumber).toBe(290);
+    expect(r.mergeCommitSha).toBe("sha-of-290");
+    // The whole point: the WRONG historical PR (#117) is never consulted.
+    expect(calls.some((k) => k.startsWith("pr list"))).toBe(false);
+    expect(calls.some((k) => k.startsWith("pr view 290"))).toBe(true);
+  });
+
+  test("scopes the exact lookup to the resolved repo", () => {
+    const { gh, calls } = ghFor({ onExact: merged(290), onList: [] });
+    defaultProbePrBlock("CTL-9", { gh, repo: "acme/repo", prNumber: 290 });
+    expect(calls.find((k) => k.startsWith("pr view 290"))).toContain("-R acme/repo");
+  });
+
+  test("a number that resolves to nothing falls back to the search (not a probe failure)", () => {
+    const { gh, calls } = ghFor({ onExact: {}, onList: [merged(117)] });
+    const r = defaultProbePrBlock("CTL-9", { gh, prNumber: 999 });
+    expect(r.prNumber).toBe(117);
+    expect(calls.some((k) => k.startsWith("pr list"))).toBe(true);
+  });
+
+  test("no prNumber → unchanged search behavior", () => {
+    const { gh, calls } = ghFor({ onExact: merged(290), onList: [merged(117)] });
+    const r = defaultProbePrBlock("CTL-9", { gh });
+    expect(r.prNumber).toBe(117);
+    expect(calls.some((k) => k.startsWith("pr view"))).toBe(false);
   });
 });

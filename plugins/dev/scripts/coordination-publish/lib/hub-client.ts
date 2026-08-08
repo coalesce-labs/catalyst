@@ -20,6 +20,8 @@ type FetchLike = (
 export interface HubClientOpts {
   hubUrl: string;
   dlqPath: string;
+  /** Per-host cloud bearer token; sent as `Authorization: Bearer <token>`. Absent ⇒ no auth header (interim/dev). */
+  token?: string;
   /** Append a coordination_publish_degraded event here after N consecutive failures. */
   eventLogPath?: string;
   /** Consecutive-failure count that trips the degraded event. Default 5. */
@@ -68,9 +70,17 @@ export class HubClient {
   }
 
   private async sendBatch(batch: CoordinationRecord[]): Promise<void> {
+    // Publish the FULL coordination record incl. body.payload. Cross-host consumers reconstruct
+    // wake state from the payload — e.g. parseCommentCreatedEvent (monitor.mjs) reads
+    // commentId/issueId/body/authorId from body.payload; stripping it made handleCommentWake see a
+    // null author, so its self-echo guard failed open and a Catalyst-authored parking comment could
+    // re-dispatch parked work on peer hosts (Codex P1, round 10). Any future off-machine data
+    // minimization must be a deliberate allowlist that preserves these wake fields, not a blanket strip.
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.opts.token) headers["Authorization"] = `Bearer ${this.opts.token}`;
     const res = await this.fetchImpl(this.url(), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ records: batch }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
     });
