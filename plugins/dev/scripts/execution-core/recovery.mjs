@@ -2075,7 +2075,7 @@ export function reclaimDeadWorkIfPossible(
     // see detectSessionRateLimitHit's own header for the full rationale.
     // Never changes the STOP/escalate decision itself, only its explanation.
     detectRateLimit = detectSessionRateLimitHit,
-    detectUsageLimit = (id, opts) => detectUsageLimitBlock(id, { ...opts, detectTranscriptFn: detectSessionRateLimitHit }),
+    detectUsageLimit = (id, opts) => detectUsageLimitBlock(id, opts),
     appendUsageLimitEvent = defaultAppendUsageLimitEvent,
     recordDispatchFailureFn = null,
     parkLaneFn = parkLane,

@@ -3,8 +3,11 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { laneCooldownPath, readLaneCooldown, inLaneCooldown, parkLane } from "./lane-cooldown.mjs";
+import { USAGE_LIMIT_FALLBACK_MS } from "./usage-limit.mjs";
 let dir;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "lane-cooldown-")); });
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "lane-cooldown-"));
+});
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 test("parked lane expires at reset and never shortens", () => {
   const now = Date.parse("2026-08-08T20:00:00Z");
@@ -16,6 +19,12 @@ test("parked lane expires at reset and never shortens", () => {
 });
 test("missing and malformed markers fail open", () => {
   expect(inLaneCooldown(dir, "bg", Date.now())).toBe(false);
-  mkdirSync(join(dir, ".lane-cooldowns")); writeFileSync(laneCooldownPath(dir, "bg"), "{{{");
+  mkdirSync(join(dir, ".lane-cooldowns"));
+  writeFileSync(laneCooldownPath(dir, "bg"), "{{{");
   expect(inLaneCooldown(dir, "bg", Date.now())).toBe(false);
+});
+test("stale reset timestamps use the bounded fallback", () => {
+  const now = Date.parse("2026-08-08T20:00:00Z");
+  const marker = parkLane(dir, "bg", { resetsAt: "2026-08-08T19:00:00Z", now });
+  expect(marker.expiresAt).toBe(now + USAGE_LIMIT_FALLBACK_MS);
 });
