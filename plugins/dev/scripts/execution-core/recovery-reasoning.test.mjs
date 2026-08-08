@@ -383,6 +383,45 @@ describe("defaultClassifyTicket", () => {
     expect(result.decision).toBe("fix");
     expect(result.fix_class).toBe("bounded-llm");
   });
+
+  // CTL-1679 Phase 1: cluster_fence_stale is provably retry-safe (the guard bows
+  // out BEFORE any side-effect and exit-10s) — it must classify as a deterministic
+  // FIX routed to the fence-stale-redispatch seam, NOT fall to the Rule-3 escalate.
+  test("CTL-1679: cluster_fence_stale (signal) → fix / fence_stale_redispatch (not escalate)", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      jobState: null,
+      signal: { failureReason: "cluster_fence_stale", phase: "pr" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("fence_stale_redispatch");
+    expect(result.details.seam_id).toBe("fence-stale-redispatch");
+    expect(result.details.phase).toBe("pr");
+  });
+
+  test("CTL-1679: cluster_fence_stale (top-level failureReason) → fix / fence_stale_redispatch", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      failureReason: "cluster_fence_stale",
+      signal: { phase: "monitor-merge" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("fence_stale_redispatch");
+    expect(result.details.seam_id).toBe("fence-stale-redispatch");
+    expect(result.details.phase).toBe("monitor-merge");
+  });
+
+  // CTL-1679 Phase 1: rule precedence — a cluster_fence_stale signal that ALSO
+  // carries a bounded-LLM-matching log pattern still classifies deterministically
+  // (Rule 1 wins over Rule 2), mirroring the existing deterministic > bounded-LLM order.
+  test("CTL-1679: cluster_fence_stale wins over a bounded-LLM log match (deterministic precedence)", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: "CONFLICT (content): Merge conflict in src/server.ts",
+      signal: { failureReason: "cluster_fence_stale", phase: "implement" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("fence_stale_redispatch");
+  });
 });
 
 describe("reasoningRecoveryPass", () => {
@@ -541,6 +580,69 @@ describe("reasoningRecoveryPass", () => {
     expect(result.results[2].fix_class).toBe("human");
     expect(events.filter((e) => e.type === "recovery.would-fix").length).toBe(2);
     expect(events.filter((e) => e.type === "recovery.would-escalate").length).toBe(1);
+  });
+
+  // CTL-1679 Phase 1: gating — a cluster_fence_stale item flows through the
+  // classifier as a deterministic FIX. In SHADOW it emits recovery.would-fix and
+  // invokes NO seam; in ENFORCE it invokes the fence-stale-redispatch seam exactly
+  // once and emits recovery.fixed on success / recovery.fix-failed on failure.
+  const fenceStaleItem = {
+    ticket: "CTL-9",
+    evidence: {
+      logsOutput: null,
+      jobState: null,
+      signal: { failureReason: "cluster_fence_stale", phase: "pr" },
+      failureReason: "cluster_fence_stale",
+    },
+  };
+
+  test("CTL-1679: cluster_fence_stale in SHADOW → would-fix, no seam", () => {
+    const events = [];
+    let seamCalls = 0;
+    const result = reasoningRecoveryPass([fenceStaleItem], {
+      mode: "shadow",
+      invokeSeam: () => {
+        seamCalls += 1;
+        return { success: true };
+      },
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(result.results[0].decision).toBe("fix");
+    expect(result.results[0].fix_class).toBe("fence_stale_redispatch");
+    expect(seamCalls).toBe(0);
+    expect(events.some((e) => e.type === "recovery.would-fix")).toBe(true);
+  });
+
+  test("CTL-1679: cluster_fence_stale in ENFORCE → invokes seam once, emits recovery.fixed", () => {
+    const events = [];
+    const seamCalls = [];
+    reasoningRecoveryPass([fenceStaleItem], {
+      mode: "enforce",
+      invokeSeam: (ticket, seamId, brief) => {
+        seamCalls.push({ ticket, seamId, brief });
+        return { success: true, reason: "re-armed", details: {} };
+      },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(seamCalls).toHaveLength(1);
+    expect(seamCalls[0].seamId).toBe("fence-stale-redispatch");
+    expect(seamCalls[0].brief.phase).toBe("pr");
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(true);
+  });
+
+  test("CTL-1679: cluster_fence_stale ENFORCE seam failure → recovery.fix-failed", () => {
+    const events = [];
+    reasoningRecoveryPass([fenceStaleItem], {
+      mode: "enforce",
+      invokeSeam: () => ({ success: false, reason: "signal absent", details: {} }),
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(events.some((e) => e.type === "recovery.fix-failed")).toBe(true);
   });
 
   // CTL-1157 F #5 (Codex round-4): a `defer` decision must NOT write the cooldown
