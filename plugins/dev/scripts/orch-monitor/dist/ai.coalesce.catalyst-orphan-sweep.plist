@@ -16,9 +16,11 @@
        (e.g. /Users/you/.claude/plugins/marketplaces/catalyst/plugins/dev/scripts)
     3. Replace REPLACE_HOME with your home directory (e.g. /Users/you)
     4. Replace REPLACE_START_INTERVAL with the interval in seconds (e.g. 3600)
-    5. Load:
+    5. Replace REPLACE_AGENT_PATH with a PATH that resolves `node` and `claude`
+       (launchd's own default PATH omits Homebrew and ~/.local/bin — CTL-1289)
+    6. Load:
          launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
-    6. Verify:
+    7. Verify:
          launchctl list | grep orphan-sweep
          tail -f ~/catalyst/orphan-sweep.log
 
@@ -64,10 +66,22 @@
       4. "shadow" (ADR-023 dark-by-default)
     Anything not in off|shadow|enforce falls back to shadow.
   -->
+  <!--
+    CTL-1289 — without an explicit PATH, launchd runs this agent with its own
+    bare default (no ~/.local/bin, no Homebrew). orphan-sweep.sh shells out to
+    `claude agents --json` (its OWN liveness check — the thing that's supposed
+    to stop it from flipping a genuinely-running phase signal to failed) and
+    to `node` (the explanation-JSON generator for every escalation it writes).
+    Both exit-127 silently under the bare PATH: the liveness check always
+    reports "not live" and every escalation carries an empty `explanation: {}`.
+    Mirrors catalyst-stack's _stack_agent_path — keep the two in sync.
+  -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>SWEEP_PROC_WIDEN</key>
     <string>REPLACE_SWEEP_PROC_WIDEN</string>
+    <key>PATH</key>
+    <string>REPLACE_AGENT_PATH</string>
   </dict>
 
   <key>StandardOutPath</key>

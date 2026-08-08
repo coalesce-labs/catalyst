@@ -12,7 +12,7 @@ set -uo pipefail
 # Linux CI job report red on a macOS-only installer.
 #
 # BE CLEAR ABOUT THE COST: the CI runner is ubuntu, so this suite is SKIPPED there
-# and its 38 assertions only really execute on a developer's Mac. That is partial
+# and its 43 assertions only really execute on a developer's Mac. That is partial
 # coverage, not the "now wired into CI" it might look like from the workflow file.
 # Closing it properly needs a macos-latest job.
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -176,6 +176,8 @@ run "I3b: no REPLACE_HOME token in installed plist" \
   bash -c "! grep -q 'REPLACE_HOME' '${DEST}'"
 run "I3c: no REPLACE_START_INTERVAL token in installed plist" \
   bash -c "! grep -q 'REPLACE_START_INTERVAL' '${DEST}'"
+run "I3d: no REPLACE_AGENT_PATH token in installed plist" \
+  bash -c "! grep -q 'REPLACE_AGENT_PATH' '${DEST}'"
 
 # ─── I4: installed plist passes plutil -lint (or SKIP) ───────────────────────
 if command -v plutil >/dev/null 2>&1; then
@@ -356,6 +358,31 @@ else
   echo "  SKIP: I13j: jq not available"
   PASSES=$((PASSES+1))
 fi
+
+# ─── I14: CTL-1289 — the PATH key so `node`/`claude` resolve under launchd ────
+#
+# Before this fix, EnvironmentVariables carried SWEEP_PROC_WIDEN only — no
+# PATH — so orphan-sweep.sh ran with launchd's bare default PATH. Its own
+# `claude agents --json` liveness probe and `node .../escalation-explain.mjs`
+# call both exit-127'd silently under that PATH, which is precisely how a
+# genuinely-running phase signal (CAT-35/CAT-39 and others, 2026-08-08) got
+# flipped to orphan-sweep-stale by a sweep whose liveness check could never see it.
+_path_of() {   # print the PATH value in the installed plist's EnvironmentVariables
+  grep -A2 '<key>PATH</key>' "$DEST" 2>/dev/null \
+    | sed -n 's|.*<string>\(.*\)</string>.*|\1|p' | head -1
+}
+export -f _path_of
+
+rm -f "$DEST"
+_install
+run "I14a: installed plist declares a PATH key in EnvironmentVariables" \
+  bash -c "grep -q '<key>EnvironmentVariables</key>' '${DEST}' && grep -q '<key>PATH</key>' '${DEST}'"
+run "I14b: baked PATH resolves node (not launchd's bare default)" \
+  bash -c '[[ ":$(_path_of):" == *":/opt/homebrew/bin:"* || ":$(_path_of):" == *":/usr/local/bin:"* ]]'
+run "I14c: baked PATH includes ~/.local/bin (where the joined member's claude CLI lives)" \
+  bash -c "[[ \":\$(_path_of):\" == *\":${FAKE_HOME}/.local/bin:\"* ]]"
+run "I14d: baked PATH still ends in the launchd system defaults (never narrows it)" \
+  bash -c '[[ "$(_path_of)" == *":/usr/bin:/bin:/usr/sbin:/sbin" ]]'
 
 # ─── results ─────────────────────────────────────────────────────────────────
 echo ""
