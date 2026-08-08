@@ -421,7 +421,7 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/install-orphan-sweep-guard.test.sh
 
-      - name: Ensure zsh is available (CTL-1081 zsh regression coverage)
+      - name: Ensure zsh is available (phase-artifact-gate zsh regression coverage)
         # phase-artifact-gate.test.sh's Test 11 sources lib/phase-artifact-gate.sh
         # under zsh to lock down the shopt/nullglob bug this lib was written to
         # avoid (Codex P2 follow-up) — it SKIPS (not fails) when zsh is absent, so
@@ -430,7 +430,7 @@ jobs:
         # runner image so the regression coverage doesn't silently degrade to a skip.
         run: command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh)
 
-      - name: phase-artifact-gate contract + zsh regression test (CTL-1081)
+      - name: phase-artifact-gate contract + zsh regression test
         # Covers match_thoughts_artifact (tail/slug/case forms, cross-ticket
         # lookalike + hidden-file + subdirectory exclusion, deterministic sort
         # order) and the zsh-sourcing regression (Test 11) — previously unwired

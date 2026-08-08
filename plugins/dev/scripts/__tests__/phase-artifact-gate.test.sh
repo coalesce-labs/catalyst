@@ -156,10 +156,10 @@ echo ""
 echo "Test 12 (regression): match_thoughts_artifact excludes hidden/AppleDouble files"
 HIDDEN_DIR="${SCRATCH}/thoughts/shared/hidden"
 mkdir -p "$HIDDEN_DIR"
-touch "${HIDDEN_DIR}/._2026-06-12-ctl-2020.md"
-OUT12="$(match_thoughts_artifact "$HIDDEN_DIR" "CTL-2020" 2>/dev/null || echo "")"
+touch "${HIDDEN_DIR}/._2026-06-12-proj-2020.md"
+OUT12="$(match_thoughts_artifact "$HIDDEN_DIR" "PROJ-2020" 2>/dev/null || echo "")"
 RC12=0
-match_thoughts_artifact "$HIDDEN_DIR" "CTL-2020" >/dev/null 2>&1 || RC12=$?
+match_thoughts_artifact "$HIDDEN_DIR" "PROJ-2020" >/dev/null 2>&1 || RC12=$?
 assert_eq "1" "$RC12" "hidden-only dir returns non-zero (dotfile excluded)"
 assert_eq "" "$OUT12" "hidden-only dir output is empty"
 
@@ -167,10 +167,10 @@ echo ""
 echo "Test 13 (regression): match_thoughts_artifact does not descend into subdirectories"
 NEST_DIR="${SCRATCH}/thoughts/shared/nested"
 mkdir -p "${NEST_DIR}/subdir"
-touch "${NEST_DIR}/subdir/2026-06-12-ctl-3030.md"
-OUT13="$(match_thoughts_artifact "$NEST_DIR" "CTL-3030" 2>/dev/null || echo "")"
+touch "${NEST_DIR}/subdir/2026-06-12-proj-3030.md"
+OUT13="$(match_thoughts_artifact "$NEST_DIR" "PROJ-3030" 2>/dev/null || echo "")"
 RC13=0
-match_thoughts_artifact "$NEST_DIR" "CTL-3030" >/dev/null 2>&1 || RC13=$?
+match_thoughts_artifact "$NEST_DIR" "PROJ-3030" >/dev/null 2>&1 || RC13=$?
 assert_eq "1" "$RC13" "nested-only dir returns non-zero (subdirectory not descended)"
 
 echo ""
@@ -182,20 +182,20 @@ echo "Test 15 (regression): match_thoughts_artifact handles a dir path containin
 # matches. -maxdepth is purely numeric and has no such failure mode.
 BRACKET_DIR="${SCRATCH}/repo[1]/thoughts/shared/research"
 mkdir -p "$BRACKET_DIR"
-touch "${BRACKET_DIR}/2026-01-01-ctl-5050.md"
-OUT15="$(match_thoughts_artifact "$BRACKET_DIR" "CTL-5050")"
+touch "${BRACKET_DIR}/2026-01-01-proj-5050.md"
+OUT15="$(match_thoughts_artifact "$BRACKET_DIR" "PROJ-5050")"
 RC15=$?
 assert_eq "0" "$RC15" "bracket-containing dir path still matches (return code 0)"
-assert_contains "$OUT15" "2026-01-01-ctl-5050.md" "bracket-containing dir path finds the artifact"
+assert_contains "$OUT15" "2026-01-01-proj-5050.md" "bracket-containing dir path finds the artifact"
 
 echo ""
 echo "Test 14 (regression): match_thoughts_artifact prints matches in deterministic sorted order"
 ORDER_DIR="${SCRATCH}/thoughts/shared/order"
 mkdir -p "$ORDER_DIR"
-touch "${ORDER_DIR}/2026-06-14-ctl-4040-newer.md"
-touch "${ORDER_DIR}/2026-06-01-ctl-4040-older.md"
-OUT14="$(match_thoughts_artifact "$ORDER_DIR" "CTL-4040")"
-EXPECTED14="$(printf '%s\n%s' "${ORDER_DIR}/2026-06-01-ctl-4040-older.md" "${ORDER_DIR}/2026-06-14-ctl-4040-newer.md")"
+touch "${ORDER_DIR}/2026-06-14-proj-4040-newer.md"
+touch "${ORDER_DIR}/2026-06-01-proj-4040-older.md"
+OUT14="$(match_thoughts_artifact "$ORDER_DIR" "PROJ-4040")"
+EXPECTED14="$(printf '%s\n%s' "${ORDER_DIR}/2026-06-01-proj-4040-older.md" "${ORDER_DIR}/2026-06-14-proj-4040-newer.md")"
 assert_eq "$EXPECTED14" "$OUT14" "matches are lexicographically sorted regardless of traversal/creation order"
 
 echo ""
