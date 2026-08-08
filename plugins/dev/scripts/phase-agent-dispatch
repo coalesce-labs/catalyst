@@ -867,7 +867,15 @@ for _required_tool in node linearis; do
 done
 if ((${#_missing_worker_tools[@]} > 0)); then
 	_missing_worker_tools_csv="$(IFS=,; echo "${_missing_worker_tools[*]}")"
-	mark_launch_failed "required-tool-unresolvable:${_missing_worker_tools_csv}"
+	# CAT-29 (Codex P1): mark_launch_failed rewrites the LIVE phase signal and emits
+	# phase.<PHASE>.failed.<TICKET>, so running it under --dry-run would turn a preview
+	# into a real failed-phase event that wakes and mutates the orchestration. Skipped
+	# for previews, exactly like the prior_artifact_missing refusal above; the refusal
+	# itself still reports (non-zero exit + stderr) so a preview stays honest about
+	# what it would have done.
+	if [[ $DRY_RUN -eq 0 ]]; then
+		mark_launch_failed "required-tool-unresolvable:${_missing_worker_tools_csv}"
+	fi
 	die "required worker tool(s) unresolvable after PATH hardening: ${_missing_worker_tools_csv}"
 fi
 

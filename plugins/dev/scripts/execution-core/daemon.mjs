@@ -1209,26 +1209,48 @@ export function startDaemon({
     // closure IS rearmGithubTokenFromFile), but through the registry's arm path.
     armSecret("github-token", { env: process.env });
 
-    const bootResume = reconcileBoot({
-      orchDir,
-      report,
-      concurrency,
-      dispatch: dispatchFn,
-      sdkSessionHarvest,
-    }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
-    _bootResume = bootResume;
-    // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
-    // (operator may have dropped the sentinel while the daemon was down).
-    // CTL-1367 item E2: thread the resolved executor dispatch — this is the 5th
-    // dispatch entry point and previously defaulted to defaultDispatch, so an
-    // approved-resume ticket launched via bg even under executor=sdk (split-brain).
-    processApprovedResumes({ orchDir, dispatch: dispatchFn });
+    // CAT-29 (Codex P1): the dependency verdict must be resolved BEFORE anything
+    // dispatches, and it must actually quarantine the actuators. Previously this ran
+    // after reconcileBoot/processApprovedResumes had already launched workers and was
+    // consumed only by the heartbeat callbacks — so a node missing `linearis`/`node`
+    // advertised itself as non-accepting while still dispatching work that could only
+    // fail, producing stalled/retry churn. Hoisting is safe: unlike githubAuthPreflight
+    // (a 10s `gh` network round-trip, deliberately left after the dispatches) this probe
+    // is a local PATH lookup and is fail-open — an indeterminate probe returns ok:true.
+    bootDependencyState = bootDependencyPreflight({ env: process.env, log });
+    writeBootFacts(orchDir, bootDependencyState);
+    if (!bootDependencyState.ok) {
+      log.warn(
+        { missing: bootDependencyState.missing, holdReason: bootDependencyState.holdReason },
+        `execution-core boot dependencies unusable (${bootDependencyState.missing.join(", ")}) — ` +
+        `quarantined: crash-recovery re-dispatch, approved-resume dispatch, and the ` +
+        `monitor + scheduler actuators are NOT armed. The process stays UP and keeps ` +
+        `heartbeating as non-accepting so the fleet can see it refusing (CAT-29).`
+      );
+    }
+
+    // CAT-29: both boot dispatch entry points are gated on the verdict — a quarantined
+    // node must not re-launch in-flight work it cannot run.
+    if (bootDependencyState.ok) {
+      const bootResume = reconcileBoot({
+        orchDir,
+        report,
+        concurrency,
+        dispatch: dispatchFn,
+        sdkSessionHarvest,
+      }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
+      _bootResume = bootResume;
+      // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
+      // (operator may have dropped the sentinel while the daemon was down).
+      // CTL-1367 item E2: thread the resolved executor dispatch — this is the 5th
+      // dispatch entry point and previously defaulted to defaultDispatch, so an
+      // approved-resume ticket launched via bg even under executor=sdk (split-brain).
+      processApprovedResumes({ orchDir, dispatch: dispatchFn });
+    }
     // CTL-1612: NOW probe the credential — after the dispatches, so a 10s `gh` timeout can
     // never delay crash recovery. Advisory only: never throws, never blocks boot, and
     // alerts solely on a definitive 401.
     githubAuthPreflight({ env: process.env, log });
-    bootDependencyState = bootDependencyPreflight({ env: process.env, log });
-    writeBootFacts(orchDir, bootDependencyState);
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
@@ -1307,7 +1329,11 @@ export function startDaemon({
 
     // CTL-1654: the actuator arming below (monitorFn + schedulerFn + auto-tuner) is
     // gated on _isWorkerNode — see the observe-only backstop comment above.
-    if (_isWorkerNode) {
+    // CAT-29 (Codex P1): the dependency quarantine joins the CTL-1654 node-class gate —
+    // same actuator seam, same observe-only outcome. A node whose boot dependencies are
+    // unusable arms neither the monitor nor the scheduler, so it cannot dispatch or
+    // reclaim work it has no way to execute.
+    if (_isWorkerNode && bootDependencyState.ok) {
     monitorFn({
       orchDir,
       cache,
@@ -1497,9 +1523,21 @@ export function startDaemon({
       // the same gate source fns the scheduler enforces (orchDir + concurrency are
       // both in scope here). Fail-open: readAdmissionState never throws.
       _heartbeat = startHeartbeat({
+        // CAT-29 (Codex P2): the dependency hold must return the FULL admission shape
+        // — { accepting, holdReason, effectiveCapacity, activeWorkers }. The heartbeat
+        // builder serializes this object unchanged, so returning only two fields
+        // published a heartbeat missing the capacity/occupancy the readers expect.
+        // Spread the real state (never throws) so activeWorkers stays truthful, then
+        // force the hold: effectiveCapacity 0 is exactly what readAdmissionState
+        // itself reports whenever accepting is false.
         admissionFn: () => bootDependencyState.ok
           ? readAdmissionState({ orchDir, concurrency })
-          : { accepting: false, holdReason: BOOT_DEPENDENCY_HOLD_REASON },
+          : {
+              ...readAdmissionState({ orchDir, concurrency }),
+              accepting: false,
+              holdReason: BOOT_DEPENDENCY_HOLD_REASON,
+              effectiveCapacity: 0,
+            },
         boardReachableFn: () => {
           if (!bootDependencyState.ok) {
             return { reachable: false, blindTeams: listProjectsFn().length };

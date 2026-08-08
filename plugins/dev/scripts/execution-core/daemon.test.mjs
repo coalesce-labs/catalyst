@@ -36,6 +36,7 @@ import {
   writeBootFacts,
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
+import { BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { defaultDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
 import {
@@ -82,6 +83,83 @@ describe("CAT-29 boot facts", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// CAT-29 (Codex P1 "Quarantine actuators when boot dependencies are missing"):
+// storing the verdict is not enough — it has to stop the node from acting. The
+// verdict is resolved BEFORE the boot dispatches, and a failed verdict must leave
+// crash-recovery re-dispatch AND both actuators unarmed, so a node that cannot run
+// `linearis`/`node` produces no stalled/retry churn while advertising non-accepting.
+describe("CAT-29 boot dependency quarantine", () => {
+  const armed = () => {
+    const calls = [];
+    return {
+      calls,
+      fakes: {
+        recover: () => ({}),
+        reconcileBoot: () => calls.push("boot") && ({}),
+        startMonitor: () => calls.push("monitor"),
+        startScheduler: () => calls.push("scheduler"),
+        watchRegistry: false,
+      },
+    };
+  };
+
+  test("an unusable dependency verdict arms neither the boot dispatch nor the actuators", () => {
+    const { calls, fakes } = armed();
+    startDaemon({
+      ...fakes,
+      bootDependencyPreflight: () => ({
+        ok: false,
+        missing: ["linearis"],
+        holdReason: "boot-dependency-unusable",
+      }),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  test("a healthy verdict still arms the boot dispatch and both actuators", () => {
+    const { calls, fakes } = armed();
+    startDaemon({
+      ...fakes,
+      bootDependencyPreflight: () => ({ ok: true, missing: [], holdReason: null }),
+    });
+    expect(calls).toEqual(["boot", "monitor", "scheduler"]);
+  });
+
+  test("an indeterminate (degraded) probe fails OPEN — the node keeps working", () => {
+    const { calls, fakes } = armed();
+    startDaemon({
+      ...fakes,
+      bootDependencyPreflight: () => ({ ok: true, missing: [], degraded: true, holdReason: null }),
+    });
+    expect(calls).toEqual(["boot", "monitor", "scheduler"]);
+  });
+
+  // Codex P2 on the same seam: the hold branch must return the FULL admission shape.
+  // A quarantined node still heartbeats — that is how the fleet SEES it refusing.
+  test("a quarantined node still heartbeats, as non-accepting with the full admission shape", () => {
+    let captured = null;
+    const { fakes } = armed();
+    startDaemon({
+      ...fakes,
+      bootDependencyPreflight: () => ({
+        ok: false,
+        missing: ["linearis", "node"],
+        holdReason: "boot-dependency-unusable",
+      }),
+      startHeartbeat: (opts) => {
+        captured = opts;
+        return { stop() {}, started: Promise.resolve() };
+      },
+    });
+    expect(captured).not.toBe(null);
+    const admission = captured.admissionFn();
+    expect(admission.accepting).toBe(false);
+    expect(admission.holdReason).toBe(BOOT_DEPENDENCY_HOLD_REASON);
+    expect(admission.effectiveCapacity).toBe(0);
+    expect(admission).toHaveProperty("activeWorkers");
   });
 });
 
