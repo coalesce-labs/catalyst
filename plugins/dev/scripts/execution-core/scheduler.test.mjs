@@ -388,6 +388,42 @@ describe("listInFlightTickets / readMaxParallel / computeFreeSlots", () => {
     writeSignal("CTL-3", "triage", "failed");
     expect([...listInFlightTickets(orchDir)]).toEqual(["CTL-1"]);
   });
+
+  // CTL-1667 (review fix, round 4, #3061): a ticket carrying a STALE retained
+  // `teardown: done` signal (proven stale relative to a newer phase-pr.json)
+  // must still count as in-flight — otherwise it is excluded from this Set,
+  // the advancement sweep's own sanitizeStalePostPrSignals call never gets a
+  // chance to run for it (that loop only visits tickets THIS function
+  // returns), and the ticket wedges permanently: terminalDoneOnce correctly
+  // refuses Done (its own staleness check), but nothing ever re-dispatches it
+  // either. Without the fix inside listInFlightTickets itself, this ticket
+  // would be excluded exactly like CTL-2 above.
+  test("a STALE teardown:done signal (newer sibling phase-pr.json) still counts as in-flight", () => {
+    const dir = join(orchDir, "workers", "CTL-4");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-teardown.json"),
+      JSON.stringify({
+        ticket: "CTL-4",
+        phase: "teardown",
+        status: "done",
+        completedAt: "2026-08-01T00:00:00Z",
+        updatedAt: "2026-08-01T00:00:00Z",
+      })
+    );
+    // pr (re)dispatched AFTER teardown completed — proves staleness.
+    writeFileSync(
+      join(dir, "phase-pr.json"),
+      JSON.stringify({
+        ticket: "CTL-4",
+        phase: "pr",
+        status: "done",
+        pr: { number: 400 },
+        startedAt: "2026-08-05T00:00:00Z",
+      })
+    );
+    expect([...listInFlightTickets(orchDir)]).toContain("CTL-4");
+  });
   test("readMaxParallel reads state.json, defaults to 1", () => {
     expect(readMaxParallel(orchDir)).toBe(1);
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
@@ -13872,5 +13908,52 @@ describe("CTL-1667 (review fix, round 3): sanitize stale post-PR signals before 
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-83", phase: "monitor-deploy" }]);
     expect(r.advanced).toEqual([{ ticket: "CTL-83", phase: "monitor-deploy" }]);
+  });
+
+  // Review fix (Codex P1, round 4, #3061): a stale TEARDOWN signal specifically
+  // (not just monitor-merge/monitor-deploy) is the deepest case — teardown is
+  // TERMINAL_PHASE, so isTicketInFlight treats it as terminal and
+  // listInFlightTickets excludes the ticket BEFORE the advancement loop (and
+  // its sanitizeStalePostPrSignals call) ever runs. terminalDoneOnce correctly
+  // refuses Done (isTerminalTeardownStale), but without sanitizing inside
+  // listInFlightTickets itself the ticket was permanently wedged: refused
+  // forever, advanced never. This end-to-end test drives a full schedulerTick
+  // and asserts the ticket actually gets RE-DISPATCHED (proving it was
+  // reachable), not just that the lower-level helpers return the right shape.
+  test("a ticket with a STALE teardown:done signal is reachable and gets RE-dispatched (not permanently wedged)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dir = join(orchDir, "workers", "CTL-84");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-teardown.json"),
+      JSON.stringify({
+        ticket: "CTL-84",
+        phase: "teardown",
+        status: "done",
+        completedAt: "2026-08-01T00:00:00Z",
+        updatedAt: "2026-08-01T00:00:00Z",
+      })
+    );
+    // pr (re)dispatched AFTER teardown completed — proves staleness, and is
+    // the only OTHER phase signal present (a stripped-down repro: nothing
+    // else masks whether the ticket ever reached the advancement sweep).
+    writeSignalRaw("CTL-84", "pr", {
+      ticket: "CTL-84",
+      phase: "pr",
+      status: "done",
+      pr: { number: 240 },
+      startedAt: "2026-08-05T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    // Sanitized signals = {pr: "done"} → deriveAdvancement's owed next phase
+    // is monitor-merge — proof the ticket was reachable, not excluded.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-84", phase: "monitor-merge" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-84", phase: "monitor-merge" }]);
   });
 });

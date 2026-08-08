@@ -1235,7 +1235,19 @@ export function listInFlightTickets(orchDir) {
   }
   for (const d of dirs) {
     if (!d.isDirectory()) continue;
-    const signals = readPhaseSignals(orchDir, d.name);
+    // CTL-1667 (review fix, round 4, #3061): sanitize BEFORE the in-flight
+    // check, not only inside the advancement loop below. isTicketInFlight
+    // treats a `teardown: done` signal as terminal (not in-flight) — so a
+    // ticket carrying a STALE retained teardown signal (proven stale relative
+    // to a newer phase-pr.json) was excluded from this Set entirely, and the
+    // advancement loop's OWN sanitizeStalePostPrSignals call — scoped to
+    // tickets this function already returned — never got a chance to run for
+    // it. terminalDoneOnce correctly refuses Done for that ticket (its own
+    // isTerminalTeardownStale check), but with the ticket excluded here it
+    // ALSO never reaches the advancement sweep to be re-dispatched — wedging
+    // the run permanently: refused forever, advanced never. Sanitizing here
+    // first makes both checks see the same (correct) picture.
+    const signals = sanitizeStalePostPrSignals(orchDir, d.name, readPhaseSignals(orchDir, d.name));
     // CTL-1323: a phantom recovery-pass dir is not real in-flight work — skip it so it
     // isn't counted as occupying a slot (and so buildGlobalRanking doesn't list it both
     // as in-flight here AND as a fresh new-work candidate once listStartedTickets drops it).
