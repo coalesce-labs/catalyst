@@ -5299,7 +5299,10 @@ export function schedulerTick(
     publishPreflightMode = "off",
     appendPublishPreflightBlockedEvent = defaultAppendPublishPreflightBlockedEvent,
     appendPublishPreflightWouldBlockEvent = defaultAppendPublishPreflightWouldBlockEvent,
-    escalatePublishDenied = () => {},
+    escalatePublishDenied = ({ orchDir: dir, ticket, explanation }) =>
+      labelNeedsHumanUnlessBeliefOwner(dir, ticket, writeStatus, {
+        env: process.env, site: "publish-preflight", explanation,
+      }),
     // CTL-1410 Phase B: in-process SDK-worker probe for the sweep. The REAL
     // registry read is the safe default here — it is a local Map lookup in this
     // same process (never shells out), and an empty registry (bare unit tick)
@@ -5804,14 +5807,20 @@ export function schedulerTick(
     // CAT-60: one choke-point covers advancement, parked resume, and new work.
     // Definitive denials gate only in enforce; unknown always proceeds.
     let pub = { state: "unknown" };
-    try {
-      pub = probePublishCapability({ orchDir, ticket, phase }) ?? pub;
-    } catch (err) {
-      log.warn({ ticket, phase, err: err?.message }, "publish-preflight: probe threw; dispatch proceeding");
+    if (publishPreflightMode !== "off") {
+      try {
+        pub = probePublishCapability({ orchDir, ticket, phase }) ?? pub;
+      } catch (err) {
+        log.warn({ ticket, phase, err: err?.message }, "publish-preflight: probe threw; dispatch proceeding");
+      }
     }
     if (pub.state === "denied" && publishPreflightMode !== "off") {
       if (publishPreflightMode === "enforce") {
-        safeEmit(appendPublishPreflightBlockedEvent, { ticket, phase, verdict: pub }, { ticket, phase });
+        const repoKey = pub.slug ?? ticket;
+        if (!publishWouldBlockSeen.has(repoKey)) {
+          publishWouldBlockSeen.add(repoKey);
+          safeEmit(appendPublishPreflightBlockedEvent, { ticket, phase, verdict: pub }, { ticket, phase });
+        }
         try {
           escalatePublishDenied({ orchDir, ticket, phase, verdict: pub,
             explanation: {

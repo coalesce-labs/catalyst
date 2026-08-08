@@ -59,7 +59,13 @@ _draft_pr_layer2_config_path() {
   [[ -n "$root" ]] || return 1
   project_key="$(_draft_pr_config_str "${root}/.catalyst/config.json" '.catalyst.projectKey // .projectKey' || true)"
   [[ -n "$project_key" ]] || return 1
-  contract="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/catalyst-secret-contract.sh"
+  local source_path
+  if [[ -n "${ZSH_VERSION:-}" ]]; then
+    source_path="${(%):-%x}"
+  else
+    source_path="${BASH_SOURCE[0]:-$0}"
+  fi
+  contract="$(cd "$(dirname "$source_path")" 2>/dev/null && pwd)/catalyst-secret-contract.sh"
   [[ -r "$contract" ]] || return 1
   # shellcheck source=/dev/null
   source "$contract"
@@ -83,6 +89,11 @@ _draft_pr_push_remote() {
     fi
   fi
   [[ -z "$candidate" ]] && candidate="$(_draft_pr_config_str "${CATALYST_CONFIG_PATH:-.catalyst/config.json}" '.catalyst.pr.pushRemote' || true)"
+  if [[ -z "$candidate" ]]; then
+    local upstream
+    upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+    [[ -n "$upstream" ]] && candidate="${upstream%%/*}"
+  fi
   [[ -z "$candidate" ]] && { printf 'origin\n'; return 0; }
   case "$candidate" in
     *[!A-Za-z0-9._/-]*) _draft_pr_warn "ignoring unsafe pushRemote '${candidate}'; using origin"; printf 'origin\n'; return 0 ;;

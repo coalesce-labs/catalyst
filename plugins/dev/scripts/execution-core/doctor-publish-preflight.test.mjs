@@ -32,15 +32,15 @@ describe("checkRepoPushPermission (CAT-60)", () => {
   test("fresh probe cache is reused without a gh call", () => {
     const cacheDir = mkdtempSync(join(tmpdir(), "doctor-publish-"));
     let ghCalls = 0;
-    const spawn = (cmd) => {
+    const spawn = (cmd, args) => {
       if (cmd === "git") return { status: 0, stdout: "git@github.com:coalesce-labs/catalyst.git\n" };
       ghCalls += 1;
-      return { status: 0, stdout: '{"push":true,"login":"octocat"}' };
+      return args[1] === "user" ? { status: 0, stdout: "octocat\n" } : { status: 0, stdout: '{"push":true,"owner":"coalesce-labs"}' };
     };
     const deps = { repoRoot: "/repo", cacheDir, spawn, now: () => 1000, resolveMode: () => "shadow" };
     expect(checkRepoPushPermission(deps)[0].status).toBe("pass");
     expect(checkRepoPushPermission(deps)[0].status).toBe("pass");
-    expect(ghCalls).toBe(1);
+    expect(ghCalls).toBe(3); // identity is refreshed before selecting its cache key
   });
 
   test("all messages qualify permission as push/publish", () => {
