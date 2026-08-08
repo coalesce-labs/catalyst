@@ -169,8 +169,14 @@ export function computeParity(input: {
   // whenever some unrelated pair matches. Scan THIS host's OWN would-publish stream — rows carrying a
   // `local_seq` (locally tailed), NOT inbound-pulled `hub_seq` rows whose worker_state lives on
   // another host — for terminals with no matching worker_state and report each as a divergence.
-  const workerStateKeys = new Set(workerStates.map((w) => parityKey(w.orchestrator, w.ticket)));
-  const workerStateTickets = new Set(workerStates.map((w) => w.ticket));
+  // Only TERMINAL worker_state rows count as coverage: a nonterminal projection (e.g. still
+  // `dispatched`) that the forward pass skipped has NOT reconciled the coordination terminal, so
+  // that terminal was effectively dropped and must still be flagged (Codex P1, round 11). Keying on
+  // all worker_states — terminal or not — let an identity-less failure hide behind a merely-present
+  // dispatched row for the ticket.
+  const terminalWorkerStates = workerStates.filter((w) => workerStateOutcome(w.status) !== null);
+  const workerStateKeys = new Set(terminalWorkerStates.map((w) => parityKey(w.orchestrator, w.ticket)));
+  const workerStateTickets = new Set(terminalWorkerStates.map((w) => w.ticket));
   const reportedOrphans = new Set<string>();
   for (const row of coordinationRows) {
     if (typeof row.local_seq !== "number") continue; // inbound-pulled row → worker_state is remote
@@ -180,8 +186,8 @@ export function computeParity(input: {
     const ticket = ticketFromEventName(eventName);
     if (!ticket) continue;
     const orchestrator = orchestratorFromRow(row);
-    // An identity-less terminal is covered iff ANY worker_state exists for its ticket (mirrors the
-    // forward-direction ticket fallback); a keyed terminal needs its exact (orchestrator, ticket).
+    // An identity-less terminal is covered iff a TERMINAL worker_state exists for its ticket (mirrors
+    // the forward-direction ticket fallback); a keyed terminal needs its exact TERMINAL (orchestrator, ticket).
     const covered =
       orchestrator === "" ? workerStateTickets.has(ticket) : workerStateKeys.has(parityKey(orchestrator, ticket));
     if (covered) continue;

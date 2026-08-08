@@ -103,13 +103,29 @@ describe("computeParity (CTL-1668 Phase 3)", () => {
     expect(r.verdict).toBe("inconclusive");
   });
 
-  test("non-terminal worker status → NOT a matched pair even with a terminal coordination event", () => {
+  test("non-terminal worker status + terminal coordination → not a matched pair, and the unreconciled terminal is flagged", () => {
+    // The projection is still `dispatched` but coordination recorded a terminal — the projection
+    // dropped/lagged that terminal, so it must surface as a divergence, not pass as inconclusive.
     const r = computeParity({
       workerStates: [ws("CTL-1", "dispatched")],
       coordinationRows: [row("CTL-1", "phase.teardown.complete")],
     });
     expect(r.matchedPairs).toBe(0);
-    expect(r.verdict).toBe("inconclusive");
+    expect(r.divergences.some((d) => d.ticket === "CTL-1")).toBe(true);
+    expect(r.verdict).toBe("divergent");
+  });
+
+  test("identity-less terminal is NOT masked by a merely-nonterminal worker row for the ticket", () => {
+    // SDK-fallback identity-less FAILURE for CTL-1 whose worker_state is still `dispatched`, plus an
+    // unrelated healthy pair. The dispatched row must not count as coverage, so the dropped terminal diverges.
+    const noOrch = row("CTL-1", "phase.implement.failed", "CTL-1");
+    delete (noOrch.attributes as Record<string, unknown>)["catalyst.orchestrator.id"];
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "dispatched"), ws("CTL-2", "done")],
+      coordinationRows: [noOrch, row("CTL-2", "phase.teardown.complete")],
+    });
+    expect(r.verdict).toBe("divergent");
+    expect(r.divergences.some((d) => d.ticket === "CTL-1")).toBe(true);
   });
 
   test("terminal selection follows the projection watermark, not input order (out-of-order ts)", () => {

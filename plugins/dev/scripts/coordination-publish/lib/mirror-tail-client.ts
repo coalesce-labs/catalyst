@@ -40,6 +40,10 @@ export interface CoordinationDelta {
   caused_by: string | null;
   attributes: unknown;
   resource: unknown;
+  /** Event body incl. `payload`. Cross-host consumers (parseCommentCreatedEvent) reconstruct wake
+   *  state — commentId/authorId — from body.payload, so the inbound mirror row MUST carry it through
+   *  (Codex P1, round 11); dropping it made the self-echo guard fail open on peer hosts. */
+  body?: unknown;
 }
 
 /** The result of one pull: rows + head cursor, an underflow signal (resync), or a transient error. */
@@ -84,6 +88,10 @@ function deltaToMirrorRow(d: CoordinationDelta): Record<string, unknown> {
     caused_by: d.caused_by,
     attributes: d.attributes,
     resource: d.resource,
+    // Preserve body (incl. payload) so a cross-host comment event's commentId/authorId survive the
+    // inbound reconstruction — the self-echo guard depends on it (Codex P1, round 11). Omitted when
+    // the delta carries none.
+    ...(d.body !== undefined ? { body: d.body } : {}),
     host: d.host,
     hub_seq: d.seq,
   };

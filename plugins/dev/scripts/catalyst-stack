@@ -1610,6 +1610,21 @@ render_stack_plist() {
     <key>CATALYST_CLOUD_TOKEN_ENV</key>
     <string>$(_xml_escape "${CATALYST_CLOUD_TOKEN_ENV}")</string>"
   fi
+  # The secret-contract Layer-2 path resolver reads CATALYST_LAYER2_CONFIG_FILE (pinned above) →
+  # CATALYST_MACHINE_CONFIG → XDG_CONFIG_HOME/catalyst/config.json. Pin the latter two tiers too, or a
+  # host relying on them for catalyst.cloud.tokenEnv loses them under launchd's minimal env and the
+  # resolver falls back to the default Layer-2 file after reboot — resolving the wrong token name and
+  # launching an enforce publisher without its credential (Codex P1, round 11).
+  if [[ -n "${CATALYST_MACHINE_CONFIG:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_MACHINE_CONFIG</key>
+    <string>$(_xml_escape "${CATALYST_MACHINE_CONFIG}")</string>"
+  fi
+  if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>XDG_CONFIG_HOME</key>
+    <string>$(_xml_escape "${XDG_CONFIG_HOME}")</string>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
