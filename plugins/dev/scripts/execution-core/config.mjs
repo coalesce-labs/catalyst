@@ -72,6 +72,21 @@ try {
 }
 export { log };
 
+export const PUBLISH_PREFLIGHT_MODES = ["off", "shadow", "enforce"];
+
+export function resolvePublishPreflightMode({ env = process.env, configPath = null, logger = log } = {}) {
+  let raw = env?.CATALYST_PUBLISH_PREFLIGHT;
+  if (raw == null && configPath) {
+    try {
+      raw = JSON.parse(readFileSync(configPath, "utf8"))?.catalyst?.orchestration?.publishPreflight?.mode;
+    } catch { /* missing/malformed config uses shipped default */ }
+  }
+  const mode = typeof raw === "string" ? raw.trim().toLowerCase() : "shadow";
+  if (PUBLISH_PREFLIGHT_MODES.includes(mode)) return mode;
+  logger?.warn?.({ value: raw }, "publish-preflight: invalid mode; using shadow");
+  return "shadow";
+}
+
 // CTL-1617: the canonical deployment-mode resolver is a zero-import leaf
 // (../lib/deployment-mode.mjs) shared verbatim by execution-core (this
 // re-export) and orch-monitor (direct cross-directory import) — never
