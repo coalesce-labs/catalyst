@@ -15,7 +15,9 @@ const WORKERS = join(ORCH, "workers");
 // Recording rm spy: records every (path, opts) tuple, never touches disk.
 function rmSpy() {
   const calls = [];
-  const fn = async (p, opts) => { calls.push({ path: p, opts }); };
+  const fn = async (p, opts) => {
+    calls.push({ path: p, opts });
+  };
   fn.calls = calls;
   return fn;
 }
@@ -122,7 +124,9 @@ describe("sweepWorkerDirs", () => {
       readDir: fakeDirs(["CTL-9000"]),
       statDir: async () => ({ mtimeMs: 0 }),
       rm,
-      readAgents: () => { throw new Error("exec failed"); },
+      readAgents: () => {
+        throw new Error("exec failed");
+      },
       readWorkerMeta: fakeWorkerMeta({
         "CTL-9000": { statuses: { teardown: "done" }, shortIds: new Set() },
       }),
@@ -161,7 +165,7 @@ describe("sweepWorkerDirs", () => {
     expect(res.skippedInFlight).toBe(1);
   });
 
-  it("never deletes a dir with no phase signals (empty statuses)", async () => {
+  it("a zero-signal worker dir older than retention is reclaimed (CAT-24)", async () => {
     const now = 1_000_000_000_000;
     const rm = rmSpy();
     const res = await sweepWorkerDirs({
@@ -179,9 +183,50 @@ describe("sweepWorkerDirs", () => {
       env: {},
       log: logSpy(),
     });
+    expect(rm.calls.length).toBe(1);
+    expect(res.reclaimed).toBe(1);
+  });
+
+  it("a zero-signal worker dir younger than retention is skippedRecent", async () => {
+    const now = 1_000_000_000_000;
+    const rm = rmSpy();
+    const res = await sweepWorkerDirs({
+      orchDir: ORCH,
+      readDir: fakeDirs(["CAT-young"]),
+      statDir: async () => ({ mtimeMs: now - HOUR }),
+      rm,
+      readAgents: () => ({ ok: true, agents: [] }),
+      readWorkerMeta: fakeWorkerMeta({ "CAT-young": { statuses: {}, shortIds: new Set() } }),
+      now: () => now,
+      retentionMs: RETENTION_24H,
+      emit: emitSpy(),
+      env: {},
+      log: logSpy(),
+    });
     expect(rm.calls.length).toBe(0);
-    expect(res.reclaimed).toBe(0);
-    expect(res.skippedInFlight).toBe(1);
+    expect(res.skippedRecent).toBe(1);
+  });
+
+  it("a zero-signal dir whose recorded session is live is skippedLive", async () => {
+    const now = 1_000_000_000_000;
+    const rm = rmSpy();
+    const res = await sweepWorkerDirs({
+      orchDir: ORCH,
+      readDir: fakeDirs(["CAT-live"]),
+      statDir: async () => ({ mtimeMs: now - 48 * HOUR }),
+      rm,
+      readAgents: () => ({ ok: true, agents: [agent("abc12345-0000-0000-0000-000000000000")] }),
+      readWorkerMeta: fakeWorkerMeta({
+        "CAT-live": { statuses: {}, shortIds: new Set(["abc12345"]) },
+      }),
+      now: () => now,
+      retentionMs: RETENTION_24H,
+      emit: emitSpy(),
+      env: {},
+      log: logSpy(),
+    });
+    expect(rm.calls.length).toBe(0);
+    expect(res.skippedLive).toBe(1);
   });
 
   it("never deletes a dir whose session is still live", async () => {

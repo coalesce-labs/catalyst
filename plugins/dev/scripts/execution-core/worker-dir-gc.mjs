@@ -8,7 +8,7 @@
 //
 // THE FIX: a fail-CLOSED, bounded sweep that deletes a worker dir ONLY when ALL gates pass:
 //   (0) fail-closed liveness — `claude agents` unreadable ({ok:false}) → ABORT, delete nothing.
-//   (1) terminal — has ≥1 phase signal AND !isTicketInFlight(statuses).
+//   (1) terminal — !isTicketInFlight(statuses); zero-signal residue is terminal (CAT-24).
 //   (2) idle — none of the dir's recorded bg_job_id/sessionId short-ids ∈ live short-ids.
 //   (3) mtime age >= retention (default 24h ≫ any pipeline duration).
 //   + batchCap bound; best-effort `workers.gc.swept` emit.
@@ -49,10 +49,16 @@ async function defaultReadWorkerMeta(workersRoot, ticket, { readDir, readFileFn 
       if (sig?.bg_job_id) shortIds.add(String(sig.bg_job_id).slice(0, 8));
       if (sig?.catalystSessionId) {
         let s = null;
-        try { s = shortIdFromSessionId(sig.catalystSessionId); } catch { s = null; }
+        try {
+          s = shortIdFromSessionId(sig.catalystSessionId);
+        } catch {
+          s = null;
+        }
         if (s) shortIds.add(s);
       }
-    } catch { /* unreadable/malformed → treated as absent */ }
+    } catch {
+      /* unreadable/malformed → treated as absent */
+    }
   }
   return { statuses, shortIds };
 }
@@ -114,7 +120,11 @@ export async function sweepWorkerDirs({
   const liveShortIds = new Set();
   for (const a of agentsResult.agents ?? []) {
     let s = null;
-    try { s = shortIdFromSessionId(a?.sessionId); } catch { s = null; }
+    try {
+      s = shortIdFromSessionId(a?.sessionId);
+    } catch {
+      s = null;
+    }
     if (s) liveShortIds.add(s);
   }
 
@@ -154,8 +164,9 @@ export async function sweepWorkerDirs({
     scanned++;
     const { statuses, shortIds } = await metaReader(ticket);
 
-    // Gate 1 — terminal: must have ≥1 signal AND not be in-flight.
-    if (Object.keys(statuses).length === 0 || isTicketInFlight(statuses)) {
+    // Gate 1 — terminal: not in-flight. A zero-signal residue is terminal by
+    // definition and continues through the same liveness + retention gates (CAT-24).
+    if (isTicketInFlight(statuses)) {
       skippedInFlight++;
       continue;
     }
