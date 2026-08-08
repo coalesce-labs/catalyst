@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.49.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.48.0...catalyst-dev-v12.49.0) (2026-08-08)
+## [12.49.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.48.0...catalyst-dev-v12.49.0)
+
+Aug 08, 2026
+
+<!-- ai-enhanced -->
+
+### Escalation Durability & Premature Done Guards
+
+Escalations now survive GC via a durable per-ticket store, so Needs-You cards no longer vanish when a ticket goes terminal. Three independent guards close the false-Done/false-advance family: a dispatch freshness gate, a live GitHub merged check in teardown, and a PR-merged gate in the scheduler's terminal Done writer. Worker nodes can also now set `CATALYST_DRAIN_DISABLED=1` to permanently ignore drain requests, emitting a `node.drain.ignored` tripwire event instead of silently halting new-work admission.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1473 — codify four laptop-audit failure modes ([#2638](https://github.com/coalesce-labs/catalyst/issues/2638)) ([0783e71](https://github.com/coalesce-labs/catalyst/commit/0783e712e5c9268dc5bd25d5174d13385cb22894))
 * **dev:** CTL-1494 — wire coordination-publish into catalyst-stack lifecycle ([#3066](https://github.com/coalesce-labs/catalyst/issues/3066)) ([6f3f5df](https://github.com/coalesce-labs/catalyst/commit/6f3f5dfaf5a2fd51dcea4f10096a1bef46451351))
@@ -15,10 +24,6 @@
 * **dev:** CTL-1667 — root fix for premature Done / monitor-deploy false-advance family ([#3061](https://github.com/coalesce-labs/catalyst/issues/3061)) ([c27dedd](https://github.com/coalesce-labs/catalyst/commit/c27deddf3f29ef88852544fdf440475e1e53b9b9))
 * **dev:** CTL-1668 coordination-publish cloud endpoint wiring + ADR-023 parity harness ([#3105](https://github.com/coalesce-labs/catalyst/issues/3105)) ([2640720](https://github.com/coalesce-labs/catalyst/commit/2640720f9e2cbac8dfe537211ee81c6a1889da6f))
 * **dev:** CTL-1678 — worker nodes can permanently ignore drain requests ([#3073](https://github.com/coalesce-labs/catalyst/issues/3073)) ([d9bd6c6](https://github.com/coalesce-labs/catalyst/commit/d9bd6c6d0b6791898206e990fe247b77d5b646b9))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1081 make match_thoughts_artifact shell-agnostic (zsh/shopt bug) ([#3108](https://github.com/coalesce-labs/catalyst/issues/3108)) ([bcafa4f](https://github.com/coalesce-labs/catalyst/commit/bcafa4f3122b2a1ca18d460bb76ae14c6846548c))
 * **dev:** CTL-1415 — age-gate and auto-clear a stale plugin-source .git/index.lock ([#2530](https://github.com/coalesce-labs/catalyst/issues/2530)) ([2740458](https://github.com/coalesce-labs/catalyst/commit/27404586d8cc116f6c857209c72bc9f1176838c5))
 * **dev:** CTL-1660 defer P2+ automated-review findings after round one ([#3035](https://github.com/coalesce-labs/catalyst/issues/3035)) ([b5592bb](https://github.com/coalesce-labs/catalyst/commit/b5592bbd93e7be723f7723b810315e1ce43aa821))
