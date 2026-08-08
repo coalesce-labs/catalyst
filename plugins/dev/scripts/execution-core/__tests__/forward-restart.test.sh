@@ -60,9 +60,12 @@ PID1="$(cat "$FORWARD_PID_FILE")"
 kill -0 "$PID1" 2>/dev/null || { echo "FAIL: stub forwarder pid $PID1 not alive after cold restart"; exit 1; }
 
 # --- Test 2: forward-restart when running → stops old, starts new; pid file holds NEW pid ---
-run_monitor forward-restart >/dev/null || { echo "FAIL: forward-restart (hot) exit != 0"; exit 1; }
+echo "DIAG: PID1=$PID1 cmd=$(ps -o command= -p "$PID1" 2>/dev/null || echo '<gone>')"
+RESTART_OUT="$(run_monitor forward-restart 2>&1)" || { echo "FAIL: forward-restart (hot) exit != 0"; echo "DIAG restart output: $RESTART_OUT"; exit 1; }
+echo "DIAG: restart output: $RESTART_OUT"
 [[ -f "$FORWARD_PID_FILE" ]] || { echo "FAIL: pid file gone after hot restart"; exit 1; }
 PID2="$(cat "$FORWARD_PID_FILE")"
+echo "DIAG: PID1=$PID1 PID2=$PID2 PID1-alive=$(kill -0 "$PID1" 2>/dev/null && echo yes || echo no) PID1-cmd=$(ps -o command= -p "$PID1" 2>/dev/null || echo '<gone>')"
 [[ "$PID2" != "$PID1" ]] || { echo "FAIL: pid did not change on hot restart ($PID1 == $PID2)"; exit 1; }
 kill -0 "$PID2" 2>/dev/null || { echo "FAIL: new forwarder pid $PID2 not alive"; exit 1; }
 kill -0 "$PID1" 2>/dev/null && { echo "FAIL: old forwarder pid $PID1 still alive after restart"; exit 1; } || true
