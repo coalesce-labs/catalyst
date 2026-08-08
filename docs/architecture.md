@@ -454,7 +454,7 @@ reclaim storms). Three additive defenses:
 Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket;
 the terminal sweep applies `needs-human` via `labelOnce`.
 
-### Two-axis worker state & the recordWorkerTransition chokepoint (CTL-764)
+### Two-axis worker state & the recordTransition chokepoint (CTL-764)
 
 Every worker ticket has **two orthogonal axes** — never blurred:
 
