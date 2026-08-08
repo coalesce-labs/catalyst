@@ -6,18 +6,23 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setDrain, readDrainStatus } from "./drain.mjs";
+import { setDrain, readDrainStatus, formatDrainStatus } from "./drain.mjs";
 
 let tmp;
+let savedDisabled;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "ctl1095-cli-drain-"));
   // Create workers dir so listInFlightTickets has somewhere to scan
   mkdirSync(join(tmp, "workers"), { recursive: true });
+  savedDisabled = process.env.CATALYST_DRAIN_DISABLED;
+  delete process.env.CATALYST_DRAIN_DISABLED;
 });
 
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
+  if (savedDisabled === undefined) delete process.env.CATALYST_DRAIN_DISABLED;
+  else process.env.CATALYST_DRAIN_DISABLED = savedDisabled;
 });
 
 describe("setDrain (CTL-1095)", () => {
@@ -71,5 +76,95 @@ describe("readDrainStatus (CTL-1095)", () => {
     }));
     const s = readDrainStatus(tmp);
     expect(s.inFlightCount).toBe(1);
+  });
+});
+
+describe("readDrainStatus third state (CTL-1678)", () => {
+  test("flag present + env unset → draining:true, flagPresent:true, disabled:false", () => {
+    writeFileSync(join(tmp, "drain"), "");
+    const s = readDrainStatus(tmp);
+    expect(s.draining).toBe(true);
+    expect(s.flagPresent).toBe(true);
+    expect(s.disabled).toBe(false);
+  });
+
+  test("flag present + CATALYST_DRAIN_DISABLED=1 → draining:false, flagPresent:true, disabled:true", () => {
+    writeFileSync(join(tmp, "drain"), "");
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    const s = readDrainStatus(tmp);
+    expect(s.draining).toBe(false);
+    expect(s.flagPresent).toBe(true);
+    expect(s.disabled).toBe(true);
+  });
+
+  test("no flag + CATALYST_DRAIN_DISABLED=1 → draining:false, flagPresent:false, disabled:true", () => {
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    const s = readDrainStatus(tmp);
+    expect(s.draining).toBe(false);
+    expect(s.flagPresent).toBe(false);
+    expect(s.disabled).toBe(true);
+  });
+});
+
+describe("formatDrainStatus (CTL-1678)", () => {
+  test("draining → the land-count line", () => {
+    expect(formatDrainStatus({ draining: true, inFlightCount: 2, flagPresent: true, disabled: false }))
+      .toContain("draining");
+  });
+
+  test("flag present but IGNORED", () => {
+    const line = formatDrainStatus({ draining: false, inFlightCount: 0, flagPresent: true, disabled: true });
+    expect(line).toContain("IGNORED");
+    expect(line).toContain("CATALYST_DRAIN_DISABLED=1");
+  });
+
+  test("drain-disabled, no flag", () => {
+    const line = formatDrainStatus({ draining: false, inFlightCount: 0, flagPresent: false, disabled: true });
+    expect(line).toContain("drain disabled");
+    expect(line).toContain("CATALYST_DRAIN_DISABLED=1");
+  });
+
+  test("plain not-draining", () => {
+    const line = formatDrainStatus({ draining: false, inFlightCount: 0, flagPresent: false, disabled: false });
+    expect(line).toContain("not draining");
+    expect(line).not.toContain("IGNORED");
+  });
+});
+
+// CTL-1678 (Codex round-3 P1): readDrainStatus prefers the LIVE daemon's boot snapshot.
+describe("readDrainStatus daemon-runtime preference (CTL-1678 round-3)", () => {
+  test("live marker (our own pid) beats a post-restart env edit", () => {
+    // Env claims disabled — as if execution-core.env was edited after daemon start —
+    // but the "running daemon" (this test process's pid, provably alive) captured no
+    // override at boot. The flag must therefore report as honored.
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    writeFileSync(join(tmp, "drain"), "");
+    writeFileSync(
+      join(tmp, "daemon-runtime-env.json"),
+      JSON.stringify({ pid: process.pid, startedAt: "x", drainDisabled: false, bootDrained: false })
+    );
+    // Round-4 P2: the marker is trusted only when its pid is ALSO the daemon of record.
+    writeFileSync(join(tmp, "daemon.pid"), `${process.pid}\n`);
+    const s = readDrainStatus(tmp);
+    expect(s.draining).toBe(true);
+    expect(s.disabled).toBe(false);
+    expect(s.source).toBe("daemon-runtime");
+  });
+
+  test("marker from a dead daemon is ignored → env fallback", () => {
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    writeFileSync(join(tmp, "drain"), "");
+    // Spawn-and-reap a child so we hold a real, provably-dead pid.
+    const { spawnSync } = require("node:child_process");
+    const dead = spawnSync("true").pid;
+    writeFileSync(
+      join(tmp, "daemon-runtime-env.json"),
+      JSON.stringify({ pid: dead, startedAt: "x", drainDisabled: false, bootDrained: false })
+    );
+    writeFileSync(join(tmp, "daemon.pid"), `${dead}\n`);
+    const s = readDrainStatus(tmp);
+    expect(s.disabled).toBe(true);
+    expect(s.draining).toBe(false);
+    expect(s.source).toBe("env");
   });
 });

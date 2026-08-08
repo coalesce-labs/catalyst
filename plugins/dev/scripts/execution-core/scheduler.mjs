@@ -371,7 +371,10 @@ import {
   HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
-import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
+import {
+  emitDrainedEvent as defaultEmitDrainedEvent, // CTL-1095: drained sentinel
+  maybeEmitDrainIgnored as defaultMaybeEmitDrainIgnored, // CTL-1678: drain-ignored tripwire
+} from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
@@ -3012,27 +3015,56 @@ function fenceSuppressMarkerPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".fence-suppressed");
 }
 
-// stampFenceSuppress — record that we suppressed a fence-guarded write for this dir.
+// The escalation-side cooldown is a SEPARATE marker from `.fence-suppressed`, and
+// deliberately so. `.fence-suppressed` means "a fence-guarded write was SUPPRESSED
+// here", and terminalDoneOnce reads it as a reason to skip its own probe. The
+// escalation site below arms a cooldown after a write it PERFORMED (a
+// generation-less needs-human escalation that fenceGuard let through) purely to
+// bound the per-tick probe burn — nothing about that outcome should stop a
+// genuinely-completed pipeline's terminal Done from landing. Sharing one marker did
+// exactly that: a recovery that finished teardown during the 15-minute window sat
+// non-terminal until the marker expired.
+function escalationProbeCooldownPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".escalation-probe-cooldown");
+}
+
 // Best-effort: a failed write just means we re-probe next tick (no worse than before).
-function stampFenceSuppress(orchDir, ticket, nowMs) {
+function stampCooldownMarker(path, nowMs) {
   try {
-    writeFileSync(fenceSuppressMarkerPath(orchDir, ticket), JSON.stringify({ ts: nowMs }));
+    writeFileSync(path, JSON.stringify({ ts: nowMs }));
   } catch {
     /* best-effort — re-probe next tick */
   }
 }
 
-// isFenceSuppressFresh — true when a suppression was stamped within the cooldown
-// window, so the caller should skip this dir's probe+write this tick. A missing or
-// unparseable marker, or an expired one, returns false (re-probe), so a fence that
-// becomes current again self-heals after at most one cooldown window.
-function isFenceSuppressFresh(orchDir, ticket, nowMs) {
+// A missing or unparseable marker, or an expired one, returns false (re-probe), so a
+// fence that becomes current again self-heals after at most one cooldown window.
+function isCooldownMarkerFresh(path, nowMs) {
   try {
-    const { ts } = JSON.parse(readFileSync(fenceSuppressMarkerPath(orchDir, ticket), "utf8"));
+    const { ts } = JSON.parse(readFileSync(path, "utf8"));
     return Number.isFinite(ts) && nowMs - ts < FENCE_SUPPRESS_COOLDOWN_MS;
   } catch {
     return false;
   }
+}
+
+// stampFenceSuppress — record that we suppressed a fence-guarded write for this dir.
+function stampFenceSuppress(orchDir, ticket, nowMs) {
+  stampCooldownMarker(fenceSuppressMarkerPath(orchDir, ticket), nowMs);
+}
+
+// isFenceSuppressFresh — true when a suppression was stamped within the cooldown
+// window, so the caller should skip this dir's probe+write this tick.
+function isFenceSuppressFresh(orchDir, ticket, nowMs) {
+  return isCooldownMarkerFresh(fenceSuppressMarkerPath(orchDir, ticket), nowMs);
+}
+
+function stampEscalationProbeCooldown(orchDir, ticket, nowMs) {
+  stampCooldownMarker(escalationProbeCooldownPath(orchDir, ticket), nowMs);
+}
+
+function isEscalationProbeCooldownFresh(orchDir, ticket, nowMs) {
+  return isCooldownMarkerFresh(escalationProbeCooldownPath(orchDir, ticket), nowMs);
 }
 
 // terminalDoneOnce — write the terminal `Done` Linear state for a ticket at
@@ -4015,6 +4047,9 @@ export function schedulerTick(
     isDraining = () => isDrainingDefault(orchDir),
     // CTL-1095: drained-sentinel emitter — fires once when draining && empty.
     emitDrained = () => defaultEmitDrainedEvent(),
+    // CTL-1678: drain-ignored tripwire — fires once per episode when the flag is
+    // present but CATALYST_DRAIN_DISABLED=1 neutralizes it. Default reads orchDir + env.
+    emitDrainIgnored = () => defaultMaybeEmitDrainIgnored({ orchDir }),
     // CTL-936: closed-loop intent layer. When an open beliefs.db handle is
     // provided, kill actions in reclaimDeadWork are recorded as intents and
     // suppressed once ineffective. Default null → legacy behavior (all existing
@@ -5881,7 +5916,12 @@ export function schedulerTick(
         for (const member of anomaly.members) {
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
-            if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
+            if (
+              fenceGuard(
+                { ticket: member, orchDir, multiHost, gateway, self },
+                { proceedOnMissingGeneration: true }
+              )
+            ) {
               const dcResult = routeStuckTicketToDelegate(orchDir, member, {
                 site: "dependency-cycle",
                 reason: "dependency-cycle",
@@ -6700,13 +6740,28 @@ export function schedulerTick(
     for (const anomaly of eligibleGraph.anomalies) {
       for (const member of anomaly.members) {
         if (eligibleIds.has(member)) {
+          // HRW ownership gate. This sweep runs over `eligible` — the RAW,
+          // un-owned pool — and above the ready-filter that applies ownership to
+          // dispatch, so without this gate EVERY host in the cluster escalates
+          // EVERY cycle member. An unstarted eligible ticket has no worker dir and
+          // no claim generation, so fenceGuard's escalation fail-open passes on all
+          // of them, and labelOnce's marker is host-local: N hosts → N Linear label
+          // writes and N worker.transition events for one ticket. Same dispatch
+          // roster the ready-filter below uses, so exactly one host acts.
+          // STRICT no-op at N=1.
+          if (multiHost && !ownedBy(member, _dispatchRoster(), self)) continue;
           log.warn(
             { member, members: anomaly.members },
             "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human"
           );
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
-          if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
+          if (
+            fenceGuard(
+              { ticket: member, orchDir, multiHost, gateway, self },
+              { proceedOnMissingGeneration: true }
+            )
+          ) {
             const c925Result = routeStuckTicketToDelegate(orchDir, member, {
               site: "ctl-925-cycle",
               reason: "dependency-cycle",
@@ -6883,6 +6938,12 @@ export function schedulerTick(
       /* best-effort */
     }
   }
+  // CTL-1678: drain-ignored tripwire. Independent of `draining` (which is already
+  // false when the override is set), so it must run UNCONDITIONALLY — not gated
+  // behind the `if (draining)` branch above, which would never fire under the
+  // override. The helper is a cheap `existsSync` when inactive and latches to at
+  // most one emit per episode.
+  emitDrainIgnored();
   // CTL-1150: resolve injectable seams before Pass 2 selection + dispatch loop.
   // _hasTriageArtifact: default reads filesystem (mirroring monitor.mjs:667-669).
   //   Kept inline (not imported from monitor.mjs) to avoid coupling two daemons.
@@ -7295,7 +7356,10 @@ export function schedulerTick(
       // fence itself is still checked at the original site (immediately before the
       // write, below) — NOT reordered — so a takeover mid-probe is still caught and no
       // fence-check runs before we've proven a write is needed.
-      if (isFenceSuppressFresh(orchDir, ticket, now())) {
+      if (
+        isFenceSuppressFresh(orchDir, ticket, now()) ||
+        isEscalationProbeCooldownFresh(orchDir, ticket, now())
+      ) {
         // Still surface the orphan once for the dashboard (the probe/write is what we
         // skip, not the visibility signal).
         emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
@@ -7340,7 +7404,23 @@ export function schedulerTick(
         } else {
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
-          if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+          if (
+            fenceGuard(
+              { ticket, orchDir, multiHost, gateway, self },
+              {
+                proceedOnMissingGeneration: true,
+                // CTL-1329: a missing generation stays missing next tick regardless
+                // of whether THIS tick's escalation write succeeded, so arm a cooldown
+                // — otherwise proceeding here (instead of suppressing) reintroduces the
+                // unbounded per-tick terminal-probe burn CTL-1329 fixed, just on the
+                // write path instead of the read path. It is the escalation-side marker,
+                // NOT `.fence-suppressed`: terminalDoneOnce reads the latter, so arming
+                // that one here would hold a genuinely-completed pipeline non-terminal
+                // for a whole cooldown window when recovery finishes teardown.
+                onMissingGeneration: () => stampEscalationProbeCooldown(orchDir, ticket, now()),
+              }
+            )
+          ) {
             const stalledSig = signalByTicket.get(ticket);
             const tsResult = routeStuckTicketToDelegate(orchDir, ticket, {
               site: "terminal-sweep",
