@@ -29,13 +29,46 @@ _wtr_worktree_for_branch() {
 }
 _wtr_abs() { [[ -d $1 ]] || return 1; (cd "$1" 2>/dev/null && pwd -P) || return 1; }
 
+# A branch serves $ticket when it IS the ticket (execution-core convention) or
+# ends in "-<ticket>" (the legacy "<orch-id>-<ticket>" convention that
+# orchestrate-dispatch-next uses for ${WORKTREE_BASE}/${ORCH_ID}-${T}).
+_wtr_branch_serves_ticket() {
+	local branch="$1" ticket="$2"
+	[[ -n $branch && -n $ticket ]] || return 1
+	[[ $branch == "$ticket" || $branch == *-"$ticket" ]]
+}
+
+# Print the toplevel of the CURRENT worktree when its checked-out branch already
+# serves $ticket; otherwise fail. Used to keep an already-correct caller in place.
+_wtr_cwd_serves_ticket() {
+	local ticket="$1" branch="" top=""
+	branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 1
+	_wtr_branch_serves_ticket "$branch" "$ticket" || return 1
+	top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+	[[ -n $top ]] || return 1
+	printf '%s' "$top"
+}
+
 resolve_ticket_worktree() {
-	local ticket="$1" explicit="${2:-}" candidate="" repo=""
-	# shellcheck disable=SC2034 # public breadcrumb consumed by source callers
+	local ticket="$1" explicit="${2:-}" candidate="" repo="" bad_explicit=0
+	# shellcheck disable=SC2034 # public breadcrumbs consumed by source callers
 	WT_RESOLVE_SOURCE=""
+	WT_RESOLVE_EXPLICIT_MISSING=0
 	if [[ -n $explicit ]]; then
 		if candidate="$(_wtr_abs "$explicit")"; then WT_RESOLVE_SOURCE="explicit"; WTR_RESOLVED_PATH="$candidate"; printf '%s' "$candidate"; return 0; fi
-		WT_RESOLVE_SOURCE="explicit-missing"; WTR_RESOLVED_PATH="$(pwd -P)"; printf '%s' "$WTR_RESOLVED_PATH"; return 0
+		# CAT-31 review P1: a stale or mistyped --worktree must NOT short-circuit to
+		# the caller's cwd — with strict mode off by default that silently creates
+		# signals, rebases and launches the ticket worker in an unrelated checkout.
+		# Fall through to the rungs that resolve BY TICKET instead.
+		bad_explicit=1
+		WT_RESOLVE_EXPLICIT_MISSING=1
+	fi
+	# CAT-31 review P1: when the caller is already standing in a worktree whose
+	# branch serves this ticket, keep it. A registry-first lookup would otherwise
+	# redirect an already-correct legacy dispatch (branch "<orch-id>-<ticket>")
+	# into a same-ticket execution-core checkout and rebase the wrong tree.
+	if candidate="$(_wtr_cwd_serves_ticket "$ticket")" && [[ -n $candidate ]] && candidate="$(_wtr_abs "$candidate")"; then
+		WT_RESOLVE_SOURCE="cwd-serves-ticket"; WTR_RESOLVED_PATH="$candidate"; printf '%s' "$candidate"; return 0
 	fi
 	repo="$(_wtr_repo_root_for_team "$(_wtr_team_of "$ticket")")"
 	if [[ -n $repo ]]; then
@@ -46,5 +79,8 @@ resolve_ticket_worktree() {
 		candidate="$(_wtr_worktree_for_branch "$repo" "$ticket")"
 		if [[ -n $candidate ]] && candidate="$(_wtr_abs "$candidate")"; then WT_RESOLVE_SOURCE="cwd-repo"; WTR_RESOLVED_PATH="$candidate"; printf '%s' "$candidate"; return 0; fi
 	fi
-	WT_RESOLVE_SOURCE="fallback-cwd"; WTR_RESOLVED_PATH="$(pwd -P)"; printf '%s' "$WTR_RESOLVED_PATH"; return 0
+	# Nothing resolved by ticket. Preserve "explicit-missing" when the caller passed
+	# a bad --worktree so strict mode still refuses the dispatch.
+	if [[ $bad_explicit == 1 ]]; then WT_RESOLVE_SOURCE="explicit-missing"; else WT_RESOLVE_SOURCE="fallback-cwd"; fi
+	WTR_RESOLVED_PATH="$(pwd -P)"; printf '%s' "$WTR_RESOLVED_PATH"; return 0
 }
