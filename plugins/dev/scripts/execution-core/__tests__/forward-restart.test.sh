@@ -26,7 +26,12 @@ BIN="$TMP/bin"; mkdir -p "$BIN"
 cat > "$BIN/bun" <<'SH'
 #!/usr/bin/env bash
 # Shim: `bun run <script>` → a detached long-lived sleep as the stand-in daemon.
-exec sleep 300
+# `exec -a` sets the stub's argv[0] so its command line contains "otel-forward":
+# read_forward_pid checks process IDENTITY, not just `kill -0` (a recycled pid
+# must never be reported live or signalled), so a stub that looked like a bare
+# `sleep` would be correctly rejected as not-the-forwarder and every pid-file
+# assertion below would fail.
+exec -a "bun run otel-forward/index.ts" sleep 300
 SH
 chmod +x "$BIN/bun"
 
@@ -37,7 +42,12 @@ FORWARD_PID_FILE="$TMP/otel-forward.pid"
 run_monitor() { bash "$MONITOR" "$@"; }
 
 # --- Test 3 (static): usage() + dispatch case mention forward-restart ---
-run_monitor help 2>&1 | grep -q 'forward-restart' \
+# Capture first, then match. Piping straight into `grep -q` is unsafe under
+# `set -o pipefail`: grep exits at the first match, and if usage() still has
+# lines to write (it does — the watchdog-* commands print after forward-restart)
+# the writer takes SIGPIPE and the pipeline reports failure on a PASSING check.
+USAGE_OUT="$(run_monitor help 2>&1)"
+grep -q 'forward-restart' <<<"$USAGE_OUT" \
   || { echo "FAIL: 'forward-restart' absent from usage()"; exit 1; }
 grep -qE '^\s*forward-restart\)' "$MONITOR" \
   || { echo "FAIL: 'forward-restart)' dispatch case absent"; exit 1; }
