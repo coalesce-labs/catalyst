@@ -33,7 +33,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
+import { startDelegateRunnerTimer, reapOrphanedRunners } from "./delegate-runner.mjs";
 import { drainOnce, resolveEffectiveDelegateExecutor } from "./delegate-runner-entry.mjs";
 import { DELEGATE_QUEUE_DIR, claimIntent } from "./delegate-queue.mjs";
 
@@ -920,6 +920,261 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
     }).not.toThrow();
     // the fd opened for the failed spawn is still released in the finally.
     expect(closed).toEqual([9]);
+  });
+});
+
+// CAT-39: a runner spawned by this timer can hang inside a blocking spawnSync
+// call deep in the heavy path (worktree provision / phase-agent-dispatch) —
+// confirmed in production, one instance spun a core for 8h17m, another
+// (reparented to PID 1 across a daemon restart) for 1d8h22m. Neither ever
+// logged a line. Because the hang is inside a SYNCHRONOUS call, the child's
+// own event loop is blocked — an in-process timer inside it would never fire.
+// The fix has to live OUTSIDE the child: this timer now tracks the pid+time
+// of the runner it last spawned and reaps it (SIGTERM, then SIGKILL after a
+// grace window) once it has outlived a deadline, independent of whether the
+// single-instance lock still reports it as "live" (it IS alive — that's the
+// whole problem).
+describe("startDelegateRunnerTimer — CAT-39 deadline reap of a hung spawned runner", () => {
+  // A spawn spy whose returned child supports .on("exit", fn) so tests can
+  // simulate a normal finish and assert tracking clears. makeSpawnSpy()
+  // above deliberately does NOT support this (its own tests don't need it).
+  function makeTrackedSpawnSpy() {
+    const calls = [];
+    let nextPid = 1000;
+    const children = [];
+    const spawn = (...args) => {
+      calls.push(args);
+      const listeners = {};
+      const child = {
+        unref() {},
+        pid: nextPid++,
+        on(event, fn) {
+          listeners[event] = fn;
+        },
+        _emitExit() {
+          listeners.exit?.();
+        },
+      };
+      children.push(child);
+      return child;
+    };
+    return { spawn, calls, children };
+  }
+
+  // isRunnerRunning stub: false on the first call (let the initial spawn
+  // through), true on every call after (simulate the lock staying held by
+  // the still-alive — hung — runner, so no OVERLAPPING runner ever stacks;
+  // the deadline-reap path must free it without depending on this guard).
+  function firstCallOnlyFalse() {
+    let n = 0;
+    return () => n++ > 0;
+  }
+
+  test("a tracked runner younger than the deadline is left alone (no kill, no respawn)", () => {
+    const clock = fakeClock();
+    let t = 0;
+    const spy = makeTrackedSpawnSpy();
+    const killed = [];
+    startDelegateRunnerTimer({
+      enabled: true,
+      intervalMs: 15000,
+      orchDir,
+      entryPath: "/fake/entry.mjs",
+      spawn: spy.spawn,
+      clock,
+      now: () => t,
+      isRunnerRunning: firstCallOnlyFalse(),
+      openLogFd: () => 5,
+      reapDeadlineMs: 600_000,
+      killProcess: (pid, sig) => killed.push([pid, sig]),
+    });
+    clock.advance(15000); // tick 1: spawns pid 1000 at t=0
+    t = 300_000; // 5 min later — under the 10-min deadline
+    clock.advance(15000); // tick 2: reap-check sees age 300000 < 600000 → no kill
+    expect(killed).toHaveLength(0);
+    expect(spy.calls).toHaveLength(1); // lock still held (per the stub) → no respawn either
+  });
+
+  test("a tracked runner past the deadline gets SIGTERM, then SIGKILL after the grace window", () => {
+    const clock = fakeClock();
+    let t = 0;
+    const spy = makeTrackedSpawnSpy();
+    const killed = [];
+    startDelegateRunnerTimer({
+      enabled: true,
+      intervalMs: 15000,
+      orchDir,
+      entryPath: "/fake/entry.mjs",
+      spawn: spy.spawn,
+      clock,
+      now: () => t,
+      isRunnerRunning: firstCallOnlyFalse(),
+      openLogFd: () => 5,
+      reapDeadlineMs: 600_000,
+      killProcess: (pid, sig) => killed.push([pid, sig]),
+    });
+    clock.advance(15000); // spawn pid 1000 at t=0
+    t = 700_000; // past the 600000ms deadline
+    clock.advance(15000); // reap-check: age 700000 > 600000, no prior SIGTERM → send it
+    expect(killed).toEqual([[1000, "SIGTERM"]]);
+
+    t = 700_000 + 40_000; // 40s after SIGTERM — past the 30s grace window
+    clock.advance(15000); // reap-check: still tracked (no exit event fired) → escalate
+    expect(killed).toEqual([[1000, "SIGTERM"], [1000, "SIGKILL"]]);
+  });
+
+  test("SIGTERM is not re-sent every tick inside the grace window — one SIGTERM, then wait", () => {
+    const clock = fakeClock();
+    let t = 0;
+    const spy = makeTrackedSpawnSpy();
+    const killed = [];
+    startDelegateRunnerTimer({
+      enabled: true,
+      intervalMs: 15000,
+      orchDir,
+      entryPath: "/fake/entry.mjs",
+      spawn: spy.spawn,
+      clock,
+      now: () => t,
+      isRunnerRunning: firstCallOnlyFalse(),
+      openLogFd: () => 5,
+      reapDeadlineMs: 600_000,
+      killProcess: (pid, sig) => killed.push([pid, sig]),
+    });
+    clock.advance(15000); // spawn at t=0
+    t = 700_000;
+    clock.advance(15000); // SIGTERM sent
+    t = 700_000 + 15_000; // 15s later — still inside the 30s grace window
+    clock.advance(15000); // must NOT re-send SIGTERM or jump to SIGKILL yet
+    expect(killed).toEqual([[1000, "SIGTERM"]]);
+  });
+
+  test("the child's own 'exit' event clears tracking — a runner that finishes normally is never reaped", () => {
+    const clock = fakeClock();
+    let t = 0;
+    const spy = makeTrackedSpawnSpy();
+    const killed = [];
+    startDelegateRunnerTimer({
+      enabled: true,
+      intervalMs: 15000,
+      orchDir,
+      entryPath: "/fake/entry.mjs",
+      spawn: spy.spawn,
+      clock,
+      now: () => t,
+      isRunnerRunning: firstCallOnlyFalse(),
+      openLogFd: () => 5,
+      reapDeadlineMs: 600_000,
+      killProcess: (pid, sig) => killed.push([pid, sig]),
+    });
+    clock.advance(15000); // spawn pid 1000
+    spy.children[0]._emitExit(); // the runner finished a normal, fast drain
+    t = 700_000; // long past what would have been the deadline
+    clock.advance(15000); // reap-check: tracked is null (cleared on exit) → nothing to reap
+    expect(killed).toHaveLength(0);
+  });
+
+  test("a spawn() call that never yields a pid is simply not tracked (no throw, no phantom reap)", () => {
+    const clock = fakeClock();
+    let t = 0;
+    const killed = [];
+    startDelegateRunnerTimer({
+      enabled: true,
+      intervalMs: 15000,
+      orchDir,
+      entryPath: "/fake/entry.mjs",
+      spawn: () => ({ unref() {} }), // no .pid — mirrors a spawn() edge case
+      clock,
+      now: () => t,
+      isRunnerRunning: () => false,
+      openLogFd: () => 5,
+      reapDeadlineMs: 600_000,
+      killProcess: (pid, sig) => killed.push([pid, sig]),
+    });
+    expect(() => {
+      clock.advance(15000);
+      t = 700_000;
+      clock.advance(15000);
+    }).not.toThrow();
+    expect(killed).toHaveLength(0);
+  });
+});
+
+// CAT-39: on daemon boot, kill every delegate-runner-entry.mjs process already
+// on the host — this daemon has spawned none yet, so any match is by
+// definition left over from a prior generation (confirmed in production: one
+// such orphan, reparented to PID 1, survived a daemon restart and kept
+// spinning for 32+ hours before being noticed). Deliberately NOT wired into
+// startDelegateRunnerTimer itself — see that function's own doc comment for
+// why (a real `ps` scan + real SIGTERM must never be a side effect of
+// constructing a timer instance in a test, or of a live host's own test run).
+describe("reapOrphanedRunners — CAT-39 boot-time orphan sweep", () => {
+  test("kills every process whose command line includes the entry basename", () => {
+    const killed = [];
+    const { reaped } = reapOrphanedRunners("/orch", {
+      listProcesses: () => [
+        { pid: 1, ppid: 0, command: "/usr/bin/some-other-thing" },
+        { pid: 2, ppid: 1, command: "/path/a/node /path/a/delegate-runner-entry.mjs" },
+        // A prior generation's checkout can live at a DIFFERENT absolute path
+        // (a hotpatch, a different pluginDirs resolution) — matched on
+        // basename precisely so this still catches it.
+        { pid: 3, ppid: 1, command: "/path/b/node /other/plugin-dir/delegate-runner-entry.mjs" },
+      ],
+      killProcess: (pid, sig) => killed.push([pid, sig]),
+    });
+    expect(reaped).toBe(2);
+    expect(killed).toEqual([[2, "SIGTERM"], [3, "SIGTERM"]]);
+  });
+
+  test("no matching processes → reaped:0, kill never called", () => {
+    const killed = [];
+    const { reaped } = reapOrphanedRunners("/orch", {
+      listProcesses: () => [{ pid: 1, ppid: 0, command: "/usr/bin/bash -l" }],
+      killProcess: (pid, sig) => killed.push([pid, sig]),
+    });
+    expect(reaped).toBe(0);
+    expect(killed).toHaveLength(0);
+  });
+
+  test("no orchDir → no-op, never even lists processes", () => {
+    let called = false;
+    const { reaped } = reapOrphanedRunners(undefined, {
+      listProcesses: () => {
+        called = true;
+        return [];
+      },
+    });
+    expect(reaped).toBe(0);
+    expect(called).toBe(false);
+  });
+
+  test("a listProcesses failure degrades to reaped:0 rather than throwing", () => {
+    let result;
+    expect(() => {
+      result = reapOrphanedRunners("/orch", {
+        listProcesses: () => {
+          throw new Error("ps: command not found");
+        },
+      });
+    }).not.toThrow();
+    expect(result).toEqual({ reaped: 0 });
+  });
+
+  test("a killProcess failure for one match does not stop the sweep from reaping the rest", () => {
+    const killed = [];
+    const { reaped } = reapOrphanedRunners("/orch", {
+      listProcesses: () => [
+        { pid: 2, ppid: 1, command: "delegate-runner-entry.mjs" },
+        { pid: 3, ppid: 1, command: "delegate-runner-entry.mjs" },
+      ],
+      killProcess: (pid, sig) => {
+        if (pid === 2) throw new Error("EPERM");
+        killed.push([pid, sig]);
+      },
+    });
+    // pid 2's kill threw (not counted as reaped) but the loop continues; pid 3 still got its SIGTERM.
+    expect(reaped).toBe(1);
+    expect(killed).toEqual([[3, "SIGTERM"]]);
   });
 });
 

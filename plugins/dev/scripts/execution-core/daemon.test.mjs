@@ -33,6 +33,7 @@ import {
   readLinearBotUserIds,
   readLinearBotWriteId,
   _isBotId,
+  maybeReapOrphanedDelegateRunners,
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
 import { defaultDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
@@ -3463,5 +3464,135 @@ describe("CTL-1608 — stalled-PR sweep timer start", () => {
       startStalledPrTimer: (opts) => { calls.push(opts); return { stop: () => {} }; },
     });
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ─── CAT-39 — boot-time delegate-runner orphan sweep, gated on delegate-runner
+// mode ────────────────────────────────────────────────────────────────────
+// A delegate-runner-entry.mjs left over from a prior daemon generation can
+// survive a restart and spin a core for days (confirmed in production). The
+// sweep that reaps it runs a real `ps` + real SIGTERM by default, so it MUST
+// stay off whenever the delegate-runner feature itself is off — which is the
+// state of every one of this file's other ~70 startDaemon() calls (none set
+// CATALYST_DELEGATE_RUNNER/CATALYST_BOARD_HEALTH/CATALYST_RECOVERY_PASS), so
+// this is also the regression guard that keeps this whole test file safe to
+// run on a host where the real delegate-runner is live.
+describe("CAT-39 — delegate-runner orphan sweep gated on mode", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    enableReaper: false,
+    enableHeartbeat: false,
+    enableWaitWatcher: false,
+    enableMemorySampler: false,
+    enableFleetHealth: false,
+    enableRatelimitPoller: false,
+    readAllEligible: () => [],
+  });
+
+  let prevRunner, prevBoardHealth, prevRecoveryPass;
+  beforeEach(() => {
+    prevRunner = process.env.CATALYST_DELEGATE_RUNNER;
+    prevBoardHealth = process.env.CATALYST_BOARD_HEALTH;
+    prevRecoveryPass = process.env.CATALYST_RECOVERY_PASS;
+  });
+  afterEach(() => {
+    if (prevRunner === undefined) delete process.env.CATALYST_DELEGATE_RUNNER;
+    else process.env.CATALYST_DELEGATE_RUNNER = prevRunner;
+    if (prevBoardHealth === undefined) delete process.env.CATALYST_BOARD_HEALTH;
+    else process.env.CATALYST_BOARD_HEALTH = prevBoardHealth;
+    if (prevRecoveryPass === undefined) delete process.env.CATALYST_RECOVERY_PASS;
+    else process.env.CATALYST_RECOVERY_PASS = prevRecoveryPass;
+  });
+
+  test("delegate-runner mode off (the default in every other test in this file) → sweep NOT called", () => {
+    delete process.env.CATALYST_DELEGATE_RUNNER;
+    delete process.env.CATALYST_BOARD_HEALTH;
+    delete process.env.CATALYST_RECOVERY_PASS;
+    const calls = [];
+    startDaemon({
+      ...baseOpts(),
+      reapOrphanedRunners: (orchDir) => { calls.push(orchDir); return { reaped: 0 }; },
+    });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+// maybeReapOrphanedDelegateRunners's own mode-gating logic, tested directly —
+// enableReaper:true (needed to reach this code via the full startDaemon path)
+// also arms startReaperAndTimer's whole bundle (worktree-refresh/stale-PR-
+// rescue/orphan-PR-sweep/a real ProcReaper), none of which are unit-tested at
+// that level anywhere in this file. Testing the extracted function directly
+// gets full positive-path coverage without that risk.
+describe("maybeReapOrphanedDelegateRunners (CAT-39)", () => {
+  test("mode !== 'on' → sweep never called (covers 'off', undefined, garbage)", () => {
+    for (const mode of ["off", undefined, "banana"]) {
+      const calls = [];
+      maybeReapOrphanedDelegateRunners({
+        mode,
+        orchDir: "/orch",
+        reapOrphanedRunners: (orchDir) => { calls.push(orchDir); return { reaped: 0 }; },
+      });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  test("mode === 'on' → sweep called once with this daemon's orchDir", () => {
+    const calls = [];
+    maybeReapOrphanedDelegateRunners({
+      mode: "on",
+      orchDir: "/orch/host-a",
+      reapOrphanedRunners: (orchDir) => { calls.push(orchDir); return { reaped: 0 }; },
+    });
+    expect(calls).toEqual(["/orch/host-a"]);
+  });
+
+  test("a reaped count > 0 is logged; reaped:0 stays quiet", () => {
+    const warns = [];
+    const origWarn = log.warn;
+    log.warn = (...args) => warns.push(args);
+    try {
+      maybeReapOrphanedDelegateRunners({
+        mode: "on",
+        orchDir: "/orch",
+        reapOrphanedRunners: () => ({ reaped: 2 }),
+      });
+      maybeReapOrphanedDelegateRunners({
+        mode: "on",
+        orchDir: "/orch",
+        reapOrphanedRunners: () => ({ reaped: 0 }),
+      });
+    } finally {
+      log.warn = origWarn;
+    }
+    expect(warns).toHaveLength(1);
+    expect(warns[0][0]).toEqual({ reaped: 2 });
+  });
+
+  test("a throwing sweep never propagates out of maybeReapOrphanedDelegateRunners", () => {
+    expect(() => {
+      maybeReapOrphanedDelegateRunners({
+        mode: "on",
+        orchDir: "/orch",
+        reapOrphanedRunners: () => {
+          throw new Error("ps: command not found");
+        },
+      });
+    }).not.toThrow();
+  });
+
+  test("defaults reapOrphanedRunners to the real export when not injected (no throw with mode off)", () => {
+    // Only exercises the default-parameter wiring, not a real ps/kill (mode
+    // stays off, so the real sweep is never actually invoked).
+    expect(() => {
+      maybeReapOrphanedDelegateRunners({ mode: "off", orchDir: "/orch" });
+    }).not.toThrow();
   });
 });

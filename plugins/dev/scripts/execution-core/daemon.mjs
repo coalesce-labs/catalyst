@@ -99,7 +99,7 @@ import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree
 // CTL-1331: the async board-health delegate runner timer (kicks the DETACHED
 // drainer that does the heavy worktree-provision + `claude --bg` off the daemon
 // event loop). Gated by readDelegateRunnerConfig; Phase A ships it inert.
-import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
+import { startDelegateRunnerTimer, reapOrphanedRunners } from "./delegate-runner.mjs"; // CAT-39: reapOrphanedRunners is a boot-time-only sweep, called explicitly below
 import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
 import { startStalledPrTimer as realStartStalledPrTimer, readStalledPrSweepConfig, DEFAULTS as STALLED_DEFAULTS } from "./stalled-pr-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
@@ -879,6 +879,12 @@ export function startDaemon({
   // real config (resolveClusterHosts). Kept separate from bootHosts so the
   // CTL-862 ownership-log tests (which inject bootHosts directly) still pass.
   bootResolve = undefined,
+  // CAT-39: boot-time delegate-runner-entry.mjs orphan sweep. Injectable so
+  // tests can assert the mode==="on" gating with a mock instead of a real `ps`
+  // scan + real SIGTERM; production defaults to the real sweep. Threaded into
+  // startReaperAndTimer below, which is where the delegate-runner timer setup
+  // itself already lives (grouped with the other reaper/sweep timers).
+  reapOrphanedRunners: reapOrphanedRunnersFn = reapOrphanedRunners,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -1336,6 +1342,7 @@ export function startDaemon({
         pollMs,
         orchDir,
         makeReaper,
+        reapOrphanedRunners: reapOrphanedRunnersFn,
       });
     }
 
@@ -1591,6 +1598,30 @@ export function startDaemon({
   );
 }
 
+// maybeReapOrphanedDelegateRunners — CAT-39: run the boot-time
+// delegate-runner-entry.mjs orphan sweep (see delegate-runner.mjs's
+// reapOrphanedRunners) iff the delegate-runner feature itself is on. Pulled
+// out to its own small function — exported so tests can drive the mode
+// gate directly, without needing to arm startReaperAndTimer's whole
+// enableReaper:true bundle (worktree-refresh/stale-PR-rescue/orphan-PR-sweep)
+// just to reach two lines of glue. Best-effort: a sweep failure never blocks
+// the caller.
+export function maybeReapOrphanedDelegateRunners({
+  mode,
+  orchDir,
+  reapOrphanedRunners: reapOrphanedRunnersFn = reapOrphanedRunners,
+}) {
+  if (mode !== "on") return;
+  try {
+    const { reaped } = reapOrphanedRunnersFn(orchDir);
+    if (reaped > 0) {
+      log.warn({ reaped }, "daemon boot: reaped orphaned delegate-runner-entry process(es)");
+    }
+  } catch (err) {
+    log.warn({ err: err?.message }, "daemon boot: delegate-runner orphan sweep failed");
+  }
+}
+
 // startReaperAndTimer — wire the Reaper (CTL-649 Phase 4) and the periodic
 // orphan-reaper timer (CTL-649 Phase 9) into the daemon. The reaper consumes
 // `*.reap-requested` lines appended to the canonical event log by yielding
@@ -1616,6 +1647,9 @@ function startReaperAndTimer({
   // test can observe that the poll-fallback timer (not an fs.watch event)
   // dispatched a reap-requested line into reaper.handle().
   makeReaper = (opts) => new Reaper(opts),
+  // CAT-39: boot-time delegate-runner-entry.mjs orphan sweep. Threaded from
+  // startDaemon's own injectable param of the same name.
+  reapOrphanedRunners: reapOrphanedRunnersFn = reapOrphanedRunners,
 }) {
   const eventLogPath = getEventLogPath();
   // CTL-649: the periodic sweep honors the configured recency floor
@@ -1825,9 +1859,29 @@ function startReaperAndTimer({
   // wires CATALYST_EXECUTION_CORE_DIR onto the child spawn so the entry resolves
   // orchDir; until then a forced-on child fails safe — "no orchDir" → exit 0.)
   const delegateRunnerCfg = readDelegateRunnerConfig();
+  // CAT-39: a delegate-runner-entry.mjs process from a PRIOR daemon generation
+  // can survive a restart (reparented to PID 1) and keep spinning
+  // indefinitely — confirmed in production, one such orphan burned a core for
+  // 32+ hours across a restart before being noticed. This daemon has spawned
+  // nothing yet at this point in boot, so every match is by definition stale.
+  // Runs ONCE, here, explicitly — never from inside startDelegateRunnerTimer
+  // itself, which unit tests construct directly without expecting a real `ps`
+  // scan + real SIGTERM as a side effect. See maybeReapOrphanedDelegateRunners
+  // for the gating logic itself (pulled out to a standalone pure-ish function
+  // so it is unit-testable without the rest of this heavyweight, multi-timer
+  // function — enableReaper:true here also arms the worktree-refresh/stale-PR-
+  // rescue/orphan-PR-sweep timers, none of which are unit-tested at that level
+  // anywhere in this file).
+  maybeReapOrphanedDelegateRunners({
+    mode: delegateRunnerCfg.mode,
+    orchDir,
+    reapOrphanedRunners: reapOrphanedRunnersFn,
+  });
+
   _delegateRunnerTimer = startDelegateRunnerTimer({
     enabled: delegateRunnerCfg.mode === "on",
     intervalMs: delegateRunnerCfg.intervalMs,
+    reapDeadlineMs: delegateRunnerCfg.reapDeadlineMs,
     orchDir,
   });
 
