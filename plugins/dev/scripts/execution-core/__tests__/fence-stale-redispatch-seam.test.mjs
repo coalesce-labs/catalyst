@@ -60,6 +60,7 @@ describe("CTL-1679 fence-stale-redispatch seam", () => {
     writeSignal(ticket, phase, {
       status: "failed",
       failureReason: "cluster_fence_stale",
+      retrySafe: true,
       generation: 3,
       worktreePath: "/tmp/wt/CTL-1",
       attempt: 2,
@@ -88,6 +89,8 @@ describe("CTL-1679 fence-stale-redispatch seam", () => {
     const sig = JSON.parse(readFileSync(signalPath(ticket, phase), "utf8"));
     expect(sig.status).toBe("pending");
     expect(sig.failureReason).toBeUndefined();
+    // retrySafe is cleared so a later unrelated failure doesn't inherit it.
+    expect(sig.retrySafe).toBeUndefined();
     expect(sig.generation).toBe(3);
     expect(sig.worktreePath).toBe("/tmp/wt/CTL-1");
     expect(sig.attempt).toBe(2);
