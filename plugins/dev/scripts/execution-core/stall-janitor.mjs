@@ -39,6 +39,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { log } from "./config.mjs";
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on J4 terminal GC
+import { clearStalledLabel } from "./label-guard.mjs"; // CTL-1552: reconcile needs-human label before J4 dir removal
 import { parseWorktreeForBranch } from "./worktree.mjs";
 import { cleanPorcelain } from "./worktree-safety.mjs";
 // CTL-1005 J3: prior-phase artifact completeness reuses the SAME work-done probes
@@ -896,9 +897,21 @@ export function defaultCollectStallClearCandidates({
 // Called by runStallJanitorPass in enforce mode after classifyTerminalSignalGc
 // returns "gc". The dir removal clears the ticket from listStartedTickets
 // and from all dead/stale views in the next tick.
-export function defaultGcTerminalSignals(orchDir) {
+export function defaultGcTerminalSignals(orchDir, { removeLabel = null } = {}) {
   return ({ ticket }) => {
     try {
+      // CTL-1552: the rmSync below takes workers/<T>/.linear-label-needs-human.applied
+      // collaterally. If a live needs-human LABEL is still on the ticket, deleting
+      // only the marker orphans it in Linear. So reconcile FIRST (label + marker
+      // together via clearStalledLabel) whenever the marker is present and a
+      // removeLabel seam is wired. Best-effort — clearStalledLabel never throws,
+      // and a missing seam / absent marker just falls through to the plain rmSync.
+      if (
+        typeof removeLabel === "function" &&
+        existsSync(join(orchDir, "workers", ticket, ".linear-label-needs-human.applied"))
+      ) {
+        clearStalledLabel(orchDir, ticket, "needs-human", { removeLabel });
+      }
       rmSync(join(orchDir, "workers", ticket), { recursive: true, force: true });
       // CTL-1643: also remove the durable escalation record so the board does not
       // surface a ghost needs-human card after the worker dir is GC'd. Fail-open

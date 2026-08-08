@@ -4427,6 +4427,46 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     expect(appendEvent.calls.length).toBe(0);
   });
 
+  test("CTL-1552-normalized park (stalled + stalledReason needs_human) is noop'd before the no-probe branch", () => {
+    // CTL-1552 renamed the park recovery-emit writes from status "needs-human"
+    // to "stalled" + stalledReason "needs_human". "stalled" is in TERMINAL, so
+    // classifyWorker returns "terminal" and this noops at the top — earlier and
+    // more robustly than the bespoke needs-human guard in the no-probe branch,
+    // which only ever existed because "needs-human" was NOT terminal. Pinned
+    // because the guard reads like it is the only thing protecting the
+    // worker-authored brief, and it is not.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const recoveryPassSig = {
+      ticket: "PROJ-509",
+      phase: "recovery-pass",
+      status: "stalled",
+      stalledReason: "needs_human",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: {
+        ticket: "PROJ-509",
+        phase: "recovery-pass",
+        status: "stalled",
+        stalledReason: "needs_human",
+        bg_job_id: "job-old",
+      },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => false,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("noop");
+    expect(escalate.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+  });
+
   test("no-probe-for-phase returns 'reclaim-failed' when the complete-event-seen emit-complete repair fails (regression, Codex #3027 round 4 P2)", () => {
     // The other completion-reconciliation branches (PROJ-778 alive-probe-reclaim,
     // and branch (B) of reclaimDeadWork) both return 'reclaim-failed' on a

@@ -58,6 +58,8 @@ import {
   hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
   readProjectionReadConfig, // CTL-1489: durable-projection read-cutover flag (off/shadow/enforce)
+  readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
+  readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
 } from "./config.mjs";
 import { findHeldRunFromProjection } from "./projection-reader.mjs"; // CTL-1489
 import { emitProjectionDrift } from "./projection-read-decision.mjs"; // CTL-1489
@@ -128,7 +130,7 @@ import {
   clearDispositionEmit as defaultClearDispositionEmit, // Codex #2970 round 3: reset the in-process worker.transition dedup after an out-of-band clear
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
-import { labelMarkerBase } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth)
+import { labelMarkerBase, clearStalledLabel } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle)
 import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator clear
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
@@ -809,8 +811,14 @@ export async function handleCommentWake(
       clearHoldStopCooldown(orchDir, ticket, parkedPhase);
     }
 
+    // CTL-1552: clear the needs-human LABEL and its once-marker TOGETHER via
+    // clearStalledLabel — the operator-response unpark now owns both halves. The
+    // prior raw label-removal deleted the Linear label but orphaned the once-marker
+    // (workers/<T>/.linear-label-needs-human.applied), so labelOnce stayed disarmed
+    // (a genuine re-escalation could never re-apply). Both halves together re-arm
+    // the guard. Fail-open (clearStalledLabel never throws).
     try {
-      await removeLabel(ticket, "needs-human"); // CTL-1067 Bug 3: was "needs-human/question"
+      clearStalledLabel(orchDir, ticket, "needs-human", { removeLabel });
     } catch {
       /* fail-open */
     }
@@ -1712,6 +1720,21 @@ export function startDaemon({
       rewalkDispatched: _bootResume?.dispatched ?? 0,
     },
   });
+  // CTL-1552: record which config LAYER each governance knob resolved from
+  // (env-override / config / default) at boot, so an operator can tell at a
+  // glance whether e.g. board-health enforce came from the host env or Layer-2 —
+  // previously only the beliefs booleans' sources were legible. effectiveFlags
+  // carries the resolved mode values; flagSources carries the layer each came
+  // from (now including boardHealth/recoveryPass/unstuckSweep/deadDocWorker).
+  // Fail-open — the boot self-report must never block startup.
+  try {
+    log.info(
+      { effectiveFlags: readGovernanceConfig(), flagSources: readGovernanceSources() },
+      "execution-core daemon: governance flags resolved (value ← layer)",
+    );
+  } catch {
+    /* best-effort boot self-report */
+  }
   // CTL-1271: announce roster + source + multiHost at boot so an operator can
   // always read what the daemon resolved and where it came from.
   log.info(

@@ -1106,12 +1106,18 @@ function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
     const signal = {
       ...prior,
       // CTL-1157 F #6 (Codex round-4): persist the ticket on the signal. signal-reader
-      // parseSignal keys off raw.ticket, and status:"needs-human" is NON-terminal, so
-      // this fresh recovery-pass signal wins over the failed phase signal — WITHOUT a
-      // ticket, readWorkerSignals() would then report ticket:null and scheduler-recovery
-      // / board-health consumers would lose the escalated ticket after the first pass.
+      // parseSignal keys off raw.ticket — WITHOUT a ticket, readWorkerSignals() would
+      // report ticket:null and scheduler-recovery / board-health consumers would lose
+      // the escalated ticket after the first pass.
+      // CTL-1552: status normalized to the terminal "stalled" + stalledReason (was the
+      // bespoke non-terminal "needs-human"). byActivePhase now ranks this vs. the failed
+      // phase signal by updatedAt recency (both terminal): this escalation is written
+      // LAST, so it stays the freshest and still wins. isTicketInFlight now frees the
+      // slot (intended). needs-human SEMANTICS ride on needsHumanSince + explanation +
+      // the Linear label/marker, not the raw status.
       ticket,
-      status: "needs-human",
+      status: "stalled",
+      stalledReason: "needs_human",
       needsHumanSince:
         typeof prior.needsHumanSince === "string" && prior.needsHumanSince !== ""
           ? prior.needsHumanSince

@@ -267,6 +267,12 @@ describe("isTicketInFlight", () => {
     expect(isTicketInFlight({ implement: "failed" })).toBe(false);
     expect(isTicketInFlight({ verify: "stalled" })).toBe(false);
   });
+  test("CTL-1552 — a recovery-pass escalation (now 'stalled', was 'needs-human') frees the slot", () => {
+    // The escalation signal is now the terminal "stalled" (normalized from the
+    // bespoke non-terminal "needs-human"), so isTicketInFlight no longer holds the
+    // slot for a parked-for-human ticket — the intended slot-freeing behavior.
+    expect(isTicketInFlight({ "recovery-pass": "stalled" })).toBe(false);
+  });
   test("an 'aborted' signal frees the slot (CTL-565 kill-on-drag-out)", () => {
     expect(isTicketInFlight({ research: "done", implement: "aborted" })).toBe(false);
   });

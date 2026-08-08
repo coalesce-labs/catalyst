@@ -2177,12 +2177,15 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
 });
 
 // ─── CTL-1157 F #6 (Codex round-4): escalation signal must carry `ticket` ─────
-// signal-reader parseSignal keys off raw.ticket and status:"needs-human" is
-// non-terminal, so this fresh recovery-pass signal wins over the failed phase.
-// Without a ticket, readWorkerSignals() reports ticket:null and scheduler-recovery /
-// board-health consumers lose the escalated ticket after the first pass.
+// signal-reader parseSignal keys off raw.ticket. Without a ticket, readWorkerSignals()
+// reports ticket:null and scheduler-recovery / board-health consumers lose the
+// escalated ticket after the first pass.
+// CTL-1552: status is now the terminal "stalled" + stalledReason (was the bespoke
+// non-terminal "needs-human"). byActivePhase ranks this vs. the failed phase signal
+// by updatedAt recency now that both are terminal — this escalation is written last,
+// so it stays freshest and still wins (asserted in the byActivePhase test below).
 describe("defaultWriteEscalationSignal (CTL-1157 F #6)", () => {
-  test("the written phase-recovery-pass.json carries the ticket", () => {
+  test("the written phase-recovery-pass.json carries the ticket + normalized stalled status", () => {
     const orchDir = mkdtempSync(pathJoin(tmpdir(), "esc-"));
     try {
       defaultWriteEscalationSignal(
@@ -2194,7 +2197,9 @@ describe("defaultWriteEscalationSignal (CTL-1157 F #6)", () => {
       expect(existsSync(p)).toBe(true);
       const signal = JSON.parse(readFileSync(p, "utf8"));
       expect(signal.ticket).toBe("CTL-42"); // the fix: never null
-      expect(signal.status).toBe("needs-human");
+      expect(signal.status).toBe("stalled"); // CTL-1552: normalized from needs-human
+      expect(signal.stalledReason).toBe("needs_human");
+      expect(typeof signal.needsHumanSince).toBe("string");
       expect(signal.explanation).toBeDefined();
     } finally {
       rmSync(orchDir, { recursive: true, force: true });
