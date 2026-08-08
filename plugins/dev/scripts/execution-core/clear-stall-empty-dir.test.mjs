@@ -44,12 +44,14 @@ test("clearing one of several signals leaves the dir and survivors intact", () =
   expect(existsSync(join(workerDir, "phase-recovery-pass.json"))).toBe(false);
 });
 
-test("marker-only residue is removed with the dir", () => {
+test("an operator inbox survives clearing the last phase signal", () => {
   signal("recovery-pass");
   writeFileSync(join(workerDir, "inbox.jsonl"), "{}\n");
   writeFileSync(join(workerDir, ".janitor-cleared-recovery-pass.applied"), "");
   expect(clear()).toBe(true);
-  expect(existsSync(workerDir)).toBe(false);
+  expect(existsSync(workerDir)).toBe(true);
+  expect(existsSync(join(workerDir, "inbox.jsonl"))).toBe(true);
+  expect(existsSync(join(workerDir, ".janitor-cleared-recovery-pass.applied"))).toBe(true);
 });
 
 test("a CTL-702 yield tombstone does not count as a surviving signal", () => {

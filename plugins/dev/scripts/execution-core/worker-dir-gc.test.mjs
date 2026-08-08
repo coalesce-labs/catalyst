@@ -185,6 +185,29 @@ describe("sweepWorkerDirs", () => {
     });
     expect(rm.calls.length).toBe(1);
     expect(res.reclaimed).toBe(1);
+    expect(res.reclaimedZeroSignal).toBe(1);
+    expect(res.reclaimedTickets).toEqual(["CTL-9002"]);
+  });
+
+  it("fails closed when a worker directory is unreadable", async () => {
+    const rm = rmSpy();
+    const res = await sweepWorkerDirs({
+      orchDir: ORCH,
+      readDir: fakeDirs(["CAT-unreadable"]),
+      statDir: async () => ({ mtimeMs: 0 }),
+      rm,
+      readAgents: () => ({ ok: true, agents: [] }),
+      readWorkerMeta: fakeWorkerMeta({
+        "CAT-unreadable": { statuses: {}, shortIds: new Set(), unreadable: true },
+      }),
+      now: () => 1_000_000_000_000,
+      retentionMs: RETENTION_24H,
+      emit: emitSpy(),
+      env: {},
+      log: logSpy(),
+    });
+    expect(rm.calls.length).toBe(0);
+    expect(res.skippedUnreadable).toBe(1);
   });
 
   it("a zero-signal worker dir younger than retention is skippedRecent", async () => {

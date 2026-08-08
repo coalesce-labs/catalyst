@@ -64,9 +64,10 @@ import {
 export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 
 const configuredEmptyWorkerDirGrace = Number(process.env.CATALYST_EMPTY_WORKER_DIR_GRACE_MS);
-export const EMPTY_WORKER_DIR_GRACE_MS = Number.isFinite(configuredEmptyWorkerDirGrace)
-  ? configuredEmptyWorkerDirGrace
-  : 600_000;
+export const EMPTY_WORKER_DIR_GRACE_MS =
+  Number.isFinite(configuredEmptyWorkerDirGrace) && configuredEmptyWorkerDirGrace > 0
+    ? configuredEmptyWorkerDirGrace
+    : 600_000;
 // CTL-653: the verdict-router reads (verify.json verdict + event-counted cycle
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
@@ -1876,9 +1877,17 @@ export function listStartedTickets(orchDir) {
         // the new-work pull (buildGlobalRanking) excludes the ticket forever and it
         // strands in Todo with no live worker. Dropping it here re-pulls it as fresh work.
         .filter((d) => {
+          let names;
+          try {
+            names = readdirSync(join(orchDir, "workers", d.name));
+          } catch {
+            // Fail closed: unreadable is not empty. Keep the ticket out of the
+            // new-work pull until a later tick can inspect its worker dir.
+            return true;
+          }
           const signals = readPhaseSignals(orchDir, d.name);
           if (isPhantomWorkerDir(signals)) return false;
-          if (Object.keys(signals).length > 0) return true;
+          if (workerDirHasPhaseSignals(names)) return true;
           let ageMs = Number.NaN;
           try {
             ageMs = nowMs - statSync(join(orchDir, "workers", d.name)).mtimeMs;
@@ -3941,10 +3950,20 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
     forgetDurableEscalation(orchDir, ticket);
     // 6. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
     // deleting its last real phase signal. Such residue holds no slot yet excludes
-    // the ticket from new-work dispatch. Tombstones are not real signals.
+    // the ticket from new-work dispatch. Tombstones are not real signals. Preserve
+    // a non-empty operator inbox: daemon writes the reply before invoking this
+    // clear, and the re-dispatched worker must still be able to consume it.
     try {
       const names = readdirSync(workerDir);
-      if (!workerDirHasPhaseSignals(names)) {
+      let hasInbox = false;
+      if (names.includes("inbox.jsonl")) {
+        try {
+          hasInbox = statSync(join(workerDir, "inbox.jsonl")).size > 0;
+        } catch {
+          hasInbox = true; // unreadable inbox is evidence to fail closed
+        }
+      }
+      if (!workerDirHasPhaseSignals(names) && !hasInbox) {
         rmDir(workerDir, { recursive: true, force: true });
       }
     } catch (err) {

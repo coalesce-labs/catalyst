@@ -38,7 +38,7 @@ async function defaultReadWorkerMeta(workersRoot, ticket, { readDir, readFileFn 
   try {
     files = await readDir(dir);
   } catch {
-    return { statuses, shortIds };
+    return { statuses, shortIds, unreadable: true };
   }
   for (const f of files) {
     const m = /^phase-(.+)\.json$/.exec(f);
@@ -157,12 +157,20 @@ export async function sweepWorkerDirs({
   let skippedInFlight = 0;
   let skippedLive = 0;
   let skippedRecent = 0;
+  let skippedUnreadable = 0;
+  let reclaimedZeroSignal = 0;
+  const reclaimedTickets = [];
   let errors = 0;
   let batchCapped = false;
 
   for (const ticket of tickets) {
     scanned++;
-    const { statuses, shortIds } = await metaReader(ticket);
+    const { statuses, shortIds, unreadable = false } = await metaReader(ticket);
+
+    if (unreadable) {
+      skippedUnreadable++;
+      continue;
+    }
 
     // Gate 1 — terminal: not in-flight. A zero-signal residue is terminal by
     // definition and continues through the same liveness + retention gates (CAT-24).
@@ -209,19 +217,39 @@ export async function sweepWorkerDirs({
     try {
       await rm(dir, { recursive: true, force: true });
       reclaimed++;
-    } catch {
+      if (Object.keys(statuses).length === 0) reclaimedZeroSignal++;
+      reclaimedTickets.push(ticket);
+    } catch (err) {
       errors++;
+      log.warn({ ticket, err: err?.message }, "worker-dir-gc: worker-dir removal failed");
     }
   }
 
   // Best-effort flag emit; only when we actually reclaimed something.
   if (reclaimed > 0) {
     try {
-      await emit("workers.gc.swept", { reclaimed, scanned });
+      await emit("workers.gc.swept", {
+        reclaimed,
+        reclaimedZeroSignal,
+        skippedUnreadable,
+        scanned,
+        tickets: reclaimedTickets,
+      });
     } catch (err) {
       log.warn({ err: err?.message }, "worker-dir-gc: workers.gc.swept emit failed");
     }
   }
 
-  return { reclaimed, scanned, skippedInFlight, skippedLive, skippedRecent, errors, batchCapped };
+  return {
+    reclaimed,
+    reclaimedZeroSignal,
+    reclaimedTickets,
+    scanned,
+    skippedInFlight,
+    skippedLive,
+    skippedRecent,
+    skippedUnreadable,
+    errors,
+    batchCapped,
+  };
 }
