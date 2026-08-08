@@ -240,11 +240,14 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
   // readReplica, secrets, launchd agents, catalyst.db) is written AFTER backup and so is restorable.
   const acquire = () => ({
     phase: "acquire",
-    // --no-interactive-wrapper: the acquire step runs pre-backup and non-interactively;
-    // it must only write the git-reconstructable pluginDirs config, never the user's
-    // shell rc files (~/.zshrc/~/.bashrc), which the backup phase does not capture and
-    // a rollback could not restore. The interactive `claude` wrapper is installed only
-    // by the documented manual `bash setup-plugin-source.sh` run.
+    // --no-interactive-wrapper: the acquire step runs pre-backup and non-interactively,
+    // so it does only the git-reconstructable work — the pluginDirs config write + the
+    // reversible ~/.claude/skills symlinks. It SKIPS the stateful cutover (shell-rc
+    // wrapper removal + `catalyst` marketplace/enablement retirement), which the backup
+    // phase does not capture and a rollback could not restore; both are no-ops on a
+    // fresh node anyway. The full cutover runs post-backup via pluginCutover() below
+    // (both install and reinstall), the join stage, or the documented manual
+    // `bash setup-plugin-source.sh` run.
     steps: [{ label: "plugin-source", kind: "run", argv: [scripts.pluginSrc, "--no-interactive-wrapper"] }],
   });
 
@@ -260,7 +263,21 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
     // no split; the split is only possible under a non-default config scope (a test/sandbox seam), where
     // those secrets land outside the backup/restore scope. A scoped-secrets override belongs in
     // setup-catalyst.sh, not here. set-class / pluginPullOwner / readReplica all stay under the selected scope.
+    //
+    // plugin-source-cutover (Codex P1): acquire() deliberately runs setup-plugin-source.sh with
+    // --no-interactive-wrapper (pre-backup, git-reconstructable work only) and skips the stateful
+    // half — shell-rc wrapper removal + `catalyst` marketplace/enablement retirement. Nothing else
+    // in the install/reinstall lifecycle ever ran the full cutover (only catalyst-join's separate
+    // do_setup_plugin_source stage did), so a plain `catalyst install`/reinstall left the
+    // marketplace and the legacy wrapper active alongside the new skills-dir symlinks and the
+    // post-install doctor's skills-dir-plugins check would FAIL on that residue rather than the
+    // install having actually completed the migration. Placed first in write-config (the first
+    // phase after backup(), in BOTH the install and reinstall sequences) so the shell-rc / settings.json
+    // state it mutates is already captured in the backup bundle taken one phase earlier. Re-running
+    // setup-plugin-source.sh here after acquire()'s partial run is the documented idempotent path
+    // (its own contract: "Re-running is safe and idempotent").
     const steps = [
+      { label: "plugin-source-cutover", kind: "run", argv: [scripts.pluginSrc] },
       { label: "set-class", kind: "run", argv: [scripts.catalyst, "class", nodeClass] },
       { label: "setup-catalyst", kind: "run", argv: [scripts.setup, "--non-interactive"] },
     ];
