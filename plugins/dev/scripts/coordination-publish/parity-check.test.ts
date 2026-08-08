@@ -164,6 +164,35 @@ describe("computeParity (CTL-1668 Phase 3)", () => {
     expect(r.verdict).toBe("divergent");
   });
 
+  test("orphan terminal: local coordination terminal with NO worker_state → divergent, not masked by a healthy pair", () => {
+    const r = computeParity({
+      workerStates: [ws("CTL-2", "done")],
+      coordinationRows: [
+        row("CTL-1", "phase.implement.failed"), // local (local_seq set), no worker_state for CTL-1
+        row("CTL-2", "phase.teardown.complete"), // healthy matched pair
+      ],
+    });
+    expect(r.verdict).toBe("divergent");
+    expect(r.divergences.some((d) => d.ticket === "CTL-1")).toBe(true);
+  });
+
+  test("orphan terminal forces divergent even with zero matched pairs (not merely inconclusive)", () => {
+    const r = computeParity({
+      workerStates: [],
+      coordinationRows: [row("CTL-1", "phase.implement.failed")],
+    });
+    expect(r.verdict).toBe("divergent");
+  });
+
+  test("inbound-pulled terminal (hub_seq, no local_seq) with no worker_state is NOT flagged — its projection is remote", () => {
+    const inbound = row("CTL-9", "phase.implement.failed");
+    delete (inbound as Record<string, unknown>)["local_seq"];
+    (inbound as Record<string, unknown>)["hub_seq"] = 42;
+    const r = computeParity({ workerStates: [], coordinationRows: [inbound] });
+    expect(r.divergences).toHaveLength(0);
+    expect(r.verdict).toBe("inconclusive");
+  });
+
   test("wire order preserved: rows consumed in input order, never sorted", () => {
     const rows = [row("CTL-3", "..."), row("CTL-1", "..."), row("CTL-2", "...")];
     const r = computeParity({ workerStates: [], coordinationRows: rows });

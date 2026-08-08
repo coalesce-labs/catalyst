@@ -235,6 +235,38 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(pub.outboundDepth()).toBe(0);
   });
 
+  test("enforce + hubUrl but NO client (tokenless window) buffers records to the DLQ, not dropped (Codex P1)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));
+    const dlqPath = join(dir, "dlq.jsonl");
+    // enforce + hubUrl set + no hubClient == token temporarily absent. There IS a hub to eventually
+    // reach, so rows must be preserved on the durable DLQ (not dropped like the no-hubUrl path).
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubUrl: "https://hub.example", dlqPath,
+    });
+    await pub.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(2); // still mirrored (local-first)
+    expect(pub.outboundDepth()).toBe(0);              // no in-memory outbound (no client)
+    expect(existsSync(dlqPath)).toBe(true);
+    // Two DLQ lines, each a 1-record batch — replayable by drainDlqBounded on a later tokened restart.
+    const batches = readFileSync(dlqPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(batches.length).toBe(2);
+    expect(batches[0].length).toBe(1);
+    expect(batches[0][0].id).toBe("a");
+  });
+
+  test("enforce + NO hubUrl + dlqPath (interim inbound-only) does NOT buffer to DLQ — nothing to flush to", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    const dlqPath = join(dir, "dlq-none.jsonl");
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal, dlqPath,
+    });
+    await pub.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(1);
+    expect(existsSync(dlqPath)).toBe(false); // no hubUrl → genuinely nothing to preserve for
+  });
+
   test("flushToHub drains the DLQ backlog even when outbound is empty (recovered hub catches up — Codex P1)", async () => {
     // No coordination lines were tailed, so outbound stays empty. A prior outage could have left a
     // DLQ backlog; the flush tick must still attempt an independent drain instead of early-returning.

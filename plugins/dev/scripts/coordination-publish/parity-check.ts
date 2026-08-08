@@ -163,9 +163,42 @@ export function computeParity(input: {
     }
   }
 
+  // Reverse coverage (Codex P1): the worker-driven loop above never examines a terminal coordination
+  // event that has NO worker_state row at all, so a dropped projection could slip through as healthy
+  // whenever some unrelated pair matches. Scan THIS host's OWN would-publish stream — rows carrying a
+  // `local_seq` (locally tailed), NOT inbound-pulled `hub_seq` rows whose worker_state lives on
+  // another host — for terminals with no matching worker_state and report each as a divergence.
+  const workerStateKeys = new Set(workerStates.map((w) => parityKey(w.orchestrator, w.ticket)));
+  const workerStateTickets = new Set(workerStates.map((w) => w.ticket));
+  const reportedOrphans = new Set<string>();
+  for (const row of coordinationRows) {
+    if (typeof row.local_seq !== "number") continue; // inbound-pulled row → worker_state is remote
+    const attrs = row.attributes as Record<string, unknown> | undefined;
+    const eventName = typeof attrs?.["event.name"] === "string" ? attrs["event.name"] : "";
+    if (terminalOutcomeFromEventName(eventName) === null) continue;
+    const ticket = ticketFromEventName(eventName);
+    if (!ticket) continue;
+    const orchestrator = orchestratorFromRow(row);
+    // An identity-less terminal is covered iff ANY worker_state exists for its ticket (mirrors the
+    // forward-direction ticket fallback); a keyed terminal needs its exact (orchestrator, ticket).
+    const covered =
+      orchestrator === "" ? workerStateTickets.has(ticket) : workerStateKeys.has(parityKey(orchestrator, ticket));
+    if (covered) continue;
+    const dedupKey = orchestrator === "" ? ` ${ticket}` : parityKey(orchestrator, ticket);
+    if (reportedOrphans.has(dedupKey)) continue;
+    reportedOrphans.add(dedupKey);
+    divergences.push({
+      orchestrator: orchestrator || "(unknown)",
+      ticket,
+      reason: `coordination terminal for "${orchestrator || "(no orchestrator)"}/${ticket}" has no worker_state row (projection dropped a terminal event)`,
+    });
+  }
+
+  // A divergence is a positive finding of a problem, so it takes precedence over the
+  // zero-matched-pairs "inconclusive" — an orphan terminal must not be masked as merely unevaluable.
   let verdict: Verdict;
-  if (matchedPairs === 0) verdict = "inconclusive";
-  else if (divergences.length > 0) verdict = "divergent";
+  if (divergences.length > 0) verdict = "divergent";
+  else if (matchedPairs === 0) verdict = "inconclusive";
   else verdict = "healthy";
 
   return { matchedPairs, coverageGaps, divergences, orderedTickets, verdict };

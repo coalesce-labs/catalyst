@@ -18,6 +18,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } fr
 import { dirname } from "node:path";
 import { createTailer } from "../otel-forward/lib/tail.ts";
 import { HubClient } from "./lib/hub-client.ts";
+import { appendToDlq } from "../otel-forward/lib/dlq.ts";
 
 export const SERVICE_NAME = "catalyst.coordination-publish";
 
@@ -131,6 +132,12 @@ export interface PublisherOpts {
   eventsDir?: string;
   hubClient?: HubClientLike;
   pollMs?: number;
+  /** Hub URL from resolved config. Set (with dlqPath) so the `enforce + hubUrl + no-token` window
+   *  DLQ-buffers records instead of dropping them — distinguishes a configured-but-tokenless hub
+   *  (there IS a destination, preserve) from the interim no-hubUrl path (nothing to flush to). */
+  hubUrl?: string | null;
+  /** Durable DLQ path — where a clientless-but-hub-configured window buffers records for later drain. */
+  dlqPath?: string;
 }
 
 export interface CoordinationPublisher {
@@ -222,7 +229,24 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     // NO hubClient, so flushToHub always early-returns — buffering here would grow the array by
     // one record per coordination event forever. The mirror write above is the durable record;
     // outbound is a hub-egress staging buffer with no meaning when there is nothing to flush to.
-    if (opts.mode === "enforce" && opts.hubClient) outbound.push(record);
+    if (opts.mode === "enforce" && opts.hubClient) {
+      outbound.push(record);
+    } else if (opts.mode === "enforce" && opts.hubUrl && opts.dlqPath) {
+      // enforce + hubUrl configured but NO client (token temporarily absent — a supported degraded
+      // state): there IS a hub to eventually publish to, so PRESERVE the record on the durable DLQ
+      // (disk append, NO network — so it does not reintroduce the round-4 unauthenticated-GET loop)
+      // rather than dropping it. Without this, a tokenless window mirrors + checkpoints these rows
+      // but never queues them; after a token is provisioned and the daemon restarts, checkpoint +
+      // mirror-id dedup skip them, so they are permanently absent from the hub (Codex P1). Once a
+      // real HubClient exists on restart, its flush-timer drainQueuedDlq replays this backlog.
+      // Fail-open: a DLQ write fault must never crash the never-crash daemon or block the tailer —
+      // the local mirror already durably holds the row.
+      try {
+        appendToDlq(opts.dlqPath, [record]);
+      } catch (err) {
+        console.error("[coordination-publish] tokenless DLQ buffer failed (row is still mirrored)", err);
+      }
+    }
   }
 
   const tailer = inert
@@ -334,6 +358,10 @@ if (import.meta.main) {
     checkpointPath: CHECKPOINT_PATH,
     signal: ac.signal,
     hubClient,
+    // Enable tokenless-window DLQ preservation: when hubUrl is configured but the token is absent
+    // (built.client is undefined), processLine buffers to the DLQ instead of dropping (Codex P1).
+    hubUrl: cfg.hubUrl,
+    dlqPath: DLQ_PATH,
   });
 
   const ckTimer = setInterval(() => pub.saveCheckpoint(), 10_000);
