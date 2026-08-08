@@ -4,6 +4,9 @@
     "project": {
       "ticketPrefix": "CAT"
     },
+    "pr": {
+      "pushRemote": "fork"
+    },
     "linear": {
       "teamKey": "CAT",
       "stateMap": {
