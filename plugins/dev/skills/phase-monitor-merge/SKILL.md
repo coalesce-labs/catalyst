@@ -252,17 +252,62 @@ fi
 # universally on. This enforces the AGENTS.md absolute rule (every review thread
 # resolved before merge) independent of mergeable_state, so a Codex review WITH open
 # findings can never be merged past — regardless of the arrival window (fail-CLOSED).
-UNRESOLVED_BOT_THREADS="$(gh api graphql -f query='
-  query($owner:String!,$name:String!,$pr:Int!){
-    repository(owner:$owner,name:$name){ pullRequest(number:$pr){
-      reviewThreads(first:100){ nodes { isResolved comments(first:1){ nodes { author{login} } } } } } } }' \
-  -f owner="$GH_OWNER" -f name="$GH_NAME" -F pr="$PR_NUMBER" \
-  --jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+# CTL-1680 (Codex #3079 P2): PAGINATED — mirrors pr-block-probe.mjs's REVIEW_THREADS_QUERY
+# (capped at 25 pages of 100, same as the probe's MAX_THREAD_PAGES) so a PR with more than
+# 100 review threads never silently drops an unresolved finding beyond the first page.
+# CTL-1680 (Codex #3079 P1): FAIL CLOSED on any query failure — a transient GraphQL/auth
+# error must NOT be reported as "0 unresolved" (the old `|| echo 0` fallback let a lookup
+# failure merge straight past an actually-unresolved finding). UNRESOLVED_THREAD_QUERY_FAILED
+# tracks that distinctly from a genuine zero count.
+UNRESOLVED_BOT_THREADS=0
+UNRESOLVED_THREAD_QUERY_FAILED=false
+THREAD_AFTER=""
+THREAD_PAGE=0
+THREAD_MAX_PAGES=25
+while :; do
+  THREAD_PAGE=$((THREAD_PAGE + 1))
+  if [[ "$THREAD_PAGE" -gt "$THREAD_MAX_PAGES" ]]; then
+    echo "phase-monitor-merge: review-threads exceeded ${THREAD_MAX_PAGES} pages; failing closed" >&2
+    UNRESOLVED_THREAD_QUERY_FAILED=true
+    break
+  fi
+  THREAD_ARGS=(api graphql -f query='
+    query($owner:String!,$name:String!,$pr:Int!,$after:String){
+      repository(owner:$owner,name:$name){ pullRequest(number:$pr){
+        reviewThreads(first:100, after:$after){
+          pageInfo { hasNextPage endCursor }
+          nodes { isResolved comments(first:1){ nodes { author{login} } } } } } } }' \
+    -f owner="$GH_OWNER" -f name="$GH_NAME" -F pr="$PR_NUMBER")
+  # First page leaves $after unbound (nullable → null → from the beginning).
+  [[ -n "$THREAD_AFTER" ]] && THREAD_ARGS+=(-f "after=$THREAD_AFTER")
+  THREAD_PAGE_JSON="$(gh "${THREAD_ARGS[@]}" 2>/dev/null)"
+  if [[ -z "$THREAD_PAGE_JSON" ]] || ! jq -e '.data.repository.pullRequest.reviewThreads' >/dev/null 2>&1 <<<"$THREAD_PAGE_JSON"; then
+    echo "phase-monitor-merge: review-threads GraphQL query failed; failing closed" >&2
+    UNRESOLVED_THREAD_QUERY_FAILED=true
+    break
+  fi
+  PAGE_COUNT="$(jq '[.data.repository.pullRequest.reviewThreads.nodes[]
           | select(.isResolved==false)
-          | select((.comments.nodes[0].author.login // "")|test("codex|bot";"i"))] | length' 2>/dev/null || echo 0)"
-if [[ "${UNRESOLVED_BOT_THREADS:-0}" =~ ^[0-9]+$ && "${UNRESOLVED_BOT_THREADS:-0}" -gt 0 ]]; then
-  echo "wake: pr#${PR_NUMBER} has ${UNRESOLVED_BOT_THREADS} unresolved automated-review thread(s); NOT merging until resolved (blocked-path: /catalyst-dev:review-comments)"
-  continue  # re-enter the loop; open bot findings must be addressed + resolved first
+          | select((.comments.nodes[0].author.login // "")|test("codex|bot";"i"))] | length' <<<"$THREAD_PAGE_JSON")"
+  UNRESOLVED_BOT_THREADS=$(( UNRESOLVED_BOT_THREADS + PAGE_COUNT ))
+  HAS_NEXT="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$THREAD_PAGE_JSON")"
+  [[ "$HAS_NEXT" == "true" ]] || break
+  THREAD_AFTER="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor' <<<"$THREAD_PAGE_JSON")"
+done
+if [[ "$UNRESOLVED_THREAD_QUERY_FAILED" == true ]]; then
+  echo "wake: pr#${PR_NUMBER} unresolved-thread lookup failed; NOT merging until it succeeds (fail-closed)"
+  continue  # re-enter the loop; never risk merging past an unconfirmed finding
+fi
+if [[ "$UNRESOLVED_BOT_THREADS" -gt 0 ]]; then
+  # CTL-1680 (Codex #3079 re-review P1): dispatch the existing review-remediation path
+  # instead of merely re-waiting — a bare `continue` here left the PR permanently wedged
+  # whenever conversation resolution isn't branch-protected (mergeable_state stays "clean"
+  # and no later wake ever differs from this one, so every future iteration repeats the
+  # same continue forever). Mirrors oneshot's Phase 5 `blocked` handling: same skill
+  # invocation, same one-dispatch-per-wake shape.
+  echo "wake: pr#${PR_NUMBER} has ${UNRESOLVED_BOT_THREADS} unresolved automated-review thread(s); dispatching /catalyst-dev:review-comments"
+  /catalyst-dev:review-comments "$PR_NUMBER"
+  continue  # re-enter the loop; re-evaluate mergeable_state + threads fresh next iteration
 fi
 if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "${HEAD_AGE_SEC:-}" ]]; then
   if [[ "$HEAD_AGE_SEC" -lt "$PHASE_REVIEWER_ARRIVAL_WAIT_SEC" ]]; then
@@ -288,10 +333,17 @@ MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null
 # GNU `timeout` dependency; portable to stock macOS).
 PHASE_MERGE_SHA_RETRIES="${PHASE_MERGE_SHA_RETRIES:-5}"
 MERGE_COMMIT_SHA=""
-for _i in $(seq 1 "$PHASE_MERGE_SHA_RETRIES"); do
+# CTL-1680 (Codex #3079 P1 portability): a portable counting `while` loop, NOT `seq` —
+# stock macOS (the fleet's primary launchd environment) ships no `seq` binary unless GNU
+# coreutils is installed, so `$(seq 1 N)` there expands to nothing and this loop silently
+# runs zero times, leaving MERGE_COMMIT_SHA empty on every successful merge. A bash
+# arithmetic while-loop needs no external command.
+_sha_retry=1
+while [[ "$_sha_retry" -le "$PHASE_MERGE_SHA_RETRIES" ]]; do
   MERGE_COMMIT_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty' 2>/dev/null || true)
   [[ -n "$MERGE_COMMIT_SHA" ]] && break
   sleep 2
+  _sha_retry=$((_sha_retry + 1))
 done
 [[ -z "$MERGE_COMMIT_SHA" ]] && \
   echo "phase-monitor-merge: merge_commit_sha still empty after ${PHASE_MERGE_SHA_RETRIES} attempts for pr#${PR_NUMBER}" >&2

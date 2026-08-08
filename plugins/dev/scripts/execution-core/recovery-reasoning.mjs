@@ -941,7 +941,8 @@ export function generateRemediateBrief(category, probe = null) {
         "in the ticket's phase-monitor-merge.json signal file, then re-dispatch " +
         "monitor-deploy so the pipeline resumes from the recorded SHA.",
       "Escalate ONLY if the PR is NOT actually merged on the base branch " +
-        "(verify with `gh pr view <n> --json merged,mergedAt`).",
+        "(verify with `gh pr view <n> --json state,mergedAt` — `merged` is not a " +
+        "supported `gh pr view --json` field; merged means state == \"MERGED\").",
     ]
       .filter(Boolean)
       .join(" "),
