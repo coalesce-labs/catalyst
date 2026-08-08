@@ -714,6 +714,16 @@ release_forward_lock() {
   FORWARD_LOCK_HELD=""
 }
 
+# Codex P1: a TERM/INT handler that only releases the lock and RETURNS is worse
+# than none — bash resumes the interrupted function, so an aborted restart would
+# carry on from _forward_stop_impl into _forward_start_impl and relaunch the
+# forwarder after shutdown was requested, while another lifecycle command races
+# under the lock we just dropped. Signal handling must terminate the process.
+_forward_lock_signal_exit() {
+  release_forward_lock
+  exit 143 # 128 + SIGTERM — the conventional signal-terminated status
+}
+
 # Bounded wait — never blocks a stack start forever. Returns 1 on timeout so the
 # caller can decide; callers here treat that as "someone else is mutating, skip".
 acquire_forward_lock() {
@@ -724,8 +734,10 @@ acquire_forward_lock() {
     if mkdir "$FORWARD_LOCK_DIR" 2>/dev/null; then
       echo "$$" > "${FORWARD_LOCK_DIR}/owner" 2>/dev/null || true
       FORWARD_LOCK_HELD=1
-      # Release on any exit path, including the signals launchd/stack send.
-      trap release_forward_lock EXIT INT TERM
+      # Release on any exit path. EXIT just unlocks; INT/TERM must also STOP —
+      # see _forward_lock_signal_exit.
+      trap release_forward_lock EXIT
+      trap _forward_lock_signal_exit INT TERM
       return 0
     fi
     if _forward_lock_is_stale; then
@@ -738,13 +750,30 @@ acquire_forward_lock() {
   return 1
 }
 
+# _forward_pid_is_ours PID — identity check, not just liveness (Codex P1).
+# `kill -0` proves only that SOME process owns that pid. Pids are recycled, so
+# after otel-forward exits an unrelated same-user process can inherit the
+# recorded pid — and the watchdog's enforced restart would then SIGTERM/SIGKILL
+# it. Match the command line against the forwarder entrypoint before we ever
+# signal, and FAIL CLOSED: if `ps` can't tell us, treat the pid as not-ours
+# rather than killing something we cannot identify.
+_forward_pid_is_ours() {
+  local pid="$1" cmd
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  [[ -n "$cmd" ]] || return 1
+  [[ "$cmd" == *"otel-forward"* ]]
+}
+
 read_forward_pid() {
   if [[ -f "$FORWARD_PID_FILE" ]]; then
     local pid
     pid="$(cat "$FORWARD_PID_FILE" 2>/dev/null)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && _forward_pid_is_ours "$pid"; then
       echo "$pid"; return 0
     fi
+    # Either dead, or alive but NOT the forwarder (recycled pid) — the pid file
+    # is stale either way. Drop it so start/restart can proceed cleanly, and so
+    # stop never signals a process that isn't ours.
     rm -f "$FORWARD_PID_FILE" 2>/dev/null || true
   fi
   return 1

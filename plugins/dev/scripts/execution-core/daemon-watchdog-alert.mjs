@@ -156,9 +156,22 @@ function fileFinding(io, target, { tripped, sinceMs }) {
   }
 }
 
+// Codex P1: the child carries its OWN deadline. A best-effort subprocess must
+// not be able to outlive its starter — if jq or the findings-file append blocks,
+// an un-bounded child keeps running after execution-core exits (this repo's
+// "make the loop itself self-limiting; never let cleanup be load-bearing" rule).
+// `timeout` kills it on the deadline; `unref` stops it holding the event loop open.
+const FINDING_TIMEOUT_MS = 30_000;
+
 function defaultRunFinding(args) {
   // Detached, output ignored — the finding queue drain is someone else's job.
-  execFile(ADD_FINDING, args, () => {});
+  const child = execFile(
+    ADD_FINDING,
+    args,
+    { timeout: FINDING_TIMEOUT_MS, killSignal: "SIGKILL" },
+    () => {},
+  );
+  child?.unref?.();
 }
 
 function safeLog(io, level, obj, msg) {
