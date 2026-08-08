@@ -47,6 +47,8 @@ import {
   isTerminal,
   REMEDIATE_PHASE,
   REMEDIATE_CYCLE_CAP,
+  phaseIndex, // isTicketInFlight's own supersede guard, mirroring the CTL-606 guard below
+  isKnownPhase, // same
 } from "../lib/phase-fsm.mjs";
 // CTL workflow descriptor (provenance swap): the pipeline-shape constants
 // (STAGE_RANK, TERMINAL_PHASE, NEW_WORK_ENTRY_PHASE, NON_PREEMPTABLE_PHASES) are
@@ -940,6 +942,14 @@ export const PREEMPTED_STATUS = "preempted";
 const rankedAboveSince = new Map();
 
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
+// CTL-1660 P1 (Codex #3081): entries are inserted in ASCENDING mtime order (oldest
+// dispatch first, most-recently-touched signal last), not raw readdirSync order
+// (filesystem-dependent, not chronological). isTicketInFlight's supersede guard
+// relies on this — see livePhaseEntries below — to determine which phase was
+// ACTUALLY dispatched most recently rather than assuming higher pipeline-ordinal
+// always means more recent (false whenever an earlier phase is deliberately
+// re-dispatched after a later phase already left a signal, e.g. re-running
+// `implement` after `review` requested changes).
 export function readPhaseSignals(orchDir, ticket) {
   const dir = join(orchDir, "workers", ticket);
   const signals = {};
@@ -949,16 +959,28 @@ export function readPhaseSignals(orchDir, ticket) {
   } catch {
     return signals; // no worker dir yet
   }
+  const entries = [];
   for (const f of files) {
     const m = /^phase-(.+)\.json$/.exec(f);
     if (!m) continue;
     if (m[1].includes("-yield-")) continue; // CTL-702: skip yield tombstones
+    const path = join(dir, f);
+    let status;
     try {
-      signals[m[1]] = JSON.parse(readFileSync(join(dir, f), "utf8"))?.status ?? null;
+      status = JSON.parse(readFileSync(path, "utf8"))?.status ?? null;
     } catch {
-      // unreadable / malformed signal — skip; treated as absent
+      continue; // unreadable / malformed signal — skip; treated as absent
     }
+    let mtimeMs;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      mtimeMs = 0; // vanished between readdir and stat — sorts first, harmless
+    }
+    entries.push({ phase: m[1], status, mtimeMs });
   }
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const e of entries) signals[e.phase] = e.status;
   return signals;
 }
 
@@ -972,10 +994,84 @@ export function readPhaseSignals(orchDir, ticket) {
 // same as SETTLED_STATUSES in abort-worker.mjs — a non-terminal `done` is
 // settled-as-a-signal there but still in-flight here. The divergence is
 // intentional; do not collapse the two into one shared constant.
+// SUPERSEDE GUARD: readPhaseSignals returns every workers/<T>/phase-*.json this
+// ticket has EVER had, not just the current one. Without this, a direct
+// out-of-order re-dispatch (e.g. recovery-pass re-dispatching a LATER phase to
+// unstick a ticket without clearing the earlier phase's now-stale signal) left
+// a permanently-failed predecessor that vetoed isTicketInFlight forever, even
+// once a later phase had completed and moved the ticket on — silently walling
+// it off from the advancement sweep (verify/remediate never re-checked; the
+// ticket just sat there). Mirrors the existing CTL-606 supersede guard
+// (recovery.mjs) so the two "has this ticket moved past this signal" checks
+// agree: a KNOWN phase older than the ticket's latest-dispatched KNOWN phase is
+// superseded and its status no longer counts.
+//
+// CTL-1660 P1 (Codex #3081): "latest-dispatched" is determined by DISPATCH
+// RECENCY, not raw pipeline-ordinal position. Picking the max phaseIndex across
+// every known phase ever seen breaks when a phase is deliberately re-dispatched
+// OUT OF ORDER going BACKWARD (e.g. recovery-pass or an operator re-runs
+// `implement` after `review` already completed and left a `done` signal):
+// implement's ordinal is lower than review's, so a pure ordinal-max would keep
+// treating implement as "superseded" and silently ignore its outcome — even a
+// fresh `failed` — while the stale `review: done` signal (higher ordinal, but
+// OLDER in wall-clock time) looks like the current state. `phases` here is
+// `Object.keys(signals)`, and readPhaseSignals inserts entries in ascending-
+// mtime order, so the LAST known phase encountered in iteration order is the
+// one whose signal file was most recently written — i.e. the true latest
+// dispatch — regardless of its ordinal position. Pure callers that hand-build a
+// plain {phase: status} object (tests, other in-process producers) get the same
+// answer as before as long as they list phases in dispatch order, which every
+// existing caller already does.
+//
+// Round 2 of the same finding removed the ORDINAL COMPARISON entirely (see
+// livePhaseEntries): recency alone decides supersession, so the guard is now
+// symmetric — it holds whether the pipeline moved forward or backward.
+function latestKnownPhase(phases) {
+  let latest = null;
+  for (const p of phases) {
+    if (!isKnownPhase(p)) continue; // unknown/non-pipeline signal — ignore for ordering
+    latest = p; // last known phase in iteration order wins (dispatch recency)
+  }
+  return latest;
+}
+
+// livePhaseEntries — the [phase, status] entries that still describe the ticket's
+// CURRENT state, with superseded predecessors dropped.
+//
+// CTL-1660 P1 round 2 (Codex #3081): supersession is a RECENCY question, not a
+// directional-ordinal one. The previous `phaseIndex(phase) < latestIdx` test only
+// skipped phases whose ordinal sat BELOW the latest dispatch, which silently failed
+// the backward-redispatch case this guard exists to handle: with an older
+// `review: failed` followed by a fresh `implement: running`, iteration order makes
+// `implement` the latest dispatch, but review's ordinal is HIGHER — so it was never
+// skipped, its stale `failed` still vetoed, and `isTicketInFlight` dropped live
+// rework out of the slot and advancement sweeps.
+//
+// Since readPhaseSignals inserts entries in ascending-mtime order, every KNOWN phase
+// other than the last one encountered is by definition an older dispatch — so it is
+// superseded regardless of which direction the pipeline moved.
+//
+// TWO deliberate exemptions keep this from over-superseding:
+//   1. Unknown/non-pipeline phases (e.g. a `recovery-pass` inspection signal) carry no
+//      ordering, so they neither supersede nor are superseded — always returned.
+//   2. A phase sharing the latest dispatch's ORDINAL is not superseded. `remediate`
+//      ranks AT `verify`'s index rather than after it, so the verify⇄remediate cycle
+//      would otherwise let a `remediate: done` erase the `verify: failed` that caused
+//      it — releasing the slot on a ticket whose verify never passed.
+export function livePhaseEntries(signals) {
+  const entries = Object.entries(signals ?? {});
+  const latest = latestKnownPhase(entries.map(([p]) => p));
+  if (latest === null) return entries; // no known phases — nothing can supersede
+  const latestIdx = phaseIndex(latest);
+  return entries.filter(
+    ([phase]) => !isKnownPhase(phase) || phase === latest || phaseIndex(phase) === latestIdx
+  );
+}
+
 export function isTicketInFlight(signals) {
   const phases = Object.keys(signals ?? {});
   if (phases.length === 0) return false;
-  for (const [phase, status] of Object.entries(signals)) {
+  for (const [phase, status] of livePhaseEntries(signals)) {
     if (status === "failed" || status === "stalled" || status === "aborted") return false;
     // CTL-512: monitor-deploy `skipped` is terminal-success — the producer
     // emits it when no deployment_status event arrived before the timeout
@@ -1654,8 +1750,22 @@ export function readAllEligibleTickets() {
 // remediateCycleCount: 0 }, which preserves the legacy verify → review edge.
 export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount = 0 } = {}) {
   const sig = signals ?? {};
+  // CTL-1660 P1 round 3 (Codex #3081): pick the latest phase from the LIVE set, not a
+  // raw ordinal scan. With an older `review: done` behind a newly redispatched
+  // `implement: running`, the ordinal scan selected the stale `review`, saw `done`,
+  // and returned `pr` — dispatching the PR phase while the replacement implementation
+  // was still running, skipping its verify and review entirely. (This became
+  // reachable once livePhaseEntries admitted such tickets to the advancement sweep,
+  // so the two must consume the same supersession decision.)
+  //
+  // The `in sig` guards below still consult the FULL signal map on purpose: refusing
+  // to advance into a successor that has any signal at all — even a stale one — is
+  // the conservative direction. It can only withhold an advancement, never invent a
+  // wrong one.
+  const liveSet = new Set(livePhaseEntries(sig).map(([p]) => p));
   let latest = null;
-  for (const p of PHASES) if (p in sig) latest = p; // remediate ∉ PHASES → invisible here
+  // remediate ∉ PHASES → invisible here
+  for (const p of PHASES) if (p in sig && liveSet.has(p)) latest = p;
   // CTL-703: `skipped` is advancement-eligible for monitor-deploy ONLY.
   // monitor-deploy `skipped` must advance to teardown (just as `done` does),
   // so the pipeline can reach the dedicated teardown phase even when no deploy
@@ -1682,7 +1792,15 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
     { type: "complete" }
   );
   if (isTerminal(next)) return null; // pipeline reached teardown → done (CTL-703)
-  if (next.phase in sig) return null; // successor already dispatched
+  // CTL-1660 P1 round 4 (Codex #3081): test the successor against the LIVE set, not
+  // the raw signal map. The round-3 fix made this guard consult `sig`, which was safe
+  // against wrong dispatches but traded them for a permanent WEDGE: after a backward
+  // re-dispatch COMPLETES (old `verify: done` + `review: done`, then a freshly
+  // completed `implement`), the stale `verify` signal blocked the fresh verify
+  // forever — the ticket stayed in flight and never re-ran verification or review.
+  // A superseded successor signal describes the PREVIOUS pass and must not veto the
+  // new one; a genuinely current successor is in the live set and still vetoes.
+  if (liveSet.has(next.phase)) return null; // successor already dispatched (current pass)
   return next.phase;
 }
 
@@ -7222,8 +7340,15 @@ export function schedulerTick(
         self,
       }
     );
-    const anyStalled = Object.values(signals).some((s) => s === "stalled");
-    const anyFailed = Object.values(signals).some((s) => s === "failed");
+    // CTL-1660 P1 round 2 (Codex #3081): evaluate failures through the SAME
+    // supersession decision isTicketInFlight uses. Scanning every raw status meant a
+    // superseded predecessor (e.g. `{ implement: "failed", verify: "done" }`, or an
+    // older `review: failed` behind a fresh `implement: running`) still routed the
+    // ticket to needs-human/orphan handling here — an erroneous escalation firing at
+    // the very moment the advancement sweep was correctly moving the ticket forward.
+    const liveStatuses = livePhaseEntries(signals).map(([, s]) => s);
+    const anyStalled = liveStatuses.some((s) => s === "stalled");
+    const anyFailed = liveStatuses.some((s) => s === "failed");
     // CTL-1180: pipeline-done already clears needs-human in the TERMINAL_PHASE block
     // above; never (re)apply for a genuinely-shipped ticket (the Done false positive).
     const pipelineDone = signals[TERMINAL_PHASE] === "done";

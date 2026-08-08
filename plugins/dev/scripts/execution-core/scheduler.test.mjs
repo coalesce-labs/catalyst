@@ -13,6 +13,7 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
+  utimesSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -222,6 +223,25 @@ describe("readPhaseSignals", () => {
     expect(Object.keys(signals)).toEqual(["plan"]);
     expect(signals.plan).toBe("done");
   });
+
+  test("orders entries by mtime (dispatch recency), not readdir order — CTL-1660 P1 (Codex #3081)", () => {
+    // Write review's signal FIRST (so it would sort first alphabetically/by
+    // readdir on most filesystems), then implement's SECOND — then force the
+    // mtimes to the OPPOSITE of write order to prove the sort is mtime-driven,
+    // not creation-order-driven: review is the OLDER touch, implement is the
+    // NEWER touch, mirroring a re-dispatched implement after a stale review.
+    writeSignal("CTL-1660", "review", "done");
+    writeSignal("CTL-1660", "implement", "failed");
+    const dir = join(orchDir, "workers", "CTL-1660");
+    const oldTime = new Date(Date.now() - 60_000);
+    const newTime = new Date();
+    utimesSync(join(dir, "phase-review.json"), oldTime, oldTime);
+    utimesSync(join(dir, "phase-implement.json"), newTime, newTime);
+    const signals = readPhaseSignals(orchDir, "CTL-1660");
+    // implement (the more-recently-touched file) must be LAST in key order —
+    // isTicketInFlight's supersede guard reads recency off this ordering.
+    expect(Object.keys(signals)).toEqual(["review", "implement"]);
+  });
 });
 
 describe("isTicketInFlight", () => {
@@ -278,6 +298,84 @@ describe("isTicketInFlight", () => {
   });
   test("no signals at all → NOT in-flight", () => {
     expect(isTicketInFlight({})).toBe(false);
+  });
+
+  describe("supersede guard — a stale earlier-phase failure must not veto a later-completed phase", () => {
+    test("implement failed, but verify (later) done → in-flight", () => {
+      // The real-world shape: a direct out-of-order re-dispatch skipped
+      // straight to verify without clearing implement's stale failed signal.
+      expect(isTicketInFlight({ implement: "failed", verify: "done" })).toBe(true);
+    });
+    test("implement failed, verify (later) still running → in-flight", () => {
+      expect(isTicketInFlight({ implement: "failed", verify: "running" })).toBe(true);
+    });
+    test("implement failed with NO later phase → still NOT in-flight", () => {
+      // implement is the latest-dispatched phase here, so its own failure
+      // still vetoes — this is the ordinary (non-superseded) stall case.
+      expect(isTicketInFlight({ triage: "done", implement: "failed" })).toBe(false);
+    });
+    test("two stale predecessors (research aborted, plan stalled), implement (latest) done → in-flight", () => {
+      expect(
+        isTicketInFlight({ research: "aborted", plan: "stalled", implement: "done" })
+      ).toBe(true);
+    });
+    test("the LATEST phase failing still vetoes even with earlier successes", () => {
+      expect(isTicketInFlight({ research: "done", implement: "done", verify: "failed" })).toBe(
+        false
+      );
+    });
+    test("remediate ranks at verify's index — a failed verify is NOT superseded by a later remediate attempt", () => {
+      // remediate is ancillary (ranks at verify's phaseIndex, not after it), so
+      // a failed verify alongside a remediate signal is NOT treated as stale —
+      // remediate cycling with verify must not accidentally supersede it away.
+      expect(isTicketInFlight({ verify: "failed", remediate: "done" })).toBe(false);
+    });
+    test("an unknown/non-pipeline phase name never supersedes or is superseded", () => {
+      // e.g. a recovery-pass inspection signal — isPhantomWorkerDir handles
+      // that separately; isTicketInFlight's ordering logic must ignore it.
+      expect(
+        isTicketInFlight({ implement: "failed", "recovery-pass": "done" })
+      ).toBe(false);
+    });
+    test("teardown (terminal, outside phaseIndex) alongside a stale earlier failure is still terminal", () => {
+      expect(isTicketInFlight({ implement: "failed", teardown: "done" })).toBe(false);
+    });
+  });
+
+  describe("dispatch-recency supersede — CTL-1660 P1 (Codex #3081): an earlier phase re-dispatched AFTER a later phase's stale signal must not be superseded away", () => {
+    test("implement re-dispatched (and failing) after review already completed → NOT in-flight", () => {
+      // readPhaseSignals inserts entries in ascending-mtime order, so this
+      // object's key order (review first/older, implement last/newer) is the
+      // shape the real reader produces when implement is re-dispatched after
+      // review already left a `done` signal. A pure ordinal-max supersede
+      // guard would treat implement (lower phaseIndex) as superseded and
+      // ignore its failure, leaving only the stale review:done — wrongly
+      // reporting in-flight and letting the advancement sweep derive `pr` as
+      // the next phase from that stale signal.
+      expect(isTicketInFlight({ review: "done", implement: "failed" })).toBe(false);
+    });
+    test("implement re-dispatched and still running after review already completed → in-flight", () => {
+      expect(isTicketInFlight({ review: "done", implement: "running" })).toBe(true);
+    });
+    test("plan re-dispatched (failing) after implement+verify already completed → NOT in-flight", () => {
+      expect(
+        isTicketInFlight({ implement: "done", verify: "done", plan: "failed" })
+      ).toBe(false);
+    });
+  });
+});
+
+describe("readPhaseSignals + isTicketInFlight integration — dispatch-recency supersede (CTL-1660 P1)", () => {
+  test("a failed re-dispatched implement (newer mtime) vetoes in-flight despite a stale, higher-ordinal review:done (older mtime)", () => {
+    writeSignal("CTL-1660B", "review", "done");
+    writeSignal("CTL-1660B", "implement", "failed");
+    const dir = join(orchDir, "workers", "CTL-1660B");
+    const oldTime = new Date(Date.now() - 60_000);
+    const newTime = new Date();
+    utimesSync(join(dir, "phase-review.json"), oldTime, oldTime);
+    utimesSync(join(dir, "phase-implement.json"), newTime, newTime);
+    const signals = readPhaseSignals(orchDir, "CTL-1660B");
+    expect(isTicketInFlight(signals)).toBe(false);
   });
 });
 
