@@ -179,6 +179,27 @@ if [[ -z "$DEPLOY_EVENT" ]]; then
       reason: "no deployment_status event matched within timeout"
     }' > "$WORKER_DIR/phase-monitor-deploy.json"
 
+  # CTL-1490: write the durable local thoughts doc + run the sync gate BEFORE
+  # the terminal emit below, mirroring the shared thoughts-doc block's ordering
+  # further down this script (write artifact -> thoughts doc -> sync gate ->
+  # terminal emit), so a sync-gate enforce-mode failure owns the sole terminal
+  # emit (via its own internal wrapper call + exit 11) instead of racing the
+  # `--status skipped` emit below. Without this, a cross-host takeover with no
+  # local signal files (Feature F reconstruction) would never see a
+  # monitor-deploy artifact for the (very common) no-deployment-event path and
+  # would redispatch the phase after it had already terminated. No MIRROR_BODY
+  # exists on this path (that variable is only computed on the success branch
+  # below), so compose a skip-specific body.
+  SKIP_BODY="**Phase Monitor-Deploy** — skipped (\`${DEPLOY_ENV}\`)
+
+- **Outcome**: no \`deployment_status\` event matched \`${MERGE_SHA}\` on \`${DEPLOY_ENV}\` within ${DEPLOY_TIMEOUT}s
+- **Merge SHA**: \`${MERGE_SHA}\`
+
+_Posted automatically by phase-monitor-deploy (CTL-1490)._"
+  source "${__PM_REPO_ROOT}/plugins/dev/scripts/lib/write-phase-thoughts-doc.sh"
+  write_phase_thoughts_doc "monitor-deploy" "$TICKET" "$SKIP_BODY" || true
+  "${__PM_REPO_ROOT}/plugins/dev/scripts/lib/thoughts-sync-gate.sh" --phase monitor-deploy --ticket "$TICKET" || exit 11
+
   # CTL-512: use the production wrapper so the signal file's `status` field
   # is written canonically (status: "skipped", completedAt set). The wrapper
   # merges these fields on top of the artifact JSON above without clobbering
@@ -328,7 +349,20 @@ fi
 #    $__PM_WRAPPER so the signal file's terminal `status` is flipped in-band under
 #    executor=sdk (the artifact write above already landed the same file, so the
 #    wrapper merges status/completedAt on top without clobbering deploy_* fields).
+#
+# CTL-1490 (Codex round-2, PR #2697): the durable thoughts doc is written ONLY
+# on the success branch below — mirroring the skipped-branch's own ordering
+# convention above (write artifact -> thoughts doc -> sync gate -> terminal
+# emit) rather than unconditionally before this if. A cross-host reconstruction
+# with no local signals (Feature F) reads the thoughts doc's mere PRESENCE as
+# proof monitor-deploy completed successfully; writing it regardless of
+# CANARY_STATUS would let a failed/unknown canary result still be read as
+# terminal-success, and reconstruction would dispatch teardown — archiving and
+# marking Done — on a deployment that actually failed or needs retry/escalation.
 if [[ "$CANARY_STATUS" == "success" ]]; then
+  source "${__PM_REPO_ROOT}/plugins/dev/scripts/lib/write-phase-thoughts-doc.sh"
+  write_phase_thoughts_doc "monitor-deploy" "$TICKET" "${MIRROR_BODY:-}" || true
+  "${__PM_REPO_ROOT}/plugins/dev/scripts/lib/thoughts-sync-gate.sh" --phase monitor-deploy --ticket "$TICKET" || exit 11
   "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status complete \
     --payload-json "$(cat "$RESULT_FILE")"
   exit 0

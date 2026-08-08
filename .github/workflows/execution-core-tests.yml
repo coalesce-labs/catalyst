@@ -599,4 +599,6 @@ jobs:
             updater/updater-tracing.test.mjs \
             github-auth-preflight.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
-            cluster-sync.test.mjs
+            cluster-sync.test.mjs \
+            reconstruct-ticket-state.test.mjs \
+            hosts-json-retired.test.mjs
