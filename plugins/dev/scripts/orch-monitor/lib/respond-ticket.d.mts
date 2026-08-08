@@ -81,6 +81,22 @@ export function findHeldRun(
   },
 ): HeldRun | null;
 
+/**
+ * CTL-1489 (closes CTL-1475): the default `findHeld` collaborator
+ * respondTicket calls — local-disk findHeldRun first, durable-projection
+ * fallback (off/shadow/enforce, mirroring execution-core/daemon.mjs's
+ * handleCommentWake gate) only when the local worker dir is absent.
+ */
+export function resolveHeldRun(
+  ticket: string,
+  opts?: {
+    findLocal?: (ticket: string) => HeldRun | null;
+    findProjection?: (ticket: string) => Promise<HeldRun | null>;
+    readProjectionMode?: () => string;
+    emitDrift?: (args: { ticket: string; source: string }) => unknown;
+  },
+): Promise<HeldRun | null>;
+
 export function readClusterHostCount(opts?: {
   env?: Record<string, string | undefined>;
   read?: (path: string, encoding: "utf8") => string;
@@ -116,10 +132,12 @@ export type RespondTicketResult =
 export function respondTicket(
   args: { ticket: string; response: unknown; confirm: unknown },
   opts?: {
-    findHeld?: (ticket: string) => HeldRun | null;
+    // CTL-1489: async (defaults to resolveHeldRun) — a sync test double's
+    // return value still resolves fine under `await`.
+    findHeld?: (ticket: string) => HeldRun | null | Promise<HeldRun | null>;
     fenceCheck?: (args: { ticket: string; generation: number | null }) => FenceOutcome;
     record?: (args: { ticket: string; phase: string; response: unknown }) => unknown;
     clearMarker?: (args: { ticket: string }) => unknown;
     emit?: (args: { ticket: string; response: unknown }) => unknown;
   },
-): RespondTicketResult;
+): Promise<RespondTicketResult>;

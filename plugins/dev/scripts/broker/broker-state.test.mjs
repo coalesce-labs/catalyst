@@ -252,3 +252,17 @@ describe("getAllPrStatuses — composite (repo, pr_number) keying (CTL-1157)", (
     expect(byRepo.get("org/solo")).toMatchObject({ status: "open", repo: "org/solo" });
   });
 });
+
+// CTL-1489: parity between the broker's terminal-status set and the exec-core
+// signal-reader TERMINAL set. They have no shared-import boundary (plan §"Not
+// merging the sets"), so a set-equality test enforces the invariant.
+describe("WORKER_TERMINAL_STATUSES parity (CTL-1489)", () => {
+  test("is a superset of the exec-core signal-reader TERMINAL five", async () => {
+    const { WORKER_TERMINAL_STATUSES } = await import("./broker-state.mjs");
+    // Mirror of signal-reader.mjs TERMINAL (kept in sync by this assertion).
+    const execCoreTerminal = ["done", "failed", "stalled", "skipped", "turn-cap-exhausted"];
+    for (const s of execCoreTerminal) {
+      expect(WORKER_TERMINAL_STATUSES.has(s)).toBe(true);
+    }
+  });
+});

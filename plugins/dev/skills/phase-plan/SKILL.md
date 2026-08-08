@@ -261,8 +261,11 @@ EOF
 # completion event; on sync failure the gate emits `failed` and we stop here.
 "${PLUGIN_ROOT}/scripts/lib/thoughts-sync-gate.sh" --phase "$PHASE" --ticket "$TICKET" || exit 11
 
+# CTL-1489: stamp the plan-doc artifact pointer into the completion event's
+# body.payload so durable-state consumers can locate this phase's output.
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
-  --phase "$PHASE" --ticket "$TICKET" --status complete
+  --phase "$PHASE" --ticket "$TICKET" --status complete \
+  --payload-json "$(jq -nc --arg a "${PLAN_DOC:-}" '{artifact:$a}')"
 
 # Self-halt after complete to prevent zombie workers (CTL-778 step 2).
 # Read our own bg_job_id from the signal file and ask Claude to stop us.

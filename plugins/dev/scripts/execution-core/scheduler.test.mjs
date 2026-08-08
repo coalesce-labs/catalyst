@@ -91,6 +91,7 @@ import {
   HELD_LABEL_NEEDS_INPUT,
   // CTL-1524 (C4a): hoisted dead-host computation (one surviving-roster read)
   computeDeadHosts,
+  resolveTransitionFields, // CTL-1489: widened transition-field resolver
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
@@ -13252,5 +13253,43 @@ describe("CTL-1605 review: STEP A terminal-stale live label refresh", () => {
     // SAME tick, even though its TTL has not elapsed — a later hydrate must
     // re-read fresh rather than serve the pre-write (unlabeled) descriptor.
     expect(cache.getRelations("CTL-32")).toBeUndefined();
+  });
+});
+
+// CTL-1489: resolveTransitionFields — best-effort widened-field resolver for the
+// worker.transition chokepoint. Reads the ticket's active signal, returns nulls
+// on a missing dir (never throws), and surfaces the durable-projection fields.
+describe("resolveTransitionFields (CTL-1489)", () => {
+  test("returns all-null (never throws) when the worker dir is absent", () => {
+    const fields = resolveTransitionFields(orchDir, "CTL-NOPE");
+    expect(fields).toEqual({
+      worktreePath: null,
+      bgJobId: null,
+      generation: null,
+      handoffPath: null,
+      artifact: null,
+    });
+  });
+
+  test("surfaces worktreePath/bgJobId/generation/artifact from the active signal", () => {
+    const dir = join(orchDir, "workers", "CTL-42");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-implement.json"),
+      JSON.stringify({
+        ticket: "CTL-42",
+        phase: "implement",
+        status: "running",
+        worktreePath: "/wt/CTL-42",
+        bg_job_id: "bg-xyz",
+        generation: 3,
+        artifact: "thoughts/shared/plans/x.md",
+      })
+    );
+    const fields = resolveTransitionFields(orchDir, "CTL-42");
+    expect(fields.worktreePath).toBe("/wt/CTL-42");
+    expect(fields.bgJobId).toBe("bg-xyz");
+    expect(fields.generation).toBe(3);
+    expect(fields.artifact).toBe("thoughts/shared/plans/x.md");
   });
 });

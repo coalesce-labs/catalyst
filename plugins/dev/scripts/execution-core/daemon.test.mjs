@@ -2378,6 +2378,217 @@ describe("handleCommentWake (CTL-549)", () => {
     );
     expect(dispatched).toEqual([]);
   });
+
+  // CTL-1489 (closes CTL-1475): absent local worker dir → the durable projection
+  // is the only surviving record of a held run served on another host.
+  describe("absent worker dir → projection read cutover (CTL-1489)", () => {
+    const heldFromProjection = () => ({
+      phase: "implement",
+      signal: {
+        ticket: "CTL-1",
+        phase: "implement",
+        status: "needs-input",
+        raw: { handoffPath: "/h.md", bg_job_id: "bg-xyz" },
+      },
+    });
+
+    test("off → bare return (no dispatch, no drift) even when the projection is held", async () => {
+      const orch = tmpOrcDir(); // no worker dir written → readdirSync throws
+      const dispatched = [];
+      const drifts = [];
+      await handleCommentWake(
+        { ticket: "CTL-1", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "off",
+          findHeldFromProjection: heldFromProjection,
+          emitDrift: () => drifts.push("d"),
+        }
+      );
+      expect(dispatched).toEqual([]);
+      expect(drifts).toEqual([]);
+    });
+
+    test("shadow → emits one drift, does NOT dispatch", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      const drifts = [];
+      await handleCommentWake(
+        { ticket: "CTL-1", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "shadow",
+          findHeldFromProjection: heldFromProjection,
+          emitDrift: ({ ticket }) => drifts.push(ticket),
+        }
+      );
+      expect(dispatched).toEqual([]);
+      expect(drifts).toEqual(["CTL-1"]);
+    });
+
+    test("enforce → resumes the held run from the projection (dispatch called, session reconstructed)", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      await handleCommentWake(
+        { ticket: "CTL-1", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (dir, ticket, phase, opts) => dispatched.push({ ticket, phase, opts }),
+          removeLabel: async () => {},
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: heldFromProjection,
+          // resolveSession maps the projected bg_job_id → a resume session id.
+          resolveSession: (bgJobId) => (bgJobId === "bg-xyz" ? "sess-abc" : null),
+        }
+      );
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0].ticket).toBe("CTL-1");
+      expect(dispatched[0].phase).toBe("implement");
+      expect(dispatched[0].opts.handoffPath).toBe("/h.md");
+      // CTL-1489 finding-1 fix: a held-stopped worker resumes its PAUSED session
+      // via --resume (session reconstructed from the projected bg_job_id), not a
+      // fresh re-launch that would drop the conversation.
+      expect(dispatched[0].opts.resumeSession).toBe("sess-abc");
+    });
+
+    test("enforce → no dispatch when the projection shows no held run", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      await handleCommentWake(
+        { ticket: "CTL-1", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => null,
+        }
+      );
+      expect(dispatched).toEqual([]);
+    });
+
+    // Phase-verify HIGH finding #2: findHeldFromProjection returns BOTH
+    // needs-input AND stalled — the dir-present per-signal loop treats "stalled"
+    // as a J3 unstick (clearStall, never dispatch), but the pre-fix enforce
+    // branch dispatch()ed every held status unconditionally. A cross-host
+    // stalled ticket must be stall-cleared, not blindly re-launched.
+    test("enforce → a STALLED projected run is stall-cleared, never dispatched", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      const cleared = [];
+      await handleCommentWake(
+        { ticket: "CTL-2", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => ({
+            phase: "implement",
+            signal: { ticket: "CTL-2", phase: "implement", status: "stalled", raw: {} },
+          }),
+          clearStall: ({ ticket, phase }) => {
+            cleared.push({ ticket, phase });
+            return true;
+          },
+        }
+      );
+      expect(dispatched).toEqual([]);
+      expect(cleared).toContainEqual({ ticket: "CTL-2", phase: "implement" });
+    });
+
+    // Phase-verify HIGH finding #3: the CLEAR-FIRST block removes the
+    // "needs-input" label out-of-band before this dir-absent branch runs, but
+    // the pre-fix enforce branch never emitted the CTL-764 finding-11
+    // needs-input→cleared worker.transition record (that emission previously
+    // lived only in the dir-present per-signal loop, which a cross-host wake
+    // never reaches) — leaving the durable ticket_state_transitions stream with
+    // a stale needs-input disposition and no cleared record.
+    test("enforce → a confirmed needs-input clear emits worker.transition(needs-input→cleared)", async () => {
+      const orch = tmpOrcDir(); // no worker dir → readdirSync throws → enforce branch
+      const transitions = [];
+      const dispatched = [];
+      await handleCommentWake(
+        { ticket: "CTL-3", body: "answer", authorId: "human-1" },
+        {
+          orchDir: orch,
+          botUserId: "bot-uuid",
+          isManagedTicket: () => true,
+          dispatch: (...a) => dispatched.push(a),
+          // needs-human removal (first call) reports absent; needs-input removal
+          // (second call, in the CLEAR-FIRST block) is the confirmed write.
+          removeLabel: async (ticket, label) =>
+            label === "needs-input" ? { removed: true, wrote: true } : { removed: false },
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => ({
+            phase: "implement",
+            signal: { ticket: "CTL-3", phase: "implement", status: "needs-input", raw: {} },
+          }),
+          appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+        }
+      );
+      expect(dispatched).toHaveLength(1); // needs-input still resumes, unlike stalled
+      const cleared = transitions.find(
+        (e) => e.ticket === "CTL-3" && e.fromDisposition === "needs-input"
+      );
+      expect(cleared).toMatchObject({ toDisposition: null, source: "comment-wake-clear" });
+    });
+
+    // Codex P1: every host in a multi-host cluster receives the same webhook
+    // comment and hits this exact dir-absent branch — an unfenced dispatch
+    // would let N hosts race to actuate the same human reply. Only the
+    // ticket's HRW owner (isProjectionResumeOwner) may act.
+    test("enforce → a NON-owning host defers (no dispatch, no clearStall) even with a held projection row", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      const cleared = [];
+      await handleCommentWake(
+        { ticket: "CTL-4", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => ({
+            phase: "implement",
+            signal: { ticket: "CTL-4", phase: "implement", status: "needs-input", raw: {} },
+          }),
+          clearStall: ({ ticket, phase }) => {
+            cleared.push({ ticket, phase });
+            return true;
+          },
+          isProjectionResumeOwner: () => false, // this host does NOT own CTL-4
+        }
+      );
+      expect(dispatched).toEqual([]);
+      expect(cleared).toEqual([]);
+    });
+
+    test("enforce → the OWNING host still dispatches (default isProjectionResumeOwner fail-opens true)", async () => {
+      const orch = tmpOrcDir();
+      const dispatched = [];
+      await handleCommentWake(
+        { ticket: "CTL-5", body: "answer" },
+        {
+          orchDir: orch,
+          dispatch: (...a) => dispatched.push(a),
+          removeLabel: async () => {},
+          readProjectionMode: () => "enforce",
+          findHeldFromProjection: () => ({
+            phase: "implement",
+            signal: { ticket: "CTL-5", phase: "implement", status: "needs-input", raw: {} },
+          }),
+          // isProjectionResumeOwner not supplied — must default to "owns everything"
+          // so single-host installs and every other test above keep working unwired.
+        }
+      );
+      expect(dispatched).toHaveLength(1);
+    });
+  });
 });
 
 // CTL-749: inbox writer factory functions

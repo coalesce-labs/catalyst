@@ -13,6 +13,7 @@ import { describe, it, expect } from "bun:test";
 import {
   respondTicket,
   findHeldRun,
+  resolveHeldRun,
   clearNeedsHumanMarker,
   recordResponse,
   buildResumeEvent,
@@ -46,11 +47,11 @@ function deps(over: Partial<Parameters<typeof respondTicket>[1]> = {}) {
 }
 
 describe("respondTicket — Scenario 1: answer/unblock records the response and resumes", () => {
-  it("typed confirm matches → records, clears the marker, emits the resume event, reports `resuming`", () => {
+  it("typed confirm matches → records, clears the marker, emits the resume event, reports `resuming`", async () => {
     const recorded: unknown[] = [];
     const cleared: unknown[] = [];
     const emitted: unknown[] = [];
-    const res = respondTicket(
+    const res = await respondTicket(
       { ticket: "CTL-845", response: "go ahead — the dep is merged", confirm: "CTL-845" },
       deps({
         record: (a) => recorded.push(a),
@@ -76,9 +77,9 @@ describe("respondTicket — Scenario 1: answer/unblock records the response and 
     ]);
   });
 
-  it("the three mutations fire IN ORDER: record → clear marker → emit resume", () => {
+  it("the three mutations fire IN ORDER: record → clear marker → emit resume", async () => {
     const order: string[] = [];
-    respondTicket(
+    await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-845" },
       deps({
         record: () => order.push("record"),
@@ -91,9 +92,9 @@ describe("respondTicket — Scenario 1: answer/unblock records the response and 
 });
 
 describe("respondTicket — no held run", () => {
-  it("no parked needs-input run for the ticket → not_held, NOTHING mutated", () => {
+  it("no parked needs-input run for the ticket → not_held, NOTHING mutated", async () => {
     let mutated = false;
-    const res = respondTicket(
+    const res = await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-845" },
       deps({
         findHeld: () => null,
@@ -114,12 +115,12 @@ describe("respondTicket — no held run", () => {
 });
 
 describe("respondTicket — typed-confirm gate", () => {
-  it("a mismatched confirm is rejected WITHOUT any mutation", () => {
+  it("a mismatched confirm is rejected WITHOUT any mutation", async () => {
     let mutated = false;
     const mark = () => {
       mutated = true;
     };
-    const res = respondTicket(
+    const res = await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-844" },
       deps({ record: mark, clearMarker: mark, emit: mark }),
     );
@@ -127,8 +128,8 @@ describe("respondTicket — typed-confirm gate", () => {
     expect(mutated).toBe(false);
   });
 
-  it("a missing confirm is rejected", () => {
-    const res = respondTicket(
+  it("a missing confirm is rejected", async () => {
+    const res = await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: undefined },
       deps(),
     );
@@ -137,12 +138,12 @@ describe("respondTicket — typed-confirm gate", () => {
 });
 
 describe("respondTicket — Scenario 2: the mutation is fence-aware", () => {
-  it("a verified-stale fence (exit 10) rejects the response and mutates NOTHING", () => {
+  it("a verified-stale fence (exit 10) rejects the response and mutates NOTHING", async () => {
     let mutated = false;
     const mark = () => {
       mutated = true;
     };
-    const res = respondTicket(
+    const res = await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-845" },
       deps({
         // multi-host fence reports VERIFIED stale (CLI exit 10)
@@ -156,12 +157,12 @@ describe("respondTicket — Scenario 2: the mutation is fence-aware", () => {
     expect(mutated).toBe(false);
   });
 
-  it("an indeterminate fence (CLI errored) refuses to mutate — fail-closed", () => {
+  it("an indeterminate fence (CLI errored) refuses to mutate — fail-closed", async () => {
     let mutated = false;
     const mark = () => {
       mutated = true;
     };
-    const res = respondTicket(
+    const res = await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-845" },
       deps({
         fenceCheck: () => ({ ok: false, noop: false, stale: false }),
@@ -178,9 +179,9 @@ describe("respondTicket — Scenario 2: the mutation is fence-aware", () => {
     expect(mutated).toBe(false);
   });
 
-  it("fence-checks the held run signal's OWN generation", () => {
+  it("fence-checks the held run signal's OWN generation", async () => {
     const seen: (number | null)[] = [];
-    respondTicket(
+    await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-845" },
       deps({
         findHeld: () => ({ phase: "implement", signal: heldSignal({ generation: 7 }) }),
@@ -193,9 +194,9 @@ describe("respondTicket — Scenario 2: the mutation is fence-aware", () => {
     expect(seen).toEqual([7]);
   });
 
-  it("a non-numeric generation is passed to the fence-check as null (multi-host fails closed there)", () => {
+  it("a non-numeric generation is passed to the fence-check as null (multi-host fails closed there)", async () => {
     const seen: (number | null)[] = [];
-    respondTicket(
+    await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-845" },
       deps({
         findHeld: () => ({ phase: "implement", signal: heldSignal({ generation: undefined }) }),
@@ -210,8 +211,8 @@ describe("respondTicket — Scenario 2: the mutation is fence-aware", () => {
 });
 
 describe("respondTicket — Scenario 3: single-host pass-through (fence no-op)", () => {
-  it("single-host fence pass records normally with fenceNoop:true", () => {
-    const res = respondTicket(
+  it("single-host fence pass records normally with fenceNoop:true", async () => {
+    const res = await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-845" },
       deps({ fenceCheck: () => ({ ok: true, noop: true, stale: false }) }),
     );
@@ -219,8 +220,8 @@ describe("respondTicket — Scenario 3: single-host pass-through (fence no-op)",
     expect((res as { fenceNoop: boolean }).fenceNoop).toBe(true);
   });
 
-  it("a multi-host CURRENT fence also resumes, but fenceNoop:false", () => {
-    const res = respondTicket(
+  it("a multi-host CURRENT fence also resumes, but fenceNoop:false", async () => {
+    const res = await respondTicket(
       { ticket: "CTL-845", response: "ok", confirm: "CTL-845" },
       deps({ fenceCheck: () => ({ ok: true, noop: false, stale: false }) }),
     );
@@ -261,9 +262,9 @@ describe("findHeldRun — match stalled escalation runs (CTL-1067)", () => {
 });
 
 describe("respondTicket — CTL-1067 stalled run is answerable", () => {
-  it("a stalled run is answerable — records, clears marker, emits, returns resuming", () => {
+  it("a stalled run is answerable — records, clears marker, emits, returns resuming", async () => {
     const recorded: unknown[] = [], cleared: unknown[] = [], emitted: unknown[] = [];
-    const out = respondTicket(
+    const out = await respondTicket(
       { ticket: "CTL-1067", response: "looked into it, retry", confirm: "CTL-1067" },
       {
         findHeld: () => ({ phase: "implement", signal: { status: "stalled", phase: "implement", generation: 4 } }),
@@ -280,9 +281,9 @@ describe("respondTicket — CTL-1067 stalled run is answerable", () => {
     expect(emitted).toEqual([{ ticket: "CTL-1067", response: "looked into it, retry" }]);
   });
 
-  it("stalled run + wrong typed-confirm → confirm_mismatch, NO mutation", () => {
+  it("stalled run + wrong typed-confirm → confirm_mismatch, NO mutation", async () => {
     const recorded: unknown[] = [], cleared: unknown[] = [], emitted: unknown[] = [];
-    const out = respondTicket(
+    const out = await respondTicket(
       { ticket: "CTL-1067", response: "x", confirm: "WRONG" },
       {
         findHeld: () => ({ phase: "implement", signal: { status: "stalled", phase: "implement" } }),
@@ -347,6 +348,173 @@ describe("findHeldRun — locate the parked needs-input run", () => {
       read: () => "{ not json",
     });
     expect(out).toBeNull();
+  });
+});
+
+// CTL-1489 (closes CTL-1475): resolveHeldRun is the default `findHeld`
+// respondTicket calls — local-disk first. off/shadow: a local held run
+// short-circuits outright (shadow only observes drift when local is absent).
+// enforce: a local held run is corroborated against the durable projection by
+// generation (Codex P1 round 2) before it wins, mirroring
+// execution-core/daemon.mjs's handleCommentWake gate for the local-absent path.
+describe("resolveHeldRun — cross-host projection fallback (CTL-1489)", () => {
+  it("off mode: a LOCAL held run short-circuits — the projection is never consulted", async () => {
+    let projectionCalled = false;
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input" } }),
+      findProjection: () => {
+        projectionCalled = true;
+        return Promise.resolve(null);
+      },
+      readProjectionMode: () => "off",
+    });
+    expect(out?.phase).toBe("implement");
+    expect(projectionCalled).toBe(false);
+  });
+
+  it("shadow mode: a LOCAL held run short-circuits — the projection is never consulted", async () => {
+    let projectionCalled = false;
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input" } }),
+      findProjection: () => {
+        projectionCalled = true;
+        return Promise.resolve(null);
+      },
+      readProjectionMode: () => "shadow",
+    });
+    expect(out?.phase).toBe("implement");
+    expect(projectionCalled).toBe(false);
+  });
+
+  it("enforce mode: a LOCAL held run with no durable projection row still wins (fresh park, not yet folded)", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input", generation: 3 } }),
+      findProjection: () => Promise.resolve(null),
+      readProjectionMode: () => "enforce",
+    });
+    expect(out?.phase).toBe("implement");
+  });
+
+  it("enforce mode: a LOCAL held run wins when the durable projection's generation has NOT advanced past it", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input", generation: 3 } }),
+      findProjection: () =>
+        Promise.resolve({
+          phase: "implement",
+          signal: { status: "needs-input", raw: { generation: 3 } },
+        }),
+      readProjectionMode: () => "enforce",
+    });
+    expect(out?.phase).toBe("implement");
+  });
+
+  it("enforce mode: a LOCAL held run is rejected as stale when the durable projection's generation has advanced strictly past it (Codex P1 round 2)", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => ({ phase: "implement", signal: { status: "needs-input", generation: 3 } }),
+      findProjection: () =>
+        Promise.resolve({
+          phase: "monitor-merge",
+          signal: { status: "dispatched", raw: { generation: 5 } },
+        }),
+      readProjectionMode: () => "enforce",
+    });
+    expect(out).toBeNull();
+  });
+
+  it("off mode → local absent → null (today's 404), projection never consulted", async () => {
+    let projectionCalled = false;
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => null,
+      findProjection: () => {
+        projectionCalled = true;
+        return Promise.resolve({ phase: "implement", signal: { status: "needs-input" } });
+      },
+      readProjectionMode: () => "off",
+    });
+    expect(out).toBeNull();
+    expect(projectionCalled).toBe(false);
+  });
+
+  it("shadow mode → local absent, projection held → null (observes, never acts) + emits drift", async () => {
+    const drifts: unknown[] = [];
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => null,
+      findProjection: () =>
+        Promise.resolve({ phase: "implement", signal: { status: "needs-input" } }),
+      readProjectionMode: () => "shadow",
+      emitDrift: (d: unknown) => drifts.push(d),
+    });
+    expect(out).toBeNull();
+    expect(drifts).toEqual([{ ticket: "CTL-845", source: "respond-ticket" }]);
+  });
+
+  it("enforce mode → local absent, projection held → returns the projected run", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => null,
+      findProjection: () =>
+        Promise.resolve({
+          phase: "implement",
+          signal: { ticket: "CTL-845", status: "needs-input", raw: { generation: 5 } },
+        }),
+      readProjectionMode: () => "enforce",
+    });
+    expect(out?.phase).toBe("implement");
+    expect(out?.signal?.status).toBe("needs-input");
+  });
+
+  it("enforce mode normalizes signal.raw.generation to the TOP-LEVEL generation field respondTicket reads", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => null,
+      findProjection: () =>
+        Promise.resolve({
+          phase: "implement",
+          signal: { ticket: "CTL-845", status: "needs-input", raw: { generation: 7 } },
+        }),
+      readProjectionMode: () => "enforce",
+    });
+    // The raw on-disk shape (and what runFenceCheck's caller reads) carries
+    // generation at the TOP level, not nested under .raw — get this wrong and
+    // the fence-check silently sees null (fails closed to a spurious 409 in a
+    // multi-host deployment, never an unsafe bypass, but still wrong).
+    expect((out?.signal as { generation?: number })?.generation).toBe(7);
+  });
+
+  it("enforce mode, local absent, no projection row either → null (nothing held anywhere)", async () => {
+    const out = await resolveHeldRun("CTL-845", {
+      findLocal: () => null,
+      findProjection: () => Promise.resolve(null),
+      readProjectionMode: () => "enforce",
+    });
+    expect(out).toBeNull();
+  });
+
+  it("respondTicket end-to-end: enforce + no local dir + a held projection row → resumes (not a 404)", async () => {
+    const recorded: unknown[] = [];
+    const emitted: unknown[] = [];
+    const out = await respondTicket(
+      { ticket: "CTL-2000", response: "unblocked from another host", confirm: "CTL-2000" },
+      {
+        findHeld: (ticket: string) =>
+          resolveHeldRun(ticket, {
+            findLocal: () => null, // this host has no local worker dir for CTL-2000
+            findProjection: () =>
+              Promise.resolve({
+                phase: "implement",
+                signal: { ticket: "CTL-2000", status: "needs-input", raw: { generation: 2 } },
+              }),
+            readProjectionMode: () => "enforce",
+          }),
+        fenceCheck: () => ({ ok: true, noop: true, stale: false }),
+        record: (a: unknown) => recorded.push(a),
+        clearMarker: () => undefined,
+        emit: (a: unknown) => emitted.push(a),
+      },
+    );
+    // Before CTL-1489 this was a hard 404 not_held — the PR's own claim that
+    // respond-ticket.mjs "falls through to the projection-backed reader".
+    expect(out.status).toBe("resuming");
+    expect(recorded).toHaveLength(1);
+    expect(emitted).toHaveLength(1);
   });
 });
 

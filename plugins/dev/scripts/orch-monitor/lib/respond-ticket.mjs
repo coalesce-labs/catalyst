@@ -53,6 +53,11 @@ import { dirname, join } from "node:path";
 import { readClusterHostCount, runFenceCheck } from "./stop-worker.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
 import { nodeClass } from "./canonical-event-shared.ts";
+// CTL-1489 (closes CTL-1475): the vite-safe projection reader — see the
+// off/shadow/enforce fallback wired into resolveHeldRun below.
+import { findHeldRunFromProjection as projectionFindHeldRun } from "./projection-reader.mjs";
+import { readProjectionReadConfig } from "../../execution-core/config.mjs";
+import { emitProjectionDrift } from "../../execution-core/projection-read-decision.mjs";
 
 // The execution-core worker tree root — ~/catalyst/execution-core/workers/<T>/.
 // Byte-identical to ticket-runs.mjs::DEFAULT_WORKERS_DIR and board-data.mjs's
@@ -246,6 +251,105 @@ export function findHeldRun(
   return null;
 }
 
+// ── cross-host held-run resolution (CTL-1489, closes CTL-1475) ──────────────
+// resolveHeldRun — the default `findHeld` collaborator `respondTicket` calls.
+// Tries the LOCAL disk read first (byte-identical to pre-CTL-1489 behavior,
+// and free — no DB open on the hot path). off/shadow: local wins outright
+// (shadow only observes drift when local is absent, exactly like pre-existing
+// behavior). enforce: when local is present, it is corroborated against the
+// durable projection by generation (Codex P1 round 2 — a stale local claim
+// left behind on a host after the ticket was reclaimed and resumed elsewhere
+// must not win just because it returned first; see the in-function comment
+// for the strict-generation-advance rule that avoids regressing the common
+// same-host case). When local is ABSENT, the off/shadow/enforce
+// durable-projection fallback below mirrors execution-core/daemon.mjs's
+// handleCommentWake gate exactly. off → today's null (404 not_held); shadow →
+// null + a drift observation (never changes the decision); enforce → the
+// projected held run, normalized to the shape respondTicket expects
+// (`signal.generation` at the TOP level — the raw on-disk shape — not nested
+// under `signal.raw.generation` the way workerStateRowToSignal returns it;
+// getting this wrong would silently starve runFenceCheck's generation read,
+// which fails CLOSED on a null generation in a multi-host deployment — an
+// over-conservative 409, never an unsafe bypass, but still worth getting
+// right).
+export async function resolveHeldRun(
+  ticket,
+  {
+    findLocal = findHeldRun,
+    findProjection = projectionFindHeldRun,
+    readProjectionMode = () => readProjectionReadConfig().mode,
+    emitDrift = emitProjectionDrift,
+  } = {},
+) {
+  const local = findLocal(ticket);
+  let mode;
+  try {
+    mode = readProjectionMode();
+  } catch {
+    mode = "off";
+  }
+  if (local) {
+    if (mode !== "enforce") return local; // off/shadow: unchanged, local wins
+    // Codex P1 (round 2): enforce mode must not blindly trust a stale local
+    // claim (e.g. this host's worker dir wasn't cleaned up after the ticket
+    // was already reclaimed and resumed on ANOTHER host) — "this return
+    // occurs before the rollout mode or projection is read, so enforce can
+    // answer and resume the stale local run; an unchanged generation can
+    // still pass the fence." Corroborate against the durable projection, but
+    // ONLY override local when it reports a run that has moved STRICTLY past
+    // local's own known generation — a directly comparable, monotonic signal
+    // (the same one runFenceCheck already fences on). An absent projection
+    // row, or one that hasn't caught up past local's generation yet, safely
+    // defaults to trusting local — so a ticket that parked on THIS host a
+    // moment ago (before the durable fold has run) is never wrongly reported
+    // as not held, which a naive "projection has no opinion → not held" rule
+    // would regress for the common single-host case.
+    let projected;
+    try {
+      projected = await findProjection(ticket);
+    } catch {
+      projected = null;
+    }
+    const localGeneration =
+      typeof local.signal?.generation === "number" ? local.signal.generation : null;
+    const projectedGeneration =
+      typeof projected?.signal?.raw?.generation === "number"
+        ? projected.signal.raw.generation
+        : typeof projected?.signal?.generation === "number"
+          ? projected.signal.generation
+          : null;
+    if (
+      localGeneration != null &&
+      projectedGeneration != null &&
+      projectedGeneration > localGeneration
+    ) {
+      return null; // durable state has advanced strictly past local — local is stale
+    }
+    return local;
+  }
+  if (mode === "off") return null;
+  let projected;
+  try {
+    projected = await findProjection(ticket);
+  } catch {
+    projected = null;
+  }
+  if (!projected) return null;
+  if (mode === "shadow") {
+    try {
+      emitDrift({ ticket, source: "respond-ticket" });
+    } catch {
+      /* drift emit is best-effort */
+    }
+    return null; // shadow observes but never acts
+  }
+  // enforce: normalize signal.raw.generation → signal.generation (top level)
+  // so runFenceCheck reads the SAME field the local-disk shape carries there.
+  const { phase, signal } = projected;
+  const generation = signal?.raw?.generation ?? signal?.generation ?? null;
+  return { phase, signal: { ...signal, generation } };
+}
+
 // ── orchestration: the endpoint body ─────────────────────────────────────────
 // respondTicket — drive the full BFF12 contract for
 // `POST /api/ticket/<ticket>/respond`. Outcome is a discriminated result the route
@@ -269,10 +373,14 @@ export function findHeldRun(
 // confirm is the typed-confirm token (the operator types the ticket id back), the
 // same gate BFF8 uses; mismatch is a hard 400 BEFORE any mutation. All
 // collaborators are injectable so tests cover every branch deterministically.
-export function respondTicket(
+export async function respondTicket(
   { ticket, response, confirm },
   {
-    findHeld = findHeldRun,
+    // CTL-1489: defaults to the cross-host-aware resolver (local-disk first,
+    // durable-projection fallback per the off/shadow/enforce rollout mode).
+    // `await` on a sync test double's return value is a no-op pass-through —
+    // every existing sync `findHeld` fake keeps working unmodified.
+    findHeld = resolveHeldRun,
     fenceCheck = runFenceCheck,
     record = recordResponse,
     clearMarker = clearNeedsHumanMarker,
@@ -281,7 +389,7 @@ export function respondTicket(
 ) {
   // Read first — the held run is BOTH the existence check and the source of the
   // generation we fence-check + the phase we record/resume. 404 when nothing held.
-  const held = findHeld(ticket);
+  const held = await findHeld(ticket);
   if (!held) {
     return { status: "not_held" };
   }

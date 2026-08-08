@@ -4348,7 +4348,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return Response.json({ error: "Invalid JSON body" }, { status: 400 });
           }
           const response = typeof body.response === "string" ? body.response : "";
-          const result: RespondTicketResult = respondTicket({
+          const result: RespondTicketResult = await respondTicket({
             ticket,
             response,
             confirm: body.confirm,

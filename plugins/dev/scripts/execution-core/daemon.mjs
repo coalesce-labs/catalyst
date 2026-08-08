@@ -57,9 +57,12 @@ import {
   readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
   hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
+  readProjectionReadConfig, // CTL-1489: durable-projection read-cutover flag (off/shadow/enforce)
   readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
   readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
 } from "./config.mjs";
+import { findHeldRunFromProjection } from "./projection-reader.mjs"; // CTL-1489
+import { emitProjectionDrift } from "./projection-read-decision.mjs"; // CTL-1489
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
@@ -435,6 +438,17 @@ export async function handleCommentWake(
     // silently returns to the inbox and cannot be retried. A human answering IS
     // the signal that another attempt is warranted.
     forgetIntent = defaultForgetIntent,
+    // CTL-1489: durable-projection read-cutover seams. When the local worker dir
+    // is absent (multi-host: the ticket is served elsewhere), off keeps today's
+    // bare return; shadow observes the gap; enforce resumes from the projection.
+    readProjectionMode = () => readProjectionReadConfig().mode,
+    findHeldFromProjection = findHeldRunFromProjection,
+    emitDrift = emitProjectionDrift,
+    // Codex P1: HRW single-owner fencing for the projection-enforce actuation
+    // path (dispatch/clearStall) — see the call site below. Defaults to
+    // fail-open (every host "owns" everything) so single-host installs and
+    // every existing test keep today's behavior with zero wiring.
+    isProjectionResumeOwner = () => true,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -615,7 +629,119 @@ export async function handleCommentWake(
       (f) => f.startsWith("phase-") && f.endsWith(".json")
     );
   } catch {
-    // No local worker state: the label clear above is the entire correct response.
+    // CTL-1489 (closes CTL-1475): the local worker dir is absent. In a multi-host
+    // cluster the ticket may be served on another host, so the durable projection
+    // is the only surviving record of its held state — a bare return here silently
+    // drops a legitimate human reply. off → today's bare return; shadow → observe
+    // the gap (drift event); enforce → resume the held run from durable state.
+    let mode;
+    try {
+      mode = readProjectionMode();
+    } catch {
+      mode = "off";
+    }
+    if (mode === "off") return;
+    let held = null;
+    try {
+      held = findHeldFromProjection(ticket);
+    } catch {
+      held = null;
+    }
+    if (!held) return; // no durable held run for this ticket → nothing to resume
+    if (mode === "shadow") {
+      try {
+        emitDrift({ ticket, source: "comment-wake" });
+      } catch {
+        /* drift emit is best-effort */
+      }
+      return; // shadow observes but never acts
+    }
+    // Codex P1 (daemon.mjs): EVERY host in a multi-host cluster receives the
+    // same Linear webhook comment and, on a non-serving host, hits this exact
+    // dir-absent branch reading the same global projected held row — an
+    // unfenced dispatch/clearStall here would let N hosts race to actuate the
+    // SAME human reply. Apply the same HRW ownership gate scheduler actuation
+    // uses (hrw.mjs `ownedBy`) before mutating anything: only the ticket's
+    // owning host may act; every other host silently no-ops (the owning host's
+    // own comment-wake — same webhook, same event — is the one that acts).
+    // Fail-open (default `() => true`) for single-host/tests where every host
+    // trivially owns everything, matching the dir-present path's unfenced
+    // behavior (that path only ever runs on the SERVING host by construction).
+    if (!isProjectionResumeOwner(ticket)) {
+      log.info(
+        { ticket },
+        "handleCommentWake: not this host's HRW-owned ticket — projection resume deferred to the owning host"
+      );
+      return;
+    }
+    // enforce: resume the held run reconstructed from the projection.
+    const projSig = held.signal ?? {};
+    // parkedFrom is NOT cross-host-recoverable — it lives only in the local
+    // signal file, never in worker_state / the transition event. The projected
+    // `phase` is the honest best-effort (it equals parkedFrom in the common case,
+    // and is exactly what the dir-present path falls back to via `sig.phase`).
+    const parkedPhase = projSig.phase ?? held.phase;
+    // Phase-verify HIGH finding #2: findHeldFromProjection returns BOTH
+    // HELD_STATUSES ("needs-input" AND "stalled"), but the dir-present per-signal
+    // loop treats them very differently — "stalled" is a J3 unstick (clearStall +
+    // no dispatch), never a re-dispatch. Mirror that split here instead of
+    // dispatch()ing every held status: a cross-host stalled ticket must be
+    // stall-cleared, not blindly re-launched.
+    if (projSig.status === "stalled") {
+      try {
+        clearStall({ ticket, phase: parkedPhase });
+      } catch (err) {
+        log.warn(
+          { ticket, phase: parkedPhase, err: err?.message },
+          "handleCommentWake: clearStall threw — skipping (projection enforce)"
+        );
+      }
+      return;
+    }
+    // CTL-1489: reconstruct the resume session from the projected bg_job_id so a
+    // CTL-768 held-stopped worker recovered cross-host continues its PAUSED
+    // conversation via `--resume` (the same resolveSession seam the dir-present
+    // path uses) instead of being re-launched from scratch — which would land
+    // the operator's answer in a brand-new context. Absent bg_job_id → undefined
+    // (a still-alive worker: no resume, matching the legacy path).
+    const projBgJobId = projSig.raw?.bg_job_id ?? null;
+    const resumeSession = projBgJobId ? resolveSession(projBgJobId) ?? undefined : undefined;
+    const handoffPath = projSig.raw?.handoffPath ?? undefined;
+    // Phase-verify HIGH finding #3: the CLEAR-FIRST block above already removed
+    // the "needs-input" label out-of-band (unconditionally, before this dir-absent
+    // branch runs) and left its write-confirmation in `needsInputWroteEarly` —
+    // but never emitted the CTL-764 finding-11 needs-input→cleared worker.transition
+    // record, because that emission previously lived only in the dir-present
+    // per-signal loop below, which this cross-host branch never reaches. Emit it
+    // here so the durable ticket_state_transitions stream doesn't keep a stale
+    // needs-input disposition with no cleared record. Gated on a CONFIRMED WRITE
+    // (mirrors the needs-human gate above) — only the writer host emits.
+    if (needsInputWroteEarly) {
+      try {
+        appendWorkerTransitionEvent({
+          ticket,
+          orchId: ticket,
+          fromDisposition: "needs-input",
+          toDisposition: null,
+          reason: "comment-wake",
+          source: "comment-wake-clear",
+        });
+      } catch {
+        /* observability only */
+      }
+    }
+    // No local signal file exists here (the dir is absent), so the dir-present
+    // path's stoppedForHold→stalled signal RESET is a no-op cross-host — the
+    // re-dispatch provisions a fresh worktree + signal.
+    try {
+      dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
+      log.info(
+        { ticket, phase: parkedPhase, resumed: Boolean(resumeSession) },
+        "handleCommentWake: resumed from projection (CTL-1489 enforce)"
+      );
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "handleCommentWake: projection resume dispatch failed");
+    }
     return;
   }
 
@@ -1242,6 +1368,13 @@ export function startDaemon({
           removeLabel: defaultRemoveLabel,
           botUserId: linearBotUserIds,
           clearStall: defaultClearStall(orchDir, linearWrite),
+          // Codex P1 (CTL-1489): every host receives the same webhook comment;
+          // gate the projection-enforce actuation path (dispatch/clearStall on
+          // a ticket with no local worker dir) to this ticket's HRW owner only
+          // — bootRoster/_ident.name are the same roster+identity the CTL-862
+          // boot announcement above already resolved. Trivially true (every
+          // ticket "owned") on a single-host roster.
+          isProjectionResumeOwner: (ticket) => ownedBy(ticket, bootRoster, _ident.name),
         }); // CTL-549 + CTL-756 + CTL-1365b: re-dispatch parked tickets through the resolved executor; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
