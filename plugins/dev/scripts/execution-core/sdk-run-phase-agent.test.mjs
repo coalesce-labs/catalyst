@@ -1452,6 +1452,75 @@ describe("defaultEmitBackstop → defaultWriteSignalStalled terminal-status guar
   });
 });
 
+// ── CAT-2 (2026-08-08): a pre-launch death BEFORE any signal was ever written ──
+// synthesizes a minimal terminal signal instead of silently no-op'ing. Before this
+// fix, a rejected async dispatch whose prelaunch write never landed on disk left
+// NOTHING for defaultCollectResolveConflictFailures (or any other collector) to
+// find — the durable failed-dispatch event fired, but the ticket reverted to
+// looking like a fresh, never-dispatched candidate with zero on-disk trace.
+describe("defaultEmitBackstop → defaultWriteSignalTerminal synthesizes a missing signal (CAT-2)", () => {
+  const emitFor = (signalFile, extra = {}) =>
+    defaultEmitBackstop(
+      { phase: "resolve-conflict", ticket: "CAT-9999", status: "failed", reason: "sdk-dispatch-rejected: boom", orchDir: "/ec", signalFile, ...extra },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+
+  test("no signal file at all → one is created with status:stalled + the ticket/phase context", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-cat2-"));
+    const signalFile = join(dir, "phase-resolve-conflict.json");
+    expect(existsSync(signalFile)).toBe(false);
+    emitFor(signalFile);
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.ticket).toBe("CAT-9999");
+    expect(sig.phase).toBe("resolve-conflict");
+    expect(sig.attentionReason).toBe("sdk-dispatch-rejected: boom");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the synthesized signal is flagged distinctly from a real prelaunch write", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-cat2-"));
+    const signalFile = join(dir, "phase-resolve-conflict.json");
+    emitFor(signalFile);
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.signalSynthesized).toBe(true);
+    expect(typeof sig.startedAt).toBe("string");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a turn-cap-exhausted backstop on a missing signal synthesizes with that status", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-cat2-"));
+    const signalFile = join(dir, "phase-resolve-conflict.json");
+    emitFor(signalFile, { status: "turn-cap-exhausted" });
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("turn-cap-exhausted");
+    expect(sig.signalSynthesized).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("an existing REAL signal is never marked synthesized (only the fabricated case is)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-cat2-"));
+    const signalFile = join(dir, "phase-resolve-conflict.json");
+    writeFileSync(signalFile, JSON.stringify({ status: "running", ticket: "CAT-9999", phase: "resolve-conflict" }));
+    emitFor(signalFile);
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.signalSynthesized).toBeUndefined();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("malformed JSON on disk is treated the same as missing (synthesized, not thrown)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-cat2-"));
+    const signalFile = join(dir, "phase-resolve-conflict.json");
+    writeFileSync(signalFile, "{not valid json");
+    expect(() => emitFor(signalFile)).not.toThrow();
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.signalSynthesized).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 // ── CTL-1367 item 9 + P3: resolveSdkBootExecutor (daemon-boot auth gate + event) ─
 describe("resolveSdkBootExecutor (CTL-1367 item 9 + P3 observability)", () => {
   test("executor != sdk → pure pass-through (no auth check, no event)", () => {

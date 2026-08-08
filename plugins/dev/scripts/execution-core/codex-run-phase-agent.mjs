@@ -1435,7 +1435,7 @@ export async function codexRunPhaseAgent(
     // signal is absent or already terminal).
     const failedSignalFile =
       pre.spec?.signalFile ?? join(orchDir, "workers", ticket, `phase-${phase}.json`);
-    writeSignalStalled(failedSignalFile, "codex-prelaunch-failed");
+    writeSignalStalled(failedSignalFile, "codex-prelaunch-failed", { ticket, phase });
     return {
       code: pre.code || 1,
       stdout: "",
@@ -1527,7 +1527,7 @@ export async function codexRunPhaseAgent(
       if (classification === "auth-park") {
         // STICKY needs-human path — a fresh `codex login` for this home is required.
         // Do NOT loop (a re-dispatch would just re-fail the same way).
-        writeSignalStalled(signalFile, "codex-auth");
+        writeSignalStalled(signalFile, "codex-auth", { ticket, phase });
         emitEvent("execution-core.codex.auth-park", {
           ticket,
           phase,

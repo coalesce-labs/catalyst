@@ -324,10 +324,15 @@ export function defaultEmitBackstop(
   // the event stream says turn-cap-exhausted. Every other abnormal backstop
   // (failed / overloaded-exhausted) still writes "stalled".
   if (signalFile) {
+    // CAT-2: synthesizeIfMissing:true — by construction every caller of
+    // defaultEmitBackstop reaches here only AFTER a synchronous prelaunch
+    // already committed a claim and wrote a runnable signal; a missing file
+    // at this point means the write itself was lost, not that nothing was
+    // ever claimed. See defaultWriteSignalTerminal's header comment.
     if (status === "turn-cap-exhausted") {
-      writeSignalTerminal(signalFile, "turn-cap-exhausted", reason);
+      writeSignalTerminal(signalFile, "turn-cap-exhausted", reason, { ticket, phase, synthesizeIfMissing: true });
     } else {
-      writeSignalStalled(signalFile, reason);
+      writeSignalStalled(signalFile, reason, { ticket, phase, synthesizeIfMissing: true });
     }
   }
 
@@ -437,13 +442,43 @@ const SIGNAL_TERMINAL_STATUSES = new Set([
 // terminal event (a turn-cap-exhausted backstop must leave "turn-cap-exhausted", not
 // "stalled"; the terminal sweep applies needs-human only to stalled/failed). The P3
 // terminal-clobber guard and the atomic tmp+rename are shared by every status.
-function defaultWriteSignalTerminal(signalFile, status, reason) {
+// CAT-2 (2026-08-08): `synthesizeIfMissing` (default false — preserves EVERY
+// existing caller's behavior unchanged) lets a caller opt into fabricating a
+// minimal signal when none exists, instead of the long-standing no-op. Two
+// call shapes read a missing signalFile completely differently:
+//   - A CLEAN pre-claim failure (sdkRunPhaseAgent/codexRunPhaseAgent's own
+//     direct writeSignalStalled call when runPrelaunch itself fails before
+//     ever writing anything): nothing was ever committed, so fabricating a
+//     "stalled" signal would misrepresent a claim/launch that never happened.
+//     This MUST stay a no-op — see CTL-1367 P1-B's own test for the asserted
+//     invariant. synthesizeIfMissing stays false here.
+//   - defaultEmitBackstop's callers (backstopOnRejection for a rejected async
+//     dispatch, defaultMarkLaunchFailed for a died-after-spawn codex outcome):
+//     by construction the synchronous prelaunch ALREADY wrote a runnable
+//     "dispatched" signal before the async/child portion could ever fail —
+//     see dispatch.mjs's backstopOnRejection doc comment. A signal missing at
+//     THIS point means something even more catastrophic ate the prelaunch
+//     write itself; the durable failed-dispatch event still fires, but every
+//     on-disk collector (defaultCollectResolveConflictFailures,
+//     deriveAdvancement's reclaim path) requires the file to exist to act, so
+//     the ticket silently reverted to looking like a fresh, never-dispatched
+//     candidate with zero operator visibility. Confirmed via resolve-conflict-
+//     sweep, whose live dispatch path is exactly backstopOnRejection →
+//     defaultEmitBackstop → here. defaultEmitBackstop passes
+//     synthesizeIfMissing:true explicitly for this reason.
+function defaultWriteSignalTerminal(
+  signalFile, status, reason,
+  { ticket, phase, synthesizeIfMissing = false } = {},
+) {
   try {
     let sig;
+    let synthesized = false;
     try {
       sig = JSON.parse(readFileSync(signalFile, "utf8"));
     } catch {
-      return; // no signal to flip (prelaunch never wrote one) — nothing to do
+      if (!synthesizeIfMissing) return; // no signal to flip — nothing to do (see above)
+      sig = { ticket: ticket ?? null, phase: phase ?? null };
+      synthesized = true;
     }
     if (!sig || typeof sig !== "object") return;
     // CTL-1367 P3: never clobber a terminal status (esp. a done/complete success).
@@ -452,6 +487,10 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
     sig.status = status;
     sig.attentionReason = reason || "sdk-backstop";
     sig.updatedAt = ts;
+    if (synthesized) {
+      sig.signalSynthesized = true;
+      sig.startedAt = sig.startedAt ?? ts;
+    }
     sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), [status]: ts };
     const tmp = `${signalFile}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(sig));
@@ -472,8 +511,10 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
 // stalled" writer instead of duplicating the atomic tmp+rename + P3
 // terminal-clobber guard. Its closure deps (defaultWriteSignalTerminal,
 // SIGNAL_TERMINAL_STATUSES) travel with it.
-export function defaultWriteSignalStalled(signalFile, reason) {
-  return defaultWriteSignalTerminal(signalFile, "stalled", reason);
+// CAT-2: accepts an optional {ticket, phase, synthesizeIfMissing} context —
+// see defaultWriteSignalTerminal's header for which callers should set which.
+export function defaultWriteSignalStalled(signalFile, reason, ctx) {
+  return defaultWriteSignalTerminal(signalFile, "stalled", reason, ctx);
 }
 
 // CTL-1410 Phase A: the SDK success-branch signal flip. When query() resolves
