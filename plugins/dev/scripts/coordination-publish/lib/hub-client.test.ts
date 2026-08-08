@@ -9,9 +9,19 @@ function rec(seq: number): Record<string, unknown> {
 }
 
 function okFetch() {
-  const calls: unknown[] = [];
+  const calls: Array<{ records: unknown[] }> = [];
   const fetchImpl = async (_url: string, init: { body: string }) => {
-    calls.push(JSON.parse(init.body));
+    calls.push(JSON.parse(init.body) as { records: unknown[] });
+    return { ok: true, status: 200 } as Response;
+  };
+  return { fetchImpl, calls };
+}
+
+function okFetchCapturingHeaders() {
+  const calls: Array<{ headers: Record<string, string>; records: unknown[] }> = [];
+  const fetchImpl = async (_url: string, init: { headers: Record<string, string>; body: string }) => {
+    const body = JSON.parse(init.body) as { records: unknown[] };
+    calls.push({ headers: { ...init.headers }, records: body.records });
     return { ok: true, status: 200 } as Response;
   };
   return { fetchImpl, calls };
@@ -137,5 +147,35 @@ describe("HubClient (CTL-1488 Phase 3)", () => {
     mode = "fail";
     await client.publish([rec(3)]); // fail 1 again (not 2) → no degraded event
     expect(existsSync(eventLogPath)).toBe(false);
+  });
+
+  // Phase 1: bearer auth (CTL-1668)
+  test("sendBatch sets Authorization: Bearer <token> when token configured", async () => {
+    const { fetchImpl, calls } = okFetchCapturingHeaders();
+    const client = new HubClient({ hubUrl: "https://hub.example", dlqPath, token: "tok-123", retryDelaysMs: [0, 0, 0], fetchImpl });
+    await client.publish([rec(1)]);
+    expect(calls[0].headers["Authorization"]).toBe("Bearer tok-123");
+    expect(calls[0].headers["Content-Type"]).toBe("application/json");
+  });
+
+  test("sendBatch omits Authorization header when no token", async () => {
+    const { fetchImpl, calls } = okFetchCapturingHeaders();
+    const client = new HubClient({ hubUrl: "https://hub.example", dlqPath, retryDelaysMs: [0, 0, 0], fetchImpl });
+    await client.publish([rec(1)]);
+    expect(calls[0].headers["Authorization"]).toBeUndefined();
+  });
+
+  test("posted records PRESERVE body.payload — cross-host consumers reconstruct wake state from it", async () => {
+    // Stripping body.payload broke parseCommentCreatedEvent's authorId read on the receiving host,
+    // failing the self-echo guard open and re-dispatching parked work on peers (Codex P1, round 10).
+    const { fetchImpl, calls } = okFetch();
+    const client = new HubClient({ hubUrl: "https://hub.example", dlqPath, token: "t", retryDelaysMs: [0, 0, 0], fetchImpl });
+    const r = { local_seq: 1, id: "e1", body: { name: "x", payload: { authorId: "u1", commentId: "c1" } }, attributes: {} };
+    await client.publish([r]);
+    const sent = calls[0].records[0] as Record<string, unknown>;
+    expect((sent.body as Record<string, unknown>).payload).toEqual({ authorId: "u1", commentId: "c1" });
+    expect((sent.body as Record<string, unknown>).name).toBe("x");
+    expect(sent.id).toBe("e1");
+    expect(sent.local_seq).toBe(1);
   });
 });
