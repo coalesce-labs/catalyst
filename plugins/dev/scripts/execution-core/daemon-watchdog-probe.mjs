@@ -83,6 +83,11 @@ function initState() {
     verifyCount: 0, // ticks counted in the post-restart verify window
     escalated: false, // escalation already fired this episode
     raised: false, // alert currently raised (real in enforce; internal flag in shadow)
+    // First tick on which this probe observed the target. Used ONLY as the
+    // cold-start lag baseline when the forwarder checkpoint has no
+    // lastForwardedTs yet (fresh install / legacy checkpoint). Survives
+    // resetEpisode — it describes the probe's lifetime, not an episode.
+    firstSeenAt: null,
   };
 }
 
@@ -149,6 +154,9 @@ export function startDaemonWatchdogProbe({
         continue;
       }
       const nowMs = now();
+      // Stamp the cold-start baseline BEFORE the first lag read for this target.
+      const sSeen = getState(t.name);
+      if (sSeen.firstSeenAt == null) sSeen.firstSeenAt = nowMs;
       const dlqBytes = await safeAsync(() => readDlqBytes(t.dlqPath), null);
       const lagStuck = await safeAsync(
         () =>
@@ -161,6 +169,11 @@ export function startDaemonWatchdogProbe({
             eventLogPath: forwarderEventLogPath(),
             stalenessMs,
             now: nowMs,
+            // Cold-start baseline (Codex P1): when the checkpoint has no
+            // lastForwardedTs yet, staleness is measured from when this probe
+            // first saw the target — no filesystem timestamp is trustworthy
+            // here (mtime churns every 10s; birthtime is 0 on Linux/Bun).
+            coldStartBaselineMs: sSeen.firstSeenAt,
           }),
         false,
       );

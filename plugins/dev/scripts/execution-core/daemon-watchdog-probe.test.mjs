@@ -158,6 +158,41 @@ describe("concurrent-tick safety — restart state advances BEFORE the await", (
   });
 });
 
+describe("cold-start lag baseline is threaded from probe state (CTL-1502 Codex P1)", () => {
+  // The probe owns the baseline because no filesystem timestamp works: mtime
+  // churns every 10s and birthtimeMs is 0 on Linux under Bun. Assert the probe
+  // actually stamps a first-seen time and passes it to readLagStuck — without
+  // this wiring the predicate can never fire before the first delivery.
+  test("passes a finite coldStartBaselineMs, stable across ticks", async () => {
+    const seen = [];
+    let clockNow = 5_000_000;
+    const probe = startDaemonWatchdogProbe({
+      clock: recordingClock(),
+      config: { mode: "shadow", intervalMs: 120_000, dlqMaxBytes: DLQ_MAX, stalenessMs: 900_000, cooldownMs: 0, sustainedTicks: 99, verifyTicks: 2 },
+      targets: [TARGET],
+      readDlqBytes: () => 0,
+      readLagStuck: (args) => {
+        seen.push(args.coldStartBaselineMs);
+        return false;
+      },
+      restart: async () => {},
+      alert: { raiseAlert: () => {}, clearAlert: () => {}, escalate: () => {} },
+      now: () => clockNow,
+      log: { warn: () => {}, info: () => {}, error: () => {} },
+      io: {},
+    });
+
+    await probe.tick();
+    clockNow += 60_000; // time moves on
+    await probe.tick();
+
+    expect(seen.length).toBe(2);
+    expect(Number.isFinite(seen[0])).toBe(true);
+    expect(seen[0]).toBe(5_000_000); // stamped on the FIRST tick
+    expect(seen[1]).toBe(seen[0]); // and does not drift on later ticks
+  });
+});
+
 describe("stop() cancels an in-flight restart (CTL-1502 Codex P1)", () => {
   // Stack shutdown stops execution-core BEFORE otel-forward, so an un-cancelled
   // forward-restart child can finish its stop/start AFTER stop_forward returned

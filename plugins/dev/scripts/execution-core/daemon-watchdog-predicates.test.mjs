@@ -140,10 +140,12 @@ describe("readDlqBytes (statSync size, never readFileSync)", () => {
 describe("readLagStuck cold start (no lastForwardedTs yet)", () => {
   const NOW = Date.parse("2026-07-23T12:00:00.000Z");
   const STALE = 900_000; // 15 min
+  // The baseline is INJECTED by the probe (its first-observation time), not read
+  // from the filesystem: mtime/ctime churn every 10s and birthtimeMs is 0 on
+  // Linux under Bun, so a filesystem baseline would silently never fire on the
+  // fleet's own CI/server runtime.
+  const BASE = NOW - STALE - 60_000; // probe first saw the target 16 min ago
 
-  // The checkpoint's CREATION time stands in for "forwarding started here".
-  // Node reports birthtimeMs from the real file, so age it by writing the file
-  // and comparing against a `now` far enough in its future.
   function coldSetup({ eventLogMtimeMs, payload }) {
     const { dir, cleanup } = tmp();
     const checkpointPath = join(dir, "checkpoint.json");
@@ -154,8 +156,7 @@ describe("readLagStuck cold start (no lastForwardedTs yet)", () => {
       const t = new Date(eventLogMtimeMs);
       utimesSync(eventLogPath, t, t);
     }
-    const birthMs = statSync(checkpointPath).birthtimeMs;
-    return { checkpointPath, eventLogPath, birthMs, cleanup };
+    return { checkpointPath, eventLogPath, cleanup };
   }
 
   for (const [label, payload] of [
@@ -164,16 +165,19 @@ describe("readLagStuck cold start (no lastForwardedTs yet)", () => {
     ["unparseable", { lastForwardedTs: "not-a-date" }],
   ]) {
     test(`${label} lastForwardedTs + backlog older than stalenessMs → true`, () => {
-      const { checkpointPath, eventLogPath, birthMs, cleanup } = coldSetup({
+      const { checkpointPath, eventLogPath, cleanup } = coldSetup({
         payload,
-        // Backlog: the log was written AFTER the checkpoint was created.
-        eventLogMtimeMs: Date.now() + 1_000,
+        eventLogMtimeMs: NOW - 30_000, // fresh work after the baseline
       });
       try {
-        // `now` far enough past the checkpoint's birth to exceed stalenessMs.
-        const now = birthMs + STALE + 60_000;
         expect(
-          readLagStuck({ checkpointPath, eventLogPath, stalenessMs: STALE, now }),
+          readLagStuck({
+            checkpointPath,
+            eventLogPath,
+            stalenessMs: STALE,
+            now: NOW,
+            coldStartBaselineMs: BASE,
+          }),
         ).toBe(true);
       } finally {
         cleanup();
@@ -182,14 +186,19 @@ describe("readLagStuck cold start (no lastForwardedTs yet)", () => {
   }
 
   test("cold start still within stalenessMs → false (no premature trip)", () => {
-    const { checkpointPath, eventLogPath, birthMs, cleanup } = coldSetup({
+    const { checkpointPath, eventLogPath, cleanup } = coldSetup({
       payload: {},
-      eventLogMtimeMs: Date.now() + 1_000,
+      eventLogMtimeMs: NOW - 1_000,
     });
     try {
-      const now = birthMs + 1_000; // 1s in — nowhere near the 15 min threshold
       expect(
-        readLagStuck({ checkpointPath, eventLogPath, stalenessMs: STALE, now }),
+        readLagStuck({
+          checkpointPath,
+          eventLogPath,
+          stalenessMs: STALE,
+          now: NOW,
+          coldStartBaselineMs: NOW - 5_000, // 5s in — nowhere near 15 min
+        }),
       ).toBe(false);
     } finally {
       cleanup();
@@ -197,15 +206,42 @@ describe("readLagStuck cold start (no lastForwardedTs yet)", () => {
   });
 
   test("cold start with NO backlog → false (idle host never trips)", () => {
-    const { checkpointPath, eventLogPath, birthMs, cleanup } = coldSetup({
+    const { checkpointPath, eventLogPath, cleanup } = coldSetup({
       payload: {},
-      eventLogMtimeMs: NOW - 10 * 86_400_000, // log untouched long before the checkpoint
+      eventLogMtimeMs: BASE - 86_400_000, // log untouched long before the baseline
     });
     try {
-      const now = birthMs + STALE + 60_000;
       expect(
-        readLagStuck({ checkpointPath, eventLogPath, stalenessMs: STALE, now }),
+        readLagStuck({
+          checkpointPath,
+          eventLogPath,
+          stalenessMs: STALE,
+          now: NOW,
+          coldStartBaselineMs: BASE,
+        }),
       ).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("no baseline supplied → false (non-crossing, never invents one)", () => {
+    const { checkpointPath, eventLogPath, cleanup } = coldSetup({
+      payload: {},
+      eventLogMtimeMs: NOW - 30_000,
+    });
+    try {
+      for (const bad of [undefined, null, 0, NaN, -1]) {
+        expect(
+          readLagStuck({
+            checkpointPath,
+            eventLogPath,
+            stalenessMs: STALE,
+            now: NOW,
+            coldStartBaselineMs: bad,
+          }),
+        ).toBe(false);
+      }
     } finally {
       cleanup();
     }
@@ -220,6 +256,7 @@ describe("readLagStuck cold start (no lastForwardedTs yet)", () => {
           eventLogPath: join(dir, "events.jsonl"),
           stalenessMs: STALE,
           now: NOW,
+          coldStartBaselineMs: BASE,
         }),
       ).toBe(false);
     } finally {

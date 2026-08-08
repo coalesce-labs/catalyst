@@ -54,7 +54,13 @@ export function forwarderEventLogPath() {
 // distinguishes a stuck forwarder from a legitimately idle one, so a quiet host
 // never trips. Missing checkpoint / unparseable ts / unreadable event log →
 // false (non-crossing).
-export function readLagStuck({ checkpointPath, eventLogPath, stalenessMs, now }) {
+export function readLagStuck({
+  checkpointPath,
+  eventLogPath,
+  stalenessMs,
+  now,
+  coldStartBaselineMs,
+}) {
   try {
     const { lastForwardedTs } = JSON.parse(readFileSync(checkpointPath, "utf8"));
     let lastMs = Date.parse(lastForwardedTs);
@@ -66,19 +72,20 @@ export function readLagStuck({ checkpointPath, eventLogPath, stalenessMs, now })
       // this predicate indefinitely, no matter how far the event log ran ahead —
       // the watchdog could only act once the DLQ crossed its 1 GiB default.
       //
-      // Use the checkpoint file's CREATION time as the stand-in for "forwarding
-      // started here": the forwarder writes the checkpoint at startup, so
-      // "created N ms ago, still nothing delivered, and the log has fresh work"
-      // is exactly the cold-start stall. birthtime is the only honest choice —
-      // mtime is rewritten unconditionally every 10s (the same trap the
-      // lastForwardedTs keying exists to avoid).
-      //
-      // Where birthtime is unavailable (0/NaN on some filesystems), fall through
-      // to false and keep the pre-existing non-crossing behavior rather than
-      // inventing a baseline that could fake a breach.
-      const birthMs = statSync(checkpointPath).birthtimeMs;
-      if (!Number.isFinite(birthMs) || birthMs <= 0) return false;
-      lastMs = birthMs;
+      // The baseline is CALLER-SUPPLIED (the probe's first-observation time for
+      // this target), deliberately NOT a filesystem timestamp:
+      //   - mtime/ctime are rewritten unconditionally every 10s — the same trap
+      //     the lastForwardedTs keying exists to avoid.
+      //   - birthtimeMs is 0 on Linux under Bun (the fleet's CI + server
+      //     runtime), so a birthtime baseline silently degrades to "never
+      //     detect" on exactly the hosts that matter (Codex P1, round 4).
+      // The probe stamps `firstSeenAt` on a target's first tick and passes it
+      // here, which is runtime- and filesystem-independent. Worst case it delays
+      // detection to stalenessMs after the probe starts, which is the correct
+      // conservative direction. Absent/invalid → the pre-existing non-crossing
+      // false, never an invented baseline that could fake a breach.
+      if (!Number.isFinite(coldStartBaselineMs) || coldStartBaselineMs <= 0) return false;
+      lastMs = coldStartBaselineMs;
     }
     const eventLogMtimeMs = statSync(eventLogPath).mtimeMs; // throws → caught → false
     const backlog = eventLogMtimeMs > lastMs; // fresh work after the last forward

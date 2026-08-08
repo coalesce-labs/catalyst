@@ -960,6 +960,57 @@ read_watchdog_pid() {
   return 1
 }
 
+# _resolve_watchdog_config_path — the Layer-1 config path to pin for the child,
+# echoed (empty when none is found, which leaves the child's own fallback).
+#
+# Codex P1 (round 4): deriving this from SCRIPT_DIR is wrong. Under the
+# supported marketplace-cache fallback (CATALYST_FORCE_CACHE=1, missing
+# pluginDirs, or an unhealthy checkout) SCRIPT_DIR lives under
+# ~/.claude/plugins/cache/.../<version>/scripts, so `../../..` lands in the cache
+# rather than the configured plugin-source repo — and since the LaunchAgent
+# supplies no cwd or env, the monitor node's only watchdog would silently keep
+# shadow defaults. Resolve independently of which script COPY is executing:
+#
+#   1. CATALYST_CONFIG_FILE            explicit operator/caller override
+#   2. pluginDirs → checkout root      the configured plugin SOURCE (cache-proof)
+#   3. <cwd>/.catalyst/config.json     interactive runs from a checkout
+#   4. empty                           child falls back to its own resolution
+_resolve_watchdog_config_path() {
+  if [[ -n "${CATALYST_CONFIG_FILE:-}" ]]; then
+    printf '%s' "$CATALYST_CONFIG_FILE"; return 0
+  fi
+  if [[ -f "${SCRIPT_DIR}/lib/plugin-dirs.sh" ]]; then
+    # Subshell: resolve_plugin_dirs sets globals, and this must not leak into
+    # the caller's environment.
+    local from_plugin_dirs
+    from_plugin_dirs="$(
+      # shellcheck source=lib/plugin-dirs.sh
+      source "${SCRIPT_DIR}/lib/plugin-dirs.sh" 2>/dev/null || exit 0
+      resolve_plugin_dirs >/dev/null 2>&1 || true
+      # RESOLVED_PLUGIN_DIRS is COLON-separated; split on ':' explicitly rather
+      # than relying on word-splitting (paths may contain spaces).
+      local _oldifs="$IFS"; IFS=':'
+      # shellcheck disable=SC2206
+      local _dirs=(${RESOLVED_PLUGIN_DIRS:-})
+      IFS="$_oldifs"
+      local _pd _root
+      for _pd in "${_dirs[@]}"; do
+        [[ -n "$_pd" ]] || continue
+        _root="$(plugin_checkout_root "$_pd" 2>/dev/null)" || continue
+        [[ -n "$_root" && -f "${_root}/.catalyst/config.json" ]] || continue
+        printf '%s' "${_root}/.catalyst/config.json"; exit 0
+      done
+    )" || from_plugin_dirs=""
+    if [[ -n "$from_plugin_dirs" ]]; then
+      printf '%s' "$from_plugin_dirs"; return 0
+    fi
+  fi
+  if [[ -f "$PWD/.catalyst/config.json" ]]; then
+    printf '%s' "$PWD/.catalyst/config.json"; return 0
+  fi
+  printf ''
+}
+
 _watchdog_start_impl() {
   if read_watchdog_pid >/dev/null; then
     echo "Daemon watchdog already running (pid $(cat "$WATCHDOG_PID_FILE"))"
@@ -977,13 +1028,8 @@ _watchdog_start_impl() {
   # `enforce`/`off`. Resolve it here (where SCRIPT_DIR is symlink-resolved to the
   # real plugin checkout) and export it, so launchd and an interactive start
   # agree. An explicit CATALYST_CONFIG_FILE always wins.
-  local wd_config="${CATALYST_CONFIG_FILE:-}"
-  if [[ -z "$wd_config" ]]; then
-    local repo_root
-    repo_root="$(cd -P "${SCRIPT_DIR}/../../.." 2>/dev/null && pwd)" || repo_root=""
-    [[ -n "$repo_root" && -f "${repo_root}/.catalyst/config.json" ]] \
-      && wd_config="${repo_root}/.catalyst/config.json"
-  fi
+  local wd_config
+  wd_config="$(_resolve_watchdog_config_path)"
   # APPEND (>>), never truncate: this is the shared execution-core daemon log.
   mkdir -p "$(dirname "$WATCHDOG_LOG")" 2>/dev/null || true
   CATALYST_CONFIG_FILE="$wd_config" nohup bun run "$WATCHDOG_SCRIPT" >> "$WATCHDOG_LOG" 2>&1 &
