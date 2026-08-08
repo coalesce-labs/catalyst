@@ -259,7 +259,15 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-stack-cloud-sync-plist.test.sh
 
-      - name: linear-read-replica helper test (CTL-1397 + CTL-1403)
+      - name: Ensure zsh is available (linear-read-replica zsh regression coverage)
+        # CAT-35: the suite below sources the helper under `zsh -u` to lock down the
+        # nounset regression that broke the production phase-worker read path. Those
+        # two assertions SKIP (not fail) when zsh is absent, and this workflow's other
+        # zsh install lands hundreds of lines later — so without this step the required
+        # check could pass without ever exercising the shell that caused the regression.
+        run: command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh)
+
+      - name: linear-read-replica helper test (CTL-1397 + CTL-1403 + CAT-35)
         # CTL-1403: the bash linear_read_ticket helper is the canonical agent read
         # path; this asserts its two-gate freshness + the reads-by-source emit
         # (catalyst.linear.read on every branch: replica HIT / miss / stale / failure).

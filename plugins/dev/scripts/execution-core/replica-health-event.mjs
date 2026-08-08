@@ -27,6 +27,12 @@ export function buildReplicaHealthEvent({ team, action, source = null, consecuti
       "event.entity": "monitor", "event.action": `replica.${action}`,
       "event.label": team, "catalyst.team": team,
       ...(source ? { "replica.source": source } : {}),
+      // otel-forward's OTLP conversion (lib/destinations/otlp.ts buildOtlpPayload)
+      // forwards ONLY `attributes` + `body.message` — `body.payload` is dropped
+      // off-machine. The degradation streak therefore has to ride an attribute or
+      // it is silently absent from Loki/Grafana, which is where this signal is
+      // actually consumed. Same reason reconcile-health-event mirrors its `reason`.
+      "replica.consecutive_degraded": consecutiveDegraded,
     },
     body: { payload: { team, action, source, consecutiveDegraded } },
   })}\n`;

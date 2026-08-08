@@ -64,11 +64,17 @@ export function recordReplicaRead(team, source, {
         if (appended !== false) entry.alerting = true;
       }
     } else if (source === "replica") {
-      const wasAlerting = entry.alerting;
       entry.consecutiveDegraded = 0;
       entry.lastHealthyTs = new Date().toISOString();
-      entry.alerting = false;
-      if (wasAlerting) appendEvent({ team, action: REPLICA_RECOVERED_ACTION, source, consecutiveDegraded: 0 });
+      // Clear the alert latch ONLY after the recovery event actually lands, mirroring
+      // the degraded branch. Clearing first meant a failed append (disk full, EACCES)
+      // permanently swallowed the recovery: the marker persisted alerting:false, so no
+      // later healthy read saw a prior alert to recover from, and consumers stayed
+      // stuck on monitor.replica.degraded.<TEAM> forever.
+      if (entry.alerting) {
+        const appended = appendEvent({ team, action: REPLICA_RECOVERED_ACTION, source, consecutiveDegraded: 0 });
+        if (appended !== false) entry.alerting = false;
+      }
     }
     writeMarker(team, entry);
   } catch (err) {

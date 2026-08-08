@@ -81,14 +81,16 @@ describe("buildReplicaHealthEvent", () => {
       source: "no-replica",
       consecutiveDegraded: 7,
     });
-    // NOTE (CAT-35 verify finding): consecutiveDegraded currently lives ONLY in
-    // body.payload, and otel-forward's OTLP conversion (otel-forward/lib/
-    // destinations/otlp.ts) forwards only `resource`, `body.message`, and
-    // `attributes` — so the streak count never reaches Loki/Grafana. The
-    // sibling reconcile-health-event.mjs mirrors its equivalent field into
-    // attributes for exactly this reason (CTL-1628). This assertion pins the
-    // current shape; it is deliberately NOT an endorsement of the gap.
-    expect(ev.attributes["replica.consecutive_degraded"]).toBeUndefined();
+    // CAT-35 (Codex round 1): the streak ALSO has to ride an attribute. otel-forward's
+    // OTLP conversion (otel-forward/lib/destinations/otlp.ts) forwards only `resource`,
+    // `body.message`, and `attributes` — body.payload is dropped off-machine, so a
+    // payload-only count never reaches Loki/Grafana, which is where this signal is read.
+    expect(ev.attributes["replica.consecutive_degraded"]).toBe(7);
+  });
+
+  test("streak attribute is present (as 0) on recovered, so the series closes out", () => {
+    const ev = JSON.parse(buildReplicaHealthEvent({ team: "CAT", action: REPLICA_RECOVERED_ACTION }));
+    expect(ev.attributes["replica.consecutive_degraded"]).toBe(0);
   });
 
   test("each event gets a fresh id / traceId / spanId", () => {

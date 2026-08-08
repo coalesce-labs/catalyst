@@ -48,6 +48,41 @@ test("healthy read after restart hydrates alert and emits recovered", () => {
   ]);
 });
 
+// CAT-35 (Codex round 1): the alert latch must survive a failed recovery append.
+// Clearing `alerting` before the append landed meant one failed write (disk full,
+// EACCES) permanently swallowed the recovery — the persisted marker said "not
+// alerting", so no later healthy read had an alert to recover from, and consumers
+// stayed pinned to monitor.replica.degraded.<TEAM> forever. Mirrors the degraded
+// branch, which has always gated its latch on a successful append.
+test("failed recovery append keeps the latch so a later healthy read retries", () => {
+  const events = [];
+  const persisted = [];
+  resetReplicaHealth();
+  const hydrated = () => ({ consecutiveDegraded: 3, lastHealthyTs: null, alerting: true });
+
+  // First healthy read: the append fails, so the latch must NOT clear.
+  recordReplicaRead("CAT", "replica", {
+    appendEvent: () => false,
+    readMarker: hydrated,
+    writeMarker: (_team, state) => persisted.push({ ...state }),
+    threshold: 3,
+  });
+  expect(events).toHaveLength(0);
+  expect(persisted.at(-1).alerting).toBe(true);
+
+  // Second healthy read: the append succeeds, the recovery finally lands, latch clears.
+  recordReplicaRead("CAT", "replica", {
+    appendEvent: (event) => events.push(event),
+    readMarker: hydrated,
+    writeMarker: (_team, state) => persisted.push({ ...state }),
+    threshold: 3,
+  });
+  expect(events).toEqual([
+    { team: "CAT", action: "recovered", source: "replica", consecutiveDegraded: 0 },
+  ]);
+  expect(persisted.at(-1).alerting).toBe(false);
+});
+
 test("healthy without a prior alert emits nothing", () => {
   const events = [];
   resetReplicaHealth();
