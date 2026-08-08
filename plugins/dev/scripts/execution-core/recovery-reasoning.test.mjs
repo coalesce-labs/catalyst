@@ -2986,3 +2986,83 @@ describe("parsePrNumberFromReason + probe threading", () => {
     expect(seen.prNumber).toBe(undefined);
   });
 });
+
+// CTL-1680 (Codex #3079 round-4 P1): two production failure reasons carry no `pr#<N>`,
+// so the exact number must be recovered from the sibling phase artifacts on disk.
+// Without it the probe falls back to a `--state all --limit 1` title search that can
+// resolve a DIFFERENT historical PR and recover ITS merge SHA.
+describe("prNumberFromWorkerDir / resolvePrNumberForRecovery (CTL-1680)", () => {
+  let dir;
+  beforeEach(() => { dir = mkdtempSync(pathJoin(tmpdir(), "prnum-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const signalPath = () => pathJoin(dir, "phase-monitor-deploy.json");
+  const write = (name, obj) => writeFileSync(pathJoin(dir, name), JSON.stringify(obj));
+
+  test("reads .pr.number from phase-pr.json", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    write("phase-pr.json", { pr: { number: 3079 } });
+    expect(prNumberFromWorkerDir(signalPath())).toBe(3079);
+  });
+
+  test("phase-pr.json wins over phase-monitor-merge.json and phase-implement.json", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    write("phase-pr.json", { pr: { number: 111 } });
+    write("phase-monitor-merge.json", { pr: { number: 222 } });
+    write("phase-implement.json", { draftPr: { number: 333 } });
+    expect(prNumberFromWorkerDir(signalPath())).toBe(111);
+  });
+
+  test("falls through to phase-implement.json's draftPr when the others are absent", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    write("phase-implement.json", { draftPr: { number: 456 } });
+    expect(prNumberFromWorkerDir(signalPath())).toBe(456);
+  });
+
+  test("skips a malformed / empty / non-positive source rather than throwing", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    writeFileSync(pathJoin(dir, "phase-pr.json"), "{not json");
+    write("phase-monitor-merge.json", { pr: { number: 0 } });
+    write("phase-implement.json", { draftPr: { number: 789 } });
+    expect(prNumberFromWorkerDir(signalPath())).toBe(789);
+  });
+
+  test("returns undefined when nothing names a PR (search fallback preserved)", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    expect(prNumberFromWorkerDir(signalPath())).toBeUndefined();
+    expect(prNumberFromWorkerDir("")).toBeUndefined();
+    expect(prNumberFromWorkerDir(null)).toBeUndefined();
+  });
+
+  test("resolve: the reason's own pr#<N> beats the on-disk artifacts", async () => {
+    const { resolvePrNumberForRecovery } = await import("./recovery-reasoning.mjs");
+    write("phase-pr.json", { pr: { number: 111 } });
+    expect(
+      resolvePrNumberForRecovery({
+        failureReason: "…gh REST fallback also returned empty for pr#999",
+        signalPath: signalPath(),
+      }),
+    ).toBe(999);
+  });
+
+  test("resolve: an unnumbered reason recovers the number from disk", async () => {
+    const { resolvePrNumberForRecovery } = await import("./recovery-reasoning.mjs");
+    write("phase-pr.json", { pr: { number: 2638 } });
+    // The real "no PR number available for gh REST fallback" production reason.
+    expect(
+      resolvePrNumberForRecovery({
+        failureReason:
+          "phase-monitor-merge.json has empty .pr.mergeCommitSha and no PR number available for gh REST fallback",
+        signalPath: signalPath(),
+      }),
+    ).toBe(2638);
+  });
+
+  test("resolve: reads the reason and path from evidence.signal too", async () => {
+    const { resolvePrNumberForRecovery } = await import("./recovery-reasoning.mjs");
+    write("phase-implement.json", { draftPr: { number: 77 } });
+    expect(
+      resolvePrNumberForRecovery({ signal: { failureReason: "stalled" }, signalPath: signalPath() }),
+    ).toBe(77);
+  });
+});

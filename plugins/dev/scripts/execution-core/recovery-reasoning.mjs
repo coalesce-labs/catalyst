@@ -521,6 +521,62 @@ export function parsePrNumberFromReason(reason) {
   return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
+// CTL-1680 (Codex #3079 round-4 P1): the reason string is only ONE of the places the
+// PR number lives, and two production reasons carry none —
+// phase-monitor-deploy's "…no PR number available for gh REST fallback" (phase-pr.json
+// had no `.pr.number`) and "…gh repo view returned empty" (the number WAS known but was
+// never written into the prose). For those, the number is still on disk in a SIBLING
+// phase artifact next to the failing signal. Read it from there, most-authoritative
+// first:
+//   phase-pr.json        .pr.number      — the PR the pipeline actually opened
+//   phase-monitor-merge  .pr.number      — same PR, recorded again at merge watch
+//   phase-implement.json .draftPr.number — the early draft PR (CTL-783), the only
+//                                          record when the pipeline never reached `pr`
+// Without this the probe falls through to a `--state all --limit 1` title search, which
+// on a ticket with several historical PRs can resolve a DIFFERENT attempt and recover
+// ITS merge SHA — resuming deployment on the wrong commit.
+//
+// Pure over the filesystem and total: any missing file, unreadable path, malformed JSON,
+// or non-positive value is skipped, and an exhausted search returns undefined so the
+// caller keeps its existing search fallback. `signalPath` is the failing phase signal's
+// own path (WorkerSignal.signalPath); its directory is the worker dir. A flat legacy
+// signal (workers/<T>.json) has no sibling phase artifacts — the reads simply miss.
+const PR_NUMBER_SIBLING_SOURCES = [
+  ["phase-pr.json", (d) => d?.pr?.number],
+  ["phase-monitor-merge.json", (d) => d?.pr?.number],
+  ["phase-implement.json", (d) => d?.draftPr?.number],
+];
+
+export function prNumberFromWorkerDir(signalPath, { readFile = readFileSync } = {}) {
+  if (typeof signalPath !== "string" || signalPath === "") return undefined;
+  const dir = dirname(signalPath);
+  for (const [name, pick] of PR_NUMBER_SIBLING_SOURCES) {
+    let n;
+    try {
+      n = pick(JSON.parse(readFile(join(dir, name), "utf8")));
+    } catch {
+      continue; // absent / unreadable / malformed → try the next source
+    }
+    const v = Number(n);
+    if (Number.isInteger(v) && v > 0) return v;
+  }
+  return undefined;
+}
+
+// CTL-1680 (Codex #3079 round-4 P1): resolve the PR number for a recovery item from
+// every place it can legitimately live, most-precise first — the failure reason's own
+// `pr#<N>`, then the sibling phase artifacts on disk. Returns undefined when nothing
+// names a PR, which leaves the probe's title-search fallback in place.
+export function resolvePrNumberForRecovery(evidence, { readFile = readFileSync } = {}) {
+  const fromReason = parsePrNumberFromReason(
+    evidence?.failureReason ?? evidence?.signal?.failureReason,
+  );
+  if (fromReason !== undefined) return fromReason;
+  return prNumberFromWorkerDir(evidence?.signalPath ?? evidence?.signal?.signalPath, {
+    readFile,
+  });
+}
+
 export function isPrMergeUnconfirmedReason(reason) {
   return (
     reason === PR_NOT_MERGED_REASON ||
@@ -548,15 +604,15 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
   const repo = evidence.repo ?? evidence.signal?.repo ?? undefined;
   const worktreePath =
     evidence.worktreePath ?? evidence.signal?.worktreePath ?? undefined;
-  // CTL-1680 (Codex #3079 round-3 P1): phase-monitor-deploy's empty-SHA guard names
+  // CTL-1680 (Codex #3079 round-3/4 P1): phase-monitor-deploy's empty-SHA guard names
   // the PR in its own reason string (`… returned empty for pr#<N>`). Thread that
   // number to the probe so it resolves THAT PR exactly. Without it, a ticket with no
   // head branch and several non-open historical PRs fell back to a title search that
   // collapses every match to one — and the MERGED branch below would then recover a
-  // DIFFERENT PR's merge SHA and resume deployment on the wrong commit.
-  const prNumber = parsePrNumberFromReason(
-    evidence.failureReason ?? evidence.signal?.failureReason,
-  );
+  // DIFFERENT PR's merge SHA and resume deployment on the wrong commit. Round 4: two
+  // production reasons carry no `pr#<N>` at all, so fall back to the sibling phase
+  // artifacts on disk, where the exact number is still recorded.
+  const prNumber = resolvePrNumberForRecovery(evidence);
   let probe;
   try {
     probe = probePrBlock(ticket, { branch, repo, worktreePath, prNumber });

@@ -145,6 +145,10 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    most recent `CHANGES_REQUESTED` from a human reviewer (filter on `.author.login` not matching
    known bots). If present, emit `failed` with reason "human reviewer ${LOGIN} requested changes —
    operator action required". Do NOT attempt to address human review comments programmatically.
+   The same applies to an unresolved human review **thread** left on a `COMMENTED`/`APPROVED`
+   review: it never surfaces as `CHANGES_REQUESTED` and does not always flip
+   `mergeable_state`, so the unresolved-thread gate counts human threads separately and
+   emits `failed` for them instead of dispatching `/catalyst-dev:review-comments` (CTL-1680).
 
 5. **Wake narration.** Every iteration produces one short line of assistant text before re-entering
    the wait (defeats the assistant `end_turn` rendering bleed described in [[monitor-events]] §
@@ -268,12 +272,26 @@ if gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" 2>/dev/null \
   REVIEWER_VERDICT_PRESENT=true
 fi
 # (b) clean-pass issue comment, scoped to this head by embedded short SHA or timestamp.
+# CTL-1680 (Codex #3079 round-4 P1): a comment that NAMES a head must be judged by that
+# name, never by when it arrived. Codex begins reviewing head A, head B is pushed, then
+# A's clean-pass lands — the `created_at >= $at` fallback would accept that A-verdict as
+# B's and merge B unreviewed. Codex stamps its verdict with "Reviewed commit: <sha>", so
+# reviewed_heads extracts exactly the head(s) a comment claims to have reviewed and a
+# mismatch is rejected OUTRIGHT, regardless of arrival time. The timestamp branch now
+# only rescues a comment that names NO commit at all (reviewed_heads empty) — its
+# original purpose. The prefix test is bidirectional because the stamp may be a short
+# SHA while $h is full-length, or vice versa.
 if [[ "$REVIEWER_VERDICT_PRESENT" != true ]] && \
    gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
    | jq -e --arg h "$REVIEWED_HEAD" --arg at "$HEAD_EXPOSED_AT" --arg re "$CLEAN_PASS_RE" \
-       'any(.[];
+       'def reviewed_heads:
+          [ .body | scan("(?i)reviewed commit[^0-9a-f]*([0-9a-f]{7,40})") | .[0] ];
+        any(.[];
           (.user.login|test("codex";"i"))
           and (.body|test($re;"i"))
+          and ( (reviewed_heads | length) == 0
+                or (reviewed_heads
+                    | any(. as $t | ($h|startswith($t)) or ($t|startswith($h)))) )
           and ( ((($h|length) >= 10) and (.body|test($h[0:10])))
                 or (($at != "") and (.created_at >= $at)) ))' >/dev/null 2>&1; then
   REVIEWER_VERDICT_PRESENT=true
@@ -299,7 +317,19 @@ fi
 # error must NOT be reported as "0 unresolved" (the old `|| echo 0` fallback let a lookup
 # failure merge straight past an actually-unresolved finding). UNRESOLVED_THREAD_QUERY_FAILED
 # tracks that distinctly from a genuine zero count.
+# CTL-1680 (Codex #3079 round-4 P1): count HUMAN unresolved threads as well as bot ones.
+# The author filter below used to drop every human thread, so a human who left an
+# unresolved COMMENTED/APPROVED thread (neither of which flips mergeable_state, and
+# neither of which the CHANGES_REQUESTED check catches) left this gate reading zero and
+# the skill merged past an open conversation. GitHub's ruleset also enforces thread
+# resolution on this repo, so this is defence-in-depth rather than an open merge hole —
+# but the skill's own gate must not be the weaker of the two. Routing differs by author
+# and mirrors the existing policy: bot threads are auto-remediated via
+# /catalyst-dev:review-comments; human threads are NEVER addressed programmatically
+# (same rule as human CHANGES_REQUESTED) and terminate the phase for the operator.
 UNRESOLVED_BOT_THREADS=0
+UNRESOLVED_HUMAN_THREADS=0
+UNRESOLVED_HUMAN_AUTHORS=""
 UNRESOLVED_THREAD_QUERY_FAILED=false
 THREAD_AFTER=""
 THREAD_PAGE=0
@@ -330,6 +360,18 @@ while :; do
           | select(.isResolved==false)
           | select((.comments.nodes[0].author.login // "")|test("codex|bot";"i"))] | length' <<<"$THREAD_PAGE_JSON")"
   UNRESOLVED_BOT_THREADS=$(( UNRESOLVED_BOT_THREADS + PAGE_COUNT ))
+  # The complement of the bot filter — every unresolved thread NOT opened by a bot.
+  PAGE_HUMAN_COUNT="$(jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+          | select(.isResolved==false)
+          | select(((.comments.nodes[0].author.login // "")|test("codex|bot";"i")) | not)] | length' <<<"$THREAD_PAGE_JSON")"
+  UNRESOLVED_HUMAN_THREADS=$(( UNRESOLVED_HUMAN_THREADS + PAGE_HUMAN_COUNT ))
+  if [[ "$PAGE_HUMAN_COUNT" -gt 0 ]]; then
+    PAGE_HUMAN_AUTHORS="$(jq -r '[.data.repository.pullRequest.reviewThreads.nodes[]
+            | select(.isResolved==false)
+            | select(((.comments.nodes[0].author.login // "")|test("codex|bot";"i")) | not)
+            | .comments.nodes[0].author.login // "unknown"] | unique | join(", ")' <<<"$THREAD_PAGE_JSON")"
+    UNRESOLVED_HUMAN_AUTHORS="${UNRESOLVED_HUMAN_AUTHORS:+${UNRESOLVED_HUMAN_AUTHORS}, }${PAGE_HUMAN_AUTHORS}"
+  fi
   HAS_NEXT="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$THREAD_PAGE_JSON")"
   [[ "$HAS_NEXT" == "true" ]] || break
   THREAD_AFTER="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor' <<<"$THREAD_PAGE_JSON")"
@@ -337,6 +379,21 @@ done
 if [[ "$UNRESOLVED_THREAD_QUERY_FAILED" == true ]]; then
   echo "wake: pr#${PR_NUMBER} unresolved-thread lookup failed; NOT merging until it succeeds (fail-closed)"
   continue  # re-enter the loop; never risk merging past an unconfirmed finding
+fi
+if [[ "$UNRESOLVED_HUMAN_THREADS" -gt 0 ]]; then
+  # CTL-1680 (Codex #3079 round-4 P1): a human's unresolved thread is operator work, not
+  # agent work — the same rule as human CHANGES_REQUESTED above ("Do NOT attempt to
+  # address human review comments programmatically"). Terminate the phase rather than
+  # `continue`: nothing this loop can do will resolve it, so re-waiting would spin until
+  # the 24h cap. Checked BEFORE the bot branch so a PR carrying both goes to the operator
+  # instead of silently auto-remediating half of it and merging.
+  HUMAN_THREAD_REASON="pr#${PR_NUMBER} has ${UNRESOLVED_HUMAN_THREADS} unresolved human review thread(s) (${UNRESOLVED_HUMAN_AUTHORS}) — operator action required"
+  echo "wake: ${HUMAN_THREAD_REASON}"
+  "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status failed --reason "$HUMAN_THREAD_REASON"
+  [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
+    "phase-monitor-merge failed: ${HUMAN_THREAD_REASON}" \
+    --as "$TICKET" --type attention --orch "$ORCH_ID" >/dev/null 2>&1 || true
+  exit 1
 fi
 if [[ "$UNRESOLVED_BOT_THREADS" -gt 0 ]]; then
   # CTL-1680 (Codex #3079 re-review P1): dispatch the existing review-remediation path
@@ -570,6 +627,9 @@ Failure modes that emit `phase.monitor-merge.failed.${TICKET}`:
 
 - `dirty` (merge conflicts) — operator must rebase manually.
 - Human reviewer `CHANGES_REQUESTED` — operator must address comments.
+- Unresolved **human** review thread(s) — an unresolved `COMMENTED`/`APPROVED` conversation
+  blocks the merge but is not `CHANGES_REQUESTED`, so it terminates here for the operator
+  rather than being auto-remediated (CTL-1680).
 - CI blocked after 3 auto-fix attempts.
 - `gh pr merge` succeeded but REST confirms `.merged == false` (rare; usually a branch-protection
   rule mismatch).
