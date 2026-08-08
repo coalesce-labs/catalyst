@@ -171,7 +171,7 @@ unset _SRC
 # shellcheck source=lib/catalyst-agent-path.sh
 source "$SCRIPT_DIR/lib/catalyst-agent-path.sh"
 # shellcheck source=lib/cloud-sync-token-probe.sh
-source "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
+[[ -f "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh" ]] && . "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
 
 # ─── Proxy env (used only under --proxy) ─────────────────────────────────────
 PROXY_HOST="http://127.0.0.1:8080"
@@ -2445,6 +2445,7 @@ cmd_adopt_thoughts_sync() {
 # cloud_sync_verify_report [--json] [--strict] — read-only write→read chain report.
 CLOUD_SYNC_REPLICA_TABLES="issues issue_labels labels relations projects sync_meta"
 cloud_sync_verify_report() {
+  declare -F cloud_sync_probe_token >/dev/null 2>&1 || fail "cloud-sync token probe helper missing at ${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
   local json_mode="no" strict="no"
   while [[ $# -gt 0 ]]; do
     case "$1" in --json) json_mode="yes";; --strict) strict="yes";; *) fail "unknown verify-cloud-sync arg: $1";; esac
@@ -2477,7 +2478,7 @@ cloud_sync_verify_report() {
   local cursor=""; [[ "$schema_ok" == yes ]] && cursor="$(sqlite3 "$db" "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;" 2>/dev/null || true)"
   [[ -n "$cursor" ]] && _cloud_sync_verify_add seed-cursor PASS "seed cursor present" || _cloud_sync_verify_add seed-cursor FAIL "seed cursor absent"
   local cfg="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}" mode="off"
-  [[ -f "$cfg" ]] && mode="$(jq -r '.catalyst.linearReplica.mode // .catalyst.linearReplica // "off"' "$cfg" 2>/dev/null || echo off)"
+  [[ -f "$cfg" ]] && mode="$(jq -r '(.catalyst.linearReplica | if type == "object" then .mode else . end) // "off"' "$cfg" 2>/dev/null || echo off)"
   [[ "$mode" == on ]] && _cloud_sync_verify_add read-flag PASS "read flag on" || _cloud_sync_verify_add read-flag INFO "read flag $mode"
   local report; report="$(jq -nc --argjson ok "$overall" --arg first "$first_failure" --arg db "$db" --argjson checks "$checks" '{ok:$ok,first_failure:$first,db_path:$db,checks:$checks}')"
   if [[ "$json_mode" == yes ]]; then printf '%s\n' "$report"; else jq -r '.checks[] | "\(.status)\t\(.name)\t\(.reason)"' <<<"$report"; fi
@@ -2504,7 +2505,15 @@ cmd_activate_replica() {
     merged="$(jq -nc '{catalyst:{linearReplica:{mode:"on"}}}')"
   fi
   if [[ "$dry_run" == yes ]]; then printf '%s\n' "$merged"; return 0; fi
-  mkdir -p "$(dirname "$cfg")"; local tmp="${cfg}.tmp.$$"; printf '%s\n' "$merged" > "$tmp" && mv "$tmp" "$cfg"
+  mkdir -p "$(dirname "$cfg")"
+  local tmp="${cfg}.tmp.$$"
+  if printf '%s\n' "$merged" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$cfg"; then
+    :
+  else
+    rm -f "$tmp"
+    echo "activate-replica: refusing: could not securely write Layer-2 config" >&2
+    return 1
+  fi
   log "activated local Linear replica; restart execution-core to construct the reader"
 }
 
@@ -2545,6 +2554,7 @@ cmd_adopt_cloud_sync() {
   # (which may themselves set the override name), THEN resolves the NAME + checks presence.
   # So an override that lives only in the 0600 file is honored, and one that lives only in the
   # interactive shell is correctly reported absent (Codex P2). Missing token → WARN, never fail.
+  declare -F cloud_sync_probe_token >/dev/null 2>&1 || fail "cloud-sync token probe helper missing at ${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
   local probe token_env token_present
   probe="$(cloud_sync_probe_token --host "$host_name")"
   token_env="$(printf '%s\n' "$probe" | sed -n 's/^name=//p')"

@@ -40,6 +40,8 @@ check "empty cursor fails" jq -e '(.checks[] | select(.name=="seed-cursor").stat
 fixture happy; seed_db; sqlite3 "$CATALYST_REPLICA_DB" "INSERT INTO issues VALUES('1'); INSERT INTO sync_meta VALUES('cursor','abc');"; touch "$CATALYST_REPLICA_DB.writer.lock"; OUT="$(cloud_sync_verify_report --json)"
 check "happy fixture passes" jq -e '.ok == true and (.checks|length) >= 8' <<<"$OUT"
 cloud_sync_verify_report --strict >/dev/null; check "strict happy exit zero" test "$?" -eq 0
+printf '{"catalyst":{"linearReplica":"on"}}\n' > "$CATALYST_LAYER2_CONFIG_FILE"; OUT="$(cloud_sync_verify_report --json)"
+check "legacy read flag reports on" jq -e '(.checks[] | select(.name=="read-flag")).status == "PASS"' <<<"$OUT"
 
 fixture badactivate; : > "$CATALYST_REPLICA_DB"; printf '{"keep":true}\n' > "$CATALYST_LAYER2_CONFIG_FILE"; BEFORE="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"; cmd_activate_replica >/dev/null 2>&1; EC=$?; AFTER="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"
 check "activate refuses invalid seed" test "$EC" -ne 0
@@ -47,12 +49,17 @@ check "refusal leaves config unchanged" test "$BEFORE" = "$AFTER"
 
 fixture activate; seed_db; sqlite3 "$CATALYST_REPLICA_DB" "INSERT INTO issues VALUES('1'); INSERT INTO sync_meta VALUES('cursor','abc');"; touch "$CATALYST_REPLICA_DB.writer.lock"; printf '{"keep":true}\n' > "$CATALYST_LAYER2_CONFIG_FILE"; cmd_activate_replica >/dev/null
 check "activate merges mode" jq -e '.keep == true and .catalyst.linearReplica.mode == "on"' "$CATALYST_LAYER2_CONFIG_FILE"
+check "activate preserves secret config mode" test "$(stat -f '%Lp' "$CATALYST_LAYER2_CONFIG_FILE" 2>/dev/null || stat -c '%a' "$CATALYST_LAYER2_CONFIG_FILE")" = "600"
 BEFORE="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"; cmd_activate_replica --dry-run >/dev/null; AFTER="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"
 check "dry-run changes nothing" test "$BEFORE" = "$AFTER"
 
 printf '{"catalyst":{"linearReplica":"off","token":"keep-secret"},"keep":true}\n' > "$CATALYST_LAYER2_CONFIG_FILE"
 cmd_activate_replica >/dev/null
 check "activate normalizes legacy mode without clobbering config" jq -e '.keep == true and .catalyst.token == "keep-secret" and .catalyst.linearReplica.mode == "on"' "$CATALYST_LAYER2_CONFIG_FILE"
+
+rm -f "$CATALYST_LAYER2_CONFIG_FILE"
+cmd_activate_replica >/dev/null
+check "activate creates secret config with restrictive mode" test "$(stat -f '%Lp' "$CATALYST_LAYER2_CONFIG_FILE" 2>/dev/null || stat -c '%a' "$CATALYST_LAYER2_CONFIG_FILE")" = "600"
 
 printf '{malformed\n' > "$CATALYST_LAYER2_CONFIG_FILE"; BEFORE="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"; cmd_activate_replica >/dev/null 2>&1; EC=$?; AFTER="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"
 check "activate refuses malformed existing config" test "$EC" -ne 0
