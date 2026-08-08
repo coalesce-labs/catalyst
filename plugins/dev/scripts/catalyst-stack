@@ -654,14 +654,20 @@ _start_coordination_locked() {
   #    (CTL-1668: CATALYST_CLOUD_TOKEN / configured name) reaches the daemon without
   #    persisting the credential into the long-lived catalyst-stack shell process.
   log "starting coordination-publish (mode: $mode, log: $COORDINATION_LOG)"
+  # Capture the PID and disown INSIDE the subshell that starts the job — that is the only
+  # shell where `$!` refers to this `bun &`. Doing `disown $!` in the parent (Codex P1) is
+  # broken: the parent never backgrounded this job, so under `set -u` its `$!` is either unset
+  # (aborting the function AFTER the PID/fingerprint write but BEFORE the start-lock release —
+  # wedging every future start on the leaked non-empty lock) or a stale, unrelated PID.
   (
     set +u
     [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
     nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
-    echo $! > "$COORDINATION_PID"
+    _cp_pid=$!
+    echo "$_cp_pid" > "$COORDINATION_PID"
+    disown "$_cp_pid" 2>/dev/null || true
   )
   printf '%s' "$fp" > "$COORDINATION_FP"   # record the config this pid was launched with
-  disown $! 2>/dev/null || true
   sleep 1
   pid="$(coordination_pid)"
   if pid_alive "$pid"; then

@@ -61,6 +61,36 @@ function workerStateOutcome(status: string): "success" | "failure" | null {
   return null;
 }
 
+// Select the winning terminal coordination outcome for one (orchestrator, ticket) using the SAME
+// ordering the worker_state projection applies (broker-state.mjs upsertWorkerState): status is
+// gated on the greatest `last_event_ts` watermark, with `>=` so a later-PROCESSED event wins on an
+// exact-timestamp tie. Selecting by input order alone (Codex P1) mis-picks when terminal events
+// are appended out of timestamp order — e.g. a newer failure landing before a delayed older
+// success — producing a false divergence or a false match. ISO-8601 timestamps sort
+// lexicographically, so a string `>=` reproduces the projection's comparison. A null ts never
+// advances the watermark (mirrors the projection's `excluded.last_event_ts IS NOT NULL` guard);
+// if EVERY terminal row lacks a ts we fall back to processing order (last non-null-less wins).
+function selectTerminalOutcome(rows: CoordinationRow[]): "success" | "failure" | null {
+  let best: { ts: string | null; outcome: "success" | "failure" } | null = null;
+  for (const row of rows) {
+    const attrs = row.attributes as Record<string, unknown> | undefined;
+    const eventName = typeof attrs?.["event.name"] === "string" ? attrs["event.name"] : "";
+    const outcome = terminalOutcomeFromEventName(eventName);
+    if (outcome === null) continue;
+    const ts = typeof row.ts === "string" ? row.ts : null;
+    if (best === null) {
+      best = { ts, outcome };
+      continue;
+    }
+    // Later-processed event wins iff its ts advances the watermark: a ts'd event beats a
+    // null-ts incumbent and beats-or-ties an earlier ts; a null-ts event only wins when the
+    // incumbent is also null (pure processing order).
+    const advances = ts !== null ? best.ts === null || ts >= best.ts : best.ts === null;
+    if (advances) best = { ts, outcome };
+  }
+  return best?.outcome ?? null;
+}
+
 export function computeParity(input: {
   workerStates: WorkerStateRow[];
   coordinationRows: CoordinationRow[];
@@ -100,26 +130,21 @@ export function computeParity(input: {
       continue;
     }
 
-    // This worker_state has ≥1 coordination row → counted as a matched pair.
-    matchedPairs++;
-
-    // Check for terminal status conflict: find the last terminal coordination outcome.
+    // A matched PAIR requires a COMPARABLE terminal outcome on BOTH sides. A worker_state whose
+    // coordination rows are all non-terminal (e.g. only a `worker.transition` event), or whose own
+    // status is non-terminal, is not evaluable: counting it (Codex P1) would let the harness report
+    // `healthy` — exit 0, ADR-023 promotion — with no terminal comparison performed at all.
     const wsOutcome = workerStateOutcome(ws.status);
-    if (wsOutcome !== null) {
-      let lastTerminalOutcome: "success" | "failure" | null = null;
-      for (const row of rows) {
-        const attrs = row.attributes as Record<string, unknown> | undefined;
-        const eventName = typeof attrs?.["event.name"] === "string" ? attrs["event.name"] : "";
-        const outcome = terminalOutcomeFromEventName(eventName);
-        if (outcome !== null) lastTerminalOutcome = outcome;
-      }
-      if (lastTerminalOutcome !== null && lastTerminalOutcome !== wsOutcome) {
-        divergences.push({
-          orchestrator: ws.orchestrator,
-          ticket: ws.ticket,
-          reason: `worker_state status "${ws.status}" (${wsOutcome}) conflicts with coordination terminal "${lastTerminalOutcome}"`,
-        });
-      }
+    const coordOutcome = selectTerminalOutcome(rows);
+    if (wsOutcome === null || coordOutcome === null) continue;
+
+    matchedPairs++;
+    if (coordOutcome !== wsOutcome) {
+      divergences.push({
+        orchestrator: ws.orchestrator,
+        ticket: ws.ticket,
+        reason: `worker_state status "${ws.status}" (${wsOutcome}) conflicts with coordination terminal "${coordOutcome}"`,
+      });
     }
   }
 
