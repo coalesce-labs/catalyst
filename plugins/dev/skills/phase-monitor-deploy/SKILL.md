@@ -104,6 +104,14 @@ WORKER_DIR="${WORKER_DIR:-${ORCH_DIR:+${ORCH_DIR}/workers/${TICKET}}}"
 WORKER_DIR="${WORKER_DIR:-$(pwd)}"
 mkdir -p "$WORKER_DIR"
 
+# CTL-1667 (Codex P1, #3061): capture the dispatcher-stamped generation so the
+# result-branch rewrites below PRESERVE it. Each branch recomposes
+# phase-monitor-deploy.json from scratch with `jq -nc`; without carrying the
+# generation forward the completed signal loses .generation, and a later post-PR
+# re-dispatch (next run) reading it back computes a colliding revive target that
+# wedges as claim-lost. Empty when the dispatcher wrote none (un-fenced path).
+_MD_GEN="$(jq -r '.generation // empty' "$WORKER_DIR/phase-monitor-deploy.json" 2>/dev/null || echo "")"
+
 DEPLOY_TIMEOUT="${PHASE_DEPLOY_TIMEOUT_SEC:-1800}"
 DEPLOY_ENV="${PHASE_DEPLOY_ENV:-production}"
 CANARY_CMD="${PHASE_CANARY_CMD:-claude --model haiku -p /canary --output-format json}"
@@ -168,8 +176,10 @@ if [[ -z "$DEPLOY_EVENT" ]]; then
     --arg sha "$MERGE_SHA" \
     --arg env "$DEPLOY_ENV" \
     --arg ts "$DEPLOY_TIME" \
+    --arg gen "$_MD_GEN" \
     '{
       ticket: $ticket,
+      generation: (if $gen == "" then null else ($gen | tonumber) end),
       deploy_sha: $sha,
       deploy_env: $env,
       deploy_state: "skipped",
@@ -214,8 +224,10 @@ case "$DEPLOY_STATE" in
       --arg env "$DEPLOY_ENV" \
       --arg state "$DEPLOY_STATE" \
       --arg ts "$DEPLOY_TIME" \
+      --arg gen "$_MD_GEN" \
       '{
         ticket: $ticket,
+        generation: (if $gen == "" then null else ($gen | tonumber) end),
         deploy_sha: $sha,
         deploy_env: $env,
         deploy_state: $state,
@@ -266,10 +278,12 @@ jq -nc \
   --arg sha "$MERGE_SHA" \
   --arg env "$DEPLOY_ENV" \
   --arg ts "$DEPLOY_TIME" \
+  --arg gen "$_MD_GEN" \
   --arg url "$DEPLOY_URL" \
   --slurpfile canary "$CANARY_OUT_FILE" \
   '{
     ticket: $ticket,
+    generation: (if $gen == "" then null else ($gen | tonumber) end),
     deploy_sha: $sha,
     deploy_env: $env,
     deploy_state: "success",

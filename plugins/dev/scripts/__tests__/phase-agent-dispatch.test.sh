@@ -2334,6 +2334,178 @@ for FIELD in .env .prompt .settings .model .turnCap .sessionName .pluginDirs; do
 	assert_eq "$DRY_VAL" "$PL_VAL" "prelaunch ${FIELD} == dry-run ${FIELD} (pre-launch composition byte-identical)"
 done
 
+# ─── CTL-1667: stale post-PR signal invalidation ─────────────────────────────
+# Test 71: re-dispatch monitor-merge with a STALE done signal (old PR#) launches
+# a fresh worker instead of no-oping on the prior run's stale `done`.
+echo ""
+echo "Test 71 (CTL-1667): stale post-PR signal (old PR#) re-launches a fresh worker"
+fresh_env t71
+TS_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# previous run's leftover terminal signal: PR#100, 24h ago
+TS_YESTERDAY="$(date -u -v-86400S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '86400 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2000-01-01T00:00:00Z")"
+jq -n --arg ts "$TS_YESTERDAY" \
+  '{status:"done",updatedAt:$ts,pr:{number:100,mergedAt:$ts,ciStatus:"merged"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+# current run's PR opener: PR#200
+jq -n --arg ts "$TS_NOW" \
+  '{status:"done",updatedAt:$ts,pr:{number:200}}' \
+  > "${WORKER_DIR}/phase-pr.json"
+
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT71=$("$DISPATCH" --phase monitor-merge --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+IDEMPOTENT71=$(echo "$STDOUT71" | jq -r '.idempotent // false')
+LAUNCHED71="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED71="yes"
+assert_eq "false" "$IDEMPOTENT71" "71: stale monitor-merge is NOT idempotent (re-launches)"
+assert_eq "yes" "$LAUNCHED71" "71: fresh worker WAS launched for stale monitor-merge"
+
+# ─── Test 72: re-dispatch monitor-merge with FRESH done signal (same PR#, newer
+# ts) still no-ops (the CTL-736 single-flight guard must not be broken).
+echo ""
+echo "Test 72 (CTL-1667): fresh post-PR signal (same PR#, newer ts) still idempotent"
+fresh_env t72
+TS_BASE="$(date -u -v-3600S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '3600 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2000-01-01T00:00:00Z")"
+TS_NOW2="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# current run's PR opener — older than the monitor-merge signal
+jq -n --arg ts "$TS_BASE" \
+  '{status:"done",updatedAt:$ts,pr:{number:200}}' \
+  > "${WORKER_DIR}/phase-pr.json"
+# monitor-merge signal — newer than phase-pr AND same PR#
+jq -n --arg ts "$TS_NOW2" \
+  '{status:"done",updatedAt:$ts,pr:{number:200,mergedAt:$ts,ciStatus:"merged"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+# Claim file needed to match the generation the dispatcher computes (it reads
+# signal.generation for revive target). Write a gen-1 claim so the dispatcher
+# won't re-launch due to a missing claim (it would compute gen 2 as the target
+# and EXCL-create a new claim — which succeeds and spawns a worker). For the
+# "fresh stays idempotent" assertion we need the idempotency short-circuit (before
+# the claim) to fire, so the signal's generation and status must be non-stale.
+# The idempotency guard fires BEFORE the claim, so we just need a non-stale status.
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT72=$("$DISPATCH" --phase monitor-merge --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+IDEMPOTENT72=$(echo "$STDOUT72" | jq -r '.idempotent // false')
+LAUNCHED72="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED72="yes"
+assert_eq "true" "$IDEMPOTENT72" "72: fresh monitor-merge (same PR#, newer ts) stays idempotent"
+assert_eq "no" "$LAUNCHED72" "72: no worker launched for fresh monitor-merge"
+
+# ─── Test 73 (CTL-1667, Codex P1 #3061): poststale signal WITHOUT a numeric
+# .generation + a leftover <phase>.claim.<gen> must still re-launch — not wedge as
+# claim-lost. This is the production shape Test 71 missed: the monitor-deploy
+# result branches rewrite the signal with no generation field, and the prior
+# run's claim file is still on disk. The revive target computes to gen 1 and
+# collides with that leftover claim; the reaper must recognize the poststale
+# tombstone (even though the signal generation is non-numeric) and free the orphan
+# claim so a fresh worker launches. TARGET stays deterministic (never high-water),
+# so CTL-736 single-flight is preserved.
+echo ""
+echo "Test 73 (CTL-1667): poststale signal w/o generation + leftover claim re-launches"
+fresh_env t73
+TS_NOW73="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TS_OLD73="$(date -u -v-86400S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '86400 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '2000-01-01T00:00:00Z')"
+# monitor-deploy's required prior artifact (the phase-artifact gate runs BEFORE
+# the poststale/claim logic and would otherwise refuse the dispatch outright).
+jq -n '{status:"done",pr:{number:200,mergedAt:"2026-08-01T00:00:00Z",ciStatus:"merged"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+# Prior run's leftover monitor-deploy signal: NO generation, NO .pr, OLD ts (the
+# exact shape a completed monitor-deploy result branch leaves behind).
+jq -n --arg ts "$TS_OLD73" \
+  '{status:"done",updatedAt:$ts,deploy_state:"skipped",completed_at:$ts}' \
+  > "${WORKER_DIR}/phase-monitor-deploy.json"
+# Current run's PR opener — newer than the stale signal → poststale by timestamp.
+jq -n --arg ts "$TS_NOW73" \
+  '{status:"done",updatedAt:$ts,pr:{number:200}}' \
+  > "${WORKER_DIR}/phase-pr.json"
+# Leftover claim from the prior run at the recomputed generation (1). Aged past the
+# 2-minute reaper grace so it is eligible for the atomic orphan reap.
+printf '%s\n' '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}' > "${WORKER_DIR}/monitor-deploy.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/monitor-deploy.claim.1"
+
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT73=$("$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+STATUS73=$(echo "$STDOUT73" | jq -r '.status // ""')
+LAUNCHED73="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED73="yes"
+assert_not_contains "$STATUS73" "claim-lost" "73: poststale w/o generation is NOT claim-lost (reaper frees orphan claim)"
+assert_eq "yes" "$LAUNCHED73" "73: fresh worker WAS launched despite leftover claim"
+
+# ─── Test 74 (CTL-1667 review fix, round 5, #3061): a poststale signal WITHOUT
+# a numeric .generation must compute TARGET_GENERATION DETERMINISTICALLY, so
+# that two dispatchers racing on it converge on the SAME generation and exactly
+# one wins the O_EXCL claim.
+#
+# Round 4 recovered the prior generation by scanning the on-disk claim files for
+# the highest N. That reintroduced the double-spawn the CTL-736 invariant exists
+# to close: the claim set is MUTATED by this very computation, so a staggered
+# pair sees each other's claim and advances to DIFFERENT generations (A: max 2 →
+# 3, then B: max 3 → 4), each winning its own file, and BOTH spawn a worker that
+# can run the post-PR side effects. This test now pins the property that
+# actually matters — determinism ⇒ single-flight — rather than the specific
+# number the scan produced. The gap round 4 was patching is fixed at its source
+# (phase-monitor-deploy threads _MD_GEN through all three result branches, so it
+# no longer drops .generation); a signal reaching here without one came from the
+# un-fenced degraded path, where no generation was ever established.
+echo ""
+echo "Test 74 (CTL-1667, review fix round 5): poststale signal w/o generation is DETERMINISTIC — a racing twin cannot win a second generation"
+fresh_env t74
+TS_NOW74="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TS_OLD74="$(date -u -v-86400S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '86400 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '2000-01-01T00:00:00Z')"
+# monitor-deploy's required prior artifact.
+jq -n '{status:"done",pr:{number:200,mergedAt:"2026-08-01T00:00:00Z",ciStatus:"merged"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+# Prior run's leftover monitor-deploy signal: NO generation, OLD ts (same
+# poststale shape as Test 73) — but this time the prior run had ALREADY
+# revived to generation 2 before this signal was left behind.
+jq -n --arg ts "$TS_OLD74" \
+  '{status:"done",updatedAt:$ts,deploy_state:"skipped",completed_at:$ts}' \
+  > "${WORKER_DIR}/phase-monitor-deploy.json"
+# Current run's PR opener — newer than the stale signal → poststale by timestamp.
+jq -n --arg ts "$TS_NOW74" \
+  '{status:"done",updatedAt:$ts,pr:{number:200}}' \
+  > "${WORKER_DIR}/phase-pr.json"
+# The prior run's REAL generation-2 claim — proof this phase actually reached
+# generation 2, which TARGET_GENERATION must advance past, not recycle.
+printf '%s\n' '{"generation":2,"claimedAt":"2020-01-01T00:00:00Z"}' > "${WORKER_DIR}/monitor-deploy.claim.2"
+touch -t 202001010000 "${WORKER_DIR}/monitor-deploy.claim.2"
+
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT74=$("$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+STATUS74=$(echo "$STDOUT74" | jq -r '.status // ""')
+LAUNCHED74="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED74="yes"
+assert_not_contains "$STATUS74" "claim-lost" "74: poststale w/o generation is NOT claim-lost"
+assert_eq "yes" "$LAUNCHED74" "74: fresh worker WAS launched"
+NEW_GEN74="$(jq -r '.generation' "${WORKER_DIR}/phase-monitor-deploy.json")"
+# The value is whatever the DETERMINISTIC rule yields; what must hold is that it
+# is a fixed function of the signal, not of the mutable claim set — so the
+# racing twin below recomputes this SAME number.
+assert_eq "yes" "$([[ -f "${WORKER_DIR}/monitor-deploy.claim.${NEW_GEN74}" ]] && echo yes || echo no)" \
+	"74: the winner's claim file matches the generation it stamped"
+# The pre-existing higher claim from the prior run must NOT have moved the
+# target — that is exactly the mutable-input dependency round 5 removed.
+assert_eq "no" "$([[ -f "${WORKER_DIR}/monitor-deploy.claim.3" ]] && echo yes || echo no)" \
+	"74: target was NOT derived from the on-disk claim high-water mark (no gen-3 claim)"
+
+# ─── The race: a twin dispatcher on the same unchanged inputs ────────────────
+# It must recompute the SAME generation, collide on the O_EXCL claim, bow out as
+# claim-lost, and launch NO second worker. (Under the round-4 scan it would have
+# seen the winner's new claim, advanced past it, and won a second generation.)
+CLAIMS_BEFORE74="$(ls "${WORKER_DIR}"/monitor-deploy.claim.* 2>/dev/null | wc -l | tr -d ' ')"
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT74B=$("$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+STATUS74B=$(echo "$STDOUT74B" | jq -r '.status // ""')
+LAUNCHED74B="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED74B="yes"
+CLAIMS_AFTER74="$(ls "${WORKER_DIR}"/monitor-deploy.claim.* 2>/dev/null | wc -l | tr -d ' ')"
+# The twin is refused by whichever guard it reaches first — the soft status guard
+# (the winner's signal now reads dispatched/running) or, if it raced past that, the
+# O_EXCL claim collision. Either is single-flight; what must NEVER appear is a
+# second dispatch, so assert the refusal set rather than one specific guard.
+assert_eq "yes" "$(case "$STATUS74B" in claim-lost|running|dispatched|idempotent) echo yes ;; *) echo no ;; esac)" \
+	"74: the racing twin is refused (status='${STATUS74B}', single-flight held)"
+assert_eq "no" "$LAUNCHED74B" "74: the racing twin launched NO second worker (no double-spawn)"
+assert_eq "$CLAIMS_BEFORE74" "$CLAIMS_AFTER74" "74: the twin won no additional generation (claim count unchanged)"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
