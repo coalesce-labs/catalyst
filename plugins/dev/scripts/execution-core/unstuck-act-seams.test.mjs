@@ -255,6 +255,23 @@ describe("buildSourceConflictActSeam (CTL-1219)", () => {
     expect(pushCall).toContain("--force-with-lease");
   });
 
+  test("force-push seam targets the resolved push remote", () => {
+    const gitCalls = [];
+    const seam = buildSourceConflictActSeam(
+      makeStubDeps({
+        resolvePushRemote: () => "fork",
+        runGit: (args) => {
+          gitCalls.push(args);
+          return cleanBranchGit()(args);
+        },
+      })
+    );
+    seam(sourceConflictCandidate(), { category: "source-conflict", action: "force-push-if-clean" });
+    const pushCall = gitCalls.find((a) => a.includes("push"));
+    expect(pushCall).toContain("fork");
+    expect(pushCall).not.toContain("origin");
+  });
+
   test("throws (no push) when the worktree is dirty with real work", () => {
     const gitCalls = [];
     const seam = buildSourceConflictActSeam(

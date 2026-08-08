@@ -762,6 +762,16 @@ export function defaultClassifyTicket(evidence, opts = {}) {
   // Rule 1: Check for deterministic errors in logs
   const deterministic = checkDeterministicErrors(logsOutput, failureReason);
   if (deterministic) {
+    if (deterministic.escalate) {
+      return {
+        decision: "escalate",
+        fix_class: deterministic.fix_class,
+        details: {
+          reason: deterministic.reason,
+          explanation: deterministic.explanation,
+        },
+      };
+    }
     return {
       decision: "fix",
       fix_class: deterministic.fix_class,
@@ -830,6 +840,23 @@ export function checkDeterministicErrors(logsOutput, failureReason) {
       fix_class: "push_rejected_no_workflow_scope",
       seam_id: "workflow-token-redispatch",
       reason: "Push rejected (no workflow scope); re-arm phase-pr to re-run with the scoped token",
+    };
+  }
+  if (failureReason === "push_denied_no_permission") {
+    return {
+      fix_class: "push_denied_no_permission",
+      seam_id: null,
+      escalate: true,
+      reason:
+        "Cannot publish to the repository: the automation's GitHub identity lacks push " +
+        "permission on the configured push remote. Reviewed commits exist only on this " +
+        "host until the push target or the identity's permission changes.",
+      explanation: {
+        problem:
+          "The configured push remote rejected the automation identity because it lacks repository push permission.",
+        call_to_action:
+          "Grant the automation identity push permission on that repository, or set catalyst.pr.pushRemote to a writable remote.",
+      },
     };
   }
   // Merge-conflict and rebase-failed via failureReason → bounded-LLM, not a seam stub.
