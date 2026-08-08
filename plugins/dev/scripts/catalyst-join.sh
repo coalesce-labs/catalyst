@@ -970,6 +970,11 @@ do_doctor_gate() {
   # Gate strictly on [$? -eq 0] per the doctor contract. This replaces the old
   # default of check-setup.sh, a cwd-relative full-workstation check that exits
   # nonzero on a fresh node (the reason mini-2's join needed a manual marker poke).
+  #
+  # CTL-1473: CATALYST_DOCTOR_PREINSTALL=1 downgrades install-remediable FAILs to
+  # WARNs (e.g. missing log-shipper, which will be fixed by do_install_stack below).
+  # The post-install strict verify (do_doctor_verify) then re-checks without the flag.
+  #
   # #2918 follow-up (Codex P1): thread the SAME Layer-1 the webhook-wiring
   # gate consulted (provisioner-parity plugin-source checkout) into the doctor
   # run — the deployment-mode resolver's own Layer-1 default is CWD-relative
@@ -977,11 +982,26 @@ do_doctor_gate() {
   # resolves an inferred default and keeps the webhook-ingestion FAIL on a
   # declared non-cluster join that the wiring gate intentionally skipped.
   local _doctor_l1="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/.catalyst/config.json"
-  if CATALYST_CONFIG_FILE="$_doctor_l1" bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
-    info "Doctor gate passed (catalyst-doctor: 0 FAIL checks)."
+  if CATALYST_DOCTOR_PREINSTALL=1 CATALYST_CONFIG_FILE="$_doctor_l1" bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
+    info "Doctor gate passed (catalyst-doctor: 0 FAIL checks, preinstall mode)."
     return 0
   else
     fail "Activation gate (catalyst-doctor) reported FAIL check(s). Run '${DOCTOR_SCRIPT}' for details."
+    return 1
+  fi
+}
+
+do_doctor_verify() {
+  # CTL-1473: strict post-install doctor check (no PREINSTALL downgrade).
+  # Runs AFTER do_install_stack to catch any install-remediable issues that were
+  # not actually remediated (e.g. an ephemeral shipper --config path).
+  # Threads the same provisioner-parity Layer-1 as the pre-install gate (#2918).
+  local _doctor_l1="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/.catalyst/config.json"
+  if CATALYST_CONFIG_FILE="$_doctor_l1" bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
+    info "Post-install doctor verify passed (catalyst-doctor: 0 FAIL checks)."
+    return 0
+  else
+    fail "Post-install verify (catalyst-doctor) reported FAIL check(s). Run '${DOCTOR_SCRIPT}' for details."
     return 1
   fi
 }
@@ -1041,11 +1061,15 @@ main() {
   # 5. SHARED config merge + per-node items
   run_stage "config-merge" do_config_merge || exit 1
 
-  # 6. Doctor gate (T4)
+  # 6. Doctor gate (T4) — pre-install, PREINSTALL mode (install-remediable FAILs → WARN)
   run_stage "doctor" do_doctor_gate || exit 1
 
   # 7. Install launchd stack LAST (Stage-0 SHADOW)
   run_stage "stack" do_install_stack || exit 1
+
+  # 8. Post-install strict doctor verify (CTL-1473): confirms install-remediable
+  #    issues are actually resolved (no PREINSTALL downgrade this time).
+  run_stage "doctor-verify" do_doctor_verify || exit 1
 
   # Guard so a successful re-run doesn't append a duplicate shadow-stop entry to
   # completedStages each time (verify low finding).
