@@ -16,7 +16,7 @@ const SCRIPT = join(import.meta.dir, "recovery-pass-context.mjs");
 
 function runScript(args, env = {}) {
   return execFileSync("bun", [SCRIPT, ...args], {
-    env: { ...process.env, ...env },
+    env: { ...process.env, CATALYST_TICKET: "", ...env },
     encoding: "utf8",
   });
 }
@@ -233,6 +233,26 @@ describe("dispatched mode — brief read", () => {
     expect(out).toContain("MODE=dispatched ticket=CTL-301");
     expect(out).toContain("no brief");
     expect(out).toContain("ticket-scoped");
+  });
+
+  it("prints exhausted GitHub quota with reset time, but stays quiet when healthy", () => {
+    const dir = join(orchDir, "workers", "CTL-302");
+    mkdirSync(dir, { recursive: true });
+    const briefPath = join(dir, "recovery-pass.json");
+    const base = { failureReason: "quota", diagnosis: {}, boardContext: {} };
+    writeFileSync(briefPath, JSON.stringify({
+      ...base,
+      boardContext: { githubQuota: { state: "exhausted", remaining: 0, limit: 5000, resetAt: "2026-06-20T13:00:00.000Z" } },
+    }));
+    const exhausted = runScript(["--ticket", "CTL-302", "--orch-dir", orchDir]);
+    expect(exhausted).toContain("GitHub core quota: 0/5000 remaining; resets 2026-06-20T13:00:00.000Z");
+
+    writeFileSync(briefPath, JSON.stringify({
+      ...base,
+      boardContext: { githubQuota: { state: "ok", remaining: 4900, limit: 5000, resetAt: "2026-06-20T13:00:00.000Z" } },
+    }));
+    const healthy = runScript(["--ticket", "CTL-302", "--orch-dir", orchDir]);
+    expect(healthy).not.toContain("GitHub core quota:");
   });
 });
 
