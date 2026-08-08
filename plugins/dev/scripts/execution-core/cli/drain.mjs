@@ -6,20 +6,47 @@
 
 import { writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { getExecutionCoreDir, getDrainFlagPath, isDraining } from "../config.mjs";
+import { getExecutionCoreDir, getDrainFlagPath, resolveDrainStateForRead } from "../config.mjs";
 import { listInFlightTickets } from "../scheduler.mjs";
 import { emitDrainChangedEvent } from "../drain-event.mjs";
 
 /**
  * readDrainStatus — pure read of current drain state + in-flight count.
+ * CTL-1678: reads resolveDrainStateForRead so the three-state distinction
+ * (flagPresent / disabled / draining) is surfaced additively — and (Codex round-3 P1)
+ * the disabled/draining answer comes from the LIVE daemon's boot-time env snapshot
+ * when one exists, falling back to this process's env (pre-sourced from
+ * execution-core.env by the bash wrappers) only when no daemon is running.
  * @param {string} [orchDir]
- * @returns {{ draining: boolean, inFlightCount: number }}
+ * @param {{ resolveState?: typeof resolveDrainStateForRead }} [deps]
+ * @returns {{ draining: boolean, flagPresent: boolean, disabled: boolean, inFlightCount: number, source: string }}
  */
-export function readDrainStatus(orchDir) {
+export function readDrainStatus(orchDir, { resolveState = resolveDrainStateForRead } = {}) {
   const dir = orchDir ?? getExecutionCoreDir();
-  const draining = isDraining(dir);
+  const { draining, flagPresent, disabled, source } = resolveState(dir);
   const inFlightCount = listInFlightTickets(dir).size;
-  return { draining, inFlightCount };
+  return { draining, flagPresent, disabled, inFlightCount, source };
+}
+
+/**
+ * formatDrainStatus — CTL-1678. Pure human-readable one-liner for the non-JSON
+ * CLI branch, covering the four states: draining / flag-present-but-IGNORED /
+ * drain-disabled-no-flag / plain not-draining.
+ * @param {{ draining: boolean, flagPresent: boolean, disabled: boolean, inFlightCount: number }} status
+ * @returns {string} line WITHOUT a trailing newline
+ */
+export function formatDrainStatus(status) {
+  const { draining, flagPresent, disabled, inFlightCount = 0 } = status;
+  if (draining) {
+    return `draining — ${inFlightCount} ticket${inFlightCount === 1 ? "" : "s"} to land`;
+  }
+  if (disabled && flagPresent) {
+    return "drain flag present but IGNORED (CATALYST_DRAIN_DISABLED=1)";
+  }
+  if (disabled) {
+    return "not draining (drain disabled — CATALYST_DRAIN_DISABLED=1)";
+  }
+  return "not draining";
 }
 
 /**
@@ -38,6 +65,14 @@ export function setDrain(orchDir, { off = false } = {}) {
   }
   const status = readDrainStatus(dir);
   emitDrainChangedEvent({ draining: status.draining, inFlightCount: status.inFlightCount });
+  // CTL-1678: warn loudly when a just-written flag is being neutralized by the
+  // per-node override — the operator's `drain` command "worked" but the node
+  // ignores it, which is otherwise silent.
+  if (status.disabled && status.flagPresent) {
+    process.stderr.write(
+      "warning: node has CATALYST_DRAIN_DISABLED=1 — the flag is set but IGNORED (CTL-1678)\n"
+    );
+  }
   return status;
 }
 
@@ -50,12 +85,8 @@ export function main(argv = process.argv.slice(2)) {
 
   if (json) {
     process.stdout.write(JSON.stringify(status) + "\n");
-  } else if (status.draining) {
-    process.stdout.write(
-      `draining — ${status.inFlightCount} ticket${status.inFlightCount === 1 ? "" : "s"} to land\n`
-    );
   } else {
-    process.stdout.write("not draining\n");
+    process.stdout.write(formatDrainStatus(status) + "\n");
   }
   process.exitCode = 0;
 }

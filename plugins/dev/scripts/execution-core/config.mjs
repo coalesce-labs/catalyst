@@ -8,7 +8,7 @@
 
 import { homedir, hostname } from "node:os";
 import { resolve, join } from "node:path";
-import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync, renameSync } from "node:fs";
 
 // CTL-1211: schema-version policy for cluster config. config-schema.mjs is a
 // dep-free sibling leaf, so this import cannot reintroduce the bun-install crash
@@ -96,8 +96,159 @@ export function getDrainFlagPath(orchDir) {
   return join(orchDir, "drain");
 }
 
-export function isDraining(orchDir) {
-  return existsSync(getDrainFlagPath(orchDir));
+// CTL-1678: per-node drain override. A worker sets CATALYST_DRAIN_DISABLED=1 in its
+// durable Layer-2 execution-core.env to PERMANENTLY ignore the drain flag (an
+// unattributed writer keeps halting the fleet — CTL-1675). `=== "1"` opt-in, matching
+// applyBootDrainPolicy's CATALYST_BOOT_DRAINED idiom. `env` is an injectable seam.
+//
+// CTL-1678 (Codex P1): boot-drain is AUTHORITATIVE over this worker-only override.
+// A node booted deliberately drained (CATALYST_BOOT_DRAINED=1 — the developer/monitor
+// idiom, whose sentinel applyBootDrainPolicy re-sets on every boot) must STAY drained
+// even if CATALYST_DRAIN_DISABLED=1 is also present: the override neutralizes an
+// OPERATIONAL drain sentinel, never the boot-drain policy, which the config contract
+// documents as "deliberately independent and unchanged". Both env vars persist for the
+// daemon's lifetime, so gating here keeps the override inert on a boot-drained node
+// across every runtime tick — and propagates to every consumer (isDraining,
+// resolveDrainState, and the maybeEmitDrainIgnored tripwire, which must NOT fire
+// "ignored" on a node that is legitimately boot-draining).
+export function isDrainDisabled(env = process.env) {
+  if (env?.CATALYST_BOOT_DRAINED === "1") return false;
+  return env?.CATALYST_DRAIN_DISABLED === "1";
+}
+
+// CTL-1678: the real drain chokepoint. flagPresent = the sentinel file exists;
+// disabled = the per-node override; draining = flagPresent && !disabled (the value
+// every admission consumer acts on). Status surfaces read the full object so they can
+// report "draining-but-ignored" distinctly from "not draining".
+export function resolveDrainState(orchDir, { env = process.env } = {}) {
+  const flagPresent = existsSync(getDrainFlagPath(orchDir));
+  const disabled = isDrainDisabled(env);
+  return { flagPresent, disabled, draining: flagPresent && !disabled };
+}
+
+// CTL-1678: isDraining now delegates to resolveDrainState so the flag-file read lives
+// in exactly one place. The optional second arg is an injectable env seam; every
+// existing call site passes only orchDir, so this stays backward-compatible.
+export function isDraining(orchDir, { env = process.env } = {}) {
+  return resolveDrainState(orchDir, { env }).draining;
+}
+
+// CTL-1678: once-per-episode marker for the "drain observed and ignored" tripwire.
+export function getDrainIgnoredMarkerPath(orchDir) {
+  return join(orchDir, "drain.ignored");
+}
+
+// CTL-1678 (Codex round-3 P1): the daemon's boot-time env snapshot. The durable
+// CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED overrides are restart-only — the
+// daemon captures them at launch and never re-reads execution-core.env. A read-only
+// surface (status / drain --status-read / doctor / verify-node) that sources or parses
+// the MUTABLE file therefore reports the next-restart configuration, not the env the
+// running daemon still honors. The daemon writes this marker at boot with its pid and
+// the override state it actually captured; readers prefer the marker while that pid is
+// alive and fall back to the env/file view only when no live daemon exists (where
+// "what the next start would do" IS the truthful answer).
+export function getDaemonRuntimeEnvPath(orchDir) {
+  return join(orchDir, "daemon-runtime-env.json");
+}
+
+// Fail-open (best-effort, mirrors writeBootMarker): a transient fs error must not
+// abort daemon boot. drainDisabled is recorded POST-precedence (isDrainDisabled folds
+// the boot-drain-is-authoritative rule), so readers consume it without re-deriving.
+export function writeDaemonRuntimeEnv(
+  orchDir,
+  { env = process.env, pid = process.pid, pidFile = null, now = () => new Date().toISOString() } = {}
+) {
+  const payload = {
+    pid,
+    // CTL-1678 (Codex round-5 P2): record the pid-file path the daemon ACTUALLY
+    // wrote, so a reader never has to re-derive it. EXECUTION_CORE_PID_FILE can
+    // relocate it (catalyst-execution-core, stack-reload.mjs), and a reader that
+    // guessed <orchDir>/daemon.pid would reject every snapshot on such a host —
+    // silently degrading this whole mechanism back to the mutable-file read it
+    // exists to replace. Null on a daemon started without --pid-file; readers then
+    // fall back to the same env-var chain the launcher uses.
+    pidFile,
+    startedAt: now(),
+    drainDisabled: isDrainDisabled(env),
+    bootDrained: env?.CATALYST_BOOT_DRAINED === "1",
+  };
+  try {
+    const p = getDaemonRuntimeEnvPath(orchDir);
+    const tmp = `${p}.tmp`;
+    writeFileSync(tmp, JSON.stringify(payload));
+    renameSync(tmp, p);
+  } catch { /* best-effort */ }
+  return payload;
+}
+
+// EPERM means "alive but not ours" — still alive for staleness purposes.
+function defaultIsPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+// Returns the marker ONLY when the daemon that wrote it is still alive; a marker
+// left by a crashed/stopped daemon is stale by definition and yields null.
+//
+// CTL-1678 (Codex round-4 P2): liveness alone is NOT identity. A crashed daemon
+// leaves its marker behind, and once the OS recycles that pid onto an unrelated
+// process, a bare `kill -0` probe would re-certify the dead daemon's snapshot as
+// authoritative — turning the fix for the mutable-file problem into a subtler
+// version of it. So the pid must ALSO still be the daemon of record: it has to match
+// the live contents of the launcher's daemon.pid (the same file `read_pid` gates
+// `status` on). Both conditions are required; either one failing means "no live
+// daemon" and callers fall back to the env/file view.
+// The launcher's pid-file path chain, mirrored exactly (catalyst-execution-core:24
+// `PID_FILE="${EXECUTION_CORE_PID_FILE:-$EC_DIR/daemon.pid}"`). `explicit` is the path
+// the daemon recorded in its own marker, which beats re-deriving when present.
+export function getDaemonPidPath(orchDir, { env = process.env, explicit = null } = {}) {
+  if (explicit) return explicit;
+  return env?.EXECUTION_CORE_PID_FILE || join(orchDir, "daemon.pid");
+}
+
+function defaultReadDaemonPid(orchDir, opts) {
+  try {
+    const n = Number.parseInt(readFileSync(getDaemonPidPath(orchDir, opts), "utf8").trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readDaemonRuntimeEnv(
+  orchDir,
+  { isPidAlive = defaultIsPidAlive, readDaemonPid = defaultReadDaemonPid, env = process.env } = {}
+) {
+  try {
+    const raw = JSON.parse(readFileSync(getDaemonRuntimeEnvPath(orchDir), "utf8"));
+    if (!raw || typeof raw.pid !== "number") return null;
+    // Prefer the path the daemon recorded; fall back to the launcher's env chain.
+    if (readDaemonPid(orchDir, { env, explicit: raw.pidFile ?? null }) !== raw.pid) return null;
+    if (!isPidAlive(raw.pid)) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+// resolveDrainStateForRead — the read-only-surface counterpart of resolveDrainState.
+// Flag-file presence is always read live (the sentinel is dynamic); the ENV half comes
+// from the live daemon's boot snapshot when one exists, else from the caller's env
+// (which read surfaces pre-source from execution-core.env — correct for a stopped
+// daemon, where next-start config is the running truth-to-be). `source` names which
+// tier answered so operator surfaces can say so.
+export function resolveDrainStateForRead(orchDir, { env = process.env, readRuntime = readDaemonRuntimeEnv } = {}) {
+  const runtime = readRuntime(orchDir);
+  if (runtime) {
+    const flagPresent = existsSync(getDrainFlagPath(orchDir));
+    const disabled = !!runtime.drainDisabled;
+    return { flagPresent, disabled, draining: flagPresent && !disabled, source: "daemon-runtime", daemonPid: runtime.pid };
+  }
+  return { ...resolveDrainState(orchDir, { env }), source: "env" };
 }
 
 // CTL-1095/CTL-1321: path of the once-per-episode "drained" sentinel marker. The
