@@ -23,6 +23,8 @@
 #   catalyst-stack services-status
 #   catalyst-stack adopt-updater [--print] [--force-worker]
 #   catalyst-stack adopt-cloud-sync [--print]
+#   catalyst-stack verify-cloud-sync [--json] [--strict]
+#   catalyst-stack activate-replica [--dry-run]
 #   catalyst-stack verify-updater [--json] [--no-e2e]
 #   catalyst-stack verify-node [--json]
 #   catalyst-stack sync-cloud-env
@@ -165,6 +167,9 @@ _SRC="${BASH_SOURCE[0]}"
 while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
+
+# shellcheck source=lib/cloud-sync-token-probe.sh
+[[ -f "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh" ]] && . "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
 
 # ─── Proxy env (used only under --proxy) ─────────────────────────────────────
 PROXY_HOST="http://127.0.0.1:8080"
@@ -2435,6 +2440,102 @@ cmd_adopt_thoughts_sync() {
   fi
 }
 
+# _stat_field <bsd-fmt> <gnu-fmt> <path> — portable stat, fail-closed to 0.
+#
+# The obvious one-liner `stat -f %z f || stat -c %s f` is NOT safe: on GNU
+# coreutils `-f` means --file-system, so `%z` is read as a (missing) file
+# operand. GNU stat then prints the filesystem block for the REAL path to
+# *stdout* — a line starting `  File: "..."` — and still exits nonzero, so the
+# `||` fallback runs and its numeric answer is APPENDED to that text. The
+# caller's `(( size >= 65536 ))` then evaluates the bare token `File` and dies
+# with `File: unbound variable` under `set -u`, taking every downstream check
+# with it. Each implementation is therefore tried in its own capture and the
+# result is accepted only when it is entirely numeric.
+_stat_field() {
+  local bsd_fmt="$1" gnu_fmt="$2" path="$3" out
+  out="$(stat -f "$bsd_fmt" "$path" 2>/dev/null)" || out=""
+  if [[ ! "$out" =~ ^[0-9]+$ ]]; then
+    out="$(stat -c "$gnu_fmt" "$path" 2>/dev/null)" || out=""
+  fi
+  [[ "$out" =~ ^[0-9]+$ ]] || out=0
+  printf '%s' "$out"
+}
+
+# cloud_sync_verify_report [--json] [--strict] — read-only write→read chain report.
+CLOUD_SYNC_REPLICA_TABLES="issues issue_labels labels relations projects sync_meta"
+cloud_sync_verify_report() {
+  declare -F cloud_sync_probe_token >/dev/null 2>&1 || fail "cloud-sync token probe helper missing at ${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
+  local json_mode="no" strict="no"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --json) json_mode="yes";; --strict) strict="yes";; *) fail "unknown verify-cloud-sync arg: $1";; esac
+    shift
+  done
+  local db="${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"
+  local probe token_present checks='[]' first_failure="" overall="true"
+  probe="$(cloud_sync_probe_token --host "$(_stack_host_name)")"
+  token_present="$(printf '%s\n' "$probe" | sed -n 's/^present=//p')"
+  _cloud_sync_verify_add() { local name="$1" status="$2" reason="$3"; checks="$(jq -c --arg n "$name" --arg s "$status" --arg r "$reason" '. + [{name:$n,status:$s,reason:$r}]' <<<"$checks")"; if [[ "$status" == "FAIL" ]]; then overall=false; [[ -n "$first_failure" ]] || first_failure="$reason"; fi; }
+  [[ "$token_present" == yes ]] && _cloud_sync_verify_add token PASS "token present" || _cloud_sync_verify_add token FAIL "cloud token absent"
+  if [[ "${CATALYST_CLOUD_SYNC_TEST_MODE:-}" == 1 ]]; then
+    _cloud_sync_verify_add agent UNKNOWN "launchctl skipped in test mode"
+  elif [[ -f "$CLOUD_SYNC_AGENT_PLIST" ]] && launchctl list 2>/dev/null | awk -v l="$CLOUD_SYNC_AGENT_LABEL" '$3==l && $1!="-" && $1!="0" {ok=1} END{exit !ok}'; then
+    _cloud_sync_verify_add agent PASS "agent loaded with pid"
+  else _cloud_sync_verify_add agent UNKNOWN "agent not running"; fi
+  local db_ok=no
+  if [[ ! -e "$db" ]]; then _cloud_sync_verify_add replica-db FAIL "replica db absent"
+  else local size; size="$(_stat_field %z %s "$db")"; if (( size >= 65536 )); then db_ok=yes; _cloud_sync_verify_add replica-db PASS "replica db present"; else _cloud_sync_verify_add replica-db FAIL "replica db below 65536 bytes"; fi; fi
+  local schema_ok=yes table
+  if [[ "$db_ok" == yes ]] && command -v sqlite3 >/dev/null 2>&1; then
+    for table in $CLOUD_SYNC_REPLICA_TABLES; do sqlite3 "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table';" 2>/dev/null | grep -q 1 || schema_ok=no; done
+  else schema_ok=no; fi
+  [[ "$schema_ok" == yes ]] && _cloud_sync_verify_add schema PASS "expected schema present" || _cloud_sync_verify_add schema FAIL "expected schema absent"
+  local rows=0; [[ "$schema_ok" == yes ]] && rows="$(sqlite3 "$db" 'SELECT COUNT(*) FROM issues;' 2>/dev/null || echo 0)"
+  [[ "${rows:-0}" =~ ^[0-9]+$ && "${rows:-0}" -gt 0 ]] && _cloud_sync_verify_add rows PASS "$rows issues" || _cloud_sync_verify_add rows FAIL "issues table empty"
+  local lock="$db.writer.lock" stale_ms="${CATALYST_LINEAR_REPLICA_STALE_MS:-300000}" lock_ok=no age_ms=""
+  if [[ -f "$lock" ]]; then local mt now; mt="$(_stat_field %m %Y "$lock")"; now="$(date +%s)"; age_ms=$(( (now-mt)*1000 )); (( age_ms < stale_ms )) && lock_ok=yes; fi
+  [[ "$lock_ok" == yes ]] && _cloud_sync_verify_add writer-lock PASS "writer heartbeat fresh" || _cloud_sync_verify_add writer-lock FAIL "writer lock absent or stale"
+  local cursor=""; [[ "$schema_ok" == yes ]] && cursor="$(sqlite3 "$db" "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;" 2>/dev/null || true)"
+  [[ -n "$cursor" ]] && _cloud_sync_verify_add seed-cursor PASS "seed cursor present" || _cloud_sync_verify_add seed-cursor FAIL "seed cursor absent"
+  local cfg="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}" mode="off"
+  [[ -f "$cfg" ]] && mode="$(jq -r '(.catalyst.linearReplica | if type == "object" then .mode else . end) // "off"' "$cfg" 2>/dev/null || echo off)"
+  [[ "$mode" == on ]] && _cloud_sync_verify_add read-flag PASS "read flag on" || _cloud_sync_verify_add read-flag INFO "read flag $mode"
+  local report; report="$(jq -nc --argjson ok "$overall" --arg first "$first_failure" --arg db "$db" --argjson checks "$checks" '{ok:$ok,first_failure:$first,db_path:$db,checks:$checks}')"
+  if [[ "$json_mode" == yes ]]; then printf '%s\n' "$report"; else jq -r '.checks[] | "\(.status)\t\(.name)\t\(.reason)"' <<<"$report"; fi
+  [[ "$strict" != yes || "$overall" == true ]]
+}
+
+cmd_verify_cloud_sync() { cloud_sync_verify_report "$@"; }
+
+cmd_activate_replica() {
+  local dry_run=no
+  while [[ $# -gt 0 ]]; do case "$1" in --dry-run) dry_run=yes;; *) fail "unknown activate-replica arg: $1 (try: --dry-run)";; esac; shift; done
+  local report; report="$(cloud_sync_verify_report --json)"
+  if [[ "$(jq -r '.ok' <<<"$report")" != true ]]; then
+    echo "activate-replica: refusing: $(jq -r '.first_failure' <<<"$report")" >&2; return 1
+  fi
+  local cfg="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"
+  local merged
+  if [[ -f "$cfg" ]]; then
+    merged="$(jq -c '.catalyst.linearReplica = ((.catalyst.linearReplica // {}) | if type == "object" then . else {} end) | .catalyst.linearReplica.mode = "on"' "$cfg")" || {
+      echo "activate-replica: refusing: existing Layer-2 config is not valid JSON" >&2
+      return 1
+    }
+  else
+    merged="$(jq -nc '{catalyst:{linearReplica:{mode:"on"}}}')"
+  fi
+  if [[ "$dry_run" == yes ]]; then printf '%s\n' "$merged"; return 0; fi
+  mkdir -p "$(dirname "$cfg")"
+  local tmp="${cfg}.tmp.$$"
+  if printf '%s\n' "$merged" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$cfg"; then
+    :
+  else
+    rm -f "$tmp"
+    echo "activate-replica: refusing: could not securely write Layer-2 config" >&2
+    return 1
+  fi
+  log "activated local Linear replica; restart execution-core to construct the reader"
+}
+
 # cmd_adopt_cloud_sync — install the supervised catalyst-cloud-sync LaunchAgent
 # (CTL-1394). UNLIKE adopt-updater there is NO node-class refusal: the writer runs on
 # every class (workers read the replica from the scheduler hot path; developer nodes via
@@ -2472,21 +2573,11 @@ cmd_adopt_cloud_sync() {
   # (which may themselves set the override name), THEN resolves the NAME + checks presence.
   # So an override that lives only in the 0600 file is honored, and one that lives only in the
   # interactive shell is correctly reported absent (Codex P2). Missing token → WARN, never fail.
-  local probe
-  probe="$( set +u
-    unset CATALYST_CLOUD_TOKEN_ENV CATALYST_LAYER2_CONFIG_FILE 2>/dev/null || true
-    export CATALYST_HOST_NAME="$host_name"
-    [[ -r "$HOME/.config/catalyst/cluster.env" ]] && . "$HOME/.config/catalyst/cluster.env"
-    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
-    name="$(CFG_DIR="${SCRIPT_DIR}/execution-core" bun -e '
-      const m = await import(process.env.CFG_DIR + "/config.mjs");
-      process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
-    ' 2>/dev/null || printf 'CATALYST_CLOUD_TOKEN')"
-    present="no"; [[ -n "${!name:-}" ]] && present="yes"
-    printf '%s|%s' "$name" "$present"
-  )"
-  local token_env="${probe%%|*}"
-  local token_present="${probe##*|}"
+  declare -F cloud_sync_probe_token >/dev/null 2>&1 || fail "cloud-sync token probe helper missing at ${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
+  local probe token_env token_present
+  probe="$(cloud_sync_probe_token --host "$host_name")"
+  token_env="$(printf '%s\n' "$probe" | sed -n 's/^name=//p')"
+  token_present="$(printf '%s\n' "$probe" | sed -n 's/^present=//p')"
 
   mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
 
@@ -4237,6 +4328,8 @@ case "${1:-}" in
   adopt-updater)        shift; cmd_adopt_updater "$@" ;;
   adopt-thoughts-sync)  shift; cmd_adopt_thoughts_sync "$@" ;;
   adopt-cloud-sync)     shift; cmd_adopt_cloud_sync "$@" ;;
+  verify-cloud-sync)    shift; cmd_verify_cloud_sync "$@" ;;
+  activate-replica)     shift; cmd_activate_replica "$@" ;;
   verify-updater)       shift; cmd_verify_updater "$@" ;;
   verify-node)          shift; cmd_verify_node "$@" ;;
   services-status)      shift; cmd_services_status ;;
@@ -4246,6 +4339,6 @@ case "${1:-}" in
   -h|--help)
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-thoughts-sync | adopt-cloud-sync | verify-updater | verify-node | services-status | claude-account)" ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-thoughts-sync | adopt-cloud-sync | verify-cloud-sync | activate-replica | verify-updater | verify-node | services-status | claude-account)" ;;
 esac
 fi

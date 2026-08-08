@@ -259,6 +259,14 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-stack-cloud-sync-plist.test.sh
 
+      - name: cloud-sync token probe test
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/cloud-sync-token-probe.test.sh
+
+      - name: catalyst-stack cloud-sync verifier test
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-verify-cloud-sync.test.sh
+
       - name: linear-read-replica helper test (CTL-1397 + CTL-1403)
         # CTL-1403: the bash linear_read_ticket helper is the canonical agent read
         # path; this asserts its two-gate freshness + the reads-by-source emit
