@@ -296,6 +296,35 @@ describe("getAllPrStatuses — pr_status_cache merge (CTL-1606)", () => {
     expect(getAllPrStatuses().size).toBe(0);
   });
 
+  // ─── Codex #2878 P1: the ephemeral fallback may not walk back terminal state ──
+  // Registering (or auto-registering) an interest on an ALREADY-MERGED PR writes a
+  // fresh `open` row into filter_state. Because that row is NEWER, plain newest-wins
+  // let it override the authoritative `merged` status — hiding the phantom-merged
+  // ticket and later making it look like an orphaned OPEN PR.
+  test("a NEWER filter_state `open` row cannot override pr_status_cache `merged`", () => {
+    const olderTs = new Date(Date.now() - 60_000).toISOString();
+    insertPrStatusCache({ repo: "org/z", prNumber: 400, status: "merged", updatedAt: olderTs });
+    // The interest registration happens after the merge — a newer ephemeral open row.
+    upsertFilterStateOpen({ interestId: "late-400", prNumber: 400, repo: "org/z" });
+    expect(getAllPrStatuses().get(400).get("org/z")).toMatchObject({ status: "merged" });
+  });
+
+  test("the guard is scoped to `merged` — a newer filter_state row still updates a non-terminal status", () => {
+    const olderTs = new Date(Date.now() - 60_000).toISOString();
+    insertPrStatusCache({ repo: "org/z", prNumber: 401, status: "closed", updatedAt: olderTs });
+    upsertFilterStateOpen({ interestId: "late-401", prNumber: 401, repo: "org/z" });
+    expect(getAllPrStatuses().get(401).get("org/z")).toMatchObject({ status: "open" });
+  });
+
+  test("the guard is per (repo, number) — a merged PR does not freeze the same number in another repo", () => {
+    const olderTs = new Date(Date.now() - 60_000).toISOString();
+    insertPrStatusCache({ repo: "org/x", prNumber: 402, status: "merged", updatedAt: olderTs });
+    upsertFilterStateOpen({ interestId: "other-402", prNumber: 402, repo: "org/y" });
+    const byRepo = getAllPrStatuses().get(402);
+    expect(byRepo.get("org/x")).toMatchObject({ status: "merged" });
+    expect(byRepo.get("org/y")).toMatchObject({ status: "open" });
+  });
+
   test("cross-repo #42 collision preserved across the merged sources", () => {
     insertPrStatusCache({ repo: "org/x", prNumber: 42, status: "merged" });
     upsertFilterStateOpen({ interestId: "y-42", prNumber: 42, repo: "org/y" });

@@ -740,7 +740,7 @@ export function getAllPrStatuses() {
     .all();
 
   const map = new Map();
-  const upsert = (row) => {
+  const upsert = (row, { authoritative }) => {
     if (row.pr_number == null) return;
     const repo = row.repo ?? null;
     const repoKey = repo ?? "";
@@ -750,15 +750,26 @@ export function getAllPrStatuses() {
       map.set(row.pr_number, byRepo);
     }
     const existing = byRepo.get(repoKey);
+    // CTL-1606 (Codex #2878 P1): the ephemeral fallback must never walk back the
+    // authoritative terminal state. Registering (or auto-registering) an interest on an
+    // ALREADY-MERGED PR writes a fresh `open` row into filter_state via
+    // upsertFilterStateOpen — and because that row is newer, plain newest-wins let it
+    // override the persistent `merged` status for the same (repo, number). A restarted
+    // phase or a recovery registration would then hide the phantom-merged ticket and
+    // later make it look like an orphaned OPEN PR — the exact misclassification this
+    // ticket fixes. filter_state is documented a few lines above as only a fallback, so
+    // make that true in code: a non-authoritative row never overrides a terminal one.
+    if (!authoritative && existing && existing.status === "merged") return;
     // Newest updated_at wins; ISO-8601 strings compare correctly lexicographically.
     // A tie keeps the incumbent: pr_status_cache is applied first, so on a tie the
     // persistent store is retained (not overwritten by the ephemeral row).
     if (existing && String(existing.updatedAt) >= String(row.updated_at)) return;
     byRepo.set(repoKey, { status: row.status, updatedAt: row.updated_at, repo });
   };
-  // Apply persistent store first, then let only-newer filter_state rows override.
-  for (const row of statusRows) upsert(row);
-  for (const row of filterRows) upsert(row);
+  // Apply persistent store first, then let only-newer filter_state rows override —
+  // except backward off a terminal `merged`, which the fallback may never do.
+  for (const row of statusRows) upsert(row, { authoritative: true });
+  for (const row of filterRows) upsert(row, { authoritative: false });
   return map;
 }
 

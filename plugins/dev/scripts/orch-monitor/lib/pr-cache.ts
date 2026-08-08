@@ -59,10 +59,24 @@ export function createFileBasedPrCache(dbPath = DEFAULT_DB_PATH): PrCacheLike {
   const selectStmt = db.prepare<{ pr_number: number }, [string, string]>(
     `SELECT pr_number FROM pr_cache WHERE repo = ? AND head_sha = ?`,
   );
+  // CTL-1606 (Codex #2878 P1): `merged` is TERMINAL and must never be walked back.
+  // Webhook delivery is not ordered: startup replay overlaps live delivery, and GitHub
+  // retries older deliveries. Without this guard a `closed`+merged event processed
+  // before an older `opened`/`synchronize` (which carries `merged:false`) is overwritten
+  // by that stale event — the row flips to `open` AND takes a newer updated_at, so the
+  // newest-wins read in getAllPrStatuses prefers the wrong answer and board-health
+  // misclassifies a merged PR as an orphaned open one. That is precisely the
+  // phantom-merged blindness this ticket exists to fix, re-entering through delivery order.
+  //
+  // Enforced in SQL (not in JS) so it holds atomically against the concurrent
+  // broker/orch-monitor writers on this same file, with no read-then-write race.
+  // Only `merged` is latched: `closed` -> `open` is a legitimate REOPEN, and
+  // `closed` -> `merged` is the ordinary merge, so both stay allowed.
   const upsertStatusStmt = db.prepare(
     `INSERT INTO pr_status_cache (repo, pr_number, status, updated_at)
      VALUES (?, ?, ?, ?)
-     ON CONFLICT(repo, pr_number) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
+     ON CONFLICT(repo, pr_number) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
+       WHERE pr_status_cache.status != 'merged'`,
   );
   const allStatusStmt = db.prepare<PrStatusRow, []>(
     `SELECT repo, pr_number, status, updated_at FROM pr_status_cache`,
