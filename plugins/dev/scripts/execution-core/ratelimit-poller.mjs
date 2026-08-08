@@ -40,21 +40,33 @@ function realClock() {
 // defaultReadToken — resolve the local OAuth access token. macOS reads the
 // Keychain generic password; other platforms read ~/.claude/.credentials.json.
 // Both paths parse the same JSON blob and pull .claudeAiOauth.accessToken.
-// Returns null on ANY error — never throws, never logs the token.
+// A background LaunchAgent has no interactive session to satisfy the
+// Keychain ACL prompt on a fresh grant (errSecInteractionNotAllowed), so on
+// macOS a keychain failure falls back to the same credentials file — Claude
+// Code writes both. Returns null on ANY error — never throws, never logs the
+// token.
+function readTokenFromJson(raw) {
+  const token = JSON.parse(raw)?.claudeAiOauth?.accessToken;
+  return token || null;
+}
+
 function defaultReadToken() {
-  try {
-    let raw;
-    if (process.platform === "darwin") {
-      raw = execFileSync(
+  if (process.platform === "darwin") {
+    try {
+      const raw = execFileSync(
         "security",
         ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
         { encoding: "utf8" },
       );
-    } else {
-      raw = readFileSync(resolve(homedir(), ".claude", ".credentials.json"), "utf8");
+      const token = readTokenFromJson(raw);
+      if (token) return token;
+    } catch {
+      // fall through to the credentials-file fallback below
     }
-    const token = JSON.parse(raw)?.claudeAiOauth?.accessToken;
-    return token || null;
+  }
+  try {
+    const raw = readFileSync(resolve(homedir(), ".claude", ".credentials.json"), "utf8");
+    return readTokenFromJson(raw);
   } catch {
     return null;
   }
