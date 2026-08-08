@@ -424,6 +424,90 @@ describe("defaultClassifyTicket", () => {
   });
 });
 
+describe("CTL-1679 Phase 3 — generalized retry_safe bounded retry", () => {
+  const zeroAttempts = () => 0;
+  const maxAttempts = () => RECOVERY_MAX_ATTEMPTS;
+
+  // (b) Unrecognized failure + retrySafe, budget remaining → bounded retry via the
+  // shared fence-stale-redispatch seam (NOT escalate).
+  test("unrecognized + retrySafe + budget remaining → fix / retry_safe_redispatch", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        failureReason: "some_unrecognized_reason",
+        retrySafe: true,
+        signal: { failureReason: "some_unrecognized_reason", phase: "verify" },
+      },
+      { ticket: "CTL-77", readIntentAttempts: zeroAttempts },
+    );
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("retry_safe_redispatch");
+    expect(result.details.seam_id).toBe("fence-stale-redispatch");
+    expect(result.details.phase).toBe("verify");
+  });
+
+  // (b→exhaustion) budget exhausted → escalate with a reason-named coverage-gap
+  // explanation carrying an attempts history.
+  test("unrecognized + retrySafe + budget exhausted → escalate with named reason", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        failureReason: "some_unrecognized_reason",
+        retrySafe: true,
+        signal: { failureReason: "some_unrecognized_reason", phase: "verify" },
+      },
+      { ticket: "CTL-77", readIntentAttempts: maxAttempts },
+    );
+    expect(result.decision).toBe("escalate");
+    expect(result.details.reason).toContain("some_unrecognized_reason");
+    expect(result.details.explanation).toBeDefined();
+    expect(result.details.explanation.escalation_type).toBeDefined();
+    expect(result.details.explanation.problem).toContain("some_unrecognized_reason");
+  });
+
+  // (c) Unrecognized + NOT retrySafe → immediate escalate exactly as today
+  // (regression guard — no retry budget consulted).
+  test("unrecognized + NOT retrySafe → immediate escalate (unchanged)", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        failureReason: "design-decision-required",
+        signal: { failureReason: "design-decision-required", phase: "implement" },
+      },
+      { ticket: "CTL-78", readIntentAttempts: zeroAttempts },
+    );
+    expect(result.decision).toBe("escalate");
+    expect(result.fix_class).toBe("human");
+  });
+
+  // Phase 1's deterministic cluster_fence_stale is ALSO budget-gated so an
+  // infinitely-stale fence can't loop forever: budget exhausted → escalate.
+  test("cluster_fence_stale budget exhausted → escalate with named reason", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        signal: { failureReason: "cluster_fence_stale", phase: "pr" },
+      },
+      { ticket: "CTL-79", readIntentAttempts: maxAttempts },
+    );
+    expect(result.decision).toBe("escalate");
+    expect(result.details.reason).toContain("cluster_fence_stale");
+  });
+
+  // cluster_fence_stale with budget remaining still fixes (Phase 1 preserved).
+  test("cluster_fence_stale budget remaining → fix (Phase 1 preserved)", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        signal: { failureReason: "cluster_fence_stale", phase: "pr" },
+      },
+      { ticket: "CTL-79", readIntentAttempts: zeroAttempts },
+    );
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("fence_stale_redispatch");
+  });
+});
+
 describe("reasoningRecoveryPass", () => {
   const baseItem = {
     ticket: "CTL-1",
@@ -643,6 +727,56 @@ describe("reasoningRecoveryPass", () => {
       postComment: () => {},
     });
     expect(events.some((e) => e.type === "recovery.fix-failed")).toBe(true);
+  });
+
+  // CTL-1679 Phase 3: shadow twin. An unrecognized retrySafe failure that the
+  // classifier would RETRY emits recovery.would-retry (twin of would-fix) in
+  // shadow, but still records the shadow intent / does not invoke the seam.
+  const retrySafeItem = {
+    ticket: "CTL-88",
+    evidence: {
+      logsOutput: null,
+      failureReason: "unrecognized_retry_safe",
+      retrySafe: true,
+      signal: { failureReason: "unrecognized_retry_safe", phase: "verify" },
+    },
+  };
+
+  test("CTL-1679 Phase 3: retrySafe retry in SHADOW → recovery.would-retry twin", () => {
+    const events = [];
+    let seamCalls = 0;
+    reasoningRecoveryPass([retrySafeItem], {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "retry_safe_redispatch",
+        details: { seam_id: "fence-stale-redispatch", phase: "verify", reason: "retry unrecognized_retry_safe" },
+      }),
+      invokeSeam: () => {
+        seamCalls += 1;
+        return { success: true };
+      },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(seamCalls).toBe(0);
+    expect(events.some((e) => e.type === "recovery.would-retry")).toBe(true);
+  });
+
+  // CTL-1679 Phase 3: a reason-bearing item skipped by shouldSkipItem emits a
+  // per-ticket recovery.skipped.<reason> breadcrumb so coverage gaps stay queryable.
+  test("CTL-1679 Phase 3: ledger-skipped reason-bearing item → recovery.skipped.<reason>", () => {
+    const events = [];
+    reasoningRecoveryPass([fenceStaleItem], {
+      mode: "enforce",
+      shouldSkipItem: () => true, // latched / cooldown
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    const skipped = events.find((e) => typeof e.type === "string" && e.type.startsWith("recovery.skipped."));
+    expect(skipped).toBeDefined();
+    expect(skipped.type).toContain("cluster_fence_stale");
   });
 
   // CTL-1157 F #5 (Codex round-4): a `defer` decision must NOT write the cooldown
