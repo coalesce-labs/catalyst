@@ -92,6 +92,7 @@ import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-cat
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
+import { listProjects } from "./registry.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -3558,6 +3559,67 @@ export function checkDrainDisabled(deps = {}) {
   );
 }
 
+// Advisory report for registry entries whose checkout declares a different
+// Linear team. This check is total and never FAILs: host registry state is an
+// operator repair, and doctor's FAIL count gates worker activation.
+export function checkRegistryTeamIdentity(deps = {}) {
+  const { listProjects: readProjects = listProjects } = deps;
+  let projects;
+  try {
+    projects = readProjects();
+  } catch (err) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `registry unreadable — team identity not checked (${err?.message ?? "unknown"}) (CAT-52)`,
+    );
+  }
+  if (!projects.length) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      "registry has no projects — nothing to check (the zero-project warning is the daemon's, CTL-854)",
+    );
+  }
+  const mismatches = projects.filter((project) => project?.identity?.matches === false);
+  if (mismatches.length) {
+    const details = mismatches
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (declares "${project.identity.declared}")`)
+      .join("; ");
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.WARN,
+      `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
+        "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
+        `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
+    );
+  }
+  const known = projects.filter((project) => project?.identity?.matches === true).length;
+  // No mismatch is NOT the same as verified. An entry whose checkout config is
+  // absent, unreadable, malformed, or missing teamKey yields matches:null, and
+  // grading that PASS would report a clean contract that was never actually
+  // checked — exactly the drift this check exists to surface. Anything short of
+  // full verification stays INFO (advisory-only: this check never FAILs).
+  if (known < projects.length) {
+    const unverified = projects.length - known;
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+        `teamKey; ${unverified} could not be checked (config absent, unreadable, malformed, or ` +
+        "missing catalyst.linear.teamKey) — no mismatch found, but the contract is unverified " +
+        "for those entries (CAT-52)",
+    );
+  }
+  return mkCheck(
+    "registry-team-identity",
+    STATUS.PASS,
+    `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+      "teamKey; no mismatches (CAT-52)",
+  );
+}
+
 // checkWorkerLabels — CTL-1481. Advisory health of the workspace `worker`
 // label group + its `worker:<host>` children (the best-effort claim-win
 // VISIBILITY PROJECTION stamped by worker-label.mjs — never the claim
@@ -5121,6 +5183,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
+    () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
   ];
 }
 

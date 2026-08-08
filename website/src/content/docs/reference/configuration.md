@@ -280,6 +280,42 @@ If the registry is missing (a fresh or headless host), enroll a project with
 `catalyst-execution-core register --team <TEAM> --repo-root <path>` rather than writing the file by
 hand — see [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/).
 
+#### The `team` ↔ `teamKey` contract
+
+Each registry entry's `team` must **exactly** equal the `catalyst.linear.teamKey` declared in that
+entry's `<repoRoot>/.catalyst/config.json`. The match is case- and whitespace-sensitive, because the
+code that consumes it is: the daemon routes Linear events with a strict `!==` comparison and looks
+projects up with strict `===`, so a `cat`-vs-`CAT` entry silently drops every event and resolves no
+repository.
+
+When the two disagree, a team is pointed at another project's checkout, and worktrees cut from it
+inherit that checkout's Layer-1 `catalyst.linear` config (`teamKey`/`teamId`) and its
+`project.ticketPrefix`. Catalyst reports the drift in two places, both advisory — a violation never
+blocks dispatch:
+
+- the daemon logs `registry entry repoRoot declares a different Linear team` on each registry read;
+- `catalyst doctor` reports the `registry-team-identity` check (WARN on mismatch, never FAIL). The
+  check grades INFO — not PASS — when an entry's config is absent, unreadable, malformed, or has no
+  `teamKey`, since "no mismatch found" is not the same as "contract verified".
+
+Repair the **registry entry**, not the checkout's config:
+
+```bash
+catalyst-execution-core register --team CAT --repo-root ~/code-repos/github/you/catalyst
+```
+
+Two things that repair does **not** do on its own:
+
+- **Preserve a custom `eligibleQuery`.** Re-registering without the eligible-query flags resets the
+  entry to the default all-`Todo` query. If the entry filtered by project, label, or priority, pass
+  those flags again in the same command, and confirm the result in `registry.json`.
+- **Clean up worktrees already cut from the wrong checkout.** Existing worktrees keep the old
+  checkout's config and git remote, and because both clones can resolve the same worktree path,
+  reuse checks that only compare the branch name will happily keep using them — so later phases go
+  on running in, and pushing from, the wrong repository. Remove (or re-create) any worktree made
+  from the mismatched checkout after fixing the registry, then confirm each remaining worktree's
+  `git remote get-url origin` and `.catalyst/config.json` teamKey are the ones you expect.
+
 ### Worker-status labels
 
 Catalyst uses a workspace-scoped `worker-status` Linear label group with four mutually-exclusive

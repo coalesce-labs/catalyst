@@ -583,6 +583,8 @@ jobs:
             config-pino-fallback.test.mjs \
             __tests__/config-drain-disabled.test.mjs \
             __tests__/doctor-drain-disabled.test.mjs \
+            __tests__/doctor-registry-team-identity.test.mjs \
+            __tests__/registry-team-identity.test.mjs \
             cli/drain.test.mjs \
             drain-event.test.mjs \
             config-node-class.test.mjs \
