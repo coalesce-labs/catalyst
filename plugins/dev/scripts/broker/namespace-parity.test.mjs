@@ -53,6 +53,8 @@ const INLINE_EVENT_NAMES = [
   "monitor.reconcile.failing.team",   // reconcile-health-event.mjs:66 (team is param; prefix is safe)
   "monitor.reconcile.recovered.team", // reconcile-health-event.mjs:66
   "monitor.reconcile.eligible_persist_failure.team", // reconcile-health-event.mjs (CTL-1628 persist-write escalation)
+  "monitor.replica.degraded.team", // replica-health-event.mjs (CAT-35)
+  "monitor.replica.recovered.team", // replica-health-event.mjs (CAT-35)
   "phase.triage.linear-transition.CTL-1", // triage-transition-event.mjs:53
   "linear.state.write.CTL-1",         // linear-state-write-event.mjs:77
   "agent.waiting_on_user",            // wait-event.mjs:buildWaitEnvelope
