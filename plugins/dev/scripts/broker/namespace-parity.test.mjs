@@ -78,6 +78,12 @@ import {
   EVENT_READERS_DIVERGED,
   EVENT_READERS_CONVERGED,
 } from "../execution-core/github-feed-timer.mjs";
+// CAT-60 — the publish-capability preflight blocked/would-block pair, imported from its
+// owning module so a rename cannot leave a re-typed literal behind that still passes.
+import {
+  PUBLISH_PREFLIGHT_BLOCKED,
+  PUBLISH_PREFLIGHT_WOULD_BLOCK,
+} from "../execution-core/publish-preflight-event.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -134,6 +140,8 @@ const EXEC_CORE_EVENT_NAMES = [
   FENCE_STANDOFF_EVENT, // CAT-173 fence-standoff.mjs — mutual fence standoff escalation
   EVENT_READERS_DIVERGED, // CTL-2011 github-feed-timer.mjs — exec-core env-pin diverges from broker/orch-monitor view
   EVENT_READERS_CONVERGED, // CTL-2011 github-feed-timer.mjs — readers converged after a prior split
+  PUBLISH_PREFLIGHT_BLOCKED, // CAT-60 publish-preflight-event.mjs — denied push capability
+  PUBLISH_PREFLIGHT_WOULD_BLOCK, // CAT-60 publish-preflight-event.mjs — shadow mode would-block
   ...INLINE_EVENT_NAMES,
 ];
 

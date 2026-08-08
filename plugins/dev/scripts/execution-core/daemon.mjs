@@ -67,6 +67,7 @@ import {
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
   readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
   readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
+  resolvePublishPreflightMode,
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -159,6 +160,7 @@ import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-p
 import { rearmClaudeAccountsFromFile } from "./claude-accounts-rearm.mjs"; // CTL-1984: account-slot live-rearm hook
 import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { getReconcileHealth } from "./reconcile-health.mjs";
+import { probePublishCapability as realProbePublishCapability } from "./publish-preflight.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn, setAgentSessionNarrator } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
@@ -1920,6 +1922,18 @@ export function startDaemon({
       // terminal-ness from the local Catalyst-Cloud replica. undefined → inert.
       replica: replicaReader,
       isBgJobAlive,
+      // CAT-60: production arms the otherwise-hermetic scheduler seam. Resolve
+      // the project repo from the ticket prefix and cache per remote slug.
+      publishPreflightMode: resolvePublishPreflightMode({ configPath }),
+      probePublishCapability: ({ ticket }) => {
+        const team = String(ticket || "").split("-")[0];
+        const project = realListProjects().find((p) => p.team === team);
+        return realProbePublishCapability({
+          repoRoot: project?.repoRoot,
+          pushRemote: process.env.CATALYST_PUSH_REMOTE || "origin",
+          cacheDir: join(orchDir, ".publish-preflight"),
+        });
+      },
       // CTL-1044: provide the production operator-event appender for the
       // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
       // the seam is null and the advance-shadow comparator's disagree/tick
