@@ -75,7 +75,10 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
   upserts each team's entry. Daemon reads the registry directly (D4). The CTL-554 per-repo
   enrollment under `execution-core/projects/` and the `/orchestrate` enroll step were retired in
   CTL-582. Access flows through `registry.mjs` `list-projects`/`get-project-config` — the D9 cloud
-  seam (swappable to a hosted table without touching callers).
+  seam (swappable to a hosted table without touching callers). Each entry's `team` must match its
+  `repoRoot`'s Layer-1 `catalyst.linear.teamKey`; `listProjects()` warns on a mismatch and
+  `catalyst doctor` grades it with the advisory `registry-team-identity` check. Catalyst's own CAT
+  registration is recorded in ADR-028.
 - **Heartbeat** — orchestrators write `lastHeartbeat` every 2–3 min; entries stale >10 min are GC'd
   as `abandoned`.
 

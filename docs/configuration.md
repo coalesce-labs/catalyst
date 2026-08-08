@@ -452,6 +452,25 @@ node plugins/dev/scripts/execution-core/registry.mjs upsert \
   --status Todo
 ```
 
+**The `team` ↔ `teamKey` contract.** A registry entry's `team` MUST equal the
+`catalyst.linear.teamKey` declared in `<repoRoot>/.catalyst/config.json`. This contract is defined
+by `docs/schemas/registry.schema.json`; since CAT-52 it is observable in two places:
+
+- `listProjects()` logs `registry entry repoRoot declares a different Linear team` (warn-only —
+  the entry is still returned and dispatched).
+- `catalyst doctor` reports `registry-team-identity` (WARN, never FAIL).
+
+A violation points a team at another project's checkout, so worktrees inherit the wrong `teamId`,
+`ticketPrefix`, and `pr.pushRemote`. Repair the registry entry rather than editing the checkout's
+config:
+
+```bash
+node plugins/dev/scripts/execution-core/registry.mjs upsert \
+  --team CAT --repo-root ~/code-repos/github/thagale/catalyst
+```
+
+See ADR-028 for Catalyst's own CAT registration.
+
 ---
 
 ## Phase Signal Files
