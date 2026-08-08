@@ -609,12 +609,15 @@ _start_coordination_locked() {
   #    host without hashing).
   token_fp="$(
     set +u
-    # Resolve the config dir the SAME way the projection (cloud-token-env.mjs defaultConfigDir) does
-    # — CATALYST_CONFIG_DIR override else ~/.config/catalyst — so a host that sets CATALYST_CONFIG_DIR
-    # reads cluster.env from where the token was actually projected, not a hardcoded HOME path (Codex P1).
+    # cluster.env follows the projection config dir per cloud-token-env.mjs defaultConfigDir:
+    # CATALYST_CONFIG_DIR override else ~/.config/catalyst, so a host that sets CATALYST_CONFIG_DIR
+    # reads the token from where it was actually projected. cloud-sync.env, by contrast, is ALWAYS
+    # at the canonical $HOME/.config/catalyst — the cloud-sync launcher and provisioning runbook
+    # never relocate it, so a per-node token in the documented file must be sourced there even when
+    # CATALYST_CONFIG_DIR is overridden. Codex P1, round 10.
     _cfg_dir="${CATALYST_CONFIG_DIR:-$HOME/.config/catalyst}"
     [[ -r "$_cfg_dir/cluster.env" ]] && . "$_cfg_dir/cluster.env"
-    [[ -r "$_cfg_dir/cloud-sync.env" ]] && . "$_cfg_dir/cloud-sync.env"
+    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
     _tok_name="CATALYST_CLOUD_TOKEN"
     if declare -f catalyst_secret_cloud_token_name >/dev/null 2>&1; then
       catalyst_secret_cloud_token_name cloud-token >/dev/null 2>&1
@@ -686,12 +689,12 @@ _start_coordination_locked() {
   # wedging every future start on the leaked non-empty lock) or a stale, unrelated PID.
   (
     set +u
-    # Same config-dir resolution as the fingerprint subshell / the projection (CATALYST_CONFIG_DIR
-    # override else ~/.config/catalyst), so the publisher launches with the token from where it was
-    # actually projected on a CATALYST_CONFIG_DIR host (Codex P1).
+    # Same split as the fingerprint subshell: cluster.env from the projection config dir
+    # CATALYST_CONFIG_DIR override else ~/.config/catalyst, cloud-sync.env ALWAYS from the canonical
+    # $HOME/.config/catalyst — the launcher/runbook never relocate it. Codex P1.
     _cfg_dir="${CATALYST_CONFIG_DIR:-$HOME/.config/catalyst}"
     [[ -r "$_cfg_dir/cluster.env" ]] && . "$_cfg_dir/cluster.env"
-    [[ -r "$_cfg_dir/cloud-sync.env" ]] && . "$_cfg_dir/cloud-sync.env"
+    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
     nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
     _cp_pid=$!
     echo "$_cp_pid" > "$COORDINATION_PID"

@@ -277,6 +277,35 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(batches[0][0].id).toBe("a");
   });
 
+  test("retained tokenless rows survive a restart via the checkpoint (persist on save, re-seed on start — Codex P1)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    const subdir = join(dir, "gone");
+    const dlqPath = join(subdir, "dlq.jsonl"); // parent missing → DLQ append keeps failing
+    const pub1 = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubUrl: "https://hub.example", dlqPath,
+    });
+    await pub1.drain();
+    expect(pub1.tokenlessRetryDepth()).toBe(1);
+    pub1.saveCheckpoint(); // shutdown persist — checkpoint is a DIFFERENT file than the failing DLQ
+    const ck = JSON.parse(readFileSync(checkpointPath, "utf8"));
+    expect(Array.isArray(ck.pendingRetry)).toBe(true);
+    expect(ck.pendingRetry[0].id).toBe("a");
+    // Simulate restart: a fresh publisher re-seeds the retry buffer from the checkpoint.
+    const ac2 = new AbortController();
+    const pub2 = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac2.signal,
+      hubUrl: "https://hub.example", dlqPath,
+    });
+    expect(pub2.tokenlessRetryDepth()).toBe(1); // recovered from the checkpoint, not lost
+    // Heal the fault; the new process flushes the recovered row into the durable DLQ.
+    mkdirSync(subdir, { recursive: true });
+    await pub2.flushToHub();
+    expect(pub2.tokenlessRetryDepth()).toBe(0);
+    expect(existsSync(dlqPath)).toBe(true);
+    ac2.abort();
+  });
+
   test("enforce + NO hubUrl + dlqPath (interim inbound-only) does NOT buffer to DLQ — nothing to flush to", async () => {
     writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
     const dlqPath = join(dir, "dlq-none.jsonl");

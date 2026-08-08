@@ -149,7 +149,7 @@ describe("HubClient (CTL-1488 Phase 3)", () => {
     expect(existsSync(eventLogPath)).toBe(false);
   });
 
-  // Phase 1: bearer auth + body.payload stripping (CTL-1668)
+  // Phase 1: bearer auth (CTL-1668)
   test("sendBatch sets Authorization: Bearer <token> when token configured", async () => {
     const { fetchImpl, calls } = okFetchCapturingHeaders();
     const client = new HubClient({ hubUrl: "https://hub.example", dlqPath, token: "tok-123", retryDelaysMs: [0, 0, 0], fetchImpl });
@@ -165,23 +165,17 @@ describe("HubClient (CTL-1488 Phase 3)", () => {
     expect(calls[0].headers["Authorization"]).toBeUndefined();
   });
 
-  test("posted records omit body.payload but keep everything else", async () => {
+  test("posted records PRESERVE body.payload — cross-host consumers reconstruct wake state from it", async () => {
+    // Stripping body.payload broke parseCommentCreatedEvent's authorId read on the receiving host,
+    // failing the self-echo guard open and re-dispatching parked work on peers (Codex P1, round 10).
     const { fetchImpl, calls } = okFetch();
     const client = new HubClient({ hubUrl: "https://hub.example", dlqPath, token: "t", retryDelaysMs: [0, 0, 0], fetchImpl });
-    const r = { local_seq: 1, id: "e1", body: { name: "x", payload: { big: "blob" } }, attributes: {} };
+    const r = { local_seq: 1, id: "e1", body: { name: "x", payload: { authorId: "u1", commentId: "c1" } }, attributes: {} };
     await client.publish([r]);
     const sent = calls[0].records[0] as Record<string, unknown>;
-    expect((sent.body as Record<string, unknown>).payload).toBeUndefined();
+    expect((sent.body as Record<string, unknown>).payload).toEqual({ authorId: "u1", commentId: "c1" });
     expect((sent.body as Record<string, unknown>).name).toBe("x");
     expect(sent.id).toBe("e1");
     expect(sent.local_seq).toBe(1);
-  });
-
-  test("stripping does not mutate the caller's record (mirror keeps body.payload)", async () => {
-    const { fetchImpl } = okFetch();
-    const client = new HubClient({ hubUrl: "https://hub.example", dlqPath, retryDelaysMs: [0, 0, 0], fetchImpl });
-    const r = { local_seq: 1, id: "e1", body: { payload: { big: "blob" } }, attributes: {} };
-    await client.publish([r]);
-    expect((r.body as Record<string, unknown>).payload).toEqual({ big: "blob" });
   });
 });

@@ -35,13 +35,6 @@ export interface HubClientOpts {
   fetchImpl?: FetchLike;
 }
 
-function stripBodyPayload(rec: CoordinationRecord): CoordinationRecord {
-  const body = rec.body as Record<string, unknown> | undefined;
-  if (!body || !("payload" in body)) return rec;
-  const { payload: _drop, ...bodyRest } = body;
-  return { ...rec, body: bodyRest };
-}
-
 function maxSeq(batch: CoordinationRecord[]): number {
   let m = 0;
   for (const r of batch) {
@@ -77,13 +70,18 @@ export class HubClient {
   }
 
   private async sendBatch(batch: CoordinationRecord[]): Promise<void> {
-    const wire = batch.map(stripBodyPayload);
+    // Publish the FULL coordination record incl. body.payload. Cross-host consumers reconstruct
+    // wake state from the payload — e.g. parseCommentCreatedEvent (monitor.mjs) reads
+    // commentId/issueId/body/authorId from body.payload; stripping it made handleCommentWake see a
+    // null author, so its self-echo guard failed open and a Catalyst-authored parking comment could
+    // re-dispatch parked work on peer hosts (Codex P1, round 10). Any future off-machine data
+    // minimization must be a deliberate allowlist that preserves these wake fields, not a blanket strip.
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.opts.token) headers["Authorization"] = `Bearer ${this.opts.token}`;
     const res = await this.fetchImpl(this.url(), {
       method: "POST",
       headers,
-      body: JSON.stringify({ records: wire }),
+      body: JSON.stringify({ records: batch }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
     });
     if (!res.ok) throw new Error(`coordination hub HTTP ${res.status}`);

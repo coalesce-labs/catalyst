@@ -112,6 +112,13 @@ export function computeParity(input: {
   const orderedTickets: string[] = [];
 
   for (const row of coordinationRows) {
+    // Only THIS host's own would-publish stream (local_seq set). Inbound-pulled rows (hub_seq, no
+    // local_seq) are excluded: the composite (orchestrator, ticket) is NOT host-unique because
+    // execution-core sets CATALYST_ORCHESTRATOR_ID to the ticket, so a same-ticket terminal from
+    // another host would otherwise collide with — and, under selectTerminalOutcome's last-wins
+    // tie-break, override — this host's local terminal, fabricating or masking a divergence against
+    // the LOCAL worker_state (Codex P1, round 10). The whole harness is local-vs-local.
+    if (typeof row.local_seq !== "number") continue;
     const attrs = row.attributes as Record<string, unknown> | undefined;
     const eventName = typeof attrs?.["event.name"] === "string" ? attrs["event.name"] : "";
     const ticket = ticketFromEventName(eventName);

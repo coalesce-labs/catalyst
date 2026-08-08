@@ -209,6 +209,22 @@ describe("computeParity (CTL-1668 Phase 3)", () => {
     expect(r.verdict).toBe("healthy");
   });
 
+  test("forward match ignores an inbound (hub_seq) terminal for the same ticket — no false divergence", () => {
+    // Same ticket ran on another host; its remote terminal is a FAILURE, this host's local is a
+    // success. Because CATALYST_ORCHESTRATOR_ID == ticket, a naive match would let the remote failure
+    // override the local success and falsely diverge the local done worker.
+    const inboundFail = row("CTL-1", "phase.implement.failed", "CTL-1");
+    delete (inboundFail as Record<string, unknown>)["local_seq"];
+    (inboundFail as Record<string, unknown>)["hub_seq"] = 7;
+    const localOk = row("CTL-1", "phase.teardown.complete", "CTL-1"); // local_seq set by helper
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "done")],
+      coordinationRows: [inboundFail, localOk],
+    });
+    expect(r.divergences).toHaveLength(0);
+    expect(r.verdict).toBe("healthy");
+  });
+
   test("wire order preserved: rows consumed in input order, never sorted", () => {
     const rows = [row("CTL-3", "..."), row("CTL-1", "..."), row("CTL-2", "...")];
     const r = computeParity({ workerStates: [], coordinationRows: rows });

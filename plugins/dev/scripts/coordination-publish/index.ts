@@ -29,6 +29,13 @@ export interface CoordinationCheckpoint {
   offset: number;
   /** High-water local_seq — the last value assigned before this checkpoint. */
   localSeq: number;
+  /**
+   * Tokenless-window rows whose durable DLQ append kept failing — persisted HERE (a different file
+   * than the DLQ, so a DLQ-file-specific fault like a stale root-owned file doesn't block it) so they
+   * survive a restart/SIGTERM instead of being lost from process memory. Re-seeded into the in-memory
+   * retry buffer on startup and re-attempted; omitted when empty (Codex P1, round 10).
+   */
+  pendingRetry?: Array<Record<string, unknown>>;
   updatedAt?: string;
 }
 
@@ -183,6 +190,9 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
   // not permanently lose them — symmetric with the authenticated HubClient path, which keeps its
   // batch in `outbound` when a DLQ write fails rather than dropping it (Codex P1, round 9).
   const tokenlessRetry: Array<Record<string, unknown>> = [];
+  // Restore rows a prior process persisted when its DLQ writes kept failing, so a token-provisioning
+  // restart (or any SIGTERM) does not lose them: the next flush tick re-attempts the DLQ append.
+  if (ck?.pendingRetry && Array.isArray(ck.pendingRetry)) tokenlessRetry.push(...ck.pendingRetry);
   const stats = { written: 0, skipped: 0 };
 
   function processLine(line: string): void {
@@ -330,6 +340,9 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
       path: tailer.currentPath(),
       offset: tailer.currentOffset(),
       localSeq,
+      // Carry any still-unbuffered tokenless rows through a restart (omit when none, to keep the
+      // checkpoint lean on the normal path).
+      ...(tokenlessRetry.length > 0 ? { pendingRetry: tokenlessRetry.slice() } : {}),
     });
   }
 
