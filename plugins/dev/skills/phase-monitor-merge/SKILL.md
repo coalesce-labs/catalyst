@@ -189,12 +189,24 @@ GH_OWNER="${REPO%/*}"; GH_NAME="${REPO#*/}"
 # the author/committer date would make HEAD_AGE_SEC already exceed the window and
 # merge with zero reviewer window. GraphQL `pushedDate` is the push time; fall back
 # to `committedDate`, then to the REST committer date.
+# CTL-1680 (Codex #3079 round-2 P1): a PR opened DRAFT by phase-implement and only
+# promoted to ready-for-review by phase-pr later (`gh pr ready`, no new commits) is
+# not actually reviewable until that promotion — the automated reviewer does not see
+# a draft. Anchoring solely to the commit's pushedDate would let HEAD_AGE_SEC already
+# exceed the window at promotion time, merging with zero window. Take the LATER of
+# pushedDate and the most recent READY_FOR_REVIEW_EVENT timelineItem (a PR never
+# drafted has no such event, so pushedDate wins unchanged).
 HEAD_EXPOSED_AT="$(gh api graphql -f query='
   query($owner:String!,$name:String!,$pr:Int!){
     repository(owner:$owner,name:$name){ pullRequest(number:$pr){
-      commits(last:1){ nodes { commit { oid pushedDate committedDate } } } } } }' \
+      commits(last:1){ nodes { commit { oid pushedDate committedDate } } }
+      timelineItems(itemTypes:[READY_FOR_REVIEW_EVENT], last:1){ nodes { ... on ReadyForReviewEvent { createdAt } } } } } }' \
   -f owner="$GH_OWNER" -f name="$GH_NAME" -F pr="$PR_NUMBER" \
-  --jq '.data.repository.pullRequest.commits.nodes[0].commit | (.pushedDate // .committedDate) // empty' 2>/dev/null || true)"
+  --jq '.data.repository.pullRequest as $pr
+    | (($pr.commits.nodes[0].commit | (.pushedDate // .committedDate)) // "") as $pushed
+    | (($pr.timelineItems.nodes[0].createdAt) // "") as $ready
+    | (if ($ready != "" and $ready > $pushed) then $ready else $pushed end)
+    | select(. != "")' 2>/dev/null || true)"
 [[ -n "$HEAD_EXPOSED_AT" ]] || HEAD_EXPOSED_AT="$(gh api "repos/${REPO}/commits/${REVIEWED_HEAD}" --jq '.commit.committer.date' 2>/dev/null || true)"
 # CTL-1680 (Codex #3079 P1 portability): HEAD age via jq `fromdateiso8601`, NOT the
 # BSD/macOS-only `date -j` timestamp parser. On a Linux worker the BSD form fails,

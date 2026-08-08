@@ -136,30 +136,32 @@ const PR_VIEW_FIELDS =
 function resolveTicketPr(gh, ticket, branch, owner, name) {
   const selector = branch ? ["--head", branch] : ["--search", `${ticket} in:title`];
   const repoArgs = owner && name ? ["-R", `${owner}/${name}`] : [];
-  const listRaw = gh([
+  const baseArgs = [
     "pr",
     "list",
     ...repoArgs,
     ...selector,
-    // CTL-1680: `all`, NOT `open`. The empty-mergeCommitSha family
-    // (isPrMergeUnconfirmedReason) can fire on a PR that ACTUALLY merged —
-    // monitor-merge confirmed REST `.merged==true` but recorded an empty SHA — in
-    // which case the PR is CLOSED/MERGED. `open` returned nothing for it, so the
-    // classifier escalated a successfully-merged PR to a human instead of
-    // recovering the SHA (Codex #3079 P1). `all` (limit 1, most-recent-first) still
-    // returns the OPEN PR for the teardown `pr_not_merged` case unchanged and
-    // additionally surfaces the merged PR; the classifier's MERGED branch then
-    // recovers rather than escalates.
-    "--state",
-    "all",
     "--json",
     PR_VIEW_FIELDS,
     "--limit",
     "1",
-  ]);
-  const list = safeJson(listRaw);
-  if (!Array.isArray(list) || list.length === 0) return null;
-  return list[0];
+  ];
+  // CTL-1680 (Codex #3079 round-2 P1): prefer the ACTIVE (open) PR over a
+  // historical match. A ticket can legitimately have more than one PR (an
+  // earlier, now-merged attempt plus the still-open pipeline PR); `--state all`
+  // alone has no open-first ordering guarantee, so a newer MERGED PR could shadow
+  // the still-open one — the empty-SHA-recovery MERGED branch below would then
+  // record that OTHER PR's SHA and resume deployment on it instead of
+  // remediating the actually-stuck open PR. Try `--state open` FIRST; only fall
+  // back to `--state all` (which is what surfaces a MERGED PR for the
+  // empty-mergeCommitSha recovery family, isPrMergeUnconfirmedReason — CTL-1680
+  // Codex #3079 round-1 P1) when no open PR exists.
+  const openList = safeJson(gh([...baseArgs, "--state", "open"]));
+  if (Array.isArray(openList) && openList.length > 0) return openList[0];
+
+  const allList = safeJson(gh([...baseArgs, "--state", "all"]));
+  if (!Array.isArray(allList) || allList.length === 0) return null;
+  return allList[0];
 }
 
 // Fetch all review threads across pages, accumulating nodes. Each page's

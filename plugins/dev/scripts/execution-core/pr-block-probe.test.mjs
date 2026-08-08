@@ -51,15 +51,16 @@ describe("defaultProbePrBlock — PR resolution contract (CTL-1496)", () => {
     expect(resolveCall).not.toMatch(/^pr view/);
   });
 
-  // CTL-1680 (Codex #3079 P1): the PR is resolved with `--state all`, NOT
-  // `--state open`, so a PR that already merged (empty-mergeCommitSha recovery
+  // CTL-1680 (Codex #3079 round-1 P1): when no OPEN PR exists, fall back to
+  // `--state all` so a PR that already merged (empty-mergeCommitSha recovery
   // family) is still found instead of yielding a false "no open PR" escalation.
-  test("resolves with --state all (finds a merged PR) and surfaces mergeCommitSha", () => {
+  test("falls back to --state all (finds a merged PR) when --state open is empty, and surfaces mergeCommitSha", () => {
     const calls = [];
     const gh = (args) => {
       calls.push(args.join(" "));
       const key = args.join(" ");
-      if (key.startsWith("pr list"))
+      if (key.startsWith("pr list") && key.includes("--state open")) return JSON.stringify([]);
+      if (key.startsWith("pr list") && key.includes("--state all"))
         return JSON.stringify([
           {
             number: 290,
@@ -78,11 +79,46 @@ describe("defaultProbePrBlock — PR resolution contract (CTL-1496)", () => {
     expect(r.prNumber).toBe(290);
     expect(r.state).toBe("MERGED");
     expect(r.mergeCommitSha).toBe("abc1234def5678");
-    const resolveCall = calls.find((c) => c.startsWith("pr list"));
-    expect(resolveCall).toContain("--state all");
-    expect(resolveCall).not.toContain("--state open");
+    const listCalls = calls.filter((c) => c.startsWith("pr list"));
+    // Both the open-first probe and the all-state fallback must have fired.
+    expect(listCalls.some((c) => c.includes("--state open"))).toBe(true);
+    expect(listCalls.some((c) => c.includes("--state all"))).toBe(true);
+    const resolveCall = listCalls.find((c) => c.includes("--state all"));
     // mergeCommit must be requested so the SHA can be recovered.
     expect(resolveCall).toContain("mergeCommit");
+  });
+
+  // CTL-1680 (Codex #3079 round-2 P1): a ticket can have more than one PR (an
+  // earlier, now-merged attempt plus the still-open pipeline PR). The active
+  // OPEN PR must win over a newer/matching MERGED one in the no-branch
+  // title-search path — never the reverse, which would record the wrong PR's
+  // SHA and resume deployment on it instead of remediating the actually-stuck
+  // open PR.
+  test("prefers the OPEN PR over a MERGED match in the no-branch title-search path", () => {
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args.join(" "));
+      const key = args.join(" ");
+      if (key.startsWith("pr list") && key.includes("--state open"))
+        return JSON.stringify([
+          { number: 501, state: "OPEN", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", statusCheckRollup: [] },
+        ]);
+      if (key.startsWith("pr list") && key.includes("--state all"))
+        // Should never be called — the open PR already resolved the search.
+        return JSON.stringify([
+          { number: 490, state: "MERGED", mergeStateStatus: null, mergeable: null, statusCheckRollup: [] },
+        ]);
+      if (key.includes("api graphql")) return JSON.stringify(EMPTY_THREADS);
+      if (key.includes("pr view 501 --json reviews")) return JSON.stringify({ reviews: [] });
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-99", { gh, repo: "o/r" });
+    expect(r.prNumber).toBe(501);
+    expect(r.state).toBe("OPEN");
+    const listCalls = calls.filter((c) => c.startsWith("pr list"));
+    expect(listCalls.some((c) => c.includes("--state open"))).toBe(true);
+    // The all-state fallback must NOT fire once an open PR is already found.
+    expect(listCalls.some((c) => c.includes("--state all"))).toBe(false);
   });
 
   test("resolves by --head <branch> when the branch is threaded", () => {
