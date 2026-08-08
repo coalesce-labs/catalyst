@@ -153,3 +153,23 @@ describe("deriveAdvancement — consumes the SAME supersession decision", () => 
     expect(deriveAdvancement({ triage: "done", research: "running" })).toBe(null);
   });
 });
+
+describe("deriveAdvancement — a superseded successor must not wedge the pipeline", () => {
+  // CTL-1660 P1 round 4 (Codex #3081): the round-3 guard consulted the RAW signal map,
+  // so after a backward redispatch COMPLETED, the previous pass's successor signal
+  // blocked the new one forever — in flight, never re-verified, never escalated.
+  test("completed backward redispatch re-dispatches verify despite a stale verify signal", () => {
+    // mtime order: verify and review are the OLD pass; implement is the new one.
+    expect(deriveAdvancement({ verify: "done", review: "done", implement: "done" })).toBe("verify");
+  });
+
+  test("a CURRENT successor still vetoes (no double dispatch)", () => {
+    expect(deriveAdvancement({ implement: "done", verify: "running" })).toBe(null);
+    expect(deriveAdvancement({ triage: "done", research: "dispatched" })).toBe(null);
+  });
+
+  test("normal forward advancement is still unchanged", () => {
+    expect(deriveAdvancement({ triage: "done" })).toBe("research");
+    expect(deriveAdvancement({ triage: "done", research: "done" })).toBe("plan");
+  });
+});

@@ -1792,7 +1792,15 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
     { type: "complete" }
   );
   if (isTerminal(next)) return null; // pipeline reached teardown → done (CTL-703)
-  if (next.phase in sig) return null; // successor already dispatched
+  // CTL-1660 P1 round 4 (Codex #3081): test the successor against the LIVE set, not
+  // the raw signal map. The round-3 fix made this guard consult `sig`, which was safe
+  // against wrong dispatches but traded them for a permanent WEDGE: after a backward
+  // re-dispatch COMPLETES (old `verify: done` + `review: done`, then a freshly
+  // completed `implement`), the stale `verify` signal blocked the fresh verify
+  // forever — the ticket stayed in flight and never re-ran verification or review.
+  // A superseded successor signal describes the PREVIOUS pass and must not veto the
+  // new one; a genuinely current successor is in the live set and still vetoes.
+  if (liveSet.has(next.phase)) return null; // successor already dispatched (current pass)
   return next.phase;
 }
 
