@@ -1144,6 +1144,16 @@ cmd_start() {
   if [[ "$node_class" != "developer" ]]; then
     start_forward
   fi
+  # CTL-1307 / CTL-1668 (Codex P1): project the cluster-shared cloud token into machine-level env
+  # (writes ~/.config/catalyst/cluster.env) BEFORE start_coordination launches the publisher — NOT
+  # after. On a first start right after cluster-sync decrypts a newly provisioned/rotated token,
+  # cluster.env does not exist yet; if the publisher launches first it comes up tokenless, then
+  # consumes and checkpoints coordination rows WITHOUT buffering them for outbound (index.ts only
+  # buffers when the authenticated hubClient exists), and the next keep-alive restart dedups those
+  # already-mirrored rows instead of publishing them — permanent outbound data loss, not merely
+  # delayed auth. Quiet + fail-open + idempotent: a node with no decrypted token is a silent no-op.
+  _cloud_token_env_run quiet
+
   # CTL-1494: coordination-publish follows the reporting substrate (worker + monitor,
   # gated != developer, same as start_forward). Non-fatal — a broken/absent publisher
   # must never block the stack (CTL-988 non-load-bearing). When the mode resolves to
@@ -1170,10 +1180,8 @@ cmd_start() {
     start_event_mirror || warn "continuing without event-mirror (local tail/wait-for see only local events)"
   fi
 
-  # CTL-1307: project the cluster-shared cloud token into machine-level env, if
-  # one has been decrypted from the catalyst-cluster repo. Quiet + fail-open: a
-  # node not opted into catalyst-cloud has no token and this is a silent no-op.
-  _cloud_token_env_run quiet
+  # (CTL-1307 token projection now runs BEFORE start_coordination above, so the publisher
+  # launches with cluster.env already present — see the Codex-P1 note there.)
 
   log ""
   log "stack up — current state:"
