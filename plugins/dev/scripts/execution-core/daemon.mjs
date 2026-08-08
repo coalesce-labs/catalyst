@@ -57,6 +57,9 @@ import {
   readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
   hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
+  readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
+  readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
+  resolvePublishPreflightMode,
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -136,6 +139,7 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
+import { probePublishCapability as realProbePublishCapability, resolvePushRemote } from "./publish-preflight.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
@@ -1311,6 +1315,18 @@ export function startDaemon({
       // terminal-ness from the local Catalyst-Cloud replica. undefined → inert.
       replica: replicaReader,
       isBgJobAlive,
+      // CAT-60: production arms the otherwise-hermetic scheduler seam. Resolve
+      // the project repo from the ticket prefix and cache per remote slug.
+      publishPreflightMode: resolvePublishPreflightMode({ configPath }),
+      probePublishCapability: ({ ticket }) => {
+        const team = String(ticket || "").split("-")[0];
+        const project = realListProjects().find((p) => p.team === team);
+        return realProbePublishCapability({
+          repoRoot: project?.repoRoot,
+          pushRemote: resolvePushRemote({ repoRoot: project?.repoRoot, layer1Path: configPath, layer2Path }),
+          cacheDir: join(orchDir, ".publish-preflight"),
+        });
+      },
       // CTL-1044: provide the production operator-event appender for the
       // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
       // the seam is null and the advance-shadow comparator's disagree/tick

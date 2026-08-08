@@ -88,6 +88,8 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
+import { resolvePublishPreflightMode } from "./config.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -126,6 +128,46 @@ function readLinearBotUserIds(l1Path, l2Path) {
 export const STATUS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" };
 
 export const mkCheck = (name, status, detail) => ({ name, status, detail });
+
+// checkRepoPushPermission — CAT-60. Grade the worker's ability to publish to
+// its resolved write remote independently of scheduler dispatch. Only a
+// definitive denial can fail; operational uncertainty is always informational.
+export function checkRepoPushPermission(deps = {}) {
+  const {
+    repoRoot = process.cwd(),
+    pushRemote,
+    configPath = process.env.CATALYST_CONFIG_FILE || layer1Path(),
+    layer2ConfigPath = layer2Path(),
+    env = process.env,
+    cacheDir = resolve(getExecutionCoreDir(), ".publish-preflight"),
+    probe = probePublishCapability,
+    resolveMode = resolvePublishPreflightMode,
+    now,
+    spawn,
+  } = deps;
+  const resolvedPushRemote = pushRemote ?? resolvePushRemote({ repoRoot, env, layer1Path: configPath, layer2Path: layer2ConfigPath, spawn });
+  let mode;
+  try { mode = resolveMode({ env, configPath }); } catch { mode = "shadow"; }
+  if (mode === "off") {
+    return [mkCheck("repo-push-permission", STATUS.INFO, "publish preflight is off — push permission not checked")];
+  }
+  let verdict;
+  try { verdict = probe({ repoRoot, pushRemote: resolvedPushRemote, env, cacheDir, now, spawn }); }
+  catch (err) {
+    verdict = { state: "unknown", detail: err?.message ?? "publish probe threw" };
+  }
+  const target = `${verdict?.slug ?? "the configured repository"} via ${resolvedPushRemote}`;
+  const identity = verdict?.login ? ` for ${verdict.login}` : "";
+  const cached = verdict?.cached ? " (cached)" : "";
+  if (verdict?.state === "allowed") {
+    return [mkCheck("repo-push-permission", STATUS.PASS, `publish push permission allowed on ${target}${identity}${cached}`)];
+  }
+  if (verdict?.state === "denied") {
+    const status = mode === "enforce" ? STATUS.FAIL : STATUS.WARN;
+    return [mkCheck("repo-push-permission", status, `publish push permission denied on ${target}${identity} (${mode})${cached}`)];
+  }
+  return [mkCheck("repo-push-permission", STATUS.INFO, `publish push permission could not be determined for ${target}: ${verdict?.detail ?? "unknown"}${cached}`)];
+}
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
@@ -4571,6 +4613,13 @@ export function checksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
+    repoRoot,
+    pushRemote,
+    publishProbe,
+    publishPreflightMode,
+    publishCacheDir,
+    publishNow,
+    publishSpawn,
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -4738,6 +4787,15 @@ export function checksForClass(nc, opts = {}) {
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
+    () => checkRepoPushPermission({
+      repoRoot,
+      pushRemote,
+      probe: publishProbe,
+      resolveMode: publishPreflightMode ? () => publishPreflightMode : undefined,
+      cacheDir: publishCacheDir,
+      now: publishNow,
+      spawn: publishSpawn,
+    }), // CAT-60: workers must be able to publish to the resolved write remote
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
   ];

@@ -302,6 +302,24 @@ via `orchestrate-phase-advance`, and dispatches the next `--bg` job. Dispatcher:
 `plugins/dev/scripts/phase-agent-dispatch` (CTL-448). `oneshot-legacy` (single long-lived
 job/ticket) is the runtime fallback when the key is missing.
 
+### Publish-capability preflight and the push remote (CAT-60)
+
+GitHub access is asymmetric: cloning, fetching, and reading a repository can succeed for an identity
+that cannot publish a branch there. Catalyst resolves the write target separately and checks its
+push capability inside `dispatchAndVerify`, immediately before launching a phase worker.
+
+Historically three surfaces assumed `origin`: the rebase/diff base, the push target, and remote-branch
+discovery during resume. CAT-60 makes the push target and resume discovery use the resolved push
+remote. The rebase/diff base deliberately remains `origin/<base>`; publication routing cannot
+change the canonical integration base.
+
+The probe returns `allowed`, `denied`, or `unknown` under an `off` / `shadow` / `enforce` rollout
+flag (`CATALYST_PUBLISH_PREFLIGHT` over Layer-2 configuration, default `shadow`). Shadow emits
+`publish.preflight.would-block` and continues. Enforce blocks only a definitive denial and emits
+`publish.preflight.blocked`; unknown always proceeds. A bounded identity-aware cache conserves
+GitHub quota. The worker-only doctor check reports PASS when allowed, WARN for shadow denial, FAIL
+for enforce denial, and INFO when inconclusive.
+
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),

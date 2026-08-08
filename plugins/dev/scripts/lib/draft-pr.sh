@@ -4,8 +4,9 @@
 # POSIX/zsh-safe: no ${VAR,,}, no shopt, no ${BASH_SOURCE[0]} at top-level.
 #
 # Exported functions:
-#   draft_pr_push                 — push current branch to the push remote (idempotent, fail-open)
-#   draft_pr_push_verify          — push + prove push-remote==HEAD; fail-closed; rc=3 when
+#   _draft_pr_push_remote         — resolve the configured automated push remote
+#   draft_pr_push                 — push current branch to the resolved remote (fail-open)
+#   draft_pr_push_verify          — push + prove remote==HEAD; fail-closed; rc=3 when
 #                                   the push is rejected for missing 'workflow' OAuth scope
 #                                   and no CATALYST_WORKFLOW_GITHUB_TOKEN is configured
 #   draft_pr_push_token TOKEN ... — push using an explicit PAT, bypassing GITHUB_TOKEN
@@ -15,15 +16,6 @@
 #   draft_pr_promote              — promote current branch's PR from draft to ready
 #   draft_pr_enabled              — read .catalyst/config.json knob (default true)
 #
-# Push target vs. diff base: every push site in this file pushes to the
-# CONFIGURED PUSH REMOTE (see _draft_pr_push_remote — defaults to "origin",
-# overridable via .catalyst/config.json's catalyst.pr.pushRemote for repos
-# where "origin" is a third-party upstream the daemon's identity can only
-# read). Diff/comparison sites (_draft_pr_pending_range, draft_pr_ensure's
-# commit range, draft_pr_diff_touches_workflows) intentionally keep comparing
-# against "origin" regardless — that's the authoritative default branch to
-# diff against either way, independent of where the branch gets pushed.
-#
 # Reserved return codes:
 #   3 — draft_pr_push_verify: push rejected for missing 'workflow' OAuth scope and no
 #       CATALYST_WORKFLOW_GITHUB_TOKEN fallback. Callers translate this into a MANUAL
@@ -31,6 +23,8 @@
 #   4 — draft_pr_push / draft_pr_push_verify: the pre-push safety gate refused the
 #       push (placeholder-identity commit or anomalous tree-wide deletion). Callers
 #       translate this into a push_safety_gate_blocked escalation.
+#   5 — draft_pr_push_verify: repository permission denied. Callers translate this
+#       into a push_denied_no_permission escalation.
 
 _draft_pr_warn() {
   printf 'draft-pr: %s\n' "$*" >&2
@@ -46,6 +40,72 @@ _DRAFT_PR_WORKFLOW_SCOPE_RC=3
 # tree, commit as "fixture") directly against its real cwd instead of the
 # test's isolated mkdtemp sandbox, and pushed the result to a real branch.
 _DRAFT_PR_SAFETY_GATE_RC=4
+_DRAFT_PR_PERMISSION_RC=5
+
+_draft_pr_config_str() {
+  local file="$1" selector="$2" raw
+  [[ -f "$file" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  raw="$(jq -r "$selector" "$file" 2>/dev/null || true)"
+  [[ -z "$raw" || "$raw" == "null" ]] && return 1
+  printf '%s\n' "$raw"
+}
+
+_draft_pr_layer2_config_path() {
+  local common root project_key contract base
+  common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+  [[ -n "$common" ]] || return 1
+  root="$(cd "$(dirname "$common")" 2>/dev/null && pwd || true)"
+  [[ -n "$root" ]] || return 1
+  project_key="$(_draft_pr_config_str "${root}/.catalyst/config.json" '.catalyst.projectKey // .projectKey' || true)"
+  [[ -n "$project_key" ]] || return 1
+  local source_path
+  if [[ -n "${ZSH_VERSION:-}" ]]; then
+    # This is zsh's current sourced-file expansion.
+    # shellcheck disable=SC2296
+    source_path="${(%):-%x}"
+  else
+    source_path="${BASH_SOURCE[0]:-$0}"
+  fi
+  contract="$(cd "$(dirname "$source_path")" 2>/dev/null && pwd)/catalyst-secret-contract.sh"
+  [[ -r "$contract" ]] || return 1
+  # shellcheck source=/dev/null
+  source "$contract"
+  base="$(catalyst_secret_resolve_layer2_path 2>/dev/null || true)"
+  [[ -n "$base" ]] || return 1
+  printf '%s/config-%s.json\n' "$(dirname "$base")" "$project_key"
+}
+
+_draft_pr_push_remote() {
+  local candidate="" l2 common root
+  [[ -n "${CATALYST_PUSH_REMOTE:-}" ]] && candidate="$CATALYST_PUSH_REMOTE"
+  if [[ -z "$candidate" ]]; then
+    l2="$(_draft_pr_layer2_config_path 2>/dev/null || true)"
+    [[ -n "$l2" ]] && candidate="$(_draft_pr_config_str "$l2" '.catalyst.pr.pushRemote' || true)"
+  fi
+  if [[ -z "$candidate" ]]; then
+    common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$common" ]]; then
+      root="$(cd "$(dirname "$common")" 2>/dev/null && pwd || true)"
+      [[ -n "$root" ]] && candidate="$(_draft_pr_config_str "${root}/.catalyst/config.json" '.catalyst.pr.pushRemote' || true)"
+    fi
+  fi
+  [[ -z "$candidate" ]] && candidate="$(_draft_pr_config_str "${CATALYST_CONFIG_PATH:-.catalyst/config.json}" '.catalyst.pr.pushRemote' || true)"
+  if [[ -z "$candidate" ]]; then
+    local upstream
+    upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+    [[ -n "$upstream" ]] && candidate="${upstream%%/*}"
+  fi
+  [[ -z "$candidate" ]] && { printf 'origin\n'; return 0; }
+  case "$candidate" in
+    *[!A-Za-z0-9._/-]*) _draft_pr_warn "ignoring unsafe pushRemote '${candidate}'; using origin"; printf 'origin\n'; return 0 ;;
+  esac
+  if ! git remote get-url "$candidate" >/dev/null 2>&1; then
+    _draft_pr_warn "pushRemote '${candidate}' is not a configured remote; using origin"
+    printf 'origin\n'; return 0
+  fi
+  printf '%s\n' "$candidate"
+}
 
 # _draft_pr_pending_range — the commit range about to be pushed: unpushed
 # local commits ahead of the upstream tracking branch, or ahead of
@@ -154,6 +214,20 @@ _draft_pr_is_workflow_scope_error() {
   grep -qi 'refusing to allow' "$errfile" && grep -qi 'workflow' "$errfile"
 }
 
+_draft_pr_is_permission_error() {
+  local errfile="$1"
+  [[ -f "$errfile" ]] || return 1
+  _draft_pr_is_workflow_scope_error "$errfile" && return 1
+  grep -qiE 'permission to .* denied|returned error: 403|HTTP 403' "$errfile"
+}
+
+_draft_pr_permission_context() {
+  local remote="$1" slug identity
+  slug="$(git remote get-url "$remote" 2>/dev/null || printf '<unknown>')"
+  identity="$(gh api user -q .login 2>/dev/null || printf '<unknown>')"
+  printf 'remote=%s repo=%s identity=%s' "$remote" "$slug" "$identity"
+}
+
 # draft_pr_diff_touches_workflows BASE — returns 0 iff the diff from
 # origin/<BASE> to HEAD adds or modifies a .github/workflows/ file.
 # Falls back to comparing HEAD only when origin/<BASE> is not resolvable.
@@ -199,33 +273,7 @@ _draft_pr_default_base() {
   printf 'main\n'
 }
 
-# _draft_pr_push_remote — resolve which git remote pushes go to. Reads
-# .catalyst/config.json's catalyst.pr.pushRemote (same read pattern as
-# draft_pr_enabled below); defaults to "origin" when unset, unparseable, or
-# the configured remote doesn't actually exist in this checkout.
-#
-# Exists because a repo where the daemon's own git identity has read-only
-# ("pull") access to "origin" (a third-party upstream it doesn't own, e.g.
-# coalesce-labs/catalyst) needs every push routed to a writable fork remote
-# instead. Before this, draft_pr_push/draft_pr_push_verify hardcoded "origin"
-# unconditionally, so the automated pr phase 403'd on every single attempt in
-# any repo shaped that way (confirmed 2026-08-08, CAT team's registry
-# repoRoot: git push -u origin HEAD → "has pull permission but no push
-# permission on coalesce-labs/catalyst"). "origin" stays correct everywhere
-# else in this file (diff/comparison base) — only the push target changes.
-_draft_pr_push_remote() {
-  local config_path="${CATALYST_CONFIG_PATH:-.catalyst/config.json}"
-  local remote="origin"
-  if [[ -f "$config_path" ]] && command -v jq >/dev/null 2>&1; then
-    local configured
-    configured="$(jq -r '.catalyst.pr.pushRemote // empty' "$config_path" 2>/dev/null || true)"
-    [[ -n "$configured" ]] && remote="$configured"
-  fi
-  git remote get-url "$remote" >/dev/null 2>&1 || remote="origin"
-  printf '%s\n' "$remote"
-}
-
-# draft_pr_push — idempotent push of current branch to the push remote. Fail-open.
+# draft_pr_push — idempotent push of current branch to origin. Fail-open.
 # CTL-693: suppress local pre-push hooks (trunk trufflehog/fmt/tests) on the
 # automated phase-agent push path — CI on origin/main already runs those gates.
 # Per-invocation `-c core.hooksPath=/dev/null` only; never mutates persistent
@@ -234,27 +282,18 @@ _draft_pr_push_remote() {
 draft_pr_push() {
   command -v git >/dev/null 2>&1 || { _draft_pr_warn "git unavailable"; return 1; }
   _draft_pr_safety_gate || return "$_DRAFT_PR_SAFETY_GATE_RC"
-  local errf remote
-  errf="$(mktemp -t draft-pr-push-XXXXXX 2>/dev/null || echo "/tmp/draft-pr-push-$$")"
+  local remote errf
   remote="$(_draft_pr_push_remote)"
-  if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
-    if ! git -c core.hooksPath=/dev/null push 2>"$errf"; then
-      if _draft_pr_is_workflow_scope_error "$errf"; then
-        _draft_pr_warn "git push failed: missing 'workflow' OAuth scope (continuing)"
-      else
-        _draft_pr_warn "git push failed (continuing)"
-      fi
-      rm -f "$errf"; return 1
+  errf="$(mktemp -t draft-pr-push-XXXXXX 2>/dev/null || echo "/tmp/draft-pr-push-$$")"
+  if ! git -c core.hooksPath=/dev/null push -u "$remote" HEAD 2>"$errf"; then
+    if _draft_pr_is_workflow_scope_error "$errf"; then
+      _draft_pr_warn "git push -u ${remote} failed: missing 'workflow' OAuth scope (continuing)"
+    elif _draft_pr_is_permission_error "$errf"; then
+      _draft_pr_warn "git push denied: $(_draft_pr_permission_context "$remote") missing=push (continuing)"
+    else
+      _draft_pr_warn "git push -u ${remote} failed (continuing)"
     fi
-  else
-    if ! git -c core.hooksPath=/dev/null push -u "$remote" HEAD 2>"$errf"; then
-      if _draft_pr_is_workflow_scope_error "$errf"; then
-        _draft_pr_warn "git push -u failed: missing 'workflow' OAuth scope (continuing)"
-      else
-        _draft_pr_warn "git push -u failed (continuing)"
-      fi
-      rm -f "$errf"; return 1
-    fi
+    rm -f "$errf"; return 1
   fi
   rm -f "$errf"
 }
@@ -375,7 +414,7 @@ draft_pr_promote() {
 draft_pr_push_verify() {
   command -v git >/dev/null 2>&1 || { _draft_pr_warn "git unavailable"; return 1; }
   _draft_pr_safety_gate || return "$_DRAFT_PR_SAFETY_GATE_RC"
-  local branch local_sha remote_sha errf remote
+  local branch local_sha remote remote_sha errf
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   [[ -z "$branch" || "$branch" == "HEAD" ]] && { _draft_pr_warn "detached HEAD; cannot push-verify"; return 1; }
   local_sha="$(git rev-parse HEAD 2>/dev/null || true)"
@@ -423,6 +462,10 @@ draft_pr_push_verify() {
       else
         return "$_DRAFT_PR_WORKFLOW_SCOPE_RC"
       fi
+    elif _draft_pr_is_permission_error "$errf"; then
+      _draft_pr_warn "push denied: $(_draft_pr_permission_context "$remote") missing=push"
+      rm -f "$errf"
+      return "$_DRAFT_PR_PERMISSION_RC"
     else
       _draft_pr_warn "fast-forward push failed; retrying with --force-with-lease"
       if ! git -c core.hooksPath=/dev/null push --force-with-lease -u "$remote" HEAD >/dev/null 2>"$errf"; then
@@ -442,6 +485,10 @@ draft_pr_push_verify() {
           else
             return "$_DRAFT_PR_WORKFLOW_SCOPE_RC"
           fi
+        elif _draft_pr_is_permission_error "$errf"; then
+          _draft_pr_warn "force push denied: $(_draft_pr_permission_context "$remote") missing=push"
+          rm -f "$errf"
+          return "$_DRAFT_PR_PERMISSION_RC"
         else
           _draft_pr_warn "force-with-lease push failed"
           rm -f "$errf"
@@ -481,9 +528,9 @@ draft_pr_head_oid() {
 # falsy, so `false // true` → `true`. Read the raw string and test it directly.
 draft_pr_enabled() {
   local config_path="${CATALYST_CONFIG_PATH:-.catalyst/config.json}"
-  if [[ -f "$config_path" ]] && command -v jq >/dev/null 2>&1; then
-    local raw
-    raw="$(jq -r '.catalyst.orchestration.draftPr.enabled' "$config_path" 2>/dev/null || echo 'null')"
+  local raw
+  raw="$(_draft_pr_config_str "$config_path" '.catalyst.orchestration.draftPr.enabled' || true)"
+  if [[ -n "$raw" ]]; then
     if [[ "$raw" == "false" ]]; then
       printf 'false\n'
     else
