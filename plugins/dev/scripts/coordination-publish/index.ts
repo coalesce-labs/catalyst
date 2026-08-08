@@ -356,10 +356,14 @@ if (import.meta.main) {
   if (cfg.mode === "enforce") {
     const { createMirrorTailClient, createHubChangeSource } = await import("./lib/mirror-tail-client.ts");
     let source;
-    if (cfg.hubUrl) {
+    if (cfg.hubUrl && cloudToken) {
       // Authenticate the inbound pull with the SAME tenant-bearing token as the outbound
       // HubClient — the cloud contract derives tenant from the token, so an unauthenticated GET
-      // stalls mirror convergence even while publish succeeds (Codex P1).
+      // stalls mirror convergence even while publish succeeds (Codex P1). The hub source is gated
+      // on cloudToken too: in the supported `enforce + hubUrl + no token` branch buildHubClient
+      // already disables OUTBOUND publish, so constructing an unauthenticated hub source here would
+      // just 401 every 2s and emit degradation noise, never the documented inbound-only
+      // degradation — fall through to the interim Loki path instead (Codex P1, round 4).
       source = createHubChangeSource({ hubUrl: cfg.hubUrl, token: cloudToken });
     } else {
       const lokiUrlSpecifier = ["../execution-core/config.mjs"].join("");
