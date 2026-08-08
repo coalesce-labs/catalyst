@@ -1,13 +1,13 @@
 import { test, expect } from "bun:test";
 import { runTriageStateQuery } from "../linear-query.mjs";
 
-test("no-replica branch records a skipped daemon read (CAT-35)", () => {
+test("no-replica branch does not record a daemon read (CAT-35)", () => {
   const reads = [];
   runTriageStateQuery(
     { team: "CAT", triageStatus: "Triage" },
     { replica: undefined, onSource: () => {}, recordRead: (...args) => reads.push(args) },
   );
-  expect(reads).toEqual([["replica", "skipped", null, null, "triage_list"]]);
+  expect(reads).toEqual([]);
 });
 
 test("replica-miss still records failed", () => {

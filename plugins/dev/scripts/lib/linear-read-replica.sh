@@ -42,6 +42,7 @@ _CATALYST_LINEAR_READ_REPLICA_SH=1
 # Portable self-path: BASH_SOURCE under bash, prompt-expansion %x under zsh
 # (CTL-618, same idiom as lib/canonical-event.sh). Resolve once while sourcing;
 # expanding BASH_SOURCE inside the emitters throws under zsh -u (CAT-35).
+# shellcheck disable=SC2296
 __LRR_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
 __LRR_LIB_DIR="$(cd "$(dirname "$__LRR_SELF")" && pwd)"
 

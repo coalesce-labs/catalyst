@@ -83,6 +83,13 @@ describe("checkCloudSync", () => {
     expect(m["replica-schema"].detail).toMatch(/never seeded|no schema|0 bytes/i);
   });
 
+  test("unreadable replica does not report a never-seeded schema", () => {
+    const m = byName(checkCloudSync(deps({ statFile: () => { throw new Error("permission denied"); } })));
+    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].detail).toMatch(/unreadable/i);
+    expect(m["replica-schema"].detail).not.toMatch(/never seeded|0 bytes/i);
+  });
+
   test("seeded-but-stale replica passes schema check", () => {
     const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 4_000_000, mtimeMs: NOW - 86_400_000 }) })));
     expect(m["replica-schema"].status).toBe("pass");

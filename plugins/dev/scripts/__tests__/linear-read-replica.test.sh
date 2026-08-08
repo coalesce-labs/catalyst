@@ -42,7 +42,7 @@ if command -v zsh >/dev/null 2>&1; then
 		source '${HELPER}'
 		_lrr_emit_fallback_event 'CAT-35' 'stale-absent' 'test'
 	" >/dev/null 2>&1
-	n="$(cat "${ev_dir}"/*.jsonl 2>/dev/null | grep -c 'catalyst.replica.read_fallback' || echo 0)"
+	n="$(cat "${ev_dir}"/*.jsonl 2>/dev/null | grep -c 'catalyst.replica.read_fallback' || true)"
 	assert_eq "T-zsh2 fallback event appended under zsh" "1" "$n"
 	rm -rf "$ev_dir"
 else

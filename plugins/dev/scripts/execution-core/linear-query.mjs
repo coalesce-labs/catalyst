@@ -1404,7 +1404,6 @@ export function runTriageStateQuery(query, { replica, onSource, recordRead = rec
   }
   if (!replica?.triageState) {
     onSource?.("no-replica", 0);
-    recordRead("replica", "skipped", null, null, "triage_list");
     return [];
   }
   let local;

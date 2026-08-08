@@ -3,6 +3,7 @@ import { recordReplicaRead, resetReplicaHealth } from "../replica-health.mjs";
 
 const opts = (events) => ({
   appendEvent: (event) => events.push(event),
+  readMarker: () => null,
   writeMarker: () => {},
   threshold: 3,
 });
@@ -29,6 +30,22 @@ test("healthy read after an alert emits recovered and resets", () => {
   for (let i = 0; i < 3; i += 1) recordReplicaRead("CAT", "no-replica", opts(events));
   recordReplicaRead("CAT", "replica", opts(events));
   expect(events.at(-1).action).toBe("recovered");
+});
+
+test("healthy read after restart hydrates alert and emits recovered", () => {
+  const events = [];
+  resetReplicaHealth();
+  recordReplicaRead("CAT", "replica", {
+    ...opts(events),
+    readMarker: () => ({
+      consecutiveDegraded: 3,
+      lastHealthyTs: "2026-08-08T00:00:00.000Z",
+      alerting: true,
+    }),
+  });
+  expect(events).toEqual([
+    { team: "CAT", action: "recovered", source: "replica", consecutiveDegraded: 0 },
+  ]);
 });
 
 test("healthy without a prior alert emits nothing", () => {

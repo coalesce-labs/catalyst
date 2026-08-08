@@ -3084,11 +3084,12 @@ export function checkCloudSync(deps = {}) {
   // liveness signal is the writer-lock HEARTBEAT (<db>.writer.lock), rewritten ~every 5s.
   // Gate liveness on the lock heartbeat; report the data-age as info only, never as "down".
   let size = 0;
+  let statOk = false;
   if (!dbPresent) {
     checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
   } else {
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
-    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; } catch { /* unreadable → handled below */ }
+    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; statOk = true; } catch { /* unreadable → handled below */ }
     try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) dataNewest = Math.max(dataNewest, w.mtimeMs); } catch { /* no -wal sidecar */ }
     let lockMtime = 0;
     try { lockMtime = statFile(`${dbPath}.writer.lock`).mtimeMs; } catch { /* no lock: guard disabled / writer not started */ }
@@ -3116,7 +3117,9 @@ export function checkCloudSync(deps = {}) {
   // CAT-35: distinguish a never-seeded/no-schema file from ordinary staleness.
   if (dbPresent) {
     checks.push(
-      size === 0
+      !statOk
+        ? mkCheck("replica-schema", STATUS.WARN, "replica db is present but unreadable — cannot determine whether schema is seeded")
+        : size === 0
         ? mkCheck("replica-schema", STATUS.WARN, "replica db is 0 bytes — no schema, never seeded; the writer has never authenticated")
         : size < sizeFloorBytes
           ? mkCheck("replica-schema", STATUS.WARN, `replica db is ${size}B (< ${sizeFloorBytes}B floor) — seed incomplete`)
