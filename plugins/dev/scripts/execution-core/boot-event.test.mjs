@@ -58,6 +58,17 @@ describe("buildBootEnvelope (CTL-1084)", () => {
     const e = buildBootEnvelope(BASE);
     expect(e.attributes["event.name"]).toBe("node.boot");
   });
+
+  // CTL-1552: the boot self-report must carry the governance-MODE layers, not just
+  // the beliefs booleans. Uses the REAL default sourcesFn (readGovernanceSources).
+  test("flag_sources (real sourcesFn) includes the governance-mode layers", () => {
+    const e = buildBootEnvelope({ ...BASE, sourcesFn: undefined });
+    const src = e.body.payload.flag_sources;
+    const LAYERS = new Set(["env-override", "config", "default"]);
+    for (const k of ["boardHealth", "recoveryPass", "unstuckSweep", "deadDocWorker"]) {
+      expect(LAYERS.has(src[k])).toBe(true);
+    }
+  });
 });
 
 describe("readPluginVersion (CTL-1084)", () => {
