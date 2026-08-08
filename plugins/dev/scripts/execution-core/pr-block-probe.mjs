@@ -100,6 +100,7 @@ function emptyProbe() {
   return {
     prNumber: null,
     state: null,
+    mergeCommitSha: null,
     mergeStateStatus: null,
     mergeable: null,
     failingChecks: [],
@@ -114,8 +115,11 @@ function emptyProbe() {
 // aggregate GitHub verdict (latest review per required reviewer) — used instead
 // of scanning the raw reviews history so a PR that was CHANGES_REQUESTED then
 // re-APPROVED is not false-flagged by a stale entry (CTL-1496 verify finding).
+// CTL-1680: `mergeCommit` (an object with `.oid`) lets the classifier recover the
+// merge SHA when a PR resolves as MERGED — the empty-mergeCommitSha family fires on
+// PRs that actually merged but whose SHA monitor-merge failed to record.
 const PR_VIEW_FIELDS =
-  "number,state,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision";
+  "number,state,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,mergeCommit";
 
 // Resolve the ticket's PR EXPLICITLY — never by the daemon's current branch.
 // classifyPrNotMerged runs inside the daemon process (daemon cwd), so a bare
@@ -129,24 +133,52 @@ const PR_VIEW_FIELDS =
 // daemon's cwd points at (CTL-1496 P1: without `-R`/cwd it resolved the daemon
 // repo → false "no open PR" escalation or an unrelated same-ticket PR).
 // Returns the parsed PR object or null.
-function resolveTicketPr(gh, ticket, branch, owner, name) {
-  const selector = branch ? ["--head", branch] : ["--search", `${ticket} in:title`];
+function resolveTicketPr(gh, ticket, branch, owner, name, prNumber) {
   const repoArgs = owner && name ? ["-R", `${owner}/${name}`] : [];
-  const listRaw = gh([
+
+  // CTL-1680 (Codex #3079 round-3 P1): when the FAILURE REASON itself names the PR
+  // (phase-monitor-deploy's empty-SHA guard emits `… returned empty for pr#<N>`),
+  // that number is the most precise identifier available — strictly better than any
+  // search. Resolve it EXACTLY and stop. Without this, a ticket with no branch and
+  // several non-open historical PRs fell through to the title search, which collapses
+  // every historical match to `--limit 1` and can select a DIFFERENT PR; the MERGED
+  // branch of the classifier would then recover that other PR's merge SHA and resume
+  // deployment on the wrong commit. A number that resolves to nothing (wrong repo,
+  // deleted PR) falls through to the existing search rather than failing the probe.
+  if (Number.isInteger(prNumber) && prNumber > 0) {
+    const exact = safeJson(
+      gh(["pr", "view", String(prNumber), ...repoArgs, "--json", PR_VIEW_FIELDS]),
+    );
+    if (exact && exact.number) return exact;
+  }
+
+  const selector = branch ? ["--head", branch] : ["--search", `${ticket} in:title`];
+  const baseArgs = [
     "pr",
     "list",
     ...repoArgs,
     ...selector,
-    "--state",
-    "open",
     "--json",
     PR_VIEW_FIELDS,
     "--limit",
     "1",
-  ]);
-  const list = safeJson(listRaw);
-  if (!Array.isArray(list) || list.length === 0) return null;
-  return list[0];
+  ];
+  // CTL-1680 (Codex #3079 round-2 P1): prefer the ACTIVE (open) PR over a
+  // historical match. A ticket can legitimately have more than one PR (an
+  // earlier, now-merged attempt plus the still-open pipeline PR); `--state all`
+  // alone has no open-first ordering guarantee, so a newer MERGED PR could shadow
+  // the still-open one — the empty-SHA-recovery MERGED branch below would then
+  // record that OTHER PR's SHA and resume deployment on it instead of
+  // remediating the actually-stuck open PR. Try `--state open` FIRST; only fall
+  // back to `--state all` (which is what surfaces a MERGED PR for the
+  // empty-mergeCommitSha recovery family, isPrMergeUnconfirmedReason — CTL-1680
+  // Codex #3079 round-1 P1) when no open PR exists.
+  const openList = safeJson(gh([...baseArgs, "--state", "open"]));
+  if (Array.isArray(openList) && openList.length > 0) return openList[0];
+
+  const allList = safeJson(gh([...baseArgs, "--state", "all"]));
+  if (!Array.isArray(allList) || allList.length === 0) return null;
+  return allList[0];
 }
 
 // Fetch all review threads across pages, accumulating nodes. Each page's
@@ -195,7 +227,10 @@ function fetchAllReviewThreads(gh, owner, name, prNumber) {
   );
 }
 
-export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch, worktreePath } = {}) {
+export function defaultProbePrBlock(
+  ticket,
+  { gh = realGh, repo, branch, worktreePath, prNumber } = {},
+) {
   // Resolve owner/name: prefer an explicitly-threaded `repo`, else `gh repo
   // view` run IN THE TICKET'S WORKTREE (cwd) so it reports the ticket's repo,
   // not the daemon's checkout. Falls back to the daemon cwd only when neither is
@@ -214,7 +249,7 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch, worktre
   // Resolve the ticket's PR by head branch (when threaded) or ticket-in-title
   // search — independent of the daemon's cwd/current branch, scoped to the
   // resolved owner/name.
-  const view = resolveTicketPr(gh, ticket, branch, owner, name);
+  const view = resolveTicketPr(gh, ticket, branch, owner, name, prNumber);
   if (!view || !view.number) return emptyProbe();
 
   const rollup = view.statusCheckRollup || [];
@@ -258,6 +293,8 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch, worktre
   return {
     prNumber: view.number,
     state: view.state,
+    // CTL-1680: recovered merge SHA for a PR that resolved as MERGED; null for open PRs.
+    mergeCommitSha: view.mergeCommit?.oid ?? null,
     mergeStateStatus: view.mergeStateStatus,
     mergeable: view.mergeable,
     failingChecks,

@@ -7,7 +7,9 @@ import {
   seedLocalSeqFromMirror,
   readCoordinationCheckpoint,
   currentEventLogPath,
+  buildHubClient,
 } from "./index.ts";
+import { HubClient } from "./lib/hub-client.ts";
 
 // A minimal canonical envelope with a stamped event.stream_class (Phase 2 output).
 function evLine(name: string, streamClass: "coordination" | "telemetry", extra: Record<string, unknown> = {}): string {
@@ -197,6 +199,33 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(pub.outboundDepth()).toBe(0);
   });
 
+  test("unpublished authenticated outbound rows survive a crash via the checkpoint and re-publish on restart (Codex P1)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    // pub1 buffers the row for outbound but is "killed" (saveCheckpoint, no flush) before publishing.
+    const pub1 = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubClient: { publish: async () => {} },
+    });
+    await pub1.drain();
+    expect(pub1.outboundDepth()).toBe(1);
+    pub1.saveCheckpoint(); // crash point — checkpoint persists the undelivered outbound row
+    const ck = JSON.parse(readFileSync(checkpointPath, "utf8"));
+    expect(ck.pendingRetry?.[0]?.id).toBe("a");
+    // Restart WITH a hub client: the row is re-seeded into outbound and publishes on flush.
+    const ac2 = new AbortController();
+    const published: unknown[] = [];
+    const pub2 = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac2.signal,
+      hubClient: { publish: async (batch) => { published.push(batch); } },
+    });
+    expect(pub2.outboundDepth()).toBe(1); // recovered, not lost to mirror-dedup
+    await pub2.flushToHub();
+    expect(published.length).toBe(1);
+    expect((published[0] as Array<Record<string, unknown>>)[0].id).toBe("a");
+    expect(pub2.outboundDepth()).toBe(0);
+    ac2.abort();
+  });
+
   test("flushToHub retains the batch when publish() throws — no egress loss (CTL-1488 remediate)", async () => {
     writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
     appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));
@@ -231,6 +260,88 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     // The mirror is still written (local-first), but nothing is buffered for a non-existent hub.
     expect(mirrorRecords(mirrorPath).length).toBe(2);
     expect(pub.outboundDepth()).toBe(0);
+  });
+
+  test("enforce + hubUrl but NO client (tokenless window) buffers records to the DLQ, not dropped (Codex P1)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));
+    const dlqPath = join(dir, "dlq.jsonl");
+    // enforce + hubUrl set + no hubClient == token temporarily absent. There IS a hub to eventually
+    // reach, so rows must be preserved on the durable DLQ (not dropped like the no-hubUrl path).
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubUrl: "https://hub.example", dlqPath,
+    });
+    await pub.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(2); // still mirrored (local-first)
+    expect(pub.outboundDepth()).toBe(0);              // no in-memory outbound (no client)
+    expect(existsSync(dlqPath)).toBe(true);
+    // Two DLQ lines, each a 1-record batch — replayable by drainDlqBounded on a later tokened restart.
+    const batches = readFileSync(dlqPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(batches.length).toBe(2);
+    expect(batches[0].length).toBe(1);
+    expect(batches[0][0].id).toBe("a");
+  });
+
+  test("tokenless DLQ append failure RETAINS rows in memory and retries on flush (not dropped — Codex P1)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    const subdir = join(dir, "nope");
+    const dlqPath = join(subdir, "dlq.jsonl"); // parent dir missing → appendFileSync ENOENT
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubUrl: "https://hub.example", dlqPath,
+    });
+    await pub.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(1); // still mirrored (local-first)
+    expect(existsSync(dlqPath)).toBe(false);          // durable buffering failed
+    expect(pub.tokenlessRetryDepth()).toBe(1);        // RETAINED in memory, not dropped
+    // Heal the fault; the flush tick retries the retained row into the durable DLQ.
+    mkdirSync(subdir, { recursive: true });
+    await pub.flushToHub();
+    expect(pub.tokenlessRetryDepth()).toBe(0);
+    expect(existsSync(dlqPath)).toBe(true);
+    const batches = readFileSync(dlqPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(batches[0][0].id).toBe("a");
+  });
+
+  test("retained tokenless rows survive a restart via the checkpoint (persist on save, re-seed on start — Codex P1)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    const subdir = join(dir, "gone");
+    const dlqPath = join(subdir, "dlq.jsonl"); // parent missing → DLQ append keeps failing
+    const pub1 = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubUrl: "https://hub.example", dlqPath,
+    });
+    await pub1.drain();
+    expect(pub1.tokenlessRetryDepth()).toBe(1);
+    pub1.saveCheckpoint(); // shutdown persist — checkpoint is a DIFFERENT file than the failing DLQ
+    const ck = JSON.parse(readFileSync(checkpointPath, "utf8"));
+    expect(Array.isArray(ck.pendingRetry)).toBe(true);
+    expect(ck.pendingRetry[0].id).toBe("a");
+    // Simulate restart: a fresh publisher re-seeds the retry buffer from the checkpoint.
+    const ac2 = new AbortController();
+    const pub2 = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac2.signal,
+      hubUrl: "https://hub.example", dlqPath,
+    });
+    expect(pub2.tokenlessRetryDepth()).toBe(1); // recovered from the checkpoint, not lost
+    // Heal the fault; the new process flushes the recovered row into the durable DLQ.
+    mkdirSync(subdir, { recursive: true });
+    await pub2.flushToHub();
+    expect(pub2.tokenlessRetryDepth()).toBe(0);
+    expect(existsSync(dlqPath)).toBe(true);
+    ac2.abort();
+  });
+
+  test("enforce + NO hubUrl + dlqPath (interim inbound-only) does NOT buffer to DLQ — nothing to flush to", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    const dlqPath = join(dir, "dlq-none.jsonl");
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal, dlqPath,
+    });
+    await pub.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(1);
+    expect(existsSync(dlqPath)).toBe(false); // no hubUrl → genuinely nothing to preserve for
   });
 
   test("flushToHub drains the DLQ backlog even when outbound is empty (recovered hub catches up — Codex P1)", async () => {
@@ -329,5 +440,37 @@ describe("seedLocalSeqFromMirror", () => {
   test("malformed last line → 0 (never throws)", () => {
     writeFileSync(mirrorPath, "{ not json\n");
     expect(seedLocalSeqFromMirror(mirrorPath)).toBe(0);
+  });
+});
+
+describe("buildHubClient (CTL-1668 Phase 2)", () => {
+  let dir: string, dlqPath: string, eventLogPath: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ctl1668-build-"));
+    dlqPath = join(dir, "dlq.jsonl");
+    eventLogPath = join(dir, "events.jsonl");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const paths = () => ({ dlqPath, eventLogPath });
+
+  test("enforce + hubUrl + token → HubClient with token", () => {
+    const r = buildHubClient({ mode: "enforce", hubUrl: "https://h" }, "tok", paths());
+    expect(r.client).toBeInstanceOf(HubClient);
+    expect(r.reason).toBeUndefined();
+  });
+
+  test("enforce + hubUrl + NO token → no client, degraded reason", () => {
+    const r = buildHubClient({ mode: "enforce", hubUrl: "https://h" }, null, paths());
+    expect(r.client).toBeUndefined();
+    expect(r.reason).toMatch(/no cloud token/i);
+  });
+
+  test("shadow mode → never a client regardless of token", () => {
+    expect(buildHubClient({ mode: "shadow", hubUrl: "https://h" }, "tok", paths()).client).toBeUndefined();
+  });
+
+  test("enforce + no hubUrl → no client (interim inbound-only)", () => {
+    expect(buildHubClient({ mode: "enforce", hubUrl: null }, "tok", paths()).client).toBeUndefined();
   });
 });

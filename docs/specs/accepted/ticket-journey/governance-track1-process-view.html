@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Journey — CTL-1003 · orch-monitor</title>
+<style>
+  /* ─── tokens (per spec; calm-dark) ─────────────────────────────────── */
+  :root{
+    --canvas:#0e1116; --panel:#181d24; --card:#20262f; --elev:#2b333d;
+    --border:rgba(255,255,255,0.11); --border-sub:rgba(255,255,255,0.07);
+    --fg:#dde3ea; --dim:#8b95a3;
+    --blue:#5e9ee8; --green:#41bd7d; --red:#e36b6b; --amber:#d9a843;
+    --purple:#a98ee3; --live:#53cde2;
+    --ph-triage:#8b95a3; --ph-research:#4ea1ff; --ph-plan:#a98ee3;
+    --ph-implement:#45c08a; --ph-remediate:#d97757; --ph-verify:#dba14f;
+    --ph-review:#5e9ee8; --ph-pr:#39d07a; --ph-mm:#8aa9d6; --ph-md:#9f86c0;
+    --ph-teardown:#8b95a3;
+    --sans:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--canvas);color:var(--fg);font-family:var(--sans);
+       -webkit-font-smoothing:antialiased;min-width:1600px;overflow-x:hidden}
+  .mono{font-family:var(--mono)}
+
+  .app{display:flex;min-height:100vh}
+
+  /* ─── sidebar (nav placement: Reason group above Observe) ──────────── */
+  .sidebar{width:168px;flex:0 0 168px;background:var(--canvas);
+    border-right:1px solid var(--border-sub);padding:10px 8px 12px;
+    display:flex;flex-direction:column;gap:2px;font-size:12px}
+  .brand{display:flex;align-items:center;gap:7px;padding:4px 8px 12px}
+  .brand .mark{width:18px;height:18px;border-radius:5px;
+    background:linear-gradient(135deg,#5e9ee8,#a98ee3);
+    display:flex;align-items:center;justify-content:center;
+    font-size:10px;font-weight:700;color:#0e1116}
+  .brand .bn{font-weight:600;font-size:12.5px;letter-spacing:.2px}
+  .brand .bs{font-size:9.5px;color:var(--dim);font-family:var(--mono)}
+  .ngroup{margin-top:10px}
+  .nglabel{display:flex;align-items:center;gap:5px;padding:2px 8px 4px;
+    font-size:9.5px;font-weight:600;letter-spacing:1.1px;color:var(--dim);
+    text-transform:uppercase}
+  .nglabel .chev{margin-left:auto;opacity:.55;font-size:8px}
+  .nglabel .gdot{width:7px;height:7px;border-radius:50%}
+  .nitem{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;
+    color:var(--dim);cursor:default;line-height:1}
+  .nitem svg{width:14px;height:14px;flex:0 0 14px;opacity:.85}
+  .nitem .chord{margin-left:auto;font-family:var(--mono);font-size:8.5px;
+    color:var(--dim);opacity:.55;border:1px solid var(--border-sub);
+    border-radius:3px;padding:1px 3px}
+  .nitem:hover{background:rgba(255,255,255,0.03)}
+  .nitem.active{background:var(--card);color:var(--fg)}
+  .nitem.active svg{color:var(--blue)}
+  .nitem.soon{opacity:.55}
+  .sb-foot{margin-top:auto;padding:8px 8px 0;border-top:1px solid var(--border-sub);
+    display:flex;align-items:center;gap:6px;font-size:9.5px;color:var(--dim);
+    font-family:var(--mono)}
+  .sb-foot .hdot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+
+  .main{flex:1;min-width:0;display:flex;flex-direction:column}
+
+  /* ─── (A) header ───────────────────────────────────────────────────── */
+  .topbar{height:48px;flex:0 0 48px;background:var(--canvas);
+    border-bottom:1px solid var(--border-sub);display:flex;align-items:center;
+    padding:0 16px;gap:10px}
+  .crumb{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dim)}
+  .crumb .sep{opacity:.45}
+  .crumb .ck{font-family:var(--mono);color:var(--fg)}
+  .top-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .combo{display:flex;align-items:center;gap:8px;background:var(--panel);
+    border:1px solid var(--border);border-radius:7px;padding:5px 9px;
+    font-size:12px;color:var(--fg);max-width:365px;white-space:nowrap;
+    overflow:hidden;cursor:default}
+  .combo .cid{font-family:var(--mono);color:var(--blue);font-size:11.5px}
+  .combo .ct{overflow:hidden;text-overflow:ellipsis;color:var(--fg);opacity:.92}
+  .combo .caret{color:var(--dim);font-size:9px}
+  .ghostbtn{background:transparent;border:1px solid var(--border);color:var(--dim);
+    border-radius:7px;padding:5px 11px;font-size:12px;font-family:var(--sans);
+    cursor:default}
+  .ghostbtn:hover{color:var(--fg);border-color:rgba(255,255,255,.2)}
+  .govchips{display:flex;align-items:center;gap:5px;margin-left:4px}
+  .gchip{font-family:var(--mono);font-size:10px;border:1px solid var(--border-sub);
+    border-radius:5px;padding:2.5px 7px;color:var(--dim);white-space:nowrap;
+    cursor:default;background:rgba(255,255,255,0.015)}
+  .gchip.on{color:var(--fg);border-color:var(--border)}
+  .gchip.hollow{opacity:.6}
+  .livewrap{display:flex;align-items:center;gap:7px;margin-left:8px}
+  .livedot{width:8px;height:8px;border-radius:50%;background:var(--live);
+    animation:ping 1.9s infinite}
+  .livetxt{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--live)}
+  @keyframes ping{0%{box-shadow:0 0 0 0 rgba(83,205,226,.6)}
+    70%{box-shadow:0 0 0 6px rgba(83,205,226,0)}
+    100%{box-shadow:0 0 0 0 rgba(83,205,226,0)}}
+
+  /* ─── (B) flight strip ─────────────────────────────────────────────── */
+  .strip{height:280px;flex:0 0 280px;background:var(--panel);
+    border-bottom:1px solid var(--border-sub);position:relative;overflow:hidden;
+    background-image:radial-gradient(rgba(255,255,255,0.045) 1px,transparent 1px);
+    background-size:22px 22px;background-position:4px 6px}
+  .canvasbox{position:relative;width:1432px;height:280px}
+  .strip svg.edges{position:absolute;inset:0;width:1432px;height:280px;
+    pointer-events:none}
+  .node{position:absolute;width:112px;height:44px;background:var(--card);
+    border:1px solid rgba(255,255,255,0.08);border-left:3px solid var(--pc,#8b95a3);
+    border-radius:7px;padding:6px 4px 5px 8px;z-index:3}
+  .node .nl{font-size:12px;font-weight:600;color:var(--fg);line-height:1.1;
+    white-space:nowrap}
+  .node .ns{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px;
+    white-space:nowrap;letter-spacing:-.1px}
+  .node.dimmed{opacity:.45}
+  .node.current{box-shadow:0 0 0 2px var(--live), 0 0 14px rgba(83,205,226,.18)}
+  .node.current .ns{color:#bfe9f2}
+  .curdot{position:absolute;width:8px;height:8px;border-radius:50%;
+    background:var(--live);right:-4px;top:-4px;z-index:4;animation:ping 1.9s infinite}
+  .pill{position:absolute;height:24px;border-radius:12px;border:1px solid var(--border);
+    font-family:var(--mono);font-size:10px;color:var(--dim);display:flex;
+    align-items:center;justify-content:center;padding:0 6px;z-index:3;
+    background:var(--card)}
+  .pill.donep{border-color:rgba(65,189,125,.4);color:var(--green);
+    background:rgba(65,189,125,.08);opacity:.45}
+  .pill.stalledp{border-color:rgba(227,107,107,.5);color:var(--red);
+    background:rgba(227,107,107,.09)}
+  .gchip2{position:absolute;font-family:var(--mono);font-size:10px;
+    color:var(--dim);background:#1c222b;border:1px solid var(--border-sub);
+    border-radius:5px;padding:2px 6px;white-space:nowrap;z-index:5;
+    transform:translateX(-50%)}
+  .gchip2.redc{color:var(--red);border-color:rgba(227,107,107,.35);
+    background:rgba(227,107,107,.07)}
+  .ts{position:absolute;font-family:var(--mono);font-size:9.5px;color:var(--dim);
+    transform:translateX(-50%);z-index:2}
+  .edgelabel{position:absolute;font-family:var(--mono);font-size:9px;
+    color:var(--dim);z-index:2;white-space:nowrap}
+  .stall-label{position:absolute;font-family:var(--mono);font-size:10px;
+    color:var(--red);transform:translateX(-50%);z-index:4;white-space:nowrap}
+  .cyclebadge{position:absolute;right:-10px;top:-10px;font-family:var(--mono);
+    font-size:9px;color:var(--ph-remediate);background:var(--elev);
+    border:1px solid rgba(217,119,87,.45);border-radius:8px;padding:1.5px 6px;z-index:5}
+  .reviveglyph{position:absolute;font-family:var(--mono);font-size:9px;
+    color:var(--dim);z-index:5;background:#1c222b;border:1px solid var(--border-sub);
+    border-radius:4px;padding:0.5px 4px}
+  .siding{position:absolute;border:1.5px dashed rgba(139,149,163,.55);
+    border-radius:7px;background:rgba(139,149,163,.04);color:var(--dim);
+    font-family:var(--mono);font-size:10px;display:flex;align-items:center;
+    justify-content:center;z-index:3}
+  .strip-footer{position:absolute;right:16px;bottom:8px;font-family:var(--mono);
+    font-size:10px;color:var(--dim);opacity:.75;z-index:6}
+
+  /* ─── content row: (C) hop log + (D) rail ──────────────────────────── */
+  .content{position:relative;display:flex;gap:28px;padding:22px 24px 36px;
+    align-items:flex-start;flex:1}
+  .hoplog{flex:1;max-width:560px;min-width:480px}
+  .sechead{display:flex;align-items:center;gap:9px;margin-bottom:10px}
+  .sechead .st{font-size:11px;font-weight:600;letter-spacing:1.6px;color:var(--dim)}
+  .bchip{font-family:var(--mono);font-size:10px;color:var(--dim);
+    border:1px solid var(--border-sub);border-radius:5px;padding:2px 6px}
+  .hrow{display:grid;grid-template-columns:14px minmax(196px,1fr) 70px 88px 40px 56px;
+    gap:10px;align-items:center;padding:10px 10px;border-bottom:1px solid rgba(255,255,255,0.05);
+    border-radius:6px}
+  .hrow:hover{background:rgba(255,255,255,0.025)}
+  .hdot{width:8px;height:8px;border-radius:50%;background:var(--hc,#8b95a3)}
+  .hdot.now{background:transparent;border:2px solid var(--live);width:9px;height:9px;
+    box-shadow:0 0 6px rgba(83,205,226,.4)}
+  .hedge{font-family:var(--mono);font-size:12px;color:var(--fg);display:flex;
+    align-items:center;gap:8px;white-space:nowrap}
+  .hedge .x3{font-family:var(--mono);font-size:9px;color:var(--ph-remediate);
+    border:1px solid rgba(217,119,87,.45);background:rgba(217,119,87,.08);
+    border-radius:8px;padding:1px 6px}
+  .schip{font-family:var(--mono);font-size:10px;border-radius:5px;padding:2.5px 7px;
+    text-align:center;white-space:nowrap;justify-self:start;
+    color:var(--dim);border:1px solid var(--border-sub);background:rgba(255,255,255,0.02)}
+  .schip.run{color:var(--fg);border-color:var(--border);display:inline-flex;
+    align-items:center;gap:5px}
+  .schip.run .rdot{width:6px;height:6px;border-radius:50%;background:var(--live);
+    animation:ping 1.9s infinite}
+  .schip.ffix{color:var(--amber);border-color:rgba(217,168,67,.3);
+    background:rgba(217,168,67,.05)}
+  .hclock{font-family:var(--mono);font-size:11px;color:var(--dim)}
+  .hdur{font-family:var(--mono);font-size:11px;color:var(--fg);opacity:.85}
+  .hmodel{font-family:var(--mono);font-size:9.5px;color:var(--dim);
+    border:1px solid var(--border-sub);border-radius:5px;padding:2px 6px;
+    justify-self:start;white-space:nowrap}
+  .hcaption{font-size:11px;color:var(--dim);margin-top:12px;padding:0 10px;
+    opacity:.8}
+
+  /* ─── (D) inspector rail ───────────────────────────────────────────── */
+  .rail{width:380px;flex:0 0 380px;margin-left:auto;display:flex;flex-direction:column;gap:14px}
+  .rcard{background:var(--card);border:1px solid var(--border-sub);border-radius:9px;
+    padding:13px 15px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.05),0 1px 4px rgba(0,0,0,0.3)}
+  .rhead{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+  .rhead .rt{font-size:10.5px;font-weight:600;letter-spacing:1.6px;color:var(--dim)}
+  .rhead .spacer{margin-left:auto}
+  .hostchip{font-family:var(--mono);font-size:10px;color:var(--fg);opacity:.85;
+    border:1px solid var(--border-sub);border-radius:5px;padding:2px 7px}
+  .nowprose{font-size:13px;line-height:1.6;color:var(--fg)}
+  .nowprose .m{font-family:var(--mono);font-size:12px;color:var(--fg)}
+  .nowprose .dimt{color:var(--dim)}
+  .nowprose .failt{color:var(--red)}
+  .nexthead{font-size:14.5px;font-weight:600;color:var(--red);line-height:1.35;
+    margin:2px 0 8px}
+  .nextfoot{font-size:11px;color:var(--dim)}
+  .whylink{font-family:var(--mono);font-size:10px;color:var(--blue);
+    border:1px solid rgba(94,158,232,.3);border-radius:5px;padding:2px 7px;
+    cursor:pointer;background:rgba(94,158,232,.06)}
+  .whylink:hover{background:rgba(94,158,232,.14)}
+  .grow{display:grid;grid-template-columns:16px 1fr auto;gap:9px;align-items:baseline;
+    padding:7.5px 0;border-bottom:1px solid rgba(255,255,255,0.05)}
+  .grow:last-of-type{border-bottom:0}
+  .gmark{font-family:var(--mono);font-size:12px;text-align:center}
+  .gmark.ok{color:var(--green)} .gmark.bad{color:var(--red)}
+  .gtext{font-size:12.5px;color:var(--fg);line-height:1.45}
+  .gtext .gm{font-family:var(--mono);font-size:11.5px}
+  .gtext .neg{font-family:var(--mono)}
+  .gtext .bad{color:var(--red)}
+  .gsrc{font-family:var(--mono);font-size:9.5px;color:var(--dim);
+    border:1px solid var(--border-sub);border-radius:5px;padding:1.5px 6px;
+    white-space:nowrap;align-self:center}
+  .unblock{margin-top:11px;padding-top:11px;border-top:1px solid rgba(255,255,255,0.06)}
+  .unblock .ul{font-size:10.5px;font-weight:600;letter-spacing:.8px;color:var(--dim);
+    margin-bottom:5px}
+  .unblock .uv{font-size:12px;color:var(--fg);opacity:.85;line-height:1.55}
+  .unblock .uv .m{font-family:var(--mono);font-size:11px}
+
+  /* ─── (D4) WHY drawer — open slide-over ────────────────────────────── */
+  .whydrawer{position:absolute;right:16px;top:545px;width:560px;z-index:40;
+    background:var(--elev);border:1px solid var(--border);border-radius:11px;
+    box-shadow:0 18px 48px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4),
+      inset 0 1px 0 rgba(255,255,255,.06);
+    padding:14px 16px 13px;display:block}
+  .whydrawer.closed{display:none}
+  .wdhead{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+  .wdhead .wt{font-size:13px;font-weight:600;color:var(--fg)}
+  .wdhead .wsub{font-size:11px;color:var(--dim)}
+  .wdclose{margin-left:auto;background:transparent;border:1px solid var(--border-sub);
+    color:var(--dim);border-radius:5px;width:20px;height:20px;font-size:11px;
+    line-height:1;cursor:pointer}
+  .wdclose:hover{color:var(--fg);border-color:var(--border)}
+  .wtree{font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--fg)}
+  .wtree summary{list-style:none;cursor:pointer;display:flex;align-items:center;
+    gap:7px;flex-wrap:wrap;row-gap:3px}
+  .wtree summary::-webkit-details-marker{display:none}
+  .wtree summary .twist{color:var(--dim);font-size:9px;width:9px}
+  details[open] .twist::before{content:"▾"}
+  details:not([open]) .twist::before{content:"▸"}
+  .beliefdot{color:var(--blue)}
+  .beliefname{color:var(--blue)}
+  .rulechip{font-size:9.5px;color:#aab4c2;background:rgba(139,149,163,.13);
+    border:1px solid rgba(139,149,163,.3);border-radius:4px;padding:1px 5px}
+  .valjson{color:var(--dim);font-size:10px}
+  .wleaf{display:flex;align-items:baseline;gap:7px;padding:4.5px 0 0 2px;
+    flex-wrap:nowrap;white-space:nowrap;font-size:10px}
+  .treeline{color:rgba(139,149,163,.55);flex:0 0 auto}
+  .factchip{font-size:9.5px;color:var(--green);background:rgba(65,189,125,.09);
+    border:1px solid rgba(65,189,125,.35);border-radius:4px;padding:1px 5px;
+    flex:0 0 auto}
+  .cfgchip{font-size:9.5px;color:#aab4c2;background:rgba(139,149,163,.13);
+    border:1px solid rgba(139,149,163,.3);border-radius:4px;padding:1px 5px;
+    flex:0 0 auto}
+  .leaftxt{color:var(--fg);overflow:hidden;text-overflow:ellipsis}
+  .leafts{color:var(--dim);font-size:9px;flex:0 0 auto}
+  .guardok{color:var(--green)}
+  .wlegend{margin-top:11px;padding-top:9px;border-top:1px solid rgba(255,255,255,.07);
+    font-family:var(--mono);font-size:9px;color:var(--dim);display:flex;gap:11px;
+    align-items:center;flex-wrap:wrap}
+  .wlegend .lg{color:var(--green)} .wlegend .lb{color:var(--blue)}
+  .wlegend .ln{border:1px solid var(--border);border-radius:3px;padding:0 4px}
+</style>
+</head>
+<body class="dark">
+<div class="app">
+
+  <!-- ═══ fake sidebar: Reason group directly above Observe ═══ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="mark">C</div>
+      <div><div class="bn">Catalyst</div><div class="bs">orch-monitor</div></div>
+    </div>
+
+    <div class="ngroup">
+      <div class="nglabel">Overall <span class="chev">▾</span></div>
+      <div class="nitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>Inbox</div>
+      <div class="nitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Tickets</div>
+      <div class="nitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Workers</div>
+      <div class="nitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>Queue</div>
+    </div>
+
+    <div class="ngroup">
+      <div class="nglabel"><span class="gdot" style="background:#5e9ee8"></span>catalyst <span class="chev">▸</span></div>
+    </div>
+    <div class="ngroup" style="margin-top:4px">
+      <div class="nglabel"><span class="gdot" style="background:#a98ee3"></span>adva <span class="chev">▸</span></div>
+    </div>
+
+    <div class="ngroup">
+      <div class="nglabel">Reason <span class="chev">▾</span></div>
+      <div class="nitem active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="8" height="8" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>Journey<span class="chord">g j</span></div>
+      <div class="nitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 7v14"/><path d="M16 12h2"/><path d="M16 8h2"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>Rulebook<span class="chord">g r</span></div>
+    </div>
+
+    <div class="ngroup">
+      <div class="nglabel">Observe <span class="chev">▾</span></div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Telemetry</div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>Utilization</div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>FinOps</div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>Fleet Ops</div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>DevOps</div>
+    </div>
+
+    <div class="sb-foot"><span class="hdot"></span>mini · daemon ok</div>
+  </aside>
+
+  <div class="main">
+
+    <!-- ═══ (A) header ═══ -->
+    <header class="topbar">
+      <div class="crumb">
+        <span>Overall</span><span class="sep">/</span>
+        <span>Journey</span><span class="sep">/</span>
+        <span class="ck">CTL-1003</span>
+      </div>
+      <div class="top-right">
+        <div class="combo">
+          <span class="cid">CTL-1003</span>
+          <span class="ct">— phase-monitor deploy gate hangs…</span>
+          <span class="caret">▾</span>
+        </div>
+        <button class="ghostbtn">Map</button>
+        <div class="govchips">
+          <span class="gchip on" title="beliefs.shadow — belief store evaluating every tick">shadow ●</span>
+          <span class="gchip" title="beliefs.diagnostician — off">diag ○</span>
+          <span class="gchip" title="beliefs.intents — off">intents ○</span>
+          <span class="gchip" title="beliefs.advance — off (R16/R17 derive-only)">advance ○</span>
+          <span class="gchip hollow" title="stall-janitor enforcement: dry-run">janitor dry-run</span>
+        </div>
+        <div class="livewrap"><span class="livedot"></span><span class="livetxt">LIVE</span></div>
+      </div>
+    </header>
+
+    <!-- ═══ (B) flight strip ═══ -->
+    <section class="strip">
+      <div class="canvasbox">
+        <svg class="edges" viewBox="0 0 1432 280">
+          <defs>
+            <marker id="a-triage" markerWidth="7" markerHeight="7" refX="5.4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8b95a3"/></marker>
+            <marker id="a-research" markerWidth="7" markerHeight="7" refX="5.4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#4ea1ff"/></marker>
+            <marker id="a-plan" markerWidth="7" markerHeight="7" refX="5.4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#a98ee3"/></marker>
+            <marker id="a-implement" markerWidth="7" markerHeight="7" refX="5.4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#45c08a"/></marker>
+            <marker id="a-verify" markerWidth="7" markerHeight="7" refX="5.4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#dba14f"/></marker>
+            <marker id="a-remediate" markerWidth="7" markerHeight="7" refX="5.4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#d97757"/></marker>
+            <marker id="a-red" markerWidth="7" markerHeight="7" refX="5.4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#e36b6b"/></marker>
+            <marker id="a-dim" markerWidth="7" markerHeight="7" refX="5.4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8b95a3" fill-opacity="0.5"/></marker>
+          </defs>
+
+          <!-- traveled edges (destination phase color) -->
+          <line x1="68"  y1="150" x2="79"  y2="150" stroke="#8b95a3" stroke-width="2" marker-end="url(#a-triage)"/>
+          <line x1="196" y1="150" x2="207" y2="150" stroke="#4ea1ff" stroke-width="2" marker-end="url(#a-research)"/>
+          <line x1="324" y1="150" x2="335" y2="150" stroke="#a98ee3" stroke-width="2" marker-end="url(#a-plan)"/>
+          <line x1="452" y1="150" x2="463" y2="150" stroke="#45c08a" stroke-width="2" marker-end="url(#a-implement)"/>
+          <line x1="580" y1="150" x2="591" y2="150" stroke="#dba14f" stroke-width="2" marker-end="url(#a-verify)"/>
+
+          <!-- untraveled edges -->
+          <line x1="708"  y1="150" x2="719"  y2="150" stroke="#8b95a3" stroke-opacity="0.45" stroke-width="1.5" marker-end="url(#a-dim)"/>
+          <line x1="836"  y1="150" x2="847"  y2="150" stroke="#8b95a3" stroke-opacity="0.45" stroke-width="1.5" marker-end="url(#a-dim)"/>
+          <line x1="964"  y1="150" x2="975"  y2="150" stroke="#8b95a3" stroke-opacity="0.45" stroke-width="1.5" marker-end="url(#a-dim)"/>
+          <line x1="1092" y1="150" x2="1103" y2="150" stroke="#8b95a3" stroke-opacity="0.45" stroke-width="1.5" marker-end="url(#a-dim)"/>
+          <line x1="1220" y1="150" x2="1231" y2="150" stroke="#8b95a3" stroke-opacity="0.45" stroke-width="1.5" marker-end="url(#a-dim)"/>
+          <line x1="1348" y1="150" x2="1359" y2="150" stroke="#8b95a3" stroke-opacity="0.45" stroke-width="1.5" marker-end="url(#a-dim)"/>
+
+          <!-- verify ⇄ remediate loop -->
+          <line x1="668" y1="126" x2="641" y2="97" stroke="#d97757" stroke-width="2" marker-end="url(#a-remediate)"/>
+          <line x1="580" y1="94" x2="607" y2="123" stroke="#dba14f" stroke-width="1.8" stroke-dasharray="4 4" marker-end="url(#a-verify)"/>
+
+          <!-- verify 3-way fan: small dotted connector around the right corners -->
+          <path d="M 661,122 Q 717,126 715,150 Q 713,174 688,177" fill="none"
+                stroke="#8b95a3" stroke-opacity="0.6" stroke-width="1" stroke-dasharray="2 3"/>
+
+          <!-- will-stall: verify → (stalled), dashed red -->
+          <path d="M 678,174 L 678,196 Q 678,208 690,208 L 1356,208" fill="none"
+                stroke="#e36b6b" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#a-red)"/>
+
+          <!-- needs-input siding: dashed park / resume verticals -->
+          <line x1="252" y1="176" x2="252" y2="212" stroke="#8b95a3" stroke-opacity="0.55" stroke-width="1.4" stroke-dasharray="3 4" marker-end="url(#a-dim)"/>
+          <line x1="304" y1="214" x2="304" y2="180" stroke="#8b95a3" stroke-opacity="0.55" stroke-width="1.4" stroke-dasharray="3 4" marker-end="url(#a-dim)"/>
+        </svg>
+
+        <!-- pills -->
+        <div class="pill" style="left:10px;top:138px;width:58px">(queued)</div>
+        <div class="pill donep" style="left:1364px;top:138px;width:58px">(done)</div>
+        <div class="pill stalledp" style="left:1364px;top:196px;width:58px">(stalled)</div>
+
+        <!-- main-line nodes -->
+        <div class="node" style="left:84px;top:128px;--pc:var(--ph-triage)">
+          <div class="nl">triage</div><div class="ns">done·2m</div></div>
+        <div class="node" style="left:212px;top:128px;--pc:var(--ph-research)">
+          <div class="nl">research</div><div class="ns">done·38m·sonnet</div></div>
+        <div class="node" style="left:340px;top:128px;--pc:var(--ph-plan)">
+          <div class="nl">plan</div><div class="ns">done·39m·opus</div></div>
+        <div class="node" style="left:468px;top:128px;--pc:var(--ph-implement)">
+          <div class="nl">implement</div><div class="ns">done·88m·opus</div>
+          <span class="reviveglyph" style="right:3px;bottom:-9px;position:absolute">↻ ≤1</span></div>
+        <div class="node current" style="left:596px;top:128px;--pc:var(--ph-verify)">
+          <span class="curdot"></span>
+          <div class="nl">verify</div><div class="ns">running·12m·gen 5</div></div>
+        <div class="node dimmed" style="left:724px;top:128px;--pc:var(--ph-review)">
+          <div class="nl">review</div><div class="ns">—</div></div>
+        <div class="node dimmed" style="left:852px;top:128px;--pc:var(--ph-pr)">
+          <div class="nl">pr</div><div class="ns">—</div></div>
+        <div class="node dimmed" style="left:980px;top:128px;--pc:var(--ph-mm)">
+          <div class="nl">monitor-merge</div><div class="ns">—</div></div>
+        <div class="node dimmed" style="left:1108px;top:128px;--pc:var(--ph-md)">
+          <div class="nl">monitor-deploy</div><div class="ns">—</div></div>
+        <div class="node dimmed" style="left:1236px;top:128px;--pc:var(--ph-teardown)">
+          <div class="nl">teardown</div><div class="ns">—</div></div>
+
+        <!-- remediate, floating above the line, cycle badge -->
+        <div class="node" style="left:532px;top:48px;--pc:var(--ph-remediate)">
+          <div class="nl">remediate</div><div class="ns">3 cycles·14–37m</div>
+          <span class="cyclebadge">cycle 3/3</span></div>
+
+        <!-- needs-input siding -->
+        <div class="siding" style="left:218px;top:216px;width:124px;height:30px">needs-input</div>
+        <div class="edgelabel" style="left:222px;top:188px">park</div>
+        <div class="edgelabel" style="left:312px;top:188px">resume</div>
+
+        <!-- guard chips (≤16-char mono, floating on edges) -->
+        <div class="gchip2" style="left:80px;top:98px">deps ✓ ∧ admission</div>
+        <div class="gchip2" style="left:460px;top:98px">done ∨ dep-skipped</div>
+        <div class="gchip2" style="left:718px;top:68px">fail ∧ cyc&lt;3 ∧ ¬sig</div>
+        <div class="gchip2" style="left:766px;top:104px">pass|null</div>
+        <div class="gchip2 redc" style="left:780px;top:188px">fail ∧ cyc≥3</div>
+        <div class="stall-label" style="left:1090px;top:192px">cycle_exhausted (3/3)</div>
+        <div class="edgelabel" style="left:485px;top:112px;width:100px;text-align:right">signal reset</div>
+
+        <!-- timestamps under traveled edges -->
+        <div class="ts" style="left:76px;top:178px">09:14</div>
+        <div class="ts" style="left:204px;top:178px">09:21</div>
+        <div class="ts" style="left:332px;top:178px">10:02</div>
+        <div class="ts" style="left:460px;top:178px">10:41</div>
+        <div class="ts" style="left:588px;top:178px">12:09</div>
+
+        <div class="strip-footer">rendered from workflow.default.json · sha 3f9c21a</div>
+      </div>
+    </section>
+
+    <!-- ═══ (C) hop log + (D) inspector ═══ -->
+    <div class="content">
+
+      <section class="hoplog">
+        <div class="sechead"><span class="st">JOURNEY</span><span class="bchip">[events]</span></div>
+
+        <div class="hrow" style="--hc:var(--ph-triage)">
+          <span class="hdot"></span>
+          <span class="hedge">queued → triage</span>
+          <span class="schip">done</span>
+          <span class="hclock">09:14</span>
+          <span class="hdur">2m</span>
+          <span></span>
+        </div>
+        <div class="hrow" style="--hc:var(--ph-research)">
+          <span class="hdot"></span>
+          <span class="hedge">triage → research</span>
+          <span class="schip">done</span>
+          <span class="hclock">09:21</span>
+          <span class="hdur">38m</span>
+          <span class="hmodel">sonnet</span>
+        </div>
+        <div class="hrow" style="--hc:var(--ph-plan)">
+          <span class="hdot"></span>
+          <span class="hedge">research → plan</span>
+          <span class="schip">done</span>
+          <span class="hclock">10:02</span>
+          <span class="hdur">39m</span>
+          <span class="hmodel">opus</span>
+        </div>
+        <div class="hrow" style="--hc:var(--ph-implement)">
+          <span class="hdot"></span>
+          <span class="hedge">plan → implement</span>
+          <span class="schip">done</span>
+          <span class="hclock">10:41</span>
+          <span class="hdur">88m</span>
+          <span class="hmodel">opus</span>
+        </div>
+        <div class="hrow" style="--hc:var(--ph-verify)">
+          <span class="hdot"></span>
+          <span class="hedge">implement → verify</span>
+          <span class="schip">done</span>
+          <span class="hclock">12:09</span>
+          <span class="hdur">41m</span>
+          <span class="hmodel">sonnet</span>
+        </div>
+        <div class="hrow" style="--hc:var(--ph-remediate)">
+          <span class="hdot"></span>
+          <span class="hedge">verify ⇄ remediate <span class="x3">×3</span></span>
+          <span class="schip ffix">fail→fix</span>
+          <span class="hclock">12:50–15:21</span>
+          <span class="hdur"></span>
+          <span></span>
+        </div>
+        <div class="hrow" style="--hc:var(--ph-verify)">
+          <span class="hdot now"></span>
+          <span class="hedge">verify <span style="color:var(--dim)">(now)</span></span>
+          <span class="schip run"><span class="rdot"></span>running</span>
+          <span class="hclock">15:34</span>
+          <span class="hdur">12m</span>
+          <span class="hmodel">gen 5</span>
+        </div>
+
+        <div class="hcaption">gate evaluations are not stored historically; showing recorded transitions</div>
+      </section>
+
+      <aside class="rail">
+
+        <!-- D1 NOW -->
+        <div class="rcard">
+          <div class="rhead"><span class="rt">NOW</span><span class="spacer"></span><span class="hostchip">mini</span></div>
+          <div class="nowprose">
+            <span class="m">CTL-1003</span> is in <b>verify</b> <span class="dimt">(4th entry)</span>,
+            running <span class="m">12m</span> on <span class="m">gen 5</span>.
+            Worker live <span class="dimt">(bg <span class="m">7f3a2c1d</span>)</span> on
+            <span class="m">mini</span>. Last verdict:
+            <span class="failt">fail</span> — <span class="m">regression_risk 6 ≥ 5</span>,
+            <span class="m">2 high</span> findings.
+          </div>
+        </div>
+
+        <!-- D2 NEXT -->
+        <div class="rcard">
+          <div class="rhead"><span class="rt">NEXT</span>
+            <span class="bchip">[beliefs]</span><span class="rulechip">R17</span>
+            <span class="spacer"></span>
+            <span class="whylink" onclick="toggleDrawer(true)">why ▸</span>
+          </div>
+          <div class="nexthead">Will stall: remediate-cycle-cap-exhausted (3/3)</div>
+          <div class="nextfoot">shadow — prediction only, router decides</div>
+        </div>
+
+        <!-- D3 GATE CHECKLIST -->
+        <div class="rcard">
+          <div class="rhead"><span class="rt">GATE CHECKLIST</span><span class="spacer"></span>
+            <span class="bchip">verify → next</span></div>
+
+          <div class="grow">
+            <span class="gmark ok">✓</span>
+            <span class="gtext">latest signal = <span class="gm">verify</span> · status <span class="gm">done</span></span>
+            <span class="gsrc">[signals]</span>
+          </div>
+          <div class="grow">
+            <span class="gmark bad">✗</span>
+            <span class="gtext">verdict pass — <span class="gm bad">fail</span>: <span class="gm">regression_risk 6 ≥ 5</span> · <span class="gm">2 high</span></span>
+            <span class="gsrc">[verify.json]</span>
+          </div>
+          <div class="grow">
+            <span class="gmark bad">✗</span>
+            <span class="gtext">cycles <span class="gm">3 &lt; 3</span> — cap reached</span>
+            <span class="gsrc">[events ×3]</span>
+          </div>
+          <div class="grow">
+            <span class="gmark ok">✓</span>
+            <span class="gtext"><span class="neg">¬</span> remediate signal — checked, absent</span>
+            <span class="gsrc">[signals]</span>
+          </div>
+
+          <div class="unblock">
+            <div class="ul">WHAT WOULD UNBLOCK</div>
+            <div class="uv">fix the 2 high findings on the branch ·
+              operator <span class="m">cycle-file reset</span> ·
+              <span class="m">park → resume</span></div>
+          </div>
+        </div>
+
+      </aside>
+
+      <!-- D4 WHY drawer — rendered OPEN, slide-over overlapping the rail -->
+      <div class="whydrawer" id="whyDrawer">
+        <div class="wdhead">
+          <span class="wt">Why?</span><span class="wsub">— derivation</span>
+          <button class="wdclose" onclick="toggleDrawer(false)">✕</button>
+        </div>
+        <div class="wtree">
+          <details open>
+            <summary>
+              <span class="twist"></span>
+              <span class="beliefdot">●</span>
+              <span class="beliefname">cycle_exhausted(CTL-1003)</span>
+              <span class="rulechip">R17 · S6</span>
+              <span class="valjson">{phase:"verify", remediate_count:3, cap:3}</span>
+            </summary>
+            <div class="wleaf">
+              <span class="treeline">├─</span>
+              <span class="factchip">s obs_signal #40291</span>
+              <span class="leaftxt">CTL-1003/verify status=done bg=7f3a2c1d</span>
+              <span class="leafts">@ 2026-06-11T15:21:07Z</span>
+            </div>
+            <div class="wleaf">
+              <span class="treeline">├─</span>
+              <span class="factchip">v obs_verdict #2231</span>
+              <span class="leaftxt">CTL-1003 verdict=fail</span>
+              <span class="leafts">@ 2026-06-11T15:21:07Z</span>
+            </div>
+            <div class="wleaf">
+              <span class="treeline">├─</span>
+              <span class="factchip">c obs_cycle #9871</span>
+              <span class="leaftxt">CTL-1003 remediate_count=3</span>
+              <span class="leafts">@ 2026-06-11T15:21:07Z</span>
+            </div>
+            <div class="wleaf">
+              <span class="treeline">└─</span>
+              <span class="leaftxt">remediate_count 3 ≥ cap 3 <span class="guardok">✓</span></span>
+              <span class="cfgchip">cfg · workflow.default.json cycles.maxCount</span>
+            </div>
+          </details>
+        </div>
+        <div class="wlegend">
+          <span><span class="lg">●</span> ground fact</span>
+          <span><span class="lb">●</span> derived belief</span>
+          <span><span class="rulechip" style="padding:0 4px">R</span> rule</span>
+          <span><span class="ln">¬</span> negation</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  function toggleDrawer(open){
+    document.getElementById('whyDrawer').classList.toggle('closed', !open);
+  }
+</script>
+</body>
+</html>

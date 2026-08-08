@@ -49,7 +49,6 @@ import {
   readBoardHealthConfig,
   readCoordinationConfig,
   getCoordinationMirrorPath,
-  readSanctionedNeedsHuman,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
   readLinearReplica,
   getReplicaDbPath,
@@ -67,6 +66,7 @@ import {
   getFleetHealthDir,
   getLayer2ConfigPath,
   log,
+  readGovernanceSources,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -1364,19 +1364,31 @@ describe("readDeadDocWorkerConfig (CTL-1245)", () => {
   });
 });
 
-describe("readSanctionedNeedsHuman (CTL-1432 B3)", () => {
-  const saved = process.env.CATALYST_BH_SANCTIONED_LATCHES;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.CATALYST_BH_SANCTIONED_LATCHES;
-    else process.env.CATALYST_BH_SANCTIONED_LATCHES = saved;
+// CTL-1552: the CTL-1432 B3 sanctioned-latch reader describe block was DELETED
+// together with the function — the per-host sanctioned-latch env var is gone;
+// suppression now rides on the parked-by-human label (see board-health.test.mjs).
+
+describe("readGovernanceSources — governance-mode layers (CTL-1552)", () => {
+  const MODE_KEYS = ["boardHealth", "recoveryPass", "unstuckSweep", "deadDocWorker"];
+  const LAYERS = new Set(["env-override", "config", "default"]);
+
+  test("reports a resolved layer for each governance mode (not just the beliefs flags)", () => {
+    const out = readGovernanceSources({});
+    for (const k of MODE_KEYS) {
+      expect(LAYERS.has(out[k])).toBe(true);
+    }
+    // and still covers the beliefs booleans
+    expect(LAYERS.has(out.beliefsShadow)).toBe(true);
   });
-  test("env list → parsed, trimmed, empties dropped", () => {
-    process.env.CATALYST_BH_SANCTIONED_LATCHES = "CTL-1, CTL-2 ,, CTL-3";
-    expect(readSanctionedNeedsHuman()).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+
+  test("a valid mode in env resolves as env-override for that mode", () => {
+    const out = readGovernanceSources({ CATALYST_BOARD_HEALTH: "enforce" });
+    expect(out.boardHealth).toBe("env-override");
   });
-  test("(Codex P2) an EMPTY env var explicitly clears the allowlist → [] (does not fall through to Layer-2)", () => {
-    process.env.CATALYST_BH_SANCTIONED_LATCHES = "";
-    expect(readSanctionedNeedsHuman()).toEqual([]);
+
+  test("the board-health kill-switch (env '0') resolves as env-override", () => {
+    const out = readGovernanceSources({ CATALYST_BOARD_HEALTH: "0" });
+    expect(out.boardHealth).toBe("env-override");
   });
 });
 

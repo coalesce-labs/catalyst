@@ -18,6 +18,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } fr
 import { dirname } from "node:path";
 import { createTailer } from "../otel-forward/lib/tail.ts";
 import { HubClient } from "./lib/hub-client.ts";
+import { appendToDlq } from "../otel-forward/lib/dlq.ts";
 
 export const SERVICE_NAME = "catalyst.coordination-publish";
 
@@ -28,6 +29,15 @@ export interface CoordinationCheckpoint {
   offset: number;
   /** High-water local_seq — the last value assigned before this checkpoint. */
   localSeq: number;
+  /**
+   * Undelivered rows carried across a restart: authenticated `outbound` rows not yet published AND
+   * tokenless rows whose DLQ append kept failing. Neither is recoverable from the mirror on restart
+   * (dedup skips already-mirrored ids), and this checkpoint is a different file than the DLQ (so a
+   * DLQ-file-specific fault doesn't block persisting it). On startup they are re-seeded into the
+   * outbound path (if a hub client exists) or the tokenless DLQ-retry path (if not); omitted when
+   * empty (Codex P1, rounds 10 + 12).
+   */
+  pendingRetry?: Array<Record<string, unknown>>;
   updatedAt?: string;
 }
 
@@ -101,6 +111,26 @@ export interface HubClientLike {
   drainDlq?: () => Promise<void>;
 }
 
+/**
+ * Pure factory that decides whether to construct a HubClient, return a degraded reason, or
+ * return nothing (interim / inbound-only path). Extracted so unit tests can exercise the
+ * enforce×hubUrl×token matrix without running the entrypoint.
+ *
+ * Decision table:
+ *   mode ≠ "enforce" OR no hubUrl → {} (no client, no reason — interim / shadow / off)
+ *   enforce + hubUrl + no token    → { reason } (loud one-time warn; daemon stays up inbound-only)
+ *   enforce + hubUrl + token       → { client }
+ */
+export function buildHubClient(
+  cfg: { mode: string; hubUrl: string | null },
+  token: string | null,
+  paths: { dlqPath: string; eventLogPath?: string }
+): { client?: HubClient; reason?: string } {
+  if (cfg.mode !== "enforce" || !cfg.hubUrl) return {};
+  if (!token) return { reason: "enforce+hubUrl but no cloud token — outbound publish disabled" };
+  return { client: new HubClient({ hubUrl: cfg.hubUrl, dlqPath: paths.dlqPath, eventLogPath: paths.eventLogPath, token }) };
+}
+
 export interface PublisherOpts {
   mode: CoordinationMode;
   mirrorPath: string;
@@ -111,6 +141,12 @@ export interface PublisherOpts {
   eventsDir?: string;
   hubClient?: HubClientLike;
   pollMs?: number;
+  /** Hub URL from resolved config. Set (with dlqPath) so the `enforce + hubUrl + no-token` window
+   *  DLQ-buffers records instead of dropping them — distinguishes a configured-but-tokenless hub
+   *  (there IS a destination, preserve) from the interim no-hubUrl path (nothing to flush to). */
+  hubUrl?: string | null;
+  /** Durable DLQ path — where a clientless-but-hub-configured window buffers records for later drain. */
+  dlqPath?: string;
 }
 
 export interface CoordinationPublisher {
@@ -121,6 +157,8 @@ export interface CoordinationPublisher {
   saveCheckpoint: () => void;
   currentLocalSeq: () => number;
   outboundDepth: () => number;
+  /** In-memory rows whose durable DLQ append failed and are awaiting a flushToHub retry. */
+  tokenlessRetryDepth: () => number;
   getStats: () => { written: number; skipped: number };
 }
 
@@ -149,6 +187,21 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
   const initialTailPath = opts.filePath ?? currentEventLogPath(opts.eventsDir ?? "");
   const startOffset = ck && ck.path === initialTailPath ? ck.offset : 0;
   const outbound: Array<Record<string, unknown>> = [];
+  // Tokenless-window retention: rows whose durable DLQ append FAILED (stale root-owned DLQ file,
+  // permissions, transient I/O). Held in memory and retried by flushToHub so a transient fault does
+  // not permanently lose them — symmetric with the authenticated HubClient path, which keeps its
+  // batch in `outbound` when a DLQ write fails rather than dropping it (Codex P1, round 9).
+  const tokenlessRetry: Array<Record<string, unknown>> = [];
+  // Restore rows a prior process persisted when it exited with undelivered work — outbound rows that
+  // never reached the hub, or tokenless rows whose DLQ append kept failing. Neither is recoverable
+  // from the mirror on restart (readMirrorState seeds seenIds so processLine skips them), so the
+  // checkpoint is the only durable carrier (Codex P1, round 12). Route by what THIS process can do:
+  // with a hub client, replay them through the outbound publish path; without one, back into the
+  // tokenless DLQ-retry path. flushToHub drains whichever it lands in.
+  if (ck?.pendingRetry && Array.isArray(ck.pendingRetry)) {
+    if (opts.hubClient) outbound.push(...ck.pendingRetry);
+    else tokenlessRetry.push(...ck.pendingRetry);
+  }
   const stats = { written: 0, skipped: 0 };
 
   function processLine(line: string): void {
@@ -202,7 +255,28 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     // NO hubClient, so flushToHub always early-returns — buffering here would grow the array by
     // one record per coordination event forever. The mirror write above is the durable record;
     // outbound is a hub-egress staging buffer with no meaning when there is nothing to flush to.
-    if (opts.mode === "enforce" && opts.hubClient) outbound.push(record);
+    if (opts.mode === "enforce" && opts.hubClient) {
+      outbound.push(record);
+    } else if (opts.mode === "enforce" && opts.hubUrl && opts.dlqPath) {
+      // enforce + hubUrl configured but NO client (token temporarily absent — a supported degraded
+      // state): there IS a hub to eventually publish to, so PRESERVE the record on the durable DLQ
+      // (disk append, NO network — so it does not reintroduce the round-4 unauthenticated-GET loop)
+      // rather than dropping it. Without this, a tokenless window mirrors + checkpoints these rows
+      // but never queues them; after a token is provisioned and the daemon restarts, checkpoint +
+      // mirror-id dedup skip them, so they are permanently absent from the hub (Codex P1). Once a
+      // real HubClient exists on restart, its flush-timer drainQueuedDlq replays this backlog.
+      // Fail-open: a DLQ write fault must never crash the never-crash daemon or block the tailer —
+      // the local mirror already durably holds the row.
+      try {
+        appendToDlq(opts.dlqPath, [record]);
+      } catch (err) {
+        // Durable buffering failed — RETAIN the row in memory for flushToHub to retry, rather than
+        // dropping it (the tailer/checkpoint have already advanced past it and mirror-id dedup would
+        // skip it on restart, so a bare log would be permanent hub loss) (Codex P1, round 9).
+        console.error("[coordination-publish] tokenless DLQ buffer failed — retaining for retry", err);
+        tokenlessRetry.push(record);
+      }
+    }
   }
 
   const tailer = inert
@@ -231,9 +305,23 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     // In-flight guard: flushToHub is void-called on a 1s timer, so a slow publish could overlap
     // the next tick. Skipping while one is in flight keeps a single publisher and avoids
     // double-publishing the same rows.
-    if (!opts.hubClient || flushing) return;
+    if (flushing) return;
     flushing = true;
     try {
+      // Tokenless-window DLQ retry (no hub client needed): re-append rows whose durable buffering
+      // failed earlier, so a transient DLQ fault self-heals on a later tick instead of losing them.
+      // Rows that still fail are re-retained for the next tick (bounded to the actual failed rows).
+      if (opts.mode === "enforce" && opts.hubUrl && opts.dlqPath && tokenlessRetry.length > 0) {
+        const pending = tokenlessRetry.splice(0, tokenlessRetry.length);
+        for (const rec of pending) {
+          try {
+            appendToDlq(opts.dlqPath, [rec]);
+          } catch {
+            tokenlessRetry.push(rec); // still failing → keep retaining
+          }
+        }
+      }
+      if (!opts.hubClient) return;
       if (outbound.length > 0) {
         // Snapshot without removing: splice ONLY after publish() resolves, so a publish() that throws
         // (HubClient.publish is documented never-throw, but a DLQ ENOSPC/EACCES or corrupt-line edge can
@@ -257,10 +345,16 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
 
   function saveCheckpoint(): void {
     if (!tailer) return;
+    // Persist ALL undelivered rows across a restart: authenticated outbound rows not yet published
+    // AND tokenless rows not yet DLQ'd. Neither survives via the mirror (dedup skips them), so a
+    // crash/kill/SIGTERM after buffering but before delivery would otherwise lose them (Codex P1).
+    // Omit the field entirely on the normal path (both empty) to keep the checkpoint lean.
+    const pending = [...outbound, ...tokenlessRetry];
     writeCoordinationCheckpoint(opts.checkpointPath, {
       path: tailer.currentPath(),
       offset: tailer.currentOffset(),
       localSeq,
+      ...(pending.length > 0 ? { pendingRetry: pending } : {}),
     });
   }
 
@@ -272,6 +366,7 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     saveCheckpoint,
     currentLocalSeq: () => localSeq,
     outboundDepth: () => outbound.length,
+    tokenlessRetryDepth: () => tokenlessRetry.length,
     getStats: () => ({ ...stats }),
   };
 }
@@ -299,10 +394,13 @@ if (import.meta.main) {
   process.on("SIGTERM", () => ac.abort());
   process.on("SIGINT", () => ac.abort());
 
-  const hubClient =
-    cfg.mode === "enforce" && cfg.hubUrl
-      ? new HubClient({ hubUrl: cfg.hubUrl, dlqPath: DLQ_PATH, eventLogPath: EVENT_LOG_PATH })
-      : undefined;
+  const secretContractSpecifier = ["../lib/secret-contract.mjs"].join("");
+  const { resolveSecret } = await import(secretContractSpecifier) as { resolveSecret: (id: string) => { value?: string | null } };
+  const cloudToken = resolveSecret("cloud-token").value ?? null;
+
+  const built = buildHubClient(cfg, cloudToken, { dlqPath: DLQ_PATH, eventLogPath: EVENT_LOG_PATH });
+  if (built.reason) console.error(`[coordination-publish] ${built.reason}`);
+  const hubClient = built.client;
 
   const pub = createCoordinationPublisher({
     mode: cfg.mode as CoordinationMode,
@@ -311,6 +409,10 @@ if (import.meta.main) {
     checkpointPath: CHECKPOINT_PATH,
     signal: ac.signal,
     hubClient,
+    // Enable tokenless-window DLQ preservation: when hubUrl is configured but the token is absent
+    // (built.client is undefined), processLine buffers to the DLQ instead of dropping (Codex P1).
+    hubUrl: cfg.hubUrl,
+    dlqPath: DLQ_PATH,
   });
 
   const ckTimer = setInterval(() => pub.saveCheckpoint(), 10_000);
@@ -333,8 +435,15 @@ if (import.meta.main) {
   if (cfg.mode === "enforce") {
     const { createMirrorTailClient, createHubChangeSource } = await import("./lib/mirror-tail-client.ts");
     let source;
-    if (cfg.hubUrl) {
-      source = createHubChangeSource({ hubUrl: cfg.hubUrl });
+    if (cfg.hubUrl && cloudToken) {
+      // Authenticate the inbound pull with the SAME tenant-bearing token as the outbound
+      // HubClient — the cloud contract derives tenant from the token, so an unauthenticated GET
+      // stalls mirror convergence even while publish succeeds (Codex P1). The hub source is gated
+      // on cloudToken too: in the supported `enforce + hubUrl + no token` branch buildHubClient
+      // already disables OUTBOUND publish, so constructing an unauthenticated hub source here would
+      // just 401 every 2s and emit degradation noise, never the documented inbound-only
+      // degradation — fall through to the interim Loki path instead (Codex P1, round 4).
+      source = createHubChangeSource({ hubUrl: cfg.hubUrl, token: cloudToken });
     } else {
       const lokiUrlSpecifier = ["../execution-core/config.mjs"].join("");
       const { getLokiQueryUrl } = await import(lokiUrlSpecifier);
