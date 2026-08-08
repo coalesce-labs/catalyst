@@ -161,6 +161,25 @@ _escape_repl() {
     -e 's/[&|]/\\&/g'
 }
 
+# _agent_path — PATH for launchd's otherwise-minimal environment (CTL-1289).
+# Mirrors catalyst-stack's _stack_agent_path and install-health-responder.sh's
+# _agent_path exactly — keep all three in sync.
+#
+# This LaunchAgent's plist had NO PATH key at all until this fix, so it ran
+# with launchd's bare default (no ~/.local/bin, no Homebrew). Two things broke
+# silently as a result, confirmed 2026-08-08 on a `catalyst-join`-joined
+# member: `claude agents --json` (orphan-sweep.sh's _live_bg_ids liveness
+# probe) exit-127'd and silently degraded to '[]', so _is_live_bg() ALWAYS
+# reported "not live" — the exact safety check meant to keep this sweep from
+# flipping a genuinely-running phase signal to failed was permanently blind.
+# `node .../escalation-explain.mjs` exit-127'd the same way, so every
+# escalation this script writes carried an empty `explanation: {}`. Real
+# tickets (CAT-35, CAT-39, and others) were flipped to orphan-sweep-stale by
+# a sweep that could never have detected them as live in the first place.
+_agent_path() {
+  printf '%s\n' "${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
 # ── CTL-1531: the widened-branch rollout knob must SURVIVE reinstallation ───
 #
 # This installer unconditionally regenerates and replaces the LaunchAgent plist,
@@ -235,6 +254,7 @@ _substitute() {
     -e "s|REPLACE_HOME|$(_escape_repl "$HOME")|g" \
     -e "s|REPLACE_START_INTERVAL|${interval}|g" \
     -e "s|REPLACE_SWEEP_PROC_WIDEN|${widen}|g" \
+    -e "s|REPLACE_AGENT_PATH|$(_escape_repl "$(_agent_path)")|g" \
     "$TEMPLATE"
 }
 
