@@ -153,6 +153,28 @@ assert_eq "0" "$RC10" "slugged plan doc satisfies the gate (writer↔gate agreem
 assert_contains "$OUT10" "phase-artifact-gate-contracts.md" "slugged plan doc found by matcher"
 
 echo ""
+echo "Test 11 (regression): match_thoughts_artifact behaves identically sourced under zsh"
+# `shopt` is not a zsh builtin, and the prior bash-array-glob implementation
+# relied on it (`shopt -s nullglob nocaseglob`). Under zsh that call silently
+# failed (non-fatal), then the array-glob assignment hit zsh's own default
+# no-match behavior (error, not empty-expand) on the FIRST alternative pattern
+# that didn't match — which poisoned the ENTIRE assignment, so even an
+# alternative that DID match never made it into `matches`. Confirmed root
+# cause of at least one false "prior artifact missing" plan-phase stall (see
+# CAT-39's friction log — sourced this file under an interactive zsh session,
+# not via `bash -c` as intended). Skips (not a failure) when zsh isn't installed.
+if command -v zsh >/dev/null 2>&1; then
+	ZSH_OUT="$(zsh -c "source '$LIB'; match_thoughts_artifact '$FIXTURES' CTL-1081" 2>&1)"
+	ZSH_RC=$?
+	assert_eq "0" "$ZSH_RC" "zsh: return code is 0 (at least one match)"
+	assert_contains "$ZSH_OUT" "2026-06-12-ctl-1081.md" "zsh: output includes tail form"
+	assert_contains "$ZSH_OUT" "2026-06-12-ctl-1081-per-image-ai-captions.md" "zsh: output includes lowercase slug"
+	assert_not_contains "$ZSH_OUT" "shopt" "zsh: no shopt/command-not-found noise in output"
+else
+	echo "  SKIP: zsh not installed on this host"
+fi
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-artifact-gate: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then
