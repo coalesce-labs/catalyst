@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rules Explorer — how the daemon thinks · Catalyst</title>
+<style>
+/* ── Tokens (mirrors shadcn calm-dark warm-graphite theme) ─────────────── */
+:root{
+  --bg:        #161513;   /* oklch(.188 .004 70) neighborhood */
+  --surface:   #1c1b18;
+  --surface-2: #232220;
+  --surface-3: #2a2825;
+  --border:    #2e2c27;
+  --border-soft:#262420;
+  --ink:       #e9e5dc;
+  --ink-dim:   #a39d91;
+  --ink-faint: #6f6a5f;
+  --rule-line: #3a372f;
+
+  --ok:        #6fbe87;   /* progressing / lease_valid   */
+  --ok-dim:    #3a5a45;
+  --wedge:     #e8ad4a;   /* wedged-never-started        */
+  --wedge-dim: #6b5224;
+  --stall:     #d98a4d;   /* stalled-alive               */
+  --lease:     #c9b35a;   /* lease-expired               */
+  --dead:      #e06a5e;   /* dead                        */
+  --dead-dim:  #5f322d;
+  --esc:       #b29ae9;   /* escalation / diagnostician  */
+  --esc-dim:   #4a3f6b;
+  --thr:       #7fb6c9;   /* thresholds (cfg facts)      */
+  --neg:       #8b8578;   /* stratified negation         */
+  --fact:      #98917f;   /* ground observations         */
+
+  --serif: "Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+  --mono:  ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --sans:  -apple-system,"SF Pro Text",system-ui,"Segoe UI",sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--ink);
+  font-family:var(--serif);font-size:16.5px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:inherit}
+code,pre,.mono{font-family:var(--mono)}
+.page{max-width:1280px;margin:0 auto;padding:0 40px 120px}
+
+/* ── App chrome (minimal shell echo) ───────────────────────────────────── */
+.chrome{
+  display:flex;align-items:center;gap:14px;
+  padding:14px 0 13px;border-bottom:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:12.5px;color:var(--ink-dim);
+}
+.chrome .crumb b{color:var(--ink);font-weight:600}
+.chrome .sep{color:var(--ink-faint)}
+.pill{
+  display:inline-flex;align-items:center;gap:7px;
+  border:1px solid var(--border);border-radius:999px;
+  padding:3px 11px;font-family:var(--sans);font-size:11.5px;
+  color:var(--ink-dim);background:var(--surface);white-space:nowrap;
+}
+.pill .dot{width:7px;height:7px;border-radius:50%}
+.dot-live{background:var(--ok);animation:pulse 2.2s ease-in-out infinite}
+.dot-shadow{background:var(--esc)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.chrome .spacer{flex:1}
+.chrome .tickmeta{font-family:var(--mono);font-size:11.5px;color:var(--ink-faint)}
+.chrome .tickmeta b{color:var(--ink-dim);font-weight:500}
+
+/* ── Masthead ──────────────────────────────────────────────────────────── */
+.masthead{padding:54px 0 8px;max-width:860px}
+.kicker{
+  font-family:var(--sans);font-size:11px;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--ink-faint);margin-bottom:14px;
+}
+h1{font-size:42px;line-height:1.12;font-weight:600;letter-spacing:-.012em}
+h1 .amp{color:var(--ink-faint);font-style:italic;font-weight:400}
+.deck{
+  margin-top:18px;font-size:19px;line-height:1.55;color:var(--ink-dim);
+  font-style:italic;max-width:760px;
+}
+.deck b{color:var(--ink);font-style:normal;font-weight:500}
+
+/* ── Section scaffolding ───────────────────────────────────────────────── */
+section{margin-top:84px}
+.sec-label{
+  font-family:var(--sans);font-size:11px;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--ink-faint);
+  display:flex;align-items:baseline;gap:14px;margin-bottom:10px;
+}
+.sec-label::after{content:"";flex:1;height:1px;background:var(--border-soft);align-self:center}
+.sec-label .n{color:var(--wedge);font-family:var(--mono);letter-spacing:0}
+h2{font-size:27px;font-weight:600;letter-spacing:-.008em;margin-bottom:8px}
+.lede{color:var(--ink-dim);max-width:740px;margin-bottom:30px}
+.lede code{font-size:.85em;color:var(--ink);background:var(--surface-2);padding:1px 5px;border-radius:4px}
+
+/* ── Figure 1: the diagram ─────────────────────────────────────────────── */
+.figure{
+  border:1px solid var(--border);border-radius:14px;background:var(--surface);
+  overflow-x:auto;position:relative;
+}
+.canvas{position:relative;width:1196px;height:548px;margin:0 auto}
+.canvas svg{position:absolute;inset:0;pointer-events:none}
+.band{position:absolute;top:0;bottom:0;border-left:1px dashed var(--border-soft)}
+.band-label{
+  position:absolute;top:14px;font-family:var(--sans);font-size:10.5px;
+  letter-spacing:.18em;text-transform:uppercase;color:var(--ink-faint);
+}
+.band-label b{color:var(--ink-dim);font-weight:600}
+
+/* nodes */
+.node{
+  position:absolute;border:1px solid var(--border);border-radius:10px;
+  background:var(--surface-2);padding:9px 12px 10px;
+  font-family:var(--sans);
+}
+.node .nh{display:flex;align-items:baseline;gap:8px;margin-bottom:2px}
+.node .nname{font-family:var(--mono);font-size:11px;color:var(--ink);font-weight:500;white-space:nowrap}
+.node .nsub{font-family:var(--mono);font-size:10px;color:var(--ink-faint);line-height:1.5}
+.node .ncount{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.rid{
+  display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:600;
+  border-radius:4px;padding:1px 5px;letter-spacing:.02em;
+  background:var(--surface-3);color:var(--ink-dim);border:1px solid var(--border);
+  text-decoration:none;
+}
+a.rid:hover{color:var(--ink);border-color:var(--ink-faint)}
+.rid.s1{color:var(--fact)}
+.rid.s2-ok{color:var(--ok);border-color:var(--ok-dim)}
+.rid.s2-wedge{color:var(--wedge);border-color:var(--wedge-dim)}
+.rid.s2-dead{color:var(--dead);border-color:var(--dead-dim)}
+.rid.s2-lease{color:var(--lease)}
+.rid.s2-stall{color:var(--stall)}
+.rid.s3{color:var(--thr)}
+.rid.s4{color:var(--esc);border-color:var(--esc-dim)}
+
+.node.quiet{border-style:solid;opacity:.78}
+.node.hot-wedge{border-color:var(--wedge-dim);box-shadow:0 0 0 1px var(--wedge-dim),0 8px 28px -14px rgba(232,173,74,.45)}
+.node.hot-dead{border-color:var(--dead-dim)}
+.node.hot-esc{border-color:var(--esc-dim);box-shadow:0 0 0 1px var(--esc-dim),0 8px 28px -14px rgba(178,154,233,.4)}
+.node.gauge{border-color:#33414a}
+
+.tok{
+  display:flex;align-items:center;gap:7px;margin-top:5px;
+  font-family:var(--mono);font-size:10px;color:var(--ink-dim);
+  background:var(--surface);border:1px solid var(--border-soft);
+  border-radius:6px;padding:3px 7px;text-decoration:none;
+}
+.tok .td{width:6px;height:6px;border-radius:50%;flex:none}
+.tok .age{margin-left:auto;color:var(--ink-faint)}
+.tok-wedge .td{background:var(--wedge)}
+.tok-dead .td{background:var(--dead)}
+.tok.sel{
+  border-color:var(--wedge);color:var(--ink);
+  box-shadow:0 0 0 1px var(--wedge-dim);cursor:pointer;
+}
+.tok.sel:hover{background:var(--surface-3)}
+.tok.sel .why{color:var(--wedge);font-size:9.5px;letter-spacing:.06em}
+
+.gauge-big{font-family:var(--mono);font-size:40px;line-height:1;color:var(--ink);margin:6px 0 2px;font-weight:300}
+.gauge-big small{font-size:11px;color:var(--ink-faint);font-weight:400}
+.bar{height:5px;border-radius:3px;background:var(--surface);border:1px solid var(--border-soft);margin:7px 0 2px;overflow:hidden}
+.bar i{display:block;height:100%}
+.bar-lab{font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);display:flex;justify-content:space-between}
+
+.intent-quote{
+  margin-top:7px;font-family:var(--mono);font-size:10px;line-height:1.55;
+  color:var(--ink-dim);background:var(--surface);border:1px solid var(--border-soft);
+  border-left:2px solid var(--esc);border-radius:6px;padding:6px 9px;
+}
+.intent-quote b{color:var(--dead);font-weight:500}
+
+/* annotation markers */
+.ann{
+  position:absolute;width:19px;height:19px;border-radius:50%;
+  background:var(--bg);border:1px solid var(--ink-faint);color:var(--ink-dim);
+  font-family:var(--sans);font-size:10.5px;display:flex;align-items:center;
+  justify-content:center;z-index:3;
+}
+
+/* svg edges */
+.edge{fill:none;stroke:var(--rule-line);stroke-width:1.3}
+.edge.neg{stroke-dasharray:4 4;stroke:var(--neg);opacity:.75}
+.edge.ok{stroke:var(--ok-dim)}
+.edge.dead{stroke:var(--dead-dim)}
+.edge.lease{stroke:#5c5331}
+.edge.esc{stroke:var(--esc-dim)}
+.edge.fire{
+  stroke:var(--wedge);stroke-width:1.7;stroke-dasharray:7 5;
+  animation:flow 1.1s linear infinite;
+  filter:drop-shadow(0 0 4px rgba(232,173,74,.35));
+}
+@keyframes flow{to{stroke-dashoffset:-12}}
+.elabel{font-family:var(--mono);font-size:9.5px;fill:var(--ink-faint)}
+.elabel.hot{fill:var(--wedge)}
+
+.figcap{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:22px;
+  padding:18px 26px 20px;border-top:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:12.5px;line-height:1.55;color:var(--ink-dim);
+}
+.figcap .cn{color:var(--ink);font-weight:600;margin-right:6px}
+.legend{
+  display:flex;flex-wrap:wrap;gap:18px;align-items:center;
+  padding:12px 26px;border-top:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:11.5px;color:var(--ink-faint);
+}
+.legend .li{display:inline-flex;align-items:center;gap:7px}
+.lswatch{width:22px;height:0;border-top:1.6px solid var(--rule-line)}
+.lswatch.neg{border-top-style:dashed;border-top-color:var(--neg)}
+.lswatch.fire{border-top-color:var(--wedge)}
+
+/* ── Why-trace + feed split ────────────────────────────────────────────── */
+.split{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(330px,1fr);gap:28px;align-items:start}
+.panel{border:1px solid var(--border);border-radius:14px;background:var(--surface)}
+.panel-h{
+  display:flex;align-items:baseline;gap:10px;padding:16px 22px 14px;
+  border-bottom:1px solid var(--border-soft);
+}
+.panel-h h3{font-size:17px;font-weight:600}
+.panel-h .meta{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
+.panel-b{padding:20px 24px 24px}
+
+.verdict{font-size:18.5px;line-height:1.6;max-width:640px}
+.verdict .hl{color:var(--wedge)}
+.verdict .neg-hl{color:var(--ink-dim);font-style:italic}
+.verdict-sub{margin-top:10px;font-family:var(--sans);font-size:12.5px;color:var(--ink-faint)}
+
+/* trace tree */
+.trace{margin-top:22px}
+.tn{position:relative;padding:10px 0 2px 26px;margin-left:6px;border-left:1px solid var(--border-soft)}
+.tn:last-child{border-left-color:transparent}
+.tn::before{
+  content:"";position:absolute;left:-1px;top:23px;width:18px;height:1px;
+  background:var(--border-soft);
+}
+.tn-card{border:1px solid var(--border-soft);border-radius:9px;background:var(--surface-2);padding:10px 14px 11px}
+.tn-belief>.tn-card{border-left:2px solid var(--wedge-dim)}
+.tn-root>.tn-card{border-left:2px solid var(--esc);background:linear-gradient(180deg,#242031,var(--surface-2) 60%)}
+.tn-fact>.tn-card{border-left:2px solid var(--border);background:var(--surface)}
+.tn-thr>.tn-card{border-left:2px solid var(--thr)}
+.tn-neg>.tn-card{border-left:2px dashed var(--neg);background:var(--surface)}
+.tn-head{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.tn-label{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+.tn-neg .tn-label{color:var(--ink-dim)}
+.tn-fact .tn-label{color:var(--ink-dim)}
+.tn-ts{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);white-space:nowrap}
+.tn-say{font-size:15px;line-height:1.58;color:var(--ink);margin-top:5px}
+.tn-say em{color:var(--ink-dim)}
+.tn-detail{font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--ink-dim);margin-top:5px}
+.tn-detail b{color:var(--ink);font-weight:500}
+.tn-detail .yes{color:var(--ok)}
+.fid{
+  font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);
+  border:1px solid var(--border-soft);border-radius:4px;padding:0 4px;
+}
+.kglyph{font-family:var(--mono);font-size:10px;color:var(--ink-faint)}
+.tn-neg .kglyph{color:var(--neg)}
+.tn-thr .kglyph{color:var(--thr)}
+
+.trace-foot{
+  margin-top:20px;padding-top:16px;border-top:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:12.5px;color:var(--ink-faint);line-height:1.6;
+}
+.trace-foot code{font-size:11px;color:var(--ink-dim)}
+
+/* firing feed */
+.feed{font-family:var(--mono)}
+.feed-row{
+  display:flex;gap:10px;align-items:baseline;padding:7px 22px;
+  border-bottom:1px solid var(--border-soft);font-size:11.5px;color:var(--ink-dim);
+}
+.feed-row:last-child{border-bottom:none}
+.feed-row .t{color:var(--ink-faint);font-size:10.5px;white-space:nowrap}
+.feed-row .s{flex:1;min-width:0;line-height:1.55}
+.feed-row .s b{color:var(--ink);font-weight:500}
+.feed-row.live{background:linear-gradient(90deg,rgba(178,154,233,.10),transparent 70%)}
+.feed-row.live .t{color:var(--esc)}
+.feed-sub{display:block;color:var(--ink-faint);font-size:10.5px;margin-top:2px}
+.feed-sub b{color:var(--dead);font-weight:500}
+.burst{border-left:2px solid var(--wedge);background:rgba(232,173,74,.045)}
+.burst-cap{
+  padding:6px 22px 7px;border-left:2px solid var(--wedge);
+  border-bottom:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:11px;color:var(--wedge);
+  background:rgba(232,173,74,.045);
+}
+.tick-div{
+  padding:7px 22px;font-size:10.5px;color:var(--ink-faint);
+  border-bottom:1px solid var(--border-soft);background:var(--surface);
+  letter-spacing:.04em;
+}
+.feed-row.dim{opacity:.5}
+.feed-foot{
+  padding:11px 22px;font-family:var(--sans);font-size:11px;color:var(--ink-faint);
+  border-top:1px solid var(--border-soft);
+}
+
+/* ── Rule cards ────────────────────────────────────────────────────────── */
+.stratum{margin-top:44px}
+.stratum-h{display:flex;align-items:baseline;gap:14px;margin-bottom:6px}
+.stratum-h .sn{font-family:var(--mono);font-size:13px;color:var(--ink-dim)}
+.stratum-h h3{font-size:20px;font-weight:600}
+.stratum-h .rule-count{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
+.stratum-d{color:var(--ink-dim);font-size:14.5px;max-width:720px;margin-bottom:18px}
+.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
+.card{
+  border:1px solid var(--border);border-radius:12px;background:var(--surface);
+  padding:18px 22px 16px;display:flex;flex-direction:column;gap:10px;
+  scroll-margin-top:24px;
+}
+.card.fired{border-color:var(--wedge-dim)}
+.card.fired-esc{border-color:var(--esc-dim)}
+.card.fired-dead{border-color:var(--dead-dim)}
+.card-h{display:flex;align-items:baseline;gap:10px}
+.card-h .cname{font-family:var(--mono);font-size:14px;color:var(--ink);font-weight:500}
+.fire-pill{
+  margin-left:auto;font-family:var(--mono);font-size:10px;border-radius:999px;
+  padding:2px 9px;white-space:nowrap;
+}
+.fp-hot{color:var(--wedge);border:1px solid var(--wedge-dim);background:rgba(232,173,74,.07)}
+.fp-esc{color:var(--esc);border:1px solid var(--esc-dim);background:rgba(178,154,233,.07)}
+.fp-dead{color:var(--dead);border:1px solid var(--dead-dim);background:rgba(224,106,94,.06)}
+.fp-ok{color:var(--ok);border:1px solid var(--ok-dim)}
+.fp-quiet{color:var(--ink-faint);border:1px solid var(--border)}
+.card-say{font-size:15.5px;line-height:1.58}
+.card-say em{color:var(--ink-dim)}
+.card pre{
+  font-size:11px;line-height:1.65;color:var(--ink-dim);
+  background:var(--bg);border:1px solid var(--border-soft);border-radius:8px;
+  padding:10px 13px;overflow-x:auto;
+}
+.card pre b{color:var(--ink);font-weight:500}
+.card pre .cneg{color:var(--neg)}
+.card pre .ccfg{color:var(--thr)}
+.card-meta{
+  display:flex;flex-wrap:wrap;gap:7px 14px;align-items:center;
+  font-family:var(--mono);font-size:10px;color:var(--ink-faint);
+  padding-top:4px;border-top:1px solid var(--border-soft);
+}
+.card-meta .k{letter-spacing:.08em;text-transform:uppercase;font-size:9px}
+.chip{
+  border:1px solid var(--border-soft);border-radius:4px;padding:1px 6px;
+  color:var(--ink-dim);background:var(--surface-2);white-space:nowrap;
+}
+.chip.neg{border-style:dashed;color:var(--neg)}
+.chip.cfg{color:var(--thr)}
+
+/* ── Thresholds table ──────────────────────────────────────────────────── */
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+th{
+  text-align:left;font-family:var(--sans);font-size:10px;font-weight:600;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);
+  padding:10px 16px;border-bottom:1px solid var(--border);
+}
+td{padding:11px 16px;border-bottom:1px solid var(--border-soft);color:var(--ink-dim);vertical-align:baseline}
+tr:last-child td{border-bottom:none}
+td.key{color:var(--thr)}
+td.val{color:var(--ink);text-align:right}
+td.human{color:var(--ink-faint);font-style:italic;font-family:var(--serif);font-size:13px}
+td .chip{font-size:10px}
+.tbl-note{
+  padding:14px 22px;border-top:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:12.5px;color:var(--ink-faint);line-height:1.6;
+}
+.tbl-note code{font-size:11px;color:var(--ink-dim)}
+
+/* footer */
+footer{
+  margin-top:96px;padding-top:24px;border-top:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:12px;color:var(--ink-faint);line-height:1.8;
+}
+footer code{font-size:11px}
+@media (max-width:1100px){.split{grid-template-columns:1fr}.cards{grid-template-columns:1fr}.figcap{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- ════ chrome ════ -->
+<div class="chrome">
+  <span class="crumb">Catalyst <span class="sep">›</span> Observe <span class="sep">›</span> <b>Rules</b></span>
+  <span class="pill"><span class="dot dot-shadow"></span>shadow mode — observing, not gating</span>
+  <span class="pill"><span class="dot dot-live"></span>live · stream connected</span>
+  <span class="spacer"></span>
+  <span class="tickmeta">tick <b>#6647</b> · 18:35:08Z · host <b>mini</b> · 37 facts → 30 beliefs → 1 intent · 1.8 ms</span>
+</div>
+
+<!-- ════ masthead ════ -->
+<div class="masthead">
+  <div class="kicker">Execution-core · belief store · twelve rules, four strata</div>
+  <h1>How the daemon thinks<span class="amp">, shown thinking.</span></h1>
+  <p class="deck">Every box below is a rule, every edge a derivation, every chip a <b>live worker</b>.
+  Nothing on this page is hand-drawn or hand-written: the diagram is generated from the rules,
+  the sentences are generated from the beliefs, and every claim traces — by click — to the
+  <b>fact rows</b> that forced it.</p>
+</div>
+<!-- ════ §1 · the diagram ════ -->
+<section id="diagram">
+  <div class="sec-label"><span class="n">Fig. 1</span> The liveness state machine, generated from rules-as-data</div>
+  <h2>One incident, visible at a glance</h2>
+  <p class="lede">Read left to right: <em>observations</em> become <em>verdicts</em> become
+  <em>capacity</em> becomes <em>escalation</em> — the four strata of the Datalog program, in
+  evaluation order. Dashed edges are <em>stratified negation</em>: the rule they enter fires only
+  when the rule they leave <em>did not</em>. Right now, tick <code>#6647</code>, host
+  <code>mini</code>: six workers sit wedged before their first turn, two are dead, zero hold leases
+  — and the free-slots gauge still reads 4, because wedged workers consume sessions, never leases.</p>
+
+  <div class="figure">
+    <div class="canvas">
+      <!-- strata bands -->
+      <div class="band" style="left:252px"></div>
+      <div class="band" style="left:712px"></div>
+      <div class="band" style="left:906px"></div>
+      <div class="band-label" style="left:20px"><b>S1</b> · evidence — ground correlations</div>
+      <div class="band-label" style="left:280px"><b>S2</b> · liveness verdicts — negation over S1</div>
+      <div class="band-label" style="left:736px"><b>S3</b> · capacity</div>
+      <div class="band-label" style="left:926px"><b>S4</b> · escalation ladder</div>
+
+      <!-- edges -->
+      <svg viewBox="0 0 1196 548" width="1196" height="548" aria-hidden="true">
+        <defs>
+          <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0.6 L7.4,4 L0,7.4" fill="none" stroke="var(--rule-line)" stroke-width="1.3"/>
+          </marker>
+          <marker id="arr-fire" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+            <path d="M0,0.6 L7.4,4 L0,7.4" fill="none" stroke="var(--wedge)" stroke-width="1.6"/>
+          </marker>
+          <marker id="arr-esc" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0.6 L7.4,4 L0,7.4" fill="none" stroke="var(--esc-dim)" stroke-width="1.3"/>
+          </marker>
+          <marker id="inhibit" viewBox="0 0 8 10" refX="6" refY="5" markerWidth="7" markerHeight="9" orient="auto">
+            <path d="M6,0 L6,10" fill="none" stroke="var(--neg)" stroke-width="1.8"/>
+          </marker>
+        </defs>
+
+        <!-- S1 → S2 -->
+        <path class="edge" d="M224,84 C252,84 250,132 268,132" marker-end="url(#arr)"/>
+        <text class="elabel" x="240" y="105">R4</text>
+        <path class="edge neg" d="M224,168 C250,168 250,192 268,192" marker-end="url(#inhibit)"/>
+        <text class="elabel" x="234" y="186">¬R2</text>
+        <path class="edge ok" d="M224,260 C400,260 360,88 516,88" marker-end="url(#arr)"/>
+        <text class="elabel" x="524" y="46">R5 · evidence fresh</text>
+        <path class="edge lease" d="M224,278 C320,326 460,320 516,236" marker-end="url(#arr)"/>
+        <text class="elabel" x="330" y="334">R6 · evidence stale</text>
+        <path class="edge neg" d="M224,352 C256,352 252,252 268,252" marker-end="url(#inhibit)"/>
+        <text class="elabel" x="230" y="332">¬R7</text>
+        <path class="edge dead" d="M224,368 C252,368 250,382 268,382" marker-end="url(#arr)"/>
+        <text class="elabel" x="240" y="392">R7</text>
+
+        <!-- lease-expired → stalled-alive placement refinement -->
+        <path class="edge neg" d="M605,266 L605,289" marker-end="url(#arr)"/>
+        <text class="elabel" x="613" y="282">obs_job=working</text>
+
+        <!-- S2 → S4 (firing) -->
+        <path class="edge fire" d="M492,150 C640,138 800,142 918,138" marker-end="url(#arr-fire)"/>
+        <text class="elabel hot" x="690" y="130">R10 · "never-started" · firing now</text>
+        <path class="edge esc" d="M694,330 C780,384 897,378 897,272 C897,214 908,188 922,184" marker-end="url(#arr-esc)"/>
+        <text class="elabel" x="744" y="394">R10 · "stalled-alive"</text>
+
+        <!-- S2 → S3 -->
+        <path class="edge ok" d="M694,80 C760,80 800,112 808,164" marker-end="url(#arr)"/>
+        <text class="elabel" x="704" y="68">R8 · count lease_valid = 0</text>
+
+        <!-- S4 ladder -->
+        <path class="edge esc" d="M1049,258 L1049,274" marker-end="url(#arr-esc)"/>
+        <text class="elabel" x="1059" y="271">outcome: null</text>
+        <path class="edge esc" d="M1049,353 L1049,368" marker-end="url(#arr-esc)"/>
+        <text class="elabel" x="1059" y="366">≥ max_attempts (2)</text>
+      </svg>
+
+      <!-- S1 nodes -->
+      <div class="node quiet" style="left:20px;top:52px;width:204px">
+        <div class="nh"><a class="rid s1" href="#rule-r1">R1</a><span class="nname">session_registered</span><span class="ncount">×6</span></div>
+        <div class="nsub">obs_signal ⋈ obs_agent</div>
+      </div>
+      <div class="node quiet" style="left:20px;top:128px;width:204px">
+        <div class="nh"><a class="rid s1" href="#rule-r2">R2</a><span class="nname">turn_started</span><span class="ncount" style="color:var(--wedge)">×0</span></div>
+        <div class="nsub">transcript exists — healthy sessions write it in ~0.3 s. <span style="color:var(--wedge)">Zero this tick.</span></div>
+      </div>
+      <div class="node quiet" style="left:20px;top:236px;width:204px">
+        <div class="nh"><a class="rid s1" href="#rule-r3">R3</a><span class="nname">progress_evidence</span><span class="ncount">×8</span></div>
+        <div class="nsub">max(heartbeat, transcript, signal) — newest sign of work</div>
+      </div>
+      <div class="node quiet" style="left:20px;top:330px;width:204px">
+        <div class="nh"><a class="rid s1" href="#rule-r7">R7</a><span class="nname">worker_dead</span><span class="ncount" style="color:var(--dead)">×2</span></div>
+        <div class="nsub">obs_job terminal · gone · stopped</div>
+      </div>
+      <div class="node quiet" style="left:20px;top:422px;width:204px;border-style:dashed">
+        <div class="nsub" style="font-size:10px">
+          <span style="color:var(--ink-dim)">tick #6647</span> · now 18:35:08Z<br>
+          <span style="color:var(--thr)">cfg</span> · 7 thresholds <a class="rid s3" href="#thresholds" style="margin-left:4px">view</a><br>
+          <span style="color:var(--ink-faint)">now is a fact, never a clock</span>
+        </div>
+      </div>
+
+      <!-- S2 col A -->
+      <div class="node hot-wedge" style="left:268px;top:88px;width:224px">
+        <div class="nh"><a class="rid s2-wedge" href="#rule-r4">R4</a><span class="nname">wedged-never-started</span><span class="ncount" style="color:var(--wedge)">6</span></div>
+        <a class="tok tok-wedge sel" href="#why-trace">CTL-722 · plan<span class="age">9h39m</span><span class="why">why ↓</span></a>
+        <div class="tok tok-wedge">CTL-865 · plan<span class="age">9h44m</span></div>
+        <div class="tok tok-wedge">CTL-729 · remediate<span class="age">9h22m</span></div>
+        <div class="tok tok-wedge">CTL-926 · plan<span class="age">9h04m</span></div>
+        <div class="tok tok-wedge">CTL-925 · research<span class="age">8h40m</span></div>
+        <div class="tok tok-wedge">CTL-928 · plan<span class="age">8h15m</span></div>
+      </div>
+      <div class="node hot-dead" style="left:268px;top:338px;width:224px">
+        <div class="nh"><a class="rid s2-dead" href="#rule-r7">R7</a><span class="nname">dead</span><span class="ncount" style="color:var(--dead)">2</span></div>
+        <div class="tok tok-dead" style="font-size:9.5px">CTL-718 · monitor-merge<span class="age">14h13m</span></div>
+        <div class="tok tok-dead">CTL-731 · verify<span class="age">14h13m</span></div>
+      </div>
+
+      <!-- S2 col B -->
+      <div class="node quiet" style="left:516px;top:52px;width:178px">
+        <div class="nh"><a class="rid s2-ok" href="#rule-r5">R5</a><span class="nname">progressing</span><span class="ncount">0</span></div>
+        <div class="nsub">lease_valid — no worker holds one</div>
+      </div>
+      <div class="node quiet" style="left:516px;top:158px;width:178px;height:104px">
+        <div class="nh"><a class="rid s2-lease" href="#rule-r6">R6</a><span class="nname">lease-expired</span><span class="ncount">6*</span></div>
+        <div class="nsub">* co-derived for the six wedged; R4 is more specific and wins placement</div>
+      </div>
+      <div class="node quiet" style="left:516px;top:292px;width:178px">
+        <div class="nh"><a class="rid s2-stall" href="#rule-r10">R10b</a><span class="nname">stalled-alive</span><span class="ncount">0</span></div>
+        <div class="nsub">lease expired and the job still says working</div>
+      </div>
+
+      <!-- S3 gauge -->
+      <div class="node gauge" style="left:736px;top:168px;width:152px">
+        <div class="nh"><a class="rid s3" href="#rule-r8">R8</a><span class="nname">free_slots</span></div>
+        <div class="gauge-big">4<small style="display:block;margin-top:3px">= min(6−0, 10−6)</small></div>
+        <div class="bar"><i style="width:0%;background:var(--ok)"></i></div>
+        <div class="bar-lab"><span>leases</span><span>0 / 6</span></div>
+        <div class="bar"><i style="width:60%;background:var(--wedge-dim)"></i></div>
+        <div class="bar-lab"><span>sessions</span><span>6 / 10</span></div>
+        <div class="nsub" style="margin-top:8px">→ feeds admission · shadow only</div>
+      </div>
+
+      <!-- S4 nodes -->
+      <div class="node hot-esc" style="left:926px;top:84px;width:252px">
+        <div class="nh"><a class="rid s4" href="#rule-r10">R10</a><span class="nname">wake_diagnostician</span><span class="ncount" style="color:var(--esc)">→ i1</span></div>
+        <div class="nsub">the daemon detects; the agent interprets</div>
+        <div class="intent-quote">i1 · CTL-722/plan · runner attached →<br>claude logs 5ad5c1ff →<br><b>"Unknown command: /catalyst-dev:phase-plan"</b></div>
+      </div>
+      <div class="node quiet" style="left:926px;top:278px;width:246px">
+        <div class="nh"><a class="rid s4" href="#rule-r11">R11</a><span class="nname">action_ineffective</span><span class="ncount">0</span></div>
+        <div class="nsub">acted, world unchanged → stop this channel</div>
+      </div>
+      <div class="node quiet" style="left:926px;top:372px;width:246px">
+        <div class="nh"><a class="rid s4" href="#rule-r12">R12</a><span class="nname">escalate_human</span><span class="ncount">0</span></div>
+        <div class="nsub">needs-human as a conclusion with provenance, not a label lost in a branch</div>
+      </div>
+
+      <!-- annotations -->
+      <div class="ann" style="left:228px;top:154px">1</div>
+      <div class="ann" style="left:472px;top:78px">2</div>
+      <div class="ann" style="left:744px;top:148px">3</div>
+      <div class="ann" style="left:640px;top:118px">4</div>
+    </div>
+
+    <div class="legend">
+      <span class="li"><span class="lswatch"></span>derives</span>
+      <span class="li"><span class="lswatch neg"></span>⊣ stratified negation — fires only if this did <i>not</i></span>
+      <span class="li"><span class="lswatch fire"></span>pulsing — fired this tick</span>
+      <span class="li"><span style="width:8px;height:8px;border-radius:50%;background:var(--wedge);display:inline-block"></span>worker token — click for its why-trace</span>
+      <span class="li mono" style="font-size:10.5px">layout: elkjs over diagramEdges(RULES) — never hand-drawn</span>
+    </div>
+    <div class="figcap">
+      <div><span class="cn">1</span>The absence that matters. R2 derived zero <code>turn_started</code> beliefs — six prompts were delivered to sessions that never began to think. In the old code this was four unreconciled staleness constants; here it is one dashed edge.</div>
+      <div><span class="cn">2</span>The 2026-06-09 class. Six workers crossed the 2-minute <code>never_started_ms</code> threshold within 5 ms of each other — a marketplace failure, not six coincidences.</div>
+      <div><span class="cn">3</span>The board drains instead of starving. Wedged workers hold sessions (10−6) but never leases (6−0), so R8 still finds 4 free slots. The old slots-full branch read 0 here, silently.</div>
+      <div><span class="cn">4</span>Storm-proof by construction. R10's cooldown is an <code>intent</code> fact, negated in S4 — re-firing inside 15 minutes is unrepresentable, not merely discouraged.</div>
+    </div>
+  </div>
+</section>
+<!-- ════ §2 · why-trace + firing feed ════ -->
+<section id="why-trace">
+  <div class="sec-label"><span class="n">§2</span> Provenance — every belief answers for itself</div>
+  <h2>Why did the daemon wake the diagnostician for CTL-722?</h2>
+  <p class="lede">Clicking any worker token renders <code>catalyst why</code> — one recursive query
+  over <code>belief.source_fact_ids</code>. What was <em>checked and found absent</em> is shown with
+  the same weight as what was found: negations and thresholds are first-class nodes, not footnotes.
+  Today's ten-hour archaeology, as one paragraph and its receipts.</p>
+
+  <div class="split">
+    <!-- ── left: the trace ── -->
+    <div class="panel">
+      <div class="panel-h">
+        <h3>Why-trace · CTL-722 / plan</h3>
+        <span class="meta">tick #6647 · 18:35:08Z · session 5ad5c1ff</span>
+      </div>
+      <div class="panel-b">
+        <p class="verdict">Believed <span class="hl">wedged before its first turn</span> because the
+        session registered <b>9 h 39 m</b> ago and <span class="neg-hl">no transcript ever
+        appeared</span> — 34,724,000 ms against a 120,000 ms threshold — while the job still
+        claimed to be <i>working</i> and Claude Code never recorded a terminal state. So rule R10
+        woke the diagnostician, which read the screen and found the actual wedge:
+        <span class="hl">“Unknown command: /catalyst-dev:phase-plan.”</span></p>
+        <p class="verdict-sub">3 beliefs · 4 facts · 2 thresholds · 3 negations — every line below is a row.</p>
+
+        <div class="trace">
+          <!-- b4 root -->
+          <div class="tn tn-root">
+            <div class="tn-card">
+              <div class="tn-head"><a class="rid s4" href="#rule-r10">R10</a><code class="tn-label">wake_diagnostician(CTL-722, plan, "never-started")</code><span class="fid">b4</span><span class="tn-ts">+410 ms</span></div>
+              <div class="tn-say">The state was one the daemon cannot resolve deterministically, and no recent wake had been attempted — so it raised intent <em>i1</em> rather than killing an alive worker.</div>
+              <div class="tn-detail">intent i1 dispatched → runner captured <b>claude logs 5ad5c1ff</b> → <b>"Unknown command: /catalyst-dev:phase-plan"</b></div>
+            </div>
+
+            <!-- b2 -->
+            <div class="tn tn-belief">
+              <div class="tn-card">
+                <div class="tn-head"><a class="rid s2-wedge" href="#rule-r4">R4</a><code class="tn-label">wedged_never_started(CTL-722, plan)</code><span class="fid">b2</span><span class="tn-ts">+223 ms</span></div>
+                <div class="tn-say">Registered, old enough, and the first turn never came: <em>believed wedged because no transcript after 9 h 39 m, against a 2 m threshold.</em></div>
+                <div class="tn-detail">age 34,724,000 ms ≫ never_started_ms 120,000 ms <span class="yes">✓</span> · ¬turn_started <span class="yes">✓</span> · ¬worker_dead <span class="yes">✓</span></div>
+              </div>
+
+              <!-- b1 -->
+              <div class="tn tn-belief">
+                <div class="tn-card">
+                  <div class="tn-head"><a class="rid s1" href="#rule-r1">R1</a><code class="tn-label">session_registered(CTL-722, plan, 5ad5c1ff)</code><span class="fid">b1</span></div>
+                  <div class="tn-say">The signal's background job appears in the live agents listing — the worker exists, as far as Claude Code is concerned.</div>
+                </div>
+                <div class="tn tn-fact">
+                  <div class="tn-card">
+                    <div class="tn-head"><span class="kglyph">▪ fact</span><code class="tn-label">obs_signal CTL-722/plan</code><span class="fid">f101</span><span class="tn-ts">08:56:24Z</span></div>
+                    <div class="tn-detail">status=<b>running</b> · bg_job_id=<b>5ad5c1ff</b> · started 2026-06-09T08:56:24Z</div>
+                  </div>
+                </div>
+                <div class="tn tn-fact">
+                  <div class="tn-card">
+                    <div class="tn-head"><span class="kglyph">▪ fact</span><code class="tn-label">obs_agent 5ad5c1ff</code><span class="fid">f102</span></div>
+                    <div class="tn-detail">kind=background · status=idle · state=<b>blocked</b> · pid=41782 <span style="color:var(--ink-faint)">— the field the procedural code never read</span></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- timestamps -->
+              <div class="tn tn-fact">
+                <div class="tn-card">
+                  <div class="tn-head"><span class="kglyph">▪ fact</span><code class="tn-label">obs_signal.started_at_ms</code><span class="fid">f101</span></div>
+                  <div class="tn-detail">1780995384000 <span style="color:var(--ink-faint)">(08:56:24Z)</span></div>
+                </div>
+              </div>
+              <div class="tn tn-fact">
+                <div class="tn-card">
+                  <div class="tn-head"><span class="kglyph">▪ fact</span><code class="tn-label">tick.now_ms</code><span class="fid">t6647</span></div>
+                  <div class="tn-detail">1781030108000 <span style="color:var(--ink-faint)">(18:35:08Z) — time entered the derivation here and nowhere else</span></div>
+                </div>
+              </div>
+
+              <!-- threshold -->
+              <div class="tn tn-thr">
+                <div class="tn-card">
+                  <div class="tn-head"><span class="kglyph">◆ threshold</span><code class="tn-label">cfg never_started_ms = 120,000</code><span class="fid">cfg</span></div>
+                  <div class="tn-detail">from .catalyst/config.json → catalyst.beliefs.neverStartedMs · used by R4<br>guard: now − started_at = <b>34,724,000</b> &gt; 120,000 <span class="yes">✓ (289× over)</span></div>
+                </div>
+              </div>
+
+              <!-- negations -->
+              <div class="tn tn-neg">
+                <div class="tn-card">
+                  <div class="tn-head"><span class="kglyph">¬ checked, absent</span><code class="tn-label">turn_started(CTL-722, plan)</code></div>
+                  <div class="tn-say"><em>No R2 belief exists this tick — the prompt never became a turn.</em></div>
+                </div>
+                <div class="tn tn-fact">
+                  <div class="tn-card">
+                    <div class="tn-head"><span class="kglyph">▪ fact</span><code class="tn-label">obs_transcript 5ad5c1ff</code><span class="fid">f104</span></div>
+                    <div class="tn-detail">exists_flag=<b>0</b> · mtime=null · bytes=null <span style="color:var(--ink-faint)">— absent at T+9h39m; healthy sessions write it in ~0.3 s</span></div>
+                  </div>
+                </div>
+              </div>
+              <div class="tn tn-neg">
+                <div class="tn-card">
+                  <div class="tn-head"><span class="kglyph">¬ checked, absent</span><code class="tn-label">worker_dead(CTL-722, plan)</code></div>
+                  <div class="tn-say"><em>No R7 belief — Claude Code never pronounced this job dead, so no reclaim path may touch it.</em></div>
+                </div>
+                <div class="tn tn-fact">
+                  <div class="tn-card">
+                    <div class="tn-head"><span class="kglyph">▪ fact</span><code class="tn-label">obs_job 5ad5c1ff</code><span class="fid">f103</span></div>
+                    <div class="tn-detail">state=<b>working</b> · tempo=blocked · detail=<b>"stuck on a startup dialog"</b> · first_terminal_at=null</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- cooldown negation + threshold -->
+            <div class="tn tn-neg">
+              <div class="tn-card">
+                <div class="tn-head"><span class="kglyph">¬ checked, absent</span><code class="tn-label">recent_intent("wake-diagnostician", CTL-722/plan, 900,000 ms)</code></div>
+                <div class="tn-say"><em>No wake intent for this subject within the cooldown window — storms are structurally impossible, not merely discouraged.</em></div>
+              </div>
+            </div>
+            <div class="tn tn-thr">
+              <div class="tn-card">
+                <div class="tn-head"><span class="kglyph">◆ threshold</span><code class="tn-label">cfg diag_cooldown_ms = 900,000</code><span class="fid">cfg</span></div>
+                <div class="tn-detail">used by R10 · 15 m</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="trace-foot">
+          This panel is one query, not a feature: <code>WITH RECURSIVE trace AS (SELECT belief_id …
+          UNION SELECT json_each(source_fact_ids) …)</code> walked from b4. Re-running the rules over
+          tick #6647's stored facts reproduces it byte-for-byte — <i>now</i> is a fact, never a clock.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── right: firing feed ── -->
+    <div class="panel" id="feed">
+      <div class="panel-h">
+        <h3>Belief feed</h3>
+        <span class="pill" style="margin-left:2px"><span class="dot dot-live"></span>streaming</span>
+        <span class="meta">SSE · new belief rows</span>
+      </div>
+      <div class="feed">
+        <div class="feed-row live">
+          <span class="t">18:35:08.410</span>
+          <span class="s"><a class="rid s4" href="#rule-r10">R10</a> <b>wake_diagnostician</b>(CTL-722/plan, never-started) → intent i1
+            <span class="feed-sub">runner attached: claude logs 5ad5c1ff → <b>"Unknown command: /catalyst-dev:phase-plan"</b></span>
+          </span>
+        </div>
+        <div class="feed-row">
+          <span class="t">18:35:08.231</span>
+          <span class="s"><a class="rid s3" href="#rule-r8">R8</a> <b>free_slots = 4</b> — min(6−0 leases, 10−6 sessions)</span>
+        </div>
+        <div class="burst-cap">▾ 6 workers declared wedged within 5 ms — the incident's signature</div>
+        <div class="feed-row burst"><span class="t">18:35:08.228</span><span class="s"><a class="rid s2-wedge" href="#rule-r4">R4</a> <b>wedged_never_started</b> CTL-928/plan · 8h15m</span></div>
+        <div class="feed-row burst"><span class="t">18:35:08.227</span><span class="s"><a class="rid s2-wedge" href="#rule-r4">R4</a> <b>wedged_never_started</b> CTL-925/research · 8h40m</span></div>
+        <div class="feed-row burst"><span class="t">18:35:08.226</span><span class="s"><a class="rid s2-wedge" href="#rule-r4">R4</a> <b>wedged_never_started</b> CTL-926/plan · 9h04m</span></div>
+        <div class="feed-row burst"><span class="t">18:35:08.225</span><span class="s"><a class="rid s2-wedge" href="#rule-r4">R4</a> <b>wedged_never_started</b> CTL-729/remediate · 9h22m</span></div>
+        <div class="feed-row burst"><span class="t">18:35:08.224</span><span class="s"><a class="rid s2-wedge" href="#rule-r4">R4</a> <b>wedged_never_started</b> CTL-865/plan · 9h44m</span></div>
+        <div class="feed-row burst"><span class="t">18:35:08.223</span><span class="s"><a class="rid s2-wedge" href="#rule-r4">R4</a> <b>wedged_never_started</b> <b>CTL-722/plan</b> · 9h39m <a href="#why-trace" style="color:var(--wedge);text-decoration:none">· traced ↑</a></span></div>
+        <div class="feed-row">
+          <span class="t">18:35:08.219</span>
+          <span class="s"><a class="rid s2-lease" href="#rule-r6">R6</a> <b>lease_expired</b> ×6 — co-derived; display defers to the more specific R4</span>
+        </div>
+        <div class="feed-row"><span class="t">18:35:08.180</span><span class="s"><a class="rid s2-dead" href="#rule-r7">R7</a> <b>worker_dead</b> CTL-718/monitor-merge — first_terminal_at set</span></div>
+        <div class="feed-row"><span class="t">18:35:08.179</span><span class="s"><a class="rid s2-dead" href="#rule-r7">R7</a> <b>worker_dead</b> CTL-731/verify — first_terminal_at set</span></div>
+        <div class="feed-row"><span class="t">18:35:08.118</span><span class="s"><a class="rid s1" href="#rule-r3">R3</a> <b>progress_evidence</b> ×8 — newest evidence is signal.updated_at only; no transcripts, no heartbeats</span></div>
+        <div class="feed-row"><span class="t">18:35:08.061</span><span class="s"><a class="rid s1" href="#rule-r1">R1</a> <b>session_registered</b> ×6</span></div>
+        <div class="feed-row"><span class="t">18:35:08.000</span><span class="s">tick <b>#6647</b> opened — 37 facts ingested from 6 sources</span></div>
+        <div class="tick-div">tick #6646 · 18:35:03 — same verdicts re-derived · no state changes</div>
+        <div class="feed-row dim"><span class="t">18:35:03.402</span><span class="s"><span class="rid s3">R8</span> free_slots = 4</span></div>
+        <div class="feed-row dim"><span class="t">18:35:03.214</span><span class="s"><span class="rid s2-wedge">R4</span> wedged_never_started ×6</span></div>
+      </div>
+      <div class="feed-foot">Auto-follows newest · pauses while you scroll · each row pulses its rule's edge and its subject's token on the diagram above.</div>
+    </div>
+  </div>
+</section>
+<!-- ════ §3 · the rules ════ -->
+<section id="rules">
+  <div class="sec-label"><span class="n">§3</span> The twelve rules — the program, in full</div>
+  <h2>Rules as data, read as prose</h2>
+  <p class="lede">This is the entire liveness brain: twelve stratified Datalog rules, hand-compiled
+  to SQL over <code>bun:sqlite</code>. Each card is generated from the same <code>RULES</code>
+  constant that generates Figure 1 — there is no second copy to drift. Evaluation runs the strata in
+  order, once per 5-second tick, inside a transaction; no recursion crosses a negation.</p>
+
+  <!-- S1 -->
+  <div class="stratum">
+    <div class="stratum-h"><span class="sn">S1</span><h3>Ground correlations</h3><span class="rule-count">4 rules · pure joins over observations · negation forbidden here</span></div>
+    <p class="stratum-d">Nothing in this stratum judges. It only correlates raw observations into
+    facts-about-workers that later strata may safely negate.</p>
+    <div class="cards">
+      <div class="card" id="rule-r1">
+        <div class="card-h"><span class="rid s1">R1</span><span class="cname">session_registered</span><span class="fire-pill fp-hot">fired ×6 this tick</span></div>
+        <p class="card-say">A session is registered when the phase signal's background job appears in
+        the live agents listing — <em>the worker exists, as far as Claude Code is concerned.</em></p>
+        <pre><b>session_registered</b>(T, P, Sid) :-
+    obs_signal(T, P, _, Job, _), short_of(Job, Short),
+    obs_agent(Sid, Short, kind: "background").</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">obs_signal</span><span class="chip">obs_agent</span></div>
+      </div>
+      <div class="card" id="rule-r2">
+        <div class="card-h"><span class="rid s1">R2</span><span class="cname">turn_started</span><span class="fire-pill fp-quiet">×0 — the absence that matters</span></div>
+        <p class="card-say">A turn has started when the session's transcript file exists. <em>Healthy
+        sessions create it about 0.3 seconds after spawn; wedged ones never do.</em></p>
+        <pre><b>turn_started</b>(T, P) :-
+    obs_signal(T, P, _, Job, _), session_of(Job, Sid),
+    obs_transcript(Sid, exists: 1).</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">obs_signal</span><span class="chip">obs_transcript</span><span class="k" style="margin-left:auto">negated by</span><span class="chip neg">R4</span></div>
+      </div>
+      <div class="card" id="rule-r3">
+        <div class="card-h"><span class="rid s1">R3</span><span class="cname">progress_evidence</span><span class="fire-pill fp-hot">fired ×8 this tick</span></div>
+        <p class="card-say">Progress evidence is the newest positive sign of work on any channel — a
+        heartbeat, transcript growth, or a signal update. <em>Commits and artifact bytes join in when
+        the collector grows those probes.</em></p>
+        <pre><b>progress_evidence</b>(T, P, max(Ts)) :-
+    obs_heartbeat(T, P, _, _, Ts)
+  ; obs_transcript(session_of_signal(T,P), mtime: Ts)
+  ; obs_signal(T, P, updated_at: Ts).</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">obs_heartbeat</span><span class="chip">obs_transcript</span><span class="chip">obs_signal</span></div>
+      </div>
+      <div class="card fired-dead" id="rule-r7">
+        <div class="card-h"><span class="rid s2-dead">R7</span><span class="cname">worker_dead</span><span class="fire-pill fp-dead">fired ×2 this tick</span></div>
+        <p class="card-say">A worker is dead when Claude Code itself says so: the job directory is
+        gone, a terminal timestamp is set, or the state is terminal. <em>The daemon never invents a
+        death; it only believes a durable verdict.</em></p>
+        <pre><b>worker_dead</b>(T, P) :-
+    obs_signal(T, P, _, Job, _),
+    ( obs_job(Job, exists: 0)
+    ; obs_job(Job, first_terminal_at: FT), FT != null
+    ; obs_job(Job, state: S), S in ["stopped","failed","done","blocked"] ).</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">obs_signal</span><span class="chip">obs_job</span><span class="k" style="margin-left:auto">negated by</span><span class="chip neg">R4</span><span class="chip neg">R5</span><span class="chip neg">R6</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S2 -->
+  <div class="stratum">
+    <div class="stratum-h"><span class="sn">S2</span><h3>Liveness verdicts</h3><span class="rule-count">4 rules · negation over S1 · the five states of Figure 1 live here</span></div>
+    <p class="stratum-d">Here the daemon is allowed to conclude. Every verdict is a positive belief
+    derived from evidence <i>plus</i> the documented absence of contrary evidence — the formally
+    sound version of every staleness check the procedural code did ad hoc.</p>
+    <div class="cards">
+      <div class="card fired" id="rule-r4">
+        <div class="card-h"><span class="rid s2-wedge">R4</span><span class="cname">wedged_never_started</span><span class="fire-pill fp-hot">fired ×6 this tick</span></div>
+        <p class="card-say">Registered, old enough, and the first turn never came: <em>the prompt was
+        delivered to a session that never began to think.</em> The 2026-06-09 class.</p>
+        <pre><b>wedged_never_started</b>(T, P) :-
+    session_registered(T, P, _),
+    obs_signal(T, P, started_at: S), older(S, <span class="ccfg">cfg(never_started_ms)</span>),
+    <span class="cneg">not turn_started(T, P)</span>,
+    <span class="cneg">not worker_dead(T, P)</span>.</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">R1</span><span class="chip">obs_signal</span><span class="chip">tick</span><span class="k">negates</span><span class="chip neg">¬R2</span><span class="chip neg">¬R7</span><span class="k">cfg</span><span class="chip cfg">never_started_ms</span></div>
+      </div>
+      <div class="card" id="rule-r5">
+        <div class="card-h"><span class="rid s2-ok">R5</span><span class="cname">lease_valid</span><span class="fire-pill fp-quiet">×0 — no worker is progressing</span></div>
+        <p class="card-say">A lease holds while progress evidence is younger than the phase-class
+        window — <em>30 minutes for build phases, 45 for doc phases.</em> Leases, not processes, are
+        the capacity unit.</p>
+        <pre><b>lease_valid</b>(T) :-
+    obs_signal(T, P, status: "running"),
+    progress_evidence(T, P, Ts),
+    <span class="cneg">not older(Ts, <span class="ccfg">lease_window(P)</span>)</span>,
+    <span class="cneg">not worker_dead(T, P)</span>.</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">R3</span><span class="chip">obs_signal</span><span class="k">negates</span><span class="chip neg">¬R7</span><span class="k">cfg</span><span class="chip cfg">lease_window_build_ms</span><span class="chip cfg">lease_window_doc_ms</span></div>
+      </div>
+      <div class="card" id="rule-r6">
+        <div class="card-h"><span class="rid s2-lease">R6</span><span class="cname">lease_expired</span><span class="fire-pill fp-hot">fired ×6 (display defers to R4)</span></div>
+        <p class="card-say">A running signal whose evidence has gone stale — or never existed — holds
+        an expired lease. <em>On the diagram, a worker placed here whose job still says
+        <i>working</i> renders as stalled-alive.</em></p>
+        <pre><b>lease_expired</b>(T, P) :-
+    obs_signal(T, P, status: "running"),
+    <span class="cneg">not lease_valid(T)</span>,
+    <span class="cneg">not worker_dead(T, P)</span>.</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">obs_signal</span><span class="k">negates</span><span class="chip neg">¬R5</span><span class="chip neg">¬R7</span></div>
+      </div>
+      <div class="card" id="rule-r9">
+        <div class="card-h"><span class="rid s2-lease">R9</span><span class="cname">board_drift</span><span class="fire-pill fp-quiet">×0 this tick</span></div>
+        <p class="card-say">Linear disagrees with the durable signal state. <em>Terminal Done is
+        exempt — never written backward.</em> The write-side dual of CTL-929.</p>
+        <pre><b>board_drift</b>(T, Want) :-
+    obs_signal(T, P, status: "running"), linear_key_for(P, Want),
+    obs_linear(T, Have), Have != Want, <span class="cneg">not linear_terminal(Have)</span>.</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">obs_signal</span><span class="chip">obs_linear</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S3 -->
+  <div class="stratum">
+    <div class="stratum-h"><span class="sn">S3</span><h3>Capacity</h3><span class="rule-count">1 rule · aggregation over S2 · the admission decision record</span></div>
+    <p class="stratum-d">One rule, one number, both terms shown. This belief's value payload <i>is</i>
+    the decision record for admission — replacing today's silent slots-full branch
+    (<code>scheduler.mjs:3047</code>).</p>
+    <div class="cards">
+      <div class="card" id="rule-r8" style="grid-column:1 / -1">
+        <div class="card-h"><span class="rid s3">R8</span><span class="cname">free_slots</span><span class="fire-pill fp-hot">fired ×1 · value = {free_slots: 4, by_lease: 6−0, by_session_cap: 10−6}</span></div>
+        <p class="card-say">Free slots are the lesser of unspent leases and unspent session cap.
+        <em>Wedged workers consume sessions but never leases — so the board drains instead of
+        starving, and the over-spawn guard survives even when leases free slots.</em></p>
+        <pre><b>free_slots</b>(max(0, min(<span class="ccfg">cfg(max_parallel)</span> − count{T : lease_valid(T)},
+                      <span class="ccfg">cfg(session_cap)</span>  − count{S : obs_agent(S, kind:"background")}))).</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">R5</span><span class="chip">obs_agent</span><span class="k">cfg</span><span class="chip cfg">max_parallel</span><span class="chip cfg">session_cap</span><span class="k" style="margin-left:auto">first gate to flip in shadow exit</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S4 -->
+  <div class="stratum">
+    <div class="stratum-h"><span class="sn">S4</span><h3>Escalation ladder</h3><span class="rule-count">3 rules · negation over intents · the diagnostician sits here</span></div>
+    <p class="stratum-d">The daemon detects; the agent interprets; the human is a conclusion of last
+    resort. Cooldowns and attempt budgets are facts in the <code>intent</code> table, so storms and
+    retry loops are unrepresentable rather than discouraged.</p>
+    <div class="cards">
+      <div class="card fired-esc" id="rule-r10">
+        <div class="card-h"><span class="rid s4">R10</span><span class="cname">wake_diagnostician</span><span class="fire-pill fp-esc">fired ×1 → intent i1</span></div>
+        <p class="card-say">Wake the diagnostician for states the daemon cannot resolve
+        deterministically — never kill an alive worker on suspicion. <em>CTL-792's Layer-4 bounded
+        stall-diagnostician, expressed as a rule.</em></p>
+        <pre><b>wake_diagnostician</b>(T, P, "never-started") :-
+    wedged_never_started(T, P),
+    <span class="cneg">not recent_intent("wake-diagnostician", T, P, <span class="ccfg">cfg(diag_cooldown_ms)</span>)</span>.
+<b>wake_diagnostician</b>(T, P, "stalled-alive") :-
+    lease_expired(T, P), obs_job(job_of(T,P), state: "working"),
+    <span class="cneg">not recent_intent("wake-diagnostician", T, P, <span class="ccfg">cfg(diag_cooldown_ms)</span>)</span>.</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">R4</span><span class="chip">R6</span><span class="chip">obs_job</span><span class="k">negates</span><span class="chip neg">¬recent_intent</span><span class="k">cfg</span><span class="chip cfg">diag_cooldown_ms</span></div>
+      </div>
+      <div class="card" id="rule-r11">
+        <div class="card-h"><span class="rid s4">R11</span><span class="cname">action_ineffective</span><span class="fire-pill fp-quiet">×0 this tick</span></div>
+        <p class="card-say">We acted, and the world didn't change. <em>Two attempts with no observed
+        effect means: stop retrying this channel, escalate the next one.</em> This rule kills the
+        eight-hour stop-storm class.</p>
+        <pre><b>action_ineffective</b>(Kind, Subj) :-
+    intent(Kind, Subj, attempts: N, outcome: null), N >= <span class="ccfg">cfg(max_attempts)</span>.</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">intent</span><span class="k">cfg</span><span class="chip cfg">max_attempts</span></div>
+      </div>
+      <div class="card" id="rule-r12" style="grid-column:1 / -1">
+        <div class="card-h"><span class="rid s4">R12</span><span class="cname">escalate_human</span><span class="fire-pill fp-quiet">×0 this tick — the ladder is working</span></div>
+        <p class="card-say">The second line: the diagnostician already ran — or its action proved
+        ineffective — and the state persists. <em>needs-human is now a conclusion with a provenance
+        chain, not a label write lost in a branch.</em></p>
+        <pre><b>escalate_human</b>(T, P, Why) :-
+    ( diagnosis_unresolved(T, P, Why)
+    ; wake_diagnostician(T, P, Why), action_ineffective("wake-diagnostician", T/P) ).</pre>
+        <div class="card-meta"><span class="k">reads</span><span class="chip">R10</span><span class="chip">R11</span><span class="chip">intent</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+<!-- ════ §4 · thresholds ════ -->
+<section id="thresholds">
+  <div class="sec-label"><span class="n">§4</span> Thresholds — tuning is data, not code</div>
+  <h2>Seven numbers govern everything above</h2>
+  <p class="lede">Every window and cap is a <code>cfg</code> fact, so retuning the daemon is a config
+  edit with provenance — and a why-trace can always show the exact number that was compared, as it
+  was at that tick. Display-only in v1.</p>
+
+  <div class="panel">
+    <table>
+      <thead><tr><th>key</th><th style="text-align:right">value</th><th>plainly</th><th>used by</th><th>source</th></tr></thead>
+      <tbody>
+        <tr><td class="key">never_started_ms</td><td class="val">120,000</td><td class="human">a healthy first turn arrives in under a third of a second; two minutes is generous</td><td><a class="rid s2-wedge" href="#rule-r4">R4</a></td><td>catalyst.beliefs.neverStartedMs</td></tr>
+        <tr><td class="key">lease_window_build_ms</td><td class="val">1,800,000</td><td class="human">a build phase silent for 30 minutes has stopped building</td><td><a class="rid s2-ok" href="#rule-r5">R5</a> <a class="rid s2-lease" href="#rule-r6">R6</a></td><td>catalyst.beliefs.leaseWindowBuildMs</td></tr>
+        <tr><td class="key">lease_window_doc_ms</td><td class="val">2,700,000</td><td class="human">research and planning think longer between keystrokes — 45 minutes</td><td><a class="rid s2-ok" href="#rule-r5">R5</a> <a class="rid s2-lease" href="#rule-r6">R6</a></td><td>catalyst.beliefs.leaseWindowDocMs</td></tr>
+        <tr><td class="key">max_parallel</td><td class="val">6</td><td class="human">leases the board may hold at once — the capacity unit</td><td><a class="rid s3" href="#rule-r8">R8</a></td><td>catalyst.orchestration.maxParallel</td></tr>
+        <tr><td class="key">session_cap</td><td class="val">10</td><td class="human">background sessions the host may carry, wedged or not — the over-spawn guard</td><td><a class="rid s3" href="#rule-r8">R8</a></td><td>catalyst.orchestration.sessionCap</td></tr>
+        <tr><td class="key">diag_cooldown_ms</td><td class="val">900,000</td><td class="human">one diagnostician wake per subject per quarter hour — storms unrepresentable</td><td><a class="rid s4" href="#rule-r10">R10</a></td><td>catalyst.beliefs.diagCooldownMs</td></tr>
+        <tr><td class="key">max_attempts</td><td class="val">2</td><td class="human">twice with no observed effect, then stop and climb the ladder</td><td><a class="rid s4" href="#rule-r11">R11</a></td><td>catalyst.beliefs.maxAttempts</td></tr>
+      </tbody>
+    </table>
+    <div class="tbl-note">The <i>used by</i> column is asserted equal to <code>cfgConsumers()</code>
+    over the live <code>RULES</code> constant in a unit test — this table cannot drift from the
+    rules, because it is computed from them.</div>
+  </div>
+</section>
+
+<footer>
+  <b style="color:var(--ink-dim)">Rules Explorer · v1 · display + explain only.</b> Shadow mode: no
+  gate reads these beliefs yet; exit criteria are seven clean days plus three replayed incidents
+  (this one, CTL-657, CTL-604). Generated from
+  <code>thoughts/shared/research/2026-06-09-belief-store-step1-datalog.md</code> · incident facts
+  recorded on host <code>mini</code>, 2026-06-09, tick #6647 · stream:
+  <code>/api/beliefs/stream</code> (SSE over new belief rows) · CTL-939.
+</footer>
+</div>
+</body>
+</html>
