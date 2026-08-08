@@ -43,10 +43,10 @@ _DRAFT_PR_SAFETY_GATE_RC=4
 _DRAFT_PR_PERMISSION_RC=5
 
 _draft_pr_config_str() {
-  local file="$1" path="$2" raw
+  local file="$1" selector="$2" raw
   [[ -f "$file" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
-  raw="$(jq -r "$path" "$file" 2>/dev/null || true)"
+  raw="$(jq -r "$selector" "$file" 2>/dev/null || true)"
   [[ -z "$raw" || "$raw" == "null" ]] && return 1
   printf '%s\n' "$raw"
 }
@@ -61,6 +61,8 @@ _draft_pr_layer2_config_path() {
   [[ -n "$project_key" ]] || return 1
   local source_path
   if [[ -n "${ZSH_VERSION:-}" ]]; then
+    # This is zsh's current sourced-file expansion.
+    # shellcheck disable=SC2296
     source_path="${(%):-%x}"
   else
     source_path="${BASH_SOURCE[0]:-$0}"
