@@ -3572,11 +3572,27 @@ export function checkRegistryTeamIdentity(deps = {}) {
       "registry-team-identity",
       STATUS.WARN,
       `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
-        "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit the " +
-        `wrong teamId/ticketPrefix/pushRemote: ${details} (CAT-52)`,
+        "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
+        `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
     );
   }
   const known = projects.filter((project) => project?.identity?.matches === true).length;
+  // No mismatch is NOT the same as verified. An entry whose checkout config is
+  // absent, unreadable, malformed, or missing teamKey yields matches:null, and
+  // grading that PASS would report a clean contract that was never actually
+  // checked — exactly the drift this check exists to surface. Anything short of
+  // full verification stays INFO (advisory-only: this check never FAILs).
+  if (known < projects.length) {
+    const unverified = projects.length - known;
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+        `teamKey; ${unverified} could not be checked (config absent, unreadable, malformed, or ` +
+        "missing catalyst.linear.teamKey) — no mismatch found, but the contract is unverified " +
+        "for those entries (CAT-52)",
+    );
+  }
   return mkCheck(
     "registry-team-identity",
     STATUS.PASS,

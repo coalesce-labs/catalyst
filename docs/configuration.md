@@ -452,22 +452,19 @@ node plugins/dev/scripts/execution-core/registry.mjs upsert \
   --status Todo
 ```
 
-**The `team` ↔ `teamKey` contract.** A registry entry's `team` MUST equal the
-`catalyst.linear.teamKey` declared in `<repoRoot>/.catalyst/config.json`. This contract is defined
-by `docs/schemas/registry.schema.json`; since CAT-52 it is observable in two places:
+**The `team` ↔ `teamKey` contract.** A registry entry's `team` MUST equal — exactly, since the
+runtime compares with `===`/`!==` — the `catalyst.linear.teamKey` declared in
+`<repoRoot>/.catalyst/config.json`. The contract, its failure mode, and the full repair procedure
+(including preserving a custom `eligibleQuery` and cleaning up worktrees already cut from the wrong
+checkout) are documented in the canonical configuration reference:
+`website/src/content/docs/reference/configuration.md` → "The `team` ↔ `teamKey` contract".
 
-- `listProjects()` logs `registry entry repoRoot declares a different Linear team` (warn-only —
-  the entry is still returned and dispatched).
-- `catalyst doctor` reports `registry-team-identity` (WARN, never FAIL).
-
-A violation points a team at another project's checkout, so worktrees inherit the wrong `teamId`,
-`ticketPrefix`, and `pr.pushRemote`. Repair the registry entry rather than editing the checkout's
-config:
-
-```bash
-node plugins/dev/scripts/execution-core/registry.mjs upsert \
-  --team CAT --repo-root ~/code-repos/github/thagale/catalyst
-```
+Implementation notes for this repo (CAT-52): the contract is declared by
+`docs/schemas/registry.schema.json` and observed by `teamIdentityOf()` in `registry.mjs`, which
+attaches a runtime-only `identity` field to each entry `listProjects()` returns — `matches: null`
+means "unknown", deliberately distinct from `false` ("mismatch"). `listProjects()` warns on a
+mismatch and `checkRegistryTeamIdentity()` in `doctor.mjs` grades it (WARN mismatch / INFO
+unverified / PASS all-verified, never FAIL).
 
 See ADR-028 for Catalyst's own CAT registration.
 

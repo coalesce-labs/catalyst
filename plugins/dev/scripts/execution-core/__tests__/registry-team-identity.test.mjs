@@ -40,12 +40,24 @@ describe("teamIdentityOf", () => {
     expect(result).toEqual({ declared: "CTL", matches: false });
   });
 
-  test("comparison ignores case and surrounding whitespace", () => {
+  // The runtime compares team keys strictly (monitor.mjs `query.team !==
+  // parsed.teamKey`, getProjectConfig's `p.team === team`), so a case- or
+  // whitespace-differing key IS a real mismatch — grading it "matches" would
+  // report a registry as healthy while every Linear event is silently dropped.
+  test("a case-differing team key is a mismatch, mirroring the strict runtime", () => {
     const result = teamIdentityOf(
       { team: "CAT", repoRoot: "/r" },
-      reader({ "/r/.catalyst/config.json": JSON.stringify({ catalyst: { linear: { teamKey: " cat " } } }) }),
+      reader({ "/r/.catalyst/config.json": JSON.stringify({ catalyst: { linear: { teamKey: "cat" } } }) }),
     );
-    expect(result.matches).toBe(true);
+    expect(result).toEqual({ declared: "cat", matches: false });
+  });
+
+  test("surrounding whitespace is a mismatch and is reported verbatim", () => {
+    const result = teamIdentityOf(
+      { team: "CAT", repoRoot: "/r" },
+      reader({ "/r/.catalyst/config.json": JSON.stringify({ catalyst: { linear: { teamKey: " CAT " } } }) }),
+    );
+    expect(result).toEqual({ declared: " CAT ", matches: false });
   });
 
   test("absent config is unknown", () => {

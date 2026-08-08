@@ -30,6 +30,14 @@ const defaultReadLayer1 = (path) => readFileSync(path, "utf8");
 // config. Unknown is deliberately distinct from mismatch: an absent, unreadable,
 // or malformed config is not evidence that the registry points at another team.
 // Total by design because this runs on the daemon's registry hot path.
+//
+// The comparison is EXACT (===), deliberately mirroring the runtime consumers
+// this check exists to predict: monitor.mjs routes Linear events with
+// `query.team !== parsed.teamKey` and getProjectConfig() looks entries up with
+// `p.team === team`. A case- or whitespace-insensitive match here would grade a
+// `cat`-vs-`CAT` registry as healthy while those strict comparisons silently
+// drop every event and return no repository — the check must not be more
+// forgiving than the code it predicts.
 export function teamIdentityOf(entry, readLayer1 = defaultReadLayer1) {
   const unknown = { declared: null, matches: null };
   try {
@@ -37,10 +45,9 @@ export function teamIdentityOf(entry, readLayer1 = defaultReadLayer1) {
     const parsed = JSON.parse(raw);
     const declared = (parsed?.catalyst ?? parsed)?.linear?.teamKey;
     if (typeof declared !== "string" || declared.trim() === "") return unknown;
-    const normalize = (value) => String(value).trim().toUpperCase();
     return {
-      declared: declared.trim(),
-      matches: normalize(declared) === normalize(entry.team),
+      declared,
+      matches: declared === entry.team,
     };
   } catch {
     return unknown;
@@ -95,7 +102,8 @@ export function listProjects(deps = {}) {
             repoRoot: entry.repoRoot,
           },
           "registry entry repoRoot declares a different Linear team — worktrees cut from it " +
-            "inherit the wrong teamId/ticketPrefix/pushRemote (CAT-52)",
+            "inherit that checkout's Layer-1 catalyst.linear config (teamKey/teamId) and its " +
+            "ticket prefix (CAT-52)",
         );
       }
     }

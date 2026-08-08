@@ -47,11 +47,38 @@ describe("checkRegistryTeamIdentity", () => {
     expect(checkRegistryTeamIdentity(deps([])).status).toBe("info");
   });
 
-  test("an unknown identity is not a warning", () => {
+  // "No mismatch" is not "verified". An entry whose config is absent,
+  // unreadable, malformed, or missing teamKey was never actually checked, so
+  // grading it PASS would report a clean contract that nothing confirmed.
+  test("an unknown identity is not a warning, and is never PASS", () => {
     const rec = checkRegistryTeamIdentity(
       deps([{ team: "CAT", repoRoot: "/gone", identity: { declared: null, matches: null } }]),
     );
-    expect(["info", "pass"]).toContain(rec.status);
+    expect(rec.status).toBe("info");
+    expect(rec.detail).toContain("0/1");
+  });
+
+  test("all identities unknown reports INFO, not a clean PASS", () => {
+    const rec = checkRegistryTeamIdentity(
+      deps([
+        { team: "CAT", repoRoot: "/a", identity: { declared: null, matches: null } },
+        { team: "PAN", repoRoot: "/b", identity: { declared: null, matches: null } },
+      ]),
+    );
+    expect(rec.status).toBe("info");
+    expect(rec.status).not.toBe("pass");
+    expect(rec.detail).toContain("0/2");
+  });
+
+  test("a partially verified registry stays INFO and counts the unverified", () => {
+    const rec = checkRegistryTeamIdentity(
+      deps([
+        { team: "PAN", repoRoot: "/pan", identity: { declared: "PAN", matches: true } },
+        { team: "CAT", repoRoot: "/gone", identity: { declared: null, matches: null } },
+      ]),
+    );
+    expect(rec.status).toBe("info");
+    expect(rec.detail).toContain("1/2");
   });
 
   test("a throwing registry reader degrades to INFO without throwing", () => {
