@@ -30,10 +30,12 @@ export interface CoordinationCheckpoint {
   /** High-water local_seq — the last value assigned before this checkpoint. */
   localSeq: number;
   /**
-   * Tokenless-window rows whose durable DLQ append kept failing — persisted HERE (a different file
-   * than the DLQ, so a DLQ-file-specific fault like a stale root-owned file doesn't block it) so they
-   * survive a restart/SIGTERM instead of being lost from process memory. Re-seeded into the in-memory
-   * retry buffer on startup and re-attempted; omitted when empty (Codex P1, round 10).
+   * Undelivered rows carried across a restart: authenticated `outbound` rows not yet published AND
+   * tokenless rows whose DLQ append kept failing. Neither is recoverable from the mirror on restart
+   * (dedup skips already-mirrored ids), and this checkpoint is a different file than the DLQ (so a
+   * DLQ-file-specific fault doesn't block persisting it). On startup they are re-seeded into the
+   * outbound path (if a hub client exists) or the tokenless DLQ-retry path (if not); omitted when
+   * empty (Codex P1, rounds 10 + 12).
    */
   pendingRetry?: Array<Record<string, unknown>>;
   updatedAt?: string;
@@ -190,9 +192,16 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
   // not permanently lose them — symmetric with the authenticated HubClient path, which keeps its
   // batch in `outbound` when a DLQ write fails rather than dropping it (Codex P1, round 9).
   const tokenlessRetry: Array<Record<string, unknown>> = [];
-  // Restore rows a prior process persisted when its DLQ writes kept failing, so a token-provisioning
-  // restart (or any SIGTERM) does not lose them: the next flush tick re-attempts the DLQ append.
-  if (ck?.pendingRetry && Array.isArray(ck.pendingRetry)) tokenlessRetry.push(...ck.pendingRetry);
+  // Restore rows a prior process persisted when it exited with undelivered work — outbound rows that
+  // never reached the hub, or tokenless rows whose DLQ append kept failing. Neither is recoverable
+  // from the mirror on restart (readMirrorState seeds seenIds so processLine skips them), so the
+  // checkpoint is the only durable carrier (Codex P1, round 12). Route by what THIS process can do:
+  // with a hub client, replay them through the outbound publish path; without one, back into the
+  // tokenless DLQ-retry path. flushToHub drains whichever it lands in.
+  if (ck?.pendingRetry && Array.isArray(ck.pendingRetry)) {
+    if (opts.hubClient) outbound.push(...ck.pendingRetry);
+    else tokenlessRetry.push(...ck.pendingRetry);
+  }
   const stats = { written: 0, skipped: 0 };
 
   function processLine(line: string): void {
@@ -336,13 +345,16 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
 
   function saveCheckpoint(): void {
     if (!tailer) return;
+    // Persist ALL undelivered rows across a restart: authenticated outbound rows not yet published
+    // AND tokenless rows not yet DLQ'd. Neither survives via the mirror (dedup skips them), so a
+    // crash/kill/SIGTERM after buffering but before delivery would otherwise lose them (Codex P1).
+    // Omit the field entirely on the normal path (both empty) to keep the checkpoint lean.
+    const pending = [...outbound, ...tokenlessRetry];
     writeCoordinationCheckpoint(opts.checkpointPath, {
       path: tailer.currentPath(),
       offset: tailer.currentOffset(),
       localSeq,
-      // Carry any still-unbuffered tokenless rows through a restart (omit when none, to keep the
-      // checkpoint lean on the normal path).
-      ...(tokenlessRetry.length > 0 ? { pendingRetry: tokenlessRetry.slice() } : {}),
+      ...(pending.length > 0 ? { pendingRetry: pending } : {}),
     });
   }
 

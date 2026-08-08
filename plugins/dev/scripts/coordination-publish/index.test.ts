@@ -199,6 +199,33 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(pub.outboundDepth()).toBe(0);
   });
 
+  test("unpublished authenticated outbound rows survive a crash via the checkpoint and re-publish on restart (Codex P1)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    // pub1 buffers the row for outbound but is "killed" (saveCheckpoint, no flush) before publishing.
+    const pub1 = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      hubClient: { publish: async () => {} },
+    });
+    await pub1.drain();
+    expect(pub1.outboundDepth()).toBe(1);
+    pub1.saveCheckpoint(); // crash point — checkpoint persists the undelivered outbound row
+    const ck = JSON.parse(readFileSync(checkpointPath, "utf8"));
+    expect(ck.pendingRetry?.[0]?.id).toBe("a");
+    // Restart WITH a hub client: the row is re-seeded into outbound and publishes on flush.
+    const ac2 = new AbortController();
+    const published: unknown[] = [];
+    const pub2 = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac2.signal,
+      hubClient: { publish: async (batch) => { published.push(batch); } },
+    });
+    expect(pub2.outboundDepth()).toBe(1); // recovered, not lost to mirror-dedup
+    await pub2.flushToHub();
+    expect(published.length).toBe(1);
+    expect((published[0] as Array<Record<string, unknown>>)[0].id).toBe("a");
+    expect(pub2.outboundDepth()).toBe(0);
+    ac2.abort();
+  });
+
   test("flushToHub retains the batch when publish() throws — no egress loss (CTL-1488 remediate)", async () => {
     writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
     appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));

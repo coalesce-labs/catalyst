@@ -61,6 +61,23 @@ function workerStateOutcome(status: string): "success" | "failure" | null {
   return null;
 }
 
+// Worker_state statuses that mean the projection HAS folded a terminal event — ticket-level
+// (done/failed/complete) OR the per-PHASE terminals the CTL-532 reducer emits for the phase.*
+// terminal events themselves (projection.mjs PHASE_STATUS_MAP: phase-complete / phase-failed /
+// turn-cap-exhausted). Reverse-coverage treats any of these as "the projection accounted for a
+// terminal here"; a merely-intermediate status (dispatched, pr-created, …) does NOT count, so a
+// genuinely dropped terminal still surfaces. Recognizing the phase terminals prevents ordinary
+// active multi-phase work — where each finished phase legitimately sits at phase-complete before
+// the ticket reaches done — from being reported as a dropped-projection divergence (Codex P1, round 12).
+const PROJECTED_TERMINAL_STATUSES = new Set([
+  "done",
+  "failed",
+  "complete",
+  "phase-complete",
+  "phase-failed",
+  "turn-cap-exhausted",
+]);
+
 // Select the winning terminal coordination outcome for one (orchestrator, ticket) using the SAME
 // ordering the worker_state projection applies (broker-state.mjs upsertWorkerState): status is
 // gated on the greatest `last_event_ts` watermark, with `>=` so a later-PROCESSED event wins on an
@@ -174,7 +191,7 @@ export function computeParity(input: {
   // that terminal was effectively dropped and must still be flagged (Codex P1, round 11). Keying on
   // all worker_states — terminal or not — let an identity-less failure hide behind a merely-present
   // dispatched row for the ticket.
-  const terminalWorkerStates = workerStates.filter((w) => workerStateOutcome(w.status) !== null);
+  const terminalWorkerStates = workerStates.filter((w) => PROJECTED_TERMINAL_STATUSES.has(w.status));
   const workerStateKeys = new Set(terminalWorkerStates.map((w) => parityKey(w.orchestrator, w.ticket)));
   const workerStateTickets = new Set(terminalWorkerStates.map((w) => w.ticket));
   const reportedOrphans = new Set<string>();

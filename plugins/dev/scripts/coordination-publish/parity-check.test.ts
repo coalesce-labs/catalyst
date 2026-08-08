@@ -115,6 +115,26 @@ describe("computeParity (CTL-1668 Phase 3)", () => {
     expect(r.verdict).toBe("divergent");
   });
 
+  test("active multi-phase work (worker at phase-complete) does NOT report a dropped-projection divergence", () => {
+    // A finished phase legitimately projects worker_state status `phase-complete` before the ticket
+    // reaches `done`; its phase-terminal coordination event is accounted for, not dropped.
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "phase-complete")],
+      coordinationRows: [row("CTL-1", "phase.implement.complete")],
+    });
+    expect(r.divergences).toHaveLength(0);
+    // No ticket-terminal comparison (workerStateOutcome null) → nothing matched → inconclusive, NOT divergent.
+    expect(r.verdict).toBe("inconclusive");
+  });
+
+  test("turn-cap-exhausted projection covers its phase terminal (no false divergence)", () => {
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "turn-cap-exhausted")],
+      coordinationRows: [row("CTL-1", "phase.verify.turn-cap-exhausted")],
+    });
+    expect(r.divergences).toHaveLength(0);
+  });
+
   test("identity-less terminal is NOT masked by a merely-nonterminal worker row for the ticket", () => {
     // SDK-fallback identity-less FAILURE for CTL-1 whose worker_state is still `dispatched`, plus an
     // unrelated healthy pair. The dispatched row must not count as coverage, so the dropped terminal diverges.
