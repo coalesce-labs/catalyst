@@ -13,6 +13,7 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
+  utimesSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,6 +92,8 @@ import {
   HELD_LABEL_NEEDS_INPUT,
   // CTL-1524 (C4a): hoisted dead-host computation (one surviving-roster read)
   computeDeadHosts,
+  // CTL-1667: current-run PR reader (for terminalDoneOnce gate tests)
+  readCurrentRunPrNumber,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
@@ -101,6 +104,7 @@ import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
+import { getDrainFlagPath, getEventLogPath } from "./config.mjs"; // CTL-1678: drain-disabled override integration test
 
 let orchDir;
 let catalystDir;
@@ -221,6 +225,25 @@ describe("readPhaseSignals", () => {
     expect(Object.keys(signals)).toEqual(["plan"]);
     expect(signals.plan).toBe("done");
   });
+
+  test("orders entries by mtime (dispatch recency), not readdir order — CTL-1660 P1 (Codex #3081)", () => {
+    // Write review's signal FIRST (so it would sort first alphabetically/by
+    // readdir on most filesystems), then implement's SECOND — then force the
+    // mtimes to the OPPOSITE of write order to prove the sort is mtime-driven,
+    // not creation-order-driven: review is the OLDER touch, implement is the
+    // NEWER touch, mirroring a re-dispatched implement after a stale review.
+    writeSignal("CTL-1660", "review", "done");
+    writeSignal("CTL-1660", "implement", "failed");
+    const dir = join(orchDir, "workers", "CTL-1660");
+    const oldTime = new Date(Date.now() - 60_000);
+    const newTime = new Date();
+    utimesSync(join(dir, "phase-review.json"), oldTime, oldTime);
+    utimesSync(join(dir, "phase-implement.json"), newTime, newTime);
+    const signals = readPhaseSignals(orchDir, "CTL-1660");
+    // implement (the more-recently-touched file) must be LAST in key order —
+    // isTicketInFlight's supersede guard reads recency off this ordering.
+    expect(Object.keys(signals)).toEqual(["review", "implement"]);
+  });
 });
 
 describe("isTicketInFlight", () => {
@@ -266,11 +289,95 @@ describe("isTicketInFlight", () => {
     expect(isTicketInFlight({ implement: "failed" })).toBe(false);
     expect(isTicketInFlight({ verify: "stalled" })).toBe(false);
   });
+  test("CTL-1552 — a recovery-pass escalation (now 'stalled', was 'needs-human') frees the slot", () => {
+    // The escalation signal is now the terminal "stalled" (normalized from the
+    // bespoke non-terminal "needs-human"), so isTicketInFlight no longer holds the
+    // slot for a parked-for-human ticket — the intended slot-freeing behavior.
+    expect(isTicketInFlight({ "recovery-pass": "stalled" })).toBe(false);
+  });
   test("an 'aborted' signal frees the slot (CTL-565 kill-on-drag-out)", () => {
     expect(isTicketInFlight({ research: "done", implement: "aborted" })).toBe(false);
   });
   test("no signals at all → NOT in-flight", () => {
     expect(isTicketInFlight({})).toBe(false);
+  });
+
+  describe("supersede guard — a stale earlier-phase failure must not veto a later-completed phase", () => {
+    test("implement failed, but verify (later) done → in-flight", () => {
+      // The real-world shape: a direct out-of-order re-dispatch skipped
+      // straight to verify without clearing implement's stale failed signal.
+      expect(isTicketInFlight({ implement: "failed", verify: "done" })).toBe(true);
+    });
+    test("implement failed, verify (later) still running → in-flight", () => {
+      expect(isTicketInFlight({ implement: "failed", verify: "running" })).toBe(true);
+    });
+    test("implement failed with NO later phase → still NOT in-flight", () => {
+      // implement is the latest-dispatched phase here, so its own failure
+      // still vetoes — this is the ordinary (non-superseded) stall case.
+      expect(isTicketInFlight({ triage: "done", implement: "failed" })).toBe(false);
+    });
+    test("two stale predecessors (research aborted, plan stalled), implement (latest) done → in-flight", () => {
+      expect(
+        isTicketInFlight({ research: "aborted", plan: "stalled", implement: "done" })
+      ).toBe(true);
+    });
+    test("the LATEST phase failing still vetoes even with earlier successes", () => {
+      expect(isTicketInFlight({ research: "done", implement: "done", verify: "failed" })).toBe(
+        false
+      );
+    });
+    test("remediate ranks at verify's index — a failed verify is NOT superseded by a later remediate attempt", () => {
+      // remediate is ancillary (ranks at verify's phaseIndex, not after it), so
+      // a failed verify alongside a remediate signal is NOT treated as stale —
+      // remediate cycling with verify must not accidentally supersede it away.
+      expect(isTicketInFlight({ verify: "failed", remediate: "done" })).toBe(false);
+    });
+    test("an unknown/non-pipeline phase name never supersedes or is superseded", () => {
+      // e.g. a recovery-pass inspection signal — isPhantomWorkerDir handles
+      // that separately; isTicketInFlight's ordering logic must ignore it.
+      expect(
+        isTicketInFlight({ implement: "failed", "recovery-pass": "done" })
+      ).toBe(false);
+    });
+    test("teardown (terminal, outside phaseIndex) alongside a stale earlier failure is still terminal", () => {
+      expect(isTicketInFlight({ implement: "failed", teardown: "done" })).toBe(false);
+    });
+  });
+
+  describe("dispatch-recency supersede — CTL-1660 P1 (Codex #3081): an earlier phase re-dispatched AFTER a later phase's stale signal must not be superseded away", () => {
+    test("implement re-dispatched (and failing) after review already completed → NOT in-flight", () => {
+      // readPhaseSignals inserts entries in ascending-mtime order, so this
+      // object's key order (review first/older, implement last/newer) is the
+      // shape the real reader produces when implement is re-dispatched after
+      // review already left a `done` signal. A pure ordinal-max supersede
+      // guard would treat implement (lower phaseIndex) as superseded and
+      // ignore its failure, leaving only the stale review:done — wrongly
+      // reporting in-flight and letting the advancement sweep derive `pr` as
+      // the next phase from that stale signal.
+      expect(isTicketInFlight({ review: "done", implement: "failed" })).toBe(false);
+    });
+    test("implement re-dispatched and still running after review already completed → in-flight", () => {
+      expect(isTicketInFlight({ review: "done", implement: "running" })).toBe(true);
+    });
+    test("plan re-dispatched (failing) after implement+verify already completed → NOT in-flight", () => {
+      expect(
+        isTicketInFlight({ implement: "done", verify: "done", plan: "failed" })
+      ).toBe(false);
+    });
+  });
+});
+
+describe("readPhaseSignals + isTicketInFlight integration — dispatch-recency supersede (CTL-1660 P1)", () => {
+  test("a failed re-dispatched implement (newer mtime) vetoes in-flight despite a stale, higher-ordinal review:done (older mtime)", () => {
+    writeSignal("CTL-1660B", "review", "done");
+    writeSignal("CTL-1660B", "implement", "failed");
+    const dir = join(orchDir, "workers", "CTL-1660B");
+    const oldTime = new Date(Date.now() - 60_000);
+    const newTime = new Date();
+    utimesSync(join(dir, "phase-review.json"), oldTime, oldTime);
+    utimesSync(join(dir, "phase-implement.json"), newTime, newTime);
+    const signals = readPhaseSignals(orchDir, "CTL-1660B");
+    expect(isTicketInFlight(signals)).toBe(false);
   });
 });
 
@@ -280,6 +387,42 @@ describe("listInFlightTickets / readMaxParallel / computeFreeSlots", () => {
     writeSignal("CTL-2", "teardown", "done"); // CTL-703: teardown done is terminal (not monitor-deploy)
     writeSignal("CTL-3", "triage", "failed");
     expect([...listInFlightTickets(orchDir)]).toEqual(["CTL-1"]);
+  });
+
+  // CTL-1667 (review fix, round 4, #3061): a ticket carrying a STALE retained
+  // `teardown: done` signal (proven stale relative to a newer phase-pr.json)
+  // must still count as in-flight — otherwise it is excluded from this Set,
+  // the advancement sweep's own sanitizeStalePostPrSignals call never gets a
+  // chance to run for it (that loop only visits tickets THIS function
+  // returns), and the ticket wedges permanently: terminalDoneOnce correctly
+  // refuses Done (its own staleness check), but nothing ever re-dispatches it
+  // either. Without the fix inside listInFlightTickets itself, this ticket
+  // would be excluded exactly like CTL-2 above.
+  test("a STALE teardown:done signal (newer sibling phase-pr.json) still counts as in-flight", () => {
+    const dir = join(orchDir, "workers", "CTL-4");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-teardown.json"),
+      JSON.stringify({
+        ticket: "CTL-4",
+        phase: "teardown",
+        status: "done",
+        completedAt: "2026-08-01T00:00:00Z",
+        updatedAt: "2026-08-01T00:00:00Z",
+      })
+    );
+    // pr (re)dispatched AFTER teardown completed — proves staleness.
+    writeFileSync(
+      join(dir, "phase-pr.json"),
+      JSON.stringify({
+        ticket: "CTL-4",
+        phase: "pr",
+        status: "done",
+        pr: { number: 400 },
+        startedAt: "2026-08-05T00:00:00Z",
+      })
+    );
+    expect([...listInFlightTickets(orchDir)]).toContain("CTL-4");
   });
   test("readMaxParallel reads state.json, defaults to 1", () => {
     expect(readMaxParallel(orchDir)).toBe(1);
@@ -12125,6 +12268,87 @@ describe("drained-sentinel emission (CTL-1095)", () => {
   });
 });
 
+describe("drain-disabled override (CTL-1678)", () => {
+  const eligibleOne = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  let savedDisabled;
+  beforeEach(() => {
+    savedDisabled = process.env.CATALYST_DRAIN_DISABLED;
+    delete process.env.CATALYST_DRAIN_DISABLED;
+  });
+  afterEach(() => {
+    if (savedDisabled === undefined) delete process.env.CATALYST_DRAIN_DISABLED;
+    else process.env.CATALYST_DRAIN_DISABLED = savedDisabled;
+  });
+
+  test("admission PROCEEDS when flag present but CATALYST_DRAIN_DISABLED=1 (real isDraining seam)", () => {
+    // Write the physical drain flag AND set the override. Do NOT stub isDraining —
+    // let the real isDrainingDefault(orchDir) run so this proves the one seam reaches
+    // the admission gate end-to-end (contrast with "draining node zeroes freeSlots").
+    writeFileSync(getDrainFlagPath(orchDir), "");
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-dd-1"),
+      dispatch,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      verifyDispatched: verifyOk,
+      hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is drain override
+      emitDrainIgnored: () => ({ emitted: true }), // avoid a real ps snapshot in the unit tick
+    });
+    expect(dispatch.calls).toHaveLength(1);
+  });
+
+  test("tripwire seam is invoked once per tick", () => {
+    writeFileSync(getDrainFlagPath(orchDir), "");
+    process.env.CATALYST_DRAIN_DISABLED = "1";
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const emitDrainIgnored = mock(() => ({ emitted: true }));
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      emitDrainIgnored,
+    };
+    schedulerTick(orchDir, opts);
+    expect(emitDrainIgnored).toHaveBeenCalledTimes(1);
+    // Second tick still calls the seam each tick — once-per-episode dedup is the
+    // Phase 2 latch's concern, verified there.
+    schedulerTick(orchDir, opts);
+    expect(emitDrainIgnored).toHaveBeenCalledTimes(2);
+  });
+
+  test("no node.drain.ignored line written with default helper when flag absent / env unset", () => {
+    // No flag file, env unset, default (non-injected) emitDrainIgnored helper.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-dd-3"),
+      dispatch,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      verifyDispatched: verifyOk,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(1); // admission proceeds normally
+    const logPath = getEventLogPath();
+    const lines = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
+    expect(lines.includes("node.drain.ignored")).toBe(false);
+  });
+});
+
 // CTL-1290: the board-health scheduler-seam tests live in board-health-seam.test.mjs
 // (a CI-included file) — scheduler.test.mjs is excluded from the CI allowlist for
 // its real-timer suite, so the seam coverage would not run here.
@@ -13246,5 +13470,490 @@ describe("CTL-1605 review: STEP A terminal-stale live label refresh", () => {
     // SAME tick, even though its TTL has not elapsed — a later hydrate must
     // re-read fresh rather than serve the pre-write (unlabeled) descriptor.
     expect(cache.getRelations("CTL-32")).toBeUndefined();
+  });
+});
+
+// ─── CTL-1667: terminalDoneOnce current-PR-merged gate ───────────────────────
+// The gate inside terminalDoneOnce requires the current run's phase-pr.json
+// PR number to be MERGED on GitHub before writing Done.  Mirrors the existing
+// reconcileTerminalBackstop GATE 2 (`prAdapter.prView`), but applied by the
+// PRIMARY Done writer on every terminal sweep hit.
+describe("CTL-1667: terminalDoneOnce current-PR-merged gate", () => {
+  // Dispatch stub at module scope (fakeDispatch is module-level).
+  const ctl1667Dispatch = fakeDispatch();
+
+  // Helper: write phase-pr.json + a teardown "done" signal for a ticket.
+  function writePrSignals(ticket, prNumber) {
+    writeSignalRaw(ticket, "pr", { ticket, phase: "pr", status: "done", pr: { number: prNumber } });
+    writeSignal(ticket, "teardown", "done");
+  }
+
+  // Helper: minimal writeStatus stub that captures applyTerminalDone calls.
+  function makeWriteStatus(dones) {
+    return {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: (a) => dones.push(a),
+      applyLabel: () => {},
+    };
+  }
+
+  test("CTL-1667: terminalDoneOnce does NOT write Done when current PR is OPEN", () => {
+    writePrSignals("CTL-70", 700);
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: { prView: () => ({ state: "OPEN", mergedAt: null }) },
+    });
+    expect(dones).toEqual([]); // Done refused — current PR is OPEN
+  });
+
+  test("CTL-1667: terminalDoneOnce writes Done when current PR is MERGED", () => {
+    writePrSignals("CTL-71", 710);
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "2026-08-07T00:00:00Z" }) },
+    });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-71" }));
+  });
+
+  test("CTL-1667: no phase-pr.json and no PR number → legacy behavior (Done allowed)", () => {
+    // No phase-pr.json written: only teardown signal.
+    writeSignal("CTL-72", "teardown", "done");
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      // prAdapter provided — but readCurrentRunPrNumber returns null (no phase-pr.json),
+      // so the gate is skipped and Done is allowed (preserves legacy / no-PR-opener behavior).
+      prAdapter: { prView: () => ({ state: "OPEN", mergedAt: null }) },
+    });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-72" }));
+  });
+
+  test("CTL-1667: prView throws → fail-closed, do NOT write Done", () => {
+    writePrSignals("CTL-73", 730);
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: { prView: () => { throw new Error("gh down"); } },
+    });
+    expect(dones).toEqual([]); // conservative: no Done on unverifiable merge
+  });
+
+  test("CTL-1667: readCurrentRunPrNumber returns the PR number from phase-pr.json", () => {
+    writeSignalRaw("CTL-74", "pr", { ticket: "CTL-74", phase: "pr", status: "done", pr: { number: 999 } });
+    expect(readCurrentRunPrNumber(orchDir, "CTL-74")).toBe(999);
+  });
+
+  test("CTL-1667: readCurrentRunPrNumber returns null when phase-pr.json absent", () => {
+    // CTL-74b has no phase-pr.json — just ensure the dir exists
+    mkdirSync(join(orchDir, "workers", "CTL-74b"), { recursive: true });
+    expect(readCurrentRunPrNumber(orchDir, "CTL-74b")).toBeNull();
+  });
+
+  // Review fix (Codex P2): the merge check must carry repo identity, because a
+  // normal teardown removed the worktree makePrView would otherwise resolve the
+  // slug from. The gate reads `.pr.url` from phase-pr.json and passes its slug
+  // to prView so `gh -R <slug>` works without the worktree.
+  test("CTL-1667: terminalDoneOnce threads the repo slug (from phase-pr.json url) to prView", () => {
+    writeSignalRaw("CTL-75", "pr", {
+      ticket: "CTL-75",
+      phase: "pr",
+      status: "done",
+      pr: { number: 750, url: "https://github.com/coalesce-labs/catalyst/pull/750" },
+    });
+    writeSignal("CTL-75", "teardown", "done");
+    const seen = [];
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: {
+        prView: (_t, pr) => {
+          seen.push(pr);
+          return { state: "MERGED", mergedAt: "2026-08-07T00:00:00Z" };
+        },
+      },
+    });
+    expect(seen[0]).toEqual({ number: 750, repo: "coalesce-labs/catalyst" });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-75" }));
+  });
+
+  // Review fix (Codex P1): the OPEN-PR refusal path must NOT re-run the gh
+  // prView on every tick. After the first refusal a per-dir cooldown is stamped,
+  // so the second tick within the window skips the probe entirely (bounded poll).
+  test("CTL-1667: terminalDoneOnce bounds the poll — OPEN PR is not re-probed within the cooldown", () => {
+    writePrSignals("CTL-76", 760);
+    let calls = 0;
+    const dones = [];
+    const openAdapter = {
+      prView: () => {
+        calls += 1;
+        return { state: "OPEN", mergedAt: null };
+      },
+    };
+    // Tick 1: probes GitHub, sees OPEN, refuses Done, stamps the cooldown.
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: openAdapter,
+    });
+    // Tick 2 (immediately after, within cooldown): must skip the gh probe.
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: openAdapter,
+    });
+    expect(calls).toBe(1); // second tick suppressed — no unbounded poll
+    expect(dones).toEqual([]); // still refused (PR never merged)
+  });
+
+  // Review fix (Codex P1, round 2, #3061): the cooldown above bounds the PROBE
+  // FREQUENCY but not the TOTAL count — a dir stuck on a permanently-OPEN or
+  // unverifiable PR would otherwise re-arm and re-probe `gh` every cooldown
+  // window forever. Once the total refusal count reaches
+  // TERMINAL_PR_CHECK_MAX_ATTEMPTS (default 12), the gate escalates to a much
+  // LONGER cooldown for that dir instead of the short one.
+  //
+  // Review fix (Codex P1, round 4, #3061): escalating to a longer cooldown —
+  // never a HARD, PERMANENT stop — is the fix for a follow-on finding: the
+  // first version of this cap stopped probing `gh` forever once exhausted, so
+  // a PR that genuinely merged after the budget was spent could never be
+  // detected and Linear could stay non-Done permanently with no recovery path
+  // (reconcileTerminalBackstop is inert too — its GATE 1 needs the
+  // `.terminal-done.applied` marker, which a permanently-refusing gate never
+  // writes). These two tests assert BOTH halves: the long cooldown suppresses
+  // a probe while fresh, and a probe still eventually fires once the long
+  // cooldown itself expires (eventual convergence).
+  test("CTL-1667 (review fix): terminalDoneOnce escalates to the LONG cooldown once the total probe count is exhausted", () => {
+    writePrSignals("CTL-77", 770);
+    const NOW = 10_000_000;
+    // Pre-seed the suppress marker at the exhaustion threshold, timestamped
+    // recently enough to still be within the LONG (exhausted) cooldown — a
+    // frequency-only (short-cooldown) bound would already have expired here.
+    writeFileSync(
+      join(orchDir, "workers", "CTL-77", ".terminal-pr-check-suppressed"),
+      JSON.stringify({ ts: NOW - 60 * 60_000, count: 12 }) // 1h ago: past the 5-min short cooldown, well within the 6h long one
+    );
+    let calls = 0;
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      now: () => NOW,
+      prAdapter: {
+        prView: () => {
+          calls += 1;
+          return { state: "OPEN", mergedAt: null };
+        },
+      },
+    });
+    expect(calls).toBe(0); // still within the long cooldown — no gh call
+    expect(dones).toEqual([]); // stays refused
+  });
+
+  test("CTL-1667 (review fix, round 4): terminalDoneOnce eventually re-probes and can still reach Done after the long cooldown expires", () => {
+    writePrSignals("CTL-78b", 771);
+    const NOW = 100_000_000;
+    // Exhausted, but the long cooldown has now fully expired (well past 6h).
+    writeFileSync(
+      join(orchDir, "workers", "CTL-78b", ".terminal-pr-check-suppressed"),
+      JSON.stringify({ ts: NOW - 7 * 60 * 60_000, count: 12 }) // 7h ago
+    );
+    let calls = 0;
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      now: () => NOW,
+      prAdapter: {
+        prView: () => {
+          calls += 1;
+          return { state: "MERGED", mergedAt: "2026-08-08T00:00:00Z" };
+        },
+      },
+    });
+    expect(calls).toBe(1); // probe fires again — never permanently cut off
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-78b" })); // and Done is reachable again
+  });
+
+  // Review fix (Codex P1, #3061): binds a retained `teardown: done` signal to
+  // the CURRENT run. A later phase (`pr`) dispatched AFTER teardown's own
+  // completion is proof the worker dir was reused by a run whose
+  // monitor-merge/monitor-deploy/teardown have not actually been verified —
+  // Done must be refused even though the (stale) teardown signal says "done"
+  // and even though the later PR happens to be merged.
+  test("CTL-1667 (review fix): terminalDoneOnce refuses Done when teardown evidence predates a later phase dispatch (stale signal)", () => {
+    const dir = join(orchDir, "workers", "CTL-78");
+    mkdirSync(dir, { recursive: true });
+    // Teardown "done" from an EARLIER run, completed at T0. Production always
+    // sets updatedAt alongside completedAt (phase-agent-emit-complete); the
+    // staleness check reads updatedAt (mirrors is_poststale_signal), so both
+    // are set here to match a real signal file's shape.
+    writeFileSync(
+      join(dir, "phase-teardown.json"),
+      JSON.stringify({
+        ticket: "CTL-78",
+        phase: "teardown",
+        status: "done",
+        completedAt: "2026-08-01T00:00:00Z",
+        updatedAt: "2026-08-01T00:00:00Z",
+      })
+    );
+    // `pr` phase (re)dispatched LATER, at T1 > T0 — a revived/newer run.
+    writeFileSync(
+      join(dir, "phase-pr.json"),
+      JSON.stringify({
+        ticket: "CTL-78",
+        phase: "pr",
+        status: "done",
+        pr: { number: 780 },
+        startedAt: "2026-08-05T00:00:00Z",
+      })
+    );
+    let calls = 0;
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: {
+        prView: () => {
+          calls += 1;
+          return { state: "MERGED", mergedAt: "2026-08-05T01:00:00Z" }; // the NEW PR IS merged
+        },
+      },
+    });
+    expect(dones).toEqual([]); // refused: stale teardown evidence, despite the merged PR
+    expect(calls).toBe(0); // never even reaches the merge-check gh call — caught earlier
+  });
+
+  // Companion: the SAME staleness check must NOT interfere with a genuine,
+  // single-run completion — the common case every other CTL-1667 test above
+  // already exercises implicitly (no sibling phase file is ever newer than
+  // teardown there). This test makes the non-interference explicit by setting
+  // real, correctly-ordered timestamps end to end.
+  test("CTL-1667 (review fix): terminalDoneOnce still writes Done for a genuinely fresh, correctly-ordered run", () => {
+    const dir = join(orchDir, "workers", "CTL-79");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-pr.json"),
+      JSON.stringify({
+        ticket: "CTL-79",
+        phase: "pr",
+        status: "done",
+        pr: { number: 790 },
+        startedAt: "2026-08-01T00:00:00Z",
+      })
+    );
+    // Teardown completes AFTER pr started — the normal, non-stale ordering.
+    writeFileSync(
+      join(dir, "phase-teardown.json"),
+      JSON.stringify({
+        ticket: "CTL-79",
+        phase: "teardown",
+        status: "done",
+        completedAt: "2026-08-03T00:00:00Z",
+        updatedAt: "2026-08-03T00:00:00Z",
+      })
+    );
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "2026-08-02T00:00:00Z" }) },
+    });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-79" }));
+  });
+});
+
+// ─── CTL-1667 (review fix, round 3, #3061): sanitize stale post-PR signals
+// before the advancement sweep's deriveAdvancement call ────────────────────
+// Without this, a retained STALE monitor-merge/monitor-deploy/teardown signal
+// (referencing an EARLIER run's PR, left over after a revive at an earlier
+// phase produced a NEW phase-pr.json) makes deriveAdvancement treat that phase
+// as "already dispatched" and skip straight past it — so is_poststale_signal
+// inside phase-agent-dispatch never even gets a chance to run, since the
+// dispatcher is never invoked for that phase at all.
+describe("CTL-1667 (review fix, round 3): sanitize stale post-PR signals before advancement", () => {
+  test("advancement sweep RE-dispatches monitor-merge when its signal is stale (mismatched PR#)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // Current run's PR (#200), just opened.
+    writeSignalRaw("CTL-80", "pr", {
+      ticket: "CTL-80",
+      phase: "pr",
+      status: "done",
+      pr: { number: 200 },
+      startedAt: "2026-08-05T00:00:00Z",
+      updatedAt: "2026-08-05T00:00:00Z",
+    });
+    // STALE monitor-merge signal retained from an EARLIER run's PR (#100) —
+    // predates the current PR entirely.
+    writeSignalRaw("CTL-80", "monitor-merge", {
+      ticket: "CTL-80",
+      phase: "monitor-merge",
+      status: "done",
+      pr: { number: 100 },
+      startedAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    // Without sanitization, deriveAdvancement would see "latest=monitor-merge,
+    // done" and skip straight to monitor-deploy — silently bypassing merge
+    // verification for the CURRENT PR. With sanitization, the stale
+    // monitor-merge entry is dropped, "latest" falls back to `pr`, and
+    // monitor-merge is correctly RE-dispatched for the current run.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-80", phase: "monitor-merge" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-80", phase: "monitor-merge" }]);
+  });
+
+  test("advancement sweep RE-dispatches monitor-merge when its signal predates the current PR (stale timestamp, no PR# to compare)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignalRaw("CTL-81", "pr", {
+      ticket: "CTL-81",
+      phase: "pr",
+      status: "done",
+      pr: { number: 210 },
+      startedAt: "2026-08-05T00:00:00Z",
+      updatedAt: "2026-08-05T00:00:00Z",
+    });
+    // Stale monitor-merge with NO .pr.number at all (legacy/malformed shape) —
+    // falls through to the timestamp rule, which alone proves staleness here.
+    writeSignalRaw("CTL-81", "monitor-merge", {
+      ticket: "CTL-81",
+      phase: "monitor-merge",
+      status: "done",
+      startedAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-81", phase: "monitor-merge" }]);
+  });
+
+  test("advancement sweep still advances normally past a genuinely FRESH monitor-merge signal (matching PR#, correct ordering)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignalRaw("CTL-82", "pr", {
+      ticket: "CTL-82",
+      phase: "pr",
+      status: "done",
+      pr: { number: 220 },
+      startedAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+    });
+    // monitor-merge for the SAME PR, completed AFTER pr — genuinely fresh.
+    writeSignalRaw("CTL-82", "monitor-merge", {
+      ticket: "CTL-82",
+      phase: "monitor-merge",
+      status: "done",
+      pr: { number: 220 },
+      startedAt: "2026-08-02T00:00:00Z",
+      updatedAt: "2026-08-02T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    // NOT stale → sanitization is a no-op → the sweep advances past
+    // monitor-merge to monitor-deploy, the normal happy path.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-82", phase: "monitor-deploy" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-82", phase: "monitor-deploy" }]);
+  });
+
+  test("advancement sweep is unaffected when phase-pr.json is absent (ambiguous — never invents staleness)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // No phase-pr.json at all — sanitization must not touch monitor-merge here
+    // (matches is_poststale_signal's own conservative default).
+    writeSignalRaw("CTL-83", "monitor-merge", {
+      ticket: "CTL-83",
+      phase: "monitor-merge",
+      status: "done",
+      pr: { number: 230 },
+      startedAt: "2026-08-01T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-83", phase: "monitor-deploy" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-83", phase: "monitor-deploy" }]);
+  });
+
+  // Review fix (Codex P1, round 4, #3061): a stale TEARDOWN signal specifically
+  // (not just monitor-merge/monitor-deploy) is the deepest case — teardown is
+  // TERMINAL_PHASE, so isTicketInFlight treats it as terminal and
+  // listInFlightTickets excludes the ticket BEFORE the advancement loop (and
+  // its sanitizeStalePostPrSignals call) ever runs. terminalDoneOnce correctly
+  // refuses Done (isTerminalTeardownStale), but without sanitizing inside
+  // listInFlightTickets itself the ticket was permanently wedged: refused
+  // forever, advanced never. This end-to-end test drives a full schedulerTick
+  // and asserts the ticket actually gets RE-DISPATCHED (proving it was
+  // reachable), not just that the lower-level helpers return the right shape.
+  test("a ticket with a STALE teardown:done signal is reachable and gets RE-dispatched (not permanently wedged)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dir = join(orchDir, "workers", "CTL-84");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-teardown.json"),
+      JSON.stringify({
+        ticket: "CTL-84",
+        phase: "teardown",
+        status: "done",
+        completedAt: "2026-08-01T00:00:00Z",
+        updatedAt: "2026-08-01T00:00:00Z",
+      })
+    );
+    // pr (re)dispatched AFTER teardown completed — proves staleness, and is
+    // the only OTHER phase signal present (a stripped-down repro: nothing
+    // else masks whether the ticket ever reached the advancement sweep).
+    writeSignalRaw("CTL-84", "pr", {
+      ticket: "CTL-84",
+      phase: "pr",
+      status: "done",
+      pr: { number: 240 },
+      startedAt: "2026-08-05T00:00:00Z",
+    });
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    // Sanitized signals = {pr: "done"} → deriveAdvancement's owed next phase
+    // is monitor-merge — proof the ticket was reachable, not excluded.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-84", phase: "monitor-merge" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-84", phase: "monitor-merge" }]);
   });
 });

@@ -176,10 +176,33 @@ run_s11() {
   local emit="${fpr}/scripts/phase-agent-emit-complete"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$emit"; chmod +x "$emit"
 
-  # Stub linearis
+  # CTL-1552: stub label-needs-human.mjs — the guard CLI the helper now delegates
+  # to instead of raw `linearis --labels needs-human` + a hand-written marker.
+  # Records its argv and creates the once-marker (simulating labelOnce), so the
+  # marker assertion (11b) still holds AND we can prove delegation (11g).
+  cat > "${fpr}/scripts/execution-core/label-needs-human.mjs" <<'CLISTUB'
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+const a = process.argv.slice(2);
+const get = (f) => { const i = a.indexOf(f); return i >= 0 ? a[i + 1] : undefined; };
+const orch = get("--orch-dir");
+const ticket = get("--ticket");
+if (orch && ticket) {
+  writeFileSync(join(orch, "cli-invoked.args"), a.join(" "));
+  const m = join(orch, "workers", ticket, ".linear-label-needs-human.applied");
+  mkdirSync(dirname(m), { recursive: true });
+  writeFileSync(m, "");
+}
+CLISTUB
+
+  # Stub linearis — records argv so a test can assert the raw label-add path is GONE.
   local lin_bin="${scratch}/lin_bin"
   mkdir -p "$lin_bin"
-  printf '#!/usr/bin/env bash\nexit %s\n' "$stub_lin_rc" > "${lin_bin}/linearis"
+  cat > "${lin_bin}/linearis" <<LINSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${scratch}/linearis.args"
+exit ${stub_lin_rc}
+LINSTUB
   chmod +x "${lin_bin}/linearis"
 
   # Stub linear-comment-post.sh (captures args so we can verify)
@@ -223,8 +246,8 @@ S11A_STATUS="$(jq -r '.status' "${S11A_SCRATCH}/phase-implement.json" 2>/dev/nul
 assert_eq "failed" "$S11A_STATUS" "11a: signal file status=failed"
 rm -rf "$S11A_SCRATCH"
 
-# 11b: .linear-label-needs-human.applied marker is created when CATALYST_ORCHESTRATOR_DIR set
-echo "11b: needs-human marker file created when CATALYST_ORCHESTRATOR_DIR set"
+# 11b: .linear-label-needs-human.applied marker is created (now via the guard CLI)
+echo "11b: needs-human marker file created (via guard CLI) when CATALYST_ORCHESTRATOR_DIR set"
 S11B_SCRATCH="$(run_s11 0 0 true true)"
 MARKER="${S11B_SCRATCH}/orch_dir/workers/CTL-S11/.linear-label-needs-human.applied"
 if [[ -e "$MARKER" ]]; then
@@ -280,6 +303,32 @@ S11F_SCRATCH="$(run_s11 1 0 true true)"
 S11F_STATUS="$(jq -r '.status' "${S11F_SCRATCH}/phase-implement.json" 2>/dev/null || echo "missing")"
 assert_eq "failed" "$S11F_STATUS" "11f: signal still set to failed even when linearis exits 1"
 rm -rf "$S11F_SCRATCH"
+
+# 11g: CTL-1552 — needs-human is applied THROUGH the guard CLI, not raw linearis.
+echo "11g: CTL-1552 — delegates to label-needs-human.mjs, no raw 'linearis --labels needs-human'"
+S11G_SCRATCH="$(run_s11 0 0 true true)"
+# the guard CLI was invoked with the ticket + orch dir
+CLI_ARGS_FILE="${S11G_SCRATCH}/orch_dir/cli-invoked.args"
+if [[ -s "$CLI_ARGS_FILE" ]] && grep -q -- "--ticket CTL-S11" "$CLI_ARGS_FILE" \
+     && grep -q -- "--orch-dir" "$CLI_ARGS_FILE"; then
+  pass "11g: guard CLI invoked with --ticket + --orch-dir"
+else
+  fail "11g: guard CLI not invoked as expected — got: $(cat "$CLI_ARGS_FILE" 2>/dev/null)"
+fi
+# the MANUAL explanation is threaded through, not left for the guard to
+# manufacture a generic one that would outrank the failed-phase signal
+if grep -q -- "--explanation" "$CLI_ARGS_FILE" 2>/dev/null; then
+  pass "11g: guard CLI invoked with --explanation"
+else
+  fail "11g: --explanation not threaded — got: $(cat "$CLI_ARGS_FILE" 2>/dev/null)"
+fi
+# the raw `linearis ... --labels needs-human` path is GONE
+if [[ -f "${S11G_SCRATCH}/linearis.args" ]] && grep -q -- "--labels needs-human" "${S11G_SCRATCH}/linearis.args"; then
+  fail "11g: raw 'linearis --labels needs-human' was still called — got: $(cat "${S11G_SCRATCH}/linearis.args")"
+else
+  pass "11g: no raw 'linearis --labels needs-human' add"
+fi
+rm -rf "$S11G_SCRATCH"
 
 echo ""
 echo "results: ${PASSES} passed, ${FAILURES} failed"

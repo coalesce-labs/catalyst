@@ -33,7 +33,17 @@ export function buildRecoveryItems(signals, { db = null, getBeliefs = null } = {
     // the existing linearTerminal/beliefState readers keep working. `signal` is
     // null (not {}) when there is no signal file, so an absent signal stays falsy
     // for the classifier's early-return guard.
-    let evidence = { ...raw, signal: sig.raw ?? null };
+    // CTL-1680 (Codex #3079 round-4 P1): carry the failing signal's own path so the
+    // PR-not-merged classifier can read the PR number out of a SIBLING phase artifact
+    // (phase-pr.json / phase-monitor-merge.json / phase-implement.json) when the
+    // failure reason names none. Two production reasons carry no `pr#<N>`, and without
+    // an exact number the probe falls back to a title search that can resolve a
+    // different historical PR and recover ITS merge SHA. `signalPath` is a path, not
+    // signal content, so it comes from the READER's field and is applied AFTER the raw
+    // spread: the reader's path is the real location the file was read from, whereas a
+    // `signalPath` key inside the JSON is untrusted content that could otherwise
+    // redirect the sibling-artifact reads at a different worker's directory.
+    let evidence = { ...raw, signal: sig.raw ?? null, signalPath: sig.signalPath ?? null };
     if (typeof getBeliefs === "function") {
       const beliefState = getBeliefs(db, sig.ticket);
       if (beliefState != null) {

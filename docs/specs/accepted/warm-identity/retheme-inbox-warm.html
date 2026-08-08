@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Re-theme proof — the Inbox in warm cloth · Catalyst</title>
+<style>
+/* ════════════════════════════════════════════════════════════════════════
+   RE-THEME PROOF — orch-monitor Inbox HOME wearing the living-textbook skin.
+   Two complete app frames, identical markup + data, themed by CSS variables:
+     .t-dark  — the warm-graphite charcoal ramp (the textbook mockup's ladder)
+     .t-light — the anthropic-paper :root theme that already ships in app.css,
+                plus the serif voice + the terracotta accent family.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── Page-level (textbook) tokens ───────────────────────────────────────── */
+:root{
+  --bg:        #161513;
+  --surface:   #1c1b18;
+  --surface-2: #232220;
+  --border:    #2e2c27;
+  --border-soft:#262420;
+  --ink:       #e9e5dc;
+  --ink-dim:   #a39d91;
+  --ink-faint: #6f6a5f;
+  --wedge:     #e8ad4a;
+  --ok:        #6fbe87;
+  --terra:     #d28e63;
+
+  --serif: "Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+  --mono:  ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --sans:  -apple-system,"SF Pro Text",system-ui,"Segoe UI",sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--ink);
+  font-family:var(--serif);font-size:16.5px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.band{padding:0 0 88px}
+.band-light{background:#efe9dc;color:#2b2722}
+.page{max-width:1480px;margin:0 auto;padding:0 40px}
+
+/* ── App-chrome echo strip ──────────────────────────────────────────────── */
+.chrome{
+  display:flex;align-items:center;gap:14px;
+  padding:14px 0 13px;border-bottom:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:12.5px;color:var(--ink-dim);
+}
+.chrome .crumb b{color:var(--ink);font-weight:600}
+.chrome .sep{color:var(--ink-faint)}
+.chrome .spacer{flex:1}
+.chrome .tickmeta{font-family:var(--mono);font-size:11.5px;color:var(--ink-faint)}
+.chrome .tickmeta b{color:var(--ink-dim);font-weight:500}
+.pill{
+  display:inline-flex;align-items:center;gap:7px;
+  border:1px solid var(--border);border-radius:999px;
+  padding:3px 11px;font-family:var(--sans);font-size:11.5px;
+  color:var(--ink-dim);background:var(--surface);white-space:nowrap;
+}
+.pill .dot{width:7px;height:7px;border-radius:50%}
+.dot-live{background:var(--ok);animation:pulse 2.2s ease-in-out infinite}
+.dot-terra{background:var(--terra)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── Masthead ───────────────────────────────────────────────────────────── */
+.masthead{padding:54px 0 8px;max-width:880px}
+.kicker{
+  font-family:var(--sans);font-size:11px;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--ink-faint);margin-bottom:14px;
+}
+h1{font-size:42px;line-height:1.12;font-weight:600;letter-spacing:-.012em}
+h1 .amp{color:var(--ink-faint);font-style:italic;font-weight:400}
+.deck{
+  margin-top:18px;font-size:19px;line-height:1.55;color:var(--ink-dim);
+  font-style:italic;max-width:780px;
+}
+.deck b{color:var(--ink);font-style:normal;font-weight:500}
+.band-light .deck{color:#76705f}
+.band-light .deck b{color:#2b2722}
+
+/* ── Section scaffolding ────────────────────────────────────────────────── */
+section{margin-top:72px}
+.sec-label{
+  font-family:var(--sans);font-size:11px;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--ink-faint);
+  display:flex;align-items:baseline;gap:14px;margin-bottom:10px;
+}
+.sec-label::after{content:"";flex:1;height:1px;background:var(--border-soft);align-self:center}
+.sec-label .n{color:var(--wedge);font-family:var(--mono);letter-spacing:0}
+.band-light .sec-label{color:#a89c87}
+.band-light .sec-label::after{background:#ded5c2}
+.band-light .sec-label .n{color:#a9512f}
+h2{font-size:27px;font-weight:600;letter-spacing:-.008em;margin-bottom:8px}
+.lede{color:var(--ink-dim);max-width:780px;margin-bottom:28px}
+.lede code{font-family:var(--mono);font-size:.82em;color:var(--ink);background:var(--surface-2);padding:1px 5px;border-radius:4px}
+.band-light .lede{color:#76705f}
+.band-light .lede code{color:#2b2722;background:#e6dfd0}
+
+/* ── Figure caption / annotation grid ───────────────────────────────────── */
+.figcap{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:22px;
+  padding:20px 6px 0;
+  font-family:var(--sans);font-size:12.5px;line-height:1.55;color:var(--ink-dim);
+}
+.figcap .cn{
+  display:inline-flex;width:19px;height:19px;border-radius:50%;
+  border:1px solid var(--ink-faint);color:var(--ink-dim);
+  font-size:10.5px;align-items:center;justify-content:center;
+  margin-right:8px;vertical-align:-3px;
+}
+.figcap b{color:var(--ink);font-weight:600}
+.band-light .figcap{color:#76705f}
+.band-light .figcap b{color:#2b2722}
+.band-light .figcap .cn{border-color:#b7ab94;color:#76705f}
+
+/* inline annotation circle inside the frames */
+.ann{
+  display:inline-flex;width:17px;height:17px;border-radius:50%;flex:none;
+  background:var(--f-chrome);border:1px solid var(--f-faint);color:var(--f-dim);
+  font-family:var(--sans);font-size:10px;font-weight:500;font-style:normal;
+  align-items:center;justify-content:center;margin-left:8px;
+}
+
+/* footer */
+footer{
+  padding:26px 0 60px;border-top:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:12px;color:var(--ink-faint);line-height:1.8;
+}
+footer code{font-family:var(--mono);font-size:11px;color:var(--ink-dim)}
+
+/* ════════════════════════════════════════════════════════════════════════
+   THE APP FRAME — one component, two skins.
+   Everything inside reads frame-local --f-* variables only.
+   ════════════════════════════════════════════════════════════════════════ */
+.frame{
+  display:grid;grid-template-columns:234px minmax(0,1fr);
+  height:846px;border-radius:14px;overflow:hidden;
+  border:1px solid var(--f-border);
+  background:var(--f-chrome);
+  font-family:var(--sans);font-size:13px;line-height:1.45;
+  color:var(--f-ink);
+}
+.t-dark{
+  --f-chrome:#161513;        /* sidebar / topbar / footer       */
+  --f-canvas:#1c1b18;        /* list + reading pane             */
+  --f-raise:#232220;         /* selected row, hover             */
+  --f-card:#2a2825;          /* badges, elevated chips          */
+  --f-border:#2e2c27;
+  --f-soft:#262420;
+  --f-ink:#e9e5dc;
+  --f-dim:#a39d91;
+  --f-faint:#6f6a5f;
+  --f-acc:#d28e63;           /* terracotta — keys, active nav   */
+  --f-acc-bg:#bd6b3f;        /* the one bright verb             */
+  --f-acc-ink:#fbf3ea;
+  --f-acc-soft:rgba(210,142,99,.10);
+  --f-ok:#6fbe87;
+  --f-ok-bg:rgba(111,190,135,.10);
+  --f-amber:#e8ad4a;
+  --f-amber-bar:#e8ad4a;
+  --f-amber-bg:rgba(232,173,74,.07);
+  --f-red:#e06a5e;
+  --f-red-bar:#e06a5e;
+  --f-red-bg:rgba(224,106,94,.07);
+  --f-cyan:#7fb6c9;
+  --f-olive:#c9b35a;
+  --f-orange:#d98a4d;
+  --f-lilac:#b29ae9;
+  box-shadow:0 36px 90px -48px rgba(0,0,0,.85);
+}
+.t-light{
+  --f-chrome:#f3eee3;
+  --f-canvas:#faf7f2;
+  --f-raise:#f0eadc;
+  --f-card:#fffdf9;
+  --f-border:#ddd5c7;
+  --f-soft:#e8e1d3;
+  --f-ink:#2b2722;
+  --f-dim:#76705f;
+  --f-faint:#a89f8d;
+  --f-acc:#a9512f;
+  --f-acc-bg:#c15f3c;
+  --f-acc-ink:#fdf6ef;
+  --f-acc-soft:rgba(193,95,60,.10);
+  --f-ok:#3e7e53;
+  --f-ok-bg:rgba(62,126,83,.10);
+  --f-amber:#9a6c1d;
+  --f-amber-bar:#c9962e;
+  --f-amber-bg:rgba(201,150,46,.09);
+  --f-red:#b5443a;
+  --f-red-bar:#c25247;
+  --f-red-bg:rgba(181,68,58,.07);
+  --f-cyan:#3f7c93;
+  --f-olive:#8a7a25;
+  --f-orange:#b06a2c;
+  --f-lilac:#7a5fc0;
+  box-shadow:0 28px 64px -36px rgba(43,39,34,.22);
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────────────── */
+.sb{
+  display:flex;flex-direction:column;
+  background:var(--f-chrome);border-right:1px solid var(--f-soft);
+  padding:14px 10px 12px;overflow:hidden;
+}
+.sb-brand{display:flex;align-items:center;gap:9px;padding:2px 8px 14px}
+.sb-brand .logo{color:var(--f-acc)}
+.sb-brand .word{
+  font-family:var(--serif);font-size:15.5px;font-weight:600;
+  letter-spacing:-.01em;color:var(--f-ink);
+}
+.sb-group{margin-top:4px}
+.sb-head{
+  display:flex;align-items:center;gap:7px;height:26px;padding:0 8px;
+  font-size:11px;font-weight:500;color:var(--f-faint);border-radius:6px;
+}
+.sb-head.proj{font-size:12px;color:var(--f-dim);height:29px}
+.sb-head .tw{margin-left:auto;color:var(--f-faint);display:flex}
+.sb-head .tw.open svg{transform:rotate(90deg)}
+.sb-head .sigdot{margin-left:auto;width:6px;height:6px;border-radius:50%;flex:none}
+.sigdot.amber{background:var(--f-amber-bar)}
+.sigdot.green{background:var(--f-ok)}
+.sb-head .pdot{width:8px;height:8px;border-radius:50%;flex:none}
+.sb-menu{display:flex;flex-direction:column;gap:1px;padding:1px 0 6px}
+.sb-menu.kids{margin-left:15px;border-left:1px solid var(--f-soft);padding-left:9px}
+.sb-item{
+  display:flex;align-items:center;gap:9px;height:29px;
+  padding:0 8px;border-radius:6px;color:var(--f-dim);font-weight:500;
+  font-size:12.5px;white-space:nowrap;
+}
+.sb-menu.kids .sb-item{height:27px;font-size:12px}
+.sb-item .nico{display:flex;flex:none;position:relative;color:currentColor}
+.sb-item.on{background:var(--f-acc-soft);color:var(--f-acc)}
+.sb-item .count{
+  margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--f-faint);
+}
+.sb-item .attn{
+  margin-left:auto;font-family:var(--mono);font-size:10px;
+  color:var(--f-amber);background:var(--f-amber-bg);
+  border-radius:999px;padding:1px 7px;
+}
+.sb-item .soon{
+  margin-left:auto;font-size:9.5px;color:var(--f-faint);
+  border:1px solid var(--f-soft);border-radius:4px;padding:0 5px;
+}
+.sb-item.dis{opacity:.5}
+.presence{
+  position:absolute;top:-2px;right:-3px;width:7px;height:7px;border-radius:50%;
+  background:var(--f-ok);border:2px solid var(--f-chrome);
+}
+.sb-foot{margin-top:auto;border-top:1px solid var(--f-soft);padding-top:8px}
+
+/* ── Main column ────────────────────────────────────────────────────────── */
+.main{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0}
+.topbar{
+  display:flex;align-items:center;gap:12px;
+  padding:9px 18px;border-bottom:1px solid var(--f-soft);
+  background:var(--f-chrome);font-size:12px;color:var(--f-dim);
+}
+.topbar b{color:var(--f-ink);font-weight:600}
+.topbar .sep{color:var(--f-faint)}
+.topbar .spacer{flex:1}
+.fpill{
+  display:inline-flex;align-items:center;gap:6px;
+  border:1px solid var(--f-border);border-radius:999px;
+  padding:2px 10px;font-size:10.5px;color:var(--f-dim);background:var(--f-canvas);
+}
+.fpill .dot{width:6px;height:6px;border-radius:50%;background:var(--f-ok);animation:pulse 2.2s ease-in-out infinite}
+.topbar .meta{font-family:var(--mono);font-size:10.5px;color:var(--f-faint)}
+
+.split{display:grid;grid-template-columns:486px minmax(0,1fr);min-height:0}
+
+/* ── Inbox list ─────────────────────────────────────────────────────────── */
+.list{
+  display:flex;flex-direction:column;min-height:0;
+  background:var(--f-canvas);border-right:1px solid var(--f-soft);
+}
+.calm{
+  flex:none;padding:15px 18px 13px;border-bottom:1px solid var(--f-soft);
+  font-family:var(--serif);font-size:15px;line-height:1.5;color:var(--f-ink);
+  display:flex;align-items:center;
+}
+.calm em{color:var(--f-dim);margin-left:3px}
+.list-scroll{min-height:0;flex:1;overflow:hidden}
+.lsec{border-bottom:1px solid var(--f-soft)}
+.lsec:last-child{border-bottom:none}
+.lsec-h{
+  display:flex;align-items:center;gap:8px;
+  padding:13px 18px 6px;
+  font-size:10.5px;font-weight:500;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--f-dim);
+}
+.lsec-h .n{font-family:var(--mono);letter-spacing:0;color:var(--f-faint)}
+.lsec-h .tw{display:flex;color:var(--f-faint)}
+.lsec-h .tw.open svg{transform:rotate(90deg)}
+
+.row{
+  display:flex;align-items:flex-start;gap:10px;
+  padding:10px 18px 11px;cursor:default;position:relative;
+}
+.row + .row::before{
+  content:"";position:absolute;top:0;left:18px;right:18px;height:1px;
+  background:var(--f-soft);
+}
+.row.sel{background:var(--f-raise)}
+.bar{width:3px;height:34px;border-radius:3px;flex:none;margin-top:1px;background:transparent}
+.bar.red{background:var(--f-red-bar)}
+.bar.amber{background:var(--f-amber-bar)}
+.row .glyph{margin-top:2px}
+.row-body{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.row-l1{display:flex;align-items:baseline;gap:8px;min-width:0}
+.key{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--f-acc);flex:none}
+.ask{
+  font-size:13px;color:var(--f-ink);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;min-width:0;
+}
+.sub{font-size:11px;color:var(--f-dim)}
+.sub .mono{font-family:var(--mono);font-size:10px;color:var(--f-faint)}
+.row-right{display:flex;align-items:center;gap:9px;flex:none;margin-top:3px}
+.dur{font-family:var(--mono);font-size:10.5px;color:var(--f-faint);font-variant-numeric:tabular-nums}
+.livedot{width:6px;height:6px;border-radius:50%;background:var(--f-ok);animation:pulse 2.2s ease-in-out infinite}
+.verb{
+  font-size:11px;font-weight:500;border-radius:6px;padding:2.5px 9px;
+  border:1px solid;white-space:nowrap;background:transparent;
+}
+.verb.red{color:var(--f-red);border-color:color-mix(in srgb,var(--f-red) 40%,transparent)}
+.verb.amber{color:var(--f-amber);border-color:color-mix(in srgb,var(--f-amber) 42%,transparent)}
+.dots3{color:var(--f-faint);font-family:var(--mono);font-size:12px;letter-spacing:.1em;flex:none}
+
+/* phase glyph colors */
+.ph-gray{color:var(--f-faint)} .ph-cyan{color:var(--f-cyan)} .ph-olive{color:var(--f-olive)}
+.ph-amber{color:var(--f-amber-bar)} .ph-orange{color:var(--f-orange)}
+.ph-lilac{color:var(--f-lilac)} .ph-green{color:var(--f-ok)} .ph-terra{color:var(--f-acc)}
+.glyph{display:inline-flex;flex:none}
+
+/* ── Reading pane ───────────────────────────────────────────────────────── */
+.pane{background:var(--f-canvas);min-width:0;overflow:hidden;padding:24px 30px}
+.pane-head{display:flex;align-items:flex-start;gap:13px}
+.pane-head .glyph{margin-top:4px}
+.pane-tit{min-width:0;flex:1}
+.pane-meta{display:flex;align-items:baseline;gap:9px}
+.pane-meta .key{font-size:12px}
+.pane-meta .sub{font-size:11.5px}
+.pane h3{
+  font-family:var(--serif);font-size:23px;line-height:1.3;font-weight:600;
+  letter-spacing:-.008em;color:var(--f-ink);margin-top:5px;max-width:560px;
+}
+.vic{
+  display:inline-flex;align-items:center;gap:7px;flex:none;
+  border:1px solid var(--f-border);border-radius:8px;padding:5.5px 12px;
+  font-size:11.5px;font-weight:500;color:var(--f-dim);background:var(--f-card);
+  white-space:nowrap;margin-top:2px;
+}
+.vic svg{flex:none}
+.vic .spark{color:var(--f-acc)}
+
+.hero{
+  margin-top:20px;border-left:3px solid var(--f-amber-bar);
+  background:var(--f-amber-bg);border-radius:4px;padding:13px 18px 16px;
+  max-width:600px;
+}
+.hero-k{
+  font-size:10.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--f-amber);
+}
+.hero-ask{
+  font-family:var(--serif);font-size:16.5px;line-height:1.55;color:var(--f-ink);
+  margin-top:7px;
+}
+.hero-ask code{font-family:var(--mono);font-size:.78em;background:var(--f-raise);border:1px solid var(--f-soft);border-radius:4px;padding:1px 5px;color:var(--f-dim)}
+.opts{margin-top:13px;display:flex;flex-direction:column;gap:9px;list-style:none}
+.opts li{display:flex;align-items:baseline;gap:10px}
+.opt-b{
+  flex:none;font-size:11px;font-weight:500;color:var(--f-ink);
+  border:1px solid var(--f-border);border-radius:6px;padding:2px 9px;
+  background:var(--f-card);white-space:nowrap;
+}
+.opt-d{font-family:var(--serif);font-size:13px;font-style:italic;color:var(--f-dim);line-height:1.5}
+.hero-verbs{margin-top:15px;display:flex;align-items:center;gap:12px}
+.bright{
+  font-size:12.5px;font-weight:600;color:var(--f-acc-ink);
+  background:var(--f-acc-bg);border:none;border-radius:7px;padding:6.5px 16px;
+}
+.hero-hint{font-size:11px;color:var(--f-faint)}
+
+.psep{height:1px;background:var(--f-soft);margin:24px 0 0;max-width:600px}
+.about{margin-top:18px;max-width:600px}
+.about-k{
+  font-size:10.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--f-dim);
+}
+.about-sum{font-family:var(--serif);font-size:14.5px;line-height:1.62;color:var(--f-ink);margin-top:8px}
+.about-goal{font-family:var(--serif);font-size:13px;font-style:italic;line-height:1.6;color:var(--f-dim);margin-top:7px}
+.about-goal b{font-style:normal;font-weight:500;color:var(--f-dim)}
+.whereat{margin-top:20px;max-width:600px}
+.wa-row{display:flex;align-items:center;gap:11px;margin-top:9px}
+.wa-lab{font-size:12px;color:var(--f-dim)}
+.strip{display:flex;gap:4px;align-items:center}
+.strip i{width:15px;height:3.5px;border-radius:2px;background:var(--f-soft)}
+.strip i.f{background:var(--f-olive)}
+.pane-foot{
+  margin-top:20px;font-family:var(--mono);font-size:10.5px;color:var(--f-faint);
+}
+
+/* ── Frame footer (live strip) ──────────────────────────────────────────── */
+.fbar{
+  display:flex;align-items:center;gap:16px;
+  padding:7px 18px;border-top:1px solid var(--f-soft);background:var(--f-chrome);
+  font-family:var(--mono);font-size:10.5px;color:var(--f-faint);
+}
+.fbar b{color:var(--f-dim);font-weight:500}
+.fbar .ld{display:inline-flex;align-items:center;gap:6px;color:var(--f-ok)}
+.fbar .spacer{flex:1}
+
+/* icons */
+.nico svg,.tw svg,.logo svg{display:block}
+@media (max-width:1240px){.figcap{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+
+<!-- ════════════════ DARK BAND ════════════════ -->
+<div class="band">
+<div class="page">
+
+  <div class="chrome">
+    <span class="crumb">Catalyst <span class="sep">›</span> Design <span class="sep">›</span> <b>Re-theme proof</b></span>
+    <span class="pill"><span class="dot dot-terra"></span>proposal — not shipped</span>
+    <span class="pill"><span class="dot dot-live"></span>data shapes from the live read-model</span>
+    <span class="spacer"></span>
+    <span class="tickmeta">inbox HOME · <b>same IA</b>, different cloth · charcoal + paper</span>
+  </div>
+
+  <div class="masthead">
+    <div class="kicker">Orch-monitor · warm re-theme · the identity question</div>
+    <h1>The monitor, re-bound in warm cloth<span class="amp"> — same spine, new cover.</span></h1>
+    <p class="deck">Below is the Inbox home twice, pixel-for-pixel the <b>same information
+    architecture</b> — sidebar groups, calm header sentence, bare rows, the one bright verb,
+    the reading pane — wearing the living-textbook skin instead of blue graphite. Warm paper
+    and warm charcoal, <b>serif where you read</b>, mono where it's data, and a terracotta
+    accent family where Linear-blue used to be. Live green, needs-you amber and blocked red
+    survive untouched in meaning.</p>
+  </div>
+
+  <section>
+    <div class="sec-label"><span class="n">Fig. 1</span> Warm charcoal — the fleet dashboard runs dark</div>
+    <h2>Calm dark, hue 70</h2>
+    <p class="lede">The exact ladder the app already has — chrome, canvas, raised row, card,
+    two border tones, three ink levels — with every stop's lightness kept and the hue swapped
+    blue&nbsp;→&nbsp;warm. Nothing was redrawn: <code>--surface-chrome…elevated</code> just
+    point at warm graphite.</p>
+
+    <!-- ═══ DARK APP FRAME ═══ -->
+    <div class="frame t-dark" id="frame-dark"></div>
+
+    <div class="figcap">
+      <div><span class="cn">1</span><b>Serif voice where you read.</b> The wordmark, the calm
+      state-of-things sentence, the ask and the about-block move to the textbook serif; nav,
+      chips and chrome stay quiet sans; keys and durations stay mono.</div>
+      <div><span class="cn">2</span><b>Status semantics survive.</b> Blocked keeps its red bar
+      and red verb, decisions keep amber, running rows keep the pulsing live green — the hue
+      swap never touches meaning.</div>
+      <div><span class="cn">3</span><b>Terracotta replaces Linear blue.</b> Ticket keys, the
+      active nav item, the brand mark and the one bright verb all draw from the book-cloth
+      accent family — nothing else gets to be loud.</div>
+      <div><span class="cn">4</span><b>Same anatomy, recolored.</b> Status glyphs, phase strip,
+      attention pills, presence dots and collapsed-section signal dots are the shipped
+      components, re-inked onto the warm ramp.</div>
+    </div>
+  </section>
+
+</div>
+</div>
+
+<!-- ════════════════ LIGHT BAND ════════════════ -->
+<div class="band band-light">
+<div class="page">
+
+  <section style="margin-top:0;padding-top:64px">
+    <div class="sec-label"><span class="n">Fig. 2</span> Anthropic paper — the :root theme that already ships, finished</div>
+    <h2>Warm light, on paper</h2>
+    <p class="lede">Half of this identity is already in <code>app.css</code> — the
+    <code>#faf7f2</code> canvas, cream cards, warm borders. What's new here is the other half:
+    the serif reading voice, terracotta in place of the leftover Linear-blue accent, and
+    amber/red/green re-tuned dark enough to hold on paper.</p>
+
+    <!-- ═══ LIGHT APP FRAME ═══ -->
+    <div class="frame t-light" id="frame-light"></div>
+
+    <div class="figcap">
+      <div><span class="cn">1</span><b>Identical markup.</b> Both frames render from one
+      template; only the CSS variable scope changes — the proof that this is a token re-theme,
+      not a redesign.</div>
+      <div><span class="cn">2</span><b>Accents re-tuned, not re-hued.</b> Amber drops to honey
+      ink on paper, green deepens to moss, red to brick — same roles, AA-legible on cream.</div>
+      <div><span class="cn">3</span><b>The chrome stops being a Linear knockoff.</b> Paper
+      surfaces, serif headings and the book-cloth verb read as Catalyst's own voice while every
+      learned behavior stays where it was.</div>
+      <div><span class="cn">4</span><b>Cheap to ship.</b> The enforcement contract
+      (board-tokens ⇄ CSS byte-sync, surface paint checks) already polices the ladder — the
+      re-theme is a value swap inside it.</div>
+    </div>
+  </section>
+
+  <footer style="margin-top:64px">
+    Re-theme proof · Catalyst orch-monitor Inbox HOME · same components as
+    <code>home-surface.tsx</code> / <code>inbox-row.tsx</code> / <code>reading-pane.tsx</code> /
+    <code>app-sidebar.tsx</code>, skinned with the <code>rules-explorer-living-textbook</code>
+    token family. Dark = warm-graphite ladder (hue 70) · Light = the shipped anthropic-paper
+    <code>:root</code> + serif + terracotta. Nothing on this page changes information
+    architecture, row anatomy, or status meaning.
+  </footer>
+
+</div>
+</div>
+
+<script>
+/* ── Inline icon set (lucide-ish, stroke = currentColor) ────────────────── */
+const I = {
+  logo:   '<path d="M5 3l7 9-7 9"/><path d="M13 3l7 9-7 9"/>',
+  inbox:  '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  grid:   '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',
+  users:  '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  list:   '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
+  act:    '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+  gauge:  '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  wallet: '<path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/>',
+  server: '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>',
+  code:   '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+  set:    '<line x1="21" y1="4" x2="14" y2="4"/><line x1="10" y1="4" x2="3" y2="4"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="20" x2="16" y2="20"/><line x1="12" y1="20" x2="3" y2="20"/><line x1="14" y1="2" x2="14" y2="6"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="18" x2="16" y2="22"/>',
+  sun:    '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+  moon:   '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  chev:   '<polyline points="9 18 15 12 9 6"/>',
+  ext:    '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  spark:  '<g stroke-width="1.9" stroke-linecap="round"><path d="M12 3.5V9M12 15v5.5M3.5 12H9M15 12h5.5"/><path d="M6 6l3 3M15 15l3 3M18 6l-3 3M9 15l-3 3" opacity=".85"/></g>',
+};
+function ic(name, size=15, sw=1.8){
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${I[name]}</svg>`;
+}
+
+/* ── StatusIcon glyph (ring + pie / done disc + check), currentColor ────── */
+function polar(cx,cy,r,deg){const a=(deg-90)*Math.PI/180;return[cx+r*Math.cos(a),cy+r*Math.sin(a)];}
+function glyph(frac, size=16, done=false){
+  const c=size/2, ringR=size*.4, ringW=Math.max(1.5,size*.115), pieR=size*.225;
+  let body='';
+  if(done){
+    const s=size;
+    body=`<circle cx="${c}" cy="${c}" r="${ringR+ringW/2}" fill="currentColor"/>`+
+      `<path d="M ${c-s*.16} ${c+s*.01} L ${c-s*.04} ${c+s*.13} L ${c+s*.18} ${c-s*.13}" fill="none" stroke="var(--f-canvas)" stroke-width="${Math.max(1.4,s*.11)}" stroke-linecap="round" stroke-linejoin="round"/>`;
+  } else {
+    body=`<circle cx="${c}" cy="${c}" r="${ringR}" fill="none" stroke="currentColor" stroke-opacity=".28" stroke-width="${ringW}"/>`;
+    if(frac>0){
+      const [sx,sy]=polar(c,c,ringR,0), [ex,ey]=polar(c,c,ringR,frac*360), la=frac>.5?1:0;
+      body+=`<path d="M ${sx} ${sy} A ${ringR} ${ringR} 0 ${la} 1 ${ex} ${ey}" fill="none" stroke="currentColor" stroke-width="${ringW}" stroke-linecap="round"/>`;
+      const [px,py]=polar(c,c,pieR,0), [qx,qy]=polar(c,c,pieR,frac*360);
+      body+=`<path d="M ${c} ${c} L ${px} ${py} A ${pieR} ${pieR} 0 ${la} 1 ${qx} ${qy} Z" fill="currentColor"/>`;
+    }
+  }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${body}</svg>`;
+}
+function g(cls,frac,size=16,done=false){
+  return `<span class="glyph ${cls}">${glyph(frac,size,done)}</span>`;
+}
+
+/* ── Data — shapes lifted from the live inbox ──────────────────────────── */
+const needsYou = [
+  {key:'CTL-1046', bar:'red',   ph:'ph-amber', frac:4/9,
+   ask:'Live incident: worktree debris filled the root volume on l-3300b',
+   sub:'blocked — needs you to unblock · CTL-1030', dur:'38m', verb:'Unblock', vc:'red'},
+  {key:'CTL-1049', bar:'amber', ph:'ph-olive', frac:3/9, sel:true,
+   ask:'Security interrogation needs a call on webhook token scope',
+   sub:'escalation — needs human', dur:'2h', verb:'Respond', vc:'amber'},
+  {key:'CTL-1050', bar:'amber', ph:'ph-lilac', frac:6/9,
+   ask:'Phase-review found a conflicting merge-tree result on broker tests',
+   sub:'escalation — needs human', dur:'4h', verb:'Respond', vc:'amber'},
+];
+const waiting = [
+  {key:'CTL-1038', bar:'amber', ph:'ph-lilac', frac:6/9,
+   ask:'Five verified findings from the CTL-1020 graph review',
+   sub:'waiting on you', dur:'1d', verb:'Answer', vc:'amber'},
+  {key:'CTL-1042', bar:'amber', ph:'ph-terra', frac:7/9,
+   ask:'Are headshots backfilled for the demo importer?',
+   sub:'waiting on you', dur:'2d', verb:'Answer', vc:'amber'},
+];
+const running = [
+  {key:'CTL-1052', ph:'ph-amber',  frac:4/9, ask:'Sidebar presence dots — per-project worker counts',
+   sub:'implement — step 4 of 9', dur:'12m', live:true},
+  {key:'CTL-1047', ph:'ph-orange', frac:5/9, ask:'Stall-janitor enforce-readiness hardening',
+   sub:'verify — step 5 of 9', dur:'4m', live:true},
+  {key:'CTL-1031', ph:'ph-cyan',   frac:2/9, ask:'Queue page honest empty-state',
+   sub:'research — step 2 of 9', dur:'26m', live:true},
+];
+
+function rowHtml(r){
+  return `<div class="row${r.sel?' sel':''}">
+    <span class="bar${r.bar?' '+r.bar:''}"></span>
+    ${g(r.ph,r.frac,16,!!r.done)}
+    <span class="row-body">
+      <span class="row-l1"><span class="key">${r.key}</span><span class="ask">${r.ask}</span>${r.ann?'<span class="ann">'+r.ann+'</span>':''}</span>
+      <span class="sub">${r.sub}</span>
+    </span>
+    <span class="row-right">
+      ${r.live?'<span class="livedot"></span>':''}
+      <span class="dur">${r.dur}</span>
+      ${r.verb?`<span class="verb ${r.vc}">${r.verb}</span>`:''}
+      ${r.sel?'<span class="dots3">···</span>':''}
+    </span>
+  </div>`;
+}
+
+function sbItem(o){
+  return `<div class="sb-item${o.on?' on':''}${o.dis?' dis':''}">
+    <span class="nico">${ic(o.icon)}${o.presence?'<span class="presence"></span>':''}</span>
+    <span>${o.label}</span>
+    ${o.attn?`<span class="attn">${o.attn}</span>`:''}
+    ${o.count!=null?`<span class="count">${o.count}</span>`:''}
+    ${o.soon?'<span class="soon">soon</span>':''}
+  </div>`;
+}
+function operate(scope, opts={}){
+  const k=opts.compact;
+  return `<div class="sb-menu${k?' kids':''}">
+    ${sbItem({icon:'inbox',label:'Inbox',  on:opts.active==='inbox', attn:opts.attn})}
+    ${sbItem({icon:'grid', label:'Tickets'})}
+    ${sbItem({icon:'users',label:'Workers', count:opts.workers, presence:opts.workers>0})}
+    ${sbItem({icon:'list', label:'Queue',   count:opts.queue})}
+  </div>`;
+}
+
+function frameHtml(theme){
+  const showAnn = theme==='dark';
+  const ann = (n,style='') => showAnn ? `<span class="ann" style="${style}">${n}</span>` : '';
+  const moonOrSun = theme==='dark'
+    ? sbItem({icon:'sun',label:'Warm light'})
+    : sbItem({icon:'moon',label:'Calm dark'});
+  const ny = needsYou.map((r,i)=> (i===0 && showAnn) ? {...r, ann:2} : r);
+  return `
+  <aside class="sb">
+    <div class="sb-brand">
+      <span class="logo">${ic('logo',18,2.2)}</span>
+      <span class="word">Catalyst</span>
+    </div>
+
+    <div class="sb-group">
+      <div class="sb-head">Overall <span class="tw open">${ic('chev',11,2)}</span></div>
+      ${operate('all',{active:'inbox',attn:5,workers:3,queue:4})}
+    </div>
+
+    <div class="sb-group">
+      <div class="sb-head">Projects</div>
+      <div class="sb-head proj"><span class="pdot" style="background:var(--f-cyan)"></span> Adva
+        <span class="sigdot amber"></span><span class="tw" style="margin-left:6px">${ic('chev',11,2)}</span></div>
+      <div class="sb-head proj"><span class="pdot" style="background:var(--f-acc)"></span> Catalyst
+        <span class="tw open">${ic('chev',11,2)}</span></div>
+      ${operate('catalyst',{compact:true,attn:2,workers:2,queue:3})}
+    </div>
+
+    <div class="sb-group">
+      <div class="sb-head">Observe <span class="tw open">${ic('chev',11,2)}</span></div>
+      <div class="sb-menu">
+        ${sbItem({icon:'act',   label:'Telemetry'})}
+        ${sbItem({icon:'gauge', label:'Utilization'})}
+        ${sbItem({icon:'wallet',label:'FinOps'})}
+        ${sbItem({icon:'server',label:'Fleet Ops'})}
+        ${sbItem({icon:'code',  label:'DevOps', dis:true, soon:true})}
+      </div>
+    </div>
+
+    <div class="sb-foot">
+      <div class="sb-menu">
+        ${sbItem({icon:'set',label:'Settings'})}
+        ${moonOrSun}
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <span>Overall <span class="sep">›</span> <b>Inbox</b></span>
+      <span class="spacer"></span>
+      <span class="fpill"><span class="dot"></span>live · stream connected</span>
+      <span class="meta">snapshot 18:35:08Z · host mini</span>
+    </div>
+
+    <div class="split">
+      <div class="list">
+        <div class="calm">3 running on their own · 5 need you · <em>nothing on fire.</em>${ann(1,'margin-left:auto')}</div>
+        <div class="list-scroll">
+          <div class="lsec">
+            <div class="lsec-h">Needs you <span class="n">3</span></div>
+            ${ny.map(rowHtml).join('')}
+          </div>
+          <div class="lsec">
+            <div class="lsec-h">What's waiting <span class="n">2</span></div>
+            ${waiting.map(rowHtml).join('')}
+          </div>
+          <div class="lsec">
+            <div class="lsec-h"><span class="tw open">${ic('chev',10,2)}</span> Running on its own <span class="n">3</span></div>
+            ${running.map(rowHtml).join('')}
+          </div>
+          <div class="lsec">
+            <div class="lsec-h"><span class="tw">${ic('chev',10,2)}</span> Done while you were away <span class="n">7</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pane">
+        <div class="pane-head">
+          ${g('ph-olive',3/9,24)}
+          <div class="pane-tit">
+            <div class="pane-meta"><span class="key">CTL-1049</span><span class="sub">escalation — needs human · 2h</span></div>
+            <h3>Security interrogation needs a call on webhook token scope</h3>
+          </div>
+          <span class="vic"><span class="spark">${ic('spark',13,1.9)}</span>View in Claude ${ic('ext',12,1.8)}</span>
+        </div>
+
+        <div class="hero">
+          <div class="hero-k">What's needed now</div>
+          <p class="hero-ask">The research agent found the webhook receiver minting OAuth tokens
+          with no <code>scope</code> param — the latent <code>invalid_scope</code> fail-open.
+          Should it pin the mint to write-scope now, or file a follow-up and ship the receiver
+          as-is?</p>
+          <ul class="opts">
+            <li><span class="opt-b">Pin scope now</span><span class="opt-d">touches the live mint path; adds roughly a day before the receiver ships.</span></li>
+            <li><span class="opt-b">File follow-up</span><span class="opt-d">ships today; leaves the fail-open in place until the follow-up lands.</span></li>
+          </ul>
+          <div class="hero-verbs">
+            <button class="bright">Respond</button>${ann(3)}
+            <span class="hero-hint">records your call and resumes the agent</span>
+          </div>
+        </div>
+
+        <div class="psep"></div>
+
+        <div class="about">
+          <div class="about-k">About</div>
+          <p class="about-sum">Phase-plan paused at a decision gate: the OAuth mint inside
+          <span style="font-family:var(--mono);font-size:.82em">linear-comment-post.sh</span> returns 400
+          on two paths and the plan needs an owner's call on scope before it can commit to either
+          remediation shape.</p>
+          <p class="about-goal"><b>Goal — </b>phase mirrors post to Linear without the fail-open,
+          on every host, with no marker left absent.</p>
+        </div>
+
+        <div class="whereat">
+          <div class="about-k">Where it's at</div>
+          <div class="wa-row">
+            ${g('ph-olive',3/9,16)}
+            <span class="wa-lab">Plan — step 3 of 9</span>
+            <span class="strip"><i class="f"></i><i class="f"></i><i class="f"></i><i></i><i></i><i></i><i></i><i></i><i></i></span>${ann(4)}
+          </div>
+        </div>
+
+        <div class="pane-foot">branch ctl-1049-token-scope · worktree wf_8842 · session 0f93…ce21</div>
+      </div>
+    </div>
+
+    <div class="fbar">
+      <span class="ld"><span class="livedot"></span><b>live</b></span>
+      <span><b>3</b> active · <b>2</b> working · <b>0</b> stuck</span>
+      <span><b>4</b> free slots</span>
+      <span class="spacer"></span>
+      <span>last event 12s ago · tick #6647</span>
+    </div>
+  </div>`;
+}
+
+document.getElementById('frame-dark').innerHTML  = frameHtml('dark');
+document.getElementById('frame-light').innerHTML = frameHtml('light');
+</script>
+</body>
+</html>

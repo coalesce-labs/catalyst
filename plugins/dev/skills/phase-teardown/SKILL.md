@@ -117,12 +117,54 @@ if [[ ! -f "$MERGE_FILE" ]]; then
   exit 1
 fi
 
-MERGE_CI_STATUS="$(jq -r '.pr.ciStatus // empty' "$MERGE_FILE" 2>/dev/null)"
-MERGED_AT="$(jq -r '.pr.mergedAt // empty' "$MERGE_FILE" 2>/dev/null)"
+# --- CTL-1667: Done requires the CURRENT run's PR to be MERGED on GitHub ---
+PR_FILE="$WORKER_DIR/phase-pr.json"
+CUR_PR="$(jq -r '.pr.number // empty' "$PR_FILE" 2>/dev/null)"
+MERGE_PR="$(jq -r '.pr.number // empty' "$MERGE_FILE" 2>/dev/null)"
 
-if [[ "$MERGE_CI_STATUS" != "merged" && -z "$MERGED_AT" ]]; then
+# Fail CLOSED when the current run's PR artifact is unavailable. phase-pr.json is
+# the ONLY signal that identifies THIS run's PR, and teardown DISPATCH requires
+# only phase-monitor-deploy.json — so a retained signal set from a PRIOR run (a
+# stale phase-monitor-merge.json whose PR GitHub still reports merged) could
+# otherwise reach this gate and mark the ticket Done + destroy the current
+# worktree WITHOUT ever identifying the current run's PR. Do NOT fall back to the
+# merge signal's PR number; require phase-pr.json (Codex P1, #3061).
+VERIFY_PR="$CUR_PR"
+if [[ -z "$VERIFY_PR" ]]; then
   "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
-    --reason "pr_not_merged" \
+    --reason "pr_not_merged:phase_pr_artifact_missing" \
+    ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
+    || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
+  exit 1
+fi
+
+# Identity: the merge signal must be for the current run's PR.
+# A prior run's merged PR in phase-monitor-merge.json must not satisfy this gate.
+# CTL-1667 (review fix, round 3, #3061): require MERGE_PR itself to be present,
+# not just matching when both happen to resolve. phase-monitor-merge.json is
+# REQUIRED to exist above (prior_artifact_missing:monitor_merge), but an EMPTY,
+# malformed, or legacy-shaped merge artifact (no `.pr.number`) previously
+# skipped this whole identity check entirely (the `-n "$MERGE_PR"` conjunct was
+# false), letting a stale/malformed merge artifact authorize Done on the
+# current PR's live-merged state without ever proving monitor-merge actually
+# ran for THIS run's PR.
+if [[ -n "$CUR_PR" && ( -z "$MERGE_PR" || "$CUR_PR" != "$MERGE_PR" ) ]]; then
+  "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
+    --reason "pr_not_merged:stale_merge_signal(pr=${MERGE_PR:-<empty>},cur=${CUR_PR})" \
+    ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
+    || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
+  exit 1
+fi
+
+# Live truth: is $VERIFY_PR actually MERGED on GitHub?
+# CATALYST_TEARDOWN_GH_BIN is injectable for tests (mirrors CATALYST_AUTO_REBASE_GH_BIN).
+GH_BIN="${CATALYST_TEARDOWN_GH_BIN:-gh}"
+PR_STATE="$("$GH_BIN" pr view "$VERIFY_PR" --json state,mergedAt 2>/dev/null || true)"
+MERGED_STATE="$(printf '%s' "$PR_STATE" | jq -r '.state // empty' 2>/dev/null)"
+MERGED_AT_LIVE="$(printf '%s' "$PR_STATE" | jq -r '.mergedAt // empty' 2>/dev/null)"
+if [[ "$MERGED_STATE" != "MERGED" && -z "$MERGED_AT_LIVE" ]]; then
+  "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
+    --reason "pr_not_merged:pr#${VERIFY_PR}_state=${MERGED_STATE:-unknown}" \
     ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
     || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
   exit 1

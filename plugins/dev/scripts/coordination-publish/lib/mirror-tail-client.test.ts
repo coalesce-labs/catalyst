@@ -61,6 +61,24 @@ describe("createMirrorTailClient (CTL-1488 Phase 5)", () => {
     expect(mirrorRows(mirrorPath).length).toBe(1);
   });
 
+  test("inbound delta body (incl. payload) is preserved into the mirror row — cross-host wake state survives", async () => {
+    // A cross-host linear.comment.created carries authorId/commentId in body.payload; the inbound
+    // reconstruction must keep it so the receiving host's self-echo guard sees a real author (Codex P1).
+    const withBody: CoordinationDelta = {
+      ...delta(1, "cmt-1"),
+      event_name: "linear.comment.created.CTL-1",
+      attributes: { "event.name": "linear.comment.created.CTL-1", "event.stream_class": "coordination" },
+      body: { payload: { authorId: "u1", commentId: "c1", body: "hi" } },
+    };
+    const src = scriptedSource([{ ok: true, deltas: [withBody], headSeq: 1 }]);
+    const client = createMirrorTailClient({ mirrorPath, source: src, signal: ac.signal });
+    await client.tick();
+    const rows = mirrorRows(mirrorPath);
+    expect(rows.length).toBe(1);
+    expect((rows[0].body as Record<string, Record<string, unknown>>).payload.authorId).toBe("u1");
+    expect((rows[0].body as Record<string, Record<string, unknown>>).payload.commentId).toBe("c1");
+  });
+
   test("a local row appended out-of-band DURING a merge is not double-appended when later echoed (Codex P2 PRRT_kwDOP8GlQM6SxnKy)", async () => {
     let injected = false;
     // A remote delta whose event_id getter simulates the local publisher (or a second daemon during a
@@ -298,6 +316,28 @@ describe("createHubChangeSource", () => {
       expect(res.deltas.map((d) => d.event_id)).toEqual(["evt-7"]);
       expect(res.headSeq).toBe(7);
     }
+  });
+
+  test("sends Authorization: Bearer <token> on the inbound pull when a token is configured", async () => {
+    let seen: Record<string, string> | undefined;
+    const fetchImpl = async (_url: string, init?: { headers?: Record<string, string> }) => {
+      seen = init?.headers;
+      return new Response("", { status: 200 });
+    };
+    const src = createHubChangeSource({ hubUrl: "https://hub.example", fetchImpl, token: "tok-abc" });
+    await src.pullChanges(0);
+    expect(seen?.["Authorization"]).toBe("Bearer tok-abc");
+  });
+
+  test("omits the Authorization header when no token (interim/dev)", async () => {
+    let seen: Record<string, string> | undefined = { sentinel: "x" };
+    const fetchImpl = async (_url: string, init?: { headers?: Record<string, string> }) => {
+      seen = init?.headers;
+      return new Response("", { status: 200 });
+    };
+    const src = createHubChangeSource({ hubUrl: "https://hub.example", fetchImpl });
+    await src.pullChanges(0);
+    expect(seen).toBeUndefined();
   });
 
   test("a 409 response maps to underflow", async () => {

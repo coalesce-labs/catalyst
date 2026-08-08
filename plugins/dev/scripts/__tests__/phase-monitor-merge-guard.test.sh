@@ -20,6 +20,12 @@ assert_contains() {
   else fail "$label — '$substr' not found"; fi
 }
 
+assert_not_contains() {
+  local body="$1" substr="$2" label="$3"
+  if [[ "$body" != *"$substr"* ]]; then pass "$label"
+  else fail "$label — forbidden '$substr' present"; fi
+}
+
 echo "CTL-1051: phase-monitor-merge pre-merge stale-ref guard"
 
 if [[ -f "$SKILL" ]]; then
@@ -43,6 +49,70 @@ if [[ -f "$SKILL" ]]; then
   fi
 else
   fail "SKILL.md missing for REST-path check: $SKILL"
+fi
+
+echo ""
+echo "CTL-1680 Phase 2: merge SHA is confirmed before done"
+
+if [[ -f "$SKILL" ]]; then
+  assert_contains "$BODY" "PHASE_MERGE_SHA_RETRIES" \
+    "merge SHA retry uses PHASE_MERGE_SHA_RETRIES variable"
+  assert_contains "$BODY" "# CTL-1680: retry empty merge_commit_sha" \
+    "merge SHA retry has CTL-1680 comment marker"
+  assert_contains "$BODY" "sleep 2" \
+    "merge SHA retry loop sleeps (not a spin loop)"
+  assert_contains "$BODY" "merge_commit_sha still empty after" \
+    "merge SHA retry emits observable warning on exhaustion"
+else
+  fail "SKILL.md missing for Phase 2 checks: $SKILL"
+fi
+
+echo ""
+echo "CTL-1680 Phase 3: automated-reviewer arrival window"
+
+if [[ -f "$SKILL" ]]; then
+  assert_contains "$BODY" "PHASE_REVIEWER_ARRIVAL_WAIT_SEC" \
+    "reviewer-arrival gate uses PHASE_REVIEWER_ARRIVAL_WAIT_SEC variable"
+  assert_contains "$BODY" "# CTL-1680: reviewer-arrival window" \
+    "reviewer-arrival gate has CTL-1680 comment marker"
+  assert_contains "$BODY" "reviewer-arrival window elapsed; proceeding to merge" \
+    "reviewer-arrival gate is fail-open (elapsed path proceeds to merge)"
+  assert_contains "$BODY" "REVIEWED_HEAD" \
+    "reviewer-arrival gate keys on current HEAD SHA (not just PR-open time)"
+  assert_contains "$BODY" "Reviewed commit" \
+    "reviewer-arrival gate detects clean-pass comment (Reviewed commit shape)"
+else
+  fail "SKILL.md missing for Phase 3 checks: $SKILL"
+fi
+
+echo ""
+echo "CTL-1680 remediation (Codex #3079): head-scoped, portable, bounded"
+
+if [[ -f "$SKILL" ]]; then
+  # P1: HEAD age must be parsed portably (jq), NOT with BSD/macOS-only `date -j`.
+  assert_contains "$BODY" "fromdateiso8601" \
+    "reviewer-arrival HEAD age uses portable jq fromdateiso8601"
+  assert_not_contains "$BODY" 'date -u -j -f' \
+    "reviewer-arrival gate does NOT use BSD-only date -j (Linux fail-open bug)"
+  # P1: the reviews verdict check is scoped to the current head via commit_id.
+  assert_contains "$BODY" 'commit_id == $h' \
+    "reviews verdict is scoped to REVIEWED_HEAD commit_id (no stale-head pass)"
+  # P2: the re-wait is bounded by the remaining reviewer window.
+  assert_contains "$BODY" "MERGE_WAKE_TIMEOUT_SEC" \
+    "reviewer-arrival re-wait is bounded by the remaining window"
+  # re-review P1: window anchored to head EXPOSURE (pushedDate), not commit author date.
+  assert_contains "$BODY" "pushedDate" \
+    "reviewer-arrival window anchored to head exposure (pushedDate), not commit date"
+  assert_contains "$BODY" "HEAD_EXPOSED_AT" \
+    "reviewer-arrival age uses HEAD_EXPOSED_AT"
+  # re-review P1: a bare review object is NOT a clean pass — require clean-pass phrasing.
+  assert_contains "$BODY" "CLEAN_PASS_RE" \
+    "reviewer verdict requires a clean-pass signal, not a bare review object"
+  # re-review P1: unresolved bot threads block the merge (fail-CLOSED), independent of mergeable_state.
+  assert_contains "$BODY" "UNRESOLVED_BOT_THREADS" \
+    "unresolved automated-review threads block the merge regardless of mergeable_state"
+else
+  fail "SKILL.md missing for remediation checks: $SKILL"
 fi
 
 echo ""

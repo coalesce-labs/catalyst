@@ -1,7 +1,11 @@
 # execution-core-tests.yml
 #
 # Runs the stable execution-core unit-test suite on every PR and push to main
-# that touches the execution-core source tree.
+# that touches the execution-core source tree. The workflow itself now always
+# triggers on `pull_request` (see the PR-TRIGGER NOTE below); `detect-changes` +
+# `execution-core-unit-tests`'s job-level `if:` is what keeps the actual suite
+# scoped to relevant changes — a PR that doesn't touch execution-core gets a fast
+# `skipped` conclusion instead of paying for the full ~30-step job.
 #
 # REQUIRED-STATUS-CHECK OPERATOR NOTE (CTL-963)
 # -----------------------------------------------
@@ -25,8 +29,22 @@
 
 name: Execution Core Unit Tests
 
+# PR-TRIGGER NOTE (thagale/catalyst PR #30 follow-up)
+# -----------------------------------------------------
+# `pull_request` deliberately carries NO `paths:` filter, unlike `push` below. A
+# required status check that is also path-filtered AT THE TRIGGER LEVEL can never
+# resolve on a PR whose diff doesn't match the filter — GitHub has nothing to post
+# a conclusion for, so branch protection waits on "Expected" forever and the PR is
+# permanently BLOCKED regardless of what it touches (observed on a PR that only
+# changed `.catalyst/config.json`). The workflow now always triggers on `pull_request`
+# so the check always posts a real conclusion; the path-scoping moved into the
+# `detect-changes` job below plus `execution-core-unit-tests`'s job-level `if:`. A
+# job skipped via `if:` still reports a conclusion (`skipped`), which GitHub DOES
+# accept as satisfying a required status check — unlike a workflow that never ran.
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
     paths:
       - "plugins/dev/scripts/execution-core/**"
@@ -82,61 +100,58 @@ on:
       - "package.json"
       - "bun.lock"
       - "turbo.json"
-  push:
-    branches: [main]
-    paths:
-      - "plugins/dev/scripts/execution-core/**"
-      # CTL-1348: the updater safety tests (updater/plugin-pull-defer.test.mjs) import and
-      # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
-      # only the broker must run this suite too (Codex P2).
-      - "plugins/dev/scripts/broker/**"
-      # CTL-1529 round 3: event-log-read-guard.test.mjs scans the WHOLE
-      # plugins/dev/scripts tree for whole-file event-log reads (round 2 scanned an
-      # enumerated 4 of 16 directories and the header overstated it). The trigger
-      # must match the scan, or a new whole-log read lands in an untriggered
-      # directory and the guard never runs — which is how otel-forward/lib/dlq.ts's
-      # three unbounded reads sat unnoticed in a long-lived daemon.
-      - "plugins/dev/scripts/**"
-      # NOTE: the glob above SUBSUMES every plugins/dev/scripts path listed below.
-      # They are retained as documentation of WHICH STEP each path feeds, not as
-      # triggers — do not read the list as the trigger set.
-      # CTL-1369: launcher / router / CLI-registration entry path (see PR-trigger note above).
-      - "plugins/dev/scripts/catalyst-install"
-      - "plugins/dev/scripts/catalyst"
-      - "plugins/dev/scripts/catalyst-linear"
-      - "plugins/dev/scripts/catalyst-stack"
-      # CTL-1531: orphan-sweep-plist.test.sh VALIDATES this template, so a PR that
-      # edits only the plist must run this workflow or the test never sees it.
-      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
-      - "plugins/dev/scripts/install-cli.sh"
-      - "plugins/dev/scripts/check-setup.sh"
-      # CTL-1531: orphan-sweep.sh is a DESTRUCTIVE, kill-processes script whose
-      # only guard is __tests__/orphan-sweep.test.sh (run below). Before CTL-1531
-      # it appeared in no workflow at all, so a change to its kill gates could
-      # merge entirely unverified.
-      - "plugins/dev/scripts/orphan-sweep.sh"
-      # CTL-1531 round 3: the installer resolves the SWEEP_PROC_WIDEN value baked
-      # into the LaunchAgent (shadow vs enforce for the widened process killer),
-      # and the template is where that key lives — both are guarded by
-      # install-orphan-sweep{,-guard}.test.sh below.
-      - "plugins/dev/scripts/install-orphan-sweep.sh"
-      - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
-      - "plugins/dev/scripts/__tests__/**"
-      # CTL-1387: see the pull_request note above.
-      - "plugins/dev/scripts/gen-cli-reference.sh"
-      - "website/src/content/docs/reference/catalyst-cli.md"
-      # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
-      # either must run migrate-dual-harness.test.sh below.
-      - "plugins/dev/scripts/migrate-dual-harness.sh"
-      - "plugins/dev/scripts/check-project-setup.sh"
-      - ".github/workflows/execution-core-tests.yml"
-      # CTL-1628: see the pull_request note above.
-      - "package.json"
-      - "bun.lock"
-      - "turbo.json"
 
 jobs:
+  # Always runs (see the PR-TRIGGER NOTE above) so `execution-core-unit-tests`'s
+  # required check always has a conclusion to post. Mirrors the same path set the
+  # `push` trigger above enforces at the workflow level, via `dorny/paths-filter`
+  # (gitignore-style globs, same semantics as `on.paths`) since `pull_request` no
+  # longer filters at the trigger.
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - "plugins/dev/scripts/execution-core/**"
+              - "plugins/dev/scripts/broker/**"
+              - "plugins/dev/scripts/**"
+              - "plugins/dev/scripts/catalyst-install"
+              - "plugins/dev/scripts/catalyst"
+              - "plugins/dev/scripts/catalyst-linear"
+              - "plugins/dev/scripts/catalyst-stack"
+              - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
+              - "plugins/dev/scripts/install-cli.sh"
+              - "plugins/dev/scripts/check-setup.sh"
+              - "plugins/dev/scripts/orphan-sweep.sh"
+              - "plugins/dev/scripts/install-orphan-sweep.sh"
+              - "plugins/dev/scripts/__tests__/**"
+              - "plugins/dev/scripts/gen-cli-reference.sh"
+              - "website/src/content/docs/reference/catalyst-cli.md"
+              - "plugins/dev/scripts/migrate-dual-harness.sh"
+              - "plugins/dev/scripts/check-project-setup.sh"
+              - ".github/workflows/execution-core-tests.yml"
+              - "package.json"
+              - "bun.lock"
+              - "turbo.json"
+
   execution-core-unit-tests:
+    needs: detect-changes
+    # Fail CLOSED: `needs.*.result` is only 'success' when `detect-changes` completed without
+    # error. If `dorny/paths-filter` (or the checkout before it) errors — API unavailable, token
+    # lacks permission, runner outage — `detect-changes` fails and its `relevant` output is unset,
+    # which would make a naive `needs.detect-changes.outputs.relevant == 'true'` check false and
+    # SKIP this required job. A skipped required check still posts a `skipped` conclusion, which
+    # satisfies branch protection — so a PR touching execution-core could merge without the suite
+    # ever running. Running whenever detect-changes did NOT succeed (result != 'success') treats
+    # an errored/cancelled detector as "assume relevant" and runs the suite; `!cancelled()` still
+    # keeps this job from running if the *workflow run itself* was cancelled.
+    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -181,6 +196,13 @@ jobs:
         # Walk its static graph.
         run: bun build install-lifecycle.mjs --target=node --outfile /dev/null
 
+      - name: Verify service-manifest import graph (bun build resolution check, CTL-1473)
+        # CTL-1473: service-manifest.mjs is the per-class service truth consumed by
+        # install-lifecycle.mjs and doctor.mjs. It has no heavy runtime deps (pure
+        # constants + helpers), so a bad import silently breaks both consumers. Walk
+        # its static graph before merge.
+        run: bun build service-manifest.mjs --target=node --outfile /dev/null
+
       - name: Verify catalyst-linear import graph (node-loadability contract, CTL-1391)
         # CTL-1391: linear-cli.mjs is the catalyst-linear driver, a separate CLI entrypoint
         # NOT in daemon.mjs's graph. Its node-loadability is load-bearing — the write-reject +
@@ -204,6 +226,23 @@ jobs:
         # CLI registration) that the unit tests bypass.
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-install.test.sh
+
+      - name: daemon-watchdog supervision test (CTL-1502)
+        # Covers the bash half of the CTL-1502 Codex P1 fixes: node-class gating
+        # (the standalone watchdog runs on a monitor node and NOT on a worker, so
+        # a forwarder is never double-supervised), pid-identity checks (a recycled
+        # pid is never reported live and never signalled), and lock discipline
+        # (stale-owner reaping, a TERM handler that exits rather than resuming,
+        # and one lock spanning forward-restart's stop+start).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/daemon-watchdog-supervision.test.sh
+
+      - name: forward-restart subcommand test (CTL-1502)
+        # Exercises the real catalyst-monitor.sh forward-restart transaction
+        # (cold start, hot swap, back-to-back idempotence, usage/dispatch wiring)
+        # against a stubbed forwarder — nothing else in CI covers that path.
+        working-directory: plugins/dev/scripts
+        run: bash execution-core/__tests__/forward-restart.test.sh
 
       - name: CLI reference doc drift test
         # CTL-1387: asserts website/src/content/docs/reference/catalyst-cli.md
@@ -232,6 +271,13 @@ jobs:
         # flags (source/result/op top-level attrs + numeric age_ms).
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
+
+      - name: catalyst-stack shipper ephemeral-path guard test (CTL-1473)
+        # CTL-1473: guards that install-services (--print and real) refuses to bake
+        # an ephemeral config path (worktree or /tmp). Uses CATALYST_FORCE_BAKE_DIR +
+        # CATALYST_LAYER2_CONFIG_FILE seams; no launchctl calls.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-shipper-guard.test.sh
 
       - name: gh-pr-comment helper test (CTL-1496)
         # Covers PR_NUMBER numeric validation + the idempotent existing-comment
@@ -421,7 +467,38 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/install-orphan-sweep-guard.test.sh
 
+      - name: Ensure zsh is available (phase-artifact-gate zsh regression coverage)
+        # phase-artifact-gate.test.sh's Test 11 sources lib/phase-artifact-gate.sh
+        # under zsh to lock down the shopt/nullglob bug this lib was written to
+        # avoid (Codex P2 follow-up) — it SKIPS (not fails) when zsh is absent, so
+        # without this step the required check could pass without ever exercising
+        # the zsh path. Installed explicitly rather than assumed present on the
+        # runner image so the regression coverage doesn't silently degrade to a skip.
+        run: command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh)
+
+      - name: phase-artifact-gate contract + zsh regression test
+        # Covers match_thoughts_artifact (tail/slug/case forms, cross-ticket
+        # lookalike + hidden-file + subdirectory exclusion, deterministic sort
+        # order) and the zsh-sourcing regression (Test 11) — previously unwired
+        # in this required check (Codex P2 follow-up): the shell-test allowlist
+        # above invoked neither this suite nor run-tests.sh, so the zsh behavior
+        # it locks down was unverified in CI.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/phase-artifact-gate.test.sh
+
       - name: Run stable unit tests
+        # CTL-1678 round-7 (Codex): the four drain suites added below
+        # (__tests__/config-drain-disabled, __tests__/doctor-drain-disabled,
+        # cli/drain, drain-event) had NO required-CI coverage, so every regression
+        # they guard could recur while CI stayed green.
+        #
+        # The fifth suite Codex named, __tests__/verify-node.test.sh (the BASH half
+        # of the same two-engine contract), is deliberately NOT wired in: it is
+        # ALREADY RED on main. Its monitor-class case stubs only _vn_resolve, so
+        # cmd_verify_node runs the real _vn_broker_running / _vn_monitor_running
+        # probes and FAILs wherever the stack is not running — which includes every
+        # CI runner. Wiring it in as required would block every PR. Fixing its seam
+        # coverage is tracked on CTL-1685 rather than smuggled into this PR.
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
         # timing / sandbox incompatibility:
         #
@@ -478,6 +555,7 @@ jobs:
             board-health-seam.test.mjs \
             stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
+            in-flight-supersede.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
             claim.test.mjs \
@@ -490,7 +568,15 @@ jobs:
             cluster-claim.test.mjs \
             comms-drain.test.mjs \
             codex-run-phase-agent.test.mjs \
+            daemon-watchdog-alert.test.mjs \
+            daemon-watchdog-config.test.mjs \
+            daemon-watchdog-predicates.test.mjs \
+            daemon-watchdog-probe.test.mjs \
             config-pino-fallback.test.mjs \
+            __tests__/config-drain-disabled.test.mjs \
+            __tests__/doctor-drain-disabled.test.mjs \
+            cli/drain.test.mjs \
+            drain-event.test.mjs \
             config-node-class.test.mjs \
             config-cloud-token-env.test.mjs \
             config.test.mjs \
@@ -597,6 +683,7 @@ jobs:
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
             updater/updater-tracing.test.mjs \
+            service-manifest.test.mjs \
             github-auth-preflight.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
             cluster-sync.test.mjs

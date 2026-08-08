@@ -147,7 +147,15 @@ function mergeExplanationIntoSignal(orchDir, ticket, phase, escalation) {
     sig = {};
   }
   sig.explanation = escalation;
-  sig.status = "needs-human"; // load-bearing for deriveAttention + the push gate
+  // CTL-1552: normalize the duplicate signal status. Escalation writes the terminal
+  // "stalled" + a stalledReason (was the bespoke "needs-human"), so isTicketInFlight
+  // frees the slot and there is ONE stalled representation. The needs-human SEMANTICS
+  // ride on needsHumanSince + the explanation block + the Linear label/marker, which
+  // deriveAttention + the push gate key off (not the raw status value). board-health's
+  // NEEDS_HUMAN_STATUSES and recovery-pass-context's STUCK_SIGNAL_STATUSES already
+  // include "stalled", so the ticket stays visible as stuck / needs-you.
+  sig.status = "stalled";
+  sig.stalledReason = "needs_human";
   if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
   sig.updatedAt = new Date().toISOString();
   try {

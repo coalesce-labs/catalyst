@@ -548,6 +548,23 @@ export function createWebhookHandler(
             event.number,
           );
         }
+        if (deps.prCache) {
+          // CTL-1606: persist per-PR status on every pull_request action so
+          // getAllPrStatuses() has data even when filter_state is empty.
+          // Normalize to the values board-health.mjs expects: "open", "merged", "closed".
+          // Derive from the PR STATE (event.merged), not the action: GitHub fires
+          // non-terminal actions (labeled/unlabeled/edited) on already-merged PRs,
+          // and event.merged is populated on every action (webhook-events.ts). Keying
+          // off the action would let a post-merge "labeled" webhook flip a merged PR
+          // back to "open" (newest-wins in getAllPrStatuses), re-introducing the
+          // very phantom-orphan bug this ticket fixes.
+          const status = event.merged
+            ? "merged"
+            : event.action === "closed"
+            ? "closed"
+            : "open";
+          deps.prCache.putStatus(event.repo, event.number, status);
+        }
         await deps.prFetcher.force({ repo: event.repo, number: event.number });
         break;
       }
