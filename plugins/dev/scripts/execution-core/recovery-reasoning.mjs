@@ -34,6 +34,7 @@ import {
   existsSync,
   renameSync,
   unlinkSync,
+  rmSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 // CTL-1568: read-only predicate — is the belief engine the needs-human owner?
@@ -820,8 +821,11 @@ export function defaultClassifyTicket(evidence, opts = {}) {
     return classifyPrNotMerged(evidence, { probePrBlock: probePrBlock ?? defaultProbePrBlock, log });
   }
 
-  // Rule 1: Check for deterministic errors in logs
-  const deterministic = checkDeterministicErrors(logsOutput, failureReason);
+  // Rule 1: Check for deterministic errors in logs.
+  // CTL-1679: pass the EFFECTIVE failure reason (top-level or signal-borne) plus
+  // the signal itself, so the cluster_fence_stale shortcut can read signal.phase
+  // to derive the failed phase for the fence-stale-redispatch seam.
+  const deterministic = checkDeterministicErrors(logsOutput, effectiveFailureReason, signal);
   if (deterministic) {
     return {
       decision: "fix",
@@ -829,6 +833,7 @@ export function defaultClassifyTicket(evidence, opts = {}) {
       details: {
         reason: deterministic.reason,
         seam_id: deterministic.seam_id,
+        ...(deterministic.phase !== undefined ? { phase: deterministic.phase } : {}),
       },
     };
   }
@@ -871,7 +876,22 @@ export function defaultClassifyTicket(evidence, opts = {}) {
 }
 
 // Check for deterministic errors that have registered seams
-export function checkDeterministicErrors(logsOutput, failureReason) {
+export function checkDeterministicErrors(logsOutput, failureReason, signal = null) {
+  // CTL-1679: cluster_fence_stale is provably retry-safe — cluster-fence-guard.sh
+  // emits it BEFORE any guarded side-effect and exit-10s, and a fresh dispatch
+  // bumps the cluster generation so the next fence-check passes. So it is a
+  // deterministic FIX (re-dispatch the failed phase at generation N+1), NOT a
+  // human escalate. Routed to the fence-stale-redispatch seam; the failed phase
+  // rides in details.phase (read from the signal) so the seam knows which
+  // phase-<P>.json to re-arm. Checked first — it needs no log scan.
+  if (failureReason === "cluster_fence_stale") {
+    return {
+      fix_class: "fence_stale_redispatch",
+      seam_id: "fence-stale-redispatch",
+      reason: "Cluster fence stale (side-effect not taken); re-dispatch the failed phase at a fresh generation",
+      phase: signal?.phase,
+    };
+  }
   // Check failureReason shortcuts first (no log scan needed)
   if (failureReason === "orphan-sweep-stale") {
     return {
@@ -1184,7 +1204,15 @@ function attemptFix(item, classification, { invokeSeam, invokeRecoveryPass, evid
       const seamResult = invokeSeam(
         ticket,
         details.seam_id,
-        { reason: details.reason, fix_class },
+        {
+          reason: details.reason,
+          fix_class,
+          // CTL-1679: the fence-stale-redispatch seam needs the failed phase to
+          // know which phase-<P>.json to re-arm. The classifier stamped it on
+          // details.phase; thread it through the brief so defaultInvokeSeam reads
+          // it (it prefers deps.phase for test injection, else brief.phase).
+          ...(details.phase !== undefined ? { phase: details.phase } : {}),
+        },
         {
           candidate: {
             ticket,
@@ -1656,7 +1684,107 @@ const SEAM_ID_TO_CATEGORY = {
   "orphan-reconcile": "orphan-stale",
 };
 
+// CTL-1679: derive the phase whose synthetic `complete` wakes the scheduler to
+// re-dispatch `phase` (its immediate predecessor in the pipeline). Mirrors the
+// workflow-token-redispatch template, which emits `review` (prev of `pr`) to
+// re-arm `pr`. PHASES is loaded lazily via requireSync to avoid a static cycle
+// (phase-fsm re-exports the workflow descriptor's ordered phase list). Fail-safe:
+// if the phase is the first / unknown, fall back to the phase itself (an
+// idempotent wake — deriveAdvancement still re-derives `pending` as next).
+export function fenceStalePrevPhase(phase) {
+  try {
+    const { PHASES } = requireSync("../lib/phase-fsm.mjs");
+    const idx = Array.isArray(PHASES) ? PHASES.indexOf(phase) : -1;
+    if (idx > 0) return PHASES[idx - 1];
+  } catch {
+    /* descriptor unavailable → fall back to the phase itself */
+  }
+  return phase;
+}
+
 export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
+  // CTL-1679: fence-stale-redispatch — re-arm the phase that bowed out on a stale
+  // cluster fence (cluster_fence_stale) for a fresh-generation re-dispatch. It is
+  // the workflow-token-redispatch template plus two extra steps the fence case
+  // needs (research Addendum): (1) delete the stale claim tombstone
+  // workers/<T>/phase-<P>.claim.<N> — a leftover collides on the next O_EXCL claim
+  // create → "claim-lost" silent stall (mirrors scheduler.mjs maybeResetForRemediateCycle);
+  // (2) clear the dispatch cooldown so a 30-min window / armed circuit breaker
+  // doesn't suppress the redispatch. `spawnSyncFn` is injectable for hermetic tests.
+  if (seamId === "fence-stale-redispatch") {
+    const orchDir = deps.orchDir ?? resolveOrchDir();
+    if (!orchDir) {
+      return { success: false, reason: "no orchDir for fence-stale re-dispatch", details: {} };
+    }
+    const spawnSyncFn = deps.spawnSyncFn ?? spawnSync;
+    // Production threads the failed phase through the brief (attemptFix sets
+    // brief.phase from classification details.phase); tests inject deps.phase.
+    const phase = deps.phase ?? brief?.phase;
+    if (!phase) {
+      return { success: false, reason: "no phase for fence-stale re-dispatch", details: {} };
+    }
+    const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+    if (!existsSync(signalPath)) {
+      return {
+        success: false,
+        reason: `fence-stale re-dispatch: signal file absent (${signalPath})`,
+        details: { phase, signalPath },
+      };
+    }
+    try {
+      let sig = {};
+      try {
+        sig = JSON.parse(readFileSync(signalPath, "utf8"));
+      } catch {
+        sig = {};
+      }
+      // (1) delete the stale claim tombstone at the signal's generation.
+      const gen = sig.generation;
+      if (gen !== undefined && gen !== null) {
+        try {
+          rmSync(join(orchDir, "workers", ticket, `phase-${phase}.claim.${gen}`), { force: true });
+        } catch {
+          /* best-effort — a leftover tombstone is the very thing we're clearing */
+        }
+      }
+      // (2) reset signal → pending, drop failureReason, preserve all other fields.
+      sig.status = "pending";
+      delete sig.failureReason;
+      const tmp = `${signalPath}.tmp.${process.pid}`;
+      writeFileSync(tmp, JSON.stringify(sig, null, 2));
+      renameSync(tmp, signalPath);
+      // (3) clear the dispatch cooldown marker (inline — importing scheduler.mjs
+      // here would be a cycle; the marker lives at .dispatch-cooldowns/<T>-<P>.json).
+      try {
+        rmSync(join(orchDir, ".dispatch-cooldowns", `${ticket}-${phase}.json`), { force: true });
+      } catch {
+        /* best-effort — a stale marker just suppresses one re-dispatch */
+      }
+      // (4) synthetic wake: emit prev-phase complete so deriveAdvancement re-derives
+      // <phase> as next and re-dispatches it. --no-signal-update: we own the reset.
+      const wakePhase = fenceStalePrevPhase(phase);
+      const res = spawnSyncFn(
+        EMIT_COMPLETE_BIN,
+        [
+          "--phase", wakePhase,
+          "--ticket", ticket,
+          "--status", "complete",
+          "--no-signal-update",
+          "--orch-dir", orchDir,
+          "--orch-id", ticket,
+        ],
+        { encoding: "utf8" },
+      );
+      return {
+        success: res.status === 0 || res.status == null,
+        reason: "re-armed fence-stale phase (reset failed→pending) and woke the scheduler",
+        details: { phase, wakePhase, signalPath, wakeStatus: res.status ?? null, seam_id: seamId },
+      };
+    } catch (err) {
+      return { success: false, reason: err.message, details: { error: err.message } };
+    }
+  }
+
   // CTL-1186 / CTL-1219: the two workflow-token classifications re-arm phase-pr
   // (reset its failed signal → pending) then wake the scheduler. Fully
   // synchronous — the file ops + emit are synchronous spawnSync underneath.
