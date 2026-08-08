@@ -16,6 +16,7 @@
 #     [--model <opus|sonnet|haiku>] \
 #     [--turn-cap <n>] \
 #     [--config <path>] \
+#     [--worktree <path>] \
 #     [--resume-session <uuid>] \
 #     [--dry-run]
 #
@@ -80,6 +81,9 @@ source "${SCRIPT_DIR}/lib/resume.sh"
 source "${SCRIPT_DIR}/lib/phase-sequence.sh"
 # shellcheck source=lib/worktree-rebase.sh
 source "${SCRIPT_DIR}/lib/worktree-rebase.sh"
+# CAT-31: resolve the target ticket's worktree before any cwd consumer runs.
+# shellcheck source=lib/worktree-resolve.sh
+source "${SCRIPT_DIR}/lib/worktree-resolve.sh"
 # shellcheck source=lib/worktree-remove-guard.sh
 source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 # CTL-708: opt-in bounded-LLM resolver for the source-conflict case
@@ -167,6 +171,7 @@ ORCH_ID="${CATALYST_ORCHESTRATOR_ID-}"
 MODEL_FLAG=""
 TURN_CAP_FLAG=""
 CONFIG=""
+WORKTREE_FLAG=""
 DRY_RUN=0
 # CTL-658: when set, spawn `claude --bg --resume $RESUME_SESSION` instead of a
 # fresh $PROMPT. Empty = today's fresh-start behaviour.
@@ -227,6 +232,10 @@ while [[ $# -gt 0 ]]; do
 		CONFIG="$2"
 		shift 2
 		;;
+	--worktree)
+		WORKTREE_FLAG="$2"
+		shift 2
+		;;
 	--resume-session)
 		RESUME_SESSION="$2"
 		shift 2
@@ -261,6 +270,38 @@ if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
 fi
 if [[ $PHASE == *.* ]]; then
 	die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
+fi
+
+# CAT-31: canonicalize caller-relative paths before changing cwd, then land in
+# the ticket's worktree for config lookup, signal creation, rebase, and launch.
+if [[ -n $CONFIG && $CONFIG != /* ]]; then
+	_CONFIG_DIR="$(cd "$(dirname "$CONFIG")" 2>/dev/null && pwd -P)" || die "invalid --config path: $CONFIG"
+	CONFIG="${_CONFIG_DIR}/$(basename "$CONFIG")"
+fi
+if [[ -n $ORCH_DIR && $ORCH_DIR != /* ]]; then
+	# CAT-31 review P2: resolve against the caller's cwd WITHOUT requiring the
+	# directory to preexist — a first dispatch legitimately names an orch dir that
+	# the later `mkdir -p "$ORCH_DIR/workers/$TICKET"` creates, and an equally
+	# nonexistent ABSOLUTE path still succeeds. Failing here made otherwise
+	# identical dispatches differ solely by path form.
+	if _ORCH_DIR_ABS="$(cd "$ORCH_DIR" 2>/dev/null && pwd -P)"; then
+		ORCH_DIR="$_ORCH_DIR_ABS"
+	else
+		_ORCH_DIR_REL="${ORCH_DIR#./}"
+		ORCH_DIR="$(pwd -P)/${_ORCH_DIR_REL}"
+	fi
+fi
+_DISPATCH_CWD_BEFORE="$(pwd -P)"
+resolve_ticket_worktree "$TICKET" "$WORKTREE_FLAG" >/dev/null
+TICKET_WORKTREE="$WTR_RESOLVED_PATH"
+if [[ ${CATALYST_DISPATCH_WORKTREE_STRICT:-0} == 1 ]]; then
+	case "$WT_RESOLVE_SOURCE" in
+	fallback-cwd | explicit-missing) die "could not resolve a worktree for $TICKET (source=$WT_RESOLVE_SOURCE) and CATALYST_DISPATCH_WORKTREE_STRICT=1" ;;
+	esac
+fi
+if [[ $TICKET_WORKTREE != "$_DISPATCH_CWD_BEFORE" ]]; then
+	cd "$TICKET_WORKTREE" || die "failed to cd into resolved worktree $TICKET_WORKTREE"
+	_DISPATCH_CWD_CORRECTED=1
 fi
 
 # CTL-1365b: validate the launch verb. Empty == bg (the default). Export a
@@ -301,6 +342,13 @@ CONFIG_PATH="$(resolve_config)"
 # might dispatch from. `CATALYST_MACHINE_CONFIG` overrides the path for tests.
 # Precedence: repo > machine > built-in default.
 MACHINE_CONFIG_PATH="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+# CAT-31 review P2: this resolves AFTER the cwd correction above, so a relative
+# CATALYST_MACHINE_CONFIG would be looked up under the ticket worktree and
+# silently missed (falling back to the built-in defaults). Canonicalize it
+# against the caller's original cwd, the way --config is canonicalized.
+if [[ -n ${CATALYST_MACHINE_CONFIG:-} && $MACHINE_CONFIG_PATH != /* ]]; then
+	MACHINE_CONFIG_PATH="${_DISPATCH_CWD_BEFORE}/${MACHINE_CONFIG_PATH#./}"
+fi
 
 config_value() {
 	local key="$1" default="$2"
@@ -789,7 +837,10 @@ TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # resolved worktree, so `pwd` is the ground-truth land site for this
 # dispatch. A later revive reads this field back and asserts the registry-
 # derived path matches it before launching the bg worker.
-WORKTREE_PATH_RESOLVED="$(pwd)"
+WORKTREE_PATH_RESOLVED="$TICKET_WORKTREE"
+if [[ ${_DISPATCH_CWD_CORRECTED:-0} == 1 && $DRY_RUN -eq 0 ]] && command -v emit_dispatch_cwd_corrected >/dev/null 2>&1; then
+	emit_dispatch_cwd_corrected "$PHASE" "$TICKET" "$ORCH_ID" "$_DISPATCH_CWD_BEFORE" "$TICKET_WORKTREE" "$WT_RESOLVE_SOURCE"
+fi
 # CTL-852: capture host identity at dispatch time (nested object, not OTel
 # dotted-key style — signal files use nested fields, unlike event resource blocks).
 _DISPATCH_HOST_NAME="$(catalyst_host_name)"
@@ -1105,7 +1156,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 # ─── CTL-667 + CTL-707: front-load merge-conflict surfacing ─────────────────
-# On a FRESH dispatch of a BUILD phase, rebase this worktree (cwd) onto current
+# On a FRESH dispatch of a BUILD phase, rebase the ticket's worktree (cwd,
+# resolved by CAT-31) onto current
 # origin/<base>. CTL-707 replaces the binary rebase with a 4-layer classifier
 # (rebase_onto_base_classified): clean → proceed; tests/noise → auto-resolve;
 # thoughts → stall; source → CTL-708 (stub always stalls); research/plan source
@@ -1187,12 +1239,12 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 						# claim is exclusive and wins instead of colliding on gen 1.
 						rm -f "${WORKER_DIR}/${PHASE}.claim."* 2>/dev/null || true
 						echo "phase-agent-dispatch: recreated worktree at ${_NEW_WT}; re-dispatching ${TICKET}/${PHASE}" >&2
-						cd "$_NEW_WT"
+						cd "$_NEW_WT" || die "failed to enter recreated worktree $_NEW_WT"
 						# CTL-990: mark the recreate as spent — survives the exec, so a
 						# second rc=2 in the re-dispatched run parks instead of looping.
 						export CATALYST_RECREATE_ATTEMPTED=1
 						exec "$0" --phase "$PHASE" --ticket "$TICKET" \
-							--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID"
+							--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" --worktree "$_NEW_WT"
 					else
 						echo "phase-agent-dispatch: recreate failed to produce worktree; parking instead" >&2
 					fi
@@ -1294,7 +1346,7 @@ emit_launch_spec() {
 		--arg sessionName "$SESSION_NAME" \
 		--argjson attempt "$ATTEMPT" \
 		--arg resumeSession "$RESUME_SESSION" \
-		--arg worktreePath "$(pwd)" \
+		--arg worktreePath "$TICKET_WORKTREE" \
 		--argjson generation "$GENERATION" \
 		--arg pluginDirs "$PLUGIN_DIRS_RESOLVED" \
 		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
