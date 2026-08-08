@@ -32,6 +32,7 @@ import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
   applyBootDrainPolicy, // CTL-1321: boot accepting work by default
+  writeDaemonRuntimeEnv, // CTL-1678: boot-time env snapshot for read-only surfaces
   getRegistryPath,
   getEventLogPath,
   getJobsRoot, // CTL-1165 D3: job-dir GC root
@@ -967,6 +968,15 @@ export function startDaemon({
     writeFileSync(tmp, String(process.pid));
     renameSync(tmp, pidFile);
   }
+
+  // CTL-1678 (Codex round-3 P1): snapshot the drain-override env THIS process captured,
+  // keyed by our pid, so read-only surfaces (status / doctor / verify-node) report the
+  // running daemon's effective state instead of re-reading the mutable env file (whose
+  // edits are restart-only and may describe a future daemon, not this one). Written
+  // AFTER the pid file — readers require both to agree, so the reverse order would
+  // publish a snapshot that is briefly unverifiable. `pidFile` is recorded in the
+  // payload because EXECUTION_CORE_PID_FILE can relocate it (round-5 P2).
+  writeDaemonRuntimeEnv(orchDir, { pidFile });
 
   // A throw from any composed boot step must not leave a stale PID file —
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
