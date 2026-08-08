@@ -25,6 +25,7 @@ describe("parseRateLimitBody", () => {
 
   test("returns null for missing core or invalid input", () => {
     expect(parseRateLimitBody('{"resources":{}}', { host: "h", nowMs: NOW })).toBeNull();
+    expect(parseRateLimitBody('{"resources":{"core":{"limit":null,"used":0,"remaining":null,"reset":null}}}', { host: "h", nowMs: NOW })).toBeNull();
     for (const value of ["not json", "", null]) {
       expect(parseRateLimitBody(value, { host: "h", nowMs: NOW })).toBeNull();
     }

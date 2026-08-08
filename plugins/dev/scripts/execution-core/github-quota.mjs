@@ -8,11 +8,9 @@ export const GITHUB_QUOTA_DEFAULTS = {
 
 function normalizeResource(resource) {
   if (!resource || typeof resource !== "object") return null;
-  const limit = Number(resource.limit);
-  const used = Number(resource.used);
-  const remaining = Number(resource.remaining);
+  const { limit, used, remaining } = resource;
   if (![limit, used, remaining].every(Number.isFinite)) return null;
-  const reset = Number(resource.reset);
+  const reset = resource.reset;
   let resetAt = null;
   if (Number.isFinite(reset)) {
     try {
@@ -63,8 +61,8 @@ function unknown(fields = {}) {
 }
 
 export function evaluateQuotaHeadroom(snapshot, thresholds = {}, nowMs) {
-  const remaining = Number(snapshot?.core?.remaining);
-  const limit = Number(snapshot?.core?.limit);
+  const remaining = snapshot?.core?.remaining;
+  const limit = snapshot?.core?.limit;
   const sampledMs = Date.parse(snapshot?.sampledAt ?? "");
   if (!snapshot?.core || !Number.isFinite(remaining) || !Number.isFinite(limit) || limit <= 0 || !Number.isFinite(sampledMs) || !Number.isFinite(nowMs)) {
     return unknown();
