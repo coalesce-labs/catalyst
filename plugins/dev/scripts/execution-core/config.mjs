@@ -155,6 +155,10 @@ export function getReconcileHealthDir() {
   return resolve(getExecutionCoreDir(), "reconcile-health");
 }
 
+export function getReplicaHealthDir() {
+  return resolve(getExecutionCoreDir(), "replica-health");
+}
+
 // CTL-1503 — fleet-health durable-latch dir. Holds the edge-trigger latch marker
 // (fleet-health-latch.json) the probe persists on the healthy→degraded /
 // degraded→healthy edges and hydrates on start, so a daemon restart mid-episode
@@ -1142,6 +1146,9 @@ export const RECONCILE_INTERVAL_MS =
 // Env-overridable for tuning/tests.
 export const RECONCILE_FAILURE_ALERT_THRESHOLD =
   Number(process.env.EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD) || 3;
+
+export const REPLICA_DEGRADED_ALERT_THRESHOLD =
+  Number(process.env.EXECUTION_CORE_REPLICA_DEGRADED_ALERT_THRESHOLD) || 3;
 
 // Debounce window: state_changed events that enter the eligible state coalesce
 // into one reconcile poll per affected project per burst.

@@ -24,7 +24,7 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync } from "node:fs";
+import { readFileSync, statSync, existsSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
 import { resolve, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -2817,6 +2817,41 @@ export function checkCloudTokenEnv(deps = {}) {
   return checks;
 }
 
+// CAT-35 replica-schema verification helpers. The production reader (replica-read.mjs)
+// prepares queries against `issues` and `sync_meta`; a file that lacks either is unusable
+// no matter how large it is, so `replica-schema` must not PASS on size alone.
+export const REQUIRED_REPLICA_TABLES = ["issues", "sync_meta"];
+const SQLITE_MAGIC = "SQLite format 3\0";
+
+// defaultIsSqliteFile — read ONLY the 16-byte magic header (never the whole file, which
+// can be hundreds of MiB). Returns false on any read error: unreadable is not verified.
+function defaultIsSqliteFile(path) {
+  let fd = null;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(SQLITE_MAGIC.length);
+    const read = readSync(fd, buf, 0, buf.length, 0);
+    return read === buf.length && buf.toString("latin1") === SQLITE_MAGIC;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+// defaultReadDbTables — table names via the sqlite3 CLI (an OPTIONAL dependency; doctor
+// runs under bare node and must not import bun:sqlite). Returns null — meaning "could not
+// verify", distinct from [] meaning "verified, no tables" — when sqlite3 is absent or the
+// query fails, so the caller reports unverified instead of inventing a WARN.
+function defaultReadDbTables(path) {
+  const r = spawnSync("sqlite3", ["-readonly", path, "SELECT name FROM sqlite_master WHERE type='table'"], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null;
+  return r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+}
+
 // checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
 // writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
 // is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
@@ -2843,6 +2878,8 @@ export function checkCloudSync(deps = {}) {
     // (4× the SDK's 15s lock-stale) absorbs heartbeat jitter; > this ⇒ heartbeat stopped.
     lockStaleMs = Number(process.env.CATALYST_REPLICA_LOCK_STALE_MS) || 60_000,
     sizeFloorBytes = 65_536,
+    isSqliteFile = defaultIsSqliteFile, // CAT-35
+    readDbTables = defaultReadDbTables, // CAT-35
   } = deps;
 
   const installed = agentInstalled(label, laDir);
@@ -2872,12 +2909,13 @@ export function checkCloudSync(deps = {}) {
   // measures "time since last mirrored change", NOT writer liveness. The feed-independent
   // liveness signal is the writer-lock HEARTBEAT (<db>.writer.lock), rewritten ~every 5s.
   // Gate liveness on the lock heartbeat; report the data-age as info only, never as "down".
+  let size = 0;
+  let statOk = false;
   if (!dbPresent) {
     checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
   } else {
-    let size = 0;
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
-    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; } catch { /* unreadable → handled below */ }
+    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; statOk = true; } catch { /* unreadable → handled below */ }
     try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) dataNewest = Math.max(dataNewest, w.mtimeMs); } catch { /* no -wal sidecar */ }
     let lockMtime = 0;
     try { lockMtime = statFile(`${dbPath}.writer.lock`).mtimeMs; } catch { /* no lock: guard disabled / writer not started */ }
@@ -2902,6 +2940,38 @@ export function checkCloudSync(deps = {}) {
     }
   }
 
+  // CAT-35: distinguish a never-seeded/no-schema file from ordinary staleness.
+  // Size alone must never earn a PASS: a truncated, corrupt, or entirely unrelated
+  // file above the floor would otherwise be declared "schema seeded" while every
+  // production read misses, which is the exact failure this check exists to catch.
+  // So a PASS additionally requires the SQLite magic header AND — when a sqlite3
+  // reader is available — the two tables the production reader actually prepares
+  // against (`issues`, `sync_meta`). With no reader present we say so rather than
+  // claiming verification we did not perform.
+  if (dbPresent) {
+    if (!statOk) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is present but unreadable — cannot determine whether schema is seeded"));
+    } else if (size === 0) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is 0 bytes — no schema, never seeded; the writer has never authenticated"));
+    } else if (size < sizeFloorBytes) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${size}B (< ${sizeFloorBytes}B floor) — seed incomplete`));
+    } else if (!isSqliteFile(dbPath)) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${Math.round(size / 1024)}KiB but has no SQLite header — corrupt or not a database; every read will miss`));
+    } else {
+      const tables = readDbTables(dbPath);
+      if (tables === null) {
+        checks.push(mkCheck("replica-schema", STATUS.INFO, `replica db ${Math.round(size / 1024)}KiB, valid SQLite header — table presence unverified (no sqlite3 reader available)`));
+      } else {
+        const missing = REQUIRED_REPLICA_TABLES.filter((t) => !tables.includes(t));
+        checks.push(
+          missing.length > 0
+            ? mkCheck("replica-schema", STATUS.WARN, `replica db ${Math.round(size / 1024)}KiB is missing required table(s): ${missing.join(", ")} — the reader cannot prepare its queries`)
+            : mkCheck("replica-schema", STATUS.PASS, `replica db ${Math.round(size / 1024)}KiB — schema seeded (${REQUIRED_REPLICA_TABLES.join(" + ")} present)`),
+        );
+      }
+    }
+  }
+
   // (c) token presence — by NAME only, NEVER the value.
   const tokenVal = env[tokenEnv.envVar];
   const tokenSet = typeof tokenVal === "string" && tokenVal.length > 0;
@@ -2922,6 +2992,18 @@ export function checkCloudSync(deps = {}) {
     checks.push(mkCheck("replica-read-flag", STATUS.WARN, "writer running + replica present but CATALYST_LINEAR_REPLICA=off — flip it on to read from the replica"));
   } else {
     checks.push(mkCheck("replica-read-flag", STATUS.INFO, "replica read tier off (CATALYST_LINEAR_REPLICA unset/off)"));
+  }
+
+  const tokenMissing = !tokenSet;
+  const flagOff = mode !== "on";
+  if (tokenMissing && flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier INERT end-to-end: token ${tokenEnv.envVar} unset AND CATALYST_LINEAR_REPLICA off. Both must be fixed, token FIRST`));
+  } else if (tokenMissing || flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier partially configured (${tokenMissing ? `token ${tokenEnv.envVar} unset` : "CATALYST_LINEAR_REPLICA off"}) — reads still fall back`));
+  } else {
+    checks.push(mkCheck("replica-tier", STATUS.PASS, "replica tier fully configured (token set + read flag on)"));
   }
 
   return checks;
