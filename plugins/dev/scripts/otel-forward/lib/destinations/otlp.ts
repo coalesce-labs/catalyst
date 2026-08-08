@@ -1,12 +1,25 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
-import { withRetry, DEFAULT_RETRY_DELAYS_MS } from "../retry.ts";
-import { appendToDlq, drainDlqBounded, DEFAULT_MAX_DRAIN_BATCHES } from "../dlq.ts";
+import {
+  HttpError, classifyStatus, parseRetryAfter,
+  withHttpRetry, type HttpRetryPolicy, type HttpRetryClock,
+} from "../retry.ts";
+import { appendToDlq, drainDlqBounded, DEFAULT_MAX_DRAIN_BATCHES, type DrainOutcome } from "../dlq.ts";
+import { partitionByAge } from "../age-filter.ts";
 import { log } from "../logger.ts";
 import { buildCanonicalEnvelope } from "../canonical.ts";
 
 const destLog = log.child({ destination: "otlp" });
+
+// CTL-1506 (Codex P2): per-PROCESS nonce folded into every emitted event's id. The id
+// hash (buildCanonicalEnvelope) covers only ts+event+idExtra — NOT host/process identity
+// — and truncates the timestamp to whole seconds, so a bare per-instance sequence would
+// still collide across two fleet hosts (or a same-second restart) emitting the same
+// event type/count at the same seq position. A random per-process nonce makes each
+// instance's ids disjoint from every other process's.
+const INSTANCE_NONCE = randomUUID().slice(0, 8);
 
 interface OtlpAttr {
   key: string;
@@ -29,6 +42,16 @@ function toAttrArray(obj: Record<string, unknown>): OtlpAttr[] {
   );
 }
 
+// CTL-1506 (Codex P2): never put a NaN timeUnixNano on the wire. An unparseable timestamp
+// would serialize to JSON `null`, which the collector rejects with a terminal 400 that
+// dead-drops every co-rider in the batch. Fall back to a fresh clock (NOT to a possibly-old
+// observedTs, which could itself be past Loki's window and trigger the same too-old drop) —
+// a record with an unknown time is sent as "now", which is always inside the accept window.
+function toUnixNano(ts: string | undefined): number {
+  const t = ts ? Date.parse(ts) : NaN;
+  return (Number.isNaN(t) ? Date.now() : t) * 1_000_000;
+}
+
 export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
   return {
     resourceLogs: events.map((ev) => ({
@@ -40,8 +63,8 @@ export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
           scope: { name: "catalyst.otel-forward" },
           logRecords: [
             {
-              timeUnixNano: Date.parse(ev.ts) * 1_000_000,
-              observedTimeUnixNano: Date.parse(ev.observedTs ?? ev.ts) * 1_000_000,
+              timeUnixNano: toUnixNano(ev.ts),
+              observedTimeUnixNano: toUnixNano(ev.observedTs ?? ev.ts),
               severityNumber: ev.severityNumber,
               severityText: ev.severityText,
               ...(ev.traceId ? { traceId: ev.traceId } : {}),
@@ -58,18 +81,34 @@ export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
   };
 }
 
+// CTL-1506: 1 h — conservative default; configurable if the deployment's Loki
+// window differs. Records older than this are dropped before send.
+export const DEFAULT_LOKI_ACCEPT_WINDOW_MS = 3_600_000;
+
 export interface OtlpSenderOpts {
   endpoint: string;
   dlqPath: string;
   timeoutMs?: number;
-  /** Override retry delays for testing. Defaults to [0, 1000, 5000] ms. */
+  /** @deprecated No-op; use httpRetryPolicy instead. Kept for backward-compat. */
   retryDelaysMs?: number[];
-  /** Path to append a canonical forward_failed event on flush failure (CTL-1008 Phase 4). */
-  eventLogPath?: string;
+  /** CTL-1506: HTTP-status-aware retry policy for the OTLP sender. */
+  httpRetryPolicy?: HttpRetryPolicy;
+  /** Injected clock for deterministic testing. */
+  retryClock?: HttpRetryClock;
+  /** CTL-1506: age window for Loki. Records older than this are dropped before send. */
+  lokiAcceptWindowMs?: number;
+  /** Path to append canonical events on flush failure/drop (CTL-1008 Phase 4). May be a
+   *  resolver so the CURRENT monthly log file is picked at emission time — a long-running
+   *  daemon that crosses a UTC month boundary must not keep writing to the previous
+   *  month's file the tailer no longer reads (CTL-1506 Codex P2). */
+  eventLogPath?: string | (() => string);
   /** Max DLQ batches to drain per flush cycle. Defaults to DEFAULT_MAX_DRAIN_BATCHES. */
   maxDrainBatches?: number;
   /** Called after each successfully delivered batch (primary or DLQ). Used by Phase 3 lag tracking. */
   onBatchDelivered?: (batch: CanonicalEvent[]) => void;
+  /** CTL-1506 (Codex P1): shutdown signal. When aborted, in-flight retries stop and the
+   *  batch is DLQ'd immediately, so a flush can't outlive the launcher's SIGKILL grace. */
+  signal?: AbortSignal;
 }
 
 // CTL-1008 Phase 4: guard against re-amplifying our own failure events —
@@ -79,64 +118,217 @@ function isSelfBatch(batch: CanonicalEvent[]): boolean {
   return batch.every((ev) => ev.resource?.["service.name"] === "catalyst.otel-forward");
 }
 
+// CTL-1506 (Codex P2): outcome of an age-aware send. `pending` is the still-fresh set
+// that did NOT deliver (to DLQ/requeue or terminal-drop); `aged` is every record that
+// aged out across attempts (accounting deferred to the caller); `delivered` is the set
+// actually POSTed on success.
+type SendResult =
+  | { kind: "delivered"; delivered: CanonicalEvent[]; aged: CanonicalEvent[] }
+  | { kind: "dropped_terminal"; pending: CanonicalEvent[]; aged: CanonicalEvent[] }
+  | { kind: "failed_retryable"; pending: CanonicalEvent[]; aged: CanonicalEvent[]; err: unknown };
+
 export class OtlpSender {
   constructor(private opts: OtlpSenderOpts) {}
 
+  // CTL-1506 (Codex P2): monotonic per-process sequence folded into every emitted
+  // event's id. buildCanonicalEnvelope truncates the timestamp to whole seconds and
+  // derives the id solely from ts+event+idExtra, so two equally-sized drop counters
+  // emitted within the same second would otherwise collide on both the event-list key
+  // path and the forwarded logRecordUid; the seq makes each satisfy the per-record
+  // uniqueness contract.
+  private emitSeq = 0;
+
+  private emitEvent(
+    eventName: string,
+    payload: Record<string, unknown>,
+    extraAttrs: Record<string, unknown> = {},
+    // CTL-1506 (Codex P2): default WARN/13 for drop counters; callers pass ERROR/17
+    // for failure events so error-only queries still surface them.
+    severity: { text: CanonicalEvent["severityText"]; number: number } = { text: "WARN", number: 13 }
+  ): void {
+    if (!this.opts.eventLogPath) return;
+    // CTL-1506 (Codex P2): resolve the path per emission so a month rollover is honored.
+    const logPath = typeof this.opts.eventLogPath === "function"
+      ? this.opts.eventLogPath()
+      : this.opts.eventLogPath;
+    if (!logPath) return;
+    try {
+      const ev = buildCanonicalEnvelope({
+        serviceName: "catalyst.otel-forward",
+        eventName,
+        severityText: severity.text,
+        severityNumber: severity.number,
+        payload,
+        idExtra: `${payload.count ?? payload.batchSize ?? ""}:${INSTANCE_NONCE}:${this.emitSeq++}`,
+        attributes: extraAttrs,
+      });
+      mkdirSync(dirname(logPath), { recursive: true });
+      appendFileSync(logPath, JSON.stringify(ev) + "\n");
+    } catch {
+      // Best-effort — never throw from event emission
+    }
+  }
+
+  private emitDrop(reason: "aged" | "terminal_4xx", records: CanonicalEvent[]): void {
+    if (!this.opts.eventLogPath || isSelfBatch(records)) return;
+    this.emitEvent(
+      "catalyst.observability.forward_dropped",
+      { count: records.length, reason },
+      { "catalyst.observability.drop_reason": reason }
+    );
+  }
+
+  private emitFailure(batch: CanonicalEvent[], err: unknown): void {
+    destLog.error(
+      { batchSize: batch.length, err: err instanceof Error ? err.message : String(err) },
+      "flush failed, wrote events to DLQ"
+    );
+    if (this.opts.eventLogPath && !isSelfBatch(batch)) {
+      this.emitEvent(
+        "catalyst.observability.forward_failed",
+        {
+          batchSize: batch.length,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        {},
+        // CTL-1506 (Codex P2): failure events keep ERROR/17 so documented error-only
+        // queries (severityText == "ERROR") still surface exhausted-retry delivery
+        // failures; drop counters intentionally stay WARN/13.
+        { text: "ERROR", number: 17 }
+      );
+    }
+  }
+
+  // CTL-1506 (Codex P2): send `records` with age re-partitioning on EVERY retry
+  // attempt. A record just inside the window at entry can age out during the (up to
+  // maxRetryElapsedMs) retry loop; re-partitioning per attempt drops it-with-counter
+  // and removes it from the working set BEFORE the next send, so a stale co-rider can
+  // no longer drag a fresh batch into a terminal too-old rejection. Aged records are
+  // COLLECTED (not emitted) here so each caller decides WHEN to count them — the drain
+  // path must defer counting until the entry is actually consumed, else a retryable
+  // requeue recounts them on every later drain.
+  private async sendFreshWithAging(
+    rawSend: (b: CanonicalEvent[]) => Promise<void>,
+    records: CanonicalEvent[],
+    windowMs: number
+  ): Promise<SendResult> {
+    const state = { pending: records, aged: [] as CanonicalEvent[] };
+    // CTL-1506 (Codex P2): partition for send against a slightly stricter cutoff (window
+    // minus a delivery margin) so a record barely inside the window can't cross the cutoff
+    // DURING the request/collector processing and trigger a terminal too-old response that
+    // drops its fresher co-riders. Margin is bounded to ≤ ¼ of the window so it never
+    // inverts the cutoff on small windows.
+    const margin = Math.min(this.opts.timeoutMs ?? 5000, Math.floor(windowMs / 4));
+    const sendWindowMs = Math.max(1, windowMs - margin);
+    const clock: HttpRetryClock = {
+      ...this.opts.retryClock,
+      signal: this.opts.retryClock?.signal ?? this.opts.signal,
+    };
+    try {
+      await withHttpRetry(
+        async () => {
+          const { fresh, aged } = partitionByAge(state.pending, Date.now(), sendWindowMs);
+          if (aged.length) state.aged.push(...aged);
+          state.pending = fresh;
+          if (fresh.length === 0) return; // aged out entirely → nothing to send (success)
+          await rawSend(fresh);
+        },
+        this.opts.httpRetryPolicy,
+        clock
+      );
+      return { kind: "delivered", delivered: state.pending, aged: state.aged };
+    } catch (err) {
+      if (err instanceof HttpError && classifyStatus(err.status) === "terminal") {
+        return { kind: "dropped_terminal", pending: state.pending, aged: state.aged };
+      }
+      return { kind: "failed_retryable", pending: state.pending, aged: state.aged, err };
+    }
+  }
+
+  // CTL-1506: build the drain callback for drainDlqBounded. Terminal 4xx → "dropped";
+  // retryable exhaustion → rethrow (preserves CTL-1060 bounded backpressure) WITHOUT
+  // counting aged co-riders, so requeueing the unchanged entry never double-counts them
+  // (Codex P2). Aged are counted only on a consuming outcome (delivered or terminal).
+  private makeDrainSend(
+    rawSend: (b: CanonicalEvent[]) => Promise<void>,
+    windowMs: number
+  ): (batch: unknown[]) => Promise<DrainOutcome> {
+    return async (batch: unknown[]) => {
+      const events = batch as CanonicalEvent[];
+      const result = await this.sendFreshWithAging(rawSend, events, windowMs);
+      if (result.kind === "failed_retryable") {
+        // Requeue the ENTIRE entry (drainDlqBounded rewrites the original line). Aged
+        // co-riders ride along and are counted only when the entry finally consumes.
+        throw result.err;
+      }
+      if (result.aged.length) this.emitDrop("aged", result.aged);
+      if (result.kind === "dropped_terminal") {
+        if (result.pending.length) this.emitDrop("terminal_4xx", result.pending);
+        return "dropped";
+      }
+      // delivered — an entry that aged out entirely is consumed but not delivered.
+      return result.delivered.length > 0 ? "delivered" : "dropped";
+    };
+  }
+
   async flush(batch: CanonicalEvent[]): Promise<void> {
     const url = `${this.opts.endpoint.replace(/:4317/, ":4318").replace(/\/$/, "")}/v1/logs`;
-    const retryDelays = this.opts.retryDelaysMs ?? [...DEFAULT_RETRY_DELAYS_MS];
+    const windowMs = this.opts.lokiAcceptWindowMs ?? DEFAULT_LOKI_ACCEPT_WINDOW_MS;
 
-    // sendBatch is the raw network call — only retried for the PRIMARY batch.
-    const sendBatch = async (b: CanonicalEvent[]) => {
+    const rawSend = async (b: CanonicalEvent[]) => {
+      // CTL-1506 (Codex P1): abort the in-flight request on shutdown too, not just on the
+      // per-request timeout, so a graceful stop doesn't wait out a slow socket.
+      const timeoutSignal = AbortSignal.timeout(this.opts.timeoutMs ?? 5000);
+      const signal = this.opts.signal
+        ? AbortSignal.any([timeoutSignal, this.opts.signal])
+        : timeoutSignal;
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(buildOtlpPayload(b)),
-        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
+        signal,
       });
-      if (!res.ok) throw new Error(`OTLP HTTP ${res.status}`);
+      if (!res.ok) {
+        throw new HttpError(
+          res.status,
+          parseRetryAfter(res.headers.get("retry-after"), Date.now())
+        );
+      }
     };
 
-    try {
-      // CTL-1060: PRIMARY only inside withRetry — drain is OUTSIDE.
-      await withRetry(() => sendBatch(batch), 3, retryDelays);
-    } catch (err) {
-      appendToDlq(this.opts.dlqPath, batch);
-      destLog.error(
-        { batchSize: batch.length, err: err instanceof Error ? err.message : String(err) },
-        "flush failed, wrote events to DLQ"
-      );
-      // CTL-1008 Phase 4: emit a canonical forward_failed event for subscriber visibility.
-      // Loop guard: skip if the failed batch is already self-emitted failure events to
-      // prevent a feedback loop (at most one failure-event per failed batch).
-      if (this.opts.eventLogPath && !isSelfBatch(batch)) {
-        try {
-          const failureEvent = buildCanonicalEnvelope({
-            serviceName: "catalyst.otel-forward",
-            eventName: "catalyst.observability.forward_failed",
-            severityText: "ERROR",
-            severityNumber: 17,
-            payload: {
-              batchSize: batch.length,
-              err: err instanceof Error ? err.message : String(err),
-            },
-            idExtra: String(batch.length),
-          });
-          mkdirSync(dirname(this.opts.eventLogPath), { recursive: true });
-          appendFileSync(this.opts.eventLogPath, JSON.stringify(failureEvent) + "\n");
-        } catch {
-          // Best-effort — failure to write the failure event must never throw
-        }
+    // 1) Age-partition BEFORE send — aged records never leave the client. A fully-aged
+    //    incoming batch returns here (no send, no drain — the early-return invariant).
+    const { fresh, aged } = partitionByAge(batch, Date.now(), windowMs);
+    if (aged.length) this.emitDrop("aged", aged);
+    if (fresh.length === 0) return; // nothing to send → skip drain
+
+    // 2) Send fresh via status-aware retry, re-partitioning by age on each attempt
+    //    (Codex P2). Aged records never ride the DLQ in the primary path, so we count
+    //    them on every outcome; only the still-fresh `pending` set is DLQ'd/dropped.
+    const result = await this.sendFreshWithAging(rawSend, fresh, windowMs);
+    if (result.aged.length) this.emitDrop("aged", result.aged); // records that aged mid-retry
+    if (result.kind === "dropped_terminal") {
+      if (result.pending.length) this.emitDrop("terminal_4xx", result.pending);
+      return; // never DLQ a terminal 4xx
+    }
+    if (result.kind === "failed_retryable") {
+      if (result.pending.length) {
+        appendToDlq(this.opts.dlqPath, result.pending);
+        this.emitFailure(result.pending, result.err);
       }
-      // Primary failed → backend unhealthy → do not attempt to drain
-      return;
+      return; // backend unhealthy → skip drain
     }
 
-    // Primary delivered → backend healthy → bounded, failure-isolated drain OUTSIDE withRetry.
-    this.opts.onBatchDelivered?.(batch);
+    // 3) Delivered → bounded drain. But ONLY when a real POST actually succeeded
+    //    (delivered.length > 0). If the fresh set aged out entirely during the retry
+    //    backoff, withHttpRetry resolves without ever confirming the backend is healthy
+    //    (Codex P2) — draining then would start another full retry window against a
+    //    possibly-unhealthy backend, exactly the failed-primary case that skips draining.
+    if (result.delivered.length === 0) return;
+    this.opts.onBatchDelivered?.(result.delivered);
     await drainDlqBounded(
       this.opts.dlqPath,
-      (b) => withRetry(() => sendBatch(b as CanonicalEvent[]), 3, [...retryDelays]),
+      this.makeDrainSend(rawSend, windowMs),
       {
         maxBatches: this.opts.maxDrainBatches ?? DEFAULT_MAX_DRAIN_BATCHES,
         onBatchDelivered: this.opts.onBatchDelivered
@@ -146,3 +338,4 @@ export class OtlpSender {
     );
   }
 }
+
