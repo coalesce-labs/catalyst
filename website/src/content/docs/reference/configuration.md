@@ -1204,3 +1204,31 @@ kill-switch and any unset/garbage value both resolve to `off`.
 | `catalyst.coordination.mode` _(Layer-2)_ | `off` | Same three values; honored when the env var is unset. |
 | `CATALYST_COORDINATION_HUB_URL` _(env var)_ | _(none)_ | Base URL of the catalyst-cloud coordination changefeed used in `enforce`. Overrides Layer-2. When empty/unset the publisher uses the interim Loki-tail transport instead. |
 | `catalyst.coordination.hubUrl` _(Layer-2)_ | `null` | Same; honored when the env var is unset. |
+
+**Cloud token (enforce delivery).** In `enforce` mode the publisher sends each batch to
+`<hubUrl>/coordination/publish` with an `Authorization: Bearer <token>` header. The **payload
+carries no tenant field** — the server derives tenant from the token. The token comes from the
+`cloud-token` secret-contract row (ADR-0008 leg-3 credential): `~/.config/catalyst/cloud-sync.env`
+must export the resolved var name (default `CATALYST_CLOUD_TOKEN`; the exact name is
+`CATALYST_CLOUD_TOKEN_ENV` → Layer-2 → `CATALYST_CLOUD_TOKEN`). `catalyst-stack start` sources
+this file in a subshell when spawning the daemon so the credential is inherited without leaking into
+the long-lived shell process.
+
+An enforce host with a valid `hubUrl` but **no** token degrades to inbound-only with a one-time
+warning — it never hammers the hub with 401s. Provisioning a token and restarting
+(`catalyst-stack start`) bounces the daemon (token presence is part of the restart fingerprint).
+
+**Shadow → enforce promotion (ADR-023 rollout gate).** Do not flip hosts to enforce until all of
+the following are true, verified by `bun coordination-publish/parity-check.ts` on each candidate
+host over a ≥3–5 day window:
+
+1. Non-zero matched pairs (the mirror contains coordination rows that align with the `worker_state`
+   projection — meaning the outbound stream is non-empty and well-formed).
+2. Zero divergences (no terminal-status conflicts between the coordination mirror and the
+   `worker_state` projection).
+3. Each candidate has been spot-checked for false positives.
+
+Once criteria are met, flip **one host at a time** to `enforce`. Rollback = unset the mode +
+`catalyst-stack start` (the daemon self-exits on `off`, ADR-023 rule 5). The three-way exit
+contract of `parity-check.ts`: `0` = healthy, `1` = divergent, `2` = inconclusive (mirror empty
+or no matching pairs — not an error, just not yet evaluable).
