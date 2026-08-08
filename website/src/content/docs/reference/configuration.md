@@ -133,6 +133,13 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.fleetHealth.swapUsedMbClearThreshold`          | `16384`                      | CTL-1503 hysteresis band — the latched swap degradation CLEARS (fires `fleet.health.recovered` once) only when swap drops strictly below this LOWER threshold, so a value hovering in `[clear, trip)` can't re-flap. Clamped below `swapUsedMbThreshold` if misconfigured. Env `EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD`. |
 | `orchestration.fleetHealth.selfHealEnabled`                   | `false`                      | Whether a sustained breach triggers self-heal (the two orphan-reaper intents plus a bounded `ppid==1` `node`/`bun` child sweep). **Default OFF** — the first ship is a pure alert. Enable with `EXECUTION_CORE_FLEET_SELF_HEAL=1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `orchestration.fleetHealth.sustainedTicks`                    | `2`                          | Consecutive degraded ticks required before self-heal fires (once per breach episode; re-armed only after a healthy tick).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `orchestration.daemonWatchdog.mode`                           | `shadow`                     | Stuck-but-alive daemon watchdog (CTL-1502). `off` disables; `shadow` detects + logs `would-restart` but never restarts; `enforce` restarts a stuck daemon (otel-forward) once per breach episode. Precedence: `CATALYST_DAEMON_WATCHDOG=0` (kill-switch → `off`) → `EXECUTION_CORE_DAEMON_WATCHDOG_MODE` → this key → `shadow`. |
+| `orchestration.daemonWatchdog.intervalMs`                     | `120000`                     | How often the probe checks the stuck predicates (ms). Env `EXECUTION_CORE_DAEMON_WATCHDOG_INTERVAL_MS`. |
+| `orchestration.daemonWatchdog.dlqMaxBytes`                    | `1073741824`                 | DLQ-file size (bytes, via `statSync` — O(1), robust past 2 GB) at or above which the `dlq` predicate trips. Default 1 GiB. Env `EXECUTION_CORE_DAEMON_WATCHDOG_DLQ_MAX_BYTES`. |
+| `orchestration.daemonWatchdog.stalenessMs`                    | `900000`                     | How long the checkpoint's `lastForwardedTs` may stay frozen — while the event log has fresher writes (real backlog) — before the `lag` predicate trips. Default 15 min. Env `EXECUTION_CORE_DAEMON_WATCHDOG_STALENESS_MS`. |
+| `orchestration.daemonWatchdog.cooldownMs`                     | `900000`                     | Minimum time between restarts (ms). Default 15 min — deliberately > the 600s launchd `StartInterval` so the two supervision layers never race. Env `EXECUTION_CORE_DAEMON_WATCHDOG_COOLDOWN_MS`. |
+| `orchestration.daemonWatchdog.sustainedTicks`                 | `2`                          | Consecutive breach ticks required before the watchdog acts (hysteresis). Env `EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS`. |
+| `orchestration.daemonWatchdog.verifyTicks`                    | `2`                          | Post-restart re-check window: if the predicate is still tripped after this many ticks, the watchdog escalates (latched alert + `severity:high` finding) instead of restarting again. Env `EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS`. |
 | `catalyst.stallJanitor.censusIntervalSeconds` _(Layer 2)_     | `900` (15 min)               | How often the stall-janitor's git-heavy worktree/stall censuses (J1 orphan-worktree, J3 stall-clear, J4 terminal-signal GC) may run, off the per-tick scheduler hot path. Each fires a `git worktree list` per repo plus a `git status` per terminal worktree, so running them every tick on a many-worktree host ages the daemon heartbeat and holds new-work dispatch; this cadence keeps them off the hot path while the cheap J2 ghost-session kill still runs every tick (CTL-1324). Env `CATALYST_STALL_JANITOR_INTERVAL_MS` (milliseconds) overrides.                                                                                                                                                                                                                                                                                                                                                                    |
 
 The orphan child-process reaper is the corroboration-heavy companion to the session-level reaper:
@@ -461,6 +468,45 @@ not per-repo:
   work-eligible worker. It is treated as the most restrictive class and `catalyst doctor` **FAILs**
   until the value is corrected — so a typo can never make a node pick up work.
 - A missing or malformed Layer-2 file never throws; it falls through to the `worker` default.
+
+### Drain override (`CATALYST_DRAIN_DISABLED`, CTL-1678)
+
+`CATALYST_DRAIN_DISABLED=1` is a **worker-only, per-node** override that makes the node
+**permanently ignore the drain flag**. It exists because an unattributed recurring writer (CTL-1675)
+keeps silently setting the drain sentinel fleet-wide, halting all new-work admission; this env lets a
+worker neutralize that flag durably without a code change.
+
+- **Where to set it:** in the durable **Layer-2** `~/.config/catalyst/execution-core.env` (it is
+  `source`d into the daemon's environment at launch), then `catalyst-stack restart`.
+- **Opt-in semantics:** strict `=== "1"` (matching `CATALYST_BOOT_DRAINED`). Any other value —
+  unset, `0`, `true`, empty — leaves the node honoring the flag. **Unset (the fleet default) is a
+  byte-for-byte no-op**; nothing changes until it is set.
+- **What it does:** it makes `isDraining()` return `false` at the single admission chokepoint, so
+  **every** new-work consumer (the scheduler dispatch gate, the monitor triage-dispatch gate, and the
+  admission-state reporter) admits work again through one seam. The physical `drain` file is left in
+  place — the override neutralizes it, it does not delete it.
+- **Tripwire (attribution):** whenever the flag is present but ignored, the daemon emits a
+  once-per-episode **`node.drain.ignored`** event carrying the flag's mtime and a truncated `ps`
+  snapshot, to keep gathering evidence for CTL-1675. It re-arms once the flag is removed and
+  re-created.
+- **The third state is visible:** `catalyst-execution-core drain --status-read` prints
+  `drain flag present but IGNORED (CATALYST_DRAIN_DISABLED=1)` (and warns on stderr when you toggle
+  the flag on a drain-disabled node), `catalyst doctor` reports an advisory `drain-disabled` check
+  (WARN when the flag is present-and-ignored, PASS/INFO otherwise — never a FAIL), and
+  `catalyst-stack verify-node` shows a `drain-disabled` line on the worker profile.
+- **Does not touch boot-drain.** `CATALYST_BOOT_DRAINED` and the boot-drain policy are deliberately
+  independent and unchanged, so a `developer`/`monitor` node keeps booting drained (this override is
+  **worker-only**).
+
+```bash
+# In ~/.config/catalyst/execution-core.env on a WORKER node (e.g. mini, mini-2):
+# MUST be `export`ed — this file is sourced (not `set -a`) before the daemon is
+# launched, and bash does not pass a bare (unexported) assignment to the child
+# process, so a non-exported value would leave the daemon still drained.
+export CATALYST_DRAIN_DISABLED=1
+# then:
+catalyst-stack restart
+```
 
 ### Read-replica endpoint (`catalyst.readReplica.baseUrl`, CTL-1346)
 

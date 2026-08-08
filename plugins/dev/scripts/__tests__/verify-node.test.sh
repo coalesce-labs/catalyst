@@ -339,6 +339,118 @@ expect_eq "fallback: layer2 false exits non-zero"     "1"       "$NOBUN_FALSE_EC
 expect_eq "fallback: layer2 false verdict=fail"       "fail"    "$(printf '%s' "$NOBUN_FALSE_OUT" | jq -r '.verdict')"
 expect_eq "fallback: layer2 false node_class=monitor" "monitor" "$(printf '%s' "$NOBUN_FALSE_OUT" | jq -r '.node_class')"
 
+# ── CTL-1678: _vn_drained honors CATALYST_DRAIN_DISABLED; _vn_drain_disabled ──
+# A drain-disabled worker admits new work, so _vn_drained must report `no` even
+# when the physical flag file exists (truthful — the override neutralizes it).
+DRAIN_SCRATCH="$(mktemp -d)"
+mkdir -p "${DRAIN_SCRATCH}/execution-core"
+: > "${DRAIN_SCRATCH}/execution-core/drain"   # physical flag present
+# CTL-1678 (Codex P2): the probes now source the machine-local execution-core.env so the
+# durable override is visible. Point CATALYST_EXECUTION_CORE_ENV at controlled files:
+# an EMPTY one (sourcing is a no-op → the ambient/prefix vars decide) keeps the legacy
+# cases hermetic regardless of the host's real ~/.config/catalyst/execution-core.env; an
+# OVERRIDE one proves the file-sourced value reaches the probe.
+DRAIN_ENV_EMPTY="$(mktemp)"
+DRAIN_ENV_OVERRIDE="$(mktemp)"
+printf 'export CATALYST_DRAIN_DISABLED=1\n' > "$DRAIN_ENV_OVERRIDE"
+
+# flag present + override set → no (override wins)
+expect_eq "_vn_drained: flag present + DRAIN_DISABLED=1 → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" CATALYST_DRAIN_DISABLED=1 _vn_drained )"
+# flag present + env unset → yes (unchanged legacy behavior)
+expect_eq "_vn_drained: flag present + env unset → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drained' )"
+# boot-drained + env unset → yes (unchanged)
+expect_eq "_vn_drained: boot-drained + env unset → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="${DRAIN_SCRATCH}/absent" CATALYST_BOOT_DRAINED=1 bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drained' )"
+# Codex P2 (finding #3): boot-drain is AUTHORITATIVE — BOTH BOOT_DRAINED=1 and
+# DRAIN_DISABLED=1 present → drained=yes (matches config.mjs isDrainDisabled, which
+# returns false under boot-drain). The pre-fix Bash mirror returned `no` here.
+expect_eq "_vn_drained: boot-drained + DRAIN_DISABLED=1 → yes (boot wins)" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" CATALYST_BOOT_DRAINED=1 CATALYST_DRAIN_DISABLED=1 _vn_drained )"
+# Codex P2 (finding #2): the durable override lives ONLY in execution-core.env (ambient
+# unset) → the probe sources it and reports the neutralized flag as `no`.
+expect_eq "_vn_drained: flag present + override in env-file (ambient unset) → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drained' )"
+
+# _vn_drain_disabled: yes iff CATALYST_DRAIN_DISABLED == "1" AND not boot-drained
+expect_eq "_vn_drain_disabled: =1 → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DRAIN_DISABLED=1 _vn_drain_disabled )"
+expect_eq "_vn_drain_disabled: =0 → no"  "no"  \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DRAIN_DISABLED=0 _vn_drain_disabled )"
+expect_eq "_vn_drain_disabled: unset → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" bash -c 'unset CATALYST_DRAIN_DISABLED; source "'"$STACK"'"; _vn_drain_disabled' )"
+# Codex P2 (finding #3): boot-drain neutralizes the override → _vn_drain_disabled reports
+# `no` even with DRAIN_DISABLED=1 (mirrors config.mjs isDrainDisabled).
+expect_eq "_vn_drain_disabled: boot-drained + DRAIN_DISABLED=1 → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_BOOT_DRAINED=1 CATALYST_DRAIN_DISABLED=1 _vn_drain_disabled )"
+# Codex P2 (finding #2): override from the env-file (ambient unset) → yes.
+expect_eq "_vn_drain_disabled: override in env-file (ambient unset) → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
+
+# _vn_v_drain_disabled verdict helper (advisory PASS either way)
+expect_eq "_vn_v_drain_disabled: yes → PASS" "PASS" "$(status_of "$(_vn_v_drain_disabled yes)")"
+expect_eq "_vn_v_drain_disabled: no → PASS"  "PASS" "$(status_of "$(_vn_v_drain_disabled no)")"
+case "$(_vn_v_drain_disabled yes)" in
+  *"ignores the drain flag"*) ok "_vn_v_drain_disabled: yes detail names 'ignores the drain flag'" ;;
+  *) fail "_vn_v_drain_disabled: yes detail" "missing 'ignores the drain flag'" ;;
+esac
+
+# ── CTL-1678 (Codex round-3 P1): a LIVE daemon's boot snapshot beats the env file ──
+# The overrides are restart-only; when daemon-runtime-env.json exists and its pid is
+# alive, the probes must answer from it and ignore the (possibly newer) env file.
+RT_MARKER="${DRAIN_SCRATCH}/execution-core/daemon-runtime-env.json"
+# Round-4 P2: the marker is trusted only when its pid is ALSO the live daemon of record
+# (daemon.pid), so a recycled pid cannot re-certify a crashed daemon's snapshot.
+RT_PIDFILE="${DRAIN_SCRATCH}/execution-core/daemon.pid"
+echo "$$" > "$RT_PIDFILE"
+# Live marker (this test shell's pid), no override captured at boot — the env file's
+# post-restart CATALYST_DRAIN_DISABLED=1 must NOT flip the answer.
+printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$$" > "$RT_MARKER"
+expect_eq "_vn_drained: live marker no-override beats env-file override → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drained' )"
+expect_eq "_vn_drain_disabled: live marker no-override beats env-file override → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
+# Live marker WITH the override, empty env file — the running daemon ignores the flag.
+printf '{"pid":%s,"startedAt":"x","drainDisabled":true,"bootDrained":false}\n' "$$" > "$RT_MARKER"
+expect_eq "_vn_drained: live marker override, flag present → no" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drained' )"
+expect_eq "_vn_drain_disabled: live marker override → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
+# Dead-pid marker → stale, fall back to the env file (which carries the override).
+_dead_pid="$(bash -c 'echo $$')"   # that shell has exited; its pid is dead
+printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$_dead_pid" > "$RT_MARKER"
+echo "$_dead_pid" > "$RT_PIDFILE"
+expect_eq "_vn_drain_disabled: dead-pid marker → env-file fallback → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED; source "'"$STACK"'"; _vn_drain_disabled' )"
+
+# Round-6 P2: the marker's RECORDED pidFile is honored even when the caller did not
+# inherit EXECUTION_CORE_PID_FILE — otherwise a relocated-pid-file host rejects every
+# valid snapshot and silently falls back to the mutable env file.
+RT_RELOCATED="${DRAIN_SCRATCH}/relocated.pid"
+echo "$$" > "$RT_RELOCATED"
+printf '{"pid":%s,"pidFile":"%s","startedAt":"x","drainDisabled":true,"bootDrained":false}\n' "$$" "$RT_RELOCATED" > "$RT_MARKER"
+rm -f "$RT_PIDFILE"   # the DEFAULT path does not exist; only the recorded one does
+expect_eq "_vn_drain_disabled: recorded pidFile honored without env inheritance" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED EXECUTION_CORE_PID_FILE; source "'"$STACK"'"; _vn_drain_disabled' )"
+expect_eq "_vn_drained: recorded pidFile honored, flag present but ignored" "no" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED EXECUTION_CORE_PID_FILE; source "'"$STACK"'"; _vn_drained' )"
+# "pidFile":null (daemon started without --pid-file) falls through to the env/default chain.
+echo "$$" > "$RT_PIDFILE"
+printf '{"pid":%s,"pidFile":null,"startedAt":"x","drainDisabled":true,"bootDrained":false}\n' "$$" > "$RT_MARKER"
+expect_eq "_vn_drain_disabled: pidFile:null falls back to the default path" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_EMPTY" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED EXECUTION_CORE_PID_FILE; source "'"$STACK"'"; _vn_drain_disabled' )"
+
+# Round-4 P2: alive pid, but daemon.pid names a DIFFERENT daemon → marker untrusted,
+# fall back to the env file (which carries the override).
+printf '{"pid":%s,"startedAt":"x","drainDisabled":false,"bootDrained":false}\n' "$$" > "$RT_MARKER"
+echo "999999" > "$RT_PIDFILE"
+expect_eq "_vn_drain_disabled: pid-not-of-record → env-file fallback → yes" "yes" \
+  "$( CATALYST_EXECUTION_CORE_ENV="$DRAIN_ENV_OVERRIDE" CATALYST_DIR="$DRAIN_SCRATCH" bash -c 'unset CATALYST_DRAIN_DISABLED CATALYST_BOOT_DRAINED EXECUTION_CORE_PID_FILE; source "'"$STACK"'"; _vn_drain_disabled' )"
+
+rm -rf "$DRAIN_SCRATCH"
+rm -f "$DRAIN_ENV_EMPTY" "$DRAIN_ENV_OVERRIDE"
+
 rm -rf "$SCRATCH"
 
 echo ""
