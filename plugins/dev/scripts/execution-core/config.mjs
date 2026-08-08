@@ -1785,25 +1785,12 @@ export function readDeadDocWorkerConfig() {
 //             carrying the whole-board context. Operator-gated — never auto-enabled.
 export const BOARD_HEALTH_MODES = new Set(["off", "shadow", "enforce"]);
 
-// readSanctionedNeedsHuman — CTL-1432 (B3). The operator-sanctioned needs-human
-// latch allowlist: tickets a human has deliberately parked at needs-human that the
-// delegate must NOT re-propose as moves every scan (they drown the genuinely-stuck
-// tickets). They STAY visible in boardContext.frozenNeedsHuman — this only
-// suppresses them from proposeMoves. Env CATALYST_BH_SANCTIONED_LATCHES
-// (comma-separated ticket ids) overrides Layer-2 catalyst.boardHealth.
-// sanctionedNeedsHuman; default empty (suppress nothing).
-export function readSanctionedNeedsHuman(env = process.env) {
-  const raw = env.CATALYST_BH_SANCTIONED_LATCHES;
-  // CTL-1432 (Codex P2): a DEFINED env var — even empty — is an explicit override, so
-  // `CATALYST_BH_SANCTIONED_LATCHES=` clears the allowlist (empty → []). Only fall
-  // through to Layer-2 when the env var is UNSET (undefined).
-  if (typeof raw === "string") {
-    return raw.split(",").map((s) => s.trim()).filter(Boolean);
-  }
-  const l2 = readLayer2BoardHealth();
-  const list = l2?.sanctionedNeedsHuman;
-  return Array.isArray(list) ? list.filter((x) => typeof x === "string") : [];
-}
+// CTL-1552: the per-host sanctioned-latch reader (the board-health env-var /
+// Layer-2 needs-human allowlist from CTL-1432 B3) was DELETED.
+// The "a human is holding this ticket" sanction now rides on the ticket itself —
+// the standalone `parked-by-human` Linear label board-health reads from the
+// descriptor it already receives (isParkedByHuman) — so a park applies on EVERY
+// host instead of only the one that happened to look. See board-health.mjs.
 
 function readLayer2BoardHealth() {
   try {
@@ -2138,14 +2125,49 @@ export function readGovernanceConfig(env = process.env) {
   };
 }
 
-// readGovernanceSources — parallel view of where each beliefs flag's effective
+// CTL-1552: resolveModeSource — the layer a mode reader's effective value came
+// from, mirroring each reader's env→Layer-2→default precedence exactly.
+// "env-override" (a valid mode string OR the "0" kill-switch in env) | "config"
+// (a valid Layer-2 mode) | "default". Governance modes were previously invisible
+// to the boot self-report (only BELIEFS_FLAGS were reported), so an operator
+// could not tell whether e.g. board-health enforce came from the env or Layer-2.
+function resolveModeSource(envVal, l2Mode, modes) {
+  if (envVal === "0") return "env-override"; // kill-switch is an explicit env override
+  if (typeof envVal === "string" && modes.has(envVal)) return "env-override";
+  if (typeof l2Mode === "string" && modes.has(l2Mode)) return "config";
+  return "default";
+}
+
+// readGovernanceSources — parallel view of where each governance knob's effective
 // value came from: "env-override" | "config" | "default". Used by the boot
 // self-report (boot-event.mjs) and catalyst-stack status to surface env overrides.
+// CTL-1552: extended beyond the beliefs booleans to also cover the mode-reader
+// family (boardHealth / recoveryPass / unstuckSweep / deadDocWorker).
 export function readGovernanceSources(env = process.env) {
   const l2 = readLayer2Governance();
   const out = {};
   for (const [key, envName] of Object.entries(BELIEFS_FLAGS)) {
     out[key] = resolveBeliefsFlag(env[envName], l2[key]).source;
   }
+  out.boardHealth = resolveModeSource(
+    env.CATALYST_BOARD_HEALTH,
+    readLayer2BoardHealth().mode,
+    BOARD_HEALTH_MODES,
+  );
+  out.recoveryPass = resolveModeSource(
+    env.CATALYST_RECOVERY_PASS,
+    readLayer2RecoveryPass().mode,
+    RECOVERY_PASS_MODES,
+  );
+  out.unstuckSweep = resolveModeSource(
+    env.CATALYST_UNSTUCK_SWEEP ?? env.EXECUTION_CORE_UNSTUCK_SWEEP_MODE,
+    readLayer2UnstuckSweep().mode,
+    UNSTUCK_SWEEP_MODES,
+  );
+  out.deadDocWorker = resolveModeSource(
+    env.CATALYST_DEAD_DOC_WORKER_RECLAIM,
+    readLayer2DeadDocWorker().mode,
+    DEAD_DOC_WORKER_MODES,
+  );
   return out;
 }
