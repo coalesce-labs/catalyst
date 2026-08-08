@@ -696,6 +696,15 @@ cmd_url() {
 # `mkdir` is the portable atomic test-and-set (stock macOS ships no flock).
 FORWARD_LOCK_DIR="${CATALYST_DIR}/otel-forward.lock"
 FORWARD_LOCK_HELD=""
+# The watchdog lifecycle needs the SAME serialization (Codex P1): two concurrent
+# `watchdog-start`s (launchd's periodic `catalyst-stack start` overlapping an
+# operator start) could both pass read_watchdog_pid before either writes the pid
+# file, leaving an untracked enforce-mode watchdog that `watchdog-stop` cannot
+# terminate and that could restart otel-forward after a later stack shutdown.
+# A SEPARATE lock dir: the two lifecycles are independent, and sharing one lock
+# would make a slow forward-restart block watchdog-status for no reason.
+WATCHDOG_LOCK_DIR="${CATALYST_DIR}/daemon-watchdog.lock"
+WATCHDOG_LOCK_HELD=""
 
 # Stale-lock reaper: a holder that died mid-transaction (SIGKILL, panic) would
 # otherwise wedge every future forwarder mutation. The owner pid is recorded
@@ -719,9 +728,56 @@ release_forward_lock() {
 # carry on from _forward_stop_impl into _forward_start_impl and relaunch the
 # forwarder after shutdown was requested, while another lifecycle command races
 # under the lock we just dropped. Signal handling must terminate the process.
-_forward_lock_signal_exit() {
+_release_all_catalyst_locks() {
   release_forward_lock
+  release_watchdog_lock
+}
+
+_forward_lock_signal_exit() {
+  _release_all_catalyst_locks
   exit 143 # 128 + SIGTERM — the conventional signal-terminated status
+}
+
+# ── watchdog lifecycle lock ────────────────────────────────────────────────
+# Same mkdir test-and-set + dead-owner reaper + bounded wait as the forwarder
+# lock above, over its own lock dir. Kept as an explicit sibling pair rather than
+# a name-ref'd generic: macOS ships bash 3.2, which has no `declare -n`, and the
+# indirection needed to fake it is far easier to get subtly wrong than 20 lines
+# of duplication in a path whose whole job is not launching two daemons.
+_watchdog_lock_is_stale() {
+  local owner
+  owner="$(cat "${WATCHDOG_LOCK_DIR}/owner" 2>/dev/null)" || return 1
+  [[ -n "$owner" ]] || return 0
+  kill -0 "$owner" 2>/dev/null && return 1
+  return 0
+}
+
+release_watchdog_lock() {
+  [[ -n "$WATCHDOG_LOCK_HELD" ]] || return 0
+  rm -rf "$WATCHDOG_LOCK_DIR" 2>/dev/null || true
+  WATCHDOG_LOCK_HELD=""
+}
+
+acquire_watchdog_lock() {
+  local waited=0
+  [[ -n "$WATCHDOG_LOCK_HELD" ]] && return 0
+  mkdir -p "$CATALYST_DIR" 2>/dev/null || true
+  while [[ $waited -lt 100 ]]; do
+    if mkdir "$WATCHDOG_LOCK_DIR" 2>/dev/null; then
+      echo "$$" > "${WATCHDOG_LOCK_DIR}/owner" 2>/dev/null || true
+      WATCHDOG_LOCK_HELD=1
+      trap _release_all_catalyst_locks EXIT
+      trap _forward_lock_signal_exit INT TERM
+      return 0
+    fi
+    if _watchdog_lock_is_stale; then
+      rm -rf "$WATCHDOG_LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 1
 }
 
 # Bounded wait — never blocks a stack start forever. Returns 1 on timeout so the
@@ -736,7 +792,7 @@ acquire_forward_lock() {
       FORWARD_LOCK_HELD=1
       # Release on any exit path. EXIT just unlocks; INT/TERM must also STOP —
       # see _forward_lock_signal_exit.
-      trap release_forward_lock EXIT
+      trap _release_all_catalyst_locks EXIT
       trap _forward_lock_signal_exit INT TERM
       return 0
     fi
@@ -870,7 +926,19 @@ cmd_forward_restart() {
 # in-daemon probe and never starts this, so exactly one supervisor exists either
 # way. Same pid-file + identity-check conventions as the forward-* commands.
 WATCHDOG_PID_FILE="${CATALYST_DIR}/daemon-watchdog.pid"
-WATCHDOG_LOG="${CATALYST_DIR}/daemon-watchdog.log"
+# Codex P1: append to the log Alloy ALREADY tails for this service
+# (execution-core/daemon.log → service.name catalyst.execution-core) rather than
+# inventing a daemon-watchdog.log that no shipper knows about. The watchdog's
+# whole point is an alert path independent of the possibly-wedged otel-forward
+# egress, so a raised/escalated record written to an unshipped file would never
+# reach Loki/Grafana — the exact failure the out-of-band sink exists to avoid.
+# The runner emits the same pino-JSON shape as the daemon, so the records parse
+# and label identically to the in-daemon probe's on a worker.
+# NOTE: this makes the records shippable, not shipped — `catalyst-stack` starts
+# Alloy on worker nodes only (CTL-1654), so on a monitor node the durable marker
+# ~/catalyst/watchdog/<daemon>.alert.json remains the load-bearing local sink.
+# Shipping observation-node logs is tracked separately (CTL-1720).
+WATCHDOG_LOG="${CATALYST_DAEMON_LOG:-${CATALYST_DIR}/execution-core/daemon.log}"
 WATCHDOG_SCRIPT="${SCRIPT_DIR}/execution-core/daemon-watchdog-run.mjs"
 
 _watchdog_pid_is_ours() {
@@ -892,7 +960,7 @@ read_watchdog_pid() {
   return 1
 }
 
-cmd_watchdog_start() {
+_watchdog_start_impl() {
   if read_watchdog_pid >/dev/null; then
     echo "Daemon watchdog already running (pid $(cat "$WATCHDOG_PID_FILE"))"
     return 0
@@ -901,14 +969,16 @@ cmd_watchdog_start() {
     echo "Daemon watchdog script not found ($WATCHDOG_SCRIPT) — not started" >&2
     return 1
   fi
-  nohup bun run "$WATCHDOG_SCRIPT" > "$WATCHDOG_LOG" 2>&1 &
+  # APPEND (>>), never truncate: this is the shared execution-core daemon log.
+  mkdir -p "$(dirname "$WATCHDOG_LOG")" 2>/dev/null || true
+  nohup bun run "$WATCHDOG_SCRIPT" >> "$WATCHDOG_LOG" 2>&1 &
   local wd_pid=$!
   disown "$wd_pid" 2>/dev/null || true
   echo "$wd_pid" > "$WATCHDOG_PID_FILE"
   echo "Daemon watchdog started (pid $wd_pid)"
 }
 
-cmd_watchdog_stop() {
+_watchdog_stop_impl() {
   local pid
   if ! pid=$(read_watchdog_pid); then
     echo "Daemon watchdog not running"; return 0
@@ -921,6 +991,28 @@ cmd_watchdog_stop() {
   kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
   rm -f "$WATCHDOG_PID_FILE" 2>/dev/null || true
   echo "Daemon watchdog stopped"
+}
+
+cmd_watchdog_start() {
+  if ! acquire_watchdog_lock; then
+    echo "Daemon watchdog busy (another start/stop in progress) — skipping start"
+    return 0
+  fi
+  _watchdog_start_impl
+  local rc=$?
+  release_watchdog_lock
+  return $rc
+}
+
+cmd_watchdog_stop() {
+  if ! acquire_watchdog_lock; then
+    echo "Daemon watchdog busy (another start/stop in progress) — skipping stop"
+    return 0
+  fi
+  _watchdog_stop_impl
+  local rc=$?
+  release_watchdog_lock
+  return $rc
 }
 
 cmd_watchdog_status() {

@@ -19,10 +19,22 @@
 // Lifecycle: `catalyst-monitor watchdog-start|watchdog-stop|watchdog-status`
 // supervises this with a pid file, mirroring the forward-* commands.
 
+import { resolve } from "node:path";
 import { startDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs";
 import { readDaemonWatchdogConfig, log } from "./config.mjs";
 
-const config = readDaemonWatchdogConfig();
+// Codex P1: resolve the Layer-1 config path the SAME way daemon.mjs does
+// (CATALYST_CONFIG_FILE, else <cwd>/.catalyst/config.json). Calling
+// readDaemonWatchdogConfig() with no path makes readDaemonWatchdogConfigLayer1
+// return {} unconditionally, so every documented Layer-1 knob —
+// `daemonWatchdog.mode: "enforce"` / `"off"` and all thresholds — would be
+// silently ignored here. On a monitor node this is the ONLY watchdog host, so
+// that would strand its forwarder shadow-only while workers honored the very
+// same config file.
+const configPath =
+  process.env.CATALYST_CONFIG_FILE || resolve(process.cwd(), ".catalyst", "config.json");
+
+const config = readDaemonWatchdogConfig(configPath);
 
 if (!config.enabled) {
   // Not an error: the knob is off for this node. Exit 0 so a supervisor treats
@@ -32,7 +44,7 @@ if (!config.enabled) {
 }
 
 log.info(
-  { mode: config.mode, intervalMs: config.intervalMs },
+  { mode: config.mode, intervalMs: config.intervalMs, configPath },
   "daemon-watchdog-run: standalone watchdog started (observation node)",
 );
 

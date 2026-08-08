@@ -137,7 +137,7 @@ fi
 
 # EXIT must NOT share the exiting handler (that would turn every clean return
 # into a 143) — the traps are deliberately split.
-if grep -q 'trap release_forward_lock EXIT$' "$MONITOR_SH" \
+if grep -q 'trap _release_all_catalyst_locks EXIT' "$MONITOR_SH" \
    && grep -q 'trap _forward_lock_signal_exit INT TERM' "$MONITOR_SH"; then
   ok "EXIT and INT/TERM traps are split (clean exits stay clean)"
 else
@@ -152,6 +152,81 @@ if grep -A12 '^cmd_forward_restart()' "$MONITOR_SH" | grep -q 'acquire_forward_l
   ok "forward-restart holds one lock across stop+start (single transaction)"
 else
   fail "forward-restart does not hold a single lock across both halves"
+fi
+
+# ── 4. standalone runner honors Layer-1 config ─────────────────────────────
+# readDaemonWatchdogConfig() with NO path makes readDaemonWatchdogConfigLayer1
+# return {} unconditionally, silently ignoring every documented Layer-1 knob.
+# On a monitor node this runner is the ONLY watchdog host, so that would strand
+# its forwarder shadow-only while workers honored the same config file.
+if grep -q 'CATALYST_CONFIG_FILE' "$RUNNER" \
+   && grep -q 'readDaemonWatchdogConfig(configPath)' "$RUNNER"; then
+  ok "standalone runner resolves + passes a Layer-1 config path"
+else
+  fail "standalone runner ignores Layer-1 config (no configPath threaded)"
+fi
+
+# Functional: a Layer-1 `mode: "off"` must actually shut the runner down.
+CFG_HOME="$(mktemp -d)"
+mkdir -p "${CFG_HOME}/.catalyst"
+cat > "${CFG_HOME}/.catalyst/config.json" <<'JSON'
+{"catalyst":{"orchestration":{"daemonWatchdog":{"mode":"off"}}}}
+JSON
+if command -v bun >/dev/null 2>&1; then
+  RUN_OUT="$(cd "$CFG_HOME" && CATALYST_DIR="$CFG_HOME" bun run "$RUNNER" 2>&1)"
+  if grep -q 'disabled by config' <<<"$RUN_OUT"; then
+    ok "Layer-1 daemonWatchdog.mode=off shuts the standalone runner down"
+  else
+    fail "Layer-1 mode=off ignored by the standalone runner: ${RUN_OUT}"
+  fi
+else
+  ok "SKIP: bun unavailable — Layer-1 functional check not run"
+fi
+rm -rf "$CFG_HOME"
+
+# ── 5. the watchdog lifecycle is serialized too ────────────────────────────
+# Two concurrent watchdog-starts could otherwise both pass read_watchdog_pid
+# before either wrote the pid file, leaving an untracked enforce-mode watchdog
+# that watchdog-stop cannot terminate.
+if grep -q 'acquire_watchdog_lock' "$MONITOR_SH" \
+   && grep -A6 '^cmd_watchdog_start()' "$MONITOR_SH" | grep -q 'acquire_watchdog_lock' \
+   && grep -A6 '^cmd_watchdog_stop()' "$MONITOR_SH" | grep -q 'acquire_watchdog_lock'; then
+  ok "watchdog start/stop are serialized behind a lock"
+else
+  fail "watchdog lifecycle is not serialized"
+fi
+
+# The forwarder and watchdog locks must be DISTINCT dirs — sharing one would let
+# a slow forward-restart block watchdog-status for no reason.
+if grep -q 'WATCHDOG_LOCK_DIR=' "$MONITOR_SH" \
+   && ! grep -q 'WATCHDOG_LOCK_DIR="\${FORWARD_LOCK_DIR}"' "$MONITOR_SH"; then
+  ok "watchdog and forwarder use distinct lock dirs"
+else
+  fail "watchdog and forwarder share a lock dir"
+fi
+
+# bash keeps exactly ONE EXIT trap, so both acquirers must install the combined
+# releaser — otherwise the second acquire silently discards the first's cleanup.
+if grep -c 'trap _release_all_catalyst_locks EXIT' "$MONITOR_SH" | grep -q '^2$'; then
+  ok "both lock acquirers install the combined EXIT releaser"
+else
+  fail "EXIT traps not unified — one lock's cleanup can clobber the other's"
+fi
+
+# ── 6. the watchdog log is one Alloy already tails, and is APPENDED ─────────
+# A raised/escalated record written to a file no shipper knows about would never
+# reach Loki — the exact failure the out-of-band sink exists to prevent. And it
+# must never truncate: this is the shared execution-core daemon log.
+if grep -q 'WATCHDOG_LOG="\${CATALYST_DAEMON_LOG:-\${CATALYST_DIR}/execution-core/daemon.log}"' "$MONITOR_SH"; then
+  ok "watchdog log points at the Alloy-tailed execution-core/daemon.log"
+else
+  fail "watchdog log is not the already-shipped daemon log"
+fi
+
+if grep -A3 'nohup bun run "\$WATCHDOG_SCRIPT"' "$MONITOR_SH" | grep -q '>> "\$WATCHDOG_LOG"'; then
+  ok "watchdog log is APPENDED (shared daemon log never truncated)"
+else
+  fail "watchdog start truncates the shared daemon log (> instead of >>)"
 fi
 
 echo ""
