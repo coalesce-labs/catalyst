@@ -489,7 +489,7 @@ mode, restarts the stuck daemon exactly once per breach episode.
   ship registers exactly one target (otel-forward) behind a descriptor registry, so a second watched
   daemon is a one-line addition.
 
-### Two-axis worker state & the recordWorkerTransition chokepoint (CTL-764)
+### Two-axis worker state & the recordTransition chokepoint (CTL-764)
 
 Every worker ticket has **two orthogonal axes** — never blurred:
 

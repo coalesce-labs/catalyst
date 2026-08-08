@@ -1752,6 +1752,32 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(resetTickets).toContain("CTL-1");
   });
 
+  // CTL-1552: the unpark now clears the needs-human LABEL and its once-marker
+  // TOGETHER (via clearStalledLabel), re-arming labelOnce. The prior raw
+  // removeLabel left workers/<T>/.linear-label-needs-human.applied orphaned.
+  test("CTL-1552 — unpark clears the needs-human once-marker as well as the label", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "needs-input", parkedFrom: "implement" });
+    const marker = join(orch, "workers", "CTL-1", ".linear-label-needs-human.applied");
+    writeFileSync(marker, "");
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        // clearStalledLabel treats a { removed: true } result as a confirmed
+        // removal → deletes the once-marker(s).
+        removeLabel: (ticket, label) => {
+          removed.push({ ticket, label });
+          return { removed: true };
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" }); // label removed…
+    expect(existsSync(marker)).toBe(false); // …AND the once-marker cleared (re-armed)
+  });
+
   // Codex #2970 post-merge round 1: the EARLIER needs-input removal (inside the
   // needs-human block, gated on humanProvenance + isManagedTicket) can itself
   // perform the real write. The per-signal loop's OWN removeLabel(ticket,
