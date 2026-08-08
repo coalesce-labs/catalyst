@@ -369,7 +369,10 @@ import {
   HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
-import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
+import {
+  emitDrainedEvent as defaultEmitDrainedEvent, // CTL-1095: drained sentinel
+  maybeEmitDrainIgnored as defaultMaybeEmitDrainIgnored, // CTL-1678: drain-ignored tripwire
+} from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
@@ -3905,6 +3908,9 @@ export function schedulerTick(
     isDraining = () => isDrainingDefault(orchDir),
     // CTL-1095: drained-sentinel emitter — fires once when draining && empty.
     emitDrained = () => defaultEmitDrainedEvent(),
+    // CTL-1678: drain-ignored tripwire — fires once per episode when the flag is
+    // present but CATALYST_DRAIN_DISABLED=1 neutralizes it. Default reads orchDir + env.
+    emitDrainIgnored = () => defaultMaybeEmitDrainIgnored({ orchDir }),
     // CTL-936: closed-loop intent layer. When an open beliefs.db handle is
     // provided, kill actions in reclaimDeadWork are recorded as intents and
     // suppressed once ineffective. Default null → legacy behavior (all existing
@@ -6773,6 +6779,12 @@ export function schedulerTick(
       /* best-effort */
     }
   }
+  // CTL-1678: drain-ignored tripwire. Independent of `draining` (which is already
+  // false when the override is set), so it must run UNCONDITIONALLY — not gated
+  // behind the `if (draining)` branch above, which would never fire under the
+  // override. The helper is a cheap `existsSync` when inactive and latches to at
+  // most one emit per episode.
+  emitDrainIgnored();
   // CTL-1150: resolve injectable seams before Pass 2 selection + dispatch loop.
   // _hasTriageArtifact: default reads filesystem (mirroring monitor.mjs:667-669).
   //   Kept inline (not imported from monitor.mjs) to avoid coupling two daemons.
