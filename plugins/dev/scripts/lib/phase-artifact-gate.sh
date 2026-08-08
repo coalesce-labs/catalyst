@@ -101,7 +101,7 @@ own_thoughts_artifact_dir_for_phase() {
 # `repo[1]/thoughts/shared/research`) never matches `-path "$dir"` against
 # itself, gets pruned as if it were an unrelated subdirectory, and the whole
 # directory silently returns no matches even though the file is right there
-# (reproduced with `repo[1]/2026-01-01-ctl-1.md`; confirmed via Codex review).
+# (reproduced with `repo[1]/2026-01-01-proj-1.md`; confirmed via Codex review).
 # `-maxdepth` carries no such risk (it's a purely numeric depth bound, no
 # path/pattern matching involved) and is supported identically by both GNU
 # find (Linux CI) and BSD find (macOS, this repo's primary fleet host — see

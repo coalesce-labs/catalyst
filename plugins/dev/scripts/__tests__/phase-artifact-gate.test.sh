@@ -172,6 +172,7 @@ OUT13="$(match_thoughts_artifact "$NEST_DIR" "PROJ-3030" 2>/dev/null || echo "")
 RC13=0
 match_thoughts_artifact "$NEST_DIR" "PROJ-3030" >/dev/null 2>&1 || RC13=$?
 assert_eq "1" "$RC13" "nested-only dir returns non-zero (subdirectory not descended)"
+assert_eq "" "$OUT13" "nested-only dir output is empty"
 
 echo ""
 echo "Test 15 (regression): match_thoughts_artifact handles a dir path containing glob metacharacters"
@@ -210,11 +211,15 @@ echo "Test 11 (regression): match_thoughts_artifact behaves identically sourced 
 # PROJ-39's friction log — sourced this file under an interactive zsh session,
 # not via `bash -c` as intended). Skips (not a failure) when zsh isn't installed.
 if command -v zsh >/dev/null 2>&1; then
-	ZSH_OUT="$(zsh -c "source '$LIB'; match_thoughts_artifact '$FIXTURES' CTL-1081" 2>&1)"
+	ZSH_DIR="${SCRATCH}/thoughts/shared/zsh-fixtures"
+	mkdir -p "$ZSH_DIR"
+	touch "${ZSH_DIR}/2026-06-12-proj-1081.md"
+	touch "${ZSH_DIR}/2026-06-12-proj-1081-per-image-ai-captions.md"
+	ZSH_OUT="$(zsh -c "source '$LIB'; match_thoughts_artifact '$ZSH_DIR' PROJ-1081" 2>&1)"
 	ZSH_RC=$?
 	assert_eq "0" "$ZSH_RC" "zsh: return code is 0 (at least one match)"
-	assert_contains "$ZSH_OUT" "2026-06-12-ctl-1081.md" "zsh: output includes tail form"
-	assert_contains "$ZSH_OUT" "2026-06-12-ctl-1081-per-image-ai-captions.md" "zsh: output includes lowercase slug"
+	assert_contains "$ZSH_OUT" "2026-06-12-proj-1081.md" "zsh: output includes tail form"
+	assert_contains "$ZSH_OUT" "2026-06-12-proj-1081-per-image-ai-captions.md" "zsh: output includes lowercase slug"
 	assert_not_contains "$ZSH_OUT" "shopt" "zsh: no shopt/command-not-found noise in output"
 else
 	echo "  SKIP: zsh not installed on this host"
