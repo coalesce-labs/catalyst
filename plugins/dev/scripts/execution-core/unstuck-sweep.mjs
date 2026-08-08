@@ -98,6 +98,13 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   // same "already fully escalated" shape as escalation-ask-cap above — so the
   // unstuck sweep must stay quiet here too, not re-escalate every interval.
   "no-probe-for-phase":               { category: "skip",           action: "skip" },
+  // CTL-1552: the normalized human handoff (recovery-emit's mergeExplanationIntoSignal
+  // and recovery-reasoning both write stalled + stalledReason "needs_human") is a
+  // COMPLETED escalation — label, brief and Linear comment are already posted. Without
+  // an entry here it routes to unknown/escalate, whose path bypasses the intent gate,
+  // so every sweep interval would post another authored Linear comment on a ticket a
+  // human is already holding. Same "already fully escalated" shape as the three above.
+  needs_human:                        { category: "skip",           action: "skip" },
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.
