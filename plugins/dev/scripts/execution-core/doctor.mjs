@@ -1330,11 +1330,36 @@ function defaultThoughtsCloneOk(dir) {
   }
 }
 
+// A configured org is untrusted text going into a RegExp — escape it, or an org
+// containing regex metacharacters would either throw or match too broadly. Matching is
+// anchored to path-segment boundaries so "coalesce-labs" never matches the distinct org
+// "coalesce-labs-fork".
+function escapeThoughtsOrg(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// defaultConfiguredThoughtsOrg — the GitHub owner THIS node's Layer-1 declares as its
+// thoughts host: `catalyst.thoughts.org`, falling back to `catalyst.thoughts.profile`
+// (a HumanLayer alias that only coincidentally equals the owner — the same loud
+// fallback join-bundle.mjs and provision-thoughts.sh make). Returns "" when nothing is
+// declared, which the gate treats as "cannot judge" rather than "wrong".
+function defaultConfiguredThoughtsOrg() {
+  try {
+    const l1 = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const t = l1?.catalyst?.thoughts;
+    const v = t?.org ?? t?.profile ?? "";
+    return typeof v === "string" ? v : "";
+  } catch {
+    return "";
+  }
+}
+
 export function checkThoughts(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
     readHumanlayer = defaultReadHumanlayer,
     cloneOk = defaultThoughtsCloneOk,
+    configuredThoughtsOrg = defaultConfiguredThoughtsOrg,
   } = deps;
 
   const roster = resolveRoster();
@@ -1364,19 +1389,42 @@ export function checkThoughts(deps = {}) {
   const thoughtsRepo = typeof t.thoughtsRepo === "string" ? t.thoughtsRepo : "";
   const defaultProfile = typeof t.defaultProfile === "string" ? t.defaultProfile : "";
 
-  // Pollution guard: primary must be coalesce-labs, NEVER a foreign repo. The
-  // global thoughtsRepo fallback defaulting to groundworkapp/rightsite-cloud is
-  // the exact pollution bug (locked invariant: provision-thoughts-invariant.test.sh).
-  if (/groundworkapp|rightsite-cloud/i.test(thoughtsRepo) || /groundworkapp|rightsite-cloud/i.test(defaultProfile)) {
+  // Pollution guard: the humanlayer primary must be the org THIS node configured, never
+  // a foreign one. The bug this locks out (provision-thoughts-invariant.test.sh) is the
+  // global thoughtsRepo fallback silently settling on somebody else's org.
+  //
+  // Codex #3080 P1: the org names were previously HARDCODED here — coalesce-labs PASS,
+  // groundworkapp/rightsite-cloud FAIL — which is the very hardcoding this PR removes
+  // from the provisioning path. A node that legitimately hosts its thoughts under
+  // rightsite-cloud (the documented rightsite-cloud/adva layout) provisioned correctly
+  // and was then FAILed here, so `catalyst-join.sh` aborted activation right after a
+  // successful join. Judge against the CONFIGURED primary instead: same guard, no catalog.
+  const wantOrg = configuredThoughtsOrg();
+  const matchesWant =
+    wantOrg !== "" &&
+    (new RegExp(`(^|[/@:])${escapeThoughtsOrg(wantOrg)}(/|$)`, "i").test(thoughtsRepo) ||
+      defaultProfile.toLowerCase() === wantOrg.toLowerCase());
+  if (wantOrg === "") {
+    // Nothing declared — we cannot say which org is "foreign", so do not guess.
+    checks.push(
+      mkCheck(
+        "thoughts-primary",
+        STATUS.WARN,
+        `cannot verify humanlayer.json primary — no catalyst.thoughts.org/.profile in Layer-1 (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}")`,
+      ),
+    );
+  } else if (matchesWant) {
+    checks.push(
+      mkCheck("thoughts-primary", STATUS.PASS, `humanlayer.json primary = ${wantOrg} (as configured)`),
+    );
+  } else if (thoughtsRepo !== "" || defaultProfile !== "") {
     checks.push(
       mkCheck(
         "thoughts-primary",
         STATUS.FAIL,
-        `humanlayer.json primary resolves to a FOREIGN repo (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}") — pollutes groundworkapp/rightsite-cloud; must be coalesce-labs`,
+        `humanlayer.json primary resolves to a FOREIGN org (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}") — this node configures catalyst.thoughts.org="${wantOrg}"; pollutes the wrong repo`,
       ),
     );
-  } else if (/coalesce-labs/i.test(thoughtsRepo) || defaultProfile === "coalesce-labs") {
-    checks.push(mkCheck("thoughts-primary", STATUS.PASS, "humanlayer.json primary = coalesce-labs"));
   } else {
     checks.push(
       mkCheck(

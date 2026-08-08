@@ -121,9 +121,14 @@
           "description": "HumanLayer thoughts persistence settings.",
           "additionalProperties": false,
           "properties": {
+            "org": {
+              "type": ["string", "null"],
+              "description": "GitHub organization/owner that hosts this project's `thoughts` repo — provisioning clones `https://github.com/<org>/thoughts.git` into `~/catalyst/hlt/<org>/thoughts`. This is a GitHub owner, NOT the `profile` alias below and NOT the org of the project's own code repo: a project whose code lives under `github.com/groundworkapp/Adva` can keep its thoughts under `github.com/rightsite-cloud/thoughts`. null (or absent) makes provisioning fall back — loudly — to `profile`, which is correct only when the two names coincide.",
+              "default": null
+            },
             "profile": {
               "type": ["string", "null"],
-              "description": "HumanLayer profile name for the thoughts CLI. null disables thoughts persistence.",
+              "description": "HumanLayer profile name for the thoughts CLI — the key under `.thoughts.profiles` in humanlayer.json, NOT a GitHub owner (see `org` above). null disables thoughts persistence.",
               "default": null
             },
             "directory": {

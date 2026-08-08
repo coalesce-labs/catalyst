@@ -939,7 +939,7 @@ describe("checkThoughts", () => {
     expect(checks[0].detail).toContain("humanlayer.json");
   });
 
-  it("FAILs a multiHost member whose primary resolves to a foreign repo (groundworkapp guard)", () => {
+  it("FAILs a multiHost member whose primary resolves to a foreign repo (pollution guard)", () => {
     const checks = checkThoughts({
       resolveRoster: multi,
       readHumanlayer: () => ({
@@ -950,9 +950,67 @@ describe("checkThoughts", () => {
         },
       }),
       cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
     });
     expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
-    expect(checks.find((c) => c.name === "thoughts-primary").detail).toMatch(/foreign|groundworkapp/i);
+    expect(checks.find((c) => c.name === "thoughts-primary").detail).toMatch(/foreign/i);
+  });
+
+  // Codex #3080 P1: the guard used to hardcode the org catalog — coalesce-labs PASS,
+  // groundworkapp/rightsite-cloud FAIL. A node that legitimately hosts its thoughts
+  // under rightsite-cloud provisioned correctly and was then FAILed here, aborting
+  // activation right after a successful join. The verdict must follow the CONFIGURED
+  // primary, not a name.
+  it("PASSes a member whose CONFIGURED primary is rightsite-cloud (no hardcoded catalog)", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/rightsite-cloud/thoughts",
+          defaultProfile: "adva",
+          repoMappings: { "/r": { repo: "x", profile: "adva" } },
+        },
+      }),
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "rightsite-cloud",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
+  });
+
+  it("FAILs when the primary is coalesce-labs but the node configured another org", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "rightsite-cloud",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
+  });
+
+  it("WARNs (never guesses) when Layer-1 declares no thoughts org", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.WARN);
+  });
+
+  it("does not treat a same-prefix org as a match (coalesce-labs vs coalesce-labs-fork)", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/coalesce-labs-fork/thoughts",
+          defaultProfile: "coalesce-labs-fork",
+          repoMappings: { "/r": { repo: "x", profile: "coalesce-labs-fork" } },
+        },
+      }),
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
   });
 
   it("FAILs a multiHost member with empty repoMappings", () => {
@@ -980,7 +1038,12 @@ describe("checkThoughts", () => {
   });
 
   it("PASSes a fully-provisioned multiHost member", () => {
-    const checks = checkThoughts({ resolveRoster: multi, readHumanlayer: cleanHl, cloneOk: okClone });
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
+    });
     expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
     expect(verdict(checks, "thoughts-repo-mappings")).toBe(STATUS.PASS);
     expect(verdict(checks, "thoughts-clone")).toBe(STATUS.PASS);
