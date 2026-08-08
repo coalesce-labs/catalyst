@@ -39,8 +39,13 @@ if node "$CLUSTER_CLAIM_CLI" fence-check "$TICKET" "$CATALYST_CLUSTER_GENERATION
 fi
 
 # Stale (exit 10 or any non-current result) — bow out without the side-effect.
+# CTL-1679: stamp retry_safe:true. The bow-out happens BEFORE any guarded
+# side-effect and a fresh dispatch bumps the generation so the next fence-check
+# passes — so this failure is safe to mechanically re-dispatch. The recovery-pass
+# classifier reads retry_safe off the signal/evidence to redispatch instead of
+# escalating a human.
 echo "${PHASE}: cluster fence stale (gen=${CATALYST_CLUSTER_GENERATION}) — bowing out, no side-effect" >&2
 "${EMIT}" \
   --phase "$PHASE" --ticket "$TICKET" --status failed \
-  --reason "cluster_fence_stale" || true
+  --reason "cluster_fence_stale" --payload-json '{"retry_safe":true}' || true
 exit 10
