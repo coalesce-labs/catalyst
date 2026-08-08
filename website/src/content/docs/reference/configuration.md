@@ -601,15 +601,63 @@ plist; the launcher sources it from a `0600` file at run time.
 | `CATALYST_CLOUD_TOKEN_ENV` env / `catalyst.cloud.tokenEnv` (Layer-2)    | Optional escape hatch — point the writer at a **differently-named** token var on a specific host (per-host config, not code).                                                                                                                                    | `CATALYST_CLOUD_TOKEN`                                           |
 | `CATALYST_CLOUD_BASE_URL` / `CATALYST_CLOUD_ACCOUNT` env                | Cloud feed coordinates.                                                                                                                                                                                                                                          | `https://api.catalyst-cloud.coalescelabs.ai/api/v1` / `tenant-0` |
 
-**Seed-before-flip runbook** (per host): provision the host's token as
-`export CATALYST_CLOUD_TOKEN=…` in `~/.config/catalyst/cloud-sync.env` (`chmod 600`) →
-`catalyst-stack adopt-cloud-sync` → wait for a verified seed (`catalyst doctor`'s `replica-fresh`
-PASS, or `sqlite3 ~/catalyst/catalyst-replica.db 'SELECT COUNT(*) FROM issues'` > 0) → **then** set
-`CATALYST_LINEAR_REPLICA=on` (and restart execution-core on a worker so the scheduler builds the
-reader). Flipping the flag before the seed completes is harmless — reads simply MISS through to
-`linearis` (no relief) until the replica is populated. `catalyst doctor` +
-`catalyst-stack services-status` report writer liveness, replica freshness, and token presence (by
-name — never the value).
+**Seed-before-flip runbook** (run on each host):
+
+1. **Operator credential step:** obtain the cloud credential from the operator who manages the
+   service. This repository does not contain it. Provision it in the launcher's `0600` environment
+   file:
+
+   ```bash
+   mkdir -p ~/.config/catalyst
+   printf 'export CATALYST_CLOUD_TOKEN=%s\n' '<credential>' \
+     > ~/.config/catalyst/cloud-sync.env
+   chmod 600 ~/.config/catalyst/cloud-sync.env
+   ```
+
+2. Install and start the supervised writer:
+
+   ```bash
+   catalyst-stack adopt-cloud-sync
+   ```
+
+   If the writer was already adopted, restart it so it reads the newly provisioned token:
+
+   ```bash
+   launchctl kickstart -k gui/$(id -u)/ai.coalesce.catalyst-cloud-sync
+   ```
+
+3. Verify the complete write-to-read chain:
+
+   ```bash
+   catalyst-stack verify-cloud-sync
+   ```
+
+   Repeat after resolving any reported failure until every gating check passes. This verifies the
+   token, replica database and schema, issue rows, fresh writer lock, and non-empty seed cursor; it
+   also reports writer-agent and read-flag state. For automation, use
+   `catalyst-stack verify-cloud-sync --json --strict`.
+
+4. Enable replica reads through the guarded activation command:
+
+   ```bash
+   catalyst-stack activate-replica
+   ```
+
+   The command refuses to change the Layer-2 read flag until the seed checks in step 3 are genuinely
+   green. Use `catalyst-stack activate-replica --dry-run` to preview the config merge without writing.
+
+5. On a worker node, restart execution-core so the scheduler constructs its replica reader:
+
+   ```bash
+   catalyst-execution-core restart
+   ```
+
+**Why the writer can look healthy while doing nothing:** the launchd agent uses
+`KeepAlive={SuccessfulExit:false}`. When no token is available, the writer deliberately exits `0`,
+which tells launchd not to restart it; an installed plist can therefore coexist with an idle writer
+and an unseeded database. Each such launch emits `catalyst.replica.writer_idle` to the unified event
+log while preserving the non-crashing exit contract. `catalyst-stack verify-cloud-sync` is the
+authoritative acceptance check—an installed service alone is not proof of a usable replica.
 
 ```json
 { "catalyst": { "linearReplica": { "mode": "on" } } }
