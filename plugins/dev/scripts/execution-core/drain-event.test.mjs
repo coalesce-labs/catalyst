@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test drain-event.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, appendFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, appendFileSync, writeFileSync, existsSync, rmSync, utimesSync, statSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,9 +12,14 @@ import {
   emitDrainChangedEvent,
   buildDrainedEnvelope,
   emitDrainedEvent,
+  buildDrainIgnoredEnvelope,
+  emitDrainIgnoredEvent,
+  maybeEmitDrainIgnored,
   DRAIN_CHANGED_EVENT,
   DRAINED_EVENT,
+  DRAIN_IGNORED_EVENT,
 } from "./drain-event.mjs";
+import { getDrainFlagPath, getDrainIgnoredMarkerPath } from "./config.mjs";
 
 const HOST_ENVS = ["CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE"];
 let savedEnv = {};
@@ -152,5 +157,189 @@ describe("emitDrainedEvent (CTL-1095)", () => {
     appendFileSync(fileAsDir, "x");
     const bad = join(fileAsDir, "events.jsonl");
     expect(emitDrainedEvent({ logPath: bad })).toBe(false);
+  });
+});
+
+describe("buildDrainIgnoredEnvelope (CTL-1678)", () => {
+  test("drain.ignored envelope: name/entity/action + payload", () => {
+    const env = buildDrainIgnoredEnvelope({ flagMtimeMs: 123, ps: "PID CMD" });
+    expect(env.attributes["event.name"]).toBe("node.drain.ignored");
+    expect(DRAIN_IGNORED_EVENT).toBe("node.drain.ignored");
+    expect(env.attributes["event.entity"]).toBe("node");
+    expect(env.attributes["event.action"]).toBe("drain.ignored");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload["host.name"]).toBeDefined();
+    expect(env.body.payload.draining).toBe(false);
+    expect(env.body.payload.ignored).toBe(true);
+    expect(env.body.payload.flagMtimeMs).toBe(123);
+    expect(env.body.payload.ps).toBe("PID CMD");
+  });
+
+  test("defaults flagMtimeMs/ps to null when absent", () => {
+    const env = buildDrainIgnoredEnvelope({});
+    expect(env.body.payload.flagMtimeMs).toBeNull();
+    expect(env.body.payload.ps).toBeNull();
+  });
+});
+
+describe("emitDrainIgnoredEvent (CTL-1678)", () => {
+  let tmp;
+  let logPath;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "ctl1678-di-"));
+    logPath = join(tmp, "events.jsonl");
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("appends one parseable node.drain.ignored line", () => {
+    process.env.CATALYST_HOST_NAME = "mini";
+    expect(emitDrainIgnoredEvent({ flagMtimeMs: 42, ps: "PID CMD", logPath })).toBe(true);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const evt = JSON.parse(lines[0]);
+    expect(evt.attributes["event.name"]).toBe("node.drain.ignored");
+    expect(evt.body.payload.flagMtimeMs).toBe(42);
+    expect(evt.body.payload["host.name"]).toBe("mini");
+  });
+
+  test("returns false (never throws) when the log path is unwriteable", () => {
+    const fileAsDir = join(tmp, "afile");
+    appendFileSync(fileAsDir, "x");
+    const bad = join(fileAsDir, "events.jsonl");
+    expect(emitDrainIgnoredEvent({ logPath: bad })).toBe(false);
+  });
+});
+
+describe("maybeEmitDrainIgnored latch (CTL-1678)", () => {
+  let tmp;
+  let logPath;
+  const disabledEnv = { CATALYST_DRAIN_DISABLED: "1" };
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "ctl1678-latch-"));
+    logPath = join(tmp, "events.jsonl");
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function setFlag(present) {
+    const p = getDrainFlagPath(tmp);
+    if (present) writeFileSync(p, "");
+    else rmSync(p, { force: true });
+  }
+
+  test("flag present + disabled, marker absent → emits once, writes marker, finite mtime", () => {
+    setFlag(true);
+    const r = maybeEmitDrainIgnored({
+      orchDir: tmp,
+      env: disabledEnv,
+      logPath,
+      psSnapshotFn: () => "PID CMD",
+    });
+    expect(r.emitted).toBe(true);
+    expect(existsSync(getDrainIgnoredMarkerPath(tmp))).toBe(true);
+    const evt = JSON.parse(readFileSync(logPath, "utf8").trim());
+    expect(Number.isFinite(evt.body.payload.flagMtimeMs)).toBe(true);
+  });
+
+  test("second call with marker present → emitted:false, no new line (dedup)", () => {
+    setFlag(true);
+    maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    const r2 = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(r2.emitted).toBe(false);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+  });
+
+  test("flag present but not disabled → emitted:false, no line, no marker", () => {
+    setFlag(true);
+    const r = maybeEmitDrainIgnored({ orchDir: tmp, env: {}, logPath, psSnapshotFn: () => "x" });
+    expect(r.emitted).toBe(false);
+    expect(existsSync(logPath)).toBe(false);
+    expect(existsSync(getDrainIgnoredMarkerPath(tmp))).toBe(false);
+  });
+
+  test("flag removed while marker exists → clears marker so a re-created flag re-arms", () => {
+    setFlag(true);
+    maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(existsSync(getDrainIgnoredMarkerPath(tmp))).toBe(true);
+    // flag removed → marker cleared
+    setFlag(false);
+    const cleared = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(cleared.emitted).toBe(false);
+    expect(existsSync(getDrainIgnoredMarkerPath(tmp))).toBe(false);
+    // re-created flag re-arms → emits again
+    setFlag(true);
+    const again = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(again.emitted).toBe(true);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(2);
+  });
+
+  test("psSnapshotFn that throws → still emits (ps null), never throws", () => {
+    setFlag(true);
+    const r = maybeEmitDrainIgnored({
+      orchDir: tmp,
+      env: disabledEnv,
+      logPath,
+      psSnapshotFn: () => { throw new Error("ps blew up"); },
+    });
+    expect(r.emitted).toBe(true);
+    const evt = JSON.parse(readFileSync(logPath, "utf8").trim());
+    expect(evt.body.payload.ps).toBeNull();
+  });
+
+  // CTL-1678 (Codex P2, round 2): a flag removed and re-created BETWEEN ticks never
+  // presents an absent state to any tick, so the stale marker would suppress the new
+  // episode. The marker persists the flag INODE; a genuinely new flag file (a different
+  // inode — removed then recreated) re-arms even with no observed absent gap. Driven
+  // deterministically via the marker (an FS may reuse a freed inode number, so we assert
+  // the "latched inode ≠ live inode" branch directly rather than depending on that).
+  test("marker inode differs from live flag (rm+recreate episode) → re-emits", () => {
+    setFlag(true);
+    maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    const marker = JSON.parse(readFileSync(getDrainIgnoredMarkerPath(tmp), "utf8"));
+    expect(Number.isFinite(marker.flagIno)).toBe(true);
+    // Simulate a genuinely new flag file: the marker holds a DIFFERENT (prior-episode) inode.
+    const liveIno = statSync(getDrainFlagPath(tmp)).ino;
+    writeFileSync(getDrainIgnoredMarkerPath(tmp), JSON.stringify({ flagIno: liveIno + 1 }));
+    const again = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(again.emitted).toBe(true);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(2);
+  });
+
+  // CTL-1678 (Codex P2, round 2): the crux of finding #4 — an IN-PLACE rewrite (setDrain's
+  // writeFileSync O_TRUNC, or a recurring external writer overwriting the same file) keeps
+  // the inode and MUST stay latched, even though it bumps the mtime. An mtime discriminator
+  // would spam a fresh episode here.
+  test("in-place rewrite (same inode, bumped mtime) → stays latched (once-per-episode)", () => {
+    setFlag(true);
+    maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    const inoBefore = statSync(getDrainFlagPath(tmp)).ino;
+    // Rewrite the SAME file in place (O_TRUNC) and bump its mtime — no rm, so inode stays.
+    writeFileSync(getDrainFlagPath(tmp), "");
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(getDrainFlagPath(tmp), future, future);
+    expect(statSync(getDrainFlagPath(tmp)).ino).toBe(inoBefore); // sanity: inode preserved
+    const r2 = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(r2).toEqual({ emitted: false, latched: true });
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+  });
+
+  test("legacy empty marker (no mtime) → conservatively latched, never per-tick spam", () => {
+    setFlag(true);
+    // Simulate a pre-CTL-1678-fix marker with no persisted mtime.
+    writeFileSync(getDrainIgnoredMarkerPath(tmp), "");
+    const r = maybeEmitDrainIgnored({ orchDir: tmp, env: disabledEnv, logPath, psSnapshotFn: () => "x" });
+    expect(r).toEqual({ emitted: false, latched: true });
+    expect(existsSync(logPath)).toBe(false);
   });
 });

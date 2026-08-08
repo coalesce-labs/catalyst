@@ -35,6 +35,9 @@ EOF
 	chmod +x "$FAKE"
 	export EXECUTION_CORE_DAEMON_SCRIPT="$FAKE"
 	export EXECUTION_CORE_RUNTIME="bash" # run the fake under bash, not bun
+	# This lifecycle suite supplies a fake daemon and does not exercise CAT-29's
+	# dependency gate; the dedicated preflight suite covers that contract.
+	export CATALYST_SKIP_DEP_PREFLIGHT=1
 }
 
 teardown() {
@@ -42,7 +45,7 @@ teardown() {
 	pkill -f "fake-daemon.sh" 2>/dev/null || true
 	rm -rf "$SCRATCH"
 	unset CATALYST_DIR EXECUTION_CORE_DAEMON_SCRIPT EXECUTION_CORE_RUNTIME \
-	      DAEMON_ENV_DUMP CATALYST_EXECUTION_CORE_ENV
+	      DAEMON_ENV_DUMP CATALYST_EXECUTION_CORE_ENV CATALYST_SKIP_DEP_PREFLIGHT
 }
 
 # Return a localhost TCP port with no current listener (best-effort).
@@ -255,6 +258,30 @@ JSON
 	unset CLAUDE_SETTINGS_JSON OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_PROTOCOL OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER CLAUDE_CODE_ENABLE_TELEMETRY
 	rm -rf "$SETTINGS_DIR"
 fi
+
+echo "test 11 (CTL-1678): drain/status CLI arm sources the machine-local override"
+# The read-only drain path (`drain --status-read`, `status`) runs in a fresh process
+# that never sourced execution-core.env; _source_daemon_env_for_read must import an
+# `export`ed CATALYST_DRAIN_DISABLED so the CLI reports the state the daemon honors.
+# shellcheck source=/dev/null
+source "$SCRIPT" # source-safe: dispatch guarded, helpers defined
+T11=$(mktemp -d)
+ENVF="$T11/execution-core.env"
+printf 'export CATALYST_DRAIN_DISABLED=1\n' > "$ENVF"
+export CATALYST_EXECUTION_CORE_ENV="$ENVF"
+unset CATALYST_DRAIN_DISABLED
+_source_daemon_env_for_read
+if [ "${CATALYST_DRAIN_DISABLED:-}" = "1" ]; then pass "sources the override from execution-core.env"; else fail "sources the override from execution-core.env" "got=${CATALYST_DRAIN_DISABLED:-<unset>}"; fi
+# the exported value must reach a child process — parity with how the daemon sees it.
+CHILD_SEES="$(bash -c 'printf %s "${CATALYST_DRAIN_DISABLED-}"')"
+if [ "$CHILD_SEES" = "1" ]; then pass "exported override reaches a child process"; else fail "exported override reaches a child process" "child_sees=$CHILD_SEES"; fi
+# absent env file → fail-open no-op (never a non-zero return that could abort a caller).
+unset CATALYST_DRAIN_DISABLED
+export CATALYST_EXECUTION_CORE_ENV="$T11/does-not-exist.env"
+if _source_daemon_env_for_read; then pass "absent env file → no-op success"; else fail "absent env file → no-op success"; fi
+if [ -z "${CATALYST_DRAIN_DISABLED:-}" ]; then pass "absent env file leaves override unset"; else fail "absent env file leaves override unset" "got=${CATALYST_DRAIN_DISABLED}"; fi
+unset CATALYST_EXECUTION_CORE_ENV CATALYST_DRAIN_DISABLED
+rm -rf "$T11"
 
 echo ""
 echo "─────────────────────────────────────────"

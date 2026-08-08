@@ -47,6 +47,8 @@ import {
   isTerminal,
   REMEDIATE_PHASE,
   REMEDIATE_CYCLE_CAP,
+  phaseIndex, // isTicketInFlight's own supersede guard, mirroring the CTL-606 guard below
+  isKnownPhase, // same
 } from "../lib/phase-fsm.mjs";
 // CTL workflow descriptor (provenance swap): the pipeline-shape constants
 // (STAGE_RANK, TERMINAL_PHASE, NEW_WORK_ENTRY_PHASE, NON_PREEMPTABLE_PHASES) are
@@ -311,6 +313,7 @@ import {
   readUnstuckSweepConfig,
   readRecoveryPassConfig,
   readBoardHealthConfig,
+  readGithubQuotaBoardHealthConfig,
   readReclaimGatewayFreshMs,
   isThrottled,
 } from "./config.mjs";
@@ -369,12 +372,16 @@ import {
   HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
-import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
+import {
+  emitDrainedEvent as defaultEmitDrainedEvent, // CTL-1095: drained sentinel
+  maybeEmitDrainIgnored as defaultMaybeEmitDrainIgnored, // CTL-1678: drain-ignored tripwire
+} from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
+import { readGithubQuota } from "./github-quota-timer.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609: delegate-first escalation seam
 import {
   getAllTicketDescriptors,
@@ -936,7 +943,52 @@ export const PREEMPTED_STATUS = "preempted";
 // Cleared on stopScheduler/__resetForTests (see daemon module state section).
 const rankedAboveSince = new Map();
 
+// readCurrentRunPrNumber — return the current run's PR number from phase-pr.json,
+// or null if the file is absent or malformed (CTL-1667).
+export function readCurrentRunPrNumber(orchDir, ticket) {
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-pr.json");
+    return JSON.parse(readFileSync(p, "utf8"))?.pr?.number ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// readCurrentRunPrRepo — return the current run's repo slug (`owner/name`) from
+// phase-pr.json, or null when unresolvable (CTL-1667 review fix). Prefers an
+// explicit `.pr.repo`; otherwise derives it from the `.pr.url` GitHub PR link.
+//
+// Why this exists: the production `makePrView` adapter derives the repo slug
+// from the ticket's WORKTREE `origin` remote when the passed PR object carries
+// no `.repo`. But by the time the terminalDoneOnce Done-recovery gate runs, a
+// normal teardown has already removed that worktree, so the worktree-derived
+// slug resolves empty → prView returns an UNKNOWN view → the gate can never
+// confirm the merge. Preserving the repo identity that phase-pr.json already
+// stored lets prView run `gh -R <slug>` without the (removed) worktree.
+export function readCurrentRunPrRepo(orchDir, ticket) {
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-pr.json");
+    const pr = JSON.parse(readFileSync(p, "utf8"))?.pr;
+    if (!pr) return null;
+    if (typeof pr.repo === "string" && pr.repo) return pr.repo;
+    const m =
+      typeof pr.url === "string" &&
+      pr.url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
+// CTL-1660 P1 (Codex #3081): entries are inserted in ASCENDING mtime order (oldest
+// dispatch first, most-recently-touched signal last), not raw readdirSync order
+// (filesystem-dependent, not chronological). isTicketInFlight's supersede guard
+// relies on this — see livePhaseEntries below — to determine which phase was
+// ACTUALLY dispatched most recently rather than assuming higher pipeline-ordinal
+// always means more recent (false whenever an earlier phase is deliberately
+// re-dispatched after a later phase already left a signal, e.g. re-running
+// `implement` after `review` requested changes).
 export function readPhaseSignals(orchDir, ticket) {
   const dir = join(orchDir, "workers", ticket);
   const signals = {};
@@ -946,17 +998,79 @@ export function readPhaseSignals(orchDir, ticket) {
   } catch {
     return signals; // no worker dir yet
   }
+  const entries = [];
   for (const f of files) {
     const m = /^phase-(.+)\.json$/.exec(f);
     if (!m) continue;
     if (m[1].includes("-yield-")) continue; // CTL-702: skip yield tombstones
+    const path = join(dir, f);
+    let status;
     try {
-      signals[m[1]] = JSON.parse(readFileSync(join(dir, f), "utf8"))?.status ?? null;
+      status = JSON.parse(readFileSync(path, "utf8"))?.status ?? null;
     } catch {
-      // unreadable / malformed signal — skip; treated as absent
+      continue; // unreadable / malformed signal — skip; treated as absent
     }
+    let mtimeMs;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      mtimeMs = 0; // vanished between readdir and stat — sorts first, harmless
+    }
+    entries.push({ phase: m[1], status, mtimeMs });
   }
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const e of entries) signals[e.phase] = e.status;
   return signals;
+}
+
+// readPhaseSignalTimestamp — `.updatedAt // .startedAt` off one phase's signal
+// file, mirroring is_poststale_signal's own timestamp precedence
+// (lib/phase-signal-freshness.sh). Returns null when the phase's signal file
+// is absent, unreadable, or carries neither field (CTL-1667 review fix, #3061).
+function readPhaseSignalTimestamp(orchDir, ticket, phase) {
+  try {
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
+    return sig?.updatedAt ?? sig?.startedAt ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// isTerminalTeardownStale — CTL-1667 (review fix, #3061): true when SOME OTHER
+// phase in the worker dir was (re)dispatched strictly AFTER the terminal
+// `teardown` signal's own timestamp. See the call site in terminalDoneOnce for
+// the full rationale — in short, a `teardown: done` signal has no FSM
+// successor to be invalidated by the dispatcher's post-stale handling the way
+// every other phase's stale signal is, so this is the one place that binds it
+// to the current run. Every phase-agent-dispatch write (fresh OR revive)
+// unconditionally stamps a fresh `startedAt`, so any sibling phase file newer
+// than teardown's own timestamp proves the worker dir was touched by a run
+// that started after teardown last reported done. Conservative: an
+// unestablishable baseline (teardown's own timestamp absent/unreadable) or no
+// comparably-timestamped sibling returns false — never invents staleness from
+// a data gap, only detects a genuine one.
+function isTerminalTeardownStale(orchDir, ticket) {
+  const teardownAt = readPhaseSignalTimestamp(orchDir, ticket, TERMINAL_PHASE);
+  if (!teardownAt) return false; // no baseline to compare against → not proven stale
+  const dir = join(orchDir, "workers", ticket);
+  let files;
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const f of files) {
+    const m = /^phase-(.+)\.json$/.exec(f);
+    if (!m || m[1] === TERMINAL_PHASE || m[1].includes("-yield-")) continue;
+    let startedAt;
+    try {
+      startedAt = JSON.parse(readFileSync(join(dir, f), "utf8"))?.startedAt;
+    } catch {
+      continue; // unreadable sibling — not comparable evidence either way
+    }
+    if (typeof startedAt === "string" && startedAt > teardownAt) return true;
+  }
+  return false;
 }
 
 // isTicketInFlight — true when a ticket still occupies a worker slot. Pure over
@@ -969,10 +1083,84 @@ export function readPhaseSignals(orchDir, ticket) {
 // same as SETTLED_STATUSES in abort-worker.mjs — a non-terminal `done` is
 // settled-as-a-signal there but still in-flight here. The divergence is
 // intentional; do not collapse the two into one shared constant.
+// SUPERSEDE GUARD: readPhaseSignals returns every workers/<T>/phase-*.json this
+// ticket has EVER had, not just the current one. Without this, a direct
+// out-of-order re-dispatch (e.g. recovery-pass re-dispatching a LATER phase to
+// unstick a ticket without clearing the earlier phase's now-stale signal) left
+// a permanently-failed predecessor that vetoed isTicketInFlight forever, even
+// once a later phase had completed and moved the ticket on — silently walling
+// it off from the advancement sweep (verify/remediate never re-checked; the
+// ticket just sat there). Mirrors the existing CTL-606 supersede guard
+// (recovery.mjs) so the two "has this ticket moved past this signal" checks
+// agree: a KNOWN phase older than the ticket's latest-dispatched KNOWN phase is
+// superseded and its status no longer counts.
+//
+// CTL-1660 P1 (Codex #3081): "latest-dispatched" is determined by DISPATCH
+// RECENCY, not raw pipeline-ordinal position. Picking the max phaseIndex across
+// every known phase ever seen breaks when a phase is deliberately re-dispatched
+// OUT OF ORDER going BACKWARD (e.g. recovery-pass or an operator re-runs
+// `implement` after `review` already completed and left a `done` signal):
+// implement's ordinal is lower than review's, so a pure ordinal-max would keep
+// treating implement as "superseded" and silently ignore its outcome — even a
+// fresh `failed` — while the stale `review: done` signal (higher ordinal, but
+// OLDER in wall-clock time) looks like the current state. `phases` here is
+// `Object.keys(signals)`, and readPhaseSignals inserts entries in ascending-
+// mtime order, so the LAST known phase encountered in iteration order is the
+// one whose signal file was most recently written — i.e. the true latest
+// dispatch — regardless of its ordinal position. Pure callers that hand-build a
+// plain {phase: status} object (tests, other in-process producers) get the same
+// answer as before as long as they list phases in dispatch order, which every
+// existing caller already does.
+//
+// Round 2 of the same finding removed the ORDINAL COMPARISON entirely (see
+// livePhaseEntries): recency alone decides supersession, so the guard is now
+// symmetric — it holds whether the pipeline moved forward or backward.
+function latestKnownPhase(phases) {
+  let latest = null;
+  for (const p of phases) {
+    if (!isKnownPhase(p)) continue; // unknown/non-pipeline signal — ignore for ordering
+    latest = p; // last known phase in iteration order wins (dispatch recency)
+  }
+  return latest;
+}
+
+// livePhaseEntries — the [phase, status] entries that still describe the ticket's
+// CURRENT state, with superseded predecessors dropped.
+//
+// CTL-1660 P1 round 2 (Codex #3081): supersession is a RECENCY question, not a
+// directional-ordinal one. The previous `phaseIndex(phase) < latestIdx` test only
+// skipped phases whose ordinal sat BELOW the latest dispatch, which silently failed
+// the backward-redispatch case this guard exists to handle: with an older
+// `review: failed` followed by a fresh `implement: running`, iteration order makes
+// `implement` the latest dispatch, but review's ordinal is HIGHER — so it was never
+// skipped, its stale `failed` still vetoed, and `isTicketInFlight` dropped live
+// rework out of the slot and advancement sweeps.
+//
+// Since readPhaseSignals inserts entries in ascending-mtime order, every KNOWN phase
+// other than the last one encountered is by definition an older dispatch — so it is
+// superseded regardless of which direction the pipeline moved.
+//
+// TWO deliberate exemptions keep this from over-superseding:
+//   1. Unknown/non-pipeline phases (e.g. a `recovery-pass` inspection signal) carry no
+//      ordering, so they neither supersede nor are superseded — always returned.
+//   2. A phase sharing the latest dispatch's ORDINAL is not superseded. `remediate`
+//      ranks AT `verify`'s index rather than after it, so the verify⇄remediate cycle
+//      would otherwise let a `remediate: done` erase the `verify: failed` that caused
+//      it — releasing the slot on a ticket whose verify never passed.
+export function livePhaseEntries(signals) {
+  const entries = Object.entries(signals ?? {});
+  const latest = latestKnownPhase(entries.map(([p]) => p));
+  if (latest === null) return entries; // no known phases — nothing can supersede
+  const latestIdx = phaseIndex(latest);
+  return entries.filter(
+    ([phase]) => !isKnownPhase(phase) || phase === latest || phaseIndex(phase) === latestIdx
+  );
+}
+
 export function isTicketInFlight(signals) {
   const phases = Object.keys(signals ?? {});
   if (phases.length === 0) return false;
-  for (const [phase, status] of Object.entries(signals)) {
+  for (const [phase, status] of livePhaseEntries(signals)) {
     if (status === "failed" || status === "stalled" || status === "aborted") return false;
     // CTL-512: monitor-deploy `skipped` is terminal-success — the producer
     // emits it when no deployment_status event arrived before the timeout
@@ -1049,7 +1237,19 @@ export function listInFlightTickets(orchDir) {
   }
   for (const d of dirs) {
     if (!d.isDirectory()) continue;
-    const signals = readPhaseSignals(orchDir, d.name);
+    // CTL-1667 (review fix, round 4, #3061): sanitize BEFORE the in-flight
+    // check, not only inside the advancement loop below. isTicketInFlight
+    // treats a `teardown: done` signal as terminal (not in-flight) — so a
+    // ticket carrying a STALE retained teardown signal (proven stale relative
+    // to a newer phase-pr.json) was excluded from this Set entirely, and the
+    // advancement loop's OWN sanitizeStalePostPrSignals call — scoped to
+    // tickets this function already returned — never got a chance to run for
+    // it. terminalDoneOnce correctly refuses Done for that ticket (its own
+    // isTerminalTeardownStale check), but with the ticket excluded here it
+    // ALSO never reaches the advancement sweep to be re-dispatched — wedging
+    // the run permanently: refused forever, advanced never. Sanitizing here
+    // first makes both checks see the same (correct) picture.
+    const signals = sanitizeStalePostPrSignals(orchDir, d.name, readPhaseSignals(orchDir, d.name));
     // CTL-1323: a phantom recovery-pass dir is not real in-flight work — skip it so it
     // isn't counted as occupying a slot (and so buildGlobalRanking doesn't list it both
     // as in-flight here AND as a fresh new-work candidate once listStartedTickets drops it).
@@ -1326,6 +1526,65 @@ function readPhaseSignalRaw(orchDir, ticket, phase) {
   } catch {
     return null;
   }
+}
+
+// POST_PR_PHASES — mirrors lib/phase-signal-freshness.sh's POST_PR_PHASES
+// exactly: the three phases whose signal can go stale relative to a LATER
+// phase-pr.json (CTL-1667 review fix, round 3, #3061).
+const POST_PR_PHASES = ["monitor-merge", "monitor-deploy", TERMINAL_PHASE];
+
+// isPostPrSignalStale — JS port of is_poststale_signal
+// (lib/phase-signal-freshness.sh) for the scheduler-side advancement sweep.
+// KEEP THE TWO RULES IN SYNC with that file (bash cannot import this .mjs):
+//   1. PR-number mismatch (both signal.pr.number and phase-pr.pr.number
+//      present and different) → STALE — definitive, takes precedence.
+//   2. Signal predates phase-pr.json's timestamp (`.updatedAt // .startedAt`
+//      on both sides) → STALE.
+//   3. Anything ambiguous (missing files, unresolvable timestamps, no PR
+//      numbers to compare) → NOT stale. A data gap never invents staleness,
+//      it only ever fails to detect a genuine one — the same fail-safe
+//      direction the bash predicate uses for its own caller (avoiding a
+//      spurious re-dispatch); here it avoids spuriously discarding a
+//      genuinely-current signal.
+function isPostPrSignalStale(orchDir, ticket, phase) {
+  if (!POST_PR_PHASES.includes(phase)) return false;
+  const sig = readPhaseSignalRaw(orchDir, ticket, phase);
+  const pr = readPhaseSignalRaw(orchDir, ticket, "pr");
+  if (!sig || !pr) return false; // either file absent → cannot prove staleness
+  const sigPr = sig?.pr?.number;
+  const curPr = pr?.pr?.number;
+  if (sigPr != null && curPr != null && sigPr !== curPr) return true;
+  const sigTs = sig?.updatedAt ?? sig?.startedAt ?? null;
+  const prTs = pr?.updatedAt ?? pr?.startedAt ?? null;
+  if (typeof sigTs === "string" && typeof prTs === "string") return sigTs < prTs;
+  return false;
+}
+
+// sanitizeStalePostPrSignals — CTL-1667 (review fix, round 3, #3061): strip any
+// post-PR phase signal (monitor-merge, monitor-deploy, teardown) proven stale
+// relative to the current phase-pr.json BEFORE deriveAdvancement ever sees it.
+// deriveAdvancement is pure and treats the highest-indexed phase present in
+// `signals` as "latest", then advances past it — so a RETAINED stale signal
+// (e.g. an old phase-monitor-merge.json left over from a run that was revived
+// at an earlier phase, with a new phase-pr.json but no fresh monitor-merge
+// dispatch yet) makes it skip straight past that phase for the current run
+// instead of re-dispatching it. is_poststale_signal already exists to catch
+// exactly this — but ONLY inside phase-agent-dispatch, which is never invoked
+// here in the first place: deriveAdvancement decided the phase was "already
+// dispatched" before any dispatcher call happens. Filtering the stale entries
+// out of the signals map here makes deriveAdvancement re-derive "latest" from
+// the next OLDER, still-fresh phase, so the stale phase is re-dispatched like
+// any other missing one — restoring monitor-merge/monitor-deploy/teardown
+// verification for the CURRENT PR instead of silently skipping it.
+function sanitizeStalePostPrSignals(orchDir, ticket, signals) {
+  let out = signals;
+  for (const phase of POST_PR_PHASES) {
+    if (phase in out && isPostPrSignalStale(orchDir, ticket, phase)) {
+      if (out === signals) out = { ...signals }; // copy-on-write — never mutate the caller's map
+      delete out[phase];
+    }
+  }
+  return out;
 }
 
 // predecessorPhaseOf — the completed phase whose happy-path successor is `next`
@@ -1651,8 +1910,22 @@ export function readAllEligibleTickets() {
 // remediateCycleCount: 0 }, which preserves the legacy verify → review edge.
 export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount = 0 } = {}) {
   const sig = signals ?? {};
+  // CTL-1660 P1 round 3 (Codex #3081): pick the latest phase from the LIVE set, not a
+  // raw ordinal scan. With an older `review: done` behind a newly redispatched
+  // `implement: running`, the ordinal scan selected the stale `review`, saw `done`,
+  // and returned `pr` — dispatching the PR phase while the replacement implementation
+  // was still running, skipping its verify and review entirely. (This became
+  // reachable once livePhaseEntries admitted such tickets to the advancement sweep,
+  // so the two must consume the same supersession decision.)
+  //
+  // The `in sig` guards below still consult the FULL signal map on purpose: refusing
+  // to advance into a successor that has any signal at all — even a stale one — is
+  // the conservative direction. It can only withhold an advancement, never invent a
+  // wrong one.
+  const liveSet = new Set(livePhaseEntries(sig).map(([p]) => p));
   let latest = null;
-  for (const p of PHASES) if (p in sig) latest = p; // remediate ∉ PHASES → invisible here
+  // remediate ∉ PHASES → invisible here
+  for (const p of PHASES) if (p in sig && liveSet.has(p)) latest = p;
   // CTL-703: `skipped` is advancement-eligible for monitor-deploy ONLY.
   // monitor-deploy `skipped` must advance to teardown (just as `done` does),
   // so the pipeline can reach the dedicated teardown phase even when no deploy
@@ -1679,7 +1952,15 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
     { type: "complete" }
   );
   if (isTerminal(next)) return null; // pipeline reached teardown → done (CTL-703)
-  if (next.phase in sig) return null; // successor already dispatched
+  // CTL-1660 P1 round 4 (Codex #3081): test the successor against the LIVE set, not
+  // the raw signal map. The round-3 fix made this guard consult `sig`, which was safe
+  // against wrong dispatches but traded them for a permanent WEDGE: after a backward
+  // re-dispatch COMPLETES (old `verify: done` + `review: done`, then a freshly
+  // completed `implement`), the stale `verify` signal blocked the fresh verify
+  // forever — the ticket stayed in flight and never re-ran verification or review.
+  // A superseded successor signal describes the PREVIOUS pass and must not veto the
+  // new one; a genuinely current successor is in the live set and still vetoes.
+  if (liveSet.has(next.phase)) return null; // successor already dispatched (current pass)
   return next.phase;
 }
 
@@ -2902,24 +3183,176 @@ function fenceSuppressMarkerPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".fence-suppressed");
 }
 
-// stampFenceSuppress — record that we suppressed a fence-guarded write for this dir.
+// The escalation-side cooldown is a SEPARATE marker from `.fence-suppressed`, and
+// deliberately so. `.fence-suppressed` means "a fence-guarded write was SUPPRESSED
+// here", and terminalDoneOnce reads it as a reason to skip its own probe. The
+// escalation site below arms a cooldown after a write it PERFORMED (a
+// generation-less needs-human escalation that fenceGuard let through) purely to
+// bound the per-tick probe burn — nothing about that outcome should stop a
+// genuinely-completed pipeline's terminal Done from landing. Sharing one marker did
+// exactly that: a recovery that finished teardown during the 15-minute window sat
+// non-terminal until the marker expired.
+function escalationProbeCooldownPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".escalation-probe-cooldown");
+}
+
 // Best-effort: a failed write just means we re-probe next tick (no worse than before).
-function stampFenceSuppress(orchDir, ticket, nowMs) {
+function stampCooldownMarker(path, nowMs) {
   try {
-    writeFileSync(fenceSuppressMarkerPath(orchDir, ticket), JSON.stringify({ ts: nowMs }));
+    writeFileSync(path, JSON.stringify({ ts: nowMs }));
   } catch {
     /* best-effort — re-probe next tick */
   }
 }
 
-// isFenceSuppressFresh — true when a suppression was stamped within the cooldown
-// window, so the caller should skip this dir's probe+write this tick. A missing or
-// unparseable marker, or an expired one, returns false (re-probe), so a fence that
-// becomes current again self-heals after at most one cooldown window.
-function isFenceSuppressFresh(orchDir, ticket, nowMs) {
+// A missing or unparseable marker, or an expired one, returns false (re-probe), so a
+// fence that becomes current again self-heals after at most one cooldown window.
+function isCooldownMarkerFresh(path, nowMs) {
   try {
-    const { ts } = JSON.parse(readFileSync(fenceSuppressMarkerPath(orchDir, ticket), "utf8"));
+    const { ts } = JSON.parse(readFileSync(path, "utf8"));
     return Number.isFinite(ts) && nowMs - ts < FENCE_SUPPRESS_COOLDOWN_MS;
+  } catch {
+    return false;
+  }
+}
+
+// stampFenceSuppress — record that we suppressed a fence-guarded write for this dir.
+function stampFenceSuppress(orchDir, ticket, nowMs) {
+  stampCooldownMarker(fenceSuppressMarkerPath(orchDir, ticket), nowMs);
+}
+
+// isFenceSuppressFresh — true when a suppression was stamped within the cooldown
+// window, so the caller should skip this dir's probe+write this tick.
+function isFenceSuppressFresh(orchDir, ticket, nowMs) {
+  return isCooldownMarkerFresh(fenceSuppressMarkerPath(orchDir, ticket), nowMs);
+}
+
+function stampEscalationProbeCooldown(orchDir, ticket, nowMs) {
+  stampCooldownMarker(escalationProbeCooldownPath(orchDir, ticket), nowMs);
+}
+
+function isEscalationProbeCooldownFresh(orchDir, ticket, nowMs) {
+  return isCooldownMarkerFresh(escalationProbeCooldownPath(orchDir, ticket), nowMs);
+}
+
+// CTL-1667 (review fix): the terminalDoneOnce current-PR-merged gate makes a
+// synchronous `gh` PR-view call. On the REFUSAL path — the current PR is still
+// OPEN, or the merge is unverifiable (prView threw / GitHub is down) — a
+// retained `teardown: done` dir would otherwise re-run that `gh` call on EVERY
+// scheduler tick (~2x/sec) until the PR merges, an unbounded poll that burns the
+// shared GitHub-API quota and blocks the scheduler on network I/O. AGENTS.md
+// ("Working the Loop") requires waiting on the event log with only a BOUNDED
+// poll as fallback. This cooldown is that bound: after a refusal we stamp a
+// per-dir marker and skip the `gh` probe for a window. A genuine merge still
+// converges — the marker expires and the next post-cooldown tick re-checks,
+// sees MERGED, and writes Done. Marker lives in the worker dir (reaped with it),
+// mirroring .fence-suppressed / .terminal-done.applied.
+const TERMINAL_PR_CHECK_COOLDOWN_MS = (() => {
+  const v = Number(process.env.CATALYST_TERMINAL_PR_CHECK_COOLDOWN_MS);
+  return Number.isFinite(v) && v > 0 ? v : 5 * 60_000;
+})();
+
+// CTL-1667 (review fix, #3061): the cooldown above bounds the PROBE
+// FREQUENCY, not the total number of probes — a retained `teardown: done`
+// dir sitting on an OPEN or perpetually-unverifiable PR re-arms automatically
+// every time the cooldown expires and probes `gh` again, FOREVER. That is
+// still an unbounded synchronous GitHub poll (just a slow one), which
+// AGENTS.md ("Working the Loop") requires to be a bounded fallback, not an
+// indefinite one. TERMINAL_PR_CHECK_MAX_ATTEMPTS is the threshold after which
+// the SHORT per-probe cooldown escalates to the much LONGER
+// TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS below — RATE-bounded, never a hard
+// permanent stop.
+//
+// CTL-1667 (review fix, round 4): the first version of this cap made the gate
+// stop calling `gh` for a dir FOREVER once exhausted — a genuine merge
+// arriving after the budget was spent (or a later run reusing the same
+// worker dir) could then never reach `prView`/terminalDoneOnce again, leaving
+// Linear permanently non-Done with no recovery path (reconcileTerminalBackstop
+// is inert too: its GATE 1 requires the `.terminal-done.applied` marker, which
+// a permanently-refusing gate never writes). Escalating the cooldown instead
+// of hard-stopping keeps the total probe RATE bounded (the original ask) while
+// guaranteeing eventual convergence: a merge is still detected, just on a
+// much slower cadence once a dir has proven itself persistently stuck.
+const TERMINAL_PR_CHECK_MAX_ATTEMPTS = (() => {
+  const v = Number(process.env.CATALYST_TERMINAL_PR_CHECK_MAX_ATTEMPTS);
+  return Number.isFinite(v) && v > 0 ? v : 12; // default: ~1h of 5-min-cooldown probing
+})();
+
+const TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS = (() => {
+  const v = Number(process.env.CATALYST_TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS);
+  return Number.isFinite(v) && v > 0 ? v : 6 * 60 * 60_000; // default: 6h between probes once exhausted
+})();
+
+function terminalPrCheckMarkerPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".terminal-pr-check-suppressed");
+}
+
+function terminalPrCheckExhaustedMarkerPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".terminal-pr-check-exhausted");
+}
+
+// warnTerminalPrCheckExhaustedOnce — surface the escalation into the LONG
+// cooldown tier LOUDLY exactly once per worker dir (never a silent-forever
+// refusal — "Surface anomalies loudly"), via a dedicated marker so the WARN
+// doesn't repeat on every subsequent probe. Best-effort. The gate keeps
+// probing on the long cadence after this — it is a rate change, not a stop.
+function warnTerminalPrCheckExhaustedOnce(orchDir, ticket) {
+  const marker = terminalPrCheckExhaustedMarkerPath(orchDir, ticket);
+  if (existsSync(marker)) return;
+  log.warn(
+    { ticket, maxAttempts: TERMINAL_PR_CHECK_MAX_ATTEMPTS },
+    "ctl-1667: terminal-PR-merged probe budget exhausted — escalating to the long cooldown (still probing, far less often); Done stays refused"
+  );
+  try {
+    writeFileSync(marker, "");
+  } catch {
+    /* best-effort — a repeat WARN next tick is harmless */
+  }
+}
+
+// stampTerminalPrCheckSuppress — record that the current-PR-merged gate refused
+// Done this tick, and bump the total-attempts counter (CTL-1667 review fix:
+// bounds the total probe count, not just the per-probe cooldown). Best-effort:
+// a failed write just means we re-probe next tick. Fires the one-time
+// exhaustion WARN exactly on the tick the count first reaches the threshold.
+function stampTerminalPrCheckSuppress(orchDir, ticket, nowMs) {
+  let count = 1;
+  try {
+    const prior = JSON.parse(readFileSync(terminalPrCheckMarkerPath(orchDir, ticket), "utf8"));
+    if (Number.isFinite(prior?.count)) count = prior.count + 1;
+  } catch {
+    /* first refusal, or an unreadable prior marker — start the count at 1 */
+  }
+  try {
+    writeFileSync(
+      terminalPrCheckMarkerPath(orchDir, ticket),
+      JSON.stringify({ ts: nowMs, count })
+    );
+  } catch {
+    /* best-effort — re-probe next tick */
+  }
+  if (count === TERMINAL_PR_CHECK_MAX_ATTEMPTS) warnTerminalPrCheckExhaustedOnce(orchDir, ticket);
+}
+
+// isTerminalPrCheckSuppressFresh — true when the gate refused recently enough
+// that the caller should skip the `gh` PR-view this tick. Tiered: the first
+// TERMINAL_PR_CHECK_MAX_ATTEMPTS refusals use the SHORT cooldown; once that
+// count is reached, subsequent refusals use the much LONGER
+// TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS — bounding the total probe RATE
+// without ever fully cutting a dir off from eventually converging (CTL-1667
+// review fix, round 4). A missing, unparseable, or expired marker returns
+// false (re-probe), so a genuine merge still converges to Done.
+function isTerminalPrCheckSuppressFresh(orchDir, ticket, nowMs) {
+  try {
+    const { ts, count } = JSON.parse(
+      readFileSync(terminalPrCheckMarkerPath(orchDir, ticket), "utf8")
+    );
+    if (!Number.isFinite(ts)) return false;
+    const cooldown =
+      Number.isFinite(count) && count >= TERMINAL_PR_CHECK_MAX_ATTEMPTS
+        ? TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS
+        : TERMINAL_PR_CHECK_COOLDOWN_MS;
+    return nowMs - ts < cooldown;
   } catch {
     return false;
   }
@@ -2958,6 +3391,10 @@ export function terminalDoneOnce(
     // CTL-1157 A1: injectable fence decision (deterministic in tests). Production
     // uses the real fenceGuard, which reads the cross-host claim generation.
     fence = fenceGuard,
+    // CTL-1667: injectable prAdapter for the current-PR-merged gate. The same
+    // prAdapter already threaded to reconcileTerminalBackstop; schedulerTick
+    // passes it through to both callers from the same opts object.
+    prAdapter = undefined,
   } = {}
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
@@ -2983,6 +3420,94 @@ export function terminalDoneOnce(
     // stalled/failed branch uses immediately before its needs-human write.
     stampFenceSuppress(orchDir, ticket, now());
     return null;
+  }
+  // CTL-1667 (review fix, #3061) — bind the retained `teardown: done` evidence
+  // to the CURRENT run before trusting it at all. deriveAdvancement never
+  // re-dispatches a terminal `teardown` signal (transition() has no successor
+  // once `teardown` is `done`), so — unlike every non-terminal phase — a
+  // `teardown: done` signal left over from an EARLIER run is never invalidated
+  // by the dispatcher's post-stale handling (is_poststale_signal /
+  // POSTSTALE_SIGNAL, lib/phase-signal-freshness.sh, this same PR): nothing
+  // ever asks phase-agent-dispatch to dispatch `teardown` again, so that
+  // invalidation code path simply never runs for this phase. If the worker dir
+  // was reused for a later run (a revive/redispatch of an earlier phase, e.g.
+  // `pr`, after this teardown already reported done — without clearing the
+  // stale phase-teardown.json), that later dispatch always writes its OWN
+  // phase-<x>.json with a fresh `startedAt` (phase-agent-dispatch's
+  // unconditional skeleton write). A later phase's `startedAt` newer than this
+  // teardown's own completion is therefore proof the retained "done" evidence
+  // predates — and cannot cover — that later run, whether or not its own
+  // phase-pr.json currently resolves a PR number (it may not exist yet, or may
+  // have been overwritten again by a still-later redispatch). Conservative in
+  // the SAME direction as is_poststale_signal: no comparable timestamp on
+  // either side (this teardown signal, or every sibling phase file) proves
+  // nothing, so it is NOT treated as stale — a data gap never invents
+  // staleness, it only ever fails to detect a genuine one.
+  if (isTerminalTeardownStale(orchDir, ticket)) {
+    // CTL-1667 (review fix, round 4): throttle the WARN to once per cooldown
+    // window (was unconditional — a retained stale signal has no successor
+    // that ever clears this condition, so an unthrottled log.warn flooded
+    // daemon logs/telemetry at the full per-tick rate indefinitely).
+    if (!isTerminalPrCheckSuppressFresh(orchDir, ticket, now())) {
+      stampTerminalPrCheckSuppress(orchDir, ticket, now());
+      log.warn(
+        { ticket },
+        "ctl-1667: retained teardown:done signal predates a later phase dispatch — refusing Done (stale evidence)"
+      );
+    }
+    return null;
+  }
+  // CTL-1667 — GATE: the current run's PR must be MERGED before Done.
+  // Mirrors reconcileTerminalBackstop GATE 2 (`prAdapter.prView`). Engages only
+  // when a current PR number is resolvable from phase-pr.json; when it is absent
+  // the gate is skipped and today's behavior (no-PR tickets complete) is preserved.
+  // Fail-closed: an unverifiable merge (prView throws or missing prAdapter while a
+  // PR number IS resolvable) refuses Done rather than assuming success.
+  // Reuses the same merged definition as reconcileTerminalBackstop:3126.
+  //
+  // CTL-1667 (review fixes):
+  //   • Repo identity — pass the repo slug from phase-pr.json so `makePrView`
+  //     resolves `gh -R <slug>` directly instead of falling back to the ticket's
+  //     WORKTREE origin, which a normal teardown has already removed (a
+  //     `{number}`-only lookup would resolve UNKNOWN → the gate could never
+  //     confirm the merge or run its documented Done recovery).
+  //   • Bounded poll — every refusal (PR still OPEN, prView throws, or missing
+  //     prAdapter) stamps a per-dir cooldown so the synchronous `gh` probe is
+  //     skipped for a window instead of re-running on every ~2x/sec tick (the
+  //     AGENTS.md "bounded poll as fallback" contract). The merge still converges
+  //     to Done once the cooldown expires and the next tick sees MERGED.
+  //   • Bounded TOTAL probes — the cooldown above only bounds the FREQUENCY. A
+  //     dir stuck refusing forever (a permanently-open or unverifiable PR)
+  //     would otherwise re-arm and re-probe `gh` every cooldown window
+  //     indefinitely. Once the total refusal count reaches
+  //     TERMINAL_PR_CHECK_MAX_ATTEMPTS, isTerminalPrCheckSuppressFresh
+  //     escalates to the much longer TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS
+  //     for this dir — RATE-bounded, never a hard permanent stop (round 4:
+  //     a genuine merge arriving after the budget is spent must still
+  //     eventually be detected).
+  {
+    const currentPrNum = readCurrentRunPrNumber(orchDir, ticket);
+    if (currentPrNum != null) {
+      if (isTerminalPrCheckSuppressFresh(orchDir, ticket, now())) return null; // bounded: within cooldown (short or, once exhausted, long), skip the gh probe
+      if (!prAdapter || typeof prAdapter.prView !== "function") {
+        stampTerminalPrCheckSuppress(orchDir, ticket, now());
+        return null; // can't verify → fail-closed (bounded)
+      }
+      const repo = readCurrentRunPrRepo(orchDir, ticket);
+      const prRef = repo ? { number: currentPrNum, repo } : { number: currentPrNum };
+      let merged = false;
+      try {
+        const view = prAdapter.prView(ticket, prRef);
+        merged = !!(view && (view.state === "MERGED" || view.mergedAt != null));
+      } catch {
+        stampTerminalPrCheckSuppress(orchDir, ticket, now());
+        return null; // unverifiable merge → fail-closed, refuse Done (bounded)
+      }
+      if (!merged) {
+        stampTerminalPrCheckSuppress(orchDir, ticket, now());
+        return null; // current PR still open → do NOT write Done (bounded)
+      }
+    }
   }
   // CTL-1157 (ALARM-NOT-BLOCK — THE REVERSAL): the terminal sweep writes Done
   // DIRECTLY (no agent to reason). The earlier behavior REFUSED the write when an
@@ -3905,6 +4430,9 @@ export function schedulerTick(
     isDraining = () => isDrainingDefault(orchDir),
     // CTL-1095: drained-sentinel emitter — fires once when draining && empty.
     emitDrained = () => defaultEmitDrainedEvent(),
+    // CTL-1678: drain-ignored tripwire — fires once per episode when the flag is
+    // present but CATALYST_DRAIN_DISABLED=1 neutralizes it. Default reads orchDir + env.
+    emitDrainIgnored = () => defaultMaybeEmitDrainIgnored({ orchDir }),
     // CTL-936: closed-loop intent layer. When an open beliefs.db handle is
     // provided, kill actions in reclaimDeadWork are recorded as intents and
     // suppressed once ineffective. Default null → legacy behavior (all existing
@@ -5528,6 +6056,8 @@ export function schedulerTick(
           // The daemon binds this to read from the real orchDir; a bare tick passes
           // nothing → assembleBoardState defaults to () => new Map() (observable:false).
           getStalledPrState: _boardHealth.getStalledPrState ?? (() => readStalledPrState(orchDir)),
+          getGithubQuota: _boardHealth.getGithubQuota ?? (() => readGithubQuota(orchDir)),
+          githubQuotaMode: _boardHealth.githubQuotaMode ?? readGithubQuotaBoardHealthConfig().mode,
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the
@@ -5771,7 +6301,12 @@ export function schedulerTick(
         for (const member of anomaly.members) {
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
-            if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
+            if (
+              fenceGuard(
+                { ticket: member, orchDir, multiHost, gateway, self },
+                { proceedOnMissingGeneration: true }
+              )
+            ) {
               const dcResult = routeStuckTicketToDelegate(orchDir, member, {
                 site: "dependency-cycle",
                 reason: "dependency-cycle",
@@ -6317,7 +6852,14 @@ export function schedulerTick(
     // signals so deriveAdvancement re-dispatches a fresh verify this tick).
     maybeResetForRemediateCycle(orchDir, ticket);
 
-    const signals = readPhaseSignals(orchDir, ticket);
+    // CTL-1667 (review fix, round 3, #3061): strip any post-PR phase signal
+    // (monitor-merge/monitor-deploy/teardown) proven stale relative to the
+    // current phase-pr.json BEFORE deriveAdvancement sees it — see
+    // sanitizeStalePostPrSignals for the full rationale. Without this,
+    // deriveAdvancement treats a retained stale signal as "already dispatched"
+    // and advances PAST it, so the phase-agent-dispatch-side freshness check
+    // (is_poststale_signal) never even gets a chance to run for that phase.
+    const signals = sanitizeStalePostPrSignals(orchDir, ticket, readPhaseSignals(orchDir, ticket));
     // CTL-653: the verdict-router reads — verify.json verdict + event-counted
     // cycle budget. Injected into deriveAdvancement so the router stays pure.
     const verdict = readVerifyVerdict({ ticket, orchDir });
@@ -6590,13 +7132,28 @@ export function schedulerTick(
     for (const anomaly of eligibleGraph.anomalies) {
       for (const member of anomaly.members) {
         if (eligibleIds.has(member)) {
+          // HRW ownership gate. This sweep runs over `eligible` — the RAW,
+          // un-owned pool — and above the ready-filter that applies ownership to
+          // dispatch, so without this gate EVERY host in the cluster escalates
+          // EVERY cycle member. An unstarted eligible ticket has no worker dir and
+          // no claim generation, so fenceGuard's escalation fail-open passes on all
+          // of them, and labelOnce's marker is host-local: N hosts → N Linear label
+          // writes and N worker.transition events for one ticket. Same dispatch
+          // roster the ready-filter below uses, so exactly one host acts.
+          // STRICT no-op at N=1.
+          if (multiHost && !ownedBy(member, _dispatchRoster(), self)) continue;
           log.warn(
             { member, members: anomaly.members },
             "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human"
           );
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
-          if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
+          if (
+            fenceGuard(
+              { ticket: member, orchDir, multiHost, gateway, self },
+              { proceedOnMissingGeneration: true }
+            )
+          ) {
             const c925Result = routeStuckTicketToDelegate(orchDir, member, {
               site: "ctl-925-cycle",
               reason: "dependency-cycle",
@@ -6773,6 +7330,12 @@ export function schedulerTick(
       /* best-effort */
     }
   }
+  // CTL-1678: drain-ignored tripwire. Independent of `draining` (which is already
+  // false when the override is set), so it must run UNCONDITIONALLY — not gated
+  // behind the `if (draining)` branch above, which would never fire under the
+  // override. The helper is a cheap `existsSync` when inactive and latches to at
+  // most one emit per episode.
+  emitDrainIgnored();
   // CTL-1150: resolve injectable seams before Pass 2 selection + dispatch loop.
   // _hasTriageArtifact: default reads filesystem (mirroring monitor.mjs:667-669).
   //   Kept inline (not imported from monitor.mjs) to avoid coupling two daemons.
@@ -7110,6 +7673,12 @@ export function schedulerTick(
         checkOpenPrs,
         emitDoneWithOpenPr,
         emitDoneApplied,
+        prAdapter, // CTL-1667: thread through for the current-PR-merged gate
+        now, // CTL-1667 (review fix, round 4): thread the tick's injectable clock
+        // through so the terminal-PR-check / fence-suppress cooldowns are
+        // deterministically testable at the schedulerTick level, not only via
+        // a direct terminalDoneOnce call (previously always fell back to the
+        // real wall clock here regardless of a caller-supplied `now`).
       });
       // CTL-764 finding 7: emit the terminal Done stage transition on a REAL Done
       // write — independent of the needs-human clear below (a normally-completed
@@ -7161,8 +7730,15 @@ export function schedulerTick(
         self,
       }
     );
-    const anyStalled = Object.values(signals).some((s) => s === "stalled");
-    const anyFailed = Object.values(signals).some((s) => s === "failed");
+    // CTL-1660 P1 round 2 (Codex #3081): evaluate failures through the SAME
+    // supersession decision isTicketInFlight uses. Scanning every raw status meant a
+    // superseded predecessor (e.g. `{ implement: "failed", verify: "done" }`, or an
+    // older `review: failed` behind a fresh `implement: running`) still routed the
+    // ticket to needs-human/orphan handling here — an erroneous escalation firing at
+    // the very moment the advancement sweep was correctly moving the ticket forward.
+    const liveStatuses = livePhaseEntries(signals).map(([, s]) => s);
+    const anyStalled = liveStatuses.some((s) => s === "stalled");
+    const anyFailed = liveStatuses.some((s) => s === "failed");
     // CTL-1180: pipeline-done already clears needs-human in the TERMINAL_PHASE block
     // above; never (re)apply for a genuinely-shipped ticket (the Done false positive).
     const pipelineDone = signals[TERMINAL_PHASE] === "done";
@@ -7178,7 +7754,10 @@ export function schedulerTick(
       // fence itself is still checked at the original site (immediately before the
       // write, below) — NOT reordered — so a takeover mid-probe is still caught and no
       // fence-check runs before we've proven a write is needed.
-      if (isFenceSuppressFresh(orchDir, ticket, now())) {
+      if (
+        isFenceSuppressFresh(orchDir, ticket, now()) ||
+        isEscalationProbeCooldownFresh(orchDir, ticket, now())
+      ) {
         // Still surface the orphan once for the dashboard (the probe/write is what we
         // skip, not the visibility signal).
         emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
@@ -7223,7 +7802,23 @@ export function schedulerTick(
         } else {
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
-          if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+          if (
+            fenceGuard(
+              { ticket, orchDir, multiHost, gateway, self },
+              {
+                proceedOnMissingGeneration: true,
+                // CTL-1329: a missing generation stays missing next tick regardless
+                // of whether THIS tick's escalation write succeeded, so arm a cooldown
+                // — otherwise proceeding here (instead of suppressing) reintroduces the
+                // unbounded per-tick terminal-probe burn CTL-1329 fixed, just on the
+                // write path instead of the read path. It is the escalation-side marker,
+                // NOT `.fence-suppressed`: terminalDoneOnce reads the latter, so arming
+                // that one here would hold a genuinely-completed pipeline non-terminal
+                // for a whole cooldown window when recovery finishes teardown.
+                onMissingGeneration: () => stampEscalationProbeCooldown(orchDir, ticket, now()),
+              }
+            )
+          ) {
             const stalledSig = signalByTicket.get(ticket);
             const tsResult = routeStuckTicketToDelegate(orchDir, ticket, {
               site: "terminal-sweep",

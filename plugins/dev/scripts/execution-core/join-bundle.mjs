@@ -203,6 +203,30 @@ export function assembleJoinBundle() {
     },
     repoUrl,
     pluginSourceUrl: resolvePluginSourceUrl(l2) || repoUrl,
+    // The GitHub org that hosts the seed's thoughts repo — distinct from
+    // projectKey (the Layer-2 secrets-file key), from repoUrl/pluginSourceUrl
+    // (wherever the plugin source lives, possibly a personal fork), and from
+    // thoughts.profile (a HumanLayer alias that need not equal the owner).
+    // Falls back to thoughts.profile for a seed predating catalyst.thoughts.org
+    // — correct only when the two names coincide, so the consumer warns.
+    // null when neither is set. Optional (existence-only) — a null degrades to
+    // a warning in catalyst-join.sh, never an abort.
+    thoughtsOrg: l1?.catalyst?.thoughts?.org ?? l1?.catalyst?.thoughts?.profile ?? null,
+    // Whether thoughtsOrg came from the authoritative catalyst.thoughts.org or
+    // the thoughts.profile fallback, so the consumer can say which.
+    thoughtsOrgSource: l1?.catalyst?.thoughts?.org
+      ? "thoughts.org"
+      : l1?.catalyst?.thoughts?.profile
+        ? "thoughts.profile"
+        : null,
+    // Codex #3080 P1: the HumanLayer profile ALIAS paired with thoughtsOrg. It need not
+    // equal the owner — the documented rightsite-cloud/adva layout hosts thoughts under
+    // github.com/rightsite-cloud but reaches them through the local profile `adva`, and
+    // create-worktree.sh later requests `adva` by name from Layer-1. Carrying only the
+    // owner meant provision-thoughts fell back to profile == org on its bare-CSV path,
+    // so humanlayer.json got no `adva` profile and background worktrees resolved to a
+    // nonexistent one and failed to sync thoughts. null when unset (identity applies).
+    thoughtsProfile: l1?.catalyst?.thoughts?.profile ?? null,
     // CTL-1284: non-secret webhook wiring (smee channels + per-team webhookId
     // map). null when the seed has no monitor block. multiHost-gated by the
     // consumer; deliberately NOT in BUNDLE_REQUIRED_KEYS.

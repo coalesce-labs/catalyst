@@ -21,6 +21,7 @@ import {
   checkThoughts,
   checkClaudeSettings,
   checkReaper,
+  checkLogShipper,
   checkHealthResponder,
   checkAgentBrowser,
   checkCloudTokenEnv,
@@ -646,6 +647,30 @@ describe("checkDaemonToolPath", () => {
     // smoke-probes linearis + claude (node is resolution-only)
     expect(probed).toEqual(["linearis", "claude"]);
   });
+
+  it("CAT-29 prefers the running daemon PATH and reports plist disagreement", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: "/opt/homebrew/bin:/usr/bin",
+      runningFacts: { pid: 42, path: "/usr/bin" },
+      resolveInPath: (cmd, path) => path.includes("homebrew") || cmd !== "linearis",
+      smokeProbe: () => 0,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("running daemon");
+    expect(checks[0].detail).toContain("disagrees");
+    expect(checks[0].detail).toContain("linearis");
+  });
+
+  it("CAT-29 falls back to the plist when running boot facts are absent", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      runningFacts: null,
+      resolveInPath: () => true,
+      smokeProbe: () => 0,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("launchd");
+  });
 });
 
 // ─── Phase 5c: checkWebhookIngestion (CTL-1284) ──────────────────────────────
@@ -938,7 +963,7 @@ describe("checkThoughts", () => {
     expect(checks[0].detail).toContain("humanlayer.json");
   });
 
-  it("FAILs a multiHost member whose primary resolves to a foreign repo (groundworkapp guard)", () => {
+  it("FAILs a multiHost member whose primary resolves to a foreign repo (pollution guard)", () => {
     const checks = checkThoughts({
       resolveRoster: multi,
       readHumanlayer: () => ({
@@ -949,9 +974,67 @@ describe("checkThoughts", () => {
         },
       }),
       cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
     });
     expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
-    expect(checks.find((c) => c.name === "thoughts-primary").detail).toMatch(/foreign|groundworkapp/i);
+    expect(checks.find((c) => c.name === "thoughts-primary").detail).toMatch(/foreign/i);
+  });
+
+  // Codex #3080 P1: the guard used to hardcode the org catalog — coalesce-labs PASS,
+  // groundworkapp/rightsite-cloud FAIL. A node that legitimately hosts its thoughts
+  // under rightsite-cloud provisioned correctly and was then FAILed here, aborting
+  // activation right after a successful join. The verdict must follow the CONFIGURED
+  // primary, not a name.
+  it("PASSes a member whose CONFIGURED primary is rightsite-cloud (no hardcoded catalog)", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/rightsite-cloud/thoughts",
+          defaultProfile: "adva",
+          repoMappings: { "/r": { repo: "x", profile: "adva" } },
+        },
+      }),
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "rightsite-cloud",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
+  });
+
+  it("FAILs when the primary is coalesce-labs but the node configured another org", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "rightsite-cloud",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
+  });
+
+  it("WARNs (never guesses) when Layer-1 declares no thoughts org", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.WARN);
+  });
+
+  it("does not treat a same-prefix org as a match (coalesce-labs vs coalesce-labs-fork)", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/coalesce-labs-fork/thoughts",
+          defaultProfile: "coalesce-labs-fork",
+          repoMappings: { "/r": { repo: "x", profile: "coalesce-labs-fork" } },
+        },
+      }),
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
   });
 
   it("FAILs a multiHost member with empty repoMappings", () => {
@@ -979,7 +1062,12 @@ describe("checkThoughts", () => {
   });
 
   it("PASSes a fully-provisioned multiHost member", () => {
-    const checks = checkThoughts({ resolveRoster: multi, readHumanlayer: cleanHl, cloneOk: okClone });
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
+    });
     expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
     expect(verdict(checks, "thoughts-repo-mappings")).toBe(STATUS.PASS);
     expect(verdict(checks, "thoughts-clone")).toBe(STATUS.PASS);
@@ -1766,6 +1854,169 @@ describe("checkAgentBrowser", () => {
     expect(checks.every((c) => c.status !== STATUS.FAIL)).toBe(true);
     expect(checks.find((c) => c.name === "agent-browser-version").status).toBe(STATUS.PASS);
     expect(checks.find((c) => c.name === "agent-browser-doctor").status).toBe(STATUS.PASS);
+  });
+});
+
+// ─── checkLogShipper (CTL-1473) ──────────────────────────────────────────────
+
+const shipperPlist = (cfg) =>
+  `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string>` +
+  `<string>/x/launch.sh</string><string>--config</string><string>${cfg}</string></array></dict></plist>`;
+
+describe("checkLogShipper", () => {
+  it("is a no-op (empty) for classes that do not ship logs (developer/monitor)", () => {
+    expect(checkLogShipper({ shipsLogs: false })).toEqual([]);
+  });
+
+  it("FAILs when the shipper LaunchAgent is not installed (shipsLogs class)", () => {
+    const c = checkLogShipper({ shipsLogs: true, readFile: () => { throw new Error("ENOENT"); } });
+    expect(c).toHaveLength(1);
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs when the plist is present but launchd never loaded the job", () => {
+    const cfg = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(cfg),
+      shipperState: () => ({ loaded: false, lastExit: null }),
+    });
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs and names the offending path when --config is outside the pristine checkout", () => {
+    const bad = "/Users/x/catalyst/wt/CTL-1410/plugins/dev/scripts/log-shipper/config.alloy";
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(bad),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    const found = c.find((x) => x.name === "shipper-config");
+    expect(found).toBeDefined();
+    expect(found.status).toBe(STATUS.FAIL);
+    expect(found.detail).toContain(bad);
+  });
+
+  it("PASSes when loaded and --config resolves to the canonical path", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(c.every((x) => x.status === STATUS.PASS)).toBe(true);
+  });
+
+  it("downgrades FAIL→WARN under preinstall flag", () => {
+    const c = checkLogShipper({
+      shipsLogs: true,
+      preinstall: true,
+      readFile: () => { throw new Error("ENOENT"); },
+    });
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs (not FAILs) when canonicalConfig is unavailable", () => {
+    const cfg = "/some/path/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(cfg),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => null,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(c[0].name).toBe("shipper-config");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  // CTL-1473 remediate (round-3): a loaded-but-crash-looping shipper (non-zero
+  // LastExitStatus, shipping nothing) must NOT report a clean shipper-config
+  // PASS. The prior code dropped lastExit; these assert the shipper-health
+  // check now FAILs on 127/non-zero and never falls through to a clean pass.
+  it("FAILs with shipper-health (not a config PASS) when loaded but last exit was 127", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 127 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.FAIL);
+    expect(c.some((x) => x.name === "shipper-config" && x.status === STATUS.PASS)).toBe(false);
+  });
+
+  it("FAILs with shipper-health on a non-zero, non-127 exit (crash-looping shipper)", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 78 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.FAIL);
+    expect(c[0].detail).toContain("78");
+  });
+
+  it("downgrades shipper-health FAIL→WARN under the preinstall flag", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      preinstall: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 127 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  it("PASSes (config check) when loaded but never run yet (lastExit null)", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: null }),
+    });
+    expect(c.every((x) => x.status === STATUS.PASS)).toBe(true);
+    expect(c.some((x) => x.name === "shipper-config")).toBe(true);
+  });
+});
+
+describe("checksForClass — checkLogShipper membership (CTL-1473)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  it("worker suite includes checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "worker", raw: "worker" }));
+    expect(s).toContain("checkLogShipper");
+  });
+  it("developer suite does NOT include checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "developer", raw: "developer" }));
+    expect(s).not.toContain("checkLogShipper");
+  });
+  it("monitor suite does NOT include checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "monitor", raw: "monitor" }));
+    expect(s).not.toContain("checkLogShipper");
   });
 });
 

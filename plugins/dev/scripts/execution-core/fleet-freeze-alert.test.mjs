@@ -38,6 +38,51 @@ beforeEach(() => {
   process.env.CATALYST_DIR = catalystDir;
   __resetFleetFreezeLatch(); // clear in-memory latch + force re-hydrate from the fresh (empty) dir
 });
+
+describe("CAT-29 time-based total-blindness tripwire", () => {
+  test("raises before the count latch and names the concrete tool failure", () => {
+    const alerts = [];
+    const health = [];
+    const result = checkFleetFreeze({
+      teams: ["CTL", "ADV"],
+      isTeamFrozen: () => false,
+      isTeamFailing: () => true,
+      getTeamLastSuccess: () => null,
+      getTeamLastFailureMessage: () => 'exit 127: Executable not found in $PATH: "linearis"',
+      bootTs: 1_000,
+      now: 301_001,
+      blindAlertMs: 300_000,
+      append: (line) => alerts.push(JSON.parse(line)),
+      emitHealth: (payload, opts) => health.push({ payload, opts }),
+    });
+
+    expect(result.emitted).toBe("raised");
+    expect(alerts[0].body.payload.reason).toContain("linearis");
+    expect(health).toHaveLength(1);
+    expect(health[0].opts).toBeUndefined();
+  });
+
+  test("does not raise inside the blindness window or when one team succeeds", () => {
+    const common = {
+      teams: ["CTL", "ADV"],
+      isTeamFrozen: () => false,
+      isTeamFailing: () => true,
+      getTeamLastSuccess: () => null,
+      bootTs: 1_000,
+      blindAlertMs: 300_000,
+      append: () => { throw new Error("must not emit"); },
+      emitHealth: () => { throw new Error("must not emit"); },
+    };
+    expect(checkFleetFreeze({ ...common, now: 300_999 }).emitted).toBeNull();
+    expect(
+      checkFleetFreeze({
+        ...common,
+        now: 400_000,
+        isTeamFailing: (team) => team !== "ADV",
+      }).emitted,
+    ).toBeNull();
+  });
+});
 afterEach(() => {
   if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
   else process.env.CATALYST_DIR = prevCatalystDir;
