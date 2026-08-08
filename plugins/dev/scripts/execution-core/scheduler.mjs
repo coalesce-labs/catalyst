@@ -3244,14 +3244,29 @@ const TERMINAL_PR_CHECK_COOLDOWN_MS = (() => {
 // every time the cooldown expires and probes `gh` again, FOREVER. That is
 // still an unbounded synchronous GitHub poll (just a slow one), which
 // AGENTS.md ("Working the Loop") requires to be a bounded fallback, not an
-// indefinite one. TERMINAL_PR_CHECK_MAX_ATTEMPTS caps the total number of
-// refusals this gate will ever probe for a given worker dir; once the cap is
-// reached the gate stops calling `gh` for that dir entirely (it still refuses
-// Done — never the reverse — so exhausting the budget can only make the gate
-// MORE conservative, never less).
+// indefinite one. TERMINAL_PR_CHECK_MAX_ATTEMPTS is the threshold after which
+// the SHORT per-probe cooldown escalates to the much LONGER
+// TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS below — RATE-bounded, never a hard
+// permanent stop.
+//
+// CTL-1667 (review fix, round 4): the first version of this cap made the gate
+// stop calling `gh` for a dir FOREVER once exhausted — a genuine merge
+// arriving after the budget was spent (or a later run reusing the same
+// worker dir) could then never reach `prView`/terminalDoneOnce again, leaving
+// Linear permanently non-Done with no recovery path (reconcileTerminalBackstop
+// is inert too: its GATE 1 requires the `.terminal-done.applied` marker, which
+// a permanently-refusing gate never writes). Escalating the cooldown instead
+// of hard-stopping keeps the total probe RATE bounded (the original ask) while
+// guaranteeing eventual convergence: a merge is still detected, just on a
+// much slower cadence once a dir has proven itself persistently stuck.
 const TERMINAL_PR_CHECK_MAX_ATTEMPTS = (() => {
   const v = Number(process.env.CATALYST_TERMINAL_PR_CHECK_MAX_ATTEMPTS);
   return Number.isFinite(v) && v > 0 ? v : 12; // default: ~1h of 5-min-cooldown probing
+})();
+
+const TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS = (() => {
+  const v = Number(process.env.CATALYST_TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS);
+  return Number.isFinite(v) && v > 0 ? v : 6 * 60 * 60_000; // default: 6h between probes once exhausted
 })();
 
 function terminalPrCheckMarkerPath(orchDir, ticket) {
@@ -3262,10 +3277,30 @@ function terminalPrCheckExhaustedMarkerPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".terminal-pr-check-exhausted");
 }
 
+// warnTerminalPrCheckExhaustedOnce — surface the escalation into the LONG
+// cooldown tier LOUDLY exactly once per worker dir (never a silent-forever
+// refusal — "Surface anomalies loudly"), via a dedicated marker so the WARN
+// doesn't repeat on every subsequent probe. Best-effort. The gate keeps
+// probing on the long cadence after this — it is a rate change, not a stop.
+function warnTerminalPrCheckExhaustedOnce(orchDir, ticket) {
+  const marker = terminalPrCheckExhaustedMarkerPath(orchDir, ticket);
+  if (existsSync(marker)) return;
+  log.warn(
+    { ticket, maxAttempts: TERMINAL_PR_CHECK_MAX_ATTEMPTS },
+    "ctl-1667: terminal-PR-merged probe budget exhausted — escalating to the long cooldown (still probing, far less often); Done stays refused"
+  );
+  try {
+    writeFileSync(marker, "");
+  } catch {
+    /* best-effort — a repeat WARN next tick is harmless */
+  }
+}
+
 // stampTerminalPrCheckSuppress — record that the current-PR-merged gate refused
 // Done this tick, and bump the total-attempts counter (CTL-1667 review fix:
 // bounds the total probe count, not just the per-probe cooldown). Best-effort:
-// a failed write just means we re-probe next tick.
+// a failed write just means we re-probe next tick. Fires the one-time
+// exhaustion WARN exactly on the tick the count first reaches the threshold.
 function stampTerminalPrCheckSuppress(orchDir, ticket, nowMs) {
   let count = 1;
   try {
@@ -3282,51 +3317,30 @@ function stampTerminalPrCheckSuppress(orchDir, ticket, nowMs) {
   } catch {
     /* best-effort — re-probe next tick */
   }
+  if (count === TERMINAL_PR_CHECK_MAX_ATTEMPTS) warnTerminalPrCheckExhaustedOnce(orchDir, ticket);
 }
 
-// isTerminalPrCheckSuppressFresh — true when the gate refused within the cooldown
-// window, so the caller should skip the `gh` PR-view this tick. A missing,
-// unparseable, or expired marker returns false (re-probe), so a PR that merges
-// converges to Done after at most one cooldown window.
+// isTerminalPrCheckSuppressFresh — true when the gate refused recently enough
+// that the caller should skip the `gh` PR-view this tick. Tiered: the first
+// TERMINAL_PR_CHECK_MAX_ATTEMPTS refusals use the SHORT cooldown; once that
+// count is reached, subsequent refusals use the much LONGER
+// TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS — bounding the total probe RATE
+// without ever fully cutting a dir off from eventually converging (CTL-1667
+// review fix, round 4). A missing, unparseable, or expired marker returns
+// false (re-probe), so a genuine merge still converges to Done.
 function isTerminalPrCheckSuppressFresh(orchDir, ticket, nowMs) {
   try {
-    const { ts } = JSON.parse(
+    const { ts, count } = JSON.parse(
       readFileSync(terminalPrCheckMarkerPath(orchDir, ticket), "utf8")
     );
-    return Number.isFinite(ts) && nowMs - ts < TERMINAL_PR_CHECK_COOLDOWN_MS;
+    if (!Number.isFinite(ts)) return false;
+    const cooldown =
+      Number.isFinite(count) && count >= TERMINAL_PR_CHECK_MAX_ATTEMPTS
+        ? TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS
+        : TERMINAL_PR_CHECK_COOLDOWN_MS;
+    return nowMs - ts < cooldown;
   } catch {
     return false;
-  }
-}
-
-// isTerminalPrCheckExhausted — true once the total refusal count recorded by
-// stampTerminalPrCheckSuppress has reached TERMINAL_PR_CHECK_MAX_ATTEMPTS
-// (CTL-1667 review fix, #3061). A missing/unparseable marker (never refused
-// yet) returns false.
-function isTerminalPrCheckExhausted(orchDir, ticket) {
-  try {
-    const { count } = JSON.parse(readFileSync(terminalPrCheckMarkerPath(orchDir, ticket), "utf8"));
-    return Number.isFinite(count) && count >= TERMINAL_PR_CHECK_MAX_ATTEMPTS;
-  } catch {
-    return false;
-  }
-}
-
-// warnTerminalPrCheckExhaustedOnce — surface the probe-budget exhaustion LOUDLY
-// exactly once per worker dir (never a silent-forever refusal — "Surface
-// anomalies loudly"), via a dedicated marker so the WARN doesn't repeat every
-// tick once the budget is spent. Best-effort.
-function warnTerminalPrCheckExhaustedOnce(orchDir, ticket) {
-  const marker = terminalPrCheckExhaustedMarkerPath(orchDir, ticket);
-  if (existsSync(marker)) return;
-  log.warn(
-    { ticket, maxAttempts: TERMINAL_PR_CHECK_MAX_ATTEMPTS },
-    "ctl-1667: terminal-PR-merged probe budget exhausted — no further gh polling for this dir; Done stays refused"
-  );
-  try {
-    writeFileSync(marker, "");
-  } catch {
-    /* best-effort — a repeat WARN next tick is harmless */
   }
 }
 
@@ -3416,13 +3430,17 @@ export function terminalDoneOnce(
   // nothing, so it is NOT treated as stale — a data gap never invents
   // staleness, it only ever fails to detect a genuine one.
   if (isTerminalTeardownStale(orchDir, ticket)) {
+    // CTL-1667 (review fix, round 4): throttle the WARN to once per cooldown
+    // window (was unconditional — a retained stale signal has no successor
+    // that ever clears this condition, so an unthrottled log.warn flooded
+    // daemon logs/telemetry at the full per-tick rate indefinitely).
     if (!isTerminalPrCheckSuppressFresh(orchDir, ticket, now())) {
       stampTerminalPrCheckSuppress(orchDir, ticket, now());
+      log.warn(
+        { ticket },
+        "ctl-1667: retained teardown:done signal predates a later phase dispatch — refusing Done (stale evidence)"
+      );
     }
-    log.warn(
-      { ticket },
-      "ctl-1667: retained teardown:done signal predates a later phase dispatch — refusing Done (stale evidence)"
-    );
     return null;
   }
   // CTL-1667 — GATE: the current run's PR must be MERGED before Done.
@@ -3447,19 +3465,16 @@ export function terminalDoneOnce(
   //   • Bounded TOTAL probes — the cooldown above only bounds the FREQUENCY. A
   //     dir stuck refusing forever (a permanently-open or unverifiable PR)
   //     would otherwise re-arm and re-probe `gh` every cooldown window
-  //     indefinitely. TERMINAL_PR_CHECK_MAX_ATTEMPTS caps the total refusal
-  //     count; once exhausted the gate stops calling `gh` for this dir at all
-  //     (it stays refused — exhausting the budget only makes it MORE
-  //     conservative, never less) and surfaces the exhaustion loudly exactly
-  //     once instead of polling silently forever.
+  //     indefinitely. Once the total refusal count reaches
+  //     TERMINAL_PR_CHECK_MAX_ATTEMPTS, isTerminalPrCheckSuppressFresh
+  //     escalates to the much longer TERMINAL_PR_CHECK_EXHAUSTED_COOLDOWN_MS
+  //     for this dir — RATE-bounded, never a hard permanent stop (round 4:
+  //     a genuine merge arriving after the budget is spent must still
+  //     eventually be detected).
   {
     const currentPrNum = readCurrentRunPrNumber(orchDir, ticket);
     if (currentPrNum != null) {
-      if (isTerminalPrCheckExhausted(orchDir, ticket)) {
-        warnTerminalPrCheckExhaustedOnce(orchDir, ticket);
-        return null; // bounded: total probe budget spent — stay refused, no further gh calls
-      }
-      if (isTerminalPrCheckSuppressFresh(orchDir, ticket, now())) return null; // bounded: within cooldown, skip the gh probe
+      if (isTerminalPrCheckSuppressFresh(orchDir, ticket, now())) return null; // bounded: within cooldown (short or, once exhausted, long), skip the gh probe
       if (!prAdapter || typeof prAdapter.prView !== "function") {
         stampTerminalPrCheckSuppress(orchDir, ticket, now());
         return null; // can't verify → fail-closed (bounded)
@@ -7643,6 +7658,11 @@ export function schedulerTick(
         emitDoneWithOpenPr,
         emitDoneApplied,
         prAdapter, // CTL-1667: thread through for the current-PR-merged gate
+        now, // CTL-1667 (review fix, round 4): thread the tick's injectable clock
+        // through so the terminal-PR-check / fence-suppress cooldowns are
+        // deterministically testable at the schedulerTick level, not only via
+        // a direct terminalDoneOnce call (previously always fell back to the
+        // real wall clock here regardless of a caller-supplied `now`).
       });
       // CTL-764 finding 7: emit the terminal Done stage transition on a REAL Done
       // write — independent of the needs-human clear below (a normally-completed

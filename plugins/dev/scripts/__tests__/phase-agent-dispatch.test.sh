@@ -2429,6 +2429,50 @@ LAUNCHED73="no"
 assert_not_contains "$STATUS73" "claim-lost" "73: poststale w/o generation is NOT claim-lost (reaper frees orphan claim)"
 assert_eq "yes" "$LAUNCHED73" "73: fresh worker WAS launched despite leftover claim"
 
+# ─── Test 74 (CTL-1667 review fix, round 4, #3061): a poststale signal WITHOUT
+# a numeric .generation must recover the prior generation from on-disk claim
+# files rather than defaulting to 0 (→ TARGET_GENERATION 1). If the prior run
+# had already revived past generation 1 (a real monitor-deploy.claim.2 exists
+# on disk), recycling generation 1 lets a delayed worker from that EARLIER
+# generation later complete and pass phase-agent-emit-complete's `mine <
+# signal` fence on an EQUAL generation — overwriting the current run's signal.
+# TARGET_GENERATION must land at 3 here (one past the highest real claim ever
+# made for this phase), never 1.
+echo ""
+echo "Test 74 (CTL-1667, review fix round 4): poststale signal w/o generation recovers past a real prior generation (never recycles)"
+fresh_env t74
+TS_NOW74="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TS_OLD74="$(date -u -v-86400S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '86400 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '2000-01-01T00:00:00Z')"
+# monitor-deploy's required prior artifact.
+jq -n '{status:"done",pr:{number:200,mergedAt:"2026-08-01T00:00:00Z",ciStatus:"merged"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+# Prior run's leftover monitor-deploy signal: NO generation, OLD ts (same
+# poststale shape as Test 73) — but this time the prior run had ALREADY
+# revived to generation 2 before this signal was left behind.
+jq -n --arg ts "$TS_OLD74" \
+  '{status:"done",updatedAt:$ts,deploy_state:"skipped",completed_at:$ts}' \
+  > "${WORKER_DIR}/phase-monitor-deploy.json"
+# Current run's PR opener — newer than the stale signal → poststale by timestamp.
+jq -n --arg ts "$TS_NOW74" \
+  '{status:"done",updatedAt:$ts,pr:{number:200}}' \
+  > "${WORKER_DIR}/phase-pr.json"
+# The prior run's REAL generation-2 claim — proof this phase actually reached
+# generation 2, which TARGET_GENERATION must advance past, not recycle.
+printf '%s\n' '{"generation":2,"claimedAt":"2020-01-01T00:00:00Z"}' > "${WORKER_DIR}/monitor-deploy.claim.2"
+touch -t 202001010000 "${WORKER_DIR}/monitor-deploy.claim.2"
+
+rm -f "$CLAUDE_STUB_LOG"
+STDOUT74=$("$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+STATUS74=$(echo "$STDOUT74" | jq -r '.status // ""')
+LAUNCHED74="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED74="yes"
+assert_not_contains "$STATUS74" "claim-lost" "74: poststale w/o generation (real prior gen 2) is NOT claim-lost"
+assert_eq "yes" "$LAUNCHED74" "74: fresh worker WAS launched"
+NEW_GEN74="$(jq -r '.generation' "${WORKER_DIR}/phase-monitor-deploy.json")"
+assert_eq "3" "$NEW_GEN74" "74: TARGET_GENERATION recovered past the real gen-2 claim (=3, never recycles gen 1 or 2)"
+assert_eq "yes" "$([[ -f "${WORKER_DIR}/monitor-deploy.claim.3" ]] && echo yes || echo no)" \
+	"74: new claim file is monitor-deploy.claim.3 (not a collision-prone gen-1 recycle)"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"

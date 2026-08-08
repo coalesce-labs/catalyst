@@ -13587,16 +13587,28 @@ describe("CTL-1667: terminalDoneOnce current-PR-merged gate", () => {
   // FREQUENCY but not the TOTAL count — a dir stuck on a permanently-OPEN or
   // unverifiable PR would otherwise re-arm and re-probe `gh` every cooldown
   // window forever. Once the total refusal count reaches
-  // TERMINAL_PR_CHECK_MAX_ATTEMPTS (default 12), the gate must stop calling
-  // `gh` for that dir entirely — even outside the per-probe cooldown window.
-  test("CTL-1667 (review fix): terminalDoneOnce bounds the TOTAL probe count, not just the frequency", () => {
+  // TERMINAL_PR_CHECK_MAX_ATTEMPTS (default 12), the gate escalates to a much
+  // LONGER cooldown for that dir instead of the short one.
+  //
+  // Review fix (Codex P1, round 4, #3061): escalating to a longer cooldown —
+  // never a HARD, PERMANENT stop — is the fix for a follow-on finding: the
+  // first version of this cap stopped probing `gh` forever once exhausted, so
+  // a PR that genuinely merged after the budget was spent could never be
+  // detected and Linear could stay non-Done permanently with no recovery path
+  // (reconcileTerminalBackstop is inert too — its GATE 1 needs the
+  // `.terminal-done.applied` marker, which a permanently-refusing gate never
+  // writes). These two tests assert BOTH halves: the long cooldown suppresses
+  // a probe while fresh, and a probe still eventually fires once the long
+  // cooldown itself expires (eventual convergence).
+  test("CTL-1667 (review fix): terminalDoneOnce escalates to the LONG cooldown once the total probe count is exhausted", () => {
     writePrSignals("CTL-77", 770);
+    const NOW = 10_000_000;
     // Pre-seed the suppress marker at the exhaustion threshold, timestamped
-    // WELL outside the cooldown window so a frequency-only bound would allow
-    // (and this test would otherwise force) a re-probe.
+    // recently enough to still be within the LONG (exhausted) cooldown — a
+    // frequency-only (short-cooldown) bound would already have expired here.
     writeFileSync(
       join(orchDir, "workers", "CTL-77", ".terminal-pr-check-suppressed"),
-      JSON.stringify({ ts: 0, count: 12 })
+      JSON.stringify({ ts: NOW - 60 * 60_000, count: 12 }) // 1h ago: past the 5-min short cooldown, well within the 6h long one
     );
     let calls = 0;
     const dones = [];
@@ -13604,6 +13616,7 @@ describe("CTL-1667: terminalDoneOnce current-PR-merged gate", () => {
       readEligible: () => [],
       dispatch: ctl1667Dispatch,
       writeStatus: makeWriteStatus(dones),
+      now: () => NOW,
       prAdapter: {
         prView: () => {
           calls += 1;
@@ -13611,8 +13624,34 @@ describe("CTL-1667: terminalDoneOnce current-PR-merged gate", () => {
         },
       },
     });
-    expect(calls).toBe(0); // budget exhausted — no gh call at all
-    expect(dones).toEqual([]); // stays refused (exhausting the budget never grants Done)
+    expect(calls).toBe(0); // still within the long cooldown — no gh call
+    expect(dones).toEqual([]); // stays refused
+  });
+
+  test("CTL-1667 (review fix, round 4): terminalDoneOnce eventually re-probes and can still reach Done after the long cooldown expires", () => {
+    writePrSignals("CTL-78b", 771);
+    const NOW = 100_000_000;
+    // Exhausted, but the long cooldown has now fully expired (well past 6h).
+    writeFileSync(
+      join(orchDir, "workers", "CTL-78b", ".terminal-pr-check-suppressed"),
+      JSON.stringify({ ts: NOW - 7 * 60 * 60_000, count: 12 }) // 7h ago
+    );
+    let calls = 0;
+    const dones = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: ctl1667Dispatch,
+      writeStatus: makeWriteStatus(dones),
+      now: () => NOW,
+      prAdapter: {
+        prView: () => {
+          calls += 1;
+          return { state: "MERGED", mergedAt: "2026-08-08T00:00:00Z" };
+        },
+      },
+    });
+    expect(calls).toBe(1); // probe fires again — never permanently cut off
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-78b" })); // and Done is reachable again
   });
 
   // Review fix (Codex P1, #3061): binds a retained `teardown: done` signal to
