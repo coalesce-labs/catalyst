@@ -522,6 +522,18 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/phase-artifact-gate.test.sh
 
+      - name: CAT-60 config documentation coverage
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/config-docs-coverage.test.sh
+
+      - name: CAT-60 phase-pr return-code mapping
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/phase-pr-rc-map.test.sh
+
+      - name: CAT-60 draft PR push-remote and permission contract
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/draft-pr-lib.test.sh
+
       - name: Run stable unit tests
         # CTL-1678 round-7 (Codex): the four drain suites added below
         # (__tests__/config-drain-disabled, __tests__/doctor-drain-disabled,
@@ -631,6 +643,7 @@ jobs:
             __tests__/replica-health.test.mjs \
             __tests__/replica-health-event.test.mjs \
             __tests__/linear-query-triage-source.test.mjs \
+            doctor-publish-preflight.test.mjs \
             eligible-set.test.mjs \
             event-cursor.test.mjs \
             event-scan.test.mjs \
@@ -726,6 +739,8 @@ jobs:
             updater/updater-tracing.test.mjs \
             service-manifest.test.mjs \
             github-auth-preflight.test.mjs \
+            publish-preflight.test.mjs \
+            publish-preflight-config.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \
