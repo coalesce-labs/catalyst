@@ -56,7 +56,7 @@ export function listProjects(deps = {}) {
     readRegistry = () => readFileSync(getRegistryPath(), "utf8"),
     exists = existsSync,
     readLayer1 = defaultReadLayer1,
-    warn = log.warn,
+    warn = (obj, message) => log.warn(obj, message),
   } = deps;
   const file = getRegistryPath();
   let parsed;
