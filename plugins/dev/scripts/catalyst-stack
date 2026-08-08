@@ -1549,6 +1549,24 @@ render_stack_plist() {
     <key>OTEL_EXPORTER_OTLP_ENDPOINT</key>
     <string>$(_xml_escape "${OTEL_EXPORTER_OTLP_ENDPOINT}")</string>"
   fi
+  # CTL-1668 (Codex P1): pin the cloud-token LOCATION overrides. launchd's minimal RunAtLoad/keep-alive
+  # environment sources no shell rc, so without these a host installed with a nondefault
+  # CATALYST_CONFIG_DIR (where cloud-token-env.mjs projects/reads cluster.env) or a custom
+  # CATALYST_CLOUD_TOKEN_ENV (the token's env-var name) would, after reboot, project and source the
+  # DEFAULT ~/.config/catalyst/cluster.env under the DEFAULT token name — restarting an enforce
+  # publisher WITHOUT its credential and never noticing (the fingerprint resolves the default too).
+  # Captured at install time from the invoking environment; omitted when unset.
+  local cloudtok_env=""
+  if [[ -n "${CATALYST_CONFIG_DIR:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_CONFIG_DIR</key>
+    <string>$(_xml_escape "${CATALYST_CONFIG_DIR}")</string>"
+  fi
+  if [[ -n "${CATALYST_CLOUD_TOKEN_ENV:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_CLOUD_TOKEN_ENV</key>
+    <string>$(_xml_escape "${CATALYST_CLOUD_TOKEN_ENV}")</string>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -1582,7 +1600,7 @@ render_stack_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>$(_xml_escape "${HOME}")</string>${host_env}${catdir_env}${layer2_env}${coord_env}${otel_env}
+    <string>$(_xml_escape "${HOME}")</string>${host_env}${catdir_env}${layer2_env}${coord_env}${otel_env}${cloudtok_env}
   </dict>
 
   <!--

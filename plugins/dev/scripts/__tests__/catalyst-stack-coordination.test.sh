@@ -281,6 +281,25 @@ if grep -q '<key>OTEL_EXPORTER_OTLP_ENDPOINT</key>' <<<"$OUT_LK" && grep -q '<st
   pass "plist-loki: pins OTEL_EXPORTER_OTLP_ENDPOINT when set"
 else failx "plist-loki: pins OTEL_EXPORTER_OTLP_ENDPOINT when set" "$OUT_LK"; fi
 
+# --- plist cloud-token LOCATION override pinning (Codex P1, CTL-1668): CATALYST_CONFIG_DIR (where
+#     the token is projected/read) and CATALYST_CLOUD_TOKEN_ENV (the token's env-var name) must ride
+#     into the launchd agent env, or the minimal-env keep-alive projects/sources the DEFAULT
+#     cluster.env under the DEFAULT name after reboot and restarts an enforce publisher tokenless. ---
+OUT_CT="$(CATALYST_CONFIG_DIR="/custom/cfg" CATALYST_CLOUD_TOKEN_ENV="MY_CLOUD_TOK" \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q '<key>CATALYST_CONFIG_DIR</key>' <<<"$OUT_CT" && grep -q '<string>/custom/cfg</string>' <<<"$OUT_CT"; then
+  pass "plist-cloudtok: pins CATALYST_CONFIG_DIR when set"
+else failx "plist-cloudtok: pins CATALYST_CONFIG_DIR when set" "$OUT_CT"; fi
+if grep -q '<key>CATALYST_CLOUD_TOKEN_ENV</key>' <<<"$OUT_CT" && grep -q '<string>MY_CLOUD_TOK</string>' <<<"$OUT_CT"; then
+  pass "plist-cloudtok: pins CATALYST_CLOUD_TOKEN_ENV when set"
+else failx "plist-cloudtok: pins CATALYST_CLOUD_TOKEN_ENV when set" "$OUT_CT"; fi
+# Omit both keys when unset (default location/name).
+OUT_CT_OFF="$(env -u CATALYST_CONFIG_DIR -u CATALYST_CLOUD_TOKEN_ENV \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if ! grep -q 'CATALYST_CONFIG_DIR' <<<"$OUT_CT_OFF" && ! grep -q 'CATALYST_CLOUD_TOKEN_ENV' <<<"$OUT_CT_OFF"; then
+  pass "plist-cloudtok: omits both keys when unset"
+else failx "plist-cloudtok: omits both keys when unset" "$OUT_CT_OFF"; fi
+
 # --- plist XML escaping (Codex P2): an env value with an XML metacharacter (e.g. a
 #     hub URL with &) must be escaped so the plist stays well-formed and loadable. ---
 OUT_XE="$(CATALYST_COORDINATION_HUB_URL='https://hub.example/p?x=1&y=2<z>"q"' \

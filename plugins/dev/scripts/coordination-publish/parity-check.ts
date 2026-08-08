@@ -97,37 +97,32 @@ export function computeParity(input: {
 }): ParityResult {
   const { workerStates, coordinationRows } = input;
 
-  // Build coordination index in input order (never sort), keyed by the (orchestrator, ticket)
-  // composite so a worker_state row only ever matches coordination rows from its OWN run.
-  const coordByKey = new Map<string, CoordinationRow[]>();
-  // Identity-less fallback: coordination rows with NO catalyst.orchestrator.id. The SDK terminal
-  // emitter's defaultAppendEventLog fallback (sdk-run-phase-agent.mjs) — used when
-  // phase-agent-emit-complete is missing or fails — writes exactly this shape: a real terminal
-  // event carrying the ticket but no orchestrator. Dropping it from the composite index would make
-  // a FAILED terminal silently unmatchable to its (orchestrator, ticket) worker row, so a healthy
-  // pair elsewhere could still return verdict=healthy/0 (Codex P1). Match these against EVERY
-  // worker_state for the ticket instead — conservative: a failed identity-less terminal then
-  // diverges rather than disappearing.
-  const coordNoOrchByTicket = new Map<string, CoordinationRow[]>();
+  // Index ALL coordination rows by ticket in a SINGLE list per ticket, preserving input (wire)
+  // order and tagging each with its orchestrator. A worker_state then matches the entries whose
+  // orchestrator is its OWN (composite isolation, so multiple orchestrators/runs of a ticket never
+  // cross-contaminate) OR is identity-less. Identity-less rows (no catalyst.orchestrator.id) come
+  // from the SDK terminal emitter's defaultAppendEventLog fallback (sdk-run-phase-agent.mjs, when
+  // phase-agent-emit-complete is missing/fails) — a real terminal carrying the ticket but no
+  // orchestrator; matching them against every worker_state for the ticket keeps a failed
+  // identity-less terminal from silently disappearing. Keeping BOTH kinds in one ordered list (not
+  // two concatenated maps) is essential: selectTerminalOutcome's watermark tie-break is
+  // last-processed-wins, so re-ordering an earlier identity-less row after a later keyed row would
+  // flip the winner and fabricate a divergence (Codex P1, round 8).
+  const coordByTicket = new Map<string, Array<{ orch: string; row: CoordinationRow }>>();
   const orderedTickets: string[] = [];
-  const seenTickets = new Set<string>();
 
   for (const row of coordinationRows) {
     const attrs = row.attributes as Record<string, unknown> | undefined;
     const eventName = typeof attrs?.["event.name"] === "string" ? attrs["event.name"] : "";
     const ticket = ticketFromEventName(eventName);
     if (!ticket) continue;
-    // orderedTickets stays ticket-scoped (wire-order provenance, not a match key).
-    if (!seenTickets.has(ticket)) {
-      seenTickets.add(ticket);
-      orderedTickets.push(ticket);
+    const entry = { orch: orchestratorFromRow(row), row };
+    const existing = coordByTicket.get(ticket);
+    if (existing) existing.push(entry);
+    else {
+      coordByTicket.set(ticket, [entry]);
+      orderedTickets.push(ticket); // first sighting → wire-order provenance
     }
-    const orchestrator = orchestratorFromRow(row);
-    const index = orchestrator === "" ? coordNoOrchByTicket : coordByKey;
-    const key = orchestrator === "" ? ticket : parityKey(orchestrator, ticket);
-    const existing = index.get(key);
-    if (existing) existing.push(row);
-    else index.set(key, [row]);
   }
 
   let matchedPairs = 0;
@@ -135,11 +130,10 @@ export function computeParity(input: {
   const divergences: ParityResult["divergences"] = [];
 
   for (const ws of workerStates) {
-    // Composite-keyed rows for this run PLUS any identity-less rows for the same ticket.
-    const rows = [
-      ...(coordByKey.get(parityKey(ws.orchestrator, ws.ticket)) ?? []),
-      ...(coordNoOrchByTicket.get(ws.ticket) ?? []),
-    ];
+    // This run's OWN entries plus identity-less entries for the same ticket, IN INPUT ORDER.
+    const rows = (coordByTicket.get(ws.ticket) ?? [])
+      .filter((e) => e.orch === ws.orchestrator || e.orch === "")
+      .map((e) => e.row);
     if (rows.length === 0) {
       coverageGaps.push({ orchestrator: ws.orchestrator, ticket: ws.ticket });
       continue;

@@ -193,6 +193,22 @@ describe("computeParity (CTL-1668 Phase 3)", () => {
     expect(r.verdict).toBe("inconclusive");
   });
 
+  test("identity-less + keyed terminals merge in WIRE order: earlier failure, later success → healthy (not falsely divergent)", () => {
+    // Identity-less FAILURE appears first in the mirror, keyed SUCCESS later (same/missing ts). With
+    // last-processed-wins tie-break, the later success must win. A naive concat that moves the
+    // identity-less row after the keyed row would reverse this and falsely mark the done worker divergent.
+    const failNoOrch = row("CTL-1", "phase.implement.failed", "CTL-1");
+    delete (failNoOrch.attributes as Record<string, unknown>)["catalyst.orchestrator.id"];
+    const okKeyed = row("CTL-1", "phase.teardown.complete", "orchA");
+    const r = computeParity({
+      workerStates: [ws("CTL-1", "done", "orchA")],
+      coordinationRows: [failNoOrch, okKeyed], // wire order: failure THEN success
+    });
+    expect(r.matchedPairs).toBe(1);
+    expect(r.divergences).toHaveLength(0);
+    expect(r.verdict).toBe("healthy");
+  });
+
   test("wire order preserved: rows consumed in input order, never sorted", () => {
     const rows = [row("CTL-3", "..."), row("CTL-1", "..."), row("CTL-2", "...")];
     const r = computeParity({ workerStates: [], coordinationRows: rows });
