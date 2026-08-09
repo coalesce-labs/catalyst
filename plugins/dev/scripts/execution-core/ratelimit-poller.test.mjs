@@ -7,7 +7,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test ratelimit-poller.test.mjs
 
 import { test, expect, describe } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startRatelimitPoller } from "./ratelimit-poller.mjs";
@@ -80,6 +80,28 @@ function harness({
 // ─── 200 parse + emit ────────────────────────────────────────────────────────
 
 describe("tick — 200 body", () => {
+  test("publishes the successful sample to the orchestrator snapshot", async () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "cat58-ratelimit-snapshot-"));
+    try {
+      const w = startRatelimitPoller({
+        orchDir,
+        clock: recordingClock(),
+        config: { enabled: true, intervalMs: 300000, usageEndpoint: "https://example/usage" },
+        readToken: () => TOKEN,
+        fetchUsage: async () => ({ status: 200, body: usageBody() }),
+        resolveEmail: async () => null,
+        emit: () => {},
+        now: () => Date.parse("2026-08-08T18:00:00.000Z"),
+      });
+      await w.tick();
+      const snapshot = JSON.parse(readFileSync(join(orchDir, "account-quota.json"), "utf8"));
+      expect(snapshot.sevenDayResetsAt).toBe("2026-06-13T00:00:00Z");
+      expect(snapshot.email).toBeUndefined();
+    } finally {
+      rmSync(orchDir, { recursive: true, force: true });
+    }
+  });
+
   test("parses a 200 body and emits one account.ratelimit.sampled with all fields", async () => {
     const { w, emitted } = harness();
     await w.tick();

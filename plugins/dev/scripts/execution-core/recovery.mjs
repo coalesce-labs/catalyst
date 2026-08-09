@@ -51,6 +51,7 @@ import {
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
 import { USAGE_LIMIT_TEXT_RE, detectUsageLimitBlock, buildUsageLimitExplanation } from "./usage-limit.mjs";
 import { parkLane } from "./lane-cooldown.mjs";
+import { resolveAccountResetsAt } from "./account-quota.mjs";
 import { scanEventsChunked, scanEventsSince, DEFAULT_TAIL_MAX_BYTES } from "./event-tail.mjs"; // CTL-1514 / CTL-1529: bounded event-log scans
 // CTL-863 fleet-unfreeze (entourage follow-up to #2552): readPeerHeartbeatsSyncCached is
 // the CACHED reader — a 45s in-process TTL cache around the same anchor-issue read, safe
@@ -2088,6 +2089,7 @@ export function reclaimDeadWorkIfPossible(
     appendUsageLimitEvent = defaultAppendUsageLimitEvent,
     recordDispatchFailureFn = null,
     parkLaneFn = parkLane,
+    resolveAccountResetsAtFn = resolveAccountResetsAt,
     appendReviveSuppressedEvent = defaultAppendReviveSuppressedEvent,
     reviveDispatch = defaultReviveDispatch,
     applyStalledLabel = defaultApplyStalledLabel,
@@ -3454,7 +3456,14 @@ export function reclaimDeadWorkIfPossible(
   // before the progress gate; otherwise forward progress causes an immediate
   // revive into the same exhausted lane.
   let quota = { blocked: false };
-  try { quota = detectUsageLimit(prevBgJobId, { now }); } catch { quota = { blocked: false }; }
+  try {
+    quota = detectUsageLimit(prevBgJobId, {
+      now,
+      pollerResetsAt: resolveAccountResetsAtFn?.(orchDir, { now }) ?? null,
+    });
+  } catch {
+    quota = { blocked: false };
+  }
   if (quota.blocked) {
     if (prevBgJobId) {
       emitReapIntent("phase.terminal.reap-requested", { ticket, phase, bgJobId: prevBgJobId, worktreePath: signal.raw?.worktreePath, reason: "cat-58-usage-limit-blocked" }).catch(() => {});

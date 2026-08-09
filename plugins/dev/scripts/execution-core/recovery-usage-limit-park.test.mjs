@@ -20,7 +20,7 @@ function recorder(returnValue) {
   return fn;
 }
 
-function scenario({ writeSignal = true, detail = "You've hit your weekly limit · resets Aug 10 at 1pm (America/Chicago)" } = {}) {
+function scenario({ writeSignal = true, detail = "You've hit your weekly limit · resets Aug 10 at 1pm (America/Chicago)", pollerResetsAt = null } = {}) {
   const orchDir = mkdtempSync(join(tmpdir(), "cat58-park-"));
   dirs.push(orchDir);
   const ticket = "CAT-58";
@@ -46,7 +46,14 @@ function scenario({ writeSignal = true, detail = "You've hit your weekly limit �
     repoRoot: "/repo",
     jobLifecycle: () => "dead-gone",
     probes: { implement: () => false },
-    detectUsageLimit: () => ({ blocked: true, resetsAt, resetSource: "detail", source: "timeline", detail }),
+    detectUsageLimit: (_id, { pollerResetsAt: sampledReset } = {}) => ({
+      blocked: true,
+      resetsAt: sampledReset ?? resetsAt,
+      resetSource: sampledReset ? "poller" : "detail",
+      source: "timeline",
+      detail,
+    }),
+    resolveAccountResetsAtFn: () => pollerResetsAt,
     appendUsageLimitEvent,
     parkLaneFn,
     recordDispatchFailureFn: recorder(undefined),
@@ -90,5 +97,21 @@ describe("reclaimDeadWorkIfPossible — CAT-58 usage-limit park", () => {
     const s = scenario();
     reclaimDeadWorkIfPossible(s.orchDir, s.signal, s.opts);
     expect(existsSync(join(s.orchDir, "workers", s.ticket, "phase-recovery-pass.json"))).toBe(false);
+  });
+
+  test("a fresh account snapshot supplies the detector's poller reset tier", () => {
+    const futureIso = "2026-08-11T18:00:00.000Z";
+    const s = scenario({ pollerResetsAt: futureIso });
+    reclaimDeadWorkIfPossible(s.orchDir, s.signal, s.opts);
+    const persisted = JSON.parse(readFileSync(s.signalPath, "utf8"));
+    expect(persisted.usageLimitSource).toBe("timeline");
+    expect(persisted.usageLimitResetsAt).toBe(futureIso);
+    expect(s.appendUsageLimitEvent.calls[0][0].quota.resetSource).toBe("poller");
+  });
+
+  test("no account snapshot leaves the existing detail tier unchanged", () => {
+    const s = scenario();
+    reclaimDeadWorkIfPossible(s.orchDir, s.signal, s.opts);
+    expect(s.appendUsageLimitEvent.calls[0][0].quota.resetSource).toBe("detail");
   });
 });
