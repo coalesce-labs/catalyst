@@ -4934,6 +4934,9 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
         hasStackAgent: true,
         hasUpdaterAgent: true, // the two-puller hazard
         pluginPullOwner: "broker",
+        // Hermeticity: the real skills-dir probe reads a live ~/.claude tree, which a
+        // unit test must not depend on (its own coverage lives with checkSkillsDirPlugins).
+        skillsDirCheck: () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }],
       }),
       log: () => {},
     });
@@ -4947,6 +4950,8 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: true,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker",
+      // Hermeticity: stub the live ~/.claude skills-dir probe (see checkSkillsDirPlugins).
+      skillsDirCheck: () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }],
       log: () => {},
     });
     expect(code).toBe(0);
@@ -4959,6 +4964,8 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: false,
       hasUpdaterAgent: true,
       pluginPullOwner: "updater",
+      // Hermeticity: stub the live ~/.claude skills-dir probe (see checkSkillsDirPlugins).
+      skillsDirCheck: () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }],
       log: () => {},
     });
     expect(code).toBe(0);
@@ -4991,6 +4998,8 @@ describe("runDoctor profile routing (CTL-1369 PR4)", () => {
       hasStackAgent: true,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker",
+      // Hermeticity: stub the live ~/.claude skills-dir probe (see checkSkillsDirPlugins).
+      skillsDirCheck: () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }],
       log: (m) => logs.push(m),
     });
     const parsed = JSON.parse(logs[0]);
