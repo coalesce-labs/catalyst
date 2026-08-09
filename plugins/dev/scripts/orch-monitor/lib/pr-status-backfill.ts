@@ -37,7 +37,12 @@ export interface BackfillDeps {
 // lowercase "open" | "closed" | "merged" triple, and treats a merged PR as
 // terminal — so map MERGED first and never infer it from `closed` alone.
 export function normalizePrState(state: unknown, mergedAt: unknown): string | null {
-  const s = String(state ?? "").toUpperCase();
+  // `state` is typed `unknown` (it comes straight off parsed gh JSON), so it can
+  // be an object — and `String(someObject)` yields "[object Object]", which is
+  // both meaningless here and a lint error (no-base-to-string). Only a string is
+  // ever a real GitHub state; anything else falls through to the `null` return
+  // below, which is the documented "unrecognized → skip rather than guess" path.
+  const s = typeof state === "string" ? state.toUpperCase() : "";
   if (s === "MERGED" || (mergedAt != null && mergedAt !== "")) return "merged";
   if (s === "CLOSED") return "closed";
   if (s === "OPEN") return "open";
