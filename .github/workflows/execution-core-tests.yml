@@ -529,6 +529,7 @@ jobs:
             autotune-writeback.test.mjs \
             board-health.test.mjs \
             board-health-seam.test.mjs \
+            dispatch-readiness.test.mjs \
             stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
             boot-resume-approval.test.mjs \
@@ -606,6 +607,7 @@ jobs:
             registry.test.mjs \
             replica-read.test.mjs \
             scan.test.mjs \
+            scheduler-created-at.test.mjs \
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \
             scheduler-replica-freshness.test.mjs \
