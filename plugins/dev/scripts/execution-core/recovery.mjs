@@ -574,11 +574,20 @@ export function defaultAppendReclaimEvent({
   );
 }
 
-export function defaultAppendUsageLimitEvent({ phase, ticket, orchId, orchDir, bgJobId, quota }) {
+export function defaultAppendUsageLimitEvent({ phase, ticket, orchId, orchDir, bgJobId, quota, explanation = null }) {
   return appendEnvelopeBestEffort(buildEventEnvelope({
     phase, ticket, orchId, action: "usage-limit-blocked",
     reason: "account-usage-limit", ticketType: resolveTicketType(orchDir, ticket),
-    payloadExtras: { bgJobId, lane: "bg", resetsAt: quota.resetsAt, resetSource: quota.resetSource, source: quota.source, detail: quota.detail },
+    payloadExtras: {
+      bgJobId,
+      lane: "bg",
+      resetsAt: quota.resetsAt,
+      resetSource: quota.resetSource,
+      source: quota.source,
+      detail: quota.detail,
+      problem: explanation?.problem ?? null,
+      callToAction: explanation?.call_to_action ?? null,
+    },
   }));
 }
 
@@ -3451,19 +3460,26 @@ export function reclaimDeadWorkIfPossible(
       emitReapIntent("phase.terminal.reap-requested", { ticket, phase, bgJobId: prevBgJobId, worktreePath: signal.raw?.worktreePath, reason: "cat-58-usage-limit-blocked" }).catch(() => {});
       intentAwareKill({ bgJobId: prevBgJobId });
     }
+    const explanation = buildUsageLimitExplanation({
+      ticket,
+      phase,
+      resetsAt: quota.resetsAt,
+      lane: "bg",
+      fallbackLane: "codex-exec",
+      detail: quota.detail,
+    });
     const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
     try {
       const raw = JSON.parse(readFileSync(signalPath, "utf8"));
-      Object.assign(raw, { status: "failed", failureReason: "usage-limit-blocked", usageLimitResetsAt: quota.resetsAt, usageLimitDetail: quota.detail ?? null, usageLimitSource: quota.source, updatedAt: new Date(now()).toISOString() });
+      Object.assign(raw, { status: "failed", failureReason: "usage-limit-blocked", usageLimitResetsAt: quota.resetsAt, usageLimitDetail: quota.detail ?? null, usageLimitSource: quota.source, usageLimitExplanation: explanation, updatedAt: new Date(now()).toISOString() });
       const tmp = `${signalPath}.tmp.${process.pid}`;
       writeFileSync(tmp, JSON.stringify(raw, null, 2)); renameSync(tmp, signalPath);
     } catch (err) { log.warn({ ticket, phase, err: err.message }, "cat-58: usage-limit signal write failed"); }
     const expiresAtOverride = Date.parse(quota.resetsAt);
     recordDispatchFailureFn?.(orchDir, ticket, phase, 0, now(), { expiresAtOverride, reasonCode: "usage-limit-blocked", countsTowardBreaker: false });
     parkLaneFn?.(orchDir, "bg", { resetsAt: quota.resetsAt, detail: quota.detail, ticket, phase, now: now() });
-    appendUsageLimitEvent({ phase, ticket, orchId, orchDir, bgJobId: prevBgJobId, quota });
-    const explanation = buildUsageLimitExplanation({ ticket, phase, resetsAt: quota.resetsAt, lane: "bg", fallbackLane: "codex-exec", detail: quota.detail });
-    log.warn({ ticket, phase, resetsAt: quota.resetsAt, explanation }, "cat-58: account usage limit — parking instead of reviving");
+    appendUsageLimitEvent({ phase, ticket, orchId, orchDir, bgJobId: prevBgJobId, quota, explanation });
+    log.warn({ ticket, phase, resetsAt: quota.resetsAt }, "cat-58: account usage limit — parking instead of reviving");
     return "usage-limit-parked";
   }
 
