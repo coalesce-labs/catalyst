@@ -106,6 +106,8 @@ function mkBoard(o = {}) {
     ownerForTicket: o.ownerForTicket ?? null,
     // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite lookup.
     repoForTicket: o.repoForTicket ?? null,
+    verifyOpenPrs: o.verifyOpenPrs ?? null,
+    getBranchSalvage: o.getBranchSalvage ?? null,
     // CTL-1432 (B2): deferred board-health anchor candidates.
     deferredBoardHealth: o.deferredBoardHealth ?? [],
     // CTL-1644: per-ticket evidence map for the stranded-mid-pipeline check.
@@ -2037,6 +2039,138 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   test("buildBoardContext defaults the cohort to [] when green (shadow-safe)", () => {
     const b = board({ ticketsById: one({ updatedAt: at(2) }) });
     expect(buildBoardContext(b, evaluateInvariants(b)).unownedInFlight).toEqual([]);
+  });
+});
+
+describe("checkUnownedInFlight — authoritative PR confirmation (CAT-11)", () => {
+  const now = Date.parse("2026-08-09T00:00:00.000Z");
+  const stale = (id, hoursAgo = 72, overrides = {}) => [id, {
+    identifier: id, state: "Implement",
+    updatedAt: new Date(now - hoursAgo * HOUR).toISOString(), ...overrides,
+  }];
+  const run = (overrides = {}, thresholds = {}) => {
+    const board = mkBoard({ now, mode: "enforce", ticketsById: new Map([stale("CAT-11")]), ...overrides });
+    return evaluateInvariants(board, { thresholds }).unownedInFlight;
+  };
+
+  test("unbound confirmation seam preserves the historical flagged cohort", () => {
+    const r = run();
+    expect(r.flagged).toEqual(["CAT-11"]);
+    expect(r.confirmedNoPr).toBe(0);
+  });
+
+  test("an authoritatively discovered open PR spares the ticket", () => {
+    const r = run({ verifyOpenPrs: () => ({ ok: false, prs: [{ number: 72, state: "OPEN" }] }) });
+    expect(r.flagged).toEqual([]);
+    expect(r.sparedByPrDiscovery).toBe(1);
+  });
+
+  test("an authoritative empty result confirms and flags PROJ-5's shape", () => {
+    const r = run({ verifyOpenPrs: () => ({ ok: true, prs: [] }) });
+    expect(r.flagged).toEqual(["CAT-11"]);
+    expect(r.confirmedNoPr).toBe(1);
+  });
+
+  test("unverifiable and thrown checks spare conservatively", () => {
+    for (const verifyOpenPrs of [
+      () => ({ ok: false, unverifiable: true, reason: "gh failed", prs: [] }),
+      () => ({ unverifiable: true, prs: [{ number: 9 }] }),
+      () => { throw new Error("gh failed"); },
+    ]) {
+      const r = run({ verifyOpenPrs });
+      expect(r.flagged).toEqual([]);
+      expect(r.unverifiablePrChecks).toBe(1);
+    }
+  });
+
+  test("confirmation runs only for candidates surviving every cheap predicate", () => {
+    const calls = [];
+    const ticketsById = new Map([
+      stale("CAT-CANDIDATE"), stale("CAT-TODO", 72, { state: "Todo" }),
+      stale("CAT-DONE", 72, { state: "Done" }), stale("CAT-LIVE"),
+      stale("CAT-PR", 72, { pr_number: 4 }), stale("CAT-FRESH", 1),
+    ]);
+    const r = run({
+      ticketsById,
+      signals: [{ ticket: "CAT-LIVE", status: "running" }],
+      prStatusMap: mkPrStatusMap([{ prNumber: 4, status: "open" }]),
+      verifyOpenPrs: (ticket) => { calls.push(ticket.identifier); return { prs: [] }; },
+    });
+    expect(calls).toEqual(["CAT-CANDIDATE"]);
+    expect(r.flagged).toEqual(["CAT-CANDIDATE"]);
+  });
+
+  test("oldest-first budget caps calls and never flags the unconfirmed tail", () => {
+    const calls = [];
+    const ticketsById = new Map(Array.from({ length: 7 }, (_, i) => stale(`CAT-${i}`, 72 - i)));
+    const r = run({ ticketsById, verifyOpenPrs: (ticket) => {
+      calls.push(ticket.identifier); return { prs: [] };
+    } }, { unownedPrVerifyMax: 3 });
+    expect(calls).toEqual(["CAT-0", "CAT-1", "CAT-2"]);
+    expect(r.flagged).toEqual(["CAT-0", "CAT-1", "CAT-2"]);
+    expect(r.unconfirmedForBudget).toBe(4);
+  });
+
+  test("off mode never invokes confirmation", () => {
+    let calls = 0;
+    const board = mkBoard({ now, mode: "off", ticketsById: new Map([stale("CAT-11")]),
+      verifyOpenPrs: () => { calls++; return { prs: [] }; } });
+    expect(evaluateInvariants(board).unownedInFlight).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
+  test("assembleBoardState carries only function seams", () => {
+    const verifyOpenPrs = () => ({ prs: [] });
+    const getBranchSalvage = () => ({});
+    const wired = assembleBoardState({ verifyOpenPrs, getBranchSalvage });
+    expect(wired.verifyOpenPrs).toBe(verifyOpenPrs);
+    expect(wired.getBranchSalvage).toBe(getBranchSalvage);
+    const inert = assembleBoardState({ verifyOpenPrs: true, getBranchSalvage: {} });
+    expect(inert.verifyOpenPrs).toBeNull();
+    expect(inert.getBranchSalvage).toBeNull();
+  });
+});
+
+describe("CAT-11 branch-salvage board context", () => {
+  const ticket = { identifier: "CAT-11", state: "Implement", branchName: "CAT-11" };
+  const invs = (prDiscovery = {}) => ({ ...allGreen(), unownedInFlight: {
+    ok: false, failed: 1, observable: true, flagged: ["CAT-11"], prDiscovery,
+  } });
+
+  test("v4 emits an empty additive detail cohort without changing existing fields", () => {
+    const ctx = buildBoardContext(mkBoard(), allGreen());
+    expect(ctx.schema).toBe("recovery-board-context/v4");
+    expect(ctx.unownedInFlightDetail).toEqual([]);
+    expect(ctx.unownedInFlight).toEqual([]);
+    expect(ctx.stalledPrs).toEqual([]);
+  });
+
+  test("unbound salvage stays unknown and held", () => {
+    const ctx = buildBoardContext(mkBoard({ ticketsById: new Map([["CAT-11", ticket]]) }), invs());
+    expect(ctx.unownedInFlightDetail).toEqual([{
+      ticket: "CAT-11", branchName: "CAT-11", remoteBranchExists: undefined,
+      commitsAhead: null, openPrs: [], route: "unknown-salvage", dispatchable: false,
+    }]);
+  });
+
+  test("remote committed work is classified resume-from-remote", () => {
+    const board = mkBoard({ ticketsById: new Map([["CAT-11", ticket]]),
+      getBranchSalvage: () => ({ branchName: "CAT-11", remoteBranchExists: true,
+        commitsAhead: 2, worktreeUnpushed: false }) });
+    expect(buildBoardContext(board, invs()).unownedInFlightDetail[0]).toMatchObject({
+      ticket: "CAT-11", remoteBranchExists: true, commitsAhead: 2,
+      route: "resume-from-remote", dispatchable: true,
+    });
+  });
+
+  test("detail preserves authoritative PR results and move rationale accepts an available route", () => {
+    const openPr = { number: 72, state: "OPEN" };
+    const board = mkBoard({ ticketsById: new Map([["CAT-11", ticket]]) });
+    expect(buildBoardContext(board, invs({ "CAT-11": { prs: [openPr] } }))
+      .unownedInFlightDetail[0].openPrs).toEqual([openPr]);
+    const moves = proposeMoves(invs(), { ticketsById: board.ticketsById,
+      unownedInFlightDetail: [{ ticket: "CAT-11", route: "resume-from-remote" }] });
+    expect(moves.tier2[0].rationale).toContain("resume-from-remote");
   });
 });
 

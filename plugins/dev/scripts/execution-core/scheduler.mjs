@@ -149,7 +149,9 @@ import { makePrView } from "./scan-adapters.mjs";
 // longer blocks the write; it supplies the FACTS used to decide whether to fire the
 // recovery.done-applied-with-open-pr alarm. Permissive no-op default in schedulerTick;
 // armed with this real impl by runTick.
-import { defaultCheckOpenPrs } from "./open-pr-gate.mjs";
+import { defaultCheckOpenPrs, defaultDeriveBranchName } from "./open-pr-gate.mjs";
+import { makeOpenPrVerifier } from "./unowned-pr-verify.mjs";
+import { probeBranchSalvage } from "./branch-salvage.mjs";
 // CTL-1157 (ALARM-NOT-BLOCK): the loud `recovery.done-applied-with-open-pr` event
 // the pure-code terminal sweep emits when it lands a Done while an open PR exists.
 import {
@@ -6077,6 +6079,8 @@ export function schedulerTick(
           // below; a bare tick passes none → empty-Map default keeps the new invariant
           // observable:false (shadow-first, ADR-023).
           getStrandedEvidence: _boardHealth.getStrandedEvidence,
+          verifyOpenPrs: _boardHealth.verifyOpenPrs,
+          getBranchSalvage: _boardHealth.getBranchSalvage,
           // CTL-1608: inject the stalled-PR stamp map (from workers/*/stalled-pr.json).
           // The daemon binds this to read from the real orchDir; a bare tick passes
           // nothing → assembleBoardState defaults to () => new Map() (observable:false).
@@ -8312,6 +8316,23 @@ let _unstuckLastRunMs = 0;
 // daemon restart (module reload) or via __resetForTests.
 let _stallJanitorCensusLastRunMs = 0;
 
+// CAT-11: one verifier closure per daemon/orchestrator so its TTL memo survives
+// scheduler ticks. The closure itself owns the memo; this map only owns lifetime.
+const _unownedPrVerifiers = new Map();
+function unownedPrVerifierFor(opts) {
+  const key = opts.orchDir;
+  if (!_unownedPrVerifiers.has(key)) {
+    _unownedPrVerifiers.set(key, makeOpenPrVerifier({
+      checkOpenPrs: (ticket) => (opts.checkOpenPrs ?? defaultCheckOpenPrs)(ticket),
+      getQuota: () => readGithubQuota(opts.orchDir),
+      ttlMs: Number(process.env.CATALYST_BH_UNOWNED_PR_VERIFY_TTL_MS) || 30 * 60_000,
+      minRemaining: Number(process.env.CATALYST_BH_UNOWNED_PR_MIN_QUOTA) || 500,
+      enabled: process.env.CATALYST_BH_UNOWNED_PR_VERIFY !== "0",
+    }));
+  }
+  return _unownedPrVerifiers.get(key);
+}
+
 function runTick() {
   try {
     // CTL-1330 Tier 1: emit the event-loop delay accumulated since the previous
@@ -9025,6 +9046,17 @@ function runTick() {
             });
           }
           return evidenceMap;
+        },
+        verifyOpenPrs: unownedPrVerifierFor(runningOpts),
+        getBranchSalvage: (ticket) => {
+          try {
+            const team = teamOf(ticket);
+            const repoRoot = team ? getProjectConfig(team)?.repoRoot ?? null : null;
+            const branchName = defaultDeriveBranchName(ticket, { cwd: repoRoot ?? undefined });
+            return probeBranchSalvage(ticket, { branchName, repoRoot });
+          } catch (error) {
+            return { unverifiable: true, reason: error instanceof Error ? error.message : String(error) };
+          }
         },
         // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so
         // the phantom/orphaned-PR cohorts disambiguate a cross-repo #-collision by

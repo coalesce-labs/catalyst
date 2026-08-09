@@ -721,6 +721,12 @@ re-asserted immediately after salvage completes (not just before it starts) at e
 site, since salvage's own duration widens the window a live handle could appear in. (Retention/GC of
 `~/catalyst/salvage/` beyond the dedup above is deferred follow-up.)
 
+For stale `unownedInFlight` candidates, board-health's cheap scan and the repository-level PR
+enumerator now meet at an injected seam: `open-pr-gate.mjs` confirms the union of ticket-key search,
+branch-head search, and Linear PR attachments instead of relying only on the webhook cache. A
+confirmed orphan can produce a `recover-unowned-in-flight` move, but the delegate still acts only
+when an operator sets `CATALYST_BOARD_HEALTH=enforce`; shadow mode remains read-only.
+
 ### Linear app-actor self-echo guard (`botUserId`)
 
 The execution-core daemon mirrors phase-agent output to Linear and wakes on human replies, so it
