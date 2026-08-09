@@ -675,12 +675,16 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            recovery-fix-backoff.test.mjs \
+            recovery-orphan-stale-e2e.test.mjs \
             pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
+            unstuck-orphan-merge.test.mjs \
+            orphan-sweep-explain.test.mjs \
             unstuck-escalate-seam.test.mjs \
             unstuck-sweep.test.mjs \
             lib/catalyst-resource.test.mjs \
