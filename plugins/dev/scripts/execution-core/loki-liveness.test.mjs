@@ -277,6 +277,65 @@ describe("capacity enrichment (CTL-1551)", () => {
     expect(out["mini-2"].max_parallel).toBeNull(); // no capacity published → no-data, not 0
   });
 
+  // ── CAT-57 (query E): the productivity read must actually be QUERIED ──
+  // Regression guard for the exact miss Codex caught: the parser alone is inert,
+  // because Loki only surfaces a structured-metadata field when a query REFERENCES
+  // it. These tests fail if query E is ever dropped, even with parsing intact.
+  test("query E is ISSUED and merges last_advance_at onto A's liveness map", async () => {
+    const adv = "2026-08-09T04:00:00Z";
+    let sawAdvanceQuery = false;
+    const advStream = (host, tsNs) => ({
+      stream: { host_name: host, event_name: "node.heartbeat" },
+      values: [[tsNs, "node.heartbeat", { catalyst_node_last_advance_at: adv }]],
+    });
+    const fetcher = async (url) => {
+      if (url.includes("last_advance_at")) {
+        sawAdvanceQuery = true;
+        return ok([advStream("mini", "1783451090000000000")]);
+      }
+      if (url.includes("max_parallel") || url.includes("in_flight_tickets") || url.includes("active_count")) return ok([]);
+      return ok([
+        stream("mini", [{ tsNs: "1783451090000000000" }]),
+        stream("mini-2", [{ tsNs: "1783451092000000000" }]),
+      ]);
+    };
+    const out = await readClusterLivenessFromLoki({ lokiUrl: "http://loki:3100", fetcher, nowMs: 1783451100000 });
+    expect(sawAdvanceQuery).toBe(true); // the miss this guards
+    expect(out.mini.last_advance_at).toBe(adv);
+    expect(out["mini-2"].last_advance_at).toBeNull(); // never published → unknown, not fabricated
+  });
+
+  test("query E honors the rollback guard — a STALE advance never lands on fresher liveness", async () => {
+    // A's newest liveness line is NEWER than E's newest attribute-bearing line
+    // (the dual-publish / rollback window). Merging would make a stuck host look
+    // productive, so the merge must be skipped and the field stay unknown.
+    const fetcher = async (url) => {
+      if (url.includes("last_advance_at"))
+        return ok([{
+          stream: { host_name: "mini", event_name: "node.heartbeat" },
+          values: [["1783451000000000000", "node.heartbeat", { catalyst_node_last_advance_at: "2026-08-09T03:00:00Z" }]],
+        }]);
+      if (url.includes("max_parallel") || url.includes("in_flight_tickets") || url.includes("active_count")) return ok([]);
+      return ok([stream("mini", [{ tsNs: "1783451090000000000" }])]);
+    };
+    const out = await readClusterLivenessFromLoki({ lokiUrl: "http://loki:3100", fetcher, nowMs: 1783451100000 });
+    expect(out.mini.last_advance_at).toBeNull();
+  });
+
+  test("query E failure does NOT break liveness, tickets, or capacity", async () => {
+    const fetcher = async (url) => {
+      if (url.includes("last_advance_at")) throw new Error("loki blip on E");
+      if (url.includes("in_flight_tickets"))
+        return ok([stream("mini", [{ tsNs: "1783451090000000000", metaTickets: "CTL-7" }])]);
+      if (url.includes("max_parallel")) return ok([]);
+      return ok([stream("mini", [{ tsNs: "1783451090000000000" }])]);
+    };
+    const out = await readClusterLivenessFromLoki({ lokiUrl: "http://loki:3100", fetcher });
+    expect(out.mini.last_seen).toBeDefined();
+    expect(out.mini.in_flight_tickets).toEqual(["CTL-7"]);
+    expect(out.mini.last_advance_at).toBeNull();
+  });
+
   test("capacity-enrichment (query C) failure does NOT break liveness or tickets", async () => {
     const fetcher = async (url) => {
       if (url.includes("max_parallel")) throw new Error("loki blip on C");
