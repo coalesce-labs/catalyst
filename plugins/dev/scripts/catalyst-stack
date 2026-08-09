@@ -1154,6 +1154,35 @@ cmd_sync_cloud_env() {
   _cloud_token_env_run
 }
 
+# CAT-53: durable local alarm for a degraded component start.
+STACK_ALERT_FILE="${CATALYST_DIR:-$HOME/catalyst}/stack/start.alert.json"
+
+_stack_raise_start_alarm() {
+  local tmp i=0 c
+  mkdir -p "$(dirname "$STACK_ALERT_FILE")" 2>/dev/null || true
+  tmp="${STACK_ALERT_FILE}.tmp.$$"
+  {
+    printf '{"status":"degraded","host":"%s","at":"%s","failed":[' \
+      "$(hostname -s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    for c in "${_STACK_FAILED[@]}"; do
+      [[ $i -gt 0 ]] && printf ','
+      printf '"%s"' "$c"
+      i=$((i + 1))
+    done
+    printf ']}\n'
+  } > "$tmp" 2>/dev/null && mv "$tmp" "$STACK_ALERT_FILE" 2>/dev/null || true
+
+  catalyst-state.sh event --event "catalyst.alert.raised" \
+    --detail "stack start degraded: ${_STACK_FAILED[*]}" >/dev/null 2>&1 || true
+  "${SCRIPT_DIR}/add-finding.sh" --skill catalyst-stack --severity high \
+    --tags "stack,supervision,cat-53" \
+    --title "stack start degraded on $(hostname -s): ${_STACK_FAILED[*]}" \
+    --body "catalyst-stack start could not bring up: ${_STACK_FAILED[*]}. See ${STACK_ALERT_FILE} and each component's own log under ${CATALYST_DIR:-$HOME/catalyst}/." \
+    >/dev/null 2>&1 || true
+}
+
+_stack_clear_start_alarm() { rm -f "$STACK_ALERT_FILE" 2>/dev/null || true; }
+
 # ─── Top-level commands ─────────────────────────────────────────────────────
 cmd_start() {
   local use_proxy="no"
@@ -1194,19 +1223,37 @@ cmd_start() {
   # (Codex P2 "keep developer starts daemonless").
   local node_class; node_class="$(_resolve_node_class)"
 
+  # CAT-53: record every attempted component so health, not control-flow
+  # completion, determines the final banner. Array writes are quoted/zsh-safe.
+  _STACK_ATTEMPTED=()
+  _STACK_FAILED=()
+  _stack_run() {
+    local name="$1" rc
+    shift
+    _STACK_ATTEMPTED+=("$name")
+    if "$@"; then
+      return 0
+    else
+      rc=$?
+      _STACK_FAILED+=("$name")
+      warn "${name} failed to start (rc=${rc})"
+      return 1
+    fi
+  }
+
   # CTL-1084: known-good start order is monitor → broker → execution-core
   # (encoded here instead of operator memory; daemon always last).
   if [[ "$node_class" != "developer" ]]; then
-    start_monitor
-    start_broker
+    _stack_run monitor start_monitor
+    _stack_run broker start_broker
   fi
   if [[ "$node_class" == "worker" ]]; then
-    start_daemon "$use_proxy"
+    _stack_run execution-core start_daemon "$use_proxy"
   else
     log "node.class=${node_class}: observation-only — execution-core NOT started"
   fi
   if [[ "$node_class" != "developer" ]]; then
-    start_forward
+    _stack_run otel-forward start_forward
   fi
   # CTL-1307 / CTL-1668 (Codex P1): project the cluster-shared cloud token into machine-level env
   # (writes ~/.config/catalyst/cluster.env) BEFORE start_coordination launches the publisher — NOT
@@ -1224,7 +1271,7 @@ cmd_start() {
   # worker keeps the in-daemon one, a developer runs no forwarder to watch.
   # Non-fatal: a watchdog is a tap, and a tap must never be load-bearing (CTL-988).
   if [[ "$node_class" == "monitor" ]]; then
-    start_daemon_watchdog || warn "continuing without daemon-watchdog (forwarder supervised by pid-liveness only)"
+    _stack_run daemon-watchdog start_daemon_watchdog
   fi
   # CTL-1494: coordination-publish follows the reporting substrate (worker + monitor,
   # gated != developer, same as start_forward). Non-fatal — a broken/absent publisher
@@ -1232,7 +1279,7 @@ cmd_start() {
   # `off` (the default) start_coordination is a clean no-op, so this is byte-identical
   # inert on an unconfigured node.
   if [[ "$node_class" != "developer" ]]; then
-    start_coordination || warn "continuing without coordination-publish (coordination mirror won't be written)"
+    _stack_run coordination start_coordination
   fi
   # CTL-1263: the log-shipper comes up LAST — it only tails the daemons' .log
   # files, so it should start after the daemons it observes. start_shipper is
@@ -1243,21 +1290,34 @@ cmd_start() {
   # instantly on death instead of waiting for the next 600s tick.
   # CTL-1654: monitor/developer nodes have no Alloy log-shipper (docs/health-responder.md).
   if [[ "$node_class" == "worker" ]]; then
-    start_shipper || warn "continuing without log-shipper (daemon logs won't be shipped to Loki)"
+    _stack_run log-shipper start_shipper
   fi
 
   # CTL-1654: bring up the event-mirror on observation nodes (fan fleet events in).
   # start_event_mirror is a no-op stub until Phase 4 wires the real service.
   if [[ "$node_class" != "worker" ]]; then
-    start_event_mirror || warn "continuing without event-mirror (local tail/wait-for see only local events)"
+    _stack_run event-mirror start_event_mirror
   fi
 
   # (CTL-1307 token projection now runs BEFORE start_coordination above, so the publisher
   # launches with cluster.env already present — see the Codex-P1 note there.)
 
   log ""
-  log "stack up — current state:"
+  if [[ ${#_STACK_FAILED[@]} -eq 0 ]]; then
+    log "stack up — current state:"
+    cmd_status
+    _stack_clear_start_alarm
+    return 0
+  fi
+
+  log "stack DEGRADED — ${#_STACK_FAILED[@]} of ${#_STACK_ATTEMPTED[@]} components failed to start:"
+  local _c
+  for _c in "${_STACK_FAILED[@]}"; do log "  ✗ ${_c}"; done
+  log ""
+  log "current state:"
   cmd_status
+  _stack_raise_start_alarm
+  return 1
 }
 
 cmd_stop() {
@@ -1306,6 +1366,9 @@ latest_boot_event() {
 }
 
 cmd_status() {
+  if [[ -f "$STACK_ALERT_FILE" ]]; then
+    echo "  ⚠ ALARM          last start was DEGRADED: $(jq -r '.failed|join(", ")' "$STACK_ALERT_FILE" 2>/dev/null) ($(jq -r .at "$STACK_ALERT_FILE" 2>/dev/null))"
+  fi
   local mp; mp="$(mitm_pid)"
   if pid_alive "$mp"; then echo "  mitmproxy        running  pid=$mp"; else echo "  mitmproxy        stopped"; fi
   echo -n "  broker           "; catalyst-broker status 2>&1 | head -1
