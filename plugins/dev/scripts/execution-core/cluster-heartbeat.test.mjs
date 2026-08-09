@@ -44,6 +44,12 @@ describe("parseHeartbeatMetadata", () => {
     }
   });
 
+  test("keeps a parseable future last_seen as positive liveness", () => {
+    const now = Date.parse("2026-08-09T03:00:00Z");
+    expect(parseHeartbeatMetadata({ last_seen: "2026-08-09T03:30:00Z" }, { now }).last_seen)
+      .toBe("2026-08-09T03:30:00Z");
+  });
+
   test("old publisher metadata remains intact and gains unknown last_advance_at", () => {
     expect(parseHeartbeatMetadata({
       host: "mini", last_seen: "2026-08-09T02:00:00Z", in_flight_tickets: ["CAT-1"],

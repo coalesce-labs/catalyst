@@ -124,6 +124,11 @@ function normaliseIsoTimestamp(value, { now = Date.now() } = {}) {
   return value;
 }
 
+function normaliseLastSeen(value) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return null;
+  return value;
+}
+
 export function parseHeartbeatMetadata(metadata, { now = Date.now() } = {}) {
   const m = metadata ?? {};
   const raw = m.in_flight_tickets;
@@ -134,7 +139,9 @@ export function parseHeartbeatMetadata(metadata, { now = Date.now() } = {}) {
   const inFlightCount = Number.isInteger(rawCount) && rawCount >= 0 ? rawCount : tickets.length;
   return {
     host: m.host ?? null,
-    last_seen: normaliseIsoTimestamp(m.last_seen, { now }),
+    // A future last_seen is still positive liveness. Rejecting clock-skewed
+    // peers here can split dispatch ownership and permit double dispatch.
+    last_seen: normaliseLastSeen(m.last_seen),
     last_advance_at: normaliseIsoTimestamp(m.last_advance_at, { now }),
     in_flight_tickets: tickets,
     max_parallel: maxParallel,
@@ -275,7 +282,7 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
     default:
       process.stderr.write(
         `cluster-heartbeat.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-heartbeat.mjs <publish <anchor> <host> <ticketsCSV> [maxParallel] [issueId] | read <anchor> | resolve-anchor <anchor>>\n",
+          "usage: cluster-heartbeat.mjs <publish <anchor> <host> <ticketsCSV> [maxParallel] [issueId] [--last-advance-at=<iso>] | read <anchor> | resolve-anchor <anchor>>\n",
       );
       return 1;
   }

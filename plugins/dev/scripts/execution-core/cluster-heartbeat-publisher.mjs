@@ -23,7 +23,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { computeLastPhaseAdvanceTs, readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
+import { computeLastPhaseAdvanceTs, readAllPhaseSignals, readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
 import {
   getClusterHosts,
   getHostName,
@@ -150,7 +150,7 @@ export function startLivenessPublisher({
   // CTL-1092: this host's live slot count, published with each heartbeat so the
   // monitor cluster view can show per-host capacity. Injectable for tests.
   currentMaxParallel = () => readLocalMaxParallel(orchDir),
-  lastAdvanceAt = () => computeLastPhaseAdvanceTs(readWorkerSignals(orchDir), { self }),
+  lastAdvanceAt = () => computeLastPhaseAdvanceTs(readAllPhaseSignals(orchDir), { self }),
   publish = (args) => publishHeartbeatSync(args),
   // CTL-863: heartbeat-cadence fence re-emit. Linear-FREE (a local event-log
   // append) — it MUST NOT be gated behind the Linear breaker-skip below (doing so

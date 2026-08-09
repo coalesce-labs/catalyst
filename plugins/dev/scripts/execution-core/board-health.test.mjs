@@ -2770,7 +2770,22 @@ describe("boardHealthPass enforce — launch-failure exclusion prevents recovery
 });
 
 describe("CAT-57 host-scoped board health", () => {
-  test("makeOwnsFilter hashes over dispatchRoster and fails open", () => {
+  test("recovery anchors do not re-home an offline peer's raw-roster slice outside holistic failover", () => {
+    const b = mkOwnedBoard({
+      roster: ["mini", "offline"],
+      dispatchRoster: ["mini"],
+      eligible: [],
+      owner: (_ticket, roster) => roster.includes("offline") ? "offline" : "mini",
+    });
+    const moves = { tier1: [{ ticket: "CAT-PEER" }], tier2: [], tier3: [] };
+    expect(selectAnchorCandidates(moves, b)).toEqual([]);
+    expect(selectAnchorCandidates(moves, b, {
+      holistic: true,
+      strandedOrDeadHosts: new Set(["offline"]),
+    })).toEqual(["CAT-PEER"]);
+  });
+
+  test("makeOwnsFilter defaults to raw roster, supports dispatch scope, and fails open", () => {
     const seen = [];
     const b = mkOwnedBoard({
       roster: ["mini", "stale"],
@@ -2778,7 +2793,8 @@ describe("CAT-57 host-scoped board health", () => {
       owner: (_ticket, roster) => { seen.push(roster); return "mini"; },
     });
     expect(makeOwnsFilter(b)("CAT-57")).toBe(true);
-    expect(seen).toEqual([["mini", "peer"]]);
+    expect(makeOwnsFilter(b, { scope: "dispatch" })("CAT-57")).toBe(true);
+    expect(seen).toEqual([["mini", "stale"], ["mini", "peer"]]);
     expect(makeOwnsFilter(mkOwnedBoard({ owner: () => { throw new Error("hrw"); } }))("CAT-57")).toBe(true);
   });
 
@@ -2861,6 +2877,7 @@ describe("CAT-57 nodeProductivity invariant", () => {
       expect(r.note.length).toBeGreaterThan(0);
     }
     expect(evaluateInvariants(productivityBoard({ peerProductivity: null })).nodeProductivity.observable).toBe(false);
+    expect(evaluateInvariants(productivityBoard({ peerProductivity: {} })).nodeProductivity.observable).toBe(false);
     expect(evaluateInvariants(productivityBoard({ roster: ["mini"] })).nodeProductivity.observable).toBe(false);
     expect(evaluateInvariants(productivityBoard({ ticketsById: new Map([["SELF", {}]]), owner: () => "mini", peerProductivity: { mini: { last_seen: seen, last_advance_at: stale } } })).nodeProductivity.flagged).toEqual([]);
     expect(evaluateInvariants(productivityBoard({ owner: () => { throw new Error("hrw"); } })).nodeProductivity.observable).toBe(false);
