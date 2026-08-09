@@ -2071,6 +2071,18 @@ export function readGithubQuotaBoardHealthConfig(env = process.env) {
   return { mode: "shadow" };
 }
 
+// CAT-57: peer-productivity reporting is independently shadow-first even when
+// the broader board-health delegate runs in enforce mode.
+export function readProductivityBoardHealthConfig(env = process.env) {
+  const l2 = readLayer2BoardHealth();
+  const value = env.CATALYST_BH_PRODUCTIVITY;
+  if (typeof value === "string" && BOARD_HEALTH_MODES.has(value)) return { mode: value };
+  if (typeof l2.productivity === "string" && BOARD_HEALTH_MODES.has(l2.productivity)) {
+    return { mode: l2.productivity };
+  }
+  return { mode: "shadow" };
+}
+
 // CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce
 // discipline (ADR-023) and env-override → Layer-2 → default precedence as
 // readBoardHealthConfig, with ONE deliberate difference: the default is "off",
