@@ -211,6 +211,66 @@ describe("CAT-36 new-work admission", () => {
     }
   });
 
+  test("an admission probe-error streak restarts after a non-probed tick", () => {
+    const warnings = [];
+    const realWarn = log.warn;
+    seedTriagedWaiter(orchDir, "CTL-WAIT");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const broken = { identifier: "CTL-BROKEN", priority: 1, createdAt: "2026-05-01T00:00:00Z" };
+    const throwingProbe = (_dir, ticket) => {
+      if (ticket === "CTL-BROKEN") throw new Error("EACCES");
+      return true;
+    };
+    try {
+      log.warn = (...args) => warnings.push(args);
+      schedulerTick(
+        orchDir,
+        admissionOpts({ eligible: [broken], hasTriageArtifact: throwingProbe })
+      );
+      const blocked = {
+        ...broken,
+        relations: {
+          nodes: [{ type: "blocked_by", relatedIssue: { identifier: "CTL-DEP" } }],
+        },
+        inverseRelations: { nodes: [] },
+      };
+      const blockedBatch = (ids) =>
+        new Map(
+          ids.map((id) => [
+            id,
+            {
+              state: "In Progress",
+              priority: 1,
+              labels: [],
+              relations:
+                id === "CTL-BROKEN"
+                  ? blocked.relations
+                  : { nodes: [] },
+              inverseRelations: { nodes: [] },
+            },
+          ])
+        );
+      schedulerTick(
+        orchDir,
+        admissionOpts({ eligible: [blocked], fetchBatch: blockedBatch })
+      );
+      schedulerTick(
+        orchDir,
+        admissionOpts({ eligible: [broken], hasTriageArtifact: throwingProbe })
+      );
+      const heldTicks = warnings
+        .filter((args) =>
+          args.some(
+            (a) => typeof a === "string" && a.includes("admission triage artifact probe failed")
+          )
+        )
+        .map((args) => args.find((a) => a && typeof a === "object")?.held_ticks);
+      expect(heldTicks).toEqual([1, 1]);
+    } finally {
+      log.warn = realWarn;
+    }
+  });
+
   // CAT-36 (Codex P2, #3140): the hold-streak map self-cleaned only on the
   // "became ready" path, so a ticket that LEFT `ready` (removed, reassigned,
   // newly dependency-blocked) kept its entry for the daemon's lifetime — and a

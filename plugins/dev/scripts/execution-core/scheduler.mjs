@@ -6462,9 +6462,15 @@ export function schedulerTick(
         return false;
       });
       if (lastAdmissionProbeLogged.size > 0) {
-        const admissionPoolIds = new Set(admissionPool.map((t) => t.identifier));
+        const probedCandidateIds = new Set(
+          admissionPool
+            .filter(
+              (t) => readyIds.has(t.identifier) && !triagedWaitingSet.has(t.identifier)
+            )
+            .map((t) => t.identifier)
+        );
         for (const ticket of lastAdmissionProbeLogged.keys()) {
-          if (!admissionPoolIds.has(ticket)) lastAdmissionProbeLogged.delete(ticket);
+          if (!probedCandidateIds.has(ticket)) lastAdmissionProbeLogged.delete(ticket);
         }
       }
       const readyCandidates = rankTickets(admissionContenders);
