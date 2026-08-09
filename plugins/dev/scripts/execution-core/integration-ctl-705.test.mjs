@@ -140,6 +140,77 @@ function admissionOpts({
 const noopReclaim = () => "noop";
 
 describe("CAT-36 new-work admission", () => {
+  test("a triage-probe error on the admission path is logged, not swallowed", () => {
+    const warnings = [];
+    const realWarn = log.warn;
+    seedTriagedWaiter(orchDir, "CTL-WAIT");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const probeError = Object.assign(new Error("EACCES"), { code: "EACCES" });
+    try {
+      log.warn = (...args) => warnings.push(args);
+      schedulerTick(
+        orchDir,
+        admissionOpts({
+          eligible: [
+            { identifier: "CTL-BROKEN", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+          ],
+          hasTriageArtifact: (_dir, ticket) => {
+            if (ticket === "CTL-BROKEN") throw probeError;
+            return true;
+          },
+        })
+      );
+      const warning = warnings.find((args) =>
+        args.some(
+          (a) => typeof a === "string" && a.includes("admission triage artifact probe failed")
+        )
+      );
+      expect(warning).toBeDefined();
+      expect(warning.find((a) => a && typeof a === "object")).toMatchObject({
+        ticket: "CTL-BROKEN",
+        reason: "triage-probe-error",
+        held_ticks: 1,
+      });
+      expect(warning.find((a) => a && typeof a === "object")?.error).toContain("EACCES");
+    } finally {
+      log.warn = realWarn;
+    }
+  });
+
+  test("admission probe-error cadence is independent from the new-work hold cadence", () => {
+    const warnings = [];
+    const realWarn = log.warn;
+    seedTriagedWaiter(orchDir, "CTL-WAIT");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    try {
+      log.warn = (...args) => warnings.push(args);
+      for (let tick = 0; tick < 12; tick += 1) {
+        schedulerTick(
+          orchDir,
+          admissionOpts({
+            eligible: [
+              { identifier: "CTL-BROKEN", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+            ],
+            hasTriageArtifact: (_dir, ticket) => {
+              if (ticket === "CTL-BROKEN") throw new Error("EACCES");
+              return true;
+            },
+          })
+        );
+      }
+      const streaksFor = (fragment) =>
+        warnings
+          .filter((args) =>
+            args.some((a) => typeof a === "string" && a.includes(fragment))
+          )
+          .map((args) => args.find((a) => a && typeof a === "object")?.held_ticks);
+      expect(streaksFor("admission triage artifact probe failed")).toEqual([1, 10]);
+      expect(streaksFor("triage artifact probe failed — holding new-work")).toEqual([1, 10]);
+    } finally {
+      log.warn = realWarn;
+    }
+  });
+
   // CAT-36 (Codex P2, #3140): the hold-streak map self-cleaned only on the
   // "became ready" path, so a ticket that LEFT `ready` (removed, reassigned,
   // newly dependency-blocked) kept its entry for the daemon's lifetime — and a

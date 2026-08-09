@@ -6432,14 +6432,41 @@ export function schedulerTick(
       const freeSlotsForPromotion = livenessIsFresh()
         ? Math.max(0, computeFreeSlots(maxParallel, occupiedCount))
         : 0;
-      const admissionContenders = admissionPool.filter(
-        (t) =>
-          readyIds.has(t.identifier) &&
-          (triagedWaitingSet.has(t.identifier) ||
-            canOccupySlotNow(orchDir, t.identifier, {
-              hasTriageArtifact: _hasTriageArtifact,
-            }).ok)
-      );
+      const admissionContenders = admissionPool.filter((t) => {
+        if (!readyIds.has(t.identifier)) return false;
+        if (triagedWaitingSet.has(t.identifier)) return true;
+        const readiness = canOccupySlotNow(orchDir, t.identifier, {
+          hasTriageArtifact: _hasTriageArtifact,
+        });
+        if (readiness.ok) {
+          lastAdmissionProbeLogged.delete(t.identifier);
+          return true;
+        }
+        if (readiness.error) {
+          const streak = (lastAdmissionProbeLogged.get(t.identifier) ?? 0) + 1;
+          lastAdmissionProbeLogged.set(t.identifier, streak);
+          if (streak === 1 || streak % HOLD_RELOG_EVERY === 0) {
+            log.warn(
+              {
+                ticket: t.identifier,
+                reason: readiness.reason,
+                held_ticks: streak,
+                error: String(readiness.error),
+              },
+              "ctl-1150: admission triage artifact probe failed — excluding candidate (CAT-36)"
+            );
+          }
+        } else {
+          lastAdmissionProbeLogged.delete(t.identifier);
+        }
+        return false;
+      });
+      if (lastAdmissionProbeLogged.size > 0) {
+        const admissionPoolIds = new Set(admissionPool.map((t) => t.identifier));
+        for (const ticket of lastAdmissionProbeLogged.keys()) {
+          if (!admissionPoolIds.has(ticket)) lastAdmissionProbeLogged.delete(ticket);
+        }
+      }
       const readyCandidates = rankTickets(admissionContenders);
       const admittedSlice = selectDispatchablePerProject(
         readyCandidates,
@@ -8367,6 +8394,8 @@ const observedYieldFiles = new Set();
 // daemon restart (via __resetForTests).
 const lastHeldEmitState = new Map();
 const lastHoldLogged = new Map();
+// Admission probe failures have an independent cadence from sweep 2 holds.
+const lastAdmissionProbeLogged = new Map();
 const STARVATION_WARN_STREAK = 3;
 const STARVATION_REWARN_EVERY = 10;
 const HOLD_RELOG_EVERY = 10;
@@ -9585,6 +9614,7 @@ export function __resetForTests() {
   observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
   lastHoldLogged.clear();
+  lastAdmissionProbeLogged.clear();
   starvationStreak = 0;
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
