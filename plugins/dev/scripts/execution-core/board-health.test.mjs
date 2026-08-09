@@ -61,6 +61,12 @@ test("account usage headroom is derived from sampled utilization", () => {
   expect(inv).toMatchObject({ sevenDayPct: 100, resetsAt: "2026-08-10T17:59:59Z" });
 });
 
+test("account usage headroom is unobservable without numeric utilization", () => {
+  const ring = { accountRatelimit: { fiveHourPct: null, sevenDayPct: null } };
+  const inv = evaluateInvariants({ ring, mode: "enforce", ticketsById: new Map(), signals: [], eligible: [], capacity: { free: 0 }, now: NOW }).accountUsageHeadroom;
+  expect(inv).toMatchObject({ ok: true, observable: false, note: "account usage sample carries no utilization data" });
+});
+
 // mkPrStatusMap — build the composite `Map<number, Map<repoKey, entry>>` shape
 // (CTL-1157, Codex #4) that broker-state.getAllPrStatuses now returns, from flat
 // {prNumber, repo, status, updatedAt} rows. Mirrors how the real reader nests

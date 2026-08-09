@@ -1793,6 +1793,33 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
   });
 });
 
+describe("CAT-58 deferred executor-lane dispatch", () => {
+  test("does not count a deferred dispatch as a ticket failure", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const failedEvents = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [{
+        identifier: "CAT-58-DEFERRED",
+        priority: 1,
+        createdAt: "x",
+        state: { name: "Todo" },
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      }],
+      dispatch: () => ({ code: 75, deferred: true, reason: "no-healthy-executor-lane" }),
+      liveBackgroundCount: () => 0,
+      hosts: ["vega"],
+      hostName: "vega",
+      appendDispatchFailedEvent: (event) => failedEvents.push(event),
+      hasTriageArtifact: () => true,
+      fetchBatch: mkBatch({ "CAT-58-DEFERRED": { state: "Todo", priority: 1, labels: [], relations: { nodes: [] }, inverseRelations: { nodes: [] } } }),
+    });
+    const marker = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CAT-58-DEFERRED", "research"), "utf8"));
+    expect(marker).toMatchObject({ consecutiveFailures: 0, reasonCode: "no-healthy-executor-lane" });
+    expect(failedEvents).toHaveLength(0);
+  });
+});
+
 // ── CTL-671 Phase 4: runaway event-rate domination alert ──
 describe("runaway event-rate alert (CTL-671)", () => {
   test("emits exactly one runaway event per window when a ticket dominates", () => {

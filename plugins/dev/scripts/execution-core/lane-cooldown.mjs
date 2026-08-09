@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { log } from "./config.mjs";
 import { USAGE_LIMIT_FALLBACK_MS } from "./usage-limit.mjs";
@@ -16,6 +16,15 @@ export function readLaneCooldown(orchDir, lane) {
 export function inLaneCooldown(orchDir, lane, now = Date.now()) {
   const marker = readLaneCooldown(orchDir, lane);
   return !!marker && typeof marker.expiresAt === "number" && now < marker.expiresAt;
+}
+export function clearLaneCooldown(orchDir, lane) {
+  try {
+    rmSync(laneCooldownPath(orchDir, lane), { force: true });
+    return true;
+  } catch (err) {
+    log.warn({ lane, err: err.message }, "cat-58: lane cool-down clear failed — continuing");
+    return false;
+  }
 }
 export function parkLane(
   orchDir,

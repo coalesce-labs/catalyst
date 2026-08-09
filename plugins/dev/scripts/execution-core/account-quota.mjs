@@ -58,12 +58,16 @@ export function readAccountQuota(orchDir, { now = Date.now, log = defaultLog } =
 export function resolveAccountResetsAt(orchDir, { now = Date.now } = {}) {
   const snapshot = readAccountQuota(orchDir, { now });
   if (!snapshot) return null;
-  const fiveHourPct = Number(snapshot.fiveHourPct);
-  const sevenDayPct = Number(snapshot.sevenDayPct);
-  if (Number.isFinite(fiveHourPct) && Number.isFinite(sevenDayPct)) {
+  const fiveHourPct = snapshot.fiveHourPct;
+  const sevenDayPct = snapshot.sevenDayPct;
+  const hasFiveHourPct = typeof fiveHourPct === "number" && Number.isFinite(fiveHourPct);
+  const hasSevenDayPct = typeof sevenDayPct === "number" && Number.isFinite(sevenDayPct);
+  if (hasFiveHourPct && hasSevenDayPct) {
     return fiveHourPct > sevenDayPct
       ? snapshot.fiveHourResetsAt ?? snapshot.sevenDayResetsAt ?? null
       : snapshot.sevenDayResetsAt ?? snapshot.fiveHourResetsAt ?? null;
   }
+  if (hasFiveHourPct) return snapshot.fiveHourResetsAt ?? snapshot.sevenDayResetsAt ?? null;
+  if (hasSevenDayPct) return snapshot.sevenDayResetsAt ?? snapshot.fiveHourResetsAt ?? null;
   return snapshot.sevenDayResetsAt ?? snapshot.fiveHourResetsAt ?? null;
 }

@@ -889,6 +889,9 @@ function checkAccountUsageHeadroom(b) {
   // (CAT-40 locks that passthrough with a test), so the cliff judgment lives here.
   const near = deriveNearCliff(rl);
   const values = [rl.fiveHourPct, rl.sevenDayPct].filter((n) => typeof n === "number" && Number.isFinite(n));
+  if (values.length === 0) {
+    return invariant(true, 0, false, [], "account usage sample carries no utilization data");
+  }
   const pct = values.length ? Math.max(...values) : 0;
   const resetsAt = rl.sevenDayResetsAt ?? rl.fiveHourResetsAt ?? null;
   return invariant(!near, near ? 1 : 0, true, near ? ["account-usage"] : [], near ? `account at ${pct}% utilization — resets ${resetsAt ?? "unknown"}` : `account usage headroom ok (${pct}%)`, { fiveHourPct: rl.fiveHourPct ?? null, sevenDayPct: rl.sevenDayPct ?? null, resetsAt, nearCliffPct: NEAR_CLIFF_PCT });

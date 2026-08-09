@@ -46,6 +46,8 @@ describe("account quota snapshot", () => {
     expect(resolveAccountResetsAt(orchDir, { now: () => nowMs })).toBe("2026-08-08T20:00:00.000Z");
     writeAccountQuota(orchDir, { fiveHourResetsAt: "2026-08-08T20:00:00.000Z" }, { now: () => nowMs });
     expect(resolveAccountResetsAt(orchDir, { now: () => nowMs })).toBe("2026-08-08T20:00:00.000Z");
+    writeAccountQuota(orchDir, { fiveHourPct: null, sevenDayPct: 80, fiveHourResetsAt: "2026-08-08T20:00:00.000Z", sevenDayResetsAt: "2026-08-10T18:00:00.000Z" }, { now: () => nowMs });
+    expect(resolveAccountResetsAt(orchDir, { now: () => nowMs })).toBe("2026-08-10T18:00:00.000Z");
     writeAccountQuota(orchDir, {}, { now: () => nowMs });
     expect(resolveAccountResetsAt(orchDir, { now: () => nowMs })).toBeNull();
   });

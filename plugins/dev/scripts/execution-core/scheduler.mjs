@@ -77,6 +77,7 @@ import {
   isThenable,
   backstopOnRejection,
 } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) dispatch synchronously + backstop a rejected async dispatch
+import { clearLaneCooldown } from "./lane-cooldown.mjs";
 import {
   fetchTicketState,
   fetchTicketsBatch,
@@ -2550,7 +2551,7 @@ export function recordDispatchFailure(orchDir, ticket, phase, code, now, { expir
   const dir = join(orchDir, ".dispatch-cooldowns");
   const path = dispatchCooldownPath(orchDir, ticket, phase);
   const prev = readCooldownMarker(orchDir, ticket, phase);
-  let consecutiveFailures = 1;
+  let consecutiveFailures = countsTowardBreaker ? 1 : 0;
   if (prev?.code === code && typeof prev.consecutiveFailures === "number") {
     consecutiveFailures = countsTowardBreaker ? prev.consecutiveFailures + 1 : prev.consecutiveFailures;
   }
@@ -4765,6 +4766,7 @@ export function schedulerTick(
       const v = verifyDispatched(orchDir, ticket, phase, { requireBgJob: !dispatchWasAsync });
       if (v.ok) {
         clearDispatchCooldown(orchDir, ticket, phase); // CTL-624: success clears any prior cool-down
+        if (dispatch === defaultDispatch) clearLaneCooldown(orchDir, "bg");
         // CTL-660: record the VERIFIED launch. Re-read the signal for the
         // bg_job_id + worktreePath the launched worker wrote.
         const signal = readPhaseSignalRaw(orchDir, ticket, phase);
@@ -4824,6 +4826,17 @@ export function schedulerTick(
         });
       }
       return { ok: false, code: 0, reason, signal: null };
+    }
+
+    // A parked executor lane is infrastructure state, not a ticket failure.
+    // Arm a retry cooldown without incrementing the breaker or emitting a
+    // misleading phase.dispatch.failed event.
+    if (r.deferred) {
+      const cd = recordDispatchFailure(orchDir, ticket, phase, r.code, now(), {
+        countsTowardBreaker: false,
+        reasonCode: r.reason ?? "no-healthy-executor-lane",
+      });
+      return { ok: false, code: r.code, reason: r.reason, deferred: true, expiresAt: cd.expiresAt, signal: null };
     }
 
     // rc != 0 — real dispatch failure.
