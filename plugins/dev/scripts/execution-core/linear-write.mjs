@@ -207,7 +207,13 @@ export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache }) {
 // Unrecoverable reasons ("missing-label", "exclusive-conflict") are NOT retried;
 // every other reason is retryable next tick (labelOnce only writes its .applied
 // marker when applied: true, so a failure naturally retries).
-export function applyLabel({ ticket, label, exec = defaultExec }) {
+// CTL-1568 (Codex #2861 P1): `readLabels` is an injectable verification seam.
+// Default is unchanged (fetchTicketLabels → a live `linearis issues read`), so every
+// existing daemon caller behaves exactly as before. The recovery-pass SKILL path
+// passes a replica-backed reader instead: that path runs per escalation and its
+// read-back was adding a live, rate-limited single-ticket API call to a shared fleet
+// quota — the read-path rule in AGENTS.md exists precisely for this.
+export function applyLabel({ ticket, label, exec = defaultExec, readLabels = null }) {
   try {
     const writeRes = exec("linearis", [
       "issues",
@@ -226,7 +232,12 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
       );
       return { applied: false, reason };
     }
-    const labels = fetchTicketLabels(ticket, { exec });
+    // A readLabels seam returning null/undefined means "cannot serve this read"
+    // (replica stale, absent, or unreadable) — NOT "the label is missing". Fall back
+    // to the live read-back so verification is never weakened; only a real array
+    // short-circuits the API call.
+    let labels = readLabels ? readLabels(ticket) : null;
+    if (labels == null) labels = fetchTicketLabels(ticket, { exec });
     if (!Array.isArray(labels) || !labels.includes(label)) {
       log.warn(
         { ticket, label, readback: labels },
