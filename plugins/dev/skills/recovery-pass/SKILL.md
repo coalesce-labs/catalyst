@@ -634,7 +634,25 @@ Rubric Four governs rescuing orphaned committed work that has no PR.
 >
 > **ACT (Tier 1 — just do it):**
 >
-> 0. **Scope to the entry's OWN repository first.** One holistic scan can carry actionable
+> 0a. **Bind `ENTRY` from the brief before anything else.** The board-context renderer prints
+>    a human summary, not shell state, and this skill's prelude runs under `set -u` — so
+>    dereferencing `$ENTRY` without binding it aborts the whole rescue with
+>    `ENTRY: unbound variable`. Read the JSON brief directly and iterate:
+>
+>    ```bash
+>    BRIEF="${ORCH_DIR}/workers/${TICKET}/recovery-pass.json"
+>    # Only entries this host owns, that are dispatchable, and whose probe was verifiable.
+>    jq -c '.boardContext.unownedInFlightDetail[]?
+>           | select(.dispatchable == true and .unverifiable != true)' "$BRIEF" \
+>    | while IFS= read -r ENTRY; do
+>        REPO_ROOT="$(jq -r '.repoRoot // empty' <<<"$ENTRY")"
+>        BRANCH="$(jq -r '.branchName // empty' <<<"$ENTRY")"
+>        [ -n "$REPO_ROOT" ] && [ -n "$BRANCH" ] || { echo "skip: unscoped entry"; continue; }
+>        # … steps 0b–3 below, all chained off "$REPO_ROOT" / "$WORKTREE_PATH" …
+>      done
+>    ```
+>
+> 0b. **Scope to the entry's OWN repository first.** One holistic scan can carry actionable
 >    orphans from several enrolled repos, and you are running in the *anchor* ticket's repo.
 >    Every command below must be chained into the entry's `repoRoot`
 >    (`cd "$(jq -r '.repoRoot' <<<"$ENTRY")" && …`) — a bare `cd` on its own line that
@@ -643,8 +661,19 @@ Rubric Four governs rescuing orphaned committed work that has no PR.
 >    `repoRoot`, SKIP it and escalate; never guess. Skip any entry whose `owner` is not this
 >    host, and any with `dispatchable: false` or `unverifiable: true`.
 > 1. Rebuild the worktree from **the branch the probe actually found** — pass the entry's
->    `branchName`, NOT the bare ticket key:
->    `cd "$REPO_ROOT" && create-worktree.sh "$(jq -r '.branchName' <<<"$ENTRY")"`.
+>    `branchName`, NOT the bare ticket key, and **capture the path it prints**:
+>
+>    ```bash
+>    WORKTREE_PATH="$(cd "$REPO_ROOT" && create-worktree.sh "$BRANCH" | sed -n 's/^WORKTREE_PATH=//p')"
+>    [ -n "$WORKTREE_PATH" ] && [ -d "$WORKTREE_PATH" ] || { echo "skip: no worktree"; continue; }
+>    ```
+>
+>    `create-worktree.sh` **returns to its caller** and only prints `WORKTREE_PATH` — it does
+>    not leave you inside the new tree. Every step below must therefore be chained through
+>    `cd "$WORKTREE_PATH" && …`; running the rebase/push/PR helpers in the recovery worker's
+>    original checkout rebases and opens a PR from the WRONG branch, omitting the very
+>    orphaned commits being rescued. This is separate from the repo-scoping in 0b: it bites
+>    even once you are in the correct repository.
 >    `create-worktree.sh` fetches and seeds exclusively from `origin/<worktree_name>`
 >    (CTL-1640), so when the orphaned work lives on Linear's branch-name slug rather than
 >    `refs/heads/<TICKET>`, passing the ticket key makes BOTH the fetch and the seed miss —
@@ -655,12 +684,24 @@ Rubric Four governs rescuing orphaned committed work that has no PR.
 >    `origin/<branchName>`, and `git rev-list --count origin/<base>..HEAD` must match the
 >    entry's `commitsAhead`. If it does not, STOP and escalate — do not open a PR over a
 >    worktree that lost the work.
-> 2. Source BOTH lib primitives — `source "${PLUGIN_ROOT}/scripts/lib/worktree-rebase.sh"`
+> 2. **Inside `$WORKTREE_PATH`**, source BOTH lib primitives —
+>    `source "${PLUGIN_ROOT}/scripts/lib/worktree-rebase.sh"`
 >    (owns `rebase_onto_base_classified`) and `source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"`
 >    (owns `draft_pr_push_verify` / `draft_pr_ensure`), exactly as RUBRIC TWO does. Rebase onto
 >    `origin/<base>` via `rebase_onto_base_classified`, then run `draft_pr_push_verify` and
 >    `draft_pr_ensure` to open a **draft** PR. Draft, not ready: this work was never reviewed
->    and may be mid-phase.
+>    and may be mid-phase. Chain the whole step so it cannot run in the caller's checkout:
+>
+>    ```bash
+>    cd "$WORKTREE_PATH" && source "${PLUGIN_ROOT}/scripts/lib/worktree-rebase.sh" \
+>      && source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" \
+>      && rebase_onto_base_classified && draft_pr_push_verify && draft_pr_ensure
+>    ```
+>
+>    Before opening the PR, confirm you are on the rescued work: `git rev-parse --abbrev-ref HEAD`
+>    must be `$BRANCH` and `git rev-list --count origin/<base>..HEAD` must match the entry's
+>    `commitsAhead`. If either disagrees, STOP and escalate rather than opening a PR that
+>    silently contains nothing.
 >
 >    **The draft requirement is load-bearing — enforce it, don't assume it.** When
 >    `gh pr create --draft` is rejected or transiently fails, `draft_pr_ensure` RETRIES

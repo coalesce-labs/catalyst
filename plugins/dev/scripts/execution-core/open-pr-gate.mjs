@@ -311,12 +311,25 @@ export function defaultCheckOpenPrs(
       "100",
     ]))
       if (p && p.number != null) seen.set(p.number, p);
-    if (head) {
+    // CAT-11 (Codex P1 round 3): probe BOTH the Linear branch-name slug and the
+    // TICKET-KEY head. execution-core pushes orphaned work to `refs/heads/<TICKET>`
+    // (dispatch.mjs passes `expectedBranch: ticket`, create-worktree.sh seeds from
+    // `origin/<TICKET>`), so a PR on that branch whose title/body omit the key, whose
+    // Linear branchName is a different slug, and which has no attachment was missed by
+    // all three passes — and this result is authoritative, so it admitted duplicate-PR
+    // salvage on exactly the orphan population this gate exists to catch. `--search` is
+    // an issue/PR search query, not a branch filter, so it does not cover this.
+    const heads = [];
+    for (const h of [head, ticket]) {
+      const name = h == null ? "" : String(h).trim();
+      if (name && !heads.includes(name)) heads.push(name);
+    }
+    for (const h of heads) {
       for (const p of gh([
         "pr",
         "list",
         "--head",
-        head,
+        h,
         "--state",
         "open",
         "--json",

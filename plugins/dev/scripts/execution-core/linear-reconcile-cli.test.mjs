@@ -950,3 +950,48 @@ test("ENUMERATOR (CAT-11): an EMPTY attachment derivation still yields a clean a
   expect(r.unverifiable).toBeFalsy();
   expect(r.prs).toEqual([]);
 });
+
+// CAT-11 (Codex P1 round 3): the enumerator must probe the TICKET-KEY head too.
+// execution-core pushes orphaned work to refs/heads/<TICKET>, so a PR on that branch
+// whose title/body omit the key, whose Linear branchName is a different slug, and
+// which has no attachment was missed by all three passes — while the result still
+// claimed to be authoritative, admitting duplicate-PR salvage on exactly the orphan
+// population this gate exists to catch. `--search` is a search query, not a branch filter.
+test("ENUMERATOR (CAT-11): a PR on the TICKET-KEY branch is found even with no key in the title", () => {
+  const heads = [];
+  const runGh = (args) => {
+    if (args.includes("--head")) {
+      const h = args[args.indexOf("--head") + 1];
+      heads.push(h);
+      if (h === "CTL-9") return [{ number: 777, state: "OPEN", isDraft: true, title: "some work" }];
+      return [];
+    }
+    return []; // --search finds nothing: the key appears nowhere in title/body
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => "ryan/ctl-9-a-different-linear-slug",
+    deriveAttachmentPrs: () => [],
+  });
+  expect(heads).toContain("CTL-9");
+  expect(heads).toContain("ryan/ctl-9-a-different-linear-slug");
+  expect(r.prs.map((p) => p.number)).toEqual([777]);
+  expect(r.ok).toBe(false); // an open PR was found ⇒ not a clean "no open PRs"
+});
+
+// The ticket-key head must not double-count when it IS the Linear branch name.
+test("ENUMERATOR (CAT-11): ticket-key head is deduped against an identical branchName", () => {
+  const heads = [];
+  const runGh = (args) => {
+    if (args.includes("--head")) {
+      heads.push(args[args.indexOf("--head") + 1]);
+      return [{ number: 42, state: "OPEN", isDraft: false, title: "t" }];
+    }
+    return [];
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh, deriveBranchName: () => "CTL-9", deriveAttachmentPrs: () => [],
+  });
+  expect(heads).toEqual(["CTL-9"]);
+  expect(r.prs.map((p) => p.number)).toEqual([42]);
+});
