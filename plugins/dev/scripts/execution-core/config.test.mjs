@@ -1490,6 +1490,27 @@ describe("readProductivityBoardHealthConfig (CAT-57)", () => {
     process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
     expect(readProductivityBoardHealthConfig().mode).toBe("shadow");
   });
+
+  // CAT-57 (Codex P2): the documented contract is "Garbage values fall back to
+  // `shadow`. Overrides Layer-2." Falling through to Layer-2 on a typo meant an
+  // operator reaching for the env var to REDUCE actuation silently left Layer-2
+  // `enforce` live — the wrong failure direction for a shadow-first knob.
+  test("a SET-but-invalid env value falls back to shadow AND overrides Layer-2 enforce", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { productivity: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    // Baseline: with no env var, Layer-2 enforce is honored.
+    expect(readProductivityBoardHealthConfig().mode).toBe("enforce");
+    for (const typo of ["enfore", "shadwo", "ENFORCE ", "1", "true"]) {
+      process.env.CATALYST_BH_PRODUCTIVITY = typo;
+      expect(readProductivityBoardHealthConfig().mode).toBe("shadow");
+    }
+    // An UNSET or empty/whitespace var still defers to Layer-2 (not an override).
+    for (const empty of ["", "   "]) {
+      process.env.CATALYST_BH_PRODUCTIVITY = empty;
+      expect(readProductivityBoardHealthConfig().mode).toBe("enforce");
+    }
+  });
 });
 
 describe("readCoordinationConfig (CTL-1488)", () => {

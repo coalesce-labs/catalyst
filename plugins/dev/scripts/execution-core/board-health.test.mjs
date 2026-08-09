@@ -2896,6 +2896,54 @@ describe("CAT-57 nodeProductivity invariant", () => {
     expect(ev.details.unproductiveNodeCount).toBe(1);
   });
 
+  // CAT-57 (Codex P1): shadow used to pass [] as `flagged`, so both telemetry
+  // sinks derived from it read 0/empty and a shadow scan that DID detect an
+  // unproductive peer was indistinguishable from a healthy one — the shadow-first
+  // observation period observed nothing.
+  test("shadow REPORTS the detected peers without actuating on them", () => {
+    const b = productivityBoard({ productivityMode: "shadow" });
+    const invs = evaluateInvariants(b);
+    const r = invs.nodeProductivity;
+
+    // Detection is preserved and reaches BOTH telemetry sinks...
+    expect(r.flagged).toEqual(["peer"]);
+    expect(r.unproductive.peer).toMatchObject({ ageMs: 48 * HOUR, ownedTickets: ["CAT-PEER"] });
+    expect(buildBoardContext(b, invs).unproductiveNodes).toEqual([
+      { host: "peer", lastAdvanceAt: stale, ageMs: 48 * HOUR, ownedTickets: ["CAT-PEER"] },
+    ]);
+    expect(
+      buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, b), board: b })
+        .details.unproductiveNodeCount,
+    ).toBe(1);
+
+    // ...while staying strictly non-actuating: ok stays true and observable false,
+    // so proposeMoves' `!ok` gate yields no tier-3 escalate.
+    expect(r).toMatchObject({ ok: true, failed: 0, observable: false });
+    expect(proposeMoves(invs, b).tier3.some((m) => m.move === "escalate-unproductive-node")).toBe(false);
+  });
+
+  // CAT-57 (Codex P2): the board snapshot retains Done/Canceled rows, so a peer
+  // whose entire HRW share has already shipped must not count as owning work.
+  test("terminal tickets are not part of a peer's owned share", () => {
+    for (const state of ["Done", "Canceled", "Duplicate", "Merged"]) {
+      const r = evaluateInvariants(productivityBoard({
+        ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER", state }]]),
+      })).nodeProductivity;
+      expect(r.flagged).toEqual([]);
+    }
+    // Non-vacuity: the identical fixture in a NON-terminal state is still flagged,
+    // and a peer keeps its share when only SOME of its tickets are terminal.
+    expect(evaluateInvariants(productivityBoard({
+      ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER", state: "In Progress" }]]),
+    })).nodeProductivity.flagged).toEqual(["peer"]);
+    expect(evaluateInvariants(productivityBoard({
+      ticketsById: new Map([
+        ["CAT-DONE", { identifier: "CAT-DONE", state: "Done" }],
+        ["CAT-PEER", { identifier: "CAT-PEER", state: "Todo" }],
+      ]),
+    })).nodeProductivity.unproductive.peer.ownedTickets).toEqual(["CAT-PEER"]);
+  });
+
   test("off omits key and never reads productivity seam", () => {
     expect(evaluateInvariants(productivityBoard({ mode: "off" }), { mode: "off" }).nodeProductivity).toBeUndefined();
     let called = 0;

@@ -314,7 +314,17 @@ function ownedTicketsByHost(board) {
   if (typeof board?.ownerForTicket !== "function") return null;
   const out = new Map();
   try {
-    for (const [id] of board.ticketsById ?? []) {
+    for (const [id, d] of board.ticketsById ?? []) {
+      // CAT-57 (Codex P2): skip TERMINAL descriptors. The production board snapshot
+      // drops removed rows but RETAINS Done/Canceled tickets, so a peer whose whole
+      // HRW share has already shipped still read as "owns work" — and once its last
+      // advance aged past the threshold it was reported unproductive with nothing
+      // left to advance. Productivity is about dispatchable work, so terminal
+      // tickets are not part of the share. BLOCKER_DONE_RE (not TERMINAL_STATUSES)
+      // is the right matcher here: these are Linear STATE names, and it is the one
+      // that covers cancelled/duplicate as well as done/complete/merged.
+      const state = d?.state ?? d?.linear_state ?? null;
+      if (state && BLOCKER_DONE_RE.test(String(state))) continue;
       // Productivity describes each peer's dispatchable share, so use the same
       // liveness-filtered roster that dispatch admission uses.
       const host = board.ownerForTicket(id, board.dispatchRoster ?? board.roster);
@@ -933,7 +943,16 @@ function checkNodeProductivity(b, t) {
   const note = flagged.length
     ? `${flagged.length} live owning node(s) have not advanced work past a phase boundary`
     : "all known live owning peers are productive";
-  if (mode !== "enforce") return invariant(true, 0, false, [], `${mode}: ${note}`, { unproductive: details });
+  // CAT-57 (Codex P1): shadow must still REPORT what it detected. Passing [] here
+  // erased the populated `flagged` set, and both telemetry sinks derive from it —
+  // buildBoardScanEvent's unproductiveNodeCount (flagged.length) and
+  // buildBoardContext's unproductiveNodes (flagged.map(...)) — so a shadow scan that
+  // found unproductive peers emitted 0/empty, indistinguishable from a healthy scan.
+  // That defeats the shadow-first observation period this invariant ships behind.
+  // Carrying `flagged` stays non-actuating: proposeMoves gates the tier-3
+  // escalate-unproductive-node on `!invariants.nodeProductivity.ok`, and ok stays
+  // true here (observable:false likewise keeps Gate 3 from reading it).
+  if (mode !== "enforce") return invariant(true, 0, false, flagged, `${mode}: ${note}`, { unproductive: details });
   return invariant(flagged.length === 0, flagged.length, true, flagged, note, { unproductive: details });
 }
 

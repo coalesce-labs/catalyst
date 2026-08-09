@@ -316,6 +316,7 @@ import {
   readGithubQuotaBoardHealthConfig,
   readProductivityBoardHealthConfig,
   getLivenessAnchorIssue,
+  getLivenessReadSource,
   readReclaimGatewayFreshMs,
   isThrottled,
 } from "./config.mjs";
@@ -6074,6 +6075,24 @@ export function schedulerTick(
           getPeerProductivity:
             _boardHealth.getPeerProductivity ??
             (() => {
+              // CAT-57 (Codex P1): honor the CONFIGURED cross-host liveness source.
+              // Under CATALYST_LIVENESS_READ_SOURCE=loki the publisher deliberately
+              // stops updating the Linear anchor attachment (see its tick(): it
+              // returns early once readSource() !== "linear"). Reading that frozen
+              // attachment here would (a) score every peer off a stale record — no
+              // fresh last_advance_at, so each peer is silently skipped even under
+              // productivity=enforce, which reads as "all peers productive" rather
+              // than "unobservable" — and (b) reintroduce the very periodic Linear
+              // read that mode exists to retire. Return null so nodeProductivity
+              // reports observable:false honestly until a Loki-backed productivity
+              // read exists.
+              if (getLivenessReadSource() !== "linear") return null;
+              // CAT-57 (Codex P2): single-host is unobservable by construction —
+              // checkNodeProductivity rejects roster.length <= 1 before ever looking
+              // at this value — so never spend a Linear read (nor block the tick on
+              // a subprocess) for data that cannot change the result. Mirrors the
+              // liveness publisher's own single-host exact no-op.
+              if (!Array.isArray(roster) || roster.length <= 1) return null;
               const anchorIssue = getLivenessAnchorIssue();
               return anchorIssue ? readPeerHeartbeatsSyncCached({ anchorIssue }) : null;
             }),
