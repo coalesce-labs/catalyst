@@ -25,6 +25,7 @@ import {
   classifyRevivalRoute,
   // CTL-1552: the parked-by-human label reader + the deferred-anchor filter it feeds.
   isParkedByHuman,
+  isHumanEscalatedSignal,
   eligibleDeferredAnchors,
   makeOwnsFilter,
   resolveRosterSeam,
@@ -660,24 +661,24 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
   });
 
   test("Gate 2: failures but freeSlots===0 → skip/no-free-slots", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1) };
+    const invs = { ...allGreen(), blockedTree: inv(false, 1, true, ["CTL-1"]) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 0 } }));
     expect(d.gate.decision).toBe("skip");
     expect(d.gate.reason).toBe("no-free-slots");
   });
 
   test("Gate 3: failures + free slots + rate-limit cliff → skip/rate-limit-cliff", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), rateLimitHeadroom: inv(false, 1) };
+    const invs = { ...allGreen(), blockedTree: inv(false, 1, true, ["CTL-1"]), rateLimitHeadroom: inv(false, 1) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     expect(d.gate.decision).toBe("skip");
     expect(d.gate.reason).toBe("rate-limit-cliff");
   });
 
-  test("Gate 4: real observable failures + headroom → proceed + tiered proposals", () => {
+  test("CAT-76: ticket-less dispatch-liveness note is visible but does not proceed", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
-    expect(d.gate.decision).toBe("proceed");
-    expect(d.gate.reason).toMatch(/invariant\(s\) flagged/);
+    expect(d.gate.decision).toBe("skip");
+    expect(d.gate.reason).toBe("no-actionable-moves");
     expect(d.invariantsFailed).toBe(1);
     expect(d.proposed.tier1).toBe(1); // dispatch wedge → kick-dispatch
   });
@@ -821,6 +822,42 @@ describe("CTL-1552 — parked-by-human label suppression", () => {
 
 });
 
+describe("CAT-76 — authored escalation suppression", () => {
+  const authored = { status: "needs-human", explanation: { escalation_type: "decision", problem: "choose base", call_to_action: "choose", options: ["A", "B"], why_you: "operator decision" } };
+
+  test("recognizes authored needs-human and stalled signals, failing open otherwise", () => {
+    expect(isHumanEscalatedSignal(authored)).toBe(true);
+    expect(isHumanEscalatedSignal({ ...authored, status: "stalled" })).toBe(true);
+    expect(isHumanEscalatedSignal({ ...authored, explanation: { ...authored.explanation, degraded: true } })).toBe(false);
+    expect(isHumanEscalatedSignal({ status: "needs-human" })).toBe(false);
+    expect(isHumanEscalatedSignal({ status: "needs-human", explanation: null })).toBe(false);
+    expect(isHumanEscalatedSignal({ ...authored, status: "in-progress" })).toBe(false);
+    expect(isHumanEscalatedSignal(null)).toBe(false);
+  });
+
+  test("assembleBoardState default is inert; bound authored signal suppresses proposals and eligible fallback", () => {
+    const opts = { getBoard: () => [{ identifier: "CAT-40", state: "Todo" }], getWorkerSignals: () => [], getEligible: () => [{ identifier: "CAT-40" }] };
+    const inert = assembleBoardState(opts);
+    expect(inert.humanEscalatedTickets.size).toBe(0);
+    const board = assembleBoardState({ ...opts, readEscalationSignal: () => authored });
+    expect([...board.humanEscalatedTickets]).toEqual(["CAT-40"]);
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CAT-40"]), workerAge: inv(false, 1, true, ["CAT-40"]) };
+    expect([...proposeMoves(invs, board).tier1, ...proposeMoves(invs, board).tier2].some((m) => m.ticket === "CAT-40")).toBe(false);
+    expect(selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board)).not.toContain("CAT-40");
+    const decision = decideBoardHealth(invs, { ...board, capacity: { freeSlots: 4 } });
+    expect(decision.gate.reason).toBe("no-actionable-moves");
+    expect(decision.sanctioned).toContain("CAT-40");
+  });
+
+  test("missing or degraded explanation remains anchorable", () => {
+    for (const signal of [{ status: "needs-human" }, { ...authored, explanation: { ...authored.explanation, degraded: true } }]) {
+      const board = assembleBoardState({ getBoard: () => [{ identifier: "CAT-40", state: "Todo" }], getEligible: () => [], readEscalationSignal: () => signal });
+      const moves = proposeMoves({ ...allGreen(), needsHumanPile: inv(false, 1, true, ["CAT-40"]) }, board);
+      expect(moves.tier1.map((m) => m.ticket)).toContain("CAT-40");
+    }
+  });
+});
+
 // ─── CTL-1432 (B2): deferred board-health intents become anchor candidates ──────
 describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () => {
   test("a deferred board-health ticket (on the live board) with NO invariant flag is a self-owned anchor candidate", () => {
@@ -955,7 +992,7 @@ describe("buildBoardScanEvent", () => {
   });
 
   test("type/ticket/scalars at top of details; rosters as arrays; mode echoed", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-1"]) };
     const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision });
 
@@ -968,7 +1005,7 @@ describe("buildBoardScanEvent", () => {
     expect(typeof ev.details.gateReason).toBe("string");
     expect(ev.details.proposedTier1).toBe(decision.proposed.tier1);
     // per-invariant {ok,failed,observable}
-    expect(ev.details.invariants.dispatchLiveness).toEqual({ ok: false, failed: 1, observable: true });
+    expect(ev.details.invariants.workerAge).toEqual({ ok: false, failed: 1, observable: true });
     // rosters/move arrays live in details (→ body.payload), as arrays
     expect(Array.isArray(ev.details.flagged)).toBe(true);
     expect(ev.details.flagged).toContain("CTL-1");
@@ -1196,8 +1233,8 @@ function flaggedDeps(extra = {}) {
   // a board that trips dispatchLiveness (free slots + queue + no recent dispatch)
   return {
     orchDir: "/tmp/x",
-    getBoard: () => [],
-    getWorkerSignals: () => [],
+    getBoard: () => [{ identifier: "CTL-1", state: "Implement" }],
+    getWorkerSignals: () => [{ ticket: "CTL-1", phase: "implement", status: "running", updatedAt: new Date(NOW - 5 * HOUR).toISOString() }],
     getEligible: () => [{ identifier: "CTL-1" }, { identifier: "CTL-2" }],
     roster: [],
     self: "mini",
@@ -1528,6 +1565,8 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
       flaggedDeps({
         mode: "enforce",
         getEligible: () => [], // no queue → no dispatch wedge → all-green → gate=skip
+        getBoard: () => [],
+        getWorkerSignals: () => [],
         emit: (e) => emits.push(e),
         act: () => { throw new Error("must not act — gate held"); },
       }),
@@ -1572,7 +1611,7 @@ describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 
     // exact nesting the daemon writes (buildRecoveryEnvelope → body.payload.details).
     // Before the fix, deriveRing read payload.mode (null) and every enforce scan was
     // filtered out — silently disabling the invariant in production.
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-1"]) };
     const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     const flat = buildBoardScanEvent({
       mode: "enforce",
