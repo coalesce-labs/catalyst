@@ -6160,6 +6160,9 @@ export function schedulerTick(
   // Dependency-ready subset of the above — the starvation streak's input.
   let triagedWaitingReadyCount = 0;
   const heldReasons = [];
+  // CAT-36: sweep 2's heldReasons names only new-work holds. Admission holds
+  // imply different operator actions, so preserve them as a distinct field.
+  const admissionHeld = [];
   {
     // A.1 — the triaged-waiting pool: exactly the set sweep 1 would free-promote
     // this tick (triage:done, no research signal, not parked). Covers live
@@ -6506,6 +6509,10 @@ export function schedulerTick(
           reason = "awaiting-capacity-or-priority";
         }
         // else: admitted → desired null → clear-on-pickup (both labels removed).
+
+        if (desired !== null && admissionHeld.length < HELD_LOG_CAP) {
+          admissionHeld.push({ ticket, reason });
+        }
 
         // CTL-764 findings B + F: the worker.transition emission must reflect the
         // ticket's TRUE disposition. needs-human is sticky + exclusive, so when it is
@@ -7450,7 +7457,7 @@ export function schedulerTick(
       lastHoldLogged.delete(t.identifier);
       return true;
     }
-    if (heldReasons.length < 20) {
+    if (heldReasons.length < HELD_LOG_CAP) {
       heldReasons.push({ ticket: t.identifier, reason: readiness.reason });
     }
     const previousHold = lastHoldLogged.get(t.identifier);
@@ -8117,6 +8124,7 @@ export function schedulerTick(
         triaged_waiting: triagedWaitingCount,
         triaged_waiting_ready: triagedWaitingReadyCount,
         held: heldReasons,
+        admission_held: admissionHeld,
       },
       "scheduler: board appears frozen — queued work cannot make progress (CAT-36)"
     );
@@ -8362,6 +8370,7 @@ const lastHoldLogged = new Map();
 const STARVATION_WARN_STREAK = 3;
 const STARVATION_REWARN_EVERY = 10;
 const HOLD_RELOG_EVERY = 10;
+const HELD_LOG_CAP = 20;
 // A scheduler process owns one orchDir, so one process-wide streak is sufficient.
 let starvationStreak = 0;
 // CTL-764 Phase 5: last-emitted disposition per ticket for the worker.transition

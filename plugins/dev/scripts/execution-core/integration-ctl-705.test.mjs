@@ -90,6 +90,53 @@ function makeRealDispatch() {
   return fn;
 }
 
+function seedTriagedWaiter(baseDir, ticket) {
+  const dir = join(baseDir, "workers", ticket);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "phase-triage.json"),
+    JSON.stringify({ ticket, phase: "triage", status: "done" })
+  );
+}
+
+function admissionOpts({
+  eligible = [],
+  fetchBatch = (ids) =>
+    new Map(
+      ids.map((id) => [
+        id,
+        {
+          state: "In Progress",
+          priority: 1,
+          labels: [],
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [] },
+        },
+      ])
+    ),
+  hasTriageArtifact = () => true,
+} = {}) {
+  return {
+    readEligible: () => eligible,
+    reclaimDeadWork: noopReclaim,
+    liveBackgroundCount: () => 0,
+    dispatch: makeRealDispatch(),
+    hasTriageArtifact,
+    listStartedTickets: () => new Set(),
+    fetchBatch,
+    livenessIsFresh: () => false,
+    isDraining: () => false,
+    recoveryPass: { mode: "off" },
+    boardHealth: { mode: "off" },
+    writeStatus: {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+      removeLabel: () => ({ removed: true }),
+    },
+  };
+}
+
 const noopReclaim = () => "noop";
 
 describe("CAT-36 new-work admission", () => {
@@ -242,6 +289,88 @@ describe("CAT-36 starvation warning cadence", () => {
   test("counts queued work blocked by stale liveness with a distinct reason", () => {
     const result = nextStarvationState(2, { ...idle, freeSlots: 0, livenessFresh: false });
     expect(result).toEqual({ streak: 3, warn: true, reason: "stale-liveness" });
+  });
+
+  test("the frozen-board warn names each admission-held waiter and its reason", () => {
+    const warnings = [];
+    const realWarn = log.warn;
+    seedTriagedWaiter(orchDir, "CTL-WAIT-A");
+    seedTriagedWaiter(orchDir, "CTL-WAIT-B");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    try {
+      log.warn = (...args) => warnings.push(args);
+      for (let tick = 0; tick < 3; tick += 1) schedulerTick(orchDir, admissionOpts());
+      const frozen = warnings.find((args) =>
+        args.some((a) => typeof a === "string" && a.includes("board appears frozen"))
+      );
+      expect(frozen).toBeDefined();
+      expect(frozen.find((a) => a && typeof a === "object")?.admission_held).toEqual(
+        expect.arrayContaining([
+          { ticket: "CTL-WAIT-A", reason: "awaiting-capacity-or-priority" },
+          { ticket: "CTL-WAIT-B", reason: "awaiting-capacity-or-priority" },
+        ])
+      );
+    } finally {
+      log.warn = realWarn;
+    }
+  });
+
+  test("the frozen-board warn distinguishes dependency-blocked admission waiters", () => {
+    const warnings = [];
+    const realWarn = log.warn;
+    seedTriagedWaiter(orchDir, "CTL-READY");
+    seedTriagedWaiter(orchDir, "CTL-BLOCKED");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const fetchBatch = (ids) =>
+      new Map(
+        ids.map((id) => [
+          id,
+          {
+            state: "In Progress",
+            priority: 1,
+            labels: [],
+            relations:
+              id === "CTL-BLOCKED"
+                ? { nodes: [{ type: "blocked_by", relatedIssue: { identifier: "CTL-DEP" } }] }
+                : { nodes: [] },
+            inverseRelations: { nodes: [] },
+          },
+        ])
+      );
+    try {
+      log.warn = (...args) => warnings.push(args);
+      for (let tick = 0; tick < 3; tick += 1) {
+        schedulerTick(orchDir, admissionOpts({ fetchBatch }));
+      }
+      const frozen = warnings.find((args) =>
+        args.some((a) => typeof a === "string" && a.includes("board appears frozen"))
+      );
+      expect(frozen).toBeDefined();
+      expect(frozen.find((a) => a && typeof a === "object")?.admission_held).toContainEqual({
+        ticket: "CTL-BLOCKED",
+        reason: "blocked-by-open-dependency",
+      });
+    } finally {
+      log.warn = realWarn;
+    }
+  });
+
+  test("admission-held details are capped on a large frozen board", () => {
+    const warnings = [];
+    const realWarn = log.warn;
+    for (let i = 1; i <= 25; i += 1) seedTriagedWaiter(orchDir, `CTL-WAIT-${i}`);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 25 }));
+    try {
+      log.warn = (...args) => warnings.push(args);
+      for (let tick = 0; tick < 3; tick += 1) schedulerTick(orchDir, admissionOpts());
+      const frozen = warnings.find((args) =>
+        args.some((a) => typeof a === "string" && a.includes("board appears frozen"))
+      );
+      expect(frozen).toBeDefined();
+      expect(frozen.find((a) => a && typeof a === "object")?.admission_held).toHaveLength(20);
+    } finally {
+      log.warn = realWarn;
+    }
   });
 
   // Regression guard for the phase-review finding: hasWaitingWork must be derived
