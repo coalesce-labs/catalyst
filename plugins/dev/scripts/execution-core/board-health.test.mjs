@@ -11,12 +11,14 @@
 import { describe, test, expect } from "bun:test";
 import {
   assembleBoardState,
+  DEFAULT_THRESHOLDS,
   evaluateInvariants,
   decideBoardHealth,
   proposeMoves,
   selectAnchor,
   selectAnchorCandidates,
   buildBoardContext,
+  buildUnownedInFlightDetail,
   buildBoardScanEvent,
   boardHealthPass,
   // CTL-1524 (C4b): lazy deadHosts resolution (array OR thunk)
@@ -119,12 +121,18 @@ function mkBoard(o = {}) {
     deadHosts: o.deadHosts ?? [],
     // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite lookup.
     repoForTicket: o.repoForTicket ?? null,
+    verifyOpenPrs: o.verifyOpenPrs ?? null,
+    getBranchSalvage: o.getBranchSalvage ?? null,
     // CTL-1432 (B2/B3): deferred board-health anchor candidates + sanctioned latch allowlist.
     deferredBoardHealth: o.deferredBoardHealth ?? [],
     sanctionedNeedsHuman: o.sanctionedNeedsHuman ?? [],
     // CTL-1644: per-ticket evidence map for the stranded-mid-pipeline check.
     // Empty Map default ⇒ checkStrandedMidPipeline stays observable:false (shadow-first).
     strandedEvidence: o.strandedEvidence ?? new Map(),
+    // CAT-11 (Codex round 1): rotation cursor + injectable monotonic clock for the
+    // budgeted open-PR verification loop. Both are INPUTS — the invariant stays pure.
+    unownedPrVerifyCursor: o.unownedPrVerifyCursor ?? 0,
+    ...(o.monotonicNowMs ? { monotonicNowMs: o.monotonicNowMs } : {}),
     now: o.now ?? NOW,
   };
 }
@@ -1038,7 +1046,7 @@ describe("buildBoardContext", () => {
     const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-OLD"]) };
     const ctx = buildBoardContext(board, invs);
 
-    expect(ctx.schema).toBe("recovery-board-context/v3");
+    expect(ctx.schema).toBe("recovery-board-context/v4");
     expect(ctx.slots).toEqual({ capacity: 4, inUse: 2, free: 2 });
     expect(ctx.eligibleQueue.depth).toBe(2);
     expect(ctx.eligibleQueue.topTickets).toEqual(["CTL-1", "CTL-2"]);
@@ -1229,7 +1237,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     // falls back to the top eligible ticket.
     expect(acted[0].anchor).toBe("CTL-1");
     // the delegate gets the WHOLE-board context, not a per-item brief.
-    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v3");
+    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v4");
     expect(acted[0].decision.gate.decision).toBe("proceed");
     // the act result is threaded back into the pass result (observability).
     expect(r.act).toEqual({ dispatched: true, attempts: 1 });
@@ -2036,6 +2044,173 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   });
 });
 
+describe("checkUnownedInFlight — authoritative PR confirmation (CAT-11)", () => {
+  const now = Date.parse("2026-08-09T00:00:00.000Z");
+  const stale = (id, hoursAgo = 72, overrides = {}) => [id, {
+    identifier: id, state: "Implement",
+    updatedAt: new Date(now - hoursAgo * HOUR).toISOString(), ...overrides,
+  }];
+  const run = (overrides = {}, thresholds = {}) => {
+    const board = mkBoard({ now, mode: "enforce", ticketsById: new Map([stale("CAT-11")]), ...overrides });
+    return evaluateInvariants(board, { thresholds }).unownedInFlight;
+  };
+
+  test("unbound confirmation seam preserves the historical flagged cohort", () => {
+    const r = run();
+    expect(r.flagged).toEqual(["CAT-11"]);
+    expect(r.confirmedNoPr).toBe(0);
+  });
+
+  test("an authoritatively discovered open PR spares the ticket", () => {
+    const r = run({ verifyOpenPrs: () => ({ ok: false, prs: [{ number: 72, state: "OPEN" }] }) });
+    expect(r.flagged).toEqual([]);
+    expect(r.sparedByPrDiscovery).toBe(1);
+  });
+
+  test("an authoritative empty result confirms and flags PROJ-5's shape", () => {
+    const r = run({ verifyOpenPrs: () => ({ ok: true, prs: [] }) });
+    expect(r.flagged).toEqual(["CAT-11"]);
+    expect(r.confirmedNoPr).toBe(1);
+  });
+
+  test("unverifiable and thrown checks spare conservatively", () => {
+    for (const verifyOpenPrs of [
+      () => ({ ok: false, unverifiable: true, reason: "gh failed", prs: [] }),
+      () => ({ unverifiable: true, prs: [{ number: 9 }] }),
+      () => { throw new Error("gh failed"); },
+    ]) {
+      const r = run({ verifyOpenPrs });
+      expect(r.flagged).toEqual([]);
+      expect(r.unverifiablePrChecks).toBe(1);
+    }
+  });
+
+  test("confirmation runs only for candidates surviving every cheap predicate", () => {
+    const calls = [];
+    const ticketsById = new Map([
+      stale("CAT-CANDIDATE"), stale("CAT-TODO", 72, { state: "Todo" }),
+      stale("CAT-DONE", 72, { state: "Done" }), stale("CAT-LIVE"),
+      stale("CAT-PR", 72, { pr_number: 4 }), stale("CAT-FRESH", 1),
+    ]);
+    const r = run({
+      ticketsById,
+      signals: [{ ticket: "CAT-LIVE", status: "running" }],
+      prStatusMap: mkPrStatusMap([{ prNumber: 4, status: "open" }]),
+      verifyOpenPrs: (ticket) => { calls.push(ticket); return { prs: [] }; },
+    });
+    expect(calls).toEqual(["CAT-CANDIDATE"]);
+    expect(r.flagged).toEqual(["CAT-CANDIDATE"]);
+  });
+
+  test("oldest-first budget caps calls and never flags the unconfirmed tail", () => {
+    const calls = [];
+    const ticketsById = new Map(Array.from({ length: 7 }, (_, i) => stale(`CAT-${i}`, 72 - i)));
+    const r = run({ ticketsById, verifyOpenPrs: (ticket) => {
+      calls.push(ticket); return { prs: [] };
+    } }, { unownedPrVerifyMax: 3 });
+    expect(calls).toEqual(["CAT-0", "CAT-1", "CAT-2"]);
+    expect(r.flagged).toEqual(["CAT-0", "CAT-1", "CAT-2"]);
+    expect(r.unconfirmedForBudget).toBe(4);
+  });
+
+  // CAT-11 (review): the kill switch is an operator escape hatch — it must restore
+  // the pre-CAT-11 cohort exactly, not a budget-truncated subset of it. A verifier
+  // that answers null still binds the seam, so the budgeted branch silently drops
+  // every candidate past unownedPrVerifyMax.
+  test("kill-switch cohort is identical to the unbound-seam cohort", () => {
+    const ticketsById = new Map(Array.from({ length: 9 }, (_, i) => stale(`CAT-${i}`, 72 - i)));
+    const thresholds = { unownedPrVerifyMax: 5 };
+    const unbound = run({ ticketsById }, thresholds);
+    const disabled = run({ ticketsById, verifyOpenPrs: null }, thresholds);
+    expect(unbound.flagged).toHaveLength(9);
+    expect(disabled.flagged).toEqual(unbound.flagged);
+    expect(disabled.unconfirmedForBudget).toBe(0);
+  });
+
+  // CAT-11 (review): an all-unverifiable scan must not render as a healthy board —
+  // that is exactly how a broken seam / exhausted quota / dead gh auth would hide.
+  test("green summary is qualified when nothing could actually be verified", () => {
+    const ticketsById = new Map(Array.from({ length: 7 }, (_, i) => stale(`CAT-${i}`, 72 - i)));
+    const r = run({ ticketsById, verifyOpenPrs: () => ({ unverifiable: true, prs: [] }) },
+      { unownedPrVerifyMax: 3 });
+    expect(r.flagged).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.note).toBe("no unowned in-flight tickets (3 unverifiable, 4 unconfirmed for budget)");
+  });
+
+  test("spared-only green summary keeps its pre-existing wording", () => {
+    const r = run({ verifyOpenPrs: () => ({ prs: [{ number: 72 }] }) });
+    expect(r.note).toBe("no unowned in-flight tickets (1 spared by authoritative PR discovery)");
+  });
+
+  test("off mode never invokes confirmation", () => {
+    let calls = 0;
+    const board = mkBoard({ now, mode: "off", ticketsById: new Map([stale("CAT-11")]),
+      verifyOpenPrs: () => { calls++; return { prs: [] }; } });
+    expect(evaluateInvariants(board).unownedInFlight).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
+  test("assembleBoardState carries only function seams", () => {
+    const verifyOpenPrs = () => ({ prs: [] });
+    const getBranchSalvage = () => ({});
+    const wired = assembleBoardState({ verifyOpenPrs, getBranchSalvage });
+    expect(wired.verifyOpenPrs).toBe(verifyOpenPrs);
+    expect(wired.getBranchSalvage).toBe(getBranchSalvage);
+    const inert = assembleBoardState({ verifyOpenPrs: true, getBranchSalvage: {} });
+    expect(inert.verifyOpenPrs).toBeNull();
+    expect(inert.getBranchSalvage).toBeNull();
+  });
+});
+
+describe("CAT-11 branch-salvage board context", () => {
+  const ticket = { identifier: "CAT-11", state: "Implement", branchName: "CAT-11" };
+  const invs = (prDiscovery = {}) => ({ ...allGreen(), unownedInFlight: {
+    ok: false, failed: 1, observable: true, flagged: ["CAT-11"], prDiscovery,
+  } });
+
+  test("v4 emits an empty additive detail cohort without changing existing fields", () => {
+    const ctx = buildBoardContext(mkBoard(), allGreen());
+    expect(ctx.schema).toBe("recovery-board-context/v4");
+    expect(ctx.unownedInFlightDetail).toEqual([]);
+    expect(ctx.unownedInFlight).toEqual([]);
+    expect(ctx.stalledPrs).toEqual([]);
+  });
+
+  test("unbound salvage stays unknown and held", () => {
+    const ctx = buildBoardContext(mkBoard({ ticketsById: new Map([["CAT-11", ticket]]) }), invs());
+    expect(ctx.unownedInFlightDetail).toEqual([{
+      ticket: "CAT-11", branchName: "CAT-11", remoteBranchExists: undefined,
+      commitsAhead: null, openPrs: [], route: "unknown-salvage", dispatchable: false,
+      // CAT-11 (Codex P1 round 2): the detail now also carries the verification
+      // status and the ownership/repo scoping the delegate needs. Asserted exactly
+      // (toEqual) so a silently-dropped field is a failure, not a passing subset.
+      unverifiable: false, salvageReason: null, budgetSkipped: false,
+      owner: null, repoRoot: null,
+    }]);
+  });
+
+  test("remote committed work is classified resume-from-remote", () => {
+    const board = mkBoard({ ticketsById: new Map([["CAT-11", ticket]]),
+      getBranchSalvage: () => ({ branchName: "CAT-11", remoteBranchExists: true,
+        commitsAhead: 2, worktreeUnpushed: false }) });
+    expect(buildBoardContext(board, invs()).unownedInFlightDetail[0]).toMatchObject({
+      ticket: "CAT-11", remoteBranchExists: true, commitsAhead: 2,
+      route: "resume-from-remote", dispatchable: true,
+    });
+  });
+
+  test("detail preserves authoritative PR results and move rationale accepts an available route", () => {
+    const openPr = { number: 72, state: "OPEN" };
+    const board = mkBoard({ ticketsById: new Map([["CAT-11", ticket]]) });
+    expect(buildBoardContext(board, invs({ "CAT-11": { prs: [openPr] } }))
+      .unownedInFlightDetail[0].openPrs).toEqual([openPr]);
+    const moves = proposeMoves(invs(), { ticketsById: board.ticketsById,
+      unownedInFlightDetail: [{ ticket: "CAT-11", route: "resume-from-remote" }] });
+    expect(moves.tier2[0].rationale).toContain("resume-from-remote");
+  });
+});
+
 // ─── CTL-1610 (Phase 2): skippedReasonNoClock threading ─────────────────────
 describe("checkActuationLiveness — skippedReasonNoClock (CTL-1610)", () => {
   const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, skippedReason: "all-candidates-cooldown", skippedReasonNoClock: false, ...o });
@@ -2755,5 +2930,185 @@ describe("boardHealthPass enforce — launch-failure exclusion prevents recovery
       eligible: [{ identifier: "CTL-EXCL", state: "Todo" }],
     });
     expect(actInvoked).toBe(false);
+  });
+});
+
+// ─── CAT-11 (Codex round 1): budgeted verification must rotate AND stay bounded ──
+// Two P1 findings on the same loop. (1) Slicing the oldest `unownedPrVerifyMax`
+// every scan re-checks the same prefix forever, so any candidate past the cap sits
+// at "unconfirmed for budget" indefinitely — including tickets whose only reason
+// for being spared is a memoized open-PR result that still consumed a slot.
+// (2) The 15s limit is PER SUBPROCESS; one enumeration can spawn a replica read,
+// several `gh pr list` calls, an attachment read and a `gh pr view` each, so an
+// unbounded batch can block phase scheduling and liveness for minutes per tick.
+describe("checkUnownedInFlight verification budget (CAT-11, Codex round 1)", () => {
+  const HOUR = 3_600_000;
+  const NOW = Date.parse("2026-07-27T00:00:00.000Z");
+  const stale = (hoursAgo) => new Date(NOW - hoursAgo * HOUR).toISOString();
+  // Six stale candidates, distinct ages so ordering is deterministic.
+  const sixTickets = () =>
+    new Map(Array.from({ length: 6 }, (_, i) => [
+      `CTL-${i + 1}`,
+      { id: `CTL-${i + 1}`, state: "Implement", updatedAt: stale(100 - i) },
+    ]));
+
+  const runScan = ({ cursor, verify, monotonicNowMs }) =>
+    evaluateInvariants(
+      mkBoard({
+        now: NOW,
+        mode: "enforce",
+        ticketsById: sixTickets(),
+        verifyOpenPrs: verify,
+        unownedPrVerifyCursor: cursor,
+        ...(monotonicNowMs ? { monotonicNowMs } : {}),
+      }),
+      { thresholds: { ...DEFAULT_THRESHOLDS, unownedPrVerifyMax: 2 } },
+    ).unownedInFlight;
+
+  test("rotates the window so EVERY candidate is reached across successive scans", () => {
+    const everChecked = new Set();
+    // ceil(6 / 2) = 3 scans should cover all six.
+    for (let scan = 0; scan < 3; scan++) {
+      runScan({ cursor: scan * 2, verify: (t) => { everChecked.add(t); return { ok: true, prs: [] }; } });
+    }
+    expect([...everChecked].sort()).toEqual(
+      ["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5", "CTL-6"],
+    );
+  });
+
+  // Non-vacuity guard: with a FIXED cursor the same prefix repeats — this is the
+  // exact behaviour the rotation replaces, so it must be observably different.
+  test("a fixed cursor re-checks only the same prefix (the bug being fixed)", () => {
+    const everChecked = new Set();
+    for (let scan = 0; scan < 3; scan++) {
+      runScan({ cursor: 0, verify: (t) => { everChecked.add(t); return { ok: true, prs: [] }; } });
+    }
+    expect(everChecked.size).toBe(2);
+  });
+
+  test("stops starting NEW verifications once the batch time budget is spent", () => {
+    let checked = 0;
+    let clock = 0;
+    const r = evaluateInvariants(
+      mkBoard({
+        now: NOW,
+        mode: "enforce",
+        ticketsById: sixTickets(),
+        // Each verification "costs" 40s of wall clock.
+        monotonicNowMs: () => clock,
+        verifyOpenPrs: () => { checked += 1; clock += 40_000; return { ok: true, prs: [] }; },
+        unownedPrVerifyCursor: 0,
+      }),
+      { thresholds: { ...DEFAULT_THRESHOLDS, unownedPrVerifyMax: 6, unownedPrVerifyBatchMs: 30_000 } },
+    ).unownedInFlight;
+    // The first runs (budget not yet spent); every later one is skipped, not run.
+    expect(checked).toBe(1);
+    expect(r.budgetExhausted).toBe(true);
+    expect(r.unconfirmedForBudget).toBe(5);
+  });
+
+  // A batch budget must never SILENTLY shrink the cohort — an all-skipped scan has
+  // to say so rather than render as a clean board.
+  test("an exhausted batch budget is surfaced in the green qualifier", () => {
+    let clock = 0;
+    const r = evaluateInvariants(
+      mkBoard({
+        now: NOW,
+        mode: "enforce",
+        ticketsById: sixTickets(),
+        monotonicNowMs: () => clock,
+        verifyOpenPrs: () => { clock += 60_000; return { ok: true, prs: [{ number: 1 }] }; },
+        unownedPrVerifyCursor: 0,
+      }),
+      { thresholds: { ...DEFAULT_THRESHOLDS, unownedPrVerifyMax: 6, unownedPrVerifyBatchMs: 10_000 } },
+    ).unownedInFlight;
+    expect(r.note).toContain("batch time budget exhausted");
+  });
+});
+
+// ─── CAT-11 (Codex round 2): defects in the round-1 remediation itself ──────────
+describe("CAT-11 round-2 remediations", () => {
+  const NOW = Date.parse("2026-07-27T00:00:00.000Z");
+  const stale = new Date(NOW - 100 * 3_600_000).toISOString();
+  const tix = (n = 1) => new Map(Array.from({ length: n }, (_, i) => [
+    `CTL-${i + 1}`, { id: `CTL-${i + 1}`, state: "Implement", updatedAt: stale },
+  ]));
+
+  // An unverifiable probe (round-1's fetch-failed result) must NOT be dispatchable.
+  // Round 1 fed only remoteBranchExists+worktreeUnpushed to the classifier, which
+  // picked resume-from-remote and marked it dispatchable — acting on evidence we
+  // explicitly could not confirm.
+  test("an UNVERIFIABLE salvage probe is held, and says so in the detail", () => {
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(),
+      getBranchSalvage: () => ({
+        branchName: "CTL-1", remoteBranchExists: true, worktreeUnpushed: false,
+        commitsAhead: null, unverifiable: true, reason: "fetch-failed",
+      }),
+    });
+    const d = buildBoardContext(board, evaluateInvariants(board, { mode: "enforce" }))
+      .unownedInFlightDetail[0];
+    expect(d.dispatchable).toBe(false);
+    expect(d.route).toBe("unknown-salvage");
+    expect(d.unverifiable).toBe(true);
+    expect(d.salvageReason).toBe("fetch-failed");
+  });
+
+  // Non-vacuity: a fully VERIFIED probe still routes to the dispatchable arm, so the
+  // hold above is a real discrimination rather than a blanket refusal.
+  test("a fully verified probe is still dispatchable resume-from-remote", () => {
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(),
+      getBranchSalvage: () => ({ branchName: "CTL-1", remoteBranchExists: true,
+        commitsAhead: 3, worktreeUnpushed: false }),
+    });
+    const d = buildBoardContext(board, evaluateInvariants(board, { mode: "enforce" }))
+      .unownedInFlightDetail[0];
+    expect(d).toMatchObject({ dispatchable: true, route: "resume-from-remote", unverifiable: false });
+  });
+
+  // proposeMoves read the detail off the assembled board, where it never existed, so
+  // `route` was always undefined and a HELD ticket still became an anchorable move.
+  test("a held (non-dispatchable) unowned ticket never becomes an anchorable move", () => {
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(),
+      getBranchSalvage: () => ({ branchName: "CTL-1", remoteBranchExists: true,
+        commitsAhead: null, unverifiable: true }),
+    });
+    const invariants = evaluateInvariants(board, { mode: "enforce" });
+    const withDetail = { ...board, unownedInFlightDetail: buildUnownedInFlightDetail(board, invariants) };
+    const moves = proposeMoves(invariants, withDetail);
+    expect(moves.tier2.some((m) => m.move === "recover-unowned-in-flight")).toBe(false);
+  });
+
+  test("a DISPATCHABLE unowned ticket still becomes a move (non-vacuity)", () => {
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(),
+      getBranchSalvage: () => ({ branchName: "CTL-1", remoteBranchExists: true,
+        commitsAhead: 2, worktreeUnpushed: false }),
+    });
+    const invariants = evaluateInvariants(board, { mode: "enforce" });
+    const withDetail = { ...board, unownedInFlightDetail: buildUnownedInFlightDetail(board, invariants) };
+    expect(proposeMoves(invariants, withDetail).tier2
+      .some((m) => m.move === "recover-unowned-in-flight")).toBe(true);
+  });
+
+  // The salvage probes run outside the PR-verification budget and each issues several
+  // git calls, so the batch needs its own deadline.
+  test("the salvage probe batch is bounded and unprobed entries stay held", () => {
+    let clock = 0;
+    let probes = 0;
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(4),
+      monotonicNowMs: () => clock,
+      getBranchSalvage: () => { probes += 1; clock += 40_000;
+        return { branchName: "b", remoteBranchExists: true, commitsAhead: 2, worktreeUnpushed: false }; },
+    });
+    const detail = buildUnownedInFlightDetail(board, evaluateInvariants(board, { mode: "enforce" }),
+      { thresholds: { ...DEFAULT_THRESHOLDS, salvageProbeBatchMs: 30_000 } });
+    expect(probes).toBe(1);
+    const skipped = detail.filter((d) => d.budgetSkipped);
+    expect(skipped.length).toBe(3);
+    expect(skipped.every((d) => d.dispatchable === false)).toBe(true);
   });
 });

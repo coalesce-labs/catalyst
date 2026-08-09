@@ -918,3 +918,80 @@ test("--graphql: buildReadState with neither var set throws naming both variable
     else process.env.LINEAR_API_KEY = savedKey;
   }
 });
+
+// CAT-11 (Codex P1 round 1): a FAILED attachment derivation is not "no hints".
+// The attachment-capable Linear read is the ONLY way to find a PR whose title and
+// head both omit the ticket key. When that read is rate-limited or times out, the
+// old code swallowed the throw to [] and still reported the enumeration as
+// authoritative — so the PR read as "confirmed absent". CAT-11 made that answer
+// load-bearing for orphan salvage (the ticket enters branch rescue and the
+// delegate can open a DUPLICATE PR), so the failure must surface as unverifiable.
+test("ENUMERATOR (CAT-11): a THROWN attachment derivation is unverifiable, never confirmed-absent", () => {
+  const runGh = () => [];
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => null,
+    deriveAttachmentPrs: () => { throw new Error("linear read timed out"); },
+  });
+  expect(r.ok).toBe(false);
+  expect(r.unverifiable).toBe(true);
+  expect(r.reason).toContain("attachment derivation failed");
+});
+
+// Non-vacuity: an attachment derivation that legitimately returns NOTHING is still
+// a clean, authoritative "no open PRs" — the fix must not turn every empty into
+// unverifiable, which would spare every ticket and make the cohort inert.
+test("ENUMERATOR (CAT-11): an EMPTY attachment derivation still yields a clean answer", () => {
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh: () => [],
+    deriveBranchName: () => null,
+    deriveAttachmentPrs: () => [],
+  });
+  expect(r.unverifiable).toBeFalsy();
+  expect(r.prs).toEqual([]);
+});
+
+// CAT-11 (Codex P1 round 3): the enumerator must probe the TICKET-KEY head too.
+// execution-core pushes orphaned work to refs/heads/<TICKET>, so a PR on that branch
+// whose title/body omit the key, whose Linear branchName is a different slug, and
+// which has no attachment was missed by all three passes — while the result still
+// claimed to be authoritative, admitting duplicate-PR salvage on exactly the orphan
+// population this gate exists to catch. `--search` is a search query, not a branch filter.
+test("ENUMERATOR (CAT-11): a PR on the TICKET-KEY branch is found even with no key in the title", () => {
+  const heads = [];
+  const runGh = (args) => {
+    if (args.includes("--head")) {
+      const h = args[args.indexOf("--head") + 1];
+      heads.push(h);
+      if (h === "CTL-9") return [{ number: 777, state: "OPEN", isDraft: true, title: "some work" }];
+      return [];
+    }
+    return []; // --search finds nothing: the key appears nowhere in title/body
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => "ryan/ctl-9-a-different-linear-slug",
+    deriveAttachmentPrs: () => [],
+  });
+  expect(heads).toContain("CTL-9");
+  expect(heads).toContain("ryan/ctl-9-a-different-linear-slug");
+  expect(r.prs.map((p) => p.number)).toEqual([777]);
+  expect(r.ok).toBe(false); // an open PR was found ⇒ not a clean "no open PRs"
+});
+
+// The ticket-key head must not double-count when it IS the Linear branch name.
+test("ENUMERATOR (CAT-11): ticket-key head is deduped against an identical branchName", () => {
+  const heads = [];
+  const runGh = (args) => {
+    if (args.includes("--head")) {
+      heads.push(args[args.indexOf("--head") + 1]);
+      return [{ number: 42, state: "OPEN", isDraft: false, title: "t" }];
+    }
+    return [];
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh, deriveBranchName: () => "CTL-9", deriveAttachmentPrs: () => [],
+  });
+  expect(heads).toEqual(["CTL-9"]);
+  expect(r.prs.map((p) => p.number)).toEqual([42]);
+});

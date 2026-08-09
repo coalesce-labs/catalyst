@@ -16,7 +16,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { schedulerTick, holisticBoardHealthAct } from "./scheduler.mjs";
+import { schedulerTick, holisticBoardHealthAct, unownedPrVerifierFor } from "./scheduler.mjs";
 import { boardHealthPass } from "./board-health.mjs";
 
 let orchDir;
@@ -149,6 +149,51 @@ describe("schedulerTick — getStrandedEvidence seam (CTL-1644)", () => {
       boardHealthPassFn: (_opts) => ({ ran: true, ranAtMs: 1 }),
     });
     expect(actCalls.length).toBe(0);
+  });
+});
+
+describe("schedulerTick — CAT-11 discovery and salvage seams", () => {
+  test("threads verifyOpenPrs and getBranchSalvage to boardHealthPass", () => {
+    const calls = [];
+    const verifyOpenPrs = () => ({ ok: true, prs: [] });
+    const getBranchSalvage = () => ({ remoteBranchExists: true, commitsAhead: 2 });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: () => {},
+      reclaimDeadWork: () => "noop",
+      liveBackgroundCount: () => 0,
+      boardHealth: { mode: "shadow", verifyOpenPrs, getBranchSalvage },
+      boardHealthPassFn: (opts) => { calls.push(opts); return { ran: true }; },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].verifyOpenPrs).toBe(verifyOpenPrs);
+    expect(calls[0].getBranchSalvage).toBe(getBranchSalvage);
+  });
+
+  test("real scheduler verifier consumes the ticket key used by board-health", () => {
+    const calls = [];
+    const verifyOpenPrs = unownedPrVerifierFor({
+      orchDir,
+      checkOpenPrs: (ticket) => { calls.push(ticket); return { ok: true, prs: [] }; },
+    });
+
+    expect(verifyOpenPrs("CAT-11")).toEqual({ ok: true, prs: [] });
+    expect(calls).toEqual(["CAT-11"]);
+  });
+
+  // CAT-11 (review): CATALYST_BH_UNOWNED_PR_VERIFY=0 must leave the seam UNBOUND.
+  // A closure that merely answers null keeps b.verifyOpenPrs truthy, so
+  // checkUnownedInFlight takes the budgeted branch and truncates the cohort.
+  test("kill switch leaves the confirmation seam unbound, not stubbed", () => {
+    const prev = process.env.CATALYST_BH_UNOWNED_PR_VERIFY;
+    process.env.CATALYST_BH_UNOWNED_PR_VERIFY = "0";
+    try {
+      expect(unownedPrVerifierFor({ orchDir, checkOpenPrs: () => ({ prs: [] }) })).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_BH_UNOWNED_PR_VERIFY;
+      else process.env.CATALYST_BH_UNOWNED_PR_VERIFY = prev;
+    }
   });
 });
 

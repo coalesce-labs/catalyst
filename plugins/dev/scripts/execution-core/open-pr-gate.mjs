@@ -156,7 +156,13 @@ export function defaultDeriveAttachmentPrs(ticket, { cwd, read = readTicketRepli
     // flagless read returns none and this whole pass is inert. withAttachments makes
     // catalyst-linear do the attachment-capable live read.
     const rec = read(ticket, { cwd, withAttachments: true });
-    if (!rec) return [];
+    // CAT-11 (Codex P1 round 2): `readTicketReplica` returns null for a FAILED read
+    // (non-zero status, timeout, unparseable stdout) — not for "this ticket has no
+    // attachments". Collapsing that null to [] made the round-1 catch below
+    // unreachable with production defaults, so an attachment-only PR was still
+    // reported as authoritatively absent and could enter duplicate-PR salvage.
+    // Propagate it as an error so the enumeration reports UNVERIFIABLE instead.
+    if (!rec) throw new Error(`attachment read returned no record for ${ticket}`);
     // Tolerate several shapes the replica may expose: an `attachments` array (Linear
     // GraphQL nodes), a `prLinks`/`pullRequests` array, or `attachments.nodes`.
     const atts = []
@@ -305,12 +311,25 @@ export function defaultCheckOpenPrs(
       "100",
     ]))
       if (p && p.number != null) seen.set(p.number, p);
-    if (head) {
+    // CAT-11 (Codex P1 round 3): probe BOTH the Linear branch-name slug and the
+    // TICKET-KEY head. execution-core pushes orphaned work to `refs/heads/<TICKET>`
+    // (dispatch.mjs passes `expectedBranch: ticket`, create-worktree.sh seeds from
+    // `origin/<TICKET>`), so a PR on that branch whose title/body omit the key, whose
+    // Linear branchName is a different slug, and which has no attachment was missed by
+    // all three passes — and this result is authoritative, so it admitted duplicate-PR
+    // salvage on exactly the orphan population this gate exists to catch. `--search` is
+    // an issue/PR search query, not a branch filter, so it does not cover this.
+    const heads = [];
+    for (const h of [head, ticket]) {
+      const name = h == null ? "" : String(h).trim();
+      if (name && !heads.includes(name)) heads.push(name);
+    }
+    for (const h of heads) {
       for (const p of gh([
         "pr",
         "list",
         "--head",
-        head,
+        h,
         "--state",
         "open",
         "--json",
@@ -326,8 +345,23 @@ export function defaultCheckOpenPrs(
     let attachmentPrs = [];
     try {
       attachmentPrs = deriveAttachmentPrs(ticket, { cwd: repoCwd }) || [];
-    } catch {
-      attachmentPrs = [];
+    } catch (err) {
+      // CAT-11 (Codex P1 round 1): a FAILED derivation is not "no attachment hints".
+      // When the attachment-capable Linear read is rate-limited or times out, this
+      // silently became [] and the enumeration still reported itself authoritative —
+      // so a PR whose title and head both omit the ticket key, discoverable ONLY via
+      // its Linear attachment, read as "confirmed absent". CAT-11 made that answer
+      // load-bearing for orphan salvage, so the ticket could enter branch rescue and
+      // the delegate open a DUPLICATE PR. Swallowing it is safe only for callers that
+      // just want hints; it is not safe for proving absence. Surface it, matching the
+      // attachment-VIEW failure path below.
+      return {
+        ok: false,
+        unverifiable: true,
+        reason: `attachment derivation failed: ${err?.message || String(err)}`,
+        prs: [...seen.values()],
+        branchName: head ?? null,
+      };
     }
     // CTL-1157 (Codex round-6): the ticket's OWN GitHub "owner/repo", so a same-repo
     // attachment URL dedups against the bare-number key the ticket-key/head list passes

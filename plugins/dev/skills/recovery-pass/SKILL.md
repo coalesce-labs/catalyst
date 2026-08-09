@@ -398,7 +398,8 @@ each, print `BOARD <invariant> OK` or `BOARD <invariant> ANOMALY: <what> → <ac
 > START FROM IT — don't re-derive cold.** When the daemon-side board-health delegate
 > dispatched you, the `board context (whole-board, read-only)` block already carries
 > this scan's result: the stuck workers + ages, the stranded nodes + their owned
-> tickets, slots, and the eligible-queue depth. When a GitHub quota snapshot is
+> tickets, slots, the eligible-queue depth, and the per-ticket
+> `unownedInFlightDetail` salvage evidence. When a GitHub quota snapshot is
 > available, its dedicated `githubQuota` field carries `{state, remaining, limit,
 > remainingPct, resetAt, host, ageMs}`; use its reset time when diagnosing a REST
 > rate-limit cliff. Treat
@@ -467,14 +468,15 @@ The line is simple: **does this change the SYSTEM, or just unstick a stuck THING
   it is, why we have it, why it's failing, your recommendation* — plain language, no
   jargon. He decides; the decision becomes a durable setting so next time it's Tier 1/2.
 
-## The three delegate rubrics — the senior-engineer judgment gates
+## The four delegate rubrics — the senior-engineer judgment gates
 
-The 3-tier rope says *how much* you may do. These three rubrics say *exactly how to
-judge* the three hardest cases the delegate faces, and they are the **gating
+The 3-tier rope says *how much* you may do. These four rubrics say *exactly how to
+judge* the hardest cases the delegate faces, and they are the **gating
 heuristics you MUST satisfy before any autonomous action** of that kind. They make
 the Step 0–4 loop below concrete: Rubric One governs moving a PR-state ticket to
 Done, Rubric Two governs finishing a stuck PR yourself vs. escalating, Rubric Three
-governs deciding a human is genuinely needed and authoring the brief for them.
+governs deciding a human is genuinely needed and authoring the brief for them, and
+Rubric Four governs rescuing orphaned committed work that has no PR.
 
 > **Consistency with the code (CTL-1157 — THE REVERSAL).** Rubric One's autonomous Done write goes
 > through `linear-reconcile-cli.mjs declare … --by "recovery-pass"`, which **now just WRITES the Done
@@ -619,6 +621,128 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 > NOT escalations (you remediate these in PR-2 yourself): a stale/BEHIND open PR (rebase + merge it), a
 > red-CI open PR with a deterministic fix (fix it, push, re-check), an abandoned/superseded open PR
 > (close it). Mechanically-resolvable ⇒ FIX; genuine-judgment ⇒ escalate.
+
+### RUBRIC FOUR — Orphaned committed work with no PR
+
+> **Trigger:** your brief's `boardContext.unownedInFlightDetail` carries an entry with
+> `remoteBranchExists: true`, `commitsAhead >= 1`, and no open PR.
+>
+> **Verify first, always.** Re-run the authoritative enumeration for that ticket through
+> `open-pr-gate.mjs` and the Rubric One union before acting. The brief is a snapshot and the
+> daemon's answer may be up to `CATALYST_BH_UNOWNED_PR_VERIFY_TTL_MS` old. If a PR turns up,
+> you are in Rubric One or Two, not here.
+>
+> **ACT (Tier 1 — just do it):**
+>
+> 0a. **Bind `ENTRY` from the brief before anything else.** The board-context renderer prints
+>    a human summary, not shell state, and this skill's prelude runs under `set -u` — so
+>    dereferencing `$ENTRY` without binding it aborts the whole rescue with
+>    `ENTRY: unbound variable`. Read the JSON brief directly and iterate:
+>
+>    ```bash
+>    BRIEF="${ORCH_DIR}/workers/${TICKET}/recovery-pass.json"
+>    # Only entries this host owns, that are dispatchable, and whose probe was verifiable.
+>    jq -c '.boardContext.unownedInFlightDetail[]?
+>           | select(.dispatchable == true and .unverifiable != true)' "$BRIEF" \
+>    | while IFS= read -r ENTRY; do
+>        REPO_ROOT="$(jq -r '.repoRoot // empty' <<<"$ENTRY")"
+>        BRANCH="$(jq -r '.branchName // empty' <<<"$ENTRY")"
+>        [ -n "$REPO_ROOT" ] && [ -n "$BRANCH" ] || { echo "skip: unscoped entry"; continue; }
+>        # … steps 0b–3 below, all chained off "$REPO_ROOT" / "$WORKTREE_PATH" …
+>      done
+>    ```
+>
+> 0b. **Scope to the entry's OWN repository first.** One holistic scan can carry actionable
+>    orphans from several enrolled repos, and you are running in the *anchor* ticket's repo.
+>    Every command below must be chained into the entry's `repoRoot`
+>    (`cd "$(jq -r '.repoRoot' <<<"$ENTRY")" && …`) — a bare `cd` on its own line that
+>    silently fails applies a non-anchor entry's branch to the anchor repository, and the
+>    later rebase and `gh` calls then target the wrong repo too. If an entry carries no
+>    `repoRoot`, SKIP it and escalate; never guess. Skip any entry whose `owner` is not this
+>    host, and any with `dispatchable: false` or `unverifiable: true`.
+> 1. Rebuild the worktree from **the branch the probe actually found** — pass the entry's
+>    `branchName`, NOT the bare ticket key, and **capture the path it prints**:
+>
+>    ```bash
+>    WORKTREE_PATH="$(cd "$REPO_ROOT" && create-worktree.sh "$BRANCH" | sed -n 's/^WORKTREE_PATH=//p')"
+>    [ -n "$WORKTREE_PATH" ] && [ -d "$WORKTREE_PATH" ] || { echo "skip: no worktree"; continue; }
+>    ```
+>
+>    `create-worktree.sh` **returns to its caller** and only prints `WORKTREE_PATH` — it does
+>    not leave you inside the new tree. Every step below must therefore be chained through
+>    `cd "$WORKTREE_PATH" && …`; running the rebase/push/PR helpers in the recovery worker's
+>    original checkout rebases and opens a PR from the WRONG branch, omitting the very
+>    orphaned commits being rescued. This is separate from the repo-scoping in 0b: it bites
+>    even once you are in the correct repository.
+>    `create-worktree.sh` fetches and seeds exclusively from `origin/<worktree_name>`
+>    (CTL-1640), so when the orphaned work lives on Linear's branch-name slug rather than
+>    `refs/heads/<TICKET>`, passing the ticket key makes BOTH the fetch and the seed miss —
+>    it silently creates a fresh branch off the base and the draft PR you open in step 2
+>    contains **none** of the commits this rubric exists to rescue. `branchName` is the
+>    candidate `probeBranchSalvage` confirmed via `ls-remote`, which is why it is reported.
+>    Verify the rebuild before continuing: the new worktree's HEAD must equal
+>    `origin/<branchName>`, and `git rev-list --count origin/<base>..HEAD` must match the
+>    entry's `commitsAhead`. If it does not, STOP and escalate — do not open a PR over a
+>    worktree that lost the work.
+> 2. **Inside `$WORKTREE_PATH`**, source BOTH lib primitives —
+>    `source "${PLUGIN_ROOT}/scripts/lib/worktree-rebase.sh"`
+>    (owns `rebase_onto_base_classified`) and `source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"`
+>    (owns `draft_pr_push_verify` / `draft_pr_ensure`), exactly as RUBRIC TWO does. Rebase onto
+>    `origin/<base>` via `rebase_onto_base_classified`, then run `draft_pr_push_verify` and
+>    `draft_pr_ensure` to open a **draft** PR. Draft, not ready: this work was never reviewed
+>    and may be mid-phase. Chain the whole step so it cannot run in the caller's checkout:
+>
+>    ```bash
+>    cd "$WORKTREE_PATH" && source "${PLUGIN_ROOT}/scripts/lib/worktree-rebase.sh" \
+>      && source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" \
+>      && rebase_onto_base_classified && draft_pr_push_verify && draft_pr_ensure
+>    ```
+>
+>    Before opening the PR, confirm you are on the rescued work: `git rev-parse --abbrev-ref HEAD`
+>    must be `$BRANCH` and `git rev-list --count origin/<base>..HEAD` must match the entry's
+>    `commitsAhead`. If either disagrees, STOP and escalate rather than opening a PR that
+>    silently contains nothing.
+>
+>    **The draft requirement is load-bearing — enforce it, don't assume it.** When
+>    `gh pr create --draft` is rejected or transiently fails, `draft_pr_ensure` RETRIES
+>    WITHOUT `--draft` and returns success with a **ready** PR. That would put unreviewed,
+>    possibly mid-phase orphan work straight onto the normal review/merge path. So treat the
+>    helper's own result as untrusted: read back `.isDraft` and, if it is `false`, immediately
+>    convert the PR back with `gh pr ready --undo "$PR_NUMBER"`. If that conversion also
+>    fails, ESCALATE — never leave a rescued orphan branch sitting as a ready PR.
+> 3. Re-arm the ticket so the scheduler actually re-queues it, then record the win with
+>    `recovery-emit.mjs fixed`.
+>
+>    **This cohort usually has NO worker directory** — that is what made it unowned in the
+>    first place — so there is typically no prior phase signal to "re-arm", and the worktree
+>    and draft-PR primitives create none. The only signal guaranteed to exist is this pass's
+>    own `phase-recovery-pass.json`, which the End block marks complete. If you stop there the
+>    rescued PR sits OUTSIDE the phase pipeline, and the now-authoritative PR discovery will
+>    simply spare the ticket on every later scan instead of resuming it — the ticket looks
+>    healthier while being just as stuck.
+>
+>    **Do NOT hand-write a `pending` `phase-monitor-merge.json`.** That looks like a re-arm
+>    but WEDGES the ticket: `deriveAdvancement` only dispatches when the latest phase signal
+>    is `done`, so a non-terminal signal for the target phase becomes the latest phase and
+>    advancement returns `null` — and because the worker dir now exists and is non-phantom,
+>    the ticket reads as in-flight and no later admission path repairs it. Instead **dispatch
+>    monitor-merge through the normal path**, exactly as the other rubrics dispatch a phase:
+>    `phase-agent-dispatch --ticket <TICKET> --phase monitor-merge` from the entry's
+>    `repoRoot` (equivalently, write the *predecessor* `phase-pr.json` as `status: "done"`
+>    with the `pr.number`/`pr.url` you just opened, so the FSM legitimately owes
+>    monitor-merge). Confirm the dispatch was accepted — or that the ticket is back in
+>    `isTicketInFlight` — before emitting `fixed`; if it was not, ESCALATE rather than
+>    leaving a rescued PR outside the pipeline.
+>
+> **ESCALATE instead when:**
+>
+> - `commitsAhead` is 0 or the remote branch is absent. There is nothing to rescue, and
+>   re-admitting the ticket is a scope decision, not an unstick.
+> - `route` is `unknown-salvage` or the salvage probe was `unverifiable`. You cannot prove
+>   there is no work to lose; never restart-fresh on unproven evidence.
+> - `route` is `adopt` (unpushed local commits; CTL-1642 is not implemented). The work is on
+>   another host's disk and only that host can push it.
+> - The enumeration turns up two or more candidate PRs. That is Rubric One's multi-PR trap.
 
 ### PR-not-merged remediation playbook (CTL-1496)
 

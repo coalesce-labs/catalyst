@@ -38,7 +38,7 @@ import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecover
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
-const DEFAULT_THRESHOLDS = {
+export const DEFAULT_THRESHOLDS = {
   dispatchStallMs: Number(process.env.CATALYST_BH_DISPATCH_STALL_MS) || 10 * 60_000,
   workerAgeMs: Number(process.env.CATALYST_BH_WORKER_AGE_MS) || 4 * 3_600_000,
   projectSilenceMs: Number(process.env.CATALYST_BH_PROJECT_SILENCE_MS) || 24 * 3_600_000,
@@ -63,6 +63,16 @@ const DEFAULT_THRESHOLDS = {
   // observed population sat like this for WEEKS, so 24h is already far past any
   // legitimate gap while staying well inside "a human would call this stuck".
   unownedInFlightMs: Number(process.env.CATALYST_BH_UNOWNED_INFLIGHT_MS) || 24 * 3_600_000,
+  // CAT-11: authoritative PR confirmation can spend GitHub quota. At a 5-minute
+  // scan cadence against a 24-hour stale cohort, five oldest-first checks per
+  // scan bound cost without sacrificing useful detection latency.
+  unownedPrVerifyMax: Number(process.env.CATALYST_BH_UNOWNED_PR_VERIFY_MAX) || 5,
+  // CAT-11 (Codex P1 round 1): whole-batch wall-clock budget for the synchronous
+  // open-PR verifications. The per-subprocess timeout does not bound the BATCH.
+  unownedPrVerifyBatchMs: Number(process.env.CATALYST_BH_UNOWNED_PR_VERIFY_BATCH_MS) || 30_000,
+  // CAT-11 (Codex P1 round 2): whole-batch budget for the SALVAGE probes, which run
+  // outside the PR-verification budget above and each issue several git calls.
+  salvageProbeBatchMs: Number(process.env.CATALYST_BH_SALVAGE_PROBE_BATCH_MS) || 30_000,
   // CTL-1644: how long an HRW-owned in-flight ticket may have NO actuation (no
   // worker dir, no live bg, no fresh recovery intent) before the new
   // checkStrandedMidPipeline invariant flags it and classifies a revival route.
@@ -424,6 +434,20 @@ export function assembleBoardState({
   // ownerRepoFromRepoRoot); null default ⇒ repo underivable ⇒ number-only lookup
   // (N=1 byte-identical; a true collision with no repo stays the ambiguous skip).
   repoForTicket = null,
+  // CAT-11: authoritative open-PR confirmation and branch-salvage probes stay
+  // outside this module. Null defaults preserve the pre-CAT-11 behavior.
+  verifyOpenPrs = null,
+  getBranchSalvage = null,
+  // CAT-11 (Codex P1 round 2): the rotating verification cursor MUST be forwarded
+  // onto the board — the scheduler supplied it but assembleBoardState dropped it, so
+  // checkUnownedInFlight always fell back to 0 and the rotation was inert in
+  // production (the exact starvation the round-1 fix was meant to remove).
+  unownedPrVerifyCursor = 0,
+  monotonicNowMs = undefined,
+  // CAT-11 (Codex P1 round 2): ticket → enrolled repoRoot, so a multi-repo delegate
+  // can scope each orphan rebuild to the right repository. Null default = unknown,
+  // which the skill treats as "skip and escalate", never "use the anchor's repo".
+  repoRootForTicket = null,
   getReconcileMarkers = () => ({}),
   // CTL-1432 (B2): live query for tickets carrying a deferred board-health
   // recovery-intent (defer→fix_class=board-health) — folded into the anchor
@@ -596,6 +620,8 @@ export function assembleBoardState({
     // CTL-1157 (Codex #4): the ticket→owner/repo resolver for the composite
     // (repo, number) PR-status lookup. Null when unbound (number-only fallback).
     repoForTicket: typeof repoForTicket === "function" ? repoForTicket : null,
+    verifyOpenPrs: typeof verifyOpenPrs === "function" ? verifyOpenPrs : null,
+    getBranchSalvage: typeof getBranchSalvage === "function" ? getBranchSalvage : null,
     // CTL-1644: per-ticket actuation+salvageability evidence for
     // checkStrandedMidPipeline. Off mode returns an empty Map (byte-identical);
     // shadow/enforce invoke getStrandedEvidence() once per proceeding scan.
@@ -1068,7 +1094,7 @@ function checkUnownedInFlight(b, t) {
     b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket) ?? []
   );
   const prMap = b.prStatusMap instanceof Map ? b.prStatusMap : null;
-  const flagged = [];
+  const candidates = [];
   let unobservableAges = 0;
   for (const [id, d] of tickets) {
     const state = d?.state ?? d?.linear_state ?? null;
@@ -1100,21 +1126,105 @@ function checkUnownedInFlight(b, t) {
     const ts = tsMillis(updatedAt);
     // Fail SAFE on an unreadable timestamp: without an age we cannot prove
     // staleness, and flagging on "unknown" would re-dispatch fresh work.
-    if (!Number.isFinite(ts)) {
-      unobservableAges++;
-      continue;
-    }
-    if (nowMs - ts >= limit) flagged.push(id);
+    if (!Number.isFinite(ts)) { unobservableAges++; continue; }
+    if (nowMs - ts >= limit) candidates.push({ id, ts, descriptor: d });
   }
+
+  let flagged = [];
+  let sparedByPrDiscovery = 0;
+  let unverifiablePrChecks = 0;
+  let confirmedNoPr = 0;
+  let unconfirmedForBudget = 0;
+  let budgetExhausted = false;
+  const prDiscovery = {};
+  if (!b.verifyOpenPrs) {
+    flagged = candidates.map(({ id }) => id);
+  } else {
+    const maxChecks = Math.max(0, Number(t?.unownedPrVerifyMax ?? DEFAULT_THRESHOLDS.unownedPrVerifyMax));
+    const ordered = [...candidates].sort((a, z) => a.ts - z.ts || a.id.localeCompare(z.id));
+    // CAT-11 (Codex P1 round 1): ROTATE the verification window. Slicing the oldest
+    // `maxChecks` every scan re-checks the same prefix forever — and tickets spared
+    // because they have an open PR still occupy the cap (their memoized result is
+    // cheap but still consumes a slot), so a candidate past the prefix could sit at
+    // "unconfirmed for budget" indefinitely and never be checked at all. Advance a
+    // caller-supplied cursor so every candidate is reached within ceil(n/max) scans.
+    // The invariant stays PURE: the cursor is an input, never module state.
+    const cursorRaw = Number(b.unownedPrVerifyCursor ?? 0);
+    const cursor = Number.isFinite(cursorRaw) ? Math.trunc(cursorRaw) : 0;
+    let checked;
+    if (maxChecks >= ordered.length) {
+      checked = ordered;
+    } else {
+      const start = ordered.length > 0 ? ((cursor % ordered.length) + ordered.length) % ordered.length : 0;
+      checked = Array.from({ length: maxChecks }, (_, i) => ordered[(start + i) % ordered.length]);
+    }
+    unconfirmedForBudget = ordered.length - checked.length;
+    // CAT-11 (Codex P1 round 1): bound the WHOLE batch, not just each subprocess.
+    // One enumeration can spawn a replica read, several `gh pr list` calls, an
+    // attachment read and a `gh pr view` per attachment — each with its own 15s
+    // limit — so a handful of slow candidates could block phase scheduling and
+    // liveness for minutes inside a single synchronous tick. Stop starting NEW
+    // verifications once the batch budget is spent; the unstarted remainder is
+    // reported as unconfirmed-for-budget (and the rotation above reaches it next scan).
+    const batchBudgetMs = Number(t?.unownedPrVerifyBatchMs ?? DEFAULT_THRESHOLDS.unownedPrVerifyBatchMs);
+    const readClock = typeof b.monotonicNowMs === "function" ? b.monotonicNowMs : () => Date.now();
+    const batchStart = readClock();
+    const batchBounded = Number.isFinite(batchBudgetMs) && batchBudgetMs > 0;
+    for (const candidate of checked) {
+      if (batchBounded && readClock() - batchStart >= batchBudgetMs) {
+        budgetExhausted = true;
+        unconfirmedForBudget++;
+        continue;
+      }
+      let result;
+      try {
+        // Scheduler-bound discovery seams consume the canonical ticket key, as
+        // do the neighbouring repo/evidence seams. Passing the descriptor here
+        // made team/repo derivation fail closed and silently emptied this cohort.
+        result = b.verifyOpenPrs(candidate.id);
+      } catch {
+        unverifiablePrChecks++;
+        prDiscovery[candidate.id] = { unverifiable: true, prs: [] };
+        continue;
+      }
+      if (result == null) {
+        flagged.push(candidate.id);
+        continue;
+      }
+      const prs = Array.isArray(result.prs) ? result.prs : [];
+      prDiscovery[candidate.id] = { unverifiable: !!result.unverifiable, prs };
+      if (result.unverifiable) {
+        unverifiablePrChecks++;
+      } else if (prs.length > 0) {
+        sparedByPrDiscovery++;
+      } else {
+        confirmedNoPr++;
+        flagged.push(candidate.id);
+      }
+    }
+  }
+  // CAT-11 (review): an all-unverifiable scan must NOT read like a healthy board.
+  // Without this qualifier a broken seam / exhausted quota / dead gh auth renders as
+  // the unqualified "no unowned in-flight tickets" — the exact silent failure this
+  // invariant exists to catch. Qualifiers are ordered and comma-joined so the
+  // spared-only summary keeps its pre-existing wording.
+  const greenQualifiers = [];
+  if (sparedByPrDiscovery > 0) greenQualifiers.push(`${sparedByPrDiscovery} spared by authoritative PR discovery`);
+  if (unverifiablePrChecks > 0) greenQualifiers.push(`${unverifiablePrChecks} unverifiable`);
+  if (unconfirmedForBudget > 0) greenQualifiers.push(`${unconfirmedForBudget} unconfirmed for budget`);
+  if (budgetExhausted) greenQualifiers.push("batch time budget exhausted");
   return invariant(
     flagged.length === 0,
     flagged.length,
     true,
     flagged,
     flagged.length === 0
-      ? "no unowned in-flight tickets"
+      ? greenQualifiers.length > 0
+        ? `no unowned in-flight tickets (${greenQualifiers.join(", ")})`
+        : "no unowned in-flight tickets"
       : `${flagged.length} ticket(s) assert an in-flight state with no worker and no open PR past ${Math.round(limit / 3_600_000)}h`,
-    { unobservableAges, thresholdMs: limit }
+    { unobservableAges, thresholdMs: limit, sparedByPrDiscovery, unverifiablePrChecks,
+      confirmedNoPr, unconfirmedForBudget, budgetExhausted, prDiscovery },
   );
 }
 
@@ -1678,13 +1788,20 @@ export function proposeMoves(invariants, _b) {
   // recover-unowned-in-flight move to prevent double-dispatch. The classified route
   // move (route-stranded-mid-pipeline) carries the specific revival action instead.
   const strandedClassified = invariants.strandedMidPipeline?.classified ?? {};
+  const unownedDetail = new Map((_b?.unownedInFlightDetail ?? []).map((d) => [d.ticket, d]));
   for (const t of invariants.unownedInFlight?.flagged ?? []) {
     if (!invariants.unownedInFlight.ok && !sanction(t) && !strandedClassified[t]) {
-      tier2.push({
-        ticket: t,
-        move: "recover-unowned-in-flight",
-        rationale: "Linear state claims in-flight but there is no worker and no open PR",
-      });
+      const d = unownedDetail.get(t);
+      // CAT-11 (Codex P1 round 2): apply the SAME held-route gate the stranded cohort
+      // uses. A non-dispatchable route (adopt / unknown-salvage / unverifiable probe)
+      // is surfaced for visibility but must never anchor an autonomous dispatch — the
+      // recovery-pass skill has no route-aware hold branch and would actuate a route
+      // the classifier marked unsafe. This gate was previously unreachable because the
+      // detail did not exist on the board at selection time.
+      if (d?.dispatchable === false) continue;
+      const route = d?.route;
+      tier2.push({ ticket: t, move: "recover-unowned-in-flight", route,
+        rationale: `Linear state claims in-flight but there is no worker and no open PR${route ? `; revival route: ${route}` : ""}` });
     }
   }
   // CTL-1644: one tier2 route move per stranded ticket — the delegate picks the
@@ -1852,6 +1969,86 @@ function quotaForPublication(board) {
   };
 }
 
+// CAT-11 (Codex P1 round 2): extracted from buildBoardContext so the salvage
+// classification exists BEFORE decideBoardHealth/proposeMoves runs. Previously
+// proposeMoves read `_b.unownedInFlightDetail` off the assembled board, where it
+// never existed (it was built later, in buildBoardContext), so `route` was always
+// undefined and EVERY flagged ticket became an anchorable tier-2 move — including
+// ones whose local work is explicitly held (`adopt` / `unknown-salvage`).
+//
+// Also bounds the SALVAGE batch (Codex P1 round 2): these probes run synchronously
+// inside the scheduler tick and each can issue several ls-remote/fetch calls with
+// their own timeouts, so the default cohort could block scheduling for minutes even
+// though the PR-verification budget was already capped. Stop STARTING new probes
+// once the deadline passes; unprobed entries stay held (never dispatchable).
+export function buildUnownedInFlightDetail(boardState, invariants, { thresholds = DEFAULT_THRESHOLDS } = {}) {
+  const unownedInFlight = invariants.unownedInFlight?.flagged ?? [];
+  const prDiscovery = invariants.unownedInFlight?.prDiscovery ?? {};
+  const budgetMs = Number(thresholds?.salvageProbeBatchMs ?? DEFAULT_THRESHOLDS.salvageProbeBatchMs);
+  const readClock = typeof boardState.monotonicNowMs === "function"
+    ? boardState.monotonicNowMs : () => Date.now();
+  const started = readClock();
+  const bounded = Number.isFinite(budgetMs) && budgetMs > 0;
+  return unownedInFlight.map((ticket) => {
+    const descriptor = boardState.ticketsById?.get(ticket) ?? { identifier: ticket };
+    let salvage = {};
+    let budgetSkipped = false;
+    if (boardState.getBranchSalvage) {
+      if (bounded && readClock() - started >= budgetMs) {
+        budgetSkipped = true;
+        salvage = { unverifiable: true, reason: "salvage-batch-budget-exhausted" };
+      } else {
+        try {
+          salvage = boardState.getBranchSalvage(ticket) ?? {};
+        } catch {
+          salvage = { unverifiable: true };
+        }
+      }
+    }
+    const openPrs = prDiscovery[ticket]?.prs ?? [];
+    // An UNVERIFIABLE probe — or one that could not count commits — must never be
+    // classified as dispatchable. The round-1 fetch-failed fix returns
+    // {remoteBranchExists:true, worktreeUnpushed:false, unverifiable:true,
+    // commitsAhead:null}; feeding only the first two fields to the classifier picked
+    // `resume-from-remote` and marked it dispatchable, so a delegate could rebuild and
+    // push from evidence we explicitly could not confirm. RUBRIC FOUR already requires
+    // escalation for an unverifiable probe — hold it here and PRESERVE `unverifiable`
+    // in the returned detail so the delegate can see why.
+    const salvageUnverifiable = salvage.unverifiable === true
+      || (salvage.remoteBranchExists === true && salvage.commitsAhead == null);
+    const classification = salvageUnverifiable
+      ? { route: "unknown-salvage", dispatchable: false }
+      : classifyRevivalRoute({
+        openPr: openPrs[0] ?? null,
+        remoteBranchExists: salvage.remoteBranchExists,
+        // The branch-only probe establishes that remote work exists but cannot
+        // prove the absence of local unpushed work unless its result says so.
+        worktreeUnpushed: salvage.worktreeUnpushed,
+      });
+    return {
+      ticket,
+      branchName: salvage.branchName ?? descriptor.branchName ?? descriptor.branch_name ?? null,
+      remoteBranchExists: salvage.remoteBranchExists,
+      commitsAhead: salvage.commitsAhead ?? null,
+      openPrs,
+      route: classification.route,
+      dispatchable: classification.dispatchable,
+      unverifiable: salvageUnverifiable,
+      salvageReason: salvage.reason ?? null,
+      budgetSkipped,
+      // CAT-11 (Codex P1 round 2): carry the ticket's OWNER and repoRoot so a
+      // multi-host delegate can refuse a foreign host's orphan, and a multi-repo
+      // delegate can `cd` into the right repository before rebuilding.
+      owner: typeof boardState.ownerForTicket === "function"
+        ? (() => { try { return boardState.ownerForTicket(ticket); } catch { return null; } })()
+        : null,
+      repoRoot: typeof boardState.repoRootForTicket === "function"
+        ? (() => { try { return boardState.repoRootForTicket(ticket); } catch { return null; } })()
+        : null,
+    };
+  });
+}
+
 // ── (5) buildBoardContext — PURE. The whole-board brief the dispatched delegate
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
@@ -1871,10 +2068,16 @@ export function buildBoardContext(boardState, invariants) {
       ageSeconds: s?.ageMs != null ? Math.round(s.ageMs / 1000) : null,
     };
   });
+  const unownedInFlight = invariants.unownedInFlight?.flagged ?? [];
+  // Reuse the pre-computed detail when boardHealthPass already built it (it must, so
+  // proposeMoves can see held routes); recompute only for a bare/unit call.
+  const unownedInFlightDetail = Array.isArray(boardState.unownedInFlightDetail)
+    ? boardState.unownedInFlightDetail
+    : buildUnownedInFlightDetail(boardState, invariants);
   return {
     // CTL-1608: v3 adds the stalled-PR cohort (additive; readers default each
     // field to []). The skill reads them defensively, never gates on the schema.
-    schema: "recovery-board-context/v3",
+    schema: "recovery-board-context/v4",
     snapshotAt: new Date(boardState.now).toISOString(),
     host: { self: boardState.self, roster: boardState.roster, multiHost: boardState.multiHost },
     slots: {
@@ -1902,7 +2105,9 @@ export function buildBoardContext(boardState, invariants) {
     // so a cohort omitted here is a cohort the worker cannot even enumerate: it would
     // see the failure count and a single anchor, fix one ticket, and leave the rest
     // exactly as stuck. Additive, like the cohorts above; [] when green/unobservable.
-    unownedInFlight: invariants.unownedInFlight?.flagged ?? [],
+    unownedInFlight,
+    // CAT-11 v4: additive per-ticket PR and salvage evidence for the delegate.
+    unownedInFlightDetail,
     // CTL-1644: per-ticket classified revival routes for the delegate. The worker
     // reads this map to know WHICH arm to dispatch per ticket (pr-not-merged /
     // resume-from-remote / adopt / restart-fresh) without re-running the board scan.
@@ -2072,6 +2277,14 @@ export function boardHealthPass({
   getStalledPrState,
   getGithubQuota,
   githubQuotaMode,
+  verifyOpenPrs,
+  getBranchSalvage,
+  // CAT-11 (Codex P1 round 2): must be destructured here too — the comment above
+  // spells out the trap, and the round-1 fix fell straight into it: the scheduler
+  // supplied the cursor, this destructure dropped it, and the rotation was inert.
+  unownedPrVerifyCursor = 0,
+  monotonicNowMs,
+  repoRootForTicket,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   getNotLiveHosts,
   lastRunMs = _lastRunMs,
@@ -2090,19 +2303,9 @@ export function boardHealthPass({
     return { ran: false, reason: "throttled" }; // no emit, no act, NO deadHosts read
   }
 
-  const board = assembleBoardState({
-    orchDir,
-    getBoard,
-    getWorkerSignals,
-    getEligible,
-    roster,
-    self,
-    multiHost,
-    capacity,
-    readEventRing,
-    ownerForTicket,
-    repoForTicket,
-    getReconcileMarkers,
+  const _rawBoard = assembleBoardState({
+    orchDir, getBoard, getWorkerSignals, getEligible,
+    roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, repoRootForTicket, getReconcileMarkers,
     // CTL-1524 (C4b): resolved HERE — past the `off` branch and past the throttle —
     // so the expensive whole-log heartbeat read behind the daemon's thunk is paid
     // only on a tick that actually proceeds, not on all ~59 throttled ticks between
@@ -2113,10 +2316,27 @@ export function boardHealthPass({
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
     getGithubQuota,
     githubQuotaMode,
+    verifyOpenPrs,
+    getBranchSalvage,
+    // CAT-11 (Codex P1 round 2): forward the rotation cursor + injectable clock, else
+    // checkUnownedInFlight reads undefined and the budgeted window never rotates.
+    unownedPrVerifyCursor,
+    ...(monotonicNowMs !== undefined ? { monotonicNowMs } : {}),
+    repoRootForTicket,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
     ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
   });
-  const invariants = evaluateInvariants(board, { mode });
+  const invariants = evaluateInvariants(_rawBoard, { mode });
+  // CAT-11 (Codex P1 round 2): classify salvage BEFORE proposing moves. proposeMoves
+  // reads `board.unownedInFlightDetail` to suppress held routes; building it only in
+  // buildBoardContext (after selection) left `route` undefined and let a held
+  // adopt/unknown-salvage ticket anchor an autonomous dispatch. Computed once and
+  // reused by buildBoardContext below, so the salvage probes still run exactly once.
+  // The assembled board is frozen, so derive an extended view rather than mutating it.
+  const board = Object.freeze({
+    ..._rawBoard,
+    unownedInFlightDetail: buildUnownedInFlightDetail(_rawBoard, invariants),
+  });
   const dec = decideBoardHealth(invariants, board);
 
   // enforce-ONLY actuation (CTL-1300), and only if a caller injected an `act`
