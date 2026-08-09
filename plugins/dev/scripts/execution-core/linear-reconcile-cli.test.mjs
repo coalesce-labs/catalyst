@@ -918,3 +918,35 @@ test("--graphql: buildReadState with neither var set throws naming both variable
     else process.env.LINEAR_API_KEY = savedKey;
   }
 });
+
+// CAT-11 (Codex P1 round 1): a FAILED attachment derivation is not "no hints".
+// The attachment-capable Linear read is the ONLY way to find a PR whose title and
+// head both omit the ticket key. When that read is rate-limited or times out, the
+// old code swallowed the throw to [] and still reported the enumeration as
+// authoritative — so the PR read as "confirmed absent". CAT-11 made that answer
+// load-bearing for orphan salvage (the ticket enters branch rescue and the
+// delegate can open a DUPLICATE PR), so the failure must surface as unverifiable.
+test("ENUMERATOR (CAT-11): a THROWN attachment derivation is unverifiable, never confirmed-absent", () => {
+  const runGh = () => [];
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => null,
+    deriveAttachmentPrs: () => { throw new Error("linear read timed out"); },
+  });
+  expect(r.ok).toBe(false);
+  expect(r.unverifiable).toBe(true);
+  expect(r.reason).toContain("attachment derivation failed");
+});
+
+// Non-vacuity: an attachment derivation that legitimately returns NOTHING is still
+// a clean, authoritative "no open PRs" — the fix must not turn every empty into
+// unverifiable, which would spare every ticket and make the cohort inert.
+test("ENUMERATOR (CAT-11): an EMPTY attachment derivation still yields a clean answer", () => {
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh: () => [],
+    deriveBranchName: () => null,
+    deriveAttachmentPrs: () => [],
+  });
+  expect(r.unverifiable).toBeFalsy();
+  expect(r.prs).toEqual([]);
+});

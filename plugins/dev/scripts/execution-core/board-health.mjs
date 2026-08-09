@@ -38,7 +38,7 @@ import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecover
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
-const DEFAULT_THRESHOLDS = {
+export const DEFAULT_THRESHOLDS = {
   dispatchStallMs: Number(process.env.CATALYST_BH_DISPATCH_STALL_MS) || 10 * 60_000,
   workerAgeMs: Number(process.env.CATALYST_BH_WORKER_AGE_MS) || 4 * 3_600_000,
   projectSilenceMs: Number(process.env.CATALYST_BH_PROJECT_SILENCE_MS) || 24 * 3_600_000,
@@ -67,6 +67,9 @@ const DEFAULT_THRESHOLDS = {
   // scan cadence against a 24-hour stale cohort, five oldest-first checks per
   // scan bound cost without sacrificing useful detection latency.
   unownedPrVerifyMax: Number(process.env.CATALYST_BH_UNOWNED_PR_VERIFY_MAX) || 5,
+  // CAT-11 (Codex P1 round 1): whole-batch wall-clock budget for the synchronous
+  // open-PR verifications. The per-subprocess timeout does not bound the BATCH.
+  unownedPrVerifyBatchMs: Number(process.env.CATALYST_BH_UNOWNED_PR_VERIFY_BATCH_MS) || 30_000,
   // CTL-1644: how long an HRW-owned in-flight ticket may have NO actuation (no
   // worker dir, no live bg, no fresh recovery intent) before the new
   // checkStrandedMidPipeline invariant flags it and classifies a revival route.
@@ -1132,15 +1135,47 @@ function checkUnownedInFlight(b, t) {
   let unverifiablePrChecks = 0;
   let confirmedNoPr = 0;
   let unconfirmedForBudget = 0;
+  let budgetExhausted = false;
   const prDiscovery = {};
   if (!b.verifyOpenPrs) {
     flagged = candidates.map(({ id }) => id);
   } else {
     const maxChecks = Math.max(0, Number(t?.unownedPrVerifyMax ?? DEFAULT_THRESHOLDS.unownedPrVerifyMax));
     const ordered = [...candidates].sort((a, z) => a.ts - z.ts || a.id.localeCompare(z.id));
-    const checked = ordered.slice(0, maxChecks);
+    // CAT-11 (Codex P1 round 1): ROTATE the verification window. Slicing the oldest
+    // `maxChecks` every scan re-checks the same prefix forever — and tickets spared
+    // because they have an open PR still occupy the cap (their memoized result is
+    // cheap but still consumes a slot), so a candidate past the prefix could sit at
+    // "unconfirmed for budget" indefinitely and never be checked at all. Advance a
+    // caller-supplied cursor so every candidate is reached within ceil(n/max) scans.
+    // The invariant stays PURE: the cursor is an input, never module state.
+    const cursorRaw = Number(b.unownedPrVerifyCursor ?? 0);
+    const cursor = Number.isFinite(cursorRaw) ? Math.trunc(cursorRaw) : 0;
+    let checked;
+    if (maxChecks >= ordered.length) {
+      checked = ordered;
+    } else {
+      const start = ordered.length > 0 ? ((cursor % ordered.length) + ordered.length) % ordered.length : 0;
+      checked = Array.from({ length: maxChecks }, (_, i) => ordered[(start + i) % ordered.length]);
+    }
     unconfirmedForBudget = ordered.length - checked.length;
+    // CAT-11 (Codex P1 round 1): bound the WHOLE batch, not just each subprocess.
+    // One enumeration can spawn a replica read, several `gh pr list` calls, an
+    // attachment read and a `gh pr view` per attachment — each with its own 15s
+    // limit — so a handful of slow candidates could block phase scheduling and
+    // liveness for minutes inside a single synchronous tick. Stop starting NEW
+    // verifications once the batch budget is spent; the unstarted remainder is
+    // reported as unconfirmed-for-budget (and the rotation above reaches it next scan).
+    const batchBudgetMs = Number(t?.unownedPrVerifyBatchMs ?? DEFAULT_THRESHOLDS.unownedPrVerifyBatchMs);
+    const readClock = typeof b.monotonicNowMs === "function" ? b.monotonicNowMs : () => Date.now();
+    const batchStart = readClock();
+    const batchBounded = Number.isFinite(batchBudgetMs) && batchBudgetMs > 0;
     for (const candidate of checked) {
+      if (batchBounded && readClock() - batchStart >= batchBudgetMs) {
+        budgetExhausted = true;
+        unconfirmedForBudget++;
+        continue;
+      }
       let result;
       try {
         // Scheduler-bound discovery seams consume the canonical ticket key, as
@@ -1177,6 +1212,7 @@ function checkUnownedInFlight(b, t) {
   if (sparedByPrDiscovery > 0) greenQualifiers.push(`${sparedByPrDiscovery} spared by authoritative PR discovery`);
   if (unverifiablePrChecks > 0) greenQualifiers.push(`${unverifiablePrChecks} unverifiable`);
   if (unconfirmedForBudget > 0) greenQualifiers.push(`${unconfirmedForBudget} unconfirmed for budget`);
+  if (budgetExhausted) greenQualifiers.push("batch time budget exhausted");
   return invariant(
     flagged.length === 0,
     flagged.length,
@@ -1188,7 +1224,7 @@ function checkUnownedInFlight(b, t) {
         : "no unowned in-flight tickets"
       : `${flagged.length} ticket(s) assert an in-flight state with no worker and no open PR past ${Math.round(limit / 3_600_000)}h`,
     { unobservableAges, thresholdMs: limit, sparedByPrDiscovery, unverifiablePrChecks,
-      confirmedNoPr, unconfirmedForBudget, prDiscovery },
+      confirmedNoPr, unconfirmedForBudget, budgetExhausted, prDiscovery },
   );
 }
 

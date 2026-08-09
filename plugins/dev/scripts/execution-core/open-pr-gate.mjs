@@ -326,8 +326,23 @@ export function defaultCheckOpenPrs(
     let attachmentPrs = [];
     try {
       attachmentPrs = deriveAttachmentPrs(ticket, { cwd: repoCwd }) || [];
-    } catch {
-      attachmentPrs = [];
+    } catch (err) {
+      // CAT-11 (Codex P1 round 1): a FAILED derivation is not "no attachment hints".
+      // When the attachment-capable Linear read is rate-limited or times out, this
+      // silently became [] and the enumeration still reported itself authoritative —
+      // so a PR whose title and head both omit the ticket key, discoverable ONLY via
+      // its Linear attachment, read as "confirmed absent". CAT-11 made that answer
+      // load-bearing for orphan salvage, so the ticket could enter branch rescue and
+      // the delegate open a DUPLICATE PR. Swallowing it is safe only for callers that
+      // just want hints; it is not safe for proving absence. Surface it, matching the
+      // attachment-VIEW failure path below.
+      return {
+        ok: false,
+        unverifiable: true,
+        reason: `attachment derivation failed: ${err?.message || String(err)}`,
+        prs: [...seen.values()],
+        branchName: head ?? null,
+      };
     }
     // CTL-1157 (Codex round-6): the ticket's OWN GitHub "owner/repo", so a same-repo
     // attachment URL dedups against the bare-number key the ticket-key/head list passes

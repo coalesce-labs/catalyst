@@ -634,16 +634,47 @@ Rubric Four governs rescuing orphaned committed work that has no PR.
 >
 > **ACT (Tier 1 — just do it):**
 >
-> 1. Rebuild the worktree from the pushed work with `create-worktree.sh <TICKET>`. It seeds
->    from `origin/<TICKET>` by default (CTL-1640).
+> 1. Rebuild the worktree from **the branch the probe actually found** — pass the entry's
+>    `branchName`, NOT the bare ticket key:
+>    `create-worktree.sh "$(jq -r '.branchName' <<<"$ENTRY")"`.
+>    `create-worktree.sh` fetches and seeds exclusively from `origin/<worktree_name>`
+>    (CTL-1640), so when the orphaned work lives on Linear's branch-name slug rather than
+>    `refs/heads/<TICKET>`, passing the ticket key makes BOTH the fetch and the seed miss —
+>    it silently creates a fresh branch off the base and the draft PR you open in step 2
+>    contains **none** of the commits this rubric exists to rescue. `branchName` is the
+>    candidate `probeBranchSalvage` confirmed via `ls-remote`, which is why it is reported.
+>    Verify the rebuild before continuing: the new worktree's HEAD must equal
+>    `origin/<branchName>`, and `git rev-list --count origin/<base>..HEAD` must match the
+>    entry's `commitsAhead`. If it does not, STOP and escalate — do not open a PR over a
+>    worktree that lost the work.
 > 2. Source BOTH lib primitives — `source "${PLUGIN_ROOT}/scripts/lib/worktree-rebase.sh"`
 >    (owns `rebase_onto_base_classified`) and `source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"`
 >    (owns `draft_pr_push_verify` / `draft_pr_ensure`), exactly as RUBRIC TWO does. Rebase onto
 >    `origin/<base>` via `rebase_onto_base_classified`, then run `draft_pr_push_verify` and
 >    `draft_pr_ensure` to open a **draft** PR. Draft, not ready: this work was never reviewed
 >    and may be mid-phase.
-> 3. Re-arm the ticket's phase signal so the scheduler re-queues it, and record the win with
+>
+>    **The draft requirement is load-bearing — enforce it, don't assume it.** When
+>    `gh pr create --draft` is rejected or transiently fails, `draft_pr_ensure` RETRIES
+>    WITHOUT `--draft` and returns success with a **ready** PR. That would put unreviewed,
+>    possibly mid-phase orphan work straight onto the normal review/merge path. So treat the
+>    helper's own result as untrusted: read back `.isDraft` and, if it is `false`, immediately
+>    convert the PR back with `gh pr ready --undo "$PR_NUMBER"`. If that conversion also
+>    fails, ESCALATE — never leave a rescued orphan branch sitting as a ready PR.
+> 3. Re-arm the ticket so the scheduler actually re-queues it, then record the win with
 >    `recovery-emit.mjs fixed`.
+>
+>    **This cohort usually has NO worker directory** — that is what made it unowned in the
+>    first place — so there is typically no prior phase signal to "re-arm", and the worktree
+>    and draft-PR primitives create none. The only signal guaranteed to exist is this pass's
+>    own `phase-recovery-pass.json`, which the End block marks complete. If you stop there the
+>    rescued PR sits OUTSIDE the phase pipeline, and the now-authoritative PR discovery will
+>    simply spare the ticket on every later scan instead of resuming it — the ticket looks
+>    healthier while being just as stuck. So write a concrete downstream signal:
+>    `workers/<TICKET>/phase-monitor-merge.json` with `status: "pending"`, the `pr.number` /
+>    `pr.url` you just opened, and the ticket's `worktreePath`, so the next scheduler tick
+>    dispatches `monitor-merge` against the rescued PR. Confirm the file exists and parses
+>    before emitting `fixed`.
 >
 > **ESCALATE instead when:**
 >

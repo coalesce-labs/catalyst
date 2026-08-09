@@ -11,6 +11,7 @@
 import { describe, test, expect } from "bun:test";
 import {
   assembleBoardState,
+  DEFAULT_THRESHOLDS,
   evaluateInvariants,
   decideBoardHealth,
   proposeMoves,
@@ -113,6 +114,10 @@ function mkBoard(o = {}) {
     // CTL-1644: per-ticket evidence map for the stranded-mid-pipeline check.
     // Empty Map default ⇒ checkStrandedMidPipeline stays observable:false (shadow-first).
     strandedEvidence: o.strandedEvidence ?? new Map(),
+    // CAT-11 (Codex round 1): rotation cursor + injectable monotonic clock for the
+    // budgeted open-PR verification loop. Both are INPUTS — the invariant stays pure.
+    unownedPrVerifyCursor: o.unownedPrVerifyCursor ?? 0,
+    ...(o.monotonicNowMs ? { monotonicNowMs: o.monotonicNowMs } : {}),
     now: o.now ?? NOW,
   };
 }
@@ -3113,5 +3118,98 @@ describe("CAT-57 nodeProductivity invariant", () => {
     let called = 0;
     expect(() => assembleBoardState({ mode: "off", productivityMode: "enforce", getPeerProductivity: () => { called += 1; throw new Error("must not run"); } })).not.toThrow();
     expect(called).toBe(0);
+  });
+});
+
+// ─── CAT-11 (Codex round 1): budgeted verification must rotate AND stay bounded ──
+// Two P1 findings on the same loop. (1) Slicing the oldest `unownedPrVerifyMax`
+// every scan re-checks the same prefix forever, so any candidate past the cap sits
+// at "unconfirmed for budget" indefinitely — including tickets whose only reason
+// for being spared is a memoized open-PR result that still consumed a slot.
+// (2) The 15s limit is PER SUBPROCESS; one enumeration can spawn a replica read,
+// several `gh pr list` calls, an attachment read and a `gh pr view` each, so an
+// unbounded batch can block phase scheduling and liveness for minutes per tick.
+describe("checkUnownedInFlight verification budget (CAT-11, Codex round 1)", () => {
+  const HOUR = 3_600_000;
+  const NOW = Date.parse("2026-07-27T00:00:00.000Z");
+  const stale = (hoursAgo) => new Date(NOW - hoursAgo * HOUR).toISOString();
+  // Six stale candidates, distinct ages so ordering is deterministic.
+  const sixTickets = () =>
+    new Map(Array.from({ length: 6 }, (_, i) => [
+      `CTL-${i + 1}`,
+      { id: `CTL-${i + 1}`, state: "Implement", updatedAt: stale(100 - i) },
+    ]));
+
+  const runScan = ({ cursor, verify, monotonicNowMs }) =>
+    evaluateInvariants(
+      mkBoard({
+        now: NOW,
+        mode: "enforce",
+        ticketsById: sixTickets(),
+        verifyOpenPrs: verify,
+        unownedPrVerifyCursor: cursor,
+        ...(monotonicNowMs ? { monotonicNowMs } : {}),
+      }),
+      { thresholds: { ...DEFAULT_THRESHOLDS, unownedPrVerifyMax: 2 } },
+    ).unownedInFlight;
+
+  test("rotates the window so EVERY candidate is reached across successive scans", () => {
+    const everChecked = new Set();
+    // ceil(6 / 2) = 3 scans should cover all six.
+    for (let scan = 0; scan < 3; scan++) {
+      runScan({ cursor: scan * 2, verify: (t) => { everChecked.add(t); return { ok: true, prs: [] }; } });
+    }
+    expect([...everChecked].sort()).toEqual(
+      ["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5", "CTL-6"],
+    );
+  });
+
+  // Non-vacuity guard: with a FIXED cursor the same prefix repeats — this is the
+  // exact behaviour the rotation replaces, so it must be observably different.
+  test("a fixed cursor re-checks only the same prefix (the bug being fixed)", () => {
+    const everChecked = new Set();
+    for (let scan = 0; scan < 3; scan++) {
+      runScan({ cursor: 0, verify: (t) => { everChecked.add(t); return { ok: true, prs: [] }; } });
+    }
+    expect(everChecked.size).toBe(2);
+  });
+
+  test("stops starting NEW verifications once the batch time budget is spent", () => {
+    let checked = 0;
+    let clock = 0;
+    const r = evaluateInvariants(
+      mkBoard({
+        now: NOW,
+        mode: "enforce",
+        ticketsById: sixTickets(),
+        // Each verification "costs" 40s of wall clock.
+        monotonicNowMs: () => clock,
+        verifyOpenPrs: () => { checked += 1; clock += 40_000; return { ok: true, prs: [] }; },
+        unownedPrVerifyCursor: 0,
+      }),
+      { thresholds: { ...DEFAULT_THRESHOLDS, unownedPrVerifyMax: 6, unownedPrVerifyBatchMs: 30_000 } },
+    ).unownedInFlight;
+    // The first runs (budget not yet spent); every later one is skipped, not run.
+    expect(checked).toBe(1);
+    expect(r.budgetExhausted).toBe(true);
+    expect(r.unconfirmedForBudget).toBe(5);
+  });
+
+  // A batch budget must never SILENTLY shrink the cohort — an all-skipped scan has
+  // to say so rather than render as a clean board.
+  test("an exhausted batch budget is surfaced in the green qualifier", () => {
+    let clock = 0;
+    const r = evaluateInvariants(
+      mkBoard({
+        now: NOW,
+        mode: "enforce",
+        ticketsById: sixTickets(),
+        monotonicNowMs: () => clock,
+        verifyOpenPrs: () => { clock += 60_000; return { ok: true, prs: [{ number: 1 }] }; },
+        unownedPrVerifyCursor: 0,
+      }),
+      { thresholds: { ...DEFAULT_THRESHOLDS, unownedPrVerifyMax: 6, unownedPrVerifyBatchMs: 10_000 } },
+    ).unownedInFlight;
+    expect(r.note).toContain("batch time budget exhausted");
   });
 });

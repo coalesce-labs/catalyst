@@ -1,5 +1,82 @@
 import { describe, expect, test } from "bun:test";
-import { probeBranchSalvage } from "./branch-salvage.mjs";
+import { probeBranchSalvage, probeWorktreeUnpushed, resolveWorktreePath } from "./branch-salvage.mjs";
+
+// CAT-11 (Codex P1/P2 round 1) — the local-salvage half of the evidence, the
+// configured base branch, and the no-longer-ignored fetch status.
+describe("branch salvage — local evidence and base branch (Codex round 1)", () => {
+  const lsRemoteHit = { status: 0, stdout: "abc\trefs/heads/PROJ-5\n" };
+
+  // THE headline bug: production never supplied worktreeUnpushed, so
+  // classifyRevivalRoute always fell through to non-dispatchable unknown-salvage
+  // and RUBRIC FOUR's rescue route was unreachable. git says "no worktree" → false.
+  test("supplies worktreeUnpushed:false when git holds no worktree for the branch", () => {
+    const run = (_bin, args) => {
+      if (args[0] === "ls-remote") return lsRemoteHit;
+      if (args[0] === "worktree") return { status: 0, stdout: "worktree /other\nbranch refs/heads/nope\n" };
+      if (args[0] === "fetch") return { status: 0, stdout: "" };
+      return { status: 0, stdout: "3\n" };
+    };
+    const r = probeBranchSalvage("PROJ-5", { branchName: "PROJ-5", repoRoot: "/repo", run });
+    expect(r.worktreeUnpushed).toBe(false);
+    expect(r).toMatchObject({ remoteBranchExists: true, commitsAhead: 3 });
+  });
+
+  // A FAILED worktree probe must stay UNKNOWN — never a false "no unpushed work",
+  // which would let resume-from-remote discard real local commits.
+  test("a failed worktree-list probe leaves worktreeUnpushed undefined", () => {
+    const run = (_bin, args) => {
+      if (args[0] === "ls-remote") return lsRemoteHit;
+      if (args[0] === "worktree") return { status: 128, stdout: "" };
+      if (args[0] === "fetch") return { status: 0, stdout: "" };
+      return { status: 0, stdout: "1\n" };
+    };
+    expect(probeBranchSalvage("PROJ-5", { branchName: "PROJ-5", repoRoot: "/repo", run })
+      .worktreeUnpushed).toBeUndefined();
+  });
+
+  test("counts commits against the CONFIGURED base branch, not a hardcoded main", () => {
+    const seen = [];
+    const run = (_bin, args) => {
+      seen.push(args.join(" "));
+      if (args[0] === "ls-remote") return lsRemoteHit;
+      if (args[0] === "worktree") return { status: 0, stdout: "" };
+      if (args[0] === "fetch") return { status: 0, stdout: "" };
+      return { status: 0, stdout: "4\n" };
+    };
+    probeBranchSalvage("PROJ-5", {
+      branchName: "PROJ-5", repoRoot: "/repo", baseBranch: "develop", run,
+    });
+    expect(seen.some((s) => s.includes("origin/develop..origin/PROJ-5"))).toBe(true);
+    expect(seen.some((s) => s.includes("origin/main.."))).toBe(false);
+  });
+
+  // A stale tracking ref makes rev-list SUCCEED after a failed fetch, publishing a
+  // verifiable-looking count computed from stale data. That must be unverifiable.
+  test("a failed fetch is unverifiable, never a stale commit count", () => {
+    const run = (_bin, args) => {
+      if (args[0] === "ls-remote") return lsRemoteHit;
+      if (args[0] === "worktree") return { status: 0, stdout: "" };
+      if (args[0] === "fetch") return { status: 1, stdout: "", stderr: "auth failed" };
+      return { status: 0, stdout: "99\n" }; // stale ref would happily answer
+    };
+    expect(probeBranchSalvage("PROJ-5", { branchName: "PROJ-5", repoRoot: "/repo", run }))
+      .toMatchObject({ unverifiable: true, reason: "fetch-failed", commitsAhead: null });
+  });
+
+  test("resolveWorktreePath returns the path when the branch IS checked out", () => {
+    const run = () => ({ status: 0,
+      stdout: "worktree /a\nbranch refs/heads/other\n\nworktree /wt/PROJ-5\nbranch refs/heads/PROJ-5\n" });
+    expect(resolveWorktreePath(["PROJ-5"], { repoRoot: "/repo", run })).toBe("/wt/PROJ-5");
+  });
+
+  test("probeWorktreeUnpushed reports false for a path that does not exist", () => {
+    expect(probeWorktreeUnpushed("/definitely/not/here/PROJ-5")).toBe(false);
+  });
+
+  test("probeWorktreeUnpushed stays unknown with no path at all", () => {
+    expect(probeWorktreeUnpushed("")).toBeUndefined();
+  });
+});
 
 describe("probeBranchSalvage (CAT-11)", () => {
   test("reports a remote branch and its commits ahead", () => {
@@ -12,7 +89,7 @@ describe("probeBranchSalvage (CAT-11)", () => {
     };
     expect(probeBranchSalvage("PROJ-5", { branchName: "PROJ-5", repoRoot: "/repo", run }))
       .toEqual({ remoteBranchExists: true, commitsAhead: 2, branchName: "PROJ-5",
-        candidates: ["PROJ-5"] });
+        candidates: ["PROJ-5"], worktreeUnpushed: false });
     expect(calls.every(({ opts }) => Number.isFinite(opts.timeout) && opts.timeout > 0)).toBe(true);
     expect(calls.every(({ opts }) => opts.cwd === "/repo")).toBe(true);
   });
@@ -21,7 +98,7 @@ describe("probeBranchSalvage (CAT-11)", () => {
     const run = () => ({ status: 0, stdout: "" });
     expect(probeBranchSalvage("PROJ-5", { branchName: "PROJ-5", repoRoot: "/repo", run }))
       .toEqual({ remoteBranchExists: false, commitsAhead: 0, branchName: "PROJ-5",
-        candidates: ["PROJ-5"] });
+        candidates: ["PROJ-5"], worktreeUnpushed: false });
   });
 
   test("keeps failed branch existence unknown", () => {
@@ -43,10 +120,11 @@ describe("probeBranchSalvage (CAT-11)", () => {
   test("keeps commits unknown when rev-list fails", () => {
     const run = (_bin, args) => (args[0] === "ls-remote"
       ? { status: 0, stdout: "abc\trefs/heads/PROJ-5\n" }
+      : args[0] === "worktree" ? { status: 0, stdout: "" }
       : args[0] === "fetch" ? { status: 0, stdout: "" } : { status: 1, stdout: "" });
     expect(probeBranchSalvage("PROJ-5", { branchName: "PROJ-5", repoRoot: "/repo", run }))
       .toEqual({ remoteBranchExists: true, commitsAhead: null, branchName: "PROJ-5",
-        candidates: ["PROJ-5"], reason: "rev-list-failed" });
+        candidates: ["PROJ-5"], worktreeUnpushed: false, reason: "rev-list-failed" });
   });
 
   test("does not spawn when branch or repo is underivable", () => {

@@ -6081,6 +6081,12 @@ export function schedulerTick(
           getStrandedEvidence: _boardHealth.getStrandedEvidence,
           verifyOpenPrs: _boardHealth.verifyOpenPrs,
           getBranchSalvage: _boardHealth.getBranchSalvage,
+          // CAT-11 (Codex P1 round 1): advance the verification window each scan so
+          // the budgeted check rotates through ALL stale candidates instead of
+          // re-checking the same oldest prefix forever (which left any candidate past
+          // the cap permanently "unconfirmed for budget"). Module-level so it survives
+          // ticks; the invariant itself stays pure — this is an input, not state it owns.
+          unownedPrVerifyCursor: _unownedPrVerifyCursor++,
           // CTL-1608: inject the stalled-PR stamp map (from workers/*/stalled-pr.json).
           // The daemon binds this to read from the real orchDir; a bare tick passes
           // nothing → assembleBoardState defaults to () => new Map() (observable:false).
@@ -8316,6 +8322,29 @@ let _unstuckLastRunMs = 0;
 // daemon restart (module reload) or via __resetForTests.
 let _stallJanitorCensusLastRunMs = 0;
 
+// CAT-11 (Codex P2 round 1): the enrolled repo's base branch, read from origin/HEAD
+// (the same source `resolve_base_branch` in lib/worktree-rebase.sh uses). Falls back
+// to "main" only when the symbolic ref is unreadable, so a master/develop repo is
+// counted against its own history instead of a branch that does not exist there.
+export function resolveOriginHeadBranch(repoRoot, { run = spawnSync } = {}) {
+  if (!repoRoot) return "main";
+  try {
+    const r = run("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+      { cwd: repoRoot, encoding: "utf8", timeout: 15_000 });
+    if (r?.status !== 0) return "main";
+    const ref = String(r.stdout ?? "").trim();
+    const short = ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
+    return short || "main";
+  } catch {
+    return "main";
+  }
+}
+
+// CAT-11 (Codex P1 round 1): monotonically advancing cursor for the unowned-PR
+// verification window. Rotating it per scan guarantees every stale candidate is
+// reached within ceil(candidates / unownedPrVerifyMax) scans.
+let _unownedPrVerifyCursor = 0;
+
 // CAT-11: one verifier closure per daemon/orchestrator so its TTL memo survives
 // scheduler ticks. The closure itself owns the memo; this map only owns lifetime.
 const _unownedPrVerifiers = new Map();
@@ -9059,7 +9088,13 @@ function runTick() {
             const team = teamOf(ticket);
             const repoRoot = team ? getProjectConfig(team)?.repoRoot ?? null : null;
             const branchName = defaultDeriveBranchName(ticket, { cwd: repoRoot ?? undefined });
-            return probeBranchSalvage(ticket, { branchName, repoRoot });
+            // CAT-11 (Codex P2 round 1): resolve the repo's ACTUAL base branch from
+            // origin/HEAD rather than assuming `main` — against a master/develop repo
+            // the hardcoded default counted against the wrong history (or failed), so
+            // real orphaned commits never reached RUBRIC FOUR's commitsAhead >= 1.
+            return probeBranchSalvage(ticket, {
+              branchName, repoRoot, baseBranch: resolveOriginHeadBranch(repoRoot),
+            });
           } catch (error) {
             return { unverifiable: true, reason: error instanceof Error ? error.message : String(error) };
           }

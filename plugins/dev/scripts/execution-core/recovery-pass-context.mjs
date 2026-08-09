@@ -369,6 +369,29 @@ function printDispatchedBrief(ticket, orchDir) {
       // or an operator; the worker must not act on these.
       console.log(`stranded mid-pipeline (held, do NOT act): ${heldCount}`);
     }
+    // CAT-11 (Codex P1 round 1): RUBRIC FOUR's trigger is literally
+    // `boardContext.unownedInFlightDetail`, but this renderer emitted slots, queue
+    // depth, workers, nodes, quota and stranded routes only — never that field. A
+    // router-dispatched delegate following the skill therefore could not see or
+    // enumerate the orphaned-branch entries at all, and would have had to guess that
+    // it must reopen and parse the JSON brief. Print the actionable entries so the
+    // rubric's trigger is satisfiable from the context the delegate is actually given.
+    // Only DISPATCHABLE entries are listed, matching the held-route discipline above;
+    // held ones are surfaced as a count so they stay observable but not actionable.
+    const uid = Array.isArray(bc.unownedInFlightDetail) ? bc.unownedInFlightDetail : [];
+    const uidActionable = uid.filter((e) => e?.dispatchable !== false);
+    const uidHeld = uid.length - uidActionable.length;
+    if (uidActionable.length) {
+      console.log(
+        `unowned in-flight (orphaned work, RUBRIC FOUR): ${uidActionable
+          .map((e) => `${e.ticket}→${e.route ?? "?"}`
+            + ` [branch ${e.branchName ?? "?"}, +${e.commitsAhead ?? "?"} commits]`)
+          .join(", ")}`,
+      );
+    }
+    if (uidHeld) {
+      console.log(`unowned in-flight (held, do NOT act): ${uidHeld}`);
+    }
   }
   console.log("--- recent log buffer (tail 40) ---");
   const logs = brief?.diagnosis?.logsOutput || "(no logs captured)";
