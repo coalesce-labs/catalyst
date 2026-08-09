@@ -49,6 +49,16 @@ import {
 } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { defaultProbePrBlock } from "./pr-block-probe.mjs";
+// Static (not requireSync) on purpose. Bun rejects `require()` of a module whose
+// ESM graph is async — but ONLY on a COLD cache: once anything has imported this
+// module, the same requireSync succeeds. That made the empty-registry fallback
+// below silently order-dependent — it worked under the tests (whose own import
+// graph warms the module) and returned `registry build failed: require() async
+// module ... is unsupported` in a production process that reached the fallback
+// first. There is no import cycle to break here (unstuck-act-seams.mjs and its
+// dep closure do not import this module), so a plain static import is both safe
+// and deterministic.
+import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
 import { captureEvidence } from "./diagnostician.mjs";
 import {
   clearFixFailures,
@@ -1692,7 +1702,6 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
   let registry = deps.actByCategory;
   if (!registry || typeof registry[category] !== "function") {
     try {
-      const { buildUnstuckActSeams } = requireSync("./unstuck-act-seams.mjs");
       registry = buildUnstuckActSeams({
         orchDir: deps.orchDir ?? resolveOrchDir(),
         ...(deps.resolvePrState ? { resolvePrState: deps.resolvePrState } : {}),
