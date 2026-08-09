@@ -13,8 +13,9 @@
 // Run: bun test plugins/dev/scripts/broker/stack-reload.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { writeFileSync, unlinkSync } from "node:fs";
+import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   decideStackReload,
   handleStackReloadEvent,
@@ -23,6 +24,7 @@ import {
   STACK_RELOAD_CONFIRM_POLL_MS,
   pidFilePathForComponent,
   defaultIsRunningFn,
+  readPidFor,
 } from "./stack-reload.mjs";
 
 // ─── fake-timer helper ───────────────────────────────────────────────────────
@@ -1198,5 +1200,71 @@ describe("otel-forward is reloaded on checkout advance (CTL-1506 follow-up)", ()
     // must use forward-restart, never a bare `restart` (that would bounce the monitor).
     expect(spawned).toContain("catalyst-monitor forward-restart");
     expect(spawned).not.toContain("catalyst-monitor restart");
+  });
+});
+
+// ─── otel-forward restart CONFIRMATION (Codex #3164 P1) ─────────────────────
+// The other non-monitor components take defaultConfirmReload's best-effort
+// `return true`. otel-forward must not: `cmd_forward_restart` exits 0 when it
+// cannot take the mutation lock ("Forwarder busy … skipping restart"), and the
+// spawned Bun process can die during startup. Both leave a STALE forwarder while
+// `stack.reload.complete` claims success — the exact outage this component was
+// added to prevent. Confirmation therefore requires a LIVE pid that DIFFERS from
+// the pre-restart one.
+describe("otel-forward reload confirmation (Codex #3164 P1)", () => {
+  const changed = [{ root: "/co", oldSha: "a", newSha: "b", changed: true }];
+  const pidPath = join(tmpdir(), "sr-confirm-test", "otel-forward.pid");
+  let prevDir;
+
+  beforeEach(() => {
+    prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = join(tmpdir(), "sr-confirm-test");
+    mkdirSync(join(tmpdir(), "sr-confirm-test"), { recursive: true });
+  });
+  afterEach(() => {
+    try { unlinkSync(pidPath); } catch { /* ok */ }
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+  });
+
+  // Drive a reload where ONLY otel-forward is running, using the REAL confirmFn.
+  const runReload = (emitted) =>
+    handleStackReloadEvent({
+      results: changed,
+      loadedCommitRoot: "/co",
+      spawnFn: () => {},
+      isRunningFn: (c) => c.name === "otel-forward",
+      emitFn: (e) => emitted.push(e),
+      now: 0,
+      ...immediate,
+    });
+
+  test("an UNCHANGED pid (lock-contention skip, which exits 0) is NOT confirmed", () => {
+    writeFileSync(pidPath, String(process.pid)); // alive, but never turns over
+    const emitted = [];
+    runReload(emitted);
+    // A skip must surface as degraded, never as a false complete.
+    expect(emitted.find((e) => e.event === "stack.reload.complete")).toBeUndefined();
+    const degraded = emitted.find((e) => e.event === "stack.reload.degraded");
+    expect(degraded).toBeDefined();
+    expect(degraded.detail.reason).toBe("restart_not_confirmed");
+    expect(degraded.detail.unconfirmed.map((c) => c.name)).toContain("otel-forward");
+  });
+
+  test("a pid file naming a DEAD pid (startup crash) is NOT confirmed", () => {
+    writeFileSync(pidPath, "2147483646"); // implausible pid → kill(pid,0) throws
+    const emitted = [];
+    runReload(emitted);
+    expect(emitted.find((e) => e.event === "stack.reload.complete")).toBeUndefined();
+    expect(emitted.find((e) => e.event === "stack.reload.degraded")).toBeDefined();
+  });
+
+  test("readPidFor returns null for an absent or malformed pid file", () => {
+    try { unlinkSync(pidPath); } catch { /* ok */ }
+    expect(readPidFor("otel-forward")).toBeNull();
+    writeFileSync(pidPath, "not-a-pid");
+    expect(readPidFor("otel-forward")).toBeNull();
+    writeFileSync(pidPath, "0");
+    expect(readPidFor("otel-forward")).toBeNull();
   });
 });
