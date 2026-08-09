@@ -861,7 +861,20 @@ _forward_stop_impl() {
   while [[ $waited -lt 30 ]] && kill -0 "$pid" 2>/dev/null; do
     sleep 0.1; waited=$((waited + 1))
   done
-  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+  # CTL-1502: escalating to SIGKILL used to return immediately with no
+  # confirmation the kill took effect — kill -0 can keep reporting a
+  # just-SIGKILL'd pid as alive for a brief window (unreaped zombie state)
+  # until its parent/init reaps it, so callers observed "stopped" moments
+  # before the pid was actually gone (root cause of the CI-flaky
+  # forward-restart.test.sh hot-swap assertion). Poll after SIGKILL too,
+  # same bound as the SIGTERM wait above, instead of trusting a single check.
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+    waited=0
+    while [[ $waited -lt 30 ]] && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.1; waited=$((waited + 1))
+    done
+  fi
   rm -f "$FORWARD_PID_FILE" 2>/dev/null || true
   echo "Forwarder stopped"
 }

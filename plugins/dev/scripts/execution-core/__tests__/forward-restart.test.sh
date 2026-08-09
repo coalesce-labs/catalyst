@@ -65,7 +65,21 @@ run_monitor forward-restart >/dev/null || { echo "FAIL: forward-restart (hot) ex
 PID2="$(cat "$FORWARD_PID_FILE")"
 [[ "$PID2" != "$PID1" ]] || { echo "FAIL: pid did not change on hot restart ($PID1 == $PID2)"; exit 1; }
 kill -0 "$PID2" 2>/dev/null || { echo "FAIL: new forwarder pid $PID2 not alive"; exit 1; }
-kill -0 "$PID1" 2>/dev/null && { echo "FAIL: old forwarder pid $PID1 still alive after restart"; exit 1; } || true
+# CTL-1502 CI FLAKE: root cause was a real gap in _forward_stop_impl (fixed in
+# catalyst-monitor.sh) — the SIGKILL escalation path returned immediately with
+# no confirmation the kill took effect, so "Forwarder stopped" could be echoed
+# moments before the kernel actually finished tearing PID1 down (visible as a
+# transient kill -0 success on an unreaped/zombie pid). _forward_stop_impl now
+# polls after SIGKILL too, same bound as the SIGTERM wait. This retry is kept
+# as a small defense-in-depth margin on the OBSERVER side (this test's own
+# kill -0 runs from a separate process than the one that just confirmed the
+# reap) rather than the primary fix.
+PID1_GONE=0
+for _ in $(seq 1 10); do
+  kill -0 "$PID1" 2>/dev/null || { PID1_GONE=1; break; }
+  sleep 0.1
+done
+[[ "$PID1_GONE" == "1" ]] || { echo "FAIL: old forwarder pid $PID1 still alive after restart"; exit 1; }
 
 # --- Test 4: two back-to-back restarts both exit 0 (idempotent) ---
 run_monitor forward-restart >/dev/null || { echo "FAIL: 1st back-to-back restart exit != 0"; exit 1; }
