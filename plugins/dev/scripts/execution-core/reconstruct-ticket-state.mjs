@@ -179,6 +179,22 @@ export function queryArchivedWorkersViaCli(dbPath, ticket, { execFileFn = execFi
   return rows[0];
 }
 
+// CTL-1490 (Codex #2697 P1): only a SUCCESSFUL completion is terminal evidence.
+//
+// archived_workers.final_status is copied straight from the worker signal's `status`
+// (catalyst-archive.ts), so the column also carries "failed", "stalled", "skipped" and
+// "turn-cap-exhausted" — every LIFECYCLE-terminal state, not just success. Treating any
+// row as terminal told reconstruction a ticket had finished when its worker had in fact
+// failed or stalled, so teardown was never resumed or redispatched. A non-success row
+// must fall through to the artifact walk, exactly as a missing row does.
+const ARCHIVE_TERMINAL_STATUSES = new Set(["done", "complete"]);
+
+function isArchiveTerminalRow(row) {
+  if (!row) return false;
+  const st = String(row.final_status ?? "").trim().toLowerCase();
+  return ARCHIVE_TERMINAL_STATUSES.has(st);
+}
+
 export async function defaultCheckArchive(
   ticket,
   {
@@ -205,7 +221,7 @@ export async function defaultCheckArchive(
   try {
     const { Database } = await importBunSqlite();
     const row = queryArchivedWorkersViaBun(dbPath, ticket, Database);
-    if (row) return { terminal: true, completedPhases: PHASES.slice() };
+    if (isArchiveTerminalRow(row)) return { terminal: true, completedPhases: PHASES.slice() };
     return null;
   } catch {
     // bun:sqlite unavailable (plain Node) or the query itself failed —
@@ -214,7 +230,7 @@ export async function defaultCheckArchive(
 
   try {
     const row = queryArchivedWorkersViaCli(dbPath, ticket, { execFileFn });
-    if (row) return { terminal: true, completedPhases: PHASES.slice() };
+    if (isArchiveTerminalRow(row)) return { terminal: true, completedPhases: PHASES.slice() };
     return null;
   } catch {
     return null;

@@ -349,3 +349,38 @@ describe("Node-loadable CLI contract", () => {
     expect(parsed).toHaveProperty("completedPhases");
   });
 });
+
+// ─── CTL-1490 (Codex #2697 P1): archive rows must be filtered to SUCCESS ─────
+// archived_workers.final_status is copied straight from the worker signal's status
+// (catalyst-archive.ts), so it also carries failed/stalled/skipped/turn-cap-exhausted.
+// Treating any row as terminal told reconstruction a ticket had finished when its
+// worker had actually failed — so teardown was never resumed or redispatched.
+describe("defaultCheckArchive — only successful statuses are terminal (CTL-1490)", () => {
+  const check = (final_status) =>
+    defaultCheckArchive("T-1", {
+      archiveDir: "/nonexistent",
+      readdirFn: () => { throw new Error("no archive dir"); },
+      dbPath: "/tmp/does-not-matter.db",
+      execFileFn: () => JSON.stringify(final_status === null ? [] : [{ final_status }]),
+    });
+
+  test("done / complete are terminal", async () => {
+    expect((await check("done"))?.terminal).toBe(true);
+    expect((await check("complete"))?.terminal).toBe(true);
+  });
+
+  test("failed / stalled / skipped / turn-cap-exhausted are NOT terminal", async () => {
+    for (const st of ["failed", "stalled", "skipped", "turn-cap-exhausted"]) {
+      const r = await check(st);
+      expect(r?.terminal === true).toBe(false);
+    }
+  });
+
+  test("status matching is case- and whitespace-insensitive", async () => {
+    expect((await check(" Done "))?.terminal).toBe(true);
+  });
+
+  test("no archived row at all stays non-terminal", async () => {
+    expect((await check(null))?.terminal === true).toBe(false);
+  });
+});

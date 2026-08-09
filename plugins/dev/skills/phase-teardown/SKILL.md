@@ -553,9 +553,18 @@ fi
 # (per memory: phase_env_ticket_leak_from_sibling). Loud (non-fatal) diagnostic
 # if the emitter itself fails — otherwise the ticket stalls with the failure of
 # the surfacing mechanism itself unobservable.
-"$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status complete \
-  ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
-  || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
+# CTL-1490 (Codex #2697 P1): CAPTURE the emit's exit status — do not swallow it with
+# `|| echo`. The marker below is read by reconstruct-ticket-state as terminal evidence,
+# so writing it after a FAILED emit tells reconstruction the pipeline finished when no
+# terminal event ever landed: teardown is then never resumed or redispatched, which is
+# precisely the state the marker exists to make detectable.
+EMIT_OK="false"
+if "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status complete \
+  ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"}; then
+  EMIT_OK="true"
+else
+  echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
+fi
 
 # CTL-1490 (Codex round-2, PR #2697): drop a terminal-completion marker into
 # the archive dir, written LAST — after every prior step in this script
@@ -570,7 +579,9 @@ fi
 # resume/redispatch teardown. Best-effort — a failed touch here just means a
 # future reconstruction falls through to the thoughts-artifact walk instead
 # of the fast archive-terminal path, same as before this marker existed.
-if [[ "${ARCHIVE_OK:-false}" == "true" ]]; then
+# Gate on BOTH: the archive must exist AND the terminal event must have landed.
+# Either alone is insufficient evidence that the pipeline actually completed.
+if [[ "${ARCHIVE_OK:-false}" == "true" && "${EMIT_OK:-false}" == "true" ]]; then
   : > "${ARCHIVE_DIR}/.teardown-complete" 2>/dev/null \
     || echo "phase-teardown: could not write .teardown-complete marker (non-fatal)" >&2
 fi
