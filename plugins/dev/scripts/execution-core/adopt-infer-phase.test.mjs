@@ -196,6 +196,50 @@ console.log("\nadopt-infer-phase.mjs tests\n");
   }
 }
 
+// ─── Test 6: orchDir threading — orchestrator-scoped probes fire (Codex #3175) ─
+// A durable verify.json under <orchDir>/workers/<ticket>/ must let the shim infer
+// the phase AFTER verify (review). Without --orch-dir the same fixture can only
+// see up to the worktree artifacts, so it falls back to 'research'. This proves
+// the P2 fix: the orchestrator-scoped probes now receive orchDir.
+
+{
+  const ticket = "CTL-9995";
+  const { dir, cleanup } = makeGitFixture(ticket);
+  const orchDir = join(dir, "..", "orch");
+  const workerDir = join(orchDir, "workers", ticket);
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(
+    join(workerDir, "verify.json"),
+    JSON.stringify({
+      findings: [],
+      regression_risk: 2,
+      tests_attempted: 3,
+      gates: {},
+      generatedAt: "2026-01-01T00:00:00Z",
+    })
+  );
+  try {
+    // Without --orch-dir: the orchestrator-scoped probes cannot see the signal.
+    const noOrch = runShim(["--ticket", ticket, "--cwd", dir], GIT_ENV);
+    assert(
+      noOrch.stdout.trim() === "research",
+      `without --orch-dir falls back to research, got '${noOrch.stdout.trim()}'`
+    );
+    // With --orch-dir: verifyProbe fires → next phase is review.
+    const withOrch = runShim(
+      ["--ticket", ticket, "--cwd", dir, "--orch-dir", orchDir],
+      GIT_ENV
+    );
+    assert(withOrch.code === 0, "exits 0 with orchDir verify.json", withOrch.stderr);
+    assert(
+      withOrch.stdout.trim() === "review",
+      `infers 'review' after verify done (orchDir threaded), got '${withOrch.stdout.trim()}'`
+    );
+  } finally {
+    cleanup();
+  }
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\nResults: ${passes} passed, ${failures} failed\n`);

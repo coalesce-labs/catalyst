@@ -136,6 +136,17 @@ exit 0
 STUB
   chmod +x "${bin_dir}/phase-agent-dispatch"
 
+  # lsof: default = report NO holders (exit 1, empty stdout/stderr) so the
+  # live-handle guard (worktree-remove-guard.sh, sourced by catalyst-adopt.sh)
+  # treats a fresh fixture worktree as truly orphaned. Without this stub the
+  # guard would fail-closed on a host lacking lsof. A specific test overrides
+  # this stub to inject a foreign holder and assert the refusal path.
+  cat > "${bin_dir}/lsof" <<STUB
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "${bin_dir}/lsof"
+
   # node: forward to real node for adopt-infer-phase.mjs; log other uses
   local real_node; real_node="$(command -v node)"
   cat > "${bin_dir}/node" <<STUB
@@ -463,6 +474,149 @@ echo "--- Phase 5: --json contract ---"
     >/dev/null 2>&1; ok_rc=$?
 
   assert_eq 0 "$ok_rc" "exit-codes: success exits 0"
+}
+
+# ─── Phase 6: remediation hardening (Codex #3175) ────────────────────────────
+
+echo ""
+echo "--- Phase 6: remediation hardening (Codex #3175) ---"
+
+# 6.1 Live handle present → refuse to mutate (no WIP commit), exit non-zero
+{
+  tag="${SCRATCH}/livehandle"
+  make_repo "$tag" "CTL-9101" --dirty
+  bin_dir="${SCRATCH}/bin_live"; log="${SCRATCH}/call_live.log"
+  install_stubs "$bin_dir" "$log"
+  # Override lsof to report a FOREIGN holder (a pid that is not our ancestor).
+  cat > "${bin_dir}/lsof" <<'STUB'
+#!/usr/bin/env bash
+printf 'p999999\nn/some/held/file\n'
+exit 0
+STUB
+  chmod +x "${bin_dir}/lsof"
+
+  out=$(
+    PATH="${bin_dir}:$PATH" \
+    CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_live" \
+    CATALYST_ADOPT_TICKET_STATE="Implement" \
+    bash "$ADOPT" "CTL-9101" \
+      --worktree "$WORK" \
+      --orch-dir "$SCRATCH" --orch-id "test-orch-live" 2>&1
+  ); rc=$?
+
+  assert_true "[[ $rc -ne 0 ]]" "live-handle: refuses (non-zero exit)"
+  assert_contains "$out" "live handle" "live-handle: message mentions a live handle"
+  ahead=$(git -C "$WORK" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
+  assert_eq "0" "$ahead" "live-handle: no WIP commit made"
+}
+
+# 6.2 Dispatcher failure propagates: adopt exits non-zero, --json .adopted=false
+{
+  tag="${SCRATCH}/dispfail"
+  make_repo "$tag" "CTL-9102"
+  bin_dir="${SCRATCH}/bin_df"; log="${SCRATCH}/call_df.log"
+  install_stubs "$bin_dir" "$log"
+  # Dispatcher reports a missing prior artifact (contract: exit 2).
+  cat > "${bin_dir}/phase-agent-dispatch" <<'STUB'
+#!/usr/bin/env bash
+echo "dispatch: missing prior-phase artifact" >&2
+exit 2
+STUB
+  chmod +x "${bin_dir}/phase-agent-dispatch"
+
+  stdout_out=$(
+    PATH="${bin_dir}:$PATH" \
+    CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_df" \
+    CATALYST_ADOPT_TICKET_STATE="Research" \
+    bash "$ADOPT" "CTL-9102" \
+      --worktree "$WORK" \
+      --orch-dir "$SCRATCH" --orch-id "test-orch-df" \
+      --json 2>/dev/null
+  ); rc=$?
+
+  assert_true "[[ $rc -ne 0 ]]" "dispatch-fail: adopt exits non-zero"
+  if echo "$stdout_out" | jq -e '.adopted == false' >/dev/null 2>&1; then
+    pass "dispatch-fail: --json .adopted is false"
+  else
+    fail "dispatch-fail: .adopted not false — got: $stdout_out"
+  fi
+  if echo "$stdout_out" | jq -e '.refused_reason | startswith("dispatch_failed")' >/dev/null 2>&1; then
+    pass "dispatch-fail: refused_reason is dispatch_failed"
+  else
+    fail "dispatch-fail: refused_reason wrong — got: $stdout_out"
+  fi
+}
+
+# 6.3 Terminal set includes the repository-recognized 'Duplicate' by default
+{
+  tag="${SCRATCH}/dup"
+  make_repo "$tag" "CTL-9103"
+  bin_dir="${SCRATCH}/bin_dup"; log="${SCRATCH}/call_dup.log"
+  install_stubs "$bin_dir" "$log"
+
+  out=$(
+    PATH="${bin_dir}:$PATH" \
+    CATALYST_ADOPT_TICKET_STATE="Duplicate" \
+    bash "$ADOPT" "CTL-9103" \
+      --worktree "$WORK" \
+      --orch-dir "$SCRATCH" --orch-id "test-orch-dup" 2>&1
+  ); rc=$?
+
+  assert_eq 2 "$rc" "terminal-duplicate: exits 2 (Duplicate is terminal)"
+  ahead=$(git -C "$WORK" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
+  assert_eq "0" "$ahead" "terminal-duplicate: no commit made"
+}
+
+# 6.4 Terminal set honors a PROJECT-renamed done state from config stateMap
+{
+  tag="${SCRATCH}/renamed"
+  make_repo "$tag" "CTL-9104"
+  bin_dir="${SCRATCH}/bin_rn"; log="${SCRATCH}/call_rn.log"
+  install_stubs "$bin_dir" "$log"
+  cfg="${SCRATCH}/renamed-config.json"
+  cat > "$cfg" <<'JSON'
+{ "catalyst": { "linear": { "stateMap": { "done": "Shipped", "canceled": "Abandoned" } } } }
+JSON
+
+  out=$(
+    PATH="${bin_dir}:$PATH" \
+    CATALYST_CONFIG_JSON="$cfg" \
+    CATALYST_ADOPT_TICKET_STATE="Shipped" \
+    bash "$ADOPT" "CTL-9104" \
+      --worktree "$WORK" \
+      --orch-dir "$SCRATCH" --orch-id "test-orch-rn" 2>&1
+  ); rc=$?
+
+  assert_eq 2 "$rc" "terminal-renamed: exits 2 (config stateMap.done=Shipped is terminal)"
+}
+
+# 6.5 Bounded matching: a longer sibling ticket's worktree is NOT resolved
+{
+  root="${SCRATCH}/bound"
+  origin="${root}/origin.git"; primary="${root}/primary"
+  rm -rf "$root"; mkdir -p "$root"
+  git init --quiet --bare -b main "$origin"
+  git clone --quiet "$origin" "$primary" 2>/dev/null
+  ( cd "$primary" || exit 1
+    printf 'base\n' > base.txt; git add base.txt; git commit --quiet -m base
+    git push --quiet origin HEAD:refs/heads/main
+    git worktree add --quiet -b "ryan/CTL-1642-target" "${root}/wt-1642" >/dev/null 2>&1
+    git worktree add --quiet -b "ryan/CTL-16420-other" "${root}/wt-16420" >/dev/null 2>&1
+  )
+  bin_dir="${SCRATCH}/bin_bound"; log="${SCRATCH}/call_bound.log"
+  install_stubs "$bin_dir" "$log"
+
+  out=$(
+    cd "$primary" &&
+    PATH="${bin_dir}:$PATH" \
+    CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_bound" \
+    CATALYST_ADOPT_TICKET_STATE="Research" \
+    bash "$ADOPT" "CTL-1642" \
+      --orch-dir "$SCRATCH" --orch-id "test-orch-bound" 2>&1
+  ); rc=$?
+
+  assert_contains "$out" "wt-1642" "bounded-match: resolves the CTL-1642 worktree"
+  assert_not_contains "$out" "wt-16420" "bounded-match: does NOT resolve the CTL-16420 sibling"
 }
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
