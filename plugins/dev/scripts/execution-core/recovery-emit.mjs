@@ -57,9 +57,11 @@ import {
   writeFileSync,
   renameSync,
   existsSync,
+  statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   buildRecoveryEnvelope,
@@ -90,6 +92,84 @@ import { labelNeedsHumanUnlessBeliefOwner, beliefOwnsNeedsHuman } from "./label-
 async function loadApplyLabel() {
   const mod = await import("./linear-write.mjs");
   return mod.applyLabel;
+}
+
+
+// hasEscalateHumanBelief — CTL-1568 (Codex #2861 P1): is there ACTUAL evidence that
+// the belief engine queued a needs-human escalation for THIS ticket?
+//
+// `beliefOwnsNeedsHuman(env)` is literally `env.CATALYST_INTENTS_ENFORCE === "1"` — it
+// identifies the configured owner and proves nothing about this ticket. But
+// executeEscalations only ever labels tickets that have a current-tick
+// `escalate_human` belief row, and R12 derives solely from the wedged-worker chain — a
+// recovery-pass escalation produces no such row, and most parked tickets have no
+// worker dir at all. So under enforcement the old predicate declared "the belief owner
+// has this" for a ticket the belief engine will never touch: the label was skipped,
+// the "(See your inbox.)" comment was posted anyway, and the intent latched. The human
+// is pointed at an inbox row that does not exist.
+//
+// Node-safe by necessity: this CLI runs under `node` (see loadApplyLabel), so it cannot
+// import the bun:sqlite-backed collector. Shell out to sqlite3 with the SAME query
+// getEscalateHumanBelief uses, including the '/' subject boundary so CTL-1241 matches
+// but CTL-12410 does not.
+//
+// Returns true | false | null(unknown — db absent, sqlite3 missing, or query failed).
+// The caller treats anything other than `true` as NOT-owned, which is the fail-SAFE
+// direction: we page a human rather than silently assume someone else did.
+function hasEscalateHumanBelief(ticket) {
+  const db = join(process.env.CATALYST_DIR || join(homedir(), "catalyst"), "beliefs.db");
+  if (!existsSync(db)) return null;
+  const res = spawnSync(
+    "sqlite3",
+    [
+      "-readonly",
+      db,
+      `SELECT 1 FROM belief WHERE name = 'escalate_human' AND subject LIKE '${String(ticket).replace(/'/g, "''")}/%' ORDER BY tick_id DESC LIMIT 1;`,
+    ],
+    { encoding: "utf8" },
+  );
+  if (res.error || res.status !== 0) return null;
+  return String(res.stdout || "").trim() === "1";
+}
+
+// replicaReadLabels — CTL-1568 (Codex #2861 P1): verify the label write-back against
+// the local SQL replica instead of a live `linearis issues read`.
+//
+// applyLabel's read-back previously always went live. On the recovery-pass skill path
+// that adds a rate-limited single-ticket API call per escalation to a shared fleet
+// quota — exactly what AGENTS.md's read-path rule forbids, and the vector behind the
+// prior 429 flaps.
+//
+// Freshness gate mirrors replica-read.mjs's isReplicaFresh EXACTLY, reimplemented here
+// only because that module is bun:sqlite-backed and this CLI runs under node (same
+// constraint as loadApplyLabel): prefer the writer's `.writer.lock` heartbeat — which
+// advances on writer LIVENESS, not on data changes, so a quiet Linear feed does not
+// look stale — and fall back to the db mtime only when the lock is absent. Threshold
+// CATALYST_LINEAR_REPLICA_STALE_MS, default 5 min.
+//
+// Returns an array of label names, or NULL when the replica is stale/absent/unreadable
+// — and null makes applyLabel fall through to its live read-back, i.e. the pre-existing
+// behavior. So this can only ever REMOVE API calls, never weaken verification.
+function replicaReadLabels(ticket) {
+  const db = process.env.CATALYST_REPLICA_DB
+    || join(process.env.CATALYST_DIR || join(homedir(), "catalyst"), "catalyst-replica.db");
+  if (!existsSync(db)) return null;
+  const thresholdMs = Number(process.env.CATALYST_LINEAR_REPLICA_STALE_MS) || 300_000;
+  let fresh = false;
+  try {
+    fresh = Date.now() - statSync(db + ".writer.lock").mtimeMs <= thresholdMs;
+  } catch {
+    try { fresh = Date.now() - statSync(db).mtimeMs <= thresholdMs; } catch { return null; }
+  }
+  if (!fresh) return null; // stale writer → do NOT serve; caller falls back to live
+  const res = spawnSync(
+    "sqlite3",
+    ["-readonly", db,
+     `SELECT l.name FROM issue_labels il JOIN labels l ON l.id = il.label_id JOIN issues i ON i.id = il.issue_id WHERE i.identifier = '${String(ticket).replace(/'/g, "''")}';`],
+    { encoding: "utf8" },
+  );
+  if (res.error || res.status !== 0) return null;
+  return String(res.stdout || "").split("\n").map((x) => x.trim()).filter(Boolean);
 }
 
 const argv = process.argv.slice(2);
@@ -301,7 +381,9 @@ if (sub === "escalated") {
         labelNeedsHumanUnlessBeliefOwner(
           orchDir,
           ticket,
-          { applyLabel },
+          // Replica-backed read-back (Codex #2861 P1) — falls back to the live
+          // read only when the replica is stale/absent.
+          { applyLabel: (a) => applyLabel({ ...a, readLabels: replicaReadLabels }) },
           // treatAlreadyAppliedAsLanded: this gate asks "is the label PRESENT?",
           // not "did I apply it on this call" (Codex #2861 P1).
           { site: "recovery-emit-escalated", treatAlreadyAppliedAsLanded: true },
@@ -313,7 +395,13 @@ if (sub === "escalated") {
   // A false return has two causes; only one is a broken escalation. When the belief
   // engine owns needs-human it applies the label out-of-band — ownership transferred,
   // so the comment stays truthful.
-  const ownedByBelief = !labelled && beliefOwnsNeedsHuman(process.env) === true;
+  // CTL-1568 (Codex #2861 P1): ownership requires BOTH the configured owner AND real
+  // evidence the belief engine queued this ticket. Anything else (no row, no db, no
+  // sqlite3) is treated as NOT-owned — fail-safe: page a human rather than assume.
+  const ownedByBelief =
+    !labelled &&
+    beliefOwnsNeedsHuman(process.env) === true &&
+    hasEscalateHumanBelief(ticket) === true;
 
   // (4b) Latch the escalated intent — ONLY once the label actually landed.
   //
