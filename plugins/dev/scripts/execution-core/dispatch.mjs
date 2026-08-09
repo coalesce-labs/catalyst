@@ -386,6 +386,7 @@ export function makePhaseAwareDispatchFn({
         emitEvent?.({ "event.name": "execution-core.executor.usage-limit-fallback", payload: { ticket: args.ticket, phase: args.phase, from: "bg", to: "codex-exec", expiresAt: marker?.expiresAt } });
       } else {
         emitEvent?.({ "event.name": "execution-core.executor.no-healthy-lane", payload: { ticket: args.ticket, phase: args.phase, lane: "bg", expiresAt: marker?.expiresAt } });
+        return { code: 75, deferred: true, reason: "no-healthy-executor-lane" };
       }
     }
     const fn = dispatchForExecutor(effective);
