@@ -66,6 +66,10 @@ import {
   defaultEmitEvent,
   defaultRecordIntent,
   recordVerdict,
+  bumpEscalationDeferrals,
+  readEscalationDeferrals,
+  clearEscalationDeferrals,
+  RECOVERY_MAX_ESCALATION_DEFERRALS,
 } from "./recovery-reasoning.mjs";
 // CTL-1568: this shim posts the escalation comment but never applied the
 // needs-human LABEL, so an agent reply could not bring the row back to the inbox.
@@ -267,26 +271,6 @@ if (sub === "escalated") {
   // (2) Merge the explanation onto the signal → inbox row + push gate.
   mergeExplanationIntoSignal(orchDir, ticket, phase, escalation);
 
-  // (3) Latch the escalated intent (terminal — router stops re-acting).
-  //     CTL-1439 (P0a): carries the verdict fields so the ledger records the
-  //     session's actual conclusion, not just the latch.
-  try {
-    defaultRecordIntent(
-      ticket,
-      {
-        type: "recovery-pass",
-        decision: "escalate",
-        escalated: true,
-        escalation,
-        verdict: "escalate",
-        verdictReason: reason,
-      },
-      { orchDir },
-    );
-  } catch (err) {
-    process.stderr.write(`recovery-emit: intent latch failed: ${err.message}\n`);
-  }
-
   // (4) CTL-1568: apply the needs-human LABEL. This shim never did, which is why
   //     an agent reply could not bring the row back to the inbox and the CTL-1569
   //     ≥3-turn loop could never close. The signal write in (2) flips
@@ -318,7 +302,9 @@ if (sub === "escalated") {
           orchDir,
           ticket,
           { applyLabel },
-          { site: "recovery-emit-escalated" },
+          // treatAlreadyAppliedAsLanded: this gate asks "is the label PRESENT?",
+          // not "did I apply it on this call" (Codex #2861 P1).
+          { site: "recovery-emit-escalated", treatAlreadyAppliedAsLanded: true },
         ) === true;
     } catch (err) {
       process.stderr.write(`recovery-emit: needs-human label write threw on ${ticket}: ${err.message}\n`);
@@ -328,6 +314,72 @@ if (sub === "escalated") {
   // engine owns needs-human it applies the label out-of-band — ownership transferred,
   // so the comment stays truthful.
   const ownedByBelief = !labelled && beliefOwnsNeedsHuman(process.env) === true;
+
+  // (4b) Latch the escalated intent — ONLY once the label actually landed.
+  //
+  // CTL-1568 (Codex #2861 P1): this latch used to run BEFORE the label was even
+  // attempted. `escalated: true` is TERMINAL — defaultSkipReason treats such an
+  // intent as done for RECOVERY_TERMINAL_INTENT_TTL_MS (7 days) — so a transient
+  // applyLabel failure (its own `{applied:false, reason:"transient"|"rate-limited"|
+  // "verify-failed"}` path) left the ticket latched-but-unlabelled, with the comment
+  // withheld and NOTHING retrying for a week. The sibling escalateExhaustedIntents
+  // already documents and implements the correct order ("The attempt MUST precede
+  // the ledger latch"); this site did the opposite.
+  //
+  // Now: attempt the label first, and only latch when it landed (or when the belief
+  // engine owns it, i.e. ownership genuinely transferred). Otherwise leave the intent
+  // UNLATCHED so the next recovery pass re-enters and retries, and bound that retry
+  // with the same deferral counter escalateExhaustedIntents uses so a permanently
+  // failing label degrades to a loud give-up instead of an infinite loop.
+  if (labelled || ownedByBelief) {
+    // Escalation completed cleanly — drop any deferral counter so a later,
+    // unrelated failure starts from a clean slate.
+    clearEscalationDeferrals(orchDir, ticket);
+    try {
+      defaultRecordIntent(
+        ticket,
+        {
+          type: "recovery-pass",
+          decision: "escalate",
+          escalated: true,
+          escalation,
+          verdict: "escalate",
+          verdictReason: reason,
+        },
+        { orchDir },
+      );
+    } catch (err) {
+      process.stderr.write(`recovery-emit: intent latch failed: ${err.message}\n`);
+    }
+  } else {
+    // bumpEscalationDeferrals returns NULL when the counter cannot be persisted.
+    // Its contract (recovery-reasoning.mjs) is explicit: with no counter there is no
+    // retry bound, so the caller must stay SILENT and retry quietly rather than emit
+    // a WARN every tick of a full/read-only disk. Honor that — no latch, no output.
+    const deferrals = bumpEscalationDeferrals(orchDir, ticket, new Date().toISOString());
+    if (deferrals === null) {
+      // unbounded → quiet retry, exactly as the counter's contract requires
+    } else if (deferrals >= RECOVERY_MAX_ESCALATION_DEFERRALS) {
+      // Retry budget exhausted — latch anyway so we stop re-entering forever, but
+      // say so loudly: the ticket is escalated in the ledger WITHOUT the label.
+      process.stderr.write(
+        `recovery-emit: needs-human label failed ${deferrals}x for ${ticket}; latching escalation WITHOUT the label (retry budget exhausted)\n`,
+      );
+      try {
+        defaultRecordIntent(
+          ticket,
+          { type: "recovery-pass", decision: "escalate", escalated: true, escalation, verdict: "escalate", verdictReason: reason },
+          { orchDir },
+        );
+      } catch (err) {
+        process.stderr.write(`recovery-emit: intent latch failed: ${err.message}\n`);
+      }
+    } else {
+      process.stderr.write(
+        `recovery-emit: needs-human label did not land for ${ticket} (attempt ${deferrals}/${RECOVERY_MAX_ESCALATION_DEFERRALS}); NOT latching so a later pass retries\n`,
+      );
+    }
+  }
 
   // (5) CTL-1439 (P0a): ticket-visible escalation comment — the audit found the
   //     skill-side comment discipline failed in practice (0/7 posted), so the
@@ -347,6 +399,9 @@ if (sub === "escalated") {
       ticket,
       reason,
       site: "recovery-emit-escalated",
+      // Codex #2861 P1: carry the retry count so the alarm distinguishes a one-off
+      // transient from a ticket wedged against a permanently failing label.
+      deferrals: readEscalationDeferrals(orchDir, ticket),
     });
     process.stderr.write(
       `recovery-emit: needs-human label did NOT land on ${ticket} — escalation comment withheld ` +

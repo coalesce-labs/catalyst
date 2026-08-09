@@ -1473,9 +1473,20 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
     reason = null,
     details = null,
     escalation = null,
+    site = null,
+    deferrals = null,
   } = event;
   // Escalations carry WARN severity; fixes/triage carry INFO.
-  const escalated = type === "recovery.would-escalate" || type === "recovery.escalated";
+  //
+  // CTL-1568 (Codex #2861 P1): recovery.escalation.split is an alarm — it fires when
+  // the escalation comment and the needs-human label DISAGREE, i.e. a human was told
+  // to check an inbox row that does not exist. It was serialized as INFO, so the
+  // "loud one-time alarm" was an unclassified log line no severity-based alert or
+  // dashboard would surface. It is WARN, like the other escalation events.
+  const escalated =
+    type === "recovery.would-escalate" ||
+    type === "recovery.escalated" ||
+    type === "recovery.escalation.split";
   return {
     ts,
     id: randomBytes(8).toString("hex"),
@@ -1493,11 +1504,17 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
       // ← the CTL key — what loadRecoveryOutcomes keys its outcome map on.
       "event.label": ticket,
       ...(fix_class != null ? { "recovery.fix_class": fix_class } : {}),
+      // CTL-1568 (Codex #2861 P1): carry the split alarm's own dimensions. Both were
+      // passed by the emitter and silently dropped here, leaving the alarm with no
+      // source site and no retry count — the two things an operator needs to tell a
+      // one-off transient from a ticket wedged against a permanently failing label.
+      ...(site != null ? { "recovery.site": String(site) } : {}),
+      ...(deferrals != null ? { "recovery.deferrals": Number(deferrals) } : {}),
       // CTL-1291: bounded numerics/enums promoted so the numbers are chartable.
       ...promoteNumericAttrs(type, details),
     },
     // human-readable mirror; also the reader's fallback ticket-key source.
-    body: { payload: { ticket, type, fix_class, reason, details, escalation } },
+    body: { payload: { ticket, type, fix_class, reason, details, escalation, site, deferrals } },
   };
 }
 

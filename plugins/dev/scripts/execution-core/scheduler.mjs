@@ -5569,6 +5569,12 @@ export function schedulerTick(
               labelNeedsHuman: (dir, t) =>
                 labelNeedsHumanUnlessBeliefOwner(dir, t, writeStatus, {
                   site: "attempts-exhausted",
+                  // CTL-1568 (Codex #2861 P1): this gate decides whether to post a
+                  // human-facing comment and latch the escalation, so what matters is
+                  // that the label is PRESENT — not that this call applied it. Without
+                  // this, a ticket another producer already parked needs-human has its
+                  // escalation permanently suppressed once the deferral cap is hit.
+                  treatAlreadyAppliedAsLanded: true,
                   // The curated explanation is already on disk from escalateExhaustedIntents's
                   // prior writeSignal call. Pass a thin hint so the absent-warn is suppressed;
                   // writeExplanationSignal's no-overwrite guard keeps the richer signal intact.

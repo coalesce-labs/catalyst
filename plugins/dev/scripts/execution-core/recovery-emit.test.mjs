@@ -344,7 +344,43 @@ describe("recovery-emit escalated — needs-human label (CTL-1568)", () => {
     expect(readEvents().some((e) => e.attributes?.["event.name"] === "recovery.escalation.split")).toBe(true);
     // the durable surfaces still landed
     expect(readEvents().some((e) => e.attributes?.["event.name"] === "recovery.escalated")).toBe(true);
-    expect(readLedger("TST-901").escalated).toBe(true);
+    // CTL-1568 (Codex #2861 P1): the ledger must NOT be latched here. `escalated:true`
+    // is TERMINAL — defaultSkipReason treats it as done for 7 days — so latching on a
+    // TRANSIENT label failure (this stub is a rate-limit) left the ticket escalated but
+    // unlabelled, comment withheld, and nothing retrying for a week. Leaving it
+    // unlatched is what lets the next recovery pass re-enter and retry.
+    let ledger901 = null;
+    try { ledger901 = readLedger("TST-901"); } catch { ledger901 = null; }
+    expect(ledger901?.escalated === true).toBe(false);
+    // The split alarm now carries WARN severity and its own dimensions, so an
+    // operator can tell a one-off transient from a wedged ticket.
+    const split = readEvents().find((e) => e.attributes?.["event.name"] === "recovery.escalation.split");
+    expect(split.severityText).toBe("WARN");
+    expect(split.attributes["recovery.site"]).toBe("recovery-emit-escalated");
+    expect(typeof split.attributes["recovery.deferrals"]).toBe("number");
+  });
+
+  test("a label that FAILS repeatedly eventually latches, loudly, instead of retrying forever", () => {
+    writeFileSync(
+      pathJoin(catalystDir, "bin", "linearis"),
+      `#!/bin/bash\nif [[ "$1" == "issues" && "$2" == "update" ]]; then echo "rate limited" >&2; exit 1; fi\nprintf '{"identifier":"%s","labels":{"nodes":[]}}\\n' "$3"\nexit 0\n`,
+    );
+    chmodSync(pathJoin(catalystDir, "bin", "linearis"), 0o755);
+    let last = null;
+    // Re-enter until the retry budget is spent; the bound is what stops this being
+    // an infinite retry loop once the label is permanently broken.
+    for (let i = 0; i < 8; i++) {
+      last = runCli([
+        "escalated", "--ticket", "TST-903", "--orch-dir", orchDir,
+        "--phase", "recovery-pass", "--escalation", escalation,
+      ]);
+      expect(last.status).toBe(0);
+      let l = null;
+      try { l = readLedger("TST-903"); } catch { l = null; }
+      if (l?.escalated === true) break;
+    }
+    expect(readLedger("TST-903").escalated).toBe(true);
+    expect(last.stderr).toContain("retry budget exhausted");
   });
 
   test("shadow mode writes NEITHER label nor comment", () => {
