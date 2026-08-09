@@ -12,6 +12,7 @@ import {
   byActivePhase,
   countSdkInflight,
   hasFreshClaim,
+  computeLastPhaseAdvanceTs,
 } from "./signal-reader.mjs";
 
 let orchDir;
@@ -55,6 +56,25 @@ function byTicket(signals) {
   for (const s of signals) m.set(s.ticket, s);
   return m;
 }
+
+describe("computeLastPhaseAdvanceTs", () => {
+  const now = Date.parse("2026-08-09T03:00:00Z");
+  test("returns the newest self-attributed terminal completion, preferring completedAt", () => {
+    const signals = [
+      { status: "complete", completedAt: "2026-08-09T01:00:00Z", updatedAt: "2026-08-09T02:30:00Z", raw: { host: { name: "mini" } } },
+      { status: "failed", updatedAt: "2026-08-09T02:00:00Z", raw: {} },
+      { status: "running", updatedAt: "2026-08-09T02:50:00Z", raw: { host: { name: "mini" } } },
+      { status: "done", updatedAt: "2026-08-09T02:40:00Z", raw: { host: { name: "peer" } } },
+    ];
+    expect(computeLastPhaseAdvanceTs(signals, { self: "mini", now })).toBe("2026-08-09T02:00:00.000Z");
+  });
+
+  test("returns null for garbage, malformed records, and future timestamps without throwing", () => {
+    expect(computeLastPhaseAdvanceTs(null, { self: "mini", now })).toBeNull();
+    expect(computeLastPhaseAdvanceTs([null, 3, { status: "complete", updatedAt: "bad" }], { self: "mini", now })).toBeNull();
+    expect(computeLastPhaseAdvanceTs([{ status: "complete", updatedAt: "2026-08-09T04:00:00Z" }], { self: "mini", now })).toBeNull();
+  });
+});
 
 // --- tests ----------------------------------------------------------------
 
