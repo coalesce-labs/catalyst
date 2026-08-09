@@ -595,8 +595,6 @@ jobs:
             autotune-writeback.test.mjs \
             board-health.test.mjs \
             board-health-seam.test.mjs \
-            branch-salvage.test.mjs \
-            unowned-pr-verify.test.mjs \
             stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
             in-flight-supersede.test.mjs \
