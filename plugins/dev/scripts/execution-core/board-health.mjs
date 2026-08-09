@@ -2084,10 +2084,10 @@ export function boardHealthPass({
         // deadHosts: a never-seen roster member is "not live" but is not proven
         // dead. Keep strandedNode escalation observable, but require the recovery
         // proof before it can authorize foreign-work takeover.
-        const deadHosts = new Set(board.deadHosts ?? []);
+        const boardDeadHosts = new Set(board.deadHosts ?? []);
         const strandedOrDeadHosts = new Set([
-          ...(invariants.strandedNode?.flagged ?? []).filter((host) => deadHosts.has(host)),
-          ...deadHosts,
+          ...(invariants.strandedNode?.flagged ?? []).filter((host) => boardDeadHosts.has(host)),
+          ...boardDeadHosts,
         ]);
         const candidates = selectAnchorCandidates(dec.moves, board, { holistic: true, strandedOrDeadHosts });
         const anchor = candidates[0] ?? null;

@@ -1269,8 +1269,15 @@ export const HEARTBEAT_RESTORE_HOLD_MS = resolveRestoreHoldMs(
   HEARTBEAT_GRACE_MS,
 );
 
+const dispatchOutageSustainedRaw = process.env.CATALYST_DISPATCH_OUTAGE_SUSTAINED_MS;
+const dispatchOutageSustainedMs = Number(dispatchOutageSustainedRaw);
 export const DISPATCH_OUTAGE_SUSTAINED_MS =
-  Number(process.env.CATALYST_DISPATCH_OUTAGE_SUSTAINED_MS) || 300_000;
+  typeof dispatchOutageSustainedRaw === "string"
+    && dispatchOutageSustainedRaw.trim() !== ""
+    && Number.isFinite(dispatchOutageSustainedMs)
+    && dispatchOutageSustainedMs >= 0
+    ? dispatchOutageSustainedMs
+    : 300_000;
 
 export function getDispatchOutageFallback() {
   const fallback = "last-known-good";
@@ -1280,7 +1287,11 @@ export function getDispatchOutageFallback() {
     try {
       configValue = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))
         ?.catalyst?.cluster?.dispatchOutageFallback;
-    } catch {
+    } catch (err) {
+      log.warn(
+        { layer2Path: getLayer2ConfigPath(), err: err?.message ?? String(err) },
+        "execution-core: Layer-2 dispatch outage fallback config unreadable; using environment/default",
+      );
       configValue = undefined;
     }
     const value = envValue || configValue || fallback;

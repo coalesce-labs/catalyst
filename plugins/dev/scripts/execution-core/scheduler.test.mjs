@@ -10488,6 +10488,23 @@ describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => 
   test("sustained outage narrows to the last-known-good roster by default", () => {
     writeFileSync(
       join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ __lastGoodRoster: ["mini", "laptop"], __outage: { sinceMs: 1_000 } }),
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop", "gone"],
+      orchDir,
+      self: "mini",
+      nowMs: 10_000,
+      sustainedMs: 5_000,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(out).toEqual(["mini", "laptop"]);
+  });
+
+  test("sustained outage refuses to narrow a multi-host roster to self", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
       JSON.stringify({ __lastGoodRoster: ["mini"], __outage: { sinceMs: 1_000 } }),
     );
     const out = resolveDispatchRoster({
@@ -10499,7 +10516,34 @@ describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => 
       readHeartbeats: () => ({}),
       persist: true,
     });
-    expect(out).toEqual(["mini"]);
+    expect(out).toEqual(["mini", "ghost", "gone"]);
+  });
+
+  test("complete healthy view persists a safe LKG consumed by a later sustained outage", () => {
+    const roster = ["mini", "laptop", "tower"];
+    const healthy = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent, tower: recent }),
+      persist: true,
+    });
+    expect(healthy).toEqual(roster);
+    const persisted = JSON.parse(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8"));
+    expect(persisted.__lastGoodRoster).toEqual(roster);
+
+    const outage = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW + 10_000,
+      sustainedMs: 0,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(outage).toEqual(roster);
   });
 
   test("cold-start sustained outage remains on the full roster", () => {

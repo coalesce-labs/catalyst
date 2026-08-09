@@ -634,7 +634,10 @@ export function resolveDispatchRoster({
       ...lkg.filter((h) => roster.includes(h)),
       ...(typeof self === "string" && self ? [self] : []),
     ])];
-    const useLastGood = sustained && mode === "last-known-good" && lkg.length > 0 && narrowed.length > 0;
+    // A singleton LKG on a multi-host roster is not a partition: every host
+    // would union in itself and own the whole board. Only narrow to a roster
+    // that still contains multiple independently observed workers.
+    const useLastGood = sustained && mode === "last-known-good" && narrowed.length > 1;
     const degradedRoster = useLastGood ? narrowed : roster;
     try {
       onDegrade({
@@ -661,7 +664,14 @@ export function resolveDispatchRoster({
     nowMs,
     self,
   });
-  const healthyState = withLastGoodRoster(clearOutage(nextState), dispatchRoster);
+  // The LKG is evidence about the heartbeat view, not the post-deflap dispatch
+  // roster. Persist it only when the positive view is complete; otherwise a
+  // healthy tick with never-live/restore-held peers could record [self] and
+  // collapse HRW partitioning during the next sustained feed outage.
+  const clearedState = clearOutage(nextState);
+  const healthyState = live.length === roster.length
+    ? withLastGoodRoster(clearedState, live)
+    : clearedState;
   if (persist) writeDeflapState(orchDir, healthyState);
   return dispatchRoster;
 }
@@ -679,7 +689,7 @@ const DISPATCH_ROSTER_SUSTAINED_WARN_INTERVAL_MS = 600_000;
 let _lastDispatchRosterOutageWarnMs = 0;
 let _lastSustainedWarnMs = 0;
 let _sustainedEpisodeLogged = false;
-function warnDispatchRosterOutage({ roster, self, reason, error, sustained = false, outageMs = 0, degradedTo = "full-roster", lastGoodRoster = [] } = {}) {
+function warnDispatchRosterOutage({ roster, self, reason, error, sustained = false, outageMs = 0, degradedTo = "full-roster", lastGoodRoster: lastGoodRosterHosts = [] } = {}) {
   const nowMs = Date.now();
   if (sustained) {
     if (_sustainedEpisodeLogged && nowMs - _lastSustainedWarnMs < DISPATCH_ROSTER_SUSTAINED_WARN_INTERVAL_MS) return;
@@ -691,7 +701,7 @@ function warnDispatchRosterOutage({ roster, self, reason, error, sustained = fal
     _lastDispatchRosterOutageWarnMs = nowMs;
   }
   log.warn(
-    { roster, self, reason, error, sustained, outageMs, degradedTo, lastGoodRoster },
+    { roster, self, reason, error, sustained, outageMs, degradedTo, lastGoodRoster: lastGoodRosterHosts },
     "ctl-1091: dispatch-roster liveness read degraded to the FULL roster — cross-host failover is OFF this tick (every host owns only its own HRW slice). This is the correct fail-safe; investigate the heartbeat/Loki feed if it persists.",
   );
 }

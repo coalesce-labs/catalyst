@@ -1731,10 +1731,13 @@ export function startDaemon({
 
   if (bootMultiHost && Array.isArray(dispatchRosterForBoot)) {
     const bootLivenessState = readDeflapState(orchDir);
+    const hasPriorLivenessObservation = Object.keys(bootLivenessState).some(
+      (key) => !key.startsWith("__"),
+    );
     const neverLivePeers = bootRoster.filter(
       (host) => host !== bootSelf && bootLivenessState[host]?.everLive !== true,
     );
-    if (neverLivePeers.length > 0) {
+    if (hasPriorLivenessObservation && neverLivePeers.length > 0) {
       log.warn(
         { host: bootSelf, neverLiveHosts: neverLivePeers, roster: bootRoster, dispatchRoster: dispatchRosterForBoot },
         "execution-core daemon: rostered worker(s) are not live. Their HRW share fails over while peer liveness is healthy but may revert during a peer-view outage; start the daemon there, or remove a non-worker node from catalyst.cluster.staticRoster / catalyst-cluster cluster.json.",
