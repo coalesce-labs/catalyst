@@ -3657,6 +3657,13 @@ const nodeClassOf = (over = {}) => ({
   ...over,
 });
 
+// The real skills-dir probe reads a live ~/.claude tree, so on any machine that has not
+// run the skills-dir cutover (every CI runner, and any dev box mid-migration) it FAILs —
+// which would silently change what the install-rubric tests below are asserting. They are
+// about the node-class/agent/owner grading, not the cutover; `checkSkillsDirPlugins` owns
+// its own coverage. Inject a passing stub so those assertions grade only their own subject.
+const passingSkillsDirCheck = () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }];
+
 describe("checkNodeClass (CTL-1355)", () => {
   it("PASSes an explicit, recognized class", () => {
     const checks = checkNodeClass({ nodeClass: nodeClassOf({ class: "developer", raw: "developer" }) });
@@ -4934,10 +4941,11 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
         hasStackAgent: true,
         hasUpdaterAgent: true, // the two-puller hazard
         pluginPullOwner: "broker",
+        skillsDirCheck: passingSkillsDirCheck,
       }),
       log: () => {},
     });
-    expect(code).toBe(1);
+    expect(code).toBe(1); // exactly ONE fail — the updater agent — not the ambient skills-dir state
   });
 
   it("PASSes a correctly-provisioned worker post-install (stack only, owner=broker)", async () => {
@@ -4947,6 +4955,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: true,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck,
       log: () => {},
     });
     expect(code).toBe(0);
@@ -4991,6 +5000,7 @@ describe("runDoctor profile routing (CTL-1369 PR4)", () => {
       hasStackAgent: true,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck,
       log: (m) => logs.push(m),
     });
     const parsed = JSON.parse(logs[0]);
