@@ -13,8 +13,9 @@
 // Run: bun test plugins/dev/scripts/broker/stack-reload.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { writeFileSync, unlinkSync } from "node:fs";
+import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   decideStackReload,
   handleStackReloadEvent,
@@ -23,6 +24,7 @@ import {
   STACK_RELOAD_CONFIRM_POLL_MS,
   pidFilePathForComponent,
   defaultIsRunningFn,
+  readPidFor,
 } from "./stack-reload.mjs";
 
 // ─── fake-timer helper ───────────────────────────────────────────────────────
@@ -70,7 +72,7 @@ describe("decideStackReload", () => {
       loadedCommitRoot: "/co",
     });
     expect(d.shouldReload).toBe(true);
-    expect(d.components.map((c) => c.name).sort()).toEqual(["execution-core", "monitor"]);
+    expect(d.components.map((c) => c.name).sort()).toEqual(["execution-core", "monitor", "otel-forward"]);
     expect(d.brokerSelfReload).toBe(false);
     expect(d.components.find((c) => c.name === "monitor").oldSha).toBe("a");
     expect(d.components.find((c) => c.name === "monitor").newSha).toBe("b");
@@ -355,7 +357,10 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
     handleStackReloadEvent({ ...opts(3), now: 20_000 });
     expect(reloads).toEqual([]);
     timers.advance(STACK_RELOAD_DEBOUNCE_MS);
-    expect(reloads.filter((c) => c === "catalyst-monitor").length).toBe(1);
+    // catalyst-monitor is invoked TWICE per reload now: once for the monitor itself
+    // and once as `forward-restart` for otel-forward (a sub-service of the same
+    // wrapper). The debounce guarantee is still one RELOAD, not one spawn.
+    expect(reloads.filter((c) => c === "catalyst-monitor").length).toBe(2);
     expect(reloads.filter((c) => c === "catalyst-execution-core").length).toBe(1);
   });
 
@@ -375,7 +380,8 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
     });
     expect(reloads).toEqual([]);
     timers.advance(STACK_RELOAD_DEBOUNCE_MS);
-    expect(reloads.length).toBe(2);
+    // monitor + execution-core + otel-forward
+    expect(reloads.length).toBe(3);
   });
 
   test("the last change's newSha wins in the deploy event", () => {
@@ -767,10 +773,13 @@ describe("running-state probe (CTL-1089)", () => {
     });
     const started = emitted.find((e) => e.event === "stack.reload.started");
     expect(started.detail.components).toEqual(["monitor"]);
-    expect(started.detail.skipped).toEqual(["execution-core"]);
+    expect(started.detail.skipped.sort()).toEqual(["execution-core", "otel-forward"]);
     const complete = emitted.find((e) => e.event === "stack.reload.complete");
     expect(complete.detail.components.map((c) => c.name)).toEqual(["monitor"]);
-    expect(complete.detail.skipped).toEqual([{ name: "execution-core", reason: "not_running" }]);
+    expect(complete.detail.skipped.sort((a, b) => a.name.localeCompare(b.name))).toEqual([
+      { name: "execution-core", reason: "not_running" },
+      { name: "otel-forward", reason: "not_running" },
+    ]);
   });
 
   test("both running → both restarted, empty skipped (no regression)", () => {
@@ -810,7 +819,7 @@ describe("running-state probe (CTL-1089)", () => {
     const complete = emitted.find((e) => e.event === "stack.reload.complete");
     expect(complete).toBeDefined();
     expect(complete.detail.components).toEqual([]);
-    expect(complete.detail.skipped.map((s) => s.name).sort()).toEqual(["execution-core", "monitor"]);
+    expect(complete.detail.skipped.map((s) => s.name).sort()).toEqual(["execution-core", "monitor", "otel-forward"]);
   });
 
   test("all stopped but broker code changed → broker still self-reloads", () => {
@@ -1133,5 +1142,129 @@ describe("defaultIsRunningFn / pidFilePathForComponent (CTL-1089)", () => {
     });
     expect(spawned.some((cmd) => cmd === "catalyst-monitor")).toBe(false);
     expect(spawned.some((cmd) => cmd === "catalyst-execution-core")).toBe(false);
+  });
+});
+
+// ─── otel-forward in the reload chain (CTL-1506 follow-up) ──────────────────
+// Regression guard for a real outage: PR #2742 shipped the Loki age-drop that
+// fixed a live export failure. It reached both minis' disks seconds after the
+// merge, but the forwarder processes had been running since the previous day and
+// were NOT in this component list — so the fleet ran pre-fix code with the fix
+// sitting on disk, and the outage continued until they were restarted by hand.
+describe("otel-forward is reloaded on checkout advance (CTL-1506 follow-up)", () => {
+  const changed = [{ changed: true, root: "/r", oldSha: "aaa", newSha: "bbb", restartNeeded: false }];
+
+  test("otel-forward is in the component set", () => {
+    const d = decideStackReload({ results: changed, loadedCommitRoot: "/other" });
+    const f = d.components.find((c) => c.name === "otel-forward");
+    expect(f).toBeDefined();
+    expect(f.oldSha).toBe("aaa");
+    expect(f.newSha).toBe("bbb");
+  });
+
+  test("it restarts via `forward-restart`, NOT a bare `restart` (which would bounce the monitor)", () => {
+    const d = decideStackReload({ results: changed, loadedCommitRoot: "/other" });
+    const f = d.components.find((c) => c.name === "otel-forward");
+    expect(f.cmd).toBe("catalyst-monitor");
+    expect(f.args).toEqual(["forward-restart"]);
+    // The monitor component must keep the default argv, or a reload would restart
+    // the forwarder twice and never the monitor.
+    const m = d.components.find((c) => c.name === "monitor");
+    expect(m.args ?? ["restart"]).toEqual(["restart"]);
+  });
+
+  test("its PID file matches the wrapper's FORWARD_PID_FILE, so the running-gate can see it", () => {
+    const prev = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = "/tmp/ctest";
+    try {
+      expect(pidFilePathForComponent("otel-forward")).toBe("/tmp/ctest/otel-forward.pid");
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prev;
+    }
+  });
+
+  test("a running forwarder is actually spawned with forward-restart", () => {
+    const spawned = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd, args) => { spawned.push(`${cmd} ${(args ?? []).join(" ")}`); },
+      isRunningFn: (c) => c.name === "otel-forward",
+      confirmFn: () => true,
+      emitFn: () => {},
+      now: 0,
+      ...immediate,
+    });
+    // Only the forwarder is "running", so it is the ONLY thing restarted — and it
+    // must use forward-restart, never a bare `restart` (that would bounce the monitor).
+    expect(spawned).toContain("catalyst-monitor forward-restart");
+    expect(spawned).not.toContain("catalyst-monitor restart");
+  });
+});
+
+// ─── otel-forward restart CONFIRMATION (Codex #3164 P1) ─────────────────────
+// The other non-monitor components take defaultConfirmReload's best-effort
+// `return true`. otel-forward must not: `cmd_forward_restart` exits 0 when it
+// cannot take the mutation lock ("Forwarder busy … skipping restart"), and the
+// spawned Bun process can die during startup. Both leave a STALE forwarder while
+// `stack.reload.complete` claims success — the exact outage this component was
+// added to prevent. Confirmation therefore requires a LIVE pid that DIFFERS from
+// the pre-restart one.
+describe("otel-forward reload confirmation (Codex #3164 P1)", () => {
+  const changed = [{ root: "/co", oldSha: "a", newSha: "b", changed: true }];
+  const pidPath = join(tmpdir(), "sr-confirm-test", "otel-forward.pid");
+  let prevDir;
+
+  beforeEach(() => {
+    prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = join(tmpdir(), "sr-confirm-test");
+    mkdirSync(join(tmpdir(), "sr-confirm-test"), { recursive: true });
+  });
+  afterEach(() => {
+    try { unlinkSync(pidPath); } catch { /* ok */ }
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+  });
+
+  // Drive a reload where ONLY otel-forward is running, using the REAL confirmFn.
+  const runReload = (emitted) =>
+    handleStackReloadEvent({
+      results: changed,
+      loadedCommitRoot: "/co",
+      spawnFn: () => {},
+      isRunningFn: (c) => c.name === "otel-forward",
+      emitFn: (e) => emitted.push(e),
+      now: 0,
+      ...immediate,
+    });
+
+  test("an UNCHANGED pid (lock-contention skip, which exits 0) is NOT confirmed", () => {
+    writeFileSync(pidPath, String(process.pid)); // alive, but never turns over
+    const emitted = [];
+    runReload(emitted);
+    // A skip must surface as degraded, never as a false complete.
+    expect(emitted.find((e) => e.event === "stack.reload.complete")).toBeUndefined();
+    const degraded = emitted.find((e) => e.event === "stack.reload.degraded");
+    expect(degraded).toBeDefined();
+    expect(degraded.detail.reason).toBe("restart_not_confirmed");
+    expect(degraded.detail.unconfirmed.map((c) => c.name)).toContain("otel-forward");
+  });
+
+  test("a pid file naming a DEAD pid (startup crash) is NOT confirmed", () => {
+    writeFileSync(pidPath, "2147483646"); // implausible pid → kill(pid,0) throws
+    const emitted = [];
+    runReload(emitted);
+    expect(emitted.find((e) => e.event === "stack.reload.complete")).toBeUndefined();
+    expect(emitted.find((e) => e.event === "stack.reload.degraded")).toBeDefined();
+  });
+
+  test("readPidFor returns null for an absent or malformed pid file", () => {
+    try { unlinkSync(pidPath); } catch { /* ok */ }
+    expect(readPidFor("otel-forward")).toBeNull();
+    writeFileSync(pidPath, "not-a-pid");
+    expect(readPidFor("otel-forward")).toBeNull();
+    writeFileSync(pidPath, "0");
+    expect(readPidFor("otel-forward")).toBeNull();
   });
 });
