@@ -460,8 +460,18 @@ Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlig
 the terminal sweep applies `needs-human` via `labelOnce`.
 
 A worker directory must not persist with zero phase signals (CAT-24). The shared stall-clear seam
-removes the directory when it deletes the last real signal; aged signal-less residue is also dropped
-from the new-work exclude set and reclaimed by worker-dir GC after its retention gate.
+removes the directory when it deletes the last real signal — but only once `clearStalledLabel`
+reports a CONFIRMED label removal (`onSettled`), since production's `removeLabel` is async: removing
+inline would race the `onRemoved` callback that re-creates the dir to write
+`.janitor-cleared-<phase>.applied`, and on a FAILED removal would drop the once-marker while Linear
+still carries the label. Aged signal-less residue is also dropped from the new-work exclude set
+(grace: `orchestration.orphanReaper.workerGc.emptyDirGraceSeconds`, default 600s) and reclaimed by
+worker-dir GC after its retention gate. Three fail-closed guards bound the reclaim: a dir whose
+phase JSON is unreadable/malformed is skipped entirely (the discarded session id is what the
+liveness gate correlates on), a zero-signal dir preserving a non-empty unconsumed `inbox.jsonl` is
+never deleted (and is re-pullable immediately rather than parked for the grace), and every deletion
+DETACHES first — the dir is atomically renamed to a GC-owned `.gc-<ticket>-<ts>` sibling so a
+concurrent redispatch writes into a fresh inode the sweep can no longer touch.
 
 ### Stuck-but-alive daemon watchdog (CTL-1502)
 

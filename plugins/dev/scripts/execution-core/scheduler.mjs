@@ -63,11 +63,10 @@ import {
 } from "../lib/workflow-descriptor.mjs";
 export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 
-const configuredEmptyWorkerDirGrace = Number(process.env.CATALYST_EMPTY_WORKER_DIR_GRACE_MS);
-export const EMPTY_WORKER_DIR_GRACE_MS =
-  Number.isFinite(configuredEmptyWorkerDirGrace) && configuredEmptyWorkerDirGrace > 0
-    ? configuredEmptyWorkerDirGrace
-    : 600_000;
+// CAT-24: resolved per call (never frozen at module load) so an operator's
+// Layer-1 edit takes effect on the next tick, like every other Layer-1 knob.
+// Canonical schema: catalyst.orchestration.orphanReaper.workerGc.emptyDirGraceSeconds.
+export { EMPTY_WORKER_DIR_GRACE_DEFAULT_MS };
 // CTL-653: the verdict-router reads (verify.json verdict + event-counted cycle
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
@@ -225,6 +224,8 @@ import {
   phaseBudgetMs,
   readStallJanitorConfig,
   readCostCapConfig,
+  readEmptyWorkerDirGraceMs,
+  EMPTY_WORKER_DIR_GRACE_DEFAULT_MS,
 } from "./config.mjs";
 // CTL-1137: cost-cap watcher (Pass 0c) — out-of-process per-session $ preemption.
 import {
@@ -1867,7 +1868,7 @@ export function buildPerProjectGauge(inFlight, perProject = {}, freeSlots) {
 // listStartedTickets — every ticket that already has a worker dir, in any
 // status. The pull step excludes these so a finished/failed ticket is never
 // re-pulled as new work (revive of a failed ticket is a separate owner's job).
-export function listStartedTickets(orchDir) {
+export function listStartedTickets(orchDir, { graceMs = readEmptyWorkerDirGraceMs() } = {}) {
   try {
     const nowMs = Date.now();
     return new Set(
@@ -1888,6 +1889,19 @@ export function listStartedTickets(orchDir) {
           const signals = readPhaseSignals(orchDir, d.name);
           if (isPhantomWorkerDir(signals)) return false;
           if (workerDirHasPhaseSignals(names)) return true;
+          // CAT-24 (Codex): a zero-signal dir holding a non-empty inbox.jsonl is the
+          // clear-stall path's deliberate hand-off — the operator's reply preserved for
+          // a worker that no longer exists. Creating the inbox refreshed the dir mtime,
+          // so the grace below would read it as a dispatch-in-progress and park the
+          // answered ticket for the whole window. It is the opposite: re-pull it NOW so
+          // a new worker consumes the reply.
+          if (names.includes("inbox.jsonl")) {
+            try {
+              if (statSync(join(orchDir, "workers", d.name, "inbox.jsonl")).size > 0) return false;
+            } catch {
+              /* unreadable inbox → fall through to the age-based decision */
+            }
+          }
           let ageMs = Number.NaN;
           try {
             ageMs = nowMs - statSync(join(orchDir, "workers", d.name)).mtimeMs;
@@ -1896,11 +1910,7 @@ export function listStartedTickets(orchDir) {
           }
           // CAT-24: aged zero-signal residue must not exclude a ticket forever. The
           // grace protects phase-agent-dispatch's mkdir→first-signal bare-dir window.
-          return !isReclaimableEmptyWorkerDir({
-            hasSignals: false,
-            ageMs,
-            graceMs: EMPTY_WORKER_DIR_GRACE_MS,
-          });
+          return !isReclaimableEmptyWorkerDir({ hasSignals: false, ageMs, graceMs });
         })
         .map((d) => d.name)
     );
@@ -3906,8 +3916,65 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
         "stall-janitor: stalled-signal delete failed (CTL-1005)"
       );
     }
-    // 2. clear the needs-human label; write the once-marker ONLY on confirmed removal
+    // 2. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
+    try {
+      rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
+    } catch {
+      /* best-effort */
+    }
+    // 3. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
+    //    stalled ticket starts a FRESH cycle — without this, a retried phase
+    //    that no-progresses again hits the spent ask-cap (askCount >= cap) and
+    //    is suppressed without a fresh ask or re-stall (Codex P2 on #2590).
+    try {
+      rmSync(join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`), { force: true });
+    } catch {
+      /* best-effort */
+    }
+    // 4. CTL-1643: clear the durable escalation record so the next same-episode
+    //    gate starts fresh. Without this, the labelAttempts > 0 guard in
+    //    escalateOnce suppresses the re-escalation event after the operator re-arms.
+    forgetDurableEscalation(orchDir, ticket);
+    // 5. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
+    // deleting its last real phase signal. Such residue holds no slot yet excludes
+    // the ticket from new-work dispatch. Tombstones are not real signals. Preserve
+    // a non-empty operator inbox: the daemon writes the reply before invoking this
+    // clear, and the re-dispatched worker must still be able to consume it.
+    const removeEmptyWorkerDir = () => {
+      try {
+        const names = readdirSync(workerDir);
+        let hasInbox = false;
+        if (names.includes("inbox.jsonl")) {
+          try {
+            hasInbox = statSync(join(workerDir, "inbox.jsonl")).size > 0;
+          } catch {
+            hasInbox = true; // unreadable inbox is evidence to fail closed
+          }
+        }
+        if (!workerDirHasPhaseSignals(names) && !hasInbox) {
+          rmDir(workerDir, { recursive: true, force: true });
+        }
+      } catch (err) {
+        if (err?.code !== "ENOENT") {
+          log.warn(
+            { ticket, phase, err: err?.message },
+            "stall-janitor: empty worker-dir removal failed (CAT-24)"
+          );
+        }
+      }
+    };
+    // 6. clear the needs-human label; write the once-marker ONLY on confirmed removal
     //    (CTL-1045 Bug 4 — a failed clear must NOT disarm future escalations).
+    //
+    //    CAT-24 (Codex P1): this runs LAST, and the empty-dir removal above hangs off
+    //    `onSettled`, because production's removeLabel is ASYNC. Deleting the dir
+    //    inline would (a) race the later `onRemoved`, which re-mkdirs the dir to write
+    //    `.janitor-cleared-<phase>.applied` and so recreates the exact marker-only
+    //    residue this is meant to eliminate, and (b) on a FAILED removal, delete
+    //    `.linear-label-needs-human.applied` while Linear still carries the label —
+    //    re-arming an escalation that was never actually cleared. So: only sweep the
+    //    dir once removal is CONFIRMED, and leave it in place otherwise (worker-dir-gc
+    //    reclaims it after retention).
     try {
       clearStalledLabel(orchDir, ticket, "needs-human", writeStatus, {
         onRemoved: () => {
@@ -3922,57 +3989,15 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
             );
           }
         },
+        onSettled: (confirmed) => {
+          if (confirmed) removeEmptyWorkerDir();
+        },
       });
     } catch (err) {
       log.warn(
         { ticket, phase, err: err?.message },
         "stall-janitor: needs-human clear failed (CTL-1005)"
       );
-    }
-    // 3. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
-    try {
-      rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
-    } catch {
-      /* best-effort */
-    }
-    // 4. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
-    //    stalled ticket starts a FRESH cycle — without this, a retried phase
-    //    that no-progresses again hits the spent ask-cap (askCount >= cap) and
-    //    is suppressed without a fresh ask or re-stall (Codex P2 on #2590).
-    try {
-      rmSync(join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`), { force: true });
-    } catch {
-      /* best-effort */
-    }
-    // 5. CTL-1643: clear the durable escalation record so the next same-episode
-    //    gate starts fresh. Without this, the labelAttempts > 0 guard in
-    //    escalateOnce suppresses the re-escalation event after the operator re-arms.
-    forgetDurableEscalation(orchDir, ticket);
-    // 6. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
-    // deleting its last real phase signal. Such residue holds no slot yet excludes
-    // the ticket from new-work dispatch. Tombstones are not real signals. Preserve
-    // a non-empty operator inbox: daemon writes the reply before invoking this
-    // clear, and the re-dispatched worker must still be able to consume it.
-    try {
-      const names = readdirSync(workerDir);
-      let hasInbox = false;
-      if (names.includes("inbox.jsonl")) {
-        try {
-          hasInbox = statSync(join(workerDir, "inbox.jsonl")).size > 0;
-        } catch {
-          hasInbox = true; // unreadable inbox is evidence to fail closed
-        }
-      }
-      if (!workerDirHasPhaseSignals(names) && !hasInbox) {
-        rmDir(workerDir, { recursive: true, force: true });
-      }
-    } catch (err) {
-      if (err?.code !== "ENOENT") {
-        log.warn(
-          { ticket, phase, err: err?.message },
-          "stall-janitor: empty worker-dir removal failed (CAT-24)"
-        );
-      }
     }
     return true;
   };

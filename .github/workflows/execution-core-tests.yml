@@ -567,6 +567,7 @@ jobs:
             board-health-seam.test.mjs \
             stall-janitor-throttle.test.mjs \
             clear-stall-empty-dir.test.mjs \
+            empty-worker-dir-grace-config.test.mjs \
             phantom-worker-dir.test.mjs \
             worker-dir-gc.test.mjs \
             in-flight-supersede.test.mjs \

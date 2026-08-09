@@ -19,10 +19,10 @@ function signal(phase, status = "needs-human") {
   writeFileSync(join(workerDir, `phase-${phase}.json`), JSON.stringify({ status }));
 }
 
-const clear = (options) =>
+const clear = (options, writeStatus = { removeLabel: () => ({ removed: true }) }) =>
   defaultClearStall(
     orchDir,
-    { removeLabel: () => ({ removed: true }) },
+    writeStatus,
     options
   )({
     ticket: "CAT-24",
@@ -59,6 +59,38 @@ test("a CTL-702 yield tombstone does not count as a surviving signal", () => {
   signal("implement-yield-1", "done");
   expect(clear()).toBe(true);
   expect(existsSync(workerDir)).toBe(false);
+});
+
+// ─── CAT-24 (Codex P1): the removal waits for label settlement ───
+
+test("an ASYNC label removal still leaves no marker-only residue", async () => {
+  signal("recovery-pass");
+  let resolveRemoval;
+  const pending = new Promise((r) => {
+    resolveRemoval = r;
+  });
+  expect(clear(undefined, { removeLabel: () => pending })).toBe(true);
+  // Production's removeLabel is async: the dir must still be here while the
+  // removal is in flight, because onRemoved is about to re-create it to write
+  // .janitor-cleared-<phase>.applied.
+  expect(existsSync(workerDir)).toBe(true);
+  resolveRemoval({ removed: true });
+  await pending;
+  await new Promise((r) => setTimeout(r, 0)); // let the .then chain settle
+  expect(existsSync(join(workerDir, ".janitor-cleared-recovery-pass.applied"))).toBe(false);
+  expect(existsSync(workerDir)).toBe(false);
+});
+
+test("a FAILED label removal keeps the dir (Linear still carries the label)", () => {
+  signal("recovery-pass");
+  writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+  expect(clear(undefined, { removeLabel: () => ({ removed: false, reason: "api-500" }) })).toBe(
+    true
+  );
+  // Deleting here would drop the once-marker and re-arm an escalation that was
+  // never actually cleared. worker-dir-gc reclaims it later if it stays dead.
+  expect(existsSync(workerDir)).toBe(true);
+  expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
 });
 
 test("the seam returns true and never throws when dir removal fails", () => {

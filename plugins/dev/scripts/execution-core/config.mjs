@@ -2157,6 +2157,46 @@ export function readReclaimGatewayFreshMs(env = process.env) {
   return Number.isFinite(v) && v > 0 ? v : Number.MAX_SAFE_INTEGER;
 }
 
+// CAT-24: the empty-worker-dir grace. `phase-agent-dispatch` mkdirs
+// workers/<TICKET>/ before the worker writes its first phase signal, so a BARE dir
+// is ambiguous: either that sub-second dispatch window, or aged residue stranding
+// the ticket out of the new-work pull forever. The grace is the line between them —
+// below it the dir is presumed a live dispatch in progress; above it, reclaimable.
+//
+// Lives alongside the worker-GC knobs (Layer-1
+// catalyst.orchestration.orphanReaper.workerGc.*) because it governs the same
+// residue one altitude earlier: this decides when the SCHEDULER stops treating the
+// dir as started; workerGc.retentionSeconds decides when the bytes go. Precedence
+// env > Layer-1 > default — the shape every other Layer-1 reader uses.
+export const EMPTY_WORKER_DIR_GRACE_DEFAULT_MS = 600_000; // 10 min
+
+export function readEmptyWorkerDirGraceMsLayer1(configPath) {
+  if (!configPath) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    return parsed?.catalyst?.orchestration?.orphanReaper?.workerGc?.emptyDirGraceSeconds;
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { configPath, err: err.message },
+        "worker-dir grace: Layer-1 config unreadable; using default"
+      );
+    }
+    return undefined;
+  }
+}
+
+export function readEmptyWorkerDirGraceMs({
+  env = process.env,
+  configPath = process.env.CATALYST_CONFIG_FILE,
+} = {}) {
+  const fromEnv = Number(env.CATALYST_EMPTY_WORKER_DIR_GRACE_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  const seconds = Number(readEmptyWorkerDirGraceMsLayer1(configPath));
+  if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+  return EMPTY_WORKER_DIR_GRACE_DEFAULT_MS;
+}
+
 // CTL-1340: the Catalyst-Cloud read-replica tier for the scheduler's hot
 // per-signal terminal checks (reclaim / recovery / terminal sweeps). When ON,
 // fetchTicketState reads terminal-ness from a local sub-ms SQLite replica

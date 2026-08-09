@@ -137,6 +137,32 @@ describe("listStartedTickets / listInFlightTickets ignore phantom dirs (CTL-1323
     expect(listStartedTickets(orchDir).has("CAT-markers")).toBe(false);
   });
 
+  test("a FRESH zero-signal dir holding an operator reply is re-pulled immediately (CAT-24)", () => {
+    // clear-stall preserved the human's answer and deleted the last signal; writing
+    // inbox.jsonl refreshed the dir mtime, so the grace would otherwise park this
+    // answered ticket for the whole window with no worker to consume the reply.
+    const dir = join(orchDir, "workers", "CAT-answered");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "inbox.jsonl"), '{"from":"operator"}\n');
+    expect(listStartedTickets(orchDir).has("CAT-answered")).toBe(false);
+  });
+
+  test("a FRESH zero-signal dir with an EMPTY inbox stays protected by the grace", () => {
+    const dir = join(orchDir, "workers", "CAT-emptyinbox");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "inbox.jsonl"), "");
+    expect(listStartedTickets(orchDir).has("CAT-emptyinbox")).toBe(true);
+  });
+
+  test("the grace window is caller-overridable (config-resolved in production)", () => {
+    const dir = join(orchDir, "workers", "CAT-grace");
+    mkdirSync(dir, { recursive: true });
+    utimesSync(dir, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    // 1 min old: inside a 10-min grace, outside a 1-second one.
+    expect(listStartedTickets(orchDir, { graceMs: 600_000 }).has("CAT-grace")).toBe(true);
+    expect(listStartedTickets(orchDir, { graceMs: 1_000 }).has("CAT-grace")).toBe(false);
+  });
+
   test("an aged dir that still carries a signal is unaffected", () => {
     seedSignal("CAT-signaled", "implement", "stalled");
     const dir = join(orchDir, "workers", "CAT-signaled");
