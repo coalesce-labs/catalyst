@@ -684,6 +684,30 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
     expect(d.gate.reason).toBe("rate-limit-cliff");
   });
 
+  test("Gate 3: failures + free slots + account usage cliff → skip/account-usage-cliff", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), accountUsageHeadroom: inv(false, 1, true, ["account-usage"]) };
+    const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    expect(d.gate.decision).toBe("skip");
+    expect(d.gate.reason).toBe("account-usage-cliff");
+  });
+
+  test("Gate 3: an unobservable account usage invariant does not gate", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), accountUsageHeadroom: inv(false, 1, false) };
+    const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    expect(d.gate.decision).toBe("proceed");
+  });
+
+  test("Gate 3: the GitHub cliff wins when both quota cliffs are tripped", () => {
+    const invs = {
+      ...allGreen(),
+      dispatchLiveness: inv(false, 1),
+      rateLimitHeadroom: inv(false, 1),
+      accountUsageHeadroom: inv(false, 1),
+    };
+    const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    expect(d.gate.reason).toBe("rate-limit-cliff");
+  });
+
   test("Gate 4: real observable failures + headroom → proceed + tiered proposals", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
