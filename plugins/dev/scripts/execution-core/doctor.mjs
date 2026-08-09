@@ -24,8 +24,8 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync, realpathSync } from "node:fs";
-import { resolve, dirname, isAbsolute } from "node:path";
+import { readFileSync, statSync, existsSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
+import { resolve, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -92,6 +92,7 @@ import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-cat
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
+import { listProjects } from "./registry.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -958,6 +959,20 @@ function defaultDaemonPath() {
   }
 }
 
+// CAT-29: prefer facts published by the live daemon. A correct installed plist
+// cannot certify a daemon that was started earlier from a broken interactive
+// environment. Stale facts are ignored by verifying that their PID is alive.
+function defaultRunningDaemonFacts() {
+  try {
+    const facts = JSON.parse(readFileSync(join(getExecutionCoreDir(), "boot-facts.json"), "utf8"));
+    if (!Number.isInteger(facts?.pid) || typeof facts?.path !== "string") return null;
+    process.kill(facts.pid, 0);
+    return facts;
+  } catch {
+    return null;
+  }
+}
+
 // defaultResolveInPath — does `cmd` resolve to an executable under `pathStr`?
 // Uses `command -v` with positional args (no shell injection).
 function defaultResolveInPath(cmd, pathStr) {
@@ -984,30 +999,35 @@ function defaultSmokeProbe(cmd, args, pathStr) {
 // checkDaemonToolPath — assert the daemon's launchd PATH can resolve and run the
 // CLIs it shells out to. Injectable deps for unit testing.
 export function checkDaemonToolPath(deps = {}) {
+  const plistPath = deps.daemonPath !== undefined ? deps.daemonPath : defaultDaemonPath();
+  const runningFacts = deps.runningFacts !== undefined ? deps.runningFacts : defaultRunningDaemonFacts();
   const {
-    daemonPath = defaultDaemonPath(),
     resolveInPath = defaultResolveInPath,
     smokeProbe = defaultSmokeProbe,
     tools = ["linearis", "node", "claude"],
   } = deps;
+  const daemonPath = runningFacts?.path ?? plistPath;
 
   if (!daemonPath) {
     return [
       mkCheck(
         "daemon-tool-path",
         STATUS.WARN,
-        "no installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
+        "no running daemon boot facts or installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
       ),
     ];
   }
 
   const missing = tools.filter((t) => !resolveInPath(t, daemonPath));
   if (missing.length > 0) {
+    const source = runningFacts ? "running daemon" : "daemon launchd";
+    const disagreement =
+      runningFacts && plistPath && missing.every((tool) => resolveInPath(tool, plistPath));
     return [
       mkCheck(
         "daemon-tool-path",
         STATUS.FAIL,
-        `daemon launchd PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0). PATH=${daemonPath}`,
+        `${source} PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0).${disagreement ? " Running daemon PATH disagrees with the installed plist." : ""} PATH=${daemonPath}`,
       ),
     ];
   }
@@ -1036,7 +1056,7 @@ export function checkDaemonToolPath(deps = {}) {
     mkCheck(
       "daemon-tool-path",
       STATUS.PASS,
-      `daemon launchd PATH resolves linearis/node/claude and they run (no exit-127)`,
+      `${runningFacts ? "running daemon" : "daemon launchd"} PATH resolves linearis/node/claude and they run (no exit-127)`,
     ),
   ];
 }
@@ -3028,6 +3048,41 @@ export function checkCloudTokenEnv(deps = {}) {
   return checks;
 }
 
+// CAT-35 replica-schema verification helpers. The production reader (replica-read.mjs)
+// prepares queries against `issues` and `sync_meta`; a file that lacks either is unusable
+// no matter how large it is, so `replica-schema` must not PASS on size alone.
+export const REQUIRED_REPLICA_TABLES = ["issues", "sync_meta"];
+const SQLITE_MAGIC = "SQLite format 3\0";
+
+// defaultIsSqliteFile — read ONLY the 16-byte magic header (never the whole file, which
+// can be hundreds of MiB). Returns false on any read error: unreadable is not verified.
+function defaultIsSqliteFile(path) {
+  let fd = null;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(SQLITE_MAGIC.length);
+    const read = readSync(fd, buf, 0, buf.length, 0);
+    return read === buf.length && buf.toString("latin1") === SQLITE_MAGIC;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+// defaultReadDbTables — table names via the sqlite3 CLI (an OPTIONAL dependency; doctor
+// runs under bare node and must not import bun:sqlite). Returns null — meaning "could not
+// verify", distinct from [] meaning "verified, no tables" — when sqlite3 is absent or the
+// query fails, so the caller reports unverified instead of inventing a WARN.
+function defaultReadDbTables(path) {
+  const r = spawnSync("sqlite3", ["-readonly", path, "SELECT name FROM sqlite_master WHERE type='table'"], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null;
+  return r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+}
+
 // checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
 // writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
 // is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
@@ -3054,6 +3109,8 @@ export function checkCloudSync(deps = {}) {
     // (4× the SDK's 15s lock-stale) absorbs heartbeat jitter; > this ⇒ heartbeat stopped.
     lockStaleMs = Number(process.env.CATALYST_REPLICA_LOCK_STALE_MS) || 60_000,
     sizeFloorBytes = 65_536,
+    isSqliteFile = defaultIsSqliteFile, // CAT-35
+    readDbTables = defaultReadDbTables, // CAT-35
   } = deps;
 
   const installed = agentInstalled(label, laDir);
@@ -3083,12 +3140,13 @@ export function checkCloudSync(deps = {}) {
   // measures "time since last mirrored change", NOT writer liveness. The feed-independent
   // liveness signal is the writer-lock HEARTBEAT (<db>.writer.lock), rewritten ~every 5s.
   // Gate liveness on the lock heartbeat; report the data-age as info only, never as "down".
+  let size = 0;
+  let statOk = false;
   if (!dbPresent) {
     checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
   } else {
-    let size = 0;
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
-    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; } catch { /* unreadable → handled below */ }
+    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; statOk = true; } catch { /* unreadable → handled below */ }
     try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) dataNewest = Math.max(dataNewest, w.mtimeMs); } catch { /* no -wal sidecar */ }
     let lockMtime = 0;
     try { lockMtime = statFile(`${dbPath}.writer.lock`).mtimeMs; } catch { /* no lock: guard disabled / writer not started */ }
@@ -3113,6 +3171,38 @@ export function checkCloudSync(deps = {}) {
     }
   }
 
+  // CAT-35: distinguish a never-seeded/no-schema file from ordinary staleness.
+  // Size alone must never earn a PASS: a truncated, corrupt, or entirely unrelated
+  // file above the floor would otherwise be declared "schema seeded" while every
+  // production read misses, which is the exact failure this check exists to catch.
+  // So a PASS additionally requires the SQLite magic header AND — when a sqlite3
+  // reader is available — the two tables the production reader actually prepares
+  // against (`issues`, `sync_meta`). With no reader present we say so rather than
+  // claiming verification we did not perform.
+  if (dbPresent) {
+    if (!statOk) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is present but unreadable — cannot determine whether schema is seeded"));
+    } else if (size === 0) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is 0 bytes — no schema, never seeded; the writer has never authenticated"));
+    } else if (size < sizeFloorBytes) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${size}B (< ${sizeFloorBytes}B floor) — seed incomplete`));
+    } else if (!isSqliteFile(dbPath)) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${Math.round(size / 1024)}KiB but has no SQLite header — corrupt or not a database; every read will miss`));
+    } else {
+      const tables = readDbTables(dbPath);
+      if (tables === null) {
+        checks.push(mkCheck("replica-schema", STATUS.INFO, `replica db ${Math.round(size / 1024)}KiB, valid SQLite header — table presence unverified (no sqlite3 reader available)`));
+      } else {
+        const missing = REQUIRED_REPLICA_TABLES.filter((t) => !tables.includes(t));
+        checks.push(
+          missing.length > 0
+            ? mkCheck("replica-schema", STATUS.WARN, `replica db ${Math.round(size / 1024)}KiB is missing required table(s): ${missing.join(", ")} — the reader cannot prepare its queries`)
+            : mkCheck("replica-schema", STATUS.PASS, `replica db ${Math.round(size / 1024)}KiB — schema seeded (${REQUIRED_REPLICA_TABLES.join(" + ")} present)`),
+        );
+      }
+    }
+  }
+
   // (c) token presence — by NAME only, NEVER the value.
   const tokenVal = env[tokenEnv.envVar];
   const tokenSet = typeof tokenVal === "string" && tokenVal.length > 0;
@@ -3133,6 +3223,18 @@ export function checkCloudSync(deps = {}) {
     checks.push(mkCheck("replica-read-flag", STATUS.WARN, "writer running + replica present but CATALYST_LINEAR_REPLICA=off — flip it on to read from the replica"));
   } else {
     checks.push(mkCheck("replica-read-flag", STATUS.INFO, "replica read tier off (CATALYST_LINEAR_REPLICA unset/off)"));
+  }
+
+  const tokenMissing = !tokenSet;
+  const flagOff = mode !== "on";
+  if (tokenMissing && flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier INERT end-to-end: token ${tokenEnv.envVar} unset AND CATALYST_LINEAR_REPLICA off. Both must be fixed, token FIRST`));
+  } else if (tokenMissing || flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier partially configured (${tokenMissing ? `token ${tokenEnv.envVar} unset` : "CATALYST_LINEAR_REPLICA off"}) — reads still fall back`));
+  } else {
+    checks.push(mkCheck("replica-tier", STATUS.PASS, "replica tier fully configured (token set + read flag on)"));
   }
 
   return checks;
@@ -3454,6 +3556,67 @@ export function checkDrainDisabled(deps = {}) {
     "drain-disabled",
     STATUS.INFO,
     "not drain-disabled — this node honors the drain flag (CTL-1678)",
+  );
+}
+
+// Advisory report for registry entries whose checkout declares a different
+// Linear team. This check is total and never FAILs: host registry state is an
+// operator repair, and doctor's FAIL count gates worker activation.
+export function checkRegistryTeamIdentity(deps = {}) {
+  const { listProjects: readProjects = listProjects } = deps;
+  let projects;
+  try {
+    projects = readProjects();
+  } catch (err) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `registry unreadable — team identity not checked (${err?.message ?? "unknown"}) (CAT-52)`,
+    );
+  }
+  if (!projects.length) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      "registry has no projects — nothing to check (the zero-project warning is the daemon's, CTL-854)",
+    );
+  }
+  const mismatches = projects.filter((project) => project?.identity?.matches === false);
+  if (mismatches.length) {
+    const details = mismatches
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (declares "${project.identity.declared}")`)
+      .join("; ");
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.WARN,
+      `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
+        "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
+        `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
+    );
+  }
+  const known = projects.filter((project) => project?.identity?.matches === true).length;
+  // No mismatch is NOT the same as verified. An entry whose checkout config is
+  // absent, unreadable, malformed, or missing teamKey yields matches:null, and
+  // grading that PASS would report a clean contract that was never actually
+  // checked — exactly the drift this check exists to surface. Anything short of
+  // full verification stays INFO (advisory-only: this check never FAILs).
+  if (known < projects.length) {
+    const unverified = projects.length - known;
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+        `teamKey; ${unverified} could not be checked (config absent, unreadable, malformed, or ` +
+        "missing catalyst.linear.teamKey) — no mismatch found, but the contract is unverified " +
+        "for those entries (CAT-52)",
+    );
+  }
+  return mkCheck(
+    "registry-team-identity",
+    STATUS.PASS,
+    `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+      "teamKey; no mismatches (CAT-52)",
   );
 }
 
@@ -5020,6 +5183,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
+    () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
   ];
 }
 

@@ -54,6 +54,9 @@ export const ALERT_GITHUB_AUTH_UNUSABLE = "catalyst.alert.github_auth_unusable";
 
 export const ALERT_KIND_GITHUB_AUTH_UNUSABLE = "github_auth_unusable";
 
+export const ALERT_BOOT_DEPENDENCY_UNUSABLE = "catalyst.alert.boot_dependency_unusable";
+export const ALERT_KIND_BOOT_DEPENDENCY_UNUSABLE = "boot_dependency_unusable";
+
 // Per-kind throttle so a per-tick hot path (runEligibleQuery inside the reconcile
 // timer) cannot spam the event log during a sustained storm. The alert is a LOUD
 // "something is wrong"
@@ -198,6 +201,25 @@ export function emitGithubAuthUnusable({ tokenSource = null, reason = null, appe
       reason ??
       "the daemon's GitHub credential was rejected (HTTP 401) at boot — every gh API call from this daemon and the workers it dispatches will fail until it is replaced and the daemon restarted",
     detail: tokenSource ? { "catalyst.github_token_source": tokenSource } : {},
+    append,
+    now,
+    throttleMs,
+  });
+}
+
+// CAT-29: a daemon that cannot resolve its board/runtime dependencies stays
+// alive and reports non-accepting state for observability. The shell launcher
+// and worker dispatch gate enforce required-tool availability; this alert emits
+// the concrete missing tools and effective PATH once for diagnosis.
+export function emitBootDependencyUnusable({ missing = [], pathStr = null, reason = null, append, now, throttleMs } = {}) {
+  return emitThrottled({
+    eventName: ALERT_BOOT_DEPENDENCY_UNUSABLE,
+    kind: ALERT_KIND_BOOT_DEPENDENCY_UNUSABLE,
+    reason: reason ?? `boot dependencies unresolved: ${missing.join(", ")}`,
+    detail: {
+      "catalyst.missing_tools": missing.join(","),
+      ...(pathStr != null ? { "process.path": pathStr } : {}),
+    },
     append,
     now,
     throttleMs,

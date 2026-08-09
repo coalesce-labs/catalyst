@@ -166,6 +166,9 @@ while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 
+# shellcheck source=lib/catalyst-agent-path.sh
+source "$SCRIPT_DIR/lib/catalyst-agent-path.sh"
+
 # ─── Proxy env (used only under --proxy) ─────────────────────────────────────
 PROXY_HOST="http://127.0.0.1:8080"
 MITM_CA="${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
@@ -1513,11 +1516,11 @@ _stack_host_name() {
 # those CLIs under ~/.local; the launchd daemon shells out to them every tick
 # (reconcile → linearis, liveness snapshot → claude, linearis runtime → node),
 # so omitting these dirs makes every spawn exit-127 and the node strands
-# silently (frozen eligible set, freeSlots=0). Mirrors the proven join-shell
-# PATH order (catalyst-join.sh:719). Additive: the seed's homebrew/system tools
-# remain on PATH, and prepended member dirs that don't exist are a no-op.
+# silently (frozen eligible set, freeSlots=0). Persistent launchd definitions
+# intentionally omit the interactive installer's inherited PATH: only canonical
+# directories that exist at install time are written to the plist.
 _stack_agent_path() {
-  printf '%s\n' "${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  catalyst_agent_path ""
 }
 
 # _xml_escape <value> — escape the five XML predefined entities so an env value with
@@ -2128,7 +2131,7 @@ cmd_install_services() {
   #     install-services), so this provisions the WORKER fleet (the dark cohort). Dev/monitor (laptop)
   #     sampler coverage is a deliberate follow-up — the laptop already emits claude_code_* interactively.
   if [[ -x "${SCRIPT_DIR}/catalyst-agent/install.sh" ]]; then
-    if PATH="${HOME}/.local/node/bin:${HOME}/.local/bin:${PATH}" \
+    if PATH="$(_stack_agent_path)" \
         bash "${SCRIPT_DIR}/catalyst-agent/install.sh" 2>&1 | sed 's/^/  /'; then
       log "loaded com.catalyst.agent — per-account rate-limit usage sampler (5-min cadence)"
     else

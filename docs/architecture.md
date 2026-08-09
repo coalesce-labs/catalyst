@@ -1,5 +1,8 @@
 # Architecture
 
+For the local Linear writer, freshness gate, read tiers, configuration order, and health signals,
+see [Linear read replica](linear-replica.md).
+
 ## Three-Layer System
 
 1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/pm/`, `plugins/legacy/`, …) —
@@ -72,7 +75,10 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
   upserts each team's entry. Daemon reads the registry directly (D4). The CTL-554 per-repo
   enrollment under `execution-core/projects/` and the `/orchestrate` enroll step were retired in
   CTL-582. Access flows through `registry.mjs` `list-projects`/`get-project-config` — the D9 cloud
-  seam (swappable to a hosted table without touching callers).
+  seam (swappable to a hosted table without touching callers). Each entry's `team` must match its
+  `repoRoot`'s Layer-1 `catalyst.linear.teamKey`; `listProjects()` warns on a mismatch and
+  `catalyst doctor` grades it with the advisory `registry-team-identity` check. Catalyst's own CAT
+  registration is recorded in ADR-028.
 - **Heartbeat** — orchestrators write `lastHeartbeat` every 2–3 min; entries stale >10 min are GC'd
   as `abandoned`.
 
@@ -642,6 +648,16 @@ ring, scoped to the current month's file). The append is idempotent: events alre
 file are never double-written. `catalyst-events tail`/`wait-for` on the observation node then
 resolve fleet events locally with no polling loop. The fan-in is transport-abstracted (injectable
 `fetchFn`) so a future cloud-changefeed transport drops in without touching the dedup core.
+
+### GitHub core REST quota snapshot (CAT-40)
+
+The execution-core daemon samples `gh api rate_limit` on a dedicated timer and atomically writes the
+host's normalized core REST quota to `<orchDir>/github-quota.json`. Board-health reads that local
+snapshot rather than spending a GitHub call on its scan path, publishes the remaining count,
+percentage, reset time, sampling host, and snapshot age, and emits the scalar values on
+`recovery.board-scan`. Sampling and publication are on by default, but actuation is not:
+`CATALYST_BH_GH_QUOTA` defaults to `shadow`, so `rateLimitHeadroom` stays unobservable to Gate 3
+until an operator explicitly selects `enforce`.
 
 ### Linear app-actor self-echo guard (`botUserId`)
 

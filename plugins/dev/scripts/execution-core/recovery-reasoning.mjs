@@ -1448,6 +1448,16 @@ function promoteNumericAttrs(type, details) {
     // gap between them (total − held) is the dispatchable set as Phase 3 lands.
     num("cohort_stranded_mid_pipeline", details.strandedCount);
     num("cohort_stranded_held", details.strandedHeldCount);
+    // CAT-40 (Codex P1): promote the GitHub core-REST quota scalars. They are the
+    // whole point of the sampler — a board-wide cause with per-ticket symptoms —
+    // and the forwarder drops body.payload off-host, so leaving them in details
+    // makes the default shadow rollout unverifiable: an operator could see the
+    // scan fire but never chart the quota it observed. Both are bounded (a count
+    // and a 0-100 percentage); the reset timestamp and sampling host stay in
+    // body.payload. `num` drops nulls, so an absent snapshot promotes nothing
+    // rather than charting a fake zero.
+    num("recovery.github.core_remaining", details.githubCoreRemaining);
+    num("recovery.github.core_remaining_pct", details.githubCoreRemainingPct);
   }
   return a;
 }

@@ -143,9 +143,12 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.orphanPrSweep.repo`                            | _(auto-detected)_            | The `org/repo` slug to pass to `gh pr list`. Falls back to top-level `.catalyst/config.json` repo fields, then `gh repo view`. Set this explicitly when auto-detection is unreliable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `orchestration.stalledPrSweep.enabled`                        | `false`                      | Periodically sweep all in-flight worker PRs for review-latency, CI-health, and no-push signals independent of worker liveness (CTL-1608). **Default-off** — enable only after validating thresholds on the live board. When enabled the timer writes `workers/<TICKET>/stalled-pr.json`; board-health reads those stamps via `getStalledPrState` and emits `nudge-stalled-pr` moves.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `orchestration.stalledPrSweep.intervalSeconds`                | `900`                        | How often the stalled-PR sweep ticks (seconds). Configurable per the `CATALYST_BH_STALLED_PR_*` env thresholds below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `orchestration.githubQuotaSweep.enabled`                      | `true`                       | Sample the host's GitHub core REST quota and atomically publish it to `<orchDir>/github-quota.json`. Set `false` to disable the timer; a previous snapshot may remain on disk but becomes stale and cannot arm board-health.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `orchestration.githubQuotaSweep.intervalSeconds`              | `300`                        | How often the daemon runs the quota sampler (seconds). The sampler calls the quota-reporting endpoint, which does not consume the core quota it reports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `responder.intervalSeconds`                                   | `180`                        | How often the daemon-health responder launchd sweep runs (seconds, clamped 60–900). The responder (`health-responder.sh`, CTL-1509) detects a dead/stale cloud-sync replica writer and issues bounded `launchctl kickstart`s, escalating after the attempt cap. Baked into the launchd plist at install time (`install-health-responder.sh`); re-run `catalyst-stack install-services` after changing it.                                                                                                                                                                                                                                                                                                          |
 | `orchestration.reconcile.mode`                                | `off`                        | Completion-declaration reconcile timer (CTL-1371). Linear state is driven by **explicit completion declarations** — the model/pipeline/human says "this is done" via `catalyst-linear-reconcile declare <TICKET>` — **never** inferred from PR/merge state (a draft PR opens while work is in progress; a merged PR is not yet Done — the pipeline puts deploy-verification + teardown between merge and Done). The timer drains _pending_ declarations and makes Linear reflect them, retrying any write that didn't land. `off` = inert (also the default); `notify` = compute drift + emit `ticket.completion.drift.<ticket>` events but **never write** (safe first-ship); `write` = write the declared state via the canonical primitive. Runs on the daemon event loop, separate from the dispatch scheduler. Idempotent + CTL-758 backward-write guard (never resurrects a Canceled ticket, never regresses a Done one). |
 | `orchestration.reconcile.intervalSeconds`                     | `600`                        | How often the drain timer ticks (seconds).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `EXECUTION_CORE_RECONCILE_BLIND_ALERT_MS`                     | `300000`                     | Time-based total-board-blindness alarm. When every registered team's reconcile is failing and no team has succeeded inside this window, execution-core raises the fleet admission alert and emits `fleet.health.degraded`. This complements `EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD`; it does not replace the count-based per-team latch. |
 | `orchestration.reconcile.declarationsDir`                     | `~/catalyst/completions`     | Directory holding the durable per-ticket completion markers (`<TICKET>.json`). Overridable via `CATALYST_COMPLETIONS_DIR`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `orchestration.orphanReaper.jobGc.enabled`                    | `true`                       | Enable periodic GC of stale `~/.claude/jobs/<id>` dirs (CTL-1165 D3). Set `false` to disable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `orchestration.orphanReaper.jobGc.retentionSeconds`           | `86400`                      | Delete a job dir only if its mtime is older than this many seconds (default 24 h). Env `CATALYST_JOB_GC_RETENTION_SECONDS` overrides.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -276,6 +279,42 @@ same tool creates on top of the `Todo` and `Triage` states your team workflow al
 If the registry is missing (a fresh or headless host), enroll a project with
 `catalyst-execution-core register --team <TEAM> --repo-root <path>` rather than writing the file by
 hand — see [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/).
+
+#### The `team` ↔ `teamKey` contract
+
+Each registry entry's `team` must **exactly** equal the `catalyst.linear.teamKey` declared in that
+entry's `<repoRoot>/.catalyst/config.json`. The match is case- and whitespace-sensitive, because the
+code that consumes it is: the daemon routes Linear events with a strict `!==` comparison and looks
+projects up with strict `===`, so a `cat`-vs-`CAT` entry silently drops every event and resolves no
+repository.
+
+When the two disagree, a team is pointed at another project's checkout, and worktrees cut from it
+inherit that checkout's Layer-1 `catalyst.linear` config (`teamKey`/`teamId`) and its
+`project.ticketPrefix`. Catalyst reports the drift in two places, both advisory — a violation never
+blocks dispatch:
+
+- the daemon logs `registry entry repoRoot declares a different Linear team` on each registry read;
+- `catalyst doctor` reports the `registry-team-identity` check (WARN on mismatch, never FAIL). The
+  check grades INFO — not PASS — when an entry's config is absent, unreadable, malformed, or has no
+  `teamKey`, since "no mismatch found" is not the same as "contract verified".
+
+Repair the **registry entry**, not the checkout's config:
+
+```bash
+catalyst-execution-core register --team CAT --repo-root ~/code-repos/github/you/catalyst
+```
+
+Two things that repair does **not** do on its own:
+
+- **Preserve a custom `eligibleQuery`.** Re-registering without the eligible-query flags resets the
+  entry to the default all-`Todo` query. If the entry filtered by project, label, or priority, pass
+  those flags again in the same command, and confirm the result in `registry.json`.
+- **Clean up worktrees already cut from the wrong checkout.** Existing worktrees keep the old
+  checkout's config and git remote, and because both clones can resolve the same worktree path,
+  reuse checks that only compare the branch name will happily keep using them — so later phases go
+  on running in, and pushing from, the wrong repository. Remove (or re-create) any worktree made
+  from the mismatched checkout after fixing the registry, then confirm each remaining worktree's
+  `git remote get-url origin` and `.catalyst/config.json` teamKey are the ones you expect.
 
 ### Worker-status labels
 
@@ -430,6 +469,63 @@ sources that script, its env will always carry a non-empty (but bot) token — t
 precisely so your real `linear.apiToken` here still gets tried and used instead of being permanently
 shadowed. Generate a personal key at Linear → Settings → API → Personal API keys (`lin_api_...`, not
 an OAuth `lin_oauth_...` value) and put it here.
+
+## Event forwarders (`catalyst.observability.forwarders`)
+
+The `catalyst-otel-forward` daemon tails the canonical event log
+(`~/catalyst/events/YYYY-MM.jsonl`) and fans events out to OTLP/HTTP, PostHog, and Cloudflare
+Analytics Engine. Config lives in the Layer-2 file above under
+`catalyst.observability.forwarders`. **All forwarders are disabled by default.** This section is
+the authoritative schema; the developer reference `plugins/dev/references/event-forwarding.md`
+covers architecture, lifecycle, and DLQ operations.
+
+```json
+{
+  "catalyst": {
+    "observability": {
+      "forwarders": {
+        "otlp": {
+          "enabled": true,
+          "endpoint": "http://localhost:4318",
+          "batchSize": 100,
+          "flushIntervalMs": 5000,
+          "lokiAcceptWindowMs": 3600000,
+          "maxRetryElapsedMs": 60000
+        },
+        "posthog": {
+          "enabled": false,
+          "apiKey": "phc_...",
+          "host": "https://us.i.posthog.com",
+          "batchSize": 50,
+          "flushIntervalMs": 10000
+        },
+        "cloudflareAE": {
+          "enabled": false,
+          "accountId": "...",
+          "apiToken": "...",
+          "dataset": "catalyst_events",
+          "batchSize": 100,
+          "flushIntervalMs": 5000
+        }
+      }
+    }
+  }
+}
+```
+
+### OTLP forwarder keys
+
+| Key                  | Default                | Description                                                                                                                                             |
+| -------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false`                | Enable the OTLP/HTTP forwarder.                                                                                                                        |
+| `endpoint`           | `http://localhost:4318`| Collector ingest. `OTEL_EXPORTER_OTLP_ENDPOINT` overrides it; a `:4317` port is auto-rewritten to `:4318` for HTTP.                                     |
+| `batchSize`          | `100`                  | Advisory target only — **not currently enforced**. Each flush sends the whole accumulated buffer for that destination in one request; a hard per-request cap is a follow-up (CTL-1506). |
+| `flushIntervalMs`    | `5000`                 | Per-forwarder flush cadence — each enabled destination runs its own timer at its own interval (CTL-1506). A destination's flushes are serialized independently: a tick arriving while its previous flush is still in flight is a no-op, so this is a floor. |
+| `lokiAcceptWindowMs` | `3600000` (1 h)        | Age cutoff for Loki records (CTL-1506). Records older than this are dropped with a `forward_dropped` (`drop_reason: "aged"`) event before any send. Note the *effective* send cutoff is slightly stricter — `lokiAcceptWindowMs − min(timeoutMs, lokiAcceptWindowMs/4)` — a delivery margin so a near-cutoff record can't age past the window mid-request. Tune to your Loki `reject_old_samples_max_age`. |
+| `maxRetryElapsedMs`  | `60000` (60 s)         | Max elapsed time for HTTP retry backoff on a retryable failure (`429`/`5xx`/network) before the batch is dead-lettered (CTL-1506). Terminal `4xx` (not `429`) is dropped immediately, never retried or DLQ'd. |
+
+PostHog and Cloudflare AE keys mirror the JSON above; see the developer reference for their
+delivery semantics.
 
 ## Cluster machine-level cloud token (`CATALYST_CLOUD_TOKEN`, CTL-1307)
 
@@ -978,6 +1074,10 @@ structural, not configured), so the telemetry that is the feature's whole point 
 | ------------------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CATALYST_BOARD_HEALTH` _(env var)_                     | `shadow`          | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (CTL-1300 — on a proceeding scan, dispatch **one holistic recovery-pass delegate** anchored to a flagged ticket and carrying the whole-board context; reuses the capped + cooldown'd recovery-pass actuator. **Operator-gated — never auto-enabled**). Garbage values fall back to `shadow`. Overrides Layer-2. |
 | `catalyst.boardHealth.mode` _(Layer-2)_                 | `shadow`          | Same three values; honored when the env var is unset.                                                                                                                                                                                                                                                                                                                                                                             |
+| `CATALYST_BH_GH_QUOTA` _(env var)_                      | `shadow`          | GitHub core REST quota invariant mode: `off` skips the snapshot read, `shadow` publishes quota state but keeps the invariant unobservable, and `enforce` lets a fresh low/exhausted snapshot trip Gate 3 with `rate-limit-cliff`. Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                        |
+| `catalyst.boardHealth.githubQuota` _(Layer-2)_           | `shadow`          | Same three values; honored when `CATALYST_BH_GH_QUOTA` is unset.                                                                                                                                                                                                                                                                                                                                                                  |
+| `CATALYST_BH_GH_CORE_PCT`                                | `10`              | Remaining core REST percentage at or below which the quota state is `low`.                                                                                                                                                                                                                                                                                                                                                        |
+| `CATALYST_BH_GH_QUOTA_STALE_MS`                          | `900000` (15 min) | Maximum snapshot age. A missing or older snapshot is unknown and unobservable, even in `enforce`.                                                                                                                                                                                                                                                                                                                                  |
 | `CATALYST_BH_INTERVAL_MS`                               | `300000` (5 min)  | Cadence floor — the scan runs at most once per interval per host.                                                                                                                                                                                                                                                                                                                                                                 |
 | `CATALYST_BH_DISPATCH_STALL_MS`                         | `600000` (10 min) | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge.                                                                                                                                                                                                                                                                                                                                 |
 | `CATALYST_BH_WORKER_AGE_MS`                             | `14400000` (4 h)  | Fallback worker-age threshold (per-phase normals override it).                                                                                                                                                                                                                                                                                                                                                                    |
