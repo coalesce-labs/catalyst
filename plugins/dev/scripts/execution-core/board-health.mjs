@@ -1143,7 +1143,10 @@ function checkUnownedInFlight(b, t) {
     for (const candidate of checked) {
       let result;
       try {
-        result = b.verifyOpenPrs(candidate.descriptor);
+        // Scheduler-bound discovery seams consume the canonical ticket key, as
+        // do the neighbouring repo/evidence seams. Passing the descriptor here
+        // made team/repo derivation fail closed and silently emptied this cohort.
+        result = b.verifyOpenPrs(candidate.id);
       } catch {
         unverifiablePrChecks++;
         prDiscovery[candidate.id] = { unverifiable: true, prs: [] };
@@ -1838,7 +1841,7 @@ export function buildBoardContext(boardState, invariants) {
     let salvage = {};
     if (boardState.getBranchSalvage) {
       try {
-        salvage = boardState.getBranchSalvage(descriptor) ?? {};
+        salvage = boardState.getBranchSalvage(ticket) ?? {};
       } catch {
         salvage = { unverifiable: true };
       }

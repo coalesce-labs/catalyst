@@ -2094,7 +2094,7 @@ describe("checkUnownedInFlight — authoritative PR confirmation (CAT-11)", () =
       ticketsById,
       signals: [{ ticket: "CAT-LIVE", status: "running" }],
       prStatusMap: mkPrStatusMap([{ prNumber: 4, status: "open" }]),
-      verifyOpenPrs: (ticket) => { calls.push(ticket.identifier); return { prs: [] }; },
+      verifyOpenPrs: (ticket) => { calls.push(ticket); return { prs: [] }; },
     });
     expect(calls).toEqual(["CAT-CANDIDATE"]);
     expect(r.flagged).toEqual(["CAT-CANDIDATE"]);
@@ -2104,7 +2104,7 @@ describe("checkUnownedInFlight — authoritative PR confirmation (CAT-11)", () =
     const calls = [];
     const ticketsById = new Map(Array.from({ length: 7 }, (_, i) => stale(`CAT-${i}`, 72 - i)));
     const r = run({ ticketsById, verifyOpenPrs: (ticket) => {
-      calls.push(ticket.identifier); return { prs: [] };
+      calls.push(ticket); return { prs: [] };
     } }, { unownedPrVerifyMax: 3 });
     expect(calls).toEqual(["CAT-0", "CAT-1", "CAT-2"]);
     expect(r.flagged).toEqual(["CAT-0", "CAT-1", "CAT-2"]);

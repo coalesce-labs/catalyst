@@ -8319,7 +8319,7 @@ let _stallJanitorCensusLastRunMs = 0;
 // CAT-11: one verifier closure per daemon/orchestrator so its TTL memo survives
 // scheduler ticks. The closure itself owns the memo; this map only owns lifetime.
 const _unownedPrVerifiers = new Map();
-function unownedPrVerifierFor(opts) {
+export function unownedPrVerifierFor(opts) {
   const key = opts.orchDir;
   if (!_unownedPrVerifiers.has(key)) {
     _unownedPrVerifiers.set(key, makeOpenPrVerifier({

@@ -16,7 +16,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { schedulerTick, holisticBoardHealthAct } from "./scheduler.mjs";
+import { schedulerTick, holisticBoardHealthAct, unownedPrVerifierFor } from "./scheduler.mjs";
 import { boardHealthPass } from "./board-health.mjs";
 
 let orchDir;
@@ -169,6 +169,17 @@ describe("schedulerTick — CAT-11 discovery and salvage seams", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].verifyOpenPrs).toBe(verifyOpenPrs);
     expect(calls[0].getBranchSalvage).toBe(getBranchSalvage);
+  });
+
+  test("real scheduler verifier consumes the ticket key used by board-health", () => {
+    const calls = [];
+    const verifyOpenPrs = unownedPrVerifierFor({
+      orchDir,
+      checkOpenPrs: (ticket) => { calls.push(ticket); return { ok: true, prs: [] }; },
+    });
+
+    expect(verifyOpenPrs("CAT-11")).toEqual({ ok: true, prs: [] });
+    expect(calls).toEqual(["CAT-11"]);
   });
 });
 
