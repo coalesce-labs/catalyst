@@ -4992,6 +4992,20 @@ export function checkStaleLock(deps = {}) {
 
 const SKILLS_DIR_WRAPPER_MARKER = "# >>> catalyst plugin-source (managed) >>>";
 
+// claudeConfigDir — Claude Code's data directory, honoring CLAUDE_CONFIG_DIR.
+//
+// CTL (Codex #2664 P1): the skills-dir call sites hardcoded homedir()/.claude. Claude
+// Code lets an operator relocate that directory, and CLAUDE_CONFIG_DIR may hold a
+// COLON-SEPARATED list whose FIRST entry is the writable primary — so on a relocated
+// install the cutover wrote symlinks to, and doctor verified them in, a directory
+// Claude Code never reads. Mirrors setup-plugin-source.sh's claude_config_dir() so the
+// bash writer and this JS verifier can never disagree about where the links live.
+export function claudeConfigDir() {
+  const v = process.env.CLAUDE_CONFIG_DIR;
+  if (typeof v === "string" && v !== "") return v.split(":")[0];
+  return resolve(homedir(), ".claude");
+}
+
 // defaultExpectedSkillsPlugins — every <root>/plugins/*/.claude-plugin/plugin.json,
 // keyed by manifest `name` (the symlink basename) with `dir` realpath'd for a
 // direct string compare against the (also realpath'd) symlink target.
@@ -5022,7 +5036,7 @@ function defaultExpectedSkillsPlugins(roots) {
 // defaultSkillLink — classify ~/.claude/skills/<name>: symlink (target realpath'd,
 // null if dangling) | other (a real file/dir, never clobbered) | missing.
 function defaultSkillLink(name) {
-  const link = resolve(homedir(), ".claude", "skills", name);
+  const link = resolve(claudeConfigDir(), "skills", name);
   let st;
   try {
     st = lstatSync(link);
@@ -5095,7 +5109,7 @@ export function classifySkillsDirPlugins({
     } else if (!link.target) {
       problems.push(`~/.claude/skills/${name} is a dangling symlink`);
     } else if (link.target !== dir) {
-      problems.push(`~/.claude/skills/${name} resolves to ${link.target}, not the plugin-source checkout (${dir})`);
+      problems.push(`${claudeConfigDir()}/skills/${name} resolves to ${link.target}, not the plugin-source checkout (${dir})`);
     }
   }
 
@@ -5402,7 +5416,14 @@ export function checksForClass(nc, opts = {}) {
 // read-replica reachability/webhooks/thoughts): those depend on remote nodes + tokens an install
 // can't guarantee, so failing them would mis-attribute an operational gap to the install run.
 export function installChecksForClass(nc, opts = {}) {
-  const { hasStackAgent, hasUpdaterAgent, pluginPullOwner } = opts;
+  const {
+    hasStackAgent,
+    hasUpdaterAgent,
+    pluginPullOwner,
+    // Injectable like the sibling probes — the skills-dir state is environment-dependent
+    // (a real ~/.claude tree), so tests supply a stub rather than the live filesystem.
+    skillsDirCheck = () => checkSkillsDirPlugins({ nodeClass: nc.class }),
+  } = opts;
   // strict:true — under install verification an INFERRED/unpersisted class is a FAIL (the install's
   // write-config must have persisted catalyst.node.class), not the activation INFO (CTL-1369 PR4 Codex P2).
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc, strict: true });
@@ -5412,6 +5433,15 @@ export function installChecksForClass(nc, opts = {}) {
     nodeClassCheck,
     () => checkAgentsForClass({ nodeClass: nc.class, strict: true, hasStackAgent, hasUpdaterAgent }),
     () => checkPluginPullOwner({ nodeClass: nc.class, strict: true, owner: pluginPullOwner }),
+    // CTL (Codex #2664 P1): verify the skills-dir cutover here too. The cutover runs
+    // BEST-EFFORT from the install lifecycle's write-config phase — a partial or failed
+    // symlink pass does not fail the install — so without this check the install
+    // reported success while the plugins did not actually load in place. This is the
+    // post-install verification pass, which is exactly where a best-effort step must be
+    // confirmed. No `strict` option here: unlike its siblings this check has no advisory
+    // mode — it already returns FAIL when the cutover is incomplete (verified), so
+    // passing strict would be a silently-ignored no-op.
+    skillsDirCheck,
   ];
 }
 

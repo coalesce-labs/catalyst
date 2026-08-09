@@ -44,6 +44,22 @@
 
 set -euo pipefail
 
+# claude_config_dir — Claude Code's data directory, honoring CLAUDE_CONFIG_DIR.
+#
+# CTL (Codex #2664 P1): every new call site hardcoded "${HOME}/.claude". Claude Code
+# lets an operator relocate that directory via CLAUDE_CONFIG_DIR, and the variable may
+# hold a COLON-SEPARATED list (the first entry is the writable primary) — so a
+# relocated install had its skills symlinks written to, and verified in, a directory
+# Claude Code never reads. Resolve it in one place instead.
+claude_config_dir() {
+  if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    printf '%s' "${CLAUDE_CONFIG_DIR%%:*}"
+  else
+    printf '%s' "${HOME}/.claude"
+  fi
+}
+
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Single source of truth for the machine-config path + resolution order.
@@ -154,7 +170,7 @@ rc_files_for_interactive_shell() {
 create_skills_dir_symlinks() {
 	local checkout="$1"
 	local base="${checkout}/plugins"
-	local skills_dir="${HOME}/.claude/skills"
+	local skills_dir="$(claude_config_dir)/skills"
 	local d pname target link cur
 	if [[ ! -d "$base" ]]; then
 		echo "WARN: no plugins directory at ${base} — skipping skills-dir symlinks." >&2
@@ -183,6 +199,48 @@ create_skills_dir_symlinks() {
 			ln -s "$target" "$link" && echo "Created skills-dir symlink: ${link} -> ${target}" \
 				|| echo "WARN: could not create ${link}." >&2
 		fi
+	done
+}
+
+
+# remove_skills_dir_symlinks — the inverse of create_skills_dir_symlinks.
+#
+# CTL (Codex #2664 P1): the cutover created user-scope symlinks but nothing removed
+# them, so after uninstalling the plugin source ~/.claude/skills kept dangling entries
+# pointing into a deleted checkout — Claude Code then loads (or errors on) plugins the
+# operator believes are gone. Uninstall must undo what install did.
+#
+# Enumerates from the SKILLS DIR, not from catalog_plugin_names(checkout). The whole
+# point is the uninstall case, where the checkout is already deleted — a catalog walk
+# would then return nothing and remove nothing, i.e. it would no-op in exactly the
+# situation it exists for.
+#
+# SAFETY: only removes a SYMLINK whose target is inside the given checkout. A real
+# directory, or a symlink the operator pointed elsewhere, is left untouched and
+# reported — a blanket rm would destroy unrelated work.
+remove_skills_dir_symlinks() {
+	local checkout="$1"
+	local skills_dir="$(claude_config_dir)/skills"
+	local link tgt co_real
+	[[ -d "$skills_dir" ]] || return 0
+	co_real="$(cd "$checkout" 2>/dev/null && pwd -P)" || co_real="$checkout"
+	for link in "$skills_dir"/*; do
+		# Only ever touch a SYMLINK — never a real directory.
+		[[ -L "$link" ]] || continue
+		# Resolve the target. A DANGLING link (checkout already deleted) resolves to
+		# nothing, so fall back to the raw readlink text — otherwise the very case this
+		# exists to clean up would be skipped.
+		tgt="$(cd "$(dirname "$link")" 2>/dev/null && cd "$(readlink "$link")" 2>/dev/null && pwd -P)" || tgt=""
+		[[ -n "$tgt" ]] || tgt="$(readlink "$link")"
+		case "$tgt" in
+			"$co_real"|"$co_real"/*|"$checkout"|"$checkout"/*)
+				rm -f "$link" && echo "Removed skills-dir symlink: ${link}" \
+					|| echo "WARN: could not remove ${link}." >&2
+				;;
+			*)
+				echo "Left ${link} alone (points outside ${checkout}: ${tgt:-unresolvable})." >&2
+				;;
+		esac
 	done
 }
 
@@ -244,7 +302,7 @@ catalog_plugin_names() {
 # and the checkSkillsDirPlugins doctor check flags it for a manual finish. On a fresh
 # node (no marketplace) every step is a clean no-op.
 retire_catalyst_marketplace() {
-	local checkout="$1" settings="${HOME}/.claude/settings.json" tmp p ids_json
+	local checkout="$1" settings="$(claude_config_dir)/settings.json" tmp p ids_json
 	local -a plugin_ids=()
 	while IFS= read -r p; do
 		[[ -n "$p" ]] && plugin_ids+=("${p}@catalyst")
@@ -405,6 +463,17 @@ fi
 # runs only in full mode; --no-interactive-wrapper (install acquire, pre-backup)
 # skips it (both are no-ops on a fresh node anyway). Each `|| warn` disables `set -e`
 # inside the callee so a read-only rc / project-scoped marketplace warns, not aborts.
+# CTL (Codex #2664 P1): the inverse of the cutover. Install created user-scope
+# symlinks and nothing removed them, so an uninstalled checkout left dangling
+# ~/.claude/skills entries behind and Claude Code kept trying to load plugins the
+# operator believed were gone. `--uninstall` undoes exactly what install did (and
+# nothing else — see remove_skills_dir_symlinks's safety note) and exits.
+if [[ "${1:-}" == "--uninstall" ]]; then
+	remove_skills_dir_symlinks "$CHECKOUT_PATH" \
+		|| echo "WARN: skills-dir symlinks not fully removed (non-fatal)." >&2
+	exit 0
+fi
+
 create_skills_dir_symlinks "$CHECKOUT_PATH" \
 	|| echo "WARN: skills-dir symlinks not fully created (non-fatal) — some catalyst plugins may not load outside the daemon until fixed." >&2
 

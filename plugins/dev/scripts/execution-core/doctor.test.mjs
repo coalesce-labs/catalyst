@@ -4843,9 +4843,18 @@ describe("doctor pull-owner reads persisted installed state (CTL-1369 PR4 / Code
     await withEnv({ CATALYST_LAYER2_CONFIG_FILE: cfg }, async () => {
       // real resolveNodeClass + real defaultPluginPullOwner (both read CATALYST_LAYER2_CONFIG_FILE);
       // only the launchd agent probe is injected (it is env-dependent).
-      const code = await runDoctor({ profile: "install", json: true, hasStackAgent: false, hasUpdaterAgent: true, log: (m) => logs.push(m) });
+      // skillsDirCheck is injected: the real one probes a live ~/.claude tree, which a
+      // unit test has no business depending on. Its own coverage lives with
+      // checkSkillsDirPlugins; here we only assert it is PART of the install rubric —
+      // the point of Codex #2664 P1, since the cutover is best-effort and would
+      // otherwise let a failed install report success.
+      const code = await runDoctor({
+        profile: "install", json: true, hasStackAgent: false, hasUpdaterAgent: true,
+        skillsDirCheck: () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }],
+        log: (m) => logs.push(m),
+      });
       const parsed = JSON.parse(logs[0]);
-      expect(parsed.checks.map((c) => c.name)).toEqual(["node-class", "agents-for-class", "plugin-pull-owner"]);
+      expect(parsed.checks.map((c) => c.name)).toEqual(["node-class", "agents-for-class", "plugin-pull-owner", "skills-dir-plugins"]);
       expect(parsed.checks.find((c) => c.name === "node-class").detail).toContain("developer"); // class from the SAME file
       expect(parsed.ok).toBe(true); // class + owner consistent → developer rubric PASSes
       expect(code).toBe(0);
