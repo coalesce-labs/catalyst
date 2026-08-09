@@ -159,3 +159,90 @@ describe("drainDlqBounded", () => {
     rmSync(dir, { recursive: true });
   });
 });
+
+// CTL-1506 Phase 4: DrainOutcome "dropped" support
+describe("drainDlqBounded — DrainOutcome (CTL-1506)", () => {
+  test("callback returning 'dropped' consumes the entry, does NOT fire onBatchDelivered, continues", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "drain-dropped-"));
+    const path = join(dir, "dlq.jsonl");
+    appendToDlq(path, [{ ts: "1" }] as any);
+    appendToDlq(path, [{ ts: "2" }] as any);
+    appendToDlq(path, [{ ts: "3" }] as any);
+
+    const delivered: unknown[][] = [];
+    let callCount = 0;
+    const sendBatch = mock(async (b: unknown[]) => {
+      callCount++;
+      if (callCount === 2) return "dropped" as const; // batch 2 dropped
+      return undefined; // deliver
+    });
+
+    const result = await drainDlqBounded(path, sendBatch, {
+      onBatchDelivered: (b) => delivered.push(b),
+    });
+
+    expect(result.drained).toBe(2);
+    expect(result.dropped).toBe(1);
+    expect(result.remaining).toBe(0);
+    expect(dlqDepth(path)).toBe(0);
+    // onBatchDelivered NOT called for the dropped batch
+    expect(delivered.length).toBe(2);
+    expect((delivered[0][0] as { ts: string }).ts).toBe("1");
+    expect((delivered[1][0] as { ts: string }).ts).toBe("3");
+    rmSync(dir, { recursive: true });
+  });
+
+  test("callback returning void still counts as delivered (backward-compat)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "drain-void-"));
+    const path = join(dir, "dlq.jsonl");
+    appendToDlq(path, [{ ts: "1" }] as any);
+    const sendBatch = mock(async () => {});
+    const result = await drainDlqBounded(path, sendBatch);
+    expect(result.drained).toBe(1);
+    expect(result.dropped).toBe(0);
+    expect(result.remaining).toBe(0);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("throwing callback stops and requeues failed batch + remainder (unchanged)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "drain-throw-"));
+    const path = join(dir, "dlq.jsonl");
+    for (let i = 1; i <= 4; i++) appendToDlq(path, [{ ts: String(i) }] as any);
+    let callCount = 0;
+    const sendBatch = mock(async () => {
+      callCount++;
+      if (callCount === 2) throw new Error("fail");
+    });
+    const result = await drainDlqBounded(path, sendBatch);
+    expect(result.drained).toBe(1);
+    expect(result.dropped).toBe(0);
+    expect(result.remaining).toBe(3);
+    expect(dlqDepth(path)).toBe(3);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("mixed sequence: deliver → drop → throw → correct counts and file contents", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "drain-mixed-"));
+    const path = join(dir, "dlq.jsonl");
+    for (let i = 1; i <= 5; i++) appendToDlq(path, [{ ts: String(i) }] as any);
+    let callCount = 0;
+    const sendBatch = mock(async () => {
+      callCount++;
+      if (callCount === 2) return "dropped" as const;
+      if (callCount === 3) throw new Error("fail");
+    });
+    const result = await drainDlqBounded(path, sendBatch);
+    // batch 1: delivered, batch 2: dropped, batch 3: throws → failedAt=2
+    // survivors = lines from index 2 onwards = batches 3,4,5
+    expect(result.drained).toBe(1);
+    expect(result.dropped).toBe(1);
+    expect(result.remaining).toBe(3);
+    expect(dlqDepth(path)).toBe(3);
+    // Verify survivor file starts from the thrown batch (ts="3")
+    const survivors = readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { ts: string }[]);
+    expect(survivors[0][0].ts).toBe("3");
+    expect(survivors[1][0].ts).toBe("4");
+    expect(survivors[2][0].ts).toBe("5");
+    rmSync(dir, { recursive: true });
+  });
+});

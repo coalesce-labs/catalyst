@@ -167,6 +167,16 @@ function isPhaseSignalFile(name) {
 // workers/<ticket>/phase-<name>.json (artifacts excluded). Pure over the
 // filesystem; carries no phase-order knowledge — callers map names→indices via
 // phaseIndex (phase-fsm.mjs). The primitive behind the CTL-606 supersede guard.
+//
+// CTL-1660 P1 (Codex #3081): entries are returned in ASCENDING mtime order — oldest
+// dispatch first, most-recently-written signal LAST — the same contract
+// readPhaseSignals (scheduler.mjs) already guarantees. Raw readdirSync order is
+// filesystem-dependent and carries no chronology, which left recovery.mjs's supersede
+// guard with nothing but pipeline ordinal to go on: with an old `review: failed`
+// behind a current `implement: running`, a dying implement worker was judged
+// "superseded" by ordinal and reaped instead of revived, and its `running` signal
+// then held a slot indefinitely. Recency is the only thing that distinguishes a stale
+// predecessor from a deliberate backward re-dispatch.
 export function listDispatchedPhases(orchDir, ticket) {
   const dir = join(orchDir, "workers", ticket);
   let names;
@@ -175,13 +185,25 @@ export function listDispatchedPhases(orchDir, ticket) {
   } catch {
     return []; // no worker dir yet
   }
-  const phases = [];
+  const entries = [];
   for (const name of names) {
     if (!isPhaseSignalFile(name)) continue;
     const m = /^phase-(.+)\.json$/.exec(name);
-    if (m) phases.push(m[1]);
+    if (!m) continue;
+    let mtimeMs;
+    try {
+      mtimeMs = statSync(join(dir, name)).mtimeMs;
+    } catch {
+      mtimeMs = 0; // vanished between readdir and stat — sorts first, harmless
+    }
+    entries.push({ phase: m[1], mtimeMs, name });
   }
-  return phases;
+  // Equal mtimes are a real occurrence (two writes inside one filesystem timestamp
+  // granularity), and a bare mtime comparator would leave those ties to directory
+  // order. Break them by phase-signal FILE NAME so the result is at least
+  // deterministic across hosts and runs rather than filesystem-dependent.
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name));
+  return entries.map((e) => e.phase);
 }
 
 // SDK_INFLIGHT_STATUSES — the non-terminal worker statuses an in-process SDK

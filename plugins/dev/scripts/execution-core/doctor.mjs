@@ -24,8 +24,8 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync } from "node:fs";
-import { resolve, dirname, isAbsolute } from "node:path";
+import { readFileSync, statSync, existsSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
+import { resolve, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -42,6 +42,8 @@ import {
   resolveNodeClass,
   NODE_CLASSES,
   isDraining,
+  resolveDrainState, // CTL-1678: three-state drain resolver for checkDrainDisabled
+  readDaemonRuntimeEnv, // CTL-1678 (round-3 P1): live daemon's boot-time env snapshot
   getExecutionCoreDir,
   // CTL-1375: configured-repo discovery for the repo-icon token-scope advisory.
   getRegistryPath,
@@ -88,7 +90,9 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
+import { listProjects } from "./registry.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -955,6 +959,20 @@ function defaultDaemonPath() {
   }
 }
 
+// CAT-29: prefer facts published by the live daemon. A correct installed plist
+// cannot certify a daemon that was started earlier from a broken interactive
+// environment. Stale facts are ignored by verifying that their PID is alive.
+function defaultRunningDaemonFacts() {
+  try {
+    const facts = JSON.parse(readFileSync(join(getExecutionCoreDir(), "boot-facts.json"), "utf8"));
+    if (!Number.isInteger(facts?.pid) || typeof facts?.path !== "string") return null;
+    process.kill(facts.pid, 0);
+    return facts;
+  } catch {
+    return null;
+  }
+}
+
 // defaultResolveInPath — does `cmd` resolve to an executable under `pathStr`?
 // Uses `command -v` with positional args (no shell injection).
 function defaultResolveInPath(cmd, pathStr) {
@@ -981,30 +999,35 @@ function defaultSmokeProbe(cmd, args, pathStr) {
 // checkDaemonToolPath — assert the daemon's launchd PATH can resolve and run the
 // CLIs it shells out to. Injectable deps for unit testing.
 export function checkDaemonToolPath(deps = {}) {
+  const plistPath = deps.daemonPath !== undefined ? deps.daemonPath : defaultDaemonPath();
+  const runningFacts = deps.runningFacts !== undefined ? deps.runningFacts : defaultRunningDaemonFacts();
   const {
-    daemonPath = defaultDaemonPath(),
     resolveInPath = defaultResolveInPath,
     smokeProbe = defaultSmokeProbe,
     tools = ["linearis", "node", "claude"],
   } = deps;
+  const daemonPath = runningFacts?.path ?? plistPath;
 
   if (!daemonPath) {
     return [
       mkCheck(
         "daemon-tool-path",
         STATUS.WARN,
-        "no installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
+        "no running daemon boot facts or installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
       ),
     ];
   }
 
   const missing = tools.filter((t) => !resolveInPath(t, daemonPath));
   if (missing.length > 0) {
+    const source = runningFacts ? "running daemon" : "daemon launchd";
+    const disagreement =
+      runningFacts && plistPath && missing.every((tool) => resolveInPath(tool, plistPath));
     return [
       mkCheck(
         "daemon-tool-path",
         STATUS.FAIL,
-        `daemon launchd PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0). PATH=${daemonPath}`,
+        `${source} PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0).${disagreement ? " Running daemon PATH disagrees with the installed plist." : ""} PATH=${daemonPath}`,
       ),
     ];
   }
@@ -1033,7 +1056,7 @@ export function checkDaemonToolPath(deps = {}) {
     mkCheck(
       "daemon-tool-path",
       STATUS.PASS,
-      `daemon launchd PATH resolves linearis/node/claude and they run (no exit-127)`,
+      `${runningFacts ? "running daemon" : "daemon launchd"} PATH resolves linearis/node/claude and they run (no exit-127)`,
     ),
   ];
 }
@@ -1327,11 +1350,36 @@ function defaultThoughtsCloneOk(dir) {
   }
 }
 
+// A configured org is untrusted text going into a RegExp — escape it, or an org
+// containing regex metacharacters would either throw or match too broadly. Matching is
+// anchored to path-segment boundaries so "coalesce-labs" never matches the distinct org
+// "coalesce-labs-fork".
+function escapeThoughtsOrg(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// defaultConfiguredThoughtsOrg — the GitHub owner THIS node's Layer-1 declares as its
+// thoughts host: `catalyst.thoughts.org`, falling back to `catalyst.thoughts.profile`
+// (a HumanLayer alias that only coincidentally equals the owner — the same loud
+// fallback join-bundle.mjs and provision-thoughts.sh make). Returns "" when nothing is
+// declared, which the gate treats as "cannot judge" rather than "wrong".
+function defaultConfiguredThoughtsOrg() {
+  try {
+    const l1 = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const t = l1?.catalyst?.thoughts;
+    const v = t?.org ?? t?.profile ?? "";
+    return typeof v === "string" ? v : "";
+  } catch {
+    return "";
+  }
+}
+
 export function checkThoughts(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
     readHumanlayer = defaultReadHumanlayer,
     cloneOk = defaultThoughtsCloneOk,
+    configuredThoughtsOrg = defaultConfiguredThoughtsOrg,
   } = deps;
 
   const roster = resolveRoster();
@@ -1361,19 +1409,42 @@ export function checkThoughts(deps = {}) {
   const thoughtsRepo = typeof t.thoughtsRepo === "string" ? t.thoughtsRepo : "";
   const defaultProfile = typeof t.defaultProfile === "string" ? t.defaultProfile : "";
 
-  // Pollution guard: primary must be coalesce-labs, NEVER a foreign repo. The
-  // global thoughtsRepo fallback defaulting to groundworkapp/rightsite-cloud is
-  // the exact pollution bug (locked invariant: provision-thoughts-invariant.test.sh).
-  if (/groundworkapp|rightsite-cloud/i.test(thoughtsRepo) || /groundworkapp|rightsite-cloud/i.test(defaultProfile)) {
+  // Pollution guard: the humanlayer primary must be the org THIS node configured, never
+  // a foreign one. The bug this locks out (provision-thoughts-invariant.test.sh) is the
+  // global thoughtsRepo fallback silently settling on somebody else's org.
+  //
+  // Codex #3080 P1: the org names were previously HARDCODED here — coalesce-labs PASS,
+  // groundworkapp/rightsite-cloud FAIL — which is the very hardcoding this PR removes
+  // from the provisioning path. A node that legitimately hosts its thoughts under
+  // rightsite-cloud (the documented rightsite-cloud/adva layout) provisioned correctly
+  // and was then FAILed here, so `catalyst-join.sh` aborted activation right after a
+  // successful join. Judge against the CONFIGURED primary instead: same guard, no catalog.
+  const wantOrg = configuredThoughtsOrg();
+  const matchesWant =
+    wantOrg !== "" &&
+    (new RegExp(`(^|[/@:])${escapeThoughtsOrg(wantOrg)}(/|$)`, "i").test(thoughtsRepo) ||
+      defaultProfile.toLowerCase() === wantOrg.toLowerCase());
+  if (wantOrg === "") {
+    // Nothing declared — we cannot say which org is "foreign", so do not guess.
+    checks.push(
+      mkCheck(
+        "thoughts-primary",
+        STATUS.WARN,
+        `cannot verify humanlayer.json primary — no catalyst.thoughts.org/.profile in Layer-1 (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}")`,
+      ),
+    );
+  } else if (matchesWant) {
+    checks.push(
+      mkCheck("thoughts-primary", STATUS.PASS, `humanlayer.json primary = ${wantOrg} (as configured)`),
+    );
+  } else if (thoughtsRepo !== "" || defaultProfile !== "") {
     checks.push(
       mkCheck(
         "thoughts-primary",
         STATUS.FAIL,
-        `humanlayer.json primary resolves to a FOREIGN repo (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}") — pollutes groundworkapp/rightsite-cloud; must be coalesce-labs`,
+        `humanlayer.json primary resolves to a FOREIGN org (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}") — this node configures catalyst.thoughts.org="${wantOrg}"; pollutes the wrong repo`,
       ),
     );
-  } else if (/coalesce-labs/i.test(thoughtsRepo) || defaultProfile === "coalesce-labs") {
-    checks.push(mkCheck("thoughts-primary", STATUS.PASS, "humanlayer.json primary = coalesce-labs"));
   } else {
     checks.push(
       mkCheck(
@@ -2553,6 +2624,165 @@ export function checkAgentBrowser(deps = {}) {
   return checks;
 }
 
+// defaultShipperState — load state + last exit of the log-shipper LaunchAgent.
+// Mirrors defaultReaperState but for ai.coalesce.catalyst-log-shipper.
+function defaultShipperState() {
+  try {
+    const r = spawnSync("launchctl", ["list", MANIFEST_LABELS.shipper], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0 || !r.stdout) return { loaded: false, lastExit: null };
+    const m = r.stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
+    return { loaded: true, lastExit: m ? parseInt(m[1], 10) : null };
+  } catch {
+    return { loaded: false, lastExit: null };
+  }
+}
+
+// defaultCanonicalShipperConfig — resolve the canonical config path from the
+// registered pristine plugin-source checkout (catalyst.orchestration.pluginDirs[0]).
+// Returns the absolute path or null if the config is absent/unreadable.
+function defaultCanonicalShipperConfig() {
+  try {
+    const cfg = JSON.parse(readFileSync(layer2Path(), "utf8"));
+    const pluginDirs = cfg?.catalyst?.orchestration?.pluginDirs;
+    const pd = Array.isArray(pluginDirs) ? pluginDirs[0] : (typeof pluginDirs === "string" ? pluginDirs : null);
+    if (!pd) return null;
+    return resolve(pd, "scripts", "log-shipper", "config.alloy");
+  } catch {
+    return null;
+  }
+}
+
+// checkLogShipper — CTL-1473: for classes whose manifest declares shipsLogs:true,
+// (a) FAILs when the shipper LaunchAgent is missing/unloaded, and (b) FAILs when
+// the plist's --config path does not resolve to the canonical config under the
+// registered pristine plugin-source checkout. A preinstall flag (from
+// CATALYST_DOCTOR_PREINSTALL=1) downgrades FAILs to WARNs so the join pre-install
+// gate can run before install-services creates the shipper. The post-install strict
+// verify runs without the flag and fails hard on a missing/misconfigured shipper.
+export function checkLogShipper(deps = {}) {
+  const {
+    shipsLogs: shipperRequired = false,
+    preinstall = false,
+    plistPath = resolve(homedir(), "Library", "LaunchAgents", `${MANIFEST_LABELS.shipper}.plist`),
+    readFile = (p) => readFileSync(p, "utf8"),
+    fileExists = (p) => existsSync(p),
+    realpath = (p) => {
+      // Runtime-agnostic: realpathSync is imported at module top (line 27), so
+      // symlink normalization runs under both node and bun. The prior
+      // require("node:fs") threw under node ESM (require is undefined), silently
+      // returning the un-normalized path (CTL-1473 verify silent-failure finding).
+      try { return realpathSync(p); } catch { return p; }
+    },
+    canonicalConfig = defaultCanonicalShipperConfig,
+    shipperState = defaultShipperState,
+  } = deps;
+
+  if (!shipperRequired) return [];
+
+  const sev = (s) => (preinstall && s === STATUS.FAIL ? STATUS.WARN : s);
+  const checks = [];
+
+  let xml;
+  try {
+    xml = readFile(plistPath);
+  } catch {
+    checks.push(mkCheck(
+      "shipper-installed",
+      sev(STATUS.FAIL),
+      `log-shipper agent (${MANIFEST_LABELS.shipper}) not installed — daemon logs won't reach Loki; run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  const { loaded, lastExit } = shipperState();
+  if (!loaded) {
+    checks.push(mkCheck(
+      "shipper-installed",
+      sev(STATUS.FAIL),
+      `log-shipper plist present but not loaded by launchd — run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  // CTL-1473 remediate (round-3): inspect lastExit exactly like checkReaper
+  // (line ~1728). The prior code destructured only `loaded` and dropped
+  // lastExit, so a loaded-but-crash-looping shipper (LastExitStatus 127/78,
+  // shipping nothing) with a canonical --config path reported shipper-config:
+  // PASS — the exact "green while shipping nothing" failure this ticket exists
+  // to prevent. FAIL (sev-wrapped so the preinstall gate downgrades to WARN)
+  // given shipsLogs criticality; PASS on 0 (clean) or null (loaded but never
+  // run yet) falls through to the canonical --config check below.
+  if (lastExit === 127) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited 127 (program path unresolved) — shipping nothing; reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+  if (typeof lastExit === "number" && lastExit !== 0) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited ${lastExit} — crash-looping and shipping nothing; check the shipper log and reinstall ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  // Extract the --config argument from the plist ProgramArguments
+  const cfgMatch = xml.match(/<string>([^<]*config\.alloy)<\/string>/);
+  const bakedConfig = cfgMatch ? cfgMatch[1] : null;
+  if (!bakedConfig) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper plist present and loaded but no --config alloy path found in ${plistPath} (malformed plist)`,
+    ));
+    return checks;
+  }
+
+  const canonical = typeof canonicalConfig === "function" ? canonicalConfig() : canonicalConfig;
+  if (!canonical) {
+    checks.push(mkCheck(
+      "shipper-config",
+      STATUS.WARN,
+      `log-shipper config path unverifiable (no pluginDirs in Layer-2 config) — baked path: ${bakedConfig}`,
+    ));
+    return checks;
+  }
+
+  const bakedExists = fileExists(bakedConfig);
+  if (!bakedExists) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper --config path does not exist on disk (ephemeral/deleted worktree?): ${bakedConfig} — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  let resolvedBaked = bakedConfig;
+  let resolvedCanon = canonical;
+  try { resolvedBaked = realpath(bakedConfig); } catch { /* use raw */ }
+  try { resolvedCanon = realpath(canonical); } catch { /* use raw */ }
+
+  if (resolvedBaked !== resolvedCanon) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper --config points at a non-canonical path (likely a deleted worktree): ${bakedConfig} (expected: ${canonical}) — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  checks.push(mkCheck("shipper-config", STATUS.PASS, `log-shipper config path is canonical (${bakedConfig})`));
+  return checks;
+}
+
+
 // checkCloudTokenEnv — CTL-1307. ADVISORY for the cluster-shared-token distribution
 // checks below (the `cloud-token` row's original CTL-1307 scope): CATALYST_CLOUD_TOKEN
 // is an OPTIONAL extension for a cluster node — a node stays fully local-only without
@@ -2818,6 +3048,41 @@ export function checkCloudTokenEnv(deps = {}) {
   return checks;
 }
 
+// CAT-35 replica-schema verification helpers. The production reader (replica-read.mjs)
+// prepares queries against `issues` and `sync_meta`; a file that lacks either is unusable
+// no matter how large it is, so `replica-schema` must not PASS on size alone.
+export const REQUIRED_REPLICA_TABLES = ["issues", "sync_meta"];
+const SQLITE_MAGIC = "SQLite format 3\0";
+
+// defaultIsSqliteFile — read ONLY the 16-byte magic header (never the whole file, which
+// can be hundreds of MiB). Returns false on any read error: unreadable is not verified.
+function defaultIsSqliteFile(path) {
+  let fd = null;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(SQLITE_MAGIC.length);
+    const read = readSync(fd, buf, 0, buf.length, 0);
+    return read === buf.length && buf.toString("latin1") === SQLITE_MAGIC;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+// defaultReadDbTables — table names via the sqlite3 CLI (an OPTIONAL dependency; doctor
+// runs under bare node and must not import bun:sqlite). Returns null — meaning "could not
+// verify", distinct from [] meaning "verified, no tables" — when sqlite3 is absent or the
+// query fails, so the caller reports unverified instead of inventing a WARN.
+function defaultReadDbTables(path) {
+  const r = spawnSync("sqlite3", ["-readonly", path, "SELECT name FROM sqlite_master WHERE type='table'"], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null;
+  return r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+}
+
 // checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
 // writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
 // is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
@@ -2844,6 +3109,8 @@ export function checkCloudSync(deps = {}) {
     // (4× the SDK's 15s lock-stale) absorbs heartbeat jitter; > this ⇒ heartbeat stopped.
     lockStaleMs = Number(process.env.CATALYST_REPLICA_LOCK_STALE_MS) || 60_000,
     sizeFloorBytes = 65_536,
+    isSqliteFile = defaultIsSqliteFile, // CAT-35
+    readDbTables = defaultReadDbTables, // CAT-35
   } = deps;
 
   const installed = agentInstalled(label, laDir);
@@ -2873,12 +3140,13 @@ export function checkCloudSync(deps = {}) {
   // measures "time since last mirrored change", NOT writer liveness. The feed-independent
   // liveness signal is the writer-lock HEARTBEAT (<db>.writer.lock), rewritten ~every 5s.
   // Gate liveness on the lock heartbeat; report the data-age as info only, never as "down".
+  let size = 0;
+  let statOk = false;
   if (!dbPresent) {
     checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
   } else {
-    let size = 0;
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
-    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; } catch { /* unreadable → handled below */ }
+    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; statOk = true; } catch { /* unreadable → handled below */ }
     try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) dataNewest = Math.max(dataNewest, w.mtimeMs); } catch { /* no -wal sidecar */ }
     let lockMtime = 0;
     try { lockMtime = statFile(`${dbPath}.writer.lock`).mtimeMs; } catch { /* no lock: guard disabled / writer not started */ }
@@ -2903,6 +3171,38 @@ export function checkCloudSync(deps = {}) {
     }
   }
 
+  // CAT-35: distinguish a never-seeded/no-schema file from ordinary staleness.
+  // Size alone must never earn a PASS: a truncated, corrupt, or entirely unrelated
+  // file above the floor would otherwise be declared "schema seeded" while every
+  // production read misses, which is the exact failure this check exists to catch.
+  // So a PASS additionally requires the SQLite magic header AND — when a sqlite3
+  // reader is available — the two tables the production reader actually prepares
+  // against (`issues`, `sync_meta`). With no reader present we say so rather than
+  // claiming verification we did not perform.
+  if (dbPresent) {
+    if (!statOk) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is present but unreadable — cannot determine whether schema is seeded"));
+    } else if (size === 0) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is 0 bytes — no schema, never seeded; the writer has never authenticated"));
+    } else if (size < sizeFloorBytes) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${size}B (< ${sizeFloorBytes}B floor) — seed incomplete`));
+    } else if (!isSqliteFile(dbPath)) {
+      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${Math.round(size / 1024)}KiB but has no SQLite header — corrupt or not a database; every read will miss`));
+    } else {
+      const tables = readDbTables(dbPath);
+      if (tables === null) {
+        checks.push(mkCheck("replica-schema", STATUS.INFO, `replica db ${Math.round(size / 1024)}KiB, valid SQLite header — table presence unverified (no sqlite3 reader available)`));
+      } else {
+        const missing = REQUIRED_REPLICA_TABLES.filter((t) => !tables.includes(t));
+        checks.push(
+          missing.length > 0
+            ? mkCheck("replica-schema", STATUS.WARN, `replica db ${Math.round(size / 1024)}KiB is missing required table(s): ${missing.join(", ")} — the reader cannot prepare its queries`)
+            : mkCheck("replica-schema", STATUS.PASS, `replica db ${Math.round(size / 1024)}KiB — schema seeded (${REQUIRED_REPLICA_TABLES.join(" + ")} present)`),
+        );
+      }
+    }
+  }
+
   // (c) token presence — by NAME only, NEVER the value.
   const tokenVal = env[tokenEnv.envVar];
   const tokenSet = typeof tokenVal === "string" && tokenVal.length > 0;
@@ -2923,6 +3223,18 @@ export function checkCloudSync(deps = {}) {
     checks.push(mkCheck("replica-read-flag", STATUS.WARN, "writer running + replica present but CATALYST_LINEAR_REPLICA=off — flip it on to read from the replica"));
   } else {
     checks.push(mkCheck("replica-read-flag", STATUS.INFO, "replica read tier off (CATALYST_LINEAR_REPLICA unset/off)"));
+  }
+
+  const tokenMissing = !tokenSet;
+  const flagOff = mode !== "on";
+  if (tokenMissing && flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier INERT end-to-end: token ${tokenEnv.envVar} unset AND CATALYST_LINEAR_REPLICA off. Both must be fixed, token FIRST`));
+  } else if (tokenMissing || flagOff) {
+    checks.push(mkCheck("replica-tier", STATUS.WARN,
+      `replica tier partially configured (${tokenMissing ? `token ${tokenEnv.envVar} unset` : "CATALYST_LINEAR_REPLICA off"}) — reads still fall back`));
+  } else {
+    checks.push(mkCheck("replica-tier", STATUS.PASS, "replica tier fully configured (token set + read flag on)"));
   }
 
   return checks;
@@ -3156,6 +3468,156 @@ async function defaultLinearGraphQLPost(query, token) {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+// parseEnvFileVar / overlayDaemonDrainEnv — CTL-1678 (Codex P2). Read a single
+// `[export ]KEY=val` assignment out of an env-file body (same shape parseEnvFileExecutor
+// matches for CATALYST_EXECUTOR) and overlay the two durable drain overrides onto an env
+// object. The daemon launcher `source`s execution-core.env AFTER inheriting the ambient
+// env, so a file assignment wins over an inherited one — the overlay reproduces that
+// precedence (file value replaces ambient only when the file actually sets the key).
+function parseEnvFileFlag(text, re) {
+  if (typeof text !== "string" || !text) return null;
+  const m = text.match(re);
+  return m ? m[1] : null;
+}
+function overlayDaemonDrainEnv(env, envFileText) {
+  // Literal per-key regexes (no dynamic RegExp) mirroring parseEnvFileExecutor. File
+  // value replaces ambient only when the file actually sets the key (matching `source`).
+  const out = { ...env };
+  const dd = parseEnvFileFlag(envFileText, /^\s*(?:export\s+)?CATALYST_DRAIN_DISABLED=["']?([^"'\s]+)/m);
+  if (dd !== null) out.CATALYST_DRAIN_DISABLED = dd;
+  const bd = parseEnvFileFlag(envFileText, /^\s*(?:export\s+)?CATALYST_BOOT_DRAINED=["']?([^"'\s]+)/m);
+  if (bd !== null) out.CATALYST_BOOT_DRAINED = bd;
+  return out;
+}
+
+// checkDrainDisabled — CTL-1678. Advisory report of the per-node drain override.
+// A worker with CATALYST_DRAIN_DISABLED=1 permanently ignores the drain flag; this
+// surfaces the third "draining-but-ignored" state so an operator scanning doctor
+// output sees an active neutralization. NEVER FAILs (advisory, like checkWorkerLabels)
+// — the override is an intended operator action, so its presence must not block the
+// activation gate. WARN only when the flag is present AND being ignored; PASS/INFO
+// otherwise. Worker-suite only (the env is worker-only).
+export function checkDrainDisabled(deps = {}) {
+  const {
+    env = process.env,
+    orchDir = getExecutionCoreDir(),
+    resolveDrainState: _resolve = resolveDrainState,
+    // CTL-1678 (Codex P2): the durable CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED
+    // overrides live in the machine-local execution-core.env that the daemon launcher
+    // sources at start — `catalyst-doctor` runs doctor.mjs WITHOUT sourcing it, so a
+    // naive process.env read reports "honors the drain flag" while the running daemon
+    // ignores it (contradictory operator health output). Overlay the file's values onto
+    // the ambient env (file wins, matching `source` semantics) so this check mirrors the
+    // daemon's EFFECTIVE env. Mirrors checkSdkDaemonEnv's env-file read for CATALYST_EXECUTOR.
+    // Injectable seam; default reads the real file, absent/unreadable → "".
+    execCoreEnvPath = defaultExecCoreEnvPath(),
+    readEnvFile = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return "";
+      }
+    },
+    // CTL-1678 (Codex round-3 P1): when a daemon is RUNNING, the file overlay below can
+    // still lie — the overrides are restart-only, so a file edited after daemon start
+    // describes the NEXT daemon, not this one. Prefer the live daemon's boot-time
+    // snapshot (pid-gated: a marker from a dead daemon is ignored); the overlay is the
+    // fallback for the stopped-daemon case, where next-start config is the honest answer.
+    readRuntimeEnv = readDaemonRuntimeEnv,
+  } = deps;
+  const runtime = readRuntimeEnv(orchDir);
+  const effectiveEnv = runtime
+    ? {
+        CATALYST_DRAIN_DISABLED: runtime.drainDisabled ? "1" : "0",
+        // drainDisabled is recorded post-precedence (boot-drain already folded in), so
+        // the synthetic env never re-triggers isDrainDisabled's boot-drain gate.
+        CATALYST_BOOT_DRAINED: "0",
+      }
+    : overlayDaemonDrainEnv(env, readEnvFile(execCoreEnvPath));
+  const { flagPresent, disabled } = _resolve(orchDir, { env: effectiveEnv });
+  if (disabled && flagPresent) {
+    return mkCheck(
+      "drain-disabled",
+      STATUS.WARN,
+      "drain flag is present but being IGNORED (CATALYST_DRAIN_DISABLED=1) — " +
+        "this node admits new work despite an active drain (CTL-1678)",
+    );
+  }
+  if (disabled) {
+    return mkCheck(
+      "drain-disabled",
+      STATUS.PASS,
+      "drain-disabled — this node ignores the drain flag (CATALYST_DRAIN_DISABLED=1, CTL-1678)",
+    );
+  }
+  return mkCheck(
+    "drain-disabled",
+    STATUS.INFO,
+    "not drain-disabled — this node honors the drain flag (CTL-1678)",
+  );
+}
+
+// Advisory report for registry entries whose checkout declares a different
+// Linear team. This check is total and never FAILs: host registry state is an
+// operator repair, and doctor's FAIL count gates worker activation.
+export function checkRegistryTeamIdentity(deps = {}) {
+  const { listProjects: readProjects = listProjects } = deps;
+  let projects;
+  try {
+    projects = readProjects();
+  } catch (err) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `registry unreadable — team identity not checked (${err?.message ?? "unknown"}) (CAT-52)`,
+    );
+  }
+  if (!projects.length) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      "registry has no projects — nothing to check (the zero-project warning is the daemon's, CTL-854)",
+    );
+  }
+  const mismatches = projects.filter((project) => project?.identity?.matches === false);
+  if (mismatches.length) {
+    const details = mismatches
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (declares "${project.identity.declared}")`)
+      .join("; ");
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.WARN,
+      `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
+        "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
+        `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
+    );
+  }
+  const known = projects.filter((project) => project?.identity?.matches === true).length;
+  // No mismatch is NOT the same as verified. An entry whose checkout config is
+  // absent, unreadable, malformed, or missing teamKey yields matches:null, and
+  // grading that PASS would report a clean contract that was never actually
+  // checked — exactly the drift this check exists to surface. Anything short of
+  // full verification stays INFO (advisory-only: this check never FAILs).
+  if (known < projects.length) {
+    const unverified = projects.length - known;
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+        `teamKey; ${unverified} could not be checked (config absent, unreadable, malformed, or ` +
+        "missing catalyst.linear.teamKey) — no mismatch found, but the contract is unverified " +
+        "for those entries (CAT-52)",
+    );
+  }
+  return mkCheck(
+    "registry-team-identity",
+    STATUS.PASS,
+    `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+      "teamKey; no mismatches (CAT-52)",
+  );
 }
 
 // checkWorkerLabels — CTL-1481. Advisory health of the workspace `worker`
@@ -4542,6 +5004,9 @@ export function checksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
+    // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
+    // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
+    preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -4705,6 +5170,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
+    () => checkLogShipper({ shipsLogs: shipsLogs("worker"), preinstall }), // CTL-1473: log-shipper present + canonical config path
     () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
     () => checkAgentBrowser(), // CTL-1500: worker browser tool present + >= min + idle-timeout wired + reaper (advisory, never FAIL)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
@@ -4716,6 +5182,8 @@ export function checksForClass(nc, opts = {}) {
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
+    () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
+    () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
   ];
 }
 

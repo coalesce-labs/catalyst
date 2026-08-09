@@ -25,6 +25,8 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync, renameSync } fr
 import { dirname, join } from "node:path";
 import { getEventLogPath, getReconcileHealthDir, log } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+import { RECONCILE_BLIND_ALERT_MS } from "./config.mjs";
+import { emitFleetHealthEvent } from "./fleet-health-event.mjs";
 
 // Same topic + kind taxonomy as broker/alert-emit.mjs (event.name is the fixed
 // raised/cleared topic; the kind differentiator lives in event.label).
@@ -292,7 +294,14 @@ export function checkFleetFreeze({
   teams = [],
   isTeamFrozen = () => false,
   getTeamOrigin = () => "poll",
+  isTeamFailing = isTeamFrozen,
+  getTeamLastSuccess = () => null,
+  getTeamLastFailureMessage = () => null,
+  bootTs = Date.now(),
+  now = Date.now(),
+  blindAlertMs = RECONCILE_BLIND_ALERT_MS,
   append = defaultAppend,
+  emitHealth = emitFleetHealthEvent,
 } = {}) {
   hydrate();
   // CTL-1628 r4 post-merge: retry a previously-failed marker persist BEFORE
@@ -309,7 +318,25 @@ export function checkFleetFreeze({
   if (teams.length === 0) {
     return { frozen: _fleetFrozenRaised, emitted: null, cause: null };
   }
-  const frozen = teams.every((t) => isTeamFrozen(t));
+  const countFrozen = teams.every((t) => isTeamFrozen(t));
+  const asEpochMs = (value) => {
+    if (typeof value === "number") return value;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  };
+  const bootEpochMs = asEpochMs(bootTs);
+  const nowEpochMs = asEpochMs(now);
+  const blindSince = (team) => {
+    const value = getTeamLastSuccess(team);
+    const parsed = value == null ? bootEpochMs : asEpochMs(value);
+    return Number.isFinite(parsed) ? parsed : bootEpochMs;
+  };
+  const timeFrozen =
+    teams.every((t) => isTeamFailing(t)) &&
+    Number.isFinite(nowEpochMs) &&
+    Number.isFinite(bootEpochMs) &&
+    teams.every((t) => nowEpochMs - blindSince(t) >= blindAlertMs);
+  const frozen = countFrozen || timeFrozen;
   let emitted = null;
   let returnedCause = null;
   try {
@@ -320,6 +347,12 @@ export function checkFleetFreeze({
       // mid-freeze drift is caught, not just the moment of the initial raise.
       const origins = teams.map((t) => (getTeamOrigin(t) === "persist" ? "persist" : "poll"));
       const currentCause = classifyFreezeCause(origins);
+      const concreteFailure = teams
+        .map((t) => getTeamLastFailureMessage(t))
+        .find((message) => typeof message === "string" && message.length > 0);
+      const reason = concreteFailure
+        ? `${FREEZE_REASON_BY_CAUSE[currentCause]}; cause: ${concreteFailure}`
+        : FREEZE_REASON_BY_CAUSE[currentCause];
 
       if (!_fleetFrozenRaised) {
         // Append FIRST; flip + persist the latch only on a successful write, so
@@ -330,9 +363,10 @@ export function checkFleetFreeze({
             action: "raised",
             teams,
             cause: currentCause,
-            reason: FREEZE_REASON_BY_CAUSE[currentCause],
+            reason,
           })
         );
+        emitHealth({ tripped: ["linear_board_blind"], sustained_n: teams.length });
         _fleetFrozenRaised = true;
         _lastEmittedCause = currentCause;
         persist();
@@ -352,7 +386,7 @@ export function checkFleetFreeze({
             action: "raised",
             teams,
             cause: currentCause,
-            reason: FREEZE_REASON_BY_CAUSE[currentCause],
+            reason,
             causeChanged: true,
             previousCause,
           })
@@ -368,6 +402,10 @@ export function checkFleetFreeze({
       }
     } else if (_fleetFrozenRaised) {
       append(buildFleetFreezeAlertEvent({ action: "cleared", teams }));
+      emitHealth(
+        { tripped: ["linear_board_blind"], sustained_n: teams.length },
+        { action: "recovered" },
+      );
       _fleetFrozenRaised = false;
       _lastEmittedCause = null;
       persist();

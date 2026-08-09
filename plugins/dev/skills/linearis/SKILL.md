@@ -85,6 +85,9 @@ Scripts should use the shared helper instead of re-implementing this: source
 `plugins/dev/scripts/lib/linear-read-replica.sh` and call `linear_read_ticket <ID>` (freshness
 gate → SQL → loud `linearis` fallback).
 
+If that loud fallback persists, treat it as a replica-tier outage; the configuration order and
+health signals are documented in `docs/linear-replica.md`.
+
 ### Querying (discover the schema — don't guess columns)
 
 Run `sqlite3 "$DB" .schema` (or `.schema issues`) to see the live columns. Verified 2026-07-01:

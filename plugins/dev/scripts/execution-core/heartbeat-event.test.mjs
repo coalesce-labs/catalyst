@@ -99,6 +99,23 @@ describe("buildHeartbeatEnvelope (CTL-859)", () => {
     const noFn = buildHeartbeatEnvelope();
     expect("catalyst.node.max_parallel" in noFn.attributes).toBe(false);
   });
+
+  test("carries honest board reachability as top-level attributes", () => {
+    const healthy = buildHeartbeatEnvelope({ boardReachableFn: () => ({ reachable: true, blindTeams: 0 }) });
+    expect(healthy.attributes["catalyst.node.board_reachable"]).toBe(true);
+    expect(healthy.attributes["catalyst.node.blind_teams"]).toBe(0);
+    expect(healthy.body.payload["catalyst.node.board_reachable"]).toBeUndefined();
+    const blind = buildHeartbeatEnvelope({ boardReachableFn: () => ({ reachable: false, blindTeams: 15 }) });
+    expect(blind.attributes["catalyst.node.board_reachable"]).toBe(false);
+    expect(blind.attributes["catalyst.node.blind_teams"]).toBe(15);
+  });
+
+  test("board reachability fails safe and is absent for legacy callers", () => {
+    const failed = buildHeartbeatEnvelope({ boardReachableFn: () => { throw new Error("probe"); } });
+    expect(failed.attributes["catalyst.node.board_reachable"]).toBe(true);
+    expect(failed.attributes["catalyst.node.blind_teams"]).toBe(0);
+    expect("catalyst.node.board_reachable" in buildHeartbeatEnvelope().attributes).toBe(false);
+  });
 });
 
 describe("emitHeartbeatEvent (CTL-859)", () => {

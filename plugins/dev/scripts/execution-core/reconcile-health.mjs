@@ -57,6 +57,9 @@ function writeHealthMarker(team, state) {
       // (orch-monitor's reconcile-health-reader.ts, board-health.mjs), so
       // this is wire-compatible with markers written by pre-r3 code.
       lastFailureOrigin: state.lastFailureOrigin ?? null,
+      // CAT-29: retain the actionable spawn/tool failure, not only its broad
+      // poll/persist bucket, so the fleet-level alarm can name the cause.
+      lastFailureMessage: state.lastFailureMessage ?? null,
       updatedAt: new Date().toISOString(),
     },
     null,
@@ -117,6 +120,7 @@ function hydrateEntry(team) {
       // "poll" | "persist" (absent on pre-r3 markers → "poll"), so just pass
       // it through.
       lastFailureOrigin: marker.lastFailureOrigin,
+      lastFailureMessage: marker.lastFailureMessage ?? null,
     };
   } catch {
     return null; // best-effort: any read/parse fault → fresh defaults
@@ -159,6 +163,7 @@ export function recordReconcileSuccess(
   entry.lastSuccessTs = now();
   entry.alerting = false;
   entry.lastFailureOrigin = null;
+  entry.lastFailureMessage = null;
   if (wasAlerting) {
     log.info(
       { team, priorFailures, recoveredOrigin },
@@ -198,6 +203,7 @@ export function recordReconcileFailure(
   const entry = ensureEntry(team);
   entry.consecutiveFailures += 1;
   entry.lastFailureOrigin = origin;
+  entry.lastFailureMessage = reason ?? "reconcile-poll-failed";
   const staleMs = entry.lastSuccessTs
     ? Date.now() - Date.parse(entry.lastSuccessTs)
     : null;
@@ -254,6 +260,8 @@ export function readReconcileHealthMarkers({ dir = getReconcileHealthDir() } = {
         // CTL-1628 r3: additive field, absent on markers written by pre-r3
         // code — coerce to "poll", the pre-r3 default/fallback.
         lastFailureOrigin: parsed.lastFailureOrigin === "persist" ? "persist" : "poll",
+        lastFailureMessage:
+          typeof parsed.lastFailureMessage === "string" ? parsed.lastFailureMessage : null,
       };
     } catch {
       // unreadable / malformed marker — skip this team, keep the rest

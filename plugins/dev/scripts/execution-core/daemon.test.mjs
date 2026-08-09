@@ -33,8 +33,10 @@ import {
   readLinearBotUserIds,
   readLinearBotWriteId,
   _isBotId,
+  writeBootFacts,
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
+import { BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { defaultDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
 import {
@@ -43,6 +45,123 @@ import {
   inHoldStopCooldown,
   clearHoldStopCooldown,
 } from "./scheduler.mjs";
+
+describe("CAT-29 boot facts", () => {
+  test("atomically publishes the running PATH and dependency verdict", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cat29-boot-facts-"));
+    try {
+      const file = writeBootFacts(
+        dir,
+        { ok: false, missing: ["linearis"] },
+        { pid: 4242, startedAt: "2026-08-07T20:00:00Z", path: "/usr/bin:/bin" },
+      );
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+        pid: 4242,
+        startedAt: "2026-08-07T20:00:00Z",
+        path: "/usr/bin:/bin",
+        preflight: { ok: false, missing: ["linearis"], degraded: true },
+      });
+      expect(existsSync(`${file}.tmp`)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves an indeterminate dependency probe as degraded", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cat29-boot-facts-degraded-"));
+    try {
+      const file = writeBootFacts(
+        dir,
+        { ok: true, missing: [], degraded: true },
+        { pid: 4243, startedAt: "2026-08-07T20:01:00Z", path: "/usr/bin:/bin" },
+      );
+      expect(JSON.parse(readFileSync(file, "utf8")).preflight).toEqual({
+        ok: true,
+        missing: [],
+        degraded: true,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// CAT-29 (Codex P1 "Quarantine actuators when boot dependencies are missing"):
+// storing the verdict is not enough — it has to stop the node from acting. The
+// verdict is resolved BEFORE the boot dispatches, and a failed verdict must leave
+// crash-recovery re-dispatch AND both actuators unarmed, so a node that cannot run
+// `linearis`/`node` produces no stalled/retry churn while advertising non-accepting.
+describe("CAT-29 boot dependency quarantine", () => {
+  const armed = () => {
+    const calls = [];
+    return {
+      calls,
+      fakes: {
+        recover: () => ({}),
+        reconcileBoot: () => calls.push("boot") && ({}),
+        startMonitor: () => calls.push("monitor"),
+        startScheduler: () => calls.push("scheduler"),
+        watchRegistry: false,
+      },
+    };
+  };
+
+  test("an unusable dependency verdict arms neither the boot dispatch nor the actuators", () => {
+    const { calls, fakes } = armed();
+    startDaemon({
+      ...fakes,
+      bootDependencyPreflight: () => ({
+        ok: false,
+        missing: ["linearis"],
+        holdReason: "boot-dependency-unusable",
+      }),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  test("a healthy verdict still arms the boot dispatch and both actuators", () => {
+    const { calls, fakes } = armed();
+    startDaemon({
+      ...fakes,
+      bootDependencyPreflight: () => ({ ok: true, missing: [], holdReason: null }),
+    });
+    expect(calls).toEqual(["boot", "monitor", "scheduler"]);
+  });
+
+  test("an indeterminate (degraded) probe fails OPEN — the node keeps working", () => {
+    const { calls, fakes } = armed();
+    startDaemon({
+      ...fakes,
+      bootDependencyPreflight: () => ({ ok: true, missing: [], degraded: true, holdReason: null }),
+    });
+    expect(calls).toEqual(["boot", "monitor", "scheduler"]);
+  });
+
+  // Codex P2 on the same seam: the hold branch must return the FULL admission shape.
+  // A quarantined node still heartbeats — that is how the fleet SEES it refusing.
+  test("a quarantined node still heartbeats, as non-accepting with the full admission shape", () => {
+    let captured = null;
+    const { fakes } = armed();
+    startDaemon({
+      ...fakes,
+      bootDependencyPreflight: () => ({
+        ok: false,
+        missing: ["linearis", "node"],
+        holdReason: "boot-dependency-unusable",
+      }),
+      startHeartbeat: (opts) => {
+        captured = opts;
+        return { stop() {}, started: Promise.resolve() };
+      },
+    });
+    expect(captured).not.toBe(null);
+    const admission = captured.admissionFn();
+    expect(admission.accepting).toBe(false);
+    expect(admission.holdReason).toBe(BOOT_DEPENDENCY_HOLD_REASON);
+    expect(admission.effectiveCapacity).toBe(0);
+    expect(admission).toHaveProperty("activeWorkers");
+  });
+});
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
 let catalystDir;
@@ -777,6 +896,61 @@ describe("startDaemon", () => {
         },
       }),
       enableFleetHealth: true,
+    });
+    // Must not throw even though stop() throws
+    expect(() => stopDaemon()).not.toThrow();
+    expect(stopped).toBe(1);
+  });
+
+  // CTL-1502: the stuck-but-alive daemon watchdog probe is started from
+  // startDaemon (shadow default → enabled), gated by enableDaemonWatchdog, and
+  // stopped in stopDaemon — mirroring the fleet-health wiring exactly.
+  test("starts the daemon watchdog when enabled (CTL-1502)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startDaemonWatchdogProbe: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableDaemonWatchdog: true,
+    });
+    expect(started).toBe(1);
+  });
+
+  test("skips the daemon watchdog when disabled (mode off → CTL-1502)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startDaemonWatchdogProbe: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableDaemonWatchdog: false,
+    });
+    expect(started).toBe(0);
+  });
+
+  test("stopDaemon stops the daemon watchdog and swallows a throwing stop() (CTL-1502)", () => {
+    let stopped = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startDaemonWatchdogProbe: () => ({
+        stop: () => {
+          stopped++;
+          throw new Error("simulated watchdog stop failure");
+        },
+      }),
+      enableDaemonWatchdog: true,
     });
     // Must not throw even though stop() throws
     expect(() => stopDaemon()).not.toThrow();
@@ -1695,6 +1869,32 @@ describe("handleCommentWake (CTL-549)", () => {
       }
     );
     expect(resetTickets).toContain("CTL-1");
+  });
+
+  // CTL-1552: the unpark now clears the needs-human LABEL and its once-marker
+  // TOGETHER (via clearStalledLabel), re-arming labelOnce. The prior raw
+  // removeLabel left workers/<T>/.linear-label-needs-human.applied orphaned.
+  test("CTL-1552 — unpark clears the needs-human once-marker as well as the label", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "needs-input", parkedFrom: "implement" });
+    const marker = join(orch, "workers", "CTL-1", ".linear-label-needs-human.applied");
+    writeFileSync(marker, "");
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        // clearStalledLabel treats a { removed: true } result as a confirmed
+        // removal → deletes the once-marker(s).
+        removeLabel: (ticket, label) => {
+          removed.push({ ticket, label });
+          return { removed: true };
+        },
+      }
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" }); // label removed…
+    expect(existsSync(marker)).toBe(false); // …AND the once-marker cleared (re-armed)
   });
 
   // Codex #2970 post-merge round 1: the EARLIER needs-input removal (inside the
@@ -3500,5 +3700,49 @@ describe("CTL-1608 — stalled-PR sweep timer start", () => {
       startStalledPrTimer: (opts) => { calls.push(opts); return { stop: () => {} }; },
     });
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ─── CAT-40 — GitHub quota sampler is primed BEFORE the scheduler's first pass ─
+//
+// Codex P1 (round 2): the scheduler's initial board-health pass runs
+// synchronously inside startDaemon. Arming only a future interval left that pass
+// with no snapshot, so under CATALYST_BH_GH_QUOTA=enforce it advanced the
+// board-health throttle while quota read `unknown` — and because the scheduler's
+// own timer was registered first, the next scan could also precede the first
+// sample, stretching the blind window to ~10 minutes on a host that was
+// "sampling" the whole time. Ordering is the fix, so ordering is the assertion.
+describe("CAT-40 — GitHub quota timer start ordering", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    enableReaper: false,
+    enableHeartbeat: false,
+    enableWaitWatcher: false,
+    enableMemorySampler: false,
+    enableFleetHealth: false,
+    enableRatelimitPoller: false,
+    readAllEligible: () => [],
+  });
+
+  test("the quota timer is started, and primed, before startScheduler runs", () => {
+    const order = [];
+    startDaemon({
+      ...baseOpts(),
+      startScheduler: () => { order.push("scheduler"); },
+      startGithubQuotaTimer: (opts) => {
+        order.push("quota-timer");
+        expect(opts.primeImmediately).toBe(true);
+        expect(opts.enabled).toBe(true);
+        return { stop: () => {}, primed: true };
+      },
+    });
+    expect(order).toEqual(["quota-timer", "scheduler"]);
   });
 });

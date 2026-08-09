@@ -152,14 +152,16 @@ export function emitResumeEvent(
   return { path, event };
 }
 
-// ── clear the needs-human label + marker (inverse of labelOnce) ──────────────
+// ── clear the needs-human once-marker (re-arm labelOnce) ─────────────────────
 // clearNeedsHumanMarker — delete the `.linear-label-needs-human.{applied,skipped}`
 // once-marker(s) under the ticket's worker dir, re-arming the daemon's labelOnce
-// guard. Mirrors label-guard.mjs::clearStalledLabel's marker half exactly. The
-// Linear LABEL removal itself rides on the daemon's handleCommentWake (it strips
-// the held label as it re-dispatches), so this endpoint owns only the local
-// marker — clearing it WITHOUT the daemon also clearing the label would re-arm
-// the apply, which is the safe direction (the daemon re-applies if still held).
+// guard. Mirrors label-guard.mjs::clearStalledLabel's marker half exactly.
+// CTL-1552: the daemon's handleCommentWake now clears the Linear LABEL **and**
+// its once-marker TOGETHER (via clearStalledLabel) — it is no longer a deliberate
+// split where this endpoint owned the marker and the daemon owned the label. This
+// call is now a safe idempotent RE-ARM: if the daemon already cleared both halves
+// the marker is already gone (no-op); if this races ahead, re-arming the apply is
+// the safe direction (the daemon re-applies if the label is still genuinely held).
 // Best-effort, never throws. Returns the list of markers actually removed.
 export function clearNeedsHumanMarker(
   { ticket, label = NEEDS_HUMAN_LABEL },

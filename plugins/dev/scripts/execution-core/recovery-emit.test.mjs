@@ -205,7 +205,14 @@ describe("recovery-emit escalated — comment surfacing (CTL-1439 P0a)", () => {
     // existing three surfaces intact
     expect(readEvents().some((e) => e.attributes?.["event.name"] === "recovery.escalated")).toBe(true);
     const sig = JSON.parse(readFileSync(pathJoin(orchDir, "workers", "CTL-520", "phase-recovery-pass.json"), "utf8"));
-    expect(sig.status).toBe("needs-human");
+    // CTL-1552: status normalized to the terminal "stalled" + stalledReason (was
+    // "needs-human"); needs-human semantics ride on stalledReason/needsHumanSince/
+    // explanation, not the raw status.
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("needs_human");
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(sig.needsHumanSince).not.toBe("");
+    expect(sig.explanation).toBeDefined();
     expect(readLedger("CTL-520").escalated).toBe(true);
     expect(readLedger("CTL-520").verdict).toBe("escalate");
     // NEW: the ticket-visible escalation comment is posted by the shim itself

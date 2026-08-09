@@ -122,7 +122,10 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    (check_suite/workflow_run — see [[event-schema]]). When the broker daemon is up, register a
    `pr_lifecycle` interest via `agent.checkin.claimed_pr` and wait on
    `filter.wake.${CATALYST_SESSION_ID}` instead (the single-wake path — see [[monitor-events]]
-   Pattern 3).
+   Pattern 3). **CTL-1680:** when the reviewer-arrival window (Merge step) sets
+   `MERGE_WAKE_TIMEOUT_SEC`, the next wait MUST cap its `--timeout` at that many seconds so the loop
+   re-evaluates the window deadline even if no PR-lifecycle event arrives — otherwise the general
+   wait can block far past the window (600s broker / 180+7200s raw) and delay an already-earned merge.
 
 2. **REST is authoritative.** Every loop iteration calls `gh api repos/${REPO}/pulls/${PR_NUMBER}`
    and reads `.merged` + `.mergeable_state`. Never use `gh pr view --json mergeable` (GraphQL is
@@ -142,6 +145,10 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    most recent `CHANGES_REQUESTED` from a human reviewer (filter on `.author.login` not matching
    known bots). If present, emit `failed` with reason "human reviewer ${LOGIN} requested changes —
    operator action required". Do NOT attempt to address human review comments programmatically.
+   The same applies to an unresolved human review **thread** left on a `COMMENTED`/`APPROVED`
+   review: it never surfaces as `CHANGES_REQUESTED` and does not always flip
+   `mergeable_state`, so the unresolved-thread gate counts human threads separately and
+   emits `failed` for them instead of dispatching `/catalyst-dev:review-comments` (CTL-1680).
 
 5. **Wake narration.** Every iteration produces one short line of assistant text before re-entering
    the wait (defeats the assistant `end_turn` rendering bleed described in [[monitor-events]] §
@@ -168,12 +175,275 @@ if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
     fi
   fi
 fi
+# CTL-1680: reviewer-arrival window. mergeable_state == "clean" reflects only
+# CURRENTLY-POSTED reviews; an automated reviewer (Codex) that posts minutes after
+# PR-open never shows up in mergeable_state until it posts. Before merging a fresh
+# CLEAN PR, give an in-flight reviewer a bounded window to land its verdict.
+PHASE_REVIEWER_ARRIVAL_WAIT_SEC="${PHASE_REVIEWER_ARRIVAL_WAIT_SEC:-300}"
+# CTL-1680 (Codex #3079 P2): resolve REVIEWED_HEAD FRESH from REST, never from the
+# CTL-1051 PR_HEAD_OID above — that variable holds the PRE-push remote SHA (the
+# stale-ref reconcile redirected draft_pr_push_verify's verified SHA to /dev/null),
+# so reusing it would age/scope the OLD commit after a reconcile re-push. REST
+# `.head.sha` is authoritative and reflects the just-pushed head.
+REVIEWED_HEAD="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+GH_OWNER="${REPO%/*}"; GH_NAME="${REPO#*/}"
+# CTL-1680 (Codex #3079 re-review P1): anchor the window to when this head became
+# REVIEWABLE ON THE PR (its push time), NOT when the commit was authored. A commit
+# created during a long verify phase can predate PR exposure by hours; anchoring to
+# the author/committer date would make HEAD_AGE_SEC already exceed the window and
+# merge with zero reviewer window. GraphQL `pushedDate` is the push time; fall back
+# to `committedDate`, then to the REST committer date.
+# CTL-1680 (Codex #3079 round-2 P1): a PR opened DRAFT by phase-implement and only
+# promoted to ready-for-review by phase-pr later (`gh pr ready`, no new commits) is
+# not actually reviewable until that promotion — the automated reviewer does not see
+# a draft. Anchoring solely to the commit's pushedDate would let HEAD_AGE_SEC already
+# exceed the window at promotion time, merging with zero window. Take the LATER of
+# pushedDate and the most recent READY_FOR_REVIEW_EVENT timelineItem (a PR never
+# drafted has no such event, so pushedDate wins unchanged).
+# CTL-1680 (Codex #3079 round-3 P1): a TRANSIENT failure of this lookup must not be
+# treated as "no ready-for-review event". The old form swallowed every error with
+# `|| true`, so a network/API blip produced an empty result, fell through to the REST
+# committer date (which for a long-drafted PR is far older than its promotion), made
+# HEAD_AGE_SEC already exceed the window, and merged with ZERO reviewer wait — the
+# exact hole the window exists to close. Retry, then distinguish the two outcomes:
+#   * query SUCCEEDED but returned nothing  → genuinely no timestamp; the REST
+#     committer-date fallback below is correct.
+#   * query FAILED every attempt            → exposure time is UNKNOWN; fail SAFE by
+#     treating HEAD as freshly exposed (age 0) so the FULL window is waited out.
+HEAD_EXPOSED_AT=""
+HEAD_EXPOSED_LOOKUP_OK=false
+for _attempt in 1 2 3; do
+  if HEAD_EXPOSED_AT="$(gh api graphql -f query='
+  query($owner:String!,$name:String!,$pr:Int!){
+    repository(owner:$owner,name:$name){ pullRequest(number:$pr){
+      commits(last:1){ nodes { commit { oid pushedDate committedDate } } }
+      timelineItems(itemTypes:[READY_FOR_REVIEW_EVENT], last:1){ nodes { ... on ReadyForReviewEvent { createdAt } } } } } }' \
+  -f owner="$GH_OWNER" -f name="$GH_NAME" -F pr="$PR_NUMBER" \
+  --jq '.data.repository.pullRequest as $pr
+    | (($pr.commits.nodes[0].commit | (.pushedDate // .committedDate)) // "") as $pushed
+    | (($pr.timelineItems.nodes[0].createdAt) // "") as $ready
+    | (if ($ready != "" and $ready > $pushed) then $ready else $pushed end)
+    | select(. != "")' 2>/dev/null)"; then
+    HEAD_EXPOSED_LOOKUP_OK=true
+    break
+  fi
+  HEAD_EXPOSED_AT=""
+  [[ "$_attempt" -lt 3 ]] && sleep $(( _attempt * 5 ))
+done
+# Only fall back to the REST committer date when the lookup actually SUCCEEDED and
+# simply had no timestamp to give (never to paper over a failed lookup).
+if [[ "$HEAD_EXPOSED_LOOKUP_OK" == true && -z "$HEAD_EXPOSED_AT" ]]; then
+  HEAD_EXPOSED_AT="$(gh api "repos/${REPO}/commits/${REVIEWED_HEAD}" --jq '.commit.committer.date' 2>/dev/null || true)"
+fi
+# CTL-1680 (Codex #3079 P1 portability): HEAD age via jq `fromdateiso8601`, NOT the
+# BSD/macOS-only `date -j` timestamp parser. On a Linux worker the BSD form fails,
+# falls to `echo 0`, HEAD_AGE_SEC becomes ~the current epoch, the window check is
+# always false, and every fresh CLEAN PR merges immediately with no reviewer window.
+# jq is a hard dependency of this skill and its parse is portable (needs the trailing
+# Z, which the timestamp carries) — same approach the End-block mirror already uses.
+HEAD_AGE_SEC=""
+if [[ -n "$HEAD_EXPOSED_AT" ]]; then
+  HEAD_AGE_SEC="$(jq -n --arg a "$HEAD_EXPOSED_AT" '(now - ($a|fromdateiso8601)) | floor' 2>/dev/null || echo "")"
+elif [[ "$HEAD_EXPOSED_LOOKUP_OK" != true ]]; then
+  # Exposure time unknown after retries → assume the head was JUST exposed so the
+  # reviewer-arrival wait below runs its full length. An empty HEAD_AGE_SEC would
+  # skip that block entirely and merge unreviewed, so 0 (not "") is the safe value.
+  HEAD_AGE_SEC=0
+fi
+# Automated-reviewer CLEAN-PASS present ON THIS HEAD? (Codex #3079 P1) Every check is
+# scoped to REVIEWED_HEAD — a PR-wide match would let a STALE-head verdict (from
+# before a fix-up/rebase/force-push) suppress the window and merge the new commit
+# unreviewed. And it must be a genuine CLEAN PASS, not a bare review object: Codex
+# posts a review whether or not it has findings, so mere review presence is NOT a
+# verdict (Codex #3079 re-review P1) — the "no major issues"/👍 signal is. Note the
+# findings-review body ALSO contains "Reviewed commit", so that phrase is NOT a
+# clean-pass discriminator; only "no (major) issues"/"didn't find" is. Three shapes:
+#   (a) a REVIEW on this head whose body is a clean pass (commit_id-scoped),
+#   (b) a clean-pass issue comment on this head (embedded short SHA or timestamp),
+#   (c) a 👍 reaction posted at/after this head was exposed (reactions carry no
+#       commit, so head-scoping is temporal).
+CLEAN_PASS_RE='no (major )?issues|did ?n.?.?t find|did not find'
+REVIEWER_VERDICT_PRESENT=false
+# (a) clean-pass REVIEW, commit_id-scoped (REST carries commit_id; `gh pr view
+#     --json reviews` does not). A review WITH findings does not match CLEAN_PASS_RE.
+if gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" 2>/dev/null \
+   | jq -e --arg h "$REVIEWED_HEAD" --arg re "$CLEAN_PASS_RE" \
+       'any(.[]; (.user.login|test("codex";"i")) and (.commit_id == $h) and (.body|test($re;"i")))' >/dev/null 2>&1; then
+  REVIEWER_VERDICT_PRESENT=true
+fi
+# (b) clean-pass issue comment, scoped to this head by embedded short SHA or timestamp.
+# CTL-1680 (Codex #3079 round-4 P1): a comment that NAMES a head must be judged by that
+# name, never by when it arrived. Codex begins reviewing head A, head B is pushed, then
+# A's clean-pass lands — the `created_at >= $at` fallback would accept that A-verdict as
+# B's and merge B unreviewed. Codex stamps its verdict with "Reviewed commit: <sha>", so
+# reviewed_heads extracts exactly the head(s) a comment claims to have reviewed and a
+# mismatch is rejected OUTRIGHT, regardless of arrival time. The timestamp branch now
+# only rescues a comment that names NO commit at all (reviewed_heads empty) — its
+# original purpose. The prefix test is bidirectional because the stamp may be a short
+# SHA while $h is full-length, or vice versa.
+if [[ "$REVIEWER_VERDICT_PRESENT" != true ]] && \
+   gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+   | jq -e --arg h "$REVIEWED_HEAD" --arg at "$HEAD_EXPOSED_AT" --arg re "$CLEAN_PASS_RE" \
+       'def reviewed_heads:
+          [ .body | scan("(?i)reviewed commit[^0-9a-f]*([0-9a-f]{7,40})") | .[0] ];
+        any(.[];
+          (.user.login|test("codex";"i"))
+          and (.body|test($re;"i"))
+          and ( (reviewed_heads | length) == 0
+                or (reviewed_heads
+                    | any(. as $t | ($h|startswith($t)) or ($t|startswith($h)))) )
+          and ( ((($h|length) >= 10) and (.body|test($h[0:10])))
+                or (($at != "") and (.created_at >= $at)) ))' >/dev/null 2>&1; then
+  REVIEWER_VERDICT_PRESENT=true
+fi
+# (c) 👍 reaction clean-pass posted at/after this head was exposed.
+if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "$HEAD_EXPOSED_AT" ]] && \
+   gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
+     -H "Accept: application/vnd.github.squirrel-girl-preview+json" 2>/dev/null \
+   | jq -e --arg at "$HEAD_EXPOSED_AT" \
+       'any(.[]; (.content=="+1") and (.user.login|test("codex";"i")) and (.created_at >= $at))' >/dev/null 2>&1; then
+  REVIEWER_VERDICT_PRESENT=true
+fi
+# CTL-1680 (Codex #3079 re-review P1): unresolved automated-review findings MUST block
+# the merge even when they do NOT flip mergeable_state to "blocked" — a bot is not a
+# required reviewer in every repo, and "require conversation resolution" is not
+# universally on. This enforces the AGENTS.md absolute rule (every review thread
+# resolved before merge) independent of mergeable_state, so a Codex review WITH open
+# findings can never be merged past — regardless of the arrival window (fail-CLOSED).
+# CTL-1680 (Codex #3079 P2): PAGINATED — mirrors pr-block-probe.mjs's REVIEW_THREADS_QUERY
+# (capped at 25 pages of 100, same as the probe's MAX_THREAD_PAGES) so a PR with more than
+# 100 review threads never silently drops an unresolved finding beyond the first page.
+# CTL-1680 (Codex #3079 P1): FAIL CLOSED on any query failure — a transient GraphQL/auth
+# error must NOT be reported as "0 unresolved" (the old `|| echo 0` fallback let a lookup
+# failure merge straight past an actually-unresolved finding). UNRESOLVED_THREAD_QUERY_FAILED
+# tracks that distinctly from a genuine zero count.
+# CTL-1680 (Codex #3079 round-4 P1): count HUMAN unresolved threads as well as bot ones.
+# The author filter below used to drop every human thread, so a human who left an
+# unresolved COMMENTED/APPROVED thread (neither of which flips mergeable_state, and
+# neither of which the CHANGES_REQUESTED check catches) left this gate reading zero and
+# the skill merged past an open conversation. GitHub's ruleset also enforces thread
+# resolution on this repo, so this is defence-in-depth rather than an open merge hole —
+# but the skill's own gate must not be the weaker of the two. Routing differs by author
+# and mirrors the existing policy: bot threads are auto-remediated via
+# /catalyst-dev:review-comments; human threads are NEVER addressed programmatically
+# (same rule as human CHANGES_REQUESTED) and terminate the phase for the operator.
+UNRESOLVED_BOT_THREADS=0
+UNRESOLVED_HUMAN_THREADS=0
+UNRESOLVED_HUMAN_AUTHORS=""
+UNRESOLVED_THREAD_QUERY_FAILED=false
+THREAD_AFTER=""
+THREAD_PAGE=0
+THREAD_MAX_PAGES=25
+while :; do
+  THREAD_PAGE=$((THREAD_PAGE + 1))
+  if [[ "$THREAD_PAGE" -gt "$THREAD_MAX_PAGES" ]]; then
+    echo "phase-monitor-merge: review-threads exceeded ${THREAD_MAX_PAGES} pages; failing closed" >&2
+    UNRESOLVED_THREAD_QUERY_FAILED=true
+    break
+  fi
+  THREAD_ARGS=(api graphql -f query='
+    query($owner:String!,$name:String!,$pr:Int!,$after:String){
+      repository(owner:$owner,name:$name){ pullRequest(number:$pr){
+        reviewThreads(first:100, after:$after){
+          pageInfo { hasNextPage endCursor }
+          nodes { isResolved comments(first:1){ nodes { author{login} } } } } } } }' \
+    -f owner="$GH_OWNER" -f name="$GH_NAME" -F pr="$PR_NUMBER")
+  # First page leaves $after unbound (nullable → null → from the beginning).
+  [[ -n "$THREAD_AFTER" ]] && THREAD_ARGS+=(-f "after=$THREAD_AFTER")
+  THREAD_PAGE_JSON="$(gh "${THREAD_ARGS[@]}" 2>/dev/null)"
+  if [[ -z "$THREAD_PAGE_JSON" ]] || ! jq -e '.data.repository.pullRequest.reviewThreads' >/dev/null 2>&1 <<<"$THREAD_PAGE_JSON"; then
+    echo "phase-monitor-merge: review-threads GraphQL query failed; failing closed" >&2
+    UNRESOLVED_THREAD_QUERY_FAILED=true
+    break
+  fi
+  PAGE_COUNT="$(jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+          | select(.isResolved==false)
+          | select((.comments.nodes[0].author.login // "")|test("codex|bot";"i"))] | length' <<<"$THREAD_PAGE_JSON")"
+  UNRESOLVED_BOT_THREADS=$(( UNRESOLVED_BOT_THREADS + PAGE_COUNT ))
+  # The complement of the bot filter — every unresolved thread NOT opened by a bot.
+  PAGE_HUMAN_COUNT="$(jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+          | select(.isResolved==false)
+          | select(((.comments.nodes[0].author.login // "")|test("codex|bot";"i")) | not)] | length' <<<"$THREAD_PAGE_JSON")"
+  UNRESOLVED_HUMAN_THREADS=$(( UNRESOLVED_HUMAN_THREADS + PAGE_HUMAN_COUNT ))
+  if [[ "$PAGE_HUMAN_COUNT" -gt 0 ]]; then
+    PAGE_HUMAN_AUTHORS="$(jq -r '[.data.repository.pullRequest.reviewThreads.nodes[]
+            | select(.isResolved==false)
+            | select(((.comments.nodes[0].author.login // "")|test("codex|bot";"i")) | not)
+            | .comments.nodes[0].author.login // "unknown"] | unique | join(", ")' <<<"$THREAD_PAGE_JSON")"
+    UNRESOLVED_HUMAN_AUTHORS="${UNRESOLVED_HUMAN_AUTHORS:+${UNRESOLVED_HUMAN_AUTHORS}, }${PAGE_HUMAN_AUTHORS}"
+  fi
+  HAS_NEXT="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$THREAD_PAGE_JSON")"
+  [[ "$HAS_NEXT" == "true" ]] || break
+  THREAD_AFTER="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor' <<<"$THREAD_PAGE_JSON")"
+done
+if [[ "$UNRESOLVED_THREAD_QUERY_FAILED" == true ]]; then
+  echo "wake: pr#${PR_NUMBER} unresolved-thread lookup failed; NOT merging until it succeeds (fail-closed)"
+  continue  # re-enter the loop; never risk merging past an unconfirmed finding
+fi
+if [[ "$UNRESOLVED_HUMAN_THREADS" -gt 0 ]]; then
+  # CTL-1680 (Codex #3079 round-4 P1): a human's unresolved thread is operator work, not
+  # agent work — the same rule as human CHANGES_REQUESTED above ("Do NOT attempt to
+  # address human review comments programmatically"). Terminate the phase rather than
+  # `continue`: nothing this loop can do will resolve it, so re-waiting would spin until
+  # the 24h cap. Checked BEFORE the bot branch so a PR carrying both goes to the operator
+  # instead of silently auto-remediating half of it and merging.
+  HUMAN_THREAD_REASON="pr#${PR_NUMBER} has ${UNRESOLVED_HUMAN_THREADS} unresolved human review thread(s) (${UNRESOLVED_HUMAN_AUTHORS}) — operator action required"
+  echo "wake: ${HUMAN_THREAD_REASON}"
+  "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status failed --reason "$HUMAN_THREAD_REASON"
+  [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
+    "phase-monitor-merge failed: ${HUMAN_THREAD_REASON}" \
+    --as "$TICKET" --type attention --orch "$ORCH_ID" >/dev/null 2>&1 || true
+  exit 1
+fi
+if [[ "$UNRESOLVED_BOT_THREADS" -gt 0 ]]; then
+  # CTL-1680 (Codex #3079 re-review P1): dispatch the existing review-remediation path
+  # instead of merely re-waiting — a bare `continue` here left the PR permanently wedged
+  # whenever conversation resolution isn't branch-protected (mergeable_state stays "clean"
+  # and no later wake ever differs from this one, so every future iteration repeats the
+  # same continue forever). Mirrors oneshot's Phase 5 `blocked` handling: same skill
+  # invocation, same one-dispatch-per-wake shape.
+  echo "wake: pr#${PR_NUMBER} has ${UNRESOLVED_BOT_THREADS} unresolved automated-review thread(s); dispatching /catalyst-dev:review-comments"
+  /catalyst-dev:review-comments "$PR_NUMBER"
+  continue  # re-enter the loop; re-evaluate mergeable_state + threads fresh next iteration
+fi
+if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "${HEAD_AGE_SEC:-}" ]]; then
+  if [[ "$HEAD_AGE_SEC" -lt "$PHASE_REVIEWER_ARRIVAL_WAIT_SEC" ]]; then
+    # CTL-1680 (Codex #3079 P2): BOUND the re-wait by the time left in the window, so
+    # we re-evaluate when the window elapses even if NO further PR-lifecycle event
+    # wakes us (the general listen-loop wait can otherwise block 600s on the broker
+    # path or 180+7200s on the raw path — far past a 300s window). Export the remaining
+    # seconds; the reused wait-for MUST cap its --timeout at MERGE_WAKE_TIMEOUT_SEC.
+    MERGE_WAKE_TIMEOUT_SEC=$(( PHASE_REVIEWER_ARRIVAL_WAIT_SEC - HEAD_AGE_SEC ))
+    export MERGE_WAKE_TIMEOUT_SEC
+    echo "wake: reviewer-arrival window — pr#${PR_NUMBER} CLEAN but no automated-reviewer verdict on ${REVIEWED_HEAD:0:8} (age ${HEAD_AGE_SEC}s < ${PHASE_REVIEWER_ARRIVAL_WAIT_SEC}s); waiting up to ${MERGE_WAKE_TIMEOUT_SEC}s"
+    continue  # re-enter the event-wait loop (timeout-bounded by MERGE_WAKE_TIMEOUT_SEC); a pr_review wake or the deadline re-evaluates
+  fi
+  echo "phase-monitor-merge: reviewer-arrival window elapsed; proceeding to merge pr#${PR_NUMBER}" >&2
+fi
 gh pr merge "$PR_NUMBER" --squash --delete-branch
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
 [[ "$MERGED_OK" = "true" ]] || { echo "phase-monitor-merge: merge not confirmed via REST" >&2; exit 1; }
 
-MERGE_COMMIT_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty')
+# CTL-1680: retry empty merge_commit_sha — GitHub can return it empty for a few
+# seconds after a squash merge while it computes the SHA. Bounded + sleeps (no
+# GNU `timeout` dependency; portable to stock macOS).
+PHASE_MERGE_SHA_RETRIES="${PHASE_MERGE_SHA_RETRIES:-5}"
+MERGE_COMMIT_SHA=""
+# CTL-1680 (Codex #3079 P1 portability): a portable counting `while` loop, NOT `seq` —
+# stock macOS (the fleet's primary launchd environment) ships no `seq` binary unless GNU
+# coreutils is installed, so `$(seq 1 N)` there expands to nothing and this loop silently
+# runs zero times, leaving MERGE_COMMIT_SHA empty on every successful merge. A bash
+# arithmetic while-loop needs no external command.
+_sha_retry=1
+while [[ "$_sha_retry" -le "$PHASE_MERGE_SHA_RETRIES" ]]; do
+  MERGE_COMMIT_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty' 2>/dev/null || true)
+  [[ -n "$MERGE_COMMIT_SHA" ]] && break
+  sleep 2
+  _sha_retry=$((_sha_retry + 1))
+done
+[[ -z "$MERGE_COMMIT_SHA" ]] && \
+  echo "phase-monitor-merge: merge_commit_sha still empty after ${PHASE_MERGE_SHA_RETRIES} attempts for pr#${PR_NUMBER}" >&2
 MERGED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Record merge in signal file.
@@ -357,6 +627,9 @@ Failure modes that emit `phase.monitor-merge.failed.${TICKET}`:
 
 - `dirty` (merge conflicts) — operator must rebase manually.
 - Human reviewer `CHANGES_REQUESTED` — operator must address comments.
+- Unresolved **human** review thread(s) — an unresolved `COMMENTED`/`APPROVED` conversation
+  blocks the merge but is not `CHANGES_REQUESTED`, so it terminates here for the operator
+  rather than being auto-remediated (CTL-1680).
 - CI blocked after 3 auto-fix attempts.
 - `gh pr merge` succeeded but REST confirms `.merged == false` (rare; usually a branch-protection
   rule mismatch).

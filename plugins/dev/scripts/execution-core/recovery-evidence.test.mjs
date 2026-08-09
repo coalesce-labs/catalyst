@@ -55,7 +55,9 @@ describe("buildRecoveryItems (CTL-1241)", () => {
     );
     // CTL-1299: a missing signal file yields signal:null (falsy → classifier's
     // early-return guard still treats it as "no signal"), and no spurious raw fields.
-    expect(items[0].evidence).toEqual({ signal: null });
+    // CTL-1680: signalPath is a reader-supplied field (null here — this fixture
+    // carries none), not a raw signal field, so it does not violate that intent.
+    expect(items[0].evidence).toEqual({ signal: null, signalPath: null });
   });
 });
 
@@ -121,5 +123,36 @@ describe("buildRecoveryItems → classifier (CTL-1299 — evidence.signal)", () 
     const items = buildRecoveryItems([prodSig("CTL-E", raw)], {});
     const classification = defaultClassifyTicket(items[0].evidence);
     expect(classification.decision).toBe("escalate");
+  });
+});
+
+// CTL-1680 (Codex #3079 round-4 P1): the failing signal's own path must ride along on
+// the evidence so the pr_not_merged classifier can find the PR number in a SIBLING
+// phase artifact when the failure reason names none.
+describe("buildRecoveryItems — signalPath threading (CTL-1680)", () => {
+  test("carries the reader's signalPath onto the evidence", () => {
+    const items = buildRecoveryItems(
+      [{ ticket: "CTL-1", phase: "monitor-deploy", raw: { status: "failed" },
+         signalPath: "/orch/workers/CTL-1/phase-monitor-deploy.json" }],
+      {},
+    );
+    expect(items[0].evidence.signalPath).toBe("/orch/workers/CTL-1/phase-monitor-deploy.json");
+  });
+
+  test("signalPath is null (not undefined) when the reader supplies none", () => {
+    const items = buildRecoveryItems([{ ticket: "CTL-2", phase: "pr", raw: {} }], {});
+    expect(items[0].evidence.signalPath).toBeNull();
+  });
+
+  test("the reader's path WINS over a signalPath key inside the signal JSON", () => {
+    // Signal-file content is untrusted: it must not be able to redirect the
+    // sibling-artifact reads at another worker's directory.
+    const items = buildRecoveryItems(
+      [{ ticket: "CTL-3", phase: "pr",
+         raw: { signalPath: "/orch/workers/OTHER/phase-pr.json" },
+         signalPath: "/orch/workers/CTL-3/phase-pr.json" }],
+      {},
+    );
+    expect(items[0].evidence.signalPath).toBe("/orch/workers/CTL-3/phase-pr.json");
   });
 });

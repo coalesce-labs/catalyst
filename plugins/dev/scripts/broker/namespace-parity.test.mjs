@@ -45,6 +45,7 @@ import {
 import { JANITOR_EVENT_TYPES } from "../execution-core/janitor-event-types.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "../execution-core/unstuck-sweep-event-types.mjs";
 import { LINEAR_READ_EVENT } from "../execution-core/linear-read-event.mjs"; // CTL-1403
+import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -53,6 +54,8 @@ const INLINE_EVENT_NAMES = [
   "monitor.reconcile.failing.team",   // reconcile-health-event.mjs:66 (team is param; prefix is safe)
   "monitor.reconcile.recovered.team", // reconcile-health-event.mjs:66
   "monitor.reconcile.eligible_persist_failure.team", // reconcile-health-event.mjs (CTL-1628 persist-write escalation)
+  "monitor.replica.degraded.team", // replica-health-event.mjs (CAT-35)
+  "monitor.replica.recovered.team", // replica-health-event.mjs (CAT-35)
   "phase.triage.linear-transition.CTL-1", // triage-transition-event.mjs:53
   "linear.state.write.CTL-1",         // linear-state-write-event.mjs:77
   "agent.waiting_on_user",            // wait-event.mjs:buildWaitEnvelope
@@ -79,6 +82,7 @@ const EXEC_CORE_EVENT_NAMES = [
   ...JANITOR_EVENT_TYPES,
   ...UNSTUCK_SWEEP_EVENT_TYPES,
   LINEAR_READ_EVENT, // CTL-1403 reads-by-source (catalyst.linear.read)
+  ALERT_BOOT_DEPENDENCY_UNUSABLE,
   ...INLINE_EVENT_NAMES,
 ];
 

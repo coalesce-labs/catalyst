@@ -281,6 +281,42 @@ if grep -q '<key>OTEL_EXPORTER_OTLP_ENDPOINT</key>' <<<"$OUT_LK" && grep -q '<st
   pass "plist-loki: pins OTEL_EXPORTER_OTLP_ENDPOINT when set"
 else failx "plist-loki: pins OTEL_EXPORTER_OTLP_ENDPOINT when set" "$OUT_LK"; fi
 
+# --- plist cloud-token LOCATION override pinning (Codex P1, CTL-1668): CATALYST_CONFIG_DIR (where
+#     the token is projected/read) and CATALYST_CLOUD_TOKEN_ENV (the token's env-var name) must ride
+#     into the launchd agent env, or the minimal-env keep-alive projects/sources the DEFAULT
+#     cluster.env under the DEFAULT name after reboot and restarts an enforce publisher tokenless. ---
+OUT_CT="$(CATALYST_CONFIG_DIR="/custom/cfg" CATALYST_CLOUD_TOKEN_ENV="MY_CLOUD_TOK" \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q '<key>CATALYST_CONFIG_DIR</key>' <<<"$OUT_CT" && grep -q '<string>/custom/cfg</string>' <<<"$OUT_CT"; then
+  pass "plist-cloudtok: pins CATALYST_CONFIG_DIR when set"
+else failx "plist-cloudtok: pins CATALYST_CONFIG_DIR when set" "$OUT_CT"; fi
+if grep -q '<key>CATALYST_CLOUD_TOKEN_ENV</key>' <<<"$OUT_CT" && grep -q '<string>MY_CLOUD_TOK</string>' <<<"$OUT_CT"; then
+  pass "plist-cloudtok: pins CATALYST_CLOUD_TOKEN_ENV when set"
+else failx "plist-cloudtok: pins CATALYST_CLOUD_TOKEN_ENV when set" "$OUT_CT"; fi
+# Omit both keys when unset (default location/name).
+OUT_CT_OFF="$(env -u CATALYST_CONFIG_DIR -u CATALYST_CLOUD_TOKEN_ENV \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if ! grep -q 'CATALYST_CONFIG_DIR' <<<"$OUT_CT_OFF" && ! grep -q 'CATALYST_CLOUD_TOKEN_ENV' <<<"$OUT_CT_OFF"; then
+  pass "plist-cloudtok: omits both keys when unset"
+else failx "plist-cloudtok: omits both keys when unset" "$OUT_CT_OFF"; fi
+
+# --- plist Layer-2 path-tier pinning (Codex P1, CTL-1668 round 11): the secret-contract resolver
+#     also reads CATALYST_MACHINE_CONFIG and XDG_CONFIG_HOME, so a host using those tiers for
+#     catalyst.cloud.tokenEnv must carry them into the launchd env or reboot resolves the wrong name. ---
+OUT_L2="$(CATALYST_MACHINE_CONFIG="/etc/catalyst.json" XDG_CONFIG_HOME="/home/x/.config" \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if grep -q '<key>CATALYST_MACHINE_CONFIG</key>' <<<"$OUT_L2" && grep -q '<string>/etc/catalyst.json</string>' <<<"$OUT_L2"; then
+  pass "plist-l2tier: pins CATALYST_MACHINE_CONFIG when set"
+else failx "plist-l2tier: pins CATALYST_MACHINE_CONFIG when set" "$OUT_L2"; fi
+if grep -q '<key>XDG_CONFIG_HOME</key>' <<<"$OUT_L2" && grep -q '<string>/home/x/.config</string>' <<<"$OUT_L2"; then
+  pass "plist-l2tier: pins XDG_CONFIG_HOME when set"
+else failx "plist-l2tier: pins XDG_CONFIG_HOME when set" "$OUT_L2"; fi
+OUT_L2_OFF="$(env -u CATALYST_MACHINE_CONFIG -u XDG_CONFIG_HOME \
+  bash --noprofile --norc -c 'source "'"${STACK}"'" 2>/dev/null || true; render_stack_plist catalyst-stack 600' 2>&1)"
+if ! grep -q 'CATALYST_MACHINE_CONFIG' <<<"$OUT_L2_OFF" && ! grep -q 'XDG_CONFIG_HOME' <<<"$OUT_L2_OFF"; then
+  pass "plist-l2tier: omits both tiers when unset"
+else failx "plist-l2tier: omits both tiers when unset" "$OUT_L2_OFF"; fi
+
 # --- plist XML escaping (Codex P2): an env value with an XML metacharacter (e.g. a
 #     hub URL with &) must be escaped so the plist stays well-formed and loadable. ---
 OUT_XE="$(CATALYST_COORDINATION_HUB_URL='https://hub.example/p?x=1&y=2<z>"q"' \
