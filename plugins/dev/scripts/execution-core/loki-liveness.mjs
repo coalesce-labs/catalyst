@@ -93,6 +93,15 @@ export function parseLokiLivenessResponse(body) {
         (meta && meta.catalyst_node_active_tickets) ?? labels.catalyst_node_active_tickets;
       const rawAc = (meta && meta.catalyst_node_active_count) ?? labels.catalyst_node_active_count;
       const ac = Number(rawAc);
+      // CAT-57 (Codex round 2, P1): the productivity signal — this peer's last
+      // phase-boundary advance. Same meta-or-label defensiveness as the fields above.
+      // null (not a synthesized timestamp) when absent or unparseable: an old-daemon
+      // heartbeat must read as "unknown" so nodeProductivity skips the peer, never as
+      // "advanced just now" (which would mask a genuinely stuck host).
+      const rawAdv =
+        (meta && meta.catalyst_node_last_advance_at) ?? labels.catalyst_node_last_advance_at;
+      const lastAdvance =
+        typeof rawAdv === "string" && Number.isFinite(Date.parse(rawAdv)) ? rawAdv : null;
       out[host] = {
         last_seen: new Date(tsMs).toISOString(),
         in_flight_tickets: parseInFlight(rawTickets),
@@ -100,6 +109,7 @@ export function parseLokiLivenessResponse(body) {
         in_flight_count: Number.isInteger(ifc) && ifc >= 0 ? ifc : null,
         active_tickets: rawActive != null ? parseInFlight(rawActive) : null,
         active_count: Number.isInteger(ac) && ac >= 0 ? ac : null,
+        last_advance_at: lastAdvance,
       };
     }
   }

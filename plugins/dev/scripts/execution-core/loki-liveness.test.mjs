@@ -195,6 +195,32 @@ describe("capacity enrichment (CTL-1551)", () => {
     expect(out.mini.in_flight_count).toBe(2);
   });
 
+  // ── CAT-57: last_advance_at rides the same transport (productivity signal) ──
+  test("parse: last_advance_at from structured metadata AND from stream labels", () => {
+    const ts = "2026-08-09T04:00:00Z";
+    const mkAdv = (host, asLabels) => {
+      const meta = { catalyst_node_last_advance_at: ts };
+      const st = { host_name: host, event_name: "node.heartbeat" };
+      if (asLabels) Object.assign(st, meta);
+      return { stream: st, values: [asLabels ? ["1783451090000000000", "node.heartbeat"] : ["1783451090000000000", "node.heartbeat", meta]] };
+    };
+    expect(parseLokiLivenessResponse({ data: { result: [mkAdv("mini", false)] } }).mini.last_advance_at).toBe(ts);
+    expect(parseLokiLivenessResponse({ data: { result: [mkAdv("mini", true)] } }).mini.last_advance_at).toBe(ts);
+  });
+
+  test("parse: absent/unparseable last_advance_at is null, never a synthesized timestamp", () => {
+    // An OLD-daemon heartbeat carries no such attribute. It must read as unknown so
+    // nodeProductivity SKIPS the peer — a fabricated 'now' would mask a stuck host.
+    const plain = parseLokiLivenessResponse({
+      data: { result: [capStream("mini", "1783451090000000000", { mp: "3" })] },
+    });
+    expect(plain.mini.last_advance_at).toBeNull();
+    for (const bad of ["", "not-a-date", "  "]) {
+      const st = { stream: { host_name: "b", event_name: "node.heartbeat" }, values: [["1783451090000000000", "node.heartbeat", { catalyst_node_last_advance_at: bad }]] };
+      expect(parseLokiLivenessResponse({ data: { result: [st] } }).b.last_advance_at).toBeNull();
+    }
+  });
+
   test("parse: host from per-entry structured metadata when absent from stream labels (CTL-1551)", () => {
     const out = parseLokiLivenessResponse({
       data: {
