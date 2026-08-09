@@ -6087,6 +6087,15 @@ export function schedulerTick(
           // the cap permanently "unconfirmed for budget"). Module-level so it survives
           // ticks; the invariant itself stays pure — this is an input, not state it owns.
           unownedPrVerifyCursor: _unownedPrVerifyCursor++,
+          // CAT-11 (Codex P1 round 2): ticket → enrolled repoRoot, so the delegate can
+          // scope a multi-repo orphan rebuild instead of applying a non-anchor entry's
+          // branch to the anchor repository. NEVER bare linearis — teamOf + registry only.
+          repoRootForTicket: (ticket) => {
+            try {
+              const team = teamOf(ticket);
+              return team ? getProjectConfig(team)?.repoRoot ?? null : null;
+            } catch { return null; }
+          },
           // CTL-1608: inject the stalled-PR stamp map (from workers/*/stalled-pr.json).
           // The daemon binds this to read from the real orchDir; a bare tick passes
           // nothing → assembleBoardState defaults to () => new Map() (observable:false).

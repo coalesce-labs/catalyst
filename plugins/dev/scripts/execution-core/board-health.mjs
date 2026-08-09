@@ -70,6 +70,9 @@ export const DEFAULT_THRESHOLDS = {
   // CAT-11 (Codex P1 round 1): whole-batch wall-clock budget for the synchronous
   // open-PR verifications. The per-subprocess timeout does not bound the BATCH.
   unownedPrVerifyBatchMs: Number(process.env.CATALYST_BH_UNOWNED_PR_VERIFY_BATCH_MS) || 30_000,
+  // CAT-11 (Codex P1 round 2): whole-batch budget for the SALVAGE probes, which run
+  // outside the PR-verification budget above and each issue several git calls.
+  salvageProbeBatchMs: Number(process.env.CATALYST_BH_SALVAGE_PROBE_BATCH_MS) || 30_000,
   // CTL-1644: how long an HRW-owned in-flight ticket may have NO actuation (no
   // worker dir, no live bg, no fresh recovery intent) before the new
   // checkStrandedMidPipeline invariant flags it and classifies a revival route.
@@ -496,6 +499,16 @@ export function assembleBoardState({
   // outside this module. Null defaults preserve the pre-CAT-11 behavior.
   verifyOpenPrs = null,
   getBranchSalvage = null,
+  // CAT-11 (Codex P1 round 2): the rotating verification cursor MUST be forwarded
+  // onto the board — the scheduler supplied it but assembleBoardState dropped it, so
+  // checkUnownedInFlight always fell back to 0 and the rotation was inert in
+  // production (the exact starvation the round-1 fix was meant to remove).
+  unownedPrVerifyCursor = 0,
+  monotonicNowMs = undefined,
+  // CAT-11 (Codex P1 round 2): ticket → enrolled repoRoot, so a multi-repo delegate
+  // can scope each orphan rebuild to the right repository. Null default = unknown,
+  // which the skill treats as "skip and escalate", never "use the anchor's repo".
+  repoRootForTicket = null,
   getReconcileMarkers = () => ({}),
   // CTL-1432 (B2): live query for tickets carrying a deferred board-health
   // recovery-intent (defer→fix_class=board-health) — folded into the anchor
@@ -1710,7 +1723,15 @@ export function proposeMoves(invariants, _b) {
   const unownedDetail = new Map((_b?.unownedInFlightDetail ?? []).map((d) => [d.ticket, d]));
   for (const t of invariants.unownedInFlight?.flagged ?? []) {
     if (!invariants.unownedInFlight.ok && !sanction(t) && !strandedClassified[t]) {
-      const route = unownedDetail.get(t)?.route;
+      const d = unownedDetail.get(t);
+      // CAT-11 (Codex P1 round 2): apply the SAME held-route gate the stranded cohort
+      // uses. A non-dispatchable route (adopt / unknown-salvage / unverifiable probe)
+      // is surfaced for visibility but must never anchor an autonomous dispatch — the
+      // recovery-pass skill has no route-aware hold branch and would actuate a route
+      // the classifier marked unsafe. This gate was previously unreachable because the
+      // detail did not exist on the board at selection time.
+      if (d?.dispatchable === false) continue;
+      const route = d?.route;
       tier2.push({ ticket: t, move: "recover-unowned-in-flight", route,
         rationale: `Linear state claims in-flight but there is no worker and no open PR${route ? `; revival route: ${route}` : ""}` });
     }
@@ -1858,6 +1879,86 @@ function quotaForPublication(board) {
   };
 }
 
+// CAT-11 (Codex P1 round 2): extracted from buildBoardContext so the salvage
+// classification exists BEFORE decideBoardHealth/proposeMoves runs. Previously
+// proposeMoves read `_b.unownedInFlightDetail` off the assembled board, where it
+// never existed (it was built later, in buildBoardContext), so `route` was always
+// undefined and EVERY flagged ticket became an anchorable tier-2 move — including
+// ones whose local work is explicitly held (`adopt` / `unknown-salvage`).
+//
+// Also bounds the SALVAGE batch (Codex P1 round 2): these probes run synchronously
+// inside the scheduler tick and each can issue several ls-remote/fetch calls with
+// their own timeouts, so the default cohort could block scheduling for minutes even
+// though the PR-verification budget was already capped. Stop STARTING new probes
+// once the deadline passes; unprobed entries stay held (never dispatchable).
+export function buildUnownedInFlightDetail(boardState, invariants, { thresholds = DEFAULT_THRESHOLDS } = {}) {
+  const unownedInFlight = invariants.unownedInFlight?.flagged ?? [];
+  const prDiscovery = invariants.unownedInFlight?.prDiscovery ?? {};
+  const budgetMs = Number(thresholds?.salvageProbeBatchMs ?? DEFAULT_THRESHOLDS.salvageProbeBatchMs);
+  const readClock = typeof boardState.monotonicNowMs === "function"
+    ? boardState.monotonicNowMs : () => Date.now();
+  const started = readClock();
+  const bounded = Number.isFinite(budgetMs) && budgetMs > 0;
+  return unownedInFlight.map((ticket) => {
+    const descriptor = boardState.ticketsById?.get(ticket) ?? { identifier: ticket };
+    let salvage = {};
+    let budgetSkipped = false;
+    if (boardState.getBranchSalvage) {
+      if (bounded && readClock() - started >= budgetMs) {
+        budgetSkipped = true;
+        salvage = { unverifiable: true, reason: "salvage-batch-budget-exhausted" };
+      } else {
+        try {
+          salvage = boardState.getBranchSalvage(ticket) ?? {};
+        } catch {
+          salvage = { unverifiable: true };
+        }
+      }
+    }
+    const openPrs = prDiscovery[ticket]?.prs ?? [];
+    // An UNVERIFIABLE probe — or one that could not count commits — must never be
+    // classified as dispatchable. The round-1 fetch-failed fix returns
+    // {remoteBranchExists:true, worktreeUnpushed:false, unverifiable:true,
+    // commitsAhead:null}; feeding only the first two fields to the classifier picked
+    // `resume-from-remote` and marked it dispatchable, so a delegate could rebuild and
+    // push from evidence we explicitly could not confirm. RUBRIC FOUR already requires
+    // escalation for an unverifiable probe — hold it here and PRESERVE `unverifiable`
+    // in the returned detail so the delegate can see why.
+    const salvageUnverifiable = salvage.unverifiable === true
+      || (salvage.remoteBranchExists === true && salvage.commitsAhead == null);
+    const classification = salvageUnverifiable
+      ? { route: "unknown-salvage", dispatchable: false }
+      : classifyRevivalRoute({
+        openPr: openPrs[0] ?? null,
+        remoteBranchExists: salvage.remoteBranchExists,
+        // The branch-only probe establishes that remote work exists but cannot
+        // prove the absence of local unpushed work unless its result says so.
+        worktreeUnpushed: salvage.worktreeUnpushed,
+      });
+    return {
+      ticket,
+      branchName: salvage.branchName ?? descriptor.branchName ?? descriptor.branch_name ?? null,
+      remoteBranchExists: salvage.remoteBranchExists,
+      commitsAhead: salvage.commitsAhead ?? null,
+      openPrs,
+      route: classification.route,
+      dispatchable: classification.dispatchable,
+      unverifiable: salvageUnverifiable,
+      salvageReason: salvage.reason ?? null,
+      budgetSkipped,
+      // CAT-11 (Codex P1 round 2): carry the ticket's OWNER and repoRoot so a
+      // multi-host delegate can refuse a foreign host's orphan, and a multi-repo
+      // delegate can `cd` into the right repository before rebuilding.
+      owner: typeof boardState.ownerForTicket === "function"
+        ? (() => { try { return boardState.ownerForTicket(ticket); } catch { return null; } })()
+        : null,
+      repoRoot: typeof boardState.repoRootForTicket === "function"
+        ? (() => { try { return boardState.repoRootForTicket(ticket); } catch { return null; } })()
+        : null,
+    };
+  });
+}
+
 // ── (5) buildBoardContext — PURE. The whole-board brief the dispatched delegate
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
@@ -1880,35 +1981,11 @@ export function buildBoardContext(boardState, invariants) {
     };
   });
   const unownedInFlight = invariants.unownedInFlight?.flagged ?? [];
-  const prDiscovery = invariants.unownedInFlight?.prDiscovery ?? {};
-  const unownedInFlightDetail = unownedInFlight.map((ticket) => {
-    const descriptor = boardState.ticketsById?.get(ticket) ?? { identifier: ticket };
-    let salvage = {};
-    if (boardState.getBranchSalvage) {
-      try {
-        salvage = boardState.getBranchSalvage(ticket) ?? {};
-      } catch {
-        salvage = { unverifiable: true };
-      }
-    }
-    const openPrs = prDiscovery[ticket]?.prs ?? [];
-    const classification = classifyRevivalRoute({
-      openPr: openPrs[0] ?? null,
-      remoteBranchExists: salvage.remoteBranchExists,
-      // The branch-only probe establishes that remote work exists but cannot
-      // prove the absence of local unpushed work unless its result says so.
-      worktreeUnpushed: salvage.worktreeUnpushed,
-    });
-    return {
-      ticket,
-      branchName: salvage.branchName ?? descriptor.branchName ?? descriptor.branch_name ?? null,
-      remoteBranchExists: salvage.remoteBranchExists,
-      commitsAhead: salvage.commitsAhead ?? null,
-      openPrs,
-      route: classification.route,
-      dispatchable: classification.dispatchable,
-    };
-  });
+  // Reuse the pre-computed detail when boardHealthPass already built it (it must, so
+  // proposeMoves can see held routes); recompute only for a bare/unit call.
+  const unownedInFlightDetail = Array.isArray(boardState.unownedInFlightDetail)
+    ? boardState.unownedInFlightDetail
+    : buildUnownedInFlightDetail(boardState, invariants);
   return {
     // CAT-57: v4 adds owned queue/productivity fields; readers remain additive.
     // field to []). The skill reads them defensively, never gates on the schema.
@@ -2124,6 +2201,12 @@ export function boardHealthPass({
   productivityMode,
   verifyOpenPrs,
   getBranchSalvage,
+  // CAT-11 (Codex P1 round 2): must be destructured here too — the comment above
+  // spells out the trap, and the round-1 fix fell straight into it: the scheduler
+  // supplied the cursor, this destructure dropped it, and the rotation was inert.
+  unownedPrVerifyCursor = 0,
+  monotonicNowMs,
+  repoRootForTicket,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
@@ -2141,9 +2224,9 @@ export function boardHealthPass({
     return { ran: false, reason: "throttled" }; // no emit, no act, NO deadHosts read
   }
 
-  const board = assembleBoardState({
+  const _rawBoard = assembleBoardState({
     orchDir, getBoard, getWorkerSignals, getEligible,
-    roster, getDispatchRoster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, getReconcileMarkers,
+    roster, getDispatchRoster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, repoRootForTicket, getReconcileMarkers,
     // CTL-1524 (C4b): resolved HERE — past the `off` branch and past the throttle —
     // so the expensive whole-log heartbeat read behind the daemon's thunk is paid
     // only on a tick that actually proceeds, not on all ~59 throttled ticks between
@@ -2158,10 +2241,25 @@ export function boardHealthPass({
     productivityMode,
     verifyOpenPrs,
     getBranchSalvage,
+    // CAT-11 (Codex P1 round 2): forward the rotation cursor + injectable clock, else
+    // checkUnownedInFlight reads undefined and the budgeted window never rotates.
+    unownedPrVerifyCursor,
+    ...(monotonicNowMs !== undefined ? { monotonicNowMs } : {}),
+    repoRootForTicket,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
     ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
   });
-  const invariants = evaluateInvariants(board, { mode });
+  const invariants = evaluateInvariants(_rawBoard, { mode });
+  // CAT-11 (Codex P1 round 2): classify salvage BEFORE proposing moves. proposeMoves
+  // reads `board.unownedInFlightDetail` to suppress held routes; building it only in
+  // buildBoardContext (after selection) left `route` undefined and let a held
+  // adopt/unknown-salvage ticket anchor an autonomous dispatch. Computed once and
+  // reused by buildBoardContext below, so the salvage probes still run exactly once.
+  // The assembled board is frozen, so derive an extended view rather than mutating it.
+  const board = Object.freeze({
+    ..._rawBoard,
+    unownedInFlightDetail: buildUnownedInFlightDetail(_rawBoard, invariants),
+  });
   const dec = decideBoardHealth(invariants, board);
 
   // enforce-ONLY actuation (CTL-1300), and only if a caller injected an `act`

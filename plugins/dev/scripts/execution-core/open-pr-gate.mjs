@@ -156,7 +156,13 @@ export function defaultDeriveAttachmentPrs(ticket, { cwd, read = readTicketRepli
     // flagless read returns none and this whole pass is inert. withAttachments makes
     // catalyst-linear do the attachment-capable live read.
     const rec = read(ticket, { cwd, withAttachments: true });
-    if (!rec) return [];
+    // CAT-11 (Codex P1 round 2): `readTicketReplica` returns null for a FAILED read
+    // (non-zero status, timeout, unparseable stdout) — not for "this ticket has no
+    // attachments". Collapsing that null to [] made the round-1 catch below
+    // unreachable with production defaults, so an attachment-only PR was still
+    // reported as authoritatively absent and could enter duplicate-PR salvage.
+    // Propagate it as an error so the enumeration reports UNVERIFIABLE instead.
+    if (!rec) throw new Error(`attachment read returned no record for ${ticket}`);
     // Tolerate several shapes the replica may expose: an `attachments` array (Linear
     // GraphQL nodes), a `prLinks`/`pullRequests` array, or `attachments.nodes`.
     const atts = []

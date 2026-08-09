@@ -379,18 +379,32 @@ function printDispatchedBrief(ticket, orchDir) {
     // Only DISPATCHABLE entries are listed, matching the held-route discipline above;
     // held ones are surfaced as a count so they stay observable but not actionable.
     const uid = Array.isArray(bc.unownedInFlightDetail) ? bc.unownedInFlightDetail : [];
-    const uidActionable = uid.filter((e) => e?.dispatchable !== false);
+    // CAT-11 (Codex P1 round 2): on a multi-host board `unownedInFlightDetail`
+    // carries EVERY flagged ticket, but anchor selection only guarantees ownership of
+    // the delegate's anchor. Marking every dispatchable entry actionable let a
+    // delegate on host A rebuild and push host B's orphan while B was independently
+    // acting on it. Only this host's HRW slice is actionable; a foreign entry is
+    // context, never an instruction. `self` absent ⇒ treat nothing as foreign-safe:
+    // fall back to the anchor alone rather than claiming the whole board.
+    const self = bc.host?.self ?? null;
+    const isMine = (e) => {
+      if (!bc.host?.multiHost) return true;      // single-host: every entry is ours
+      if (e?.owner == null) return false;         // unknown owner ⇒ never act
+      return self != null && e.owner === self;
+    };
+    const uidActionable = uid.filter((e) => e?.dispatchable !== false && isMine(e));
     const uidHeld = uid.length - uidActionable.length;
     if (uidActionable.length) {
       console.log(
         `unowned in-flight (orphaned work, RUBRIC FOUR): ${uidActionable
           .map((e) => `${e.ticket}→${e.route ?? "?"}`
-            + ` [branch ${e.branchName ?? "?"}, +${e.commitsAhead ?? "?"} commits]`)
+            + ` [branch ${e.branchName ?? "?"}, +${e.commitsAhead ?? "?"} commits`
+            + `${e.repoRoot ? `, repo ${e.repoRoot}` : ""}]`)
           .join(", ")}`,
       );
     }
     if (uidHeld) {
-      console.log(`unowned in-flight (held, do NOT act): ${uidHeld}`);
+      console.log(`unowned in-flight (held or owned by another host, do NOT act): ${uidHeld}`);
     }
   }
   console.log("--- recent log buffer (tail 40) ---");

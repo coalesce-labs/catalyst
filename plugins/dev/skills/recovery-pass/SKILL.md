@@ -634,9 +634,17 @@ Rubric Four governs rescuing orphaned committed work that has no PR.
 >
 > **ACT (Tier 1 — just do it):**
 >
+> 0. **Scope to the entry's OWN repository first.** One holistic scan can carry actionable
+>    orphans from several enrolled repos, and you are running in the *anchor* ticket's repo.
+>    Every command below must be chained into the entry's `repoRoot`
+>    (`cd "$(jq -r '.repoRoot' <<<"$ENTRY")" && …`) — a bare `cd` on its own line that
+>    silently fails applies a non-anchor entry's branch to the anchor repository, and the
+>    later rebase and `gh` calls then target the wrong repo too. If an entry carries no
+>    `repoRoot`, SKIP it and escalate; never guess. Skip any entry whose `owner` is not this
+>    host, and any with `dispatchable: false` or `unverifiable: true`.
 > 1. Rebuild the worktree from **the branch the probe actually found** — pass the entry's
 >    `branchName`, NOT the bare ticket key:
->    `create-worktree.sh "$(jq -r '.branchName' <<<"$ENTRY")"`.
+>    `cd "$REPO_ROOT" && create-worktree.sh "$(jq -r '.branchName' <<<"$ENTRY")"`.
 >    `create-worktree.sh` fetches and seeds exclusively from `origin/<worktree_name>`
 >    (CTL-1640), so when the orphaned work lives on Linear's branch-name slug rather than
 >    `refs/heads/<TICKET>`, passing the ticket key makes BOTH the fetch and the seed miss —
@@ -670,11 +678,20 @@ Rubric Four governs rescuing orphaned committed work that has no PR.
 >    own `phase-recovery-pass.json`, which the End block marks complete. If you stop there the
 >    rescued PR sits OUTSIDE the phase pipeline, and the now-authoritative PR discovery will
 >    simply spare the ticket on every later scan instead of resuming it — the ticket looks
->    healthier while being just as stuck. So write a concrete downstream signal:
->    `workers/<TICKET>/phase-monitor-merge.json` with `status: "pending"`, the `pr.number` /
->    `pr.url` you just opened, and the ticket's `worktreePath`, so the next scheduler tick
->    dispatches `monitor-merge` against the rescued PR. Confirm the file exists and parses
->    before emitting `fixed`.
+>    healthier while being just as stuck.
+>
+>    **Do NOT hand-write a `pending` `phase-monitor-merge.json`.** That looks like a re-arm
+>    but WEDGES the ticket: `deriveAdvancement` only dispatches when the latest phase signal
+>    is `done`, so a non-terminal signal for the target phase becomes the latest phase and
+>    advancement returns `null` — and because the worker dir now exists and is non-phantom,
+>    the ticket reads as in-flight and no later admission path repairs it. Instead **dispatch
+>    monitor-merge through the normal path**, exactly as the other rubrics dispatch a phase:
+>    `phase-agent-dispatch --ticket <TICKET> --phase monitor-merge` from the entry's
+>    `repoRoot` (equivalently, write the *predecessor* `phase-pr.json` as `status: "done"`
+>    with the `pr.number`/`pr.url` you just opened, so the FSM legitimately owes
+>    monitor-merge). Confirm the dispatch was accepted — or that the ticket is back in
+>    `isTicketInFlight` — before emitting `fixed`; if it was not, ESCALATE rather than
+>    leaving a rescued PR outside the pipeline.
 >
 > **ESCALATE instead when:**
 >

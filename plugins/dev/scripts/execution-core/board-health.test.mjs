@@ -18,6 +18,7 @@ import {
   selectAnchor,
   selectAnchorCandidates,
   buildBoardContext,
+  buildUnownedInFlightDetail,
   buildBoardScanEvent,
   boardHealthPass,
   // CTL-1524 (C4b): lazy deadHosts resolution (array OR thunk)
@@ -2185,6 +2186,11 @@ describe("CAT-11 branch-salvage board context", () => {
     expect(ctx.unownedInFlightDetail).toEqual([{
       ticket: "CAT-11", branchName: "CAT-11", remoteBranchExists: undefined,
       commitsAhead: null, openPrs: [], route: "unknown-salvage", dispatchable: false,
+      // CAT-11 (Codex P1 round 2): the detail now also carries the verification
+      // status and the ownership/repo scoping the delegate needs. Asserted exactly
+      // (toEqual) so a silently-dropped field is a failure, not a passing subset.
+      unverifiable: false, salvageReason: null, budgetSkipped: false,
+      owner: null, repoRoot: null,
     }]);
   });
 
@@ -3211,5 +3217,92 @@ describe("checkUnownedInFlight verification budget (CAT-11, Codex round 1)", () 
       { thresholds: { ...DEFAULT_THRESHOLDS, unownedPrVerifyMax: 6, unownedPrVerifyBatchMs: 10_000 } },
     ).unownedInFlight;
     expect(r.note).toContain("batch time budget exhausted");
+  });
+});
+
+// ─── CAT-11 (Codex round 2): defects in the round-1 remediation itself ──────────
+describe("CAT-11 round-2 remediations", () => {
+  const NOW = Date.parse("2026-07-27T00:00:00.000Z");
+  const stale = new Date(NOW - 100 * 3_600_000).toISOString();
+  const tix = (n = 1) => new Map(Array.from({ length: n }, (_, i) => [
+    `CTL-${i + 1}`, { id: `CTL-${i + 1}`, state: "Implement", updatedAt: stale },
+  ]));
+
+  // An unverifiable probe (round-1's fetch-failed result) must NOT be dispatchable.
+  // Round 1 fed only remoteBranchExists+worktreeUnpushed to the classifier, which
+  // picked resume-from-remote and marked it dispatchable — acting on evidence we
+  // explicitly could not confirm.
+  test("an UNVERIFIABLE salvage probe is held, and says so in the detail", () => {
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(),
+      getBranchSalvage: () => ({
+        branchName: "CTL-1", remoteBranchExists: true, worktreeUnpushed: false,
+        commitsAhead: null, unverifiable: true, reason: "fetch-failed",
+      }),
+    });
+    const d = buildBoardContext(board, evaluateInvariants(board, { mode: "enforce" }))
+      .unownedInFlightDetail[0];
+    expect(d.dispatchable).toBe(false);
+    expect(d.route).toBe("unknown-salvage");
+    expect(d.unverifiable).toBe(true);
+    expect(d.salvageReason).toBe("fetch-failed");
+  });
+
+  // Non-vacuity: a fully VERIFIED probe still routes to the dispatchable arm, so the
+  // hold above is a real discrimination rather than a blanket refusal.
+  test("a fully verified probe is still dispatchable resume-from-remote", () => {
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(),
+      getBranchSalvage: () => ({ branchName: "CTL-1", remoteBranchExists: true,
+        commitsAhead: 3, worktreeUnpushed: false }),
+    });
+    const d = buildBoardContext(board, evaluateInvariants(board, { mode: "enforce" }))
+      .unownedInFlightDetail[0];
+    expect(d).toMatchObject({ dispatchable: true, route: "resume-from-remote", unverifiable: false });
+  });
+
+  // proposeMoves read the detail off the assembled board, where it never existed, so
+  // `route` was always undefined and a HELD ticket still became an anchorable move.
+  test("a held (non-dispatchable) unowned ticket never becomes an anchorable move", () => {
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(),
+      getBranchSalvage: () => ({ branchName: "CTL-1", remoteBranchExists: true,
+        commitsAhead: null, unverifiable: true }),
+    });
+    const invariants = evaluateInvariants(board, { mode: "enforce" });
+    const withDetail = { ...board, unownedInFlightDetail: buildUnownedInFlightDetail(board, invariants) };
+    const moves = proposeMoves(invariants, withDetail);
+    expect(moves.tier2.some((m) => m.move === "recover-unowned-in-flight")).toBe(false);
+  });
+
+  test("a DISPATCHABLE unowned ticket still becomes a move (non-vacuity)", () => {
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(),
+      getBranchSalvage: () => ({ branchName: "CTL-1", remoteBranchExists: true,
+        commitsAhead: 2, worktreeUnpushed: false }),
+    });
+    const invariants = evaluateInvariants(board, { mode: "enforce" });
+    const withDetail = { ...board, unownedInFlightDetail: buildUnownedInFlightDetail(board, invariants) };
+    expect(proposeMoves(invariants, withDetail).tier2
+      .some((m) => m.move === "recover-unowned-in-flight")).toBe(true);
+  });
+
+  // The salvage probes run outside the PR-verification budget and each issues several
+  // git calls, so the batch needs its own deadline.
+  test("the salvage probe batch is bounded and unprobed entries stay held", () => {
+    let clock = 0;
+    let probes = 0;
+    const board = mkBoard({
+      now: NOW, mode: "enforce", ticketsById: tix(4),
+      monotonicNowMs: () => clock,
+      getBranchSalvage: () => { probes += 1; clock += 40_000;
+        return { branchName: "b", remoteBranchExists: true, commitsAhead: 2, worktreeUnpushed: false }; },
+    });
+    const detail = buildUnownedInFlightDetail(board, evaluateInvariants(board, { mode: "enforce" }),
+      { thresholds: { ...DEFAULT_THRESHOLDS, salvageProbeBatchMs: 30_000 } });
+    expect(probes).toBe(1);
+    const skipped = detail.filter((d) => d.budgetSkipped);
+    expect(skipped.length).toBe(3);
+    expect(skipped.every((d) => d.dispatchable === false)).toBe(true);
   });
 });
