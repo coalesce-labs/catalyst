@@ -295,6 +295,99 @@ describe("fenceGuard — escalation-site fail-open on missing generation (watch 
   });
 });
 
+describe("fenceGuard — escalation sites stay fail-CLOSED on a KNOWN-foreign owner", () => {
+  // Regression: proceedOnMissingGeneration was written for "we cannot tell who owns
+  // this" and was reached for "we CAN tell, and it is another host" too — fenceGuard
+  // declined to borrow the foreign generation, then treated that as merely-missing and
+  // permitted the write. A stale host could then apply the STICKY needs-human label to
+  // the new owner's ACTIVE ticket, with no local once-marker on the new owner to clear it.
+  test("proceedOnMissingGeneration:true + FOREIGN-owned projection → SUPPRESS (never labels the new owner's ticket)", () => {
+    let escalated = false;
+    const warns = [];
+    const result = fenceGuard(
+      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      {
+        readGen: () => null, // this host's cluster-generation.json is gone
+        readFence: () => fenceRow({ ownerHost: "mini-2", generation: 9 }), // a peer owns it NOW
+        escalate: () => { escalated = true; return { current: true }; },
+        readSource: "linear",
+        proceedOnMissingGeneration: true,
+        logger: { warn: (...a) => warns.push(a) },
+      },
+    );
+    expect(result).toBe(false);
+    expect(escalated).toBe(false); // never borrowed the foreign gen into the authoritative read
+    expect(warns.length).toBe(1);  // suppression is loud, not silent
+  });
+
+  test("a foreign owner suppresses BEFORE onMissingGeneration fires (the call site's own fail-closed path arms its cooldown)", () => {
+    let hookFired = false;
+    const result = fenceGuard(
+      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      {
+        readGen: () => null,
+        readFence: () => fenceRow({ ownerHost: "mini-2", generation: 9 }),
+        escalate: () => ({ current: true }),
+        readSource: "linear",
+        proceedOnMissingGeneration: true,
+        onMissingGeneration: () => { hookFired = true; },
+      },
+    );
+    expect(result).toBe(false);
+    expect(hookFired).toBe(false);
+  });
+
+  test("ownership genuinely UNKNOWN still fails OPEN — a null/absent owner is not 'foreign'", () => {
+    // The PR's whole point: never silently drop an escalation when we cannot tell.
+    for (const row of [null, fenceRow({ ownerHost: null }), fenceRow({ ownerHost: "" })]) {
+      let hookFired = false;
+      const result = fenceGuard(
+        { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+        {
+          readGen: () => null,
+          readFence: () => row,
+          escalate: () => ({ current: false }),
+          readSource: "linear",
+          proceedOnMissingGeneration: true,
+          onMissingGeneration: () => { hookFired = true; },
+        },
+      );
+      expect(result).toBe(true);
+      expect(hookFired).toBe(true);
+    }
+  });
+
+  test("a throwing projection read is UNKNOWN, not foreign → still fails open at an escalation site", () => {
+    const result = fenceGuard(
+      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      {
+        readGen: () => null,
+        readFence: () => { throw new Error("sqlite is down"); },
+        escalate: () => ({ current: false }),
+        readSource: "linear",
+        proceedOnMissingGeneration: true,
+      },
+    );
+    expect(result).toBe(true);
+  });
+
+  test("SELF-owned projection is unaffected — still borrows the generation and escalates", () => {
+    let captured = null;
+    const result = fenceGuard(
+      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      {
+        readGen: () => null,
+        readFence: () => fenceRow({ ownerHost: "mini", generation: 9 }),
+        escalate: (args) => { captured = args; return { current: true }; },
+        readSource: "linear",
+        proceedOnMissingGeneration: true,
+      },
+    );
+    expect(captured).toEqual({ ticket: "CTL-1", generation: 9 });
+    expect(result).toBe(true);
+  });
+});
+
 describe("fenceGuard — hardening invariants", () => {
   test("no `soleWriter` reference remains anywhere in the source (deleted per OQ-B)", () => {
     const src = readFileSync(fileURLToPath(new URL("./fence-guard.mjs", import.meta.url)), "utf8");

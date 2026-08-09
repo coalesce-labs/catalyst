@@ -26,10 +26,63 @@ describe("loadForwarderConfig", () => {
     rmSync(dir, { recursive: true });
   });
 
+  test("otlp.endpoint defaults to http://localhost:4318 when unset (CTL-1506)", () => {
+    const cfg = loadForwarderConfig("/nonexistent", "myproject");
+    expect(cfg.otlp.endpoint).toBe("http://localhost:4318");
+  });
+
+  test("empty configured otlp.endpoint falls back to the default (CTL-1506)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "otel-forward-empty-ep-"));
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({
+      catalyst: { observability: { forwarders: { otlp: { enabled: true, endpoint: "" } } } }
+    }));
+    const cfg = loadForwarderConfig(path, "myproject");
+    expect(cfg.otlp.endpoint).toBe("http://localhost:4318");
+    rmSync(dir, { recursive: true });
+  });
+
   test("OTEL_EXPORTER_OTLP_ENDPOINT env overrides config endpoint", () => {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://override:4318";
     const cfg = loadForwarderConfig("/nonexistent", "myproject");
     expect(cfg.otlp.endpoint).toBe("http://override:4318");
     delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  });
+
+  // CTL-1506: new config knobs for status classification + age-partition
+  test("lokiAcceptWindowMs defaults to 3_600_000", () => {
+    const cfg = loadForwarderConfig("/nonexistent", "myproject");
+    expect(cfg.otlp.lokiAcceptWindowMs).toBe(3_600_000);
+  });
+
+  test("maxRetryElapsedMs defaults to 60_000", () => {
+    const cfg = loadForwarderConfig("/nonexistent", "myproject");
+    expect(cfg.otlp.maxRetryElapsedMs).toBe(60_000);
+  });
+
+  test("config file lokiAcceptWindowMs overrides default", () => {
+    const dir = mkdtempSync(join(tmpdir(), "otel-forward-window-"));
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({
+      catalyst: { observability: { forwarders: {
+        otlp: { enabled: true, endpoint: "http://localhost:4318", lokiAcceptWindowMs: 7_200_000 }
+      }}}
+    }));
+    const cfg = loadForwarderConfig(path, "myproject");
+    expect(cfg.otlp.lokiAcceptWindowMs).toBe(7_200_000);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("config file maxRetryElapsedMs overrides default", () => {
+    const dir = mkdtempSync(join(tmpdir(), "otel-forward-retry-"));
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({
+      catalyst: { observability: { forwarders: {
+        otlp: { enabled: true, endpoint: "http://localhost:4318", maxRetryElapsedMs: 120_000 }
+      }}}
+    }));
+    const cfg = loadForwarderConfig(path, "myproject");
+    expect(cfg.otlp.maxRetryElapsedMs).toBe(120_000);
+    rmSync(dir, { recursive: true });
   });
 });

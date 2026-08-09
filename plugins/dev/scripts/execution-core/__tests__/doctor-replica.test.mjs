@@ -26,6 +26,10 @@ function deps(over = {}) {
     now: NOW,
     staleMs: 120_000,
     sizeFloorBytes: 65_536,
+    // CAT-35: schema verification seams — injected so this suite keeps touching no
+    // fs/spawn. Healthy default = a real SQLite file carrying both required tables.
+    isSqliteFile: () => true,
+    readDbTables: () => ["issues", "sync_meta", "labels"],
     ...over,
   };
 }
@@ -75,6 +79,59 @@ describe("checkCloudSync", () => {
     const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 1000, mtimeMs: NOW }) })));
     expect(m["replica-fresh"].status).toBe("warn");
     expect(m["replica-fresh"].detail).toMatch(/tiny|seed/i);
+  });
+
+  test("0-byte replica reports never-seeded schema", () => {
+    const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 0, mtimeMs: NOW }) })));
+    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].detail).toMatch(/never seeded|no schema|0 bytes/i);
+  });
+
+  test("unreadable replica does not report a never-seeded schema", () => {
+    const m = byName(checkCloudSync(deps({ statFile: () => { throw new Error("permission denied"); } })));
+    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].detail).toMatch(/unreadable/i);
+    expect(m["replica-schema"].detail).not.toMatch(/never seeded|0 bytes/i);
+  });
+
+  test("seeded-but-stale replica passes schema check", () => {
+    const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 4_000_000, mtimeMs: NOW - 86_400_000 }) })));
+    expect(m["replica-schema"].status).toBe("pass");
+    expect(m["replica-schema"].detail).toMatch(/issues \+ sync_meta present/);
+  });
+
+  // CAT-35 (Codex round 1): size alone must never earn a PASS. A large file that is
+  // not a database, or is a database missing the tables the production reader
+  // prepares against, previously reported "schema seeded" while every read missed.
+  test("large non-SQLite file above the floor does NOT pass schema check", () => {
+    const m = byName(checkCloudSync(deps({ isSqliteFile: () => false })));
+    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].detail).toMatch(/no SQLite header|corrupt/i);
+  });
+
+  test("valid SQLite file missing a required table does NOT pass schema check", () => {
+    const m = byName(checkCloudSync(deps({ readDbTables: () => ["issues"] })));
+    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].detail).toMatch(/sync_meta/);
+  });
+
+  test("no sqlite3 reader → unverified INFO, never a PASS claiming a seeded schema", () => {
+    const m = byName(checkCloudSync(deps({ readDbTables: () => null })));
+    expect(m["replica-schema"].status).toBe("info");
+    expect(m["replica-schema"].detail).toMatch(/unverified/i);
+  });
+
+  test("header/table verification never introduces a FAIL", () => {
+    for (const over of [{ isSqliteFile: () => false }, { readDbTables: () => [] }, { readDbTables: () => null }]) {
+      expect(noFail(checkCloudSync(deps(over)))).toBe(true);
+    }
+  });
+
+  test("tier-inert summary names token and read flag gaps", () => {
+    const m = byName(checkCloudSync(deps({ mode: "off", env: {}, statFile: () => ({ size: 0, mtimeMs: NOW }) })));
+    expect(m["replica-tier"].status).toBe("warn");
+    expect(m["replica-tier"].detail).toMatch(/token/i);
+    expect(m["replica-tier"].detail).toMatch(/CATALYST_LINEAR_REPLICA/);
   });
 
   test("all mtimes old incl the writer-lock (heartbeat stopped) → replica-fresh WARN (likely down)", () => {

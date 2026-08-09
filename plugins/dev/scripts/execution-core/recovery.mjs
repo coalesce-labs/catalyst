@@ -3149,11 +3149,20 @@ export function reclaimDeadWorkIfPossible(
   // tombstone, manual operator file), isKnownPhase skips it instead of
   // throwing. See website/src/content/docs/observability/event-flow.md#yield-tombstones.
   const dispatched = listTicketPhases(ticket);
-  const latestIdx = dispatched.reduce((max, p) => {
-    if (!isKnownPhase(p)) return max; // CTL-702: defensive — skip unknown names
-    const i = phaseIndex(p);
-    return i > max ? i : max;
-  }, -1);
+  // CTL-1660 P1 (Codex #3081): the latest dispatch is decided by RECENCY, not by
+  // maximum pipeline ordinal — listDispatchedPhases returns ascending-mtime order, so
+  // the LAST known phase is the most recently written signal. An ordinal-max scan
+  // misjudges a deliberate BACKWARD re-dispatch: with an old `review: failed` behind a
+  // current `implement: running`, review has the higher ordinal, so a dying implement
+  // worker was ruled "superseded", reaped instead of revived or escalated, and its
+  // `running` signal then occupied a slot indefinitely. This mirrors
+  // scheduler.mjs:livePhaseEntries so the two supersede decisions agree.
+  let latestKnown = null;
+  for (const p of dispatched) {
+    if (!isKnownPhase(p)) continue; // CTL-702: defensive — skip unknown names
+    latestKnown = p;
+  }
+  const latestIdx = latestKnown === null ? -1 : phaseIndex(latestKnown);
   // The signal's OWN phase needs an analogous guard before phaseIndex(phase):
   // "recovery-pass" (the one non-FSM phase this module knows is legitimately
   // dispatched through this same signal-file machinery, via
@@ -3180,7 +3189,16 @@ export function reclaimDeadWorkIfPossible(
   // A non-FSM phase (recovery-pass) can't be "superseded" in the ordinal
   // sense — isKnownPhase(phase) is false for it, so this comparison is
   // skipped and it falls through to the reclaim-eligible path below.
-  if (isKnownPhase(phase) && phaseIndex(phase) < latestIdx) {
+  // Superseded == "an OLDER dispatch than the current one". Two exemptions mirror
+  // livePhaseEntries: the latest phase itself is never superseded, and neither is a
+  // phase sharing its ordinal (remediate ranks AT verify's index, so a remediate
+  // signal must not make a failed verify look superseded).
+  if (
+    isKnownPhase(phase) &&
+    latestKnown !== null &&
+    phase !== latestKnown &&
+    phaseIndex(phase) !== latestIdx
+  ) {
     // CTL-649: emit a reap-intent so the daemon reaper can stop the lingering
     // bg worker. Fire-and-forget — the periodic orphan reaper picks up anything
     // the reconciler missed.

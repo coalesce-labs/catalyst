@@ -119,12 +119,15 @@ write_fixture_signals() {
   jq -nc --arg s "$earlier" --arg c "$now" '{status:"done",startedAt:$s,completedAt:$c}' \
     > "$worker/phase-research.json"
 
+  # phase-pr.json — current run's PR opener (CTL-1667 gate uses this)
+  jq -nc '{status:"done",pr:{number:9999}}' > "$worker/phase-pr.json"
+
   # phase-monitor-merge.json — merged or not merged
   if [[ "$merged" == "true" ]]; then
-    jq -nc --arg now "$now" '{pr:{mergedAt:$now,ciStatus:"merged",mergeCommitSha:"deadbeef"}}' \
+    jq -nc --arg now "$now" '{pr:{number:9999,mergedAt:$now,ciStatus:"merged",mergeCommitSha:"deadbeef"}}' \
       > "$worker/phase-monitor-merge.json"
   else
-    jq -nc '{pr:{mergedAt:"",ciStatus:"open",mergeCommitSha:""}}' \
+    jq -nc '{pr:{number:9999,mergedAt:"",ciStatus:"open",mergeCommitSha:""}}' \
       > "$worker/phase-monitor-merge.json"
   fi
 
@@ -199,6 +202,13 @@ linearis_stub_install "$STUB_BIN" "$C1/linearis-calls.log"
 linear_comment_post_stub_install "$STUB_BIN" "$C1/linear-comment-calls.log"
 install_linear_transition_stub "$PLUGIN_ROOT1" "$C1/linear-transition-calls.log"
 install_presweep_stub "$PLUGIN_ROOT1"
+
+# CTL-1667: install a gh stub that reports PR#9999 as MERGED (the happy-path gate)
+cat > "$STUB_BIN/gh" <<'GH1'
+#!/usr/bin/env bash
+printf '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","number":9999}\n'
+GH1
+chmod +x "$STUB_BIN/gh"
 
 MONTH=$(date -u +%Y-%m)
 mkdir -p "$FAKE_HOME/catalyst/events"
@@ -411,6 +421,13 @@ linear_comment_post_stub_install "$STUB_BIN3" "$C3/linear-comment-calls.log"
 install_linear_transition_stub "$PLUGIN_ROOT3" "$C3/linear-transition-calls.log"
 install_presweep_stub "$PLUGIN_ROOT3"
 
+# CTL-1667: install a gh stub for Case 3 (idempotent re-run; mirror already posted)
+cat > "$STUB_BIN3/gh" <<'GH3'
+#!/usr/bin/env bash
+printf '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","number":9999}\n'
+GH3
+chmod +x "$STUB_BIN3/gh"
+
 # Pre-write the idempotency marker + reset signal to running
 : > "$WORKER3/.linear-mirror-teardown"
 jq -nc --arg s "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{status:"running",startedAt:$s}' \
@@ -557,6 +574,234 @@ run_prior_artifact_case "case4" "phase-monitor-deploy.json" "prior_artifact_miss
 echo ""
 echo "Case 5: prior-artifact guard (phase-monitor-merge.json absent)"
 run_prior_artifact_case "case5" "phase-monitor-merge.json" "prior_artifact_missing:monitor_merge"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cases B1–B4 (CTL-1667): current-PR-merged gate in the safety gate.
+#
+# The new gate requires:
+#   - phase-monitor-merge.json .pr.number == phase-pr.json .pr.number  (identity)
+#   - AND gh pr view <N> reports MERGED  (live truth, injectable via CATALYST_TEARDOWN_GH_BIN)
+#
+# Approach: injectable `gh` stub (CATALYST_TEARDOWN_GH_BIN) so no real `gh` needed.
+
+# Helper: write a per-case gh stub that reads from a fixture file.
+# The fixture file must contain a JSON object with at least {state, mergedAt}.
+install_gh_stub() {
+  local bin_dir="$1" fixture="$2"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/gh-stub" <<GHSTUB
+#!/usr/bin/env bash
+# Stub: gh pr view <N> --json state,mergedAt
+cat "${fixture}"
+GHSTUB
+  chmod +x "$bin_dir/gh-stub"
+}
+
+# Helper: build a shared teardown fixture (git pair + stubs) for CTL-1667 cases.
+# Sets CDIR, WORKERB, WT_PATHB, ORCH_DIRB, FAKE_HOMEB, STUB_BINB, PLUGIN_ROOTB.
+setup_b_case() {
+  local label="$1"
+  CDIR="$TMPROOT/$label"
+  local PRIMARY_GITB="$CDIR/primary-repo"
+  WT_PATHB="$CDIR/ticket-wt"
+  ORCH_DIRB="$CDIR/orch"
+  FAKE_HOMEB="$CDIR/home"
+  WORKERB="$ORCH_DIRB/workers/CTL-9999"
+  mkdir -p "$WORKERB" "$FAKE_HOMEB/catalyst/archives"
+  make_git_pair "$PRIMARY_GITB" "$WT_PATHB" "ctl-9999-branch"
+  mkdir -p "$WT_PATHB/.catalyst"
+  echo '{"catalyst":{"projectKey":"CTL","orchestration":{"keepWorktreeAfterMerge":false}}}' \
+    > "$WT_PATHB/.catalyst/config.json"
+  STUB_BINB="$CDIR/bin"
+  PLUGIN_ROOTB="$CDIR/plugin-root"
+  mkdir -p "$STUB_BINB" "$PLUGIN_ROOTB/scripts/lib"
+  linearis_stub_install "$STUB_BINB" "$CDIR/linearis-calls.log"
+  linear_comment_post_stub_install "$STUB_BINB" "$CDIR/linear-comment-calls.log"
+  install_linear_transition_stub "$PLUGIN_ROOTB" "$CDIR/linear-transition-calls.log"
+  install_presweep_stub "$PLUGIN_ROOTB"
+  local MONTHB; MONTHB=$(date -u +%Y-%m)
+  mkdir -p "$FAKE_HOMEB/catalyst/events"
+  : > "$FAKE_HOMEB/catalyst/events/${MONTHB}.jsonl"
+}
+
+run_b_case() {
+  local label="$1"
+  (
+    cd "$WT_PATHB" || exit 1
+    HOME="$FAKE_HOMEB" \
+    PATH="$STUB_BINB:$PATH" \
+    TICKET=CTL-9999 \
+    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIRB" \
+    CATALYST_ORCHESTRATOR_ID="orch-test-$label" \
+    CATALYST_DIR="$FAKE_HOMEB/catalyst" \
+    ORCH_DIR="$ORCH_DIRB" \
+    ORCH_ID="orch-test-$label" \
+    PLUGIN_ROOT="$PLUGIN_ROOTB" \
+    PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
+    PHASE_EMIT_HELPER="$EMIT_HELPER" \
+    PHASE_EMIT_WRAPPER="$EMIT_WRAPPER" \
+    CATALYST_COMMENT_POST_HELPER="$STUB_BINB/linear-comment-post.sh" \
+    CATALYST_TEARDOWN_GH_BIN="$STUB_BINB/gh-stub" \
+      bash "$SKILL_BODY_FILE" >"$CDIR/stdout.log" 2>"$CDIR/stderr.log"
+    echo $? > "$CDIR/exit-code"
+  )
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Case B1 (CTL-1667): current PR (200) MERGED, numbers match → gate PASSES"
+setup_b_case "caseb1"
+# phase-pr.json — current run's PR
+jq -n '{status:"done",pr:{number:200}}' > "$WORKERB/phase-pr.json"
+# phase-monitor-merge.json — same PR, mergedAt present
+NOW_B1="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -nc --arg t "$NOW_B1" '{pr:{number:200,mergedAt:$t,ciStatus:"merged"}}' \
+  > "$WORKERB/phase-monitor-merge.json"
+# phase-monitor-deploy.json
+jq -nc --arg t "$NOW_B1" '{status:"done",deploy_state:"success",startedAt:$t,completedAt:$t}' \
+  > "$WORKERB/phase-monitor-deploy.json"
+# phase-teardown.json (running)
+jq -nc --arg t "$NOW_B1" '{status:"running",startedAt:$t}' > "$WORKERB/phase-teardown.json"
+# gh stub: MERGED
+GH_FIX_B1="$TMPROOT/caseb1-gh-fixture.json"
+jq -n --arg t "$NOW_B1" '{state:"MERGED",mergedAt:$t,number:200}' > "$GH_FIX_B1"
+install_gh_stub "$STUB_BINB" "$GH_FIX_B1"
+run_b_case "caseb1"
+B1_EXIT="$(cat "$CDIR/exit-code" 2>/dev/null || echo 99)"
+assert_eq "case B1: exit code 0 (gate passes for merged current PR)" "0" "$B1_EXIT"
+B1_EMITTED="$(jq -r '.attributes."event.name" // empty' \
+  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+assert_eq "case B1: emits teardown.complete" "phase.teardown.complete.CTL-9999" "$B1_EMITTED"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Case B2 (CTL-1667): STALE merge signal (PR#100 merged) but current PR#200 is OPEN → FAILS"
+setup_b_case "caseb2"
+NOW_B2="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n '{status:"done",pr:{number:200}}' > "$WORKERB/phase-pr.json"
+# Old run's phase-monitor-merge signal (PR#100 was merged)
+jq -nc --arg t "$NOW_B2" '{pr:{number:100,mergedAt:$t,ciStatus:"merged"}}' \
+  > "$WORKERB/phase-monitor-merge.json"
+jq -nc --arg t "$NOW_B2" '{status:"done",deploy_state:"success",startedAt:$t,completedAt:$t}' \
+  > "$WORKERB/phase-monitor-deploy.json"
+jq -nc --arg t "$NOW_B2" '{status:"running",startedAt:$t}' > "$WORKERB/phase-teardown.json"
+# gh stub: current PR#200 is OPEN
+GH_FIX_B2="$TMPROOT/caseb2-gh-fixture.json"
+jq -n '{state:"OPEN",mergedAt:null,number:200}' > "$GH_FIX_B2"
+install_gh_stub "$STUB_BINB" "$GH_FIX_B2"
+run_b_case "caseb2"
+B2_EXIT="$(cat "$CDIR/exit-code" 2>/dev/null || echo 0)"
+if [ "$B2_EXIT" -ne 0 ]; then
+  ok "case B2: exits non-zero (stale merge signal / current PR open)"
+else
+  fail "case B2: exits non-zero (stale merge signal / current PR open)" "got exit 0"
+fi
+if [ -d "$WT_PATHB" ]; then
+  ok "case B2: worktree NOT removed"
+else
+  fail "case B2: worktree NOT removed" "worktree was deleted"
+fi
+B2_EMITTED="$(jq -r '.attributes."event.name" // empty' \
+  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+assert_eq "case B2: emits teardown.failed" "phase.teardown.failed.CTL-9999" "$B2_EMITTED"
+B2_TRANS=0
+[ -f "$CDIR/linear-transition-calls.log" ] && \
+  B2_TRANS="$(wc -l < "$CDIR/linear-transition-calls.log" 2>/dev/null | tr -d ' ' || echo 0)"
+assert_eq "case B2: linear-transition NOT called" "0" "$B2_TRANS"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Case B3 (CTL-1667): PR numbers match (200) but GitHub says OPEN → FAILS"
+setup_b_case "caseb3"
+NOW_B3="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n '{status:"done",pr:{number:200}}' > "$WORKERB/phase-pr.json"
+# monitor-merge signals PR#200 as merged (disk says so) — but live GitHub disagrees
+jq -nc --arg t "$NOW_B3" '{pr:{number:200,mergedAt:$t,ciStatus:"merged"}}' \
+  > "$WORKERB/phase-monitor-merge.json"
+jq -nc --arg t "$NOW_B3" '{status:"done",deploy_state:"success",startedAt:$t,completedAt:$t}' \
+  > "$WORKERB/phase-monitor-deploy.json"
+jq -nc --arg t "$NOW_B3" '{status:"running",startedAt:$t}' > "$WORKERB/phase-teardown.json"
+GH_FIX_B3="$TMPROOT/caseb3-gh-fixture.json"
+jq -n '{state:"OPEN",mergedAt:null,number:200}' > "$GH_FIX_B3"
+install_gh_stub "$STUB_BINB" "$GH_FIX_B3"
+run_b_case "caseb3"
+B3_EXIT="$(cat "$CDIR/exit-code" 2>/dev/null || echo 0)"
+if [ "$B3_EXIT" -ne 0 ]; then
+  ok "case B3: exits non-zero (gh says OPEN despite disk saying merged)"
+else
+  fail "case B3: exits non-zero (gh says OPEN despite disk saying merged)" "got exit 0"
+fi
+B3_EMITTED="$(jq -r '.attributes."event.name" // empty' \
+  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+assert_eq "case B3: emits teardown.failed" "phase.teardown.failed.CTL-9999" "$B3_EMITTED"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Case B4 (CTL-1667): gh errors (non-zero exit) → FAIL-CLOSED pr_not_merged"
+setup_b_case "caseb4"
+NOW_B4="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n '{status:"done",pr:{number:200}}' > "$WORKERB/phase-pr.json"
+jq -nc --arg t "$NOW_B4" '{pr:{number:200,mergedAt:$t,ciStatus:"merged"}}' \
+  > "$WORKERB/phase-monitor-merge.json"
+jq -nc --arg t "$NOW_B4" '{status:"done",deploy_state:"success",startedAt:$t,completedAt:$t}' \
+  > "$WORKERB/phase-monitor-deploy.json"
+jq -nc --arg t "$NOW_B4" '{status:"running",startedAt:$t}' > "$WORKERB/phase-teardown.json"
+# gh stub: exits non-zero (simulates failure)
+mkdir -p "$STUB_BINB"
+cat > "$STUB_BINB/gh-stub" <<'GHFAIL'
+#!/usr/bin/env bash
+echo "gh: error: could not reach GitHub" >&2
+exit 1
+GHFAIL
+chmod +x "$STUB_BINB/gh-stub"
+run_b_case "caseb4"
+B4_EXIT="$(cat "$CDIR/exit-code" 2>/dev/null || echo 0)"
+if [ "$B4_EXIT" -ne 0 ]; then
+  ok "case B4: exits non-zero (gh failure → fail-closed)"
+else
+  fail "case B4: exits non-zero (gh failure → fail-closed)" "got exit 0 — should fail-closed"
+fi
+B4_EMITTED="$(jq -r '.attributes."event.name" // empty' \
+  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+assert_eq "case B4: emits teardown.failed on gh error" "phase.teardown.failed.CTL-9999" "$B4_EMITTED"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Case B5 (CTL-1667 review fix, round 3): EMPTY/malformed merge PR number → FAILS (fail-closed identity)"
+setup_b_case "caseb5"
+NOW_B5="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n '{status:"done",pr:{number:200}}' > "$WORKERB/phase-pr.json"
+# Legacy/malformed monitor-merge signal: file exists (passes the prior-artifact
+# guard) but carries no .pr.number at all.
+jq -nc --arg t "$NOW_B5" '{mergedAt:$t,ciStatus:"merged"}' \
+  > "$WORKERB/phase-monitor-merge.json"
+jq -nc --arg t "$NOW_B5" '{status:"done",deploy_state:"success",startedAt:$t,completedAt:$t}' \
+  > "$WORKERB/phase-monitor-deploy.json"
+jq -nc --arg t "$NOW_B5" '{status:"running",startedAt:$t}' > "$WORKERB/phase-teardown.json"
+# gh stub: current PR#200 IS merged — the empty merge artifact is the ONLY
+# thing that should block this from passing.
+GH_FIX_B5="$TMPROOT/caseb5-gh-fixture.json"
+jq -n --arg t "$NOW_B5" '{state:"MERGED",mergedAt:$t,number:200}' > "$GH_FIX_B5"
+install_gh_stub "$STUB_BINB" "$GH_FIX_B5"
+run_b_case "caseb5"
+B5_EXIT="$(cat "$CDIR/exit-code" 2>/dev/null || echo 0)"
+if [ "$B5_EXIT" -ne 0 ]; then
+  ok "case B5: exits non-zero (empty merge-signal PR number → fail-closed)"
+else
+  fail "case B5: exits non-zero (empty merge-signal PR number → fail-closed)" "got exit 0"
+fi
+if [ -d "$WT_PATHB" ]; then
+  ok "case B5: worktree NOT removed"
+else
+  fail "case B5: worktree NOT removed" "worktree was deleted"
+fi
+B5_EMITTED="$(jq -r '.attributes."event.name" // empty' \
+  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+assert_eq "case B5: emits teardown.failed" "phase.teardown.failed.CTL-9999" "$B5_EMITTED"
+B5_TRANS=0
+[ -f "$CDIR/linear-transition-calls.log" ] && \
+  B5_TRANS="$(wc -l < "$CDIR/linear-transition-calls.log" 2>/dev/null | tr -d ' ' || echo 0)"
+assert_eq "case B5: linear-transition NOT called" "0" "$B5_TRANS"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary

@@ -70,6 +70,8 @@ export function dlqDepth(dlqPath: string): number {
   }
 }
 
+export type DrainOutcome = "delivered" | "dropped";
+
 export interface DrainBoundedOpts {
   maxBatches?: number;
   onBatchDelivered?: (batch: unknown[]) => void;
@@ -79,14 +81,17 @@ export interface DrainBoundedOpts {
 // sends each via sendBatch, and stops at the first failure — requeuing that batch
 // plus all remaining ones. Prevents the unbounded recursive drain that caused the
 // 58k-event loss when ~589 backlogged batches blocked a single flush for hours.
+// CTL-1506: callback may return "dropped" to consume an entry without counting it
+// as delivered (aged/terminal records); "dropped" entries are removed from the DLQ
+// file but never passed to onBatchDelivered. void/undefined ≡ "delivered".
 export const DEFAULT_MAX_DRAIN_BATCHES = 50;
 
 export async function drainDlqBounded(
   dlqPath: string,
-  sendBatch: (batch: unknown[]) => Promise<void>,
+  sendBatch: (batch: unknown[]) => Promise<void | DrainOutcome>,
   opts: DrainBoundedOpts = {}
-): Promise<{ drained: number; remaining: number }> {
-  if (!existsSync(dlqPath)) return { drained: 0, remaining: 0 };
+): Promise<{ drained: number; dropped: number; remaining: number }> {
+  if (!existsSync(dlqPath)) return { drained: 0, dropped: 0, remaining: 0 };
   // EVENT-LOG-FULL-READ-OK(CTL-1529): the drain reads at most `maxBatches` lines
   // but must REWRITE the survivors (`lines.slice(survivorStart)`), so it needs the
   // whole tail as well as the head — a prefix read cannot preserve the file.
@@ -95,16 +100,21 @@ export async function drainDlqBounded(
   // read-shape sweep. See the allowlist entry in
   // execution-core/event-log-read-guard.test.mjs for the full tradeoff.
   const lines = readFileSync(dlqPath, "utf8").split("\n").filter(Boolean);
-  if (lines.length === 0) return { drained: 0, remaining: 0 };
+  if (lines.length === 0) return { drained: 0, dropped: 0, remaining: 0 };
 
   const maxBatches = opts.maxBatches ?? DEFAULT_MAX_DRAIN_BATCHES;
   let drained = 0;
+  let dropped = 0;
   let failedAt = -1;
 
   for (let i = 0; i < lines.length && i < maxBatches; i++) {
     const batch = JSON.parse(lines[i]) as unknown[];
     try {
-      await sendBatch(batch);
+      const outcome = await sendBatch(batch);
+      if (outcome === "dropped") {
+        dropped++;
+        continue; // consumed from DLQ, not delivered
+      }
       opts.onBatchDelivered?.(batch);
       drained++;
     } catch {
@@ -113,8 +123,9 @@ export async function drainDlqBounded(
     }
   }
 
-  // Survivors = failed batch (if any) + everything past the cap
-  const survivorStart = failedAt >= 0 ? failedAt : Math.min(drained, maxBatches);
+  // Both drained and dropped are consumed entries; survivors start after them.
+  const consumed = drained + dropped;
+  const survivorStart = failedAt >= 0 ? failedAt : Math.min(consumed, maxBatches);
   const survivors = lines.slice(survivorStart);
 
   if (survivors.length === 0) {
@@ -123,5 +134,5 @@ export async function drainDlqBounded(
     writeFileSync(dlqPath, survivors.join("\n") + "\n");
   }
 
-  return { drained, remaining: survivors.length };
+  return { drained, dropped, remaining: survivors.length };
 }

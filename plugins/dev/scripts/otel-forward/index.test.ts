@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTailer } from "./lib/tail.ts";
 import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
-import { computeLagMs, buildLagEvent } from "./index.ts";
+import { computeLagMs, buildLagEvent, nextDurableCheckpoint } from "./index.ts";
 
 describe("computeLagMs (CTL-1060 Phase 3)", () => {
   test("returns ms delta between localNewestTs and lastForwardedTs", () => {
@@ -188,5 +188,55 @@ describe("pino records through tailer shouldForward (CTL-1424)", () => {
     const parsed = JSON.parse(emitted[0]);
     expect(parsed.level).toBe(40);
     rmSync(dir, { recursive: true });
+  });
+});
+
+// ─── CTL-1506 (Codex #2742 P1): checkpoints stay BEHIND un-flushed buffers ───
+// tailer.currentOffset() is the READ position; an event is durable only once its
+// destination's flush() resolves (delivered, or DLQ'd — the sender DLQs its own
+// failures). While OTLP is inside its retry window (default 60 s) flushDest coalesces
+// every tick onto the in-flight promise and the buffer keeps growing — so persisting
+// the read position there meant a hard crash resumed PAST those events and dropped them.
+describe("nextDurableCheckpoint (CTL-1506)", () => {
+  const P = "/e/2026-08.jsonl";
+
+  test("does NOT advance while any destination is undrained", () => {
+    expect(
+      nextDurableCheckpoint({ drained: false, currentPath: P, currentOffset: 9_000, prevPath: P, prevOffset: 100 }),
+    ).toEqual({ path: P, offset: 100 });
+  });
+
+  test("advances to the read position once everything is drained", () => {
+    expect(
+      nextDurableCheckpoint({ drained: true, currentPath: P, currentOffset: 9_000, prevPath: P, prevOffset: 100 }),
+    ).toEqual({ path: P, offset: 9_000 });
+  });
+
+  test("is monotonic — a drain never rewinds the checkpoint", () => {
+    expect(
+      nextDurableCheckpoint({ drained: true, currentPath: P, currentOffset: 50, prevPath: P, prevOffset: 4_000 }),
+    ).toEqual({ path: P, offset: 4_000 });
+  });
+
+  test("adopts a rotated file outright (offsets are per-file, not comparable)", () => {
+    const NEXT = "/e/2026-09.jsonl";
+    expect(
+      nextDurableCheckpoint({ drained: true, currentPath: NEXT, currentOffset: 12, prevPath: P, prevOffset: 999_999 }),
+    ).toEqual({ path: NEXT, offset: 12 });
+  });
+
+  test("holds the floor across a whole retry window, then releases", () => {
+    // 6 undrained ticks (a 60s OTLP retry at the 10s checkpoint cadence) must all
+    // re-persist the same floor, then the drained tick jumps to the real position.
+    let cur = { path: P, offset: 500 };
+    for (let tick = 0; tick < 6; tick++) {
+      cur = nextDurableCheckpoint({
+        drained: false, currentPath: P, currentOffset: 500 + (tick + 1) * 1_000,
+        prevPath: cur.path, prevOffset: cur.offset,
+      });
+      expect(cur.offset).toBe(500);
+    }
+    cur = nextDurableCheckpoint({ drained: true, currentPath: P, currentOffset: 6_500, prevPath: cur.path, prevOffset: cur.offset });
+    expect(cur.offset).toBe(6_500);
   });
 });
