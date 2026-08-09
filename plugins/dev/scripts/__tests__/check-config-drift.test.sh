@@ -57,6 +57,10 @@ expect_not_contains() {
 
 echo "check-config-drift tests"
 
+run "repo config declares cache reconcile shadow mode" bash -c "
+  [ \"\$(jq -r '.catalyst.broker.cacheReconcile.mode' '$REPO_ROOT/.catalyst/config.json')\" = shadow ]
+"
+
 # ── Test 1: no drift — project matches template exactly → exit 0, no stdout ──
 TPL1="${SCRATCH}/tpl1.json"
 CFG1="${SCRATCH}/cfg1.json"

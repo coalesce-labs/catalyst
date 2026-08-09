@@ -164,10 +164,10 @@ run "T5b: healthy run emits grep-stable heartbeat" \
 run "T5c: healthy run performs no kickstart" \
   bash -c "bash '$RESPONDER' >/dev/null && ! test -s '${KICKSTART_LOG}'"
 
-# T6: not-on-tier (no plist, no process) → healthy no-op, never a kickstart
+# T6: never adopted (no plist, no process) → honest no-op, never a kickstart
 _reset
-run "T6: no plist + no process is healthy (not our patient)" \
-  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy' && ! test -s '${KICKSTART_LOG}'"
+run "T6: no plist + no process is not-adopted (not our patient)" \
+  bash -c "out=\$(bash '$RESPONDER') && printf '%s' \"\$out\" | grep -q 'heartbeat status=not-adopted' && ! printf '%s' \"\$out\" | grep -q 'heartbeat status=healthy' && ! test -s '${KICKSTART_LOG}'"
 
 # T7: telemetry fail-open — emit binary removed, still exits 0
 _reset
@@ -454,8 +454,8 @@ run "T29c: dry-run never creates the state dir" \
 # whose cloud-sync agent was uninstalled must not kickstart or escalate.
 _reset
 printf '{"ts":1,"expectRestart":true}' > "$RESPONDER_SELFHEAL_FILE" # ancient breadcrumb
-run "T30: breadcrumb without the plist is healthy (not our patient)" \
-  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy' && ! test -s '${KICKSTART_LOG}'"
+run "T30: breadcrumb without the plist is not-adopted (not our patient)" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=not-adopted' && ! test -s '${KICKSTART_LOG}'"
 run "T30b: heartbeat reports no_respawn=0 without the plist" \
   bash -c "bash '$RESPONDER' | grep -q 'no_respawn=0'"
 
@@ -476,8 +476,8 @@ run "T31: settling preserves the attempt budget (no re-arm)" \
 # lock on a node without the plist must not kickstart an unloaded label.
 _reset
 touch "$MOCK_ALIVE_FILE"; _stale_lock # NO plist
-run "T32: stale lock without the plist is healthy (not our patient)" \
-  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy' && ! test -s '${KICKSTART_LOG}'"
+run "T32: stale lock without the plist is not-adopted (not our patient)" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=not-adopted' && ! test -s '${KICKSTART_LOG}'"
 
 # T33 (P2): a zero/garbage attempt window is clamped — markers survive pruning
 # and the cap still escalates instead of kickstarting every sweep forever.

@@ -23,7 +23,9 @@ exactly the outages it exists to respond to.
 | 3 | no-respawn | cloud-sync plist installed, `~/catalyst/cloud-sync.selfheal.json` has `expectRestart:true`, no process, and the breadcrumb `ts` (or file mtime) is older than `RESPONDER_SELFHEAL_GRACE_SECS` (120s) | the CTL-1508 self-heal exit expected a launchd relaunch that never came. **File absent = the normal case** (CTL-1508 ships in parallel); absent/malformed is silently ignored |
 
 All three conditions are **installed-gated** — a node without the cloud-sync plist is not on the
-replica tier and is never acted on, even if a stale breadcrumb is lying around.
+replica tier and is never acted on, even if a stale breadcrumb is lying around. That never-adopted
+state emits `heartbeat status=not-adopted installed=0`; it is intentionally distinct from
+`healthy`. Adoption remains the explicit operator action `catalyst-stack adopt-cloud-sync`.
 
 **Settling hold:** a breadcrumb *within* the grace window suppresses **all** action (including
 dead-writer) and heartbeats `status=settling` — the writer exited on purpose expecting a launchd
@@ -68,7 +70,7 @@ re-arms itself with a fresh budget for the next incident.
 Every run — healthy, acting, escalated, disabled, dry-run — ends with exactly one grep-stable line:
 
 ```
-[health-responder <run-id>] heartbeat status=<healthy|recovered|still-down|escalated|disabled|dry-run> installed=… alive=… dead_writer=… stale_lock=… no_respawn=… attempts=N/M escalated=…
+[health-responder <run-id>] heartbeat status=<healthy|not-adopted|recovered|still-down|escalated|disabled|dry-run> installed=… alive=… dead_writer=… stale_lock=… no_respawn=… attempts=N/M escalated=…
 ```
 
 Silence in `~/catalyst/health-responder.log` for longer than the interval means the **responder**

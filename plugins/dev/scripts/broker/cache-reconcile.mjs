@@ -21,6 +21,9 @@
 // untouched.
 
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import {
   getAllTicketDescriptors,
   upsertTicketDescriptor,
@@ -33,17 +36,33 @@ import { emitLinearReadEvent } from "../execution-core/linear-read-event.mjs";
 // Already a static broker dependency via index.mjs — safe under the node fallback.
 import { readLinearReplica } from "../execution-core/config.mjs";
 
-// Mode knob: env CATALYST_CACHE_RECONCILE overrides Layer-2 config; operators
-// opt in via =shadow (log would-write, touch nothing) then =enforce (write).
-// Default OFF — zero behaviour change until explicitly enabled.
-export function readCacheReconcileConfig(env = process.env) {
-  const raw = String(env.CATALYST_CACHE_RECONCILE ?? "off").toLowerCase();
+function readJsonSafe(path) {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return {}; }
+}
+
+// CAT-53: launchd does not inherit an operator's shell environment. Resolve the
+// durable layers here, with the machine-local layer overriding the committed
+// project layer. An unreadable/malformed file is simply absent.
+export function readBrokerConfigSafe(env = process.env) {
+  const layer1Path = env.CATALYST_CONFIG_FILE ?? resolve(process.cwd(), ".catalyst", "config.json");
+  const xdg = env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config");
+  const layer2Path = env.CATALYST_LAYER2_CONFIG_FILE ?? env.CATALYST_MACHINE_CONFIG ?? resolve(xdg, "catalyst", "config.json");
+  const layer1 = readJsonSafe(layer1Path)?.catalyst?.broker?.cacheReconcile ?? {};
+  const layer2 = readJsonSafe(layer2Path)?.catalyst?.broker?.cacheReconcile ?? {};
+  return { catalyst: { broker: { cacheReconcile: { ...layer1, ...layer2 } } } };
+}
+
+// Same precedence as other Catalyst knobs: env > Layer-2 > Layer-1 > default.
+export function readCacheReconcileConfig(env = process.env, cfg = readBrokerConfigSafe(env)) {
+  const durable = cfg?.catalyst?.broker?.cacheReconcile ?? {};
+  const raw = String(env.CATALYST_CACHE_RECONCILE ?? durable.mode ?? "off").toLowerCase();
   const mode = raw === "shadow" || raw === "enforce" ? raw : "off";
   const intervalMs = positiveIntOr(
-    env.CATALYST_CACHE_RECONCILE_INTERVAL_MS,
+    env.CATALYST_CACHE_RECONCILE_INTERVAL_MS ??
+      (durable.intervalSeconds == null ? undefined : Number(durable.intervalSeconds) * 1000),
     10 * 60_000, // 10 min — gentle on the per-host Linear key (self-constraint)
   );
-  const perPassCap = positiveIntOr(env.CATALYST_CACHE_RECONCILE_CAP, 250);
+  const perPassCap = positiveIntOr(env.CATALYST_CACHE_RECONCILE_CAP ?? durable.perPassCap, 250);
   return { mode, intervalMs, perPassCap };
 }
 

@@ -62,6 +62,12 @@
     "deployment": {
       "mode": "cluster"
     },
+    "broker": {
+      "cacheReconcile": {
+        "mode": "shadow",
+        "intervalSeconds": 600
+      }
+    },
     "orchestration": {
       "dispatchMode": "phase-agents",
       "worktreeRefresh": {
