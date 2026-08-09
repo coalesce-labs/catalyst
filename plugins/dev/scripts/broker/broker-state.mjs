@@ -240,6 +240,20 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
     )
   `);
 
+  // CTL-1606: persistent, webhook-populated per-PR status store. Populated by orch-monitor
+  // on every pull_request webhook; read here as the primary source for getAllPrStatuses().
+  // Identical DDL to pr-cache.ts — whichever process opens first creates it; the other
+  // CREATE TABLE IF NOT EXISTS is a no-op.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS pr_status_cache (
+      repo       TEXT NOT NULL,
+      pr_number  INTEGER NOT NULL,
+      status     TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (repo, pr_number)
+    )
+  `);
+
   return db;
 }
 
@@ -713,12 +727,21 @@ export function getAllTicketDescriptors({ includeRemoved = false } = {}) {
 // filter_state has no rows → the new invariants stay observable:false
 // (shadow-safe by default).
 export function getAllPrStatuses() {
-  const rows = ensure()
-    .prepare(`SELECT pr_number, repo, status, updated_at FROM filter_state ORDER BY updated_at DESC`)
+  const db = ensure();
+  // CTL-1606: primary source — the persistent, webhook-populated per-PR status store.
+  const statusRows = db
+    .prepare(`SELECT pr_number, repo, status, updated_at FROM pr_status_cache`)
     .all();
+  // Fallback source: the broker's ephemeral interest watch-list (CTL-284/CTL-1157).
+  // Kept for live filter_state rows (e.g. active PR↔deploy correlation) and for
+  // any (repo, number) not yet in pr_status_cache.
+  const filterRows = db
+    .prepare(`SELECT pr_number, repo, status, updated_at FROM filter_state`)
+    .all();
+
   const map = new Map();
-  for (const row of rows) {
-    if (row.pr_number == null) continue;
+  const upsert = (row, { authoritative }) => {
+    if (row.pr_number == null) return;
     const repo = row.repo ?? null;
     const repoKey = repo ?? "";
     let byRepo = map.get(row.pr_number);
@@ -726,15 +749,27 @@ export function getAllPrStatuses() {
       byRepo = new Map();
       map.set(row.pr_number, byRepo);
     }
-    // First row for a given (repo, number) wins (ORDER BY updated_at DESC); a later
-    // row for the SAME (repo, number) is an older lifecycle state → keep the newer.
-    if (byRepo.has(repoKey)) continue;
-    byRepo.set(repoKey, {
-      status: row.status,
-      updatedAt: row.updated_at,
-      repo,
-    });
-  }
+    const existing = byRepo.get(repoKey);
+    // CTL-1606 (Codex #2878 P1): the ephemeral fallback must never walk back the
+    // authoritative terminal state. Registering (or auto-registering) an interest on an
+    // ALREADY-MERGED PR writes a fresh `open` row into filter_state via
+    // upsertFilterStateOpen — and because that row is newer, plain newest-wins let it
+    // override the persistent `merged` status for the same (repo, number). A restarted
+    // phase or a recovery registration would then hide the phantom-merged ticket and
+    // later make it look like an orphaned OPEN PR — the exact misclassification this
+    // ticket fixes. filter_state is documented a few lines above as only a fallback, so
+    // make that true in code: a non-authoritative row never overrides a terminal one.
+    if (!authoritative && existing && existing.status === "merged") return;
+    // Newest updated_at wins; ISO-8601 strings compare correctly lexicographically.
+    // A tie keeps the incumbent: pr_status_cache is applied first, so on a tie the
+    // persistent store is retained (not overwritten by the ephemeral row).
+    if (existing && String(existing.updatedAt) >= String(row.updated_at)) return;
+    byRepo.set(repoKey, { status: row.status, updatedAt: row.updated_at, repo });
+  };
+  // Apply persistent store first, then let only-newer filter_state rows override —
+  // except backward off a terminal `merged`, which the fallback may never do.
+  for (const row of statusRows) upsert(row, { authoritative: true });
+  for (const row of filterRows) upsert(row, { authoritative: false });
   return map;
 }
 

@@ -3,7 +3,7 @@
 #
 # Purpose (CTL-1214 / bug #6): make the thoughts system a PROVISIONED, VERIFIED part of a node so a
 # fresh box (or server-side install) gets the right per-org thoughts repos, a clean humanlayer.json
-# (no groundworkapp global fallback, deterministic repoMappings for headless bg agents), and working
+# (a correct global fallback, deterministic repoMappings for headless bg agents), and working
 # bidirectional sync — BEFORE the node is added to the roster (the sync-gate activates at roster>1).
 #
 # DESIGN: thoughts/shared/plans/2026-06-16-cluster-hlt-thoughts-model.md
@@ -14,12 +14,27 @@
 #
 # Usage:
 #   provision-thoughts.sh [--node-user NAME] [--hlt-root DIR] [--config FILE] [--orgs a,b,c]
-#                         [--registry FILE] [--dry-run] [--no-clone] [--verify-only]
+#                         [--registry FILE] [--primary-org ORG] [--primary-profile ALIAS]
+#                         [--dry-run] [--no-clone] [--verify-only]
+#
+# Where each org comes from: a registry project's thoughts org is read from that
+# project's own Layer-1 `.catalyst/config.json` → `catalyst.thoughts.org` (a
+# GitHub owner). It falls back — loudly — to `catalyst.thoughts.profile` (a
+# HumanLayer alias, right only when the names coincide), then to the checkout
+# path's own org segment. There is no hardcoded org catalog.
+#
+# --primary-org declares the global-fallback/defaultProfile org explicitly, so a
+# registry's ORDER never decides it. catalyst-join.sh forwards the join bundle's
+# .thoughtsOrg here.
 #
 # Env overrides (for sandbox testing):
 #   HLT_ROOT          default ${CATALYST_DIR:-$HOME/catalyst}/hlt
 #   HL_CONFIG         default $HOME/.config/humanlayer/humanlayer.json
 #   CATALYST_REGISTRY default $HOME/catalyst/registry.json  (or execution-core/registry.json)
+#   CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG
+#                     default for --primary-org. No hardcoded default — a
+#                     from-scratch standalone invocation with none of --orgs,
+#                     --registry, --primary-org, or this set is a hard error.
 #
 set -uo pipefail
 
@@ -27,21 +42,38 @@ info() { echo "[provision-thoughts] $*"; }
 warn() { echo "[provision-thoughts] WARN: $*" >&2; }
 fail() { echo "[provision-thoughts] ERROR: $*" >&2; }
 
-# ── Canonical org → {profile, thoughts remote} catalog ────────────────────────
-# Standardized on GitHub ORG names (Q-DIRNAME: rightsite-cloud, not groundworkapp).
-# profile name is the HumanLayer profile key; remote is the HTTPS git URL (node auth = gh + HTTPS).
-org_profile() { case "$1" in
-  coalesce-labs)   echo "coalesce-labs" ;;
-  rightsite-cloud) echo "adva" ;;
-  ryanrozich)      echo "ryanrozich" ;;
-  *)               echo "$1" ;;  # default: profile == org
-esac; }
+# ── Org → thoughts remote ─────────────────────────────────────────────────────
+# The thoughts repo is always <org>/thoughts over HTTPS (node auth = gh + HTTPS).
 org_remote() { echo "https://github.com/$1/thoughts.git"; }
 
 # Map a registry repoRoot path → its GitHub org (…github/<org>/<repo>). Empty if unrecognized.
+# This is the org of the CODE checkout, which is only a last-resort guess at the
+# thoughts org — the two legitimately differ (see root_thoughts_org below).
 repo_root_org() { sed -nE 's|.*/github/([^/]+)/[^/]+/?.*|\1|p' <<<"$1" | head -1; }
-# Adva code repo lives under groundworkapp/ locally but its THOUGHTS repo is rightsite-cloud.
-normalize_org() { case "$1" in groundworkapp) echo "rightsite-cloud" ;; *) echo "$1" ;; esac; }
+
+# ── Per-org profile map (parallel arrays — macOS bash 3.2 has no assoc arrays) ─
+# ORGS[i] ↔ ORG_PROFILES[i]. The HumanLayer profile key need NOT equal the org:
+# a project can host its thoughts under github.com/rightsite-cloud while reaching
+# them through the local profile alias `adva`. Both come from the project's own
+# Layer-1 config, never a hardcoded catalog.
+declare -a ORGS=() ORG_PROFILES=()
+org_profile() {
+  local i=0
+  while [[ $i -lt ${#ORGS[@]} ]]; do
+    [[ "${ORGS[$i]}" == "$1" ]] && { echo "${ORG_PROFILES[$i]}"; return 0; }
+    i=$((i + 1))
+  done
+  echo "$1"
+}
+# Append an org (and its profile) if not already present.
+add_org() {
+  local org="$1" prof="${2:-$1}" i=0
+  while [[ $i -lt ${#ORGS[@]} ]]; do
+    [[ "${ORGS[$i]}" == "$org" ]] && return 0
+    i=$((i + 1))
+  done
+  ORGS+=("$org"); ORG_PROFILES+=("$prof")
+}
 
 # ── Defaults / args ───────────────────────────────────────────────────────────
 NODE_USER="${USER:-$(whoami)}"
@@ -50,9 +82,19 @@ HL_CONFIG="${HL_CONFIG:-$HOME/.config/humanlayer/humanlayer.json}"
 REGISTRY="${CATALYST_REGISTRY:-}"
 ORGS_CSV=""
 DRY_RUN=0; NO_CLONE=0; VERIFY_ONLY=0
-PRIMARY_ORG="coalesce-labs"   # global fallback + defaultProfile target (CTL-1246: this clean-config
-                              # invariant — never a groundworkapp global fallback — is locked by
-                              # __tests__/provision-thoughts-invariant.test.sh; keep it coalesce-labs)
+# The global fallback + defaultProfile target. Deliberately NOT hardcoded to any
+# specific org — this script is shared across forks/deployments with different
+# thoughts orgs, and baking one in was the CTL-1214 verify bug in the first place
+# (a stale upstream org default that doesn't exist for a downstream fork).
+# Declared by --primary-org (or this env default); when nothing declares it, it
+# settles on the first derived org.
+PRIMARY_ORG="${CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG:-}"
+# Codex #3080 P1: the HumanLayer profile ALIAS paired with PRIMARY_ORG. The alias need
+# not equal the owner (the documented rightsite-cloud/adva layout), and the bare --orgs
+# CSV carries no profile information at all — so without this the primary is registered
+# with profile == org and a project requesting `adva` by name resolves to a nonexistent
+# profile. Empty means identity (profile == org), the previous behavior.
+PRIMARY_PROFILE=""
 
 while [[ $# -gt 0 ]]; do case "$1" in
   --node-user) NODE_USER="$2"; shift 2 ;;
@@ -60,6 +102,8 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --config)    HL_CONFIG="$2"; shift 2 ;;
   --orgs)      ORGS_CSV="$2"; shift 2 ;;
   --registry)  REGISTRY="$2"; shift 2 ;;
+  --primary-org) PRIMARY_ORG="$2"; shift 2 ;;
+  --primary-profile) PRIMARY_PROFILE="$2"; shift 2 ;;
   --dry-run)   DRY_RUN=1; shift ;;
   --no-clone)  NO_CLONE=1; shift ;;
   --verify-only) VERIFY_ONLY=1; shift ;;
@@ -70,35 +114,113 @@ esac; done
 command -v jq >/dev/null || { fail "jq required"; exit 1; }
 command -v git >/dev/null || { fail "git required"; exit 1; }
 
-# ── Derive the org set ────────────────────────────────────────────────────────
-declare -a ORGS=()
-if [[ -n "$ORGS_CSV" ]]; then
-  IFS=',' read -r -a ORGS <<<"$ORGS_CSV"
-elif [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
-  info "Deriving orgs from registry: $REGISTRY"
+# ── Resolve each registry project's thoughts org / profile / subdir ───────────
+# Parallel arrays, one entry per registry repoRoot we could resolve.
+declare -a ROOT_PATHS=() ROOT_ORGS=() ROOT_PROFILES=() ROOT_SUBS=()
+
+# Resolve one repoRoot from its OWN Layer-1 config — the only place that knows
+# which GitHub org hosts its thoughts repo. Ordered sources, each fallback loud:
+#   1. catalyst.thoughts.org      — authoritative GitHub owner
+#   2. catalyst.thoughts.profile  — a HumanLayer alias; right only when the two
+#                                   names coincide, so WARN and keep going
+#   3. the repoRoot's own /github/<org>/ path segment — the code repo's owner,
+#      which legitimately differs from the thoughts owner; WARN
+# A repoRoot that yields none of the three is skipped (warned), never guessed.
+load_registry_roots() {
+  local root cfg o p d
   while IFS= read -r root; do
     [[ -z "$root" ]] && continue
-    o="$(normalize_org "$(repo_root_org "$root")")"
-    [[ -n "$o" ]] && ORGS+=("$o")
+    cfg="$root/.catalyst/config.json"
+    o=""; p=""; d=""
+    if [[ -f "$cfg" ]]; then
+      o="$(jq -r '.catalyst.thoughts.org // empty' "$cfg" 2>/dev/null)"
+      p="$(jq -r '.catalyst.thoughts.profile // empty' "$cfg" 2>/dev/null)"
+      # The repo's declared thoughts subdir — e.g. catalyst's Layer-1 maps
+      # repoRoot "catalyst" → "catalyst-workspace". Nested under the top-level
+      # "catalyst" object: .catalyst.thoughts.directory.
+      d="$(jq -r '.catalyst.thoughts.directory // empty' "$cfg" 2>/dev/null)"
+    fi
+    if [[ -z "$o" && -n "$p" ]]; then
+      warn "$root: catalyst.thoughts.org is unset — falling back to catalyst.thoughts.profile ('$p') as the GitHub org. profile is a HumanLayer alias and need not equal the owner; set catalyst.thoughts.org in that repo's .catalyst/config.json."
+      o="$p"
+    fi
+    if [[ -z "$o" ]]; then
+      o="$(repo_root_org "$root")"
+      [[ -n "$o" ]] && warn "$root: no catalyst.thoughts.org or .profile — falling back to the checkout's own path org ('$o'). The thoughts owner can differ from the code owner; set catalyst.thoughts.org."
+    fi
+    if [[ -z "$o" ]]; then
+      warn "$root: cannot determine a thoughts org (no Layer-1 thoughts config, unrecognized path) — skipping this project."
+      continue
+    fi
+    ROOT_PATHS+=("$root"); ROOT_ORGS+=("$o"); ROOT_PROFILES+=("${p:-$o}")
+    ROOT_SUBS+=("${d:-$(basename "$root")}")
   done < <(jq -r '(.projects // [])[].repoRoot // empty' "$REGISTRY" 2>/dev/null)
-  # de-dupe — guard the empty-array expansion: under `set -u`, macOS system bash
-  # 3.2 (the default on a fresh box before Homebrew) aborts on "${ORGS[@]}" when
-  # ORGS is empty (e.g. a registry whose repoRoots match no /github/<org>/ path).
-  if ((${#ORGS[@]})); then
-    IFS=$'\n' ORGS=($(printf '%s\n' "${ORGS[@]}" | awk '!seen[$0]++')); unset IFS
+}
+
+# Always resolve the registry when one is readable — even under --orgs, since
+# repoMappings are seeded from it regardless of which orgs get provisioned.
+[[ -n "$REGISTRY" && -f "$REGISTRY" ]] && load_registry_roots
+
+# ── Derive the org set ────────────────────────────────────────────────────────
+if [[ -n "$ORGS_CSV" ]]; then
+  # A bare CSV carries no profile information — profile == org (identity), EXCEPT for
+  # the declared primary, whose alias --primary-profile supplies (Codex #3080 P1).
+  declare -a _csv=()
+  IFS=',' read -r -a _csv <<<"$ORGS_CSV"
+  for o in "${_csv[@]}"; do
+    [[ -n "$o" ]] || continue
+    if [[ -n "$PRIMARY_PROFILE" && ( "$o" == "$PRIMARY_ORG" || -z "$PRIMARY_ORG" ) ]]; then
+      add_org "$o" "$PRIMARY_PROFILE"
+    else
+      add_org "$o"
+    fi
+  done
+elif [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
+  info "Deriving orgs from registry: $REGISTRY"
+  # add_org de-dupes, so no separate dedupe pass. Guard the empty-array
+  # expansion: under `set -u`, macOS system bash 3.2 (the default on a fresh box
+  # before Homebrew) aborts on "${ROOT_ORGS[@]}" when the array is empty.
+  if ((${#ROOT_ORGS[@]})); then
+    i=0
+    while [[ $i -lt ${#ROOT_ORGS[@]} ]]; do
+      add_org "${ROOT_ORGS[$i]}" "${ROOT_PROFILES[$i]}"
+      i=$((i + 1))
+    done
   fi
-else
+elif [[ -n "$PRIMARY_ORG" ]]; then
   warn "no --orgs and no readable --registry; defaulting to primary only ($PRIMARY_ORG)"
-  ORGS=("$PRIMARY_ORG")
+  add_org "$PRIMARY_ORG" "${PRIMARY_PROFILE:-$PRIMARY_ORG}"
+else
+  fail "no org specified — pass --orgs, --registry, --primary-org, or set CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG"
+  exit 1
 fi
-# Ensure the primary org is always present (and ORGS is never empty before the
-# expansions below — bash 3.2 + set -u safety).
+# ORGS may still be empty here (a --registry whose repoRoots resolved to no org
+# at all, and no CSV/override). Fall back to the declared primary if one was
+# given; otherwise this is a genuine "don't know which org" error — do NOT
+# silently guess. (bash 3.2 + set -u safety: the empty-array expansions below
+# are never reached in the failure case.)
 if ((${#ORGS[@]} == 0)); then
-  ORGS=("$PRIMARY_ORG")
-elif [[ " ${ORGS[*]} " != *" $PRIMARY_ORG "* ]]; then
-  ORGS=("$PRIMARY_ORG" "${ORGS[@]}")
+  if [[ -n "$PRIMARY_ORG" ]]; then
+    add_org "$PRIMARY_ORG" "${PRIMARY_PROFILE:-$PRIMARY_ORG}"
+  else
+    fail "registry yielded no recognized org and no --primary-org / CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG is set"
+    exit 1
+  fi
+elif [[ -n "$PRIMARY_ORG" ]]; then
+  # Force-include the declared primary. A no-op when the registry already
+  # resolved it — which is what we want, since that entry carries the project's
+  # real profile alias and this one would only know the identity default (or the one
+  # --primary-profile declared, Codex #3080 P1).
+  add_org "$PRIMARY_ORG" "${PRIMARY_PROFILE:-$PRIMARY_ORG}"
 fi
+# No primary declared: it is whichever org came out first (--orgs order, or
+# registry derivation order). Callers that care must declare one — see
+# catalyst-join.sh, which forwards the seed's bundle .thoughtsOrg.
+PRIMARY_ORG="${PRIMARY_ORG:-${ORGS[0]}}"
 info "Node org set: ${ORGS[*]}"
+# Machine-readable: catalyst-join.sh parses this to locate the primary clone
+# on the provisioner's failure path instead of assuming a hardcoded org name.
+info "Primary org: $PRIMARY_ORG"
 info "HLT root: $HLT_ROOT   config: $HL_CONFIG   user: $NODE_USER"
 [[ "$DRY_RUN" -eq 1 ]] && info "DRY-RUN: will not clone or write config"
 
@@ -123,29 +245,16 @@ write_config() {
   local primary_repo="$HLT_ROOT/$PRIMARY_ORG/thoughts"
   local primary_profile; primary_profile="$(org_profile "$PRIMARY_ORG")"
   # seed repoMappings from registry repoRoots (deterministic — bg agents resolve w/o direnv)
+  # Every field here was resolved once, up front, by load_registry_roots — from
+  # each project's OWN Layer-1 config, not from its checkout path.
   local mappings="{}"
-  if [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
-    while IFS=$'\t' read -r root team; do
-      [[ -z "$root" ]] && continue
-      local o p sub d
-      o="$(normalize_org "$(repo_root_org "$root")")"; p="$(org_profile "$o")"
-      # Default the thoughts subdir name to the repoRoot basename, ALWAYS — must be
-      # set unconditionally before any branch: bash preserves a same-named `local`
-      # across loop iterations, so leaving `sub` unset in the no-config branch would
-      # (a) crash under `set -u` when the first repoRoot lacks a config, and
-      # (b) leak the prior iteration's value to a later config-less repoRoot.
-      sub="$(basename "$root")"
-      # Prefer the repo's declared thoughts subdir when present — e.g. catalyst's
-      # Layer-1 config maps repoRoot "catalyst" → "catalyst-workspace". The key is
-      # nested under the top-level "catalyst" object: .catalyst.thoughts.directory.
-      if [[ -f "$root/.catalyst/config.json" ]]; then
-        d="$(jq -r '.catalyst.thoughts.directory // empty' "$root/.catalyst/config.json" 2>/dev/null)"
-        [[ -n "$d" ]] && sub="$d"
-      fi
-      mappings="$(jq --arg path "$root" --arg repo "$sub" --arg prof "$p" \
-        '. + {($path): {repo:$repo, profile:$prof}}' <<<"$mappings")"
-    done < <(jq -r '(.projects // [])[] | "\(.repoRoot)\t\(.team)"' "$REGISTRY" 2>/dev/null)
-  fi
+  local i=0
+  while [[ $i -lt ${#ROOT_PATHS[@]} ]]; do
+    mappings="$(jq --arg path "${ROOT_PATHS[$i]}" --arg repo "${ROOT_SUBS[$i]}" \
+      --arg prof "${ROOT_PROFILES[$i]}" \
+      '. + {($path): {repo:$repo, profile:$prof}}' <<<"$mappings")"
+    i=$((i + 1))
+  done
 
   local new_thoughts
   new_thoughts="$(jq -n \

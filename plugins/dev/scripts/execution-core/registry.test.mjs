@@ -7,7 +7,15 @@
 // mkdtempSync temp dirs — so they never touch a real ~/catalyst.
 
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -103,6 +111,7 @@ describe("listProjects", () => {
       team: "CTL",
       repoRoot: "/repos/ctl",
       eligibleQuery: { status: "Ready" },
+      identity: { declared: null, matches: null },
     });
   });
 
@@ -157,6 +166,7 @@ describe("getProjectConfig", () => {
       team: "CTL",
       repoRoot: "/repos/ctl",
       eligibleQuery: { status: "Ready" },
+      identity: { declared: null, matches: null },
     });
   });
 
@@ -191,6 +201,14 @@ describe("upsertProjectEntry", () => {
     expect(got).toHaveLength(2);
     expect(got.map((p) => p.team).sort()).toEqual(["ADV", "CTL"]);
     expect(getProjectConfig("CTL").repoRoot).toBe("/repos/ctl");
+  });
+
+  test("does not persist the derived identity observation", () => {
+    upsertProjectEntry({ team: "CTL", repoRoot: "/repos/ctl", eligibleQuery: { status: "Ready" } });
+    upsertProjectEntry({ team: "ADV", repoRoot: "/repos/adv", eligibleQuery: { status: "Todo" } });
+    const stored = JSON.parse(readFileSync(getRegistryPath(), "utf8"));
+    expect(stored.projects).toHaveLength(2);
+    expect(stored.projects.every((project) => !("identity" in project))).toBe(true);
   });
 
   test("replaces an existing team in place — no duplicates (idempotent)", () => {
@@ -311,6 +329,7 @@ describe("CLI (import.meta.main)", () => {
       team: "CTL",
       repoRoot: "/repos/ctl",
       eligibleQuery: { status: "Ready" },
+      identity: { declared: null, matches: null },
     });
   });
 

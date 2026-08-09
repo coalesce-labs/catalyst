@@ -10,7 +10,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test fence-guard-integration.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -284,6 +284,7 @@ describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
   function runTick(hosts) {
     const cacheGets = [];
     const orphanEvents = [];
+    const labels = [];
     const cache = {
       get: (id) => { cacheGets.push(id); return "Implement"; },
       set: () => {},
@@ -295,7 +296,7 @@ describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
       writeStatus: {
         applyTerminalDone: () => ({ applied: true }),
         applyPhaseStatus: () => {},
-        applyLabel: () => ({ applied: true }),
+        applyLabel: (a) => { labels.push(a); return { applied: true }; },
       },
       liveBackgroundCount: () => 0,
       teardownWorktree: () => true,
@@ -303,7 +304,7 @@ describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
       appendOrphanDetectedEvent: (e) => { orphanEvents.push(e); return true; },
       hosts,
     });
-    return { cacheGets, orphanEvents };
+    return { cacheGets, orphanEvents, labels };
   }
 
   test("multi-host + stale fence: probe runs once, then cooldown-skips later ticks", () => {
@@ -323,5 +324,120 @@ describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
     const t2 = runTick(["single-host"]);
     expect(t1.cacheGets).toContain("CTL-Z");
     expect(t2.cacheGets).toContain("CTL-Z");
+  });
+
+  // Regression: a PERMITTED escalation (generation missing → fenceGuard fails open)
+  // armed the SAME `.fence-suppressed` marker that terminalDoneOnce consumes. If
+  // recovery then completed teardown inside the 15-minute window, the scheduler
+  // skipped the Linear Done write and a genuinely-finished pipeline sat non-terminal
+  // until the marker expired. The escalation cooldown now has its own marker; only a
+  // real fence SUPPRESSION arms the one terminalDoneOnce reads.
+  test("permitted escalation arms the escalation-only cooldown, NOT the marker terminalDoneOnce consumes", () => {
+    writeStalled("CTL-Y");
+    const wdir = join(orchDir, "workers", "CTL-Y");
+    const t1 = runTick(["host-A", "host-B"]);
+    // The escalation went through (that is this PR's fail-open intent).
+    expect(t1.labels.filter((l) => l.ticket === "CTL-Y" && l.label === "needs-human").length)
+      .toBeGreaterThan(0);
+    expect(existsSync(join(wdir, ".escalation-probe-cooldown"))).toBe(true);
+    expect(existsSync(join(wdir, ".fence-suppressed"))).toBe(false);
+    // ...and the burn bound the cooldown exists for still holds next tick.
+    const t2 = runTick(["host-A", "host-B"]);
+    expect(t2.cacheGets).not.toContain("CTL-Y");
+  });
+});
+
+// ── CTL-925 sweep-2 cycle escalation is HRW-owner-only ────────────────────────
+//
+// This sweep runs over the RAW `eligible` pool, above the ready-filter that applies
+// HRW ownership. Unstarted eligible tickets have no worker dir and no claim
+// generation, so the escalation site's fail-open lets every host through — and
+// labelOnce's marker is host-local. Without an ownership gate an N-host cluster
+// issues N Linear label writes and N worker.transition events for one cycle member.
+
+import { ownerForTicket } from "./hrw.mjs";
+
+describe("schedulerTick ctl-925 cycle escalation — HRW ownership gate", () => {
+  const ROSTER = ["mini", "mini-2"];
+  // Anchor the fixture to the real HRW math rather than assuming an owner.
+  const RING = ["CTL-901", "CTL-902"];
+  let orchDir;
+  let catalystDir;
+  let prevCatalystDir;
+
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl925-hrw-"));
+    prevCatalystDir = process.env.CATALYST_DIR;
+    catalystDir = mkdtempSync(join(tmpdir(), "ctl925-hrw-cat-"));
+    process.env.CATALYST_DIR = catalystDir;
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+    rmSync(catalystDir, { recursive: true, force: true });
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+  });
+
+  const elig = (identifier, rel, inv) => ({
+    identifier,
+    priority: 2,
+    createdAt: "x",
+    state: { name: "Todo" },
+    relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: rel } }] },
+    inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: inv } }] },
+  });
+  // A 2-node ring: neither member can ever become ready.
+  const ring = () => [elig(RING[0], RING[1], RING[1]), elig(RING[1], RING[0], RING[0])];
+
+  // Run one tick as `hostName`, returning the needs-human tickets it labelled.
+  function runAs(hostName, { hosts = ROSTER, survivors = ROSTER } = {}) {
+    const labels = [];
+    schedulerTick(orchDir, {
+      readEligible: ring,
+      dispatch: () => ({ code: 0, stdout: "" }),
+      writeStatus: {
+        applyTerminalDone: () => ({ applied: true }),
+        applyPhaseStatus: () => ({ applied: true }),
+        applyLabel: (a) => { labels.push(a); return { applied: true }; },
+        removeLabel: () => ({ removed: true }),
+        applyBlockedByRelation: () => ({ applied: true }),
+      },
+      liveBackgroundCount: () => 0,
+      teardownWorktree: () => true,
+      hosts,
+      hostName,
+      dispatchSurvivingRoster: survivors,
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      now: () => 1_000,
+    });
+    return labels.filter((l) => l.label === "needs-human").map((l) => l.ticket);
+  }
+
+  test("each cycle member is escalated by exactly ONE host — its HRW owner", () => {
+    for (const member of RING) {
+      const owner = ownerForTicket(member, ROSTER);
+      expect(ROSTER).toContain(owner);
+      const peer = ROSTER.find((h) => h !== owner);
+      // Each host gets its own orchDir state: labelOnce markers are host-local, so
+      // a shared dir would let the first run's marker mask the second run's write.
+      rmSync(join(orchDir, "workers"), { recursive: true, force: true });
+      expect(runAs(owner)).toContain(member);
+      rmSync(join(orchDir, "workers"), { recursive: true, force: true });
+      expect(runAs(peer)).not.toContain(member);
+    }
+  });
+
+  test("single-host is a strict no-op — the lone host still escalates every member", () => {
+    expect(runAs("mini", { hosts: ["mini"], survivors: ["mini"] }).sort()).toEqual([...RING].sort());
+  });
+
+  test("an OFFLINE owner's cycle member fails over to the surviving host", () => {
+    const member = RING[0];
+    const owner = ownerForTicket(member, ROSTER);
+    const survivor = ROSTER.find((h) => h !== owner);
+    // Owner shed from the dispatch roster → HRW re-homes to the survivor, which must
+    // pick the escalation up rather than letting it strand.
+    expect(ownerForTicket(member, [survivor])).toBe(survivor);
+    expect(runAs(survivor, { survivors: [survivor] })).toContain(member);
   });
 });
