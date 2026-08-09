@@ -47,6 +47,7 @@ import {
   CLUSTER_SYNC_INTERVAL_MS,
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
+  readProductivityBoardHealthConfig,
   readCoordinationConfig,
   getCoordinationMirrorPath,
   readSanctionedNeedsHuman,
@@ -1440,6 +1441,70 @@ describe("readBoardHealthConfig (CTL-1290)", () => {
   test("accepts an injected env bag (env param overrides process.env)", () => {
     process.env.CATALYST_BOARD_HEALTH = "shadow";
     expect(readBoardHealthConfig({ CATALYST_BOARD_HEALTH: "0" }).mode).toBe("off");
+  });
+});
+
+describe("readProductivityBoardHealthConfig (CAT-57)", () => {
+  const PRODUCTIVITY_ENVS = ["CATALYST_BH_PRODUCTIVITY", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of PRODUCTIVITY_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "cat57-bh-productivity-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of PRODUCTIVITY_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("defaults to shadow when absent or invalid", () => {
+    expect(readProductivityBoardHealthConfig().mode).toBe("shadow");
+    process.env.CATALYST_BH_PRODUCTIVITY = "garbage";
+    expect(readProductivityBoardHealthConfig().mode).toBe("shadow");
+  });
+
+  test("honors off, shadow, and enforce from the environment", () => {
+    for (const mode of ["off", "shadow", "enforce"]) {
+      process.env.CATALYST_BH_PRODUCTIVITY = mode;
+      expect(readProductivityBoardHealthConfig().mode).toBe(mode);
+    }
+  });
+
+  test("reads Layer-2 when env is unset and env wins when set", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { productivity: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readProductivityBoardHealthConfig().mode).toBe("off");
+    process.env.CATALYST_BH_PRODUCTIVITY = "enforce";
+    expect(readProductivityBoardHealthConfig().mode).toBe("enforce");
+  });
+
+  test("invalid Layer-2 falls back to shadow", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { productivity: "garbage" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readProductivityBoardHealthConfig().mode).toBe("shadow");
+  });
+
+  // CAT-57 (Codex P2): the documented contract is "Garbage values fall back to
+  // `shadow`. Overrides Layer-2." Falling through to Layer-2 on a typo meant an
+  // operator reaching for the env var to REDUCE actuation silently left Layer-2
+  // `enforce` live — the wrong failure direction for a shadow-first knob.
+  test("a SET-but-invalid env value falls back to shadow AND overrides Layer-2 enforce", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { productivity: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    // Baseline: with no env var, Layer-2 enforce is honored.
+    expect(readProductivityBoardHealthConfig().mode).toBe("enforce");
+    for (const typo of ["enfore", "shadwo", "ENFORCE ", "1", "true"]) {
+      process.env.CATALYST_BH_PRODUCTIVITY = typo;
+      expect(readProductivityBoardHealthConfig().mode).toBe("shadow");
+    }
+    // An UNSET or empty/whitespace var still defers to Layer-2 (not an override).
+    for (const empty of ["", "   "]) {
+      process.env.CATALYST_BH_PRODUCTIVITY = empty;
+      expect(readProductivityBoardHealthConfig().mode).toBe("enforce");
+    }
   });
 });
 

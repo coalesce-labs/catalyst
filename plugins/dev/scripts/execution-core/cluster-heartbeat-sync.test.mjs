@@ -13,6 +13,18 @@ import {
 } from "./cluster-heartbeat-sync.mjs";
 
 describe("publishHeartbeatSync — argv + fail-open contract", () => {
+  test("appends last advance as a named flag without shifting existing positionals", () => {
+    const calls = [];
+    const spawn = (_bin, args) => {
+      calls.push(args);
+      return { status: 0, stdout: '{}\n' };
+    };
+    const opts = { spawn, nodeBin: "node", cli: "heartbeat.mjs", resolveIssueId: () => "uuid" };
+    publishHeartbeatSync({ anchorIssue: "CAT-1", host: "mini", inFlightTickets: [] }, opts);
+    publishHeartbeatSync({ anchorIssue: "CAT-1", host: "mini", inFlightTickets: [], lastAdvanceAt: "2026-08-09T02:00:00Z" }, opts);
+    expect(calls[0]).toEqual(["heartbeat.mjs", "publish", "CAT-1", "mini", "", "", "uuid"]);
+    expect(calls[1]).toEqual([...calls[0], "--last-advance-at=2026-08-09T02:00:00Z"]);
+  });
   test("returns ok:true and forwards anchor/host/tickets to the CLI", () => {
     let captured;
     const spawn = (bin, args) => {

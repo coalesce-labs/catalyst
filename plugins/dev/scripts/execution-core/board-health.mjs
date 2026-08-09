@@ -33,7 +33,7 @@
 // kill-switch; enforce (CTL-1300) dispatches ONE holistic recovery-pass delegate
 // per proceeding scan, anchored + carrying the whole-board context — operator-gated.
 
-import { isThrottled } from "./config.mjs";
+import { HEARTBEAT_GRACE_MS, isThrottled } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
 
@@ -79,6 +79,9 @@ export const DEFAULT_THRESHOLDS = {
   // Same 24h default as unownedInFlightMs — both share the "weeks is too long,
   // 24h is already past any legitimate inter-phase gap" rationale.
   strandedMidPipelineMs: Number(process.env.CATALYST_BH_STRANDED_MS) || 24 * 3_600_000,
+  // CAT-57: 24h is already past any legitimate inter-phase gap while staying
+  // well inside "a human would call this stuck".
+  unproductiveNodeMs: Number(process.env.CATALYST_BH_UNPRODUCTIVE_MS) || 24 * 3_600_000,
   // CTL-1608: stalled-PR staleness thresholds (review-latency / CI-health /
   // no-push), independent of worker liveness. Conservative defaults — longer
   // than orphanedPrAgeMs (48h) to avoid false positives on normal review cadence.
@@ -270,6 +273,53 @@ function dedupeFlagged(invariants) {
   return [...seen];
 }
 
+// makeOwnsFilter — the ONE HRW self-ownership predicate. Recovery ownership
+// defaults to the raw roster so an unavailable peer's slice can only fail over
+// through the explicit holistic + stranded/dead-host gate. Dispatch callers opt
+// into the live dispatch roster. N=1/unbound owns everything; failures open.
+export function makeOwnsFilter(board, { scope = "raw" } = {}) {
+  const multiHost = !!(board?.multiHost && typeof board?.ownerForTicket === "function");
+  const roster = scope === "dispatch"
+    ? (board?.dispatchRoster ?? board?.roster ?? [])
+    : (board?.roster ?? []);
+  return (ticket) => {
+    if (!multiHost) return true;
+    try { return board.ownerForTicket(ticket, roster) === board.self; }
+    catch { return true; }
+  };
+}
+
+// HRW share tally for new CAT-57 consumers. checkStrandedNode deliberately keeps
+// its existing inline implementation to avoid colliding with CAT-23.
+function ownedTicketsByHost(board) {
+  if (typeof board?.ownerForTicket !== "function") return null;
+  const out = new Map();
+  try {
+    for (const [id, d] of board.ticketsById ?? []) {
+      // CAT-57 (Codex P2): skip TERMINAL descriptors. The production board snapshot
+      // drops removed rows but RETAINS Done/Canceled tickets, so a peer whose whole
+      // HRW share has already shipped still read as "owns work" — and once its last
+      // advance aged past the threshold it was reported unproductive with nothing
+      // left to advance. Productivity is about dispatchable work, so terminal
+      // tickets are not part of the share. BLOCKER_DONE_RE (not TERMINAL_STATUSES)
+      // is the right matcher here: these are Linear STATE names, and it is the one
+      // that covers cancelled/duplicate as well as done/complete/merged.
+      const state = d?.state ?? d?.linear_state ?? null;
+      if (state && BLOCKER_DONE_RE.test(String(state))) continue;
+      // Productivity describes each peer's dispatchable share, so use the same
+      // liveness-filtered roster that dispatch admission uses.
+      const host = board.ownerForTicket(id, board.dispatchRoster ?? board.roster);
+      if (!host) continue;
+      const ids = out.get(host) ?? [];
+      ids.push(id);
+      out.set(host, ids);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 // extractBlockers — pull blocked_by target ids out of a descriptor's relations,
 // tolerating the several shapes the cache/broker emit (array of relation
 // objects, or a flat {blockedBy:[...]}). Returns [] on anything unparseable —
@@ -317,7 +367,7 @@ export function deriveNearCliff(payload) {
   return values.length > 0 && Math.max(...values) >= NEAR_CLIFF_PCT;
 }
 
-export function deriveRing(events, nowMs) {
+export function deriveRing(events, nowMs, self) {
   const ring = {
     recentDispatchTs: null,
     cacheReconcile: null,
@@ -335,7 +385,9 @@ export function deriveRing(events, nowMs) {
     // breaker, runaway alert); counting them here would green the invariant exactly
     // when dispatch is broken. requested|launched = the scheduler actually acting.
     if (/\.dispatch\.(requested|launched)(\.|$)|worker[.-]create|new-work/i.test(name)) {
-      if (Number.isFinite(tsMs)) ring.recentDispatchTs = Math.max(ring.recentDispatchTs ?? 0, tsMs);
+      const evHost = ev?.resource?.["host.name"] ?? ev?.body?.payload?.["host.name"] ?? null;
+      const isOurs = !self || !evHost || evHost === self;
+      if (isOurs && Number.isFinite(tsMs)) ring.recentDispatchTs = Math.max(ring.recentDispatchTs ?? 0, tsMs);
     } else if (/cache\.reconcile/i.test(name)) {
       ring.cacheReconcile = {
         changed: payload.changed ?? payload.corrected ?? 0,
@@ -410,12 +462,22 @@ export function resolveNotLiveHosts(notLiveHosts) {
   }
 }
 
+export function resolveRosterSeam(value, fallback) {
+  try {
+    const resolved = typeof value === "function" ? value() : value;
+    return Array.isArray(resolved) ? resolved : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function assembleBoardState({
   orchDir,
   getBoard = () => [],
   getWorkerSignals = () => [],
   getEligible = () => [],
   roster = [],
+  getDispatchRoster = null,
   // CTL-1157 (MUST-FIX 1): the provably-dead host set — hosts whose heartbeat is
   // stale past the grace window. The daemon computes it from computeSurvivingRoster
   // (scheduler.mjs); empty default keeps the holistic foreign-failover unreachable
@@ -480,6 +542,8 @@ export function assembleBoardState({
   // shadow (the default) reads and publishes but cannot actuate.
   getGithubQuota = () => null,
   githubQuotaMode = process.env.CATALYST_BH_GH_QUOTA || "shadow",
+  getPeerProductivity = () => null,
+  productivityMode = process.env.CATALYST_BH_PRODUCTIVITY || "shadow",
   now = () => Date.now(),
   // CTL-1649: does a triage.json artifact exist for a given ticket? Injected so
   // board-health.mjs stays fs-free (no fs import). Default () => true is
@@ -569,11 +633,13 @@ export function assembleBoardState({
     }
   }
 
+  const rosterArr = Array.isArray(roster) ? roster : [];
   return Object.freeze({
     ticketsById,
     signals,
     eligible,
-    roster: Array.isArray(roster) ? roster : [],
+    roster: rosterArr,
+    dispatchRoster: resolveRosterSeam(getDispatchRoster, rosterArr),
     // CTL-1524 (C4b): resolve here too, so a direct assembleBoardState caller may
     // also pass a thunk. Already-resolved arrays pass through untouched.
     deadHosts: resolveDeadHosts(deadHosts),
@@ -607,15 +673,11 @@ export function assembleBoardState({
     // CTL-1608 off-gate: in off the stalled-PR state read must NOT run — skip
     // getStalledPrState() so off stays byte-identical to origin/main.
     stalledPrMap: mode === "off" ? new Map() : safe(() => getStalledPrState(), new Map()),
-    githubQuota:
-      mode === "off" || githubQuotaMode === "off" ? null : safe(() => getGithubQuota(), null),
-    githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode)
-      ? githubQuotaMode
-      : "shadow",
-    ring: deriveRing(
-      safe(() => readEventRing({ orchDir }), []),
-      nowMs
-    ),
+    githubQuota: mode === "off" || githubQuotaMode === "off" ? null : safe(() => getGithubQuota(), null),
+    githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode) ? githubQuotaMode : "shadow",
+    productivityMode: ["off", "shadow", "enforce"].includes(productivityMode) ? productivityMode : "shadow",
+    peerProductivity: mode === "off" || productivityMode === "off" ? null : safe(() => getPeerProductivity(), null),
+    ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs, self ?? ""),
     ownerForTicket: typeof ownerForTicket === "function" ? ownerForTicket : null,
     // CTL-1157 (Codex #4): the ticket→owner/repo resolver for the composite
     // (repo, number) PR-status lookup. Null when unbound (number-only fallback).
@@ -689,6 +751,7 @@ export function evaluateInvariants(
       // condition that makes every Claude-lane re-dispatch futile until reset.
       // Cohort-gated like its siblings so the off set stays byte-identical.
       accountUsageHeadroom: () => checkAccountUsageHeadroom(boardState),
+      nodeProductivity: () => checkNodeProductivity(boardState, thresholds),
     });
   }
   const out = {};
@@ -724,9 +787,14 @@ function checkCacheCoherence(b) {
 // + ~no recent dispatch. The single most important silent wedge.
 function checkDispatchLiveness(b, t) {
   const free = b.capacity.freeSlots;
-  const queued = b.eligible.length;
+  const owns = makeOwnsFilter(b, { scope: "dispatch" });
+  const ownedEligible = b.eligible.filter((e) => owns(e.id));
+  const queuedTotal = b.eligible.length;
+  const queued = ownedEligible.length;
+  const extra = { queuedTotal, queuedOwned: queued };
   if (free <= 0 || queued <= 0) {
-    return invariant(true, 0, true, [], `no wedge (free=${free}, queued=${queued})`);
+    return invariant(true, 0, true, [],
+      `no wedge (free=${free}, ${queued} owned of ${queuedTotal} queued)`, extra);
   }
   const last = b.ring?.recentDispatchTs ?? null;
   const staleMs = last == null ? null : b.now - last;
@@ -735,15 +803,11 @@ function checkDispatchLiveness(b, t) {
     !wedged,
     wedged ? 1 : 0,
     true,
+    wedged ? ownedEligible.slice(0, 5).map((e) => e.id).filter(Boolean) : [],
     wedged
-      ? b.eligible
-          .slice(0, 5)
-          .map((e) => e.id)
-          .filter(Boolean)
-      : [],
-    wedged
-      ? `${free} free slot(s) + ${queued} queued + ${last == null ? "no recent dispatch seen" : `${Math.round(staleMs / 60_000)}m since dispatch`} → wedge`
-      : "dispatch live"
+      ? `${free} free slot(s) + ${queued} owned queued (of ${queuedTotal}) + ${last == null ? "no recent dispatch seen" : `${Math.round(staleMs / 60_000)}m since dispatch`} → wedge`
+      : "dispatch live",
+    extra,
   );
 }
 
@@ -951,6 +1015,63 @@ function checkStrandedNode(b) {
       : "all rostered nodes participating",
     { reconcileFailingTeams },
   );
+}
+
+// #16 — node productivity (CAT-57). A rostered peer that is LIVE and OWNS work
+// but has advanced nothing past a phase boundary within the window. This is
+// distinct from checkStrandedNode's liveness verdict. Missing advance data is
+// unknown, never stranded. Escalate-only: it reports but never anchors a delegate.
+function checkNodeProductivity(b, t) {
+  const mode = b?.productivityMode ?? "shadow";
+  const roster = Array.isArray(b?.roster) ? b.roster : [];
+  const peerProductivity = b?.peerProductivity;
+  const productivityEmpty = peerProductivity instanceof Map
+    ? peerProductivity.size === 0
+    : peerProductivity != null && typeof peerProductivity === "object"
+      ? Object.keys(peerProductivity).length === 0
+      : false;
+  if (roster.length <= 1 || typeof b?.ownerForTicket !== "function" || peerProductivity == null || productivityEmpty) {
+    return invariant(true, 0, false, [], "peer productivity unavailable → not observable");
+  }
+  const owned = ownedTicketsByHost(b);
+  if (!owned) return invariant(true, 0, false, [], "HRW share unavailable → not observable");
+  const flagged = [];
+  const details = {};
+  const recordFor = (host) => b.peerProductivity instanceof Map
+    ? b.peerProductivity.get(host)
+    : b.peerProductivity?.[host];
+  for (const host of roster) {
+    if (!host || host === b.self) continue;
+    const ownedTickets = owned.get(host) ?? [];
+    if (ownedTickets.length === 0) continue;
+    const record = recordFor(host);
+    if (!record) continue;
+    const seenMs = tsMillis(record.last_seen ?? record.lastSeen ?? null);
+    if (!Number.isFinite(seenMs) || b.now - seenMs > HEARTBEAT_GRACE_MS) continue;
+    const advanceRaw = record.last_advance_at ?? record.lastAdvanceAt ?? null;
+    if (advanceRaw == null) continue;
+    const advanceMs = tsMillis(advanceRaw);
+    if (!Number.isFinite(advanceMs)) continue;
+    const ageMs = b.now - advanceMs;
+    if (ageMs > t.unproductiveNodeMs) {
+      flagged.push(host);
+      details[host] = { lastAdvanceAt: new Date(advanceMs).toISOString(), ageMs, ownedTickets };
+    }
+  }
+  const note = flagged.length
+    ? `${flagged.length} live owning node(s) have not advanced work past a phase boundary`
+    : "all known live owning peers are productive";
+  // CAT-57 (Codex P1): shadow must still REPORT what it detected. Passing [] here
+  // erased the populated `flagged` set, and both telemetry sinks derive from it —
+  // buildBoardScanEvent's unproductiveNodeCount (flagged.length) and
+  // buildBoardContext's unproductiveNodes (flagged.map(...)) — so a shadow scan that
+  // found unproductive peers emitted 0/empty, indistinguishable from a healthy scan.
+  // That defeats the shadow-first observation period this invariant ships behind.
+  // Carrying `flagged` stays non-actuating: proposeMoves gates the tier-3
+  // escalate-unproductive-node on `!invariants.nodeProductivity.ok`, and ok stays
+  // true here (observable:false likewise keeps Gate 3 from reading it).
+  if (mode !== "enforce") return invariant(true, 0, false, flagged, `${mode}: ${note}`, { unproductive: details });
+  return invariant(flagged.length === 0, flagged.length, true, flagged, note, { unproductive: details });
 }
 
 // CTL-1435 (C2): the skippedReason values that mean "the delegate proceeded with
@@ -1605,15 +1726,7 @@ function eligibleDeferredAnchors(board) {
   // CTL-1432 (Codex P2): HRW-ownership filter, mirroring selectAnchorCandidates — a
   // foreign-owned deferred marker must not make the gate proceed (this host would then
   // no-anchor it). N=1 / no roster / no ownerForTicket ⇒ owns everything ⇒ unchanged.
-  const multiHost = !!(board?.multiHost && typeof board?.ownerForTicket === "function");
-  const owns = (t) => {
-    if (!multiHost) return true;
-    try {
-      return board.ownerForTicket(t, board.roster) === board.self;
-    } catch {
-      return true; // fail-open: a broken HRW read must not block self-owned actuation
-    }
-  };
+  const owns = makeOwnsFilter(board);
   return (board?.deferredBoardHealth ?? []).filter((t) => {
     if (sanctioned.has(t)) return false;
     if (!owns(t)) return false;
@@ -1841,6 +1954,13 @@ export function proposeMoves(invariants, _b) {
   for (const h of invariants.strandedNode?.flagged ?? []) {
     if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but is not live" });
   }
+  for (const h of invariants.nodeProductivity?.flagged ?? []) {
+    if (!invariants.nodeProductivity.ok) tier3.push({
+      host: h,
+      move: "escalate-unproductive-node",
+      rationale: "rostered node owns work and is live but has advanced nothing past a phase boundary",
+    });
+  }
   for (const p of invariants.projectSilence?.flagged ?? []) {
     if (!invariants.projectSilence.ok)
       tier3.push({
@@ -1890,15 +2010,8 @@ export function selectAnchorCandidates(
   { holistic = false, strandedOrDeadHosts = new Set() } = {}
 ) {
   const multiHost = !!(board && board.multiHost && typeof board.ownerForTicket === "function");
-  const owns = (ticket) => {
-    if (!ticket) return false;
-    if (!multiHost) return true;
-    try {
-      return board.ownerForTicket(ticket, board.roster) === board.self;
-    } catch {
-      return true; // fail-open: a broken HRW read must not block self-owned actuation
-    }
-  };
+  const baseOwns = makeOwnsFilter(board);
+  const owns = (ticket) => !!ticket && baseOwns(ticket);
   // CTL-1649: tickets whose ONLY non-clean signal is a triage launch failure are
   // excluded from anchor candidates — the monitor's triage retry path owns that
   // worktree and must not be raced by a holistic recovery-pass.
@@ -2053,6 +2166,8 @@ export function buildUnownedInFlightDetail(boardState, invariants, { thresholds 
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
   const githubQuota = quotaForPublication(boardState);
+  const owns = makeOwnsFilter(boardState, { scope: "dispatch" });
+  const ownedEligible = boardState.eligible.filter((e) => owns(e.id));
   // CTL-1157: the stuck-worker set is the UNION of the age-flagged workers and the
   // status-based needs-human pile (Workstream B), deduped by ticket.
   const stuckTickets = [
@@ -2075,7 +2190,7 @@ export function buildBoardContext(boardState, invariants) {
     ? boardState.unownedInFlightDetail
     : buildUnownedInFlightDetail(boardState, invariants);
   return {
-    // CTL-1608: v3 adds the stalled-PR cohort (additive; readers default each
+    // CAT-57: v4 adds owned queue/productivity fields; readers remain additive.
     // field to []). The skill reads them defensively, never gates on the schema.
     schema: "recovery-board-context/v4",
     snapshotAt: new Date(boardState.now).toISOString(),
@@ -2087,10 +2202,9 @@ export function buildBoardContext(boardState, invariants) {
     },
     eligibleQueue: {
       depth: boardState.eligible.length,
-      topTickets: boardState.eligible
-        .slice(0, 5)
-        .map((e) => e.id)
-        .filter(Boolean),
+      topTickets: boardState.eligible.slice(0, 5).map((e) => e.id).filter(Boolean),
+      ownedDepth: ownedEligible.length,
+      ownedTopTickets: ownedEligible.slice(0, 5).map((e) => e.id).filter(Boolean),
     },
     stuckWorkers,
     // CTL-1157 v2: the three stuck cohorts, surfaced additively so the delegate
@@ -2130,6 +2244,12 @@ export function buildBoardContext(boardState, invariants) {
           })
         : [],
     })),
+    unproductiveNodes: (invariants.nodeProductivity?.flagged ?? []).map((host) => ({
+      host,
+      lastAdvanceAt: invariants.nodeProductivity?.unproductive?.[host]?.lastAdvanceAt ?? null,
+      ageMs: invariants.nodeProductivity?.unproductive?.[host]?.ageMs ?? null,
+      ownedTickets: invariants.nodeProductivity?.unproductive?.[host]?.ownedTickets ?? [],
+    })),
     invariants: Object.fromEntries(
       Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed }])
     ),
@@ -2141,6 +2261,7 @@ export function buildBoardContext(boardState, invariants) {
 // chartable attributes); rosters/move arrays stay in details → body.payload.
 export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const githubQuota = quotaForPublication(board);
+  const owns = board == null ? null : makeOwnsFilter(board, { scope: "dispatch" });
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
   // proposedMoves but never whether anything was dispatched — the blind spot behind
@@ -2218,6 +2339,8 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       slotCapacity: _slotCap,
       slotInUse,
       slotFree,
+      eligibleOwnedDepth: board == null ? null : board.eligible.filter((e) => owns(e.id)).length,
+      unproductiveNodeCount: invariants.nodeProductivity?.flagged?.length ?? 0,
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
       invariants: Object.fromEntries(
@@ -2256,6 +2379,7 @@ export function boardHealthPass({
   getWorkerSignals,
   getEligible,
   roster,
+  getDispatchRoster,
   self,
   multiHost,
   capacity,
@@ -2285,6 +2409,8 @@ export function boardHealthPass({
   unownedPrVerifyCursor = 0,
   monotonicNowMs,
   repoRootForTicket,
+  getPeerProductivity,
+  productivityMode,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   getNotLiveHosts,
   lastRunMs = _lastRunMs,
@@ -2305,7 +2431,7 @@ export function boardHealthPass({
 
   const _rawBoard = assembleBoardState({
     orchDir, getBoard, getWorkerSignals, getEligible,
-    roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, repoRootForTicket, getReconcileMarkers,
+    roster, getDispatchRoster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, repoRootForTicket, getReconcileMarkers,
     // CTL-1524 (C4b): resolved HERE — past the `off` branch and past the throttle —
     // so the expensive whole-log heartbeat read behind the daemon's thunk is paid
     // only on a tick that actually proceeds, not on all ~59 throttled ticks between
@@ -2323,6 +2449,8 @@ export function boardHealthPass({
     unownedPrVerifyCursor,
     ...(monotonicNowMs !== undefined ? { monotonicNowMs } : {}),
     repoRootForTicket,
+    getPeerProductivity,
+    productivityMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
     ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
   });

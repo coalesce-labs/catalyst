@@ -75,6 +75,9 @@ import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-heal
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
+// CAT-57: same advance computation the Linear-anchor liveness publisher uses, so the
+// Loki and Linear transports agree on what counts as a phase-boundary advance.
+import { computeLastPhaseAdvanceTs, readAllPhaseSignals } from "./signal-reader.mjs";
 import { readAdmissionState } from "./admission-state.mjs"; // CTL-1322: live admission block for the heartbeat
 import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets, localActiveTickets } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list; CTL-1581: active (slot-occupancy) list
 import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
@@ -1465,6 +1468,18 @@ export function startDaemon({
         // result → attribute omitted.
         maxParallelFn: () =>
           readMaxParallel(orchDir, resolveBootConcurrency({ layer1Path: configPath, layer2Path })),
+        // CAT-57 (Codex round 2, P1): carry this host's last phase-boundary advance on
+        // node.heartbeat so board-health's nodeProductivity invariant is observable via
+        // Loki. Uses the SAME computation the Linear-anchor publisher uses
+        // (cluster-heartbeat-publisher.mjs), so the two transports cannot disagree about
+        // what counts as an advance. Fail-open: a throw/invalid value omits the attribute.
+        lastAdvanceAtFn: () => {
+          try {
+            return computeLastPhaseAdvanceTs(readAllPhaseSignals(orchDir), { self: getHostName() });
+          } catch {
+            return null;
+          }
+        },
       });
       // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
       // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.

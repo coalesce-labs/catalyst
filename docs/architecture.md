@@ -109,6 +109,15 @@ reflects live dispatch ownership. Board health's `strandedNode` invariant is liv
 Team-level reconcile failures remain visible as context but never authorize takeover of another
 host's work.
 
+**Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
+scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
+Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and
+owned depths in its scan context; dispatch-recency evidence is also host-scoped, fail-open for
+legacy events without host attribution. The separate `nodeProductivity` invariant reports a live
+peer that owns work but has not crossed a phase boundary within the configured window. It defaults
+to `shadow` and proposes only an escalate-only tier-3 move, so it cannot dispatch a recovery
+delegate.
+
 **Worker signal projection (CTL-532 = ADR-018 Phase 3, shipped; Phase 1 retired, CTL-1628).**
 Per-worker `workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process
 locking; ADR-018 originally proposed closing that gap via a `worker.state_changed` command event and

@@ -12,6 +12,7 @@ import {
   byActivePhase,
   countSdkInflight,
   hasFreshClaim,
+  computeLastPhaseAdvanceTs,
 } from "./signal-reader.mjs";
 
 let orchDir;
@@ -55,6 +56,25 @@ function byTicket(signals) {
   for (const s of signals) m.set(s.ticket, s);
   return m;
 }
+
+describe("computeLastPhaseAdvanceTs", () => {
+  const now = Date.parse("2026-08-09T03:00:00Z");
+  test("returns the newest self-attributed terminal completion, preferring completedAt", () => {
+    const signals = [
+      { status: "complete", completedAt: "2026-08-09T01:00:00Z", updatedAt: "2026-08-09T02:30:00Z", raw: { host: { name: "mini" } } },
+      { status: "failed", updatedAt: "2026-08-09T02:00:00Z", raw: {} },
+      { status: "running", updatedAt: "2026-08-09T02:50:00Z", raw: { host: { name: "mini" } } },
+      { status: "done", updatedAt: "2026-08-09T02:40:00Z", raw: { host: { name: "peer" } } },
+    ];
+    expect(computeLastPhaseAdvanceTs(signals, { self: "mini", now })).toBe("2026-08-09T02:00:00.000Z");
+  });
+
+  test("returns null for garbage, malformed records, and future timestamps without throwing", () => {
+    expect(computeLastPhaseAdvanceTs(null, { self: "mini", now })).toBeNull();
+    expect(computeLastPhaseAdvanceTs([null, 3, { status: "complete", updatedAt: "bad" }], { self: "mini", now })).toBeNull();
+    expect(computeLastPhaseAdvanceTs([{ status: "complete", updatedAt: "2026-08-09T04:00:00Z" }], { self: "mini", now })).toBeNull();
+  });
+});
 
 // --- tests ----------------------------------------------------------------
 
@@ -384,6 +404,17 @@ describe("yield-tombstone exclusion (CTL-702)", () => {
 // the active one). The belief rules join obs_signal(T, P, …) per phase, so the
 // fact collector needs to observe superseded/terminal sibling phases.
 describe("readAllPhaseSignals (CTL-934)", () => {
+  test("feeds phase advances from terminal siblings while the active phase is running", () => {
+    writeNested("T-ACTIVE", "research", { status: "done", updatedAt: "2026-08-09T02:55:00Z" });
+    writeNested("T-ACTIVE", "implement", { status: "running", updatedAt: "2026-08-09T02:59:00Z" });
+    writeNested("T-STALE", "triage", { status: "stalled", updatedAt: "2026-08-06T03:00:00Z" });
+    const now = Date.parse("2026-08-09T03:00:00Z");
+    expect(computeLastPhaseAdvanceTs(readWorkerSignals(orchDir), { self: "mini", now }))
+      .toBe("2026-08-06T03:00:00.000Z");
+    expect(computeLastPhaseAdvanceTs(readAllPhaseSignals(orchDir), { self: "mini", now }))
+      .toBe("2026-08-09T02:55:00.000Z");
+  });
+
   test("returns EVERY nested phase signal for a ticket, not just the active one", () => {
     writeNested("CTL-50", "research", {
       bg_job_id: "aaa1",

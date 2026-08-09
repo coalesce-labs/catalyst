@@ -99,6 +99,43 @@ describe("buildHeartbeatEnvelope (CTL-859)", () => {
     const noFn = buildHeartbeatEnvelope();
     expect("catalyst.node.max_parallel" in noFn.attributes).toBe(false);
   });
+
+  // ── CAT-57: last_advance_at as a Loki-reachable productivity signal ──
+  test("carries catalyst.node.last_advance_at when lastAdvanceAtFn supplies an ISO ts", () => {
+    const ts = "2026-08-09T04:00:00Z";
+    const env = buildHeartbeatEnvelope({ lastAdvanceAtFn: () => ts });
+    expect(env.attributes["catalyst.node.last_advance_at"]).toBe(ts);
+  });
+
+  test("omits catalyst.node.last_advance_at when unknown — absent must read as unknown, never 'advanced just now'", () => {
+    for (const bad of [null, undefined, "", "not-a-date", 0, 1786248000000, {}, NaN]) {
+      const env = buildHeartbeatEnvelope({ lastAdvanceAtFn: () => bad });
+      expect("catalyst.node.last_advance_at" in env.attributes).toBe(false);
+    }
+    // A THROWING seam must not take the whole heartbeat down with it.
+    const threw = buildHeartbeatEnvelope({ lastAdvanceAtFn: () => { throw new Error("signal scan failed"); } });
+    expect("catalyst.node.last_advance_at" in threw.attributes).toBe(false);
+    expect(threw.attributes["event.name"]).toBeTruthy();
+    // No seam supplied at all (every non-daemon caller) → attribute absent.
+    expect("catalyst.node.last_advance_at" in buildHeartbeatEnvelope().attributes).toBe(false);
+  });
+
+  test("carries honest board reachability as top-level attributes", () => {
+    const healthy = buildHeartbeatEnvelope({ boardReachableFn: () => ({ reachable: true, blindTeams: 0 }) });
+    expect(healthy.attributes["catalyst.node.board_reachable"]).toBe(true);
+    expect(healthy.attributes["catalyst.node.blind_teams"]).toBe(0);
+    expect(healthy.body.payload["catalyst.node.board_reachable"]).toBeUndefined();
+    const blind = buildHeartbeatEnvelope({ boardReachableFn: () => ({ reachable: false, blindTeams: 15 }) });
+    expect(blind.attributes["catalyst.node.board_reachable"]).toBe(false);
+    expect(blind.attributes["catalyst.node.blind_teams"]).toBe(15);
+  });
+
+  test("board reachability fails safe and is absent for legacy callers", () => {
+    const failed = buildHeartbeatEnvelope({ boardReachableFn: () => { throw new Error("probe"); } });
+    expect(failed.attributes["catalyst.node.board_reachable"]).toBe(true);
+    expect(failed.attributes["catalyst.node.blind_teams"]).toBe(0);
+    expect("catalyst.node.board_reachable" in buildHeartbeatEnvelope().attributes).toBe(false);
+  });
 });
 
 describe("emitHeartbeatEvent (CTL-859)", () => {
