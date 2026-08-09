@@ -665,13 +665,24 @@ export function resolveDispatchRoster({
     self,
   });
   // The LKG is evidence about the heartbeat view, not the post-deflap dispatch
-  // roster. Persist it only when the positive view is complete; otherwise a
+  // roster. REFRESH it only when the positive view is complete; otherwise a
   // healthy tick with never-live/restore-held peers could record [self] and
   // collapse HRW partitioning during the next sustained feed outage.
+  //
+  // A partial view must not REFRESH the LKG, but it must not ERASE it either:
+  // computeDispatchRoster returns a freshly-built `{}` (per-host entries only),
+  // and writeDeflapState replaces the file wholesale, so simply not refreshing
+  // would drop the recorded roster. The realistic outage progression is
+  // full-view → one peer goes quiet (partial view) → feed dies, which is exactly
+  // the path that would have wiped the evidence one tick before it is needed.
   const clearedState = clearOutage(nextState);
-  const healthyState = live.length === roster.length
-    ? withLastGoodRoster(clearedState, live)
-    : clearedState;
+  const priorGood = lastGoodRoster(prevState);
+  const healthyState =
+    live.length === roster.length
+      ? withLastGoodRoster(clearedState, live)
+      : priorGood.length > 0
+        ? withLastGoodRoster(clearedState, priorGood)
+        : clearedState;
   if (persist) writeDeflapState(orchDir, healthyState);
   return dispatchRoster;
 }

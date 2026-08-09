@@ -10546,6 +10546,77 @@ describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => 
     expect(outage).toEqual(roster);
   });
 
+  test("a partial healthy view carries the LKG forward instead of erasing it", () => {
+    const roster = ["mini", "laptop", "tower"];
+    // Tick 1 — complete view records the LKG.
+    resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent, tower: recent }),
+      persist: true,
+    });
+
+    // Tick 2 — `tower` goes quiet. Still a healthy (non-outage) read, so the LKG
+    // must NOT be refreshed to the narrower view, but must NOT be dropped either.
+    resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW + 1_000,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      persist: true,
+    });
+    const persisted = JSON.parse(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8"));
+    expect(persisted.__lastGoodRoster).toEqual(roster);
+
+    // Tick 3 — feed dies. The surviving evidence is still consumable.
+    const outage = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW + 10_000,
+      sustainedMs: 0,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(outage).toEqual(roster);
+  });
+
+  test("a partial healthy view narrows a later sustained outage to the recorded LKG", () => {
+    const roster = ["mini", "laptop", "ghost"];
+    // Tick 1 — only mini+laptop have ever been live; `ghost` never checks in, so
+    // the view is never complete and no LKG is ever recorded from it.
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ __lastGoodRoster: ["mini", "laptop"] }),
+    );
+    // Tick 2 — partial healthy view (ghost absent) must preserve the LKG.
+    resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      persist: true,
+    });
+    // Tick 3 — sustained outage narrows to the preserved LKG, shedding ghost.
+    const outage = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW + 10_000,
+      sustainedMs: 0,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(outage.sort()).toEqual(["laptop", "mini"]);
+  });
+
   test("cold-start sustained outage remains on the full roster", () => {
     const out = resolveDispatchRoster({
       roster: ["mini", "ghost"],
