@@ -140,6 +140,13 @@ export function pidFilePathForComponent(name) {
   if (name === "execution-core")
     return process.env.EXECUTION_CORE_PID_FILE
       || resolve(base, "execution-core", "daemon.pid");
+  // CTL-1506 follow-up: otel-forward. Mirrors catalyst-monitor.sh:54
+  // (FORWARD_PID_FILE="${CATALYST_DIR}/otel-forward.pid"), so the running-state
+  // gate below sees the same file the wrapper writes — without this the probe
+  // returns null, the component is treated as not-running, and the reload is
+  // silently skipped exactly like it was before it was wired up at all.
+  if (name === "otel-forward")
+    return process.env.FORWARD_PID_FILE || resolve(base, "otel-forward.pid");
   return null;
 }
 
@@ -202,11 +209,26 @@ export function decideStackReload({ results = [], loadedCommitRoot = null } = {}
   if (changed.length === 0) {
     return { shouldReload: false, brokerSelfReload: false, components: [] };
   }
-  // Both monitor and exec-core run from the advanced checkout — reload both.
+  // Monitor, exec-core AND otel-forward all run from the advanced checkout — reload all.
+  //
+  // CTL-1506 follow-up: otel-forward was MISSING from this list, and the omission
+  // was not theoretical. PR #2742 shipped the Loki age-drop that fixes a live
+  // export outage; the fix reached both minis' disks within seconds of the merge,
+  // but the forwarder processes had been running since the previous day and never
+  // restarted — so the fleet ran pre-fix code with the fix sitting right there,
+  // and the outage continued until the forwarders were restarted by hand. A merged
+  // fix that never restarts is indistinguishable from no fix.
+  //
+  // It restarts via `catalyst-monitor forward-restart` rather than a bare
+  // `restart` (which would bounce the MONITOR), hence the per-component args.
+  // That subcommand takes the same mutation lock as forward-start/-stop
+  // (catalyst-monitor.sh, CTL-1502 Codex P1), so it is safe against launchd's
+  // periodic `catalyst-stack start` and the daemon watchdog racing it.
   const { oldSha = null, newSha = null } = changed[0];
   const components = [
     { name: "monitor", cmd: "catalyst-monitor", oldSha, newSha },
     { name: "execution-core", cmd: "catalyst-execution-core", oldSha, newSha },
+    { name: "otel-forward", cmd: "catalyst-monitor", args: ["forward-restart"], oldSha, newSha },
   ];
   // brokerSelfReload only when restartNeeded for the broker's own checkout root.
   const brokerSelfReload = changed.some(
@@ -268,7 +290,9 @@ function performReload({
   const unconfirmed = [];
   const pending = [];
   for (const c of toReload) {
-    if (trySpawn(spawnFn, c.cmd, ["restart"])) {
+    // Per-component argv: defaults to ["restart"], but otel-forward is a
+    // sub-service of the monitor wrapper and needs ["forward-restart"].
+    if (trySpawn(spawnFn, c.cmd, c.args ?? ["restart"])) {
       pending.push({ c, attempts: 0, retried: false });
     } else {
       // Spawn threw synchronously — the restart never launched.
