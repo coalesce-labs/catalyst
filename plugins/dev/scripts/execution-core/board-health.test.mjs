@@ -26,6 +26,8 @@ import {
   // CTL-1552: the parked-by-human label reader + the deferred-anchor filter it feeds.
   isParkedByHuman,
   eligibleDeferredAnchors,
+  makeOwnsFilter,
+  resolveRosterSeam,
 } from "./board-health.mjs";
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
 // exercises the production body.payload.details nesting + attribute promotion.
@@ -75,6 +77,7 @@ function mkBoard(o = {}) {
     signals: o.signals ?? [],
     eligible: o.eligible ?? [],
     roster: o.roster ?? [],
+    dispatchRoster: o.dispatchRoster ?? o.roster ?? [],
     self: o.self ?? "mini",
     multiHost: o.multiHost ?? false,
     // CTL-1157: assembleBoardState now records the run mode on the board so
@@ -91,6 +94,8 @@ function mkBoard(o = {}) {
     stalledPrMap: o.stalledPrMap ?? new Map(),
     githubQuota: o.githubQuota ?? null,
     githubQuotaMode: o.githubQuotaMode ?? "shadow",
+    peerProductivity: o.peerProductivity ?? null,
+    productivityMode: o.productivityMode ?? "shadow",
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -108,6 +113,16 @@ function mkBoard(o = {}) {
     strandedEvidence: o.strandedEvidence ?? new Map(),
     now: o.now ?? NOW,
   };
+}
+
+function mkOwnedBoard({ owner = () => "mini", ...overrides } = {}) {
+  return mkBoard({
+    multiHost: true,
+    roster: ["mini", "peer"],
+    dispatchRoster: ["mini", "peer"],
+    ownerForTicket: owner,
+    ...overrides,
+  });
 }
 
 // CTL-1552: build a ticketsById Map whose listed ids each carry the parked-by-human
@@ -1058,7 +1073,7 @@ describe("buildBoardContext", () => {
     const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-OLD"]) };
     const ctx = buildBoardContext(board, invs);
 
-    expect(ctx.schema).toBe("recovery-board-context/v3");
+    expect(ctx.schema).toBe("recovery-board-context/v4");
     expect(ctx.slots).toEqual({ capacity: 4, inUse: 2, free: 2 });
     expect(ctx.eligibleQueue.depth).toBe(2);
     expect(ctx.eligibleQueue.topTickets).toEqual(["CTL-1", "CTL-2"]);
@@ -1249,7 +1264,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     // falls back to the top eligible ticket.
     expect(acted[0].anchor).toBe("CTL-1");
     // the delegate gets the WHOLE-board context, not a per-item brief.
-    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v3");
+    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v4");
     expect(acted[0].decision.gate.decision).toBe("proceed");
     // the act result is threaded back into the pass result (observability).
     expect(r.act).toEqual({ dispatched: true, attempts: 1 });
@@ -2751,5 +2766,123 @@ describe("boardHealthPass enforce — launch-failure exclusion prevents recovery
       eligible: [{ identifier: "CTL-EXCL", state: "Todo" }],
     });
     expect(actInvoked).toBe(false);
+  });
+});
+
+describe("CAT-57 host-scoped board health", () => {
+  test("makeOwnsFilter hashes over dispatchRoster and fails open", () => {
+    const seen = [];
+    const b = mkOwnedBoard({
+      roster: ["mini", "stale"],
+      dispatchRoster: ["mini", "peer"],
+      owner: (_ticket, roster) => { seen.push(roster); return "mini"; },
+    });
+    expect(makeOwnsFilter(b)("CAT-57")).toBe(true);
+    expect(seen).toEqual([["mini", "peer"]]);
+    expect(makeOwnsFilter(mkOwnedBoard({ owner: () => { throw new Error("hrw"); } }))("CAT-57")).toBe(true);
+  });
+
+  test("resolveRosterSeam resolves arrays/thunks and falls back on invalid/throw", () => {
+    const fallback = ["mini"];
+    expect(resolveRosterSeam(["peer"], fallback)).toEqual(["peer"]);
+    expect(resolveRosterSeam(() => ["peer"], fallback)).toEqual(["peer"]);
+    expect(resolveRosterSeam(null, fallback)).toBe(fallback);
+    expect(resolveRosterSeam(() => { throw new Error("down"); }, fallback)).toBe(fallback);
+  });
+
+  test("dispatch liveness judges only this host's eligible share and reports both depths", () => {
+    const foreign = mkOwnedBoard({
+      eligible: [{ id: "CAT-FOREIGN" }],
+      owner: () => "peer",
+      capacity: { freeSlots: 4 },
+      ring: { recentDispatchTs: null },
+    });
+    expect(evaluateInvariants(foreign).dispatchLiveness).toMatchObject({
+      ok: true, queuedTotal: 1, queuedOwned: 0, flagged: [],
+    });
+    const owned = mkOwnedBoard({
+      eligible: [{ id: "CAT-OWNED" }, { id: "CAT-FOREIGN" }],
+      owner: (id) => id === "CAT-OWNED" ? "mini" : "peer",
+      capacity: { freeSlots: 4 }, ring: { recentDispatchTs: null },
+    });
+    expect(evaluateInvariants(owned).dispatchLiveness).toMatchObject({
+      ok: false, queuedTotal: 2, queuedOwned: 1, flagged: ["CAT-OWNED"],
+    });
+  });
+
+  test("deriveRing ignores a peer-stamped dispatch but accepts unattributed/local dispatch", () => {
+    const event = (host) => ({
+      attributes: { "event.name": "phase.dispatch.launched.CAT-1" },
+      resource: host ? { "host.name": host } : {},
+      ts: new Date(NOW - MIN).toISOString(),
+    });
+    const base = { self: "mini", now: () => NOW };
+    expect(assembleBoardState({ ...base, readEventRing: () => [event("peer")] }).ring.recentDispatchTs).toBeNull();
+    expect(assembleBoardState({ ...base, readEventRing: () => [event()] }).ring.recentDispatchTs).toBe(NOW - MIN);
+    expect(assembleBoardState({ ...base, readEventRing: () => [event("mini")] }).ring.recentDispatchTs).toBe(NOW - MIN);
+  });
+
+  test("context and scan expose additive owned eligible depth", () => {
+    const b = mkOwnedBoard({ eligible: [{ id: "A" }, { id: "B" }], owner: (id) => id === "A" ? "mini" : "peer" });
+    const invs = evaluateInvariants(b);
+    const ctx = buildBoardContext(b, invs);
+    expect(ctx.schema).toBe("recovery-board-context/v4");
+    expect(ctx.eligibleQueue).toMatchObject({ depth: 2, topTickets: ["A", "B"], ownedDepth: 1, ownedTopTickets: ["A"] });
+    const event = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, b), board: b });
+    expect(event.details.eligibleOwnedDepth).toBe(1);
+  });
+});
+
+describe("CAT-57 nodeProductivity invariant", () => {
+  const stale = new Date(NOW - 48 * HOUR).toISOString();
+  const fresh = new Date(NOW - HOUR).toISOString();
+  const seen = new Date(NOW - 30_000).toISOString();
+  const productivityBoard = (o = {}) => mkOwnedBoard({
+    ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER" }]]),
+    owner: () => "peer",
+    productivityMode: "enforce",
+    peerProductivity: { peer: { last_seen: seen, last_advance_at: stale } },
+    ...o,
+  });
+
+  test("flags only live peers with owned work and stale advances", () => {
+    const bad = evaluateInvariants(productivityBoard()).nodeProductivity;
+    expect(bad).toMatchObject({ ok: false, failed: 1, flagged: ["peer"], observable: true });
+    expect(evaluateInvariants(productivityBoard({ peerProductivity: { peer: { last_seen: seen, last_advance_at: fresh } } })).nodeProductivity.flagged).toEqual([]);
+    expect(evaluateInvariants(productivityBoard({ owner: () => "mini" })).nodeProductivity.flagged).toEqual([]);
+    expect(evaluateInvariants(productivityBoard({ peerProductivity: { peer: { last_seen: stale, last_advance_at: stale } } })).nodeProductivity.flagged).toEqual([]);
+    expect(evaluateInvariants(productivityBoard({ peerProductivity: { peer: { last_seen: seen } } })).nodeProductivity.flagged).toEqual([]);
+  });
+
+  test("mode and seam gates are fail-open; self is never judged", () => {
+    for (const mode of ["off", "shadow"]) {
+      const r = evaluateInvariants(productivityBoard({ productivityMode: mode })).nodeProductivity;
+      expect(r.observable).toBe(false);
+      expect(r.note.length).toBeGreaterThan(0);
+    }
+    expect(evaluateInvariants(productivityBoard({ peerProductivity: null })).nodeProductivity.observable).toBe(false);
+    expect(evaluateInvariants(productivityBoard({ roster: ["mini"] })).nodeProductivity.observable).toBe(false);
+    expect(evaluateInvariants(productivityBoard({ ticketsById: new Map([["SELF", {}]]), owner: () => "mini", peerProductivity: { mini: { last_seen: seen, last_advance_at: stale } } })).nodeProductivity.flagged).toEqual([]);
+    expect(evaluateInvariants(productivityBoard({ owner: () => { throw new Error("hrw"); } })).nodeProductivity.observable).toBe(false);
+  });
+
+  test("is tier3-only, non-actionable, and included in context/event", () => {
+    const b = productivityBoard();
+    const invs = evaluateInvariants(b);
+    const moves = proposeMoves(invs, b);
+    expect(moves.tier3).toContainEqual(expect.objectContaining({ host: "peer", move: "escalate-unproductive-node" }));
+    expect(moves.tier1.some((m) => m.move === "escalate-unproductive-node")).toBe(false);
+    expect(moves.tier2.some((m) => m.move === "escalate-unproductive-node")).toBe(false);
+    expect(decideBoardHealth({ nodeProductivity: invs.nodeProductivity }, b).gate).toMatchObject({ decision: "skip", reason: "no-actionable-moves" });
+    expect(buildBoardContext(b, invs).unproductiveNodes).toEqual([{ host: "peer", lastAdvanceAt: stale, ageMs: 48 * HOUR, ownedTickets: ["CAT-PEER"] }]);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, b), board: b });
+    expect(ev.details.unproductiveNodeCount).toBe(1);
+  });
+
+  test("off omits key and never reads productivity seam", () => {
+    expect(evaluateInvariants(productivityBoard({ mode: "off" }), { mode: "off" }).nodeProductivity).toBeUndefined();
+    let called = 0;
+    expect(() => assembleBoardState({ mode: "off", productivityMode: "enforce", getPeerProductivity: () => { called += 1; throw new Error("must not run"); } })).not.toThrow();
+    expect(called).toBe(0);
   });
 });

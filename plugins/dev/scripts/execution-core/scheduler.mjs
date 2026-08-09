@@ -314,9 +314,12 @@ import {
   readRecoveryPassConfig,
   readBoardHealthConfig,
   readGithubQuotaBoardHealthConfig,
+  readProductivityBoardHealthConfig,
+  getLivenessAnchorIssue,
   readReclaimGatewayFreshMs,
   isThrottled,
 } from "./config.mjs";
+import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -6043,6 +6046,10 @@ export function schedulerTick(
           },
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,
+          // CAT-57: judge board-health ownership over the same live, deflapped
+          // dispatch roster used by the scheduler's new-work admission gate.
+          // Keep this lazy so the board-health interval throttle remains effective.
+          getDispatchRoster: () => _dispatchRoster(),
           // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite
           // (repo, number) PR-status lookup. Daemon-bound below; a bare tick
           // passes none → null → number-only fallback (N=1 byte-identical).
@@ -6064,6 +6071,14 @@ export function schedulerTick(
           getStalledPrState: _boardHealth.getStalledPrState ?? (() => readStalledPrState(orchDir)),
           getGithubQuota: _boardHealth.getGithubQuota ?? (() => readGithubQuota(orchDir)),
           githubQuotaMode: _boardHealth.githubQuotaMode ?? readGithubQuotaBoardHealthConfig().mode,
+          getPeerProductivity:
+            _boardHealth.getPeerProductivity ??
+            (() => {
+              const anchorIssue = getLivenessAnchorIssue();
+              return anchorIssue ? readPeerHeartbeatsSyncCached({ anchorIssue }) : null;
+            }),
+          productivityMode:
+            _boardHealth.productivityMode ?? readProductivityBoardHealthConfig().mode,
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the
